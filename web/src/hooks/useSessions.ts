@@ -72,5 +72,5 @@ export function useSessions(session: SupaSession | null) {
     setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, status } : s))
   }
 
-  return { sessions, loading, createSession, deleteSession, rotateToken, updateSessionStatus, refetch: fetchSessions }
+  return { sessions, setSessions, loading, createSession, deleteSession, rotateToken, updateSessionStatus, refetch: fetchSessions }
 }

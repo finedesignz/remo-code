@@ -31,8 +31,8 @@ export function Layout({ session, user, signOut }: Props) {
     if (msg.type === 'session_status') {
       sessionsHook.updateSessionStatus(msg.session_id, msg.status)
     }
-    if (msg.type === 'session_list') {
-      sessionsHook.refetch()
+    if (msg.type === 'session_list' && msg.sessions) {
+      sessionsHook.setSessions(msg.sessions)
     }
   })
 

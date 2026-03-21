@@ -2,7 +2,9 @@ import type { ServerWebSocket } from 'bun'
 import { timingSafeEqual } from 'crypto'
 import { ChannelInbound } from './protocol'
 import { verifyChannelToken, setSessionStatus, insertMessage } from '../db/dal'
-import { registerChannel, unregisterChannel, broadcastToSubscribers } from './registry'
+import { registerChannel, unregisterChannel, broadcastToSubscribers, broadcastToUser } from './registry'
+import { listSessions } from '../db/dal'
+import { supabaseAdmin } from '../db/supabase'
 
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
@@ -97,6 +99,10 @@ export async function handleChannelMessage(ws: ServerWebSocket<ChannelWsData>, r
       status: 'online',
     })
 
+    // Push updated session list to all browser clients for this user
+    // (handles new sessions the client hasn't seen yet)
+    pushSessionList(session.user_id)
+
     // Start heartbeat
     data.heartbeatTimer = setInterval(() => {
       try { ws.send(JSON.stringify({ type: 'ping' })) } catch {}
@@ -150,5 +156,21 @@ export async function handleChannelClose(ws: ServerWebSocket<ChannelWsData>) {
       session_id: data.sessionId,
       status: 'offline',
     })
+    // Push updated session list to user's browser clients
+    if (data.userId) pushSessionList(data.userId)
   }
+}
+
+// Fetch and broadcast the full session list to all browser clients for a user
+async function pushSessionList(userId: string) {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('sessions')
+      .select('id, name, project_dir, status, last_activity, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+    if (!error && data) {
+      broadcastToUser(userId, { type: 'session_list', sessions: data })
+    }
+  } catch {}
 }
