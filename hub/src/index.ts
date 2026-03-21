@@ -52,11 +52,6 @@ app.use('/api/*', cors({
   credentials: true,
 }))
 
-// Rate limiting on API (C3 fix)
-// Note: x-forwarded-for is used as fallback for unauthenticated requests only;
-// for production behind a reverse proxy, configure the proxy to set a trusted header.
-app.use('/api/*', rateLimit({ windowMs: 60_000, max: 60, keyFn: (c) => c.get('userId') || c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'anon' }))
-
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
 
@@ -64,12 +59,13 @@ app.get('/health', (c) => c.json({ ok: true }))
 app.route('/api/setup', setup)
 
 // Plugin routes (API key auth — MUST be before JWT catch-all)
-app.use('/api/plugin/*', rateLimit({ windowMs: 60_000, max: 10, keyFn: (c) => c.req.header('authorization')?.slice(0, 20) || 'anon' }))
+app.use('/api/plugin/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.req.header('authorization')?.slice(0, 20) || 'anon' }))
 app.use('/api/plugin/*', apiKeyMiddleware)
 app.route('/api/plugin', plugin)
 
-// Protected API routes (JWT auth)
+// Protected API routes (JWT auth, then rate limit keyed on userId)
 app.use('/api/*', authMiddleware)
+app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('userId') || 'anon' }))
 app.route('/api/sessions', sessions)
 app.route('/api/api-keys', apiKeys)
 app.route('/api/messages', messages)
