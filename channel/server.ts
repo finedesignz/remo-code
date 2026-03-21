@@ -73,7 +73,34 @@ if (!state) {
   process.exit(1)
 }
 
-const PROJECT_DIR = process.cwd()
+// Determine the actual project directory.
+// The plugin runs with --cwd pointing to the channel/ subdirectory,
+// so process.cwd() is wrong. We walk up to find the git root, or
+// use CLAUDE_PROJECT_DIR if set by Claude Code.
+function findProjectDir(): string {
+  // Check env var first (future Claude Code versions may set this)
+  if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR
+
+  // Walk up from cwd looking for .git (project root indicator)
+  let dir = process.cwd()
+  const { root } = require('path').parse(dir)
+  while (dir !== root) {
+    if (existsSync(join(dir, '.git'))) return dir
+    dir = join(dir, '..')
+    dir = require('path').resolve(dir)
+  }
+
+  // Fallback: if cwd basename is a known plugin subdir, go up one level
+  const cwd = process.cwd()
+  const base = basename(cwd)
+  if (base === 'channel' || base === 'plugin') {
+    return require('path').resolve(join(cwd, '..'))
+  }
+
+  return cwd
+}
+
+const PROJECT_DIR = findProjectDir()
 
 // -- Auto-register session via API key --
 
