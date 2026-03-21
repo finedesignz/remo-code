@@ -24,8 +24,7 @@ export function AuthForm() {
             },
           }}
           theme="dark"
-          providers={['github', 'google']}
-          redirectTo={window.location.origin}
+          providers={[]}
         />
       </div>
     </div>
