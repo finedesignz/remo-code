@@ -11,18 +11,17 @@ const SetupBody = z.object({
 
 // Check if setup is needed (no users exist yet)
 setup.get('/status', async (c) => {
-  const { count, error } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 })
+  const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 })
   if (error) return c.json({ error: 'failed to check setup status' }, 500)
-  const needsSetup = !count || count === 0
+  const needsSetup = !data.users || data.users.length === 0
   return c.json({ needs_setup: needsSetup })
 })
 
 // Create the first superadmin user (only works when no users exist)
 setup.post('/create-admin', async (c) => {
-  // Verify no users exist
-  const { data: { users }, error: listError } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 })
+  const { data: listData, error: listError } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 })
   if (listError) return c.json({ error: 'failed to check users' }, 500)
-  if (users && users.length > 0) {
+  if (listData.users && listData.users.length > 0) {
     return c.json({ error: 'setup already completed' }, 403)
   }
 
@@ -34,7 +33,7 @@ setup.post('/create-admin', async (c) => {
   const { data, error } = await supabaseAdmin.auth.admin.createUser({
     email: parsed.data.email,
     password: parsed.data.password,
-    email_confirm: true, // Auto-confirm the first admin
+    email_confirm: true,
   })
 
   if (error) {
