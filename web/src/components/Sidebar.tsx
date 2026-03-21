@@ -15,6 +15,7 @@ interface Props {
   onDeleteSession: (id: string) => Promise<void>
   onRotateToken: (id: string) => Promise<{ token: string } | null>
   onShowConnect: (data: ConnectData) => void
+  onShowApiKey: () => void
   connected: boolean
   user: User
   signOut: () => void
@@ -23,7 +24,7 @@ interface Props {
 
 export function Sidebar({
   sessions, activeSessionId, onSelectSession,
-  onCreateSession, onDeleteSession, onRotateToken, onShowConnect,
+  onCreateSession, onDeleteSession, onRotateToken, onShowConnect, onShowApiKey,
   connected, user, signOut, onClose,
 }: Props) {
   const [showCreate, setShowCreate] = useState(false)
@@ -152,10 +153,20 @@ export function Sidebar({
           )}
         </div>
 
-        <div className="p-3 border-t border-slate-700/80">
+        <div className="p-3 border-t border-slate-700/80 flex gap-2">
+          <button
+            onClick={onShowApiKey}
+            className="flex-1 py-1.5 text-xs text-slate-500 hover:text-indigo-300 transition-colors flex items-center justify-center gap-1"
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+              <path d="M10.5 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z" />
+              <path d="M8.5 7l-6.5 6.5v2h2v-2h2v-2h2l1-1" />
+            </svg>
+            API Key
+          </button>
           <button
             onClick={signOut}
-            className="w-full py-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            className="flex-1 py-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
           >
             Sign out
           </button>

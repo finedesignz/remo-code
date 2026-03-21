@@ -2,40 +2,144 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { readFileSync, chmodSync, mkdirSync } from 'fs'
-import { join } from 'path'
+import { readFileSync, writeFileSync, chmodSync, mkdirSync, existsSync } from 'fs'
+import { join, basename } from 'path'
 import { homedir } from 'os'
 
-// -- Config --
+// -- State Management --
 
-const STATE_DIR = join(homedir(), '.claude', 'channels', 'hub')
+const STATE_DIR = join(homedir(), '.claude', 'channels', 'remo-code')
+const STATE_FILE = join(STATE_DIR, 'state.json')
 const ENV_FILE = join(STATE_DIR, '.env')
 
-// Load env from state dir
-try {
-  chmodSync(ENV_FILE, 0o600)
-  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const m = line.match(/^(\w+)=(.*)$/)
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
-  }
-} catch {}
+interface SessionCache {
+  session_id: string
+  token: string
+  name: string
+}
 
-const HUB_URL = process.env.HUB_URL
-const HUB_TOKEN = process.env.HUB_TOKEN
-const SESSION_ID = process.env.SESSION_ID || require('path').basename(process.cwd())
+interface PluginState {
+  hub_url: string
+  api_key: string
+  sessions: Record<string, SessionCache>
+}
 
-if (!HUB_URL || !HUB_TOKEN) {
+function loadState(): PluginState | null {
+  // Try state.json first
+  try {
+    const state = JSON.parse(readFileSync(STATE_FILE, 'utf8')) as PluginState
+    if (state.hub_url && state.api_key) return state
+  } catch {}
+
+  // Fall back to .env for backward compatibility
+  try {
+    chmodSync(ENV_FILE, 0o600)
+    const env: Record<string, string> = {}
+    for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
+      const m = line.match(/^(\w+)=(.*)$/)
+      if (m) env[m[1]] = m[2]
+    }
+    if (env.HUB_URL && env.HUB_TOKEN) {
+      const projectDir = process.cwd()
+      const sessionId = env.SESSION_ID || basename(projectDir)
+      return {
+        hub_url: env.HUB_URL,
+        api_key: '', // no API key in legacy mode
+        sessions: {
+          [projectDir]: { session_id: sessionId, token: env.HUB_TOKEN, name: basename(projectDir) },
+        },
+      }
+    }
+  } catch {}
+
+  return null
+}
+
+function saveState(state: PluginState) {
+  mkdirSync(STATE_DIR, { recursive: true })
+  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
+  try { chmodSync(STATE_FILE, 0o600) } catch {}
+}
+
+// -- Load config --
+
+const state = loadState()
+if (!state) {
   process.stderr.write(
-    'hub channel: HUB_URL and HUB_TOKEN required.\n' +
-    'Run /hub:configure <hub_url> <token> or set them in ' + ENV_FILE + '\n'
+    'remo-code: No configuration found.\n' +
+    'Generate an API key at https://app.remo-code.com, then run:\n' +
+    '  /remo-code:configure <api_key>\n'
   )
   process.exit(1)
+}
+
+const PROJECT_DIR = process.cwd()
+
+// -- Auto-register session via API key --
+
+async function ensureSession(): Promise<SessionCache> {
+  const cached = state!.sessions[PROJECT_DIR]
+  if (cached) return cached
+
+  if (!state!.api_key) {
+    process.stderr.write('remo-code: no API key configured, cannot auto-register\n')
+    process.exit(1)
+  }
+
+  process.stderr.write('remo-code: auto-registering session...\n')
+
+  const res = await fetch(`${state!.hub_url}/api/plugin/sessions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${state!.api_key}`,
+    },
+    body: JSON.stringify({ project_dir: PROJECT_DIR }),
+  })
+
+  if (res.status === 401) {
+    process.stderr.write(
+      'remo-code: API key is invalid or revoked.\n' +
+      'Generate a new key at https://app.remo-code.com, then run:\n' +
+      '  /remo-code:configure <new_api_key>\n'
+    )
+    process.exit(1)
+  }
+
+  if (!res.ok) {
+    const text = await res.text()
+    process.stderr.write(`remo-code: registration failed (${res.status}): ${text}\n`)
+    process.exit(1)
+  }
+
+  const data = await res.json() as { session_id: string; token: string; name: string }
+  const session: SessionCache = { session_id: data.session_id, token: data.token, name: data.name }
+  state!.sessions[PROJECT_DIR] = session
+  saveState(state!)
+
+  process.stderr.write(`remo-code: registered session "${data.name}" (${data.session_id})\n`)
+  return session
+}
+
+async function reRegister(): Promise<SessionCache | null> {
+  if (!state!.api_key) return null
+
+  // Clear cached token for this project
+  delete state!.sessions[PROJECT_DIR]
+  saveState(state!)
+
+  try {
+    return await ensureSession()
+  } catch (err: any) {
+    process.stderr.write(`remo-code: re-registration failed: ${err.message}\n`)
+    return null
+  }
 }
 
 // -- MCP Server --
 
 const mcp = new Server(
-  { name: 'hub', version: '0.0.1' },
+  { name: 'remo-code', version: '0.0.1' },
   {
     capabilities: {
       experimental: { 'claude/channel': {} },
@@ -44,7 +148,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads a web UI, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their browser.',
       '',
-      'Messages from the web arrive as <channel source="hub" chat_id="..." message_id="..." user="..." ts="...">.',
+      'Messages from the web arrive as <channel source="remo-code" chat_id="..." message_id="..." user="..." ts="...">.',
       'Reply with the reply tool — pass chat_id back.',
       'Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
       '',
@@ -107,23 +211,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   try {
     switch (req.params.name) {
       case 'reply': {
-        const text = String(args.text || '')
         sendToHub({
           type: 'assistant_message',
           id: crypto.randomUUID(),
-          content: text,
+          content: String(args.text || ''),
           ts: new Date().toISOString(),
         })
         return { content: [{ type: 'text' as const, text: 'sent' }] }
       }
-
       case 'react': {
-        // Reactions are currently a no-op on the hub side — acknowledged silently
         return { content: [{ type: 'text' as const, text: `reacted ${args.emoji}` }] }
       }
-
       case 'edit_message': {
-        // Edit support — send as assistant_message with same ID for now
         sendToHub({
           type: 'assistant_message',
           id: String(args.message_id),
@@ -132,7 +231,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         })
         return { content: [{ type: 'text' as const, text: 'edited' }] }
       }
-
       default:
         return { content: [{ type: 'text' as const, text: `unknown tool: ${req.params.name}` }], isError: true }
     }
@@ -144,21 +242,25 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 // -- WebSocket to Hub --
 
 let ws: WebSocket | null = null
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let currentSession: SessionCache | null = null
 const RECONNECT_DELAY_MS = 5_000
 
-function connectToHub() {
-  const wsUrl = HUB_URL!.replace(/^http/, 'ws') + '/ws/channel'
-  process.stderr.write(`hub channel: connecting to ${wsUrl}\n`)
+async function connectToHub() {
+  if (!currentSession) {
+    currentSession = await ensureSession()
+  }
+
+  const wsUrl = state!.hub_url.replace(/^http/, 'ws') + '/ws/channel'
+  process.stderr.write(`remo-code: connecting to ${wsUrl}\n`)
 
   ws = new WebSocket(wsUrl)
 
   ws.onopen = () => {
-    process.stderr.write('hub channel: connected, authenticating...\n')
+    process.stderr.write('remo-code: connected, authenticating...\n')
     ws!.send(JSON.stringify({
       type: 'auth',
-      session_id: SESSION_ID,
-      token: HUB_TOKEN,
+      session_id: currentSession!.session_id,
+      token: currentSession!.token,
     }))
   }
 
@@ -167,24 +269,22 @@ function connectToHub() {
     try { msg = JSON.parse(String(event.data)) } catch { return }
 
     if (msg.type === 'auth_ok') {
-      process.stderr.write('hub channel: authenticated\n')
-      // Send status
+      process.stderr.write(`remo-code: authenticated as "${currentSession!.name}"\n`)
       sendToHub({ type: 'status', status: 'idle' })
     }
 
     if (msg.type === 'auth_error') {
-      process.stderr.write(`hub channel: auth failed — ${msg.error}\n`)
-      ws?.close()
+      process.stderr.write(`remo-code: auth failed — ${msg.error}\n`)
+      // Don't close here — onclose will handle re-registration
     }
 
     if (msg.type === 'user_message') {
-      // Push into Claude Code session
       await mcp.notification({
         method: 'notifications/claude/channel',
         params: {
           content: msg.content,
           meta: {
-            chat_id: SESSION_ID,
+            chat_id: currentSession!.session_id,
             message_id: msg.id,
             user: 'web',
             ts: msg.ts,
@@ -198,14 +298,32 @@ function connectToHub() {
     }
   }
 
-  ws.onclose = () => {
-    process.stderr.write('hub channel: disconnected, reconnecting in 5s...\n')
+  ws.onclose = (event) => {
     ws = null
-    reconnectTimer = setTimeout(connectToHub, RECONNECT_DELAY_MS)
+
+    if (event.code === 4001 || event.code === 4004) {
+      // Auth failed or token rotated — re-register via API key
+      process.stderr.write(`remo-code: token invalid (${event.code}), re-registering...\n`)
+      currentSession = null
+      setTimeout(async () => {
+        const newSession = await reRegister()
+        if (newSession) {
+          currentSession = newSession
+          connectToHub()
+        } else {
+          process.stderr.write('remo-code: could not re-register, will retry in 30s\n')
+          setTimeout(connectToHub, 30_000)
+        }
+      }, 1_000)
+    } else {
+      // Network issue — simple reconnect with cached token
+      process.stderr.write('remo-code: disconnected, reconnecting in 5s...\n')
+      setTimeout(connectToHub, RECONNECT_DELAY_MS)
+    }
   }
 
-  ws.onerror = (err) => {
-    process.stderr.write(`hub channel: ws error\n`)
+  ws.onerror = () => {
+    process.stderr.write('remo-code: ws error\n')
   }
 }
 

@@ -4,7 +4,10 @@ import { config } from './config'
 import { authMiddleware } from './auth/middleware'
 import { sessions } from './api/sessions'
 import { messages } from './api/messages'
+import { apiKeys } from './api/api-keys'
+import { plugin } from './api/plugin'
 import { setup } from './api/setup'
+import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit } from './middleware/rate-limit'
 import {
   createChannelWsData, handleChannelOpen, handleChannelMessage, handleChannelClose,
@@ -60,9 +63,15 @@ app.get('/health', (c) => c.json({ ok: true }))
 // Setup routes (no auth required — guarded internally by user count check)
 app.route('/api/setup', setup)
 
-// Protected API routes
+// Plugin routes (API key auth — MUST be before JWT catch-all)
+app.use('/api/plugin/*', rateLimit({ windowMs: 60_000, max: 10, keyFn: (c) => c.req.header('authorization')?.slice(0, 20) || 'anon' }))
+app.use('/api/plugin/*', apiKeyMiddleware)
+app.route('/api/plugin', plugin)
+
+// Protected API routes (JWT auth)
 app.use('/api/*', authMiddleware)
 app.route('/api/sessions', sessions)
+app.route('/api/api-keys', apiKeys)
 app.route('/api/messages', messages)
 
 // Resolve web dist directory (works both in Docker and locally)

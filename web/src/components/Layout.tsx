@@ -6,6 +6,7 @@ import { useChat } from '../hooks/useChat'
 import { Sidebar, type ConnectData } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
 import { ConnectModal } from './ConnectModal'
+import { ApiKeyModal } from './ApiKeyModal'
 
 interface Props {
   session: Session
@@ -17,6 +18,7 @@ export function Layout({ session, user, signOut }: Props) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [connectData, setConnectData] = useState<ConnectData | null>(null)
+  const [showApiKey, setShowApiKey] = useState(false)
 
   const { connected, send, subscribe } = useWebSocket(session)
   const sessionsHook = useSessions(session)
@@ -59,7 +61,10 @@ export function Layout({ session, user, signOut }: Props) {
 
   return (
     <div className="flex h-full bg-slate-900 relative overflow-hidden">
-      {/* Connect modal — rendered at top level, above everything */}
+      {/* Modals — rendered at top level, above everything */}
+      {showApiKey && (
+        <ApiKeyModal session={session} onClose={() => setShowApiKey(false)} />
+      )}
       {connectData && (
         <ConnectModal
           token={connectData.token}
@@ -92,6 +97,7 @@ export function Layout({ session, user, signOut }: Props) {
           onDeleteSession={sessionsHook.deleteSession}
           onRotateToken={sessionsHook.rotateToken}
           onShowConnect={setConnectData}
+          onShowApiKey={() => setShowApiKey(true)}
           connected={connected}
           user={user}
           signOut={signOut}
