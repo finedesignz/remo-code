@@ -181,6 +181,12 @@ const mcp = new Server(
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments.',
       'Use react to add emoji reactions, and edit_message to update a message you previously sent.',
+      '',
+      'IMPORTANT: The user cannot see your terminal output. When working on a task that takes more than a few seconds:',
+      '1. Send a brief reply immediately acknowledging what you will do (e.g. "Looking into that..." or "Let me check the logs.")',
+      '2. As you work, send progress updates via reply every 30-60 seconds for longer tasks (e.g. "Found the issue in auth.ts, fixing now..." or "Tests passing, deploying...")',
+      '3. Send a final reply with the result or answer.',
+      'This keeps the user informed since they cannot see your work in progress.',
     ].join('\n'),
   },
 )

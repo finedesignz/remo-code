@@ -140,6 +140,7 @@ export function Layout({ session, user, signOut }: Props) {
           loading={chatLoading}
           onSend={sendMessage}
           activeSessionId={activeSessionId}
+          sessionStatus={activeSession?.status}
         />
       </div>
     </div>
