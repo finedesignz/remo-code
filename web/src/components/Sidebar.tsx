@@ -1,7 +1,11 @@
 import { useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import type { CodeSession } from '../hooks/useSessions'
-import { ConnectModal } from './ConnectModal'
+
+export interface ConnectData {
+  token: string
+  name: string
+}
 
 interface Props {
   sessions: CodeSession[]
@@ -10,32 +14,27 @@ interface Props {
   onCreateSession: (name: string, projectDir?: string) => Promise<any>
   onDeleteSession: (id: string) => Promise<void>
   onRotateToken: (id: string) => Promise<{ token: string } | null>
+  onShowConnect: (data: ConnectData) => void
   connected: boolean
   user: User
   signOut: () => void
   onClose?: () => void
 }
 
-interface ConnectData {
-  token: string
-  name: string
-}
-
 export function Sidebar({
   sessions, activeSessionId, onSelectSession,
-  onCreateSession, onDeleteSession, onRotateToken,
+  onCreateSession, onDeleteSession, onRotateToken, onShowConnect,
   connected, user, signOut, onClose,
 }: Props) {
   const [showCreate, setShowCreate] = useState(false)
   const [newName, setNewName] = useState('')
-  const [connectData, setConnectData] = useState<ConnectData | null>(null)
 
   const handleCreate = async () => {
     if (!newName.trim()) return
     const name = newName.trim()
     const result = await onCreateSession(name)
     if (result?.token) {
-      setConnectData({ token: result.token, name })
+      onShowConnect({ token: result.token, name })
     }
     setNewName('')
     setShowCreate(false)
@@ -44,20 +43,11 @@ export function Sidebar({
   const handleReconnect = async (session: CodeSession) => {
     const result = await onRotateToken(session.id)
     if (result?.token) {
-      setConnectData({ token: result.token, name: session.name })
+      onShowConnect({ token: result.token, name: session.name })
     }
   }
 
   return (
-    <>
-      {connectData && (
-        <ConnectModal
-          token={connectData.token}
-          sessionName={connectData.name}
-          onClose={() => setConnectData(null)}
-        />
-      )}
-
       <div className="w-72 h-full border-r border-slate-700/80 flex flex-col bg-slate-900 md:bg-slate-800/30 shrink-0">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-slate-700/80">
@@ -171,6 +161,5 @@ export function Sidebar({
           </button>
         </div>
       </div>
-    </>
   )
 }

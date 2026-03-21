@@ -3,8 +3,9 @@ import type { Session, User } from '@supabase/supabase-js'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useSessions } from '../hooks/useSessions'
 import { useChat } from '../hooks/useChat'
-import { Sidebar } from './Sidebar'
+import { Sidebar, type ConnectData } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
+import { ConnectModal } from './ConnectModal'
 
 interface Props {
   session: Session
@@ -15,6 +16,7 @@ interface Props {
 export function Layout({ session, user, signOut }: Props) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [connectData, setConnectData] = useState<ConnectData | null>(null)
 
   const { connected, send, subscribe } = useWebSocket(session)
   const sessionsHook = useSessions(session)
@@ -35,7 +37,6 @@ export function Layout({ session, user, signOut }: Props) {
   // Close sidebar on mobile when selecting a session
   const handleSelectSession = useCallback((id: string) => {
     setActiveSessionId(id)
-    // Close on mobile
     if (window.innerWidth < 768) {
       setSidebarOpen(false)
     }
@@ -58,6 +59,15 @@ export function Layout({ session, user, signOut }: Props) {
 
   return (
     <div className="flex h-full bg-slate-900 relative overflow-hidden">
+      {/* Connect modal — rendered at top level, above everything */}
+      {connectData && (
+        <ConnectModal
+          token={connectData.token}
+          sessionName={connectData.name}
+          onClose={() => setConnectData(null)}
+        />
+      )}
+
       {/* Mobile overlay backdrop */}
       {sidebarOpen && (
         <div
@@ -81,6 +91,7 @@ export function Layout({ session, user, signOut }: Props) {
           onCreateSession={sessionsHook.createSession}
           onDeleteSession={sessionsHook.deleteSession}
           onRotateToken={sessionsHook.rotateToken}
+          onShowConnect={setConnectData}
           connected={connected}
           user={user}
           signOut={signOut}
@@ -90,7 +101,6 @@ export function Layout({ session, user, signOut }: Props) {
 
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Top bar */}
         <header className="flex items-center gap-3 px-3 py-2.5 border-b border-slate-700/80 bg-slate-800/60 backdrop-blur-sm shrink-0">
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
