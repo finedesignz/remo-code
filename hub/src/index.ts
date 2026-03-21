@@ -1,6 +1,5 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { serveStatic } from 'hono/bun'
 import { config } from './config'
 import { authMiddleware } from './auth/middleware'
 import { sessions } from './api/sessions'
@@ -11,6 +10,8 @@ import {
 import {
   createClientWsData, handleClientOpen, handleClientMessage, handleClientClose,
 } from './ws/client'
+import { existsSync } from 'fs'
+import { join, resolve } from 'path'
 
 const app = new Hono()
 
@@ -38,14 +39,14 @@ app.use('/api/*', authMiddleware)
 app.route('/api/sessions', sessions)
 app.route('/api/messages', messages)
 
-// Serve static web UI (built files from ../web/dist)
-app.use('/*', serveStatic({ root: '../web/dist' }))
-app.use('/*', serveStatic({ root: '../web/dist', path: 'index.html' })) // SPA fallback
+// Resolve web dist directory (works both in Docker and locally)
+const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
+const webDist = webDistCandidates.find(p => existsSync(p)) || './web/dist'
 
 // Start Bun server with WebSocket upgrade handling
 const server = Bun.serve({
   port: config.port,
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url)
 
     // WebSocket upgrades
@@ -63,8 +64,20 @@ const server = Bun.serve({
       return upgraded ? undefined : new Response('upgrade failed', { status: 400 })
     }
 
-    // Hono handles REST
-    return app.fetch(req)
+    // Try Hono (API routes, health)
+    const honoResponse = await app.fetch(req)
+    if (honoResponse.status !== 404) return honoResponse
+
+    // Serve static files from web/dist
+    const filePath = join(webDist, url.pathname === '/' ? 'index.html' : url.pathname)
+    const file = Bun.file(filePath)
+    if (await file.exists()) return new Response(file)
+
+    // SPA fallback — serve index.html for client-side routing
+    const indexFile = Bun.file(join(webDist, 'index.html'))
+    if (await indexFile.exists()) return new Response(indexFile)
+
+    return new Response('not found', { status: 404 })
   },
   websocket: {
     open(ws) {
@@ -86,3 +99,4 @@ const server = Bun.serve({
 })
 
 console.log(`Hub server running on http://localhost:${server.port}`)
+console.log(`Serving web UI from: ${resolve(webDist)}`)
