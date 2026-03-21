@@ -28,7 +28,7 @@ RUN bun install --frozen-lockfile --production
 COPY hub/ hub/
 COPY --from=web-build /app/web/dist web/dist
 
-RUN adduser --disabled-password --gecos '' appuser && chown -R appuser:appuser /app
+RUN groupadd -r appuser && useradd -r -g appuser -d /app appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 3040
