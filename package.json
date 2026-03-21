@@ -1,0 +1,13 @@
+{
+  "name": "remo-code",
+  "private": true,
+  "workspaces": ["hub", "channel", "web"],
+  "scripts": {
+    "dev:hub": "cd hub && bun run dev",
+    "dev:web": "cd web && bun run dev",
+    "build:web": "cd web && bun run build"
+  },
+  "devDependencies": {
+    "pg": "^8.20.0"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "hub",
+  "description": "Remo Code channel for Claude Code — bridges your Claude Code session to the Remo Code hub for remote chat access via web, phone, or any browser.",
+  "version": "0.0.1",
+  "keywords": ["remo-code", "remote", "channel", "mcp", "chat"]
+}
