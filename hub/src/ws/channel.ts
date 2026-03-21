@@ -6,6 +6,8 @@ import { registerChannel, unregisterChannel, broadcastToSubscribers } from './re
 
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
+const MSG_RATE_WINDOW_MS = 10_000
+const MSG_RATE_MAX = 60 // channels send more (assistant messages can be frequent)
 
 interface ChannelWsData {
   authenticated: boolean
@@ -13,6 +15,8 @@ interface ChannelWsData {
   userId: string | null
   authTimer: ReturnType<typeof setTimeout> | null
   heartbeatTimer: ReturnType<typeof setInterval> | null
+  msgCount: number
+  msgWindowStart: number
 }
 
 export function createChannelWsData(): ChannelWsData {
@@ -22,6 +26,8 @@ export function createChannelWsData(): ChannelWsData {
     userId: null,
     authTimer: null,
     heartbeatTimer: null,
+    msgCount: 0,
+    msgWindowStart: Date.now(),
   }
 }
 
@@ -100,6 +106,15 @@ export async function handleChannelMessage(ws: ServerWebSocket<ChannelWsData>, r
   }
 
   if (!data.authenticated || !data.sessionId) return
+
+  // Per-connection message rate limiting
+  const now = Date.now()
+  if (now - data.msgWindowStart > MSG_RATE_WINDOW_MS) {
+    data.msgCount = 0
+    data.msgWindowStart = now
+  }
+  data.msgCount++
+  if (data.msgCount > MSG_RATE_MAX) return // silently drop
 
   if (msg.type === 'assistant_message') {
     // Store message and broadcast to subscribed clients

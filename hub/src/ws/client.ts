@@ -10,6 +10,8 @@ import {
 } from './registry'
 
 const AUTH_TIMEOUT_MS = 5_000
+const MSG_RATE_WINDOW_MS = 10_000
+const MSG_RATE_MAX = 30 // max 30 messages per 10 seconds
 
 interface ClientWsData {
   authenticated: boolean
@@ -17,6 +19,8 @@ interface ClientWsData {
   jwt: string | null
   clientEntry: ClientEntry | null
   authTimer: ReturnType<typeof setTimeout> | null
+  msgCount: number
+  msgWindowStart: number
 }
 
 export function createClientWsData(): ClientWsData {
@@ -26,6 +30,8 @@ export function createClientWsData(): ClientWsData {
     jwt: null,
     clientEntry: null,
     authTimer: null,
+    msgCount: 0,
+    msgWindowStart: Date.now(),
   }
 }
 
@@ -74,6 +80,15 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   }
 
   if (!data.authenticated || !data.userId || !data.clientEntry) return
+
+  // Per-connection message rate limiting
+  const now = Date.now()
+  if (now - data.msgWindowStart > MSG_RATE_WINDOW_MS) {
+    data.msgCount = 0
+    data.msgWindowStart = now
+  }
+  data.msgCount++
+  if (data.msgCount > MSG_RATE_MAX) return // silently drop
 
   if (msg.type === 'subscribe') {
     // Verify user owns these sessions before subscribing

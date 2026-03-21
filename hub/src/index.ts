@@ -50,7 +50,9 @@ app.use('/api/*', cors({
 }))
 
 // Rate limiting on API (C3 fix)
-app.use('/api/*', rateLimit({ windowMs: 60_000, max: 60, keyFn: (c) => c.get('userId') || c.req.header('x-forwarded-for') || 'anon' }))
+// Note: x-forwarded-for is used as fallback for unauthenticated requests only;
+// for production behind a reverse proxy, configure the proxy to set a trusted header.
+app.use('/api/*', rateLimit({ windowMs: 60_000, max: 60, keyFn: (c) => c.get('userId') || c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'anon' }))
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
@@ -71,6 +73,13 @@ const webDist = resolve(webDistCandidates.find(p => existsSync(p)) || './web/dis
 const wsConnectionsPerIp = new Map<string, number>()
 const MAX_WS_CONNECTIONS_PER_IP = 20
 
+// Periodic cleanup of stale IP entries (every 5 minutes)
+setInterval(() => {
+  for (const [ip, count] of wsConnectionsPerIp) {
+    if (count <= 0) wsConnectionsPerIp.delete(ip)
+  }
+}, 300_000)
+
 // Start Bun server with WebSocket upgrade handling
 const server = Bun.serve({
   port: config.port,
@@ -88,7 +97,8 @@ const server = Bun.serve({
       }
 
       // Connection limit per IP (DoS protection)
-      const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
+      // Prefer trusted proxy headers, fall back to x-forwarded-for
+      const ip = req.headers.get('cf-connecting-ip') || req.headers.get('x-real-ip') || req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
       const currentCount = wsConnectionsPerIp.get(ip) || 0
       if (currentCount >= MAX_WS_CONNECTIONS_PER_IP) {
         return new Response('too many connections', { status: 429 })

@@ -57,9 +57,20 @@ export function useSessions(session: SupaSession | null) {
     await fetchSessions()
   }
 
+  const rotateToken = async (id: string) => {
+    if (!session?.access_token) return null
+    const hubUrl = import.meta.env.VITE_HUB_URL || ''
+    const res = await fetch(`${hubUrl}/api/sessions/${id}/rotate-token`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    })
+    if (res.ok) return res.json() // { token: "remo_..." }
+    return null
+  }
+
   const updateSessionStatus = (sessionId: string, status: string) => {
     setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, status } : s))
   }
 
-  return { sessions, loading, createSession, deleteSession, updateSessionStatus, refetch: fetchSessions }
+  return { sessions, loading, createSession, deleteSession, rotateToken, updateSessionStatus, refetch: fetchSessions }
 }
