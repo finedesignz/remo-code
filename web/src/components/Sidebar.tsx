@@ -16,6 +16,8 @@ interface Props {
   onRotateToken: (id: string) => Promise<{ token: string } | null>
   onShowConnect: (data: ConnectData) => void
   onShowApiKey: () => void
+  onNavigate: (hash: string) => void
+  isAdmin?: boolean
   connected: boolean
   user: User
   signOut: () => void
@@ -25,6 +27,7 @@ interface Props {
 export function Sidebar({
   sessions, activeSessionId, onSelectSession,
   onCreateSession, onDeleteSession, onRotateToken, onShowConnect, onShowApiKey,
+  onNavigate, isAdmin,
   connected, user, signOut, onClose,
 }: Props) {
   const [showCreate, setShowCreate] = useState(false)
@@ -164,22 +167,53 @@ export function Sidebar({
           )}
         </div>
 
-        <div className="p-3 border-t border-slate-700/80 flex gap-2">
+        <div className="p-3 border-t border-slate-700/80 flex items-center gap-1">
+          {isAdmin && (
+            <button
+              onClick={() => onNavigate('#/admin')}
+              className="p-2 text-slate-500 hover:text-purple-300 transition-colors rounded-lg hover:bg-slate-700/50"
+              title="Admin Dashboard"
+              aria-label="Admin Dashboard"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M8 2l2 2.5h3.5l-1 3L14 10l-3 1-1.5 3L8 12.5 6.5 14l-1.5-3-3-1 1.5-2.5-1-3H6z" />
+              </svg>
+            </button>
+          )}
+          <button
+            onClick={() => onNavigate('#/settings')}
+            className="p-2 text-slate-500 hover:text-indigo-300 transition-colors rounded-lg hover:bg-slate-700/50"
+            title="Settings"
+            aria-label="Settings"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="8" cy="8" r="2.5" />
+              <path d="M13.5 8a5.5 5.5 0 0 0-.1-.9l1.4-1.1-1-1.7-1.7.5a5.5 5.5 0 0 0-1.5-.9L10.2 2H8.2l-.4 1.9a5.5 5.5 0 0 0-1.5.9l-1.7-.5-1 1.7 1.4 1.1A5.5 5.5 0 0 0 5 8c0 .3 0 .6.1.9L3.6 10l1 1.7 1.7-.5c.4.4.9.7 1.5.9l.4 1.9h2l.4-1.9c.6-.2 1.1-.5 1.5-.9l1.7.5 1-1.7-1.4-1.1c0-.3.1-.6.1-.9z" />
+            </svg>
+          </button>
           <button
             onClick={onShowApiKey}
-            className="flex-1 py-1.5 text-xs text-slate-500 hover:text-indigo-300 transition-colors flex items-center justify-center gap-1"
+            className="p-2 text-slate-500 hover:text-indigo-300 transition-colors rounded-lg hover:bg-slate-700/50"
+            title="API Key"
+            aria-label="API Key"
           >
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
               <path d="M10.5 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z" />
               <path d="M8.5 7l-6.5 6.5v2h2v-2h2v-2h2l1-1" />
             </svg>
-            API Key
           </button>
+          <div className="flex-1" />
           <button
             onClick={signOut}
-            className="flex-1 py-1.5 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            className="p-2 text-slate-500 hover:text-slate-300 transition-colors rounded-lg hover:bg-slate-700/50"
+            title="Sign out"
+            aria-label="Sign out"
           >
-            Sign out
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M6 2H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3" />
+              <path d="M10 12l4-4-4-4" />
+              <path d="M14 8H6" />
+            </svg>
           </button>
         </div>
       </div>

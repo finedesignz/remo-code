@@ -7,7 +7,11 @@ import { messages } from './api/messages'
 import { apiKeys } from './api/api-keys'
 import { plugin } from './api/plugin'
 import { setup } from './api/setup'
+import { profile } from './api/profile'
+import { billing, billingWebhook } from './api/billing'
+import { admin } from './api/admin'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
+import { adminMiddleware } from './auth/admin-middleware'
 import { rateLimit } from './middleware/rate-limit'
 import {
   createChannelWsData, handleChannelOpen, handleChannelMessage, handleChannelClose,
@@ -58,6 +62,9 @@ app.get('/health', (c) => c.json({ ok: true }))
 // Setup routes (no auth required — guarded internally by user count check)
 app.route('/api/setup', setup)
 
+// Stripe webhook (no auth — signature verified internally)
+app.route('/api/billing', billingWebhook)
+
 // Plugin routes (API key auth — MUST be before JWT catch-all)
 app.use('/api/plugin/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.req.header('authorization')?.slice(0, 20) || 'anon' }))
 app.use('/api/plugin/*', apiKeyMiddleware)
@@ -69,6 +76,12 @@ app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('u
 app.route('/api/sessions', sessions)
 app.route('/api/api-keys', apiKeys)
 app.route('/api/messages', messages)
+app.route('/api/profile', profile)
+app.route('/api/billing', billing)
+
+// Admin routes (JWT auth + admin role check)
+app.use('/api/admin/*', adminMiddleware)
+app.route('/api/admin', admin)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]

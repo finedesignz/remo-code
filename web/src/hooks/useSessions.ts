@@ -28,7 +28,7 @@ export function useSessions(session: SupaSession | null) {
 
   useEffect(() => { fetchSessions() }, [fetchSessions])
 
-  const createSession = async (name: string, projectDir?: string) => {
+  const createSession = async (name: string, projectDir?: string): Promise<any> => {
     if (!session?.access_token) return null
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     const res = await fetch(`${hubUrl}/api/sessions`, {
@@ -43,6 +43,9 @@ export function useSessions(session: SupaSession | null) {
       const data = await res.json()
       await fetchSessions()
       return data // includes { ...session, token: "remo_..." }
+    }
+    if (res.status === 403) {
+      return { error: 'session_limit_reached', status: 403 }
     }
     return null
   }

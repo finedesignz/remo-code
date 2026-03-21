@@ -11,11 +11,16 @@ type MessageHandler = (msg: WsMessage) => void
 export function useWebSocket(session: Session | null) {
   const [connected, setConnected] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
+  const authedRef = useRef(false)
   const handlersRef = useRef<Set<MessageHandler>>(new Set())
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  // Queue messages sent before WebSocket is authenticated
+  const pendingRef = useRef<object[]>([])
 
   const connect = useCallback(() => {
     if (!session?.access_token) return
+
+    authedRef.current = false
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = import.meta.env.VITE_HUB_URL
@@ -35,7 +40,13 @@ export function useWebSocket(session: Session | null) {
       try { msg = JSON.parse(event.data) } catch { return }
 
       if (msg.type === 'auth_ok') {
+        authedRef.current = true
         setConnected(true)
+        // Flush any messages queued before auth completed
+        for (const pending of pendingRef.current) {
+          ws.send(JSON.stringify(pending))
+        }
+        pendingRef.current = []
         return
       }
 
@@ -50,6 +61,7 @@ export function useWebSocket(session: Session | null) {
     }
 
     ws.onclose = () => {
+      authedRef.current = false
       setConnected(false)
       wsRef.current = null
       reconnectRef.current = setTimeout(connect, 3000)
@@ -67,8 +79,11 @@ export function useWebSocket(session: Session | null) {
   }, [connect])
 
   const send = useCallback((msg: object) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    if (wsRef.current?.readyState === WebSocket.OPEN && authedRef.current) {
       wsRef.current.send(JSON.stringify(msg))
+    } else {
+      // Queue for when auth completes
+      pendingRef.current.push(msg)
     }
   }, [])
 

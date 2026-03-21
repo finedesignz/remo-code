@@ -3,6 +3,8 @@ import { z } from 'zod'
 import { findOrCreateSession } from '../db/dal'
 import { hashToken } from '../ws/channel'
 import { getChannel } from '../ws/registry'
+import { supabaseAdmin } from '../db/supabase'
+import { TIER_LIMITS } from './profile'
 
 const plugin = new Hono()
 
@@ -31,6 +33,29 @@ plugin.post('/sessions', async (c) => {
   }
 
   try {
+    // Check if this is a new session (not reconnecting existing)
+    const { data: existingSession } = await supabaseAdmin
+      .from('sessions')
+      .select('id')
+      .eq('user_id', userId)
+      .eq('project_dir', parsed.data.project_dir)
+      .maybeSingle()
+
+    if (!existingSession) {
+      // New session — check tier limit
+      const { data: prof } = await supabaseAdmin.from('profiles').select('tier').eq('id', userId).single()
+      const tier = prof?.tier || 'free'
+      const limit = TIER_LIMITS[tier] || 1
+      const { count } = await supabaseAdmin
+        .from('sessions')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+
+      if ((count || 0) >= limit) {
+        return c.json({ error: 'session limit reached', tier, limit, current: count }, 403)
+      }
+    }
+
     const rawToken = generateToken()
     const tokenHash = await hashToken(rawToken)
     const result = await findOrCreateSession(userId, parsed.data.project_dir, tokenHash)
