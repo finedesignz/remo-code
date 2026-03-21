@@ -1,6 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
-import type { Profile } from '../hooks/useProfile'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useSessions } from '../hooks/useSessions'
 import { useChat } from '../hooks/useChat'
@@ -13,12 +12,10 @@ interface Props {
   session: Session
   user: User
   signOut: () => void
-  profile: Profile
   onNavigate: (hash: string) => void
-  onShowPricing: () => void
 }
 
-export function Layout({ session, user, signOut, profile, onNavigate, onShowPricing }: Props) {
+export function Layout({ session, user, signOut, onNavigate }: Props) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [connectData, setConnectData] = useState<ConnectData | null>(null)
@@ -31,24 +28,16 @@ export function Layout({ session, user, signOut, profile, onNavigate, onShowPric
   )
 
   // Listen for session status updates
-  subscribe((msg) => {
-    if (msg.type === 'session_status') {
-      sessionsHook.updateSessionStatus(msg.session_id, msg.status)
-    }
-    if (msg.type === 'session_list' && msg.sessions) {
-      sessionsHook.setSessions(msg.sessions)
-    }
-  })
-
-  // Wrap createSession to detect 403 session limit
-  const handleCreateSession = useCallback(async (name: string, projectDir?: string) => {
-    const result = await sessionsHook.createSession(name, projectDir)
-    if (result?.error === 'session_limit_reached') {
-      onShowPricing()
-      return null
-    }
-    return result
-  }, [sessionsHook, onShowPricing])
+  useEffect(() => {
+    return subscribe((msg) => {
+      if (msg.type === 'session_status') {
+        sessionsHook.updateSessionStatus(msg.session_id, msg.status)
+      }
+      if (msg.type === 'session_list' && msg.sessions) {
+        sessionsHook.setSessions(msg.sessions)
+      }
+    })
+  }, [subscribe, sessionsHook.updateSessionStatus, sessionsHook.setSessions])
 
   // Close sidebar on mobile when selecting a session
   const handleSelectSession = useCallback((id: string) => {
@@ -107,13 +96,12 @@ export function Layout({ session, user, signOut, profile, onNavigate, onShowPric
           sessions={sessionsHook.sessions}
           activeSessionId={activeSessionId}
           onSelectSession={handleSelectSession}
-          onCreateSession={handleCreateSession}
+          onCreateSession={sessionsHook.createSession}
           onDeleteSession={sessionsHook.deleteSession}
           onRotateToken={sessionsHook.rotateToken}
           onShowConnect={setConnectData}
           onShowApiKey={() => setShowApiKey(true)}
           onNavigate={onNavigate}
-          isAdmin={profile.role === 'admin'}
           connected={connected}
           user={user}
           signOut={signOut}

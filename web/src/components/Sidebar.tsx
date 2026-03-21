@@ -17,7 +17,6 @@ interface Props {
   onShowConnect: (data: ConnectData) => void
   onShowApiKey: () => void
   onNavigate: (hash: string) => void
-  isAdmin?: boolean
   connected: boolean
   user: User
   signOut: () => void
@@ -27,7 +26,7 @@ interface Props {
 export function Sidebar({
   sessions, activeSessionId, onSelectSession,
   onCreateSession, onDeleteSession, onRotateToken, onShowConnect, onShowApiKey,
-  onNavigate, isAdmin,
+  onNavigate,
   connected, user, signOut, onClose,
 }: Props) {
   const [showCreate, setShowCreate] = useState(false)
@@ -56,7 +55,10 @@ export function Sidebar({
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-slate-700/80">
           <div className="min-w-0">
-            <h1 className="text-lg font-bold text-white">Remo Code</h1>
+            <div className="flex items-center gap-2">
+              <img src="/logo.png" alt="" className="h-6 w-6 object-contain" />
+              <h1 className="text-lg font-bold text-white">Remo Code</h1>
+            </div>
             <p className="text-xs text-slate-500 mt-0.5 truncate">{user.email}</p>
           </div>
           <button
@@ -168,18 +170,6 @@ export function Sidebar({
         </div>
 
         <div className="p-3 border-t border-slate-700/80 flex items-center gap-1">
-          {isAdmin && (
-            <button
-              onClick={() => onNavigate('#/admin')}
-              className="p-2 text-slate-500 hover:text-purple-300 transition-colors rounded-lg hover:bg-slate-700/50"
-              title="Admin Dashboard"
-              aria-label="Admin Dashboard"
-            >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M8 2l2 2.5h3.5l-1 3L14 10l-3 1-1.5 3L8 12.5 6.5 14l-1.5-3-3-1 1.5-2.5-1-3H6z" />
-              </svg>
-            </button>
-          )}
           <button
             onClick={() => onNavigate('#/settings')}
             className="p-2 text-slate-500 hover:text-indigo-300 transition-colors rounded-lg hover:bg-slate-700/50"

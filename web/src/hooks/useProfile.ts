@@ -6,9 +6,7 @@ export interface Profile {
   email: string
   display_name: string | null
   role: string
-  tier: string
   session_count: number
-  session_limit: number
 }
 
 export function useProfile(session: Session | null) {
@@ -50,7 +48,5 @@ export function useProfile(session: Session | null) {
     return null
   }, [session?.access_token])
 
-  const isAdmin = profile?.role === 'admin'
-
-  return { profile, loading, fetchProfile, updateProfile, isAdmin }
+  return { profile, loading, fetchProfile, updateProfile }
 }

@@ -1,15 +1,9 @@
 import { Hono } from 'hono'
 import { createApiKey, listApiKeys, revokeApiKey } from '../db/dal'
 import { hashToken } from '../ws/channel'
+import { generateToken } from '../utils/token'
 
 const apiKeys = new Hono()
-
-function generateApiKey(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32))
-  const b64 = btoa(String.fromCharCode(...bytes))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-  return `remokey_${b64}`
-}
 
 // List API keys (never returns raw key)
 apiKeys.get('/', async (c) => {
@@ -21,7 +15,7 @@ apiKeys.get('/', async (c) => {
 // Generate new API key (revokes existing active key)
 apiKeys.post('/', async (c) => {
   const userId = c.get('userId')
-  const rawKey = generateApiKey()
+  const rawKey = generateToken('remokey_')
   const keyHash = await hashToken(rawKey)
   const key = await createApiKey(userId, keyHash)
   return c.json({ ...key, key: rawKey }, 201)

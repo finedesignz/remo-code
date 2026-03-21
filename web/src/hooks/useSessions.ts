@@ -44,9 +44,6 @@ export function useSessions(session: SupaSession | null) {
       await fetchSessions()
       return data // includes { ...session, token: "remo_..." }
     }
-    if (res.status === 403) {
-      return { error: 'session_limit_reached', status: 403 }
-    }
     return null
   }
 

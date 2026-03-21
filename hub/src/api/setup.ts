@@ -17,7 +17,7 @@ setup.use('*', rateLimit({
   keyFn: (c) => `setup:${c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'anon'}`,
 }))
 
-// Mutex to prevent race condition on admin creation
+// Mutex to prevent race condition on first-user creation
 let setupInProgress = false
 
 // Check if setup is needed (no users exist yet)
@@ -28,7 +28,7 @@ setup.get('/status', async (c) => {
   return c.json({ needs_setup: needsSetup })
 })
 
-// Create the first superadmin user (only works when no users exist)
+// Create the first user (only works when no users exist)
 setup.post('/create-admin', async (c) => {
   // Mutex: reject concurrent setup attempts
   if (setupInProgress) {

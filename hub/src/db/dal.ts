@@ -42,7 +42,7 @@ export async function updateSessionToken(sb: SupabaseClient, id: string, tokenHa
   if (error) throw error
 }
 
-// -- Sessions (admin, no RLS — used by channel WS auth) --
+// -- Sessions (server-level, no RLS — used by channel WS auth) --
 
 export async function verifyChannelToken(sessionId: string) {
   const { data, error } = await supabaseAdmin
@@ -61,7 +61,7 @@ export async function setSessionStatus(sessionId: string, status: 'online' | 'of
     .eq('id', sessionId)
 }
 
-// -- API Keys (admin, bypasses RLS) --
+// -- API Keys (server-level, bypasses RLS) --
 
 export async function createApiKey(userId: string, keyHash: string) {
   // Revoke any existing active key
@@ -110,7 +110,7 @@ export async function verifyApiKey(keyHash: string) {
   return data
 }
 
-// -- Sessions (admin, for plugin auto-registration) --
+// -- Sessions (server-level, for plugin auto-registration) --
 
 export async function findOrCreateSession(userId: string, projectDir: string, tokenHash: string) {
   const name = projectDir.split(/[/\\]/).filter(Boolean).pop() || 'unnamed'

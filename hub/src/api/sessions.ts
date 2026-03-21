@@ -3,8 +3,7 @@ import { z } from 'zod'
 import { createSession, listSessions, getSession, deleteSession, updateSessionToken } from '../db/dal'
 import { hashToken } from '../ws/channel'
 import { getChannel } from '../ws/registry'
-import { supabaseAdmin } from '../db/supabase'
-import { TIER_LIMITS } from './profile'
+import { generateToken } from '../utils/token'
 
 const CreateSessionBody = z.object({
   name: z.string().min(1).max(100).trim(),
@@ -12,13 +11,6 @@ const CreateSessionBody = z.object({
 })
 
 const sessions = new Hono()
-
-function generateToken(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(32))
-  const b64 = btoa(String.fromCharCode(...bytes))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-  return `remo_${b64}`
-}
 
 // List all sessions for the authenticated user
 sessions.get('/', async (c) => {
@@ -47,27 +39,7 @@ sessions.post('/', async (c) => {
     return c.json({ error: 'invalid input' }, 400)
   }
 
-  // Check session limit based on tier
-  const { data: prof } = await supabaseAdmin.from('profiles').select('tier').eq('id', userId).single()
-  const tier = prof?.tier || 'free'
-  const limit = TIER_LIMITS[tier] || 1
-
-  const { count } = await supabaseAdmin
-    .from('sessions')
-    .select('id', { count: 'exact', head: true })
-    .eq('user_id', userId)
-
-  if ((count || 0) >= limit) {
-    return c.json({
-      error: 'session limit reached',
-      tier,
-      limit,
-      current: count,
-      upgrade_url: '/settings?tab=billing',
-    }, 403)
-  }
-
-  const rawToken = generateToken()
+  const rawToken = generateToken('remo_')
   const tokenHash = await hashToken(rawToken)
 
   const session = await createSession(sb, userId, parsed.data.name, parsed.data.project_dir || null, tokenHash)
@@ -98,7 +70,7 @@ sessions.post('/:id/rotate-token', async (c) => {
     return c.json({ error: 'not found' }, 404)
   }
 
-  const rawToken = generateToken()
+  const rawToken = generateToken('remo_')
   const tokenHash = await hashToken(rawToken)
   await updateSessionToken(sb, sessionId, tokenHash)
 

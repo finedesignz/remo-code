@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import type { Profile } from '../hooks/useProfile'
-import { useBilling } from '../hooks/useBilling'
 import { useApiKey } from '../hooks/useApiKey'
 
 interface Props {
@@ -9,36 +8,11 @@ interface Props {
   profile: Profile
   onUpdateProfile: (data: { display_name: string }) => Promise<any>
   onBack: () => void
-  onShowPricing: () => void
 }
 
-type Tab = 'account' | 'billing' | 'apikey'
+type Tab = 'account' | 'apikey'
 
-function TierBadge({ tier }: { tier: string }) {
-  const colors: Record<string, string> = {
-    free: 'bg-slate-600 text-slate-200',
-    pro: 'bg-indigo-600/30 text-indigo-300 ring-1 ring-indigo-500/40',
-    max: 'bg-amber-600/30 text-amber-300 ring-1 ring-amber-500/40',
-  }
-  return (
-    <span className={`px-2 py-0.5 rounded-full text-xs font-semibold uppercase tracking-wide ${colors[tier] || colors.free}`}>
-      {tier}
-    </span>
-  )
-}
-
-function RoleBadge({ role }: { role: string }) {
-  if (role === 'admin') {
-    return (
-      <span className="px-2 py-0.5 rounded-full text-xs font-semibold uppercase tracking-wide bg-purple-600/30 text-purple-300 ring-1 ring-purple-500/40">
-        Admin
-      </span>
-    )
-  }
-  return null
-}
-
-export function SettingsPage({ session, profile, onUpdateProfile, onBack, onShowPricing }: Props) {
+export function SettingsPage({ session, profile, onUpdateProfile, onBack }: Props) {
   const [tab, setTab] = useState<Tab>('account')
   const [displayName, setDisplayName] = useState(profile.display_name || '')
   const [saving, setSaving] = useState(false)
@@ -46,7 +20,6 @@ export function SettingsPage({ session, profile, onUpdateProfile, onBack, onShow
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'account', label: 'Account' },
-    { id: 'billing', label: 'Billing' },
     { id: 'apikey', label: 'API Key' },
   ]
 
@@ -126,20 +99,7 @@ export function SettingsPage({ session, profile, onUpdateProfile, onBack, onShow
                   </div>
                 </div>
               </div>
-
-              <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-white mb-3">Role & Tier</h3>
-                <div className="flex items-center gap-3">
-                  <TierBadge tier={profile.tier} />
-                  <RoleBadge role={profile.role} />
-                </div>
-              </div>
             </div>
-          )}
-
-          {/* Billing Tab */}
-          {tab === 'billing' && (
-            <BillingTab session={session} profile={profile} onShowPricing={onShowPricing} />
           )}
 
           {/* API Key Tab */}
@@ -147,86 +107,6 @@ export function SettingsPage({ session, profile, onUpdateProfile, onBack, onShow
             <ApiKeyTab session={session} />
           )}
         </div>
-      </div>
-    </div>
-  )
-}
-
-/* ------------------------------------------------------------------ */
-/* Billing sub-tab                                                     */
-/* ------------------------------------------------------------------ */
-
-function BillingTab({ session, profile, onShowPricing }: { session: Session; profile: Profile; onShowPricing: () => void }) {
-  const { subscription, loading, openPortal } = useBilling(session)
-
-  const limitLabel = profile.session_limit === -1 ? 'Unlimited' : String(profile.session_limit)
-
-  return (
-    <div className="space-y-6">
-      <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5">
-        <h3 className="text-sm font-semibold text-white mb-4">Current Plan</h3>
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <TierBadge tier={profile.tier} />
-            <span className="text-sm text-slate-300">{profile.session_count} / {limitLabel} channels</span>
-          </div>
-        </div>
-
-        {/* Usage bar */}
-        {profile.session_limit > 0 && (
-          <div className="mb-4">
-            <div className="h-2 bg-slate-700 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all ${
-                  profile.session_count >= profile.session_limit ? 'bg-red-500' : 'bg-indigo-500'
-                }`}
-                style={{ width: `${Math.min(100, (profile.session_count / profile.session_limit) * 100)}%` }}
-              />
-            </div>
-          </div>
-        )}
-
-        <button
-          onClick={onShowPricing}
-          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-white font-medium transition-colors"
-        >
-          {profile.tier === 'free' ? 'Upgrade Plan' : 'Change Plan'}
-        </button>
-      </div>
-
-      <div className="bg-slate-800/60 border border-slate-700/80 rounded-xl p-5">
-        <h3 className="text-sm font-semibold text-white mb-4">Subscription</h3>
-        {loading ? (
-          <p className="text-sm text-slate-500">Loading...</p>
-        ) : subscription ? (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-slate-400">Status</span>
-              <span className={`font-medium ${subscription.status === 'active' ? 'text-emerald-400' : 'text-amber-400'}`}>
-                {subscription.status}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-slate-400">Current period ends</span>
-              <span className="text-slate-200">
-                {new Date(subscription.current_period_end).toLocaleDateString()}
-              </span>
-            </div>
-            {subscription.cancel_at_period_end && (
-              <p className="text-xs text-amber-400 bg-amber-900/20 border border-amber-800/40 rounded-lg px-3 py-2">
-                Your subscription will cancel at the end of the current period.
-              </p>
-            )}
-            <button
-              onClick={openPortal}
-              className="w-full py-2.5 border border-slate-600 hover:border-slate-500 rounded-lg text-sm text-slate-300 hover:text-white font-medium transition-colors"
-            >
-              Manage in Stripe
-            </button>
-          </div>
-        ) : (
-          <p className="text-sm text-slate-500">No active subscription. You are on the free plan.</p>
-        )}
       </div>
     </div>
   )

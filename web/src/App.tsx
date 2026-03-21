@@ -5,24 +5,20 @@ import { AuthForm } from './components/AuthForm'
 import { SetupForm } from './components/SetupForm'
 import { Layout } from './components/Layout'
 import { SettingsPage } from './components/SettingsPage'
-import { AdminDashboard } from './components/AdminDashboard'
-import { PricingModal } from './components/PricingModal'
 
-type Route = 'chat' | 'settings' | 'admin'
+type Route = 'chat' | 'settings'
 
 function getRoute(): Route {
   const hash = window.location.hash
   if (hash === '#/settings') return 'settings'
-  if (hash === '#/admin') return 'admin'
   return 'chat'
 }
 
 export default function App() {
   const { session, user, loading, signOut } = useAuth()
-  const { profile, loading: profileLoading, updateProfile, isAdmin } = useProfile(session)
+  const { profile, loading: profileLoading, updateProfile } = useProfile(session)
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null)
   const [route, setRoute] = useState<Route>(getRoute)
-  const [showPricing, setShowPricing] = useState(false)
 
   useEffect(() => {
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
@@ -74,40 +70,12 @@ export default function App() {
 
   return (
     <>
-      {showPricing && (
-        <PricingModal
-          session={session}
-          currentTier={profile.tier}
-          onClose={() => setShowPricing(false)}
-        />
-      )}
-
       {route === 'settings' && (
         <SettingsPage
           session={session}
           profile={profile}
           onUpdateProfile={updateProfile}
           onBack={goToChat}
-          onShowPricing={() => setShowPricing(true)}
-        />
-      )}
-
-      {route === 'admin' && isAdmin && (
-        <AdminDashboard
-          session={session}
-          onBack={goToChat}
-        />
-      )}
-
-      {/* Redirect non-admin from admin route */}
-      {route === 'admin' && !isAdmin && (
-        <Layout
-          session={session}
-          user={user}
-          signOut={signOut}
-          profile={profile}
-          onNavigate={navigate}
-          onShowPricing={() => setShowPricing(true)}
         />
       )}
 
@@ -116,9 +84,7 @@ export default function App() {
           session={session}
           user={user}
           signOut={signOut}
-          profile={profile}
           onNavigate={navigate}
-          onShowPricing={() => setShowPricing(true)}
         />
       )}
     </>

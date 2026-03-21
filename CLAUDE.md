@@ -110,6 +110,10 @@ All WS messages validated with Zod schemas in `hub/src/ws/protocol.ts`.
 
 **~/.claude/channels/remo-code/.env** (channel config): `HUB_URL`, `HUB_TOKEN`, `SESSION_ID`
 
+## PR Hygiene
+
+Periodically check for open PRs with `gh pr list`. Review them for conflicts with current work, stale branches, or changes that have already been applied to main. Flag any that should be closed or merged.
+
 ## Deployment
 
 Docker multi-stage build (see `Dockerfile`): installs deps → builds web → copies into production image with non-root user. Runs on Coolify at `remo-code.com`, port 3040.

@@ -6,6 +6,16 @@ import { readFileSync, writeFileSync, chmodSync, mkdirSync, existsSync } from 'f
 import { join, basename } from 'path'
 import { homedir } from 'os'
 
+// -- Global error handlers — keep the process alive --
+
+process.on('uncaughtException', (err) => {
+  process.stderr.write(`remo-code: uncaught exception: ${err.message}\n`)
+})
+
+process.on('unhandledRejection', (err: any) => {
+  process.stderr.write(`remo-code: unhandled rejection: ${err?.message || err}\n`)
+})
+
 // -- State Management --
 
 const STATE_DIR = join(homedir(), '.claude', 'channels', 'remo-code')
@@ -136,7 +146,7 @@ async function ensureSession(): Promise<SessionCache> {
   if (!res.ok) {
     const text = await res.text()
     process.stderr.write(`remo-code: registration failed (${res.status}): ${text}\n`)
-    process.exit(1)
+    throw new Error(`registration failed (${res.status})`)
   }
 
   const data = await res.json() as { session_id: string; token: string; name: string }
@@ -277,10 +287,40 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 let ws: WebSocket | null = null
 let currentSession: SessionCache | null = null
 const RECONNECT_DELAY_MS = 5_000
+let lastPong = 0
+let healthInterval: ReturnType<typeof setInterval> | null = null
+
+// Periodic health check — detect silent disconnects and force reconnect
+const HEALTH_CHECK_INTERVAL_MS = 60_000
+const HEALTH_CHECK_TIMEOUT_MS = 90_000 // no pong in 90s = dead
+
+function startHealthCheck() {
+  stopHealthCheck()
+  healthInterval = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (Date.now() - lastPong > HEALTH_CHECK_TIMEOUT_MS) {
+      process.stderr.write('remo-code: no heartbeat received, reconnecting...\n')
+      ws.close()
+    }
+  }, HEALTH_CHECK_INTERVAL_MS)
+}
+
+function stopHealthCheck() {
+  if (healthInterval) {
+    clearInterval(healthInterval)
+    healthInterval = null
+  }
+}
 
 async function connectToHub() {
   if (!currentSession) {
-    currentSession = await ensureSession()
+    try {
+      currentSession = await ensureSession()
+    } catch (err: any) {
+      process.stderr.write(`remo-code: session setup failed, retrying in 30s: ${err.message}\n`)
+      setTimeout(connectToHub, 30_000)
+      return
+    }
   }
 
   const wsUrl = state!.hub_url.replace(/^http/, 'ws') + '/ws/channel'
@@ -290,6 +330,7 @@ async function connectToHub() {
 
   ws.onopen = () => {
     process.stderr.write('remo-code: connected, authenticating...\n')
+    lastPong = Date.now()
     ws!.send(JSON.stringify({
       type: 'auth',
       session_id: currentSession!.session_id,
@@ -304,6 +345,7 @@ async function connectToHub() {
     if (msg.type === 'auth_ok') {
       process.stderr.write(`remo-code: authenticated as "${currentSession!.name}"\n`)
       sendToHub({ type: 'status', status: 'idle' })
+      startHealthCheck()
     }
 
     if (msg.type === 'auth_error') {
@@ -327,12 +369,14 @@ async function connectToHub() {
     }
 
     if (msg.type === 'ping') {
+      lastPong = Date.now()
       ws?.send(JSON.stringify({ type: 'pong' }))
     }
   }
 
   ws.onclose = (event) => {
     ws = null
+    stopHealthCheck()
 
     if (event.code === 4001 || event.code === 4004) {
       // Auth failed or token rotated — re-register via API key
@@ -370,3 +414,11 @@ function sendToHub(msg: object) {
 
 await mcp.connect(new StdioServerTransport())
 connectToHub()
+
+// If the stdio pipe closes (Claude Code disconnected but process survives),
+// clean up and exit so we don't become a zombie.
+process.stdin.on('end', () => {
+  process.stderr.write('remo-code: stdin closed (Claude Code disconnected), exiting\n')
+  ws?.close()
+  process.exit(0)
+})

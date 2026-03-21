@@ -4,18 +4,12 @@ import { supabaseAdmin } from '../db/supabase'
 
 const profile = new Hono()
 
-const TIER_LIMITS: Record<string, number> = {
-  free: 1,
-  pro: 10,
-  max: Infinity,
-}
-
 // Get current user's profile
 profile.get('/', async (c) => {
   const userId = c.get('userId')
   const { data, error } = await supabaseAdmin
     .from('profiles')
-    .select('id, email, display_name, role, tier, stripe_customer_id, created_at')
+    .select('id, email, display_name, role, created_at')
     .eq('id', userId)
     .single()
 
@@ -30,7 +24,6 @@ profile.get('/', async (c) => {
   return c.json({
     ...data,
     session_count: count || 0,
-    session_limit: TIER_LIMITS[data.tier] || 1,
   })
 })
 
@@ -53,4 +46,4 @@ profile.patch('/', async (c) => {
   return c.json({ ok: true })
 })
 
-export { profile, TIER_LIMITS }
+export { profile }

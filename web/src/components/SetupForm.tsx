@@ -44,7 +44,7 @@ export function SetupForm({ onComplete }: Props) {
         return
       }
 
-      // Auto sign in after creating admin
+      // Auto sign in after creating account
       const { error: signInError } = await supabase.auth.signInWithPassword({ email, password })
       if (signInError) {
         setError('Account created but sign-in failed. Please sign in manually.')
@@ -61,9 +61,10 @@ export function SetupForm({ onComplete }: Props) {
   return (
     <div className="flex items-center justify-center min-h-screen bg-slate-900">
       <div className="w-full max-w-md p-8">
+        <img src="/logo.png" alt="Remo Code" className="h-12 mx-auto mb-4" />
         <h1 className="text-3xl font-bold text-center mb-2 text-white">Remo Code</h1>
         <p className="text-center text-slate-400 mb-2">
-          Welcome! Create your admin account to get started.
+          Welcome! Create your account to get started.
         </p>
         <p className="text-center text-xs text-slate-500 mb-8">
           This is a one-time setup for the first user.
@@ -84,7 +85,7 @@ export function SetupForm({ onComplete }: Props) {
               onChange={e => setEmail(e.target.value)}
               required
               className="w-full px-4 py-2.5 bg-slate-800 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="admin@example.com"
+              placeholder="you@example.com"
             />
           </div>
 
@@ -118,7 +119,7 @@ export function SetupForm({ onComplete }: Props) {
             disabled={loading}
             className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-white font-medium transition-colors"
           >
-            {loading ? 'Creating...' : 'Create Admin Account'}
+            {loading ? 'Creating...' : 'Create Account'}
           </button>
         </form>
       </div>
