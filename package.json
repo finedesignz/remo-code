@@ -8,6 +8,7 @@
     "build:web": "cd web && bun run build"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.2.2",
     "pg": "^8.20.0"
   },
   "dependencies": {

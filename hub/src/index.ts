@@ -4,6 +4,7 @@ import { config } from './config'
 import { authMiddleware } from './auth/middleware'
 import { sessions } from './api/sessions'
 import { messages } from './api/messages'
+import { setup } from './api/setup'
 import { rateLimit } from './middleware/rate-limit'
 import {
   createChannelWsData, handleChannelOpen, handleChannelMessage, handleChannelClose,
@@ -53,6 +54,9 @@ app.use('/api/*', rateLimit({ windowMs: 60_000, max: 60, keyFn: (c) => c.get('us
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
+
+// Setup routes (no auth required — guarded internally by user count check)
+app.route('/api/setup', setup)
 
 // Protected API routes
 app.use('/api/*', authMiddleware)

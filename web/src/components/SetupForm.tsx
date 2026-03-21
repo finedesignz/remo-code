@@ -1,0 +1,127 @@
+import { useState } from 'react'
+import { supabase } from '../lib/supabase'
+
+interface Props {
+  onComplete: () => void
+}
+
+export function SetupForm({ onComplete }: Props) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError('')
+
+    if (password !== confirmPassword) {
+      setError('Passwords do not match')
+      return
+    }
+
+    if (password.length < 8) {
+      setError('Password must be at least 8 characters')
+      return
+    }
+
+    setLoading(true)
+
+    try {
+      const hubUrl = import.meta.env.VITE_HUB_URL || ''
+      const res = await fetch(`${hubUrl}/api/setup/create-admin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      })
+
+      const data = await res.json()
+
+      if (!res.ok) {
+        setError(data.error || 'Setup failed')
+        setLoading(false)
+        return
+      }
+
+      // Auto sign in after creating admin
+      const { error: signInError } = await supabase.auth.signInWithPassword({ email, password })
+      if (signInError) {
+        setError('Account created but sign-in failed. Please sign in manually.')
+      }
+
+      onComplete()
+    } catch {
+      setError('Network error — is the hub running?')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-slate-900">
+      <div className="w-full max-w-md p-8">
+        <h1 className="text-3xl font-bold text-center mb-2 text-white">Remo Code</h1>
+        <p className="text-center text-slate-400 mb-2">
+          Welcome! Create your admin account to get started.
+        </p>
+        <p className="text-center text-xs text-slate-500 mb-8">
+          This is a one-time setup for the first user.
+        </p>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {error && (
+            <div className="p-3 bg-red-900/30 border border-red-800 rounded-lg text-red-300 text-sm">
+              {error}
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm text-slate-400 mb-1">Email</label>
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              required
+              className="w-full px-4 py-2.5 bg-slate-800 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="admin@example.com"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm text-slate-400 mb-1">Password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              required
+              minLength={8}
+              className="w-full px-4 py-2.5 bg-slate-800 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="Min 8 characters"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm text-slate-400 mb-1">Confirm Password</label>
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={e => setConfirmPassword(e.target.value)}
+              required
+              className="w-full px-4 py-2.5 bg-slate-800 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="Confirm password"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-white font-medium transition-colors"
+          >
+            {loading ? 'Creating...' : 'Create Admin Account'}
+          </button>
+        </form>
+      </div>
+    </div>
+  )
+}
