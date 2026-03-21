@@ -92,26 +92,28 @@ export function Sidebar({
                   <span className="truncate font-medium flex-1">{s.name}</span>
                   {/* Action buttons — visible on hover */}
                   <span className="hidden group-hover:flex items-center gap-1 shrink-0">
-                    <span
+                    <button
+                      type="button"
                       onClick={(e) => { e.stopPropagation(); handleReconnect(s) }}
-                      className="px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-indigo-300 bg-slate-700/80 hover:bg-slate-600/80 rounded transition-colors cursor-pointer"
+                      className="px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-indigo-300 bg-slate-700/80 hover:bg-slate-600/80 rounded transition-colors"
                       title="Get new connection token"
                     >
                       <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                         <path d="M1 4v-3h3" /><path d="M3.51 11a7 7 0 0 0 12.13-3.5" />
                         <path d="M15 12v3h-3" /><path d="M12.49 5a7 7 0 0 0-12.13 3.5" />
                       </svg>
-                    </span>
-                    <span
+                    </button>
+                    <button
+                      type="button"
                       onClick={(e) => { e.stopPropagation(); if (confirm(`Delete session "${s.name}"?`)) onDeleteSession(s.id) }}
-                      className="px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-red-400 bg-slate-700/80 hover:bg-red-900/50 rounded transition-colors cursor-pointer"
+                      className="px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-red-400 bg-slate-700/80 hover:bg-red-900/50 rounded transition-colors"
                       title="Delete session"
                     >
                       <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                         <line x1="4" y1="4" x2="12" y2="12" />
                         <line x1="12" y1="4" x2="4" y2="12" />
                       </svg>
-                    </span>
+                    </button>
                   </span>
                 </div>
                 {s.project_dir && (

@@ -1,6 +1,6 @@
 import type { Context, Next } from 'hono'
 import { verifyApiKey } from '../db/dal'
-import { hashToken } from '../ws/channel'
+import { hashToken } from '../lib/crypto'
 
 export async function apiKeyMiddleware(c: Context, next: Next) {
   const authHeader = c.req.header('Authorization')

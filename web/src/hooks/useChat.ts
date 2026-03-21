@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { Session } from '@supabase/supabase-js'
+import { hubFetch } from '../lib/api'
 
 export interface ChatMessage {
   id: string
@@ -26,10 +27,7 @@ export function useChat(
     }
 
     setLoading(true)
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    fetch(`${hubUrl}/api/messages/${activeSessionId}?limit=50`, {
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
+    hubFetch(`/api/messages/${activeSessionId}?limit=50`, session.access_token)
       .then(r => r.ok ? r.json() : [])
       .then(data => {
         setMessages(data)

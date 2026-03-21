@@ -1,3 +1,10 @@
+// -1 = unlimited (JSON cannot represent Infinity)
+export const TIER_LIMITS: Record<string, number> = {
+  free: 1,
+  pro: 10,
+  max: -1,
+}
+
 export const config = {
   port: Number(process.env.PORT || 3040),
   supabaseUrl: process.env.SUPABASE_URL!,

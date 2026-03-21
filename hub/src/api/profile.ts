@@ -1,14 +1,9 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { supabaseAdmin } from '../db/supabase'
+import { TIER_LIMITS } from '../config'
 
 const profile = new Hono()
-
-const TIER_LIMITS: Record<string, number> = {
-  free: 1,
-  pro: 10,
-  max: Infinity,
-}
 
 // Get current user's profile
 profile.get('/', async (c) => {
@@ -50,7 +45,24 @@ profile.patch('/', async (c) => {
     .eq('id', userId)
 
   if (error) return c.json({ error: 'update failed' }, 500)
-  return c.json({ ok: true })
+
+  // Return the updated profile (same shape as GET)
+  const { data } = await supabaseAdmin
+    .from('profiles')
+    .select('id, email, display_name, role, tier, stripe_customer_id, created_at')
+    .eq('id', userId)
+    .single()
+
+  const { count } = await supabaseAdmin
+    .from('sessions')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+
+  return c.json({
+    ...data,
+    session_count: count || 0,
+    session_limit: TIER_LIMITS[data?.tier || 'free'] || 1,
+  })
 })
 
-export { profile, TIER_LIMITS }
+export { profile }

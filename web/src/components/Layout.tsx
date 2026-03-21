@@ -31,14 +31,16 @@ export function Layout({ session, user, signOut, profile, onNavigate, onShowPric
   )
 
   // Listen for session status updates
-  subscribe((msg) => {
-    if (msg.type === 'session_status') {
-      sessionsHook.updateSessionStatus(msg.session_id, msg.status)
-    }
-    if (msg.type === 'session_list' && msg.sessions) {
-      sessionsHook.setSessions(msg.sessions)
-    }
-  })
+  useEffect(() => {
+    return subscribe((msg) => {
+      if (msg.type === 'session_status') {
+        sessionsHook.updateSessionStatus(msg.session_id, msg.status)
+      }
+      if (msg.type === 'session_list' && msg.sessions) {
+        sessionsHook.setSessions(msg.sessions)
+      }
+    })
+  }, [subscribe, sessionsHook.updateSessionStatus, sessionsHook.setSessions])
 
   // Wrap createSession to detect 403 session limit
   const handleCreateSession = useCallback(async (name: string, projectDir?: string) => {
@@ -113,7 +115,7 @@ export function Layout({ session, user, signOut, profile, onNavigate, onShowPric
           onShowConnect={setConnectData}
           onShowApiKey={() => setShowApiKey(true)}
           onNavigate={onNavigate}
-          isAdmin={profile.role === 'admin'}
+          isAdmin={profile?.role === 'admin'}
           connected={connected}
           user={user}
           signOut={signOut}

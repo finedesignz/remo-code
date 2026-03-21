@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { Session as SupaSession } from '@supabase/supabase-js'
+import { hubFetch } from '../lib/api'
 
 export interface CodeSession {
   id: string
@@ -16,10 +17,7 @@ export function useSessions(session: SupaSession | null) {
 
   const fetchSessions = useCallback(async () => {
     if (!session?.access_token) return
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/sessions`, {
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
+    const res = await hubFetch('/api/sessions', session.access_token)
     if (res.ok) {
       setSessions(await res.json())
     }
@@ -28,52 +26,39 @@ export function useSessions(session: SupaSession | null) {
 
   useEffect(() => { fetchSessions() }, [fetchSessions])
 
-  const createSession = async (name: string, projectDir?: string): Promise<any> => {
+  const createSession = useCallback(async (name: string, projectDir?: string): Promise<any> => {
     if (!session?.access_token) return null
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/sessions`, {
+    const res = await hubFetch('/api/sessions', session.access_token, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${session.access_token}`,
-      },
       body: JSON.stringify({ name, project_dir: projectDir }),
     })
     if (res.ok) {
       const data = await res.json()
       await fetchSessions()
-      return data // includes { ...session, token: "remo_..." }
+      return data
     }
     if (res.status === 403) {
       return { error: 'session_limit_reached', status: 403 }
     }
     return null
-  }
+  }, [session?.access_token, fetchSessions])
 
-  const deleteSession = async (id: string) => {
+  const deleteSession = useCallback(async (id: string) => {
     if (!session?.access_token) return
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    await fetch(`${hubUrl}/api/sessions/${id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
+    await hubFetch(`/api/sessions/${id}`, session.access_token, { method: 'DELETE' })
     await fetchSessions()
-  }
+  }, [session?.access_token, fetchSessions])
 
-  const rotateToken = async (id: string) => {
+  const rotateToken = useCallback(async (id: string) => {
     if (!session?.access_token) return null
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/sessions/${id}/rotate-token`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
-    if (res.ok) return res.json() // { token: "remo_..." }
+    const res = await hubFetch(`/api/sessions/${id}/rotate-token`, session.access_token, { method: 'POST' })
+    if (res.ok) return res.json()
     return null
-  }
+  }, [session?.access_token])
 
-  const updateSessionStatus = (sessionId: string, status: string) => {
+  const updateSessionStatus = useCallback((sessionId: string, status: string) => {
     setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, status } : s))
-  }
+  }, [])
 
   return { sessions, setSessions, loading, createSession, deleteSession, rotateToken, updateSessionStatus, refetch: fetchSessions }
 }

@@ -7,6 +7,7 @@ import { Layout } from './components/Layout'
 import { SettingsPage } from './components/SettingsPage'
 import { AdminDashboard } from './components/AdminDashboard'
 import { PricingModal } from './components/PricingModal'
+import { HUB_URL } from './lib/api'
 
 type Route = 'chat' | 'settings' | 'admin'
 
@@ -17,6 +18,14 @@ function getRoute(): Route {
   return 'chat'
 }
 
+function LoadingScreen() {
+  return (
+    <div className="flex items-center justify-center h-screen bg-slate-900">
+      <div className="text-slate-400">Loading...</div>
+    </div>
+  )
+}
+
 export default function App() {
   const { session, user, loading, signOut } = useAuth()
   const { profile, loading: profileLoading, updateProfile, isAdmin } = useProfile(session)
@@ -25,8 +34,7 @@ export default function App() {
   const [showPricing, setShowPricing] = useState(false)
 
   useEffect(() => {
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    fetch(`${hubUrl}/api/setup/status`)
+    fetch(`${HUB_URL}/api/setup/status`)
       .then(r => r.json())
       .then(data => setNeedsSetup(data.needs_setup))
       .catch(() => setNeedsSetup(false))
@@ -43,34 +51,18 @@ export default function App() {
     window.location.hash = hash
   }, [])
 
-  const goToChat = useCallback(() => {
-    window.location.hash = '#/'
-  }, [])
-
-  if (loading || needsSetup === null) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-slate-900">
-        <div className="text-slate-400">Loading...</div>
-      </div>
-    )
-  }
+  if (loading || needsSetup === null) return <LoadingScreen />
 
   if (needsSetup) {
     return <SetupForm onComplete={() => setNeedsSetup(false)} />
   }
 
-  if (!session || !user) {
-    return <AuthForm />
-  }
+  if (!session || !user) return <AuthForm />
 
-  // Wait for profile to load before rendering gated routes
-  if (profileLoading || !profile) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-slate-900">
-        <div className="text-slate-400">Loading...</div>
-      </div>
-    )
-  }
+  if (profileLoading || !profile) return <LoadingScreen />
+
+  // Non-admin on admin route falls through to chat
+  const effectiveRoute = (route === 'admin' && !isAdmin) ? 'chat' : route
 
   return (
     <>
@@ -82,36 +74,24 @@ export default function App() {
         />
       )}
 
-      {route === 'settings' && (
+      {effectiveRoute === 'settings' && (
         <SettingsPage
           session={session}
           profile={profile}
           onUpdateProfile={updateProfile}
-          onBack={goToChat}
+          onBack={() => navigate('#/')}
           onShowPricing={() => setShowPricing(true)}
         />
       )}
 
-      {route === 'admin' && isAdmin && (
+      {effectiveRoute === 'admin' && (
         <AdminDashboard
           session={session}
-          onBack={goToChat}
+          onBack={() => navigate('#/')}
         />
       )}
 
-      {/* Redirect non-admin from admin route */}
-      {route === 'admin' && !isAdmin && (
-        <Layout
-          session={session}
-          user={user}
-          signOut={signOut}
-          profile={profile}
-          onNavigate={navigate}
-          onShowPricing={() => setShowPricing(true)}
-        />
-      )}
-
-      {route === 'chat' && (
+      {effectiveRoute === 'chat' && (
         <Layout
           session={session}
           user={user}

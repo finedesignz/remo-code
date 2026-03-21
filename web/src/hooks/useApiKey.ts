@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { Session } from '@supabase/supabase-js'
+import { hubFetch } from '../lib/api'
 
 export interface ApiKey {
   id: string
@@ -15,40 +16,29 @@ export function useApiKey(session: Session | null) {
 
   const fetchKeys = useCallback(async () => {
     if (!session?.access_token) return
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/api-keys`, {
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
+    const res = await hubFetch('/api/api-keys', session.access_token)
     if (res.ok) setKeys(await res.json())
     setLoading(false)
   }, [session?.access_token])
 
   useEffect(() => { fetchKeys() }, [fetchKeys])
 
-  const generateKey = async () => {
+  const generateKey = useCallback(async () => {
     if (!session?.access_token) return null
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/api-keys`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
+    const res = await hubFetch('/api/api-keys', session.access_token, { method: 'POST' })
     if (res.ok) {
       const data = await res.json()
       await fetchKeys()
-      return data // { id, name, created_at, key: "remokey_..." }
+      return data
     }
     return null
-  }
+  }, [session?.access_token, fetchKeys])
 
-  const revokeKey = async (id: string) => {
+  const revokeKey = useCallback(async (id: string) => {
     if (!session?.access_token) return
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    await fetch(`${hubUrl}/api/api-keys/${id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    })
+    await hubFetch(`/api/api-keys/${id}`, session.access_token, { method: 'DELETE' })
     await fetchKeys()
-  }
+  }, [session?.access_token, fetchKeys])
 
   const activeKey = keys.find(k => !k.revoked_at) || null
 

@@ -3,8 +3,8 @@ import { timingSafeEqual } from 'crypto'
 import { ChannelInbound } from './protocol'
 import { verifyChannelToken, setSessionStatus, insertMessage } from '../db/dal'
 import { registerChannel, unregisterChannel, broadcastToSubscribers, broadcastToUser } from './registry'
-import { listSessions } from '../db/dal'
 import { supabaseAdmin } from '../db/supabase'
+import { hashToken } from '../lib/crypto'
 
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
@@ -31,13 +31,6 @@ export function createChannelWsData(): ChannelWsData {
     msgCount: 0,
     msgWindowStart: Date.now(),
   }
-}
-
-export async function hashToken(token: string): Promise<string> {
-  const encoder = new TextEncoder()
-  const data = encoder.encode(token)
-  const hash = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
 export function handleChannelOpen(ws: ServerWebSocket<ChannelWsData>) {
