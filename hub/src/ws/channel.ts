@@ -1,4 +1,5 @@
 import type { ServerWebSocket } from 'bun'
+import { timingSafeEqual } from 'crypto'
 import { ChannelInbound } from './protocol'
 import { verifyChannelToken, setSessionStatus, insertMessage } from '../db/dal'
 import { registerChannel, unregisterChannel, broadcastToSubscribers } from './registry'
@@ -63,7 +64,10 @@ export async function handleChannelMessage(ws: ServerWebSocket<ChannelWsData>, r
     }
 
     const tokenHash = await hashToken(msg.token)
-    if (tokenHash !== session.token_hash) {
+    // Timing-safe comparison to prevent side-channel attacks (H1 fix)
+    const a = Buffer.from(tokenHash, 'utf8')
+    const b = Buffer.from(session.token_hash, 'utf8')
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
       ws.send(JSON.stringify({ type: 'auth_error', error: 'invalid' }))
       ws.close(4001, 'auth failed')
       return

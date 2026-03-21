@@ -52,9 +52,7 @@ export function unregisterClient(entry: ClientEntry) {
 }
 
 export function subscribeClient(entry: ClientEntry, sessionIds: string[]) {
-  for (const id of sessionIds) {
-    entry.subscriptions.add(id)
-  }
+  entry.subscriptions = new Set(sessionIds) // Replace, don't accumulate (M6 fix)
 }
 
 // Broadcast to all clients subscribed to a session

@@ -4,6 +4,7 @@ import { config } from './config'
 import { authMiddleware } from './auth/middleware'
 import { sessions } from './api/sessions'
 import { messages } from './api/messages'
+import { rateLimit } from './middleware/rate-limit'
 import {
   createChannelWsData, handleChannelOpen, handleChannelMessage, handleChannelClose,
 } from './ws/channel'
@@ -15,12 +16,28 @@ import { join, resolve } from 'path'
 
 const app = new Hono()
 
-// Security headers
+// Global error handler — never leak internals
+app.onError((err, c) => {
+  console.error('[error]', err.message)
+  return c.json({ error: 'internal error' }, 500)
+})
+
+// Security headers (C2 fix: CSP + HSTS)
 app.use('*', async (c, next) => {
   await next()
   c.header('X-Content-Type-Options', 'nosniff')
   c.header('X-Frame-Options', 'DENY')
   c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
+  c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  c.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  c.header('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "connect-src 'self' wss: https://*.supabase.co",
+    "img-src 'self' data:",
+    "frame-ancestors 'none'",
+  ].join('; '))
 })
 
 // CORS
@@ -30,6 +47,9 @@ app.use('/api/*', cors({
   allowHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
 }))
+
+// Rate limiting on API (C3 fix)
+app.use('/api/*', rateLimit({ windowMs: 60_000, max: 60, keyFn: (c) => c.get('userId') || c.req.header('x-forwarded-for') || 'anon' }))
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
@@ -41,7 +61,11 @@ app.route('/api/messages', messages)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
-const webDist = webDistCandidates.find(p => existsSync(p)) || './web/dist'
+const webDist = resolve(webDistCandidates.find(p => existsSync(p)) || './web/dist')
+
+// Track WS connections per IP for DoS protection
+const wsConnectionsPerIp = new Map<string, number>()
+const MAX_WS_CONNECTIONS_PER_IP = 20
 
 // Start Bun server with WebSocket upgrade handling
 const server = Bun.serve({
@@ -49,31 +73,52 @@ const server = Bun.serve({
   async fetch(req, server) {
     const url = new URL(req.url)
 
-    // WebSocket upgrades
-    if (url.pathname === '/ws/channel') {
-      const upgraded = server.upgrade(req, {
-        data: { type: 'channel' as const, ...createChannelWsData() },
-      })
-      return upgraded ? undefined : new Response('upgrade failed', { status: 400 })
-    }
+    // WebSocket upgrades — with origin validation (C2 fix) and connection limits
+    if (url.pathname === '/ws/channel' || url.pathname === '/ws/client') {
+      // Origin check for browser clients
+      if (url.pathname === '/ws/client') {
+        const origin = req.headers.get('origin')
+        if (origin && !config.allowedOrigins.includes(origin)) {
+          return new Response('forbidden', { status: 403 })
+        }
+      }
 
-    if (url.pathname === '/ws/client') {
-      const upgraded = server.upgrade(req, {
-        data: { type: 'client' as const, ...createClientWsData() },
-      })
-      return upgraded ? undefined : new Response('upgrade failed', { status: 400 })
+      // Connection limit per IP (DoS protection)
+      const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
+      const currentCount = wsConnectionsPerIp.get(ip) || 0
+      if (currentCount >= MAX_WS_CONNECTIONS_PER_IP) {
+        return new Response('too many connections', { status: 429 })
+      }
+      wsConnectionsPerIp.set(ip, currentCount + 1)
+
+      const wsType = url.pathname === '/ws/channel' ? 'channel' : 'client'
+      const wsData = wsType === 'channel'
+        ? { type: 'channel' as const, ip, ...createChannelWsData() }
+        : { type: 'client' as const, ip, ...createClientWsData() }
+
+      const upgraded = server.upgrade(req, { data: wsData })
+      if (!upgraded) {
+        wsConnectionsPerIp.set(ip, (wsConnectionsPerIp.get(ip) || 1) - 1)
+        return new Response('upgrade failed', { status: 400 })
+      }
+      return undefined
     }
 
     // Try Hono (API routes, health)
     const honoResponse = await app.fetch(req)
     if (honoResponse.status !== 404) return honoResponse
 
-    // Serve static files from web/dist
-    const filePath = join(webDist, url.pathname === '/' ? 'index.html' : url.pathname)
+    // Serve static files from web/dist — with path traversal protection (M4 fix)
+    const requestedPath = decodeURIComponent(url.pathname)
+    const filePath = resolve(webDist, requestedPath === '/' ? 'index.html' : requestedPath.slice(1))
+    if (!filePath.startsWith(webDist)) {
+      return new Response('forbidden', { status: 403 })
+    }
+
     const file = Bun.file(filePath)
     if (await file.exists()) return new Response(file)
 
-    // SPA fallback — serve index.html for client-side routing
+    // SPA fallback
     const indexFile = Bun.file(join(webDist, 'index.html'))
     if (await indexFile.exists()) return new Response(indexFile)
 
@@ -92,6 +137,14 @@ const server = Bun.serve({
       if (ws.data.type === 'client') await handleClientMessage(ws as any, text)
     },
     close(ws) {
+      // Decrement connection count
+      const ip = (ws.data as any).ip
+      if (ip) {
+        const count = wsConnectionsPerIp.get(ip) || 1
+        if (count <= 1) wsConnectionsPerIp.delete(ip)
+        else wsConnectionsPerIp.set(ip, count - 1)
+      }
+
       if (ws.data.type === 'channel') handleChannelClose(ws as any)
       if (ws.data.type === 'client') handleClientClose(ws as any)
     },
@@ -99,4 +152,4 @@ const server = Bun.serve({
 })
 
 console.log(`Hub server running on http://localhost:${server.port}`)
-console.log(`Serving web UI from: ${resolve(webDist)}`)
+console.log(`Serving web UI from: ${webDist}`)

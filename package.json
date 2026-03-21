@@ -9,5 +9,8 @@
   },
   "devDependencies": {
     "pg": "^8.20.0"
+  },
+  "dependencies": {
+    "rehype-sanitize": "^6.0.0"
   }
 }

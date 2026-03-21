@@ -1,7 +1,13 @@
 import { Hono } from 'hono'
+import { z } from 'zod'
 import { createSession, listSessions, getSession, deleteSession, updateSessionToken } from '../db/dal'
 import { hashToken } from '../ws/channel'
 import { getChannel } from '../ws/registry'
+
+const CreateSessionBody = z.object({
+  name: z.string().min(1).max(100).trim(),
+  project_dir: z.string().max(500).optional(),
+})
 
 const sessions = new Hono()
 
@@ -34,16 +40,15 @@ sessions.get('/:id', async (c) => {
 sessions.post('/', async (c) => {
   const sb = c.get('supabase')
   const userId = c.get('userId')
-  const body = await c.req.json<{ name: string; project_dir?: string }>()
-
-  if (!body.name || typeof body.name !== 'string') {
-    return c.json({ error: 'name is required' }, 400)
+  const parsed = CreateSessionBody.safeParse(await c.req.json())
+  if (!parsed.success) {
+    return c.json({ error: 'invalid input' }, 400)
   }
 
   const rawToken = generateToken()
   const tokenHash = await hashToken(rawToken)
 
-  const session = await createSession(sb, userId, body.name, body.project_dir || null, tokenHash)
+  const session = await createSession(sb, userId, parsed.data.name, parsed.data.project_dir || null, tokenHash)
 
   return c.json({ ...session, token: rawToken }, 201)
 })
