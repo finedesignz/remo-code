@@ -30,22 +30,27 @@ plugin.post('/sessions', async (c) => {
     return c.json({ error: 'project_dir is required' }, 400)
   }
 
-  const rawToken = generateToken()
-  const tokenHash = await hashToken(rawToken)
-  const result = await findOrCreateSession(userId, parsed.data.project_dir, tokenHash)
+  try {
+    const rawToken = generateToken()
+    const tokenHash = await hashToken(rawToken)
+    const result = await findOrCreateSession(userId, parsed.data.project_dir, tokenHash)
 
-  // If reusing existing session, close old channel connection
-  if (!result.created) {
-    const channel = getChannel(result.id)
-    if (channel) {
-      try { channel.ws.close(4004, 'token rotated') } catch {}
+    // If reusing existing session, close old channel connection
+    if (!result.created) {
+      const channel = getChannel(result.id)
+      if (channel) {
+        try { channel.ws.close(4004, 'token rotated') } catch {}
+      }
     }
-  }
 
-  return c.json(
-    { session_id: result.id, token: rawToken, name: result.name },
-    result.created ? 201 : 200,
-  )
+    return c.json(
+      { session_id: result.id, token: rawToken, name: result.name },
+      result.created ? 201 : 200,
+    )
+  } catch (err: any) {
+    console.error('[plugin/sessions]', err.message, err.code, err.details)
+    return c.json({ error: 'session creation failed' }, 500)
+  }
 })
 
 export { plugin }
