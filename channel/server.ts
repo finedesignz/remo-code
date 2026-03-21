@@ -77,7 +77,7 @@ const state = loadState()
 if (!state) {
   process.stderr.write(
     'remo-code: No configuration found.\n' +
-    'Generate an API key at https://app.remo-code.com, then run:\n' +
+    'Generate an API key at https://demo.remo-code.com, then run:\n' +
     '  /remo-code:configure <api_key>\n'
   )
   process.exit(1)
@@ -137,7 +137,7 @@ async function ensureSession(): Promise<SessionCache> {
   if (res.status === 401) {
     process.stderr.write(
       'remo-code: API key is invalid or revoked.\n' +
-      'Generate a new key at https://app.remo-code.com, then run:\n' +
+      'Generate a new key at https://demo.remo-code.com, then run:\n' +
       '  /remo-code:configure <new_api_key>\n'
     )
     process.exit(1)
