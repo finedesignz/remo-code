@@ -12,7 +12,7 @@ export function useWebSocket(session: Session | null) {
   const [connected, setConnected] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const handlersRef = useRef<Set<MessageHandler>>(new Set())
-  const reconnectRef = useRef<ReturnType<typeof setTimeout>>()
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   const connect = useCallback(() => {
     if (!session?.access_token) return
