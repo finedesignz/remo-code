@@ -1,6 +1,8 @@
-# Remo Code
+<p align="center">
+  <img src="docs/logo.png" alt="Remo Code" width="360" />
+</p>
 
-Remote access to your Claude Code sessions from any browser or phone.
+<p align="center">Remote access to your Claude Code sessions from any browser or phone.</p>
 
 Remo Code connects your local Claude Code terminals to a central hub server, giving you a real-time chat interface to interact with any session from anywhere. It uses the [Claude Code channels](https://code.claude.com/docs/en/channels) system — the same contract as the official Telegram, Discord, and fakechat plugins.
 
@@ -42,11 +44,11 @@ Create a Supabase project and run the migration in `supabase/migrations/001_init
 
 ```bash
 # Hub config
-cp .env.example hub/.env
+cp hub/.env.example hub/.env
 # Edit: SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, HUB_ALLOWED_ORIGINS
 
 # Web config
-cp .env.example web/.env
+cp web/.env.example web/.env
 # Edit: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, VITE_HUB_URL
 ```
 
@@ -62,7 +64,7 @@ bun run dev:web
 
 ### 5. Create your account
 
-Open `http://localhost:5173`. On first visit you'll see the setup form — create your admin account.
+Open `http://localhost:5173`. On first visit you'll see the setup form — create your account.
 
 ### 6. Connect a Claude Code session
 
@@ -118,13 +120,13 @@ The Docker image builds the web frontend and serves it from the hub server — n
 ## Project Structure
 
 ```
-remo-code.com/
 ├── hub/                # Bun + Hono server (HTTP, WebSocket, auth)
 │   └── src/
-│       ├── api/        # REST endpoints (sessions, messages, setup)
+│       ├── api/        # REST endpoints (sessions, messages, profile, setup)
 │       ├── auth/       # JWT verification middleware
 │       ├── db/         # Supabase clients and data access layer
 │       ├── middleware/  # Rate limiting
+│       ├── utils/      # Shared utilities (token generation)
 │       └── ws/         # WebSocket handlers + Zod protocol schemas
 ├── web/                # React 19 + Vite + Tailwind CSS 4 SPA
 │   └── src/
@@ -133,9 +135,9 @@ remo-code.com/
 ├── channel/            # Claude Code channel plugin (MCP server)
 │   ├── server.ts       # MCP server + WebSocket client to hub
 │   ├── .claude-plugin/ # Plugin metadata (plugin.json)
-│   ├── .mcp.json       # MCP server config for Claude Code
 │   └── skills/         # /remo-code:configure skill
 ├── supabase/           # Database migrations
+├── docs/               # Logo and assets
 └── Dockerfile          # Multi-stage production build
 ```
 
@@ -153,4 +155,4 @@ remo-code.com/
 
 ## License
 
-Private
+MIT

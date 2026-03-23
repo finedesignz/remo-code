@@ -43,7 +43,7 @@ plugin.post('/sessions', async (c) => {
     )
   } catch (err: any) {
     console.error('[plugin/sessions]', err)
-    return c.json({ error: 'session creation failed', detail: err.message }, 500)
+    return c.json({ error: 'session creation failed' }, 500)
   }
 })
 

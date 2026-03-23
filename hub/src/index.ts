@@ -33,7 +33,7 @@ app.use('*', async (c, next) => {
   c.header('X-Content-Type-Options', 'nosniff')
   c.header('X-Frame-Options', 'DENY')
   c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
-  c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload')
   c.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
   c.header('Content-Security-Policy', [
     "default-src 'self'",
@@ -145,13 +145,13 @@ const server = Bun.serve({
     return new Response('not found', { status: 404 })
   },
   websocket: {
+    maxPayloadLength: 65536,
     open(ws) {
       if (ws.data.type === 'channel') handleChannelOpen(ws as any)
       if (ws.data.type === 'client') handleClientOpen(ws as any)
     },
     async message(ws, raw) {
       const text = typeof raw === 'string' ? raw : new TextDecoder().decode(raw)
-      if (text.length > 65536) return // max message size
 
       if (ws.data.type === 'channel') await handleChannelMessage(ws as any, text)
       if (ws.data.type === 'client') await handleClientMessage(ws as any, text)

@@ -6,7 +6,7 @@
     "name": "Remo Code"
   },
   "homepage": "https://remo-code.com",
-  "repository": "https://github.com/artic/remo-code.com",
-  "license": "Apache-2.0",
+  "repository": "https://github.com/artic/remo-code",
+  "license": "MIT",
   "keywords": ["remo-code", "remote", "channel", "mcp", "chat", "web"]
 }
