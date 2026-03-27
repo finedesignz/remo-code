@@ -25,9 +25,11 @@ plugin.post('/sessions', async (c) => {
   }
 
   try {
+    // Normalize Windows backslashes to forward slashes for consistent storage/lookup
+    const projectDir = parsed.data.project_dir.replace(/\\/g, '/')
     const rawToken = generateToken('remo_')
     const tokenHash = await hashToken(rawToken)
-    const result = await findOrCreateSession(userId, parsed.data.project_dir, tokenHash)
+    const result = await findOrCreateSession(userId, projectDir, tokenHash)
 
     // If reusing existing session, close old channel connection
     if (!result.created) {

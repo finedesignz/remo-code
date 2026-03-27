@@ -119,19 +119,17 @@ if (!state) {
 }
 
 // Determine the actual project directory.
-// The plugin runs with --cwd pointing to the plugin cache (via .mcp.json),
-// so process.cwd() is NOT the user's project. We check env vars, then walk
-// up from cwd — but skip .git dirs inside the Claude plugin cache, since
-// marketplace repos are git repos too and would give a false match.
+// .mcp.json runs `bun ${CLAUDE_PLUGIN_ROOT}/server.ts` WITHOUT --cwd,
+// so process.cwd() is Claude Code's working directory (the user's project).
+// We walk up from cwd looking for .git as a project root indicator.
 function findProjectDir(): string {
-  // Check env var first (future Claude Code versions may set this)
   if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR
 
   const resolve = require('path').resolve
   const cwd = process.cwd()
   const pluginCache = join(homedir(), '.claude', 'plugins')
 
-  // Walk up from cwd looking for .git — but skip matches inside the plugin cache
+  // Walk up from cwd looking for .git — skip matches inside the plugin cache
   let dir = cwd
   const { root } = require('path').parse(dir)
   while (dir !== root) {
@@ -141,17 +139,12 @@ function findProjectDir(): string {
     dir = resolve(join(dir, '..'))
   }
 
-  // Fallback: if cwd basename is a known plugin subdir, go up one level
-  const base = basename(cwd)
-  if (base === 'channel' || base === 'plugin') {
-    return resolve(join(cwd, '..'))
-  }
-
-  // Last resort: use a process-unique key so sessions don't collide
-  return `session-${process.ppid || Date.now()}`
+  // No .git found — use cwd directly (user may be outside a git repo)
+  return cwd
 }
 
-const PROJECT_DIR = findProjectDir()
+// Normalize to forward slashes so cache keys match the hub's storage format
+const PROJECT_DIR = findProjectDir().replace(/\\/g, '/')
 
 // -- Auto-register session via API key --
 
