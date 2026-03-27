@@ -6,7 +6,7 @@ arguments:
     description: "Your API key (starts with remokey_). Generate one at Settings in the Remo Code web UI."
     required: true
   - name: hub_url
-    description: "The hub URL. Defaults to https://demo.remo-code.com"
+    description: "The hub URL. Defaults to https://app.remo-code.com"
     required: false
 ---
 
@@ -18,7 +18,7 @@ Save the API key so the channel plugin can auto-register sessions. Each project 
 
 1. Create the config directory at `~/.claude/channels/remo-code/` if it doesn't exist
 2. Load existing `state.json` or create a new one
-3. Set `api_key` to `{{api_key}}` and `hub_url` to `{{hub_url}}` (default: `https://demo.remo-code.com`)
+3. Set `api_key` to `{{api_key}}` and `hub_url` to `{{hub_url}}` (default: `https://app.remo-code.com`)
 4. Verify the key works by calling `GET {{hub_url}}/api/plugin/verify` with header `Authorization: Bearer {{api_key}}`
 5. If verification succeeds (200), save `state.json` with permissions 600
 6. If verification fails (401), tell the user the key is invalid
@@ -29,7 +29,7 @@ Write this to `~/.claude/channels/remo-code/state.json`:
 
 ```json
 {
-  "hub_url": "{{hub_url or https://demo.remo-code.com}}",
+  "hub_url": "{{hub_url or https://app.remo-code.com}}",
   "api_key": "{{api_key}}",
   "sessions": {}
 }
@@ -48,3 +48,13 @@ Tell the user:
 > claude --dangerously-load-development-channels plugin:remo-code@claude-plugins-official
 > ```
 > Sessions will be auto-created for each project directory — no manual token setup needed.
+
+## Per-session override via environment variables
+
+You can override the hub URL and API key for a single session without touching state.json:
+
+```bash
+REMO_HUB_URL=https://app.remo-code.com REMO_API_KEY=remokey_... claude --dangerously-load-development-channels plugin:remo-code@claude-plugins-official
+```
+
+When env vars are set, the plugin will NOT write to state.json, so other sessions are unaffected.

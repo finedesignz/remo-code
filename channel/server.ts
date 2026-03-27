@@ -34,38 +34,73 @@ interface PluginState {
   sessions: Record<string, SessionCache>
 }
 
+// Parse CLI arguments: --hub-url=<url> and --api-key=<key>
+function parseArgs(): { hubUrl?: string; apiKey?: string } {
+  const result: { hubUrl?: string; apiKey?: string } = {}
+  for (const arg of process.argv.slice(2)) {
+    if (arg.startsWith('--hub-url=')) result.hubUrl = arg.slice('--hub-url='.length)
+    if (arg.startsWith('--api-key=')) result.apiKey = arg.slice('--api-key='.length)
+  }
+  return result
+}
+
+const cliArgs = parseArgs()
+
 function loadState(): PluginState | null {
+  // CLI args / env vars take highest priority — allows per-session override
+  const envHubUrl = cliArgs.hubUrl || process.env.REMO_HUB_URL
+  const envApiKey = cliArgs.apiKey || process.env.REMO_API_KEY
+
   // Try state.json first
+  let fileState: PluginState | null = null
   try {
     const state = JSON.parse(readFileSync(STATE_FILE, 'utf8')) as PluginState
-    if (state.hub_url && state.api_key) return state
+    if (state.hub_url && state.api_key) fileState = state
   } catch {}
 
   // Fall back to .env for backward compatibility
-  try {
-    chmodSync(ENV_FILE, 0o600)
-    const env: Record<string, string> = {}
-    for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-      const m = line.match(/^(\w+)=(.*)$/)
-      if (m) env[m[1]] = m[2]
-    }
-    if (env.HUB_URL && env.HUB_TOKEN) {
-      const projectDir = process.cwd()
-      const sessionId = env.SESSION_ID || basename(projectDir)
-      return {
-        hub_url: env.HUB_URL,
-        api_key: '', // no API key in legacy mode
-        sessions: {
-          [projectDir]: { session_id: sessionId, token: env.HUB_TOKEN, name: basename(projectDir) },
-        },
+  if (!fileState) {
+    try {
+      chmodSync(ENV_FILE, 0o600)
+      const env: Record<string, string> = {}
+      for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
+        const m = line.match(/^(\w+)=(.*)$/)
+        if (m) env[m[1]] = m[2]
       }
-    }
-  } catch {}
+      if (env.HUB_URL && env.HUB_TOKEN) {
+        const projectDir = process.cwd()
+        const sessionId = env.SESSION_ID || basename(projectDir)
+        fileState = {
+          hub_url: env.HUB_URL,
+          api_key: '', // no API key in legacy mode
+          sessions: {
+            [projectDir]: { session_id: sessionId, token: env.HUB_TOKEN, name: basename(projectDir) },
+          },
+        }
+      }
+    } catch {}
+  }
 
-  return null
+  // Apply env/CLI overrides on top of file state
+  if (envHubUrl || envApiKey) {
+    const base = fileState || { hub_url: '', api_key: '', sessions: {} }
+    if (envHubUrl) base.hub_url = envHubUrl
+    if (envApiKey) base.api_key = envApiKey
+    // Clear cached sessions when hub URL changes
+    if (envHubUrl && fileState && fileState.hub_url !== envHubUrl) {
+      base.sessions = {}
+    }
+    return (base.hub_url && base.api_key) ? base : null
+  }
+
+  return fileState
 }
 
+// Track whether config came from env/CLI (don't clobber state.json in that case)
+const usingEnvOverride = !!(cliArgs.hubUrl || cliArgs.apiKey || process.env.REMO_HUB_URL || process.env.REMO_API_KEY)
+
 function saveState(state: PluginState) {
+  if (usingEnvOverride) return // don't overwrite state.json when using env/CLI config
   mkdirSync(STATE_DIR, { recursive: true })
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
   try { chmodSync(STATE_FILE, 0o600) } catch {}
@@ -77,37 +112,43 @@ const state = loadState()
 if (!state) {
   process.stderr.write(
     'remo-code: No configuration found.\n' +
-    'Generate an API key at https://demo.remo-code.com, then run:\n' +
+    'Generate an API key at https://app.remo-code.com, then run:\n' +
     '  /remo-code:configure <api_key>\n'
   )
   process.exit(1)
 }
 
 // Determine the actual project directory.
-// The plugin runs with --cwd pointing to the channel/ subdirectory,
-// so process.cwd() is wrong. We walk up to find the git root, or
-// use CLAUDE_PROJECT_DIR if set by Claude Code.
+// The plugin runs with --cwd pointing to the plugin cache (via .mcp.json),
+// so process.cwd() is NOT the user's project. We check env vars, then walk
+// up from cwd — but skip .git dirs inside the Claude plugin cache, since
+// marketplace repos are git repos too and would give a false match.
 function findProjectDir(): string {
   // Check env var first (future Claude Code versions may set this)
   if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR
 
-  // Walk up from cwd looking for .git (project root indicator)
-  let dir = process.cwd()
+  const resolve = require('path').resolve
+  const cwd = process.cwd()
+  const pluginCache = join(homedir(), '.claude', 'plugins')
+
+  // Walk up from cwd looking for .git — but skip matches inside the plugin cache
+  let dir = cwd
   const { root } = require('path').parse(dir)
   while (dir !== root) {
-    if (existsSync(join(dir, '.git'))) return dir
-    dir = join(dir, '..')
-    dir = require('path').resolve(dir)
+    if (existsSync(join(dir, '.git')) && !resolve(dir).startsWith(resolve(pluginCache))) {
+      return dir
+    }
+    dir = resolve(join(dir, '..'))
   }
 
   // Fallback: if cwd basename is a known plugin subdir, go up one level
-  const cwd = process.cwd()
   const base = basename(cwd)
   if (base === 'channel' || base === 'plugin') {
-    return require('path').resolve(join(cwd, '..'))
+    return resolve(join(cwd, '..'))
   }
 
-  return cwd
+  // Last resort: use a process-unique key so sessions don't collide
+  return `session-${process.ppid || Date.now()}`
 }
 
 const PROJECT_DIR = findProjectDir()
@@ -137,7 +178,7 @@ async function ensureSession(): Promise<SessionCache> {
   if (res.status === 401) {
     process.stderr.write(
       'remo-code: API key is invalid or revoked.\n' +
-      'Generate a new key at https://demo.remo-code.com, then run:\n' +
+      'Generate a new key at https://app.remo-code.com, then run:\n' +
       '  /remo-code:configure <new_api_key>\n'
     )
     process.exit(1)
