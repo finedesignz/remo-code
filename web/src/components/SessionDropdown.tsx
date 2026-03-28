@@ -90,7 +90,7 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession }: 
 
       {open && (
         <div
-          className="absolute top-full left-0 right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 overflow-hidden"
+          className="absolute top-full left-0 right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 overflow-y-auto max-h-64"
           role="listbox"
         >
           {connected.map(s => (

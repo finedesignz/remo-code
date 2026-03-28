@@ -166,7 +166,7 @@ function ApiKeyTab({ session }: { session: Session }) {
                 </code>
                 <button
                   onClick={() => copyText(newKey, 'key')}
-                  className="absolute top-2 right-2 px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 rounded transition-colors opacity-0 group-hover:opacity-100"
+                  className="absolute top-2 right-2 px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 rounded transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
                 >
                   {copied === 'key' ? 'Copied!' : 'Copy'}
                 </button>
@@ -180,7 +180,7 @@ function ApiKeyTab({ session }: { session: Session }) {
                 </pre>
                 <button
                   onClick={() => copyText(configureCmd, 'cmd')}
-                  className="absolute top-2 right-2 px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 rounded transition-colors opacity-0 group-hover:opacity-100"
+                  className="absolute top-2 right-2 px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 rounded transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
                 >
                   {copied === 'cmd' ? 'Copied!' : 'Copy'}
                 </button>

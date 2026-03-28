@@ -68,7 +68,7 @@ export function ConnectModal({ token, sessionName, onClose }: Props) {
                   <pre className="bg-slate-900 rounded-lg p-2.5 text-[11px] text-emerald-300 font-mono overflow-x-auto whitespace-pre">{envContent}</pre>
                   <button
                     onClick={() => copyText(envContent, 'config')}
-                    className="absolute top-1.5 right-1.5 px-2 py-0.5 text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-300 rounded transition-colors opacity-0 group-hover:opacity-100"
+                    className="absolute top-1.5 right-1.5 px-2 py-0.5 text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-300 rounded transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
                   >
                     {copied === 'config' ? 'Copied!' : 'Copy'}
                   </button>
@@ -85,7 +85,7 @@ export function ConnectModal({ token, sessionName, onClose }: Props) {
                   <pre className="bg-slate-900 rounded-lg p-2.5 text-[11px] text-emerald-300 font-mono overflow-x-auto">{`claude --dangerously-load-development-channels plugin:remo-code@claude-plugins-official`}</pre>
                   <button
                     onClick={() => copyText('claude --dangerously-load-development-channels plugin:remo-code@claude-plugins-official', 'cmd')}
-                    className="absolute top-1.5 right-1.5 px-2 py-0.5 text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-300 rounded transition-colors opacity-0 group-hover:opacity-100"
+                    className="absolute top-1.5 right-1.5 px-2 py-0.5 text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-300 rounded transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
                   >
                     {copied === 'cmd' ? 'Copied!' : 'Copy'}
                   </button>
@@ -99,7 +99,7 @@ export function ConnectModal({ token, sessionName, onClose }: Props) {
                   <code className="block bg-slate-900 rounded-lg p-2.5 text-[11px] text-amber-200 font-mono break-all select-all">{token}</code>
                   <button
                     onClick={() => copyText(token, 'token')}
-                    className="absolute top-1.5 right-1.5 px-2 py-0.5 text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-300 rounded transition-colors opacity-0 group-hover:opacity-100"
+                    className="absolute top-1.5 right-1.5 px-2 py-0.5 text-[10px] bg-slate-700 hover:bg-slate-600 text-slate-300 rounded transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
                   >
                     {copied === 'token' ? 'Copied!' : 'Copy'}
                   </button>
