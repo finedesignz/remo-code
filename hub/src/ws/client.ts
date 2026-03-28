@@ -47,7 +47,10 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   const data = ws.data
 
   let parsed: unknown
-  try { parsed = JSON.parse(raw) } catch { return }
+  try { parsed = JSON.parse(raw) } catch (e: any) {
+    console.error('[client] JSON parse error:', e.message)
+    return
+  }
 
   const result = ClientInbound.safeParse(parsed)
   if (!result.success) return
@@ -70,6 +73,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     if (data.authTimer) clearTimeout(data.authTimer)
 
     data.clientEntry = registerClient(user.id, ws)
+    console.log(`[client] authenticated user=${user.id}`)
     ws.send(JSON.stringify({ type: 'auth_ok' }))
 
     // Send session list immediately
@@ -102,6 +106,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   }
 
   if (msg.type === 'send_message') {
+    console.log(`[client] send_message session=${msg.session_id} user=${data.userId}`)
     // Verify ownership via RLS
     const sb = supabaseForUser(data.jwt!)
     const { data: session } = await sb
@@ -110,7 +115,10 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       .eq('id', msg.session_id)
       .single()
 
-    if (!session) return // silently drop — session not found or not owned
+    if (!session) {
+      console.log(`[client] session not found or not owned: ${msg.session_id}`)
+      return
+    }
 
     // Store the user message
     const message = await insertMessage(msg.session_id, 'user', msg.content)
@@ -125,17 +133,21 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // Forward to channel (Claude Code session)
     const channel = getChannel(msg.session_id)
     if (channel) {
+      console.log(`[client] forwarding to channel session=${msg.session_id}`)
       channel.ws.send(JSON.stringify({
         type: 'user_message',
         id: message.id,
         content: msg.content,
         ts: message.created_at,
       }))
+    } else {
+      console.log(`[client] no channel connected for session=${msg.session_id}`)
     }
   }
 }
 
 export function handleClientClose(ws: ServerWebSocket<ClientWsData>) {
+  console.log(`[client] closed user=${ws.data.userId}`)
   if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
   if (ws.data.clientEntry) {
     unregisterClient(ws.data.clientEntry)

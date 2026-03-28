@@ -42,9 +42,11 @@ export async function hashToken(token: string): Promise<string> {
 
 export function handleChannelOpen(ws: ServerWebSocket<ChannelWsData>) {
   const data = ws.data
+  console.log('[channel] connection opened')
   // Require auth within 5 seconds
   data.authTimer = setTimeout(() => {
     if (!data.authenticated) {
+      console.log('[channel] auth timeout, closing')
       ws.close(4000, 'auth timeout')
     }
   }, AUTH_TIMEOUT_MS)
@@ -54,7 +56,10 @@ export async function handleChannelMessage(ws: ServerWebSocket<ChannelWsData>, r
   const data = ws.data
 
   let parsed: unknown
-  try { parsed = JSON.parse(raw) } catch { return }
+  try { parsed = JSON.parse(raw) } catch (e: any) {
+    console.error('[channel] JSON parse error:', e.message, '| raw:', raw.slice(0, 200))
+    return
+  }
 
   const result = ChannelInbound.safeParse(parsed)
   if (!result.success) return
@@ -87,6 +92,7 @@ export async function handleChannelMessage(ws: ServerWebSocket<ChannelWsData>, r
     data.userId = session.user_id
     if (data.authTimer) clearTimeout(data.authTimer)
 
+    console.log(`[channel] authenticated session=${session.id} user=${session.user_id}`)
     registerChannel(session.id, session.user_id, ws)
     await setSessionStatus(session.id, 'online')
 
@@ -123,7 +129,7 @@ export async function handleChannelMessage(ws: ServerWebSocket<ChannelWsData>, r
   if (data.msgCount > MSG_RATE_MAX) return // silently drop
 
   if (msg.type === 'assistant_message') {
-    // Store message and broadcast to subscribed clients
+    console.log(`[channel] assistant_message session=${data.sessionId} len=${msg.content.length}`)
     const message = await insertMessage(data.sessionId, 'assistant', msg.content)
     broadcastToSubscribers(data.sessionId, {
       type: 'message',
@@ -145,6 +151,7 @@ export async function handleChannelMessage(ws: ServerWebSocket<ChannelWsData>, r
 
 export async function handleChannelClose(ws: ServerWebSocket<ChannelWsData>) {
   const data = ws.data
+  console.log(`[channel] closed session=${data.sessionId}`)
   if (data.authTimer) clearTimeout(data.authTimer)
   if (data.heartbeatTimer) clearInterval(data.heartbeatTimer)
 
