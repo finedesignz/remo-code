@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import type { CodeSession } from '../hooks/useSessions'
+import { sessionLabel, connectedSessions } from './SessionDropdown'
 
 export interface ConnectData {
   token: string
@@ -73,9 +74,9 @@ export function Sidebar({
           </button>
         </div>
 
-        {/* Session list */}
+        {/* Session list — only connected sessions */}
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-          {sessions.map(s => (
+          {connectedSessions(sessions).map(s => (
             <div key={s.id} className="group relative">
               <button
                 onClick={() => onSelectSession(s.id)}
@@ -87,11 +88,9 @@ export function Sidebar({
               >
                 <div className="flex items-center gap-2">
                   <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                    s.status === 'online' ? 'bg-emerald-400' :
-                    s.status === 'thinking' ? 'bg-amber-400 animate-pulse' :
-                    'bg-slate-600'
+                    s.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
                   }`} />
-                  <span className="truncate font-medium flex-1">{s.name}</span>
+                  <span className="truncate font-medium flex-1">{sessionLabel(s)}</span>
                   {/* Action buttons — visible on hover */}
                   <span className="hidden group-hover:flex items-center gap-1 shrink-0">
                     <span
@@ -105,7 +104,7 @@ export function Sidebar({
                       </svg>
                     </span>
                     <span
-                      onClick={(e) => { e.stopPropagation(); if (confirm(`Delete session "${s.name}"?`)) onDeleteSession(s.id) }}
+                      onClick={(e) => { e.stopPropagation(); if (confirm(`Delete session "${sessionLabel(s)}"?`)) onDeleteSession(s.id) }}
                       className="px-1.5 py-0.5 text-[10px] text-slate-400 hover:text-red-400 bg-slate-700/80 hover:bg-red-900/50 rounded transition-colors cursor-pointer"
                       title="Delete session"
                     >
@@ -125,9 +124,9 @@ export function Sidebar({
             </div>
           ))}
 
-          {sessions.length === 0 && (
+          {connectedSessions(sessions).length === 0 && (
             <p className="text-sm text-slate-500 text-center py-8">
-              No sessions yet. Create one to get started.
+              No active sessions. Connect a Claude Code instance to get started.
             </p>
           )}
         </div>

@@ -7,6 +7,7 @@ import { Sidebar, type ConnectData } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
 import { ConnectModal } from './ConnectModal'
 import { ApiKeyModal } from './ApiKeyModal'
+import { SessionDropdown, connectedSessions, sessionLabel } from './SessionDropdown'
 
 interface Props {
   session: Session
@@ -38,6 +39,17 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
       }
     })
   }, [subscribe, sessionsHook.updateSessionStatus, sessionsHook.setSessions])
+
+  // Auto-select first connected session when none is selected (or current goes offline)
+  useEffect(() => {
+    const online = connectedSessions(sessionsHook.sessions)
+    if (activeSessionId) {
+      // If the active session is still connected, keep it
+      if (online.some(s => s.id === activeSessionId)) return
+    }
+    // Select the first connected session, or null if none
+    setActiveSessionId(online.length > 0 ? online[0].id : null)
+  }, [sessionsHook.sessions, activeSessionId])
 
   // Close sidebar on mobile when selecting a session
   const handleSelectSession = useCallback((id: string) => {
@@ -84,7 +96,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
         />
       )}
 
-      {/* Sidebar */}
+      {/* Sidebar — desktop only (hidden on mobile, replaced by dropdown) */}
       <div
         className={`
           sidebar-panel fixed inset-y-0 left-0 z-40 w-72
@@ -112,6 +124,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">
         <header className="flex items-center gap-3 px-3 py-2.5 border-b border-slate-700/80 bg-slate-800/60 backdrop-blur-sm shrink-0">
+          {/* Hamburger — opens sidebar (settings/create/manage sessions) */}
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
             className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-700/50 transition-colors"
@@ -123,14 +136,26 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
               <line x1="3" y1="15" x2="17" y2="15" />
             </svg>
           </button>
-          <div className="flex-1 min-w-0">
+
+          {/* Mobile: session dropdown */}
+          <div className="md:hidden flex-1 min-w-0">
+            <SessionDropdown
+              sessions={sessionsHook.sessions}
+              activeSessionId={activeSessionId}
+              onSelectSession={handleSelectSession}
+            />
+          </div>
+
+          {/* Desktop: session name display */}
+          <div className="hidden md:block flex-1 min-w-0">
             <h2 className="text-sm font-semibold text-slate-200 truncate">
-              {activeSession?.name || 'Remo Code'}
+              {activeSession ? sessionLabel(activeSession) : 'Remo Code'}
             </h2>
             {activeSession?.project_dir && (
               <p className="text-[11px] text-slate-500 truncate">{activeSession.project_dir}</p>
             )}
           </div>
+
           {connected && (
             <span className="flex items-center gap-1.5 text-xs text-emerald-400 shrink-0">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
