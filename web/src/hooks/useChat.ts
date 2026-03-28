@@ -14,6 +14,7 @@ export function useChat(
   activeSessionId: string | null,
   subscribe: (handler: (msg: any) => void) => () => void,
   send: (msg: object) => void,
+  connectionId: number,
 ) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [loading, setLoading] = useState(false)
@@ -54,7 +55,7 @@ export function useChat(
         })
       }
     })
-  }, [activeSessionId, subscribe, send])
+  }, [activeSessionId, subscribe, send, connectionId])
 
   const sendMessage = useCallback((content: string) => {
     if (!activeSessionId) return

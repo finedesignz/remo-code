@@ -10,6 +10,8 @@ type MessageHandler = (msg: WsMessage) => void
 
 export function useWebSocket(session: Session | null) {
   const [connected, setConnected] = useState(false)
+  // Increments on each successful auth — consumers use this to re-subscribe after reconnect
+  const [connectionId, setConnectionId] = useState(0)
   const wsRef = useRef<WebSocket | null>(null)
   const authedRef = useRef(false)
   const handlersRef = useRef<Set<MessageHandler>>(new Set())
@@ -42,6 +44,8 @@ export function useWebSocket(session: Session | null) {
       if (msg.type === 'auth_ok') {
         authedRef.current = true
         setConnected(true)
+        // Bump connectionId so consumers (useChat) re-subscribe
+        setConnectionId(prev => prev + 1)
         // Flush any messages queued before auth completed
         for (const pending of pendingRef.current) {
           ws.send(JSON.stringify(pending))
@@ -92,5 +96,5 @@ export function useWebSocket(session: Session | null) {
     return () => { handlersRef.current.delete(handler) }
   }, [])
 
-  return { connected, send, subscribe }
+  return { connected, connectionId, send, subscribe }
 }

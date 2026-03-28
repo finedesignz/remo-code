@@ -24,10 +24,10 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
   const [showApiKey, setShowApiKey] = useState(false)
 
   const { theme, toggleTheme } = useTheme()
-  const { connected, send, subscribe } = useWebSocket(session)
+  const { connected, connectionId, send, subscribe } = useWebSocket(session)
   const sessionsHook = useSessions(session)
   const { messages, loading: chatLoading, sendMessage } = useChat(
-    session, activeSessionId, subscribe, send
+    session, activeSessionId, subscribe, send, connectionId
   )
 
   // Listen for session status updates
