@@ -1,8 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { findOrCreateSession } from '../db/dal'
+import { createPluginSession } from '../db/dal'
 import { hashToken } from '../ws/channel'
-import { getChannel } from '../ws/registry'
 import { generateToken } from '../utils/token'
 
 const plugin = new Hono()
@@ -16,7 +15,7 @@ plugin.get('/verify', (c) => {
   return c.json({ ok: true, user_id: c.get('userId') })
 })
 
-// Auto-create or reconnect a session
+// Create a new session for this plugin connection
 plugin.post('/sessions', async (c) => {
   const userId = c.get('userId')
   const parsed = PluginSessionBody.safeParse(await c.req.json())
@@ -29,19 +28,11 @@ plugin.post('/sessions', async (c) => {
     const projectDir = parsed.data.project_dir.replace(/\\/g, '/')
     const rawToken = generateToken('remo_')
     const tokenHash = await hashToken(rawToken)
-    const result = await findOrCreateSession(userId, projectDir, tokenHash)
-
-    // If reusing existing session, close old channel connection
-    if (!result.created) {
-      const channel = getChannel(result.id)
-      if (channel) {
-        try { channel.ws.close(4004, 'token rotated') } catch {}
-      }
-    }
+    const result = await createPluginSession(userId, projectDir, tokenHash)
 
     return c.json(
       { session_id: result.id, token: rawToken, name: result.name },
-      result.created ? 201 : 200,
+      201,
     )
   } catch (err: any) {
     console.error('[plugin/sessions]', err)

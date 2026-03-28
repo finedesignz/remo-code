@@ -85,7 +85,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
         )}
       </div>
 
-      <form onSubmit={handleSubmit} className="p-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-slate-700">
+      <form onSubmit={handleSubmit} className="p-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)]">
         <div className="flex gap-2 items-end">
           <textarea
             value={input}
@@ -93,7 +93,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
             onKeyDown={handleKeyDown}
             placeholder="Send a message to Claude..."
             rows={1}
-            className="flex-1 px-4 py-2.5 bg-slate-800 border border-slate-600 rounded-lg text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none max-h-32"
+            className="flex-1 px-4 py-2.5 bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none max-h-32"
           />
           <button
             type="submit"

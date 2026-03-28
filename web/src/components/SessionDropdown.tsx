@@ -90,7 +90,7 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession }: 
 
       {open && (
         <div
-          className="absolute top-full left-0 right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 overflow-y-auto max-h-64"
+          className="absolute top-full left-0 right-0 mt-1 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg shadow-xl z-50 overflow-y-auto max-h-64"
           role="listbox"
         >
           {connected.map(s => (
@@ -102,7 +102,7 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession }: 
               className={`w-full text-left px-3 py-2.5 text-sm transition-colors flex items-center gap-2 ${
                 s.id === activeSessionId
                   ? 'bg-indigo-600/20 text-white'
-                  : 'text-slate-300 hover:bg-slate-700/50'
+                  : 'text-slate-300 hover:bg-[var(--bg-tertiary)]/50'
               }`}
             >
               <span className={`w-2 h-2 rounded-full flex-shrink-0 ${

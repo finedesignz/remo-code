@@ -3,6 +3,7 @@ import type { Session, User } from '@supabase/supabase-js'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useSessions } from '../hooks/useSessions'
 import { useChat } from '../hooks/useChat'
+import { useTheme } from '../hooks/useTheme'
 import { Sidebar, type ConnectData } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
 import { ConnectModal } from './ConnectModal'
@@ -22,6 +23,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
   const [connectData, setConnectData] = useState<ConnectData | null>(null)
   const [showApiKey, setShowApiKey] = useState(false)
 
+  const { theme, toggleTheme } = useTheme()
   const { connected, send, subscribe } = useWebSocket(session)
   const sessionsHook = useSessions(session)
   const { messages, loading: chatLoading, sendMessage } = useChat(
@@ -75,7 +77,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
     : null
 
   return (
-    <div className="flex h-full bg-slate-900 relative overflow-hidden">
+    <div className="flex h-full bg-[var(--bg-primary)] relative overflow-hidden">
       {/* Modals — rendered at top level, above everything */}
       {showApiKey && (
         <ApiKeyModal session={session} onClose={() => setShowApiKey(false)} />
@@ -123,7 +125,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
 
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="flex items-center gap-3 px-3 py-2.5 border-b border-slate-700/80 bg-slate-800/60 backdrop-blur-sm shrink-0">
+        <header className="flex items-center gap-3 px-3 py-2.5 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/60 backdrop-blur-sm shrink-0">
           {/* Hamburger — opens sidebar (settings/create/manage sessions) */}
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -156,12 +158,44 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
             )}
           </div>
 
-          {connected && (
+          {activeSession && (activeSession.status === 'online' || activeSession.status === 'thinking') ? (
             <span className="flex items-center gap-1.5 text-xs text-emerald-400 shrink-0">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               <span className="hidden sm:inline">Connected</span>
             </span>
-          )}
+          ) : activeSession ? (
+            <span className="flex items-center gap-1.5 text-xs text-slate-500 shrink-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+              <span className="hidden sm:inline">Offline</span>
+            </span>
+          ) : null}
+
+          <button
+            onClick={toggleTheme}
+            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-700/50 transition-colors"
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-label="Toggle theme"
+          >
+            {theme === 'dark' ? (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="8" cy="8" r="3" />
+                <path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3.05 3.05l1.06 1.06M11.89 11.89l1.06 1.06M3.05 12.95l1.06-1.06M11.89 4.11l1.06-1.06" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13.5 8.5a5.5 5.5 0 1 1-7-7 4.5 4.5 0 0 0 7 7z" />
+              </svg>
+            )}
+          </button>
+
+          <button
+            onClick={() => onNavigate('#/settings')}
+            className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white text-sm font-medium shrink-0 hover:bg-indigo-500 transition-colors"
+            title={user.email || 'Profile'}
+            aria-label="Profile settings"
+          >
+            {(user.email || '?')[0].toUpperCase()}
+          </button>
         </header>
 
         <ChatPanel

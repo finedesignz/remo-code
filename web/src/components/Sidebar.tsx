@@ -52,9 +52,9 @@ export function Sidebar({
   }
 
   return (
-      <div className="w-72 h-full border-r border-slate-700/80 flex flex-col bg-slate-900 md:bg-slate-800/30 shrink-0">
+      <div className="w-72 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-slate-700/80">
+        <div className="flex items-center justify-between p-4 border-b border-[var(--border-color)]">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <img src="/logo.png" alt="" className="h-6 w-6 object-contain" />
@@ -134,7 +134,7 @@ export function Sidebar({
         </div>
 
         {/* Create session */}
-        <div className="p-3 border-t border-slate-700/80">
+        <div className="p-3 border-t border-[var(--border-color)]">
           {showCreate ? (
             <div className="space-y-2">
               <input
@@ -165,12 +165,12 @@ export function Sidebar({
               onClick={() => setShowCreate(true)}
               className="w-full py-2.5 text-sm text-indigo-400 hover:text-indigo-300 hover:bg-slate-700/50 rounded-lg transition-colors font-medium"
             >
-              + New Session
+              + Connect Session
             </button>
           )}
         </div>
 
-        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-slate-700/80 flex items-center gap-1">
+        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-1">
           <button
             onClick={() => onNavigate('#/settings')}
             className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-slate-500 hover:text-indigo-300 transition-colors rounded-lg hover:bg-slate-700/50"
