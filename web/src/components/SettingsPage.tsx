@@ -142,7 +142,7 @@ function ApiKeyTab({ session }: { session: Session }) {
     setNewKey(null)
   }
 
-  const agentCmd = newKey ? `npx remo-code-agent --api-key ${newKey}` : ''
+  const agentCmd = newKey ? `npx remo-code-agent --api-key ${newKey} --local-output` : ''
 
   if (loading) {
     return <p className="text-sm text-[var(--text-muted)]">Loading...</p>

@@ -39,11 +39,14 @@ bun run dev:web
 # Build web for production
 bun run build:web
 
-# Run the local agent (connects to production hub)
-cd agent && bun src/index.ts --hub-url https://app.remo-code.com --api-key <your_api_key>
+# Run the local agent (connects to production hub, output to terminal + web)
+npx remo-code-agent --api-key <your_api_key> --local-output
 
 # Run the local agent (connects to local hub)
-cd agent && bun src/index.ts --hub-url http://localhost:3040 --api-key <your_api_key>
+npx remo-code-agent --hub-url http://localhost:3040 --api-key <your_api_key> --local-output
+
+# Run without terminal output (web UI only)
+npx remo-code-agent --api-key <your_api_key>
 ```
 
 ## Local Agent (Recommended Connection Method)

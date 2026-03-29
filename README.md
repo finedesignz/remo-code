@@ -87,7 +87,7 @@ Open `http://localhost:5173` and create your account on the setup form.
 Generate an API key in Settings, then run the agent in your project directory:
 
 ```bash
-npx remo-code-agent --api-key YOUR_API_KEY
+npx remo-code-agent --api-key YOUR_API_KEY --local-output
 ```
 
 That's it. The agent spawns a Claude Code process, and everything streams to your browser in real-time — thinking, tool calls, file edits, and responses.
@@ -99,7 +99,7 @@ That's it. The agent spawns a Claude Code process, and everything streams to you
 If you don't want to self-host, use the hosted hub at [app.remo-code.com](https://app.remo-code.com):
 
 ```bash
-npx remo-code-agent --api-key YOUR_API_KEY
+npx remo-code-agent --api-key YOUR_API_KEY --local-output
 ```
 
 The default hub URL is `https://app.remo-code.com` — no `--hub-url` needed.

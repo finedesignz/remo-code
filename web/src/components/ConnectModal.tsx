@@ -9,7 +9,7 @@ export function ConnectModal({ apiKey, onClose }: Props) {
   const [copied, setCopied] = useState(false)
   const hubUrl = import.meta.env.VITE_HUB_URL || window.location.origin
 
-  const agentCmd = `npx remo-code-agent --api-key ${apiKey}`
+  const agentCmd = `npx remo-code-agent --api-key ${apiKey} --local-output`
 
   const copyText = (text: string) => {
     navigator.clipboard.writeText(text)
