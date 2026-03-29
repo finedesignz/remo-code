@@ -25,6 +25,10 @@ body {
   --text-primary: #0f172a;
   --text-secondary: #475569;
   --text-muted: #94a3b8;
+  --text-on-accent: #ffffff;
+  --scrollbar-thumb: #cbd5e1;
+  --scrollbar-hover: #94a3b8;
+  --code-bg: #f1f5f9;
 }
 
 .dark {
@@ -36,6 +40,10 @@ body {
   --text-primary: #e2e8f0;
   --text-secondary: #94a3b8;
   --text-muted: #64748b;
+  --text-on-accent: #ffffff;
+  --scrollbar-thumb: #334155;
+  --scrollbar-hover: #475569;
+  --code-bg: #0f172a;
 }
 
 /* Auto-growing textarea reset */
@@ -70,9 +78,9 @@ textarea {
   background: transparent;
 }
 .chat-scroll::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: var(--scrollbar-thumb);
   border-radius: 3px;
 }
 .chat-scroll::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+  background: var(--scrollbar-hover);
 }

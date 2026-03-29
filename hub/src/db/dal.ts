@@ -124,6 +124,38 @@ export async function createPluginSession(userId: string, projectDir: string, to
   return { id: data.id, name: data.name }
 }
 
+export async function findOrCreateAgentSession(userId: string, projectDir: string, tokenHash: string) {
+  const name = projectDir.split(/[/\\]/).filter(Boolean).pop() || 'unnamed'
+
+  // Check for existing session with same user_id + project_dir
+  const { data: existing } = await supabaseAdmin
+    .from('sessions')
+    .select('id, name')
+    .eq('user_id', userId)
+    .eq('project_dir', projectDir)
+    .order('last_activity', { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (existing) {
+    // Rotate token on existing session
+    await supabaseAdmin
+      .from('sessions')
+      .update({ token_hash: tokenHash })
+      .eq('id', existing.id)
+    return { id: existing.id, name: existing.name, created: false }
+  }
+
+  // Create new session
+  const { data, error } = await supabaseAdmin
+    .from('sessions')
+    .insert({ user_id: userId, name, project_dir: projectDir, token_hash: tokenHash })
+    .select('id, name')
+    .single()
+  if (error) throw error
+  return { id: data.id, name: data.name, created: true }
+}
+
 // -- Messages (user-scoped via RLS) --
 
 export async function getMessages(sb: SupabaseClient, sessionId: string, limit = 50, before?: string) {

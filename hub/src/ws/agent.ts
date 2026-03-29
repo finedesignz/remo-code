@@ -1,9 +1,9 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, createPluginSession, setSessionStatus, insertMessage } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, setSessionStatus, insertMessage } from '../db/dal'
 import { hashToken } from './channel'
 import { generateToken } from '../utils/token'
-import { registerChannel, unregisterChannel, broadcastToSubscribers, broadcastToUser } from './registry'
+import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
 import { supabaseAdmin } from '../db/supabase'
 
 const AUTH_TIMEOUT_MS = 5_000
@@ -79,17 +79,26 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     const userId = apiKeyRecord.user_id
     const projectDir = msg.project_dir.replace(/\\/g, '/')
 
-    // Create a session for this agent connection
+    // Find existing session for this project or create a new one
     const rawToken = generateToken('remo_')
     const tokenHash = await hashToken(rawToken)
-    const session = await createPluginSession(userId, projectDir, tokenHash)
+    const session = await findOrCreateAgentSession(userId, projectDir, tokenHash)
+
+    // If reusing an existing session, close any active channel connection first
+    if (!session.created) {
+      const existing = getChannel(session.id)
+      if (existing) {
+        try { existing.ws.close(4004, 'replaced') } catch {}
+        unregisterChannel(session.id)
+      }
+    }
 
     ws.data.authenticated = true
     ws.data.sessionId = session.id
     ws.data.userId = userId
     if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
 
-    console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir}`)
+    console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir} reused=${!session.created}`)
     registerChannel(session.id, userId, ws as any)
     await setSessionStatus(session.id, 'online')
 

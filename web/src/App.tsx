@@ -45,8 +45,8 @@ export default function App() {
 
   if (loading || needsSetup === null) {
     return (
-      <div className="flex items-center justify-center h-screen bg-slate-900">
-        <div className="text-slate-400">Loading...</div>
+      <div className="flex items-center justify-center h-screen bg-[var(--bg-primary)]">
+        <div className="text-[var(--text-muted)]">Loading...</div>
       </div>
     )
   }
@@ -62,8 +62,8 @@ export default function App() {
   // Wait for profile to load before rendering gated routes
   if (profileLoading || !profile) {
     return (
-      <div className="flex items-center justify-center h-screen bg-slate-900">
-        <div className="text-slate-400">Loading...</div>
+      <div className="flex items-center justify-center h-screen bg-[var(--bg-primary)]">
+        <div className="text-[var(--text-muted)]">Loading...</div>
       </div>
     )
   }

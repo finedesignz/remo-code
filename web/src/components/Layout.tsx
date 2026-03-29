@@ -133,7 +133,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
           {/* Hamburger — opens sidebar (settings/create/manage sessions) */}
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-700/50 transition-colors"
+            className="text-[var(--text-muted)] hover:text-[var(--text-primary)] p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
             aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
           >
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -155,11 +155,11 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
 
           {/* Desktop: session name display */}
           <div className="hidden md:block flex-1 min-w-0">
-            <h2 className="text-sm font-semibold text-slate-200 truncate">
+            <h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">
               {activeSession ? sessionLabel(activeSession) : 'Remo Code'}
             </h2>
             {activeSession?.project_dir && (
-              <p className="text-[11px] text-slate-500 truncate">{activeSession.project_dir}</p>
+              <p className="text-[11px] text-[var(--text-muted)] truncate">{activeSession.project_dir}</p>
             )}
           </div>
 
@@ -169,15 +169,15 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
               <span className="hidden sm:inline">Connected</span>
             </span>
           ) : activeSession ? (
-            <span className="flex items-center gap-1.5 text-xs text-slate-500 shrink-0">
-              <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+            <span className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] shrink-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-[var(--text-muted)]" />
               <span className="hidden sm:inline">Offline</span>
             </span>
           ) : null}
 
           <button
             onClick={toggleTheme}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-700/50 transition-colors"
+            className="p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
             title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
             aria-label="Toggle theme"
           >
@@ -195,7 +195,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
 
           <button
             onClick={() => onNavigate('#/settings')}
-            className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white text-sm font-medium shrink-0 hover:bg-indigo-500 transition-colors"
+            className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-sm font-medium shrink-0 hover:bg-indigo-500 transition-colors"
             title={user.email || 'Profile'}
             aria-label="Profile settings"
           >

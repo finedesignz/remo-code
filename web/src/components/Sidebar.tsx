@@ -61,13 +61,13 @@ export function Sidebar({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <img src="/logo.png" alt="" className="h-6 w-6 object-contain" />
-              <h1 className="text-lg font-bold text-white">Remo Code</h1>
+              <h1 className="text-lg font-bold text-[var(--text-primary)]">Remo Code</h1>
             </div>
-            <p className="text-xs text-slate-500 mt-0.5 truncate">{user.email}</p>
+            <p className="text-xs text-[var(--text-muted)] mt-0.5 truncate">{user.email}</p>
           </div>
           <button
             onClick={onClose}
-            className="md:hidden p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-700/50 transition-colors"
+            className="md:hidden p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
             aria-label="Close sidebar"
           >
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -101,8 +101,8 @@ export function Sidebar({
                 onClick={() => onSelectSession(s.id)}
                 className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
                   s.id === activeSessionId
-                    ? 'bg-indigo-600/20 text-white ring-1 ring-indigo-500/30'
-                    : 'text-slate-300 hover:bg-slate-700/50 active:bg-slate-700/70'
+                    ? 'bg-indigo-600/20 text-[var(--text-primary)] ring-1 ring-indigo-500/30'
+                    : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 active:bg-[var(--bg-tertiary)]/70'
                 }`}
               >
                 <div className="flex items-center gap-2">
@@ -115,7 +115,7 @@ export function Sidebar({
                   <span className="flex md:hidden md:group-hover:flex items-center gap-1 shrink-0">
                     <button
                       onClick={(e) => { e.stopPropagation(); handleReconnect(s) }}
-                      className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-slate-400 hover:text-indigo-300 bg-slate-700/80 hover:bg-slate-600/80 rounded transition-colors"
+                      className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-[var(--text-muted)] hover:text-indigo-300 bg-[var(--bg-tertiary)]/80 hover:bg-[var(--bg-tertiary)]/80 rounded transition-colors"
                       title="Get new connection token"
                       aria-label={`Reconnect ${sessionLabel(s)}`}
                     >
@@ -126,7 +126,7 @@ export function Sidebar({
                     </button>
                     <button
                       onClick={(e) => { e.stopPropagation(); if (confirm(`Delete session "${sessionLabel(s)}"?`)) onDeleteSession(s.id) }}
-                      className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-slate-400 hover:text-red-400 bg-slate-700/80 hover:bg-red-900/50 rounded transition-colors"
+                      className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-[var(--text-muted)] hover:text-red-400 bg-[var(--bg-tertiary)]/80 hover:bg-red-900/50 rounded transition-colors"
                       title="Delete session"
                       aria-label={`Delete ${sessionLabel(s)}`}
                     >
@@ -138,7 +138,7 @@ export function Sidebar({
                   </span>
                 </div>
                 {s.project_dir && (
-                  <div className="text-[11px] text-slate-500 mt-0.5 truncate pl-4">
+                  <div className="text-[11px] text-[var(--text-muted)] mt-0.5 truncate pl-4">
                     {s.project_dir}
                   </div>
                 )}
@@ -147,7 +147,7 @@ export function Sidebar({
           ))}
 
           {connectedSessions(sessions).length === 0 && (
-            <p className="text-sm text-slate-500 text-center py-8">
+            <p className="text-sm text-[var(--text-muted)] text-center py-8">
               No active sessions. Connect a Claude Code instance to get started.
             </p>
           )}
@@ -162,19 +162,19 @@ export function Sidebar({
                 onChange={e => setNewName(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && handleCreate()}
                 placeholder="Session name..."
-                className="w-full px-3 py-2 bg-slate-800 border border-slate-600 rounded-lg text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                className="w-full px-3 py-2 bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                 autoFocus
               />
               <div className="flex gap-2">
                 <button
                   onClick={handleCreate}
-                  className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-white font-medium transition-colors"
+                  className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors"
                 >
                   Create
                 </button>
                 <button
                   onClick={() => { setShowCreate(false); setNewName('') }}
-                  className="px-3 py-2 text-slate-400 hover:text-white text-sm transition-colors"
+                  className="px-3 py-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm transition-colors"
                 >
                   Cancel
                 </button>
@@ -183,7 +183,7 @@ export function Sidebar({
           ) : (
             <button
               onClick={() => setShowCreate(true)}
-              className="w-full py-2.5 text-sm text-indigo-400 hover:text-indigo-300 hover:bg-slate-700/50 rounded-lg transition-colors font-medium"
+              className="w-full py-2.5 text-sm text-indigo-400 hover:text-indigo-300 hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
             >
               + Connect Session
             </button>
@@ -193,7 +193,7 @@ export function Sidebar({
         <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-1">
           <button
             onClick={() => onNavigate('#/settings')}
-            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-slate-500 hover:text-indigo-300 transition-colors rounded-lg hover:bg-slate-700/50"
+            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-[var(--text-muted)] hover:text-indigo-300 transition-colors rounded-lg hover:bg-[var(--bg-tertiary)]/50"
             title="Settings"
             aria-label="Settings"
           >
@@ -204,7 +204,7 @@ export function Sidebar({
           </button>
           <button
             onClick={onShowApiKey}
-            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-slate-500 hover:text-indigo-300 transition-colors rounded-lg hover:bg-slate-700/50"
+            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-[var(--text-muted)] hover:text-indigo-300 transition-colors rounded-lg hover:bg-[var(--bg-tertiary)]/50"
             title="API Key"
             aria-label="API Key"
           >
@@ -216,7 +216,7 @@ export function Sidebar({
           <div className="flex-1" />
           <button
             onClick={signOut}
-            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-slate-500 hover:text-slate-300 transition-colors rounded-lg hover:bg-slate-700/50"
+            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors rounded-lg hover:bg-[var(--bg-tertiary)]/50"
             title="Sign out"
             aria-label="Sign out"
           >

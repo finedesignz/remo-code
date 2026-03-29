@@ -22,7 +22,7 @@ export function ThinkingBlock({ content, isStreaming }: Props) {
           {isStreaming ? (
             <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
           ) : (
-            <span className="inline-block w-2 h-2 rounded-full bg-slate-500" />
+            <span className="inline-block w-2 h-2 rounded-full bg-[var(--text-muted)]" />
           )}
         </span>
         <span className="font-medium">Thinking</span>

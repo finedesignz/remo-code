@@ -55,8 +55,8 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession, un
 
   if (connected.length === 0) {
     return (
-      <div className="flex items-center gap-2 text-sm text-slate-500">
-        <span className="w-2 h-2 rounded-full bg-slate-600" />
+      <div className="flex items-center gap-2 text-sm text-[var(--text-muted)]">
+        <span className="w-2 h-2 rounded-full bg-[var(--bg-tertiary)]" />
         No active sessions
       </div>
     )
@@ -66,7 +66,7 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession, un
     <div ref={ref} className="relative flex-1 min-w-0">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 w-full min-w-0 px-2 py-1.5 rounded-lg text-sm hover:bg-slate-700/50 transition-colors"
+        className="flex items-center gap-2 w-full min-w-0 px-2 py-1.5 rounded-lg text-sm hover:bg-[var(--bg-tertiary)]/50 transition-colors"
         aria-expanded={open}
         aria-haspopup="listbox"
       >
@@ -75,18 +75,18 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession, un
             <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
               active.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
             }`} />
-            <span className="truncate font-medium text-slate-200">
+            <span className="truncate font-medium text-[var(--text-secondary)]">
               {sessionLabel(active)}
             </span>
           </>
         ) : (
-          <span className="text-slate-400">Select session</span>
+          <span className="text-[var(--text-muted)]">Select session</span>
         )}
         {totalUnread > 0 && <UnreadBadge count={totalUnread} />}
         <svg
           width="12" height="12" viewBox="0 0 12 12" fill="none"
           stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
-          className={`ml-auto flex-shrink-0 text-slate-500 transition-transform ${open ? 'rotate-180' : ''}`}
+          className={`ml-auto flex-shrink-0 text-[var(--text-muted)] transition-transform ${open ? 'rotate-180' : ''}`}
         >
           <path d="M3 4.5L6 7.5L9 4.5" />
         </svg>
@@ -105,8 +105,8 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession, un
               onClick={(e) => { e.preventDefault(); onSelectSession(s.id); setOpen(false) }}
               className={`w-full text-left px-3 py-2.5 text-sm transition-colors flex items-center gap-2 ${
                 s.id === activeSessionId
-                  ? 'bg-indigo-600/20 text-white'
-                  : 'text-slate-300 hover:bg-[var(--bg-tertiary)]/50'
+                  ? 'bg-indigo-600/20 text-[var(--text-primary)]'
+                  : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50'
               }`}
             >
               <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
@@ -115,7 +115,7 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession, un
               <div className="min-w-0 flex-1">
                 <div className="truncate font-medium">{sessionLabel(s)}</div>
                 {s.project_dir && (
-                  <div className="text-[11px] text-slate-500 truncate">{s.project_dir}</div>
+                  <div className="text-[11px] text-[var(--text-muted)] truncate">{s.project_dir}</div>
                 )}
               </div>
               <UnreadBadge count={unreadCounts[s.id] || 0} />
