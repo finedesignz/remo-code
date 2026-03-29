@@ -119,14 +119,8 @@ export function useChat(
     const msg: any = { type: 'send_message', session_id: activeSessionId, content, id }
     if (images?.length) msg.images = images
     send(msg)
-    // Optimistic add
-    setMessages(prev => [...prev, {
-      id,
-      session_id: activeSessionId,
-      role: 'user' as const,
-      content,
-      created_at: new Date().toISOString(),
-    }])
+    // No optimistic add — the hub broadcasts the stored message back to us
+    // which avoids duplicate messages (the DB generates a different UUID)
   }, [activeSessionId, send])
 
   return { messages, loading, sendMessage, unreadCounts, markRead }

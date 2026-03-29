@@ -62,12 +62,20 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100
   }, [])
 
-  // Only auto-scroll if user is near bottom
+  // Scroll to bottom on new messages/activity (if near bottom)
   useEffect(() => {
     if (isNearBottom.current && scrollRef.current) {
       scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
     }
   }, [messages, sessionStatus, activity])
+
+  // Always scroll to bottom immediately on session switch or initial load
+  useEffect(() => {
+    isNearBottom.current = true
+    if (scrollRef.current) {
+      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'instant' })
+    }
+  }, [activeSessionId])
 
   // Clear attachments on session switch
   useEffect(() => {
@@ -157,7 +165,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
 
   if (!activeSessionId) {
     return (
-      <div className="flex-1 flex items-center justify-center text-slate-500">
+      <div className="flex-1 flex items-center justify-center text-[var(--text-muted)]">
         Select a session from the sidebar to start chatting
       </div>
     )
@@ -175,10 +183,10 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
         className="flex-1 overflow-y-auto p-4 space-y-3 chat-scroll"
       >
         {loading && (
-          <div className="text-center text-slate-500 text-sm py-4">Loading messages...</div>
+          <div className="text-center text-[var(--text-muted)] text-sm py-4">Loading messages...</div>
         )}
         {!loading && messages.length === 0 && (
-          <div className="text-center text-slate-500 text-sm py-8">
+          <div className="text-center text-[var(--text-muted)] text-sm py-8">
             No messages yet. Send a message to Claude.
           </div>
         )}
@@ -222,12 +230,12 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
               onPaste={handlePaste}
               placeholder="Send a message to Claude..."
               rows={1}
-              className="flex-1 px-4 py-2.5 bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none max-h-32"
+              className="flex-1 px-4 py-2.5 bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none max-h-32"
             />
             <button
               type="submit"
               disabled={!input.trim() && attachedFiles.length === 0}
-              className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 rounded-lg text-sm text-white font-medium transition-colors shrink-0"
+              className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors shrink-0"
             >
               Send
             </button>
