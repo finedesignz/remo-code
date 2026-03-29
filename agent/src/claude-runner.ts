@@ -10,121 +10,178 @@ export type RunnerEvent =
   | { type: 'assistant_message'; content: string }
   | { type: 'result'; cost: number; duration_ms: number }
   | { type: 'error'; message: string }
+  | { type: 'ready' }
 
+type EventCallback = (event: RunnerEvent) => void
+
+/**
+ * Persistent Claude runner — keeps a single interactive process alive.
+ * Messages are sent via stdin in stream-json format, responses streamed from stdout.
+ */
 export class ClaudeRunner {
   private proc: Subprocess | null = null
   private projectDir: string
+  private listener: EventCallback | null = null
+  private buffer = ''
+  private fullText = ''
+  private ready = false
 
   constructor(projectDir: string) {
     this.projectDir = projectDir
   }
 
-  /**
-   * Send a user message to Claude and stream back parsed events.
-   * Each call spawns a new `claude -p` process (stateless).
-   */
-  async *run(message: string): AsyncGenerator<RunnerEvent> {
+  /** Start the persistent Claude process */
+  start(onEvent: EventCallback) {
+    this.listener = onEvent
+
     this.proc = spawn({
-      cmd: ['claude', '-p', '--output-format', 'stream-json', '--verbose'],
+      cmd: [
+        'claude',
+        '--input-format', 'stream-json',
+        '--output-format', 'stream-json',
+        '--verbose',
+      ],
       cwd: this.projectDir,
       stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
     })
 
-    // Write user message to stdin and close (Bun FileSink API)
-    this.proc.stdin.write(message)
-    this.proc.stdin.end()
+    console.log(`[runner] spawned claude pid=${this.proc.pid}`)
 
-    yield { type: 'status', state: 'thinking' }
+    // Read stdout in background
+    this.readStream()
 
-    // Read stdout line by line, parse JSON events (Bun ReadableStream)
-    const reader = this.proc.stdout.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let fullText = ''
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          if (!line.trim()) continue
-          let event: CliEvent
-          try {
-            event = JSON.parse(line)
-          } catch {
-            continue // skip malformed lines
-          }
-
-          for (const parsed of this.parseEvent(event)) {
-            if (parsed.type === 'text_delta') fullText += parsed.content
-            yield parsed
-          }
-        }
+    // Mark ready after a short delay — interactive mode may not emit init
+    // until first user message, so we can't wait for it
+    setTimeout(() => {
+      if (!this.ready && this.proc) {
+        this.ready = true
+        console.log('[runner] ready (timeout-based)')
+        this.listener?.({ type: 'ready' })
       }
+    }, 3_000)
 
-      // Process remaining buffer
-      if (buffer.trim()) {
-        try {
-          const event: CliEvent = JSON.parse(buffer)
-          for (const parsed of this.parseEvent(event)) {
-            if (parsed.type === 'text_delta') fullText += parsed.content
-            yield parsed
-          }
-        } catch {}
-      }
-
-      // Emit final assembled message
-      if (fullText) {
-        yield { type: 'assistant_message', content: fullText }
-      }
-    } finally {
-      yield { type: 'status', state: 'idle' }
+    // Monitor for unexpected exit
+    this.proc.exited.then((code) => {
+      console.log(`[runner] claude exited with code ${code}`)
       this.proc = null
-    }
+      this.ready = false
+    })
   }
 
-  /** Cancel the running process */
+  /** Send a user message to the running Claude process */
+  sendMessage(content: string) {
+    if (!this.proc || !this.ready) {
+      console.error('[runner] process not ready, cannot send message')
+      this.listener?.({ type: 'error', message: 'Claude process not ready' })
+      return
+    }
+
+    this.fullText = ''
+    this.listener?.({ type: 'status', state: 'thinking' })
+
+    const msg = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content },
+    })
+
+    this.proc.stdin.write(msg + '\n')
+    this.proc.stdin.flush()
+  }
+
+  /** Cancel the current request */
   cancel() {
     if (this.proc) {
       this.proc.kill('SIGINT')
     }
   }
 
-  private *parseEvent(event: CliEvent): Generator<RunnerEvent> {
+  /** Stop the process entirely */
+  stop() {
+    if (this.proc) {
+      this.proc.kill()
+      this.proc = null
+    }
+    this.ready = false
+  }
+
+  get isReady() { return this.ready }
+
+  private async readStream() {
+    if (!this.proc) return
+    const reader = this.proc.stdout.getReader()
+    const decoder = new TextDecoder()
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        this.buffer += decoder.decode(value, { stream: true })
+        const lines = this.buffer.split('\n')
+        this.buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const event: CliEvent = JSON.parse(line)
+            this.handleEvent(event)
+          } catch {
+            // skip malformed lines
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error('[runner] stream read error:', err.message)
+    }
+  }
+
+  private handleEvent(event: CliEvent) {
+    // Mark ready after init event
+    if (event.type === 'system' && (event as any).subtype === 'init') {
+      this.ready = true
+      console.log(`[runner] ready, session=${(event as any).session_id}`)
+      this.listener?.({ type: 'ready' })
+      return
+    }
+
+    // Parse assistant content blocks
     if (event.type === 'assistant' && 'message' in event) {
       const msg = (event as any).message
       if (!msg?.content) return
       for (const block of msg.content) {
         if (block.type === 'text' && block.text) {
-          yield { type: 'status', state: 'writing' }
-          yield { type: 'text_delta', content: block.text }
+          this.listener?.({ type: 'status', state: 'writing' })
+          this.listener?.({ type: 'text_delta', content: block.text })
+          this.fullText += block.text
         }
         if (block.type === 'thinking' && block.thinking) {
-          yield { type: 'status', state: 'thinking' }
-          yield { type: 'thinking', content: block.thinking }
+          this.listener?.({ type: 'status', state: 'thinking' })
+          this.listener?.({ type: 'thinking', content: block.thinking })
         }
         if (block.type === 'tool_use') {
-          yield { type: 'status', state: 'tool_calling' }
-          yield { type: 'tool_use', tool: block.name, tool_id: block.id, input: block.input }
+          this.listener?.({ type: 'status', state: 'tool_calling' })
+          this.listener?.({ type: 'tool_use', tool: block.name, tool_id: block.id, input: block.input })
         }
       }
     }
 
+    // Tool results
     if (event.type === 'tool_result') {
       const tr = event as any
-      yield { type: 'tool_result', tool_id: tr.tool_use_id, content: tr.content || '', is_error: tr.is_error }
+      this.listener?.({ type: 'tool_result', tool_id: tr.tool_use_id, content: tr.content || '', is_error: tr.is_error })
     }
 
+    // Final result — emit assembled message and go idle
     if (event.type === 'result') {
       const r = event as any
-      yield { type: 'result', cost: r.total_cost_usd || 0, duration_ms: r.duration_ms || 0 }
+      if (this.fullText) {
+        this.listener?.({ type: 'assistant_message', content: this.fullText })
+        this.fullText = ''
+      }
+      this.listener?.({ type: 'result', cost: r.total_cost_usd || 0, duration_ms: r.duration_ms || 0 })
+      this.listener?.({ type: 'status', state: 'idle' })
     }
   }
 }
