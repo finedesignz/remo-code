@@ -39,13 +39,17 @@ bun run dev:web
 # Build web for production
 bun run build:web
 
-# Run the local agent (connects to production hub, output to terminal + web)
+# Run the local agent (recommended: set up a shell alias)
+# alias claude-remote='npx remo-code-agent --api-key <your_api_key> --local-output'
+claude-remote
+
+# Or run directly (connects to production hub, output to terminal + web)
 npx remo-code-agent --api-key <your_api_key> --local-output
 
-# Run the local agent (connects to local hub)
+# Connect to local hub for development
 npx remo-code-agent --hub-url http://localhost:3040 --api-key <your_api_key> --local-output
 
-# Run without terminal output (web UI only)
+# Web UI only (no terminal output)
 npx remo-code-agent --api-key <your_api_key>
 ```
 

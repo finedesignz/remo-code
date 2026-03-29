@@ -90,9 +90,26 @@ Generate an API key in Settings, then run the agent in your project directory:
 npx remo-code-agent --api-key YOUR_API_KEY --local-output
 ```
 
-That's it. The agent spawns a Claude Code process, and everything streams to your browser in real-time — thinking, tool calls, file edits, and responses.
+That's it. The agent spawns a Claude Code process, and everything streams to your browser in real-time — thinking, tool calls, file edits, and responses. You get both terminal output and web UI.
 
-**Each agent = one Claude Code session.** To connect multiple projects, run the agent in each project directory. Each gets its own session in the web UI.
+**Each agent = one Claude Code session.** To connect multiple projects, run the agent in each project directory. Each gets its own session in the web UI. Sessions auto-resume by project directory.
+
+### Set up a shell alias (recommended)
+
+To make connecting seamless, add an alias to your shell profile:
+
+```bash
+# bash (~/.bashrc or ~/.bash_profile)
+alias claude-remote='npx remo-code-agent --api-key YOUR_API_KEY --local-output'
+
+# zsh (~/.zshrc)
+alias claude-remote='npx remo-code-agent --api-key YOUR_API_KEY --local-output'
+
+# fish (~/.config/fish/config.fish)
+alias claude-remote 'npx remo-code-agent --api-key YOUR_API_KEY --local-output'
+```
+
+Then just run `claude-remote` in any project directory — same as running `claude` but with remote streaming to the web UI.
 
 ### Using the hosted version
 
