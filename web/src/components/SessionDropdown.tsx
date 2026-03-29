@@ -18,6 +18,11 @@ export function sessionLabel(s: CodeSession): string {
   return s.name
 }
 
+/** Short session ID for display (first 8 chars) */
+export function shortId(s: CodeSession): string {
+  return s.id.slice(0, 8)
+}
+
 /** Filter to only connected (online/thinking) sessions */
 export function connectedSessions(sessions: CodeSession[]): CodeSession[] {
   return sessions.filter(s => s.status === 'online' || s.status === 'thinking')
@@ -113,7 +118,10 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession, un
                 s.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
               }`} />
               <div className="min-w-0 flex-1">
-                <div className="truncate font-medium">{sessionLabel(s)}</div>
+                <div className="flex items-center gap-1.5">
+                  <span className="truncate font-medium">{sessionLabel(s)}</span>
+                  <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
+                </div>
                 {s.project_dir && (
                   <div className="text-[11px] text-[var(--text-muted)] truncate">{s.project_dir}</div>
                 )}

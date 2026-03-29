@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import type { CodeSession } from '../hooks/useSessions'
-import { sessionLabel, connectedSessions } from './SessionDropdown'
+import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
 import { UnreadBadge } from './UnreadBadge'
 
 export interface ConnectData {
@@ -110,6 +110,7 @@ export function Sidebar({
                     s.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
                   }`} />
                   <span className="truncate font-medium flex-1">{sessionLabel(s)}</span>
+                  <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
                   <UnreadBadge count={unreadCounts[s.id] || 0} />
                   {/* Action buttons — always visible on mobile, hover on desktop */}
                   <span className="flex md:hidden md:group-hover:flex items-center gap-1 shrink-0">

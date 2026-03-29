@@ -9,7 +9,7 @@ import { Sidebar, type ConnectData } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
 import { ConnectModal } from './ConnectModal'
 import { ApiKeyModal } from './ApiKeyModal'
-import { SessionDropdown, connectedSessions, sessionLabel } from './SessionDropdown'
+import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 
 interface Props {
   session: Session
@@ -155,8 +155,9 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
 
           {/* Desktop: session name display */}
           <div className="hidden md:block flex-1 min-w-0">
-            <h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">
+            <h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate flex items-center gap-1.5">
               {activeSession ? sessionLabel(activeSession) : 'Remo Code'}
+              {activeSession && <span className="text-[10px] text-[var(--text-muted)] font-mono font-normal">{shortId(activeSession)}</span>}
             </h2>
             {activeSession?.project_dir && (
               <p className="text-[11px] text-[var(--text-muted)] truncate">{activeSession.project_dir}</p>
