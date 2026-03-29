@@ -79,20 +79,9 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
   // Handle showing connect modal — generate API key if none exists
   const [connectApiKey, setConnectApiKey] = useState<string | null>(null)
 
-  const handleShowConnect = useCallback(async () => {
-    if (activeKey) {
-      // User already has an active key — we don't have the raw key, prompt them to use the API Key modal
-      // Show the connect modal with a placeholder that tells them to check their key
-      setShowConnect(true)
-    } else {
-      // Generate a new key and show it in the connect modal
-      const result = await generateKey()
-      if (result?.key) {
-        setConnectApiKey(result.key)
-        setShowConnect(true)
-      }
-    }
-  }, [activeKey, generateKey])
+  const handleShowConnect = useCallback(() => {
+    setShowConnect(true)
+  }, [])
 
   const activeSession = activeSessionId
     ? sessionsHook.sessions.find(s => s.id === activeSessionId)
@@ -105,15 +94,11 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
         <ApiKeyModal session={session} onClose={() => setShowApiKey(false)} />
       )}
       {showConnect && (
-        connectApiKey ? (
-          <ConnectModal
-            apiKey={connectApiKey}
-            onClose={() => { setShowConnect(false); setConnectApiKey(null) }}
-          />
-        ) : (
-          /* Active key exists but we don't have the raw value — open ApiKeyModal instead */
-          <ApiKeyModal session={session} onClose={() => setShowConnect(false)} />
-        )
+        <ConnectModal
+          apiKey={connectApiKey || undefined}
+          onGenerateKey={generateKey}
+          onClose={() => { setShowConnect(false); setConnectApiKey(null) }}
+        />
       )}
 
       {/* Mobile overlay backdrop */}
