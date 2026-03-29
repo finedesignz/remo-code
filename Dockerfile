@@ -6,6 +6,7 @@ COPY package.json bun.lock ./
 COPY hub/package.json hub/
 COPY channel/package.json channel/
 COPY web/package.json web/
+COPY agent/package.json agent/
 
 # Install all workspace dependencies
 RUN bun install --frozen-lockfile
@@ -38,6 +39,7 @@ COPY package.json bun.lock ./
 COPY hub/package.json hub/
 COPY channel/package.json channel/
 COPY web/package.json web/
+COPY agent/package.json agent/
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 RUN bun install --frozen-lockfile --production
 
