@@ -37,12 +37,12 @@ export const ClientAuth = z.object({
 export const ClientSendMessage = z.object({
   type: z.literal('send_message'),
   session_id: z.string().min(1).max(256),
-  content: z.string().min(1).max(65536),
+  content: z.string().min(1).max(1_000_000),
   id: z.string().uuid(),
   images: z.array(z.object({
     media_type: z.string(),
-    data: z.string(),
-  })).optional(),
+    data: z.string().max(10_000_000), // base64 image data up to ~7.5MB raw
+  })).max(5).optional(),
   attachments: z.array(z.object({
     filename: z.string(),
     content: z.string(),

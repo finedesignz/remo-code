@@ -152,7 +152,7 @@ const server = Bun.serve({
     return new Response('not found', { status: 404 })
   },
   websocket: {
-    maxPayloadLength: 65536,
+    maxPayloadLength: 10 * 1024 * 1024, // 10 MB (supports image attachments)
     open(ws) {
       if (ws.data.type === 'agent') handleAgentOpen(ws as any)
       else if (ws.data.type === 'channel') handleChannelOpen(ws as any)

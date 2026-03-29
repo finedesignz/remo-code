@@ -151,6 +151,11 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     }
 
     content += input.trim()
+    // Ensure content is non-empty (hub requires min 1 char)
+    if (!content && images.length > 0) {
+      content = '[Image attached]'
+    }
+    if (!content) return
     onSend(content, images.length > 0 ? images : undefined)
     setInput('')
     setAttachedFiles([])
