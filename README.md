@@ -2,9 +2,9 @@
   <img src="web/public/logo.png" alt="Remo Code" width="360" />
 </p>
 
-<h3 align="center">The open-source, self-hosted alternative to OpenClaw</h3>
+<h3 align="center">Chat with Claude Code from any browser or phone</h3>
 
-<p align="center">Chat with your Claude Code sessions from any browser or phone — without giving a third party access to your machine.</p>
+<p align="center">Full activity streaming — thinking, tool calls, and responses in real-time. Self-hosted, open-source.</p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> &bull;
@@ -19,19 +19,17 @@
 
 **[OpenClaw](https://openclaw.ai/)** popularized the idea of talking to an AI agent from your phone. But it requires you to trust a third-party runtime with shell access to your machine, and [security researchers have already found real data exfiltration in community-contributed OpenClaw skills](https://medium.com/@cognidownunder/claude-code-remote-control-vs-openclaw-one-is-secure-and-the-other-is-a-liability-3cd936cc58b3).
 
-**Remo Code** gives you the same "chat with your agent from anywhere" workflow, but:
+**Remo Code** gives you the same "chat with your agent from anywhere" workflow, but with full activity streaming and complete control:
 
 | | OpenClaw | Claude Code Remote Control | **Remo Code** |
 |---|---|---|---|
 | Self-hosted | Partial (local agent, cloud relay) | No (Anthropic relay) | **Yes, fully** |
 | Open source | Yes | No | **Yes (MIT)** |
+| Activity streaming | No | No | **Yes (thinking, tool calls, text)** |
 | Web UI | No (messaging apps only) | Yes (claude.ai) | **Yes (your own domain)** |
 | Multi-session | No | No | **Yes** |
-| Built on official API | No (custom runtime) | Yes | **Yes (Channels contract)** |
-| Works when laptop sleeps | No | No | No* |
+| File attachments | No | No | **Yes (images + text files)** |
 | Auth & data storage | Third-party servers | Anthropic servers | **Your Supabase instance** |
-
-> *All three require the Claude Code process to be running. The difference is who controls the relay infrastructure — with Remo Code, you do.
 
 ### Who is this for?
 
@@ -45,20 +43,20 @@
 ### Prerequisites
 
 - [Bun](https://bun.sh) runtime
+- [Claude Code](https://claude.ai/code) CLI installed
 - A [Supabase](https://supabase.com/) project (free tier works)
-- [Claude Code](https://claude.ai/code) v2.1.80+
 
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/anthropics/remo-code.git
+git clone https://github.com/finedesignz/remo-code.git
 cd remo-code
 bun install
 ```
 
 ### 2. Configure Supabase
 
-Create a Supabase project and run the migration in `supabase/migrations/001_initial.sql` via the SQL Editor.
+Create a Supabase project and run the migrations in `supabase/migrations/` via the SQL Editor.
 
 ### 3. Set environment variables
 
@@ -84,22 +82,27 @@ bun run dev:web
 
 Open `http://localhost:5173` and create your account on the setup form.
 
-### 6. Connect a Claude Code session
+### 6. Connect Claude Code
 
-Create a session in the web UI, then in your terminal:
+Generate an API key in Settings, then run the agent in your project directory:
 
 ```bash
-# Install the channel plugin
-/plugin install remo-code@claude-plugins-official
-
-# Configure the connection
-/remo-code:configure http://localhost:3040 remo_YOUR_TOKEN
-
-# Restart with channels enabled
-claude --dangerously-load-development-channels plugin:remo-code@claude-plugins-official
+npx remo-code-agent --api-key YOUR_API_KEY
 ```
 
-That's it. Messages you send in the browser appear in Claude Code, and replies flow back in real time.
+That's it. The agent spawns a Claude Code process, and everything streams to your browser in real-time — thinking, tool calls, file edits, and responses.
+
+**Each agent = one Claude Code session.** To connect multiple projects, run the agent in each project directory. Each gets its own session in the web UI.
+
+### Using the hosted version
+
+If you don't want to self-host, use the hosted hub at [app.remo-code.com](https://app.remo-code.com):
+
+```bash
+npx remo-code-agent --api-key YOUR_API_KEY
+```
+
+The default hub URL is `https://app.remo-code.com` — no `--hub-url` needed.
 
 ## Architecture
 
@@ -108,29 +111,42 @@ Browser (React SPA)
     ↕ WebSocket + REST API
 Hub Server (Bun + Hono)
     ↕ WebSocket
-Channel Plugin (MCP server per session)
-    ↕ stdio
-Claude Code
+Local Agent (one per project)
+    ↕ subprocess stdin/stdout (stream-json)
+Claude Code CLI
 ```
 
-Three packages in a Bun workspace:
+Four packages in a Bun workspace:
 
-- **hub/** — Bun + Hono server handling auth (Supabase JWT), message relay, and session management via WebSocket and REST.
-- **web/** — React 19 + Vite + Tailwind CSS 4 chat UI with session switching, online/offline status, and markdown rendering.
-- **channel/** — Claude Code [channel plugin](https://code.claude.com/docs/en/channels-reference) (MCP server) that bridges each terminal session to the hub. Same contract as the official Telegram and Discord plugins.
+- **hub/** — Bun + Hono server handling auth (Supabase JWT), message relay, and session management. Broadcasts Claude's activity events (thinking, tool use, text) to subscribed browsers.
+- **web/** — React 19 + Vite + Tailwind CSS 4 chat UI with activity feed, session switching, file attachments, light/dark theme, and unread badges.
+- **agent/** — Local streaming agent that runs on your dev machine. Spawns a persistent Claude Code CLI process with `--input-format stream-json --output-format stream-json`, parses events, and relays to the hub. Published as [`remo-code-agent`](https://www.npmjs.com/package/remo-code-agent) on npm.
+- **channel/** — (Legacy) Claude Code channel plugin. Kept for backward compatibility.
 
 ## How It Works
 
-The channel plugin follows the [Claude Code channels contract](https://code.claude.com/docs/en/channels-reference) — the same official API that powers Anthropic's own Telegram and Discord integrations:
+1. You run `npx remo-code-agent --api-key xxx` in your project directory
+2. The agent connects to the hub via WebSocket and registers a session
+3. The agent spawns `claude --input-format stream-json --output-format stream-json --verbose`
+4. When you send a message in the web UI, the hub forwards it to the agent
+5. The agent writes the message to Claude's stdin as JSON
+6. Claude responds — thinking, tool calls, text stream out via stdout
+7. The agent parses the stream-json events and relays them to the hub
+8. The hub broadcasts to all subscribed browsers in real-time
 
-1. Claude Code spawns the channel as an MCP subprocess (stdio transport)
-2. The channel connects outbound to your hub via WebSocket and authenticates with a hashed token
-3. When you send a message in the web UI, the hub forwards it to the channel
-4. The channel emits a `notifications/claude/channel` event into Claude Code
-5. Claude processes the message and calls the `reply` tool to respond
-6. The reply flows back through the hub to all connected browsers
+**Session resume:** The agent reuses existing sessions by matching the project directory. Restart the agent and it reconnects to the same session with full message history.
 
-No custom runtime. No monkey-patching. Just the official channels API.
+**Conversation memory:** The agent keeps a single persistent Claude process — full conversation context is maintained across messages, just like the terminal.
+
+## Features
+
+- **Activity streaming** — see Claude's thinking, tool calls, and text responses in real-time
+- **File attachments** — paste images (Ctrl+V) or attach text files in the chat
+- **Multi-session** — run agents in multiple project directories, switch between them
+- **Session resume** — restart the agent and reconnect to the same session
+- **Unread badges** — know when sessions have new messages
+- **Light/dark theme** — toggle in the header
+- **Mobile-first** — responsive design with safe-area support for notched devices
 
 ## Production Deployment
 
@@ -146,7 +162,7 @@ docker run -p 3040:3040 \
   remo-code
 ```
 
-The Docker image builds the web frontend and serves it from the hub — one container, one port.
+The Docker image builds the web frontend and serves it from the hub — one container, one port. The agent runs on your dev machine, not on the server.
 
 ## Project Structure
 
@@ -154,30 +170,31 @@ The Docker image builds the web frontend and serves it from the hub — one cont
 ├── hub/                # Bun + Hono server (HTTP, WebSocket, auth)
 │   └── src/
 │       ├── api/        # REST endpoints (sessions, messages, profile, setup)
-│       ├── auth/       # JWT verification middleware
+│       ├── auth/       # JWT + API key verification middleware
 │       ├── db/         # Supabase clients and data access layer
 │       ├── middleware/  # Rate limiting
 │       ├── utils/      # Shared utilities (token generation)
-│       └── ws/         # WebSocket handlers + Zod protocol schemas
+│       └── ws/         # WebSocket handlers (agent, channel, client) + Zod schemas
 ├── web/                # React 19 + Vite + Tailwind CSS 4 SPA
 │   └── src/
-│       ├── components/ # Layout, Sidebar, ChatPanel, AuthForm, etc.
-│       └── hooks/      # useAuth, useWebSocket, useSessions, useChat
-├── channel/            # Claude Code channel plugin (MCP server)
-│   ├── server.ts       # MCP server + WebSocket client to hub
-│   ├── .claude-plugin/ # Plugin metadata (plugin.json)
-│   └── skills/         # /remo-code:configure skill
+│       ├── components/ # Layout, ChatPanel, ActivityFeed, Sidebar, etc.
+│       └── hooks/      # useAuth, useWebSocket, useSessions, useChat, useActivity
+├── agent/              # Local streaming agent (npm: remo-code-agent)
+│   └── src/
+│       ├── index.ts    # Entry point — wires hub client, Claude runner
+│       ├── claude-runner.ts  # Persistent Claude CLI process management
+│       ├── hub-client.ts     # WebSocket client to hub
+│       └── config.ts         # Config loading (CLI args, env vars, config file)
+├── channel/            # (Legacy) Claude Code channel plugin
 ├── supabase/           # Database migrations
 └── Dockerfile          # Multi-stage production build
 ```
 
 ## Security
 
-Remo Code is designed with a security-first approach — the opposite of "just give this npm package shell access and hope for the best":
-
 - **Supabase JWT auth** on all API and WebSocket endpoints
 - **Row-Level Security** on all database tables — multi-tenant by default
-- **Session tokens** stored as SHA-256 hashes with timing-safe comparison
+- **API keys** stored as SHA-256 hashes with timing-safe comparison
 - **CSP, HSTS, and security headers** on all responses
 - **Rate limiting** on API routes, setup endpoints, and WebSocket messages
 - **Per-IP connection limits** on WebSocket endpoints
@@ -189,4 +206,4 @@ Your data stays in your Supabase instance. Your Claude Code sessions stay on you
 
 ## License
 
-MIT
+Apache-2.0
