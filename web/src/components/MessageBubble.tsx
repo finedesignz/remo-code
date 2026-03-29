@@ -6,31 +6,47 @@ interface Props {
   message: ChatMessage
 }
 
+// Extract data URI images from message content and return them separately
+function extractImages(content: string): { images: string[]; text: string } {
+  const images: string[] = []
+  const text = content.replace(/!\[.*?\]\((data:image\/[^)]+)\)/g, (_, dataUri) => {
+    images.push(dataUri)
+    return ''
+  }).trim()
+  return { images, text }
+}
+
 export function MessageBubble({ message }: Props) {
   const isUser = message.role === 'user'
+  const { images, text } = extractImages(message.content)
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
         className={`max-w-[80%] rounded-xl px-4 py-2.5 text-sm overflow-hidden ${
           isUser
-            ? 'bg-indigo-600 text-white'
+            ? 'bg-indigo-600 text-[var(--text-on-accent)]'
             : 'bg-[var(--bg-tertiary)]/70 text-[var(--text-primary)]'
         }`}
       >
+        {/* Inline images */}
+        {images.map((src, i) => (
+          <img key={i} src={src} alt="" className="rounded-lg max-h-64 w-auto mb-2" />
+        ))}
+
         {isUser ? (
-          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+          text ? <p className="whitespace-pre-wrap break-words">{text}</p> : null
         ) : (
-          <div className="prose prose-sm prose-invert max-w-none [&_pre]:bg-slate-900 [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:overflow-x-auto [&_code]:text-emerald-300 [&_a]:text-indigo-400 break-words">
+          <div className="prose prose-sm prose-invert max-w-none [&_pre]:bg-[var(--code-bg)] [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:overflow-x-auto [&_code]:text-emerald-300 [&_a]:text-indigo-400 break-words">
             <Markdown
               rehypePlugins={[rehypeSanitize]}
               components={{ a: ({ children, href, ...props }) => (
                 <a href={href} target="_blank" rel="noopener noreferrer" {...props}>{children}</a>
               )}}
-            >{message.content}</Markdown>
+            >{text || message.content}</Markdown>
           </div>
         )}
-        <div className={`text-[10px] mt-1 ${isUser ? 'text-indigo-200' : 'text-slate-500'}`}>
+        <div className={`text-[10px] mt-1 ${isUser ? 'text-indigo-200' : 'text-[var(--text-muted)]'}`}>
           {new Date(message.created_at).toLocaleTimeString()}
         </div>
       </div>

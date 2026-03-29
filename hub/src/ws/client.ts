@@ -120,8 +120,17 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       return
     }
 
+    // Embed images as markdown data URIs so they render in the chat history
+    let storedContent = msg.content
+    if (msg.images?.length) {
+      const imgMarkdown = msg.images.map((img: any, i: number) =>
+        `![image-${i + 1}](data:${img.media_type};base64,${img.data})`
+      ).join('\n')
+      storedContent = imgMarkdown + '\n\n' + storedContent
+    }
+
     // Store the user message
-    const message = await insertMessage(msg.session_id, 'user', msg.content)
+    const message = await insertMessage(msg.session_id, 'user', storedContent)
 
     // Broadcast to all subscribed clients (including sender for confirmation)
     broadcastToSubscribers(msg.session_id, {
