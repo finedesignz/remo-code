@@ -6,6 +6,7 @@ export interface AgentConfig {
   hubUrl: string
   apiKey: string
   projectDir: string
+  localOutput: boolean
 }
 
 const CONFIG_PATH = join(homedir(), '.config', 'remo-code', 'config.json')
@@ -46,16 +47,20 @@ export function loadConfig(): AgentConfig {
   }
 
   const projectDir = args['--project-dir'] || process.cwd()
+  const localOutput = '--local-output' in args || process.env.REMO_LOCAL_OUTPUT === '1'
 
-  return { hubUrl, apiKey, projectDir }
+  return { hubUrl, apiKey, projectDir, localOutput }
 }
 
 function parseArgs(argv: string[]): Record<string, string> {
+  const booleanFlags = new Set(['--local-output'])
   const result: Record<string, string> = {}
   for (let i = 0; i < argv.length; i++) {
     if (argv[i].startsWith('--') && argv[i].includes('=')) {
       const [key, ...rest] = argv[i].split('=')
       result[key] = rest.join('=')
+    } else if (booleanFlags.has(argv[i])) {
+      result[argv[i]] = 'true'
     } else if (argv[i].startsWith('--') && i + 1 < argv.length) {
       result[argv[i]] = argv[i + 1]
       i++

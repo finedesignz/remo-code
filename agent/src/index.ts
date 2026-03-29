@@ -34,11 +34,12 @@ console.log('')
 console.log(`  Remo Code Agent v${VERSION}`)
 console.log(`  Project: ${config.projectDir}`)
 console.log(`  Hub:     ${config.hubUrl}`)
+console.log(`  Output:  ${config.localOutput ? 'terminal + web' : 'web only'}`)
 console.log(`  Connecting...`)
 console.log('')
 
 const hub = new HubClient(config.hubUrl, config.apiKey, config.projectDir, handleMessage)
-const runner = new ClaudeRunner(config.projectDir)
+const runner = new ClaudeRunner(config.projectDir, config.localOutput)
 
 function handleRunnerEvent(event: RunnerEvent) {
   const sessionId = hub.sessionIdValue
@@ -76,6 +77,9 @@ function sendUserMessage(msg: Extract<HubToAgent, { type: 'user_message' }>) {
     }
   }
   prompt += msg.content
+  if (config.localOutput) {
+    process.stdout.write(`\x1b[32m> ${msg.content}\x1b[0m\n\n`)
+  }
   runner.sendMessage(prompt)
 }
 
