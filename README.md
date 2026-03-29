@@ -96,18 +96,58 @@ That's it. The agent spawns a Claude Code process, and everything streams to you
 
 ### Set up a shell alias (recommended)
 
-To make connecting seamless, add an alias to your shell profile:
+Add an alias so you can run `claude-remote` instead of the full command:
 
+<details>
+<summary><b>Windows (PowerShell)</b></summary>
+
+Add to your PowerShell profile (`$PROFILE`):
+```powershell
+# Open profile in editor (creates it if it doesn't exist)
+if (!(Test-Path $PROFILE)) { New-Item -Path $PROFILE -Force }
+notepad $PROFILE
+```
+
+Add this line:
+```powershell
+function claude-remote { npx remo-code-agent --api-key YOUR_API_KEY --local-output }
+```
+
+Reload: `. $PROFILE` or open a new terminal.
+</details>
+
+<details>
+<summary><b>macOS / Linux (bash)</b></summary>
+
+Add to `~/.bashrc` (or `~/.bash_profile` on macOS):
 ```bash
-# bash (~/.bashrc or ~/.bash_profile)
 alias claude-remote='npx remo-code-agent --api-key YOUR_API_KEY --local-output'
+```
 
-# zsh (~/.zshrc)
+Reload: `source ~/.bashrc`
+</details>
+
+<details>
+<summary><b>macOS / Linux (zsh)</b></summary>
+
+Add to `~/.zshrc`:
+```bash
 alias claude-remote='npx remo-code-agent --api-key YOUR_API_KEY --local-output'
+```
 
-# fish (~/.config/fish/config.fish)
+Reload: `source ~/.zshrc`
+</details>
+
+<details>
+<summary><b>fish</b></summary>
+
+Add to `~/.config/fish/config.fish`:
+```fish
 alias claude-remote 'npx remo-code-agent --api-key YOUR_API_KEY --local-output'
 ```
+
+Reload: `source ~/.config/fish/config.fish`
+</details>
 
 Then just run `claude-remote` in any project directory — same as running `claude` but with remote streaming to the web UI.
 
