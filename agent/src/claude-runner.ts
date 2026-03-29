@@ -1,5 +1,6 @@
 import { spawn, type Subprocess } from 'bun'
 import type { CliEvent } from './types'
+import * as ui from './local-ui'
 
 export type RunnerEvent =
   | { type: 'thinking'; content: string }
@@ -165,17 +166,17 @@ export class ClaudeRunner {
           this.listener?.({ type: 'status', state: 'writing' })
           this.listener?.({ type: 'text_delta', content: block.text })
           this.fullText += block.text
-          if (this.localOutput) process.stdout.write(block.text)
+          if (this.localOutput) ui.printTextDelta(block.text)
         }
         if (block.type === 'thinking' && block.thinking) {
           this.listener?.({ type: 'status', state: 'thinking' })
           this.listener?.({ type: 'thinking', content: block.thinking })
-          if (this.localOutput) process.stdout.write(`\x1b[2m${block.thinking}\x1b[0m`)
+          if (this.localOutput) ui.printThinking(block.thinking)
         }
         if (block.type === 'tool_use') {
           this.listener?.({ type: 'status', state: 'tool_calling' })
           this.listener?.({ type: 'tool_use', tool: block.name, tool_id: block.id, input: block.input })
-          if (this.localOutput) process.stdout.write(`\x1b[36m> ${block.name}\x1b[0m\n`)
+          if (this.localOutput) ui.printToolUse(block.name, block.input)
         }
       }
     }
@@ -184,31 +185,19 @@ export class ClaudeRunner {
     if (event.type === 'tool_result') {
       const tr = event as any
       this.listener?.({ type: 'tool_result', tool_id: tr.tool_use_id, content: tr.content || '', is_error: tr.is_error })
-      if (this.localOutput) {
-        const preview = (tr.content || '').slice(0, 200)
-        if (tr.is_error) {
-          process.stdout.write(`\x1b[31m  Error: ${preview}\x1b[0m\n`)
-        } else {
-          process.stdout.write(`\x1b[2m  ${preview}${(tr.content || '').length > 200 ? '...' : ''}\x1b[0m\n`)
-        }
-      }
+      if (this.localOutput) ui.printToolResult(tr.content || '', tr.is_error)
     }
 
     // Final result — emit assembled message and go idle
     if (event.type === 'result') {
       const r = event as any
-      if (this.localOutput && this.fullText) {
-        process.stdout.write('\n')
-      }
       if (this.fullText) {
         this.listener?.({ type: 'assistant_message', content: this.fullText })
         this.fullText = ''
       }
       this.listener?.({ type: 'result', cost: r.total_cost_usd || 0, duration_ms: r.duration_ms || 0 })
       this.listener?.({ type: 'status', state: 'idle' })
-      if (this.localOutput) {
-        process.stdout.write(`\x1b[2m  ($${r.total_cost_usd?.toFixed(4) || '?'}, ${((r.duration_ms || 0) / 1000).toFixed(1)}s)\x1b[0m\n\n`)
-      }
+      if (this.localOutput) ui.printResponseEnd(r.total_cost_usd || 0, r.duration_ms || 0)
     }
   }
 }

@@ -3,6 +3,7 @@ import { loadConfig } from './config'
 import { HubClient } from './hub-client'
 import { ClaudeRunner, type RunnerEvent } from './claude-runner'
 import type { HubToAgent } from './types'
+import * as ui from './local-ui'
 import { spawnSync } from 'child_process'
 
 const VERSION = '0.1.0'
@@ -15,8 +16,7 @@ const claudeCheck = spawnSync('claude', ['--version'], {
 })
 
 if (claudeCheck.status !== 0 && !claudeCheck.stdout?.toString().trim()) {
-  console.error('')
-  console.error('  Claude Code CLI not found.')
+  ui.printError('Claude Code CLI not found.')
   console.error('')
   console.error('  The remo-code-agent requires the Claude Code CLI to be installed')
   console.error('  and available in your PATH.')
@@ -30,14 +30,7 @@ if (claudeCheck.status !== 0 && !claudeCheck.stdout?.toString().trim()) {
 const config = loadConfig()
 
 // --- Startup banner ---
-console.log('')
-console.log(`  Remo Code Agent v${VERSION}`)
-console.log(`  Project: ${config.projectDir}`)
-console.log(`  Hub:     ${config.hubUrl}`)
-console.log(`  Output:  ${config.localOutput ? 'terminal + web' : 'web only'}`)
-if (config.resume) console.log(`  Resume:  ${config.resume}`)
-console.log(`  Connecting...`)
-console.log('')
+ui.printBanner(VERSION, config.projectDir, config.hubUrl, config.resume)
 
 const hub = new HubClient(config.hubUrl, config.apiKey, config.projectDir, handleMessage)
 const runner = new ClaudeRunner(config.projectDir, config.localOutput, config.resume)
@@ -78,9 +71,7 @@ function sendUserMessage(msg: Extract<HubToAgent, { type: 'user_message' }>) {
     }
   }
   prompt += msg.content
-  if (config.localOutput) {
-    process.stdout.write(`\x1b[32m> ${msg.content}\x1b[0m\n\n`)
-  }
+  if (config.localOutput) ui.printUserMessage(msg.content)
   runner.sendMessage(prompt)
 }
 

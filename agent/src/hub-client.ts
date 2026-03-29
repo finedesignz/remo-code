@@ -1,5 +1,6 @@
 import { hostname } from 'os'
 import type { AgentToHub, HubToAgent } from './types'
+import { printConnected, printDisconnected } from './local-ui'
 
 type MessageHandler = (msg: HubToAgent) => void
 
@@ -31,12 +32,9 @@ export class HubClient {
 
   connect() {
     const wsUrl = this.hubUrl.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/agent'
-    console.log(`[hub-client] connecting to ${wsUrl}`)
-
     this.ws = new WebSocket(wsUrl)
 
     this.ws.onopen = () => {
-      console.log('[hub-client] connected, authenticating...')
       this.send({
         type: 'auth',
         api_key: this.apiKey,
@@ -54,7 +52,7 @@ export class HubClient {
       if (msg.type === 'auth_ok') {
         this.authenticated = true
         this.sessionId = (msg as any).session_id
-        console.log(`[hub-client] authenticated, session=${this.sessionId}`)
+        printConnected(this.sessionId!)
       }
 
       if (msg.type === 'auth_error') {
@@ -78,7 +76,7 @@ export class HubClient {
     }
 
     this.ws.onclose = () => {
-      console.log('[hub-client] disconnected, reconnecting in 5s...')
+      printDisconnected()
       this.authenticated = false
       this.reconnectTimer = setTimeout(() => this.connect(), 5000)
     }
