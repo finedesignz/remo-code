@@ -3,10 +3,39 @@ import { loadConfig } from './config'
 import { HubClient } from './hub-client'
 import { ClaudeRunner, type RunnerEvent } from './claude-runner'
 import type { HubToAgent } from './types'
+import { spawnSync } from 'child_process'
 
+const VERSION = '0.1.0'
+
+// --- Pre-flight: check that claude CLI is available ---
+const claudeCheck = spawnSync('claude', ['--version'], {
+  stdio: ['ignore', 'pipe', 'ignore'],
+  timeout: 5_000,
+  shell: true,
+})
+
+if (claudeCheck.status !== 0 && !claudeCheck.stdout?.toString().trim()) {
+  console.error('')
+  console.error('  Claude Code CLI not found.')
+  console.error('')
+  console.error('  The remo-code-agent requires the Claude Code CLI to be installed')
+  console.error('  and available in your PATH.')
+  console.error('')
+  console.error('  Install it from: https://claude.ai/code')
+  console.error('')
+  process.exit(1)
+}
+
+// --- Load config ---
 const config = loadConfig()
-console.log(`[remo-agent] project: ${config.projectDir}`)
-console.log(`[remo-agent] hub: ${config.hubUrl}`)
+
+// --- Startup banner ---
+console.log('')
+console.log(`  Remo Code Agent v${VERSION}`)
+console.log(`  Project: ${config.projectDir}`)
+console.log(`  Hub:     ${config.hubUrl}`)
+console.log(`  Connecting...`)
+console.log('')
 
 const hub = new HubClient(config.hubUrl, config.apiKey, config.projectDir, handleMessage)
 const runner = new ClaudeRunner(config.projectDir)
@@ -55,16 +84,14 @@ hub.connect()
 
 // Start Claude after a short delay to let hub auth complete
 setTimeout(() => {
-  console.log('[remo-agent] starting Claude process...')
+  console.log('[remo-agent] Starting Claude process...')
   runner.start(handleRunnerEvent)
 }, 2_000)
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-  console.log('[remo-agent] shutting down...')
+  console.log('\n[remo-agent] Shutting down...')
   runner.stop()
   hub.close()
   process.exit(0)
 })
-
-console.log('[remo-agent] starting up...')

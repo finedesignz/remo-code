@@ -33,7 +33,7 @@ export function ApiKeyModal({ session, onClose }: Props) {
     setNewKey(null)
   }
 
-  const configureCmd = newKey ? `/remo-code:configure ${newKey}` : ''
+  const agentCmd = newKey ? `npx remo-code-agent --api-key ${newKey}` : ''
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
@@ -45,7 +45,7 @@ export function ApiKeyModal({ session, onClose }: Props) {
           </div>
 
           <p className="text-[var(--text-muted)] text-sm mb-6">
-            Your API key lets the Claude Code plugin auto-register sessions. One key connects all your projects.
+            Your API key is used with the agent command to connect Claude Code sessions. One key connects all your projects.
           </p>
 
           {loading ? (
@@ -69,20 +69,20 @@ export function ApiKeyModal({ session, onClose }: Props) {
               </div>
 
               <div>
-                <p className="text-xs text-[var(--text-muted)] mb-2">In any Claude Code session, run:</p>
+                <p className="text-xs text-[var(--text-muted)] mb-2">Run this in your project directory:</p>
                 <div className="relative group">
                   <pre className="bg-[var(--code-bg)] rounded-lg p-3 text-xs text-indigo-300 font-mono overflow-x-auto">
-{configureCmd}
+{agentCmd}
                   </pre>
                   <button
-                    onClick={() => copyText(configureCmd, 'cmd')}
+                    onClick={() => copyText(agentCmd, 'cmd')}
                     className="absolute top-2 right-2 px-2 py-1 text-xs bg-[var(--bg-tertiary)] hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
                   >
                     {copied === 'cmd' ? 'Copied!' : 'Copy'}
                   </button>
                 </div>
                 <p className="text-[10px] text-[var(--text-muted)] mt-2">
-                  Then restart with: <code className="text-[var(--text-muted)]">claude --dangerously-load-development-channels plugin:remo-code@claude-plugins-official</code>
+                  The agent will auto-register a session for your project directory.
                 </p>
               </div>
 

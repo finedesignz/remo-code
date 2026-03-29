@@ -5,7 +5,8 @@ import { useSessions } from '../hooks/useSessions'
 import { useChat } from '../hooks/useChat'
 import { useActivity } from '../hooks/useActivity'
 import { useTheme } from '../hooks/useTheme'
-import { Sidebar, type ConnectData } from './Sidebar'
+import { useApiKey } from '../hooks/useApiKey'
+import { Sidebar } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
 import { ConnectModal } from './ConnectModal'
 import { ApiKeyModal } from './ApiKeyModal'
@@ -21,7 +22,7 @@ interface Props {
 export function Layout({ session, user, signOut, onNavigate }: Props) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [connectData, setConnectData] = useState<ConnectData | null>(null)
+  const [showConnect, setShowConnect] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
 
   const { theme, toggleTheme } = useTheme()
@@ -31,6 +32,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
     session, activeSessionId, subscribe, send, connectionId
   )
   const activity = useActivity(activeSessionId, subscribe)
+  const { activeKey, generateKey } = useApiKey(session)
 
   // Listen for session status updates
   useEffect(() => {
@@ -74,6 +76,24 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
     return () => window.removeEventListener('keydown', handleKey)
   }, [sidebarOpen])
 
+  // Handle showing connect modal — generate API key if none exists
+  const [connectApiKey, setConnectApiKey] = useState<string | null>(null)
+
+  const handleShowConnect = useCallback(async () => {
+    if (activeKey) {
+      // User already has an active key — we don't have the raw key, prompt them to use the API Key modal
+      // Show the connect modal with a placeholder that tells them to check their key
+      setShowConnect(true)
+    } else {
+      // Generate a new key and show it in the connect modal
+      const result = await generateKey()
+      if (result?.key) {
+        setConnectApiKey(result.key)
+        setShowConnect(true)
+      }
+    }
+  }, [activeKey, generateKey])
+
   const activeSession = activeSessionId
     ? sessionsHook.sessions.find(s => s.id === activeSessionId)
     : null
@@ -84,12 +104,16 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
       {showApiKey && (
         <ApiKeyModal session={session} onClose={() => setShowApiKey(false)} />
       )}
-      {connectData && (
-        <ConnectModal
-          token={connectData.token}
-          sessionName={connectData.name}
-          onClose={() => setConnectData(null)}
-        />
+      {showConnect && (
+        connectApiKey ? (
+          <ConnectModal
+            apiKey={connectApiKey}
+            onClose={() => { setShowConnect(false); setConnectApiKey(null) }}
+          />
+        ) : (
+          /* Active key exists but we don't have the raw value — open ApiKeyModal instead */
+          <ApiKeyModal session={session} onClose={() => setShowConnect(false)} />
+        )
       )}
 
       {/* Mobile overlay backdrop */}
@@ -112,10 +136,8 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
           sessions={sessionsHook.sessions}
           activeSessionId={activeSessionId}
           onSelectSession={handleSelectSession}
-          onCreateSession={sessionsHook.createSession}
           onDeleteSession={sessionsHook.deleteSession}
-          onRotateToken={sessionsHook.rotateToken}
-          onShowConnect={setConnectData}
+          onShowConnect={handleShowConnect}
           onShowApiKey={() => setShowApiKey(true)}
           onNavigate={onNavigate}
           onRefresh={sessionsHook.refetch}

@@ -10,6 +10,8 @@ export interface AgentConfig {
 
 const CONFIG_PATH = join(homedir(), '.config', 'remo-code', 'config.json')
 
+const DEFAULT_HUB_URL = 'https://app.remo-code.com'
+
 export function loadConfig(): AgentConfig {
   const args = parseArgs(process.argv.slice(2))
 
@@ -26,11 +28,20 @@ export function loadConfig(): AgentConfig {
     } catch {}
   }
 
-  if (!hubUrl || !apiKey) {
-    console.error('Missing hub_url or api_key. Provide via:')
-    console.error('  --hub-url and --api-key flags')
-    console.error('  REMO_HUB_URL and REMO_API_KEY env vars')
-    console.error(`  ${CONFIG_PATH}`)
+  // Default hub URL if still not set
+  hubUrl = hubUrl || DEFAULT_HUB_URL
+
+  if (!apiKey) {
+    console.error('')
+    console.error('  Remo Code Agent - Missing API key')
+    console.error('')
+    console.error('  Provide your API key via one of:')
+    console.error('    npx remo-code-agent --api-key remokey_xxx')
+    console.error('    REMO_API_KEY=remokey_xxx npx remo-code-agent')
+    console.error(`    ${CONFIG_PATH}  (JSON: { "api_key": "remokey_xxx" })`)
+    console.error('')
+    console.error('  Get your API key at https://app.remo-code.com/settings')
+    console.error('')
     process.exit(1)
   }
 

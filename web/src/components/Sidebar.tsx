@@ -1,22 +1,14 @@
-import { useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import type { CodeSession } from '../hooks/useSessions'
 import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
 import { UnreadBadge } from './UnreadBadge'
 
-export interface ConnectData {
-  token: string
-  name: string
-}
-
 interface Props {
   sessions: CodeSession[]
   activeSessionId: string | null
   onSelectSession: (id: string) => void
-  onCreateSession: (name: string, projectDir?: string) => Promise<any>
   onDeleteSession: (id: string) => Promise<void>
-  onRotateToken: (id: string) => Promise<{ token: string } | null>
-  onShowConnect: (data: ConnectData) => void
+  onShowConnect: () => void
   onShowApiKey: () => void
   onNavigate: (hash: string) => void
   onRefresh: () => void
@@ -29,30 +21,10 @@ interface Props {
 
 export function Sidebar({
   sessions, activeSessionId, onSelectSession,
-  onCreateSession, onDeleteSession, onRotateToken, onShowConnect, onShowApiKey,
+  onDeleteSession, onShowConnect, onShowApiKey,
   onNavigate, onRefresh,
   connected, user, signOut, onClose, unreadCounts = {},
 }: Props) {
-  const [showCreate, setShowCreate] = useState(false)
-  const [newName, setNewName] = useState('')
-
-  const handleCreate = async () => {
-    if (!newName.trim()) return
-    const name = newName.trim()
-    const result = await onCreateSession(name)
-    if (result?.token) {
-      onShowConnect({ token: result.token, name })
-    }
-    setNewName('')
-    setShowCreate(false)
-  }
-
-  const handleReconnect = async (session: CodeSession) => {
-    const result = await onRotateToken(session.id)
-    if (result?.token) {
-      onShowConnect({ token: result.token, name: session.name })
-    }
-  }
 
   return (
       <div className="w-72 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
@@ -115,17 +87,6 @@ export function Sidebar({
                   {/* Action buttons — always visible on mobile, hover on desktop */}
                   <span className="flex md:hidden md:group-hover:flex items-center gap-1 shrink-0">
                     <button
-                      onClick={(e) => { e.stopPropagation(); handleReconnect(s) }}
-                      className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-[var(--text-muted)] hover:text-indigo-300 bg-[var(--bg-tertiary)]/80 hover:bg-[var(--bg-tertiary)]/80 rounded transition-colors"
-                      title="Get new connection token"
-                      aria-label={`Reconnect ${sessionLabel(s)}`}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <path d="M1 4v-3h3" /><path d="M3.51 11a7 7 0 0 0 12.13-3.5" />
-                        <path d="M15 12v3h-3" /><path d="M12.49 5a7 7 0 0 0-12.13 3.5" />
-                      </svg>
-                    </button>
-                    <button
                       onClick={(e) => { e.stopPropagation(); if (confirm(`Delete session "${sessionLabel(s)}"?`)) onDeleteSession(s.id) }}
                       className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-[var(--text-muted)] hover:text-red-400 bg-[var(--bg-tertiary)]/80 hover:bg-red-900/50 rounded transition-colors"
                       title="Delete session"
@@ -154,41 +115,14 @@ export function Sidebar({
           )}
         </div>
 
-        {/* Create session */}
+        {/* Connect session button */}
         <div className="p-3 border-t border-[var(--border-color)]">
-          {showCreate ? (
-            <div className="space-y-2">
-              <input
-                value={newName}
-                onChange={e => setNewName(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleCreate()}
-                placeholder="Session name..."
-                className="w-full px-3 py-2 bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                autoFocus
-              />
-              <div className="flex gap-2">
-                <button
-                  onClick={handleCreate}
-                  className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors"
-                >
-                  Create
-                </button>
-                <button
-                  onClick={() => { setShowCreate(false); setNewName('') }}
-                  className="px-3 py-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm transition-colors"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setShowCreate(true)}
-              className="w-full py-2.5 text-sm text-indigo-400 hover:text-indigo-300 hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
-            >
-              + Connect Session
-            </button>
-          )}
+          <button
+            onClick={onShowConnect}
+            className="w-full py-2.5 text-sm text-indigo-400 hover:text-indigo-300 hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
+          >
+            + Connect Session
+          </button>
         </div>
 
         <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-1">

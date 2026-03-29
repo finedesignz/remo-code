@@ -58,7 +58,13 @@ export class HubClient {
       }
 
       if (msg.type === 'auth_error') {
-        console.error(`[hub-client] auth failed: ${msg.error}`)
+        console.error('')
+        console.error(`  Hub authentication failed: ${msg.error}`)
+        console.error('')
+        console.error(`  Hub URL: ${this.hubUrl}`)
+        console.error('  Check that your API key is correct and not expired.')
+        console.error('  Get a new key at https://app.remo-code.com/settings')
+        console.error('')
         this.ws?.close()
         return
       }
@@ -78,7 +84,8 @@ export class HubClient {
     }
 
     this.ws.onerror = (err) => {
-      console.error('[hub-client] error:', err)
+      console.error(`[hub-client] Connection error to ${wsUrl}`)
+      console.error('[hub-client] Check that the hub URL is reachable and your API key is valid.')
     }
   }
 
