@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import type { CodeSession } from '../hooks/useSessions'
 import { sessionLabel, connectedSessions } from './SessionDropdown'
+import { UnreadBadge } from './UnreadBadge'
 
 export interface ConnectData {
   token: string
@@ -18,17 +19,19 @@ interface Props {
   onShowConnect: (data: ConnectData) => void
   onShowApiKey: () => void
   onNavigate: (hash: string) => void
+  onRefresh: () => void
   connected: boolean
   user: User
   signOut: () => void
   onClose?: () => void
+  unreadCounts?: Record<string, number>
 }
 
 export function Sidebar({
   sessions, activeSessionId, onSelectSession,
   onCreateSession, onDeleteSession, onRotateToken, onShowConnect, onShowApiKey,
-  onNavigate,
-  connected, user, signOut, onClose,
+  onNavigate, onRefresh,
+  connected, user, signOut, onClose, unreadCounts = {},
 }: Props) {
   const [showCreate, setShowCreate] = useState(false)
   const [newName, setNewName] = useState('')
@@ -74,6 +77,22 @@ export function Sidebar({
           </button>
         </div>
 
+        {/* Session list header with refresh */}
+        <div className="flex items-center justify-between px-3 pt-2 pb-1">
+          <span className="text-[11px] font-medium text-[var(--text-muted)] uppercase tracking-wider">Sessions</span>
+          <button
+            onClick={onRefresh}
+            className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
+            title="Refresh sessions"
+            aria-label="Refresh sessions"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <path d="M1 4v-3h3" /><path d="M3.51 11a7 7 0 0 0 12.13-3.5" />
+              <path d="M15 12v3h-3" /><path d="M12.49 5a7 7 0 0 0-12.13 3.5" />
+            </svg>
+          </button>
+        </div>
+
         {/* Session list — only connected sessions */}
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
           {connectedSessions(sessions).map(s => (
@@ -91,6 +110,7 @@ export function Sidebar({
                     s.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
                   }`} />
                   <span className="truncate font-medium flex-1">{sessionLabel(s)}</span>
+                  <UnreadBadge count={unreadCounts[s.id] || 0} />
                   {/* Action buttons — always visible on mobile, hover on desktop */}
                   <span className="flex md:hidden md:group-hover:flex items-center gap-1 shrink-0">
                     <button

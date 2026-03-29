@@ -1,0 +1,13 @@
+{
+  "name": "remo-code-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "remo-agent": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts",
+    "dev": "bun --watch src/index.ts"
+  },
+  "dependencies": {}
+}

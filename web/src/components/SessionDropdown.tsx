@@ -1,10 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
 import type { CodeSession } from '../hooks/useSessions'
+import { UnreadBadge } from './UnreadBadge'
 
 interface Props {
   sessions: CodeSession[]
   activeSessionId: string | null
   onSelectSession: (id: string) => void
+  unreadCounts?: Record<string, number>
 }
 
 /** Derive a short, human-readable label from a session */
@@ -21,12 +23,13 @@ export function connectedSessions(sessions: CodeSession[]): CodeSession[] {
   return sessions.filter(s => s.status === 'online' || s.status === 'thinking')
 }
 
-export function SessionDropdown({ sessions, activeSessionId, onSelectSession }: Props) {
+export function SessionDropdown({ sessions, activeSessionId, onSelectSession, unreadCounts = {} }: Props) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
   const connected = connectedSessions(sessions)
   const active = connected.find(s => s.id === activeSessionId)
+  const totalUnread = Object.values(unreadCounts).reduce((sum, c) => sum + c, 0)
 
   // Close on outside click/touch
   useEffect(() => {
@@ -79,6 +82,7 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession }: 
         ) : (
           <span className="text-slate-400">Select session</span>
         )}
+        {totalUnread > 0 && <UnreadBadge count={totalUnread} />}
         <svg
           width="12" height="12" viewBox="0 0 12 12" fill="none"
           stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
@@ -114,6 +118,7 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession }: 
                   <div className="text-[11px] text-slate-500 truncate">{s.project_dir}</div>
                 )}
               </div>
+              <UnreadBadge count={unreadCounts[s.id] || 0} />
             </button>
           ))}
         </div>

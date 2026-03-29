@@ -39,6 +39,14 @@ export const ClientSendMessage = z.object({
   session_id: z.string().min(1).max(256),
   content: z.string().min(1).max(65536),
   id: z.string().uuid(),
+  images: z.array(z.object({
+    media_type: z.string(),
+    data: z.string(),
+  })).optional(),
+  attachments: z.array(z.object({
+    filename: z.string(),
+    content: z.string(),
+  })).optional(),
 })
 
 export const ClientSubscribe = z.object({
@@ -58,7 +66,18 @@ export const ClientInbound = z.discriminatedUnion('type', [
 export type HubToChannel =
   | { type: 'auth_ok' }
   | { type: 'auth_error'; error: string }
-  | { type: 'user_message'; id: string; content: string; ts: string }
+  | { type: 'user_message'; id: string; content: string; ts: string;
+      images?: Array<{ media_type: string; data: string }>;
+      attachments?: Array<{ filename: string; content: string }> }
+  | { type: 'ping' }
+
+export type HubToAgent =
+  | { type: 'auth_ok'; session_id: string }
+  | { type: 'auth_error'; error: string }
+  | { type: 'user_message'; session_id: string; id: string; content: string;
+      images?: Array<{ media_type: string; data: string }>;
+      attachments?: Array<{ filename: string; content: string }> }
+  | { type: 'cancel'; session_id: string }
   | { type: 'ping' }
 
 export type HubToClient =

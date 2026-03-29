@@ -11,6 +11,13 @@
         "pg": "^8.20.0",
       },
     },
+    "agent": {
+      "name": "remo-code-agent",
+      "version": "0.1.0",
+      "bin": {
+        "remo-agent": "./src/index.ts",
+      },
+    },
     "channel": {
       "name": "remo-code-channel",
       "version": "0.0.1",
@@ -662,6 +669,8 @@
     "remark-parse": ["remark-parse@11.0.0", "", { "dependencies": { "@types/mdast": "^4.0.0", "mdast-util-from-markdown": "^2.0.0", "micromark-util-types": "^2.0.0", "unified": "^11.0.0" } }, "sha512-FCxlKLNGknS5ba/1lmpYijMUzX2esxW5xQqjWxw2eHFfS2MSdaHVINFmhjo+qN1WhZhNimq0dZATN9pH0IDrpA=="],
 
     "remark-rehype": ["remark-rehype@11.1.2", "", { "dependencies": { "@types/hast": "^3.0.0", "@types/mdast": "^4.0.0", "mdast-util-to-hast": "^13.0.0", "unified": "^11.0.0", "vfile": "^6.0.0" } }, "sha512-Dh7l57ianaEoIpzbp0PC9UKAdCSVklD8E5Rpw7ETfbTl3FqcOOgq5q2LVDhgGCkaBv7p24JXikPdvhhmHvKMsw=="],
+
+    "remo-code-agent": ["remo-code-agent@workspace:agent"],
 
     "remo-code-channel": ["remo-code-channel@workspace:channel"],
 

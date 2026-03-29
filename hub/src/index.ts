@@ -16,6 +16,9 @@ import {
 import {
   createClientWsData, handleClientOpen, handleClientMessage, handleClientClose,
 } from './ws/client'
+import {
+  createAgentWsData, handleAgentOpen, handleAgentMessage, handleAgentClose,
+} from './ws/agent'
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 
@@ -93,7 +96,7 @@ const server = Bun.serve({
     const url = new URL(req.url)
 
     // WebSocket upgrades — with origin validation (C2 fix) and connection limits
-    if (url.pathname === '/ws/channel' || url.pathname === '/ws/client') {
+    if (url.pathname === '/ws/channel' || url.pathname === '/ws/client' || url.pathname === '/ws/agent') {
       // Origin check for browser clients
       if (url.pathname === '/ws/client') {
         const origin = req.headers.get('origin')
@@ -111,10 +114,14 @@ const server = Bun.serve({
       }
       wsConnectionsPerIp.set(ip, currentCount + 1)
 
-      const wsType = url.pathname === '/ws/channel' ? 'channel' : 'client'
-      const wsData = wsType === 'channel'
-        ? { type: 'channel' as const, ip, ...createChannelWsData() }
-        : { type: 'client' as const, ip, ...createClientWsData() }
+      let wsData: any
+      if (url.pathname === '/ws/agent') {
+        wsData = { type: 'agent' as const, ip, ...createAgentWsData() }
+      } else if (url.pathname === '/ws/channel') {
+        wsData = { type: 'channel' as const, ip, ...createChannelWsData() }
+      } else {
+        wsData = { type: 'client' as const, ip, ...createClientWsData() }
+      }
 
       const upgraded = server.upgrade(req, { data: wsData })
       if (!upgraded) {
@@ -147,21 +154,24 @@ const server = Bun.serve({
   websocket: {
     maxPayloadLength: 65536,
     open(ws) {
-      if (ws.data.type === 'channel') handleChannelOpen(ws as any)
-      if (ws.data.type === 'client') handleClientOpen(ws as any)
+      if (ws.data.type === 'agent') handleAgentOpen(ws as any)
+      else if (ws.data.type === 'channel') handleChannelOpen(ws as any)
+      else if (ws.data.type === 'client') handleClientOpen(ws as any)
     },
     async message(ws, raw) {
       const text = typeof raw === 'string' ? raw : new TextDecoder().decode(raw)
 
-      if (ws.data.type === 'channel') await handleChannelMessage(ws as any, text)
-      if (ws.data.type === 'client') await handleClientMessage(ws as any, text)
+      if (ws.data.type === 'agent') await handleAgentMessage(ws as any, text)
+      else if (ws.data.type === 'channel') await handleChannelMessage(ws as any, text)
+      else if (ws.data.type === 'client') await handleClientMessage(ws as any, text)
     },
     close(ws) {
       const ip = (ws.data as any).ip
       if (ip) decrementIp(ip)
 
-      if (ws.data.type === 'channel') handleChannelClose(ws as any)
-      if (ws.data.type === 'client') handleClientClose(ws as any)
+      if (ws.data.type === 'agent') handleAgentClose(ws as any)
+      else if (ws.data.type === 'channel') handleChannelClose(ws as any)
+      else if (ws.data.type === 'client') handleClientClose(ws as any)
     },
   },
 })

@@ -130,16 +130,20 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       message,
     })
 
-    // Forward to channel (Claude Code session)
+    // Forward to channel or agent (Claude Code session)
     const channel = getChannel(msg.session_id)
     if (channel) {
       console.log(`[client] forwarding to channel session=${msg.session_id}`)
-      channel.ws.send(JSON.stringify({
+      const forwardPayload: Record<string, unknown> = {
         type: 'user_message',
         id: message.id,
         content: msg.content,
         ts: message.created_at,
-      }))
+      }
+      // Include images/attachments if present (used by agent connections)
+      if (msg.images) forwardPayload.images = msg.images
+      if (msg.attachments) forwardPayload.attachments = msg.attachments
+      channel.ws.send(JSON.stringify(forwardPayload))
     } else {
       console.log(`[client] no channel connected for session=${msg.session_id}`)
     }

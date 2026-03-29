@@ -3,6 +3,7 @@ import type { Session, User } from '@supabase/supabase-js'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useSessions } from '../hooks/useSessions'
 import { useChat } from '../hooks/useChat'
+import { useActivity } from '../hooks/useActivity'
 import { useTheme } from '../hooks/useTheme'
 import { Sidebar, type ConnectData } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
@@ -26,9 +27,10 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
   const { theme, toggleTheme } = useTheme()
   const { connected, connectionId, send, subscribe } = useWebSocket(session)
   const sessionsHook = useSessions(session)
-  const { messages, loading: chatLoading, sendMessage } = useChat(
+  const { messages, loading: chatLoading, sendMessage, unreadCounts } = useChat(
     session, activeSessionId, subscribe, send, connectionId
   )
+  const activity = useActivity(activeSessionId, subscribe)
 
   // Listen for session status updates
   useEffect(() => {
@@ -116,10 +118,12 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
           onShowConnect={setConnectData}
           onShowApiKey={() => setShowApiKey(true)}
           onNavigate={onNavigate}
+          onRefresh={sessionsHook.refetch}
           connected={connected}
           user={user}
           signOut={signOut}
           onClose={() => setSidebarOpen(false)}
+          unreadCounts={unreadCounts}
         />
       </div>
 
@@ -145,6 +149,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
               sessions={sessionsHook.sessions}
               activeSessionId={activeSessionId}
               onSelectSession={handleSelectSession}
+              unreadCounts={unreadCounts}
             />
           </div>
 
@@ -204,6 +209,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
           onSend={sendMessage}
           activeSessionId={activeSessionId}
           sessionStatus={activeSession?.status}
+          activity={activity}
         />
       </div>
     </div>
