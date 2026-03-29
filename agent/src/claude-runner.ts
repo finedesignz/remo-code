@@ -32,14 +32,13 @@ export class ClaudeRunner {
       stderr: 'pipe',
     })
 
-    // Write user message to stdin and close
-    const writer = this.proc.stdin.getWriter()
-    await writer.write(new TextEncoder().encode(message))
-    await writer.close()
+    // Write user message to stdin and close (Bun FileSink API)
+    this.proc.stdin.write(message)
+    this.proc.stdin.end()
 
     yield { type: 'status', state: 'thinking' }
 
-    // Read stdout line by line, parse JSON events
+    // Read stdout line by line, parse JSON events (Bun ReadableStream)
     const reader = this.proc.stdout.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
