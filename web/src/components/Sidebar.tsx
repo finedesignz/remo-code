@@ -2,6 +2,7 @@ import type { User } from '@supabase/supabase-js'
 import type { CodeSession } from '../hooks/useSessions'
 import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
 import { UnreadBadge } from './UnreadBadge'
+import { SessionTooltip } from './SessionTooltip'
 
 interface Props {
   sessions: CodeSession[]
@@ -105,6 +106,9 @@ export function Sidebar({
                   </div>
                 )}
               </button>
+              <div className="hidden group-hover:block absolute left-full top-0 ml-2 z-50 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg shadow-xl pointer-events-none">
+                <SessionTooltip session={s} />
+              </div>
             </div>
           ))}
 

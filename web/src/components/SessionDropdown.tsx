@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import type { CodeSession } from '../hooks/useSessions'
 import { UnreadBadge } from './UnreadBadge'
+import { timeAgo } from './SessionTooltip'
 
 interface Props {
   sessions: CodeSession[]
@@ -107,6 +108,7 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession, un
               key={s.id}
               role="option"
               aria-selected={s.id === activeSessionId}
+              title={`${sessionLabel(s)} (${shortId(s)})\n${s.project_dir || ''}\nActive: ${timeAgo(s.last_activity)}\nStatus: ${s.status}`}
               onClick={(e) => { e.preventDefault(); onSelectSession(s.id); setOpen(false) }}
               className={`w-full text-left px-3 py-2.5 text-sm transition-colors flex items-center gap-2 ${
                 s.id === activeSessionId
