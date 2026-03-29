@@ -176,5 +176,11 @@ const server = Bun.serve({
   },
 })
 
+// On startup, mark all sessions as offline (in-memory registries are empty after restart)
+import { supabaseAdmin } from './db/supabase'
+supabaseAdmin.from('sessions').update({ status: 'offline' }).neq('status', 'offline').then(() => {
+  console.log('[startup] reset all session statuses to offline')
+})
+
 console.log(`Hub server running on http://localhost:${server.port}`)
 console.log(`Serving web UI from: ${webDist}`)

@@ -84,13 +84,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     const tokenHash = await hashToken(rawToken)
     const session = await findOrCreateAgentSession(userId, projectDir, tokenHash)
 
-    // If reusing an existing session, close any active channel connection first
+    // If reusing an existing session, unregister any stale channel entry
+    // (don't close — the old WS may already be dead, and closing triggers
+    // a reconnect loop if the agent is the same process reconnecting)
     if (!session.created) {
-      const existing = getChannel(session.id)
-      if (existing) {
-        try { existing.ws.close(4004, 'replaced') } catch {}
-        unregisterChannel(session.id)
-      }
+      unregisterChannel(session.id)
     }
 
     ws.data.authenticated = true
