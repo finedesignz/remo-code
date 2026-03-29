@@ -7,6 +7,7 @@ export interface AgentConfig {
   apiKey: string
   projectDir: string
   localOutput: boolean
+  resume: string | undefined
 }
 
 const CONFIG_PATH = join(homedir(), '.config', 'remo-code', 'config.json')
@@ -48,8 +49,9 @@ export function loadConfig(): AgentConfig {
 
   const projectDir = args['--project-dir'] || process.cwd()
   const localOutput = '--local-output' in args || process.env.REMO_LOCAL_OUTPUT === '1'
+  const resume = args['--resume'] || undefined
 
-  return { hubUrl, apiKey, projectDir, localOutput }
+  return { hubUrl, apiKey, projectDir, localOutput, resume }
 }
 
 function parseArgs(argv: string[]): Record<string, string> {

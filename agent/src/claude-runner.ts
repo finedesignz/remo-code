@@ -27,22 +27,30 @@ export class ClaudeRunner {
   private ready = false
   private localOutput: boolean
 
-  constructor(projectDir: string, localOutput = false) {
+  private resumeId: string | undefined
+
+  constructor(projectDir: string, localOutput = false, resumeId?: string) {
     this.projectDir = projectDir
     this.localOutput = localOutput
+    this.resumeId = resumeId
   }
 
   /** Start the persistent Claude process */
   start(onEvent: EventCallback) {
     this.listener = onEvent
 
+    const cmd = [
+      'claude',
+      '--input-format', 'stream-json',
+      '--output-format', 'stream-json',
+      '--verbose',
+    ]
+    if (this.resumeId) {
+      cmd.push('--resume', this.resumeId)
+    }
+
     this.proc = spawn({
-      cmd: [
-        'claude',
-        '--input-format', 'stream-json',
-        '--output-format', 'stream-json',
-        '--verbose',
-      ],
+      cmd,
       cwd: this.projectDir,
       stdin: 'pipe',
       stdout: 'pipe',
