@@ -43,14 +43,9 @@ export function useChat(
     activeSessionRef.current = activeSessionId
   }, [activeSessionId])
 
-  // Fetch history when session changes
-  useEffect(() => {
-    if (!session?.access_token || !activeSessionId) {
-      setMessages([])
-      return
-    }
-
-    setLoading(true)
+  // Fetch message history
+  const fetchMessages = useCallback(() => {
+    if (!session?.access_token || !activeSessionId) return
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     fetch(`${hubUrl}/api/messages/${activeSessionId}?limit=50`, {
       headers: { Authorization: `Bearer ${session.access_token}` },
@@ -62,6 +57,27 @@ export function useChat(
       })
       .catch(() => setLoading(false))
   }, [session?.access_token, activeSessionId])
+
+  // Fetch on session change
+  useEffect(() => {
+    if (!activeSessionId) {
+      setMessages([])
+      return
+    }
+    setLoading(true)
+    fetchMessages()
+  }, [activeSessionId, fetchMessages])
+
+  // Refetch when tab becomes visible (catches messages missed while in background)
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && activeSessionId) {
+        fetchMessages()
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [activeSessionId, fetchMessages])
 
   // Subscribe to live messages
   useEffect(() => {
