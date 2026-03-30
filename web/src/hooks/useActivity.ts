@@ -5,8 +5,15 @@ export interface TextDeltaEvent { type: 'text_delta'; content: string }
 export interface ToolUseEvent { type: 'tool_use'; tool: string; tool_id: string; input: unknown }
 export interface ToolResultEvent { type: 'tool_result'; tool_id: string; content: string; is_error?: boolean }
 export interface StatusEvent { type: 'status'; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
+export interface PermissionRequestEvent { type: 'permission_request'; request_id: string; tool_name: string; tool_input: unknown }
 
-export type ActivityEvent = ThinkingEvent | TextDeltaEvent | ToolUseEvent | ToolResultEvent | StatusEvent
+export type ActivityEvent = ThinkingEvent | TextDeltaEvent | ToolUseEvent | ToolResultEvent | StatusEvent | PermissionRequestEvent
+
+export interface PermissionRequest {
+  request_id: string
+  tool_name: string
+  tool_input: unknown
+}
 
 export interface ActivityState {
   status: 'idle' | 'thinking' | 'tool_calling' | 'writing'
@@ -20,6 +27,7 @@ export interface ActivityState {
     is_error?: boolean
     done: boolean
   }>
+  pendingPermission: PermissionRequest | null
 }
 
 const INITIAL_STATE: ActivityState = {
@@ -27,6 +35,7 @@ const INITIAL_STATE: ActivityState = {
   thinkingText: '',
   streamingText: '',
   toolCalls: [],
+  pendingPermission: null,
 }
 
 export function useActivity(
@@ -65,8 +74,9 @@ export function useActivity(
       }
 
       if (msg.type === 'tool_use') {
+        // Clear any pending permission once a tool starts executing
         const call = { tool: msg.tool, tool_id: msg.tool_id, input: msg.input, done: false }
-        stateRef.current = { ...stateRef.current, toolCalls: [...stateRef.current.toolCalls, call] }
+        stateRef.current = { ...stateRef.current, toolCalls: [...stateRef.current.toolCalls, call], pendingPermission: null }
         setActivity({ ...stateRef.current })
       }
 
@@ -77,6 +87,18 @@ export function useActivity(
             : tc
         )
         stateRef.current = { ...stateRef.current, toolCalls: calls }
+        setActivity({ ...stateRef.current })
+      }
+
+      if (msg.type === 'permission_request') {
+        stateRef.current = {
+          ...stateRef.current,
+          pendingPermission: {
+            request_id: msg.request_id,
+            tool_name: msg.tool_name,
+            tool_input: msg.tool_input,
+          },
+        }
         setActivity({ ...stateRef.current })
       }
     })

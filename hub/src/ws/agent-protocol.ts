@@ -49,6 +49,14 @@ export const AgentAssistantMessage = z.object({
   content: z.string().min(1).max(65536),
 })
 
+export const AgentPermissionRequest = z.object({
+  type: z.literal('permission_request'),
+  session_id: z.string(),
+  request_id: z.string(),
+  tool_name: z.string(),
+  tool_input: z.unknown(),
+})
+
 export const AgentInbound = z.discriminatedUnion('type', [
   AgentAuth,
   AgentThinking,
@@ -57,6 +65,7 @@ export const AgentInbound = z.discriminatedUnion('type', [
   AgentToolResult,
   AgentStatus,
   AgentAssistantMessage,
+  AgentPermissionRequest,
   z.object({ type: z.literal('pong') }),
 ])
 

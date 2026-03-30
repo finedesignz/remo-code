@@ -93,6 +93,15 @@ export function printDisconnected() {
   console.log(`  ${YELLOW}● Disconnected${RESET} ${DIM}— reconnecting...${RESET}`)
 }
 
+export function printPermissionRequest(toolName: string, toolInput: unknown) {
+  const inputStr = typeof toolInput === 'object' ? JSON.stringify(toolInput) : String(toolInput)
+  const preview = inputStr.length > 120 ? inputStr.slice(0, 120) + '...' : inputStr
+  console.log(`  ${YELLOW}⚠ Permission needed:${RESET} ${BOLD}${toolName}${RESET}`)
+  console.log(`  ${DIM}${preview}${RESET}`)
+  console.log(`  ${DIM}Approve from web UI at https://app.remo-code.com${RESET}`)
+  console.log('')
+}
+
 export function printError(message: string) {
   console.log(`  ${RED}✗ ${message}${RESET}`)
 }

@@ -12,6 +12,7 @@ interface Props {
   activeSessionId: string | null
   sessionStatus?: string
   activity: ActivityState
+  onPermissionRespond: (requestId: string, approved: boolean) => void
 }
 
 const MAX_FILES = 5
@@ -48,7 +49,7 @@ function classifyFile(file: File): 'text' | 'image' | null {
   return null
 }
 
-export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionStatus, activity }: Props) {
+export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionStatus, activity, onPermissionRespond }: Props) {
   const [input, setInput] = useState('')
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -200,7 +201,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
         ))}
 
         {/* Activity feed (live streaming from agent) */}
-        <ActivityFeed activity={activity} />
+        <ActivityFeed activity={activity} onPermissionRespond={onPermissionRespond} />
       </div>
 
       <form onSubmit={handleSubmit} className="border-t border-[var(--border-color)]">

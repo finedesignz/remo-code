@@ -54,10 +54,18 @@ export const ClientSubscribe = z.object({
   session_ids: z.array(z.string().min(1)).max(100),
 })
 
+export const ClientPermissionResponse = z.object({
+  type: z.literal('permission_response'),
+  session_id: z.string().min(1),
+  request_id: z.string().min(1),
+  approved: z.boolean(),
+})
+
 export const ClientInbound = z.discriminatedUnion('type', [
   ClientAuth,
   ClientSendMessage,
   ClientSubscribe,
+  ClientPermissionResponse,
   z.object({ type: z.literal('pong') }),
 ])
 
@@ -77,6 +85,7 @@ export type HubToAgent =
   | { type: 'user_message'; session_id: string; id: string; content: string;
       images?: Array<{ media_type: string; data: string }>;
       attachments?: Array<{ filename: string; content: string }> }
+  | { type: 'permission_response'; session_id: string; request_id: string; approved: boolean }
   | { type: 'cancel'; session_id: string }
   | { type: 'ping' }
 
@@ -86,4 +95,5 @@ export type HubToClient =
   | { type: 'message'; session_id: string; message: { id: string; role: string; content: string; created_at: string } }
   | { type: 'session_status'; session_id: string; status: string }
   | { type: 'session_list'; sessions: Array<{ id: string; name: string; project_dir: string | null; status: string; last_activity: string | null; created_at: string }> }
+  | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
   | { type: 'ping' }

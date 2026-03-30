@@ -7,6 +7,7 @@ export type AgentToHub =
   | { type: 'tool_result'; session_id: string; tool_id: string; content: string; is_error?: boolean }
   | { type: 'status'; session_id: string; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
   | { type: 'assistant_message'; session_id: string; content: string }
+  | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
   | { type: 'pong' }
 
 // Events the hub sends TO the agent
@@ -16,6 +17,7 @@ export type HubToAgent =
   | { type: 'user_message'; session_id: string; id: string; content: string;
       images?: Array<{ media_type: string; data: string }>;
       attachments?: Array<{ filename: string; content: string }> }
+  | { type: 'permission_response'; session_id: string; request_id: string; approved: boolean }
   | { type: 'cancel'; session_id: string }
   | { type: 'ping' }
 
@@ -57,4 +59,13 @@ export interface CliResultEvent {
   session_id: string
 }
 
-export type CliEvent = CliInitEvent | CliAssistantEvent | CliToolResultEvent | CliResultEvent | { type: string; [key: string]: unknown }
+export interface CliControlRequestEvent {
+  type: 'control_request'
+  request_id: string
+  subtype: 'can_use_tool'
+  tool_name: string
+  tool_input: unknown
+  session_id: string
+}
+
+export type CliEvent = CliInitEvent | CliAssistantEvent | CliToolResultEvent | CliResultEvent | CliControlRequestEvent | { type: string; [key: string]: unknown }

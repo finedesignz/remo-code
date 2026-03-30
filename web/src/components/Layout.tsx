@@ -34,6 +34,17 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
   const activity = useActivity(activeSessionId, subscribe)
   const { activeKey, generateKey } = useApiKey(session)
 
+  // Handle permission responses
+  const handlePermissionRespond = useCallback((requestId: string, approved: boolean) => {
+    if (!activeSessionId) return
+    send({
+      type: 'permission_response',
+      session_id: activeSessionId,
+      request_id: requestId,
+      approved,
+    })
+  }, [activeSessionId, send])
+
   // Listen for session status updates
   useEffect(() => {
     return subscribe((msg) => {
@@ -218,6 +229,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
           activeSessionId={activeSessionId}
           sessionStatus={activeSession?.status}
           activity={activity}
+          onPermissionRespond={handlePermissionRespond}
         />
       </div>
     </div>

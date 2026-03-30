@@ -125,6 +125,18 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     broadcastToSubscribers(sessionId, { ...msg })
   }
 
+  // --- Permission requests: relay to subscribed browser clients ---
+  if (msg.type === 'permission_request') {
+    console.log(`[agent] permission_request session=${sessionId} tool=${msg.tool_name} req=${msg.request_id}`)
+    broadcastToSubscribers(sessionId, {
+      type: 'permission_request',
+      session_id: sessionId,
+      request_id: msg.request_id,
+      tool_name: msg.tool_name,
+      tool_input: msg.tool_input,
+    })
+  }
+
   // --- Status updates ---
   if (msg.type === 'status') {
     const dbStatus = msg.state === 'idle' ? 'online' : 'thinking'

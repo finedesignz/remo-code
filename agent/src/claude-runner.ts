@@ -9,6 +9,7 @@ export type RunnerEvent =
   | { type: 'tool_result'; tool_id: string; content: string; is_error?: boolean }
   | { type: 'status'; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
   | { type: 'assistant_message'; content: string }
+  | { type: 'permission_request'; request_id: string; tool_name: string; tool_input: unknown }
   | { type: 'result'; cost: number; duration_ms: number }
   | { type: 'error'; message: string }
   | { type: 'ready' }
@@ -45,7 +46,6 @@ export class ClaudeRunner {
       '--input-format', 'stream-json',
       '--output-format', 'stream-json',
       '--verbose',
-      '--dangerously-skip-permissions',
     ]
     if (this.resumeId) {
       cmd.push('--resume', this.resumeId)
@@ -102,6 +102,24 @@ export class ClaudeRunner {
     this.proc.stdin.flush()
   }
 
+  /** Respond to a permission request from Claude */
+  respondToPermission(requestId: string, approved: boolean) {
+    if (!this.proc) {
+      console.error('[runner] process not running, cannot respond to permission')
+      return
+    }
+
+    const response = JSON.stringify({
+      type: 'control_response',
+      request_id: requestId,
+      behavior: approved ? 'allow' : 'deny',
+    })
+
+    console.log(`[runner] permission ${approved ? 'approved' : 'denied'} for ${requestId}`)
+    this.proc.stdin.write(response + '\n')
+    this.proc.stdin.flush()
+  }
+
   /** Cancel the current request */
   cancel() {
     if (this.proc) {
@@ -155,6 +173,20 @@ export class ClaudeRunner {
       this.ready = true
       console.log(`[runner] ready, session=${(event as any).session_id}`)
       this.listener?.({ type: 'ready' })
+      return
+    }
+
+    // Permission requests from Claude CLI
+    if (event.type === 'control_request' && (event as any).subtype === 'can_use_tool') {
+      const req = event as any
+      console.log(`[runner] permission requested: ${req.tool_name} (${req.request_id})`)
+      if (this.localOutput) ui.printPermissionRequest(req.tool_name, req.tool_input)
+      this.listener?.({
+        type: 'permission_request',
+        request_id: req.request_id,
+        tool_name: req.tool_name,
+        tool_input: req.tool_input,
+      })
       return
     }
 

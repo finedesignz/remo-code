@@ -58,6 +58,10 @@ function handleMessage(msg: HubToAgent) {
     }
     sendUserMessage(msg)
   }
+  if (msg.type === 'permission_response') {
+    console.log(`[remo-agent] permission response: ${msg.approved ? 'approved' : 'denied'} (${msg.request_id})`)
+    runner.respondToPermission(msg.request_id, msg.approved)
+  }
   if (msg.type === 'cancel') {
     runner.cancel()
   }

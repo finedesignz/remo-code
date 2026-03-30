@@ -1,15 +1,17 @@
 import type { ActivityState } from '../hooks/useActivity'
 import { ThinkingBlock } from './ThinkingBlock'
 import { ToolUseBlock } from './ToolUseBlock'
+import { PermissionBlock } from './PermissionBlock'
 import Markdown from 'react-markdown'
 import rehypeSanitize from 'rehype-sanitize'
 
 interface Props {
   activity: ActivityState
+  onPermissionRespond: (requestId: string, approved: boolean) => void
 }
 
-export function ActivityFeed({ activity }: Props) {
-  if (activity.status === 'idle') return null
+export function ActivityFeed({ activity, onPermissionRespond }: Props) {
+  if (activity.status === 'idle' && !activity.pendingPermission) return null
 
   return (
     <div className="flex justify-start animate-msg-in">
@@ -27,6 +29,14 @@ export function ActivityFeed({ activity }: Props) {
           <ToolUseBlock key={tc.tool_id} toolCall={tc} />
         ))}
 
+        {/* Permission request */}
+        {activity.pendingPermission && (
+          <PermissionBlock
+            permission={activity.pendingPermission}
+            onRespond={onPermissionRespond}
+          />
+        )}
+
         {/* Streaming text */}
         {activity.streamingText && (
           <div className="rounded-xl px-4 py-2.5 text-sm bg-[var(--bg-tertiary)]/70 text-[var(--text-primary)]">
@@ -42,7 +52,7 @@ export function ActivityFeed({ activity }: Props) {
         )}
 
         {/* Status indicator when no text yet */}
-        {!activity.streamingText && !activity.thinkingText && activity.toolCalls.length === 0 && (
+        {!activity.streamingText && !activity.thinkingText && activity.toolCalls.length === 0 && !activity.pendingPermission && (
           <div className="bg-[var(--bg-tertiary)]/70 rounded-xl px-4 py-3 flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-[var(--text-muted)] animate-bounce" style={{ animationDelay: '0ms' }} />
             <span className="w-2 h-2 rounded-full bg-[var(--text-muted)] animate-bounce" style={{ animationDelay: '150ms' }} />

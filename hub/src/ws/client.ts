@@ -105,6 +105,29 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     subscribeClient(data.clientEntry, ownedIds)
   }
 
+  if (msg.type === 'permission_response') {
+    console.log(`[client] permission_response session=${msg.session_id} req=${msg.request_id} approved=${msg.approved}`)
+    // Verify ownership
+    const sb = supabaseForUser(data.jwt!)
+    const { data: session } = await sb
+      .from('sessions')
+      .select('id')
+      .eq('id', msg.session_id)
+      .single()
+    if (!session) return
+
+    // Forward to agent
+    const channel = getChannel(msg.session_id)
+    if (channel) {
+      channel.ws.send(JSON.stringify({
+        type: 'permission_response',
+        session_id: msg.session_id,
+        request_id: msg.request_id,
+        approved: msg.approved,
+      }))
+    }
+  }
+
   if (msg.type === 'send_message') {
     console.log(`[client] send_message session=${msg.session_id} user=${data.userId}`)
     // Verify ownership via RLS
