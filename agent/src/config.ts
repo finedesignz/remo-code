@@ -11,6 +11,7 @@ export interface AgentConfig {
 }
 
 const CONFIG_PATH = join(homedir(), '.config', 'remo-code', 'config.json')
+const CLAUDE_SETTINGS_PATH = join(homedir(), '.claude', 'settings.json')
 
 const DEFAULT_HUB_URL = 'https://app.remo-code.com'
 
@@ -21,12 +22,22 @@ export function loadConfig(): AgentConfig {
   let hubUrl = args['--hub-url'] || process.env.REMO_HUB_URL || ''
   let apiKey = args['--api-key'] || process.env.REMO_API_KEY || ''
 
-  // Fall back to config file
+  // Fall back to remo-code config file
   if ((!hubUrl || !apiKey) && existsSync(CONFIG_PATH)) {
     try {
       const file = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
       hubUrl = hubUrl || file.hub_url || ''
       apiKey = apiKey || file.api_key || ''
+    } catch {}
+  }
+
+  // Fall back to Claude Code settings.json env vars
+  if ((!hubUrl || !apiKey) && existsSync(CLAUDE_SETTINGS_PATH)) {
+    try {
+      const settings = JSON.parse(readFileSync(CLAUDE_SETTINGS_PATH, 'utf-8'))
+      const env = settings.env || {}
+      hubUrl = hubUrl || env.REMO_HUB_URL || ''
+      apiKey = apiKey || env.REMO_API_KEY || ''
     } catch {}
   }
 
