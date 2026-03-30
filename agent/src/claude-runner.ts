@@ -51,12 +51,18 @@ export class ClaudeRunner {
       cmd.push('--resume', this.resumeId)
     }
 
+    // Strip ANTHROPIC_API_KEY from env so Claude CLI uses OAuth subscription
+    // instead of potentially invalid project-specific API keys from .env files
+    const env = { ...process.env }
+    delete env.ANTHROPIC_API_KEY
+
     this.proc = spawn({
       cmd,
       cwd: this.projectDir,
       stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
+      env,
     })
 
     console.log(`[runner] spawned claude pid=${this.proc.pid}`)
