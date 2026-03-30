@@ -4,7 +4,6 @@ WORKDIR /app
 # Copy workspace root and all package.json files
 COPY package.json bun.lock ./
 COPY hub/package.json hub/
-COPY channel/package.json channel/
 COPY web/package.json web/
 COPY agent/package.json agent/
 
@@ -37,7 +36,6 @@ ENV SUPABASE_URL=$SUPABASE_URL \
 
 COPY package.json bun.lock ./
 COPY hub/package.json hub/
-COPY channel/package.json channel/
 COPY web/package.json web/
 COPY agent/package.json agent/
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*

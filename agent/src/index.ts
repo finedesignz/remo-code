@@ -6,7 +6,7 @@ import type { HubToAgent } from './types'
 import * as ui from './local-ui'
 import { spawnSync } from 'child_process'
 
-const VERSION = '0.2.0'
+const VERSION = '0.3.0'
 
 // --- Pre-flight: check that claude CLI is available ---
 const claudeCheck = spawnSync('claude', ['--version'], {
