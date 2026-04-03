@@ -102,6 +102,9 @@ export class ClaudeRunner {
     // Read stdout in background
     this.readStream()
 
+    // Read stderr for diagnostics
+    this.readStderr()
+
     // Mark ready after a short delay — interactive mode may not emit init
     // until first user message, so we can't wait for it
     setTimeout(() => {
@@ -112,11 +115,23 @@ export class ClaudeRunner {
       }
     }, 3_000)
 
-    // Monitor for unexpected exit
+    // Monitor for unexpected exit — auto-restart after delay
     this.proc.exited.then((code) => {
       console.log(`[runner] claude exited with code ${code}`)
       this.proc = null
       this.ready = false
+
+      // Auto-restart unless intentionally stopped
+      if (this.listener) {
+        const delay = 3_000
+        console.log(`[runner] restarting claude in ${delay / 1000}s...`)
+        setTimeout(() => {
+          if (this.listener) {
+            console.log('[runner] restarting claude process...')
+            this.start(this.listener)
+          }
+        }, delay)
+      }
     })
   }
 
@@ -183,8 +198,9 @@ export class ClaudeRunner {
     }
   }
 
-  /** Stop the process entirely */
+  /** Stop the process entirely (no auto-restart) */
   stop() {
+    this.listener = null // prevent auto-restart
     if (this.proc) {
       this.proc.kill()
       this.proc = null
@@ -193,6 +209,20 @@ export class ClaudeRunner {
   }
 
   get isReady() { return this.ready }
+
+  private async readStderr() {
+    if (!this.proc?.stderr) return
+    const reader = this.proc.stderr.getReader()
+    const decoder = new TextDecoder()
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const text = decoder.decode(value, { stream: true }).trim()
+        if (text) console.error(`[runner:stderr] ${text}`)
+      }
+    } catch { /* process exited */ }
+  }
 
   private async readStream() {
     if (!this.proc) return
