@@ -11,8 +11,7 @@ const VERSION = '0.3.1'
 // --- Pre-flight: check that claude CLI is available ---
 const claudeCheck = spawnSync('claude', ['--version'], {
   stdio: ['ignore', 'pipe', 'ignore'],
-  timeout: 5_000,
-  shell: true,
+  timeout: 10_000,
 })
 
 if (claudeCheck.status !== 0 && !claudeCheck.stdout?.toString().trim()) {
