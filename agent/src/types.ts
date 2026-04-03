@@ -8,6 +8,8 @@ export type AgentToHub =
   | { type: 'status'; session_id: string; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
   | { type: 'assistant_message'; session_id: string; content: string }
   | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
+  | { type: 'user_question'; session_id: string; request_id: string; question: string;
+      options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }
   | { type: 'pong' }
 
 // Events the hub sends TO the agent
@@ -18,6 +20,7 @@ export type HubToAgent =
       images?: Array<{ media_type: string; data: string }>;
       attachments?: Array<{ filename: string; content: string }> }
   | { type: 'permission_response'; session_id: string; request_id: string; approved: boolean }
+  | { type: 'question_response'; session_id: string; request_id: string; answer: string }
   | { type: 'cancel'; session_id: string }
   | { type: 'ping' }
 

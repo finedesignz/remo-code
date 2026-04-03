@@ -57,6 +57,18 @@ export const AgentPermissionRequest = z.object({
   tool_input: z.unknown(),
 })
 
+export const AgentUserQuestion = z.object({
+  type: z.literal('user_question'),
+  session_id: z.string(),
+  request_id: z.string(),
+  question: z.string(),
+  options: z.array(z.object({
+    label: z.string(),
+    description: z.string().optional(),
+  })).optional(),
+  is_multi_select: z.boolean().optional(),
+})
+
 export const AgentInbound = z.discriminatedUnion('type', [
   AgentAuth,
   AgentThinking,
@@ -66,6 +78,7 @@ export const AgentInbound = z.discriminatedUnion('type', [
   AgentStatus,
   AgentAssistantMessage,
   AgentPermissionRequest,
+  AgentUserQuestion,
   z.object({ type: z.literal('pong') }),
 ])
 

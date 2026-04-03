@@ -61,11 +61,19 @@ export const ClientPermissionResponse = z.object({
   approved: z.boolean(),
 })
 
+export const ClientQuestionResponse = z.object({
+  type: z.literal('question_response'),
+  session_id: z.string().min(1),
+  request_id: z.string().min(1),
+  answer: z.string().min(1),
+})
+
 export const ClientInbound = z.discriminatedUnion('type', [
   ClientAuth,
   ClientSendMessage,
   ClientSubscribe,
   ClientPermissionResponse,
+  ClientQuestionResponse,
   z.object({ type: z.literal('pong') }),
 ])
 
@@ -86,6 +94,7 @@ export type HubToAgent =
       images?: Array<{ media_type: string; data: string }>;
       attachments?: Array<{ filename: string; content: string }> }
   | { type: 'permission_response'; session_id: string; request_id: string; approved: boolean }
+  | { type: 'question_response'; session_id: string; request_id: string; answer: string }
   | { type: 'cancel'; session_id: string }
   | { type: 'ping' }
 
@@ -96,4 +105,6 @@ export type HubToClient =
   | { type: 'session_status'; session_id: string; status: string }
   | { type: 'session_list'; sessions: Array<{ id: string; name: string; project_dir: string | null; status: string; last_activity: string | null; created_at: string }> }
   | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
+  | { type: 'user_question'; session_id: string; request_id: string; question: string;
+      options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }
   | { type: 'ping' }

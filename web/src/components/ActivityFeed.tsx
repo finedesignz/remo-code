@@ -2,16 +2,18 @@ import type { ActivityState } from '../hooks/useActivity'
 import { ThinkingBlock } from './ThinkingBlock'
 import { ToolUseBlock } from './ToolUseBlock'
 import { PermissionBlock } from './PermissionBlock'
+import { QuestionBlock } from './QuestionBlock'
 import Markdown from 'react-markdown'
 import rehypeSanitize from 'rehype-sanitize'
 
 interface Props {
   activity: ActivityState
   onPermissionRespond: (requestId: string, approved: boolean) => void
+  onQuestionRespond: (requestId: string, answer: string) => void
 }
 
-export function ActivityFeed({ activity, onPermissionRespond }: Props) {
-  if (activity.status === 'idle' && !activity.pendingPermission) return null
+export function ActivityFeed({ activity, onPermissionRespond, onQuestionRespond }: Props) {
+  if (activity.status === 'idle' && !activity.pendingPermission && !activity.pendingQuestion) return null
 
   return (
     <div className="flex justify-start animate-msg-in">
@@ -34,6 +36,14 @@ export function ActivityFeed({ activity, onPermissionRespond }: Props) {
           <PermissionBlock
             permission={activity.pendingPermission}
             onRespond={onPermissionRespond}
+          />
+        )}
+
+        {/* User question */}
+        {activity.pendingQuestion && (
+          <QuestionBlock
+            question={activity.pendingQuestion}
+            onRespond={onQuestionRespond}
           />
         )}
 

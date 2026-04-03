@@ -128,6 +128,29 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     }
   }
 
+  if (msg.type === 'question_response') {
+    console.log(`[client] question_response session=${msg.session_id} req=${msg.request_id}`)
+    // Verify ownership
+    const sb = supabaseForUser(data.jwt!)
+    const { data: session } = await sb
+      .from('sessions')
+      .select('id')
+      .eq('id', msg.session_id)
+      .single()
+    if (!session) return
+
+    // Forward to agent
+    const channel = getChannel(msg.session_id)
+    if (channel) {
+      channel.ws.send(JSON.stringify({
+        type: 'question_response',
+        session_id: msg.session_id,
+        request_id: msg.request_id,
+        answer: msg.answer,
+      }))
+    }
+  }
+
   if (msg.type === 'send_message') {
     console.log(`[client] send_message session=${msg.session_id} user=${data.userId}`)
     // Verify ownership via RLS

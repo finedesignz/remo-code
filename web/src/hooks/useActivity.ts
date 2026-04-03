@@ -6,13 +6,22 @@ export interface ToolUseEvent { type: 'tool_use'; tool: string; tool_id: string;
 export interface ToolResultEvent { type: 'tool_result'; tool_id: string; content: string; is_error?: boolean }
 export interface StatusEvent { type: 'status'; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
 export interface PermissionRequestEvent { type: 'permission_request'; request_id: string; tool_name: string; tool_input: unknown }
+export interface UserQuestionEvent { type: 'user_question'; request_id: string; question: string;
+  options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }
 
-export type ActivityEvent = ThinkingEvent | TextDeltaEvent | ToolUseEvent | ToolResultEvent | StatusEvent | PermissionRequestEvent
+export type ActivityEvent = ThinkingEvent | TextDeltaEvent | ToolUseEvent | ToolResultEvent | StatusEvent | PermissionRequestEvent | UserQuestionEvent
 
 export interface PermissionRequest {
   request_id: string
   tool_name: string
   tool_input: unknown
+}
+
+export interface PendingQuestion {
+  request_id: string
+  question: string
+  options?: Array<{ label: string; description?: string }>
+  is_multi_select?: boolean
 }
 
 export interface ActivityState {
@@ -28,6 +37,7 @@ export interface ActivityState {
     done: boolean
   }>
   pendingPermission: PermissionRequest | null
+  pendingQuestion: PendingQuestion | null
 }
 
 const INITIAL_STATE: ActivityState = {
@@ -36,6 +46,7 @@ const INITIAL_STATE: ActivityState = {
   streamingText: '',
   toolCalls: [],
   pendingPermission: null,
+  pendingQuestion: null,
 }
 
 export function useActivity(
@@ -97,6 +108,19 @@ export function useActivity(
             request_id: msg.request_id,
             tool_name: msg.tool_name,
             tool_input: msg.tool_input,
+          },
+        }
+        setActivity({ ...stateRef.current })
+      }
+
+      if (msg.type === 'user_question') {
+        stateRef.current = {
+          ...stateRef.current,
+          pendingQuestion: {
+            request_id: msg.request_id,
+            question: msg.question,
+            options: msg.options,
+            is_multi_select: msg.is_multi_select,
           },
         }
         setActivity({ ...stateRef.current })

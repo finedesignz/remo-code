@@ -10,11 +10,43 @@ export type RunnerEvent =
   | { type: 'status'; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
   | { type: 'assistant_message'; content: string }
   | { type: 'permission_request'; request_id: string; tool_name: string; tool_input: unknown }
+  | { type: 'user_question'; request_id: string; question: string;
+      options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }
   | { type: 'result'; cost: number; duration_ms: number }
   | { type: 'error'; message: string }
   | { type: 'ready' }
 
 type EventCallback = (event: RunnerEvent) => void
+
+/** Extract option labels from an elicitation schema (if it contains enum/oneOf) */
+function parseOptionsFromSchema(schema: unknown): Array<{ label: string; description?: string }> {
+  if (!schema || typeof schema !== 'object') return []
+  const s = schema as Record<string, unknown>
+
+  // Check for properties with enum values (AskUserQuestion-style)
+  if (s.properties && typeof s.properties === 'object') {
+    const props = s.properties as Record<string, any>
+    for (const key of Object.keys(props)) {
+      const prop = props[key]
+      if (prop?.enum && Array.isArray(prop.enum)) {
+        return prop.enum.map((v: string) => ({ label: String(v) }))
+      }
+      if (prop?.oneOf && Array.isArray(prop.oneOf)) {
+        return prop.oneOf.map((item: any) => ({
+          label: item.const || item.title || String(item),
+          description: item.description,
+        }))
+      }
+    }
+  }
+
+  // Direct enum at top level
+  if (s.enum && Array.isArray(s.enum)) {
+    return (s.enum as string[]).map((v) => ({ label: String(v) }))
+  }
+
+  return []
+}
 
 /**
  * Persistent Claude runner — keeps a single interactive process alive.
@@ -126,6 +158,24 @@ export class ClaudeRunner {
     this.proc.stdin.flush()
   }
 
+  /** Respond to a user question from Claude */
+  respondToQuestion(requestId: string, answer: string) {
+    if (!this.proc) {
+      console.error('[runner] process not running, cannot respond to question')
+      return
+    }
+
+    const response = JSON.stringify({
+      type: 'control_response',
+      request_id: requestId,
+      response: { answer },
+    })
+
+    console.log(`[runner] question answered for ${requestId}`)
+    this.proc.stdin.write(response + '\n')
+    this.proc.stdin.flush()
+  }
+
   /** Cancel the current request */
   cancel() {
     if (this.proc) {
@@ -193,6 +243,35 @@ export class ClaudeRunner {
         tool_name: req.tool_name,
         tool_input: req.tool_input,
       })
+      return
+    }
+
+    // User questions / elicitations from Claude CLI
+    // The request may be nested in a `request` field (SDK format) or flat (CLI format)
+    if (event.type === 'control_request') {
+      const raw = event as any
+      const inner = raw.request || raw // handle both nested and flat formats
+      const subtype = inner.subtype
+      const requestId = raw.request_id
+
+      if (subtype === 'elicitation' || subtype === 'side_question') {
+        // Parse question text and options from various possible field names
+        const question = inner.message || inner.question || inner.text || 'Claude is asking a question'
+        const rawSchema = inner.requested_schema
+        const options = parseOptionsFromSchema(rawSchema)
+        console.log(`[runner] user question (${subtype}): ${question.slice(0, 80)} (${requestId})`)
+        if (this.localOutput) ui.printQuestion(question, options)
+        this.listener?.({
+          type: 'user_question',
+          request_id: requestId,
+          question,
+          ...(options.length > 0 ? { options } : {}),
+        })
+        return
+      }
+
+      // Log unknown control_request subtypes for debugging
+      console.log(`[runner] unhandled control_request subtype=${subtype} request_id=${requestId}`)
       return
     }
 

@@ -102,6 +102,18 @@ export function printPermissionRequest(toolName: string, toolInput: unknown) {
   console.log('')
 }
 
+export function printQuestion(question: string, options?: Array<{ label: string; description?: string }>) {
+  console.log(`  ${MAGENTA}? ${BOLD}Question:${RESET} ${question}`)
+  if (options?.length) {
+    for (const opt of options) {
+      const desc = opt.description ? ` ${DIM}— ${opt.description}${RESET}` : ''
+      console.log(`    ${MAGENTA}•${RESET} ${opt.label}${desc}`)
+    }
+  }
+  console.log(`  ${DIM}Answer from web UI at https://app.remo-code.com${RESET}`)
+  console.log('')
+}
+
 export function printError(message: string) {
   console.log(`  ${RED}✗ ${message}${RESET}`)
 }

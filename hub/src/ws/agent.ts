@@ -137,6 +137,19 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     })
   }
 
+  // --- User questions: relay to subscribed browser clients ---
+  if (msg.type === 'user_question') {
+    console.log(`[agent] user_question session=${sessionId} req=${msg.request_id}`)
+    broadcastToSubscribers(sessionId, {
+      type: 'user_question',
+      session_id: sessionId,
+      request_id: msg.request_id,
+      question: msg.question,
+      ...(msg.options ? { options: msg.options } : {}),
+      ...(msg.is_multi_select ? { is_multi_select: msg.is_multi_select } : {}),
+    })
+  }
+
   // --- Status updates ---
   if (msg.type === 'status') {
     const dbStatus = msg.state === 'idle' ? 'online' : 'thinking'

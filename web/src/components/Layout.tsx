@@ -45,6 +45,17 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
     })
   }, [activeSessionId, send])
 
+  // Handle question responses
+  const handleQuestionRespond = useCallback((requestId: string, answer: string) => {
+    if (!activeSessionId) return
+    send({
+      type: 'question_response',
+      session_id: activeSessionId,
+      request_id: requestId,
+      answer,
+    })
+  }, [activeSessionId, send])
+
   // Listen for session status updates
   useEffect(() => {
     return subscribe((msg) => {
@@ -230,6 +241,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
           sessionStatus={activeSession?.status}
           activity={activity}
           onPermissionRespond={handlePermissionRespond}
+          onQuestionRespond={handleQuestionRespond}
         />
       </div>
     </div>
