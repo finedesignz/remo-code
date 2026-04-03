@@ -81,7 +81,7 @@ const webDist = resolve(webDistCandidates.find(p => existsSync(p)) || './web/dis
 
 // Track WS connections per IP for DoS protection
 const wsConnectionsPerIp = new Map<string, number>()
-const MAX_WS_CONNECTIONS_PER_IP = 20
+const MAX_WS_CONNECTIONS_PER_IP = 100
 
 function decrementIp(ip: string) {
   const count = wsConnectionsPerIp.get(ip) || 1
