@@ -125,6 +125,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     broadcastToSubscribers(sessionId, { ...msg })
   }
 
+  // --- Agent log messages: relay to subscribed browser clients ---
+  if (msg.type === 'agent_log') {
+    broadcastToSubscribers(sessionId, { type: 'agent_log', session_id: sessionId, message: msg.message })
+  }
+
   // --- Permission requests: relay to subscribed browser clients ---
   if (msg.type === 'permission_request') {
     console.log(`[agent] permission_request session=${sessionId} tool=${msg.tool_name} req=${msg.request_id}`)

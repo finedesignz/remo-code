@@ -13,11 +13,26 @@ interface Props {
 }
 
 export function ActivityFeed({ activity, onPermissionRespond, onQuestionRespond }: Props) {
-  if (activity.status === 'idle' && !activity.pendingPermission && !activity.pendingQuestion) return null
+  const hasActivity = activity.status !== 'idle' || activity.pendingPermission || activity.pendingQuestion
+  const hasLogs = activity.agentLogs.length > 0
+
+  if (!hasActivity && !hasLogs) return null
 
   return (
     <div className="flex justify-start animate-msg-in">
       <div className="max-w-[80%] space-y-2 w-full">
+
+        {/* Agent startup logs — shown when idle, hidden once Claude starts responding */}
+        {!hasActivity && hasLogs && (
+          <div className="rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-color)] px-3 py-2 space-y-0.5">
+            {activity.agentLogs.map((log, i) => (
+              <div key={i} className="flex items-center gap-2 text-xs text-[var(--text-muted)] font-mono">
+                <span className="text-[var(--text-muted)] opacity-40">›</span>
+                {log}
+              </div>
+            ))}
+          </div>
+        )}
         {/* Thinking */}
         {activity.thinkingText && (
           <ThinkingBlock

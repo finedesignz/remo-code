@@ -10,6 +10,7 @@ export type AgentToHub =
   | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
   | { type: 'user_question'; session_id: string; request_id: string; question: string;
       options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }
+  | { type: 'agent_log'; session_id: string; message: string }
   | { type: 'pong' }
 
 // Events the hub sends TO the agent

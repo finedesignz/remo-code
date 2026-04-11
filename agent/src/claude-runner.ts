@@ -14,6 +14,7 @@ export type RunnerEvent =
       options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }
   | { type: 'result'; cost: number; duration_ms: number }
   | { type: 'error'; message: string }
+  | { type: 'log'; message: string }
   | { type: 'ready' }
 
 type EventCallback = (event: RunnerEvent) => void
@@ -79,6 +80,7 @@ export class ClaudeRunner {
       '--output-format', 'stream-json',
       '--verbose',
     ]
+    cmd.push('--dangerously-skip-permissions')
     if (this.resumeId) {
       cmd.push('--resume', this.resumeId)
     }
@@ -98,6 +100,7 @@ export class ClaudeRunner {
     })
 
     console.log(`[runner] spawned claude pid=${this.proc.pid}`)
+    this.listener?.({ type: 'log', message: `Starting Claude... (pid ${this.proc.pid})` })
 
     // Read stdout in background
     this.readStream()
@@ -125,6 +128,7 @@ export class ClaudeRunner {
       if (this.listener) {
         const delay = 3_000
         console.log(`[runner] restarting claude in ${delay / 1000}s...`)
+        this.listener?.({ type: 'log', message: `Claude exited (code ${code}), restarting in ${delay / 1000}s...` })
         setTimeout(() => {
           if (this.listener) {
             console.log('[runner] restarting claude process...')
@@ -136,7 +140,7 @@ export class ClaudeRunner {
   }
 
   /** Send a user message to the running Claude process */
-  sendMessage(content: string) {
+  sendMessage(content: string, images?: Array<{ media_type: string; data: string }>) {
     if (!this.proc || !this.ready) {
       console.error('[runner] process not ready, cannot send message')
       this.listener?.({ type: 'error', message: 'Claude process not ready' })
@@ -146,9 +150,28 @@ export class ClaudeRunner {
     this.fullText = ''
     this.listener?.({ type: 'status', state: 'thinking' })
 
+    // Build content as array when images are present
+    let messageContent: string | Array<unknown>
+    if (images && images.length > 0) {
+      const blocks: Array<unknown> = images.map((img) => ({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: img.media_type,
+          data: img.data,
+        },
+      }))
+      if (content) {
+        blocks.push({ type: 'text', text: content })
+      }
+      messageContent = blocks
+    } else {
+      messageContent = content
+    }
+
     const msg = JSON.stringify({
       type: 'user',
-      message: { role: 'user', content },
+      message: { role: 'user', content: messageContent },
     })
 
     this.proc.stdin.write(msg + '\n')
@@ -258,6 +281,7 @@ export class ClaudeRunner {
     if (event.type === 'system' && (event as any).subtype === 'init') {
       this.ready = true
       console.log(`[runner] ready, session=${(event as any).session_id}`)
+      this.listener?.({ type: 'log', message: `Claude ready (session ${((event as any).session_id as string).slice(0, 8)})` })
       this.listener?.({ type: 'ready' })
       return
     }

@@ -6,7 +6,7 @@ import type { HubToAgent } from './types'
 import * as ui from './local-ui'
 import { spawnSync } from 'child_process'
 
-const VERSION = '0.3.4'
+const VERSION = '0.3.6'
 
 // --- Pre-flight: check that claude CLI is available ---
 const claudeCheck = spawnSync('claude', ['--version'], {
@@ -34,14 +34,27 @@ ui.printBanner(VERSION, config.projectDir, config.hubUrl, config.resume)
 const hub = new HubClient(config.hubUrl, config.apiKey, config.projectDir, handleMessage)
 const runner = new ClaudeRunner(config.projectDir, config.localOutput, config.resume)
 
+function sendLog(message: string) {
+  const sessionId = hub.sessionIdValue
+  if (!sessionId) return
+  hub.send({ type: 'agent_log', session_id: sessionId, message })
+}
+
 function handleRunnerEvent(event: RunnerEvent) {
   const sessionId = hub.sessionIdValue
   if (!sessionId) return
   if (event.type === 'result' || event.type === 'ready') return // internal, don't relay
+  if (event.type === 'log') {
+    sendLog(event.message)
+    return
+  }
   hub.send({ ...event, session_id: sessionId } as any)
 }
 
 function handleMessage(msg: HubToAgent) {
+  if (msg.type === 'auth_ok') {
+    sendLog(`Remo Code Agent v${VERSION} connected — ${config.projectDir}`)
+  }
   if (msg.type === 'user_message') {
     if (!runner.isReady) {
       console.log('[remo-agent] Claude not ready yet, queuing...')
@@ -79,7 +92,7 @@ function sendUserMessage(msg: Extract<HubToAgent, { type: 'user_message' }>) {
   }
   prompt += msg.content
   if (config.localOutput) ui.printUserMessage(msg.content)
-  runner.sendMessage(prompt)
+  runner.sendMessage(prompt, msg.images)
 }
 
 // Connect to hub, then start Claude
@@ -90,6 +103,7 @@ setTimeout(() => {
   console.log('[remo-agent] Starting Claude process...')
   runner.start(handleRunnerEvent)
 }, 2_000)
+
 
 // Graceful shutdown
 process.on('SIGINT', () => {

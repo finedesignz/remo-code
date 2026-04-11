@@ -69,6 +69,12 @@ export const AgentUserQuestion = z.object({
   is_multi_select: z.boolean().optional(),
 })
 
+export const AgentLog = z.object({
+  type: z.literal('agent_log'),
+  session_id: z.string(),
+  message: z.string().max(1000),
+})
+
 export const AgentInbound = z.discriminatedUnion('type', [
   AgentAuth,
   AgentThinking,
@@ -79,6 +85,7 @@ export const AgentInbound = z.discriminatedUnion('type', [
   AgentAssistantMessage,
   AgentPermissionRequest,
   AgentUserQuestion,
+  AgentLog,
   z.object({ type: z.literal('pong') }),
 ])
 

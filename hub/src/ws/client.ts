@@ -5,7 +5,7 @@ import { insertMessage, listSessions } from '../db/dal'
 import { supabaseForUser } from '../db/supabase'
 import {
   registerClient, unregisterClient, subscribeClient,
-  getChannel, broadcastToSubscribers,
+  getChannel, unregisterChannel, broadcastToSubscribers,
   type ClientEntry,
 } from './registry'
 
@@ -188,7 +188,6 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // Forward to channel or agent (Claude Code session)
     const channel = getChannel(msg.session_id)
     if (channel) {
-      console.log(`[client] forwarding to channel session=${msg.session_id}`)
       const forwardPayload: Record<string, unknown> = {
         type: 'user_message',
         id: message.id,
@@ -198,7 +197,15 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       // Include images/attachments if present (used by agent connections)
       if (msg.images) forwardPayload.images = msg.images
       if (msg.attachments) forwardPayload.attachments = msg.attachments
-      channel.ws.send(JSON.stringify(forwardPayload))
+      const sent = channel.ws.send(JSON.stringify(forwardPayload))
+      if (sent === -1) {
+        // Socket is closed/dead — clean up the stale registry entry
+        console.log(`[client] channel send failed (socket dead), unregistering session=${msg.session_id}`)
+        unregisterChannel(msg.session_id)
+        broadcastToSubscribers(msg.session_id, { type: 'session_status', session_id: msg.session_id, status: 'offline' })
+      } else {
+        console.log(`[client] forwarding to channel session=${msg.session_id}`)
+      }
     } else {
       console.log(`[client] no channel connected for session=${msg.session_id}`)
     }

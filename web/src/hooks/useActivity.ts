@@ -38,6 +38,7 @@ export interface ActivityState {
   }>
   pendingPermission: PermissionRequest | null
   pendingQuestion: PendingQuestion | null
+  agentLogs: string[]
 }
 
 const INITIAL_STATE: ActivityState = {
@@ -47,6 +48,7 @@ const INITIAL_STATE: ActivityState = {
   toolCalls: [],
   pendingPermission: null,
   pendingQuestion: null,
+  agentLogs: [],
 }
 
 export function useActivity(
@@ -65,9 +67,14 @@ export function useActivity(
       if (msg.type === 'status') {
         const state = msg.state as ActivityState['status']
         if (state === 'idle') {
-          // Reset on idle
-          stateRef.current = INITIAL_STATE
-          setActivity(INITIAL_STATE)
+          // Reset on idle but preserve permission/question if user hasn't responded, and preserve logs
+          stateRef.current = {
+            ...INITIAL_STATE,
+            pendingPermission: stateRef.current.pendingPermission,
+            pendingQuestion: stateRef.current.pendingQuestion,
+            agentLogs: stateRef.current.agentLogs,
+          }
+          setActivity(stateRef.current)
         } else {
           stateRef.current = { ...stateRef.current, status: state }
           setActivity({ ...stateRef.current })
@@ -85,9 +92,8 @@ export function useActivity(
       }
 
       if (msg.type === 'tool_use') {
-        // Clear any pending permission once a tool starts executing
         const call = { tool: msg.tool, tool_id: msg.tool_id, input: msg.input, done: false }
-        stateRef.current = { ...stateRef.current, toolCalls: [...stateRef.current.toolCalls, call], pendingPermission: null }
+        stateRef.current = { ...stateRef.current, toolCalls: [...stateRef.current.toolCalls, call] }
         setActivity({ ...stateRef.current })
       }
 
@@ -122,6 +128,14 @@ export function useActivity(
             options: msg.options,
             is_multi_select: msg.is_multi_select,
           },
+        }
+        setActivity({ ...stateRef.current })
+      }
+
+      if (msg.type === 'agent_log') {
+        stateRef.current = {
+          ...stateRef.current,
+          agentLogs: [...stateRef.current.agentLogs, msg.message],
         }
         setActivity({ ...stateRef.current })
       }
