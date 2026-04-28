@@ -5,6 +5,7 @@ import { AuthForm } from './components/AuthForm'
 import { SetupForm } from './components/SetupForm'
 import { Layout } from './components/Layout'
 import { SettingsPage } from './components/SettingsPage'
+import type { AuthUser } from './lib/auth.ts'
 
 type Route = 'chat' | 'settings'
 
@@ -15,8 +16,8 @@ function getRoute(): Route {
 }
 
 export default function App() {
-  const { session, user, loading, signOut } = useAuth()
-  const { profile, loading: profileLoading, updateProfile } = useProfile(session)
+  const { user, token, loading, signIn, signOut } = useAuth()
+  const { profile, loading: profileLoading, updateProfile } = useProfile(token)
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null)
   const [route, setRoute] = useState<Route>(getRoute)
 
@@ -55,8 +56,8 @@ export default function App() {
     return <SetupForm onComplete={() => setNeedsSetup(false)} />
   }
 
-  if (!session || !user) {
-    return <AuthForm />
+  if (!token || !user) {
+    return <AuthForm onAuth={signIn} />
   }
 
   // Wait for profile to load before rendering gated routes
@@ -72,7 +73,7 @@ export default function App() {
     <>
       {route === 'settings' && (
         <SettingsPage
-          session={session}
+          token={token}
           profile={profile}
           onUpdateProfile={updateProfile}
           onBack={goToChat}
@@ -81,7 +82,7 @@ export default function App() {
 
       {route === 'chat' && (
         <Layout
-          session={session}
+          token={token}
           user={user}
           signOut={signOut}
           onNavigate={navigate}

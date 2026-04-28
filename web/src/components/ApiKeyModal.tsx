@@ -1,14 +1,13 @@
 import { useState } from 'react'
-import type { Session } from '@supabase/supabase-js'
 import { useApiKey } from '../hooks/useApiKey'
 
 interface Props {
-  session: Session
+  token: string
   onClose: () => void
 }
 
-export function ApiKeyModal({ session, onClose }: Props) {
-  const { activeKey, loading, generateKey, revokeKey } = useApiKey(session)
+export function ApiKeyModal({ token, onClose }: Props) {
+  const { activeKey, loading, generateKey, revokeKey } = useApiKey(token)
   const [newKey, setNewKey] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)

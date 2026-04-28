@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { Session } from '@supabase/supabase-js'
+import { getStoredToken } from '../lib/auth.ts'
 
 type WsMessage = {
   type: string
@@ -8,7 +8,7 @@ type WsMessage = {
 
 type MessageHandler = (msg: WsMessage) => void
 
-export function useWebSocket(session: Session | null) {
+export function useWebSocket(token: string | null) {
   const [connected, setConnected] = useState(false)
   // Increments on each successful auth — consumers use this to re-subscribe after reconnect
   const [connectionId, setConnectionId] = useState(0)
@@ -20,7 +20,8 @@ export function useWebSocket(session: Session | null) {
   const pendingRef = useRef<object[]>([])
 
   const connect = useCallback(() => {
-    if (!session?.access_token) return
+    const authToken = token || getStoredToken()
+    if (!authToken) return
 
     authedRef.current = false
 
@@ -34,7 +35,7 @@ export function useWebSocket(session: Session | null) {
     wsRef.current = ws
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'auth', token: session.access_token }))
+      ws.send(JSON.stringify({ type: 'auth', token: authToken }))
     }
 
     ws.onmessage = (event) => {
@@ -72,7 +73,7 @@ export function useWebSocket(session: Session | null) {
     }
 
     ws.onerror = () => {} // onclose will fire
-  }, [session?.access_token])
+  }, [token])
 
   useEffect(() => {
     connect()

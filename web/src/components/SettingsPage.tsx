@@ -1,10 +1,9 @@
 import { useState } from 'react'
-import type { Session } from '@supabase/supabase-js'
 import type { Profile } from '../hooks/useProfile'
 import { useApiKey } from '../hooks/useApiKey'
 
 interface Props {
-  session: Session
+  token: string
   profile: Profile
   onUpdateProfile: (data: { display_name: string }) => Promise<any>
   onBack: () => void
@@ -12,7 +11,7 @@ interface Props {
 
 type Tab = 'account' | 'apikey'
 
-export function SettingsPage({ session, profile, onUpdateProfile, onBack }: Props) {
+export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props) {
   const [tab, setTab] = useState<Tab>('account')
   const [displayName, setDisplayName] = useState(profile.display_name || '')
   const [saving, setSaving] = useState(false)
@@ -104,7 +103,7 @@ export function SettingsPage({ session, profile, onUpdateProfile, onBack }: Prop
 
           {/* API Key Tab */}
           {tab === 'apikey' && (
-            <ApiKeyTab session={session} />
+            <ApiKeyTab token={token} />
           )}
         </div>
       </div>
@@ -116,8 +115,8 @@ export function SettingsPage({ session, profile, onUpdateProfile, onBack }: Prop
 /* API Key sub-tab                                                     */
 /* ------------------------------------------------------------------ */
 
-function ApiKeyTab({ session }: { session: Session }) {
-  const { activeKey, loading, generateKey, revokeKey } = useApiKey(session)
+function ApiKeyTab({ token }: { token: string }) {
+  const { activeKey, loading, generateKey, revokeKey } = useApiKey(token)
   const [newKey, setNewKey] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)

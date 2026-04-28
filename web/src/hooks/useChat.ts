@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type { Session } from '@supabase/supabase-js'
 
 export interface ChatMessage {
   id: string
@@ -27,7 +26,7 @@ function saveUnread(counts: Record<string, number>) {
 }
 
 export function useChat(
-  session: Session | null,
+  token: string | null,
   activeSessionId: string | null,
   subscribe: (handler: (msg: any) => void) => () => void,
   send: (msg: object) => void,
@@ -45,10 +44,10 @@ export function useChat(
 
   // Fetch message history
   const fetchMessages = useCallback(() => {
-    if (!session?.access_token || !activeSessionId) return
+    if (!token || !activeSessionId) return
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     fetch(`${hubUrl}/api/messages/${activeSessionId}?limit=50`, {
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
       .then(r => r.ok ? r.json() : [])
       .then(data => {
@@ -56,7 +55,7 @@ export function useChat(
         setLoading(false)
       })
       .catch(() => setLoading(false))
-  }, [session?.access_token, activeSessionId])
+  }, [token, activeSessionId])
 
   // Fetch on session change
   useEffect(() => {

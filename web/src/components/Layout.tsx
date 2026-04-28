@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
-import type { Session, User } from '@supabase/supabase-js'
+import type { AuthUser } from '../lib/auth.ts'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useSessions } from '../hooks/useSessions'
 import { useChat } from '../hooks/useChat'
@@ -13,26 +13,26 @@ import { ApiKeyModal } from './ApiKeyModal'
 import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 
 interface Props {
-  session: Session
-  user: User
+  token: string
+  user: AuthUser
   signOut: () => void
   onNavigate: (hash: string) => void
 }
 
-export function Layout({ session, user, signOut, onNavigate }: Props) {
+export function Layout({ token, user, signOut, onNavigate }: Props) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showConnect, setShowConnect] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
 
   const { theme, toggleTheme } = useTheme()
-  const { connected, connectionId, send, subscribe } = useWebSocket(session)
-  const sessionsHook = useSessions(session)
+  const { connected, connectionId, send, subscribe } = useWebSocket(token)
+  const sessionsHook = useSessions(token)
   const { messages, loading: chatLoading, sendMessage, unreadCounts } = useChat(
-    session, activeSessionId, subscribe, send, connectionId
+    token, activeSessionId, subscribe, send, connectionId
   )
   const activity = useActivity(activeSessionId, subscribe)
-  const { activeKey, generateKey } = useApiKey(session)
+  const { activeKey, generateKey } = useApiKey(token)
 
   // Handle permission responses
   const handlePermissionRespond = useCallback((requestId: string, approved: boolean) => {
@@ -113,7 +113,7 @@ export function Layout({ session, user, signOut, onNavigate }: Props) {
     <div className="flex h-full bg-[var(--bg-primary)] relative overflow-hidden">
       {/* Modals — rendered at top level, above everything */}
       {showApiKey && (
-        <ApiKeyModal session={session} onClose={() => setShowApiKey(false)} />
+        <ApiKeyModal token={token} onClose={() => setShowApiKey(false)} />
       )}
       {showConnect && (
         <ConnectModal

@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { Session as SupaSession } from '@supabase/supabase-js'
 
 export interface CodeSession {
   id: string
@@ -10,32 +9,32 @@ export interface CodeSession {
   created_at: string
 }
 
-export function useSessions(session: SupaSession | null) {
+export function useSessions(token: string | null) {
   const [sessions, setSessions] = useState<CodeSession[]>([])
   const [loading, setLoading] = useState(true)
 
   const fetchSessions = useCallback(async () => {
-    if (!session?.access_token) return
+    if (!token) return
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     const res = await fetch(`${hubUrl}/api/sessions`, {
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
     if (res.ok) {
       setSessions(await res.json())
     }
     setLoading(false)
-  }, [session?.access_token])
+  }, [token])
 
   useEffect(() => { fetchSessions() }, [fetchSessions])
 
   const createSession = async (name: string, projectDir?: string): Promise<any> => {
-    if (!session?.access_token) return null
+    if (!token) return null
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     const res = await fetch(`${hubUrl}/api/sessions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${session.access_token}`,
+        Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ name, project_dir: projectDir }),
     })
@@ -48,21 +47,21 @@ export function useSessions(session: SupaSession | null) {
   }
 
   const deleteSession = async (id: string) => {
-    if (!session?.access_token) return
+    if (!token) return
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     await fetch(`${hubUrl}/api/sessions/${id}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
     await fetchSessions()
   }
 
   const rotateToken = async (id: string) => {
-    if (!session?.access_token) return null
+    if (!token) return null
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     const res = await fetch(`${hubUrl}/api/sessions/${id}/rotate-token`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
     if (res.ok) return res.json() // { token: "remo_..." }
     return null

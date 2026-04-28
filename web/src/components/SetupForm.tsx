@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { supabase } from '../lib/supabase'
 
 interface Props {
   onComplete: () => void
@@ -44,12 +43,7 @@ export function SetupForm({ onComplete }: Props) {
         return
       }
 
-      // Auto sign in after creating account
-      const { error: signInError } = await supabase.auth.signInWithPassword({ email, password })
-      if (signInError) {
-        setError('Account created but sign-in failed. Please sign in manually.')
-      }
-
+      // Setup complete — user will be prompted to sign in via AuthForm
       onComplete()
     } catch {
       setError('Network error — is the hub running?')

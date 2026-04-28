@@ -1,4 +1,4 @@
-import type { User } from '@supabase/supabase-js'
+import type { AuthUser } from '../lib/auth.ts'
 import type { CodeSession } from '../hooks/useSessions'
 import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
 import { UnreadBadge } from './UnreadBadge'
@@ -14,7 +14,7 @@ interface Props {
   onNavigate: (hash: string) => void
   onRefresh: () => void
   connected: boolean
-  user: User
+  user: AuthUser
   signOut: () => void
   onClose?: () => void
   unreadCounts?: Record<string, number>

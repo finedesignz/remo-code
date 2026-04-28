@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react'
-import type { Session } from '@supabase/supabase-js'
 
 export interface ApiKey {
   id: string
@@ -9,28 +8,28 @@ export interface ApiKey {
   revoked_at: string | null
 }
 
-export function useApiKey(session: Session | null) {
+export function useApiKey(token: string | null) {
   const [keys, setKeys] = useState<ApiKey[]>([])
   const [loading, setLoading] = useState(true)
 
   const fetchKeys = useCallback(async () => {
-    if (!session?.access_token) return
+    if (!token) return
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     const res = await fetch(`${hubUrl}/api/api-keys`, {
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
     if (res.ok) setKeys(await res.json())
     setLoading(false)
-  }, [session?.access_token])
+  }, [token])
 
   useEffect(() => { fetchKeys() }, [fetchKeys])
 
   const generateKey = async () => {
-    if (!session?.access_token) return null
+    if (!token) return null
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     const res = await fetch(`${hubUrl}/api/api-keys`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
     if (res.ok) {
       const data = await res.json()
@@ -41,11 +40,11 @@ export function useApiKey(session: Session | null) {
   }
 
   const revokeKey = async (id: string) => {
-    if (!session?.access_token) return
+    if (!token) return
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     await fetch(`${hubUrl}/api/api-keys/${id}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${session.access_token}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
     await fetchKeys()
   }
