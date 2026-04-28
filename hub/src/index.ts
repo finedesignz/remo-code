@@ -43,7 +43,7 @@ app.use('*', async (c, next) => {
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
-    "connect-src 'self' wss: https://*.supabase.co",
+    "connect-src 'self' wss:",
     "img-src 'self' data:",
     "frame-ancestors 'none'",
   ].join('; '))
