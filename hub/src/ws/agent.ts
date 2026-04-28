@@ -1,10 +1,9 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, findOrCreateAgentSession, setSessionStatus, insertMessage } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, setSessionStatus, insertMessage, listSessions } from '../db/dal'
 import { hashToken } from './channel'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
-import { supabaseAdmin } from '../db/supabase'
 
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
@@ -69,14 +68,12 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
     // Hash the raw API key before verifying (same pattern as api-key-middleware)
     const keyHash = await hashToken(msg.api_key)
-    const apiKeyRecord = await verifyApiKey(keyHash)
-    if (!apiKeyRecord) {
+    const userId = await verifyApiKey(keyHash)
+    if (!userId) {
       ws.send(JSON.stringify({ type: 'auth_error', error: 'invalid api key' }))
       ws.close(4001, 'auth failed')
       return
     }
-
-    const userId = apiKeyRecord.user_id
     const projectDir = msg.project_dir.replace(/\\/g, '/')
 
     // Find existing session for this project or create a new one
@@ -207,12 +204,7 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
   }
 }
 
-// Helper: list sessions using admin client (no JWT needed)
+// Helper: list sessions for a user via DAL
 async function listSessionsForUser(userId: string) {
-  const { data } = await supabaseAdmin
-    .from('sessions')
-    .select('id, name, project_dir, status, last_activity, created_at')
-    .eq('user_id', userId)
-    .order('last_activity', { ascending: false, nullsFirst: false })
-  return data || []
+  return listSessions(userId)
 }

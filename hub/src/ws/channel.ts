@@ -4,7 +4,6 @@ import { ChannelInbound } from './protocol'
 import { verifyChannelToken, setSessionStatus, insertMessage } from '../db/dal'
 import { registerChannel, unregisterChannel, broadcastToSubscribers, broadcastToUser } from './registry'
 import { listSessions } from '../db/dal'
-import { supabaseAdmin } from '../db/supabase'
 
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
@@ -171,13 +170,7 @@ export async function handleChannelClose(ws: ServerWebSocket<ChannelWsData>) {
 // Fetch and broadcast the full session list to all browser clients for a user
 async function pushSessionList(userId: string) {
   try {
-    const { data, error } = await supabaseAdmin
-      .from('sessions')
-      .select('id, name, project_dir, status, last_activity, created_at')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false })
-    if (!error && data) {
-      broadcastToUser(userId, { type: 'session_list', sessions: data })
-    }
+    const sessions = await listSessions(userId)
+    broadcastToUser(userId, { type: 'session_list', sessions })
   } catch {}
 }

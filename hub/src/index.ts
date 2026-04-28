@@ -181,8 +181,8 @@ const server = Bun.serve({
 })
 
 // On startup, mark all sessions as offline (in-memory registries are empty after restart)
-import { supabaseAdmin } from './db/supabase'
-supabaseAdmin.from('sessions').update({ status: 'offline' }).neq('status', 'offline').then(() => {
+import { setOfflineStaleAgentSessions } from './db/dal.ts'
+setOfflineStaleAgentSessions().then(() => {
   console.log('[startup] reset all session statuses to offline')
 })
 
