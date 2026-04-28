@@ -40,6 +40,36 @@ export async function createSession(userId: string, name: string, projectDir: st
   return rows[0];
 }
 
+// Find existing session by project_dir (reuse) or create a new one.
+// Returns { ...session, created: boolean }
+export async function findOrCreateAgentSession(userId: string, projectDir: string, tokenHash: string) {
+  const existing = await findSessionByProjectDir(userId, projectDir);
+  if (existing) {
+    // Update the token hash so the agent gets a fresh token
+    await sql`UPDATE sessions SET token_hash = ${tokenHash}, last_activity = now() WHERE id = ${existing.id}`;
+    return { ...existing, token_hash: tokenHash, created: false };
+  }
+  // Derive a human-readable name from the last path segment
+  const name = projectDir.split('/').filter(Boolean).pop() ?? 'session';
+  const rows = await sql`
+    INSERT INTO sessions (user_id, name, project_dir, token_hash)
+    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash})
+    RETURNING *
+  `;
+  return { ...rows[0], created: true };
+}
+
+// Create a session for a legacy channel/plugin connection
+export async function createPluginSession(userId: string, projectDir: string, tokenHash: string) {
+  const name = projectDir.split('/').filter(Boolean).pop() ?? 'session';
+  const rows = await sql`
+    INSERT INTO sessions (user_id, name, project_dir, token_hash)
+    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash})
+    RETURNING *
+  `;
+  return rows[0];
+}
+
 export async function updateSessionStatus(sessionId: string, status: string) {
   await sql`UPDATE sessions SET status = ${status}, last_activity = now() WHERE id = ${sessionId}`;
 }

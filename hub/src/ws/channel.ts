@@ -1,7 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import { timingSafeEqual } from 'crypto'
 import { ChannelInbound } from './protocol'
-import { verifyChannelToken, setSessionStatus, insertMessage } from '../db/dal'
+import { verifyChannelToken, updateSessionStatus as setSessionStatus, insertMessage } from '../db/dal'
 import { registerChannel, unregisterChannel, broadcastToSubscribers, broadcastToUser } from './registry'
 import { listSessions } from '../db/dal'
 

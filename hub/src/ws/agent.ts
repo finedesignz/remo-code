@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, findOrCreateAgentSession, setSessionStatus, insertMessage, listSessions } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, listSessions } from '../db/dal'
 import { hashToken } from './channel'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
