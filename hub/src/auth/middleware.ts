@@ -1,25 +1,19 @@
-import type { Context, Next } from 'hono'
-import { supabaseForUser } from '../db/supabase'
-import { supabaseAdmin } from '../db/supabase'
+import type { Context, Next } from "hono";
+import { verifyJwt } from "./jwt.ts";
 
-// Extracts and verifies the Supabase JWT from the Authorization header.
-// Sets userId and a user-scoped Supabase client on the context.
 export async function authMiddleware(c: Context, next: Next) {
-  const authHeader = c.req.header('Authorization')
-  if (!authHeader?.startsWith('Bearer ')) {
-    return c.json({ error: 'unauthorized' }, 401)
+  const header = c.req.header("Authorization");
+  if (!header?.startsWith("Bearer ")) {
+    return c.json({ error: "Unauthorized" }, 401);
   }
-
-  const jwt = authHeader.slice(7)
-  const { data: { user }, error } = await supabaseAdmin.auth.getUser(jwt)
-
-  if (error || !user) {
-    return c.json({ error: 'unauthorized' }, 401)
+  const token = header.slice(7);
+  try {
+    const payload = verifyJwt(token);
+    c.set("userId", payload.sub);
+    c.set("userRole", payload.role);
+    c.set("userEmail", payload.email);
+  } catch {
+    return c.json({ error: "Invalid token" }, 401);
   }
-
-  c.set('userId', user.id)
-  c.set('jwt', jwt)
-  c.set('supabase', supabaseForUser(jwt))
-
-  await next()
+  await next();
 }
