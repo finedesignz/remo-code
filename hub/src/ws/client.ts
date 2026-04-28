@@ -1,8 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import { ClientInbound } from './protocol'
-import { supabaseAdmin } from '../db/supabase'
-import { insertMessage, listSessions } from '../db/dal'
-import { supabaseForUser } from '../db/supabase'
+import { verifyJwt } from '../auth/jwt.ts'
+import { insertMessage, listSessions, getSession } from '../db/dal'
 import {
   registerClient, unregisterClient, subscribeClient,
   getChannel, unregisterChannel, broadcastToSubscribers,
@@ -16,7 +15,6 @@ const MSG_RATE_MAX = 30 // max 30 messages per 10 seconds
 interface ClientWsData {
   authenticated: boolean
   userId: string | null
-  jwt: string | null
   clientEntry: ClientEntry | null
   authTimer: ReturnType<typeof setTimeout> | null
   msgCount: number
@@ -27,7 +25,6 @@ export function createClientWsData(): ClientWsData {
   return {
     authenticated: false,
     userId: null,
-    jwt: null,
     clientEntry: null,
     authTimer: null,
     msgCount: 0,
@@ -60,25 +57,23 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   if (msg.type === 'auth') {
     if (data.authenticated) return
 
-    const { data: { user }, error } = await supabaseAdmin.auth.getUser(msg.token)
-    if (error || !user) {
-      ws.send(JSON.stringify({ type: 'auth_error', error: 'invalid' }))
-      ws.close(4001, 'auth failed')
+    try {
+      const payload = verifyJwt(msg.token)
+      data.userId = payload.sub
+      data.authenticated = true
+    } catch {
+      ws.close(4001, 'Unauthorized')
       return
     }
 
-    data.authenticated = true
-    data.userId = user.id
-    data.jwt = msg.token
     if (data.authTimer) clearTimeout(data.authTimer)
 
-    data.clientEntry = registerClient(user.id, ws)
-    console.log(`[client] authenticated user=${user.id}`)
+    data.clientEntry = registerClient(data.userId!, ws)
+    console.log(`[client] authenticated user=${data.userId}`)
     ws.send(JSON.stringify({ type: 'auth_ok' }))
 
     // Send session list immediately
-    const sb = supabaseForUser(msg.token)
-    const sessions = await listSessions(sb)
+    const sessions = await listSessions(data.userId!)
     ws.send(JSON.stringify({ type: 'session_list', sessions }))
     return
   }
@@ -96,24 +91,17 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
 
   if (msg.type === 'subscribe') {
     // Verify user owns these sessions before subscribing
-    const sb = supabaseForUser(data.jwt!)
-    const { data: ownedSessions } = await sb
-      .from('sessions')
-      .select('id')
-      .in('id', msg.session_ids)
-    const ownedIds = (ownedSessions || []).map((s: any) => s.id)
+    const ownedChecks = await Promise.all(
+      msg.session_ids.map((id: string) => getSession(id, data.userId!))
+    )
+    const ownedIds = msg.session_ids.filter((_: string, i: number) => ownedChecks[i] !== null)
     subscribeClient(data.clientEntry, ownedIds)
   }
 
   if (msg.type === 'permission_response') {
     console.log(`[client] permission_response session=${msg.session_id} req=${msg.request_id} approved=${msg.approved}`)
     // Verify ownership
-    const sb = supabaseForUser(data.jwt!)
-    const { data: session } = await sb
-      .from('sessions')
-      .select('id')
-      .eq('id', msg.session_id)
-      .single()
+    const session = await getSession(msg.session_id, data.userId!)
     if (!session) return
 
     // Forward to agent
@@ -131,12 +119,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   if (msg.type === 'question_response') {
     console.log(`[client] question_response session=${msg.session_id} req=${msg.request_id}`)
     // Verify ownership
-    const sb = supabaseForUser(data.jwt!)
-    const { data: session } = await sb
-      .from('sessions')
-      .select('id')
-      .eq('id', msg.session_id)
-      .single()
+    const session = await getSession(msg.session_id, data.userId!)
     if (!session) return
 
     // Forward to agent
@@ -153,14 +136,8 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
 
   if (msg.type === 'send_message') {
     console.log(`[client] send_message session=${msg.session_id} user=${data.userId}`)
-    // Verify ownership via RLS
-    const sb = supabaseForUser(data.jwt!)
-    const { data: session } = await sb
-      .from('sessions')
-      .select('id')
-      .eq('id', msg.session_id)
-      .single()
-
+    // Verify ownership
+    const session = await getSession(msg.session_id, data.userId!)
     if (!session) {
       console.log(`[client] session not found or not owned: ${msg.session_id}`)
       return
