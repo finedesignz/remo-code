@@ -70,13 +70,9 @@ The agent (`agent/src/index.ts`) runs on the same machine as Claude Code. It:
 
 ## Database
 
-Uses **Supabase** (hosted PostgreSQL + Auth). Schema in `supabase/migrations/`.
+Uses **PostgreSQL** (self-hosted). Schema in `hub/src/db/schema.sql` — run once on a fresh database.
 
-Tables: `sessions` (Claude Code sessions with hashed tokens), `messages` (chat history), `api_keys` (plugin/agent authentication). All have RLS policies scoping data to `auth.uid()`.
-
-The hub uses two Supabase clients:
-- `supabaseAdmin` (service role key) — bypasses RLS for agent auth, status updates, message insertion
-- `supabaseForUser(jwt)` — per-request client with user's JWT, RLS enforced automatically
+Tables: `users` (email + bcrypt password, role), `sessions` (Claude Code sessions), `messages` (chat history), `api_keys` (agent authentication). All queries are scoped by `user_id` with explicit WHERE clauses.
 
 ## WebSocket Protocol
 
@@ -87,7 +83,7 @@ The hub uses two Supabase clients:
 - 30s heartbeat ping/pong
 
 **`/ws/client`** (browser connects here):
-- Auth: `{ type: "auth", token: "<supabase_jwt>" }` → verified via `supabaseAdmin.auth.getUser()`
+- Auth: `{ type: "auth", token: "<jwt>" }` → verified via `JWT_SECRET`
 - Client sends `send_message` (with optional `images`/`attachments`) and `subscribe`
 - Hub sends `message`, `session_status`, `session_list`, plus activity events (`thinking`, `text_delta`, `tool_use`, `tool_result`, `status`)
 - Both endpoints have 5s auth timeout, per-IP connection limits (20), per-connection message rate limits
@@ -110,9 +106,9 @@ All WS messages validated with Zod schemas in `hub/src/ws/protocol.ts` and `hub/
 
 ## Environment Variables
 
-**hub/.env**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `PORT` (3040), `HUB_ALLOWED_ORIGINS`
+**hub/.env**: `DATABASE_URL` (PostgreSQL connection string), `JWT_SECRET` (min 32 chars), `PORT` (3040), `HUB_ALLOWED_ORIGINS`
 
-**web/.env**: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_HUB_URL`
+**web/.env**: `VITE_HUB_URL`
 
 **Agent config**: CLI args, env vars (`REMO_HUB_URL`, `REMO_API_KEY`), or `~/.config/remo-code/config.json`
 

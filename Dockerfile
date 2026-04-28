@@ -13,8 +13,6 @@ RUN bun install --frozen-lockfile
 # Build web frontend (VITE_ vars are baked into the JS bundle at build time)
 FROM deps AS web-build
 ARG VITE_HUB_URL
-ARG VITE_SUPABASE_URL
-ARG VITE_SUPABASE_ANON_KEY
 COPY web/ web/
 RUN cd web && bun run build
 
@@ -23,14 +21,12 @@ FROM oven/bun:1
 WORKDIR /app
 
 # Runtime env vars (Coolify passes these as ARGs; convert to ENV so they're available at runtime)
-ARG SUPABASE_URL
-ARG SUPABASE_ANON_KEY
-ARG SUPABASE_SERVICE_ROLE_KEY
+ARG DATABASE_URL
+ARG JWT_SECRET
 ARG HUB_ALLOWED_ORIGINS
 ARG PORT=3040
-ENV SUPABASE_URL=$SUPABASE_URL \
-    SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY \
-    SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SERVICE_ROLE_KEY \
+ENV DATABASE_URL=$DATABASE_URL \
+    JWT_SECRET=$JWT_SECRET \
     HUB_ALLOWED_ORIGINS=$HUB_ALLOWED_ORIGINS \
     PORT=$PORT
 
