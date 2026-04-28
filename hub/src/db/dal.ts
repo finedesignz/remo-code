@@ -1,186 +1,145 @@
-import type { SupabaseClient } from '@supabase/supabase-js'
-import { supabaseAdmin } from './supabase'
+import { sql } from "./postgres.ts";
 
-// -- Sessions (user-scoped via RLS) --
+// ── Sessions ──────────────────────────────────────────────────────────────────
 
-export async function listSessions(sb: SupabaseClient) {
-  const { data, error } = await sb
-    .from('sessions')
-    .select('id, name, project_dir, status, last_activity, created_at')
-    .order('created_at', { ascending: false })
-  if (error) throw error
-  return data
+export async function listSessions(userId: string) {
+  return sql`
+    SELECT id, name, project_dir, status, token_hash, last_activity, created_at
+    FROM sessions WHERE user_id = ${userId} ORDER BY last_activity DESC NULLS LAST
+  `;
 }
 
-export async function getSession(sb: SupabaseClient, id: string) {
-  const { data, error } = await sb
-    .from('sessions')
-    .select('id, name, project_dir, status, last_activity, created_at')
-    .eq('id', id)
-    .single()
-  if (error) throw error
-  return data
+export async function getSession(sessionId: string, userId: string) {
+  const rows = await sql`
+    SELECT id, name, project_dir, status, token_hash, last_activity, created_at
+    FROM sessions WHERE id = ${sessionId} AND user_id = ${userId}
+  `;
+  return rows[0] ?? null;
 }
 
-export async function createSession(sb: SupabaseClient, userId: string, name: string, projectDir: string | null, tokenHash: string) {
-  const { data, error } = await sb
-    .from('sessions')
-    .insert({ user_id: userId, name, project_dir: projectDir, token_hash: tokenHash })
-    .select('id, name, project_dir, status, created_at')
-    .single()
-  if (error) throw error
-  return data
+export async function getSessionById(sessionId: string) {
+  const rows = await sql`SELECT * FROM sessions WHERE id = ${sessionId}`;
+  return rows[0] ?? null;
 }
 
-export async function deleteSession(sb: SupabaseClient, id: string) {
-  const { error } = await sb.from('sessions').delete().eq('id', id)
-  if (error) throw error
+export async function findSessionByProjectDir(userId: string, projectDir: string) {
+  const rows = await sql`
+    SELECT * FROM sessions
+    WHERE user_id = ${userId} AND project_dir = ${projectDir}
+    ORDER BY last_activity DESC NULLS LAST LIMIT 1
+  `;
+  return rows[0] ?? null;
 }
 
-export async function updateSessionToken(sb: SupabaseClient, id: string, tokenHash: string) {
-  const { error } = await sb.from('sessions').update({ token_hash: tokenHash }).eq('id', id)
-  if (error) throw error
+export async function createSession(userId: string, name: string, projectDir: string | null, tokenHash: string) {
+  const rows = await sql`
+    INSERT INTO sessions (user_id, name, project_dir, token_hash)
+    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash})
+    RETURNING *
+  `;
+  return rows[0];
 }
 
-// -- Sessions (server-level, no RLS — used by channel WS auth) --
-
-export async function verifyChannelToken(sessionId: string) {
-  const { data, error } = await supabaseAdmin
-    .from('sessions')
-    .select('id, user_id, token_hash')
-    .eq('id', sessionId)
-    .single()
-  if (error) return null
-  return data
+export async function updateSessionStatus(sessionId: string, status: string) {
+  await sql`UPDATE sessions SET status = ${status}, last_activity = now() WHERE id = ${sessionId}`;
 }
 
-export async function setSessionStatus(sessionId: string, status: 'online' | 'offline' | 'thinking') {
-  await supabaseAdmin
-    .from('sessions')
-    .update({ status, last_activity: new Date().toISOString() })
-    .eq('id', sessionId)
+export async function updateSessionToken(sessionId: string, tokenHash: string) {
+  await sql`UPDATE sessions SET token_hash = ${tokenHash} WHERE id = ${sessionId}`;
 }
 
-// -- API Keys (server-level, bypasses RLS) --
-
-export async function createApiKey(userId: string, keyHash: string) {
-  // Revoke any existing active key
-  await supabaseAdmin
-    .from('api_keys')
-    .update({ revoked_at: new Date().toISOString() })
-    .eq('user_id', userId)
-    .is('revoked_at', null)
-
-  const { data, error } = await supabaseAdmin
-    .from('api_keys')
-    .insert({ user_id: userId, key_hash: keyHash })
-    .select('id, name, created_at')
-    .single()
-  if (error) throw error
-  return data
+export async function deleteSession(sessionId: string, userId: string) {
+  await sql`DELETE FROM sessions WHERE id = ${sessionId} AND user_id = ${userId}`;
 }
 
-export async function listApiKeys(sb: SupabaseClient) {
-  const { data, error } = await sb
-    .from('api_keys')
-    .select('id, name, created_at, last_used_at, revoked_at')
-    .order('created_at', { ascending: false })
-  if (error) throw error
-  return data
+export async function setOfflineStaleAgentSessions() {
+  await sql`UPDATE sessions SET status = 'offline' WHERE status = 'online'`;
 }
 
-export async function revokeApiKey(sb: SupabaseClient, id: string) {
-  const { error } = await sb
-    .from('api_keys')
-    .update({ revoked_at: new Date().toISOString() })
-    .eq('id', id)
-  if (error) throw error
+// ── Messages ──────────────────────────────────────────────────────────────────
+
+export async function listMessages(sessionId: string, userId: string) {
+  return sql`
+    SELECT m.id, m.session_id, m.role, m.content, m.created_at
+    FROM messages m
+    JOIN sessions s ON s.id = m.session_id
+    WHERE m.session_id = ${sessionId} AND s.user_id = ${userId}
+    ORDER BY m.created_at ASC
+  `;
 }
+
+export async function insertMessage(sessionId: string, role: string, content: string) {
+  const rows = await sql`
+    INSERT INTO messages (session_id, role, content) VALUES (${sessionId}, ${role}, ${content}) RETURNING *
+  `;
+  return rows[0];
+}
+
+// ── API Keys ──────────────────────────────────────────────────────────────────
 
 export async function verifyApiKey(keyHash: string) {
-  const { data, error } = await supabaseAdmin
-    .from('api_keys')
-    .select('id, user_id, revoked_at')
-    .eq('key_hash', keyHash)
-    .is('revoked_at', null)
-    .single()
-  if (error || !data) return null
-  // Update last_used_at (fire-and-forget)
-  supabaseAdmin.from('api_keys').update({ last_used_at: new Date().toISOString() }).eq('id', data.id)
-  return data
+  const rows = await sql`
+    SELECT user_id FROM api_keys WHERE key_hash = ${keyHash} AND revoked_at IS NULL LIMIT 1
+  `;
+  if (!rows[0]) return null;
+  await sql`UPDATE api_keys SET last_used_at = now() WHERE key_hash = ${keyHash} AND revoked_at IS NULL`;
+  return rows[0].user_id as string;
 }
 
-// -- Sessions (server-level, for plugin auto-registration) --
-
-export async function createPluginSession(userId: string, projectDir: string, tokenHash: string) {
-  const name = projectDir.split(/[/\\]/).filter(Boolean).pop() || 'unnamed'
-
-  const { data, error } = await supabaseAdmin
-    .from('sessions')
-    .insert({ user_id: userId, name, project_dir: projectDir, token_hash: tokenHash })
-    .select('id, name')
-    .single()
-  if (error) throw error
-  return { id: data.id, name: data.name }
+export async function listApiKeys(userId: string) {
+  return sql`
+    SELECT id, name, created_at, last_used_at FROM api_keys
+    WHERE user_id = ${userId} AND revoked_at IS NULL ORDER BY created_at DESC
+  `;
 }
 
-export async function findOrCreateAgentSession(userId: string, projectDir: string, tokenHash: string) {
-  const name = projectDir.split(/[/\\]/).filter(Boolean).pop() || 'unnamed'
-
-  // Check for existing session with same user_id + project_dir
-  const { data: existing } = await supabaseAdmin
-    .from('sessions')
-    .select('id, name')
-    .eq('user_id', userId)
-    .eq('project_dir', projectDir)
-    .order('last_activity', { ascending: false, nullsFirst: false })
-    .limit(1)
-    .maybeSingle()
-
-  if (existing) {
-    // Rotate token on existing session
-    await supabaseAdmin
-      .from('sessions')
-      .update({ token_hash: tokenHash })
-      .eq('id', existing.id)
-    return { id: existing.id, name: existing.name, created: false }
-  }
-
-  // Create new session
-  const { data, error } = await supabaseAdmin
-    .from('sessions')
-    .insert({ user_id: userId, name, project_dir: projectDir, token_hash: tokenHash })
-    .select('id, name')
-    .single()
-  if (error) throw error
-  return { id: data.id, name: data.name, created: true }
+export async function createApiKey(userId: string, keyHash: string, name: string) {
+  await sql`UPDATE api_keys SET revoked_at = now() WHERE user_id = ${userId} AND revoked_at IS NULL`;
+  const rows = await sql`
+    INSERT INTO api_keys (user_id, key_hash, name) VALUES (${userId}, ${keyHash}, ${name}) RETURNING *
+  `;
+  return rows[0];
 }
 
-// -- Messages (user-scoped via RLS) --
-
-export async function getMessages(sb: SupabaseClient, sessionId: string, limit = 50, before?: string) {
-  let query = sb
-    .from('messages')
-    .select('id, session_id, role, content, created_at')
-    .eq('session_id', sessionId)
-    .order('created_at', { ascending: false })
-    .limit(limit)
-
-  if (before) {
-    query = query.lt('created_at', before)
-  }
-
-  const { data, error } = await query
-  if (error) throw error
-  return (data || []).reverse()
+export async function revokeApiKey(userId: string) {
+  await sql`UPDATE api_keys SET revoked_at = now() WHERE user_id = ${userId} AND revoked_at IS NULL`;
 }
 
-export async function insertMessage(sessionId: string, role: 'user' | 'assistant', content: string) {
-  const { data, error } = await supabaseAdmin
-    .from('messages')
-    .insert({ session_id: sessionId, role, content })
-    .select('id, session_id, role, content, created_at')
-    .single()
-  if (error) throw error
-  return data
+// ── Users / Profiles ──────────────────────────────────────────────────────────
+
+export async function getUserById(id: string) {
+  const rows = await sql`SELECT id, email, display_name, role, created_at, updated_at FROM users WHERE id = ${id}`;
+  return rows[0] ?? null;
+}
+
+export async function getUserByEmail(email: string) {
+  const rows = await sql`SELECT * FROM users WHERE email = ${email}`;
+  return rows[0] ?? null;
+}
+
+export async function countUsers() {
+  const rows = await sql`SELECT COUNT(*)::int AS count FROM users`;
+  return rows[0].count as number;
+}
+
+export async function createUser(email: string, passwordHash: string, role: string = 'user') {
+  const rows = await sql`
+    INSERT INTO users (email, password_hash, role) VALUES (${email}, ${passwordHash}, ${role}) RETURNING id, email, display_name, role, created_at
+  `;
+  return rows[0];
+}
+
+export async function updateProfile(userId: string, displayName: string) {
+  const rows = await sql`
+    UPDATE users SET display_name = ${displayName}, updated_at = now() WHERE id = ${userId}
+    RETURNING id, email, display_name, role
+  `;
+  return rows[0] ?? null;
+}
+
+// ── Channel token ─────────────────────────────────────────────────────────────
+
+export async function verifyChannelToken(sessionId: string) {
+  const rows = await sql`SELECT token_hash, user_id FROM sessions WHERE id = ${sessionId}`;
+  return rows[0] ?? null;
 }
