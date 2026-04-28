@@ -7,7 +7,6 @@
     "start": "bun src/index.ts"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.49.0",
     "bcryptjs": "^3.0.3",
     "hono": "^4.7.0",
     "jsonwebtoken": "^9.0.3",
