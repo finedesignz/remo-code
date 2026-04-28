@@ -7,6 +7,7 @@ import { messages } from './api/messages'
 import { apiKeys } from './api/api-keys'
 import { plugin } from './api/plugin'
 import { setup } from './api/setup'
+import { authRouter } from './api/auth'
 import { profile } from './api/profile'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit } from './middleware/rate-limit'
@@ -58,6 +59,9 @@ app.use('/api/*', cors({
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
+
+// Auth routes (no auth required)
+app.route('/api/auth', authRouter)
 
 // Setup routes (no auth required — guarded internally by user count check)
 app.route('/api/setup', setup)
