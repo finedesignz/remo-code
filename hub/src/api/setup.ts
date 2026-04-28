@@ -1,67 +1,31 @@
-import { Hono } from 'hono'
-import { z } from 'zod'
-import { supabaseAdmin } from '../db/supabase'
-import { rateLimit } from '../middleware/rate-limit'
+import { Hono } from "hono";
+import { countUsers, createUser } from "../db/dal.ts";
+import { hashPassword } from "../auth/password.ts";
 
-const setup = new Hono()
+export const setupRouter = new Hono();
 
-const SetupBody = z.object({
-  email: z.string().email().max(255),
-  password: z.string().min(8).max(128),
-})
+let setupInProgress = false;
 
-// Strict rate limit on setup endpoints (5 req/min by IP)
-setup.use('*', rateLimit({
-  windowMs: 60_000,
-  max: 5,
-  keyFn: (c) => `setup:${c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'anon'}`,
-}))
+setupRouter.get("/status", async (c) => {
+  const count = await countUsers();
+  return c.json({ needsSetup: count === 0 });
+});
 
-// Mutex to prevent race condition on first-user creation
-let setupInProgress = false
-
-// Check if setup is needed (no users exist yet)
-setup.get('/status', async (c) => {
-  const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 })
-  if (error) return c.json({ error: 'failed to check setup status' }, 500)
-  const needsSetup = !data.users || data.users.length === 0
-  return c.json({ needs_setup: needsSetup })
-})
-
-// Create the first user (only works when no users exist)
-setup.post('/create-admin', async (c) => {
-  // Mutex: reject concurrent setup attempts
-  if (setupInProgress) {
-    return c.json({ error: 'setup already in progress' }, 409)
-  }
-  setupInProgress = true
-
+setupRouter.post("/create-admin", async (c) => {
+  if (setupInProgress) return c.json({ error: "Setup already in progress" }, 409);
+  setupInProgress = true;
   try {
-    const { data: listData, error: listError } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 })
-    if (listError) return c.json({ error: 'failed to check users' }, 500)
-    if (listData.users && listData.users.length > 0) {
-      return c.json({ error: 'setup already completed' }, 403)
-    }
+    const count = await countUsers();
+    if (count > 0) return c.json({ error: "Admin already exists" }, 409);
 
-    const parsed = SetupBody.safeParse(await c.req.json())
-    if (!parsed.success) {
-      return c.json({ error: 'invalid input — email and password (min 8 chars) required' }, 400)
-    }
+    const { email, password } = await c.req.json<{ email: string; password: string }>();
+    if (!email || !password) return c.json({ error: "Email and password required" }, 400);
+    if (password.length < 8) return c.json({ error: "Password must be at least 8 characters" }, 400);
 
-    const { data, error } = await supabaseAdmin.auth.admin.createUser({
-      email: parsed.data.email,
-      password: parsed.data.password,
-      email_confirm: true,
-    })
-
-    if (error) {
-      return c.json({ error: error.message }, 400)
-    }
-
-    return c.json({ ok: true, user_id: data.user.id }, 201)
+    const hash = await hashPassword(password);
+    const user = await createUser(email.toLowerCase().trim(), hash, "admin");
+    return c.json({ success: true, user: { id: user.id, email: user.email, role: user.role } });
   } finally {
-    setupInProgress = false
+    setupInProgress = false;
   }
-})
-
-export { setup }
+});

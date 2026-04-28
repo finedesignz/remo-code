@@ -1,23 +1,18 @@
 import { Hono } from 'hono'
-import { getMessages, getSession } from '../db/dal'
+import { listMessages, getSession } from '../db/dal'
 
 const messages = new Hono()
 
-// Get paginated messages for a session
+// Get messages for a session (ownership verified via userId)
 messages.get('/:sessionId', async (c) => {
-  const sb = c.get('supabase')
+  const userId = c.get('userId') as string
   const sessionId = c.req.param('sessionId')
-  const limit = Math.min(Number(c.req.query('limit') || 50), 100)
-  const before = c.req.query('before') || undefined
 
-  // Verify session ownership via RLS
-  try {
-    await getSession(sb, sessionId)
-  } catch {
-    return c.json({ error: 'not found' }, 404)
-  }
+  // Verify session ownership
+  const session = await getSession(sessionId, userId)
+  if (!session) return c.json({ error: 'not found' }, 404)
 
-  const data = await getMessages(sb, sessionId, limit, before)
+  const data = await listMessages(sessionId, userId)
   return c.json(data)
 })
 

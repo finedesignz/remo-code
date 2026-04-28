@@ -7,25 +7,25 @@ const apiKeys = new Hono()
 
 // List API keys (never returns raw key)
 apiKeys.get('/', async (c) => {
-  const sb = c.get('supabase')
-  const keys = await listApiKeys(sb)
+  const userId = c.get('userId') as string
+  const keys = await listApiKeys(userId)
   return c.json(keys)
 })
 
 // Generate new API key (revokes existing active key)
 apiKeys.post('/', async (c) => {
-  const userId = c.get('userId')
+  const userId = c.get('userId') as string
   const rawKey = generateToken('remokey_')
   const keyHash = await hashToken(rawKey)
-  const key = await createApiKey(userId, keyHash)
+  const key = await createApiKey(userId, keyHash, 'default')
   return c.json({ ...key, key: rawKey }, 201)
 })
 
-// Revoke a key
+// Revoke all active keys for the user
 apiKeys.delete('/:id', async (c) => {
-  const sb = c.get('supabase')
+  const userId = c.get('userId') as string
   try {
-    await revokeApiKey(sb, c.req.param('id'))
+    await revokeApiKey(userId)
     return c.json({ ok: true })
   } catch {
     return c.json({ error: 'not found' }, 404)

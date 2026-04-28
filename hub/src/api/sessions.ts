@@ -14,26 +14,22 @@ const sessions = new Hono()
 
 // List all sessions for the authenticated user
 sessions.get('/', async (c) => {
-  const sb = c.get('supabase')
-  const data = await listSessions(sb)
+  const userId = c.get('userId') as string
+  const data = await listSessions(userId)
   return c.json(data)
 })
 
 // Get a single session
 sessions.get('/:id', async (c) => {
-  const sb = c.get('supabase')
-  try {
-    const session = await getSession(sb, c.req.param('id'))
-    return c.json(session)
-  } catch {
-    return c.json({ error: 'not found' }, 404)
-  }
+  const userId = c.get('userId') as string
+  const session = await getSession(c.req.param('id'), userId)
+  if (!session) return c.json({ error: 'not found' }, 404)
+  return c.json(session)
 })
 
 // Create a new session — returns the raw token ONCE
 sessions.post('/', async (c) => {
-  const sb = c.get('supabase')
-  const userId = c.get('userId')
+  const userId = c.get('userId') as string
   const parsed = CreateSessionBody.safeParse(await c.req.json())
   if (!parsed.success) {
     return c.json({ error: 'invalid input' }, 400)
@@ -42,16 +38,16 @@ sessions.post('/', async (c) => {
   const rawToken = generateToken('remo_')
   const tokenHash = await hashToken(rawToken)
 
-  const session = await createSession(sb, userId, parsed.data.name, parsed.data.project_dir || null, tokenHash)
+  const session = await createSession(userId, parsed.data.name, parsed.data.project_dir || null, tokenHash)
 
   return c.json({ ...session, token: rawToken }, 201)
 })
 
 // Delete a session
 sessions.delete('/:id', async (c) => {
-  const sb = c.get('supabase')
+  const userId = c.get('userId') as string
   try {
-    await deleteSession(sb, c.req.param('id'))
+    await deleteSession(c.req.param('id'), userId)
     return c.json({ ok: true })
   } catch {
     return c.json({ error: 'not found' }, 404)
@@ -60,19 +56,16 @@ sessions.delete('/:id', async (c) => {
 
 // Rotate session token — returns new raw token, invalidates old
 sessions.post('/:id/rotate-token', async (c) => {
-  const sb = c.get('supabase')
+  const userId = c.get('userId') as string
   const sessionId = c.req.param('id')
 
   // Verify ownership
-  try {
-    await getSession(sb, sessionId)
-  } catch {
-    return c.json({ error: 'not found' }, 404)
-  }
+  const session = await getSession(sessionId, userId)
+  if (!session) return c.json({ error: 'not found' }, 404)
 
   const rawToken = generateToken('remo_')
   const tokenHash = await hashToken(rawToken)
-  await updateSessionToken(sb, sessionId, tokenHash)
+  await updateSessionToken(sessionId, tokenHash)
 
   // Close existing channel connection
   const channel = getChannel(sessionId)
