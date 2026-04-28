@@ -3,6 +3,7 @@ import { countUsers, createUser } from "../db/dal.ts";
 import { hashPassword } from "../auth/password.ts";
 
 export const setupRouter = new Hono();
+export { setupRouter as setup };
 
 let setupInProgress = false;
 

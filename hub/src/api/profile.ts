@@ -3,6 +3,7 @@ import { authMiddleware } from "../auth/middleware.ts";
 import { getUserById, updateProfile } from "../db/dal.ts";
 
 export const profileRouter = new Hono();
+export { profileRouter as profile };
 profileRouter.use("/*", authMiddleware);
 
 profileRouter.get("/", async (c) => {
