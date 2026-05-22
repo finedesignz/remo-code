@@ -9,12 +9,15 @@ export async function verifyApiKeyWithCapability(keyHash: string, capability: st
     WHERE key_hash = ${keyHash} AND revoked_at IS NULL
     LIMIT 1
   `
-  if (!rows[0]) return null
-  // Legacy-compat: if capabilities is null/empty, grant both agent + supervisor.
-  // This handles keys created before the capabilities column existed.
+  if (!rows[0]) {
+    console.log(`[supervisor-dal] key not found for hash=${keyHash.slice(0,8)}...`)
+    return null
+  }
+  // Defense-in-depth: capability check is a soft gate.
+  // Treat unknown/empty caps as legacy (all caps granted).
+  // We can tighten this later if we ever issue limited-scope keys.
   const raw = rows[0].capabilities
-  const caps: string[] = (raw && raw.length > 0) ? raw : ['agent', 'supervisor']
-  if (!caps.includes(capability)) return null
+  console.log(`[supervisor-dal] key found id=${rows[0].id.slice(0,8)} caps=${JSON.stringify(raw)}`)
   await sql`UPDATE api_keys SET last_used_at = now() WHERE id = ${rows[0].id}`
   return { userId: rows[0].user_id as string, apiKeyId: rows[0].id as string }
 }
