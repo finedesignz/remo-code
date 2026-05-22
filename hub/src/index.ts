@@ -75,7 +75,11 @@ app.use('/api/plugin/*', apiKeyMiddleware)
 app.route('/api/plugin', plugin)
 
 // Protected API routes (JWT auth, then rate limit keyed on userId)
-app.use('/api/*', authMiddleware)
+// Skip /api/github/callback — it's hit by GitHub's redirect, not by an authed client.
+app.use('/api/*', async (c, next) => {
+  if (c.req.path === '/api/github/callback') return next()
+  return authMiddleware(c, next)
+})
 app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('userId') || 'anon' }))
 app.route('/api/sessions', sessions)
 app.route('/api/api-keys', apiKeys)
