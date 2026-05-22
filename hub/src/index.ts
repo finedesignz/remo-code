@@ -11,6 +11,7 @@ import { authRouter } from './api/auth'
 import { profile } from './api/profile'
 import { supervisors as supervisorsApi } from './api/supervisors'
 import { github as githubApi } from './api/github'
+import { commands as commandsApi } from './api/commands'
 import { runMigrations } from './db/migrate'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit } from './middleware/rate-limit'
@@ -87,6 +88,7 @@ app.route('/api/messages', messages)
 app.route('/api/profile', profile)
 app.route('/api/supervisors', supervisorsApi)
 app.route('/api/github', githubApi)
+app.route('/api/commands', commandsApi)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]

@@ -62,6 +62,17 @@ export const RepoOpResult = z.object({
   data: z.unknown().optional(),
 })
 
+export const SupervisorCommandsSync = z.object({
+  type: z.literal('supervisor.commands_sync'),
+  commands: z.array(z.object({
+    kind: z.enum(['command', 'skill']),
+    name: z.string().max(120),
+    description: z.string().max(2000).nullable(),
+    source: z.string().max(120),
+    path: z.string().max(1024),
+  })).max(2000),
+})
+
 export const SupervisorInbound = [
   SupervisorHello,
   SupervisorState,
@@ -69,6 +80,7 @@ export const SupervisorInbound = [
   RepoScanResult,
   RepoCloneProgress,
   RepoOpResult,
+  SupervisorCommandsSync,
 ]
 
 // -- Hub -> Supervisor (constructed by hub, not validated) --

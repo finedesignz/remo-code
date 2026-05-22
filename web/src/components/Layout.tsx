@@ -242,6 +242,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
           activity={activity}
           onPermissionRespond={handlePermissionRespond}
           onQuestionRespond={handleQuestionRespond}
+          token={token}
         />
       </div>
     </div>

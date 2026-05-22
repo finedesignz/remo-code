@@ -1,0 +1,2 @@
+[   21391ms] [VERBOSE] [DOM] Input elements should have autocomplete attributes (suggested: "username"): (More info: https://goo.gl/9p2vKq) %o @ https://account.proton.me/pass:0
+[   55139ms] [ERROR] NotAllowedError: The operation either timed out or was not allowed. See: https://www.w3.org/TR/webauthn-2/#sctn-privacy-considerations-client. @ https://account.proton.me/assets/static/PublicAppInteractive.792f550c.chunk.js:1

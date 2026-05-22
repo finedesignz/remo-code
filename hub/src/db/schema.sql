@@ -102,4 +102,18 @@ CREATE TABLE IF NOT EXISTS session_runs (
 CREATE INDEX IF NOT EXISTS idx_runs_user ON session_runs(user_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_supervisor ON session_runs(supervisor_id);
 
+CREATE TABLE IF NOT EXISTS supervisor_commands (
+  id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  supervisor_id TEXT NOT NULL REFERENCES supervisors(id) ON DELETE CASCADE,
+  kind          TEXT NOT NULL CHECK (kind IN ('command','skill')),
+  name          TEXT NOT NULL,
+  description   TEXT,
+  source        TEXT NOT NULL,
+  path          TEXT NOT NULL,
+  synced_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_supcmds_user ON supervisor_commands(user_id, kind, name);
+CREATE INDEX IF NOT EXISTS idx_supcmds_supervisor ON supervisor_commands(supervisor_id);
+
 -- Auto-migrate on hub startup: hub/src/db/migrate.ts runs this file on boot.

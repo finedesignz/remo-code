@@ -4,7 +4,7 @@ import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessi
 import { hashToken } from './channel'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
-import { verifyApiKeyWithCapability, upsertSupervisor, endRun } from '../db/supervisor-dal'
+import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands } from '../db/supervisor-dal'
 import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
   updateSupervisorState, heartbeatSupervisor,
@@ -257,6 +257,17 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
 
   if (msg.type === 'repo.scan_result' || msg.type === 'repo.op_result') {
     resolveRequest(supervisorId, msg.req_id, msg)
+    return
+  }
+
+  if (msg.type === 'supervisor.commands_sync') {
+    try {
+      await replaceSupervisorCommands({ userId, supervisorId, commands: msg.commands })
+      console.log(`[supervisor] commands sync supervisor=${supervisorId} count=${msg.commands.length}`)
+      broadcastToUser(userId, { type: 'commands_updated', supervisor_id: supervisorId, count: msg.commands.length })
+    } catch (err: any) {
+      console.error('[supervisor] commands sync failed', err.message)
+    }
     return
   }
 

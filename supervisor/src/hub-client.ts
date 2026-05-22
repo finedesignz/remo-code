@@ -2,6 +2,7 @@ import { hostname, platform, release } from 'os'
 import { scanAll } from './repo-scanner'
 import { cloneRepo, pullRepo, checkoutBranch } from './git-ops'
 import { ProcessManager, type ProcState } from './process-manager'
+import { scanAllCommands } from './commands-scanner'
 import type { SupervisorConfig } from './config'
 
 const VERSION = '0.1.0'
@@ -14,6 +15,7 @@ type OutboundMsg =
   | { type: 'repo.scan_result'; req_id: string; repos: any[] }
   | { type: 'repo.op_result'; req_id: string; op: string; ok: boolean; error?: string; data?: any }
   | { type: 'repo.clone_progress'; req_id: string; stage: string; percent?: number }
+  | { type: 'supervisor.commands_sync'; commands: Array<{ kind: 'command' | 'skill'; name: string; description: string | null; source: string; path: string }> }
   | { type: 'pong' }
 
 export class SupervisorClient {
@@ -114,6 +116,14 @@ export class SupervisorClient {
         roots: this.cfg.roots,
         capabilities: ['supervisor', 'agent'],
       })
+      // Sync commands + skills (best-effort, async)
+      try {
+        const cmds = scanAllCommands()
+        this.send({ type: 'supervisor.commands_sync', commands: cmds })
+        this.log('info', `synced ${cmds.length} commands/skills`)
+      } catch (err: any) {
+        this.log('warn', `commands scan failed: ${err.message}`)
+      }
       return
     }
     if (msg.type === 'auth_error') {

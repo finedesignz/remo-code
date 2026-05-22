@@ -14,6 +14,14 @@ interface Props {
   activity: ActivityState
   onPermissionRespond: (requestId: string, approved: boolean) => void
   onQuestionRespond: (requestId: string, answer: string) => void
+  token?: string
+}
+
+interface SlashItem {
+  kind: 'command' | 'skill'
+  name: string
+  description: string | null
+  source: string
 }
 
 const MAX_FILES = 5
@@ -50,9 +58,40 @@ function classifyFile(file: File): 'text' | 'image' | null {
   return null
 }
 
-export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionStatus, activity, onPermissionRespond, onQuestionRespond }: Props) {
+export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionStatus, activity, onPermissionRespond, onQuestionRespond, token }: Props) {
   const [input, setInput] = useState('')
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
+  const [slashItems, setSlashItems] = useState<SlashItem[]>([])
+  const [slashIdx, setSlashIdx] = useState(0)
+  const [slashOpen, setSlashOpen] = useState(false)
+
+  // Load synced commands once per session
+  useEffect(() => {
+    if (!token) return
+    const hubUrl = import.meta.env.VITE_HUB_URL || ''
+    fetch(`${hubUrl}/api/commands`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.ok ? r.json() : { commands: [] })
+      .then((d) => setSlashItems(d.commands || []))
+      .catch(() => {})
+  }, [token])
+
+  const slashMatch = (() => {
+    if (!input.startsWith('/')) return null
+    const m = input.match(/^\/([\w.:-]*)/)
+    if (!m) return null
+    const q = m[1].toLowerCase()
+    const matches = slashItems
+      .filter((c) => c.name.toLowerCase().includes(q))
+      .slice(0, 8)
+    return { query: q, matches }
+  })()
+  const slashVisible = slashOpen && !!slashMatch && slashMatch.matches.length > 0
+
+  function applySlash(item: SlashItem) {
+    setInput(`/${item.name} `)
+    setSlashOpen(false)
+    setSlashIdx(0)
+  }
   const scrollRef = useRef<HTMLDivElement>(null)
   const isNearBottom = useRef(true)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -164,6 +203,16 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (slashVisible) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIdx((i) => Math.min(slashMatch!.matches.length - 1, i + 1)); return }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); setSlashIdx((i) => Math.max(0, i - 1)); return }
+      if (e.key === 'Escape')    { e.preventDefault(); setSlashOpen(false); return }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        e.preventDefault()
+        applySlash(slashMatch!.matches[slashIdx])
+        return
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSubmit(e)
@@ -230,15 +279,42 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
                 <path d="M15.5 9.2L9.2 15.5a3.5 3.5 0 0 1-5-5L10.9 3.8a2.3 2.3 0 1 1 3.3 3.3L7.5 13.8a1.2 1.2 0 0 1-1.7-1.7l6-6" />
               </svg>
             </button>
-            <textarea
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder="Send a message to Claude..."
-              rows={1}
-              className="flex-1 px-4 py-2.5 bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none max-h-32"
-            />
+            <div className="flex-1 relative">
+              {slashVisible && (
+                <div className="absolute bottom-full left-0 right-0 mb-2 max-h-64 overflow-y-auto rounded-lg bg-[var(--bg-secondary)] shadow-xl ring-1 ring-[var(--border-color)] z-10">
+                  {slashMatch!.matches.map((it, i) => (
+                    <button
+                      key={`${it.kind}:${it.name}:${it.source}`}
+                      type="button"
+                      onMouseEnter={() => setSlashIdx(i)}
+                      onClick={() => applySlash(it)}
+                      className={`w-full text-left px-3 py-2 text-sm ${i === slashIdx ? 'bg-indigo-600/20 text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
+                    >
+                      <div className="flex items-baseline gap-2">
+                        <span className="font-mono">/{it.name}</span>
+                        <span className="text-[10px] text-[var(--text-muted)] uppercase">{it.kind}</span>
+                        <span className="text-[10px] text-[var(--text-muted)] truncate">{it.source}</span>
+                      </div>
+                      {it.description && <div className="text-xs text-[var(--text-muted)] truncate">{it.description}</div>}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <textarea
+                value={input}
+                onChange={e => {
+                  setInput(e.target.value)
+                  if (e.target.value.startsWith('/')) { setSlashOpen(true); setSlashIdx(0) }
+                  else setSlashOpen(false)
+                }}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                onFocus={() => { if (input.startsWith('/')) setSlashOpen(true) }}
+                placeholder="Send a message to Claude... (type / for commands)"
+                rows={1}
+                className="w-full px-4 py-2.5 bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none max-h-32"
+              />
+            </div>
             <button
               type="submit"
               disabled={!input.trim() && attachedFiles.length === 0}

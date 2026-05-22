@@ -146,6 +146,33 @@ export async function listInstallations(userId: string) {
   `
 }
 
+// ── Supervisor commands ──────────────────────────────────────────────────────
+
+export async function replaceSupervisorCommands(args: {
+  userId: string
+  supervisorId: string
+  commands: Array<{ kind: string; name: string; description: string | null; source: string; path: string }>
+}) {
+  await sql`DELETE FROM supervisor_commands WHERE supervisor_id = ${args.supervisorId}`
+  if (args.commands.length === 0) return
+  // Bulk insert
+  for (const c of args.commands) {
+    await sql`
+      INSERT INTO supervisor_commands (user_id, supervisor_id, kind, name, description, source, path)
+      VALUES (${args.userId}, ${args.supervisorId}, ${c.kind}, ${c.name}, ${c.description}, ${c.source}, ${c.path})
+    `
+  }
+}
+
+export async function listCommandsForUser(userId: string) {
+  return sql`
+    SELECT id, supervisor_id, kind, name, description, source, path, synced_at
+    FROM supervisor_commands
+    WHERE user_id = ${userId}
+    ORDER BY kind, name
+  `
+}
+
 export async function getInstallation(installationId: number, userId: string) {
   const rows = await sql`
     SELECT * FROM github_installations
