@@ -6,7 +6,7 @@ import type { HubToAgent } from './types'
 import * as ui from './local-ui'
 import { spawnSync } from 'child_process'
 
-const VERSION = '0.3.6'
+const VERSION = '0.3.7'
 
 // --- Pre-flight: check that claude CLI is available ---
 const claudeCheck = spawnSync('claude', ['--version'], {
@@ -103,6 +103,23 @@ setTimeout(() => {
   console.log('[remo-agent] Starting Claude process...')
   runner.start(handleRunnerEvent)
 }, 2_000)
+
+// If --initial-prompt was given, send it once both hub auth + Claude are ready
+if (config.initialPrompt) {
+  const initial = config.initialPrompt
+  const trySend = () => {
+    if (hub.sessionIdValue && runner.isReady) {
+      console.log('[remo-agent] Sending initial prompt...')
+      runner.sendMessage(initial)
+      return true
+    }
+    return false
+  }
+  const check = setInterval(() => {
+    if (trySend()) clearInterval(check)
+  }, 500)
+  setTimeout(() => clearInterval(check), 60_000)
+}
 
 
 // Graceful shutdown

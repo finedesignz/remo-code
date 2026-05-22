@@ -57,11 +57,19 @@ export class ProcessManager {
 
     this.setState('starting', { runId: spec.runId, repoPath: spec.repoPath, restartCount: this.restartCount })
 
-    // Find the claude binary the same way claude-remote-agent does:
-    // We spawn 'claude' directly (assumed in PATH on user's machine).
-    // Claude's stream-json IO is handled by sending an initial user message via stdin.
+    // Spawn the standard remo-code-agent. The agent connects to the hub itself,
+    // registers a session by project_dir, parses claude's stream-json, and relays
+    // activity events. The supervisor only owns process lifecycle (start/stop/restart).
     this.stderrTail = []
-    const cmd = ['claude', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions']
+    const cmd = [
+      'npx', '-y', 'remo-code-agent',
+      '--api-key', spec.apiKey,
+      '--hub-url', spec.hubUrl,
+      '--project-dir', spec.repoPath,
+    ]
+    if (spec.initialPrompt) {
+      cmd.push('--initial-prompt', spec.initialPrompt)
+    }
     const env = { ...process.env }
     delete (env as any).ANTHROPIC_API_KEY
 
@@ -74,22 +82,17 @@ export class ProcessManager {
         env,
       })
     } catch (err: any) {
-      this.cb.onLog('error', `failed to spawn claude: ${err.message}`, spec.runId)
+      this.cb.onLog('error', `failed to spawn agent: ${err.message}`, spec.runId)
       this.setState('crashed', { runId: spec.runId, repoPath: spec.repoPath, lastExit: { code: null, reason: `spawn_error: ${err.message}` } })
       this.scheduleRestart(null, 'spawn_error')
       return
     }
 
     const pid = this.proc.pid
-    this.cb.onLog('info', `claude spawned pid=${pid} in ${spec.repoPath}`, spec.runId)
+    this.cb.onLog('info', `agent spawned pid=${pid} in ${spec.repoPath}`, spec.runId)
     this.setState('running', { runId: spec.runId, repoPath: spec.repoPath, pid, restartCount: this.restartCount })
 
-    // If initial prompt provided, send it once the process is ready.
-    // We treat "ready" as 3s post-spawn (matches agent pattern).
-    if (spec.initialPrompt) {
-      setTimeout(() => this.injectInitialPrompt(spec.initialPrompt!), 4000)
-    }
-
+    this.consumeStdoutAsLogs()
     this.consumeStderr()
 
     this.proc.exited.then((code) => {
@@ -135,18 +138,6 @@ export class ProcessManager {
     }, delay)
   }
 
-  private injectInitialPrompt(prompt: string) {
-    if (!this.proc?.stdin) return
-    const msg = JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } })
-    try {
-      this.proc.stdin.write(msg + '\n')
-      this.proc.stdin.flush?.()
-      this.cb.onLog('info', `injected initial prompt (${prompt.length} chars)`, this.currentRun?.runId)
-    } catch (err: any) {
-      this.cb.onLog('warn', `failed to inject initial prompt: ${err.message}`, this.currentRun?.runId)
-    }
-  }
-
   async stop(reason: string) {
     if (this.state === 'idle') return
     this.userStop = true
@@ -166,6 +157,24 @@ export class ProcessManager {
   private setState(state: ProcState, info: any = {}) {
     this.state = state
     this.cb.onStateChange(state, { restartCount: this.restartCount, ...info })
+  }
+
+  private async consumeStdoutAsLogs() {
+    if (!this.proc?.stdout) return
+    try {
+      const reader = this.proc.stdout.getReader()
+      const decoder = new TextDecoder()
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const text = decoder.decode(value, { stream: true })
+        for (const line of text.split('\n')) {
+          if (line.trim()) {
+            this.cb.onLog('info', `[agent] ${line.slice(0, 500)}`, this.currentRun?.runId)
+          }
+        }
+      }
+    } catch {}
   }
 
   private async consumeStderr() {
