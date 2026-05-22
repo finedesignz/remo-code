@@ -10,7 +10,10 @@ export async function verifyApiKeyWithCapability(keyHash: string, capability: st
     LIMIT 1
   `
   if (!rows[0]) return null
-  const caps: string[] = rows[0].capabilities || []
+  // Legacy-compat: if capabilities is null/empty, grant both agent + supervisor.
+  // This handles keys created before the capabilities column existed.
+  const raw = rows[0].capabilities
+  const caps: string[] = (raw && raw.length > 0) ? raw : ['agent', 'supervisor']
   if (!caps.includes(capability)) return null
   await sql`UPDATE api_keys SET last_used_at = now() WHERE id = ${rows[0].id}`
   return { userId: rows[0].user_id as string, apiKeyId: rows[0].id as string }
