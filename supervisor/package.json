@@ -1,0 +1,28 @@
+{
+  "name": "remo-code-supervisor",
+  "version": "0.1.0",
+  "description": "Local supervisor for Remo Code — manage and remote-launch claude-code sessions in your local repos from the web UI",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "remo-code-supervisor": "src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "bun --watch src/index.ts run",
+    "start": "bun src/index.ts run"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "keywords": ["claude", "claude-code", "remote", "supervisor", "remo-code"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/finedesignz/remo-code.git",
+    "directory": "supervisor"
+  }
+}

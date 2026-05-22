@@ -131,6 +131,20 @@ export function Sidebar({
 
         <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-1">
           <button
+            onClick={() => onNavigate('#/supervisor')}
+            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-[var(--text-muted)] hover:text-indigo-300 transition-colors rounded-lg hover:bg-[var(--bg-tertiary)]/50"
+            title="Supervisor — manage local repos"
+            aria-label="Supervisor"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="3" width="12" height="9" rx="1.5" />
+              <path d="M5 14h6" />
+              <path d="M8 12v2" />
+              <circle cx="5" cy="6" r="0.6" fill="currentColor" />
+              <path d="M7.5 6h4" />
+            </svg>
+          </button>
+          <button
             onClick={() => onNavigate('#/settings')}
             className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-[var(--text-muted)] hover:text-indigo-300 transition-colors rounded-lg hover:bg-[var(--bg-tertiary)]/50"
             title="Settings"

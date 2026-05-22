@@ -4,6 +4,11 @@ import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessi
 import { hashToken } from './channel'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
+import { verifyApiKeyWithCapability, upsertSupervisor, endRun } from '../db/supervisor-dal'
+import {
+  registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
+  updateSupervisorState, heartbeatSupervisor,
+} from './supervisor-registry'
 
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
@@ -11,8 +16,11 @@ const RATE_LIMIT = { max: 120, windowMs: 10_000 }
 
 export interface AgentWsData {
   authenticated: boolean
+  role: 'agent' | 'supervisor'
   sessionId: string | null
+  supervisorId: string | null
   userId: string | null
+  apiKeyId: string | null
   authTimer: ReturnType<typeof setTimeout> | null
   heartbeatTimer: ReturnType<typeof setInterval> | null
   messageCount: number
@@ -22,8 +30,11 @@ export interface AgentWsData {
 export function createAgentWsData(): AgentWsData {
   return {
     authenticated: false,
+    role: 'agent',
     sessionId: null,
+    supervisorId: null,
     userId: null,
+    apiKeyId: null,
     authTimer: null,
     heartbeatTimer: null,
     messageCount: 0,
@@ -42,7 +53,6 @@ export function handleAgentOpen(ws: ServerWebSocket<AgentWsData>) {
 }
 
 export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: string) {
-  // Rate limiting
   const now = Date.now()
   if (now - ws.data.windowStart > RATE_LIMIT.windowMs) {
     ws.data.messageCount = 0
@@ -51,9 +61,7 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
   if (++ws.data.messageCount > RATE_LIMIT.max) return
 
   let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch (e: any) {
+  try { parsed = JSON.parse(raw) } catch (e: any) {
     console.error('[agent] JSON parse error:', e.message)
     return
   }
@@ -65,9 +73,28 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
   // --- Auth ---
   if (msg.type === 'auth') {
     if (ws.data.authenticated) return
-
-    // Hash the raw API key before verifying (same pattern as api-key-middleware)
     const keyHash = await hashToken(msg.api_key)
+
+    if (msg.role === 'supervisor') {
+      const verified = await verifyApiKeyWithCapability(keyHash, 'supervisor')
+      if (!verified) {
+        ws.send(JSON.stringify({ type: 'auth_error', error: 'invalid api key or missing supervisor capability' }))
+        ws.close(4001, 'auth failed')
+        return
+      }
+      ws.data.authenticated = true
+      ws.data.role = 'supervisor'
+      ws.data.userId = verified.userId
+      ws.data.apiKeyId = verified.apiKeyId
+      if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
+      console.log(`[supervisor] authenticated user=${verified.userId}`)
+      ws.send(JSON.stringify({ type: 'auth_ok', role: 'supervisor' }))
+      ws.data.heartbeatTimer = setInterval(() => {
+        try { ws.send(JSON.stringify({ type: 'ping' })) } catch {}
+      }, HEARTBEAT_INTERVAL_MS)
+      return
+    }
+
     const userId = await verifyApiKey(keyHash)
     if (!userId) {
       ws.send(JSON.stringify({ type: 'auth_error', error: 'invalid api key' }))
@@ -76,19 +103,16 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     }
     const projectDir = msg.project_dir.replace(/\\/g, '/')
 
-    // Find existing session for this project or create a new one
     const rawToken = generateToken('remo_')
     const tokenHash = await hashToken(rawToken)
     const session = await findOrCreateAgentSession(userId, projectDir, tokenHash)
 
-    // If reusing an existing session, unregister any stale channel entry
-    // (don't close — the old WS may already be dead, and closing triggers
-    // a reconnect loop if the agent is the same process reconnecting)
     if (!session.created) {
       unregisterChannel(session.id)
     }
 
     ws.data.authenticated = true
+    ws.data.role = 'agent'
     ws.data.sessionId = session.id
     ws.data.userId = userId
     if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
@@ -99,12 +123,10 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
     ws.send(JSON.stringify({ type: 'auth_ok', session_id: session.id }))
 
-    // Start heartbeat
     ws.data.heartbeatTimer = setInterval(() => {
       try { ws.send(JSON.stringify({ type: 'ping' })) } catch {}
     }, HEARTBEAT_INTERVAL_MS)
 
-    // Notify browser clients of new session
     broadcastToUser(userId, { type: 'session_list', sessions: await listSessionsForUser(userId) })
     broadcastToSubscribers(session.id, {
       type: 'session_status',
@@ -114,20 +136,26 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     return
   }
 
-  if (!ws.data.authenticated || !ws.data.sessionId) return
+  if (!ws.data.authenticated) return
+
+  // --- Supervisor messages ---
+  if (ws.data.role === 'supervisor') {
+    await handleSupervisorMessage(ws, msg)
+    return
+  }
+
+  if (!ws.data.sessionId) return
   const { sessionId } = ws.data
 
-  // --- Activity events: relay to subscribed browser clients ---
+  // --- Agent activity events ---
   if (msg.type === 'thinking' || msg.type === 'text_delta' || msg.type === 'tool_use' || msg.type === 'tool_result') {
     broadcastToSubscribers(sessionId, { ...msg })
   }
 
-  // --- Agent log messages: relay to subscribed browser clients ---
   if (msg.type === 'agent_log') {
     broadcastToSubscribers(sessionId, { type: 'agent_log', session_id: sessionId, message: msg.message })
   }
 
-  // --- Permission requests: relay to subscribed browser clients ---
   if (msg.type === 'permission_request') {
     console.log(`[agent] permission_request session=${sessionId} tool=${msg.tool_name} req=${msg.request_id}`)
     broadcastToSubscribers(sessionId, {
@@ -139,7 +167,6 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     })
   }
 
-  // --- User questions: relay to subscribed browser clients ---
   if (msg.type === 'user_question') {
     console.log(`[agent] user_question session=${sessionId} req=${msg.request_id}`)
     broadcastToSubscribers(sessionId, {
@@ -152,7 +179,6 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     })
   }
 
-  // --- Status updates ---
   if (msg.type === 'status') {
     const dbStatus = msg.state === 'idle' ? 'online' : 'thinking'
     await setSessionStatus(sessionId, dbStatus as any)
@@ -160,7 +186,6 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     broadcastToUser(ws.data.userId!, { type: 'session_status', session_id: sessionId, status: dbStatus })
   }
 
-  // --- Final assistant message: persist and broadcast ---
   if (msg.type === 'assistant_message') {
     console.log(`[agent] assistant_message session=${sessionId} len=${msg.content.length}`)
     const message = await insertMessage(sessionId, 'assistant', msg.content)
@@ -171,13 +196,88 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     })
   }
 
-  if (msg.type === 'pong') return // heartbeat response
+  if (msg.type === 'pong') return
+}
+
+async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: any) {
+  const userId = ws.data.userId!
+  const apiKeyId = ws.data.apiKeyId!
+
+  if (msg.type === 'supervisor.hello') {
+    const row = await upsertSupervisor({
+      userId,
+      apiKeyId,
+      hostname: msg.hostname,
+      version: msg.version,
+      os: msg.os,
+      roots: msg.roots,
+    })
+    ws.data.supervisorId = row.id
+    registerSupervisor({ ws, supervisorId: row.id, userId, apiKeyId, roots: msg.roots })
+    console.log(`[supervisor] hello supervisor=${row.id} host=${msg.hostname} roots=${msg.roots.length}`)
+    broadcastToUser(userId, {
+      type: 'supervisor_update',
+      supervisor_id: row.id,
+      state: 'idle',
+      hostname: msg.hostname,
+      version: msg.version,
+      os: msg.os,
+      roots: msg.roots,
+    })
+    return
+  }
+
+  if (!ws.data.supervisorId) return
+  const supervisorId = ws.data.supervisorId
+
+  await heartbeatSupervisor(supervisorId)
+
+  if (msg.type === 'supervisor.state') {
+    await updateSupervisorState(supervisorId, msg.state, msg.run_id ?? null)
+    if (msg.last_exit && msg.run_id) {
+      await endRun(msg.run_id, msg.last_exit.code, msg.last_exit.reason)
+    }
+    return
+  }
+
+  if (msg.type === 'supervisor.log') {
+    broadcastToUser(userId, {
+      type: 'supervisor_log',
+      supervisor_id: supervisorId,
+      level: msg.level,
+      message: msg.message,
+      run_id: msg.run_id,
+      ts: msg.ts || new Date().toISOString(),
+    })
+    return
+  }
+
+  if (msg.type === 'repo.scan_result' || msg.type === 'repo.op_result') {
+    resolveRequest(supervisorId, msg.req_id, msg)
+    return
+  }
+
+  if (msg.type === 'repo.clone_progress') {
+    broadcastToUser(userId, {
+      type: 'repo_clone_progress',
+      supervisor_id: supervisorId,
+      req_id: msg.req_id,
+      stage: msg.stage,
+      percent: msg.percent,
+    })
+    return
+  }
 }
 
 export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
-  console.log(`[agent] closed session=${ws.data.sessionId}`)
+  console.log(`[agent] closed role=${ws.data.role} session=${ws.data.sessionId} supervisor=${ws.data.supervisorId}`)
   if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
   if (ws.data.heartbeatTimer) clearInterval(ws.data.heartbeatTimer)
+
+  if (ws.data.role === 'supervisor' && ws.data.supervisorId) {
+    unregisterSupervisor(ws.data.supervisorId)
+    return
+  }
 
   if (ws.data.sessionId) {
     unregisterChannel(ws.data.sessionId)
@@ -195,7 +295,6 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
         session_id: ws.data.sessionId,
         status: 'offline',
       })
-      // Push updated session list to user's browser clients
       broadcastToUser(ws.data.userId, {
         type: 'session_list',
         sessions: await listSessionsForUser(ws.data.userId),
@@ -204,7 +303,6 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
   }
 }
 
-// Helper: list sessions for a user via DAL
 async function listSessionsForUser(userId: string) {
   return listSessions(userId)
 }

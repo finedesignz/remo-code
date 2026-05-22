@@ -5,13 +5,15 @@ import { AuthForm } from './components/AuthForm'
 import { SetupForm } from './components/SetupForm'
 import { Layout } from './components/Layout'
 import { SettingsPage } from './components/SettingsPage'
+import { SupervisorPage } from './components/SupervisorPage'
 import type { AuthUser } from './lib/auth.ts'
 
-type Route = 'chat' | 'settings'
+type Route = 'chat' | 'settings' | 'supervisor'
 
 function getRoute(): Route {
   const hash = window.location.hash
   if (hash === '#/settings') return 'settings'
+  if (hash.startsWith('#/supervisor')) return 'supervisor'
   return 'chat'
 }
 
@@ -78,6 +80,10 @@ export default function App() {
           onUpdateProfile={updateProfile}
           onBack={goToChat}
         />
+      )}
+
+      {route === 'supervisor' && (
+        <SupervisorPage token={token} onBack={goToChat} />
       )}
 
       {route === 'chat' && (

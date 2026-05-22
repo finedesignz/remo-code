@@ -9,6 +9,9 @@ import { plugin } from './api/plugin'
 import { setup } from './api/setup'
 import { authRouter } from './api/auth'
 import { profile } from './api/profile'
+import { supervisors as supervisorsApi } from './api/supervisors'
+import { github as githubApi } from './api/github'
+import { runMigrations } from './db/migrate'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit } from './middleware/rate-limit'
 import {
@@ -78,6 +81,8 @@ app.route('/api/sessions', sessions)
 app.route('/api/api-keys', apiKeys)
 app.route('/api/messages', messages)
 app.route('/api/profile', profile)
+app.route('/api/supervisors', supervisorsApi)
+app.route('/api/github', githubApi)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
@@ -180,11 +185,16 @@ const server = Bun.serve({
   },
 })
 
-// On startup, mark all sessions as offline (in-memory registries are empty after restart)
+// On startup: apply migrations, then mark all sessions as offline
 import { setOfflineStaleAgentSessions } from './db/dal.ts'
-setOfflineStaleAgentSessions().then(() => {
-  console.log('[startup] reset all session statuses to offline')
-})
+runMigrations()
+  .then(() => setOfflineStaleAgentSessions())
+  .then(() => {
+    console.log('[startup] reset all session statuses to offline')
+  })
+  .catch((err) => {
+    console.error('[startup] migration/init error:', err.message)
+  })
 
 console.log(`Hub server running on http://localhost:${server.port}`)
 console.log(`Serving web UI from: ${webDist}`)

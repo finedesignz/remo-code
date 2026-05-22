@@ -11,8 +11,9 @@ export interface JwtPayload {
   role: string;
 }
 
-export function signJwt(payload: JwtPayload): string {
-  return jwt.sign(payload, config.jwtSecret, { expiresIn: "30d" });
+export function signJwt(payload: JwtPayload, expiresInSeconds?: number): string {
+  const expiresIn = expiresInSeconds ? `${expiresInSeconds}s` : "30d";
+  return jwt.sign(payload, config.jwtSecret, { expiresIn });
 }
 
 export function verifyJwt(token: string): JwtPayload {

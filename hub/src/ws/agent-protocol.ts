@@ -1,4 +1,8 @@
 import { z } from 'zod'
+import {
+  SupervisorHello, SupervisorState, SupervisorLog,
+  RepoScanResult, RepoCloneProgress, RepoOpResult,
+} from './supervisor-protocol'
 
 // -- Agent -> Hub (inbound messages from the local streaming agent) --
 
@@ -7,6 +11,7 @@ export const AgentAuth = z.object({
   api_key: z.string().min(1),
   project_dir: z.string().min(1),
   hostname: z.string().optional(),
+  role: z.enum(['agent', 'supervisor']).optional(),
 })
 
 export const AgentThinking = z.object({
@@ -87,6 +92,12 @@ export const AgentInbound = z.discriminatedUnion('type', [
   AgentUserQuestion,
   AgentLog,
   z.object({ type: z.literal('pong') }),
+  SupervisorHello,
+  SupervisorState,
+  SupervisorLog,
+  RepoScanResult,
+  RepoCloneProgress,
+  RepoOpResult,
 ])
 
 export type AgentInboundType = z.infer<typeof AgentInbound>
