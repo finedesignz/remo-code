@@ -151,7 +151,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           {info && <div className="p-3 bg-emerald-900/30 border border-emerald-800/60 rounded-lg text-sm text-emerald-200">{info}</div>}
 
           {/* Supervisor card */}
-          <div className="bg-[var(--bg-secondary)]/60 border border-[var(--border-color)] rounded-xl p-5">
+          <div className="rounded-xl p-5">
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">My machines</h3>
             {supervisors.length === 0 ? (
               <div className="text-sm text-[var(--text-muted)]">
@@ -190,7 +190,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           </div>
 
           {/* GitHub */}
-          <div className="bg-[var(--bg-secondary)]/60 border border-[var(--border-color)] rounded-xl p-5">
+          <div className="rounded-xl p-5">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-[var(--text-primary)]">GitHub</h3>
               {!githubConfigured ? (
@@ -207,7 +207,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           </div>
 
           {/* Repo list */}
-          <div className="bg-[var(--bg-secondary)]/60 border border-[var(--border-color)] rounded-xl p-5">
+          <div className="rounded-xl p-5">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold text-[var(--text-primary)]">Repos</h3>
               <div className="flex items-center gap-2">
