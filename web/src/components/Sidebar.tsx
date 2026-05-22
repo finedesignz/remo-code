@@ -129,55 +129,20 @@ export function Sidebar({
           </button>
         </div>
 
-        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-1">
-          <button
-            onClick={() => onNavigate('#/supervisor')}
-            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-[var(--text-muted)] hover:text-indigo-300 transition-colors rounded-lg hover:bg-[var(--bg-tertiary)]/50"
-            title="Supervisor — manage local repos"
-            aria-label="Supervisor"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="2" y="3" width="12" height="9" rx="1.5" />
-              <path d="M5 14h6" />
-              <path d="M8 12v2" />
-              <circle cx="5" cy="6" r="0.6" fill="currentColor" />
-              <path d="M7.5 6h4" />
-            </svg>
-          </button>
+        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-2">
           <button
             onClick={() => onNavigate('#/settings')}
-            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-[var(--text-muted)] hover:text-indigo-300 transition-colors rounded-lg hover:bg-[var(--bg-tertiary)]/50"
-            title="Settings"
-            aria-label="Settings"
+            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
           >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="8" cy="8" r="2.5" />
-              <path d="M13.5 8a5.5 5.5 0 0 0-.1-.9l1.4-1.1-1-1.7-1.7.5a5.5 5.5 0 0 0-1.5-.9L10.2 2H8.2l-.4 1.9a5.5 5.5 0 0 0-1.5.9l-1.7-.5-1 1.7 1.4 1.1A5.5 5.5 0 0 0 5 8c0 .3 0 .6.1.9L3.6 10l1 1.7 1.7-.5c.4.4.9.7 1.5.9l.4 1.9h2l.4-1.9c.6-.2 1.1-.5 1.5-.9l1.7.5 1-1.7-1.4-1.1c0-.3.1-.6.1-.9z" />
-            </svg>
+            Settings
           </button>
-          <button
-            onClick={onShowApiKey}
-            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-[var(--text-muted)] hover:text-indigo-300 transition-colors rounded-lg hover:bg-[var(--bg-tertiary)]/50"
-            title="API Key"
-            aria-label="API Key"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-              <path d="M10.5 2.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5z" />
-              <path d="M8.5 7l-6.5 6.5v2h2v-2h2v-2h2l1-1" />
-            </svg>
-          </button>
-          <div className="flex-1" />
           <button
             onClick={signOut}
-            className="p-2.5 min-w-[44px] min-h-[44px] flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors rounded-lg hover:bg-[var(--bg-tertiary)]/50"
+            className="px-3 py-2 text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors"
             title="Sign out"
             aria-label="Sign out"
           >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M6 2H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3" />
-              <path d="M10 12l4-4-4-4" />
-              <path d="M14 8H6" />
-            </svg>
+            Sign out
           </button>
         </div>
       </div>

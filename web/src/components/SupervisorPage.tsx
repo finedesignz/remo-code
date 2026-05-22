@@ -2,7 +2,8 @@ import { useEffect, useState, useCallback } from 'react'
 
 interface Props {
   token: string
-  onBack: () => void
+  onBack?: () => void
+  embedded?: boolean
 }
 
 interface Supervisor {
@@ -50,7 +51,7 @@ function apiFetch(token: string, path: string, init?: RequestInit) {
   })
 }
 
-export function SupervisorPage({ token, onBack }: Props) {
+export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const [supervisors, setSupervisors] = useState<Supervisor[]>([])
   const [activeSupervisorId, setActiveSupervisorId] = useState<string | null>(null)
   const [localRepos, setLocalRepos] = useState<LocalRepo[]>([])
@@ -143,19 +144,9 @@ export function SupervisorPage({ token, onBack }: Props) {
     window.location.href = data.url
   }
 
-  return (
-    <div className="flex flex-col h-full bg-[var(--bg-primary)]">
-      <header className="flex items-center gap-3 px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/60 backdrop-blur-sm shrink-0">
-        <button onClick={onBack} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors" aria-label="Back to chat">
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 4l-6 6 6 6" />
-          </svg>
-        </button>
-        <h2 className="text-sm font-semibold text-[var(--text-secondary)]">Supervisor</h2>
-      </header>
-
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-3xl mx-auto p-4 sm:p-6 space-y-5">
+  const body = (
+    <div className="space-y-5">
+          {/* removed page chrome — embedded inside Settings */}
           {error && <div className="p-3 bg-red-900/30 border border-red-800/60 rounded-lg text-sm text-red-200">{error}</div>}
           {info && <div className="p-3 bg-emerald-900/30 border border-emerald-800/60 rounded-lg text-sm text-emerald-200">{info}</div>}
 
@@ -272,8 +263,6 @@ export function SupervisorPage({ token, onBack }: Props) {
               </div>
             )}
           </div>
-        </div>
-      </div>
 
       {startTarget && activeSupervisor && (
         <StartDialog
@@ -285,6 +274,28 @@ export function SupervisorPage({ token, onBack }: Props) {
           onError={(msg) => { setError(msg); setTimeout(() => setError(null), 6000) }}
         />
       )}
+    </div>
+  )
+
+  if (embedded) return body
+
+  return (
+    <div className="flex flex-col h-full bg-[var(--bg-primary)]">
+      <header className="flex items-center gap-3 px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/60 backdrop-blur-sm shrink-0">
+        {onBack && (
+          <button onClick={onBack} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors" aria-label="Back to chat">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 4l-6 6 6 6" />
+            </svg>
+          </button>
+        )}
+        <h2 className="text-sm font-semibold text-[var(--text-secondary)]">Supervisor</h2>
+      </header>
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-3xl mx-auto p-4 sm:p-6">
+          {body}
+        </div>
+      </div>
     </div>
   )
 }

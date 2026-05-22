@@ -16,6 +16,9 @@ export function ConnectModal({ apiKey, onGenerateKey, onClose }: Props) {
   const agentCmd = displayKey
     ? `npx remo-code-agent --api-key ${displayKey} --local-output`
     : 'npx remo-code-agent --api-key YOUR_API_KEY --local-output'
+  const aliasCmd = displayKey
+    ? `alias claude-remote='npx remo-code-agent --api-key ${displayKey} --local-output'`
+    : `alias claude-remote='npx remo-code-agent --api-key YOUR_API_KEY --local-output'`
 
   const copyText = (text: string) => {
     navigator.clipboard.writeText(text)
@@ -75,6 +78,27 @@ export function ConnectModal({ apiKey, onGenerateKey, onClose }: Props) {
               </button>
             </div>
           )}
+
+          {/* Shell alias tip */}
+          <div className="mb-4 p-3 bg-[var(--bg-tertiary)]/30 border border-[var(--border-color)] rounded-lg">
+            <p className="text-xs text-[var(--text-muted)] mb-2">
+              Tip: add a shell alias so you can just run <code className="text-[var(--text-secondary)]">claude-remote</code> from any project:
+            </p>
+            <div className="relative group">
+              <pre className="bg-[var(--code-bg)] rounded-lg p-3 text-xs text-emerald-300 font-mono overflow-x-auto whitespace-pre">{aliasCmd}</pre>
+              {displayKey && (
+                <button
+                  onClick={() => copyText(aliasCmd)}
+                  className="absolute top-2 right-2 px-2 py-1 text-xs bg-[var(--bg-tertiary)] hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
+                >
+                  Copy
+                </button>
+              )}
+            </div>
+            <p className="text-xs text-[var(--text-muted)] mt-2">
+              Add to <code className="text-[var(--text-secondary)]">~/.bashrc</code> or <code className="text-[var(--text-secondary)]">~/.zshrc</code>, reload your shell, then run <code className="text-[var(--text-secondary)]">claude-remote</code>.
+            </p>
+          </div>
 
           {/* Hub URL info */}
           <div className="mb-4 p-3 bg-[var(--bg-tertiary)]/30 border border-[var(--border-color)] rounded-lg">

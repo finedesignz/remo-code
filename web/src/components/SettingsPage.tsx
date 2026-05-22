@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { Profile } from '../hooks/useProfile'
 import { useApiKey } from '../hooks/useApiKey'
+import { SupervisorPage } from './SupervisorPage'
 
 interface Props {
   token: string
@@ -9,15 +10,29 @@ interface Props {
   onBack: () => void
 }
 
-type Tab = 'account' | 'apikey'
+type Tab = 'account' | 'supervisor' | 'apikey'
+
+function readTabFromHash(): Tab {
+  const m = window.location.hash.match(/[?&]tab=([a-z]+)/)
+  const v = m?.[1] as Tab | undefined
+  if (v === 'account' || v === 'supervisor' || v === 'apikey') return v
+  return 'supervisor'
+}
 
 export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props) {
-  const [tab, setTab] = useState<Tab>('account')
+  const [tab, setTab] = useState<Tab>(readTabFromHash)
   const [displayName, setDisplayName] = useState(profile.display_name || '')
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
 
+  // Keep URL hash in sync with active tab (so refresh preserves it)
+  useEffect(() => {
+    const next = `#/settings?tab=${tab}`
+    if (window.location.hash !== next) window.history.replaceState(null, '', next)
+  }, [tab])
+
   const tabs: { id: Tab; label: string }[] = [
+    { id: 'supervisor', label: 'Supervisor' },
     { id: 'account', label: 'Account' },
     { id: 'apikey', label: 'API Key' },
   ]
@@ -99,6 +114,11 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
                 </div>
               </div>
             </div>
+          )}
+
+          {/* Supervisor Tab — handles GitHub connect + repo list inline */}
+          {tab === 'supervisor' && (
+            <SupervisorPage token={token} embedded />
           )}
 
           {/* API Key Tab */}
