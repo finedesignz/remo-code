@@ -17,10 +17,17 @@ export async function runMigrations() {
     return
   }
   const ddl = readFileSync(path, 'utf-8')
-  const statements = ddl
+  // Strip line comments first, then split on semicolons.
+  // A previous bug: filtering statements that START WITH `--` dropped statements
+  // preceded by a comment block (e.g. ALTER TABLE preceded by "-- Migration ...").
+  const stripped = ddl
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('--'))
+    .join('\n')
+  const statements = stripped
     .split(/;\s*\n/)
     .map((s) => s.trim())
-    .filter((s) => s.length > 0 && !s.startsWith('--'))
+    .filter((s) => s.length > 0)
 
   let applied = 0
   for (const stmt of statements) {
