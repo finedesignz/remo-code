@@ -214,6 +214,9 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     })
     ws.data.supervisorId = row.id
     registerSupervisor({ ws, supervisorId: row.id, userId, apiKeyId, roots: msg.roots })
+    // Reset state to idle on (re)connect — any previously running session was
+    // owned by the supervisor process which has since restarted.
+    await updateSupervisorState(row.id, 'idle', null)
     console.log(`[supervisor] hello supervisor=${row.id} host=${msg.hostname} roots=${msg.roots.length}`)
     broadcastToUser(userId, {
       type: 'supervisor_update',
