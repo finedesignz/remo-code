@@ -42,7 +42,7 @@ supervisors.post('/:id/scan', async (c) => {
 })
 
 const CloneBody = z.object({
-  installation_id: z.number(),
+  installation_id: z.coerce.number(), // BIGINT from postgres comes back as string
   owner: z.string().min(1),
   repo: z.string().min(1),
   target_dir_name: z.string().min(1).max(120).regex(/^[A-Za-z0-9._-]+$/),
@@ -52,8 +52,9 @@ supervisors.post('/:id/clone', async (c) => {
   if (!isGitHubAppConfigured()) return c.json({ error: 'github app not configured' }, 503)
   const a = await authorizeSupervisor(c)
   if ('error' in a) return a.error
-  const body = CloneBody.safeParse(await c.req.json().catch(() => ({})))
-  if (!body.success) return c.json({ error: 'bad body' }, 400)
+  const raw = await c.req.json().catch(() => ({}))
+  const body = CloneBody.safeParse(raw)
+  if (!body.success) return c.json({ error: 'bad body', details: body.error.flatten(), received: raw }, 400)
 
   // Use first root as clone parent
   const root = (a.row.roots && a.row.roots[0]) as string | undefined

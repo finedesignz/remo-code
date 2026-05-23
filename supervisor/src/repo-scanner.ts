@@ -34,29 +34,9 @@ function readBranch(repoPath: string): string | null {
   } catch { return null }
 }
 
-function gitSync(args: string[], cwd: string, timeoutMs = 5000): string | null {
-  try {
-    const result = Bun.spawnSync(['git', ...args], {
-      cwd,
-      stdout: 'pipe',
-      stderr: 'ignore',
-      timeout: timeoutMs,
-    })
-    if (result.exitCode !== 0) return null
-    return new TextDecoder().decode(result.stdout)
-  } catch { return null }
-}
-
-function isDirty(repoPath: string): boolean {
-  const out = gitSync(['status', '--porcelain'], repoPath)
-  if (out == null) return false
-  return out.trim().length > 0
-}
-
-function lastCommit(repoPath: string): string | null {
-  const out = gitSync(['log', '-1', '--pretty=%h%x09%s'], repoPath)
-  return out?.trim() || null
-}
+// Note: deliberately avoiding `git status` / `git log` here — spawning git for every repo
+// makes scan O(N) slow on Windows (~200ms per spawn). dirty/last_commit can be loaded
+// lazily on demand if needed; for the picker we only need name, remote, branch.
 
 export function scanRoot(root: string): ScannedRepo[] {
   const out: ScannedRepo[] = []
@@ -73,8 +53,8 @@ export function scanRoot(root: string): ScannedRepo[] {
       name: basename(path),
       remote: readRemote(path),
       branch: readBranch(path),
-      dirty: isDirty(path),
-      last_commit: lastCommit(path),
+      dirty: false,
+      last_commit: null,
     })
   }
   return out
