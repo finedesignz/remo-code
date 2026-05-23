@@ -54,6 +54,7 @@ function apiFetch(token: string, path: string, init?: RequestInit) {
 export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const [supervisors, setSupervisors] = useState<Supervisor[]>([])
   const [activeSupervisorId, setActiveSupervisorId] = useState<string | null>(null)
+  const [activeRuns, setActiveRuns] = useState<any[]>([])
   const [localRepos, setLocalRepos] = useState<LocalRepo[]>([])
   const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([])
   const [githubConfigured, setGithubConfigured] = useState(false)
@@ -134,8 +135,27 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const stopActive = async () => {
     if (!activeSupervisorId) return
     await apiFetch(token, `/api/supervisors/${activeSupervisorId}/stop`, { method: 'POST', body: JSON.stringify({ reason: 'user' }) })
-    loadSupervisors()
+    loadSupervisors(); loadActiveRuns()
   }
+  const stopRun = async (runId: string) => {
+    if (!activeSupervisorId) return
+    await apiFetch(token, `/api/supervisors/${activeSupervisorId}/stop`, { method: 'POST', body: JSON.stringify({ reason: 'user', run_id: runId }) })
+    loadActiveRuns()
+  }
+  const loadActiveRuns = useCallback(async () => {
+    if (!activeSupervisorId) { setActiveRuns([]); return }
+    const r = await apiFetch(token, `/api/supervisors/${activeSupervisorId}/active`)
+    if (r.ok) {
+      const d = await r.json()
+      setActiveRuns(d.runs || [])
+    }
+  }, [token, activeSupervisorId])
+
+  useEffect(() => { loadActiveRuns() }, [loadActiveRuns])
+  useEffect(() => {
+    const t = setInterval(loadActiveRuns, 5_000)
+    return () => clearInterval(t)
+  }, [loadActiveRuns])
 
   const connectGitHub = async () => {
     const r = await apiFetch(token, '/api/github/install_url')
@@ -149,12 +169,20 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           {/* removed page chrome — embedded inside Settings */}
           {error && <div className="p-3 bg-red-900/30 rounded-lg text-sm text-red-200">{error}</div>}
           {info && <div className="p-3 bg-emerald-900/30 rounded-lg text-sm text-emerald-200">{info}</div>}
-          {activeSupervisor?.state === 'running' && (
-            <div className="p-3 bg-amber-900/20 rounded-lg flex items-center justify-between gap-3">
-              <div className="text-sm text-amber-200">
-                Currently running. Stop the active session to start another.
+          {activeRuns.length > 0 && (
+            <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-4">
+              <div className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider mb-2">Active sessions ({activeRuns.length})</div>
+              <div className="space-y-1">
+                {activeRuns.map((r) => (
+                  <div key={r.id} className="flex items-center justify-between px-3 py-2 rounded hover:bg-[var(--bg-tertiary)]/40">
+                    <div className="min-w-0">
+                      <div className="text-sm text-[var(--text-primary)] truncate">{r.repo_path.split('/').pop()}</div>
+                      <div className="text-xs text-[var(--text-muted)] truncate">{r.branch || 'default branch'} · started {new Date(r.started_at).toLocaleTimeString()}{r.restart_count > 0 && <> · {r.restart_count} restart{r.restart_count > 1 ? 's' : ''}</>}</div>
+                    </div>
+                    <button onClick={() => stopRun(r.id)} className="px-3 py-1 text-xs bg-red-600/80 hover:bg-red-500 rounded text-white shrink-0">Stop</button>
+                  </div>
+                ))}
               </div>
-              <button onClick={stopActive} className="px-3 py-1.5 text-xs bg-red-600/80 hover:bg-red-500 rounded text-white shrink-0">Stop</button>
             </div>
           )}
 
@@ -251,7 +279,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                       {it.local ? (
                         <button
                           onClick={() => setStartTarget({ kind: 'local', repo: it.local! })}
-                          disabled={!activeSupervisor?.online || activeSupervisor?.state !== 'idle'}
+                          disabled={!activeSupervisor?.online}
                           className="px-2 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded text-white disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           Start
@@ -259,7 +287,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                       ) : it.github ? (
                         <button
                           onClick={() => setStartTarget({ kind: 'github', repo: it.github! })}
-                          disabled={!activeSupervisor?.online || activeSupervisor?.state !== 'idle'}
+                          disabled={!activeSupervisor?.online}
                           className="px-2 py-1 text-xs bg-indigo-600/70 hover:bg-indigo-500 rounded text-white disabled:opacity-40"
                         >
                           Clone & Start

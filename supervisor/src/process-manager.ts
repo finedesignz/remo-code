@@ -20,47 +20,74 @@ const BACKOFF_SCHEDULE = [1000, 2000, 4000, 8000, 16000, 30000]
 const CIRCUIT_WINDOW_MS = 10 * 60_000
 const CIRCUIT_THRESHOLD = 5
 
+interface RunInstance {
+  spec: RunSpec
+  proc: Subprocess | null
+  state: ProcState
+  restartCount: number
+  recentCrashes: number[]
+  restartTimer: ReturnType<typeof setTimeout> | null
+  userStop: boolean
+  stderrTail: string[]
+}
+
+/** Manages N concurrent claude-agent child processes, one per run_id. */
 export class ProcessManager {
-  private state: ProcState = 'idle'
-  private proc: Subprocess | null = null
-  private currentRun: RunSpec | null = null
-  private restartCount = 0
-  private recentCrashes: number[] = []
-  private restartTimer: ReturnType<typeof setTimeout> | null = null
-  private userStop = false
+  private runs = new Map<string, RunInstance>()
   private cb: ProcessManagerCallbacks
-  private stderrTail: string[] = []
 
   constructor(cb: ProcessManagerCallbacks) {
     this.cb = cb
   }
 
-  get currentState() { return this.state }
-  get currentRunId() { return this.currentRun?.runId ?? null }
-  get currentRepoPath() { return this.currentRun?.repoPath ?? null }
-
-  async start(spec: RunSpec) {
-    if (this.state !== 'idle') {
-      this.cb.onLog('warn', `Refusing start: current state=${this.state}`, spec.runId)
-      return
+  /** Aggregate supervisor state — 'running' if any run is active, else 'idle'. */
+  get currentState(): ProcState {
+    for (const r of this.runs.values()) {
+      if (r.state === 'running' || r.state === 'starting' || r.state === 'crashed') return 'running'
     }
-    this.currentRun = spec
-    this.restartCount = 0
-    this.recentCrashes = []
-    this.userStop = false
-    this.spawnInner()
+    return 'idle'
+  }
+  /** First active run_id, if any. */
+  get currentRunId(): string | null {
+    for (const r of this.runs.values()) {
+      if (r.state !== 'idle' && r.state !== 'stopped') return r.spec.runId
+    }
+    return null
+  }
+  get currentRepoPath(): string | null {
+    const id = this.currentRunId
+    return id ? this.runs.get(id)!.spec.repoPath : null
+  }
+  get activeRuns(): Array<{ runId: string; repoPath: string; state: ProcState; pid: number | null }> {
+    return Array.from(this.runs.values())
+      .filter((r) => r.state !== 'idle' && r.state !== 'stopped')
+      .map((r) => ({ runId: r.spec.runId, repoPath: r.spec.repoPath, state: r.state, pid: r.proc?.pid ?? null }))
   }
 
-  private spawnInner() {
-    if (!this.currentRun) return
-    const spec = this.currentRun
+  async start(spec: RunSpec) {
+    if (this.runs.has(spec.runId)) {
+      this.cb.onLog('warn', `Refusing duplicate start for run_id`, spec.runId)
+      return
+    }
+    const run: RunInstance = {
+      spec,
+      proc: null,
+      state: 'idle',
+      restartCount: 0,
+      recentCrashes: [],
+      restartTimer: null,
+      userStop: false,
+      stderrTail: [],
+    }
+    this.runs.set(spec.runId, run)
+    this.spawn(run)
+  }
 
-    this.setState('starting', { runId: spec.runId, repoPath: spec.repoPath, restartCount: this.restartCount })
+  private spawn(run: RunInstance) {
+    const spec = run.spec
+    this.setState(run, 'starting', { runId: spec.runId, repoPath: spec.repoPath })
 
-    // Spawn the standard remo-code-agent. The agent connects to the hub itself,
-    // registers a session by project_dir, parses claude's stream-json, and relays
-    // activity events. The supervisor only owns process lifecycle (start/stop/restart).
-    this.stderrTail = []
+    run.stderrTail = []
     const cmd = [
       'npx', '-y', 'remo-code-agent',
       '--api-key', spec.apiKey,
@@ -74,7 +101,7 @@ export class ProcessManager {
     delete (env as any).ANTHROPIC_API_KEY
 
     try {
-      this.proc = Bun.spawn(cmd, {
+      run.proc = Bun.spawn(cmd, {
         cwd: spec.repoPath,
         stdin: 'pipe',
         stdout: 'pipe',
@@ -83,86 +110,90 @@ export class ProcessManager {
       })
     } catch (err: any) {
       this.cb.onLog('error', `failed to spawn agent: ${err.message}`, spec.runId)
-      this.setState('crashed', { runId: spec.runId, repoPath: spec.repoPath, lastExit: { code: null, reason: `spawn_error: ${err.message}` } })
-      this.scheduleRestart(null, 'spawn_error')
+      this.setState(run, 'crashed', { runId: spec.runId, repoPath: spec.repoPath, lastExit: { code: null, reason: `spawn_error: ${err.message}` } })
+      this.scheduleRestart(run, null, 'spawn_error')
       return
     }
 
-    const pid = this.proc.pid
+    const pid = run.proc.pid
     this.cb.onLog('info', `agent spawned pid=${pid} in ${spec.repoPath}`, spec.runId)
-    this.setState('running', { runId: spec.runId, repoPath: spec.repoPath, pid, restartCount: this.restartCount })
+    this.setState(run, 'running', { runId: spec.runId, repoPath: spec.repoPath, pid })
 
-    this.consumeStdoutAsLogs()
-    this.consumeStderr()
+    this.consumeStdout(run)
+    this.consumeStderr(run)
 
-    this.proc.exited.then((code) => {
-      const reason = this.userStop ? 'user' : code === 0 ? 'clean' : 'crash'
-      const tail = this.stderrTail.slice(-40).join('\n')
-      this.cb.onLog(reason === 'crash' ? 'error' : 'info', `claude exited code=${code} reason=${reason}`, spec.runId)
+    run.proc.exited.then((code) => {
+      const reason = run.userStop ? 'user' : code === 0 ? 'clean' : 'crash'
+      const tail = run.stderrTail.slice(-40).join('\n')
+      this.cb.onLog(reason === 'crash' ? 'error' : 'info', `agent exited code=${code} reason=${reason}`, spec.runId)
 
-      if (this.userStop) {
-        this.setState('idle', { runId: spec.runId, lastExit: { code: code ?? null, reason, stderrTail: tail } })
-        this.currentRun = null
+      if (run.userStop) {
+        this.setState(run, 'idle', { runId: spec.runId, lastExit: { code: code ?? null, reason, stderrTail: tail } })
+        this.runs.delete(spec.runId)
         return
       }
-
       if (reason === 'clean') {
-        this.setState('idle', { runId: spec.runId, lastExit: { code: code ?? null, reason, stderrTail: tail } })
-        this.currentRun = null
+        this.setState(run, 'idle', { runId: spec.runId, lastExit: { code: code ?? null, reason, stderrTail: tail } })
+        this.runs.delete(spec.runId)
         return
       }
-
       // crash
-      this.recentCrashes.push(Date.now())
-      this.recentCrashes = this.recentCrashes.filter((t) => Date.now() - t < CIRCUIT_WINDOW_MS)
-      if (this.recentCrashes.length >= CIRCUIT_THRESHOLD) {
-        this.cb.onLog('error', `circuit breaker open: ${this.recentCrashes.length} crashes in ${CIRCUIT_WINDOW_MS / 60_000}min — stopping`, spec.runId)
-        this.setState('stopped', { runId: spec.runId, lastExit: { code: code ?? null, reason: 'circuit_open', stderrTail: tail } })
-        this.currentRun = null
+      run.recentCrashes.push(Date.now())
+      run.recentCrashes = run.recentCrashes.filter((t) => Date.now() - t < CIRCUIT_WINDOW_MS)
+      if (run.recentCrashes.length >= CIRCUIT_THRESHOLD) {
+        this.cb.onLog('error', `circuit breaker open — stopping`, spec.runId)
+        this.setState(run, 'stopped', { runId: spec.runId, lastExit: { code: code ?? null, reason: 'circuit_open', stderrTail: tail } })
+        this.runs.delete(spec.runId)
         return
       }
-      this.scheduleRestart(code ?? null, 'crash', tail)
+      this.scheduleRestart(run, code ?? null, 'crash', tail)
     })
   }
 
-  private scheduleRestart(exitCode: number | null, reason: string, stderrTail = '') {
-    if (!this.currentRun) return
-    const delay = BACKOFF_SCHEDULE[Math.min(this.restartCount, BACKOFF_SCHEDULE.length - 1)]
-    this.restartCount++
-    this.cb.onLog('warn', `restarting in ${delay}ms (attempt ${this.restartCount})`, this.currentRun.runId)
-    this.setState('crashed', { runId: this.currentRun.runId, lastExit: { code: exitCode, reason, stderrTail } })
-    this.restartTimer = setTimeout(() => {
-      this.restartTimer = null
-      if (!this.currentRun) return
-      this.spawnInner()
+  private scheduleRestart(run: RunInstance, exitCode: number | null, reason: string, stderrTail = '') {
+    const delay = BACKOFF_SCHEDULE[Math.min(run.restartCount, BACKOFF_SCHEDULE.length - 1)]
+    run.restartCount++
+    this.cb.onLog('warn', `restarting in ${delay}ms (attempt ${run.restartCount})`, run.spec.runId)
+    this.setState(run, 'crashed', { runId: run.spec.runId, lastExit: { code: exitCode, reason, stderrTail } })
+    run.restartTimer = setTimeout(() => {
+      run.restartTimer = null
+      if (!this.runs.has(run.spec.runId)) return
+      this.spawn(run)
     }, delay)
   }
 
-  async stop(reason: string) {
-    if (this.state === 'idle') return
-    this.userStop = true
-    if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null }
-    this.setState('stopping', { runId: this.currentRun?.runId })
-    if (this.proc) {
-      try { this.proc.kill('SIGINT') } catch {}
-      // SIGKILL after 10s
+  async stop(runId: string, _reason: string) {
+    const run = this.runs.get(runId)
+    if (!run) return
+    run.userStop = true
+    if (run.restartTimer) { clearTimeout(run.restartTimer); run.restartTimer = null }
+    this.setState(run, 'stopping', { runId })
+    if (run.proc) {
+      try { run.proc.kill('SIGINT') } catch {}
       setTimeout(() => {
-        if (this.proc) {
-          try { this.proc.kill('SIGKILL') } catch {}
+        if (run.proc) {
+          try { run.proc.kill('SIGKILL') } catch {}
         }
       }, 10_000)
     }
   }
 
-  private setState(state: ProcState, info: any = {}) {
-    this.state = state
-    this.cb.onStateChange(state, { restartCount: this.restartCount, ...info })
+  /** Stop all active runs. */
+  async stopAll(reason: string) {
+    for (const runId of this.runs.keys()) {
+      await this.stop(runId, reason)
+    }
   }
 
-  private async consumeStdoutAsLogs() {
-    if (!this.proc?.stdout) return
+  private setState(run: RunInstance, state: ProcState, info: any = {}) {
+    run.state = state
+    this.cb.onStateChange(state, { restartCount: run.restartCount, ...info })
+  }
+
+  private async consumeStdout(run: RunInstance) {
+    if (!run.proc?.stdout) return
     try {
-      const reader = this.proc.stdout.getReader()
+      const reader = run.proc.stdout.getReader()
       const decoder = new TextDecoder()
       while (true) {
         const { done, value } = await reader.read()
@@ -170,17 +201,17 @@ export class ProcessManager {
         const text = decoder.decode(value, { stream: true })
         for (const line of text.split('\n')) {
           if (line.trim()) {
-            this.cb.onLog('info', `[agent] ${line.slice(0, 500)}`, this.currentRun?.runId)
+            this.cb.onLog('info', `[agent] ${line.slice(0, 500)}`, run.spec.runId)
           }
         }
       }
     } catch {}
   }
 
-  private async consumeStderr() {
-    if (!this.proc?.stderr) return
+  private async consumeStderr(run: RunInstance) {
+    if (!run.proc?.stderr) return
     try {
-      const reader = this.proc.stderr.getReader()
+      const reader = run.proc.stderr.getReader()
       const decoder = new TextDecoder()
       while (true) {
         const { done, value } = await reader.read()
@@ -188,8 +219,8 @@ export class ProcessManager {
         const text = decoder.decode(value, { stream: true })
         for (const line of text.split('\n')) {
           if (line.trim()) {
-            this.stderrTail.push(line)
-            if (this.stderrTail.length > 200) this.stderrTail.shift()
+            run.stderrTail.push(line)
+            if (run.stderrTail.length > 200) run.stderrTail.shift()
           }
         }
       }

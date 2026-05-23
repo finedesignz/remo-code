@@ -86,9 +86,7 @@ supervisors.post('/:id/start', async (c) => {
   const body = StartBody.safeParse(await c.req.json().catch(() => ({})))
   if (!body.success) return c.json({ error: 'bad body' }, 400)
 
-  const entry = getSupervisorRegistryEntry(a.supervisorId)!
-  if (entry.state !== 'idle') return c.json({ error: 'supervisor busy', state: entry.state }, 409)
-
+  // Concurrent runs allowed — supervisor manages N children.
   // We need an api_key to pass to the supervisor so it can spawn claude-remote
   // talking to this hub. We re-use the supervisor's own api_key (it has agent capability too).
   // The supervisor sends "hello" with its api_key_id; the actual raw key is stored client-side.
@@ -122,26 +120,41 @@ supervisors.post('/:id/start', async (c) => {
   return c.json({ run_id: run.id })
 })
 
-const StopBody = z.object({ reason: z.string().max(120).optional() })
+const StopBody = z.object({ reason: z.string().max(120).optional(), run_id: z.string().optional() })
 
 supervisors.post('/:id/stop', async (c) => {
   const a = await authorizeSupervisor(c)
   if ('error' in a) return a.error
   const body = StopBody.safeParse(await c.req.json().catch(() => ({})))
   const reason = (body.success ? body.data.reason : 'user') || 'user'
-  const entry = getSupervisorRegistryEntry(a.supervisorId)!
-  if (!entry.state || entry.state === 'idle') return c.json({ ok: true, note: 'already idle' })
+  const runId = body.success ? body.data.run_id : undefined
   try {
     sendToSupervisor(a.supervisorId, {
       type: 'session.stop',
       req_id: `stop_${Date.now()}`,
-      run_id: (await getSupervisor(a.supervisorId, a.userId)).current_run_id,
+      run_id: runId ?? '',  // empty string => stop all
       reason,
     } as any)
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
   return c.json({ ok: true })
+})
+
+// List active runs for a supervisor (one row per running child)
+supervisors.get('/:id/active', async (c) => {
+  const userId = c.get('userId') as string
+  const id = c.req.param('id')
+  const row = await getSupervisor(id, userId)
+  if (!row) return c.json({ error: 'not found' }, 404)
+  const { sql } = await import('../db/postgres')
+  const rows = await sql`
+    SELECT id, repo_path, branch, started_at, restart_count, session_id
+    FROM session_runs
+    WHERE supervisor_id = ${id} AND user_id = ${userId} AND ended_at IS NULL
+    ORDER BY started_at DESC
+  `
+  return c.json({ runs: rows })
 })
 
 supervisors.get('/:id/runs', async (c) => {

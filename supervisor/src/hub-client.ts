@@ -191,7 +191,8 @@ export class SupervisorClient {
   }
 
   private async onSessionStop(msg: { run_id: string; reason: string }) {
-    await this.pm.stop(msg.reason)
+    if (msg.run_id) await this.pm.stop(msg.run_id, msg.reason)
+    else await this.pm.stopAll(msg.reason)
   }
 
   private onSessionStatus(msg: { req_id: string }) {
