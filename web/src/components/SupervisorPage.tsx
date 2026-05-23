@@ -147,11 +147,19 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const body = (
     <div className="space-y-5">
           {/* removed page chrome — embedded inside Settings */}
-          {error && <div className="p-3 bg-red-900/30 border border-red-800/60 rounded-lg text-sm text-red-200">{error}</div>}
-          {info && <div className="p-3 bg-emerald-900/30 border border-emerald-800/60 rounded-lg text-sm text-emerald-200">{info}</div>}
+          {error && <div className="p-3 bg-red-900/30 rounded-lg text-sm text-red-200">{error}</div>}
+          {info && <div className="p-3 bg-emerald-900/30 rounded-lg text-sm text-emerald-200">{info}</div>}
+          {activeSupervisor?.state === 'running' && (
+            <div className="p-3 bg-amber-900/20 rounded-lg flex items-center justify-between gap-3">
+              <div className="text-sm text-amber-200">
+                Currently running. Stop the active session to start another.
+              </div>
+              <button onClick={stopActive} className="px-3 py-1.5 text-xs bg-red-600/80 hover:bg-red-500 rounded text-white shrink-0">Stop</button>
+            </div>
+          )}
 
           {/* Supervisor card */}
-          <div className="rounded-xl p-5">
+          <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">My machines</h3>
             {supervisors.length === 0 ? (
               <div className="text-sm text-[var(--text-muted)]">
@@ -167,7 +175,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                   <div
                     key={s.id}
                     onClick={() => setActiveSupervisorId(s.id)}
-                    className={`p-3 rounded-lg border cursor-pointer transition-colors ${s.id === activeSupervisorId ? 'border-indigo-500/70 bg-indigo-500/10' : 'border-[var(--border-color)] hover:bg-[var(--bg-tertiary)]/40'}`}
+                    className={`p-3 rounded-lg cursor-pointer transition-colors ${s.id === activeSupervisorId ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30' : 'hover:bg-[var(--bg-tertiary)]/40'}`}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
@@ -190,7 +198,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           </div>
 
           {/* GitHub */}
-          <div className="rounded-xl p-5">
+          <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-[var(--text-primary)]">GitHub</h3>
               {!githubConfigured ? (
@@ -202,12 +210,12 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               )}
             </div>
             {githubConfigured && installations.length > 0 && (
-              <button onClick={connectGitHub} className="mt-3 px-3 py-1.5 text-xs border border-[var(--border-color)] rounded text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40">Add another installation</button>
+              <button onClick={connectGitHub} className="mt-3 px-3 py-1.5 text-xs rounded text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)]">Add another installation</button>
             )}
           </div>
 
           {/* Repo list */}
-          <div className="rounded-xl p-5">
+          <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold text-[var(--text-primary)]">Repos</h3>
               <div className="flex items-center gap-2">
@@ -222,7 +230,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search…"
-                className="flex-1 px-2 py-1 text-xs bg-[var(--bg-primary)]/60 border border-[var(--border-color)] rounded text-[var(--text-primary)] placeholder-[var(--text-muted)]"
+                className="flex-1 px-2 py-1 text-xs bg-[var(--bg-tertiary)]/40 rounded text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:bg-[var(--bg-tertiary)]/60"
               />
             </div>
             {mergedRepos.length === 0 ? (
@@ -364,7 +372,7 @@ function StartDialog(props: {
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-      <div className="w-full max-w-md bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-2xl p-6 shadow-xl">
+      <div className="w-full max-w-md bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] rounded-xl p-6 shadow-xl">
         <h3 className="text-base font-semibold text-[var(--text-primary)] mb-4">
           Start in {localRepo?.name || githubRepo?.name}
         </h3>
@@ -372,11 +380,11 @@ function StartDialog(props: {
           <div>
             <label className="block text-xs text-[var(--text-muted)] mb-1">Branch</label>
             {branches.length > 0 ? (
-              <select value={branch} onChange={(e) => setBranch(e.target.value)} className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)]">
+              <select value={branch} onChange={(e) => setBranch(e.target.value)} className="w-full px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500/50 text-sm text-[var(--text-primary)]">
                 {branches.map((b) => <option key={b} value={b}>{b}</option>)}
               </select>
             ) : (
-              <input value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="main" className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)]" />
+              <input value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="main" className="w-full px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500/50 text-sm text-[var(--text-primary)]" />
             )}
           </div>
           <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
@@ -385,7 +393,7 @@ function StartDialog(props: {
           </label>
           <div>
             <label className="block text-xs text-[var(--text-muted)] mb-1">Initial prompt (optional)</label>
-            <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={4} placeholder="What should Claude work on?" className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)]" />
+            <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={4} placeholder="What should Claude work on?" className="w-full px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500/50 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)]" />
           </div>
         </div>
         <div className="mt-5 flex justify-end gap-2">
