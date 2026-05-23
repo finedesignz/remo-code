@@ -6,7 +6,7 @@ import { SupervisorPage } from './SupervisorPage'
 interface Props {
   token: string
   profile: Profile
-  onUpdateProfile: (data: { display_name: string }) => Promise<any>
+  onUpdateProfile: (data: { display_name?: string; system_prompt?: string | null }) => Promise<any>
   onBack: () => void
 }
 
@@ -22,8 +22,11 @@ function readTabFromHash(): Tab {
 export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props) {
   const [tab, setTab] = useState<Tab>(readTabFromHash)
   const [displayName, setDisplayName] = useState(profile.display_name || '')
+  const [systemPrompt, setSystemPrompt] = useState(profile.system_prompt || '')
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [savingPrompt, setSavingPrompt] = useState(false)
+  const [savedPrompt, setSavedPrompt] = useState(false)
 
   // Keep URL hash in sync with active tab (so refresh preserves it)
   useEffect(() => {
@@ -43,6 +46,14 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
     setSaving(false)
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
+  }
+
+  const handleSavePrompt = async () => {
+    setSavingPrompt(true)
+    await onUpdateProfile({ system_prompt: systemPrompt })
+    setSavingPrompt(false)
+    setSavedPrompt(true)
+    setTimeout(() => setSavedPrompt(false), 2000)
   }
 
   return (
@@ -111,6 +122,33 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
                     </button>
                     {saved && <span className="text-sm text-emerald-400">Saved</span>}
                   </div>
+                </div>
+              </div>
+
+              <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
+                <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">System Prompt</h3>
+                <p className="text-xs text-[var(--text-muted)] mb-4">
+                  Injected into every new Claude session via <code className="text-emerald-300">--append-system-prompt</code>.
+                  Use this to set persistent instructions — e.g. "after finishing a task, always commit, push, and redeploy."
+                  Applies on the next agent restart for each project.
+                </p>
+                <textarea
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  placeholder="e.g. When you finish a task, commit and push the changes, then trigger the Coolify redeploy."
+                  rows={8}
+                  className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 ring-1 ring-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono resize-y min-h-[160px]"
+                />
+                <div className="flex items-center gap-3 mt-3">
+                  <button
+                    onClick={handleSavePrompt}
+                    disabled={savingPrompt}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+                  >
+                    {savingPrompt ? 'Saving...' : 'Save'}
+                  </button>
+                  {savedPrompt && <span className="text-sm text-emerald-400">Saved — applies on next agent restart</span>}
+                  <span className="text-xs text-[var(--text-muted)] ml-auto">{systemPrompt.length} chars</span>
                 </div>
               </div>
             </div>

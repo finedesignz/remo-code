@@ -60,6 +60,26 @@ textarea {
   transition: transform 200ms ease;
 }
 
+/* Markdown content in assistant messages — restore list markers and basic spacing.
+   Tailwind 4 reset strips list-style; we don't have @tailwindcss/typography, so set them here. */
+.prose ul { list-style: disc; padding-left: 1.25rem; margin: 0.5rem 0; }
+.prose ol { list-style: decimal; padding-left: 1.5rem; margin: 0.5rem 0; }
+.prose ul ul, .prose ol ul { list-style: circle; }
+.prose ul ul ul, .prose ol ol ol { list-style: square; }
+.prose li { margin: 0.15rem 0; }
+.prose li > p { margin: 0; }
+.prose p { margin: 0.5rem 0; }
+.prose p:first-child { margin-top: 0; }
+.prose p:last-child { margin-bottom: 0; }
+.prose h1, .prose h2, .prose h3, .prose h4 { font-weight: 600; margin: 0.75rem 0 0.4rem; }
+.prose h1 { font-size: 1.15rem; }
+.prose h2 { font-size: 1.05rem; }
+.prose h3 { font-size: 1rem; }
+.prose blockquote { border-left: 3px solid var(--border-color); padding-left: 0.75rem; color: var(--text-secondary); margin: 0.5rem 0; }
+.prose hr { border: 0; border-top: 1px solid var(--border-color); margin: 0.75rem 0; }
+.prose table { border-collapse: collapse; margin: 0.5rem 0; }
+.prose th, .prose td { border: 1px solid var(--border-color); padding: 0.25rem 0.5rem; }
+
 /* Message entry animation */
 @keyframes msg-in {
   from { opacity: 0; transform: translateY(8px); }

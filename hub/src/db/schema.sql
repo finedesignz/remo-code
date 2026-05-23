@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_active ON api_keys(user_id) WHERE revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash) WHERE revoked_at IS NULL;
 
+-- Per-user system prompt injected at the start of every new Claude session
+ALTER TABLE users ADD COLUMN IF NOT EXISTS system_prompt TEXT;
+
 -- Migration for existing rows (idempotent — only adds column if missing)
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS capabilities TEXT[] NOT NULL DEFAULT ARRAY['agent','supervisor'];
 -- Ensure all active keys have the supervisor cap (idempotent backfill)

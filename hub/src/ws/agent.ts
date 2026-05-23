@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, listSessions } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, listSessions, getUserSystemPrompt } from '../db/dal'
 import { hashToken } from './channel'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
@@ -121,7 +121,8 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     registerChannel(session.id, userId, ws as any)
     await setSessionStatus(session.id, 'online')
 
-    ws.send(JSON.stringify({ type: 'auth_ok', session_id: session.id }))
+    const systemPrompt = await getUserSystemPrompt(userId)
+    ws.send(JSON.stringify({ type: 'auth_ok', session_id: session.id, system_prompt: systemPrompt }))
 
     ws.data.heartbeatTimer = setInterval(() => {
       try { ws.send(JSON.stringify({ type: 'ping' })) } catch {}

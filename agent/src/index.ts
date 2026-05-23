@@ -6,7 +6,7 @@ import type { HubToAgent } from './types'
 import * as ui from './local-ui'
 import { spawnSync } from 'child_process'
 
-const VERSION = '0.3.7'
+const VERSION = '0.3.8'
 
 // --- Pre-flight: check that claude CLI is available ---
 const claudeCheck = spawnSync('claude', ['--version'], {
@@ -51,9 +51,22 @@ function handleRunnerEvent(event: RunnerEvent) {
   hub.send({ ...event, session_id: sessionId } as any)
 }
 
+let runnerStarted = false
+function startRunnerOnce() {
+  if (runnerStarted) return
+  runnerStarted = true
+  console.log('[remo-agent] Starting Claude process...')
+  runner.start(handleRunnerEvent)
+}
+
 function handleMessage(msg: HubToAgent) {
   if (msg.type === 'auth_ok') {
     sendLog(`Remo Code Agent v${VERSION} connected — ${config.projectDir}`)
+    if (msg.system_prompt) {
+      runner.setSystemPrompt(msg.system_prompt)
+      sendLog(`Custom system prompt applied (${msg.system_prompt.length} chars)`)
+    }
+    startRunnerOnce()
   }
   if (msg.type === 'user_message') {
     if (!runner.isReady) {
@@ -95,14 +108,16 @@ function sendUserMessage(msg: Extract<HubToAgent, { type: 'user_message' }>) {
   runner.sendMessage(prompt, msg.images)
 }
 
-// Connect to hub, then start Claude
+// Connect to hub — Claude is started after auth_ok so the system prompt
+// (if any) is applied on the first spawn. Fallback timer in case the hub
+// connection takes longer than expected.
 hub.connect()
-
-// Start Claude after a short delay to let hub auth complete
 setTimeout(() => {
-  console.log('[remo-agent] Starting Claude process...')
-  runner.start(handleRunnerEvent)
-}, 2_000)
+  if (!runnerStarted) {
+    console.log('[remo-agent] auth_ok not received yet — starting Claude without server-side system prompt')
+    startRunnerOnce()
+  }
+}, 5_000)
 
 // If --initial-prompt was given, send it once both hub auth + Claude are ready
 if (config.initialPrompt) {

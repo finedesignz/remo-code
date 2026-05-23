@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import type { AuthUser } from '../lib/auth.ts'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useSessions } from '../hooks/useSessions'
@@ -158,11 +158,11 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
 
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="flex items-center gap-3 px-3 py-2.5 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/60 backdrop-blur-sm shrink-0">
-          {/* Hamburger — opens sidebar (settings/create/manage sessions) */}
+        <header className="relative z-40 flex items-center gap-3 px-3 py-2.5 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/60 backdrop-blur-sm shrink-0">
+          {/* Hamburger — desktop only (mobile uses dropdown switcher) */}
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="text-[var(--text-muted)] hover:text-[var(--text-primary)] p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+            className="hidden md:inline-flex text-[var(--text-muted)] hover:text-[var(--text-primary)] p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
             aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
           >
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -223,14 +223,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
             )}
           </button>
 
-          <button
-            onClick={() => onNavigate('#/settings')}
-            className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-sm font-medium shrink-0 hover:bg-indigo-500 transition-colors"
-            title={user.email || 'Profile'}
-            aria-label="Profile settings"
-          >
-            {(user.email || '?')[0].toUpperCase()}
-          </button>
+          <ProfileMenu user={user} onNavigate={onNavigate} signOut={signOut} />
         </header>
 
         <ChatPanel
@@ -245,6 +238,70 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
           token={token}
         />
       </div>
+    </div>
+  )
+}
+
+function ProfileMenu({ user, onNavigate, signOut }: { user: AuthUser; onNavigate: (h: string) => void; signOut: () => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: Event) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('pointerdown', onDown)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const go = (hash: string) => { setOpen(false); onNavigate(hash) }
+  const initial = (user.email || '?')[0].toUpperCase()
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-sm font-medium shrink-0 hover:bg-indigo-500 transition-colors"
+        title={user.email || 'Profile'}
+        aria-label="Profile menu"
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
+        {initial}
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full mt-1 w-56 bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] rounded-lg shadow-xl z-50 py-1"
+        >
+          <div className="px-3 py-2 border-b border-[var(--border-color)]">
+            <div className="text-xs text-[var(--text-muted)]">Signed in as</div>
+            <div className="text-sm text-[var(--text-primary)] truncate">{user.email}</div>
+          </div>
+          <button
+            role="menuitem"
+            onClick={() => go('#/settings?tab=account')}
+            className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors"
+          >Profile</button>
+          <button
+            role="menuitem"
+            onClick={() => go('#/settings')}
+            className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors"
+          >Settings</button>
+          <div className="my-1 border-t border-[var(--border-color)]" />
+          <button
+            role="menuitem"
+            onClick={() => { setOpen(false); signOut() }}
+            className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
+          >Logout</button>
+        </div>
+      )}
     </div>
   )
 }

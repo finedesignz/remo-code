@@ -15,7 +15,13 @@ profileRouter.get("/", async (c) => {
 
 profileRouter.patch("/", async (c) => {
   const userId = c.get("userId") as string;
-  const { display_name } = await c.req.json<{ display_name: string }>();
-  const updated = await updateProfile(userId, display_name);
+  const body = await c.req.json<{ display_name?: string; system_prompt?: string | null }>();
+  const fields: { display_name?: string; system_prompt?: string | null } = {};
+  if (body.display_name !== undefined) fields.display_name = body.display_name;
+  if (body.system_prompt !== undefined) {
+    const v = body.system_prompt;
+    fields.system_prompt = typeof v === 'string' && v.trim() === '' ? null : v;
+  }
+  const updated = await updateProfile(userId, fields);
   return c.json(updated);
 });

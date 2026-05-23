@@ -6,6 +6,7 @@ export interface Profile {
   display_name: string | null
   role: string
   session_count: number
+  system_prompt?: string | null
 }
 
 export function useProfile(token: string | null) {
@@ -28,7 +29,7 @@ export function useProfile(token: string | null) {
 
   useEffect(() => { fetchProfile() }, [fetchProfile])
 
-  const updateProfile = useCallback(async (data: { display_name: string }) => {
+  const updateProfile = useCallback(async (data: { display_name?: string; system_prompt?: string | null }) => {
     if (!token) return
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     const res = await fetch(`${hubUrl}/api/profile`, {

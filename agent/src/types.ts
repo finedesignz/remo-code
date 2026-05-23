@@ -15,7 +15,7 @@ export type AgentToHub =
 
 // Events the hub sends TO the agent
 export type HubToAgent =
-  | { type: 'auth_ok'; session_id: string }
+  | { type: 'auth_ok'; session_id: string; system_prompt?: string | null }
   | { type: 'auth_error'; error: string }
   | { type: 'user_message'; session_id: string; id: string; content: string;
       images?: Array<{ media_type: string; data: string }>;

@@ -138,8 +138,13 @@ export async function revokeApiKey(userId: string) {
 // ── Users / Profiles ──────────────────────────────────────────────────────────
 
 export async function getUserById(id: string) {
-  const rows = await sql`SELECT id, email, display_name, role, created_at, updated_at FROM users WHERE id = ${id}`;
+  const rows = await sql`SELECT id, email, display_name, role, system_prompt, created_at, updated_at FROM users WHERE id = ${id}`;
   return rows[0] ?? null;
+}
+
+export async function getUserSystemPrompt(id: string): Promise<string | null> {
+  const rows = await sql`SELECT system_prompt FROM users WHERE id = ${id}`;
+  return (rows[0]?.system_prompt as string | null) ?? null;
 }
 
 export async function getUserByEmail(email: string) {
@@ -159,12 +164,32 @@ export async function createUser(email: string, passwordHash: string, role: stri
   return rows[0];
 }
 
-export async function updateProfile(userId: string, displayName: string) {
-  const rows = await sql`
-    UPDATE users SET display_name = ${displayName}, updated_at = now() WHERE id = ${userId}
-    RETURNING id, email, display_name, role
-  `;
-  return rows[0] ?? null;
+export async function updateProfile(userId: string, fields: { display_name?: string; system_prompt?: string | null }) {
+  // Build a partial update — only touch the columns provided.
+  if (fields.display_name !== undefined && fields.system_prompt !== undefined) {
+    const rows = await sql`
+      UPDATE users SET display_name = ${fields.display_name}, system_prompt = ${fields.system_prompt}, updated_at = now()
+      WHERE id = ${userId}
+      RETURNING id, email, display_name, role, system_prompt
+    `;
+    return rows[0] ?? null;
+  }
+  if (fields.display_name !== undefined) {
+    const rows = await sql`
+      UPDATE users SET display_name = ${fields.display_name}, updated_at = now() WHERE id = ${userId}
+      RETURNING id, email, display_name, role, system_prompt
+    `;
+    return rows[0] ?? null;
+  }
+  if (fields.system_prompt !== undefined) {
+    const rows = await sql`
+      UPDATE users SET system_prompt = ${fields.system_prompt}, updated_at = now() WHERE id = ${userId}
+      RETURNING id, email, display_name, role, system_prompt
+    `;
+    return rows[0] ?? null;
+  }
+  // Nothing to update — return current row
+  return getUserById(userId);
 }
 
 // ── Channel token ─────────────────────────────────────────────────────────────

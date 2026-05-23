@@ -63,11 +63,18 @@ export class ClaudeRunner {
   private localOutput: boolean
 
   private resumeId: string | undefined
+  private systemPrompt: string | undefined
 
-  constructor(projectDir: string, localOutput = false, resumeId?: string) {
+  constructor(projectDir: string, localOutput = false, resumeId?: string, systemPrompt?: string) {
     this.projectDir = projectDir
     this.localOutput = localOutput
     this.resumeId = resumeId
+    this.systemPrompt = systemPrompt && systemPrompt.trim() ? systemPrompt : undefined
+  }
+
+  /** Update the injected system prompt (applied on next process start) */
+  setSystemPrompt(prompt: string | null | undefined) {
+    this.systemPrompt = prompt && prompt.trim() ? prompt : undefined
   }
 
   /** Start the persistent Claude process */
@@ -83,6 +90,9 @@ export class ClaudeRunner {
     cmd.push('--dangerously-skip-permissions')
     if (this.resumeId) {
       cmd.push('--resume', this.resumeId)
+    }
+    if (this.systemPrompt) {
+      cmd.push('--append-system-prompt', this.systemPrompt)
     }
 
     // Strip ANTHROPIC_API_KEY from env so Claude CLI uses OAuth subscription
