@@ -114,6 +114,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const isNearBottom = useRef(true)
+  const forceBottomRef = useRef(true)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [newCount, setNewCount] = useState(0)
@@ -151,31 +152,46 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     if (anchored) setNewCount(0)
   }, [])
 
-  // On new messages/activity: scroll only if anchored; else count unseen messages
+  // On new messages/activity: scroll only if anchored; else count unseen messages.
+  // If a session-switch forced-bottom is pending, slam to bottom unconditionally
+  // (and clear the latch) so freshly-loaded messages always land at the bottom.
   const prevMsgCountRef = useRef(messages.length)
   useEffect(() => {
     const delta = messages.length - prevMsgCountRef.current
     prevMsgCountRef.current = messages.length
-    if (isNearBottom.current && scrollRef.current) {
-      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+    const el = scrollRef.current
+    if (forceBottomRef.current) {
+      const raf = requestAnimationFrame(() => {
+        const node = scrollRef.current
+        if (node) node.scrollTo({ top: node.scrollHeight, behavior: 'auto' })
+      })
+      // Only release the latch once messages have actually rendered for this session
+      if (messages.length > 0) forceBottomRef.current = false
+      isNearBottom.current = true
+      setNewCount(0)
+      return () => cancelAnimationFrame(raf)
+    }
+    if (isNearBottom.current && el) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
     } else if (delta > 0) {
       setNewCount((c) => c + delta)
     }
   }, [messages, sessionStatus, activity])
 
-  // Always scroll to bottom on session switch — runs after DOM commit, and again
-  // when loading flips false so the freshly-rendered messages land at the bottom.
+  // Session switch: arm forced-bottom latch and reset anchor so the next render
+  // (once messages load) slams to the bottom regardless of prior scroll position.
   useEffect(() => {
+    forceBottomRef.current = true
     isNearBottom.current = true
     setNewCount(0)
-    prevMsgCountRef.current = messages.length
+    prevMsgCountRef.current = 0
     const raf = requestAnimationFrame(() => {
       const el = scrollRef.current
       if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })
     })
     return () => cancelAnimationFrame(raf)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId, loading])
+  }, [activeSessionId])
 
   // Clear attachments on session switch
   useEffect(() => {
