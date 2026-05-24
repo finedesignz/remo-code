@@ -76,15 +76,13 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
     })
   }, [subscribe, sessionsHook.updateSessionStatus, sessionsHook.setSessions])
 
-  // Auto-select first connected session when none is selected (or current goes offline)
+  // Auto-select first connected session ONLY on initial load (when nothing is selected).
+  // Never override a user-chosen session — even if it goes offline or another session comes
+  // online, the user's selection is sticky. Switching only happens on explicit user action.
   useEffect(() => {
+    if (activeSessionId) return
     const online = connectedSessions(sessionsHook.sessions)
-    if (activeSessionId) {
-      // If the active session is still connected, keep it
-      if (online.some(s => s.id === activeSessionId)) return
-    }
-    // Select the first connected session, or null if none
-    setActiveSessionId(online.length > 0 ? online[0].id : null)
+    if (online.length > 0) setActiveSessionId(online[0].id)
   }, [sessionsHook.sessions, activeSessionId])
 
   // Close sidebar on mobile when selecting a session.
