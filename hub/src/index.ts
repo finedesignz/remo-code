@@ -14,6 +14,7 @@ import { github as githubApi } from './api/github'
 import { commands as commandsApi } from './api/commands'
 import { transcribe as transcribeApi } from './api/transcribe'
 import { scheduledTasks as scheduledTasksApi } from './api/scheduled-tasks'
+import { scheduledTaskRuns as scheduledTaskRunsApi } from './api/scheduled-task-runs'
 import { runMigrations } from './db/migrate'
 import { loadAll as loadAllScheduledTasks } from './scheduler/index.ts'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
@@ -100,6 +101,7 @@ app.route('/api/github', githubApi)
 app.route('/api/commands', commandsApi)
 app.route('/api/transcribe', transcribeApi)
 app.route('/api/scheduled-tasks', scheduledTasksApi)
+app.route('/api/scheduled-task-runs', scheduledTaskRunsApi)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
