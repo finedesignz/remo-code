@@ -1,6 +1,6 @@
 {
   "name": "remo-code-agent",
-  "version": "0.3.9",
+  "version": "0.4.0",
   "description": "Local agent for Remo Code — streams Claude Code activity to the web UI",
   "type": "module",
   "bin": {

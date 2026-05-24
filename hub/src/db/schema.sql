@@ -53,6 +53,11 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash) WHERE revoked
 -- Per-user system prompt injected at the start of every new Claude session
 ALTER TABLE users ADD COLUMN IF NOT EXISTS system_prompt TEXT;
 
+-- Connected-agent host info (OS, arch, CPU, RAM, runtime versions). Set on the
+-- session row when the agent authenticates. Surfaced in the Settings UI under
+-- a "Connected Agent" card.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS agent_info JSONB;
+
 -- Soft-delete column for sessions. Set when user explicitly disconnects so a
 -- stale agent process cannot resurrect the row via findOrCreateAgentSession.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;

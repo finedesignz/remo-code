@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, recentlyDisconnectedForProjectDir } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, recentlyDisconnectedForProjectDir, updateSessionAgentInfo } from '../db/dal'
 import { hashToken } from './channel'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
@@ -172,6 +172,16 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir} reused=${!session.created}`)
     registerChannel(session.id, userId, ws as any)
     await setSessionStatus(session.id, 'online')
+
+    // Persist agent host info (OS, CPU, RAM, runtime versions) for the Settings UI.
+    if ((msg as any).agent_info) {
+      const info = { ...(msg as any).agent_info, hostname: (msg as any).agent_info.hostname || msg.hostname }
+      try { await updateSessionAgentInfo(session.id, info) } catch (e: any) {
+        console.error('[agent] failed to persist agent_info', e?.message)
+      }
+    } else if (msg.hostname) {
+      try { await updateSessionAgentInfo(session.id, { hostname: msg.hostname }) } catch {}
+    }
 
     const systemPrompt = await getUserSystemPrompt(userId)
     ws.send(JSON.stringify({ type: 'auth_ok', session_id: session.id, system_prompt: systemPrompt }))

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import type { Profile } from '../hooks/useProfile'
 import { useApiKey } from '../hooks/useApiKey'
+import { useSessions, type AgentInfo, type CodeSession } from '../hooks/useSessions'
 import { SupervisorPage } from './SupervisorPage'
 
 interface Props {
@@ -78,6 +79,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
 
   const renderAccount = () => (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+      <ConnectedAgentsCard token={token} />
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
         <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-4">Profile</h3>
         <div className="space-y-4">
@@ -250,6 +252,96 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Connected Agents card                                               */
+/* ------------------------------------------------------------------ */
+
+function formatBytes(bytes?: number): string {
+  if (!bytes || bytes <= 0) return '—'
+  const gb = bytes / (1024 ** 3)
+  if (gb >= 1) return `${gb.toFixed(1)} GB`
+  const mb = bytes / (1024 ** 2)
+  return `${mb.toFixed(0)} MB`
+}
+
+function platformLabel(p?: string): string {
+  if (!p) return '—'
+  if (p === 'darwin') return 'macOS'
+  if (p === 'win32') return 'Windows'
+  if (p === 'linux') return 'Linux'
+  return p
+}
+
+function ConnectedAgentsCard({ token }: { token: string }) {
+  const { sessions, loading, refetch } = useSessions(token)
+  const online = sessions.filter((s: CodeSession) =>
+    (s.status === 'online' || s.status === 'thinking') && s.agent_info
+  )
+
+  return (
+    <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 xl:col-span-2">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)]">Connected Agents</h3>
+        <button
+          onClick={refetch}
+          className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+        >
+          Refresh
+        </button>
+      </div>
+      {loading ? (
+        <p className="text-sm text-[var(--text-muted)]">Loading...</p>
+      ) : online.length === 0 ? (
+        <p className="text-sm text-[var(--text-muted)]">
+          No connected agents. Run <code className="text-emerald-300">claude-remote</code> on a machine to connect one.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {online.map((s: CodeSession) => {
+            const info = (s.agent_info || {}) as AgentInfo
+            return (
+              <div key={s.id} className="bg-[var(--bg-primary)]/60 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className={`w-2 h-2 rounded-full ${s.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`} />
+                  <span className="text-sm font-semibold text-[var(--text-primary)]">
+                    {info.hostname || s.name}
+                  </span>
+                  {info.agent_version && (
+                    <span className="text-[10px] font-mono text-[var(--text-muted)] ml-auto">v{info.agent_version}</span>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2 text-xs">
+                  <Spec label="OS" value={`${platformLabel(info.platform)}${info.os_release ? ` ${info.os_release}` : ''}`} />
+                  <Spec label="Arch" value={info.arch} />
+                  <Spec label="CPU" value={info.cpu_model} />
+                  <Spec label="Cores" value={info.cpu_cores?.toString()} />
+                  <Spec label="Memory" value={formatBytes(info.total_mem_bytes)} />
+                  <Spec label="Runtime" value={info.bun_version ? `Bun ${info.bun_version}` : info.node_version ? `Node ${info.node_version}` : '—'} />
+                  {s.project_dir && (
+                    <div className="col-span-2 sm:col-span-3">
+                      <div className="text-[var(--text-muted)] text-[10px] uppercase tracking-wider mb-0.5">Project</div>
+                      <div className="text-[var(--text-secondary)] font-mono break-all">{s.project_dir}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Spec({ label, value }: { label: string; value?: string }) {
+  return (
+    <div>
+      <div className="text-[var(--text-muted)] text-[10px] uppercase tracking-wider">{label}</div>
+      <div className="text-[var(--text-secondary)] truncate" title={value}>{value || '—'}</div>
     </div>
   )
 }

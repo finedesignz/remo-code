@@ -4,10 +4,14 @@ import { sql } from "./postgres.ts";
 
 export async function listSessions(userId: string) {
   return sql`
-    SELECT id, name, project_dir, status, token_hash, last_activity, created_at
+    SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info
     FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST
   `;
+}
+
+export async function updateSessionAgentInfo(sessionId: string, info: unknown) {
+  await sql`UPDATE sessions SET agent_info = ${JSON.stringify(info)}::jsonb WHERE id = ${sessionId}`;
 }
 
 export async function getSession(sessionId: string, userId: string) {

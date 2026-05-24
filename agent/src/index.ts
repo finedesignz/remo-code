@@ -6,7 +6,7 @@ import type { HubToAgent } from './types'
 import * as ui from './local-ui'
 import { spawnSync } from 'child_process'
 
-const VERSION = '0.3.9'
+const VERSION = '0.4.0'
 
 // --- Pre-flight: check that claude CLI is available ---
 const claudeCheck = spawnSync('claude', ['--version'], {
@@ -31,7 +31,7 @@ const config = loadConfig()
 // --- Startup banner ---
 ui.printBanner(VERSION, config.projectDir, config.hubUrl, config.resume)
 
-const hub = new HubClient(config.hubUrl, config.apiKey, config.projectDir, handleMessage)
+const hub = new HubClient(config.hubUrl, config.apiKey, config.projectDir, handleMessage, VERSION)
 const runner = new ClaudeRunner(config.projectDir, config.localOutput, config.resume)
 
 function sendLog(message: string) {

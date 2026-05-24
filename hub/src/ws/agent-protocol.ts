@@ -7,12 +7,26 @@ import {
 
 // -- Agent -> Hub (inbound messages from the local streaming agent) --
 
+export const AgentInfo = z.object({
+  hostname: z.string().optional(),
+  platform: z.string().optional(),       // e.g. 'darwin' | 'linux' | 'win32'
+  os_release: z.string().optional(),     // e.g. '10.0.26200' or '14.4.1'
+  arch: z.string().optional(),           // e.g. 'x64', 'arm64'
+  cpu_model: z.string().optional(),
+  cpu_cores: z.number().int().nonnegative().optional(),
+  total_mem_bytes: z.number().nonnegative().optional(),
+  node_version: z.string().optional(),
+  bun_version: z.string().optional(),
+  agent_version: z.string().optional(),
+}).passthrough()
+
 export const AgentAuth = z.object({
   type: z.literal('auth'),
   api_key: z.string().min(1),
   project_dir: z.string().min(1),
   hostname: z.string().optional(),
   role: z.enum(['agent', 'supervisor']).optional(),
+  agent_info: AgentInfo.optional(),
 })
 
 export const AgentThinking = z.object({

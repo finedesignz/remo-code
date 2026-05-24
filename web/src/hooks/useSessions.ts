@@ -1,5 +1,18 @@
 import { useState, useEffect, useCallback } from 'react'
 
+export interface AgentInfo {
+  hostname?: string
+  platform?: string
+  os_release?: string
+  arch?: string
+  cpu_model?: string
+  cpu_cores?: number
+  total_mem_bytes?: number
+  node_version?: string
+  bun_version?: string
+  agent_version?: string
+}
+
 export interface CodeSession {
   id: string
   name: string
@@ -7,6 +20,7 @@ export interface CodeSession {
   status: string
   last_activity: string | null
   created_at: string
+  agent_info?: AgentInfo | null
 }
 
 export function useSessions(token: string | null) {

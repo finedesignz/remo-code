@@ -1,6 +1,11 @@
 // Events the agent sends TO the hub (parsed from Claude CLI stream-json)
 export type AgentToHub =
-  | { type: 'auth'; api_key: string; project_dir: string; hostname: string }
+  | { type: 'auth'; api_key: string; project_dir: string; hostname: string;
+      agent_info?: {
+        hostname?: string; platform?: string; os_release?: string; arch?: string;
+        cpu_model?: string; cpu_cores?: number; total_mem_bytes?: number;
+        node_version?: string; bun_version?: string; agent_version?: string;
+      } }
   | { type: 'thinking'; session_id: string; content: string }
   | { type: 'text_delta'; session_id: string; content: string }
   | { type: 'tool_use'; session_id: string; tool: string; tool_id: string; input: unknown }

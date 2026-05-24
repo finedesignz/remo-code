@@ -1,8 +1,37 @@
-import { hostname } from 'os'
+import { hostname, platform, release, arch, cpus, totalmem } from 'os'
 import type { AgentToHub, HubToAgent } from './types'
 import { printConnected, printDisconnected } from './local-ui'
 
 type MessageHandler = (msg: HubToAgent) => void
+
+export interface AgentInfo {
+  hostname: string
+  platform: string
+  os_release: string
+  arch: string
+  cpu_model?: string
+  cpu_cores: number
+  total_mem_bytes: number
+  node_version?: string
+  bun_version?: string
+  agent_version?: string
+}
+
+function collectAgentInfo(agentVersion?: string): AgentInfo {
+  const cpuList = cpus()
+  return {
+    hostname: hostname(),
+    platform: platform(),
+    os_release: release(),
+    arch: arch(),
+    cpu_model: cpuList[0]?.model,
+    cpu_cores: cpuList.length,
+    total_mem_bytes: totalmem(),
+    node_version: process.versions.node,
+    bun_version: (process.versions as any).bun,
+    agent_version: agentVersion,
+  }
+}
 
 export class HubClient {
   private ws: WebSocket | null = null
@@ -10,6 +39,7 @@ export class HubClient {
   private apiKey: string
   private projectDir: string
   private hostnameName: string
+  private agentInfo: AgentInfo
   private sessionId: string | null = null
   private onMessage: MessageHandler
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -21,11 +51,13 @@ export class HubClient {
     apiKey: string,
     projectDir: string,
     onMessage: MessageHandler,
+    agentVersion?: string,
   ) {
     this.hubUrl = hubUrl
     this.apiKey = apiKey
     this.projectDir = projectDir.replace(/\\/g, '/')
     this.hostnameName = hostname()
+    this.agentInfo = collectAgentInfo(agentVersion)
     this.onMessage = onMessage
   }
 
@@ -41,6 +73,7 @@ export class HubClient {
         api_key: this.apiKey,
         project_dir: this.projectDir,
         hostname: this.hostnameName,
+        agent_info: this.agentInfo,
       })
     }
 
