@@ -37,15 +37,23 @@ export function useChat(
   const [loading, setLoading] = useState(false)
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>(loadUnread)
   const activeSessionRef = useRef(activeSessionId)
+  const lastFetchRef = useRef<Record<string, number>>({})
 
   // Keep ref in sync
   useEffect(() => {
     activeSessionRef.current = activeSessionId
   }, [activeSessionId])
 
-  // Fetch message history
-  const fetchMessages = useCallback(() => {
+  // Fetch message history. If `throttle` true, skip if last fetch for this
+  // session was <2s ago (coalesces alt-tab spam). Session-change fetches
+  // bypass the throttle so switching always feels instant.
+  const fetchMessages = useCallback((opts?: { throttle?: boolean }) => {
     if (!token || !activeSessionId) return
+    if (opts?.throttle) {
+      const last = lastFetchRef.current[activeSessionId] || 0
+      if (Date.now() - last < 2000) return
+    }
+    lastFetchRef.current[activeSessionId] = Date.now()
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     fetch(`${hubUrl}/api/messages/${activeSessionId}?limit=50`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -68,16 +76,30 @@ export function useChat(
     fetchMessages()
   }, [activeSessionId, fetchMessages])
 
-  // Refetch when tab becomes visible (catches messages missed while in background)
+  // Refetch when tab regains focus or visibility (catches messages missed
+  // while in background). Throttled to once per 2s per session.
   useEffect(() => {
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible' && activeSessionId) {
-        fetchMessages()
-      }
+    if (!activeSessionId) return
+    const handler = () => {
+      if (document.visibilityState !== 'visible') return
+      fetchMessages({ throttle: true })
     }
-    document.addEventListener('visibilitychange', handleVisibility)
-    return () => document.removeEventListener('visibilitychange', handleVisibility)
+    const focusHandler = () => fetchMessages({ throttle: true })
+    document.addEventListener('visibilitychange', handler)
+    window.addEventListener('focus', focusHandler)
+    return () => {
+      document.removeEventListener('visibilitychange', handler)
+      window.removeEventListener('focus', focusHandler)
+    }
   }, [activeSessionId, fetchMessages])
+
+  // Refetch on WS reconnect (covers text_delta events missed during the
+  // disconnect window). connectionId changes on every reconnect.
+  useEffect(() => {
+    if (!activeSessionId || connectionId === 0) return
+    fetchMessages({ throttle: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionId])
 
   // Subscribe to live messages
   useEffect(() => {
