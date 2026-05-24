@@ -137,6 +137,10 @@ CREATE INDEX IF NOT EXISTS idx_supcmds_user ON supervisor_commands(user_id, kind
 CREATE INDEX IF NOT EXISTS idx_supcmds_supervisor ON supervisor_commands(supervisor_id);
 
 -- ── Scheduled Tasks ───────────────────────────────────────────────────────────
+-- NOTE: IDs are TEXT (uuid-as-text) for consistency with other tables in this
+-- schema (sessions, supervisors, session_runs). The architect plan calls for
+-- UUID PKs; we use TEXT to avoid breaking the existing FK graph. Semantically
+-- equivalent — uuid generator still backs the default.
 
 CREATE TABLE IF NOT EXISTS scheduled_tasks (
   id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -156,6 +160,30 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user ON scheduled_tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user_enabled ON scheduled_tasks(user_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_session ON scheduled_tasks(session_id);
 
+-- New columns for the architect-approved scheduled-tasks phase. Idempotent
+-- ADD COLUMN IF NOT EXISTS keeps the legacy shape intact while we migrate the
+-- DAL and dispatcher. session_id remains NOT NULL on legacy rows; new rows
+-- created via the new API may target supervisors or fan-outs and set
+-- session_id to a synthetic/placeholder value to satisfy the NOT NULL until
+-- a follow-up migration drops that constraint.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS task_type TEXT NOT NULL DEFAULT 'prompt'
+  CHECK (task_type IN ('prompt','skill','security_scan','log_check','continue_dev'));
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS target_kind TEXT NOT NULL DEFAULT 'session'
+  CHECK (target_kind IN ('session','supervisor','all_agents','all_supervisors'));
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS target_id TEXT;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS cron_expr TEXT;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS catchup_policy TEXT NOT NULL DEFAULT 'skip'
+  CHECK (catchup_policy IN ('skip','run_once'));
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS max_concurrent SMALLINT NOT NULL DEFAULT 1;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS last_fire_at TIMESTAMPTZ;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS next_fire_at TIMESTAMPTZ;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS post_run_actions JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next_fire
+  ON scheduled_tasks(next_fire_at) WHERE enabled;
+
 CREATE TABLE IF NOT EXISTS scheduled_task_runs (
   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   task_id      TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
@@ -163,11 +191,33 @@ CREATE TABLE IF NOT EXISTS scheduled_task_runs (
   session_id   TEXT REFERENCES sessions(id) ON DELETE SET NULL,
   started_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at TIMESTAMPTZ,
-  status       TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','success','failed','skipped')),
+  status       TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','success','failed','skipped','pending','in_flight','cancelled')),
   error        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_runs_task ON scheduled_task_runs(task_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_scheduled_runs_user ON scheduled_task_runs(user_id, started_at DESC);
+
+-- New columns on runs for the new scheduler. Idempotent.
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ;
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS target_kind TEXT;
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS target_id TEXT;
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(10,6);
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS output_snippet TEXT;
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS triggered_by_run_id TEXT REFERENCES scheduled_task_runs(id) ON DELETE SET NULL;
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_runs_task_scheduled
+  ON scheduled_task_runs(task_id, scheduled_for DESC);
+CREATE INDEX IF NOT EXISTS idx_scheduled_runs_user_scheduled
+  ON scheduled_task_runs(user_id, scheduled_for DESC);
+CREATE INDEX IF NOT EXISTS idx_scheduled_runs_chained
+  ON scheduled_task_runs(triggered_by_run_id) WHERE triggered_by_run_id IS NOT NULL;
+
+-- Per-user daily spend cap for the scheduler cost guard and web push toggle.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_cost_cap_usd NUMERIC(10,4) NOT NULL DEFAULT 10.0000;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS web_push_enabled BOOLEAN NOT NULL DEFAULT true;
 
 -- ── Paused repos (per-(user, supervisor, repo_path)) ──────────────────────────
 -- Set when the user explicitly clicks "Disconnect" on a session whose
