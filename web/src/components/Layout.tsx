@@ -5,7 +5,6 @@ import { useSessions } from '../hooks/useSessions'
 import { useChat } from '../hooks/useChat'
 import { useActivity } from '../hooks/useActivity'
 import { useTheme } from '../hooks/useTheme'
-import { useApiKey } from '../hooks/useApiKey'
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
 import { ApiKeyModal } from './ApiKeyModal'
@@ -30,7 +29,6 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
     token, activeSessionId, subscribe, send, connectionId
   )
   const activity = useActivity(activeSessionId, subscribe)
-  const { activeKey } = useApiKey(token)
 
   // Handle permission responses
   const handlePermissionRespond = useCallback((requestId: string, approved: boolean) => {
@@ -96,12 +94,9 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
     return () => window.removeEventListener('keydown', handleKey)
   }, [sidebarOpen])
 
-  // Handle showing connect modal — generate API key if none exists
-  const [connectApiKey, setConnectApiKey] = useState<string | null>(null)
-
   const handleShowConnect = useCallback(() => {
-    setShowConnect(true)
-  }, [])
+    onNavigate('#/settings?tab=supervisor')
+  }, [onNavigate])
 
   const activeSession = activeSessionId
     ? sessionsHook.sessions.find(s => s.id === activeSessionId)
@@ -112,13 +107,6 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
       {/* Modals — rendered at top level, above everything */}
       {showApiKey && (
         <ApiKeyModal token={token} onClose={() => setShowApiKey(false)} />
-      )}
-      {showConnect && (
-        <ConnectModal
-          apiKey={connectApiKey || undefined}
-          onGenerateKey={generateKey}
-          onClose={() => { setShowConnect(false); setConnectApiKey(null) }}
-        />
       )}
 
       {/* Mobile overlay backdrop */}

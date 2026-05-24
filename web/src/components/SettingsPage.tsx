@@ -34,10 +34,17 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
     if (window.location.hash !== next) window.history.replaceState(null, '', next)
   }, [tab])
 
-  const tabs: { id: Tab; label: string }[] = [
-    { id: 'supervisor', label: 'Supervisor' },
-    { id: 'account', label: 'Account' },
-    { id: 'apikey', label: 'API Key' },
+  // Also react to external hash changes (e.g. clicking Connect in sidebar)
+  useEffect(() => {
+    const onHash = () => setTab(readTabFromHash())
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
+  const tabs: { id: Tab; label: string; desc: string }[] = [
+    { id: 'supervisor', label: 'Supervisor', desc: 'Connect repos & manage agents' },
+    { id: 'account', label: 'Account', desc: 'Profile & system prompt' },
+    { id: 'apikey', label: 'API Key', desc: 'Agent authentication' },
   ]
 
   const handleSaveName = async () => {
@@ -54,6 +61,79 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
     setSavingPrompt(false)
     setSavedPrompt(true)
     setTimeout(() => setSavedPrompt(false), 2000)
+  }
+
+  /* ----- Section renderers (used by both desktop and mobile) ----- */
+
+  const renderAccount = () => (
+    <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+      <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-4">Profile</h3>
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] mb-1.5">Email</label>
+            <div className="px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-muted)]">
+              {profile.email}
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] mb-1.5">Display Name</label>
+            <input
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Enter display name..."
+              className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSaveName}
+              disabled={saving}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+            >
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+            {saved && <span className="text-sm text-emerald-400">Saved</span>}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 xl:col-span-2">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">System Prompt</h3>
+        <p className="text-xs text-[var(--text-muted)] mb-4">
+          Injected into every new Claude session via <code className="text-emerald-300">--append-system-prompt</code>.
+          Use this to set persistent instructions — e.g. "after finishing a task, always commit, push, and redeploy."
+          Applies on the next agent restart for each project.
+        </p>
+        <textarea
+          value={systemPrompt}
+          onChange={(e) => setSystemPrompt(e.target.value)}
+          placeholder="e.g. When you finish a task, commit and push the changes, then trigger the Coolify redeploy."
+          rows={10}
+          className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono resize-y min-h-[200px]"
+        />
+        <div className="flex items-center gap-3 mt-3">
+          <button
+            onClick={handleSavePrompt}
+            disabled={savingPrompt}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+          >
+            {savingPrompt ? 'Saving...' : 'Save'}
+          </button>
+          {savedPrompt && <span className="text-sm text-emerald-400">Saved — applies on next agent restart</span>}
+          <span className="text-xs text-[var(--text-muted)] ml-auto">{systemPrompt.length} chars</span>
+        </div>
+      </div>
+    </div>
+  )
+
+  const renderSupervisor = () => <SupervisorPage token={token} embedded />
+  const renderApiKey = () => <ApiKeyTab token={token} />
+
+  const sectionFor = (id: Tab) => {
+    if (id === 'account') return renderAccount()
+    if (id === 'supervisor') return renderSupervisor()
+    return renderApiKey()
   }
 
   return (
@@ -73,96 +153,68 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
       </header>
 
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-2xl mx-auto p-4 sm:p-6">
-          {/* Tabs */}
-          <div className="flex gap-1 mb-6 bg-[var(--bg-secondary)]/60 rounded-lg p-1">
-            {tabs.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => setTab(t.id)}
-                className={`flex-1 py-2 text-sm font-medium rounded-md transition-colors ${
-                  tab === t.id
-                    ? 'bg-[var(--bg-tertiary)] text-[var(--text-primary)]'
-                    : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Account Tab */}
-          {tab === 'account' && (
-            <div className="space-y-6">
-              <div className="bg-[var(--bg-secondary)]/60 border border-[var(--border-color)] rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-4">Profile</h3>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs text-[var(--text-muted)] mb-1.5">Email</label>
-                    <div className="px-3 py-2 bg-[var(--bg-primary)]/60 border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-muted)]">
-                      {profile.email}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs text-[var(--text-muted)] mb-1.5">Display Name</label>
-                    <input
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                      placeholder="Enter display name..."
-                      className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                    />
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <button
-                      onClick={handleSaveName}
-                      disabled={saving}
-                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
-                    >
-                      {saving ? 'Saving...' : 'Save'}
-                    </button>
-                    {saved && <span className="text-sm text-emerald-400">Saved</span>}
-                  </div>
+        {/* MOBILE: accordion of all sections, no tab bar */}
+        <div className="md:hidden p-4 space-y-3">
+          {tabs.map((t) => (
+            <details
+              key={t.id}
+              open={t.id === tab}
+              onToggle={(e) => {
+                if ((e.target as HTMLDetailsElement).open) setTab(t.id)
+              }}
+              className="bg-[var(--bg-secondary)]/60 rounded-xl overflow-hidden group"
+            >
+              <summary className="cursor-pointer list-none px-4 py-3 flex items-center justify-between hover:bg-[var(--bg-tertiary)]/40 transition-colors">
+                <div>
+                  <div className="text-sm font-semibold text-[var(--text-primary)]">{t.label}</div>
+                  <div className="text-xs text-[var(--text-muted)] mt-0.5">{t.desc}</div>
                 </div>
+                <svg
+                  width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                  strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                  className="text-[var(--text-muted)] transition-transform group-open:rotate-180 shrink-0"
+                  aria-hidden="true"
+                >
+                  <path d="M4 6l4 4 4-4" />
+                </svg>
+              </summary>
+              <div className="px-4 pb-4 pt-1">
+                {sectionFor(t.id)}
               </div>
+            </details>
+          ))}
+        </div>
 
-              <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
-                <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">System Prompt</h3>
-                <p className="text-xs text-[var(--text-muted)] mb-4">
-                  Injected into every new Claude session via <code className="text-emerald-300">--append-system-prompt</code>.
-                  Use this to set persistent instructions — e.g. "after finishing a task, always commit, push, and redeploy."
-                  Applies on the next agent restart for each project.
-                </p>
-                <textarea
-                  value={systemPrompt}
-                  onChange={(e) => setSystemPrompt(e.target.value)}
-                  placeholder="e.g. When you finish a task, commit and push the changes, then trigger the Coolify redeploy."
-                  rows={8}
-                  className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 ring-1 ring-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono resize-y min-h-[160px]"
-                />
-                <div className="flex items-center gap-3 mt-3">
-                  <button
-                    onClick={handleSavePrompt}
-                    disabled={savingPrompt}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
-                  >
-                    {savingPrompt ? 'Saving...' : 'Save'}
-                  </button>
-                  {savedPrompt && <span className="text-sm text-emerald-400">Saved — applies on next agent restart</span>}
-                  <span className="text-xs text-[var(--text-muted)] ml-auto">{systemPrompt.length} chars</span>
+        {/* DESKTOP: sticky vertical tabs + content area */}
+        <div className="hidden md:block">
+          <div className="max-w-7xl mx-auto px-6 py-6">
+            <div className="flex gap-6">
+              {/* Vertical tab nav */}
+              <nav className="w-64 shrink-0">
+                <div className="sticky top-0 space-y-1">
+                  {tabs.map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => setTab(t.id)}
+                      className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors ${
+                        tab === t.id
+                          ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-[var(--text-primary)]'
+                          : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      <div className="text-sm font-medium">{t.label}</div>
+                      <div className="text-xs text-[var(--text-muted)] mt-0.5">{t.desc}</div>
+                    </button>
+                  ))}
                 </div>
+              </nav>
+
+              {/* Content area */}
+              <div className="flex-1 min-w-0">
+                {sectionFor(tab)}
               </div>
             </div>
-          )}
-
-          {/* Supervisor Tab — handles GitHub connect + repo list inline */}
-          {tab === 'supervisor' && (
-            <SupervisorPage token={token} embedded />
-          )}
-
-          {/* API Key Tab */}
-          {tab === 'apikey' && (
-            <ApiKeyTab token={token} />
-          )}
+          </div>
         </div>
       </div>
     </div>
@@ -207,7 +259,7 @@ function ApiKeyTab({ token }: { token: string }) {
 
   return (
     <div className="space-y-6">
-      <div className="bg-[var(--bg-secondary)]/60 border border-[var(--border-color)] rounded-xl p-5">
+      <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
         <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-2">API Key</h3>
         <p className="text-[var(--text-muted)] text-sm mb-5">
           Your API key is used with the agent command to connect Claude Code sessions. One key connects all your projects.
@@ -215,7 +267,7 @@ function ApiKeyTab({ token }: { token: string }) {
 
         {newKey ? (
           <div className="space-y-4">
-            <div className="p-4 bg-emerald-900/20 border border-emerald-800/50 rounded-xl">
+            <div className="p-4 bg-emerald-900/20 rounded-xl ring-1 ring-emerald-800/40">
               <p className="text-xs text-emerald-300 font-semibold mb-2">Your new API key (shown once):</p>
               <div className="relative group">
                 <code className="block bg-[var(--code-bg)] rounded-lg p-3 text-xs text-emerald-200 font-mono break-all select-all">
@@ -280,7 +332,7 @@ function ApiKeyTab({ token }: { token: string }) {
               ) : (
                 <button
                   onClick={() => setConfirming(true)}
-                  className="px-4 py-2.5 text-red-400 hover:text-red-300 border border-red-800 hover:border-red-700 rounded-xl text-sm transition-colors"
+                  className="px-4 py-2.5 text-red-400 hover:text-red-300 ring-1 ring-red-800/60 hover:ring-red-700 rounded-xl text-sm transition-colors"
                 >
                   Revoke
                 </button>
@@ -289,7 +341,7 @@ function ApiKeyTab({ token }: { token: string }) {
           </div>
         ) : (
           <div className="space-y-4">
-            <div className="p-4 bg-[var(--bg-tertiary)]/30 border border-[var(--border-color)] rounded-xl text-center">
+            <div className="p-4 bg-[var(--bg-tertiary)]/30 rounded-xl text-center">
               <p className="text-[var(--text-muted)] text-sm">No active API key</p>
               <p className="text-[var(--text-muted)] text-xs mt-1">Generate one to enable auto-registration</p>
             </div>

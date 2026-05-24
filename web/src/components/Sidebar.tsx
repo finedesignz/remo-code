@@ -119,13 +119,19 @@ export function Sidebar({
           )}
         </div>
 
-        {/* Connect session button */}
+        {/* Connect session — routes to Supervisor tab */}
         <div className="p-3 border-t border-[var(--border-color)]">
           <button
             onClick={onShowConnect}
-            className="w-full py-2.5 text-sm text-indigo-400 hover:text-indigo-300 hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
+            className="w-full py-2.5 text-sm text-indigo-400 hover:text-indigo-300 hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium flex items-center justify-center gap-2"
+            title="Connect a repository via the Supervisor"
           >
-            + Connect Session
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M6.5 9.5l-2 2a2.5 2.5 0 1 1-3.5-3.5l2-2" />
+              <path d="M9.5 6.5l2-2a2.5 2.5 0 1 1 3.5 3.5l-2 2" />
+              <path d="M6 10l4-4" />
+            </svg>
+            Connect
           </button>
         </div>
 
