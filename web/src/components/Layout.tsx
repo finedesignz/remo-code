@@ -22,6 +22,16 @@ interface Props {
 export function Layout({ token, user, signOut, onNavigate }: Props) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem('remo:sidebar-collapsed') === '1' } catch { return false }
+  })
+  const toggleCollapsed = useCallback(() => {
+    setSidebarCollapsed(prev => {
+      const next = !prev
+      try { localStorage.setItem('remo:sidebar-collapsed', next ? '1' : '0') } catch {}
+      return next
+    })
+  }, [])
   const [showApiKey, setShowApiKey] = useState(false)
 
   const { theme, toggleTheme } = useTheme()
@@ -149,7 +159,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
       {/* Sidebar — desktop only (hidden on mobile, replaced by dropdown) */}
       <div
         className={`
-          sidebar-panel fixed inset-y-0 left-0 z-40 w-72
+          sidebar-panel fixed inset-y-0 left-0 z-40 ${sidebarCollapsed ? 'w-14' : 'w-72'}
           md:relative md:z-0 md:translate-x-0 md:pointer-events-auto
           ${sidebarOpen ? 'translate-x-0 pointer-events-auto' : '-translate-x-full pointer-events-none'}
         `}
@@ -168,6 +178,8 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
           signOut={signOut}
           onClose={() => setSidebarOpen(false)}
           unreadCounts={unreadCounts}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={toggleCollapsed}
         />
       </div>
 
@@ -278,18 +290,32 @@ function ProfileMenu({ user, onNavigate, signOut }: { user: AuthUser; onNavigate
 
   const go = (hash: string) => { setOpen(false); onNavigate(hash) }
   const initial = (user.email || '?')[0].toUpperCase()
+  // Derive first name: prefer display_name's first word, else email local-part first segment.
+  const firstName = (() => {
+    const dn = (user as any).display_name as string | undefined
+    if (dn && dn.trim()) return dn.trim().split(/\s+/)[0]
+    const local = (user.email || '').split('@')[0]
+    if (!local) return ''
+    const seg = local.split(/[._-]/)[0]
+    return seg ? seg.charAt(0).toUpperCase() + seg.slice(1) : ''
+  })()
 
   return (
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen(o => !o)}
-        className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-sm font-medium shrink-0 hover:bg-indigo-500 transition-colors"
+        className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-full hover:bg-[var(--bg-tertiary)]/50 transition-colors"
         title={user.email || 'Profile'}
         aria-label="Profile menu"
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        {initial}
+        <span className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-xs font-medium shrink-0">
+          {initial}
+        </span>
+        {firstName && (
+          <span className="text-sm text-[var(--text-secondary)] font-medium hidden sm:inline">{firstName}</span>
+        )}
       </button>
       {open && (
         <div

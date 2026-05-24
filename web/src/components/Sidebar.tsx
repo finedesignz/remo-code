@@ -19,6 +19,8 @@ interface Props {
   signOut: () => void
   onClose?: () => void
   unreadCounts?: Record<string, number>
+  collapsed?: boolean
+  onToggleCollapsed?: () => void
 }
 
 export function Sidebar({
@@ -26,20 +28,62 @@ export function Sidebar({
   onDeleteSession, onShowConnect, onShowApiKey,
   onNavigate, onRefresh,
   connected, user, signOut, onClose, unreadCounts = {},
+  collapsed = false, onToggleCollapsed,
 }: Props) {
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
 
+  if (collapsed) {
+    return (
+      <div className="w-14 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0 items-center py-3 gap-2">
+        <button
+          onClick={onToggleCollapsed}
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          title="Expand sidebar"
+          aria-label="Expand sidebar"
+        >
+          <img src="/logo.png" alt="Remo Code" className="h-6 w-6 object-contain" />
+        </button>
+        <div className="flex-1" />
+        <button
+          onClick={onShowConnect}
+          className="p-2 text-indigo-400 hover:text-indigo-300 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          title="Connect a repository"
+          aria-label="Connect a repository"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M6.5 9.5l-2 2a2.5 2.5 0 1 1-3.5-3.5l2-2" />
+            <path d="M9.5 6.5l2-2a2.5 2.5 0 1 1 3.5 3.5l-2 2" />
+            <path d="M6 10l4-4" />
+          </svg>
+        </button>
+        <button
+          onClick={() => onNavigate('#/settings')}
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          title="Settings"
+          aria-label="Settings"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="8" cy="8" r="2" />
+            <path d="M13 8a5 5 0 0 0-.09-.94l1.4-1.08-1.5-2.6-1.65.66a5 5 0 0 0-1.62-.94L9.25 1.5h-3l-.29 1.6a5 5 0 0 0-1.62.94L2.69 3.38l-1.5 2.6 1.4 1.08A5 5 0 0 0 2.5 8a5 5 0 0 0 .09.94l-1.4 1.08 1.5 2.6 1.65-.66a5 5 0 0 0 1.62.94l.29 1.6h3l.29-1.6a5 5 0 0 0 1.62-.94l1.65.66 1.5-2.6-1.4-1.08A5 5 0 0 0 13 8z" />
+          </svg>
+        </button>
+      </div>
+    )
+  }
+
   return (
       <div className="w-72 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
-        {/* Header */}
+        {/* Header — logo only, with collapse toggle on desktop */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--border-color)]">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <img src="/logo.png" alt="" className="h-6 w-6 object-contain" />
-              <h1 className="text-lg font-bold text-[var(--text-primary)]">Remo Code</h1>
-            </div>
-            <p className="text-xs text-[var(--text-muted)] mt-0.5 truncate">{user.email}</p>
-          </div>
+          <button
+            onClick={onToggleCollapsed}
+            className="hidden md:inline-flex p-1 -m-1 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+            title="Collapse sidebar"
+            aria-label="Collapse sidebar"
+          >
+            <img src="/logo.png" alt="Remo Code" className="h-7 w-7 object-contain" />
+          </button>
+          <img src="/logo.png" alt="Remo Code" className="md:hidden h-7 w-7 object-contain" />
           <button
             onClick={onClose}
             className="md:hidden p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
