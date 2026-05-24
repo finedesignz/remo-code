@@ -1,4 +1,5 @@
 import type { ServerWebSocket } from 'bun'
+import { ScheduledRunEvent } from './protocol'
 
 interface ChannelEntry {
   ws: ServerWebSocket<any>
@@ -73,4 +74,26 @@ export function broadcastToUser(userId: string, message: object) {
       try { client.ws.send(json) } catch {}
     }
   }
+}
+
+/**
+ * Validated broadcast for scheduled-run lifecycle events (W3/T15).
+ * The dispatcher emits these via `broadcastToUser` directly today; this
+ * helper validates the payload against the Zod schema before sending so
+ * any shape drift is caught at dev time instead of silently shipping
+ * malformed JSON to the web UI.
+ *
+ * Drops the message (with a logged warning) on validation failure rather
+ * than throwing — the dispatcher must keep working.
+ */
+export function broadcastScheduledRun(userId: string, event: unknown) {
+  const parsed = ScheduledRunEvent.safeParse(event)
+  if (!parsed.success) {
+    console.warn(
+      `[ws.registry] broadcastScheduledRun dropped invalid event for user=${userId}:`,
+      parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+    )
+    return
+  }
+  broadcastToUser(userId, parsed.data)
 }

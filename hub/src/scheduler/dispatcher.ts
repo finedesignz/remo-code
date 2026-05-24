@@ -20,7 +20,7 @@ import { sql } from '../db/postgres.ts'
 import { resolveTargets, type ResolvedTarget } from './targets.ts'
 import * as registry from './registry.ts'
 import * as queue from './session-queue.ts'
-import { broadcastToUser } from '../ws/registry.ts'
+import { broadcastScheduledRun } from '../ws/registry.ts'
 
 const MAX_CHAIN_DEPTH = 5
 
@@ -108,7 +108,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
       triggered_by_run_id: opts.triggeredByRunId ?? null,
       error: 'daily_cost_cap',
     })
-    broadcastToUser(userId, {
+    broadcastScheduledRun(userId, {
       type: 'scheduled_run_finished',
       run_id: run.id, task_id: task.id, status: 'skipped', error: 'daily_cost_cap',
     })
@@ -170,10 +170,11 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
     }
     trackRun(ctx)
 
-    broadcastToUser(userId, {
+    broadcastScheduledRun(userId, {
       type: 'scheduled_run_started',
       run_id: run.id,
       task_id: task.id,
+      scheduled_for: now.toISOString(),
       target_kind: target.kind,
       target_id: target.sessionId ?? target.supervisorId ?? null,
     })
@@ -264,7 +265,7 @@ export async function finalizeRun(
     inFlightByRun.delete(runId)
   }
 
-  broadcastToUser(updated?.user_id ?? '', {
+  broadcastScheduledRun(updated?.user_id ?? ctx?.userId ?? '', {
     type: 'scheduled_run_finished',
     run_id: runId,
     task_id: ctx?.taskId ?? updated?.task_id ?? null,
