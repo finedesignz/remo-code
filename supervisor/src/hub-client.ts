@@ -81,11 +81,18 @@ export class SupervisorClient {
     }
   }
 
+  private static MAX_RECONNECT_ATTEMPTS = 5
+
   private scheduleReconnect() {
     if (this.reconnectTimer) return
+    if (this.reconnectAttempts >= SupervisorClient.MAX_RECONNECT_ATTEMPTS) {
+      this.log('error', `reconnect failed after ${SupervisorClient.MAX_RECONNECT_ATTEMPTS} attempts — exiting (Task Scheduler will restart)`)
+      setTimeout(() => process.exit(1), 500)
+      return
+    }
     const delay = Math.min(60_000, 1000 * Math.pow(2, Math.min(this.reconnectAttempts, 6)))
     this.reconnectAttempts++
-    this.log('info', `reconnecting in ${delay}ms`)
+    this.log('info', `reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${SupervisorClient.MAX_RECONNECT_ATTEMPTS})`)
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       this.connect()

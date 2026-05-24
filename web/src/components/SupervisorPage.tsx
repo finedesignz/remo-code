@@ -371,6 +371,16 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
             </code>
           </div>
         ) : (
+          <>
+            {activeSupervisor && !activeSupervisor.online && (
+              <div className="mb-3 p-3 rounded-lg bg-amber-900/20 text-amber-200 text-sm">
+                <div className="font-semibold">Supervisor offline</div>
+                <div className="text-xs opacity-80 mt-1">
+                  {activeSupervisor.hostname} hasn't checked in since {activeSupervisor.last_seen_at ? new Date(activeSupervisor.last_seen_at).toLocaleString() : 'never'}.
+                  The supervisor process retries the hub up to 5 times then exits; the Task Scheduler restarts it shortly after. Active sessions auto-resume on the next successful reconnect.
+                </div>
+              </div>
+            )}
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs text-[var(--text-muted)] px-1">Machine:</span>
             <select
@@ -410,6 +420,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               )}
             </div>
           </div>
+          </>
         )}
       </div>
 
