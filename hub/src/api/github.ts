@@ -123,7 +123,11 @@ github.get('/repos', async (c) => {
   for (const inst of installations as any[]) {
     try {
       const repos = await listInstallationRepos(inst.id)
-      for (const r of repos) out.push({ ...r, installation_id: inst.id, account: inst.account_login })
+      // Archived/disabled repos are filtered out — users connect active repos only.
+      for (const r of repos) {
+        if (r.archived === true || r.disabled === true) continue
+        out.push({ ...r, installation_id: inst.id, account: inst.account_login })
+      }
     } catch (err: any) {
       console.error('[github repos]', inst.id, err.message)
     }

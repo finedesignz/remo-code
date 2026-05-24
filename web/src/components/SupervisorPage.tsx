@@ -104,7 +104,15 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     finally { setScanning(false) }
   }, [token, activeSupervisorId])
 
-  useEffect(() => { loadSupervisors(); loadGitHub() }, [])
+  // Always fetch fresh on mount so newly-created/renamed/archived repos surface
+  // without a hard page reload. Also re-fetch when the tab regains focus.
+  useEffect(() => {
+    loadSupervisors()
+    loadGitHub()
+    const onFocus = () => { loadGitHub() }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [])
   useEffect(() => { if (activeSupervisorId && activeSupervisor?.online) scan() }, [activeSupervisorId])
 
   // Poll supervisor list every 10s for state updates
@@ -247,6 +255,14 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold text-[var(--text-primary)]">Repos</h3>
               <div className="flex items-center gap-2">
+                <button onClick={loadGitHub} title="Refresh GitHub repos" aria-label="Refresh GitHub repos" className="p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40">
+                  <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 10a7 7 0 0 1 12-4.95L17 7" />
+                    <path d="M17 3v4h-4" />
+                    <path d="M17 10a7 7 0 0 1-12 4.95L3 13" />
+                    <path d="M3 17v-4h4" />
+                  </svg>
+                </button>
                 <button onClick={scan} disabled={!activeSupervisor?.online || scanning} className="px-2 py-1 text-xs bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)] rounded text-[var(--text-secondary)] disabled:opacity-50">{scanning ? 'Scanning…' : 'Rescan'}</button>
               </div>
             </div>
