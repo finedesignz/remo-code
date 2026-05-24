@@ -67,6 +67,14 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
   const [slashItems, setSlashItems] = useState<SlashItem[]>([])
   const [slashIdx, setSlashIdx] = useState(0)
   const [slashOpen, setSlashOpen] = useState(false)
+  const slashSuppressedRef = useRef(false)
+
+  // True if input ends with an unfinished slash token (e.g. "/foo" or "/" or "hi /bar"),
+  // i.e. a "/" that starts the input or follows whitespace, with no space after it.
+  function hasUnfinishedSlashToken(s: string): boolean {
+    const m = s.match(/(^|\s)\/([\w.:-]*)$/)
+    return !!m
+  }
 
   // Load synced commands once per session
   useEffect(() => {
@@ -79,8 +87,9 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
   }, [token])
 
   const slashMatch = (() => {
-    if (!input.startsWith('/')) return null
-    const m = input.match(/^\/([\w.:-]*)/)
+    // Only treat as slash trigger when input is a bare unfinished slash token at the start
+    // (e.g. "/foo"). Once user types a space after the token ("/foo bar"), we stop matching.
+    const m = input.match(/^\/([\w.:-]*)$/)
     if (!m) return null
     const q = m[1].toLowerCase()
     const matches = slashItems
@@ -101,6 +110,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     const caret = item.name.length + 2 // '/' + name + ' '
     setInput(next)
     setSlashOpen(false)
+    slashSuppressedRef.current = true // latch closed; do not reopen on the next render
     setSlashIdx(0)
     requestAnimationFrame(() => {
       const ta = textareaRef.current
@@ -143,7 +153,15 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     try {
       const saved = localStorage.getItem(draftKey(activeSessionId)) || ''
       setInput(saved)
-      if (saved.startsWith('/')) setSlashOpen(true)
+      // Only reopen the dropdown if the restored draft is still an unfinished slash token
+      // (e.g. "/gsd-pl") — not when the user already typed past it ("/gsd-plan-phase do stuff").
+      if (/^\/[\w.:-]*$/.test(saved)) {
+        slashSuppressedRef.current = false
+        setSlashOpen(true)
+      } else {
+        slashSuppressedRef.current = true
+        setSlashOpen(false)
+      }
     } catch {
       setInput('')
     }
@@ -251,7 +269,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     if (slashVisible) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIdx((i) => Math.min(slashMatch!.matches.length - 1, i + 1)); return }
       if (e.key === 'ArrowUp')   { e.preventDefault(); setSlashIdx((i) => Math.max(0, i - 1)); return }
-      if (e.key === 'Escape')    { e.preventDefault(); setSlashOpen(false); return }
+      if (e.key === 'Escape')    { e.preventDefault(); setSlashOpen(false); slashSuppressedRef.current = true; return }
       if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
         e.preventDefault()
         applySlash(slashMatch!.matches[slashIdx])
@@ -355,13 +373,23 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
                 ref={textareaRef}
                 value={input}
                 onChange={e => {
-                  setInput(e.target.value)
-                  if (e.target.value.startsWith('/')) { setSlashOpen(true); setSlashIdx(0) }
-                  else setSlashOpen(false)
+                  const v = e.target.value
+                  setInput(v)
+                  const unfinished = hasUnfinishedSlashToken(v)
+                  // Clear the suppression latch only when the user has edited away from
+                  // a slash token entirely (so a fresh "/" later can reopen the menu).
+                  if (!unfinished) slashSuppressedRef.current = false
+                  if (unfinished && !slashSuppressedRef.current && /^\/[\w.:-]*$/.test(v)) {
+                    setSlashOpen(true); setSlashIdx(0)
+                  } else {
+                    setSlashOpen(false)
+                  }
                 }}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                onFocus={() => { if (input.startsWith('/')) setSlashOpen(true) }}
+                onFocus={() => {
+                  if (!slashSuppressedRef.current && /^\/[\w.:-]*$/.test(input)) setSlashOpen(true)
+                }}
                 placeholder="Send a message to Claude... (type / for commands)"
                 rows={1}
                 className="w-full px-4 py-2.5 bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none max-h-32"
