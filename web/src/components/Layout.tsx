@@ -88,23 +88,21 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
   }, [sessionsHook.sessions, activeSessionId])
 
   // Close sidebar on mobile when selecting a session.
-  // Auto-nudge: if user picks an idle (online, not thinking) session with prior history,
-  // send a brief status-update prompt. Throttled per-session (5 min) and opt-out via Settings.
+  // Auto-nudge: when user clicks an online + idle (not thinking) session,
+  // send a brief status-update prompt. Fires on any click (incl. re-selecting
+  // the already-active session), throttled per-session (5 min), opt-out via Settings.
   const handleSelectSession = useCallback((id: string) => {
-    const prevId = activeSessionId
     setActiveSessionId(id)
     if (window.innerWidth < 768) {
       setSidebarOpen(false)
     }
 
-    if (id === prevId) return // re-selecting same session: no nudge
-
     try {
       const optOut = localStorage.getItem('remo:auto-nudge') === 'off'
       if (optOut) return
       const target = sessionsHook.sessions.find(s => s.id === id)
+      // Only nudge when agent is connected AND not currently generating a response.
       if (!target || target.status !== 'online') return
-      if (!target.last_activity) return // no prior activity — likely fresh session
       const key = `remo:last-nudge:${id}`
       const last = Number(localStorage.getItem(key) || 0)
       const now = Date.now()
@@ -120,7 +118,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
         })
       }, 150)
     } catch {}
-  }, [activeSessionId, sessionsHook.sessions, send])
+  }, [sessionsHook.sessions, send])
 
   // Close sidebar on Escape
   useEffect(() => {
