@@ -41,6 +41,20 @@ supervisors.post('/:id/scan', async (c) => {
   }
 })
 
+supervisors.get('/:id/branches', async (c) => {
+  const a = await authorizeSupervisor(c)
+  if ('error' in a) return a.error
+  const repoPath = c.req.query('repo_path')
+  if (!repoPath) return c.json({ error: 'repo_path required' }, 400)
+  try {
+    const res: any = await sendRequest(a.supervisorId, { type: 'repo.list_branches', repo_path: repoPath } as any, 15_000)
+    if (!res?.ok) return c.json({ error: res?.error || 'list failed' }, 500)
+    return c.json({ branches: res.data?.branches || [], current: res.data?.current || null })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500)
+  }
+})
+
 const CloneBody = z.object({
   installation_id: z.coerce.number(), // BIGINT from postgres comes back as string
   owner: z.string().min(1),

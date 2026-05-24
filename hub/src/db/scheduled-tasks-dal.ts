@@ -5,6 +5,24 @@ export type OnCompleteAction =
   | { type: 'chain'; chain_task_id: string }
   | { type: 'notify'; notify_email?: string }
 
+// ── New shape (architect-approved) ────────────────────────────────────────────
+// PostRunAction is intentionally typed as `any` for the DAL — strict Zod schema
+// lives in `hub/src/scheduler/post-run/schema.ts` (T8.6) and gates writes at
+// the API layer.
+export type PostRunAction = any
+
+export type TaskType = 'prompt' | 'skill' | 'security_scan' | 'log_check' | 'continue_dev'
+export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
+export type CatchupPolicy = 'skip' | 'run_once'
+export type RunStatus =
+  | 'pending'
+  | 'in_flight'
+  | 'running' // legacy alias, still accepted by the CHECK constraint
+  | 'success'
+  | 'failed'
+  | 'skipped'
+  | 'cancelled'
+
 export interface ScheduledTask {
   id: string
   user_id: string
@@ -18,6 +36,19 @@ export interface ScheduledTask {
   on_complete: OnCompleteAction
   created_at: string
   updated_at: string
+  // New shape — present on rows created by the new dispatcher; may be NULL/default
+  // on legacy rows during the transition window.
+  task_type: TaskType
+  target_kind: TargetKind
+  target_id: string | null
+  payload: Record<string, any>
+  cron_expr: string | null
+  timezone: string
+  catchup_policy: CatchupPolicy
+  max_concurrent: number
+  last_fire_at: string | null
+  next_fire_at: string | null
+  post_run_actions: PostRunAction[]
 }
 
 export interface ScheduledTaskRun {
@@ -27,8 +58,18 @@ export interface ScheduledTaskRun {
   session_id: string | null
   started_at: string
   completed_at: string | null
-  status: 'running' | 'success' | 'failed' | 'skipped'
+  status: RunStatus
   error: string | null
+  // New columns (nullable on legacy rows)
+  scheduled_for: string | null
+  finished_at: string | null
+  target_kind: TargetKind | null
+  target_id: string | null
+  cost_usd: string | null // numeric returned as string by node-postgres
+  duration_ms: number | null
+  output_snippet: string | null
+  triggered_by_run_id: string | null
+  created_at: string
 }
 
 export async function listTasksForUser(userId: string): Promise<ScheduledTask[]> {

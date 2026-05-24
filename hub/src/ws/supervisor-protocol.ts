@@ -90,6 +90,7 @@ export type HubToSupervisor =
   | { type: 'repo.clone'; req_id: string; clone_url: string; target_path: string; repo_full_name: string }
   | { type: 'repo.pull'; req_id: string; repo_path: string; branch: string; clone_url: string }
   | { type: 'repo.branch_checkout'; req_id: string; repo_path: string; branch: string; create: boolean }
+  | { type: 'repo.list_branches'; req_id: string; repo_path: string }
   | { type: 'session.start'; req_id: string; run_id: string; repo_path: string; branch?: string; pull: boolean; initial_prompt?: string; api_key: string; hub_url: string }
   | { type: 'session.stop'; req_id: string; run_id: string; reason: string }
   | { type: 'session.status'; req_id: string }

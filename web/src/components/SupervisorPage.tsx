@@ -615,6 +615,15 @@ function StartDialog(props: StartDialogProps) {
         .then((r) => r.ok ? r.json() : { branches: [] })
         .then((d) => setBranches(d.branches?.map((b: any) => b.name) || []))
         .catch(() => {})
+    } else if (localRepo) {
+      apiFetch(token, `/api/supervisors/${supervisorId}/branches?repo_path=${encodeURIComponent(localRepo.path)}`)
+        .then((r) => r.ok ? r.json() : { branches: [] })
+        .then((d) => {
+          const list: string[] = d.branches || []
+          setBranches(list)
+          if (list.length) setBranch((prev) => list.includes(prev) ? prev : (d.current || list[0]))
+        })
+        .catch(() => {})
     }
   }, [])
 
