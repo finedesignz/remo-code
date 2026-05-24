@@ -313,6 +313,16 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
         message,
       })
     }
+    // W2/T9 — finalize any pending scheduled run for this session.
+    try {
+      const mod = await import('../scheduler/senders/agent.ts')
+      void mod.onAssistantMessage(sessionId, msg.content)
+    } catch {}
+    // Legacy v0 scheduler hook (kept until W5 cutover).
+    try {
+      const legacy = await import('../scheduler/index.ts')
+      void legacy.onAssistantMessage(sessionId)
+    } catch {}
   }
 
   if (msg.type === 'pong') return
