@@ -247,12 +247,8 @@ export class ClaudeRunner {
     const proc = this.proc
     if (!proc) { this.ready = false; return }
     try { proc.kill('SIGINT') } catch {}
-    const deadline = Date.now() + 3_000
-    while (Date.now() < deadline) {
-      // @ts-ignore - bun Subprocess has .exited promise
-      if ((proc as any).exitCode != null) break
-      await new Promise(r => setTimeout(r, 100))
-    }
+    const exited: Promise<unknown> = (proc as any).exited ?? Promise.resolve()
+    await Promise.race([exited, new Promise(r => setTimeout(r, 3_000))])
     try { proc.kill('SIGKILL') } catch {}
     this.proc = null
     this.ready = false

@@ -14,6 +14,7 @@ export class HubClient {
   private onMessage: MessageHandler
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private authenticated = false
+  private stopped = false
 
   constructor(
     hubUrl: string,
@@ -56,6 +57,17 @@ export class HubClient {
       }
 
       if (msg.type === 'auth_error') {
+        if (msg.error === 'session_disconnected') {
+          console.error('')
+          console.error('  Session was disconnected from the web UI.')
+          console.error('  Stopping agent. Run claude-remote again to start a fresh session.')
+          console.error('')
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+          this.reconnectTimer = null
+          this.stopped = true
+          try { this.ws?.close() } catch {}
+          process.exit(0)
+        }
         console.error('')
         console.error(`  Hub authentication failed: ${msg.error}`)
         console.error('')
@@ -63,6 +75,9 @@ export class HubClient {
         console.error('  Check that your API key is correct and not expired.')
         console.error('  Get a new key at https://app.remo-code.com/settings')
         console.error('')
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+        this.reconnectTimer = null
+        this.stopped = true
         this.ws?.close()
         return
       }
@@ -78,6 +93,7 @@ export class HubClient {
     this.ws.onclose = () => {
       printDisconnected()
       this.authenticated = false
+      if (this.stopped) return
       this.reconnectTimer = setTimeout(() => this.connect(), 5000)
     }
 
@@ -94,6 +110,7 @@ export class HubClient {
   }
 
   close() {
+    this.stopped = true
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.ws?.close()
   }

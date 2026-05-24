@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { AuthUser } from '../lib/auth.ts'
 import type { CodeSession } from '../hooks/useSessions'
 import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
@@ -26,6 +27,7 @@ export function Sidebar({
   onNavigate, onRefresh,
   connected, user, signOut, onClose, unreadCounts = {},
 }: Props) {
+  const [confirmingId, setConfirmingId] = useState<string | null>(null)
 
   return (
       <div className="w-72 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
@@ -87,17 +89,35 @@ export function Sidebar({
                   <UnreadBadge count={unreadCounts[s.id] || 0} />
                   {/* Action buttons — always visible on mobile, hover on desktop */}
                   <span className="flex md:hidden md:group-hover:flex items-center gap-1 shrink-0">
-                    <button
-                      onClick={(e) => { e.stopPropagation(); if (confirm(`Delete session "${sessionLabel(s)}"?`)) onDeleteSession(s.id) }}
-                      className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-[var(--text-muted)] hover:text-red-400 bg-[var(--bg-tertiary)]/80 hover:bg-red-900/50 rounded transition-colors"
-                      title="Delete session"
-                      aria-label={`Delete ${sessionLabel(s)}`}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <line x1="4" y1="4" x2="12" y2="12" />
-                        <line x1="12" y1="4" x2="4" y2="12" />
-                      </svg>
-                    </button>
+                    {confirmingId === s.id ? (
+                      <>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setConfirmingId(null); onDeleteSession(s.id) }}
+                          className="px-2 py-1 text-[11px] font-medium text-white bg-red-600 hover:bg-red-500 rounded transition-colors"
+                          title="Confirm: shuts down the local claude-remote process and removes the session"
+                        >
+                          Confirm stop
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setConfirmingId(null) }}
+                          className="px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 rounded transition-colors"
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setConfirmingId(s.id) }}
+                        className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-red-400 hover:text-red-300 bg-[var(--bg-tertiary)]/80 hover:bg-red-900/40 rounded transition-colors"
+                        title="Disconnect & stop agent — shuts down the local claude-remote process and removes the session"
+                        aria-label={`Disconnect ${sessionLabel(s)}`}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                          <line x1="4" y1="4" x2="12" y2="12" />
+                          <line x1="12" y1="4" x2="4" y2="12" />
+                        </svg>
+                      </button>
+                    )}
                   </span>
                 </div>
                 {s.project_dir && (

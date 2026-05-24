@@ -6,7 +6,7 @@ import type { HubToAgent } from './types'
 import * as ui from './local-ui'
 import { spawnSync } from 'child_process'
 
-const VERSION = '0.3.8'
+const VERSION = '0.3.9'
 
 // --- Pre-flight: check that claude CLI is available ---
 const claudeCheck = spawnSync('claude', ['--version'], {
@@ -93,6 +93,14 @@ function handleMessage(msg: HubToAgent) {
   }
   if (msg.type === 'cancel') {
     runner.cancel()
+  }
+  if (msg.type === 'shutdown') {
+    const reason = msg.reason ?? 'hub_requested'
+    console.log(`[remo-agent] Shutdown requested by hub (${reason}). Stopping Claude...`)
+    runner.stopGracefully().finally(() => {
+      try { hub.close() } catch {}
+      process.exit(0)
+    })
   }
 }
 

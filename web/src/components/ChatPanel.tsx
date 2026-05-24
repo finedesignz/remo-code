@@ -147,36 +147,67 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     setAttachedFiles([])
   }, [activeSessionId])
 
-  // Load persisted draft on mount / session switch
+  // Track previous session id and latest input value for synchronous flush on switch
+  const prevSessionIdRef = useRef<string | null>(null)
+  const inputRef = useRef('')
+  useEffect(() => { inputRef.current = input }, [input])
+
+  // Load persisted draft on mount / session switch.
+  // CRITICAL: flush the outgoing session's pending text synchronously BEFORE loading
+  // the new draft, so text typed within the debounce window isn't lost — and so the
+  // new session's input is set unconditionally (empty string clears A's leftover text).
   useEffect(() => {
-    if (!activeSessionId) { setInput(''); return }
-    try {
-      const saved = localStorage.getItem(draftKey(activeSessionId)) || ''
-      setInput(saved)
-      // Only reopen the dropdown if the restored draft is still an unfinished slash token
-      // (e.g. "/gsd-pl") — not when the user already typed past it ("/gsd-plan-phase do stuff").
-      if (/^\/[\w.:-]*$/.test(saved)) {
-        slashSuppressedRef.current = false
-        setSlashOpen(true)
-      } else {
-        slashSuppressedRef.current = true
-        setSlashOpen(false)
-      }
-    } catch {
+    const outgoing = prevSessionIdRef.current
+    if (outgoing && outgoing !== activeSessionId) {
+      try {
+        const pending = inputRef.current
+        if (pending && pending.trim()) {
+          localStorage.setItem(draftKey(outgoing), pending.slice(0, MAX_DRAFT_SIZE))
+        } else {
+          localStorage.removeItem(draftKey(outgoing))
+        }
+      } catch {}
+    }
+    prevSessionIdRef.current = activeSessionId
+
+    if (!activeSessionId) {
       setInput('')
+      slashSuppressedRef.current = true
+      setSlashOpen(false)
+      return
+    }
+    let saved = ''
+    try {
+      saved = localStorage.getItem(draftKey(activeSessionId)) ?? ''
+    } catch {
+      saved = ''
+    }
+    setInput(saved) // unconditional — empty string clears prior session's text
+    inputRef.current = saved
+    // Only reopen the dropdown if the restored draft is still an unfinished slash token
+    // (e.g. "/gsd-pl") — not when the user already typed past it ("/gsd-plan-phase do stuff").
+    if (/^\/[\w.:-]*$/.test(saved)) {
+      slashSuppressedRef.current = false
+      setSlashOpen(true)
+    } else {
+      slashSuppressedRef.current = true
+      setSlashOpen(false)
     }
   }, [activeSessionId])
 
-  // Debounced persist of input to localStorage (text only)
+  // Debounced persist of input to localStorage (text only). Guard with the session id
+  // captured at effect-creation so a pending timer can never write to the wrong key
+  // after a session switch.
   useEffect(() => {
     if (!activeSessionId) return
-    const key = draftKey(activeSessionId)
+    const sid = activeSessionId
+    const key = draftKey(sid)
     const t = setTimeout(() => {
       try {
         if (!input) { localStorage.removeItem(key); return }
         let value = input
         if (value.length > MAX_DRAFT_SIZE) {
-          console.warn(`[remo] draft for ${activeSessionId} exceeds ${MAX_DRAFT_SIZE}B; truncating`)
+          console.warn(`[remo] draft for ${sid} exceeds ${MAX_DRAFT_SIZE}B; truncating`)
           value = value.slice(0, MAX_DRAFT_SIZE)
         }
         localStorage.setItem(key, value)
