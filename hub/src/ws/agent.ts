@@ -1,7 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
 import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, recentlyDisconnectedForProjectDir, updateSessionAgentInfo } from '../db/dal'
-import { hashToken } from './channel'
+import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
 import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands } from '../db/supervisor-dal'
