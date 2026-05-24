@@ -38,7 +38,21 @@ export function MessageBubble({ message }: Props) {
         {isUser ? (
           text ? <p className="whitespace-pre-wrap break-words">{text}</p> : null
         ) : (
-          <div className="prose prose-sm max-w-none [&_pre]:bg-[var(--code-bg)] [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:overflow-x-auto [&_code]:text-emerald-300 [&_a]:text-indigo-400 break-words prose-headings:text-[var(--text-primary)] prose-p:text-[var(--text-primary)] prose-strong:text-[var(--text-primary)] prose-li:text-[var(--text-primary)] prose-blockquote:text-[var(--text-secondary)] prose-code:text-emerald-300 prose-th:text-[var(--text-primary)] prose-td:text-[var(--text-primary)]">
+          <div className="max-w-none break-words text-[var(--text-primary)]
+            [&_pre]:bg-[var(--code-bg)] [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:overflow-x-auto [&_pre]:my-2
+            [&_code]:text-emerald-300
+            [&_a]:text-indigo-400 [&_a]:underline
+            [&_p]:my-1.5 [&_p]:leading-relaxed
+            [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-2 [&_ul]:space-y-1
+            [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2 [&_ol]:space-y-1
+            [&_li]:marker:text-[var(--text-muted)]
+            [&_ul_ul]:list-[circle] [&_ul_ul_ul]:list-[square] [&_ul_ul]:my-1 [&_ol_ol]:my-1
+            [&_h1]:text-base [&_h1]:font-semibold [&_h1]:mt-3 [&_h1]:mb-1.5
+            [&_h2]:text-sm [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mb-1.5
+            [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-2 [&_h3]:mb-1
+            [&_blockquote]:border-l-2 [&_blockquote]:border-[var(--border-color)] [&_blockquote]:pl-3 [&_blockquote]:text-[var(--text-secondary)] [&_blockquote]:my-2
+            [&_table]:text-xs [&_table]:border-collapse [&_th]:border [&_th]:border-[var(--border-color)] [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_td]:border [&_td]:border-[var(--border-color)] [&_td]:px-2 [&_td]:py-1
+            [&_hr]:border-[var(--border-color)] [&_hr]:my-3">
             <Markdown
               remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeSanitize]}

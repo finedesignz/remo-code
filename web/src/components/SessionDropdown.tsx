@@ -100,7 +100,8 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession, un
 
       {open && (
         <div
-          className="absolute top-full left-0 right-0 mt-1 bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] rounded-lg shadow-2xl z-50 overflow-y-auto max-h-[60vh] touch-auto"
+          className="absolute top-full left-0 right-0 mt-1 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl shadow-2xl z-50 overflow-y-auto max-h-[60vh] touch-auto isolate"
+          style={{ backgroundColor: 'var(--bg-secondary)' }}
           role="listbox"
         >
           {connected.map(s => (
