@@ -13,7 +13,10 @@ import { supervisors as supervisorsApi } from './api/supervisors'
 import { github as githubApi } from './api/github'
 import { commands as commandsApi } from './api/commands'
 import { transcribe as transcribeApi } from './api/transcribe'
+import { scheduledTasks as scheduledTasksApi } from './api/scheduled-tasks'
 import { runMigrations } from './db/migrate'
+import { loadAll as loadAllScheduledTasks } from './scheduler/index.ts'
+import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit } from './middleware/rate-limit'
 import {
@@ -91,6 +94,7 @@ app.route('/api/supervisors', supervisorsApi)
 app.route('/api/github', githubApi)
 app.route('/api/commands', commandsApi)
 app.route('/api/transcribe', transcribeApi)
+app.route('/api/scheduled-tasks', scheduledTasksApi)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]

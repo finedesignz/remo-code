@@ -1,6 +1,7 @@
 import { readdirSync, statSync, existsSync, readFileSync } from 'fs'
 import { join, basename, sep } from 'path'
 import { homedir } from 'os'
+import { builtinCommands } from './builtins'
 
 export interface ScannedCommand {
   kind: 'command' | 'skill'
@@ -84,6 +85,9 @@ export function scanAllCommands(): ScannedCommand[] {
     seen.add(key)
     out.push(c)
   }
+
+  // 0. Built-in Claude Code commands (baked in, not file-scanned)
+  for (const b of builtinCommands()) push(b)
 
   // 1. User commands: ~/.claude/commands/**/*.md
   const userCmdDir = join(CLAUDE_DIR, 'commands')

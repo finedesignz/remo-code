@@ -3,6 +3,7 @@ import type { Profile } from '../hooks/useProfile'
 import { useApiKey } from '../hooks/useApiKey'
 import { useSessions, type AgentInfo, type CodeSession } from '../hooks/useSessions'
 import { SupervisorPage } from './SupervisorPage'
+import { CommandsList } from './CommandsList'
 
 interface Props {
   token: string
@@ -11,12 +12,12 @@ interface Props {
   onBack: () => void
 }
 
-type Tab = 'account' | 'supervisor' | 'apikey'
+type Tab = 'account' | 'supervisor' | 'apikey' | 'commands'
 
 function readTabFromHash(): Tab {
   const m = window.location.hash.match(/[?&]tab=([a-z]+)/)
   const v = m?.[1] as Tab | undefined
-  if (v === 'account' || v === 'supervisor' || v === 'apikey') return v
+  if (v === 'account' || v === 'supervisor' || v === 'apikey' || v === 'commands') return v
   return 'supervisor'
 }
 
@@ -55,6 +56,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
 
   const tabs: { id: Tab; label: string; desc: string }[] = [
     { id: 'supervisor', label: 'Supervisor', desc: 'Connect repos & manage agents' },
+    { id: 'commands', label: 'Commands', desc: 'Browse Claude slash commands & skills' },
     { id: 'account', label: 'Account', desc: 'Profile & system prompt' },
     { id: 'apikey', label: 'API Key', desc: 'Agent authentication' },
   ]
@@ -174,6 +176,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
   const sectionFor = (id: Tab) => {
     if (id === 'account') return renderAccount()
     if (id === 'supervisor') return renderSupervisor()
+    if (id === 'commands') return <CommandsList token={token} />
     return renderApiKey()
   }
 

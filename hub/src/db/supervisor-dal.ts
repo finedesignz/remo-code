@@ -173,6 +173,73 @@ export async function listCommandsForUser(userId: string) {
   `
 }
 
+// ── Paused repos ─────────────────────────────────────────────────────────────
+// Pause flag is set on user "Disconnect" so the supervisor never auto-spawns
+// (or restart-on-crash respawns) an agent for that repo until the user
+// explicitly clicks "Start" again.
+
+export async function addPausedRepo(args: {
+  userId: string
+  supervisorId: string
+  repoPath: string
+  reason?: string | null
+}) {
+  await sql`
+    INSERT INTO paused_repos (user_id, supervisor_id, repo_path, paused_reason)
+    VALUES (${args.userId}, ${args.supervisorId}, ${args.repoPath}, ${args.reason ?? null})
+    ON CONFLICT (user_id, supervisor_id, repo_path)
+    DO UPDATE SET paused_at = now(), paused_reason = EXCLUDED.paused_reason
+  `
+}
+
+export async function removePausedRepo(args: {
+  userId: string
+  supervisorId: string
+  repoPath: string
+}) {
+  await sql`
+    DELETE FROM paused_repos
+    WHERE user_id = ${args.userId} AND supervisor_id = ${args.supervisorId} AND repo_path = ${args.repoPath}
+  `
+}
+
+export async function listPausedRepos(supervisorId: string): Promise<string[]> {
+  const rows = await sql`
+    SELECT repo_path FROM paused_repos WHERE supervisor_id = ${supervisorId}
+  `
+  return rows.map((r: any) => r.repo_path as string)
+}
+
+export async function isRepoPaused(supervisorId: string, repoPath: string): Promise<boolean> {
+  const rows = await sql`
+    SELECT 1 FROM paused_repos
+    WHERE supervisor_id = ${supervisorId} AND repo_path = ${repoPath} LIMIT 1
+  `
+  return rows.length > 0
+}
+
+// Find the supervisor (for a given user) whose roots contain the given repo
+// path. Used by sessions.delete to find which supervisor manages a repo.
+export async function findSupervisorForRepoPath(userId: string, repoPath: string) {
+  // roots is a TEXT[] of parent directories; a repo "belongs" to a supervisor
+  // if any root is a prefix of repo_path.
+  const rows = await sql`
+    SELECT id, roots FROM supervisors WHERE user_id = ${userId}
+  `
+  for (const r of rows as any[]) {
+    const roots = (r.roots || []) as string[]
+    for (const root of roots) {
+      if (!root) continue
+      const norm = root.replace(/[\/\\]+$/, '')
+      if (repoPath === norm) continue // root itself, not a repo
+      if (repoPath.startsWith(norm + '/') || repoPath.startsWith(norm + '\\')) {
+        return r.id as string
+      }
+    }
+  }
+  return null
+}
+
 export async function getInstallation(installationId: number, userId: string) {
   const rows = await sql`
     SELECT * FROM github_installations

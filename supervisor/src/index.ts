@@ -4,7 +4,7 @@ import { SupervisorClient } from './hub-client'
 import { installService, uninstallService, statusService, SERVICE_NAME } from './nssm-installer'
 import { scanAll } from './repo-scanner'
 
-const VERSION = '0.1.0'
+const VERSION = '0.2.0'
 
 function parseArgs(argv: string[]): { cmd: string; flags: Record<string, string | boolean> } {
   const cmd = argv[0] || 'help'

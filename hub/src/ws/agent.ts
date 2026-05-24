@@ -330,6 +330,48 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     // owned by the supervisor process which has since restarted.
     await updateSupervisorState(row.id, 'idle', null)
     console.log(`[supervisor] hello supervisor=${row.id} host=${msg.hostname} roots=${msg.roots.length}`)
+
+    // Auto-resume: respawn any session_runs that were open (ended_at IS NULL).
+    // These were orphaned by a reboot/restart. We end the old run row and send a
+    // fresh session.start to the now-online supervisor. The new run reuses the
+    // same project_dir, so the UI session row is reused and history persists.
+    try {
+      const { sql } = await import('../db/postgres')
+      const orphans = await sql`
+        SELECT id, repo_path, branch, initial_prompt
+        FROM session_runs
+        WHERE supervisor_id = ${row.id} AND ended_at IS NULL
+        ORDER BY started_at ASC
+      `
+      if (orphans.length > 0) {
+        console.log(`[supervisor] auto-resuming ${orphans.length} orphan session(s)`)
+        for (const o of orphans) {
+          await sql`UPDATE session_runs SET ended_at = now(), exit_reason = 'reboot' WHERE id = ${o.id}`
+          const newRun = await sql`
+            INSERT INTO session_runs (user_id, supervisor_id, repo_path, branch, pulled, initial_prompt, restart_of)
+            VALUES (${userId}, ${row.id}, ${o.repo_path}, ${o.branch}, false, ${null}, ${o.id})
+            RETURNING id
+          `
+          const newRunId = newRun[0].id
+          try {
+            ws.send(JSON.stringify({
+              type: 'session.start',
+              req_id: newRunId,
+              run_id: newRunId,
+              repo_path: o.repo_path,
+              branch: o.branch ?? undefined,
+              pull: false,
+              api_key: '__use_local__',
+              hub_url: '__same__',
+            }))
+          } catch (err: any) {
+            console.error('[supervisor] auto-resume send failed', err.message)
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error('[supervisor] auto-resume query failed', err.message)
+    }
     broadcastToUser(userId, {
       type: 'supervisor_update',
       supervisor_id: row.id,

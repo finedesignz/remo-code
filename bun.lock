@@ -14,7 +14,7 @@
     },
     "agent": {
       "name": "remo-code-agent",
-      "version": "0.3.8",
+      "version": "0.4.0",
       "bin": {
         "remo-agent": "./src/index.ts",
       },
@@ -24,6 +24,7 @@
       "version": "0.0.1",
       "dependencies": {
         "bcryptjs": "^3.0.3",
+        "croner": "^10.0.1",
         "hono": "^4.7.0",
         "jsonwebtoken": "^9.0.3",
         "nanoid": "^5.1.0",
@@ -37,7 +38,7 @@
     },
     "supervisor": {
       "name": "remo-code-supervisor",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "bin": {
         "remo-code-supervisor": "src/index.ts",
       },
@@ -46,6 +47,7 @@
       "name": "remo-code-web",
       "version": "0.0.1",
       "dependencies": {
+        "cronstrue": "^3.14.0",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
         "react-markdown": "^9.0.0",
@@ -310,6 +312,10 @@
     "comma-separated-tokens": ["comma-separated-tokens@2.0.3", "", {}, "sha512-Fu4hJdvzeylCfQPp9SGWidpzrMs7tTrlu6Vb8XGaRGck8QSNZJJp538Wrb60Lax4fPwR64ViY468OIUTbRlGZg=="],
 
     "convert-source-map": ["convert-source-map@2.0.0", "", {}, "sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg=="],
+
+    "croner": ["croner@10.0.1", "", {}, "sha512-ixNtAJndqh173VQ4KodSdJEI6nuioBWI0V1ITNKhZZsO0pEMoDxz539T4FTTbSZ/xIOSuDnzxLVRqBVSvPNE2g=="],
+
+    "cronstrue": ["cronstrue@3.14.0", "", { "bin": { "cronstrue": "bin/cli.js" } }, "sha512-XnW4vuK/jPJjmTyDWiej1Zq36Od7ITwxaV2O1pzHZuyMVvdy7NAvyvIBzybt+idqSpfqYuoDG7uf/ocGtJVWxA=="],
 
     "csstype": ["csstype@3.2.3", "", {}, "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ=="],
 

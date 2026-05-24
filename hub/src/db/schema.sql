@@ -136,4 +136,53 @@ CREATE TABLE IF NOT EXISTS supervisor_commands (
 CREATE INDEX IF NOT EXISTS idx_supcmds_user ON supervisor_commands(user_id, kind, name);
 CREATE INDEX IF NOT EXISTS idx_supcmds_supervisor ON supervisor_commands(supervisor_id);
 
+-- ── Scheduled Tasks ───────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  name            TEXT NOT NULL,
+  cron_expression TEXT NOT NULL,
+  prompt          TEXT NOT NULL,
+  enabled         BOOLEAN NOT NULL DEFAULT true,
+  last_run_at     TIMESTAMPTZ,
+  next_run_at     TIMESTAMPTZ,
+  on_complete     JSONB NOT NULL DEFAULT '{"type":"none"}'::jsonb,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user ON scheduled_tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user_enabled ON scheduled_tasks(user_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_session ON scheduled_tasks(session_id);
+
+CREATE TABLE IF NOT EXISTS scheduled_task_runs (
+  id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  task_id      TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id   TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  started_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ,
+  status       TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','success','failed','skipped')),
+  error        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_runs_task ON scheduled_task_runs(task_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_scheduled_runs_user ON scheduled_task_runs(user_id, started_at DESC);
+
+-- ── Paused repos (per-(user, supervisor, repo_path)) ──────────────────────────
+-- Set when the user explicitly clicks "Disconnect" on a session whose
+-- project_dir matches a supervisor-managed repo. The supervisor MUST NOT
+-- auto-spawn or restart-on-crash an agent for any repo in this table.
+-- Cleared only by an explicit "Start"/"Resume" action from the web UI.
+-- Survives hub restarts and supervisor reconnects.
+CREATE TABLE IF NOT EXISTS paused_repos (
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  supervisor_id TEXT NOT NULL REFERENCES supervisors(id) ON DELETE CASCADE,
+  repo_path     TEXT NOT NULL,
+  paused_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  paused_reason TEXT,
+  PRIMARY KEY (user_id, supervisor_id, repo_path)
+);
+CREATE INDEX IF NOT EXISTS idx_paused_repos_supervisor ON paused_repos(supervisor_id);
+
 -- Auto-migrate on hub startup: hub/src/db/migrate.ts runs this file on boot.

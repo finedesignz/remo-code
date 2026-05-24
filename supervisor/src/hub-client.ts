@@ -5,7 +5,7 @@ import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
 import type { SupervisorConfig } from './config'
 
-const VERSION = '0.1.0'
+const VERSION = '0.2.0'
 
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
