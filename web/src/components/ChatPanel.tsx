@@ -434,7 +434,13 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (slashVisible) {
+    // Dropdown is only "active" for keyboard capture when input is a bare unfinished
+    // slash token (no space yet). Once the user has typed past the command (space or
+    // anything else after it), Enter MUST send the message — never re-pick a suggestion.
+    const bareSlashToken = /^\/[\w.:-]*$/.test(input)
+    const slashActive = slashVisible && bareSlashToken
+
+    if (slashActive) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIdx((i) => Math.min(slashMatch!.matches.length - 1, i + 1)); return }
       if (e.key === 'ArrowUp')   { e.preventDefault(); setSlashIdx((i) => Math.max(0, i - 1)); return }
       if (e.key === 'Escape')    { e.preventDefault(); setSlashOpen(false); slashSuppressedRef.current = true; return }
@@ -444,8 +450,17 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
         return
       }
     }
+    // Escape always dismisses dropdown without changing input
+    if (e.key === 'Escape' && slashOpen) {
+      e.preventDefault()
+      setSlashOpen(false)
+      slashSuppressedRef.current = true
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
+      // Defensive: ensure dropdown is closed before sending
+      if (slashOpen) { setSlashOpen(false); slashSuppressedRef.current = true }
       handleSubmit(e)
     }
   }
