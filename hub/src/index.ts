@@ -17,6 +17,11 @@ import { scheduledTasks as scheduledTasksApi } from './api/scheduled-tasks'
 import { runMigrations } from './db/migrate'
 import { loadAll as loadAllScheduledTasks } from './scheduler/index.ts'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
+// W2 scheduler — coexists with the legacy v0 scheduler during migration.
+import * as schedRegistry from './scheduler/registry.ts'
+import * as schedDispatcher from './scheduler/dispatcher.ts'
+import * as schedCatchup from './scheduler/catchup.ts'
+import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit } from './middleware/rate-limit'
 import {
@@ -197,17 +202,37 @@ const server = Bun.serve({
   },
 })
 
-// On startup: apply migrations, then mark all sessions as offline
+// On startup: apply migrations, then mark all sessions as offline,
+// boot the W2 scheduler (registry + catchup) alongside the legacy v0.
 import { setOfflineStaleAgentSessions, markStreamingMessagesAsInterrupted } from './db/dal.ts'
 runMigrations()
   .then(() => setOfflineStaleAgentSessions())
   .then(() => markStreamingMessagesAsInterrupted())
-  .then(() => {
-    console.log('[startup] reset all session statuses to offline; marked orphaned streaming messages as interrupted')
+  .then(() => markOrphanedRunsInterrupted())
+  .then(async () => {
+    // W2 scheduler: wire dispatcher → queue, load enabled tasks, run catch-up.
+    // Coexists with the legacy v0 scheduler (loadAllScheduledTasks).
+    schedDispatcher.init()
+    await schedRegistry.loadAll()
+    await schedCatchup.runOnce()
+    await loadAllScheduledTasks().catch((err) =>
+      console.error('[startup] legacy scheduler load failed:', err?.message),
+    )
+    console.log('[startup] reset sessions/messages/runs; W2 + v0 schedulers ready')
   })
   .catch((err) => {
     console.error('[startup] migration/init error:', err.message)
   })
+
+// Graceful shutdown — pause cron jobs and clear pending post-run timers.
+function gracefulShutdown(signal: string) {
+  console.log(`[shutdown] received ${signal}, pausing schedulers`)
+  try { schedRegistry.pauseAll() } catch {}
+  try { clearPostRunTimers() } catch {}
+  setTimeout(() => process.exit(0), 250)
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
+process.on('SIGINT', () => gracefulShutdown('SIGINT'))
 
 console.log(`Hub server running on http://localhost:${server.port}`)
 console.log(`Serving web UI from: ${webDist}`)
