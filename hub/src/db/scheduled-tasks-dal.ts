@@ -215,9 +215,283 @@ export async function markOrphanedRunsInterrupted() {
 }
 
 function normalize(row: any): ScheduledTask {
+  const on_complete =
+    typeof row.on_complete === 'string' ? JSON.parse(row.on_complete) : row.on_complete
+  const payload =
+    typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload ?? {})
+  const post_run_actions =
+    typeof row.post_run_actions === 'string'
+      ? JSON.parse(row.post_run_actions)
+      : (row.post_run_actions ?? [])
   return {
     ...row,
-    on_complete:
-      typeof row.on_complete === 'string' ? JSON.parse(row.on_complete) : row.on_complete,
+    on_complete,
+    payload,
+    post_run_actions,
   }
+}
+
+// ── New-shape API (architect-approved scheduled-tasks phase) ──────────────────
+// These functions operate on the extended columns added in the Wave 1 migration
+// (task_type/target_kind/target_id/payload/cron_expr/timezone/catchup_policy/
+// max_concurrent/last_fire_at/next_fire_at/post_run_actions on tasks;
+// scheduled_for/finished_at/target_kind/target_id/cost_usd/duration_ms/
+// output_snippet/triggered_by_run_id/created_at on runs).
+//
+// Legacy callers (the v0 scheduler in `hub/src/scheduler/index.ts`) keep using
+// the older functions above. Both shapes coexist during the migration window.
+
+export async function listEnabledTasks(): Promise<ScheduledTask[]> {
+  const rows = await sql<ScheduledTask[]>`
+    SELECT * FROM scheduled_tasks WHERE enabled = true ORDER BY created_at ASC
+  `
+  return rows.map(normalize)
+}
+
+export async function createTaskV2(input: {
+  user_id: string
+  name: string
+  task_type: TaskType
+  target_kind: TargetKind
+  target_id?: string | null
+  payload?: Record<string, any>
+  cron_expr: string
+  timezone: string
+  catchup_policy?: CatchupPolicy
+  max_concurrent?: number
+  enabled?: boolean
+  post_run_actions?: PostRunAction[]
+  // Legacy columns kept for backward compat with the existing scheduler/v0 path.
+  // session_id is NOT NULL on the table; new fan-out tasks pass a sentinel
+  // until a follow-up migration drops the NOT NULL constraint.
+  session_id: string
+  cron_expression?: string
+  prompt?: string
+}): Promise<ScheduledTask> {
+  const rows = await sql<ScheduledTask[]>`
+    INSERT INTO scheduled_tasks (
+      user_id, session_id, name, cron_expression, prompt, enabled,
+      task_type, target_kind, target_id, payload, cron_expr, timezone,
+      catchup_policy, max_concurrent, post_run_actions
+    ) VALUES (
+      ${input.user_id}, ${input.session_id}, ${input.name},
+      ${input.cron_expression ?? input.cron_expr}, ${input.prompt ?? ''},
+      ${input.enabled ?? true},
+      ${input.task_type}, ${input.target_kind}, ${input.target_id ?? null},
+      ${sql.json((input.payload ?? {}) as any)}, ${input.cron_expr},
+      ${input.timezone}, ${input.catchup_policy ?? 'skip'},
+      ${input.max_concurrent ?? 1},
+      ${sql.json((input.post_run_actions ?? []) as any)}
+    )
+    RETURNING *
+  `
+  return normalize(rows[0])
+}
+
+export async function updateTaskV2(
+  id: string,
+  userId: string,
+  fields: Partial<{
+    name: string
+    enabled: boolean
+    task_type: TaskType
+    target_kind: TargetKind
+    target_id: string | null
+    payload: Record<string, any>
+    cron_expr: string
+    timezone: string
+    catchup_policy: CatchupPolicy
+    max_concurrent: number
+    post_run_actions: PostRunAction[]
+  }>,
+): Promise<ScheduledTask | null> {
+  const sets: any[] = []
+  if (fields.name !== undefined) sets.push(sql`name = ${fields.name}`)
+  if (fields.enabled !== undefined) sets.push(sql`enabled = ${fields.enabled}`)
+  if (fields.task_type !== undefined) sets.push(sql`task_type = ${fields.task_type}`)
+  if (fields.target_kind !== undefined) sets.push(sql`target_kind = ${fields.target_kind}`)
+  if (fields.target_id !== undefined) sets.push(sql`target_id = ${fields.target_id}`)
+  if (fields.payload !== undefined) sets.push(sql`payload = ${sql.json(fields.payload as any)}`)
+  if (fields.cron_expr !== undefined) {
+    sets.push(sql`cron_expr = ${fields.cron_expr}`)
+    sets.push(sql`cron_expression = ${fields.cron_expr}`)
+  }
+  if (fields.timezone !== undefined) sets.push(sql`timezone = ${fields.timezone}`)
+  if (fields.catchup_policy !== undefined) sets.push(sql`catchup_policy = ${fields.catchup_policy}`)
+  if (fields.max_concurrent !== undefined) sets.push(sql`max_concurrent = ${fields.max_concurrent}`)
+  if (fields.post_run_actions !== undefined) {
+    sets.push(sql`post_run_actions = ${sql.json(fields.post_run_actions as any)}`)
+  }
+  if (sets.length === 0) return getTask(id, userId)
+  sets.push(sql`updated_at = now()`)
+
+  let q = sql`UPDATE scheduled_tasks SET `
+  for (let i = 0; i < sets.length; i++) {
+    q = i === 0 ? sql`${q}${sets[i]}` : sql`${q}, ${sets[i]}`
+  }
+  const rows = await sql<ScheduledTask[]>`${q} WHERE id = ${id} AND user_id = ${userId} RETURNING *`
+  return rows[0] ? normalize(rows[0]) : null
+}
+
+export async function setTaskFireTimestamps(
+  id: string,
+  last: Date | null,
+  next: Date | null,
+): Promise<void> {
+  await sql`
+    UPDATE scheduled_tasks
+    SET last_fire_at = ${last}, next_fire_at = ${next},
+        last_run_at = COALESCE(${last}, last_run_at),
+        next_run_at = ${next},
+        updated_at = now()
+    WHERE id = ${id}
+  `
+}
+
+export async function insertRunV2(input: {
+  task_id: string
+  user_id: string
+  status: RunStatus
+  scheduled_for: Date
+  target_kind: TargetKind
+  target_id?: string | null
+  session_id?: string | null
+  triggered_by_run_id?: string | null
+  error?: string | null
+}): Promise<ScheduledTaskRun> {
+  const rows = await sql<ScheduledTaskRun[]>`
+    INSERT INTO scheduled_task_runs (
+      task_id, user_id, session_id, status, error,
+      scheduled_for, target_kind, target_id, triggered_by_run_id,
+      started_at
+    ) VALUES (
+      ${input.task_id}, ${input.user_id}, ${input.session_id ?? null},
+      ${input.status}, ${input.error ?? null},
+      ${input.scheduled_for}, ${input.target_kind}, ${input.target_id ?? null},
+      ${input.triggered_by_run_id ?? null},
+      ${input.status === 'pending' ? null : sql`now()`}
+    )
+    RETURNING *
+  `
+  return rows[0]
+}
+
+export async function updateRunStatus(
+  runId: string,
+  fields: Partial<{
+    status: RunStatus
+    error: string | null
+    cost_usd: number | null
+    duration_ms: number | null
+    output_snippet: string | null
+    finished_at: Date | null
+    started_at: Date | null
+  }>,
+): Promise<ScheduledTaskRun | null> {
+  const sets: any[] = []
+  if (fields.status !== undefined) sets.push(sql`status = ${fields.status}`)
+  if (fields.error !== undefined) sets.push(sql`error = ${fields.error}`)
+  if (fields.cost_usd !== undefined) sets.push(sql`cost_usd = ${fields.cost_usd}`)
+  if (fields.duration_ms !== undefined) sets.push(sql`duration_ms = ${fields.duration_ms}`)
+  if (fields.output_snippet !== undefined) sets.push(sql`output_snippet = ${fields.output_snippet}`)
+  if (fields.finished_at !== undefined) {
+    sets.push(sql`finished_at = ${fields.finished_at}`)
+    sets.push(sql`completed_at = ${fields.finished_at}`)
+  }
+  if (fields.started_at !== undefined) sets.push(sql`started_at = ${fields.started_at}`)
+  if (sets.length === 0) return null
+
+  let q = sql`UPDATE scheduled_task_runs SET `
+  for (let i = 0; i < sets.length; i++) {
+    q = i === 0 ? sql`${q}${sets[i]}` : sql`${q}, ${sets[i]}`
+  }
+  const rows = await sql<ScheduledTaskRun[]>`${q} WHERE id = ${runId} RETURNING *`
+  return rows[0] ?? null
+}
+
+export async function listRunsForTaskV2(
+  taskId: string,
+  userId: string,
+  opts: { limit?: number; before?: Date } = {},
+): Promise<ScheduledTaskRun[]> {
+  const limit = opts.limit ?? 50
+  if (opts.before) {
+    return sql<ScheduledTaskRun[]>`
+      SELECT * FROM scheduled_task_runs
+      WHERE task_id = ${taskId} AND user_id = ${userId}
+        AND scheduled_for < ${opts.before}
+      ORDER BY scheduled_for DESC NULLS LAST, started_at DESC
+      LIMIT ${limit}
+    `
+  }
+  return sql<ScheduledTaskRun[]>`
+    SELECT * FROM scheduled_task_runs
+    WHERE task_id = ${taskId} AND user_id = ${userId}
+    ORDER BY scheduled_for DESC NULLS LAST, started_at DESC
+    LIMIT ${limit}
+  `
+}
+
+export async function getRun(runId: string, userId: string): Promise<ScheduledTaskRun | null> {
+  const rows = await sql<ScheduledTaskRun[]>`
+    SELECT * FROM scheduled_task_runs WHERE id = ${runId} AND user_id = ${userId} LIMIT 1
+  `
+  return rows[0] ?? null
+}
+
+/**
+ * Sum today's run cost for a user. "Today" is computed in the user's local
+ * timezone passed as IANA name (e.g. 'America/Los_Angeles'). Falls back to UTC
+ * if the tz is invalid.
+ */
+export async function sumTodayCostForUser(userId: string, timezone: string): Promise<number> {
+  const tz = timezone || 'UTC'
+  const rows = await sql<{ sum: string | null }[]>`
+    SELECT COALESCE(SUM(cost_usd), 0)::text AS sum
+    FROM scheduled_task_runs
+    WHERE user_id = ${userId}
+      AND scheduled_for >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}
+      AND status IN ('success', 'failed', 'in_flight', 'running')
+  `
+  return Number(rows[0]?.sum ?? 0)
+}
+
+export async function insertChainedRun(
+  parentRunId: string,
+  childTaskId: string,
+  userId: string,
+  targetKind: TargetKind,
+): Promise<ScheduledTaskRun> {
+  return insertRunV2({
+    task_id: childTaskId,
+    user_id: userId,
+    status: 'pending',
+    scheduled_for: new Date(),
+    target_kind: targetKind,
+    triggered_by_run_id: parentRunId,
+  })
+}
+
+export async function listActionsForTask(taskId: string): Promise<PostRunAction[]> {
+  const rows = await sql<{ post_run_actions: any }[]>`
+    SELECT post_run_actions FROM scheduled_tasks WHERE id = ${taskId} LIMIT 1
+  `
+  if (!rows[0]) return []
+  const v = rows[0].post_run_actions
+  return typeof v === 'string' ? JSON.parse(v) : (v ?? [])
+}
+
+/**
+ * Returns the user's active API key hash, used as the HMAC secret for webhook
+ * signing in post-run actions. Hash (not the raw key) — webhook recipients
+ * sign with the same hash on their side. Returns null if the user has no
+ * active key (caller should log + skip).
+ */
+export async function getSigningKeyForUser(userId: string): Promise<string | null> {
+  const rows = await sql<{ key_hash: string }[]>`
+    SELECT key_hash FROM api_keys
+    WHERE user_id = ${userId} AND revoked_at IS NULL
+    ORDER BY created_at DESC LIMIT 1
+  `
+  return rows[0]?.key_hash ?? null
 }
