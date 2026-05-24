@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useCallback } from 'react'
+import { useSessions } from '../hooks/useSessions'
 
 interface Props {
   token: string
@@ -152,8 +153,17 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     return 'all'
   })
   const [search, setSearch] = useState('')
-  const [sortKey, setSortKey] = useState<SortKey>('status')
-  const [sortDir, setSortDir] = useState<SortDir>('asc')
+  const [sortKey, setSortKey] = useState<SortKey>('seen')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
+  const { sessions } = useSessions(token)
+  const lastActivityByPath = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const s of sessions) {
+      if (!s.project_dir || !s.last_activity) continue
+      m.set(s.project_dir, Date.parse(s.last_activity))
+    }
+    return m
+  }, [sessions])
   const [startTarget, setStartTarget] = useState<{ kind: 'local'; repo: LocalRepo } | { kind: 'github'; repo: GitHubRepo } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
@@ -262,7 +272,10 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
       seen.add(key)
       if (matchedGh) seen.add(`gh:${matchedGh.full_name}`)
       const status: Row['status'] = run ? 'running' : 'idle'
-      const lastSeen = run ? Date.parse(run.started_at) : 0
+      // last activity = latest of: active run start, session last_activity (from chat history)
+      const sessionLast = lastActivityByPath.get(l.path) || 0
+      const runStart = run ? Date.parse(run.started_at) : 0
+      const lastSeen = Math.max(sessionLast, runStart)
       out.push({
         key,
         name: matchedGh?.full_name || l.name,
@@ -323,7 +336,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     })
 
     return filtered
-  }, [localRepos, githubRepos, activeRuns, selectedInstallationId, search, filter, sortKey, sortDir])
+  }, [localRepos, githubRepos, activeRuns, selectedInstallationId, search, filter, sortKey, sortDir, lastActivityByPath])
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
@@ -471,7 +484,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                     {row.path ? truncateMiddle(row.path, 60) : <span className="italic">—</span>}
                   </div>
                   <div className="text-xs text-[var(--text-muted)]">
-                    {row.run ? timeAgo(Date.parse(row.run.started_at)) : <span className="opacity-60">—</span>}
+                    {row.lastSeen > 0 ? timeAgo(row.lastSeen) : <span className="opacity-60">—</span>}
                   </div>
                   <div className="flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
                     <RowActions row={row} online={!!activeSupervisor?.online} onStart={() => startRow(row)} onStop={() => row.run && stopRun(row.run.id)} />

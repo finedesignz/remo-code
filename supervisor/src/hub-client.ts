@@ -1,6 +1,6 @@
 import { hostname, platform, release } from 'os'
 import { scanAll } from './repo-scanner'
-import { cloneRepo, pullRepo, checkoutBranch } from './git-ops'
+import { cloneRepo, pullRepo, checkoutBranch, listBranches } from './git-ops'
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
 import type { SupervisorConfig } from './config'
@@ -139,6 +139,7 @@ export class SupervisorClient {
       case 'repo.clone': await this.onRepoClone(msg); break
       case 'repo.pull': await this.onRepoPull(msg); break
       case 'repo.branch_checkout': await this.onBranchCheckout(msg); break
+      case 'repo.list_branches': await this.onListBranches(msg); break
       case 'session.start': await this.onSessionStart(msg); break
       case 'session.stop': await this.onSessionStop(msg); break
       case 'session.status': this.onSessionStatus(msg); break
@@ -167,6 +168,15 @@ export class SupervisorClient {
   private async onBranchCheckout(msg: { req_id: string; repo_path: string; branch: string; create: boolean }) {
     const res = await checkoutBranch(msg.repo_path, msg.branch, msg.create)
     this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'checkout', ok: res.ok, error: res.error })
+  }
+
+  private async onListBranches(msg: { req_id: string; repo_path: string }) {
+    try {
+      const data = await listBranches(msg.repo_path)
+      this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'list_branches', ok: true, data })
+    } catch (err: any) {
+      this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'list_branches', ok: false, error: err?.message || 'failed' })
+    }
   }
 
   private async onSessionStart(msg: { run_id: string; repo_path: string; branch?: string; pull?: boolean; initial_prompt?: string; api_key: string; hub_url: string }) {

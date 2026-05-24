@@ -88,8 +88,10 @@ export class ProcessManager {
     this.setState(run, 'starting', { runId: spec.runId, repoPath: spec.repoPath })
 
     run.stderrTail = []
+    // Windows resolves npx → npx.cmd via PATHEXT; Bun.spawn doesn't, so name it explicitly.
+    const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx'
     const cmd = [
-      'npx', '-y', 'remo-code-agent',
+      npx, '-y', 'remo-code-agent',
       '--api-key', spec.apiKey,
       '--hub-url', spec.hubUrl,
       '--project-dir', spec.repoPath,

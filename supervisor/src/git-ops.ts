@@ -39,6 +39,32 @@ export async function currentBranch(repoPath: string): Promise<string | null> {
   } catch { return null }
 }
 
+export async function listBranches(repoPath: string): Promise<{ branches: string[]; current: string | null }> {
+  const current = await currentBranch(repoPath)
+  try {
+    const { stdout } = await runGit(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], repoPath, 10_000)
+    const local = stdout.split('\n').map((s) => s.trim()).filter(Boolean)
+    let remote: string[] = []
+    try {
+      const { stdout: r } = await runGit(['for-each-ref', '--format=%(refname:short)', 'refs/remotes'], repoPath, 10_000)
+      remote = r.split('\n')
+        .map((s) => s.trim())
+        .filter((s) => s && !s.endsWith('/HEAD'))
+        .map((s) => s.replace(/^[^/]+\//, ''))
+    } catch {}
+    const merged = Array.from(new Set([...local, ...remote])).sort((a, b) => {
+      if (a === current) return -1
+      if (b === current) return 1
+      if (a === 'main' || a === 'master') return -1
+      if (b === 'main' || b === 'master') return 1
+      return a.localeCompare(b)
+    })
+    return { branches: merged, current }
+  } catch {
+    return { branches: current ? [current] : [], current }
+  }
+}
+
 export interface GitOpResult {
   ok: boolean
   error?: string
