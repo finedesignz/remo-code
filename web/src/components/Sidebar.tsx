@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { AuthUser } from '../lib/auth.ts'
 import type { CodeSession } from '../hooks/useSessions'
 import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
@@ -54,6 +55,18 @@ export function Sidebar({
             <path d="M6.5 9.5l-2 2a2.5 2.5 0 1 1-3.5-3.5l2-2" />
             <path d="M9.5 6.5l2-2a2.5 2.5 0 1 1 3.5 3.5l-2 2" />
             <path d="M6 10l4-4" />
+          </svg>
+        </button>
+        <button
+          onClick={() => onNavigate('#/schedules')}
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          title="Schedules"
+          aria-label="Schedules"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2.5" y="3" width="11" height="10.5" rx="1.5" />
+            <path d="M2.5 6.5h11" />
+            <path d="M5.5 1.5v3M10.5 1.5v3" />
           </svg>
         </button>
         <button
@@ -200,6 +213,13 @@ export function Sidebar({
         </div>
 
         <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-2">
+          <button
+            onClick={() => onNavigate('#/schedules')}
+            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
+            title="Scheduled tasks"
+          >
+            Schedules
+          </button>
           <button
             onClick={() => onNavigate('#/settings')}
             className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"

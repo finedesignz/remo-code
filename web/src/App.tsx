@@ -5,9 +5,11 @@ import { AuthForm } from './components/AuthForm'
 import { SetupForm } from './components/SetupForm'
 import { Layout } from './components/Layout'
 import { SettingsPage } from './components/SettingsPage'
+import { SchedulesPage } from './components/SchedulesPage'
+import { useWebSocket } from './hooks/useWebSocket'
 import type { AuthUser } from './lib/auth.ts'
 
-type Route = 'chat' | 'settings'
+type Route = 'chat' | 'settings' | 'schedules'
 
 function getRoute(): Route {
   const hash = window.location.hash
@@ -17,6 +19,7 @@ function getRoute(): Route {
     return 'settings'
   }
   if (hash.startsWith('#/settings')) return 'settings'
+  if (hash.startsWith('#/schedules')) return 'schedules'
   return 'chat'
 }
 
@@ -85,6 +88,10 @@ export default function App() {
         />
       )}
 
+      {route === 'schedules' && (
+        <SchedulesRoute token={token} onBack={goToChat} />
+      )}
+
       {route === 'chat' && (
         <Layout
           token={token}
@@ -95,4 +102,9 @@ export default function App() {
       )}
     </>
   )
+}
+
+function SchedulesRoute({ token, onBack }: { token: string; onBack: () => void }) {
+  const { subscribe } = useWebSocket(token)
+  return <SchedulesPage token={token} onBack={onBack} subscribe={subscribe} />
 }
