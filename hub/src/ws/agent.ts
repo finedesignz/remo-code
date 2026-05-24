@@ -275,6 +275,13 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     await setSessionStatus(sessionId, dbStatus as any)
     broadcastToSubscribers(sessionId, msg)
     broadcastToUser(ws.data.userId!, { type: 'session_status', session_id: sessionId, status: dbStatus })
+    // W2/T6 — promote a waiting scheduled run on thinking→idle transition.
+    if (msg.state === 'idle') {
+      try {
+        const { onSessionIdleAndPromote } = await import('../scheduler/session-queue.ts')
+        onSessionIdleAndPromote(sessionId)
+      } catch {}
+    }
   }
 
   if (msg.type === 'assistant_message') {
