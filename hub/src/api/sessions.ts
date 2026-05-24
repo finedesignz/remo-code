@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, listSessions, getSession, deleteSession, updateSessionToken } from '../db/dal'
+import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected } from '../db/dal'
 import { hashToken } from '../ws/channel'
 import { getChannel } from '../ws/registry'
 import { generateToken } from '../utils/token'
@@ -43,11 +43,26 @@ sessions.post('/', async (c) => {
   return c.json({ ...session, token: rawToken }, 201)
 })
 
-// Delete a session
+// Disconnect / delete a session.
+// 1. Tell the connected agent to shut down (kill Claude subprocess + close WS + exit).
+// 2. Soft-delete the row so the agent cannot resurrect it via findOrCreateAgentSession.
+// 3. Close the channel.
 sessions.delete('/:id', async (c) => {
   const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
   try {
-    await deleteSession(c.req.param('id'), userId)
+    const channel = getChannel(sessionId)
+    if (channel) {
+      try { channel.ws.send(JSON.stringify({ type: 'shutdown', reason: 'user_disconnect' })) } catch {}
+    }
+    await markSessionDisconnected(sessionId, userId)
+    // Give the agent ~5s to gracefully exit before forcibly closing the socket.
+    setTimeout(() => {
+      const ch = getChannel(sessionId)
+      if (ch) {
+        try { ch.ws.close(4010, 'session disconnected') } catch {}
+      }
+    }, 5_000)
     return c.json({ ok: true })
   } catch {
     return c.json({ error: 'not found' }, 404)

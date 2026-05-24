@@ -241,6 +241,23 @@ export class ClaudeRunner {
     this.ready = false
   }
 
+  /** Stop gracefully: SIGINT, wait up to 3s, then SIGKILL. */
+  async stopGracefully(): Promise<void> {
+    this.listener = null
+    const proc = this.proc
+    if (!proc) { this.ready = false; return }
+    try { proc.kill('SIGINT') } catch {}
+    const deadline = Date.now() + 3_000
+    while (Date.now() < deadline) {
+      // @ts-ignore - bun Subprocess has .exited promise
+      if ((proc as any).exitCode != null) break
+      await new Promise(r => setTimeout(r, 100))
+    }
+    try { proc.kill('SIGKILL') } catch {}
+    this.proc = null
+    this.ready = false
+  }
+
   get isReady() { return this.ready }
 
   private async readStderr() {

@@ -23,6 +23,7 @@ export type HubToAgent =
   | { type: 'permission_response'; session_id: string; request_id: string; approved: boolean }
   | { type: 'question_response'; session_id: string; request_id: string; answer: string }
   | { type: 'cancel'; session_id: string }
+  | { type: 'shutdown'; reason?: string }
   | { type: 'ping' }
 
 // Claude CLI stream-json event shapes (subset we care about)

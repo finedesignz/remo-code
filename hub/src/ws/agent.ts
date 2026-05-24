@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, listSessions, getUserSystemPrompt } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, listSessions, getUserSystemPrompt, recentlyDisconnectedForProjectDir } from '../db/dal'
 import { hashToken } from './channel'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
@@ -102,6 +102,17 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       return
     }
     const projectDir = msg.project_dir.replace(/\\/g, '/')
+
+    // Refuse stale reconnects: if the user just clicked "Disconnect" in the UI,
+    // any agent process that was alive at that moment will try to reconnect.
+    // Tell it to give up so it exits cleanly instead of recreating the session.
+    const recentlyDisconnected = await recentlyDisconnectedForProjectDir(userId, projectDir, 30)
+    if (recentlyDisconnected) {
+      console.log(`[agent] refusing reconnect — session ${recentlyDisconnected.id} was disconnected by user`)
+      ws.send(JSON.stringify({ type: 'auth_error', error: 'session_disconnected' }))
+      ws.close(4002, 'session disconnected')
+      return
+    }
 
     const rawToken = generateToken('remo_')
     const tokenHash = await hashToken(rawToken)

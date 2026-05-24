@@ -1,4 +1,5 @@
 import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import rehypeSanitize from 'rehype-sanitize'
 import type { ChatMessage } from '../hooks/useChat'
 
@@ -39,10 +40,16 @@ export function MessageBubble({ message }: Props) {
         ) : (
           <div className="prose prose-sm max-w-none [&_pre]:bg-[var(--code-bg)] [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:overflow-x-auto [&_code]:text-emerald-300 [&_a]:text-indigo-400 break-words prose-headings:text-[var(--text-primary)] prose-p:text-[var(--text-primary)] prose-strong:text-[var(--text-primary)] prose-li:text-[var(--text-primary)] prose-blockquote:text-[var(--text-secondary)] prose-code:text-emerald-300 prose-th:text-[var(--text-primary)] prose-td:text-[var(--text-primary)]">
             <Markdown
+              remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeSanitize]}
-              components={{ a: ({ children, href, ...props }) => (
-                <a href={href} target="_blank" rel="noopener noreferrer" {...props}>{children}</a>
-              )}}
+              components={{
+                a: ({ children, href, ...props }) => (
+                  <a href={href} target="_blank" rel="noopener noreferrer" {...props}>{children}</a>
+                ),
+                table: ({ children }) => (
+                  <div className="overflow-x-auto -mx-2"><table>{children}</table></div>
+                ),
+              }}
             >{text || message.content}</Markdown>
           </div>
         )}

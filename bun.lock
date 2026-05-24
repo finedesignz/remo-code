@@ -14,7 +14,7 @@
     },
     "agent": {
       "name": "remo-code-agent",
-      "version": "0.3.6",
+      "version": "0.3.8",
       "bin": {
         "remo-agent": "./src/index.ts",
       },

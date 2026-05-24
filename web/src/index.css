@@ -77,8 +77,10 @@ textarea {
 .prose h3 { font-size: 1rem; }
 .prose blockquote { border-left: 3px solid var(--border-color); padding-left: 0.75rem; color: var(--text-secondary); margin: 0.5rem 0; }
 .prose hr { border: 0; border-top: 1px solid var(--border-color); margin: 0.75rem 0; }
-.prose table { border-collapse: collapse; margin: 0.5rem 0; }
-.prose th, .prose td { border: 1px solid var(--border-color); padding: 0.25rem 0.5rem; }
+.prose table { border-collapse: collapse; margin: 0.5rem 0; width: 100%; font-size: 0.85em; }
+.prose th, .prose td { border: 1px solid var(--border-color); padding: 0.25rem 0.5rem; text-align: left; vertical-align: top; }
+.prose th { background: var(--bg-tertiary); font-weight: 600; }
+.prose tbody tr:nth-child(even) { background: color-mix(in srgb, var(--bg-tertiary) 30%, transparent); }
 
 /* Message entry animation */
 @keyframes msg-in {

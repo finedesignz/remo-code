@@ -5,28 +5,48 @@ import { sql } from "./postgres.ts";
 export async function listSessions(userId: string) {
   return sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at
-    FROM sessions WHERE user_id = ${userId} ORDER BY last_activity DESC NULLS LAST
+    FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
+    ORDER BY last_activity DESC NULLS LAST
   `;
 }
 
 export async function getSession(sessionId: string, userId: string) {
   const rows = await sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at
-    FROM sessions WHERE id = ${sessionId} AND user_id = ${userId}
+    FROM sessions WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
   `;
   return rows[0] ?? null;
 }
 
 export async function getSessionById(sessionId: string) {
-  const rows = await sql`SELECT * FROM sessions WHERE id = ${sessionId}`;
+  const rows = await sql`SELECT * FROM sessions WHERE id = ${sessionId} AND deleted_at IS NULL`;
   return rows[0] ?? null;
 }
 
 export async function findSessionByProjectDir(userId: string, projectDir: string) {
   const rows = await sql`
     SELECT * FROM sessions
-    WHERE user_id = ${userId} AND project_dir = ${projectDir}
+    WHERE user_id = ${userId} AND project_dir = ${projectDir} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+// Was there a session for this project_dir that the user disconnected in the
+// last `withinSeconds` seconds? Used to reject stale agent reconnects after
+// an explicit "Disconnect" click in the UI.
+export async function recentlyDisconnectedForProjectDir(
+  userId: string,
+  projectDir: string,
+  withinSeconds: number = 30,
+) {
+  const rows = await sql`
+    SELECT id, deleted_at FROM sessions
+    WHERE user_id = ${userId}
+      AND project_dir = ${projectDir}
+      AND deleted_at IS NOT NULL
+      AND deleted_at > now() - (${withinSeconds} || ' seconds')::interval
+    ORDER BY deleted_at DESC LIMIT 1
   `;
   return rows[0] ?? null;
 }
@@ -79,7 +99,13 @@ export async function updateSessionToken(sessionId: string, tokenHash: string) {
 }
 
 export async function deleteSession(sessionId: string, userId: string) {
-  await sql`DELETE FROM sessions WHERE id = ${sessionId} AND user_id = ${userId}`;
+  // Soft-delete so an agent process trying to reconnect after the user clicked
+  // "Disconnect" cannot resurrect the row via findOrCreateAgentSession.
+  await sql`UPDATE sessions SET deleted_at = now(), status = 'offline' WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL`;
+}
+
+export async function markSessionDisconnected(sessionId: string, userId: string) {
+  await sql`UPDATE sessions SET deleted_at = now(), status = 'offline' WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL`;
 }
 
 export async function setOfflineStaleAgentSessions() {
