@@ -10,7 +10,7 @@ export const SERVICE_NAME = 'RemoCodeSupervisor'
 const NSSM_DOWNLOAD = 'https://nssm.cc/release/nssm-2.24.zip'
 
 async function nssm(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
-  const proc = Bun.spawn([NSSM_PATH, ...args], { stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawn([NSSM_PATH, ...args], { stdout: 'pipe', stderr: 'pipe', windowsHide: true })
   const code = await proc.exited
   const stdout = await new Response(proc.stdout).text()
   const stderr = await new Response(proc.stderr).text()

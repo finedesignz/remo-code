@@ -109,6 +109,7 @@ export class ProcessManager {
         stdout: 'pipe',
         stderr: 'pipe',
         env,
+        windowsHide: true,
       })
     } catch (err: any) {
       this.cb.onLog('error', `failed to spawn agent: ${err.message}`, spec.runId)

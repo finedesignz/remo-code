@@ -107,6 +107,7 @@ export class ClaudeRunner {
       stdout: 'pipe',
       stderr: 'pipe',
       env,
+      windowsHide: true,
     })
 
     console.log(`[runner] spawned claude pid=${this.proc.pid}`)

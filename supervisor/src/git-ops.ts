@@ -6,6 +6,7 @@ async function runGit(args: string[], cwd?: string, timeoutMs = 60_000): Promise
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
+    windowsHide: true,
   })
   let timer: ReturnType<typeof setTimeout> | null = null
   const timeout = new Promise<never>((_, reject) => {
