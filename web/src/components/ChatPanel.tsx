@@ -27,6 +27,8 @@ interface SlashItem {
 const MAX_FILES = 5
 const MAX_TEXT_SIZE = 1024 * 1024       // 1 MB
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024 // 10 MB
+const MAX_DRAFT_SIZE = 16 * 1024        // 16 KB per-session draft cap
+const draftKey = (sid: string) => `remo:draft:${sid}`
 
 function readFileAsText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -134,6 +136,36 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     setAttachedFiles([])
   }, [activeSessionId])
 
+  // Load persisted draft on mount / session switch
+  useEffect(() => {
+    if (!activeSessionId) { setInput(''); return }
+    try {
+      const saved = localStorage.getItem(draftKey(activeSessionId)) || ''
+      setInput(saved)
+      if (saved.startsWith('/')) setSlashOpen(true)
+    } catch {
+      setInput('')
+    }
+  }, [activeSessionId])
+
+  // Debounced persist of input to localStorage (text only)
+  useEffect(() => {
+    if (!activeSessionId) return
+    const key = draftKey(activeSessionId)
+    const t = setTimeout(() => {
+      try {
+        if (!input) { localStorage.removeItem(key); return }
+        let value = input
+        if (value.length > MAX_DRAFT_SIZE) {
+          console.warn(`[remo] draft for ${activeSessionId} exceeds ${MAX_DRAFT_SIZE}B; truncating`)
+          value = value.slice(0, MAX_DRAFT_SIZE)
+        }
+        localStorage.setItem(key, value)
+      } catch {}
+    }, 200)
+    return () => clearTimeout(t)
+  }, [input, activeSessionId])
+
   const addFiles = useCallback((fileList: FileList | File[]) => {
     const files = Array.from(fileList)
     setAttachedFiles(prev => {
@@ -209,6 +241,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     }
     if (!content) return
     onSend(content, images.length > 0 ? images : undefined)
+    try { localStorage.removeItem(draftKey(activeSessionId)) } catch {}
     setInput('')
     setAttachedFiles([])
   }
