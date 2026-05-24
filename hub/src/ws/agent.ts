@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, listSessions, getUserSystemPrompt, recentlyDisconnectedForProjectDir } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, recentlyDisconnectedForProjectDir } from '../db/dal'
 import { hashToken } from './channel'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
@@ -13,6 +13,47 @@ import {
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
 const RATE_LIMIT = { max: 120, windowMs: 10_000 }
+
+// Per-session streaming assistant message state. Created lazily on first
+// text_delta of a turn, finalized on assistant_message. Survives hub restart
+// because every flush persists to Postgres.
+const STREAM_FLUSH_INTERVAL_MS = 500
+const STREAM_FLUSH_BYTES = 1024
+interface StreamingMessageState {
+  id: string
+  buffer: string
+  flushTimer: ReturnType<typeof setTimeout> | null
+  flushing: Promise<void> | null
+}
+const streamingBySession = new Map<string, StreamingMessageState>()
+
+async function flushStreaming(sessionId: string): Promise<void> {
+  const st = streamingBySession.get(sessionId)
+  if (!st || !st.buffer) return
+  const chunk = st.buffer
+  st.buffer = ''
+  st.flushing = appendToMessage(st.id, chunk).catch((err: any) => {
+    console.error(`[agent] flushStreaming error session=${sessionId}`, err.message)
+  })
+  await st.flushing
+  st.flushing = null
+}
+
+function scheduleStreamFlush(sessionId: string) {
+  const st = streamingBySession.get(sessionId)
+  if (!st) return
+  if (st.buffer.length >= STREAM_FLUSH_BYTES) {
+    if (st.flushTimer) { clearTimeout(st.flushTimer); st.flushTimer = null }
+    void flushStreaming(sessionId)
+    return
+  }
+  if (st.flushTimer) return
+  st.flushTimer = setTimeout(() => {
+    const s = streamingBySession.get(sessionId)
+    if (s) s.flushTimer = null
+    void flushStreaming(sessionId)
+  }, STREAM_FLUSH_INTERVAL_MS)
+}
 
 export interface AgentWsData {
   authenticated: boolean

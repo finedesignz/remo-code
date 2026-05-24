@@ -57,6 +57,14 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS system_prompt TEXT;
 -- stale agent process cannot resurrect the row via findOrCreateAgentSession.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 
+-- Message lifecycle status. Assistant messages are inserted as 'streaming'
+-- placeholders when a turn begins, incrementally appended via text_delta,
+-- then flipped to 'complete' on the final assistant_message event. If the
+-- hub restarts mid-stream, the orphaned-placeholder sweep on boot marks
+-- the row 'interrupted' so the UI can render it distinctly.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'complete'
+  CHECK (status IN ('streaming', 'complete', 'interrupted'));
+
 -- Migration for existing rows (idempotent — only adds column if missing)
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS capabilities TEXT[] NOT NULL DEFAULT ARRAY['agent','supervisor'];
 -- Ensure all active keys have the supervisor cap (idempotent backfill)

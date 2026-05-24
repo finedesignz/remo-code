@@ -103,6 +103,15 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
   const isNearBottom = useRef(true)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [newCount, setNewCount] = useState(0)
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTo({ top: el.scrollHeight, behavior })
+    isNearBottom.current = true
+    setNewCount(0)
+  }, [])
 
   function applySlash(item: SlashItem) {
     const rest = input.replace(/^\/[\w.:-]*/, '')
@@ -120,27 +129,40 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     })
   }
 
-  // Track whether user is near bottom of chat
+  // Track whether user is anchored near bottom (~80px window)
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100
+    const anchored = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    isNearBottom.current = anchored
+    if (anchored) setNewCount(0)
   }, [])
 
-  // Scroll to bottom on new messages/activity (if near bottom)
+  // On new messages/activity: scroll only if anchored; else count unseen messages
+  const prevMsgCountRef = useRef(messages.length)
   useEffect(() => {
+    const delta = messages.length - prevMsgCountRef.current
+    prevMsgCountRef.current = messages.length
     if (isNearBottom.current && scrollRef.current) {
       scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+    } else if (delta > 0) {
+      setNewCount((c) => c + delta)
     }
   }, [messages, sessionStatus, activity])
 
-  // Always scroll to bottom immediately on session switch or initial load
+  // Always scroll to bottom on session switch — runs after DOM commit, and again
+  // when loading flips false so the freshly-rendered messages land at the bottom.
   useEffect(() => {
     isNearBottom.current = true
-    if (scrollRef.current) {
-      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'instant' })
-    }
-  }, [activeSessionId])
+    setNewCount(0)
+    prevMsgCountRef.current = messages.length
+    const raf = requestAnimationFrame(() => {
+      const el = scrollRef.current
+      if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })
+    })
+    return () => cancelAnimationFrame(raf)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId, loading])
 
   // Clear attachments on session switch
   useEffect(() => {
@@ -323,7 +345,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
 
   return (
     <div
-      className="flex-1 flex flex-col min-h-0"
+      className="flex-1 flex flex-col min-h-0 relative"
       onDrop={handleDrop}
       onDragOver={handleDragOver}
     >
@@ -347,6 +369,16 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
         {/* Activity feed (live streaming from agent) */}
         <ActivityFeed activity={activity} onPermissionRespond={onPermissionRespond} onQuestionRespond={onQuestionRespond} />
       </div>
+
+      {newCount > 0 && (
+        <button
+          type="button"
+          onClick={() => scrollToBottom('smooth')}
+          className="absolute bottom-24 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 text-xs text-[var(--text-on-accent)] shadow-lg ring-1 ring-indigo-500/30 z-10"
+        >
+          ↓ {newCount} new
+        </button>
+      )}
 
       <form onSubmit={handleSubmit} className="border-t border-[var(--border-color)]">
         {!wsConnected && (

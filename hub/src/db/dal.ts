@@ -116,7 +116,7 @@ export async function setOfflineStaleAgentSessions() {
 
 export async function listMessages(sessionId: string, userId: string) {
   return sql`
-    SELECT m.id, m.session_id, m.role, m.content, m.created_at
+    SELECT m.id, m.session_id, m.role, m.content, m.status, m.created_at
     FROM messages m
     JOIN sessions s ON s.id = m.session_id
     WHERE m.session_id = ${sessionId} AND s.user_id = ${userId}
@@ -129,6 +129,45 @@ export async function insertMessage(sessionId: string, role: string, content: st
     INSERT INTO messages (session_id, role, content) VALUES (${sessionId}, ${role}, ${content}) RETURNING *
   `;
   return rows[0];
+}
+
+// Insert an empty assistant placeholder for incremental streaming. The row is
+// created as soon as Claude starts a turn so the response survives a hub
+// restart mid-stream.
+export async function insertAssistantPlaceholder(sessionId: string) {
+  const rows = await sql`
+    INSERT INTO messages (session_id, role, content, status)
+    VALUES (${sessionId}, 'assistant', '', 'streaming') RETURNING *
+  `;
+  return rows[0];
+}
+
+// Append a delta chunk to a streaming message. Called from a per-session
+// throttled flush (~500ms / 1KB) so we don't hammer Postgres on every event.
+export async function appendToMessage(messageId: string, delta: string) {
+  await sql`
+    UPDATE messages SET content = content || ${delta}
+    WHERE id = ${messageId} AND status = 'streaming'
+  `;
+}
+
+// Final overwrite at turn end — ensures the persisted content matches the
+// fully assembled text from the agent (covers any deltas dropped during
+// throttle flush or network blips) and flips status to 'complete'.
+export async function finalizeMessage(messageId: string, content: string) {
+  const rows = await sql`
+    UPDATE messages SET content = ${content}, status = 'complete'
+    WHERE id = ${messageId}
+    RETURNING *
+  `;
+  return rows[0];
+}
+
+// Boot-time sweep: any messages still marked 'streaming' must have been left
+// over by a previous hub process that died mid-turn. Mark them interrupted so
+// the UI can show them with a distinct indicator.
+export async function markStreamingMessagesAsInterrupted() {
+  await sql`UPDATE messages SET status = 'interrupted' WHERE status = 'streaming'`;
 }
 
 // ── API Keys ──────────────────────────────────────────────────────────────────
