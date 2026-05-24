@@ -227,7 +227,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
         </div>
 
         {/* DESKTOP: sticky vertical tabs + content area */}
-        <div className="hidden md:flex max-w-7xl mx-auto px-6 lg:px-8 py-6 gap-8 w-full">
+        <div className="hidden md:flex px-6 lg:px-10 xl:px-14 py-6 gap-8 w-full">
           {/* Vertical tab nav */}
           <nav className="w-64 shrink-0 sticky top-6 self-start space-y-1">
             {tabs.map((t) => (
