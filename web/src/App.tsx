@@ -13,6 +13,14 @@ import type { AuthUser } from './lib/auth.ts'
 
 type Route = 'chat' | 'settings' | 'schedules'
 
+function LoadingScreen() {
+  return (
+    <div className="flex items-center justify-center h-screen bg-[var(--bg-primary)]">
+      <div className="text-[var(--text-muted)]">Loading...</div>
+    </div>
+  )
+}
+
 function getRoute(): Route {
   const hash = window.location.hash
   // Legacy /#/supervisor → settings with supervisor tab
@@ -55,11 +63,7 @@ export default function App() {
   }, [])
 
   if (loading || needsSetup === null) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-[var(--bg-primary)]">
-        <div className="text-[var(--text-muted)]">Loading...</div>
-      </div>
-    )
+    return <LoadingScreen />
   }
 
   if (needsSetup) {
@@ -72,11 +76,7 @@ export default function App() {
 
   // Wait for profile to load before rendering gated routes
   if (profileLoading || !profile) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-[var(--bg-primary)]">
-        <div className="text-[var(--text-muted)]">Loading...</div>
-      </div>
-    )
+    return <LoadingScreen />
   }
 
   return (
