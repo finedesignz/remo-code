@@ -447,6 +447,8 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
     try { localStorage.removeItem(draftKey(activeSessionId)) } catch {}
     setInput('')
     setAttachedFiles([])
+    // Clear suppression latch so a fresh "/" after send reopens the menu.
+    slashSuppressedRef.current = false
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -628,11 +630,16 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
                 value={input}
                 onChange={e => {
                   const v = e.target.value
+                  const prev = input
                   setInput(v)
                   const unfinished = hasUnfinishedSlashToken(v)
-                  // Clear the suppression latch only when the user has edited away from
-                  // a slash token entirely (so a fresh "/" later can reopen the menu).
-                  if (!unfinished) slashSuppressedRef.current = false
+                  const prevUnfinished = hasUnfinishedSlashToken(prev)
+                  // Clear suppression latch when user is NOT mid-edit of a previously-
+                  // dismissed slash token. Specifically: latch clears when there is no
+                  // active slash token, OR when this keystroke just STARTED a new slash
+                  // token (previous input had no unfinished slash). Only keep latched
+                  // while the user keeps editing within the same dismissed token.
+                  if (!unfinished || !prevUnfinished) slashSuppressedRef.current = false
                   if (unfinished && !slashSuppressedRef.current && /^\/[\w.:-]*$/.test(v)) {
                     setSlashOpen(true); setSlashIdx(0)
                   } else {
