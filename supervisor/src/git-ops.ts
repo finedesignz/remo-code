@@ -100,6 +100,23 @@ export async function pullRepo(repoPath: string, branch: string, tokenizedUrl: s
   }
 }
 
+// Pull an already-configured local repo against its existing remote (no token needed).
+// Optionally checks out a branch first. Refuses if the worktree is dirty.
+export async function pullLocal(repoPath: string, branch?: string): Promise<GitOpResult> {
+  try {
+    if (await isDirty(repoPath)) return { ok: false, error: 'worktree is dirty; refusing to pull' }
+    if (branch) {
+      try { await runGit(['checkout', branch], repoPath, 30_000) } catch (err: any) {
+        return { ok: false, error: `checkout failed: ${err.message}` }
+      }
+    }
+    await runGit(['pull', '--ff-only'], repoPath, 120_000)
+    return { ok: true }
+  } catch (err: any) {
+    return { ok: false, error: err.message }
+  }
+}
+
 export async function checkoutBranch(repoPath: string, branch: string, create: boolean): Promise<GitOpResult> {
   try {
     if (await isDirty(repoPath)) return { ok: false, error: 'worktree is dirty; refusing to switch branches' }

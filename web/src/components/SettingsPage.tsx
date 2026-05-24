@@ -4,11 +4,17 @@ import { useApiKey } from '../hooks/useApiKey'
 import { useSessions, type AgentInfo, type CodeSession } from '../hooks/useSessions'
 import { SupervisorPage } from './SupervisorPage'
 import { CommandsList } from './CommandsList'
+import { hubFetch } from '../lib/api'
 
 interface Props {
   token: string
   profile: Profile
-  onUpdateProfile: (data: { display_name?: string; system_prompt?: string | null }) => Promise<any>
+  onUpdateProfile: (data: {
+    display_name?: string
+    system_prompt?: string | null
+    daily_cost_cap_usd?: number
+    web_push_enabled?: boolean
+  }) => Promise<any>
   onBack: () => void
 }
 
@@ -140,6 +146,9 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
           </div>
         </div>
       </div>
+
+      <CostCapCard token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
+      <NotificationsCard profile={profile} onUpdateProfile={onUpdateProfile} />
 
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 xl:col-span-2">
         <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">System Prompt</h3>
@@ -481,6 +490,158 @@ function ApiKeyTab({ token }: { token: string }) {
             </button>
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Cost cap card                                                       */
+/* ------------------------------------------------------------------ */
+
+function CostCapCard({
+  token, profile, onUpdateProfile,
+}: {
+  token: string
+  profile: Profile
+  onUpdateProfile: (data: { daily_cost_cap_usd?: number }) => Promise<any>
+}) {
+  const [cap, setCap] = useState<string>(
+    typeof profile.daily_cost_cap_usd === 'number' ? String(profile.daily_cost_cap_usd) : '10'
+  )
+  const [today, setToday] = useState<{ cost_usd: number; cap_usd: number } | null>(null)
+  const [loadingToday, setLoadingToday] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void hubFetch<{ cost_usd: number; cap_usd: number }>(token, '/api/profile/cost-today')
+      .then(d => { if (!cancelled) setToday(d) })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoadingToday(false) })
+    return () => { cancelled = true }
+  }, [token])
+
+  const handleSave = async () => {
+    const n = parseFloat(cap)
+    if (!Number.isFinite(n) || n < 0) return
+    setSaving(true)
+    try {
+      await onUpdateProfile({ daily_cost_cap_usd: n })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const spend = today?.cost_usd ?? 0
+  const limit = today?.cap_usd ?? parseFloat(cap) ?? 10
+  const pct = limit > 0 ? Math.round((spend / limit) * 100) : 0
+  const color = pct < 50 ? 'text-emerald-300' : pct < 80 ? 'text-amber-300' : 'text-red-300'
+
+  return (
+    <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
+      <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">Daily cost cap</h3>
+      <p className="text-xs text-[var(--text-muted)] mb-4">
+        Scheduled tasks won't fire if today's spend would exceed this limit. Manual chat is not affected.
+      </p>
+      <div className="space-y-3">
+        <div>
+          <label className="block text-xs text-[var(--text-muted)] mb-1.5">Limit (USD / day)</label>
+          <div className="flex items-center gap-2">
+            <span className="text-[var(--text-muted)] text-sm">$</span>
+            <input
+              type="number"
+              min={0}
+              step={0.5}
+              value={cap}
+              onChange={(e) => setCap(e.target.value)}
+              className="w-32 px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+            >
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+            {saved && <span className="text-sm text-emerald-400">Saved</span>}
+          </div>
+        </div>
+        <div className="text-xs">
+          {loadingToday ? (
+            <span className="text-[var(--text-muted)]">Loading today's spend...</span>
+          ) : (
+            <span className={color}>
+              Today: ${spend.toFixed(4)} / ${limit.toFixed(2)} ({pct}%)
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/* Notifications card                                                  */
+/* ------------------------------------------------------------------ */
+
+function NotificationsCard({
+  profile, onUpdateProfile,
+}: {
+  profile: Profile
+  onUpdateProfile: (data: { web_push_enabled?: boolean }) => Promise<any>
+}) {
+  const [webPush, setWebPush] = useState<boolean>(profile.web_push_enabled ?? true)
+  const [saving, setSaving] = useState(false)
+
+  const toggleWebPush = async () => {
+    const next = !webPush
+    setWebPush(next)
+    setSaving(true)
+    try { await onUpdateProfile({ web_push_enabled: next }) }
+    catch { setWebPush(!next) }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
+      <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">Notifications</h3>
+      <p className="text-xs text-[var(--text-muted)] mb-4">
+        Used by scheduled-task post-run actions when you opt in to email or web push.
+      </p>
+      <div className="space-y-4">
+        <div>
+          <label className="block text-xs text-[var(--text-muted)] mb-1.5">Default email recipient</label>
+          <div className="px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-muted)]">
+            {profile.email}
+          </div>
+          <p className="text-[10px] text-[var(--text-muted)] mt-1">
+            Tasks with an email action default to this address when left blank.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={toggleWebPush}
+          aria-pressed={webPush}
+          disabled={saving}
+          className="w-full flex items-center justify-between gap-3 group disabled:opacity-50"
+        >
+          <span className="text-left">
+            <span className="block text-sm text-[var(--text-primary)]">Web push (this tab)</span>
+            <span className="block text-xs text-[var(--text-muted)] mt-0.5">
+              Show browser notifications for scheduled-task events when this tab is open.
+            </span>
+          </span>
+          <span className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${webPush ? 'bg-indigo-600' : 'bg-[var(--bg-tertiary)]'}`}>
+            <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${webPush ? 'translate-x-[1.125rem]' : 'translate-x-0.5'}`} />
+          </span>
+        </button>
+        <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+          Telegram notifications require connecting Telegram in the Integrations tab.
+        </p>
       </div>
     </div>
   )

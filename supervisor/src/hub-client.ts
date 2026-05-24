@@ -1,6 +1,6 @@
 import { hostname, platform, release } from 'os'
 import { scanAll } from './repo-scanner'
-import { cloneRepo, pullRepo, checkoutBranch, listBranches } from './git-ops'
+import { cloneRepo, pullRepo, pullLocal, checkoutBranch, listBranches, isDirty } from './git-ops'
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
 import type { SupervisorConfig } from './config'
@@ -187,11 +187,20 @@ export class SupervisorClient {
   }
 
   private async onSessionStart(msg: { run_id: string; repo_path: string; branch?: string; pull?: boolean; initial_prompt?: string; api_key: string; hub_url: string }) {
-    // pull/checkout pre-flight (best-effort)
-    if (msg.pull && msg.branch) {
-      this.log('info', `pre-flight: checkout+pull not implemented w/o tokenized url; skipping`, msg.run_id)
-    }
-    if (msg.branch) {
+    // Pre-flight: bring the worktree to the latest committed state on the requested branch.
+    // pull=true → checkout + git pull --ff-only against existing remote (no token needed).
+    // pull=false but branch set → just checkout. Both gates refuse if dirty.
+    // Failures log but don't block start — the user already opted in via the UI.
+    if (msg.pull) {
+      const dirtyNow = await isDirty(msg.repo_path)
+      if (dirtyNow) {
+        this.log('warn', `pull skipped: worktree has uncommitted changes; starting on current HEAD`, msg.run_id)
+      } else {
+        const r = await pullLocal(msg.repo_path, msg.branch)
+        if (r.ok) this.log('info', `pre-flight: pulled latest on ${msg.branch || 'current branch'}`, msg.run_id)
+        else this.log('warn', `pull failed: ${r.error}`, msg.run_id)
+      }
+    } else if (msg.branch) {
       const checkout = await checkoutBranch(msg.repo_path, msg.branch, false)
       if (!checkout.ok) {
         this.log('warn', `checkout failed: ${checkout.error}`, msg.run_id)

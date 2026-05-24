@@ -615,7 +615,9 @@ function StartDialog(props: StartDialogProps) {
   const githubRepo = target.kind === 'github' ? target.repo : null
 
   const [branch, setBranch] = useState<string>(localRepo?.branch || githubRepo?.default_branch || '')
-  const [pull, setPull] = useState(false)
+  // Default ON so we always run from the latest committed state. User can opt out.
+  const [pull, setPull] = useState(true)
+  const [allowDirty, setAllowDirty] = useState(false)
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
   const [branches, setBranches] = useState<string[]>([])
@@ -657,12 +659,14 @@ function StartDialog(props: StartDialogProps) {
         if (!cd.ok) { onError(cd.error || 'clone failed'); return }
         repoPath = cd.data?.path
       }
+      // Supervisor refuses pull on a dirty repo, so don't even ask when user opted to start anyway.
+      const effectivePull = pull && !localRepo?.dirty
       const r = await apiFetch(token, `/api/supervisors/${supervisorId}/start`, {
         method: 'POST',
         body: JSON.stringify({
           repo_path: repoPath,
           branch: branch || undefined,
-          pull,
+          pull: effectivePull,
           initial_prompt: prompt || undefined,
         }),
       })
@@ -679,6 +683,24 @@ function StartDialog(props: StartDialogProps) {
           Start in {localRepo?.name || githubRepo?.name}
         </h3>
         <div className="space-y-4">
+          {localRepo?.dirty && (
+            <div className="rounded-lg bg-amber-500/10 ring-1 ring-amber-500/30 p-3 text-xs text-amber-200 space-y-2">
+              <div className="font-medium text-amber-100">Uncommitted changes detected</div>
+              <p className="text-amber-200/80">
+                This repo has local edits that haven't been committed. To run from the latest
+                code state, commit or stash them first. Otherwise Claude will start on top of
+                whatever's currently in the working tree.
+              </p>
+              <label className="flex items-center gap-2 text-amber-100 pt-1">
+                <input
+                  type="checkbox"
+                  checked={allowDirty}
+                  onChange={(e) => setAllowDirty(e.target.checked)}
+                />
+                Start anyway with uncommitted changes
+              </label>
+            </div>
+          )}
           <div>
             <label className="block text-xs text-[var(--text-muted)] mb-1">Branch</label>
             {branches.length > 0 ? (
@@ -690,7 +712,12 @@ function StartDialog(props: StartDialogProps) {
             )}
           </div>
           <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-            <input type="checkbox" checked={pull} onChange={(e) => setPull(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={pull && !localRepo?.dirty}
+              disabled={!!localRepo?.dirty}
+              onChange={(e) => setPull(e.target.checked)}
+            />
             git pull before starting {localRepo?.dirty && <span className="text-amber-400 text-xs">(disabled: dirty)</span>}
           </label>
           <div>
@@ -700,7 +727,7 @@ function StartDialog(props: StartDialogProps) {
         </div>
         <div className="mt-5 flex justify-end gap-2">
           <button onClick={onClose} disabled={busy} className="px-4 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 rounded-lg">Cancel</button>
-          <button onClick={handleStart} disabled={busy || (localRepo?.dirty && pull)} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-white">
+          <button onClick={handleStart} disabled={busy || (!!localRepo?.dirty && !allowDirty)} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-white">
             {busy ? 'Starting…' : 'Start session'}
           </button>
         </div>
