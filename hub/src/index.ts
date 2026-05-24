@@ -12,6 +12,7 @@ import { profile } from './api/profile'
 import { supervisors as supervisorsApi } from './api/supervisors'
 import { github as githubApi } from './api/github'
 import { commands as commandsApi } from './api/commands'
+import { transcribe as transcribeApi } from './api/transcribe'
 import { runMigrations } from './db/migrate'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit } from './middleware/rate-limit'
@@ -89,6 +90,7 @@ app.route('/api/profile', profile)
 app.route('/api/supervisors', supervisorsApi)
 app.route('/api/github', githubApi)
 app.route('/api/commands', commandsApi)
+app.route('/api/transcribe', transcribeApi)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
@@ -192,11 +194,12 @@ const server = Bun.serve({
 })
 
 // On startup: apply migrations, then mark all sessions as offline
-import { setOfflineStaleAgentSessions } from './db/dal.ts'
+import { setOfflineStaleAgentSessions, markStreamingMessagesAsInterrupted } from './db/dal.ts'
 runMigrations()
   .then(() => setOfflineStaleAgentSessions())
+  .then(() => markStreamingMessagesAsInterrupted())
   .then(() => {
-    console.log('[startup] reset all session statuses to offline')
+    console.log('[startup] reset all session statuses to offline; marked orphaned streaming messages as interrupted')
   })
   .catch((err) => {
     console.error('[startup] migration/init error:', err.message)

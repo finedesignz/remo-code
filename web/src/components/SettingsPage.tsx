@@ -225,34 +225,28 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
         </div>
 
         {/* DESKTOP: sticky vertical tabs + content area */}
-        <div className="hidden md:block">
-          <div className="max-w-7xl mx-auto px-6 py-6">
-            <div className="flex gap-6">
-              {/* Vertical tab nav */}
-              <nav className="w-64 shrink-0">
-                <div className="sticky top-0 space-y-1">
-                  {tabs.map((t) => (
-                    <button
-                      key={t.id}
-                      onClick={() => setTab(t.id)}
-                      className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors ${
-                        tab === t.id
-                          ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-[var(--text-primary)]'
-                          : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 hover:text-[var(--text-primary)]'
-                      }`}
-                    >
-                      <div className="text-sm font-medium">{t.label}</div>
-                      <div className="text-xs text-[var(--text-muted)] mt-0.5">{t.desc}</div>
-                    </button>
-                  ))}
-                </div>
-              </nav>
+        <div className="hidden md:flex max-w-7xl mx-auto px-6 lg:px-8 py-6 gap-8 w-full">
+          {/* Vertical tab nav */}
+          <nav className="w-64 shrink-0 sticky top-6 self-start space-y-1">
+            {tabs.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
+                  tab === t.id
+                    ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-[var(--text-primary)]'
+                    : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)]'
+                }`}
+              >
+                <div className="text-sm font-medium">{t.label}</div>
+                <div className="text-xs text-[var(--text-muted)] mt-0.5">{t.desc}</div>
+              </button>
+            ))}
+          </nav>
 
-              {/* Content area */}
-              <div className="flex-1 min-w-0">
-                {sectionFor(tab)}
-              </div>
-            </div>
+          {/* Content area */}
+          <div className="flex-1 min-w-0">
+            {sectionFor(tab)}
           </div>
         </div>
       </div>

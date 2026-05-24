@@ -5,6 +5,7 @@ export interface ChatMessage {
   session_id: string
   role: 'user' | 'assistant'
   content: string
+  status?: 'streaming' | 'complete' | 'interrupted'
   created_at: string
 }
 
@@ -91,21 +92,49 @@ export function useChat(
         const incomingMessage = msg.message as ChatMessage
 
         if (incomingSessionId === activeSessionRef.current) {
-          // Active session: show message, deduplicate
+          // Active session: insert new, OR overwrite existing by id (covers
+          // streaming placeholder → final assistant_message overwrite).
           setMessages(prev => {
-            if (prev.some(m => m.id === incomingMessage.id)) return prev
-            return [...prev, incomingMessage]
+            const idx = prev.findIndex(m => m.id === incomingMessage.id)
+            if (idx === -1) return [...prev, incomingMessage]
+            const next = prev.slice()
+            next[idx] = { ...next[idx], ...incomingMessage }
+            return next
           })
         }
 
-        // Track unread for non-active sessions (assistant messages only)
-        if (incomingSessionId !== activeSessionRef.current && incomingMessage.role === 'assistant') {
+        // Track unread for non-active sessions (assistant messages only).
+        // Skip 'streaming' placeholders — we'll count when the final 'complete'
+        // message arrives to avoid double-incrementing per turn.
+        if (
+          incomingSessionId !== activeSessionRef.current &&
+          incomingMessage.role === 'assistant' &&
+          incomingMessage.status !== 'streaming'
+        ) {
           setUnreadCounts(prev => {
             const next = { ...prev, [incomingSessionId]: (prev[incomingSessionId] || 0) + 1 }
             saveUnread(next)
             return next
           })
         }
+      }
+
+      // Live token streaming: append delta to the corresponding placeholder
+      // message so the user sees the response build up in real time. The
+      // bubble is already persisted to Postgres so a hub restart preserves
+      // whatever was streamed so far.
+      if (msg.type === 'text_delta' && msg.message_id) {
+        const incomingSessionId = msg.session_id as string
+        if (incomingSessionId !== activeSessionRef.current) return
+        const messageId = msg.message_id as string
+        const delta = msg.content as string
+        setMessages(prev => {
+          const idx = prev.findIndex(m => m.id === messageId)
+          if (idx === -1) return prev
+          const next = prev.slice()
+          next[idx] = { ...next[idx], content: next[idx].content + delta }
+          return next
+        })
       }
     })
   }, [activeSessionId, subscribe, send, connectionId])

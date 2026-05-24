@@ -53,8 +53,13 @@ export function MessageBubble({ message }: Props) {
             >{text || message.content}</Markdown>
           </div>
         )}
-        <div className={`text-[10px] mt-1 ${isUser ? 'text-indigo-200' : 'text-[var(--text-muted)]'}`}>
-          {new Date(message.created_at).toLocaleTimeString()}
+        <div className={`text-[10px] mt-1 flex items-center gap-2 ${isUser ? 'text-indigo-200' : 'text-[var(--text-muted)]'}`}>
+          <span>{new Date(message.created_at).toLocaleTimeString()}</span>
+          {message.status === 'interrupted' && (
+            <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-medium">
+              [interrupted]
+            </span>
+          )}
         </div>
       </div>
     </div>

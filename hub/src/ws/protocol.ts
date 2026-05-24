@@ -101,7 +101,8 @@ export type HubToAgent =
 export type HubToClient =
   | { type: 'auth_ok' }
   | { type: 'auth_error'; error: string }
-  | { type: 'message'; session_id: string; message: { id: string; role: string; content: string; created_at: string } }
+  | { type: 'message'; session_id: string; message: { id: string; role: string; content: string; status?: string; created_at: string } }
+  | { type: 'text_delta'; session_id: string; content: string; message_id?: string }
   | { type: 'session_status'; session_id: string; status: string }
   | { type: 'session_list'; sessions: Array<{ id: string; name: string; project_dir: string | null; status: string; last_activity: string | null; created_at: string }> }
   | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
