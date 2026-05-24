@@ -201,8 +201,36 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
   const { sessionId } = ws.data
 
   // --- Agent activity events ---
-  if (msg.type === 'thinking' || msg.type === 'text_delta' || msg.type === 'tool_use' || msg.type === 'tool_result') {
+  if (msg.type === 'thinking' || msg.type === 'tool_use' || msg.type === 'tool_result') {
     broadcastToSubscribers(sessionId, { ...msg })
+  }
+
+  if (msg.type === 'text_delta') {
+    // Lazily create a streaming assistant placeholder on the first delta of a
+    // turn. Broadcast an empty `message` event so the UI shows an assistant
+    // bubble immediately; subsequent text_delta events carry the message_id
+    // so the client appends content to the right bubble.
+    let st = streamingBySession.get(sessionId)
+    if (!st) {
+      try {
+        const placeholder = await insertAssistantPlaceholder(sessionId)
+        st = { id: placeholder.id, buffer: '', flushTimer: null, flushing: null }
+        streamingBySession.set(sessionId, st)
+        broadcastToSubscribers(sessionId, {
+          type: 'message',
+          session_id: sessionId,
+          message: placeholder,
+        })
+      } catch (err: any) {
+        console.error(`[agent] failed to create assistant placeholder session=${sessionId}`, err.message)
+      }
+    }
+    // Tag the delta with message_id so the UI can append to the correct bubble.
+    broadcastToSubscribers(sessionId, { ...msg, message_id: st?.id })
+    if (st) {
+      st.buffer += msg.content
+      scheduleStreamFlush(sessionId)
+    }
   }
 
   if (msg.type === 'agent_log') {
@@ -241,12 +269,33 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
   if (msg.type === 'assistant_message') {
     console.log(`[agent] assistant_message session=${sessionId} len=${msg.content.length}`)
-    const message = await insertMessage(sessionId, 'assistant', msg.content)
-    broadcastToSubscribers(sessionId, {
-      type: 'message',
-      session_id: sessionId,
-      message,
-    })
+    const st = streamingBySession.get(sessionId)
+    if (st) {
+      // Cancel any pending throttled flush and overwrite with the fully
+      // assembled final text from the agent. This covers any deltas dropped
+      // during throttling and guarantees the persisted content matches.
+      if (st.flushTimer) { clearTimeout(st.flushTimer); st.flushTimer = null }
+      st.buffer = ''
+      if (st.flushing) { try { await st.flushing } catch {} }
+      const message = await finalizeMessage(st.id, msg.content)
+      streamingBySession.delete(sessionId)
+      if (message) {
+        broadcastToSubscribers(sessionId, {
+          type: 'message',
+          session_id: sessionId,
+          message,
+        })
+      }
+    } else {
+      // No prior text_delta (e.g. agent reconnect between Claude's response
+      // and the result event). Fall back to a one-shot insert.
+      const message = await insertMessage(sessionId, 'assistant', msg.content)
+      broadcastToSubscribers(sessionId, {
+        type: 'message',
+        session_id: sessionId,
+        message,
+      })
+    }
   }
 
   if (msg.type === 'pong') return
