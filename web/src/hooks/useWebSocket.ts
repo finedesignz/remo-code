@@ -8,6 +8,44 @@ type WsMessage = {
 
 type MessageHandler = (msg: WsMessage) => void
 
+const PENDING_STORAGE_KEY = 'remo:ws-pending'
+// Only persist user-originated payloads — never auth/heartbeat/control noise
+const PERSISTABLE_TYPES = new Set([
+  'send_message',
+  'permission_response',
+  'question_response',
+  'cancel',
+  'subscribe',
+])
+
+function loadPersistedQueue(): object[] {
+  try {
+    const raw = localStorage.getItem(PENDING_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function savePersistedQueue(queue: object[]) {
+  try {
+    const persistable = queue.filter((m: any) => m && typeof m.type === 'string' && PERSISTABLE_TYPES.has(m.type))
+    if (persistable.length === 0) {
+      localStorage.removeItem(PENDING_STORAGE_KEY)
+    } else {
+      localStorage.setItem(PENDING_STORAGE_KEY, JSON.stringify(persistable))
+    }
+  } catch {
+    // quota/private mode — best effort
+  }
+}
+
+function clearPersistedQueue() {
+  try { localStorage.removeItem(PENDING_STORAGE_KEY) } catch {}
+}
+
 export function useWebSocket(token: string | null) {
   const [connected, setConnected] = useState(false)
   // Increments on each successful auth — consumers use this to re-subscribe after reconnect
@@ -16,8 +54,11 @@ export function useWebSocket(token: string | null) {
   const authedRef = useRef(false)
   const handlersRef = useRef<Set<MessageHandler>>(new Set())
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  // Queue messages sent before WebSocket is authenticated
-  const pendingRef = useRef<object[]>([])
+  const backoffRef = useRef(1000)
+  // Queue messages sent before WebSocket is authenticated (capped to avoid unbounded growth)
+  // Hydrated from localStorage so messages survive a full page reload during the reconnect window
+  const pendingRef = useRef<object[]>(loadPersistedQueue())
+  const MAX_PENDING = 50
 
   const connect = useCallback(() => {
     const authToken = token || getStoredToken()
@@ -45,13 +86,15 @@ export function useWebSocket(token: string | null) {
       if (msg.type === 'auth_ok') {
         authedRef.current = true
         setConnected(true)
+        backoffRef.current = 1000
         // Bump connectionId so consumers (useChat) re-subscribe
         setConnectionId(prev => prev + 1)
-        // Flush any messages queued before auth completed
+        // Flush any messages queued before auth completed (in-memory + previously persisted)
         for (const pending of pendingRef.current) {
           ws.send(JSON.stringify(pending))
         }
         pendingRef.current = []
+        clearPersistedQueue()
         return
       }
 
@@ -69,7 +112,10 @@ export function useWebSocket(token: string | null) {
       authedRef.current = false
       setConnected(false)
       wsRef.current = null
-      reconnectRef.current = setTimeout(connect, 3000)
+      // Exponential backoff: 1s -> 2s -> 4s -> ... capped at 30s
+      const delay = backoffRef.current
+      backoffRef.current = Math.min(delay * 2, 30000)
+      reconnectRef.current = setTimeout(connect, delay)
     }
 
     ws.onerror = () => {} // onclose will fire
@@ -87,8 +133,13 @@ export function useWebSocket(token: string | null) {
     if (wsRef.current?.readyState === WebSocket.OPEN && authedRef.current) {
       wsRef.current.send(JSON.stringify(msg))
     } else {
-      // Queue for when auth completes
+      // Queue for when auth completes; drop oldest if cap exceeded
       pendingRef.current.push(msg)
+      if (pendingRef.current.length > MAX_PENDING) {
+        pendingRef.current.shift()
+      }
+      // Mirror to localStorage so a full page reload during reconnect doesn't lose user input
+      savePersistedQueue(pendingRef.current)
     }
   }, [])
 

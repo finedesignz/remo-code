@@ -8,7 +8,6 @@ import { useTheme } from '../hooks/useTheme'
 import { useApiKey } from '../hooks/useApiKey'
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
-import { ConnectModal } from './ConnectModal'
 import { ApiKeyModal } from './ApiKeyModal'
 import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 
@@ -22,7 +21,6 @@ interface Props {
 export function Layout({ token, user, signOut, onNavigate }: Props) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [showConnect, setShowConnect] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
 
   const { theme, toggleTheme } = useTheme()
@@ -32,7 +30,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
     token, activeSessionId, subscribe, send, connectionId
   )
   const activity = useActivity(activeSessionId, subscribe)
-  const { activeKey, generateKey } = useApiKey(token)
+  const { activeKey } = useApiKey(token)
 
   // Handle permission responses
   const handlePermissionRespond = useCallback((requestId: string, approved: boolean) => {
@@ -236,6 +234,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
           onPermissionRespond={handlePermissionRespond}
           onQuestionRespond={handleQuestionRespond}
           token={token}
+          wsConnected={connected}
         />
       </div>
     </div>

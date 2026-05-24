@@ -15,6 +15,7 @@ interface Props {
   onPermissionRespond: (requestId: string, approved: boolean) => void
   onQuestionRespond: (requestId: string, answer: string) => void
   token?: string
+  wsConnected?: boolean
 }
 
 interface SlashItem {
@@ -60,7 +61,7 @@ function classifyFile(file: File): 'text' | 'image' | null {
   return null
 }
 
-export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionStatus, activity, onPermissionRespond, onQuestionRespond, token }: Props) {
+export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionStatus, activity, onPermissionRespond, onQuestionRespond, token, wsConnected = true }: Props) {
   const [input, setInput] = useState('')
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
   const [slashItems, setSlashItems] = useState<SlashItem[]>([])
@@ -299,6 +300,11 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
       </div>
 
       <form onSubmit={handleSubmit} className="border-t border-[var(--border-color)]">
+        {!wsConnected && (
+          <div className="px-4 py-1.5 text-xs text-amber-400 bg-amber-500/10 border-b border-[var(--border-color)]">
+            Reconnecting… your message will send once the connection is back.
+          </div>
+        )}
         <FileAttachmentBar files={attachedFiles} onRemove={handleRemoveFile} />
         <div className="p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
           <div className="flex gap-2 items-end">
