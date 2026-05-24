@@ -87,14 +87,25 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
   })()
   const slashVisible = slashOpen && !!slashMatch && slashMatch.matches.length > 0
 
-  function applySlash(item: SlashItem) {
-    setInput(`/${item.name} `)
-    setSlashOpen(false)
-    setSlashIdx(0)
-  }
   const scrollRef = useRef<HTMLDivElement>(null)
   const isNearBottom = useRef(true)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  function applySlash(item: SlashItem) {
+    const rest = input.replace(/^\/[\w.:-]*/, '')
+    const next = `/${item.name}${rest.startsWith(' ') ? '' : ' '}${rest}`
+    const caret = item.name.length + 2 // '/' + name + ' '
+    setInput(next)
+    setSlashOpen(false)
+    setSlashIdx(0)
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      ta.focus()
+      ta.setSelectionRange(caret, caret)
+    })
+  }
 
   // Track whether user is near bottom of chat
   const handleScroll = useCallback(() => {
@@ -287,6 +298,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
                       key={`${it.kind}:${it.name}:${it.source}`}
                       type="button"
                       onMouseEnter={() => setSlashIdx(i)}
+                      onMouseDown={(e) => e.preventDefault()}
                       onClick={() => applySlash(it)}
                       className={`w-full text-left px-3 py-2 text-sm ${i === slashIdx ? 'bg-indigo-600/20 text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
                     >
@@ -301,6 +313,7 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
                 </div>
               )}
               <textarea
+                ref={textareaRef}
                 value={input}
                 onChange={e => {
                   setInput(e.target.value)
