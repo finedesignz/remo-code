@@ -73,6 +73,25 @@ export const SupervisorCommandsSync = z.object({
   })).max(2000),
 })
 
+// W2/T10 — scheduled-run command lifecycle (supervisor-side).
+export const RunStarted = z.object({
+  type: z.literal('run_started'),
+  run_id: z.string(),
+})
+export const RunOutput = z.object({
+  type: z.literal('run_output'),
+  run_id: z.string(),
+  chunk: z.string().max(64_000),
+})
+export const RunFinished = z.object({
+  type: z.literal('run_finished'),
+  run_id: z.string(),
+  exit_code: z.number().nullable().optional(),
+  duration_ms: z.number().optional(),
+  snippet: z.string().max(4000).optional(),
+  error: z.string().max(2000).optional(),
+})
+
 export const SupervisorInbound = [
   SupervisorHello,
   SupervisorState,
@@ -81,6 +100,9 @@ export const SupervisorInbound = [
   RepoCloneProgress,
   RepoOpResult,
   SupervisorCommandsSync,
+  RunStarted,
+  RunOutput,
+  RunFinished,
 ]
 
 // -- Hub -> Supervisor (constructed by hub, not validated) --
@@ -94,3 +116,7 @@ export type HubToSupervisor =
   | { type: 'session.start'; req_id: string; run_id: string; repo_path: string; branch?: string; pull: boolean; initial_prompt?: string; api_key: string; hub_url: string }
   | { type: 'session.stop'; req_id: string; run_id: string; reason: string }
   | { type: 'session.status'; req_id: string }
+  // W2/T10 — execute a saved supervisor command; supervisor responds with
+  // run_started → 0..N run_output chunks → run_finished.
+  | { type: 'run_command'; run_id: string; command: string; args?: string[] }
+  | { type: 'run_cancel'; run_id: string }

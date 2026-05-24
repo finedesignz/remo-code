@@ -435,6 +435,17 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     })
     return
   }
+
+  // W2/T10 — scheduled-run lifecycle from supervisor.
+  if (msg.type === 'run_started' || msg.type === 'run_output' || msg.type === 'run_finished') {
+    try {
+      const sup = await import('../scheduler/senders/supervisor.ts')
+      await sup.handleSupervisorRunEvent(supervisorId, userId, msg)
+    } catch (err: any) {
+      console.error('[supervisor] run event handler failed', err?.message)
+    }
+    return
+  }
 }
 
 export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
