@@ -32,6 +32,15 @@ export function Sidebar({
   collapsed = false, onToggleCollapsed,
 }: Props) {
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
+  const [hoverInfo, setHoverInfo] = useState<{ id: string; top: number; left: number } | null>(null)
+
+  const handleRowEnter = (id: string, el: HTMLElement) => {
+    const rect = el.getBoundingClientRect()
+    setHoverInfo({ id, top: rect.top, left: rect.right + 8 })
+  }
+  const handleRowLeave = (id: string) => {
+    setHoverInfo(prev => (prev?.id === id ? null : prev))
+  }
 
   if (collapsed) {
     return (
@@ -84,22 +93,26 @@ export function Sidebar({
     )
   }
 
+  const hoveredSession =
+    hoverInfo ? connectedSessions(sessions).find(s => s.id === hoverInfo.id) : null
+
   return (
+    <>
       <div className="w-72 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
-        {/* Header — logo only, with collapse toggle on desktop */}
-        <div className="flex items-center justify-between p-4 border-b border-[var(--border-color)]">
+        {/* Header — large centered logo, minimal padding */}
+        <div className="relative flex items-center justify-center px-2 py-2 border-b border-[var(--border-color)]">
           <button
             onClick={onToggleCollapsed}
-            className="hidden md:inline-flex p-1 -m-1 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+            className="hidden md:inline-flex p-0.5 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
             title="Collapse sidebar"
             aria-label="Collapse sidebar"
           >
-            <img src="/logo.png" alt="Remo Code" className="h-7 w-7 object-contain" />
+            <img src="/logo.png" alt="Remo Code" className="h-14 w-14 object-contain" />
           </button>
-          <img src="/logo.png" alt="Remo Code" className="md:hidden h-7 w-7 object-contain" />
+          <img src="/logo.png" alt="Remo Code" className="md:hidden h-14 w-14 object-contain" />
           <button
             onClick={onClose}
-            className="md:hidden p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+            className="md:hidden absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
             aria-label="Close sidebar"
           >
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
@@ -236,5 +249,15 @@ export function Sidebar({
           </button>
         </div>
       </div>
+      {hoveredSession && hoverInfo && createPortal(
+        <div
+          style={{ position: 'fixed', top: hoverInfo.top, left: hoverInfo.left, zIndex: 60, pointerEvents: 'none' }}
+          className="hidden md:block bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] rounded-lg shadow-xl"
+        >
+          <SessionTooltip session={hoveredSession} />
+        </div>,
+        document.body
+      )}
+    </>
   )
 }
