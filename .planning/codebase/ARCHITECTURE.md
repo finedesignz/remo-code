@@ -258,6 +258,8 @@
 
 **Theming:** CSS custom properties (`--bg-primary`, `--text-primary`, …) in `web/src/index.css`, toggled by `useTheme.ts`.
 
+**Scheduled Tasks subsystem:** Cron-driven dispatcher under `hub/src/scheduler/` (added 2026-05). Croner-backed `Map<task_id, Cron>` registry; dispatcher resolves `target_kind` to sockets via the same `ws/registry.ts` + `ws/supervisor-registry.ts` used by the live chat path; per-session FIFO with 1 in-flight + 1 waiter; 10-min offline grace replay on reconnect; daily cost cap enforced via `sumTodayCostForUser` at fire time. Post-run action framework (`post-run/`) is a separate dispatcher with its own Zod schema, cycle detector (DFS), template renderer, and fan-out aggregator. See `docs/scheduled-tasks.md`.
+
 ---
 
-*Architecture analysis: 2026-05-22*
+*Architecture analysis: 2026-05-22 (scheduled-tasks subsystem added 2026-05-24)*

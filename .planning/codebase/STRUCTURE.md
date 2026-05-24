@@ -150,6 +150,7 @@ remo-code/
 **Database:**
 - `hub/src/db/schema.sql` — authoritative schema (run once).
 - `hub/src/db/postgres.ts` — `pg` Pool.
+- `hub/src/db/scheduled-tasks-dal.ts` — V2 DAL for scheduled tasks + run history.
 
 **Auth:**
 - `hub/src/auth/jwt.ts`, `hub/src/auth/middleware.ts` — user JWT.
@@ -157,8 +158,24 @@ remo-code/
 - `hub/src/auth/password.ts` — bcrypt.
 - `hub/src/utils/token.ts` — token generation; `hashToken` lives in `hub/src/ws/channel.ts` and is reused.
 
+**Scheduled Tasks (V2 dispatcher):**
+- `hub/src/scheduler/cron.ts` — croner wrapper (`validate`, `nextRuns`, `compilePreset`).
+- `hub/src/scheduler/registry.ts` — in-memory `Map<task_id, Cron>`; load-all on boot.
+- `hub/src/scheduler/dispatcher.ts` — cost-cap, fan-out, run-row insert, route to sender.
+- `hub/src/scheduler/targets.ts` — resolve `target_kind` → list of online sockets.
+- `hub/src/scheduler/session-queue.ts` — per-session FIFO (1 in-flight + 1 waiter).
+- `hub/src/scheduler/catchup.ts` — on boot, replay missed fires (cap 100).
+- `hub/src/scheduler/grace.ts` — 10-min offline buffer; replay on reconnect.
+- `hub/src/scheduler/senders/{agent,supervisor,coolify}.ts` — per-target-type send + finalize.
+- `hub/src/scheduler/post-run/{dispatcher,schema,template,aggregator,chain,email,telegram,webpush,webhook}.ts` — post-run action framework.
+- `web/src/lib/cron.ts` — API-compatible browser mirror of `cron.ts`.
+- `hub/src/api/scheduled-tasks.ts`, `hub/src/api/scheduled-task-runs.ts` — REST routers.
+- `web/src/components/{SchedulesPage,ScheduleEditor,PostRunActionsEditor,ScheduleRunsDrawer}.tsx` + hooks `useSchedules.ts`, `useScheduleRuns.ts`.
+
 **Testing:**
-- None in tree. Smoke testing is manual.
+- `hub/test/scheduler.test.ts` — 41 unit tests (cron, queue, post-run schema, template, aggregator, chain depth).
+- `hub/test/scheduled-tasks.e2e.test.ts` — e2e lifecycle scaffold, gated on `REMO_E2E_DB_URL`.
+- Other smoke testing is manual.
 
 ## Naming Conventions
 

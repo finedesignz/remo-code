@@ -201,6 +201,7 @@ Four packages in a Bun workspace:
 - **File attachments** — paste images (Ctrl+V) or attach text files in the chat
 - **Multi-session** — run agents in multiple project directories, switch between them
 - **Session resume** — restart the agent and reconnect to the same session
+- **Scheduled tasks** — fire prompts, skills, or supervisor commands on a cron cadence against one session, one supervisor, or all of either. Per-target run history, daily cost cap, offline-grace replay, and post-run actions (chain, email, telegram, web push, webhook). See [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
 - **Unread badges** — know when sessions have new messages
 - **Light/dark theme** — toggle in the header
 - **Mobile-first** — responsive design with safe-area support for notched devices
