@@ -196,6 +196,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       session_id: session.id,
       status: 'online',
     })
+    // W2/T12 — drain any scheduled runs parked for this session.
+    try {
+      const g = await import('../scheduler/grace.ts')
+      void g.drainForTarget(session.id, userId)
+    } catch {}
     return
   }
 
@@ -398,6 +403,11 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       os: msg.os,
       roots: msg.roots,
     })
+    // W2/T12 — drain any scheduled runs parked for this supervisor.
+    try {
+      const g = await import('../scheduler/grace.ts')
+      void g.drainForTarget(row.id, userId)
+    } catch {}
     return
   }
 
