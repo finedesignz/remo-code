@@ -181,6 +181,11 @@ ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS last_fire_at TIMESTAMPTZ;
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS next_fire_at TIMESTAMPTZ;
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS post_run_actions JSONB NOT NULL DEFAULT '[]'::jsonb;
 
+-- W2/T8: drop legacy NOT NULL on session_id so fan-out tasks
+-- (all_agents/all_supervisors) and supervisor-targeted tasks can omit it.
+-- Idempotent — Postgres no-ops if the column is already nullable.
+ALTER TABLE scheduled_tasks ALTER COLUMN session_id DROP NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next_fire
   ON scheduled_tasks(next_fire_at) WHERE enabled;
 
