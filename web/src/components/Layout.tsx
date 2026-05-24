@@ -10,6 +10,8 @@ import { ChatPanel } from './ChatPanel'
 import { ApiKeyModal } from './ApiKeyModal'
 import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 
+const NUDGE_TEXT = "Status update? Briefly: what's the current state, what would you recommend doing next, or what input do you need from me?"
+
 interface Props {
   token: string
   user: AuthUser
@@ -75,13 +77,40 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
     setActiveSessionId(online.length > 0 ? online[0].id : null)
   }, [sessionsHook.sessions, activeSessionId])
 
-  // Close sidebar on mobile when selecting a session
+  // Close sidebar on mobile when selecting a session.
+  // Auto-nudge: if user picks an idle (online, not thinking) session with prior history,
+  // send a brief status-update prompt. Throttled per-session (5 min) and opt-out via Settings.
   const handleSelectSession = useCallback((id: string) => {
+    const prevId = activeSessionId
     setActiveSessionId(id)
     if (window.innerWidth < 768) {
       setSidebarOpen(false)
     }
-  }, [])
+
+    if (id === prevId) return // re-selecting same session: no nudge
+
+    try {
+      const optOut = localStorage.getItem('remo:auto-nudge') === 'off'
+      if (optOut) return
+      const target = sessionsHook.sessions.find(s => s.id === id)
+      if (!target || target.status !== 'online') return
+      if (!target.last_activity) return // no prior activity — likely fresh session
+      const key = `remo:last-nudge:${id}`
+      const last = Number(localStorage.getItem(key) || 0)
+      const now = Date.now()
+      if (now - last < 5 * 60 * 1000) return
+      localStorage.setItem(key, String(now))
+      // Defer so activeSessionId state + subscribe effect settle before send.
+      setTimeout(() => {
+        send({
+          type: 'send_message',
+          session_id: id,
+          content: NUDGE_TEXT,
+          id: crypto.randomUUID(),
+        })
+      }, 150)
+    } catch {}
+  }, [activeSessionId, sessionsHook.sessions, send])
 
   // Close sidebar on Escape
   useEffect(() => {

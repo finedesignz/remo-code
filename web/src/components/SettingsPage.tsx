@@ -27,6 +27,17 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
   const [saved, setSaved] = useState(false)
   const [savingPrompt, setSavingPrompt] = useState(false)
   const [savedPrompt, setSavedPrompt] = useState(false)
+  const [autoNudge, setAutoNudge] = useState<boolean>(() => {
+    try { return localStorage.getItem('remo:auto-nudge') !== 'off' } catch { return true }
+  })
+
+  const toggleAutoNudge = () => {
+    setAutoNudge(prev => {
+      const next = !prev
+      try { localStorage.setItem('remo:auto-nudge', next ? 'on' : 'off') } catch {}
+      return next
+    })
+  }
 
   // Keep URL hash in sync with active tab (so refresh preserves it)
   useEffect(() => {
@@ -94,6 +105,34 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
               {saving ? 'Saving...' : 'Save'}
             </button>
             {saved && <span className="text-sm text-emerald-400">Saved</span>}
+          </div>
+
+          <div className="pt-3 border-t border-[var(--border-color)]/40">
+            <button
+              type="button"
+              onClick={toggleAutoNudge}
+              aria-pressed={autoNudge}
+              className="w-full flex items-center justify-between gap-3 group"
+              title="When you switch to an idle session, automatically ask it for a status update."
+            >
+              <span className="text-left">
+                <span className="block text-sm text-[var(--text-primary)]">Auto-nudge idle sessions on switch</span>
+                <span className="block text-xs text-[var(--text-muted)] mt-0.5">
+                  Sends a brief status-update prompt when you select an idle session.
+                </span>
+              </span>
+              <span
+                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                  autoNudge ? 'bg-indigo-600' : 'bg-[var(--bg-tertiary)]'
+                }`}
+              >
+                <span
+                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                    autoNudge ? 'translate-x-[1.125rem]' : 'translate-x-0.5'
+                  }`}
+                />
+              </span>
+            </button>
           </div>
         </div>
       </div>
