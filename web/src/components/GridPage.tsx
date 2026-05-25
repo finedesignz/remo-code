@@ -23,6 +23,7 @@ import { ChatSurface } from './ChatSurface'
 import {
   type TabWithSessions,
   type TabLayout,
+  MAX_CELLS_PER_TAB,
   listTabs,
   createTab,
   patchTab,
@@ -37,7 +38,6 @@ import type { ChatMessage } from '../hooks/useChat'
 import type { CodeSession } from '../hooks/useSessions'
 
 const ACTIVE_CELL_KEY = (tabId: string) => `grid:lastActiveCell:${tabId}`
-const MAX_CELLS_PER_TAB = 12
 
 interface Props {
   token: string
@@ -355,8 +355,8 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
                 }}
               />
               {overflowCount > 0 && (
-                <span className="text-[11px] text-amber-400">
-                  12-cell cap reached — {overflowCount} more hidden
+                <span className="text-[11px] text-amber-400" role="status">
+                  {MAX_CELLS_PER_TAB}-cell cap reached — {overflowCount} more hidden
                 </span>
               )}
             </div>
