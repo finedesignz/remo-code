@@ -207,8 +207,13 @@ export async function revokeApiKey(userId: string) {
 // ── Users / Profiles ──────────────────────────────────────────────────────────
 
 export async function getUserById(id: string) {
-  const rows = await sql`SELECT id, email, display_name, role, system_prompt, created_at, updated_at FROM users WHERE id = ${id}`;
+  const rows = await sql`SELECT id, email, display_name, role, system_prompt, timezone, daily_cost_cap_usd, web_push_enabled, created_at, updated_at FROM users WHERE id = ${id}`;
   return rows[0] ?? null;
+}
+
+export async function getUserTimezone(id: string): Promise<string> {
+  const rows = await sql<{ timezone: string | null }[]>`SELECT timezone FROM users WHERE id = ${id}`;
+  return rows[0]?.timezone || 'UTC';
 }
 
 export async function getUserSystemPrompt(id: string): Promise<string | null> {
@@ -233,32 +238,20 @@ export async function createUser(email: string, passwordHash: string, role: stri
   return rows[0];
 }
 
-export async function updateProfile(userId: string, fields: { display_name?: string; system_prompt?: string | null }) {
+export async function updateProfile(userId: string, fields: { display_name?: string; system_prompt?: string | null; timezone?: string }) {
   // Build a partial update — only touch the columns provided.
-  if (fields.display_name !== undefined && fields.system_prompt !== undefined) {
-    const rows = await sql`
-      UPDATE users SET display_name = ${fields.display_name}, system_prompt = ${fields.system_prompt}, updated_at = now()
-      WHERE id = ${userId}
-      RETURNING id, email, display_name, role, system_prompt
-    `;
-    return rows[0] ?? null;
+  const sets: any[] = [];
+  if (fields.display_name !== undefined) sets.push(sql`display_name = ${fields.display_name}`);
+  if (fields.system_prompt !== undefined) sets.push(sql`system_prompt = ${fields.system_prompt}`);
+  if (fields.timezone !== undefined) sets.push(sql`timezone = ${fields.timezone}`);
+  if (sets.length === 0) return getUserById(userId);
+  sets.push(sql`updated_at = now()`);
+  let q = sql`UPDATE users SET `;
+  for (let i = 0; i < sets.length; i++) {
+    q = i === 0 ? sql`${q}${sets[i]}` : sql`${q}, ${sets[i]}`;
   }
-  if (fields.display_name !== undefined) {
-    const rows = await sql`
-      UPDATE users SET display_name = ${fields.display_name}, updated_at = now() WHERE id = ${userId}
-      RETURNING id, email, display_name, role, system_prompt
-    `;
-    return rows[0] ?? null;
-  }
-  if (fields.system_prompt !== undefined) {
-    const rows = await sql`
-      UPDATE users SET system_prompt = ${fields.system_prompt}, updated_at = now() WHERE id = ${userId}
-      RETURNING id, email, display_name, role, system_prompt
-    `;
-    return rows[0] ?? null;
-  }
-  // Nothing to update — return current row
-  return getUserById(userId);
+  const rows = await sql`${q} WHERE id = ${userId} RETURNING id, email, display_name, role, system_prompt, timezone`;
+  return rows[0] ?? null;
 }
 
 // ── Channel token ─────────────────────────────────────────────────────────────

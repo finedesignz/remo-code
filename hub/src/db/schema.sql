@@ -241,3 +241,6 @@ CREATE TABLE IF NOT EXISTS paused_repos (
 CREATE INDEX IF NOT EXISTS idx_paused_repos_supervisor ON paused_repos(supervisor_id);
 
 -- Auto-migrate on hub startup: hub/src/db/migrate.ts runs this file on boot.
+
+-- Per-user timezone for daily cost-cap window + UI display.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';

@@ -15,6 +15,7 @@ interface Props {
     system_prompt?: string | null
     daily_cost_cap_usd?: number
     web_push_enabled?: boolean
+    timezone?: string
   }) => Promise<any>
   onBack: () => void
 }
@@ -150,6 +151,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
 
       <CostCapCard token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
       <NotificationsCard profile={profile} onUpdateProfile={onUpdateProfile} />
+      <TimezoneCard profile={profile} onUpdateProfile={onUpdateProfile} />
 
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 xl:col-span-2">
         <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">System Prompt</h3>
@@ -686,6 +688,76 @@ function NotificationsCard({
           Telegram notifications require connecting Telegram in the Integrations tab.
         </p>
       </div>
+    </div>
+  )
+}
+
+function TimezoneCard({
+  profile,
+  onUpdateProfile,
+}: {
+  profile: { timezone?: string }
+  onUpdateProfile: (data: { timezone?: string }) => Promise<any>
+}) {
+  const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const [value, setValue] = useState(profile.timezone || browserTz)
+  const [saving, setSaving] = useState(false)
+  const [status, setStatus] = useState<'idle' | 'saved' | 'error'>('idle')
+
+  useEffect(() => {
+    if (profile.timezone) setValue(profile.timezone)
+  }, [profile.timezone])
+
+  const zones = (Intl as any).supportedValuesOf
+    ? ((Intl as any).supportedValuesOf('timeZone') as string[])
+    : [browserTz, 'UTC']
+
+  const onSave = async () => {
+    setSaving(true)
+    setStatus('idle')
+    try {
+      const updated = await onUpdateProfile({ timezone: value })
+      setStatus(updated ? 'saved' : 'error')
+    } catch {
+      setStatus('error')
+    } finally {
+      setSaving(false)
+      if (status === 'saved') setTimeout(() => setStatus('idle'), 2000)
+    }
+  }
+
+  const dirty = (profile.timezone || browserTz) !== value
+
+  return (
+    <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
+      <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">Timezone</h3>
+      <p className="text-xs text-[var(--text-muted)] mb-4">
+        Used for the daily cost-cap window and scheduled-task next-run previews.
+      </p>
+      <div className="flex gap-2 items-center">
+        <select
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          className="flex-1 px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm"
+        >
+          {zones.map((z) => (
+            <option key={z} value={z}>{z}</option>
+          ))}
+        </select>
+        <button
+          onClick={onSave}
+          disabled={!dirty || saving}
+          className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+      {status === 'saved' && (
+        <p className="text-xs text-emerald-400 mt-2">Saved.</p>
+      )}
+      {status === 'error' && (
+        <p className="text-xs text-red-400 mt-2">Couldn't save. Try again.</p>
+      )}
     </div>
   )
 }

@@ -9,6 +9,7 @@ export interface Profile {
   system_prompt?: string | null
   daily_cost_cap_usd?: number
   web_push_enabled?: boolean
+  timezone?: string
 }
 
 export function useProfile(token: string | null) {
@@ -36,6 +37,7 @@ export function useProfile(token: string | null) {
     system_prompt?: string | null
     daily_cost_cap_usd?: number
     web_push_enabled?: boolean
+    timezone?: string
   }) => {
     if (!token) return
     const hubUrl = import.meta.env.VITE_HUB_URL || ''

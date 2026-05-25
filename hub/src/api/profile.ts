@@ -23,14 +23,12 @@ profileRouter.get("/", async (c) => {
 // rolling counter + midnight reset job if that ever happens.
 profileRouter.get("/cost-today", async (c) => {
   const userId = c.get("userId") as string;
-  // Pull cap + timezone in one query. `users.timezone` does not exist as a
-  // column today, so we default to UTC; the field is included for forward
-  // compatibility when a user-tz column lands.
-  const rows = await sql<{ cap: string | null }[]>`
-    SELECT daily_cost_cap_usd::text AS cap FROM users WHERE id = ${userId} LIMIT 1
+  // Pull cap + timezone in one query.
+  const rows = await sql<{ cap: string | null; timezone: string | null }[]>`
+    SELECT daily_cost_cap_usd::text AS cap, timezone FROM users WHERE id = ${userId} LIMIT 1
   `;
   const cap = Number(rows[0]?.cap ?? 10);
-  const tz = "UTC";
+  const tz = rows[0]?.timezone || "UTC";
   const spent = await sumTodayCostForUser(userId, tz);
   const percent = cap > 0 ? Math.min(100, (spent / cap) * 100) : 0;
   return c.json({
@@ -41,14 +39,25 @@ profileRouter.get("/cost-today", async (c) => {
   });
 });
 
+function isValidTimezone(tz: string): boolean {
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; }
+  catch { return false; }
+}
+
 profileRouter.patch("/", async (c) => {
   const userId = c.get("userId") as string;
-  const body = await c.req.json<{ display_name?: string; system_prompt?: string | null }>();
-  const fields: { display_name?: string; system_prompt?: string | null } = {};
+  const body = await c.req.json<{ display_name?: string; system_prompt?: string | null; timezone?: string }>();
+  const fields: { display_name?: string; system_prompt?: string | null; timezone?: string } = {};
   if (body.display_name !== undefined) fields.display_name = body.display_name;
   if (body.system_prompt !== undefined) {
     const v = body.system_prompt;
     fields.system_prompt = typeof v === 'string' && v.trim() === '' ? null : v;
+  }
+  if (body.timezone !== undefined) {
+    if (typeof body.timezone !== 'string' || !isValidTimezone(body.timezone)) {
+      return c.json({ error: 'invalid_timezone' }, 400);
+    }
+    fields.timezone = body.timezone;
   }
   const updated = await updateProfile(userId, fields);
   return c.json(updated);
