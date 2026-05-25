@@ -290,6 +290,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS claude_global_md TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_agents_md TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_config_toml TEXT;
 
+-- ── Nav reorg: avatar (stored as data URL, capped at 1MB server-side)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+
 -- ── Error capture (06-error-capture) ────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS error_projects (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),

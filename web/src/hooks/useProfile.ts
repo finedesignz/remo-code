@@ -4,6 +4,7 @@ export interface Profile {
   id: string
   email: string
   display_name: string | null
+  avatar_url?: string | null
   role: string
   session_count: number
   system_prompt?: string | null
@@ -34,6 +35,7 @@ export function useProfile(token: string | null) {
 
   const updateProfile = useCallback(async (data: {
     display_name?: string
+    avatar_url?: string | null
     system_prompt?: string | null
     daily_cost_cap_usd?: number
     web_push_enabled?: boolean

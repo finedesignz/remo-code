@@ -22,11 +22,27 @@ function isValidTimezone(tz: string): boolean {
   catch { return false; }
 }
 
+const MAX_AVATAR_BYTES = 1_400_000; // ~1MB after base64 overhead (1MB * 1.37)
+
 profileRouter.patch("/", async (c) => {
   const userId = c.get("userId") as string;
-  const body = await c.req.json<{ display_name?: string; system_prompt?: string | null; timezone?: string }>();
-  const fields: { display_name?: string; system_prompt?: string | null; timezone?: string } = {};
+  const body = await c.req.json<{ display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string }>();
+  const fields: { display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string } = {};
   if (body.display_name !== undefined) fields.display_name = body.display_name;
+  if (body.avatar_url !== undefined) {
+    const v = body.avatar_url;
+    if (v === null || v === '') {
+      fields.avatar_url = null;
+    } else if (typeof v !== 'string') {
+      return c.json({ error: 'invalid_avatar_url' }, 400);
+    } else if (!/^data:image\/(png|jpe?g|gif|webp);base64,/i.test(v)) {
+      return c.json({ error: 'invalid_avatar_format', message: 'avatar_url must be a data:image/* URL' }, 400);
+    } else if (v.length > MAX_AVATAR_BYTES) {
+      return c.json({ error: 'avatar_too_large', max_bytes: MAX_AVATAR_BYTES }, 413);
+    } else {
+      fields.avatar_url = v;
+    }
+  }
   if (body.system_prompt !== undefined) {
     const v = body.system_prompt;
     fields.system_prompt = typeof v === 'string' && v.trim() === '' ? null : v;
