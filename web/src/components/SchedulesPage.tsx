@@ -3,7 +3,7 @@ import { useSchedules, type ScheduledTask } from '../hooks/useSchedules'
 import { ScheduleEditor } from './ScheduleEditor'
 import { ScheduleRunsDrawer } from './ScheduleRunsDrawer'
 import { humanizeCron } from '../lib/cron-humanize'
-import { formatCostUsd, formatDuration } from '../lib/format'
+import { formatCostUsd, formatDuration, formatRelativeAgo } from '../lib/format'
 
 interface Props {
   token: string
@@ -282,7 +282,16 @@ function ScheduleRow({
             </span>
             {next && (
               <span className="inline-flex items-center gap-1">
-                Next: <span className="text-[var(--text-secondary)]">{formatLocalTs(next)}</span>
+                Next: <span className="text-[var(--text-secondary)]">{formatTsInTz(next, schedule.timezone)}</span>
+              </span>
+            )}
+            {schedule.last_fire_at && (
+              <span className="inline-flex items-center gap-1">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="6" cy="6" r="4.5" />
+                  <path d="M6 3.5v2.5l1.5 1.5" />
+                </svg>
+                Fired {formatRelativeAgo(new Date(schedule.last_fire_at))}
               </span>
             )}
           </div>
@@ -439,5 +448,18 @@ export function formatLocalTs(d: Date): string {
     }).format(d)
   } catch {
     return d.toISOString()
+  }
+}
+
+export function formatTsInTz(d: Date, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit',
+      timeZone: tz,
+      timeZoneName: 'short',
+    }).format(d)
+  } catch {
+    return formatLocalTs(d)
   }
 }
