@@ -43,3 +43,19 @@ Source of truth for phase ordering, status, and dependencies. The GSD SDK parses
   - `03-PLAN-004-desktop-grid-page` — wave 3 — `<GridPage>` route at `#/grid` and `#/grid/:tabId`, tab bar + grid area, resize handles, session picker
   - `03-PLAN-005-mobile-accordion` — wave 3 — `<MobileAccordion>` below `md` breakpoint, square expanded panel, pinned input
   - `03-PLAN-006-polish-and-docs` — wave 4 — nav entry, README, CLAUDE.md, `docs/grid-view.md`, visual regression check
+
+## Phase 06: supervisor-tray-app
+
+- Status: Pending
+- Goal: Convert `supervisor/` from a CLI process with a visible console window into a polished Windows tray app with a small native-feeling settings UI. No visible terminal. Surface sandbox/security controls (allowed folders, `--dangerously-skip-permissions` cap, max concurrent sessions, audit log, restrict-to-git, kill-switch hotkey) in a React + Tailwind settings UI. Coexist with the existing `nssm-installer.ts` service path so headless server installs keep working.
+- Depends on: [Phase 02]
+- Requirements: [R-06-01, R-06-02, R-06-03, R-06-04, R-06-05, R-06-06, R-06-07, R-06-08, R-06-09, R-06-10, R-06-11, R-06-12]
+- Phase dir: `.planning/phases/06-supervisor-tray-app/`
+- Plans:
+  - `06-PLAN-001-tauri-scaffold` — wave 1 — bootstrap Tauri 2 under `supervisor/tauri/`, wire `tauri-plugin-single-instance` + `tauri-plugin-autostart` + tray + `tauri-plugin-updater` + `tauri-plugin-global-shortcut`, Vite + React + Tailwind UI shell
+  - `06-PLAN-002-sidecar-and-process-control` — wave 1 — spawn existing Bun supervisor as Tauri sidecar with `CREATE_NO_WINDOW`; tray icon reflects running/stopped/crashed; auto-restart with backoff; fix WS listener leak + bound stderr buffers; daily 4am sidecar restart; 127.0.0.1:9106 bind mutex; refuse start if NSSM service running
+  - `06-PLAN-003-settings-ui` — wave 2 — Settings page React app: allowed folders (add/remove + warn on user-profile / Desktop roots), `--dangerously-skip-permissions` hard cap toggle, max concurrent sessions, audit log toggle, restrict-to-git toggle, kill-switch hotkey display (`Ctrl+Shift+Alt+K`)
+  - `06-PLAN-004-config-bridge` — wave 2 — Tauri ↔ Bun supervisor IPC + persist to existing `%APPDATA%\remo-code\supervisor.json`; file-watch + live reload within 2s; bubble validation errors back to UI
+  - `06-PLAN-005-protocol-enforcement` — wave 3 — Bun supervisor enforces security toggles in `process-manager.ts`: allowed-folders gate (with `realpath` symlink-escape check), git-only gate, max-concurrent cap, `--dangerously-skip-permissions` hard-strip when cap off, audit JSONL to `%LOCALAPPDATA%\remo-code-supervisor\audit.jsonl`, surface capability flags via `supervisor.hello`
+  - `06-PLAN-006-installer-and-autostart` — wave 3 — MSI installer via Tauri bundler; autostart Run-key on by default; coexist with NSSM (auto-detect existing service + offer one-click migrate to tray mode); uninstall removes autostart + binaries, prompts before deleting config/audit log
+  - `06-PLAN-007-docs-and-tests` — wave 4 — README + CLAUDE.md + new `docs/supervisor-tray.md`; Windows tray smoke checklist; Rust unit tests for IPC bridge pure logic; integration test for the sandbox-escape rejection
