@@ -20,6 +20,7 @@ import { executeEmail } from './email.ts'
 import { executeTelegram } from './telegram.ts'
 import { executeWebPush } from './webpush.ts'
 import { executeWebhook } from './webhook.ts'
+import { executeGithubIssue } from './github-issue.ts'
 import { report as aggregatorReport } from './aggregator.ts'
 
 const MAX_CHAIN_DEPTH = 5
@@ -157,6 +158,13 @@ async function executeAction(
         await executeWebhook(action, {
           userId: args.task.user_id,
           payload: { ...templateVars, run_id: args.runId, event: 'scheduled_task.run.finished' },
+        })
+        return
+      case 'github_issue':
+        await executeGithubIssue(action, {
+          userId: args.task.user_id,
+          templateVars,
+          runId: args.runId,
         })
         return
     }

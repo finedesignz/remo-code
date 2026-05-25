@@ -51,12 +51,23 @@ export const WebhookAction = z.object({
   config: z.object({ url: z.string().url() }),
 })
 
+export const GithubIssueAction = z.object({
+  type: z.literal('github_issue'),
+  ...Base,
+  config: z.object({
+    repo_full_name: z.string().regex(/^[^/]+\/[^/]+$/, 'must be owner/repo'),
+    labels: z.array(z.string()).max(20).optional(),
+    assignees: z.array(z.string()).max(10).optional(),
+  }),
+})
+
 export const PostRunAction = z.discriminatedUnion('type', [
   ChainTaskAction,
   NotifyEmailAction,
   NotifyTelegramAction,
   NotifyWebPushAction,
   WebhookAction,
+  GithubIssueAction,
 ])
 export type PostRunAction = z.infer<typeof PostRunAction>
 

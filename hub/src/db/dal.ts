@@ -4,7 +4,8 @@ import { sql } from "./postgres.ts";
 
 export async function listSessions(userId: string) {
   return sql`
-    SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info
+    SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info,
+           cli_kind, is_rootless, hostname
     FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST
   `;
@@ -55,18 +56,72 @@ export async function recentlyDisconnectedForProjectDir(
   return rows[0] ?? null;
 }
 
-export async function createSession(userId: string, name: string, projectDir: string | null, tokenHash: string) {
+export async function createSession(
+  userId: string,
+  name: string,
+  projectDir: string | null,
+  tokenHash: string,
+  cliKind: 'claude' | 'codex' = 'claude',
+  isRootless: boolean = false,
+  hostname: string | null = null,
+) {
   const rows = await sql`
-    INSERT INTO sessions (user_id, name, project_dir, token_hash)
-    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash})
+    INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind, is_rootless, hostname)
+    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash}, ${cliKind}, ${isRootless}, ${hostname})
     RETURNING *
   `;
   return rows[0];
 }
 
+// Find-or-create an ambient (rootless) session for (user, hostname, cli_kind).
+// Guaranteed idempotent under concurrent inserts by the partial unique index
+// idx_sessions_rootless_unique. The ON CONFLICT DO NOTHING + re-SELECT pattern
+// covers the race where two agents authenticate simultaneously.
+export async function findOrCreateRootlessSession(
+  userId: string,
+  hostname: string,
+  cliKind: 'claude' | 'codex',
+  tokenHashIfCreating: string,
+  nameIfCreating: string,
+) {
+  const existing = await sql`
+    SELECT * FROM sessions
+    WHERE user_id = ${userId}
+      AND hostname = ${hostname}
+      AND cli_kind = ${cliKind}
+      AND is_rootless = true
+      AND deleted_at IS NULL
+    LIMIT 1
+  `;
+  if (existing[0]) {
+    await sql`UPDATE sessions SET token_hash = ${tokenHashIfCreating}, last_activity = now() WHERE id = ${existing[0].id}`;
+    return { ...existing[0], token_hash: tokenHashIfCreating, created: false };
+  }
+  await sql`
+    INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind, is_rootless, hostname)
+    VALUES (${userId}, ${nameIfCreating}, NULL, ${tokenHashIfCreating}, ${cliKind}, true, ${hostname})
+    ON CONFLICT DO NOTHING
+  `;
+  const rows = await sql`
+    SELECT * FROM sessions
+    WHERE user_id = ${userId}
+      AND hostname = ${hostname}
+      AND cli_kind = ${cliKind}
+      AND is_rootless = true
+      AND deleted_at IS NULL
+    LIMIT 1
+  `;
+  return { ...rows[0], created: true };
+}
+
 // Find existing session by project_dir (reuse) or create a new one.
 // Returns { ...session, created: boolean }
-export async function findOrCreateAgentSession(userId: string, projectDir: string, tokenHash: string) {
+export async function findOrCreateAgentSession(
+  userId: string,
+  projectDir: string,
+  tokenHash: string,
+  cliKind: 'claude' | 'codex' = 'claude',
+) {
   const existing = await findSessionByProjectDir(userId, projectDir);
   if (existing) {
     // Update the token hash so the agent gets a fresh token
@@ -76,8 +131,8 @@ export async function findOrCreateAgentSession(userId: string, projectDir: strin
   // Derive a human-readable name from the last path segment
   const name = projectDir.split('/').filter(Boolean).pop() ?? 'session';
   const rows = await sql`
-    INSERT INTO sessions (user_id, name, project_dir, token_hash)
-    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash})
+    INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind)
+    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash}, ${cliKind})
     RETURNING *
   `;
   return { ...rows[0], created: true };
@@ -221,6 +276,150 @@ export async function getUserSystemPrompt(id: string): Promise<string | null> {
   return (rows[0]?.system_prompt as string | null) ?? null;
 }
 
+export type UserInstructions = {
+  claude_global_md: string | null;
+  codex_agents_md: string | null;
+  codex_config_toml: string | null;
+};
+
+export async function getUserInstructions(userId: string): Promise<UserInstructions> {
+  const rows = await sql<UserInstructions[]>`
+    SELECT claude_global_md, codex_agents_md, codex_config_toml
+    FROM users WHERE id = ${userId}
+  `;
+  const r = rows[0];
+  return {
+    claude_global_md: r?.claude_global_md ?? null,
+    codex_agents_md: r?.codex_agents_md ?? null,
+    codex_config_toml: r?.codex_config_toml ?? null,
+  };
+}
+
+export async function updateUserInstructions(
+  userId: string,
+  patch: Partial<UserInstructions>,
+): Promise<UserInstructions> {
+  // Dynamic SET clause — only update keys present in patch
+  const keys = Object.keys(patch) as Array<keyof UserInstructions>;
+  if (keys.length === 0) return getUserInstructions(userId);
+
+  // postgres.js does not support arbitrary identifier interpolation,
+  // so we branch by key set. Three columns => 7 combinations.
+  // Use a sequence of single-column updates inside a transaction-ish bundle.
+  for (const key of keys) {
+    const val = patch[key] ?? null;
+    if (key === 'claude_global_md') {
+      await sql`UPDATE users SET claude_global_md = ${val}, updated_at = now() WHERE id = ${userId}`;
+    } else if (key === 'codex_agents_md') {
+      await sql`UPDATE users SET codex_agents_md = ${val}, updated_at = now() WHERE id = ${userId}`;
+    } else if (key === 'codex_config_toml') {
+      await sql`UPDATE users SET codex_config_toml = ${val}, updated_at = now() WHERE id = ${userId}`;
+    }
+  }
+  return getUserInstructions(userId);
+}
+
+export async function rotateUserCoolifyWebhookSecret(userId: string): Promise<string> {
+  const rows = await sql<{ coolify_webhook_secret: string }[]>`
+    UPDATE users
+       SET coolify_webhook_secret = gen_random_uuid()::text,
+           updated_at = now()
+     WHERE id = ${userId}
+     RETURNING coolify_webhook_secret
+  `;
+  const secret = rows[0]?.coolify_webhook_secret;
+  if (!secret) throw new Error('rotate_failed: user not found');
+  return secret;
+}
+
+export async function getUserCoolifyWebhookStatus(userId: string): Promise<{ configured: boolean }> {
+  const rows = await sql<{ configured: boolean }[]>`
+    SELECT (coolify_webhook_secret IS NOT NULL) AS configured
+      FROM users
+     WHERE id = ${userId}
+  `;
+  return { configured: !!rows[0]?.configured };
+}
+
+// ── Coolify webhook ingress (Phase 06 / plan 004) ─────────────────────────────
+
+/**
+ * Read the user's HMAC secret for verifying inbound Coolify webhook payloads.
+ * Returns null when the user has never rotated/generated one (plan 005 rotate
+ * endpoint sets it via gen_random_uuid()). Distinct from
+ * `getUserCoolifyWebhookStatus` which only exposes presence to the owning user.
+ */
+export async function getUserCoolifyWebhookSecret(userId: string): Promise<string | null> {
+  const rows = await sql<{ coolify_webhook_secret: string | null }[]>`
+    SELECT coolify_webhook_secret FROM users WHERE id = ${userId}
+  `;
+  return rows[0]?.coolify_webhook_secret ?? null;
+}
+
+/**
+ * Lazily find-or-create the per-user internal scheduled_tasks anchor used for
+ * deployment-event runs. `scheduled_task_runs.task_id` is NOT NULL, so every
+ * webhook-derived run needs a parent task. We allocate exactly one of these
+ * per user, matched by name marker. enabled=false keeps croner from ever
+ * scheduling it. session_id is NULL (column was made nullable in schema.sql
+ * line 187).
+ */
+const INTERNAL_DEPLOY_TASK_NAME = '__internal_coolify_deployment';
+
+export async function ensureInternalDeploymentTask(userId: string): Promise<string> {
+  const existing = await sql<{ id: string }[]>`
+    SELECT id FROM scheduled_tasks
+    WHERE user_id = ${userId} AND name = ${INTERNAL_DEPLOY_TASK_NAME}
+    LIMIT 1
+  `;
+  if (existing[0]) return existing[0].id;
+  // cron_expression / cron_expr are required NOT NULL — use a never-firing
+  // pattern (Feb 31 doesn't exist).
+  const NEVER = '0 0 31 2 *';
+  const rows = await sql<{ id: string }[]>`
+    INSERT INTO scheduled_tasks (
+      user_id, session_id, name, cron_expression, prompt,
+      enabled, task_type, target_kind, payload, cron_expr, timezone
+    ) VALUES (
+      ${userId}, NULL, ${INTERNAL_DEPLOY_TASK_NAME}, ${NEVER}, '',
+      false, 'log_check', 'session', '{}'::jsonb, ${NEVER}, 'UTC'
+    )
+    RETURNING id
+  `;
+  return rows[0].id;
+}
+
+/**
+ * Insert a scheduled_task_runs row that carries Coolify deployment metadata.
+ * pending → triage will pick this up (plan 008 wire-up).
+ * success → metadata-only marker for deployment.succeeded / in_progress.
+ */
+export async function insertDeploymentRun(input: {
+  task_id: string;
+  user_id: string;
+  status: 'pending' | 'success';
+  deployment_uuid: string;
+  application_uuid: string;
+  git_repository: string | null;
+  commit_sha: string | null;
+}): Promise<{ id: string }> {
+  const rows = await sql<{ id: string }[]>`
+    INSERT INTO scheduled_task_runs (
+      task_id, user_id, session_id, status, target_kind, target_id,
+      deployment_uuid, application_uuid, git_repository, commit_sha,
+      started_at, finished_at, completed_at
+    ) VALUES (
+      ${input.task_id}, ${input.user_id}, NULL, ${input.status}, NULL, NULL,
+      ${input.deployment_uuid}, ${input.application_uuid}, ${input.git_repository}, ${input.commit_sha},
+      ${input.status === 'pending' ? null : sql`now()`},
+      ${input.status === 'success' ? sql`now()` : null},
+      ${input.status === 'success' ? sql`now()` : null}
+    )
+    RETURNING id
+  `;
+  return rows[0];
+}
+
 export async function getUserByEmail(email: string) {
   const rows = await sql`SELECT * FROM users WHERE email = ${email}`;
   return rows[0] ?? null;
@@ -252,6 +451,40 @@ export async function updateProfile(userId: string, fields: { display_name?: str
   }
   const rows = await sql`${q} WHERE id = ${userId} RETURNING id, email, display_name, role, system_prompt, timezone`;
   return rows[0] ?? null;
+}
+
+// ── GitHub-issue post-run idempotency (Phase 06 plan 007) ────────────────────
+//
+// Backed by `github_issue_idempotency` (see schema.sql). Skips duplicate
+// issue creation for the same (repo, application_uuid, deployment_uuid)
+// within `windowHours`.
+
+export async function hasOpenIssueForHash(
+  userId: string,
+  hash: string,
+  windowHours: number,
+): Promise<boolean> {
+  const rows = await sql`
+    SELECT 1 FROM github_issue_idempotency
+    WHERE user_id = ${userId}
+      AND hash = ${hash}
+      AND created_at > now() - (${String(windowHours)} || ' hours')::interval
+    LIMIT 1
+  `;
+  return rows.length > 0;
+}
+
+export async function recordOpenIssueForHash(
+  userId: string,
+  hash: string,
+  issueNumber: number,
+  repoFullName: string,
+): Promise<void> {
+  await sql`
+    INSERT INTO github_issue_idempotency (user_id, hash, repo_full_name, issue_number)
+    VALUES (${userId}, ${hash}, ${repoFullName}, ${issueNumber})
+    ON CONFLICT (user_id, hash) DO NOTHING
+  `;
 }
 
 // ── Channel token ─────────────────────────────────────────────────────────────

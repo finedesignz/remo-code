@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { recordUserMessage } from '../lib/lastUserMsg'
 
 export interface ChatMessage {
   id: string
@@ -38,6 +39,9 @@ export function useChat(
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>(loadUnread)
   const activeSessionRef = useRef(activeSessionId)
   const lastFetchRef = useRef<Record<string, number>>({})
+  // In-memory cache of last-known messages per session. Lets session
+  // switches render instantly while we refetch in the background.
+  const cacheRef = useRef<Record<string, ChatMessage[]>>({})
 
   // Keep ref in sync
   useEffect(() => {
@@ -55,24 +59,40 @@ export function useChat(
     }
     lastFetchRef.current[activeSessionId] = Date.now()
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    fetch(`${hubUrl}/api/messages/${activeSessionId}?limit=50`, {
+    const sid = activeSessionId
+    fetch(`${hubUrl}/api/messages/${sid}?limit=50`, {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then(r => r.ok ? r.json() : [])
       .then(data => {
-        setMessages(data)
-        setLoading(false)
+        cacheRef.current[sid] = data
+        // Only apply if user is still on this session
+        if (activeSessionRef.current === sid) {
+          setMessages(data)
+          setLoading(false)
+        }
       })
-      .catch(() => setLoading(false))
+      .catch(() => {
+        if (activeSessionRef.current === sid) setLoading(false)
+      })
   }, [token, activeSessionId])
 
-  // Fetch on session change
+  // Fetch on session change. If we have cached messages, render them
+  // instantly so the switch feels instant; refetch in background.
   useEffect(() => {
     if (!activeSessionId) {
       setMessages([])
+      setLoading(false)
       return
     }
-    setLoading(true)
+    const cached = cacheRef.current[activeSessionId]
+    if (cached) {
+      setMessages(cached)
+      setLoading(false)
+    } else {
+      setMessages([])
+      setLoading(true)
+    }
     fetchMessages()
   }, [activeSessionId, fetchMessages])
 
@@ -118,11 +138,19 @@ export function useChat(
           // streaming placeholder → final assistant_message overwrite).
           setMessages(prev => {
             const idx = prev.findIndex(m => m.id === incomingMessage.id)
-            if (idx === -1) return [...prev, incomingMessage]
-            const next = prev.slice()
-            next[idx] = { ...next[idx], ...incomingMessage }
+            const next = idx === -1
+              ? [...prev, incomingMessage]
+              : (() => { const n = prev.slice(); n[idx] = { ...n[idx], ...incomingMessage }; return n })()
+            cacheRef.current[incomingSessionId] = next
             return next
           })
+        } else {
+          // Background session: update cache so a later switch is instant.
+          const prev = cacheRef.current[incomingSessionId] || []
+          const idx = prev.findIndex(m => m.id === incomingMessage.id)
+          cacheRef.current[incomingSessionId] = idx === -1
+            ? [...prev, incomingMessage]
+            : (() => { const n = prev.slice(); n[idx] = { ...n[idx], ...incomingMessage }; return n })()
         }
 
         // Track unread for non-active sessions (assistant messages only).
@@ -185,6 +213,7 @@ export function useChat(
     const msg: any = { type: 'send_message', session_id: activeSessionId, content, id }
     if (images?.length) msg.images = images
     send(msg)
+    recordUserMessage(activeSessionId, content)
     // No optimistic add — the hub broadcasts the stored message back to us
     // which avoids duplicate messages (the DB generates a different UUID)
   }, [activeSessionId, send])

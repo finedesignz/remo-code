@@ -67,6 +67,19 @@ export function Sidebar({
           </svg>
         </button>
         <button
+          onClick={() => onNavigate('#/grid')}
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          title="Grid View"
+          aria-label="Grid View"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6">
+            <rect x="2" y="2" width="4.5" height="4.5" rx="0.8" />
+            <rect x="9.5" y="2" width="4.5" height="4.5" rx="0.8" />
+            <rect x="2" y="9.5" width="4.5" height="4.5" rx="0.8" />
+            <rect x="9.5" y="9.5" width="4.5" height="4.5" rx="0.8" />
+          </svg>
+        </button>
+        <button
           onClick={() => onNavigate('#/schedules')}
           className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
           title="Schedules"
@@ -76,6 +89,18 @@ export function Sidebar({
             <rect x="2.5" y="3" width="11" height="10.5" rx="1.5" />
             <path d="M2.5 6.5h11" />
             <path d="M5.5 1.5v3M10.5 1.5v3" />
+          </svg>
+        </button>
+        <button
+          onClick={() => onNavigate('#/error-capture')}
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          title="Error Capture"
+          aria-label="Error Capture"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M8 1.5l6.5 11.5h-13z" />
+            <line x1="8" y1="6" x2="8" y2="9.5" />
+            <circle cx="8" cy="11.5" r="0.4" fill="currentColor" />
           </svg>
         </button>
         <button
@@ -155,6 +180,22 @@ export function Sidebar({
                     s.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
                   }`} />
                   <span className="truncate font-medium flex-1">{sessionLabel(s)}</span>
+                  {s.cli_kind === 'codex' && (
+                    <span
+                      className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 shrink-0 font-semibold"
+                      title="Codex CLI session"
+                    >
+                      codex
+                    </span>
+                  )}
+                  {s.is_rootless && (
+                    <span
+                      className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)]/60 text-[var(--text-muted)] shrink-0 font-semibold"
+                      title={s.hostname ? `Ambient — ${s.hostname}` : 'Ambient session'}
+                    >
+                      ambient
+                    </span>
+                  )}
                   <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
                   <UnreadBadge count={unreadCounts[s.id] || 0} />
                   {/* Action buttons — always visible on mobile, hover on desktop */}
@@ -224,11 +265,25 @@ export function Sidebar({
 
         <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-2">
           <button
+            onClick={() => onNavigate('#/grid')}
+            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
+            title="Multichat grid view"
+          >
+            Grid
+          </button>
+          <button
             onClick={() => onNavigate('#/schedules')}
             className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
             title="Scheduled tasks"
           >
             Schedules
+          </button>
+          <button
+            onClick={() => onNavigate('#/error-capture')}
+            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
+            title="Error Capture"
+          >
+            Errors
           </button>
           <button
             onClick={() => onNavigate('#/settings')}

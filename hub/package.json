@@ -4,9 +4,13 @@
   "type": "module",
   "scripts": {
     "dev": "bun --watch src/index.ts",
-    "start": "bun src/index.ts"
+    "start": "bun src/index.ts",
+    "docs:openapi": "JWT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx DATABASE_URL=postgres://localhost:5432/placeholder bun run scripts/dump-openapi.ts"
   },
   "dependencies": {
+    "@hono/zod-openapi": "^0.18.4",
+    "@octokit/rest": "^22.0.1",
+    "@scalar/hono-api-reference": "^0.10.19",
     "bcryptjs": "^3.0.3",
     "croner": "^10.0.1",
     "hono": "^4.7.0",

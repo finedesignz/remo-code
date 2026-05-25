@@ -1,31 +1,18 @@
 #!/usr/bin/env bun
 import { loadConfig } from './config'
 import { HubClient } from './hub-client'
-import { ClaudeRunner, type RunnerEvent } from './claude-runner'
+import { ClaudeRunner } from './claude-runner'
+import { CodexRunner } from './codex-runner'
+import type { CliRunner, RunnerEvent } from './cli-runner'
 import type { HubToAgent } from './types'
 import * as ui from './local-ui'
 import { spawnSync } from 'child_process'
+import { mkdirSync } from 'fs'
+import { homedir } from 'os'
+import { join } from 'path'
+import { writeSeedFiles } from './seed'
 
 const VERSION = '0.4.1'
-
-// --- Pre-flight: check that claude CLI is available ---
-const claudeCheck = spawnSync('claude', ['--version'], {
-  stdio: ['ignore', 'pipe', 'ignore'],
-  timeout: 10_000,
-  windowsHide: true,
-  shell: process.platform === 'win32',
-})
-
-if (claudeCheck.status !== 0 && !claudeCheck.stdout?.toString().trim()) {
-  ui.printError('Claude Code CLI not found.')
-  console.error('')
-  console.error('  The remo-code-agent requires the Claude Code CLI to be installed')
-  console.error('  and available in your PATH.')
-  console.error('')
-  console.error('  Install it from: https://claude.ai/code')
-  console.error('')
-  process.exit(1)
-}
 
 // --- Load config ---
 const config = loadConfig()
@@ -34,79 +21,183 @@ const config = loadConfig()
 ui.printBanner(VERSION, config.projectDir, config.hubUrl, config.resume)
 
 const hub = new HubClient(config.hubUrl, config.apiKey, config.projectDir, handleMessage, VERSION)
-const runner = new ClaudeRunner(config.projectDir, config.localOutput, config.resume)
 
-function sendLog(message: string) {
-  const sessionId = hub.sessionIdValue
-  if (!sessionId) return
-  hub.send({ type: 'agent_log', session_id: sessionId, message })
-}
+// Per-session runner registry. Project session + 0..N rootless sessions coexist.
+type SessionInfo = { cliKind: 'claude' | 'codex'; isRootless: boolean; workingDir: string }
+const sessionMeta = new Map<string, SessionInfo>()
+const runners = new Map<string, CliRunner>()
+const pendingSystemPrompts = new Map<string, string>()
+const preflightDone = new Set<'claude' | 'codex'>()
+let primarySessionId: string | null = null
 
-function handleRunnerEvent(event: RunnerEvent) {
-  const sessionId = hub.sessionIdValue
-  if (!sessionId) return
-  if (event.type === 'result' || event.type === 'ready') return // internal, don't relay
-  if (event.type === 'log') {
-    sendLog(event.message)
-    return
+function preflight(cliKind: 'claude' | 'codex') {
+  if (preflightDone.has(cliKind)) return
+  preflightDone.add(cliKind)
+  const check = spawnSync(cliKind, ['--version'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 10_000,
+    windowsHide: true,
+    shell: process.platform === 'win32',
+  })
+  if (check.status !== 0 && !check.stdout?.toString().trim()) {
+    if (cliKind === 'claude') {
+      ui.printError('Claude Code CLI not found.')
+      console.error('')
+      console.error('  Install it from: https://claude.ai/code')
+    } else {
+      ui.printError('Codex CLI not found.')
+      console.error('')
+      console.error('  Install it with: npm i -g @openai/codex')
+      console.error('  Then run:        codex login   (or set OPENAI_API_KEY)')
+    }
+    console.error('')
+    process.exit(1)
   }
-  hub.send({ ...event, session_id: sessionId } as any)
 }
 
-let runnerStarted = false
-function startRunnerOnce() {
-  if (runnerStarted) return
-  runnerStarted = true
-  console.log('[remo-agent] Starting Claude process...')
-  runner.start(handleRunnerEvent)
+function sendLog(message: string, sessionId?: string) {
+  const sid = sessionId ?? primarySessionId ?? hub.sessionIdValue
+  if (!sid) return
+  hub.send({ type: 'agent_log', session_id: sid, message })
+}
+
+function makeHandler(sessionId: string) {
+  return (event: RunnerEvent) => {
+    if (event.type === 'result' || event.type === 'ready') return
+    if (event.type === 'log') {
+      sendLog(event.message, sessionId)
+      return
+    }
+    hub.send({ ...event, session_id: sessionId } as any)
+  }
+}
+
+function getOrStartRunner(sessionId: string): CliRunner | null {
+  const existing = runners.get(sessionId)
+  if (existing) return existing
+
+  const meta = sessionMeta.get(sessionId)
+  if (!meta) {
+    console.error(`[remo-agent] unknown session ${sessionId}; dropping`)
+    return null
+  }
+
+  preflight(meta.cliKind)
+  try { mkdirSync(meta.workingDir, { recursive: true }) } catch {}
+
+  let runner: CliRunner
+  if (meta.cliKind === 'codex') {
+    runner = new CodexRunner(meta.workingDir, config.localOutput)
+  } else {
+    runner = new ClaudeRunner(
+      meta.workingDir,
+      config.localOutput,
+      meta.isRootless ? undefined : config.resume,
+    )
+  }
+  const sysPrompt = pendingSystemPrompts.get(sessionId)
+  if (sysPrompt) runner.setSystemPrompt(sysPrompt)
+  runner.start(makeHandler(sessionId))
+  runners.set(sessionId, runner)
+  return runner
+}
+
+function registerSession(sessionId: string, cliKind: 'claude' | 'codex', isRootless: boolean) {
+  if (sessionMeta.has(sessionId)) return
+  const workingDir = isRootless
+    ? join(homedir(), '.remo-code', 'rootless', cliKind)
+    : config.projectDir
+  sessionMeta.set(sessionId, { cliKind, isRootless, workingDir })
+}
+
+let projectStartScheduled = false
+function startProjectRunnerOnce() {
+  if (projectStartScheduled) return
+  projectStartScheduled = true
+  if (primarySessionId) {
+    console.log('[remo-agent] Starting primary runner...')
+    getOrStartRunner(primarySessionId)
+  }
 }
 
 function handleMessage(msg: HubToAgent) {
   if (msg.type === 'auth_ok') {
-    sendLog(`Remo Code Agent v${VERSION} connected — ${config.projectDir}`)
+    const cliKind = msg.cli_kind ?? 'claude'
+    primarySessionId = msg.session_id
+    registerSession(msg.session_id, cliKind, false)
+
+    // Register rootless sessions (lazy-start; only spawn on first user_message)
+    if (msg.rootless_session_ids) {
+      for (const kind of ['claude', 'codex'] as const) {
+        const sid = msg.rootless_session_ids[kind]
+        if (sid) registerSession(sid, kind, true)
+      }
+    }
+
+    sendLog(`Remo Code Agent v${VERSION} connected — ${config.projectDir} (cli=${cliKind})`)
+
+    // Phase 05: write any hub-provided seed files (create-if-absent; never overwrite)
+    writeSeedFiles((msg as any).seed_files, (m) => sendLog(m))
+
     if (msg.system_prompt) {
-      runner.setSystemPrompt(msg.system_prompt)
+      pendingSystemPrompts.set(msg.session_id, msg.system_prompt)
       sendLog(`Custom system prompt applied (${msg.system_prompt.length} chars)`)
     }
-    startRunnerOnce()
+
+    // Pre-flight only the CLIs we'll actually host
+    const cliKinds = new Set<'claude' | 'codex'>([cliKind])
+    if (msg.rootless_session_ids) {
+      for (const k of ['claude', 'codex'] as const) {
+        if (msg.rootless_session_ids[k]) cliKinds.add(k)
+      }
+    }
+    for (const k of cliKinds) preflight(k)
+
+    startProjectRunnerOnce()
+    return
   }
+
   if (msg.type === 'user_message') {
+    const runner = getOrStartRunner(msg.session_id)
+    if (!runner) return
     if (!runner.isReady) {
-      console.log('[remo-agent] Claude not ready yet, queuing...')
-      // Wait for ready, then send
+      console.log('[remo-agent] runner not ready yet, queuing...')
       const check = setInterval(() => {
         if (runner.isReady) {
           clearInterval(check)
-          sendUserMessage(msg)
+          sendUserMessage(runner, msg)
         }
       }, 500)
-      setTimeout(() => clearInterval(check), 30_000) // give up after 30s
+      setTimeout(() => clearInterval(check), 30_000)
       return
     }
-    sendUserMessage(msg)
+    sendUserMessage(runner, msg)
+    return
   }
+
   if (msg.type === 'permission_response') {
-    console.log(`[remo-agent] permission response: ${msg.approved ? 'approved' : 'denied'} (${msg.request_id})`)
-    runner.respondToPermission(msg.request_id, msg.approved)
+    runners.get(msg.session_id)?.respondToPermission(msg.request_id, msg.approved)
+    return
   }
   if (msg.type === 'question_response') {
-    console.log(`[remo-agent] question answer received (${msg.request_id})`)
-    runner.respondToQuestion(msg.request_id, msg.answer)
+    runners.get(msg.session_id)?.respondToQuestion(msg.request_id, msg.answer)
+    return
   }
   if (msg.type === 'cancel') {
-    runner.cancel()
+    runners.get(msg.session_id)?.cancel()
+    return
   }
   if (msg.type === 'shutdown') {
     const reason = msg.reason ?? 'hub_requested'
-    console.log(`[remo-agent] Shutdown requested by hub (${reason}). Stopping Claude...`)
-    runner.stopGracefully().finally(() => {
+    console.log(`[remo-agent] Shutdown requested by hub (${reason}). Stopping runners...`)
+    Promise.all([...runners.values()].map((r) => r.stopGracefully())).finally(() => {
       try { hub.close() } catch {}
       process.exit(0)
     })
   }
 }
 
-function sendUserMessage(msg: Extract<HubToAgent, { type: 'user_message' }>) {
+function sendUserMessage(runner: CliRunner, msg: Extract<HubToAgent, { type: 'user_message' }>) {
   let prompt = ''
   if (msg.attachments?.length) {
     for (const att of msg.attachments) {
@@ -118,39 +209,46 @@ function sendUserMessage(msg: Extract<HubToAgent, { type: 'user_message' }>) {
   runner.sendMessage(prompt, msg.images)
 }
 
-// Connect to hub — Claude is started after auth_ok so the system prompt
-// (if any) is applied on the first spawn. Fallback timer in case the hub
-// connection takes longer than expected.
+// Connect to hub — runners are started after auth_ok so system prompt + cli_kind
+// are honored on the first spawn. Fallback timer in case auth_ok never arrives.
 hub.connect()
 setTimeout(() => {
-  if (!runnerStarted) {
-    console.log('[remo-agent] auth_ok not received yet — starting Claude without server-side system prompt')
-    startRunnerOnce()
+  if (!projectStartScheduled && primarySessionId) {
+    console.log('[remo-agent] auth_ok not received — starting primary runner without server prompt')
+    startProjectRunnerOnce()
+  } else if (!projectStartScheduled) {
+    // No session yet from hub — assume legacy Claude + start with project_dir as primary.
+    console.log('[remo-agent] auth_ok delayed — starting legacy Claude runner against project_dir')
+    const legacyId = 'legacy:local'
+    primarySessionId = legacyId
+    registerSession(legacyId, 'claude', false)
+    startProjectRunnerOnce()
   }
 }, 5_000)
 
-// If --initial-prompt was given, send it once both hub auth + Claude are ready
+// If --initial-prompt was given, send it once both hub auth + primary runner are ready
 if (config.initialPrompt) {
   const initial = config.initialPrompt
   const trySend = () => {
-    if (hub.sessionIdValue && runner.isReady) {
+    if (!primarySessionId) return false
+    const r = runners.get(primarySessionId)
+    if (hub.sessionIdValue && r?.isReady) {
       console.log('[remo-agent] Sending initial prompt...')
-      runner.sendMessage(initial)
+      r.sendMessage(initial)
       return true
     }
     return false
   }
-  const check = setInterval(() => {
-    if (trySend()) clearInterval(check)
-  }, 500)
+  const check = setInterval(() => { if (trySend()) clearInterval(check) }, 500)
   setTimeout(() => clearInterval(check), 60_000)
 }
-
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[remo-agent] Shutting down...')
-  runner.stop()
+  for (const r of runners.values()) {
+    try { r.stop() } catch {}
+  }
   hub.close()
   process.exit(0)
 })

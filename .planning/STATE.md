@@ -16,6 +16,8 @@ Live in production at **https://app.remo-code.com** (Coolify, Docker). One canon
 
 ## Recently shipped
 
+Phase 06 (`error-capture`) — **shipped (PR #17 open)** at HEAD `9c614b7`. Sentry-style intake at `POST /api/sentry/:project_id/envelope/` (public, `sentry_key` is credential), fingerprint + 3 pre-dispatch gates (dedupe → rate-limit → daily-cap), then `user_message` into the Claude session bound to the repo for in-session investigate/fix/commit/push. One-shot SDK auto-install for Node+Express / Node+Next.js / Python+FastAPI / Python+Django via supervisor git-ops + Coolify env PATCH. Silent-skip emails via emails4agents (6 kinds, throttled). Lives at `hub/src/error-capture/` + `hub/src/api/{sentry-intake,error-projects,errors,error-runs,error-setup}.ts`. Replaces the standalone `claude-code-self-heal` service (decommission lands in a follow-up). Full docs at `docs/error-capture.md`.
+
 Phase 02 (`scheduled-tasks`) — hub-side cron scheduler with per-target fan-out, daily cost cap, offline grace replay, boot catchup, and post-run actions (chain, email via emails4agents, telegram, web push, webhook with HMAC). Lives at `hub/src/scheduler/` (V2 dispatcher). V0 legacy at `hub/src/scheduler/index.ts` is still wired during transition. Full docs at `docs/scheduled-tasks.md`. 41 unit tests in `hub/test/scheduler.test.ts`; e2e smoke in `hub/test/scheduled-tasks.e2e.test.ts` (skipped without `REMO_E2E_DB_URL`).
 
 Phase 01 (`merge-self-heal`) — resolved stale PR #1 (`upstream-fixes`, ~14 days, 126-file drift) by cherry-picking still-valid fixes, dropping the rest, closing the PR. Crypto-helpers extracted from `ws/channel.ts` to `hub/src/lib/crypto.ts`; web fetch helper `hubFetch` added; profile route shape fixed.

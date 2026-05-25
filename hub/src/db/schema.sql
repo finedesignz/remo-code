@@ -244,3 +244,129 @@ CREATE INDEX IF NOT EXISTS idx_paused_repos_supervisor ON paused_repos(superviso
 
 -- Per-user timezone for daily cost-cap window + UI display.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';
+
+-- ── Multichat grid view: chat tabs ───────────────────────────────────────────
+-- User-named tabs grouping multiple sessions into a grid view. Cascade chain:
+-- users → chat_tabs → chat_tab_sessions ← sessions. Deleting any of those rows
+-- cleans up downstream membership automatically.
+
+CREATE TABLE IF NOT EXISTS chat_tabs (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
+  layout     TEXT NOT NULL DEFAULT 'auto-fit' CHECK (layout IN ('3x3','4x3','auto-fit')),
+  position   INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_chat_tabs_user_position ON chat_tabs(user_id, position);
+
+CREATE TABLE IF NOT EXISTS chat_tab_sessions (
+  tab_id     UUID NOT NULL REFERENCES chat_tabs(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  position   INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tab_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_tab_sessions_tab_position ON chat_tab_sessions(tab_id, position);
+CREATE INDEX IF NOT EXISTS idx_chat_tab_sessions_session ON chat_tab_sessions(session_id);
+
+-- ── Phase 05: per-session CLI selection + rootless ambient sessions ──────────
+-- cli_kind: which CLI the agent spawns for this session ('claude' | 'codex').
+-- is_rootless: ambient sessions that have no project_dir; at most one per
+--   (user_id, hostname, cli_kind) enforced by the partial unique index below.
+-- hostname: populated for rootless rows so the partial unique index can scope
+--   uniqueness per host. Project sessions leave it NULL.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cli_kind TEXT NOT NULL DEFAULT 'claude';
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WHERE constraint_name='sessions_cli_kind_check') THEN ALTER TABLE sessions ADD CONSTRAINT sessions_cli_kind_check CHECK (cli_kind IN ('claude','codex')); END IF; END $$;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_rootless BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS hostname TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_rootless_unique ON sessions(user_id, hostname, cli_kind) WHERE is_rootless = true AND deleted_at IS NULL;
+
+-- ── Phase 05: per-user instruction blobs synced to agents via auth_ok.seed_files
+-- create_if_absent semantics; agents never overwrite existing local files.
+-- NEVER include API keys or auth tokens — codex_config_toml is secret-stripped on PUT.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS claude_global_md TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_agents_md TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_config_toml TEXT;
+
+-- ── Error capture (06-error-capture) ────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS error_projects (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name            TEXT NOT NULL,
+  sentry_key      TEXT NOT NULL UNIQUE,
+  session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  dedupe_window_seconds  INTEGER NOT NULL DEFAULT 60,
+  rate_limit_per_hour    INTEGER NOT NULL DEFAULT 20,
+  daily_dispatch_cap     INTEGER NOT NULL DEFAULT 50,
+  enabled         BOOLEAN NOT NULL DEFAULT true,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_error_projects_user ON error_projects(user_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_error_projects_sentry_key ON error_projects(sentry_key);
+
+CREATE TABLE IF NOT EXISTS errors (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id      UUID NOT NULL REFERENCES error_projects(id) ON DELETE CASCADE,
+  fingerprint     TEXT NOT NULL,
+  error_type      TEXT NOT NULL,
+  error_value     TEXT NOT NULL,
+  stacktrace_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  release         TEXT NULL,
+  received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  dispatch_status TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (dispatch_status IN ('pending','dispatched','skipped','failed','deduped','rate_limited','cap_exceeded')),
+  dispatched_at   TIMESTAMPTZ NULL,
+  skip_reason     TEXT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_errors_project_received ON errors(project_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_errors_fingerprint_dedupe ON errors(fingerprint, project_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_errors_pending ON errors(project_id) WHERE dispatch_status='pending';
+
+CREATE TABLE IF NOT EXISTS error_runs (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  error_id        UUID NOT NULL REFERENCES errors(id) ON DELETE CASCADE,
+  project_id      UUID NOT NULL REFERENCES error_projects(id) ON DELETE CASCADE,
+  session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending','in_flight','success','failed','skipped','cancelled')),
+  started_at      TIMESTAMPTZ NULL,
+  finished_at     TIMESTAMPTZ NULL,
+  output_snippet  TEXT NULL,
+  error           TEXT NULL,
+  cost_usd        NUMERIC(10,6) NULL,
+  duration_ms     INTEGER NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_error_runs_project ON error_runs(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_error_runs_error ON error_runs(error_id, created_at DESC);
+-- Idempotent column adds for existing prod DBs that pre-date cost/duration tracking.
+ALTER TABLE error_runs ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(10,6) NULL;
+ALTER TABLE error_runs ADD COLUMN IF NOT EXISTS duration_ms INTEGER NULL;
+
+CREATE TABLE IF NOT EXISTS notifications_sent (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind            TEXT NOT NULL CHECK (kind IN ('dedupe_hit','rate_limit','daily_cap','dispatch_failed','session_offline','stack_not_detected')),
+  dedupe_key      TEXT NOT NULL,
+  sent_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_sent_lookup ON notifications_sent(kind, dedupe_key, sent_at DESC);
+-- Idempotent CHECK relax for existing prod DBs to allow the stack_not_detected kind (added in W5).
+ALTER TABLE notifications_sent DROP CONSTRAINT IF EXISTS notifications_sent_kind_check;
+ALTER TABLE notifications_sent ADD CONSTRAINT notifications_sent_kind_check
+  CHECK (kind IN ('dedupe_hit','rate_limit','daily_cap','dispatch_failed','session_offline','stack_not_detected'));
+
+-- ── Phase 06 plan 007: GitHub-issue post-run idempotency ─────────────────────
+-- Skips duplicate issue creation for the same (repo, app_uuid, deploy_uuid)
+-- within a 24h window. Hash = sha256(`${repo}|${app_uuid}|${deploy_uuid}`).
+CREATE TABLE IF NOT EXISTS github_issue_idempotency (
+  user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hash           TEXT NOT NULL,
+  repo_full_name TEXT NOT NULL,
+  issue_number   INTEGER NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, hash)
+);
+CREATE INDEX IF NOT EXISTS idx_gh_idem_created ON github_issue_idempotency(created_at);

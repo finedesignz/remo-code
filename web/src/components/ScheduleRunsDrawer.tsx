@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useScheduleRuns, type ScheduleRun } from '../hooks/useScheduleRuns'
 import type { ScheduledTask } from '../hooks/useSchedules'
 import { formatLocalTs } from './SchedulesPage'
+import { formatDuration } from '../lib/format'
 
 interface Props {
   token: string
@@ -10,9 +11,37 @@ interface Props {
   onClose: () => void
 }
 
+type StatusFilter = 'all' | 'success' | 'failure' | 'skipped' | 'running' | 'cancelled'
+
 export function ScheduleRunsDrawer({ token, task, subscribe, onClose }: Props) {
   const { runs, loading, error, hasMore, loadMore, refetch, cancel } = useScheduleRuns(token, task.id, { subscribe })
   const [expandedRun, setExpandedRun] = useState<string | null>(null)
+  const [filter, setFilter] = useState<StatusFilter>('all')
+
+  // Counts per status (pending grouped under running per existing live logic)
+  const counts = {
+    all: runs.length,
+    success: runs.filter(r => r.status === 'success').length,
+    failure: runs.filter(r => r.status === 'failure').length,
+    skipped: runs.filter(r => r.status === 'skipped').length,
+    running: runs.filter(r => r.status === 'running' || r.status === 'pending').length,
+    cancelled: runs.filter(r => r.status === 'cancelled').length,
+  }
+
+  const filteredRuns = filter === 'all'
+    ? runs
+    : filter === 'running'
+      ? runs.filter(r => r.status === 'running' || r.status === 'pending')
+      : runs.filter(r => r.status === filter)
+
+  // Aggregate stats over loaded runs (not filtered)
+  const successCount = counts.success
+  const failureCount = counts.failure
+  const successDenom = successCount + failureCount
+  const successRate = successDenom === 0 ? null : Math.round((successCount / successDenom) * 100)
+  const totalCost = runs.reduce((sum, r) => sum + (typeof r.cost_usd === 'number' ? r.cost_usd : 0), 0)
+  const durations = runs.map(r => r.duration_ms).filter((d): d is number => typeof d === 'number')
+  const avgDurationMs = durations.length === 0 ? null : Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
 
   // Close on Escape
   useEffect(() => {
@@ -61,6 +90,60 @@ export function ScheduleRunsDrawer({ token, task, subscribe, onClose }: Props) {
           </div>
         </div>
 
+        {runs.length > 0 && (
+          <div className="px-5 pt-4 space-y-3">
+            {/* Status filter chips */}
+            <div className="flex flex-wrap gap-1.5">
+              {([
+                ['all', 'All', counts.all, true],
+                ['success', 'Success', counts.success, true],
+                ['failure', 'Failure', counts.failure, true],
+                ['skipped', 'Skipped', counts.skipped, counts.skipped > 0],
+                ['running', 'Running', counts.running, true],
+                ['cancelled', 'Cancelled', counts.cancelled, counts.cancelled > 0],
+              ] as Array<[StatusFilter, string, number, boolean]>)
+                .filter(([, , , show]) => show)
+                .map(([key, label, count]) => {
+                  const active = filter === key
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setFilter(active && key !== 'all' ? 'all' : key)}
+                      className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${
+                        active
+                          ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300'
+                          : 'bg-[var(--bg-tertiary)]/40 text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/60'
+                      }`}
+                    >
+                      {label} ({count})
+                    </button>
+                  )
+                })}
+            </div>
+
+            {/* Summary stats banner */}
+            <div className="bg-[var(--bg-primary)]/40 rounded-lg p-3 flex flex-wrap gap-4">
+              <div>
+                <div className="text-xs text-[var(--text-muted)]">Total</div>
+                <div className="text-sm font-semibold text-[var(--text-primary)]">{runs.length} {runs.length === 1 ? 'run' : 'runs'}</div>
+              </div>
+              <div>
+                <div className="text-xs text-[var(--text-muted)]">Success rate</div>
+                <div className="text-sm font-semibold text-[var(--text-primary)]">{successRate === null ? '—' : `${successRate}%`}</div>
+              </div>
+              <div>
+                <div className="text-xs text-[var(--text-muted)]">Total cost</div>
+                <div className="text-sm font-semibold text-[var(--text-primary)]">${totalCost >= 0.01 ? totalCost.toFixed(2) : totalCost.toFixed(4)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-[var(--text-muted)]">Avg duration</div>
+                <div className="text-sm font-semibold text-[var(--text-primary)]">{formatDuration(avgDurationMs)}</div>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="p-5 space-y-2">
           {error && (
             <div className="bg-red-500/10 ring-1 ring-red-500/30 rounded-lg p-3 text-sm text-red-300">{error}</div>
@@ -74,7 +157,12 @@ export function ScheduleRunsDrawer({ token, task, subscribe, onClose }: Props) {
             </div>
           ) : (
             <>
-              {runs.map(run => (
+              {filteredRuns.length === 0 && (
+                <div className="bg-[var(--bg-primary)]/40 rounded-lg p-4 text-center text-xs text-[var(--text-muted)]">
+                  No runs match this filter.
+                </div>
+              )}
+              {filteredRuns.map(run => (
                 <RunCard
                   key={run.id}
                   run={run}
@@ -215,12 +303,3 @@ function RunStatusIcon({ status }: { status: ScheduleRun['status'] }) {
   }
 }
 
-function formatDuration(ms: number | null): string {
-  if (ms === null || ms === undefined) return '—'
-  if (ms < 1000) return `${ms}ms`
-  const s = ms / 1000
-  if (s < 60) return `${s.toFixed(1)}s`
-  const m = Math.floor(s / 60)
-  const rs = Math.round(s - m * 60)
-  return `${m}m ${rs}s`
-}

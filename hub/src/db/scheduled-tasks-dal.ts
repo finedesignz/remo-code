@@ -11,7 +11,7 @@ export type OnCompleteAction =
 // the API layer.
 export type PostRunAction = any
 
-export type TaskType = 'prompt' | 'skill' | 'security_scan' | 'log_check' | 'continue_dev'
+export type TaskType = 'prompt' | 'skill' | 'security_scan' | 'log_check' | 'continue_dev' | 'triage'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
 export type CatchupPolicy = 'skip' | 'run_once'
 export type RunStatus =
@@ -49,6 +49,9 @@ export interface ScheduledTask {
   last_fire_at: string | null
   next_fire_at: string | null
   post_run_actions: PostRunAction[]
+  // Derived from latest finalized run via LATERAL JOIN in listTasksForUser/getTask.
+  last_run_cost_usd?: number | null
+  last_run_duration_ms?: number | null
 }
 
 export interface ScheduledTaskRun {
@@ -74,14 +77,42 @@ export interface ScheduledTaskRun {
 
 export async function listTasksForUser(userId: string): Promise<ScheduledTask[]> {
   const rows = await sql<ScheduledTask[]>`
-    SELECT * FROM scheduled_tasks WHERE user_id = ${userId} ORDER BY created_at DESC
+    SELECT t.*,
+           latest.cost_usd AS last_run_cost_usd,
+           latest.duration_ms AS last_run_duration_ms
+    FROM scheduled_tasks t
+    LEFT JOIN LATERAL (
+      SELECT r.cost_usd,
+             EXTRACT(EPOCH FROM (r.finished_at - r.started_at)) * 1000 AS duration_ms
+      FROM scheduled_task_runs r
+      WHERE r.task_id = t.id
+        AND r.finished_at IS NOT NULL
+      ORDER BY r.finished_at DESC
+      LIMIT 1
+    ) latest ON true
+    WHERE t.user_id = ${userId}
+    ORDER BY t.created_at DESC
   `
   return rows.map(normalize)
 }
 
 export async function getTask(id: string, userId: string): Promise<ScheduledTask | null> {
   const rows = await sql<ScheduledTask[]>`
-    SELECT * FROM scheduled_tasks WHERE id = ${id} AND user_id = ${userId} LIMIT 1
+    SELECT t.*,
+           latest.cost_usd AS last_run_cost_usd,
+           latest.duration_ms AS last_run_duration_ms
+    FROM scheduled_tasks t
+    LEFT JOIN LATERAL (
+      SELECT r.cost_usd,
+             EXTRACT(EPOCH FROM (r.finished_at - r.started_at)) * 1000 AS duration_ms
+      FROM scheduled_task_runs r
+      WHERE r.task_id = t.id
+        AND r.finished_at IS NOT NULL
+      ORDER BY r.finished_at DESC
+      LIMIT 1
+    ) latest ON true
+    WHERE t.id = ${id} AND t.user_id = ${userId}
+    LIMIT 1
   `
   return rows[0] ? normalize(rows[0]) : null
 }
@@ -114,11 +145,23 @@ function normalize(row: any): ScheduledTask {
     typeof row.post_run_actions === 'string'
       ? JSON.parse(row.post_run_actions)
       : (row.post_run_actions ?? [])
+  // node-postgres returns NUMERIC as string; coerce when present. EXTRACT(EPOCH ...)
+  // comes back as a number (double precision) but normalize defensively.
+  const last_run_cost_usd =
+    row.last_run_cost_usd === null || row.last_run_cost_usd === undefined
+      ? null
+      : Number(row.last_run_cost_usd)
+  const last_run_duration_ms =
+    row.last_run_duration_ms === null || row.last_run_duration_ms === undefined
+      ? null
+      : Number(row.last_run_duration_ms)
   return {
     ...row,
     on_complete,
     payload,
     post_run_actions,
+    last_run_cost_usd,
+    last_run_duration_ms,
   }
 }
 

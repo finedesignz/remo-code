@@ -2,6 +2,9 @@ import { useMemo, useState } from 'react'
 import { useSchedules, type ScheduledTask } from '../hooks/useSchedules'
 import { ScheduleEditor } from './ScheduleEditor'
 import { ScheduleRunsDrawer } from './ScheduleRunsDrawer'
+import { UpcomingRunsPanel } from './UpcomingRunsPanel'
+import { humanizeCron } from '../lib/cron-humanize'
+import { formatCostUsd, formatDuration, formatRelativeAgo } from '../lib/format'
 
 interface Props {
   token: string
@@ -10,6 +13,9 @@ interface Props {
   subscribe?: (handler: (msg: any) => void) => () => void
 }
 
+type StatusFilter = 'all' | 'enabled' | 'disabled'
+type TypeFilter = 'all' | ScheduledTask['task_type']
+
 export function SchedulesPage({ token, onBack, subscribe }: Props) {
   const { schedules, loading, error, create, update, remove, toggle, runNow, refetch } = useSchedules(token)
   const [editorOpen, setEditorOpen] = useState(false)
@@ -17,6 +23,26 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
   const [drawerTaskId, setDrawerTaskId] = useState<string | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null)
   const [busy, setBusy] = useState<Record<string, boolean>>({})
+  const [searchQuery, setSearchQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
+
+  const filteredSchedules = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    return schedules.filter(s => {
+      if (q && !s.name.toLowerCase().includes(q)) return false
+      if (statusFilter === 'enabled' && s.enabled !== true) return false
+      if (statusFilter === 'disabled' && s.enabled !== false) return false
+      if (typeFilter !== 'all' && s.task_type !== typeFilter) return false
+      return true
+    })
+  }, [schedules, searchQuery, statusFilter, typeFilter])
+
+  const clearFilters = () => {
+    setSearchQuery('')
+    setStatusFilter('all')
+    setTypeFilter('all')
+  }
 
   const handleNew = () => { setEditing(null); setEditorOpen(true) }
   const handleEdit = (s: ScheduledTask) => { setEditing(s); setEditorOpen(true) }
@@ -62,7 +88,56 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
         </button>
       </header>
 
+      {schedules.length > 0 && (
+        <div className="flex items-center gap-2 px-4 md:px-6 lg:px-10 py-2 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/40 shrink-0">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by name…"
+            className="flex-1 max-w-sm px-3 py-2 text-sm rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+            aria-label="Search schedules by name"
+          />
+          <div className="inline-flex items-center gap-1 rounded-lg bg-[var(--bg-tertiary)]/60 p-0.5">
+            {(['all', 'enabled', 'disabled'] as StatusFilter[]).map(opt => (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => setStatusFilter(opt)}
+                className={`px-2.5 py-1 text-xs rounded-md capitalize transition-colors ${
+                  statusFilter === opt
+                    ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                }`}
+                aria-pressed={statusFilter === opt}
+              >
+                {opt}
+              </button>
+            ))}
+          </div>
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value as TypeFilter)}
+            className="px-3 py-2 text-sm rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+            aria-label="Filter by task type"
+          >
+            <option value="all">All types</option>
+            <option value="prompt">Prompt</option>
+            <option value="skill">Skill</option>
+            <option value="security_scan">Security scan</option>
+            <option value="log_check">Log check</option>
+            <option value="continue_dev">Continue dev</option>
+          </select>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto px-4 md:px-6 lg:px-10 py-5 md:py-6">
+        {schedules.length > 0 && (
+          <UpcomingRunsPanel
+            schedules={schedules}
+            onOpen={(id) => setDrawerTaskId(id)}
+          />
+        )}
         {loading && schedules.length === 0 ? (
           <p className="text-sm text-[var(--text-muted)]">Loading...</p>
         ) : error ? (
@@ -72,9 +147,19 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
           </div>
         ) : schedules.length === 0 ? (
           <EmptyState onNew={handleNew} />
+        ) : filteredSchedules.length === 0 ? (
+          <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 text-center max-w-xl mx-auto">
+            <p className="text-sm text-[var(--text-muted)] mb-3">No schedules match your filters.</p>
+            <button
+              onClick={clearFilters}
+              className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs text-[var(--text-on-accent)] font-medium transition-colors"
+            >
+              Clear filters
+            </button>
+          </div>
         ) : (
           <div className="space-y-3 max-w-4xl">
-            {schedules.map(s => (
+            {filteredSchedules.map(s => (
               <ScheduleRow
                 key={s.id}
                 schedule={s}
@@ -169,7 +254,7 @@ function ScheduleRow({
 }: RowProps) {
   const next = schedule.next_fire_at ? new Date(schedule.next_fire_at) : null
   const targetSummary = useMemo(() => describeTarget(schedule), [schedule.target_kind, schedule.target_id])
-  const cronSummary = useMemo(() => describeCron(schedule.cron_expr), [schedule.cron_expr])
+  const cronSummary = useMemo(() => humanizeCron(schedule.cron_expr), [schedule.cron_expr])
 
   return (
     <button
@@ -182,6 +267,10 @@ function ScheduleRow({
             <h3 className="text-sm font-semibold text-[var(--text-primary)] truncate">{schedule.name}</h3>
             <TaskTypeChip type={schedule.task_type} />
             {schedule.last_run_status && <StatusChip status={schedule.last_run_status} />}
+            <LastRunMetrics
+              costUsd={schedule.last_run_cost_usd}
+              durationMs={schedule.last_run_duration_ms}
+            />
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-muted)]">
             <span className="inline-flex items-center gap-1">
@@ -200,7 +289,16 @@ function ScheduleRow({
             </span>
             {next && (
               <span className="inline-flex items-center gap-1">
-                Next: <span className="text-[var(--text-secondary)]">{formatLocalTs(next)}</span>
+                Next: <span className="text-[var(--text-secondary)]">{formatTsInTz(next, schedule.timezone)}</span>
+              </span>
+            )}
+            {schedule.last_fire_at && (
+              <span className="inline-flex items-center gap-1">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="6" cy="6" r="4.5" />
+                  <path d="M6 3.5v2.5l1.5 1.5" />
+                </svg>
+                Fired {formatRelativeAgo(new Date(schedule.last_fire_at))}
               </span>
             )}
           </div>
@@ -281,7 +379,7 @@ function ScheduleRow({
 /* Chips                                                              */
 /* ----------------------------------------------------------------- */
 
-function TaskTypeChip({ type }: { type: ScheduledTask['task_type'] }) {
+export function TaskTypeChip({ type }: { type: ScheduledTask['task_type'] }) {
   const label: Record<ScheduledTask['task_type'], string> = {
     prompt: 'prompt',
     skill: 'skill',
@@ -310,6 +408,26 @@ function StatusChip({ status }: { status: NonNullable<ScheduledTask['last_run_st
   )
 }
 
+function LastRunMetrics({
+  costUsd,
+  durationMs,
+}: {
+  costUsd: number | null | undefined
+  durationMs: number | null | undefined
+}) {
+  const costLabel = formatCostUsd(costUsd)
+  const hasDuration = durationMs !== null && durationMs !== undefined
+  if (!costLabel && !hasDuration) return null
+  const parts: string[] = []
+  if (costLabel) parts.push(costLabel)
+  if (hasDuration) parts.push(formatDuration(durationMs))
+  return (
+    <span className="text-[10px] text-[var(--text-muted)] font-mono">
+      {parts.join(' · ')}
+    </span>
+  )
+}
+
 /* ----------------------------------------------------------------- */
 /* Formatters (exported for reuse by editor + drawer)                 */
 /* ----------------------------------------------------------------- */
@@ -329,29 +447,6 @@ function shortId(id: string | null | undefined): string {
   return id.length > 8 ? id.slice(0, 8) : id
 }
 
-export function describeCron(expr: string): string {
-  // Tiny humanizer — covers our presets. Anything else falls back to the raw expr.
-  if (!expr) return ''
-  const parts = expr.split(/\s+/)
-  if (parts.length !== 5) return expr
-  const [m, h, dom, mon, dow] = parts
-  if (m === '0' && h === '*' && dom === '*' && mon === '*' && dow === '*') return 'hourly'
-  if (m.startsWith('*/') && h === '*' && dom === '*' && mon === '*' && dow === '*') {
-    return `every ${m.slice(2)} min`
-  }
-  if (/^\d+$/.test(m) && /^\d+$/.test(h) && dom === '*' && mon === '*' && dow === '*') {
-    return `daily at ${pad2(h)}:${pad2(m)}`
-  }
-  if (/^\d+$/.test(m) && /^\d+$/.test(h) && dom === '*' && mon === '*' && dow === '1-5') {
-    return `weekdays at ${pad2(h)}:${pad2(m)}`
-  }
-  return expr
-}
-
-function pad2(s: string): string {
-  return s.length === 1 ? `0${s}` : s
-}
-
 export function formatLocalTs(d: Date): string {
   try {
     return new Intl.DateTimeFormat(undefined, {
@@ -360,5 +455,18 @@ export function formatLocalTs(d: Date): string {
     }).format(d)
   } catch {
     return d.toISOString()
+  }
+}
+
+export function formatTsInTz(d: Date, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit',
+      timeZone: tz,
+      timeZoneName: 'short',
+    }).format(d)
+  } catch {
+    return formatLocalTs(d)
   }
 }

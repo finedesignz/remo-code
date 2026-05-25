@@ -9,6 +9,7 @@ import { Sidebar } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
 import { ApiKeyModal } from './ApiKeyModal'
 import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
+import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
 
 const NUDGE_TEXT = "Status update? Briefly: what's the current state, what would you recommend doing next, or what input do you need from me?"
 
@@ -35,7 +36,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
   const [showApiKey, setShowApiKey] = useState(false)
 
   const { theme, toggleTheme } = useTheme()
-  const { connected, connectionId, send, subscribe } = useWebSocket(token)
+  const { connected, connectionId, send, subscribe, online } = useWebSocket(token)
   const sessionsHook = useSessions(token)
   const { messages, loading: chatLoading, sendMessage, unreadCounts } = useChat(
     token, activeSessionId, subscribe, send, connectionId
@@ -51,6 +52,12 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
       request_id: requestId,
       approved,
     })
+  }, [activeSessionId, send])
+
+  // Handle cancel (Stop button)
+  const handleCancel = useCallback(() => {
+    if (!activeSessionId) return
+    send({ type: 'cancel', session_id: activeSessionId })
   }, [activeSessionId, send])
 
   // Handle question responses
@@ -101,11 +108,13 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
       const target = sessionsHook.sessions.find(s => s.id === id)
       // Only nudge when agent is connected AND not currently generating a response.
       if (!target || target.status !== 'online') return
-      const key = `remo:last-nudge:${id}`
-      const last = Number(localStorage.getItem(key) || 0)
-      const now = Date.now()
-      if (now - last < 5 * 60 * 1000) return
-      localStorage.setItem(key, String(now))
+      // Gate: skip if last user message to this session WAS the nudge text (dedupe),
+      // and require >1h since the last user message (allow first-time / long-idle).
+      const lastUserMsg = readLastUserMessage(id)
+      if (lastUserMsg) {
+        if (lastUserMsg.content === NUDGE_TEXT) return
+        if (Date.now() - lastUserMsg.ts <= 60 * 60 * 1000) return
+      }
       // Defer so activeSessionId state + subscribe effect settle before send.
       setTimeout(() => {
         send({
@@ -114,6 +123,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
           content: NUDGE_TEXT,
           id: crypto.randomUUID(),
         })
+        recordUserMessage(id, NUDGE_TEXT)
       }, 150)
     } catch {}
   }, [sessionsHook.sessions, send])
@@ -260,6 +270,8 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
           onQuestionRespond={handleQuestionRespond}
           token={token}
           wsConnected={connected}
+          online={online}
+          onCancel={handleCancel}
         />
       </div>
     </div>

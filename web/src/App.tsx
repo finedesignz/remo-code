@@ -6,12 +6,16 @@ import { SetupForm } from './components/SetupForm'
 import { Layout } from './components/Layout'
 import { SettingsPage } from './components/SettingsPage'
 import { SchedulesPage } from './components/SchedulesPage'
+import { ErrorCapturePage } from './components/ErrorCapturePage'
+import { ChatSurfaceShowcase } from './components/ChatSurfaceShowcase'
+import { MobileAccordionShowcase } from './components/MobileAccordionShowcase'
+import { GridPage } from './components/GridPage'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useBrowserNotifications } from './hooks/useBrowserNotifications'
 import type { Profile } from './hooks/useProfile'
 import type { AuthUser } from './lib/auth.ts'
 
-type Route = 'chat' | 'settings' | 'schedules'
+type Route = 'chat' | 'settings' | 'schedules' | 'error-capture' | 'grid' | 'dev-chat-surface' | 'dev-mobile-accordion'
 
 function LoadingScreen() {
   return (
@@ -30,7 +34,17 @@ function getRoute(): Route {
   }
   if (hash.startsWith('#/settings')) return 'settings'
   if (hash.startsWith('#/schedules')) return 'schedules'
+  if (hash.startsWith('#/error-capture')) return 'error-capture'
+  if (hash.startsWith('#/grid')) return 'grid'
+  if (hash.startsWith('#/dev/chat-surface')) return 'dev-chat-surface'
+  if (hash.startsWith('#/dev/mobile-accordion')) return 'dev-mobile-accordion'
   return 'chat'
+}
+
+function getGridTabId(): string | undefined {
+  const hash = window.location.hash
+  const m = hash.match(/^#\/grid\/([^/?#]+)/)
+  return m ? decodeURIComponent(m[1]) : undefined
 }
 
 export default function App() {
@@ -38,6 +52,7 @@ export default function App() {
   const { profile, loading: profileLoading, updateProfile } = useProfile(token)
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null)
   const [route, setRoute] = useState<Route>(getRoute)
+  const [gridTabId, setGridTabId] = useState<string | undefined>(getGridTabId)
 
   useEffect(() => {
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
@@ -49,7 +64,7 @@ export default function App() {
 
   // Hash-based routing
   useEffect(() => {
-    const onHashChange = () => setRoute(getRoute())
+    const onHashChange = () => { setRoute(getRoute()); setGridTabId(getGridTabId()) }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
@@ -95,6 +110,22 @@ export default function App() {
         <SchedulesRoute token={token} onBack={goToChat} />
       )}
 
+      {route === 'error-capture' && (
+        <ErrorCaptureRoute token={token} onBack={goToChat} />
+      )}
+
+      {route === 'dev-chat-surface' && (
+        <ChatSurfaceShowcase token={token} />
+      )}
+
+      {route === 'dev-mobile-accordion' && (
+        <MobileAccordionShowcase token={token} />
+      )}
+
+      {route === 'grid' && (
+        <GridPage token={token} tabId={gridTabId} />
+      )}
+
       {route === 'chat' && (
         <Layout
           token={token}
@@ -110,6 +141,11 @@ export default function App() {
 function SchedulesRoute({ token, onBack }: { token: string; onBack: () => void }) {
   const { subscribe } = useWebSocket(token)
   return <SchedulesPage token={token} onBack={onBack} subscribe={subscribe} />
+}
+
+function ErrorCaptureRoute({ token, onBack }: { token: string; onBack: () => void }) {
+  const { subscribe } = useWebSocket(token)
+  return <ErrorCapturePage token={token} onBack={onBack} subscribe={subscribe} />
 }
 
 function NotificationsBridge({ token, profile }: { token: string; profile: Profile }) {

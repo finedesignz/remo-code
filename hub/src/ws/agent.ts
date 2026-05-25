@@ -1,6 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, findOrCreateAgentSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, recentlyDisconnectedForProjectDir, updateSessionAgentInfo } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo } from '../db/dal'
+import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
@@ -157,7 +158,8 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
     const rawToken = generateToken('remo_')
     const tokenHash = await hashToken(rawToken)
-    const session = await findOrCreateAgentSession(userId, projectDir, tokenHash)
+    const cliKind: 'claude' | 'codex' = (msg as any).cli_kind ?? 'claude'
+    const session = await findOrCreateAgentSession(userId, projectDir, tokenHash, cliKind)
 
     if (!session.created) {
       unregisterChannel(session.id)
@@ -169,7 +171,7 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     ws.data.userId = userId
     if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
 
-    console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir} reused=${!session.created}`)
+    console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir} cli=${cliKind} reused=${!session.created}`)
     registerChannel(session.id, userId, ws as any)
     await setSessionStatus(session.id, 'online')
 
@@ -183,8 +185,61 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       try { await updateSessionAgentInfo(session.id, { hostname: msg.hostname }) } catch {}
     }
 
+    // Phase 05: handle rootless ambient-session advertisement.
+    // The agent sends `rootless_sessions: ['claude','codex'?]` to opt-in to
+    // ambient (project-less) sessions per host per CLI.
+    const rootlessRequested: Array<'claude' | 'codex'> = Array.isArray((msg as any).rootless_sessions)
+      ? ((msg as any).rootless_sessions as string[]).filter((k): k is 'claude' | 'codex' => k === 'claude' || k === 'codex')
+      : []
+    const rootlessSessionIds: { claude?: string; codex?: string } = {}
+    if (rootlessRequested.length > 0) {
+      const hostname = (msg.hostname || (msg as any).agent_info?.hostname || '').toString()
+      if (!hostname) {
+        console.warn(`[agent] rootless_sessions advertised without hostname; ignoring`)
+      } else {
+        for (const k of rootlessRequested) {
+          try {
+            const rawTok = generateToken('remo_')
+            const hash = await hashToken(rawTok)
+            const row = await findOrCreateRootlessSession(
+              userId, hostname, k, hash,
+              `${k === 'claude' ? 'Claude' : 'Codex'} (ambient — ${hostname})`,
+            )
+            rootlessSessionIds[k] = row.id
+          } catch (e: any) {
+            console.error(`[agent] rootless ${k} create failed`, e?.message)
+          }
+        }
+      }
+    }
+
+    // Phase 05: compute seed_files from user instruction blobs scoped to the CLIs we host.
+    const cliKindsHosted = new Set<'claude' | 'codex'>([cliKind])
+    for (const k of rootlessRequested) cliKindsHosted.add(k)
+    const inst = await getUserInstructions(userId)
+    const seedCatalog: Array<{ cli: 'claude' | 'codex'; path: string; blob: string | null }> = [
+      { cli: 'claude', path: '~/.claude/CLAUDE.md', blob: inst.claude_global_md },
+      { cli: 'codex',  path: '~/.codex/AGENTS.md', blob: inst.codex_agents_md },
+      { cli: 'codex',  path: '~/.codex/config.toml', blob: inst.codex_config_toml },
+    ]
+    const seedFiles = seedCatalog
+      .filter((e) => cliKindsHosted.has(e.cli) && e.blob && e.blob.length > 0)
+      .map((e) => ({
+        path: e.path,
+        content: e.blob as string,
+        sha256: createHash('sha256').update(e.blob as string).digest('hex'),
+        mode: 'create_if_absent' as const,
+      }))
+
     const systemPrompt = await getUserSystemPrompt(userId)
-    ws.send(JSON.stringify({ type: 'auth_ok', session_id: session.id, system_prompt: systemPrompt }))
+    ws.send(JSON.stringify({
+      type: 'auth_ok',
+      session_id: session.id,
+      system_prompt: systemPrompt,
+      cli_kind: cliKind,
+      ...(Object.keys(rootlessSessionIds).length > 0 ? { rootless_session_ids: rootlessSessionIds } : {}),
+      ...(seedFiles.length > 0 ? { seed_files: seedFiles } : {}),
+    }))
 
     ws.data.heartbeatTimer = setInterval(() => {
       try { ws.send(JSON.stringify({ type: 'ping' })) } catch {}
@@ -200,6 +255,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     try {
       const g = await import('../scheduler/grace.ts')
       void g.drainForTarget(session.id, userId)
+    } catch {}
+    // W3/T4 — drain any error-capture errors parked for this session.
+    try {
+      const eg = await import('../error-capture/grace.ts')
+      void eg.drainForSession(session.id)
     } catch {}
     return
   }
@@ -322,6 +382,13 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     try {
       const mod = await import('../scheduler/senders/agent.ts')
       void mod.onAssistantMessage(sessionId, msg.content)
+    } catch {}
+    // W3 — finalize any in-flight error-capture run for this session.
+    try {
+      const ec = await import('../error-capture/run-lifecycle.ts')
+      if (ec.errorRunActiveForSession(sessionId)) {
+        void ec.onAgentReply(sessionId, msg.content)
+      }
     } catch {}
   }
 

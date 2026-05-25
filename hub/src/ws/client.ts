@@ -1,12 +1,17 @@
 import type { ServerWebSocket } from 'bun'
-import { ClientInbound } from './protocol'
+import { ClientInbound, SUBSCRIBE_MAX } from './protocol'
 import { verifyJwt } from '../auth/jwt.ts'
 import { insertMessage, listSessions, getSession } from '../db/dal'
 import {
   registerClient, unregisterClient, subscribeClient,
   getChannel, unregisterChannel, broadcastToSubscribers,
+  broadcastErrorEvent,
   type ClientEntry,
 } from './registry'
+
+// Re-export so error-capture modules can `import { broadcastErrorEvent }
+// from '../ws/client'` per the W3 contract.
+export { broadcastErrorEvent }
 
 const AUTH_TIMEOUT_MS = 5_000
 const MSG_RATE_WINDOW_MS = 10_000
@@ -90,12 +95,45 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   if (data.msgCount > MSG_RATE_MAX) return // silently drop
 
   if (msg.type === 'subscribe') {
-    // Verify user owns these sessions before subscribing
+    // Overloaded: accept legacy `session_id` (singular) OR `session_ids` (multi).
+    // Empty `session_ids: []` clears subscriptions. The set REPLACES on every
+    // subscribe call (last-write-wins) — clients send the full active set.
+    const requested: string[] = msg.session_id
+      ? [msg.session_id]
+      : (msg.session_ids ?? [])
+    // De-dupe up-front so a client that repeats an id doesn't waste DAL calls.
+    const ids = Array.from(new Set(requested))
+
+    if (ids.length > SUBSCRIBE_MAX) {
+      ws.send(JSON.stringify({
+        type: 'subscribe_error',
+        error: 'too_many_sessions',
+        max: SUBSCRIBE_MAX,
+      }))
+      return
+    }
+
+    if (ids.length === 0) {
+      subscribeClient(data.clientEntry, [])
+      return
+    }
+
+    // Verify EVERY id belongs to the authenticated user. If any id is foreign,
+    // reject the whole call and leave the existing subscription set unchanged.
     const ownedChecks = await Promise.all(
-      msg.session_ids.map((id: string) => getSession(id, data.userId!))
+      ids.map((id: string) => getSession(id, data.userId!))
     )
-    const ownedIds = msg.session_ids.filter((_: string, i: number) => ownedChecks[i] !== null)
-    subscribeClient(data.clientEntry, ownedIds)
+    const allOwned = ownedChecks.every((s) => s !== null)
+    if (!allOwned) {
+      ws.send(JSON.stringify({
+        type: 'subscribe_error',
+        error: 'invalid_subscribe',
+      }))
+      return
+    }
+
+    subscribeClient(data.clientEntry, ids)
+    return
   }
 
   if (msg.type === 'permission_response') {
@@ -154,6 +192,21 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
 
     // Store the user message
     const message = await insertMessage(msg.session_id, 'user', storedContent)
+
+    // ACK to the sender so the client can clear the message from its in-flight
+    // queue. Without this, a half-open socket (readyState=OPEN but TCP dead)
+    // would silently lose the message — the client would never retry on
+    // reconnect because it believes the send succeeded.
+    try {
+      ws.send(JSON.stringify({
+        type: 'send_ack',
+        client_id: msg.id,
+        session_id: msg.session_id,
+        message_id: message.id,
+      }))
+    } catch {
+      // socket closed mid-handle; client will resend on reconnect
+    }
 
     // Broadcast to all subscribed clients (including sender for confirmation)
     broadcastToSubscribers(msg.session_id, {
