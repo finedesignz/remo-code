@@ -626,7 +626,9 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
   if (ws.data.heartbeatTimer) clearInterval(ws.data.heartbeatTimer)
 
   if (ws.data.role === 'supervisor' && ws.data.supervisorId) {
-    unregisterSupervisor(ws.data.supervisorId)
+    // Pass the closing ws so unregister can ignore stale closes from sockets
+    // that have already been replaced by a reconnect.
+    unregisterSupervisor(ws.data.supervisorId, ws)
     return
   }
 
