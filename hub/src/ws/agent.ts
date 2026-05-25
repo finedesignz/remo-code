@@ -109,7 +109,14 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
   }
 
   const result = AgentInbound.safeParse(parsed)
-  if (!result.success) return
+  if (!result.success) {
+    // Surface schema rejections so silent drops don't masquerade as connection
+    // failures. Truncate payload preview to keep logs readable.
+    const t = (parsed as any)?.type ?? 'unknown'
+    const preview = JSON.stringify(parsed).slice(0, 200)
+    console.warn(`[agent] schema reject type=${t} authenticated=${ws.data.authenticated} role=${ws.data.role} errors=${result.error.issues.map(i => `${i.path.join('.')}:${i.message}`).join('; ')} payload=${preview}`)
+    return
+  }
   const msg = result.data
 
   // --- Auth ---
