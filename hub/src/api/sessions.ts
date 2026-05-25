@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected } from '../db/dal'
+import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../ws/channel'
 import { getChannel } from '../ws/registry'
 import { generateToken } from '../utils/token'
@@ -10,6 +11,12 @@ const CreateSessionBody = z.object({
   project_dir: z.string().max(500).optional(),
 })
 
+// Hard cap on the number of session ids a single batch-messages request can
+// fetch. Matches the WS subscribe cap (PLAN-002, SUBSCRIBE_MAX=12).
+const BATCH_MESSAGES_MAX_IDS = 12
+const BATCH_MESSAGES_DEFAULT_LIMIT = 30
+const BATCH_MESSAGES_MAX_LIMIT = 100
+
 const sessions = new Hono()
 
 // List all sessions for the authenticated user
@@ -17,6 +24,32 @@ sessions.get('/', async (c) => {
   const userId = c.get('userId') as string
   const data = await listSessions(userId)
   return c.json(data)
+})
+
+// Batch-fetch messages for up to 12 sessions at once. Used by the multichat
+// grid view to hydrate every cell with one round-trip per tab activation.
+// MUST be declared BEFORE the `/:id` GET so it isn't captured as a session id.
+sessions.get('/messages', async (c) => {
+  const userId = c.get('userId') as string
+  const idsParam = c.req.query('ids') ?? ''
+  const limitParam = c.req.query('limit')
+  const ids = idsParam.split(',').map((s) => s.trim()).filter(Boolean)
+  if (ids.length === 0) return c.json({})
+  if (ids.length > BATCH_MESSAGES_MAX_IDS) {
+    return c.json({ error: 'too_many_sessions', max: BATCH_MESSAGES_MAX_IDS }, 400)
+  }
+  let limit = BATCH_MESSAGES_DEFAULT_LIMIT
+  if (limitParam !== undefined) {
+    const n = Number(limitParam)
+    if (!Number.isInteger(n) || n < 1) {
+      return c.json({ error: 'invalid_limit' }, 400)
+    }
+    limit = Math.min(n, BATCH_MESSAGES_MAX_LIMIT)
+  }
+  // DAL filters by user_id — sessions not owned by the caller are silently
+  // dropped, so the response simply omits them (no existence leak).
+  const grouped = await getMessagesForSessions(userId, ids, limit)
+  return c.json(grouped)
 })
 
 // Get a single session
