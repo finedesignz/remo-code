@@ -7,6 +7,18 @@ export interface SupervisorConfig {
   apiKey: string
   roots: string[]
   maxConcurrent: number
+  /** HARD CAP — when false, `--dangerously-skip-permissions` is stripped from every spawn regardless of hub request. */
+  allowDangerousSkipPermissions: boolean
+  /** When true, `run.start` is rejected unless `<repoPath>/.git` exists. */
+  requireGitRepo: boolean
+  /** When true (default), every start decision is appended to `auditLogPath`. */
+  auditLogEnabled: boolean
+  /** Absolute path to the JSONL audit log. Default: `%LOCALAPPDATA%\remo-code-supervisor\audit.jsonl`. */
+  auditLogPath: string
+  /** Display-only kill-switch hotkey (Tauri shell binds it). */
+  killSwitchHotkey: string
+  /** Tauri autostart toggle (mirrored to plugin). */
+  autostart: boolean
 }
 
 function defaultConfigDir(): string {
@@ -18,9 +30,18 @@ function defaultConfigDir(): string {
   return join(xdg, 'remo-code')
 }
 
+function defaultAuditLogPath(): string {
+  if (platform() === 'win32') {
+    const local = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')
+    return join(local, 'remo-code-supervisor', 'audit.jsonl')
+  }
+  return join(homedir(), '.local', 'share', 'remo-code-supervisor', 'audit.jsonl')
+}
+
 export const CONFIG_DIR = defaultConfigDir()
 export const CONFIG_PATH = join(CONFIG_DIR, 'supervisor.json')
 const DEFAULT_HUB_URL = 'https://app.remo-code.com'
+const DEFAULT_KILL_SWITCH_HOTKEY = 'Ctrl+Shift+Alt+K'
 
 export function loadConfig(): SupervisorConfig {
   if (!existsSync(CONFIG_PATH)) {
@@ -33,6 +54,12 @@ export function loadConfig(): SupervisorConfig {
     apiKey: raw.api_key,
     roots: raw.roots || [],
     maxConcurrent: raw.max_concurrent || 1,
+    allowDangerousSkipPermissions: raw.allow_dangerous_skip_permissions === true,
+    requireGitRepo: raw.require_git_repo === true,
+    auditLogEnabled: raw.audit_log_enabled !== false, // default TRUE
+    auditLogPath: raw.audit_log_path || defaultAuditLogPath(),
+    killSwitchHotkey: raw.kill_switch_hotkey || DEFAULT_KILL_SWITCH_HOTKEY,
+    autostart: raw.autostart !== false, // default TRUE
   }
 }
 
@@ -45,6 +72,13 @@ export function saveConfig(cfg: Partial<SupervisorConfig> & { apiKey: string }) 
     hub_url: cfg.hubUrl || existing.hub_url || DEFAULT_HUB_URL,
     roots: cfg.roots || existing.roots || [],
     max_concurrent: cfg.maxConcurrent || existing.max_concurrent || 1,
+    allow_dangerous_skip_permissions:
+      cfg.allowDangerousSkipPermissions ?? existing.allow_dangerous_skip_permissions ?? false,
+    require_git_repo: cfg.requireGitRepo ?? existing.require_git_repo ?? false,
+    audit_log_enabled: cfg.auditLogEnabled ?? existing.audit_log_enabled ?? true,
+    audit_log_path: cfg.auditLogPath || existing.audit_log_path || defaultAuditLogPath(),
+    kill_switch_hotkey: cfg.killSwitchHotkey || existing.kill_switch_hotkey || DEFAULT_KILL_SWITCH_HOTKEY,
+    autostart: cfg.autostart ?? existing.autostart ?? true,
   }
   writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2), 'utf-8')
 }
