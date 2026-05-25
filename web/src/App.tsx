@@ -8,12 +8,13 @@ import { SettingsPage } from './components/SettingsPage'
 import { SchedulesPage } from './components/SchedulesPage'
 import { ChatSurfaceShowcase } from './components/ChatSurfaceShowcase'
 import { MobileAccordionShowcase } from './components/MobileAccordionShowcase'
+import { GridPage } from './components/GridPage'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useBrowserNotifications } from './hooks/useBrowserNotifications'
 import type { Profile } from './hooks/useProfile'
 import type { AuthUser } from './lib/auth.ts'
 
-type Route = 'chat' | 'settings' | 'schedules' | 'dev-chat-surface' | 'dev-mobile-accordion'
+type Route = 'chat' | 'settings' | 'schedules' | 'grid' | 'dev-chat-surface' | 'dev-mobile-accordion'
 
 function getRoute(): Route {
   const hash = window.location.hash
@@ -24,9 +25,16 @@ function getRoute(): Route {
   }
   if (hash.startsWith('#/settings')) return 'settings'
   if (hash.startsWith('#/schedules')) return 'schedules'
+  if (hash.startsWith('#/grid')) return 'grid'
   if (hash.startsWith('#/dev/chat-surface')) return 'dev-chat-surface'
   if (hash.startsWith('#/dev/mobile-accordion')) return 'dev-mobile-accordion'
   return 'chat'
+}
+
+function getGridTabId(): string | undefined {
+  const hash = window.location.hash
+  const m = hash.match(/^#\/grid\/([^/?#]+)/)
+  return m ? decodeURIComponent(m[1]) : undefined
 }
 
 export default function App() {
@@ -34,6 +42,7 @@ export default function App() {
   const { profile, loading: profileLoading, updateProfile } = useProfile(token)
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null)
   const [route, setRoute] = useState<Route>(getRoute)
+  const [gridTabId, setGridTabId] = useState<string | undefined>(getGridTabId)
 
   useEffect(() => {
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
@@ -45,7 +54,7 @@ export default function App() {
 
   // Hash-based routing
   useEffect(() => {
-    const onHashChange = () => setRoute(getRoute())
+    const onHashChange = () => { setRoute(getRoute()); setGridTabId(getGridTabId()) }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
@@ -105,6 +114,10 @@ export default function App() {
 
       {route === 'dev-mobile-accordion' && (
         <MobileAccordionShowcase token={token} />
+      )}
+
+      {route === 'grid' && (
+        <GridPage token={token} tabId={gridTabId} />
       )}
 
       {route === 'chat' && (
