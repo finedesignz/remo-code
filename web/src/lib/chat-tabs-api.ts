@@ -10,6 +10,9 @@ import type { ChatMessage } from '../hooks/useChat'
 
 export type TabLayout = '3x3' | '4x3' | 'auto-fit'
 
+/** Hard cap on cells rendered per tab. Mirrors the server-side limit. */
+export const MAX_CELLS_PER_TAB = 12
+
 export interface ChatTab {
   id: string
   user_id: string
