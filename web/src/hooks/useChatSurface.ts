@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import type { ChatMessage } from './useChat'
 import type { ActivityState } from './useActivity'
 import { createRafBatcher } from '../lib/raf-batch'
+import { recordUserMessage } from '../lib/lastUserMsg'
 
 /**
  * useChatSurface — owns ONE session's data lifecycle for a <ChatSurface>.
@@ -238,6 +239,7 @@ export function useChatSurface({
     const msg: any = { type: 'send_message', session_id: sessionId, content, id }
     if (images?.length) msg.images = images
     send(msg)
+    recordUserMessage(sessionId, content)
   }, [sessionId, send])
 
   const respondPermission = useCallback((requestId: string, approved: boolean) => {

@@ -32,7 +32,9 @@ import {
   batchMessages,
 } from '../lib/chat-tabs-api'
 import { SessionPicker } from './SessionPicker'
+import { MobileAccordion } from './MobileAccordion'
 import type { ChatMessage } from '../hooks/useChat'
+import type { CodeSession } from '../hooks/useSessions'
 
 const ACTIVE_CELL_KEY = (tabId: string) => `grid:lastActiveCell:${tabId}`
 const MAX_CELLS_PER_TAB = 12
@@ -333,43 +335,76 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
 
       {tabs.length > 0 && activeTab && visibleSessions.length > 0 && (
         <>
-          <div className="px-4 pt-3 flex items-center gap-2 shrink-0">
-            <button
-              onClick={() => setPickerOpen(true)}
-              className="px-3 py-1.5 rounded-lg bg-[var(--bg-secondary)]/60 hover:bg-[var(--bg-tertiary)]/50 text-[var(--text-secondary)] text-xs transition-colors"
-            >
-              + Add sessions
-            </button>
-            {overflowCount > 0 && (
-              <span className="text-[11px] text-amber-400">
-                12-cell cap reached — {overflowCount} more hidden
-              </span>
-            )}
-          </div>
-          <div
-            className="flex-1 min-h-0 grid gap-3 p-4 auto-rows-fr"
-            style={{
-              gridTemplateColumns:
-                activeTab.layout === '3x3' ? 'repeat(3, 1fr)' :
-                activeTab.layout === '4x3' ? 'repeat(4, 1fr)' :
-                'repeat(auto-fit, minmax(320px, 1fr))',
-            }}
-          >
-            {visibleSessions.map(s => (
-              <GridCell
-                key={s.session_id}
-                sessionRef={s}
-                isActive={s.session_id === activeCellId}
-                onActivate={() => setActiveCellId(s.session_id)}
-                onRemove={() => onRemoveFromTab(s.session_id)}
-                subscribe={subscribe}
-                send={send}
-                connectionId={connectionId}
-                token={token}
-                wsConnected={connected}
-                seedMessages={seedByTab[activeTabId!]?.[s.session_id]}
+          {/* Desktop: tab toolbar + CSS grid */}
+          <div className="hidden md:flex flex-col flex-1 min-h-0">
+            <div className="px-4 pt-3 flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => setPickerOpen(true)}
+                className="px-3 py-1.5 rounded-lg bg-[var(--bg-secondary)]/60 hover:bg-[var(--bg-tertiary)]/50 text-[var(--text-secondary)] text-xs transition-colors"
+              >
+                + Add sessions
+              </button>
+              <LayoutPicker
+                value={activeTab.layout}
+                onChange={async (next) => {
+                  if (next === activeTab.layout) return
+                  const prevTabs = tabs
+                  setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, layout: next } : t))
+                  try { await patchTab(token, activeTab.id, { layout: next }) }
+                  catch { setTabs(prevTabs) }
+                }}
               />
-            ))}
+              {overflowCount > 0 && (
+                <span className="text-[11px] text-amber-400">
+                  12-cell cap reached — {overflowCount} more hidden
+                </span>
+              )}
+            </div>
+            <div
+              className="flex-1 min-h-0 grid gap-3 p-4 auto-rows-fr"
+              style={{
+                gridTemplateColumns:
+                  activeTab.layout === '3x3' ? 'repeat(3, 1fr)' :
+                  activeTab.layout === '4x3' ? 'repeat(4, 1fr)' :
+                  'repeat(auto-fit, minmax(320px, 1fr))',
+              }}
+            >
+              {visibleSessions.map(s => (
+                <GridCell
+                  key={s.session_id}
+                  sessionRef={s}
+                  isActive={s.session_id === activeCellId}
+                  onActivate={() => setActiveCellId(s.session_id)}
+                  onRemove={() => onRemoveFromTab(s.session_id)}
+                  subscribe={subscribe}
+                  send={send}
+                  connectionId={connectionId}
+                  token={token}
+                  wsConnected={connected}
+                  seedMessages={seedByTab[activeTabId!]?.[s.session_id]}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Mobile: accordion (one ChatSurface mounted at a time). CSS-only swap. */}
+          <div className="md:hidden flex-1 min-h-0">
+            <MobileAccordion
+              sessions={visibleSessions.map<CodeSession>(s => ({
+                id: s.session_id,
+                name: s.name,
+                project_dir: s.project_dir,
+                status: s.status,
+                last_activity: null,
+                created_at: '',
+              }))}
+              subscribe={subscribe}
+              send={send}
+              connectionId={connectionId}
+              token={token}
+              wsConnected={connected}
+              tabId={activeTabId}
+            />
           </div>
         </>
       )}
@@ -584,6 +619,57 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
 }
 
 // ── Empty state ──────────────────────────────────────────────────────────────
+
+// ── Layout-mode picker ───────────────────────────────────────────────────────
+
+function LayoutPicker({ value, onChange }: { value: TabLayout; onChange: (next: TabLayout) => void | Promise<void> }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [open])
+  const label: Record<TabLayout, string> = { '3x3': '3 × 3', '4x3': '4 × 3', 'auto-fit': 'Auto-fit' }
+  const options: TabLayout[] = ['3x3', '4x3', 'auto-fit']
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="px-3 py-1.5 rounded-lg bg-[var(--bg-secondary)]/60 hover:bg-[var(--bg-tertiary)]/50 text-[var(--text-secondary)] text-xs transition-colors flex items-center gap-1.5"
+        title="Grid layout"
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+          <rect x="2" y="2" width="4.5" height="4.5" rx="0.8" />
+          <rect x="9.5" y="2" width="4.5" height="4.5" rx="0.8" />
+          <rect x="2" y="9.5" width="4.5" height="4.5" rx="0.8" />
+          <rect x="9.5" y="9.5" width="4.5" height="4.5" rx="0.8" />
+        </svg>
+        {label[value]}
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full mt-1 z-20 min-w-[120px] rounded-lg bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] shadow-xl py-1">
+          {options.map(opt => (
+            <button
+              key={opt}
+              onClick={() => { setOpen(false); onChange(opt) }}
+              className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+                opt === value
+                  ? 'bg-indigo-600/20 text-[var(--text-primary)] ring-1 ring-indigo-500/30'
+                  : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'
+              }`}
+            >
+              {label[opt]}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 
 function EmptyState({ title, body, action }: { title: string; body: string; action?: React.ReactNode }) {
   return (

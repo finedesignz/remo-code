@@ -41,6 +41,8 @@ interface BaseProps {
   className?: string
   /** Fires when this surface is interacted with (focus/click). Used by GridPage. */
   onActivate?: () => void
+  /** Parent-owned cancel handler (used by ChatPanel/Layout for density="full"). */
+  onCancel?: () => void
 }
 
 interface OwnedDataProps {
@@ -109,6 +111,7 @@ function classifyFile(file: File): 'text' | 'image' | null {
 }
 
 // Density-driven Tailwind class bundles. Kept inline for grep-ability.
+// btnSquare matches textarea height so attach/mic/send/stop align cleanly.
 const densityClasses = {
   full: {
     root: 'flex-1 flex flex-col min-h-0 relative',
@@ -117,8 +120,10 @@ const densityClasses = {
     estimateRow: 84,
     bubbleSize: 'text-sm',
     inputPad: 'p-4 pb-[max(1rem,env(safe-area-inset-bottom))]',
-    textarea: 'w-full px-4 py-2.5 text-sm',
-    sendBtn: 'px-6 py-2.5 text-sm',
+    textarea: 'w-full px-4 py-2.5 text-sm h-10',
+    sendBtn: 'h-10 px-5 text-sm',
+    btnSquare: 'h-10 w-10',
+    iconSize: 18,
     showHeader: false, // ChatPanel renders the page header
     emptyText: 'text-sm py-8',
   },
@@ -129,8 +134,10 @@ const densityClasses = {
     estimateRow: 64,
     bubbleSize: 'text-[12px]',
     inputPad: 'p-2',
-    textarea: 'w-full px-2 py-1.5 text-[12px]',
-    sendBtn: 'px-3 py-1.5 text-[12px]',
+    textarea: 'w-full px-2 py-1.5 text-[12px] h-8',
+    sendBtn: 'h-8 px-3 text-[12px]',
+    btnSquare: 'h-8 w-8',
+    iconSize: 14,
     showHeader: true,
     emptyText: 'text-xs py-4',
   },
@@ -141,8 +148,10 @@ const densityClasses = {
     estimateRow: 72,
     bubbleSize: 'text-[13px]',
     inputPad: 'p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]',
-    textarea: 'w-full px-3 py-2 text-[13px]',
-    sendBtn: 'px-4 py-2 text-[13px]',
+    textarea: 'w-full px-3 py-2 text-[13px] h-9',
+    sendBtn: 'h-9 px-4 text-[13px]',
+    btnSquare: 'h-9 w-9',
+    iconSize: 16,
     showHeader: true,
     emptyText: 'text-xs py-6',
   },
