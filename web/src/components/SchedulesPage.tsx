@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useSchedules, type ScheduledTask } from '../hooks/useSchedules'
 import { ScheduleEditor } from './ScheduleEditor'
 import { ScheduleRunsDrawer } from './ScheduleRunsDrawer'
+import { UpcomingRunsPanel } from './UpcomingRunsPanel'
 import { humanizeCron } from '../lib/cron-humanize'
 import { formatCostUsd, formatDuration, formatRelativeAgo } from '../lib/format'
 
@@ -131,6 +132,12 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
       )}
 
       <div className="flex-1 overflow-y-auto px-4 md:px-6 lg:px-10 py-5 md:py-6">
+        {schedules.length > 0 && (
+          <UpcomingRunsPanel
+            schedules={schedules}
+            onOpen={(id) => setDrawerTaskId(id)}
+          />
+        )}
         {loading && schedules.length === 0 ? (
           <p className="text-sm text-[var(--text-muted)]">Loading...</p>
         ) : error ? (
@@ -372,7 +379,7 @@ function ScheduleRow({
 /* Chips                                                              */
 /* ----------------------------------------------------------------- */
 
-function TaskTypeChip({ type }: { type: ScheduledTask['task_type'] }) {
+export function TaskTypeChip({ type }: { type: ScheduledTask['task_type'] }) {
   const label: Record<ScheduledTask['task_type'], string> = {
     prompt: 'prompt',
     skill: 'skill',
