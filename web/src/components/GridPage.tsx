@@ -220,14 +220,34 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   }, [token, tabs])
 
   const onDeleteTab = useCallback(async (id: string) => {
-    if (!confirm(`Delete tab "${tabs.find(t => t.id === id)?.name ?? id}"?`)) return
+    const target = tabs.find(t => t.id === id)
+    const cellCount = target?.sessions.length ?? 0
+    const isLast = tabs.length === 1
+    const msg = [
+      `Delete tab “${target?.name ?? id}”?`,
+      cellCount > 0 ? `Removes ${cellCount} session binding${cellCount === 1 ? '' : 's'} from this tab.` : null,
+      isLast ? 'This is your last tab — a fresh empty tab will be created.' : null,
+    ].filter(Boolean).join('\n\n')
+    if (!confirm(msg)) return
     await deleteTab(token, id)
     setTabs(prev => prev.filter(t => t.id !== id))
     if (activeTabId === id) {
       const rest = tabs.filter(t => t.id !== id)
       const next = rest[0]?.id
-      if (next) window.location.replace(`#/grid/${next}`)
-      else window.location.replace('#/grid')
+      if (next) {
+        window.location.replace(`#/grid/${next}`)
+      } else {
+        // Last-tab protection: never leave the user in route limbo. Create a
+        // fresh empty tab immediately and route to it.
+        try {
+          const fresh = await createTab(token, { name: 'New tab' })
+          setTabs([{ ...fresh, sessions: [] }])
+          setActiveTabId(fresh.id)
+          window.location.replace(`#/grid/${fresh.id}`)
+        } catch {
+          window.location.replace('#/grid')
+        }
+      }
     }
   }, [token, tabs, activeTabId])
 
@@ -500,7 +520,7 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
     <div
       role="tablist"
       aria-label="Grid tabs"
-      className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border-color)]/60 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0 overflow-x-auto"
+      className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border-color)]/60 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0 overflow-x-auto scroll-smooth [scroll-snap-type:x_proximity]"
     >
       <span className="text-xs text-[var(--text-muted)] mr-1 shrink-0" aria-live="polite">
         {wsConnected ? '● Live' : <span className="text-amber-400">○ Reconnecting</span>}
@@ -517,7 +537,7 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
             aria-controls="grid-tab-panel"
             tabIndex={isActive ? 0 : -1}
             onKeyDown={(e) => onTabKeyDown(e, i)}
-            className={`group flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs shrink-0 cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 ${
+            className={`group flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs shrink-0 cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 [scroll-snap-align:start] ${
               isActive
                 ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-[var(--text-primary)]'
                 : 'bg-[var(--bg-secondary)]/60 text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'
