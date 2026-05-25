@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import type { Profile } from '../hooks/useProfile'
 import { useWebPushPermission } from '../hooks/useWebPushPermission'
 import { useApiKey } from '../hooks/useApiKey'
@@ -20,12 +20,12 @@ interface Props {
   onBack: () => void
 }
 
-type Tab = 'account' | 'supervisor' | 'apikey' | 'commands'
+type Tab = 'account' | 'supervisor' | 'apikey' | 'commands' | 'instructions'
 
 function readTabFromHash(): Tab {
   const m = window.location.hash.match(/[?&]tab=([a-z]+)/)
   const v = m?.[1] as Tab | undefined
-  if (v === 'account' || v === 'supervisor' || v === 'apikey' || v === 'commands') return v
+  if (v === 'account' || v === 'supervisor' || v === 'apikey' || v === 'commands' || v === 'instructions') return v
   return 'supervisor'
 }
 
@@ -66,6 +66,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
     { id: 'supervisor', label: 'Supervisor', desc: 'Connect repos & manage agents' },
     { id: 'commands', label: 'Commands', desc: 'Browse Claude slash commands & skills' },
     { id: 'account', label: 'Account', desc: 'Profile & system prompt' },
+    { id: 'instructions', label: 'Instructions', desc: 'Per-CLI global instruction files synced to agents' },
     { id: 'apikey', label: 'API Key', desc: 'Agent authentication' },
   ]
 
@@ -189,6 +190,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
     if (id === 'account') return renderAccount()
     if (id === 'supervisor') return renderSupervisor()
     if (id === 'commands') return <CommandsList token={token} />
+    if (id === 'instructions') return <InstructionsTab token={token} />
     return renderApiKey()
   }
 
@@ -758,6 +760,159 @@ function TimezoneCard({
       {status === 'error' && (
         <p className="text-xs text-red-400 mt-2">Couldn't save. Try again.</p>
       )}
+    </div>
+  )
+}
+
+// ── Phase 05: per-CLI global instruction blobs synced to agents on auth_ok.
+// `create_if_absent` semantics — the agent never overwrites existing local files.
+function InstructionsTab({ token }: { token: string }) {
+  const [claudeMd, setClaudeMd] = useState<string>('')
+  const [codexAgents, setCodexAgents] = useState<string>('')
+  const [codexConfig, setCodexConfig] = useState<string>('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [savedAt, setSavedAt] = useState<number | null>(null)
+  const [strippedCount, setStrippedCount] = useState<number>(0)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const load = async () => {
+      try {
+        const data = await hubFetch<{
+          claude_global_md: string | null
+          codex_agents_md: string | null
+          codex_config_toml: string | null
+        }>(token, '/api/instructions')
+        if (cancelled) return
+        setClaudeMd(data.claude_global_md ?? '')
+        setCodexAgents(data.codex_agents_md ?? '')
+        setCodexConfig(data.codex_config_toml ?? '')
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message ?? 'Failed to load instructions')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [token])
+
+  const handleSave = async () => {
+    setSaving(true)
+    setError(null)
+    setStrippedCount(0)
+    try {
+      const data = await hubFetch<{
+        claude_global_md: string | null
+        codex_agents_md: string | null
+        codex_config_toml: string | null
+        stripped_secret_lines?: number
+      }>(token, '/api/instructions', {
+        method: 'PUT',
+        json: {
+          claude_global_md: claudeMd || null,
+          codex_agents_md: codexAgents || null,
+          codex_config_toml: codexConfig || null,
+        },
+      })
+      setClaudeMd(data.claude_global_md ?? '')
+      setCodexAgents(data.codex_agents_md ?? '')
+      setCodexConfig(data.codex_config_toml ?? '')
+      setStrippedCount(data.stripped_secret_lines ?? 0)
+      setSavedAt(Date.now())
+      setTimeout(() => setSavedAt(null), 3000)
+    } catch (e: any) {
+      setError(e?.message ?? 'Failed to save')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
+        <p className="text-sm text-[var(--text-muted)]">Loading instructions…</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">Global instruction files</h3>
+        <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+          These blobs sync to each agent on connect. Agents write them to disk only when the
+          local file does not already exist — they <strong>never</strong> overwrite. On
+          sha-256 drift the agent logs a warning and keeps the local copy.
+        </p>
+      </div>
+
+      <InstructionField
+        label={<>Claude global instructions <code className="text-[10px] text-[var(--text-muted)]">~/.claude/CLAUDE.md</code></>}
+        value={claudeMd}
+        onChange={setClaudeMd}
+        placeholder="# Global Claude Code Instructions&#10;&#10;e.g. commit + push when tasks complete, follow project port map, etc."
+      />
+      <InstructionField
+        label={<>Codex agent instructions <code className="text-[10px] text-[var(--text-muted)]">~/.codex/AGENTS.md</code></>}
+        value={codexAgents}
+        onChange={setCodexAgents}
+        placeholder="# Codex AGENTS.md&#10;&#10;Persistent instructions injected on every Codex session."
+      />
+      <InstructionField
+        label={<>Codex config <code className="text-[10px] text-[var(--text-muted)]">~/.codex/config.toml</code></>}
+        value={codexConfig}
+        onChange={setCodexConfig}
+        placeholder='# TOML config — secrets (api_key, token, etc.) are stripped on save.'
+        hint="Lines matching api_key/token/secret/password are stripped server-side on save. Put credentials in OPENAI_API_KEY or run `codex login`."
+      />
+
+      <div className="flex items-center gap-3">
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        {savedAt && (
+          <span className="text-sm text-emerald-400">
+            Saved — next agent reconnect will sync.
+            {strippedCount > 0 && ` Stripped ${strippedCount} secret line(s).`}
+          </span>
+        )}
+        {error && <span className="text-sm text-red-400">{error}</span>}
+      </div>
+    </div>
+  )
+}
+
+function InstructionField({
+  label, value, onChange, placeholder, hint,
+}: {
+  label: ReactNode
+  value: string
+  onChange: (v: string) => void
+  placeholder?: string
+  hint?: string
+}) {
+  return (
+    <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
+      <label className="block text-sm font-semibold text-[var(--text-primary)] mb-2">{label}</label>
+      {hint && <p className="text-xs text-[var(--text-muted)] mb-3">{hint}</p>}
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={8}
+        maxLength={100_000}
+        className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono resize-y min-h-[140px]"
+      />
+      <div className="mt-1.5 text-[10px] text-[var(--text-muted)] text-right">
+        {value.length.toLocaleString()} / 100,000 chars
+      </div>
     </div>
   )
 }

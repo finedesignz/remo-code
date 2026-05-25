@@ -21,6 +21,9 @@ export interface CodeSession {
   last_activity: string | null
   created_at: string
   agent_info?: AgentInfo | null
+  cli_kind?: 'claude' | 'codex'
+  is_rootless?: boolean
+  hostname?: string | null
 }
 
 export function useSessions(token: string | null) {
