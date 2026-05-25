@@ -341,6 +341,85 @@ export async function getUserCoolifyWebhookStatus(userId: string): Promise<{ con
   return { configured: !!rows[0]?.configured };
 }
 
+// ── Coolify webhook ingress (Phase 06 / plan 004) ─────────────────────────────
+
+/**
+ * Read the user's HMAC secret for verifying inbound Coolify webhook payloads.
+ * Returns null when the user has never rotated/generated one (plan 005 rotate
+ * endpoint sets it via gen_random_uuid()). Distinct from
+ * `getUserCoolifyWebhookStatus` which only exposes presence to the owning user.
+ */
+export async function getUserCoolifyWebhookSecret(userId: string): Promise<string | null> {
+  const rows = await sql<{ coolify_webhook_secret: string | null }[]>`
+    SELECT coolify_webhook_secret FROM users WHERE id = ${userId}
+  `;
+  return rows[0]?.coolify_webhook_secret ?? null;
+}
+
+/**
+ * Lazily find-or-create the per-user internal scheduled_tasks anchor used for
+ * deployment-event runs. `scheduled_task_runs.task_id` is NOT NULL, so every
+ * webhook-derived run needs a parent task. We allocate exactly one of these
+ * per user, matched by name marker. enabled=false keeps croner from ever
+ * scheduling it. session_id is NULL (column was made nullable in schema.sql
+ * line 187).
+ */
+const INTERNAL_DEPLOY_TASK_NAME = '__internal_coolify_deployment';
+
+export async function ensureInternalDeploymentTask(userId: string): Promise<string> {
+  const existing = await sql<{ id: string }[]>`
+    SELECT id FROM scheduled_tasks
+    WHERE user_id = ${userId} AND name = ${INTERNAL_DEPLOY_TASK_NAME}
+    LIMIT 1
+  `;
+  if (existing[0]) return existing[0].id;
+  // cron_expression / cron_expr are required NOT NULL — use a never-firing
+  // pattern (Feb 31 doesn't exist).
+  const NEVER = '0 0 31 2 *';
+  const rows = await sql<{ id: string }[]>`
+    INSERT INTO scheduled_tasks (
+      user_id, session_id, name, cron_expression, prompt,
+      enabled, task_type, target_kind, payload, cron_expr, timezone
+    ) VALUES (
+      ${userId}, NULL, ${INTERNAL_DEPLOY_TASK_NAME}, ${NEVER}, '',
+      false, 'log_check', 'session', '{}'::jsonb, ${NEVER}, 'UTC'
+    )
+    RETURNING id
+  `;
+  return rows[0].id;
+}
+
+/**
+ * Insert a scheduled_task_runs row that carries Coolify deployment metadata.
+ * pending → triage will pick this up (plan 008 wire-up).
+ * success → metadata-only marker for deployment.succeeded / in_progress.
+ */
+export async function insertDeploymentRun(input: {
+  task_id: string;
+  user_id: string;
+  status: 'pending' | 'success';
+  deployment_uuid: string;
+  application_uuid: string;
+  git_repository: string | null;
+  commit_sha: string | null;
+}): Promise<{ id: string }> {
+  const rows = await sql<{ id: string }[]>`
+    INSERT INTO scheduled_task_runs (
+      task_id, user_id, session_id, status, target_kind, target_id,
+      deployment_uuid, application_uuid, git_repository, commit_sha,
+      started_at, finished_at, completed_at
+    ) VALUES (
+      ${input.task_id}, ${input.user_id}, NULL, ${input.status}, NULL, NULL,
+      ${input.deployment_uuid}, ${input.application_uuid}, ${input.git_repository}, ${input.commit_sha},
+      ${input.status === 'pending' ? null : sql`now()`},
+      ${input.status === 'success' ? sql`now()` : null},
+      ${input.status === 'success' ? sql`now()` : null}
+    )
+    RETURNING id
+  `;
+  return rows[0];
+}
+
 export async function getUserByEmail(email: string) {
   const rows = await sql`SELECT * FROM users WHERE email = ${email}`;
   return rows[0] ?? null;
