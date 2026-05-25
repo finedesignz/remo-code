@@ -67,6 +67,19 @@ export function Sidebar({
           </svg>
         </button>
         <button
+          onClick={() => onNavigate('#/grid')}
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          title="Grid View"
+          aria-label="Grid View"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6">
+            <rect x="2" y="2" width="4.5" height="4.5" rx="0.8" />
+            <rect x="9.5" y="2" width="4.5" height="4.5" rx="0.8" />
+            <rect x="2" y="9.5" width="4.5" height="4.5" rx="0.8" />
+            <rect x="9.5" y="9.5" width="4.5" height="4.5" rx="0.8" />
+          </svg>
+        </button>
+        <button
           onClick={() => onNavigate('#/schedules')}
           className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
           title="Schedules"
@@ -223,6 +236,13 @@ export function Sidebar({
         </div>
 
         <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-2">
+          <button
+            onClick={() => onNavigate('#/grid')}
+            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
+            title="Multichat grid view"
+          >
+            Grid
+          </button>
           <button
             onClick={() => onNavigate('#/schedules')}
             className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
