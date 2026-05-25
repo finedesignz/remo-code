@@ -513,6 +513,41 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     return
   }
 
+  // Phase 04 plan 002 — host_resources budget snapshot.
+  // Persist to the auth'd supervisor row (NEVER trust an id in the payload)
+  // and broadcast to the user's clients so the budget chip updates live.
+  if (msg.type === 'host_resources') {
+    try {
+      const { updateSupervisorResources } = await import('../db/supervisor-dal')
+      const row = await updateSupervisorResources({
+        supervisorId,
+        cpuCores: msg.cpu_cores,
+        totalMemMb: msg.total_mem_mb,
+        freeMemMb: msg.free_mem_mb,
+        concurrencyBudget: msg.concurrency_budget,
+        budgetSource: msg.source,
+      })
+      if (row) {
+        broadcastToUser(userId, {
+          type: 'supervisor_resources_updated',
+          supervisor_id: supervisorId,
+          cpu_cores: row.cpu_cores,
+          total_mem_mb: row.total_mem_mb,
+          free_mem_mb: row.free_mem_mb,
+          concurrency_budget: row.concurrency_budget,
+          concurrency_override: row.concurrency_override,
+          budget_source: row.budget_source,
+          budget_updated_at: row.budget_updated_at instanceof Date
+            ? row.budget_updated_at.toISOString()
+            : String(row.budget_updated_at),
+        })
+      }
+    } catch (err: any) {
+      console.error('[supervisor] host_resources persist failed', err?.message)
+    }
+    return
+  }
+
   // W2/T10 — scheduled-run lifecycle from supervisor.
   if (msg.type === 'run_started' || msg.type === 'run_output' || msg.type === 'run_finished') {
     try {

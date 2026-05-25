@@ -92,19 +92,18 @@ export const RunFinished = z.object({
   error: z.string().max(2000).optional(),
 })
 
-// Host resource snapshot — agents/supervisors send periodically so the hub can
-// display CPU/RAM headroom. Phase 04 host_resources schema (stub for now —
-// imported by agent-protocol.ts and consumed by the hub WS handler).
+// Host resource snapshot — supervisors send on connect + every 60s.
+// Phase 04 plan 001 canonical shape: cpu/mem counts + derived concurrency
+// budget + the source path that produced it. Persisted by plan 002's hub
+// handler into the `supervisors` row (cpu_cores, total_mem_mb, free_mem_mb,
+// concurrency_budget, budget_source, budget_updated_at).
 export const HostResourcesMessage = z.object({
   type: z.literal('host_resources'),
-  hostname: z.string().optional(),
-  cpu_pct: z.number().min(0).max(100).optional(),
-  mem_used_bytes: z.number().nonnegative().optional(),
-  mem_total_bytes: z.number().nonnegative().optional(),
-  load_avg_1m: z.number().nonnegative().optional(),
-  load_avg_5m: z.number().nonnegative().optional(),
-  load_avg_15m: z.number().nonnegative().optional(),
-  measured_at: z.string().optional(),
+  cpu_cores: z.number().int().positive(),
+  total_mem_mb: z.number().int().positive(),
+  free_mem_mb: z.number().int().nonnegative(),
+  concurrency_budget: z.number().int().min(1),
+  source: z.enum(['cgroup_v2', 'cgroup_v1', 'host_fallback']),
 })
 
 export const SupervisorInbound = [

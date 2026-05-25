@@ -196,4 +196,11 @@ export type HubToClient =
   | { type: 'notification'; title: string; body: string;
       severity?: 'info' | 'success' | 'warning' | 'error'; url?: string;
       run_id?: string; task_id?: string }
+  // Phase 04 plan 002: supervisor reported a fresh host_resources snapshot.
+  // Web UI re-renders the budget chip without polling.
+  | { type: 'supervisor_resources_updated'; supervisor_id: string;
+      cpu_cores: number; total_mem_mb: number; free_mem_mb: number;
+      concurrency_budget: number; concurrency_override: number | null;
+      budget_source: 'cgroup_v2' | 'cgroup_v1' | 'host_fallback';
+      budget_updated_at: string }
   | { type: 'ping' }

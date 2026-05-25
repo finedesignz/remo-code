@@ -65,6 +65,65 @@ export async function touchSupervisor(supervisorId: string) {
   await sql`UPDATE supervisors SET last_seen_at = now() WHERE id = ${supervisorId}`
 }
 
+// ── Phase 04 plan 002: persist host_resources budget snapshot ─────────────────
+// Caller MUST pass the WS-authenticated supervisorId — never trust a payload id.
+export async function updateSupervisorResources(args: {
+  supervisorId: string
+  cpuCores: number
+  totalMemMb: number
+  freeMemMb: number
+  concurrencyBudget: number
+  budgetSource: 'cgroup_v2' | 'cgroup_v1' | 'host_fallback'
+}) {
+  const rows = await sql`
+    UPDATE supervisors
+    SET cpu_cores = ${args.cpuCores},
+        total_mem_mb = ${args.totalMemMb},
+        free_mem_mb = ${args.freeMemMb},
+        concurrency_budget = ${args.concurrencyBudget},
+        budget_source = ${args.budgetSource},
+        budget_updated_at = now(),
+        last_seen_at = now()
+    WHERE id = ${args.supervisorId}
+    RETURNING id, cpu_cores, total_mem_mb, free_mem_mb,
+              concurrency_budget, concurrency_override, budget_source, budget_updated_at
+  `
+  return rows[0] ?? null
+}
+
+// PATCH /api/supervisors/:id/override — hub callers must clamp the value
+// to [1, concurrency_budget * 2] BEFORE calling this. Passing null clears.
+export async function setSupervisorOverride(args: {
+  supervisorId: string
+  userId: string
+  override: number | null
+}) {
+  const rows = await sql`
+    UPDATE supervisors
+    SET concurrency_override = ${args.override}
+    WHERE id = ${args.supervisorId} AND user_id = ${args.userId}
+    RETURNING id, cpu_cores, total_mem_mb, free_mem_mb,
+              concurrency_budget, concurrency_override, budget_source, budget_updated_at
+  `
+  return rows[0] ?? null
+}
+
+// PATCH /api/users/me/preferred-supervisor — caller MUST have already verified
+// the supervisor (when non-null) belongs to userId. Passing null clears it.
+export async function setPreferredSupervisor(args: {
+  userId: string
+  supervisorId: string | null
+}) {
+  const rows = await sql`
+    UPDATE users
+    SET preferred_supervisor_id = ${args.supervisorId},
+        updated_at = now()
+    WHERE id = ${args.userId}
+    RETURNING id, preferred_supervisor_id
+  `
+  return rows[0] ?? null
+}
+
 export async function listSupervisorsForUser(userId: string) {
   return sql`
     SELECT id, hostname, version, os, roots, state, current_run_id, last_seen_at, created_at
