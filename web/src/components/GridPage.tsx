@@ -101,6 +101,45 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
     }
   }, [tabs, tabIdFromUrl, loading])
 
+  // Active-cell-scoped paste/drop. ChatSurface already handles paste on its
+  // textarea + drop on its root. The remaining case: focus is OUTSIDE all
+  // cells (e.g. tab chip, page background) — route to the active cell by
+  // synthesizing a paste/drop into its root.
+  useEffect(() => {
+    if (!activeCellId) return
+    const handlePaste = (e: ClipboardEvent) => {
+      const target = document.activeElement as HTMLElement | null
+      // If focus is inside ANY cell (its own textarea), let the cell handle it.
+      if (target?.closest?.('[data-chat-surface-cell-id]')) return
+      // Only act if there are actual files (images) on the clipboard.
+      const items = e.clipboardData?.items
+      if (!items) return
+      const hasFile = Array.from(items).some(it => it.kind === 'file')
+      if (!hasFile) return
+      const activeRoot = document.querySelector(`[data-chat-surface-cell-id="${activeCellId}"]`)
+      if (!activeRoot) return
+      // Bubble a synthetic paste into the active cell's textarea.
+      const ta = activeRoot.querySelector('textarea') as HTMLTextAreaElement | null
+      if (!ta) return
+      e.preventDefault()
+      ta.focus()
+      // Manually dispatch a new ClipboardEvent on the textarea so its onPaste fires.
+      try {
+        const dt = new DataTransfer()
+        for (const it of items) {
+          if (it.kind === 'file') {
+            const f = it.getAsFile()
+            if (f) dt.items.add(f)
+          }
+        }
+        const synthetic = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+        ta.dispatchEvent(synthetic)
+      } catch {}
+    }
+    document.addEventListener('paste', handlePaste)
+    return () => document.removeEventListener('paste', handlePaste)
+  }, [activeCellId])
+
   // Restore active cell for current tab from sessionStorage.
   useEffect(() => {
     if (!activeTabId) {
