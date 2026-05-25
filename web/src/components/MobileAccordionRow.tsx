@@ -44,17 +44,21 @@ export function MobileAccordionRow({
       ? 'bg-amber-400 animate-pulse'
       : session.status === 'online'
       ? 'bg-emerald-400'
-      : 'bg-gray-500'
+      : 'bg-[var(--text-muted)]'
 
   return (
     <div
       className="rounded-lg overflow-hidden transition-[max-height] duration-200 ease-out"
       style={{
         // Collapsed: just the row (~44px button + padding). Expanded:
-        // row + square panel (width is viewport-wide, so ~100vw) plus the
-        // safe-area inset and a small buffer. We use a generous bound and
-        // let inner aspect-ratio do the real sizing.
-        maxHeight: expanded ? 'calc(100vw + 88px)' : '52px',
+        // row + square panel + safe-area inset, capped at viewport height
+        // so wide-mobile/landscape doesn't overflow. `dvh` (dynamic viewport
+        // height) survives iOS soft-keyboard open; `vh` is the legacy
+        // fallback for any browser without dvh. Inner `aspect-ratio: 1/1`
+        // still controls the real square sizing — this is just an upper bound.
+        maxHeight: expanded
+          ? 'min(calc(100dvh - 16px), calc(100vw + 88px))'
+          : '52px',
       }}
     >
       <button
