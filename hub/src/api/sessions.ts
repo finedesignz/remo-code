@@ -5,6 +5,10 @@ import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
 import { generateToken } from '../utils/token'
+import { pickSessionTarget } from '../sessions/routing.ts'
+import { createRun } from '../db/supervisor-dal.ts'
+import { sendToSupervisor, updateSupervisorState } from '../ws/supervisor-registry.ts'
+import { releaseSessionSlot } from '../sessions/budget.ts'
 
 const CreateSessionBody = z.object({
   name: z.string().min(1).max(100).trim(),
@@ -122,6 +126,106 @@ sessions.post('/:id/rotate-token', async (c) => {
   }
 
   return c.json({ token: rawToken })
+})
+
+// ── Phase 04 plan 008 — POST /api/sessions/heal ──────────────────────────────
+// The external claude-code-self-heal service (port 9114) calls this to launch
+// a fresh session on whatever target is available, deterministically. See
+// docs/self-heal-integration.md for the consumer contract.
+const HealBody = z.object({
+  repo: z.string().min(1).max(500),
+  branch: z.string().min(1).max(200),
+  prompt: z.string().min(1).max(20_000),
+  model: z.string().max(120).optional(),
+  exclude_supervisor_ids: z.array(z.string()).max(20).optional(),
+})
+
+const HEAL_MAX_HOPS = 3
+
+sessions.post('/heal', async (c) => {
+  const userId = c.get('userId') as string
+  const parsed = HealBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_input', detail: parsed.error.issues[0]?.message }, 400)
+  }
+  const { repo, branch, prompt, model } = parsed.data
+
+  // Build a mutable exclude list so we can extend it on WS dispatch failure
+  // and re-route to the next supervisor (up to HEAL_MAX_HOPS attempts).
+  const exclude = new Set<string>(parsed.data.exclude_supervisor_ids ?? [])
+
+  for (let hop = 0; hop < HEAL_MAX_HOPS; hop++) {
+    const pick = await pickSessionTarget(userId, {
+      excludeSupervisorIds: Array.from(exclude),
+    })
+
+    if (pick.kind === 'none') {
+      return c.json({ error: 'no_target_available' }, 503)
+    }
+
+    if (pick.kind === 'supervisor') {
+      // Reservation is held — must release on dispatch failure.
+      let run: { id: string }
+      try {
+        run = await createRun({
+          userId,
+          sessionId: null,
+          supervisorId: pick.supervisor_id,
+          repoPath: repo,
+          branch,
+          pulled: false,
+          initialPrompt: prompt,
+        }) as { id: string }
+      } catch (err: any) {
+        await releaseSessionSlot(userId, pick.supervisor_id)
+        return c.json({ error: 'run_insert_failed', detail: err?.message ?? String(err) }, 500)
+      }
+
+      try {
+        sendToSupervisor(pick.supervisor_id, {
+          type: 'session.start',
+          req_id: run.id,
+          run_id: run.id,
+          repo_path: repo,
+          branch,
+          pull: false,
+          initial_prompt: prompt,
+          api_key: '__use_local__',
+          hub_url: '__same__',
+          ...(model ? { model } : {}),
+        } as any)
+      } catch (err: any) {
+        // WS write failed — release the slot and the run row, then exclude
+        // this supervisor from the next hop and retry.
+        try {
+          const { endRun } = await import('../db/supervisor-dal.ts')
+          await endRun(run.id, null, `dispatch_failed: ${err?.message ?? 'unknown'}`)
+        } catch {}
+        await releaseSessionSlot(userId, pick.supervisor_id)
+        exclude.add(pick.supervisor_id)
+        continue
+      }
+
+      try { await updateSupervisorState(pick.supervisor_id, 'starting', run.id) } catch {}
+
+      return c.json({
+        session_id: run.id,
+        target_kind: 'supervisor' as const,
+        supervisor_id: pick.supervisor_id,
+        url: `/s/${run.id}`,
+      }, 202)
+    }
+
+    // pick.kind === 'local_agent'
+    return c.json({
+      session_id: pick.agent_session_id,
+      target_kind: 'local_agent' as const,
+      url: `/s/${pick.agent_session_id}`,
+    }, 202)
+  }
+
+  // Exhausted hop budget — every supervisor we tried failed to dispatch.
+  return c.json({ error: 'no_target_available', reason: 'all_dispatches_failed' }, 503)
 })
 
 export { sessions }

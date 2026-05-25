@@ -10,7 +10,7 @@ import { setup } from './api/setup'
 import { authRouter } from './api/auth'
 import { profile } from './api/profile'
 import { account } from './api/account'
-import { supervisors as supervisorsApi } from './api/supervisors'
+import { supervisors as supervisorsApi, usersMe as usersMeApi } from './api/supervisors'
 import { github as githubApi } from './api/github'
 import { commands as commandsApi } from './api/commands'
 import { transcribe as transcribeApi } from './api/transcribe'
@@ -126,6 +126,7 @@ app.route('/api/messages', messages)
 app.route('/api/profile', profile)
 app.route('/api/account', account)
 app.route('/api/supervisors', supervisorsApi)
+app.route('/api/users/me', usersMeApi)
 app.route('/api/github', githubApi)
 app.route('/api/commands', commandsApi)
 app.route('/api/transcribe', transcribeApi)

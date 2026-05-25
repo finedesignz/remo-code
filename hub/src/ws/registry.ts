@@ -40,6 +40,16 @@ export function isSessionOnline(sessionId: string) {
   return channels.has(sessionId)
 }
 
+// Plan 04-008 — list connected agent-channel session IDs for a user.
+// Used by `pickSessionTarget` for the local-agent fallback (step 3).
+export function listOnlineAgentSessionsForUser(userId: string): string[] {
+  const out: string[] = []
+  for (const [sessionId, entry] of channels) {
+    if (entry.userId === userId) out.push(sessionId)
+  }
+  return out
+}
+
 // -- Client registry --
 
 export function registerClient(userId: string, ws: ServerWebSocket<any>): ClientEntry {

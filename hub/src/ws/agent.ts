@@ -6,6 +6,7 @@ import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
 import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands } from '../db/supervisor-dal'
+import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
 import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
   updateSupervisorState, heartbeatSupervisor,
@@ -437,7 +438,17 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       if (orphans.length > 0) {
         console.log(`[supervisor] auto-resuming ${orphans.length} orphan session(s)`)
         for (const o of orphans) {
+          // End the orphan FIRST so it doesn't count against the cap when we
+          // reserve a slot for its replacement.
           await sql`UPDATE session_runs SET ended_at = now(), exit_reason = 'reboot' WHERE id = ${o.id}`
+          // Plan 04-003: hub-authoritative gate. Skip auto-resume when at cap
+          // (a paused override or budget reduction since last boot). The orphan
+          // already ended above so the user can manually start it later.
+          const reservation = await reserveSessionSlot(userId, row.id)
+          if (!reservation.ok) {
+            console.warn(`[supervisor] auto-resume skipped run=${o.id} reason=${reservation.reason}`)
+            continue
+          }
           const newRun = await sql`
             INSERT INTO session_runs (user_id, supervisor_id, repo_path, branch, pulled, initial_prompt, restart_of)
             VALUES (${userId}, ${row.id}, ${o.repo_path}, ${o.branch}, false, ${null}, ${o.id})
@@ -486,9 +497,39 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
   await heartbeatSupervisor(supervisorId)
 
   if (msg.type === 'supervisor.state') {
+    // Plan 04-003 belt-and-suspenders: when the supervisor announces a new
+    // running session, the corresponding session_runs row should already exist
+    // (the REST/auto-resume paths create it inside the reserveSessionSlot
+    // window). Log a warning if it's missing — the gate has been bypassed.
+    if (msg.run_id && msg.state !== 'idle' && msg.state !== 'offline') {
+      try {
+        const { sql } = await import('../db/postgres')
+        const rows = await sql`
+          SELECT 1 FROM session_runs
+          WHERE id = ${msg.run_id} AND supervisor_id = ${supervisorId}
+          LIMIT 1
+        `
+        if (rows.length === 0) {
+          console.warn(`[supervisor] state announcement for unreserved run=${msg.run_id} supervisor=${supervisorId}`)
+        }
+      } catch {}
+    }
     await updateSupervisorState(supervisorId, msg.state, msg.run_id ?? null)
     if (msg.last_exit && msg.run_id) {
       await endRun(msg.run_id, msg.last_exit.code, msg.last_exit.reason)
+      // Plan 04-003: a run just ended → recompute capacity + broadcast so the
+      // UI re-renders without polling.
+      try {
+        const snap = await getCapacitySnapshot(userId, supervisorId)
+        if (snap) {
+          broadcastToUser(userId, {
+            type: 'supervisor_capacity_changed',
+            supervisor_id: supervisorId,
+            running: snap.running,
+            cap: snap.cap,
+          })
+        }
+      } catch {}
     }
     return
   }
@@ -529,6 +570,41 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       stage: msg.stage,
       percent: msg.percent,
     })
+    return
+  }
+
+  // Phase 04 plan 002 — host_resources budget snapshot.
+  // Persist to the auth'd supervisor row (NEVER trust an id in the payload)
+  // and broadcast to the user's clients so the budget chip updates live.
+  if (msg.type === 'host_resources') {
+    try {
+      const { updateSupervisorResources } = await import('../db/supervisor-dal')
+      const row = await updateSupervisorResources({
+        supervisorId,
+        cpuCores: msg.cpu_cores,
+        totalMemMb: msg.total_mem_mb,
+        freeMemMb: msg.free_mem_mb,
+        concurrencyBudget: msg.concurrency_budget,
+        budgetSource: msg.source,
+      })
+      if (row) {
+        broadcastToUser(userId, {
+          type: 'supervisor_resources_updated',
+          supervisor_id: supervisorId,
+          cpu_cores: row.cpu_cores,
+          total_mem_mb: row.total_mem_mb,
+          free_mem_mb: row.free_mem_mb,
+          concurrency_budget: row.concurrency_budget,
+          concurrency_override: row.concurrency_override,
+          budget_source: row.budget_source,
+          budget_updated_at: row.budget_updated_at instanceof Date
+            ? row.budget_updated_at.toISOString()
+            : String(row.budget_updated_at),
+        })
+      }
+    } catch (err: any) {
+      console.error('[supervisor] host_resources persist failed', err?.message)
+    }
     return
   }
 

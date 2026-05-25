@@ -20,7 +20,8 @@ import { sql } from '../db/postgres.ts'
 import { resolveTargets, type ResolvedTarget } from './targets.ts'
 import * as registry from './registry.ts'
 import * as queue from './session-queue.ts'
-import { broadcastScheduledRun } from '../ws/registry.ts'
+import { broadcastScheduledRun, broadcastToUser } from '../ws/registry.ts'
+import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget.ts'
 
 const MAX_CHAIN_DEPTH = 5
 
@@ -188,6 +189,43 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
         } catch {}
       }
       continue
+    }
+
+    // Plan 04-003: hub-authoritative concurrency gate. For supervisor-targeted
+    // runs, reserve a session slot before dispatch. At-capacity skips the run
+    // (mirrors the cost-cap skip pattern above — same shape, different reason).
+    if (target.kind === 'supervisor' && target.supervisorId) {
+      const reservation = await reserveSessionSlot(userId, target.supervisorId)
+      if (!reservation.ok) {
+        const reason = reservation.reason === 'at_capacity' ? 'at_capacity' : reservation.reason
+        await updateRunStatus(run.id, {
+          status: 'skipped',
+          error: reason,
+          finished_at: new Date(),
+        })
+        broadcastScheduledRun(userId, {
+          type: 'scheduled_run_finished',
+          run_id: run.id,
+          task_id: task.id,
+          status: 'skipped',
+          error: reason,
+        })
+        inFlightByRun.delete(run.id)
+        void onRunFinalized(task, run.id, 'skipped', reason)
+        continue
+      }
+      // Broadcast capacity change so the UI re-renders without polling.
+      try {
+        const snap = await getCapacitySnapshot(userId, target.supervisorId)
+        if (snap) {
+          broadcastToUser(userId, {
+            type: 'supervisor_capacity_changed',
+            supervisor_id: target.supervisorId,
+            running: snap.running,
+            cap: snap.cap,
+          })
+        }
+      } catch {}
     }
 
     void routeToSender(task, ctx).catch((err) => {

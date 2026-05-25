@@ -2,12 +2,15 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import {
   listSupervisorsForUser, getSupervisor, createRun, listRunsForSupervisor,
+  setSupervisorOverride, setPreferredSupervisor,
 } from '../db/supervisor-dal'
 import {
   getSupervisor as getSupervisorRegistryEntry, isSupervisorOnline,
   sendRequest, sendToSupervisor, updateSupervisorState,
 } from '../ws/supervisor-registry'
 import { isGitHubAppConfigured, mintTokenizedCloneUrl } from '../auth/github-app'
+import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
+import { broadcastToUser } from '../ws/registry'
 
 export const supervisors = new Hono()
 
@@ -101,6 +104,21 @@ supervisors.post('/:id/start', async (c) => {
   const body = StartBody.safeParse(await c.req.json().catch(() => ({})))
   if (!body.success) return c.json({ error: 'bad body' }, 400)
 
+  // Phase 04 plan 003: hub-authoritative concurrency gate. Reserve atomically
+  // before creating the run row so concurrent /start calls at cap can't both
+  // win the race.
+  const reservation = await reserveSessionSlot(a.userId, a.supervisorId)
+  if (!reservation.ok) {
+    if (reservation.reason === 'supervisor_not_found') {
+      return c.json({ error: 'not found' }, 404)
+    }
+    return c.json({
+      error: 'at_capacity',
+      running: reservation.running,
+      cap: reservation.cap,
+    }, 429)
+  }
+
   // Concurrent runs allowed — supervisor manages N children.
   // We need an api_key to pass to the supervisor so it can spawn claude-remote
   // talking to this hub. We re-use the supervisor's own api_key (it has agent capability too).
@@ -132,6 +150,20 @@ supervisors.post('/:id/start', async (c) => {
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
+
+  // Broadcast capacity change so UI re-renders without polling.
+  try {
+    const snap = await getCapacitySnapshot(a.userId, a.supervisorId)
+    if (snap) {
+      broadcastToUser(a.userId, {
+        type: 'supervisor_capacity_changed',
+        supervisor_id: a.supervisorId,
+        running: snap.running,
+        cap: snap.cap,
+      })
+    }
+  } catch {}
+
   return c.json({ run_id: run.id })
 })
 
@@ -170,6 +202,63 @@ supervisors.get('/:id/active', async (c) => {
     ORDER BY started_at DESC
   `
   return c.json({ runs: rows })
+})
+
+// Phase 04 plan 002 — concurrency override (hub clamps to [1, budget*2]).
+// Setting null clears the override (hub then uses raw concurrency_budget).
+const OverrideBody = z.object({
+  concurrency_override: z.number().int().nullable(),
+})
+
+supervisors.patch('/:id/override', async (c) => {
+  const userId = c.get('userId') as string
+  const id = c.req.param('id')
+  const row = await getSupervisor(id, userId)
+  if (!row) return c.json({ error: 'not found' }, 404)
+  const raw = await c.req.json().catch(() => ({}))
+  const body = OverrideBody.safeParse(raw)
+  if (!body.success) return c.json({ error: 'bad body', details: body.error.flatten() }, 400)
+
+  const budget = Number(row.concurrency_budget ?? 1)
+  const max = Math.max(1, budget * 2)
+  let val = body.data.concurrency_override
+  if (val !== null) {
+    if (!Number.isInteger(val) || val < 1) {
+      return c.json({ error: 'override_below_floor', min: 1 }, 400)
+    }
+    if (val > max) {
+      return c.json({ error: 'override_exceeds_ceiling', max }, 400)
+    }
+  }
+  const updated = await setSupervisorOverride({ supervisorId: id, userId, override: val })
+  if (!updated) return c.json({ error: 'not found' }, 404)
+  return c.json(updated)
+})
+
+// Phase 04 plan 002 — user-level preferred supervisor (consumed by Plan 008).
+// Mounted at /api/users/me/preferred-supervisor (see hub/src/index.ts).
+export const usersMe = new Hono()
+
+const PreferredBody = z.object({
+  supervisor_id: z.string().nullable(),
+})
+
+usersMe.patch('/preferred-supervisor', async (c) => {
+  const userId = c.get('userId') as string
+  const raw = await c.req.json().catch(() => ({}))
+  const body = PreferredBody.safeParse(raw)
+  if (!body.success) return c.json({ error: 'bad body', details: body.error.flatten() }, 400)
+
+  // When non-null, verify the supervisor belongs to this user. 404 on any
+  // mismatch (no existence leak — cross-user PATCH attempts get the same
+  // 'not found' as a non-existent id).
+  if (body.data.supervisor_id !== null) {
+    const row = await getSupervisor(body.data.supervisor_id, userId)
+    if (!row) return c.json({ error: 'not found' }, 404)
+  }
+  const updated = await setPreferredSupervisor({ userId, supervisorId: body.data.supervisor_id })
+  if (!updated) return c.json({ error: 'not found' }, 404)
+  return c.json(updated)
 })
 
 supervisors.get('/:id/runs', async (c) => {
