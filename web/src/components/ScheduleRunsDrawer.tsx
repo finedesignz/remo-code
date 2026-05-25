@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useScheduleRuns, type ScheduleRun } from '../hooks/useScheduleRuns'
 import type { ScheduledTask } from '../hooks/useSchedules'
 import { formatLocalTs } from './SchedulesPage'
+import { formatDuration } from '../lib/format'
 
 interface Props {
   token: string
@@ -302,12 +303,3 @@ function RunStatusIcon({ status }: { status: ScheduleRun['status'] }) {
   }
 }
 
-function formatDuration(ms: number | null): string {
-  if (ms === null || ms === undefined) return '—'
-  if (ms < 1000) return `${ms}ms`
-  const s = ms / 1000
-  if (s < 60) return `${s.toFixed(1)}s`
-  const m = Math.floor(s / 60)
-  const rs = Math.round(s - m * 60)
-  return `${m}m ${rs}s`
-}
