@@ -188,6 +188,21 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // Store the user message
     const message = await insertMessage(msg.session_id, 'user', storedContent)
 
+    // ACK to the sender so the client can clear the message from its in-flight
+    // queue. Without this, a half-open socket (readyState=OPEN but TCP dead)
+    // would silently lose the message — the client would never retry on
+    // reconnect because it believes the send succeeded.
+    try {
+      ws.send(JSON.stringify({
+        type: 'send_ack',
+        client_id: msg.id,
+        session_id: msg.session_id,
+        message_id: message.id,
+      }))
+    } catch {
+      // socket closed mid-handle; client will resend on reconnect
+    }
+
     // Broadcast to all subscribed clients (including sender for confirmation)
     broadcastToSubscribers(msg.session_id, {
       type: 'message',

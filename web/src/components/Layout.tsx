@@ -36,7 +36,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
   const [showApiKey, setShowApiKey] = useState(false)
 
   const { theme, toggleTheme } = useTheme()
-  const { connected, connectionId, send, subscribe } = useWebSocket(token)
+  const { connected, connectionId, send, subscribe, online } = useWebSocket(token)
   const sessionsHook = useSessions(token)
   const { messages, loading: chatLoading, sendMessage, unreadCounts } = useChat(
     token, activeSessionId, subscribe, send, connectionId
@@ -270,6 +270,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
           onQuestionRespond={handleQuestionRespond}
           token={token}
           wsConnected={connected}
+          online={online}
           onCancel={handleCancel}
         />
       </div>

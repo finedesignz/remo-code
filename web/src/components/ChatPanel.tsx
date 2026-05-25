@@ -13,6 +13,7 @@ interface Props {
   onQuestionRespond: (requestId: string, answer: string) => void
   token?: string
   wsConnected?: boolean
+  online?: boolean
   onCancel?: () => void
 }
 
@@ -31,6 +32,7 @@ export function ChatPanel({
   onQuestionRespond,
   token,
   wsConnected = true,
+  online = true,
   onCancel,
 }: Props) {
   if (!activeSessionId) {
@@ -53,6 +55,7 @@ export function ChatPanel({
       onQuestionRespond={onQuestionRespond}
       token={token}
       wsConnected={wsConnected}
+      online={online}
       onCancel={onCancel}
     />
   )
