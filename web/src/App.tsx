@@ -7,12 +7,13 @@ import { Layout } from './components/Layout'
 import { SettingsPage } from './components/SettingsPage'
 import { SchedulesPage } from './components/SchedulesPage'
 import { ChatSurfaceShowcase } from './components/ChatSurfaceShowcase'
+import { MobileAccordionShowcase } from './components/MobileAccordionShowcase'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useBrowserNotifications } from './hooks/useBrowserNotifications'
 import type { Profile } from './hooks/useProfile'
 import type { AuthUser } from './lib/auth.ts'
 
-type Route = 'chat' | 'settings' | 'schedules' | 'dev-chat-surface'
+type Route = 'chat' | 'settings' | 'schedules' | 'dev-chat-surface' | 'dev-mobile-accordion'
 
 function getRoute(): Route {
   const hash = window.location.hash
@@ -24,6 +25,7 @@ function getRoute(): Route {
   if (hash.startsWith('#/settings')) return 'settings'
   if (hash.startsWith('#/schedules')) return 'schedules'
   if (hash.startsWith('#/dev/chat-surface')) return 'dev-chat-surface'
+  if (hash.startsWith('#/dev/mobile-accordion')) return 'dev-mobile-accordion'
   return 'chat'
 }
 
@@ -99,6 +101,10 @@ export default function App() {
 
       {route === 'dev-chat-surface' && (
         <ChatSurfaceShowcase token={token} />
+      )}
+
+      {route === 'dev-mobile-accordion' && (
+        <MobileAccordionShowcase token={token} />
       )}
 
       {route === 'chat' && (
