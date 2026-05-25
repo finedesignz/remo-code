@@ -42,6 +42,7 @@ import {
   getSnippet, injectSnippet, addSentryDep, addPythonSentryRequirement,
 } from '../error-capture/setup/snippet.ts'
 import { setCoolifyEnv, redeployCoolifyApp } from '../error-capture/setup/coolify-env.ts'
+import { notifyThrottled } from '../error-capture/notify.ts'
 
 export const errorSetup = new Hono()
 
@@ -164,10 +165,15 @@ errorSetup.post('/:project_id', async (c) => {
   // 4. Detect stack
   const detection = detectStack(presentFiles)
   if (detection.stack === null) {
-    // TODO(merge): call notify('stack_not_detected', { user_id: userId,
-    //   project_id: projectId, tried: detection.tried }) so the W2 notify
-    //   module emails the user a copy-paste init snippet. Cannot wire here
-    //   without coupling — the notify kinds don't yet include this case.
+    // Fire-and-forget: email user a copy-paste init snippet. Throttled 24h
+    // per project so multiple setup attempts during a single exploration
+    // session don't spam.
+    notifyThrottled('stack_not_detected', `stack_not_detected:${project.id}`, 86_400, project, {
+      tried: detection.tried,
+      dsn,
+    }).catch((err: any) => {
+      console.error('[error-setup] stack_not_detected notify failed:', err?.message)
+    })
     return c.json({ error: 'stack_not_detected', tried: detection.tried }, 422)
   }
 

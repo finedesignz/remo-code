@@ -31,11 +31,16 @@ export type NotifyKind =
   | 'daily_cap'
   | 'dispatch_failed'
   | 'session_offline'
+  | 'stack_not_detected'
 
 export interface NotifyContext {
   error_type?: string
   error_value?: string
   detail?: string
+  /** stack_not_detected only — list of file paths the auto-detector tried. */
+  tried?: string[]
+  /** stack_not_detected only — the DSN to copy-paste into a manual SDK init. */
+  dsn?: string
 }
 
 export async function notifyThrottled(
@@ -167,6 +172,48 @@ function buildEmail(
           `The row is marked dispatch_status='failed'. Investigate the agent socket.`,
         ].filter(Boolean).join('\n'),
       }
+    case 'stack_not_detected': {
+      const dsn = ctx.dsn ?? '<your DSN — open the project in the Remo UI to copy>'
+      const tried = (ctx.tried ?? []).map(p => `  - ${p}`).join('\n') || '  (none reported)'
+      return {
+        subject: `[error-capture] ${projectName}: SDK install — stack not auto-detected`,
+        body: [
+          `Remo tried to auto-install a Sentry SDK in the repo you pointed at, but could`,
+          `not identify the stack from the candidate files. You can finish the install`,
+          `manually by dropping one of the snippets below into your app's entry point.`,
+          ``,
+          `Project: ${projectName}`,
+          `DSN:     ${dsn}`,
+          ``,
+          `Files probed:`,
+          tried,
+          ``,
+          `--- Node.js (Express / generic) ---`,
+          `// top of src/index.ts (or your server entry):`,
+          `import * as Sentry from '@sentry/node'`,
+          `Sentry.init({ dsn: process.env.SENTRY_DSN ?? '${dsn}' })`,
+          ``,
+          `npm i @sentry/node`,
+          ``,
+          `--- Next.js ---`,
+          `// sentry.server.config.ts`,
+          `import * as Sentry from '@sentry/nextjs'`,
+          `Sentry.init({ dsn: process.env.SENTRY_DSN ?? '${dsn}' })`,
+          ``,
+          `npm i @sentry/nextjs`,
+          ``,
+          `--- Python (Django / Flask / FastAPI) ---`,
+          `# top of manage.py / wsgi.py / main.py:`,
+          `import sentry_sdk`,
+          `sentry_sdk.init(dsn="${dsn}")`,
+          ``,
+          `pip install sentry-sdk`,
+          ``,
+          `Once installed, deploy and trigger an exception — it should appear in the`,
+          `Error Capture page within seconds.`,
+        ].join('\n'),
+      }
+    }
   }
 }
 
