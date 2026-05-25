@@ -6,6 +6,7 @@ import { hubFetch, HubFetchError } from '../lib/api'
 import { nextRuns, validate as validateCron, browserTimezone } from '../lib/cron'
 import { PostRunActionsEditor } from './PostRunActionsEditor'
 import { CronBuilder } from './CronBuilder'
+import { computeTaskAutoName } from '../lib/task-name'
 
 interface Props {
   token: string
@@ -51,7 +52,8 @@ const COMMON_TZS = [
 
 export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave }: Props) {
   // Basic fields
-  const [name, setName] = useState(existing?.name ?? '')
+  const [nameSuffix, setNameSuffix] = useState<string>(existing?.name ?? '')
+  const [suffixHydrated, setSuffixHydrated] = useState<boolean>(!existing)
   const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? 'prompt')
   const [prompt, setPrompt] = useState<string>(existing?.payload?.prompt ?? '')
   const [skillName, setSkillName] = useState<string>(existing?.payload?.command ?? '')
@@ -116,14 +118,53 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
   // Commands for skill picker
   const { rows: commands } = useCommands(taskType === 'skill' ? token : null)
 
+  // Auto-generated, locked name prefix — derived from type + target + cadence
+  const prefix = useMemo(() => {
+    const payload: Record<string, any> = {}
+    if (taskType === 'prompt') payload.prompt = prompt
+    if (taskType === 'skill') payload.command = skillName
+    if (taskType === 'security_scan' || taskType === 'log_check' || taskType === 'continue_dev') {
+      if (notes) payload.notes = notes
+    }
+    return computeTaskAutoName(
+      {
+        task_type: taskType,
+        target_kind: targetKind,
+        target_id: targetKind === 'session' || targetKind === 'supervisor' ? targetId : null,
+        payload,
+        cron_expr: cronExpr,
+      },
+      { sessions, supervisors },
+    )
+  }, [taskType, targetKind, targetId, prompt, skillName, notes, cronExpr, sessions, supervisors])
+
+  // For existing schedules: once the prefix can be computed, strip it from the loaded name
+  // so the user sees only the suffix portion in the input.
+  useEffect(() => {
+    if (suffixHydrated) return
+    if (!prefix) return
+    const raw = (existing?.name ?? '').trim()
+    if (!raw) { setSuffixHydrated(true); return }
+    const lowerRaw = raw.toLowerCase()
+    const lowerPrefix = prefix.toLowerCase()
+    if (lowerRaw.startsWith(lowerPrefix)) {
+      let rest = raw.slice(prefix.length).trim()
+      rest = rest.replace(/^[—\-:]+\s*/, '')
+      setNameSuffix(rest)
+    }
+    // else: keep nameSuffix = existing.name (legacy custom name, will be re-prefixed on save)
+    setSuffixHydrated(true)
+  }, [prefix, suffixHydrated, existing?.name])
+
   const handleSubmit = async () => {
     setError(null)
     setCycleError(null)
-    if (!name.trim()) { setError('Name is required'); return }
     if (!cronValidation.ok) { setError(cronValidation.error || 'Invalid cron expression'); return }
     if ((targetKind === 'session' || targetKind === 'supervisor') && !targetId) {
       setError(`Choose a ${targetKind}`); return
     }
+    if (!prefix) { setError('Pick a task type, target, and schedule first'); return }
+    const finalName = nameSuffix.trim() ? `${prefix} — ${nameSuffix.trim()}` : prefix
 
     const payload: Record<string, any> = {}
     if (taskType === 'prompt') payload.prompt = prompt.trim()
@@ -133,7 +174,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     }
 
     const input: ScheduleCreateInput = {
-      name: name.trim(),
+      name: finalName,
       task_type: taskType,
       target_kind: targetKind,
       target_id: targetKind === 'session' || targetKind === 'supervisor' ? targetId : null,
@@ -179,12 +220,25 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
         <div className="p-5 space-y-5">
           {/* Name */}
           <Field label="Name">
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Nightly security scan"
-              className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
+            <div className="flex items-stretch rounded-lg bg-[var(--bg-primary)]/60 ring-1 ring-transparent focus-within:ring-2 focus-within:ring-indigo-500 overflow-hidden">
+              <div
+                className="px-3 py-2 text-sm bg-[var(--bg-tertiary)]/50 border-r border-[var(--border-color)]/40 whitespace-nowrap font-medium select-text max-w-[60%] overflow-hidden text-ellipsis"
+                title={prefix || 'Auto-generated prefix'}
+              >
+                {prefix
+                  ? <span className="text-[var(--text-secondary)]">{prefix}</span>
+                  : <span className="text-[var(--text-muted)] italic">Auto…</span>}
+              </div>
+              <input
+                value={nameSuffix}
+                onChange={(e) => setNameSuffix(e.target.value)}
+                placeholder="(optional) add a note — e.g. nightly, high-priority"
+                className="flex-1 min-w-0 bg-transparent px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none"
+              />
+            </div>
+            <p className="mt-1.5 text-xs text-[var(--text-muted)]">
+              Name auto-updates when type, target, or schedule changes. The prefix is fixed; type to add your own note after it.
+            </p>
           </Field>
 
           {/* Task type */}
@@ -370,7 +424,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
           >Cancel</button>
           <button
             onClick={handleSubmit}
-            disabled={saving || !cronValidation.ok || !name.trim()}
+            disabled={saving || !cronValidation.ok || !prefix}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors"
           >
             {saving ? 'Saving...' : (existing ? 'Save changes' : 'Create schedule')}

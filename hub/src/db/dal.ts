@@ -4,7 +4,8 @@ import { sql } from "./postgres.ts";
 
 export async function listSessions(userId: string) {
   return sql`
-    SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info
+    SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info,
+           cli_kind, is_rootless, hostname
     FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST
   `;
@@ -55,13 +56,62 @@ export async function recentlyDisconnectedForProjectDir(
   return rows[0] ?? null;
 }
 
-export async function createSession(userId: string, name: string, projectDir: string | null, tokenHash: string) {
+export async function createSession(
+  userId: string,
+  name: string,
+  projectDir: string | null,
+  tokenHash: string,
+  cliKind: 'claude' | 'codex' = 'claude',
+  isRootless: boolean = false,
+  hostname: string | null = null,
+) {
   const rows = await sql`
-    INSERT INTO sessions (user_id, name, project_dir, token_hash)
-    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash})
+    INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind, is_rootless, hostname)
+    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash}, ${cliKind}, ${isRootless}, ${hostname})
     RETURNING *
   `;
   return rows[0];
+}
+
+// Find-or-create an ambient (rootless) session for (user, hostname, cli_kind).
+// Guaranteed idempotent under concurrent inserts by the partial unique index
+// idx_sessions_rootless_unique. The ON CONFLICT DO NOTHING + re-SELECT pattern
+// covers the race where two agents authenticate simultaneously.
+export async function findOrCreateRootlessSession(
+  userId: string,
+  hostname: string,
+  cliKind: 'claude' | 'codex',
+  tokenHashIfCreating: string,
+  nameIfCreating: string,
+) {
+  const existing = await sql`
+    SELECT * FROM sessions
+    WHERE user_id = ${userId}
+      AND hostname = ${hostname}
+      AND cli_kind = ${cliKind}
+      AND is_rootless = true
+      AND deleted_at IS NULL
+    LIMIT 1
+  `;
+  if (existing[0]) {
+    await sql`UPDATE sessions SET token_hash = ${tokenHashIfCreating}, last_activity = now() WHERE id = ${existing[0].id}`;
+    return { ...existing[0], token_hash: tokenHashIfCreating, created: false };
+  }
+  await sql`
+    INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind, is_rootless, hostname)
+    VALUES (${userId}, ${nameIfCreating}, NULL, ${tokenHashIfCreating}, ${cliKind}, true, ${hostname})
+    ON CONFLICT DO NOTHING
+  `;
+  const rows = await sql`
+    SELECT * FROM sessions
+    WHERE user_id = ${userId}
+      AND hostname = ${hostname}
+      AND cli_kind = ${cliKind}
+      AND is_rootless = true
+      AND deleted_at IS NULL
+    LIMIT 1
+  `;
+  return { ...rows[0], created: true };
 }
 
 // Find existing session by project_dir (reuse) or create a new one.

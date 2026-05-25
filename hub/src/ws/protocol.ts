@@ -151,7 +151,16 @@ export type HubToChannel =
   | { type: 'ping' }
 
 export type HubToAgent =
-  | { type: 'auth_ok'; session_id: string }
+  // Plan 05-002: auth_ok now carries cli_kind (so agent knows which CLI to
+  // spawn) and rootless_session_ids (ambient session ids per CLI, when the
+  // agent advertised rootless_sessions). system_prompt and seed_files are
+  // hoisted from the inline ad-hoc shape used by the agent (system_prompt was
+  // already being read at agent/src/index.ts; seed_files is a Plan 05 reserve).
+  | { type: 'auth_ok'; session_id: string;
+      cli_kind: 'claude' | 'codex';
+      system_prompt?: string;
+      seed_files?: unknown[];
+      rootless_session_ids?: { claude?: string; codex?: string } }
   | { type: 'auth_error'; error: string }
   | { type: 'user_message'; session_id: string; id: string; content: string;
       images?: Array<{ media_type: string; data: string }>;
@@ -170,7 +179,10 @@ export type HubToClient =
   | { type: 'tool_use'; session_id: string; tool_name: string; tool_input?: unknown; message_id?: string; run_id?: string }
   | { type: 'tool_result'; session_id: string; tool_use_id?: string; content?: unknown; run_id?: string }
   | { type: 'session_status'; session_id: string; status: string }
-  | { type: 'session_list'; sessions: Array<{ id: string; name: string; project_dir: string | null; status: string; last_activity: string | null; created_at: string; agent_info?: unknown }> }
+  | { type: 'session_list'; sessions: Array<{ id: string; name: string; project_dir: string | null; status: string; last_activity: string | null; created_at: string; agent_info?: unknown;
+      // Plan 05-002: surface CLI + rootless attribution so the sidebar can
+      // render the right badge and group ambient sessions under their host.
+      cli_kind: 'claude' | 'codex'; is_rootless: boolean; hostname: string | null }> }
   | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
   | { type: 'user_question'; session_id: string; request_id: string; question: string;
       options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }

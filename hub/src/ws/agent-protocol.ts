@@ -2,7 +2,7 @@ import { z } from 'zod'
 import {
   SupervisorHello, SupervisorState, SupervisorLog,
   RepoScanResult, RepoCloneProgress, RepoOpResult,
-  SupervisorCommandsSync,
+  SupervisorCommandsSync, HostResourcesMessage,
 } from './supervisor-protocol'
 
 // -- Agent -> Hub (inbound messages from the local streaming agent) --
@@ -20,13 +20,31 @@ export const AgentInfo = z.object({
   agent_version: z.string().optional(),
 }).passthrough()
 
+// CLI kinds supported by the agent runner. 'claude' = Claude Code CLI (default,
+// backward compat). 'codex' = Codex CLI (Plan 05). Future kinds require a new
+// schema rev.
+export const CliKind = z.enum(['claude', 'codex'])
+export type CliKindT = z.infer<typeof CliKind>
+
+// NOTE: AgentAuth is a member of a discriminatedUnion below, which requires a
+// raw ZodObject (no .refine wrappers). The "project_dir OR rootless_sessions"
+// invariant is enforced in hub/src/ws/agent.ts after parse.
 export const AgentAuth = z.object({
   type: z.literal('auth'),
   api_key: z.string().min(1),
-  project_dir: z.string().min(1),
+  // Plan 05-002: optional so a rootless-only agent (advertising only ambient
+  // sessions) can connect without a project dir. Hub-side handler rejects when
+  // BOTH project_dir AND rootless_sessions are missing.
+  project_dir: z.string().min(1).optional(),
   hostname: z.string().optional(),
   role: z.enum(['agent', 'supervisor']).optional(),
   agent_info: AgentInfo.optional(),
+  // Plan 05-002: which CLI this agent intends to spawn for its project session.
+  // When omitted, hub defaults to 'claude' (backward compat).
+  cli_kind: CliKind.optional(),
+  // Plan 05-002: agent advertises ambient (hostname-scoped) session capability.
+  // Hub find-or-creates one row per entry, scoped to (user, hostname, cli_kind).
+  rootless_sessions: z.array(CliKind).max(2).optional(),
 })
 
 export const AgentThinking = z.object({
@@ -114,6 +132,7 @@ export const AgentInbound = z.discriminatedUnion('type', [
   RepoCloneProgress,
   RepoOpResult,
   SupervisorCommandsSync,
+  HostResourcesMessage,
 ])
 
 export type AgentInboundType = z.infer<typeof AgentInbound>
