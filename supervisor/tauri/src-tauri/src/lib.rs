@@ -1,7 +1,9 @@
 //! Remo Code Supervisor — Tauri 2 shell.
 //!
-//! T3: managed Bun sidecar spawn (CREATE_NO_WINDOW + restart-on-crash).
+//! T4: NSSM-service collision check + loopback mutex probe.
 
+mod mutex_probe;
+mod nssm;
 mod sidecar;
 mod tray;
 
@@ -26,6 +28,14 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Pre-flight: refuse to spawn if NSSM service is running OR another
+            // supervisor instance already holds the loopback mutex on
+            // 127.0.0.1:9106 (fallback 9197).
+            if let Err(e) = mutex_probe::preflight(&app.handle()) {
+                log::error!("preflight failed: {e:#}");
+                return Err(e.into());
+            }
+
             tray::build(&app.handle())?;
 
             // Hide-on-close for the settings window.
