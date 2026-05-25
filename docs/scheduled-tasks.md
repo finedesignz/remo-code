@@ -64,14 +64,18 @@ to the web UI over WebSocket.
 | `hub/src/scheduler/post-run/schema.ts`    | Zod schema for `post_run_actions` + chain-cycle detector (DFS)         |
 | `hub/src/scheduler/post-run/aggregator.ts`| Fan-out aggregator: collects child results, fires post-run actions once|
 | `hub/src/scheduler/post-run/template.ts`  | `{{var}}` substitution with optional HTML escape (email variant)       |
+| `web/src/components/CronBuilder.tsx`      | Dropdown-driven cron builder (8 modes + presets) used in editor        |
+| `web/src/lib/cron-humanize.ts`            | `humanizeCron(expr)` plain-English renderer (builder + list row)       |
+| `web/src/lib/format.ts`                   | `formatDuration`, `formatCostUsd`, `formatRelativeAgo` (list chips)    |
+| `web/src/lib/scheduled-message.ts`        | `parseScheduledPrefix(text)` — extracts `[scheduled: ...]` pill        |
 
 ### REST surface
 
 | Method | Path                                   | Notes                                                           |
 |--------|----------------------------------------|-----------------------------------------------------------------|
-| GET    | `/api/scheduled-tasks`                 | List user's tasks; each row includes `next_3_runs`              |
+| GET    | `/api/scheduled-tasks`                 | List user's tasks; each row includes `next_3_runs`, `last_run_cost_usd`, `last_run_duration_ms` |
 | POST   | `/api/scheduled-tasks`                 | Create. Validates cron + TZ + `post_run_actions` + cycle check  |
-| GET    | `/api/scheduled-tasks/:id`             | Get one (user-scoped)                                           |
+| GET    | `/api/scheduled-tasks/:id`             | Get one (user-scoped); includes `last_run_cost_usd`, `last_run_duration_ms` |
 | PATCH  | `/api/scheduled-tasks/:id`             | Partial update                                                  |
 | DELETE | `/api/scheduled-tasks/:id`             | Soft remove + unregister cron                                   |
 | POST   | `/api/scheduled-tasks/:id/run-now`     | Bypass cron, fire once                                          |
@@ -148,6 +152,90 @@ API-compatible.
 
 ---
 
+## Web UI
+
+### Cron builder (`web/src/components/CronBuilder.tsx`)
+
+The editor no longer exposes a raw cron text input. `CronBuilder` is a
+dropdown-driven composer with 8 modes:
+
+| Mode              | Output                                          |
+|-------------------|-------------------------------------------------|
+| Every N minutes   | `*/N * * * *`                                   |
+| Every N hours     | `0 */N * * *`                                   |
+| Every N days      | `0 H * * *` (day-step folded into daily preset) |
+| Every N months    | `0 H 1 */N *`                                   |
+| Daily             | `M H * * *`                                     |
+| Weekly            | `M H * * DOW,DOW,...` (multi-select chips)      |
+| Monthly           | `M H D * *`; **`D = "Last day"`** maps to `L`   |
+| Custom (5-field)  | Passthrough; validated via `cron.ts`            |
+
+A common-presets quick row sits above the mode picker (hourly, every 15
+min, weekdays 9am, etc.). Below the controls the builder shows a
+read-only cron string, a plain-English summary from
+`humanizeCron(expr)`, and the next-3-runs preview rendered in the task's
+selected timezone.
+
+`humanizeCron` (`web/src/lib/cron-humanize.ts`) is shared with the list
+row, so "Every week on Mon, Wed, Fri at 09:30" appears in both surfaces.
+Unrecognized custom expressions fall back to the raw cron string.
+
+### Schedules list (`web/src/components/SchedulesPage.tsx`)
+
+Toolbar above the list:
+
+- **Search-by-name** — substring match on `task.name`
+- **Status segmented control** — `All | Enabled | Disabled`
+- **Task-type dropdown** — `All | prompt | skill | security_scan | log_check | continue_dev`
+
+Filters are client-side and AND-combined.
+
+Each row carries last-run metrics from the list endpoint:
+
+```
+<task name>                  Every weekday at 09:00 (PDT)
+<status> · $0.0034 · 12.3s   Next: May 25, 9:30 AM PDT · Fired 4m ago
+```
+
+- Cost/duration chips render with `formatCostUsd` / `formatDuration`
+  from `web/src/lib/format.ts`.
+- `Next:` is rendered in the task's own timezone with the short TZ
+  abbreviation.
+- `Fired Xm ago` appears via `formatRelativeAgo` when `last_fire_at` is
+  set on the task.
+
+### Runs drawer (`web/src/components/ScheduleRunsDrawer.tsx`)
+
+Status filter chips with live counts:
+`All | Success | Failure | Skipped | Running | Cancelled`. Filter is
+client-side over the currently loaded window.
+
+A summary stats banner sits above the run list and shows:
+
+- Total runs (in the loaded window)
+- Success rate (`success / total`, as a percentage)
+- Total cost in USD
+- Average duration in ms
+
+### Scheduled-run badge in chat
+
+When a scheduled task fires against an agent, the user message persisted
+to chat history is unchanged in shape:
+
+```
+[scheduled: <task name>]
+
+<original prompt>
+```
+
+In the web UI, `parseScheduledPrefix` (`web/src/lib/scheduled-message.ts`)
+splits that prefix off and renders it as a styled indigo pill —
+`Scheduled: <task name>` — above the prompt body inside the message
+bubble (`web/src/components/MessageBubble.tsx`). The prefix never appears
+inline as plain text.
+
+---
+
 ## Catch-up on boot
 
 On hub start, `scheduler/catchup.runOnce()` walks each enabled task and
@@ -197,6 +285,27 @@ the waiter and notifies the dispatcher to ship it.
 
 This caps notification spam and prevents pile-ups when a long task overruns
 its cadence.
+
+---
+
+## Agent sender — summary directive
+
+`hub/src/scheduler/senders/agent.ts` sends two distinct strings:
+
+1. **Stored** in `messages` (chat history) — unchanged shape:
+   `"[scheduled: <task name>]\n\n<prompt>"`. The UI strips the prefix
+   into the indigo `Scheduled:` pill.
+2. **Sent to Claude's stdin** — the stored content plus a trailing
+   directive:
+
+   > When finished, end your response with a single line starting with
+   > `Summary:` describing in 1-2 sentences what you accomplished or
+   > any blocker.
+
+This forces every scheduled run to end with a one-line summary that the
+runs drawer, output snippet, and template variables can quote without
+parsing the whole assistant turn. Only the **sent** content carries the
+directive — chat history stays clean.
 
 ---
 
