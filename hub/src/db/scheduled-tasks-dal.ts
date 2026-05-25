@@ -26,7 +26,7 @@ export type RunStatus =
 export interface ScheduledTask {
   id: string
   user_id: string
-  session_id: string
+  session_id: string | null
   name: string
   cron_expression: string
   prompt: string
@@ -149,10 +149,10 @@ export async function createTaskV2(input: {
   max_concurrent?: number
   enabled?: boolean
   post_run_actions?: PostRunAction[]
-  // Legacy columns kept for backward compat with the existing scheduler/v0 path.
-  // session_id is NOT NULL on the table; new fan-out tasks pass a sentinel
-  // until a follow-up migration drops the NOT NULL constraint.
-  session_id: string
+  // Legacy `scheduled_tasks` columns kept for backward compat. session_id is
+  // NULL for fan-out kinds (all_agents/all_supervisors) and the target session
+  // id for `target_kind = 'session'`.
+  session_id: string | null
   cron_expression?: string
   prompt?: string
 }): Promise<ScheduledTask> {

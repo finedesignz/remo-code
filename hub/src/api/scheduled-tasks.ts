@@ -165,11 +165,10 @@ scheduledTasks.post('/', async (c) => {
   const cyc = await detectCyclesForUser(userId, '__new__', v.actions)
   if (!cyc.ok) return c.json({ error: 'chain_cycle', path: cyc.cycle }, 400)
 
-  // `scheduled_tasks.session_id` is still NOT NULL in v1 schema. Use the
-  // target_id sentinel for session-typed tasks, otherwise the literal '-' so
-  // legacy v0 columns stay populated without a follow-up migration.
-  const sessionSentinel =
-    data.target_kind === 'session' && data.target_id ? data.target_id : '-'
+  // Session-typed tasks pin `session_id` to the target session; fan-out
+  // kinds (all_agents/all_supervisors) leave it NULL.
+  const sessionId =
+    data.target_kind === 'session' && data.target_id ? data.target_id : null
 
   const task = await createTaskV2({
     user_id: userId,
@@ -184,7 +183,7 @@ scheduledTasks.post('/', async (c) => {
     max_concurrent: data.max_concurrent ?? 1,
     enabled: data.enabled ?? true,
     post_run_actions: v.actions,
-    session_id: sessionSentinel,
+    session_id: sessionId,
     cron_expression: data.cron_expr,
     prompt: typeof data.payload?.prompt === 'string' ? data.payload.prompt : '',
   })
