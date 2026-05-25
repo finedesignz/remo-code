@@ -16,6 +16,9 @@ import { transcribe as transcribeApi } from './api/transcribe'
 import { scheduledTasks as scheduledTasksApi } from './api/scheduled-tasks'
 import { scheduledTaskRuns as scheduledTaskRunsApi } from './api/scheduled-task-runs'
 import { sentryIntake as sentryIntakeApi } from './api/sentry-intake'
+import { errorProjectsRouter } from './api/error-projects'
+import { errorsRouter } from './api/errors'
+import { errorRunsRouter } from './api/error-runs'
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { instructions as instructionsApi } from './api/instructions'
 import { runMigrations } from './db/migrate'
@@ -112,6 +115,9 @@ app.route('/api/commands', commandsApi)
 app.route('/api/transcribe', transcribeApi)
 app.route('/api/scheduled-tasks', scheduledTasksApi)
 app.route('/api/scheduled-task-runs', scheduledTaskRunsApi)
+app.route('/api/error-projects', errorProjectsRouter)
+app.route('/api/errors', errorsRouter)
+app.route('/api/error-runs', errorRunsRouter)
 app.route('/api/chat-tabs', chatTabsApi)
 app.route('/api/instructions', instructionsApi)
 

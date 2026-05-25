@@ -92,6 +92,18 @@ export function Sidebar({
           </svg>
         </button>
         <button
+          onClick={() => onNavigate('#/error-capture')}
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          title="Error Capture"
+          aria-label="Error Capture"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M8 1.5l6.5 11.5h-13z" />
+            <line x1="8" y1="6" x2="8" y2="9.5" />
+            <circle cx="8" cy="11.5" r="0.4" fill="currentColor" />
+          </svg>
+        </button>
+        <button
           onClick={() => onNavigate('#/settings')}
           className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
           title="Settings"
@@ -249,6 +261,13 @@ export function Sidebar({
             title="Scheduled tasks"
           >
             Schedules
+          </button>
+          <button
+            onClick={() => onNavigate('#/error-capture')}
+            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
+            title="Error Capture"
+          >
+            Errors
           </button>
           <button
             onClick={() => onNavigate('#/settings')}
