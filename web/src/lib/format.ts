@@ -12,3 +12,12 @@ export function formatCostUsd(cost: number | null | undefined): string | null {
   if (cost === null || cost === undefined) return null
   return cost >= 0.01 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(4)}`
 }
+
+export function formatRelativeAgo(d: Date): string {
+  const ms = Date.now() - d.getTime()
+  if (ms < 60_000) return 'just now'
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h ago`
+  if (ms < 7 * 86_400_000) return `${Math.floor(ms / 86_400_000)}d ago`
+  return `${Math.floor(ms / (7 * 86_400_000))}w ago`
+}
