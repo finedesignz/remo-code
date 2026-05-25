@@ -45,6 +45,11 @@ mock.module('../src/db/dal.ts', () => ({
     dalCalls.insertDeploymentRun.push(input)
     return { id: 'run-' + dalCalls.insertDeploymentRun.length }
   },
+  // Stubs required so that when other tests import modules transitively
+  // dependent on dal.ts (e.g. post-run/github-issue.ts), Bun's cached
+  // mock module still exposes the names they import.
+  hasOpenIssueForHash: async () => false,
+  recordOpenIssueForHash: async () => {},
 }))
 
 // Dynamically import AFTER mock.module is registered so the route binds to
