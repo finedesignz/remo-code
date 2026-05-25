@@ -1,0 +1,36 @@
+name: docs-drift
+
+on:
+  pull_request:
+    paths:
+      - 'hub/src/**'
+      - 'docs/openapi.json'
+      - 'docs/api.md'
+      - '.github/workflows/docs-drift.yml'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install deps
+        run: bun install
+      - name: docs:sync
+        env:
+          # Required for hub modules to load — never used at runtime here.
+          JWT_SECRET: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+          DATABASE_URL: postgres://localhost:5432/placeholder
+        run: bun run docs:sync
+      - name: Check for drift
+        run: |
+          if ! git diff --quiet -- docs/openapi.json docs/api.md; then
+            echo "::error::Docs drift detected. Run \`bun run docs:sync\` and commit docs/openapi.json + docs/api.md."
+            git --no-pager diff -- docs/openapi.json docs/api.md | head -200
+            exit 1
+          fi
+          echo "no drift"

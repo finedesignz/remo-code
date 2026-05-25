@@ -140,6 +140,54 @@ export const ScheduledRunEvent = z.discriminatedUnion('type', [
 ])
 export type ScheduledRunEvent = z.infer<typeof ScheduledRunEvent>
 
+// -- Error-capture outbound events (W3/T5) --
+// Lifecycle: error_received → (error_dispatched | error_skipped) → error_run_finished.
+
+export const ErrorReceived = z.object({
+  type: z.literal('error_received'),
+  error_id: z.string().min(1),
+  project_id: z.string().min(1),
+  fingerprint: z.string().min(1),
+  received_at: z.string(),
+})
+
+export const ErrorDispatched = z.object({
+  type: z.literal('error_dispatched'),
+  error_id: z.string().min(1),
+  project_id: z.string().min(1),
+  run_id: z.string().min(1),
+  dispatched_at: z.string(),
+})
+
+export const ErrorRunFinished = z.object({
+  type: z.literal('error_run_finished'),
+  error_id: z.string().min(1),
+  project_id: z.string().min(1),
+  run_id: z.string().min(1),
+  status: z.enum(['success', 'failed', 'skipped', 'cancelled']),
+  output_snippet: z.string().nullable().optional(),
+  cost_usd: z.number().nullable().optional(),
+  duration_ms: z.number().nullable().optional(),
+  error: z.string().nullable().optional(),
+  finished_at: z.string(),
+})
+
+export const ErrorSkipped = z.object({
+  type: z.literal('error_skipped'),
+  error_id: z.string().min(1),
+  project_id: z.string().min(1),
+  dispatch_status: z.enum(['skipped', 'failed', 'deduped', 'rate_limited', 'cap_exceeded']),
+  skip_reason: z.string().min(1),
+})
+
+export const ErrorCaptureEvent = z.discriminatedUnion('type', [
+  ErrorReceived,
+  ErrorDispatched,
+  ErrorRunFinished,
+  ErrorSkipped,
+])
+export type ErrorCaptureEvent = z.infer<typeof ErrorCaptureEvent>
+
 // -- Hub outbound types (not validated, we construct them) --
 
 export type HubToChannel =
@@ -208,4 +256,15 @@ export type HubToClient =
   // its capacity chip without polling.
   | { type: 'supervisor_capacity_changed'; supervisor_id: string;
       running: number; cap: number }
+  | { type: 'error_received'; error_id: string; project_id: string;
+      fingerprint: string; received_at: string }
+  | { type: 'error_dispatched'; error_id: string; project_id: string;
+      run_id: string; dispatched_at: string }
+  | { type: 'error_run_finished'; error_id: string; project_id: string;
+      run_id: string; status: 'success' | 'failed' | 'skipped' | 'cancelled';
+      output_snippet?: string | null; cost_usd?: number | null;
+      duration_ms?: number | null; error?: string | null; finished_at: string }
+  | { type: 'error_skipped'; error_id: string; project_id: string;
+      dispatch_status: 'skipped' | 'failed' | 'deduped' | 'rate_limited' | 'cap_exceeded';
+      skip_reason: string }
   | { type: 'ping' }

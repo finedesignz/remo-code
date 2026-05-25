@@ -1,6 +1,6 @@
 {
   "name": "remo-code-supervisor",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local supervisor for Remo Code — manage and remote-launch claude-code sessions in your local repos from the web UI",
   "type": "module",
   "main": "src/index.ts",

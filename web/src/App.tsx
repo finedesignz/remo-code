@@ -6,6 +6,7 @@ import { SetupForm } from './components/SetupForm'
 import { Layout } from './components/Layout'
 import { SettingsPage } from './components/SettingsPage'
 import { SchedulesPage } from './components/SchedulesPage'
+import { ErrorCapturePage } from './components/ErrorCapturePage'
 import { ChatSurfaceShowcase } from './components/ChatSurfaceShowcase'
 import { MobileAccordionShowcase } from './components/MobileAccordionShowcase'
 import { GridPage } from './components/GridPage'
@@ -14,7 +15,7 @@ import { useBrowserNotifications } from './hooks/useBrowserNotifications'
 import type { Profile } from './hooks/useProfile'
 import type { AuthUser } from './lib/auth.ts'
 
-type Route = 'chat' | 'settings' | 'schedules' | 'grid' | 'dev-chat-surface' | 'dev-mobile-accordion'
+type Route = 'chat' | 'settings' | 'schedules' | 'error-capture' | 'grid' | 'dev-chat-surface' | 'dev-mobile-accordion'
 
 function LoadingScreen() {
   return (
@@ -32,7 +33,12 @@ function getRoute(): Route {
     return 'settings'
   }
   if (hash.startsWith('#/settings')) return 'settings'
-  if (hash.startsWith('#/schedules')) return 'schedules'
+  // Legacy /#/schedules → settings with schedules tab
+  if (hash.startsWith('#/schedules')) {
+    window.location.hash = '#/settings?tab=schedules'
+    return 'settings'
+  }
+  if (hash.startsWith('#/error-capture')) return 'error-capture'
   if (hash.startsWith('#/grid')) return 'grid'
   if (hash.startsWith('#/dev/chat-surface')) return 'dev-chat-surface'
   if (hash.startsWith('#/dev/mobile-accordion')) return 'dev-mobile-accordion'
@@ -108,6 +114,10 @@ export default function App() {
         <SchedulesRoute token={token} onBack={goToChat} />
       )}
 
+      {route === 'error-capture' && (
+        <ErrorCaptureRoute token={token} onBack={goToChat} />
+      )}
+
       {route === 'dev-chat-surface' && (
         <ChatSurfaceShowcase token={token} />
       )}
@@ -135,6 +145,11 @@ export default function App() {
 function SchedulesRoute({ token, onBack }: { token: string; onBack: () => void }) {
   const { subscribe } = useWebSocket(token)
   return <SchedulesPage token={token} onBack={onBack} subscribe={subscribe} />
+}
+
+function ErrorCaptureRoute({ token, onBack }: { token: string; onBack: () => void }) {
+  const { subscribe } = useWebSocket(token)
+  return <ErrorCapturePage token={token} onBack={onBack} subscribe={subscribe} />
 }
 
 function NotificationsBridge({ token, profile }: { token: string; profile: Profile }) {

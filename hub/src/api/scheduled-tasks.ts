@@ -30,6 +30,9 @@ import {
   detectChainCycles,
   type PostRunAction,
 } from '../scheduler/post-run/schema.ts'
+import { buildTaskName, type TaskType, type TargetKind } from '../scheduler/auto-name.ts'
+import { listSessions } from '../db/dal.ts'
+import { listSupervisorsForUser } from '../db/supervisor-dal.ts'
 
 export const scheduledTasks = new Hono()
 
@@ -40,7 +43,12 @@ const TargetKindEnum = z.enum(['session', 'supervisor', 'all_agents', 'all_super
 const CatchupPolicyEnum = z.enum(['skip', 'run_once'])
 
 const CreateSchema = z.object({
-  name: z.string().min(1).max(200).trim(),
+  // Legacy: callers may still POST a full `name`; back-compat only. The
+  // server always recomputes the prefix from (task_type, target, cron) and
+  // composes the stored `name` as `<prefix> — <suffix>`. New clients should
+  // send `name_suffix` and omit `name`.
+  name: z.string().min(1).max(200).trim().optional(),
+  name_suffix: z.string().max(200).optional(),
   task_type: TaskTypeEnum,
   target_kind: TargetKindEnum,
   target_id: z.string().min(1).nullable().optional(),
@@ -128,6 +136,66 @@ async function detectCyclesForUser(
   return detectChainCycles(graph)
 }
 
+/**
+ * Resolve the user's sessions + supervisors and compose the locked prefix
+ * + final name. The server's prefix is authoritative on persist — the
+ * client renders a preview but never gets to override the value stored on
+ * `scheduled_tasks.name`.
+ *
+ * `legacyName` is the optional back-compat `name` body field; when no
+ * suffix was provided but a legacy name was, we use the legacy value as
+ * the suffix so users editing old rows don't lose their custom names.
+ */
+async function buildNameForUser(
+  userId: string,
+  input: {
+    task_type: TaskType
+    target_kind: TargetKind
+    target_id: string | null
+    payload: Record<string, any>
+    cron_expr: string
+  },
+  suffix: string | null | undefined,
+  legacyName: string | null | undefined,
+): Promise<{ prefix: string; suffix: string; name: string }> {
+  const [sessions, supervisors] = await Promise.all([
+    listSessions(userId),
+    listSupervisorsForUser(userId),
+  ])
+  const ctx = {
+    sessions: (sessions as any[]).map((s) => ({
+      id: s.id,
+      name: s.name,
+      project_dir: s.project_dir,
+    })),
+    supervisors: (supervisors as any[]).map((s) => ({
+      id: s.id,
+      hostname: s.hostname,
+    })),
+  }
+  let effectiveSuffix = (suffix ?? '').trim()
+  if (!effectiveSuffix && legacyName) {
+    // Strip the prefix from legacyName if it starts with it; otherwise treat
+    // the whole legacy name as a custom suffix.
+    const probe = buildTaskName(input, '', ctx)
+    const raw = legacyName.trim()
+    if (probe.prefix && raw.toLowerCase().startsWith(probe.prefix.toLowerCase())) {
+      effectiveSuffix = raw.slice(probe.prefix.length).replace(/^\s*[—\-:]+\s*/, '').trim()
+    } else {
+      effectiveSuffix = raw
+    }
+  }
+  const built = buildTaskName(input, effectiveSuffix, ctx)
+  // Fallback: if the prefix couldn't be computed (missing target etc.) but
+  // we have a legacy or suffix value, keep `name` non-empty so the NOT NULL
+  // column never breaks.
+  if (!built.name) {
+    const fallback = (legacyName || effectiveSuffix || 'Untitled task').trim()
+    return { prefix: built.prefix, suffix: built.suffix, name: fallback }
+  }
+  return built
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 scheduledTasks.get('/', async (c) => {
@@ -170,9 +238,20 @@ scheduledTasks.post('/', async (c) => {
   const sessionId =
     data.target_kind === 'session' && data.target_id ? data.target_id : null
 
+  // Build the locked auto-name prefix server-side from current sessions +
+  // supervisors. The client also computes a prefix for live preview, but the
+  // server's value is authoritative on persist.
+  const built = await buildNameForUser(userId, {
+    task_type: data.task_type,
+    target_kind: data.target_kind,
+    target_id: data.target_id ?? null,
+    payload: data.payload ?? {},
+    cron_expr: data.cron_expr,
+  }, data.name_suffix, data.name)
+
   const task = await createTaskV2({
     user_id: userId,
-    name: data.name,
+    name: built.name,
     task_type: data.task_type,
     target_kind: data.target_kind,
     target_id: data.target_id ?? null,
@@ -186,6 +265,8 @@ scheduledTasks.post('/', async (c) => {
     session_id: sessionId,
     cron_expression: data.cron_expr,
     prompt: typeof data.payload?.prompt === 'string' ? data.payload.prompt : '',
+    name_prefix: built.prefix || null,
+    name_suffix: built.suffix || null,
   })
 
   registry.register(task)
@@ -243,8 +324,33 @@ scheduledTasks.patch('/:id', async (c) => {
   )
   if (!cyc.ok) return c.json({ error: 'chain_cycle', path: cyc.cycle }, 400)
 
+  // Recompute the locked prefix from the effective (post-merge) fields and
+  // re-compose the final name. Suffix sources, in priority:
+  //   1) explicit `name_suffix` in the patch body
+  //   2) existing row's `name_suffix`
+  //   3) legacy `data.name` (treated as full custom name → suffix-only fallback)
+  const effectivePayload = data.payload ?? existing.payload ?? {}
+  const suffixSource =
+    data.name_suffix !== undefined
+      ? data.name_suffix
+      : (existing.name_suffix ?? null)
+  const built = await buildNameForUser(
+    userId,
+    {
+      task_type: (data.task_type ?? existing.task_type) as TaskType,
+      target_kind: effective.target_kind as TargetKind,
+      target_id: effective.target_id ?? null,
+      payload: effectivePayload,
+      cron_expr: effective.cron_expr,
+    },
+    suffixSource,
+    data.name,
+  )
+
   const updated = await updateTaskV2(id, userId, {
-    name: data.name,
+    name: built.name,
+    name_prefix: built.prefix || null,
+    name_suffix: built.suffix || null,
     enabled: data.enabled,
     task_type: data.task_type,
     target_kind: data.target_kind,

@@ -110,7 +110,14 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
   }
 
   const result = AgentInbound.safeParse(parsed)
-  if (!result.success) return
+  if (!result.success) {
+    // Surface schema rejections so silent drops don't masquerade as connection
+    // failures. Truncate payload preview to keep logs readable.
+    const t = (parsed as any)?.type ?? 'unknown'
+    const preview = JSON.stringify(parsed).slice(0, 200)
+    console.warn(`[agent] schema reject type=${t} authenticated=${ws.data.authenticated} role=${ws.data.role} errors=${result.error.issues.map(i => `${i.path.join('.')}:${i.message}`).join('; ')} payload=${preview}`)
+    return
+  }
   const msg = result.data
 
   // --- Auth ---
@@ -257,6 +264,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       const g = await import('../scheduler/grace.ts')
       void g.drainForTarget(session.id, userId)
     } catch {}
+    // W3/T4 — drain any error-capture errors parked for this session.
+    try {
+      const eg = await import('../error-capture/grace.ts')
+      void eg.drainForSession(session.id)
+    } catch {}
     return
   }
 
@@ -378,6 +390,13 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     try {
       const mod = await import('../scheduler/senders/agent.ts')
       void mod.onAssistantMessage(sessionId, msg.content)
+    } catch {}
+    // W3 — finalize any in-flight error-capture run for this session.
+    try {
+      const ec = await import('../error-capture/run-lifecycle.ts')
+      if (ec.errorRunActiveForSession(sessionId)) {
+        void ec.onAgentReply(sessionId, msg.content)
+      }
     } catch {}
   }
 

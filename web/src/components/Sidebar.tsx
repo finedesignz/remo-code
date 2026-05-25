@@ -92,6 +92,18 @@ export function Sidebar({
           </svg>
         </button>
         <button
+          onClick={() => onNavigate('#/error-capture')}
+          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          title="Error Capture"
+          aria-label="Error Capture"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M8 1.5l6.5 11.5h-13z" />
+            <line x1="8" y1="6" x2="8" y2="9.5" />
+            <circle cx="8" cy="11.5" r="0.4" fill="currentColor" />
+          </svg>
+        </button>
+        <button
           onClick={() => onNavigate('#/settings')}
           className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
           title="Settings"
@@ -251,35 +263,10 @@ export function Sidebar({
           </button>
         </div>
 
-        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-2">
-          <button
-            onClick={() => onNavigate('#/grid')}
-            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
-            title="Multichat grid view"
-          >
-            Grid
-          </button>
-          <button
-            onClick={() => onNavigate('#/schedules')}
-            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
-            title="Scheduled tasks"
-          >
-            Schedules
-          </button>
-          <button
-            onClick={() => onNavigate('#/settings')}
-            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
-          >
-            Settings
-          </button>
-          <button
-            onClick={signOut}
-            className="px-3 py-2 text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors"
-            title="Sign out"
-            aria-label="Sign out"
-          >
-            Sign out
-          </button>
+        {/* Footer trimmed — Grid/Schedules/Settings/Errors live in the header dropdown nav.
+            Sign-out also moved into the avatar dropdown. */}
+        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] text-[11px] text-[var(--text-muted)] truncate" title={user.email}>
+          {user.email}
         </div>
       </div>
       {hoveredSession && hoverInfo && createPortal(

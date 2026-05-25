@@ -262,7 +262,7 @@ export async function revokeApiKey(userId: string) {
 // ── Users / Profiles ──────────────────────────────────────────────────────────
 
 export async function getUserById(id: string) {
-  const rows = await sql`SELECT id, email, display_name, role, system_prompt, timezone, daily_cost_cap_usd, web_push_enabled, created_at, updated_at FROM users WHERE id = ${id}`;
+  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, web_push_enabled, created_at, updated_at FROM users WHERE id = ${id}`;
   return rows[0] ?? null;
 }
 
@@ -437,10 +437,11 @@ export async function createUser(email: string, passwordHash: string, role: stri
   return rows[0];
 }
 
-export async function updateProfile(userId: string, fields: { display_name?: string; system_prompt?: string | null; timezone?: string }) {
+export async function updateProfile(userId: string, fields: { display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string }) {
   // Build a partial update — only touch the columns provided.
   const sets: any[] = [];
   if (fields.display_name !== undefined) sets.push(sql`display_name = ${fields.display_name}`);
+  if (fields.avatar_url !== undefined) sets.push(sql`avatar_url = ${fields.avatar_url}`);
   if (fields.system_prompt !== undefined) sets.push(sql`system_prompt = ${fields.system_prompt}`);
   if (fields.timezone !== undefined) sets.push(sql`timezone = ${fields.timezone}`);
   if (sets.length === 0) return getUserById(userId);
@@ -449,8 +450,8 @@ export async function updateProfile(userId: string, fields: { display_name?: str
   for (let i = 0; i < sets.length; i++) {
     q = i === 0 ? sql`${q}${sets[i]}` : sql`${q}, ${sets[i]}`;
   }
-  const rows = await sql`${q} WHERE id = ${userId} RETURNING id, email, display_name, role, system_prompt, timezone`;
-  return rows[0] ?? null;
+  await sql`${q} WHERE id = ${userId}`;
+  return getUserById(userId);
 }
 
 // ── GitHub-issue post-run idempotency (Phase 06 plan 007) ────────────────────

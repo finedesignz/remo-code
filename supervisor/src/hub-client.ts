@@ -3,19 +3,23 @@ import { scanAll } from './repo-scanner'
 import { cloneRepo, pullRepo, pullLocal, checkoutBranch, listBranches, isDirty } from './git-ops'
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
+import { getHandler, nativeSupervisorCommands } from './commands/index'
 import type { SupervisorConfig } from './config'
 
-const VERSION = '0.2.0'
+const VERSION = '0.3.0'
 
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
-  | { type: 'supervisor.hello'; version: string; os: string; hostname: string; roots: string[]; capabilities: string[] }
+  | { type: 'supervisor.hello'; version: string; os: string; hostname: string; roots: string[]; capabilities: string[]; allow_dangerous_skip_permissions: boolean; restrict_to_git: boolean; max_concurrent: number; audit_log_enabled: boolean }
   | { type: 'supervisor.state'; state: ProcState; run_id?: string | null; repo_path?: string | null; pid?: number | null; restart_count?: number; last_exit?: any }
   | { type: 'supervisor.log'; level: string; message: string; run_id?: string; ts?: string }
   | { type: 'repo.scan_result'; req_id: string; repos: any[] }
   | { type: 'repo.op_result'; req_id: string; op: string; ok: boolean; error?: string; data?: any }
   | { type: 'repo.clone_progress'; req_id: string; stage: string; percent?: number }
   | { type: 'supervisor.commands_sync'; commands: Array<{ kind: 'command' | 'skill'; name: string; description: string | null; source: string; path: string }> }
+  | { type: 'run_started'; run_id: string }
+  | { type: 'run_output'; run_id: string; chunk: string }
+  | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
   | { type: 'pong' }
 
 export class SupervisorClient {
@@ -43,20 +47,38 @@ export class SupervisorClient {
       onLog: (level, message, runId) => {
         this.log(level, message, runId)
       },
-    })
+    }, cfg)
+  }
+
+  /** Detach handlers + close any prior socket so reconnects don't leak listeners. */
+  private detachSocket(ws: WebSocket | null) {
+    if (!ws) return
+    try { ws.onopen = null as any } catch {}
+    try { ws.onmessage = null as any } catch {}
+    try { ws.onclose = null as any } catch {}
+    try { ws.onerror = null as any } catch {}
+    try { if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) ws.close() } catch {}
   }
 
   connect() {
+    // Clean up any previous socket before reassigning — otherwise the old socket's
+    // event handlers keep closures (and this.cfg references) alive forever on reconnect.
+    this.detachSocket(this.ws)
+    this.ws = null
+
     const wsUrl = this.cfg.hubUrl.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/agent'
     this.log('info', `connecting to ${wsUrl}`)
+    let ws: WebSocket
     try {
-      this.ws = new WebSocket(wsUrl)
+      ws = new WebSocket(wsUrl)
     } catch (err: any) {
       this.log('error', `WebSocket construct failed: ${err.message}`)
       this.scheduleReconnect()
       return
     }
-    this.ws.onopen = () => {
+    this.ws = ws
+    ws.onopen = () => {
+      if (this.ws !== ws) return // stale handler from a replaced socket
       this.reconnectAttempts = 0
       this.send({
         type: 'auth',
@@ -66,17 +88,21 @@ export class SupervisorClient {
         role: 'supervisor',
       })
     }
-    this.ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
+      if (this.ws !== ws) return
       let msg: any
       try { msg = JSON.parse(typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data as any)) } catch { return }
       this.handleMessage(msg)
     }
-    this.ws.onclose = () => {
+    ws.onclose = () => {
+      if (this.ws !== ws) return // a newer socket has taken over
       this.authenticated = false
       this.log('warn', 'WebSocket closed')
+      this.detachSocket(ws)
+      this.ws = null
       this.scheduleReconnect()
     }
-    this.ws.onerror = () => {
+    ws.onerror = () => {
       // onclose will follow
     }
   }
@@ -122,12 +148,18 @@ export class SupervisorClient {
         hostname: hostname(),
         roots: this.cfg.roots,
         capabilities: ['supervisor', 'agent'],
+        allow_dangerous_skip_permissions: this.cfg.allowDangerousSkipPermissions,
+        restrict_to_git: this.cfg.requireGitRepo,
+        max_concurrent: this.cfg.maxConcurrent,
+        audit_log_enabled: this.cfg.auditLogEnabled,
       })
       // Sync commands + skills (best-effort, async)
       try {
-        const cmds = scanAllCommands()
+        const scanned = scanAllCommands()
+        const native = nativeSupervisorCommands()
+        const cmds = [...native, ...scanned]
         this.send({ type: 'supervisor.commands_sync', commands: cmds })
-        this.log('info', `synced ${cmds.length} commands/skills`)
+        this.log('info', `synced ${cmds.length} commands/skills (${native.length} native)`)
       } catch (err: any) {
         this.log('warn', `commands scan failed: ${err.message}`)
       }
@@ -150,6 +182,7 @@ export class SupervisorClient {
       case 'session.start': await this.onSessionStart(msg); break
       case 'session.stop': await this.onSessionStop(msg); break
       case 'session.status': this.onSessionStatus(msg); break
+      case 'run_command': await this.onRunCommand(msg); break
       default:
         // unknown
         break
@@ -186,7 +219,7 @@ export class SupervisorClient {
     }
   }
 
-  private async onSessionStart(msg: { run_id: string; repo_path: string; branch?: string; pull?: boolean; initial_prompt?: string; api_key: string; hub_url: string }) {
+  private async onSessionStart(msg: { run_id: string; repo_path: string; branch?: string; pull?: boolean; initial_prompt?: string; api_key: string; hub_url: string; dangerously_skip_permissions?: boolean }) {
     // Pre-flight: bring the worktree to the latest committed state on the requested branch.
     // pull=true → checkout + git pull --ff-only against existing remote (no token needed).
     // pull=false but branch set → just checkout. Both gates refuse if dirty.
@@ -213,12 +246,44 @@ export class SupervisorClient {
       initialPrompt: msg.initial_prompt ?? null,
       apiKey: this.cfg.apiKey,
       hubUrl: this.cfg.hubUrl,
+      dangerouslySkipPermissions: msg.dangerously_skip_permissions === true,
     })
   }
 
   private async onSessionStop(msg: { run_id: string; reason: string }) {
     if (msg.run_id) await this.pm.stop(msg.run_id, msg.reason)
     else await this.pm.stopAll(msg.reason)
+  }
+
+  private async onRunCommand(msg: { run_id: string; command: string; args?: string[] }) {
+    const { run_id, command } = msg
+    const args = msg.args ?? []
+    const handler = getHandler(command)
+    if (!handler) {
+      this.send({ type: 'run_finished', run_id, exit_code: 1, error: 'unknown_command' })
+      return
+    }
+    const startedAt = Date.now()
+    this.send({ type: 'run_started', run_id })
+    try {
+      const result = await handler(args)
+      this.send({
+        type: 'run_finished',
+        run_id,
+        exit_code: result.exit_code,
+        duration_ms: Date.now() - startedAt,
+        snippet: result.snippet,
+        error: result.error,
+      })
+    } catch (err: any) {
+      this.send({
+        type: 'run_finished',
+        run_id,
+        exit_code: 1,
+        duration_ms: Date.now() - startedAt,
+        error: `handler_exception: ${err?.message || String(err)}`,
+      })
+    }
   }
 
   private onSessionStatus(msg: { req_id: string }) {

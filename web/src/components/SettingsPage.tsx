@@ -1,10 +1,11 @@
-import { useState, useEffect, type ReactNode } from 'react'
+import { useState, useEffect, useRef, type ReactNode } from 'react'
 import type { Profile } from '../hooks/useProfile'
 import { useWebPushPermission } from '../hooks/useWebPushPermission'
 import { useApiKey } from '../hooks/useApiKey'
-import { useSessions, type AgentInfo, type CodeSession } from '../hooks/useSessions'
+import { useWebSocket } from '../hooks/useWebSocket'
 import { SupervisorPage } from './SupervisorPage'
 import { CommandsList } from './CommandsList'
+import { SchedulesPage } from './SchedulesPage'
 import { hubFetch } from '../lib/api'
 
 interface Props {
@@ -12,6 +13,7 @@ interface Props {
   profile: Profile
   onUpdateProfile: (data: {
     display_name?: string
+    avatar_url?: string | null
     system_prompt?: string | null
     daily_cost_cap_usd?: number
     web_push_enabled?: boolean
@@ -20,12 +22,14 @@ interface Props {
   onBack: () => void
 }
 
-type Tab = 'account' | 'supervisor' | 'apikey' | 'commands' | 'instructions'
+type Tab = 'profile' | 'supervisor' | 'apikey' | 'commands' | 'instructions' | 'schedules'
 
 function readTabFromHash(): Tab {
   const m = window.location.hash.match(/[?&]tab=([a-z]+)/)
-  const v = m?.[1] as Tab | undefined
-  if (v === 'account' || v === 'supervisor' || v === 'apikey' || v === 'commands' || v === 'instructions') return v
+  const raw = m?.[1]
+  // Back-compat: legacy 'account' → 'profile'
+  if (raw === 'account') return 'profile'
+  if (raw === 'profile' || raw === 'supervisor' || raw === 'apikey' || raw === 'commands' || raw === 'instructions' || raw === 'schedules') return raw
   return 'supervisor'
 }
 
@@ -64,8 +68,9 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
 
   const tabs: { id: Tab; label: string; desc: string }[] = [
     { id: 'supervisor', label: 'Supervisor', desc: 'Connect repos & manage agents' },
+    { id: 'schedules', label: 'Schedules', desc: 'Cron-driven scheduled tasks' },
     { id: 'commands', label: 'Commands', desc: 'Browse Claude slash commands & skills' },
-    { id: 'account', label: 'Account', desc: 'Profile & system prompt' },
+    { id: 'profile', label: 'Profile', desc: 'Display name, avatar & system prompt' },
     { id: 'instructions', label: 'Instructions', desc: 'Per-CLI global instruction files synced to agents' },
     { id: 'apikey', label: 'API Key', desc: 'Agent authentication' },
   ]
@@ -88,12 +93,12 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
 
   /* ----- Section renderers (used by both desktop and mobile) ----- */
 
-  const renderAccount = () => (
+  const renderProfile = () => (
     <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-      <ConnectedAgentsCard token={token} />
-      <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
+      <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 xl:col-span-2">
         <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-4">Profile</h3>
         <div className="space-y-4">
+          <AvatarUploader profile={profile} onUpdateProfile={onUpdateProfile} />
           <div>
             <label className="block text-xs text-[var(--text-muted)] mb-1.5">Email</label>
             <div className="px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-muted)]">
@@ -186,12 +191,14 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
 
   const renderSupervisor = () => <SupervisorPage token={token} embedded />
   const renderApiKey = () => <ApiKeyTab token={token} />
+  const renderSchedules = () => <SchedulesTabEmbedded token={token} />
 
   const sectionFor = (id: Tab) => {
-    if (id === 'account') return renderAccount()
+    if (id === 'profile') return renderProfile()
     if (id === 'supervisor') return renderSupervisor()
     if (id === 'commands') return <CommandsList token={token} />
     if (id === 'instructions') return <InstructionsTab token={token} />
+    if (id === 'schedules') return renderSchedules()
     return renderApiKey()
   }
 
@@ -275,93 +282,99 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
 }
 
 /* ------------------------------------------------------------------ */
-/* Connected Agents card                                               */
+/* Avatar uploader (data URL, 1MB cap)                                  */
 /* ------------------------------------------------------------------ */
 
-function formatBytes(bytes?: number): string {
-  if (!bytes || bytes <= 0) return '—'
-  const gb = bytes / (1024 ** 3)
-  if (gb >= 1) return `${gb.toFixed(1)} GB`
-  const mb = bytes / (1024 ** 2)
-  return `${mb.toFixed(0)} MB`
-}
+function AvatarUploader({
+  profile,
+  onUpdateProfile,
+}: {
+  profile: Profile
+  onUpdateProfile: (data: { avatar_url?: string | null }) => Promise<any>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
-function platformLabel(p?: string): string {
-  if (!p) return '—'
-  if (p === 'darwin') return 'macOS'
-  if (p === 'win32') return 'Windows'
-  if (p === 'linux') return 'Linux'
-  return p
-}
+  const initial = (profile.display_name?.trim()?.[0] || profile.email?.[0] || '?').toUpperCase()
+  const MAX_BYTES = 1_000_000
 
-function ConnectedAgentsCard({ token }: { token: string }) {
-  const { sessions, loading, refetch } = useSessions(token)
-  const online = sessions.filter((s: CodeSession) =>
-    (s.status === 'online' || s.status === 'thinking') && s.agent_info
-  )
+  const onPick = () => inputRef.current?.click()
 
-  return (
-    <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 xl:col-span-2">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-[var(--text-primary)]">Connected Agents</h3>
-        <button
-          onClick={refetch}
-          className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
-        >
-          Refresh
-        </button>
-      </div>
-      {loading ? (
-        <p className="text-sm text-[var(--text-muted)]">Loading...</p>
-      ) : online.length === 0 ? (
-        <p className="text-sm text-[var(--text-muted)]">
-          No connected agents. Run <code className="text-emerald-300">claude-remote</code> on a machine to connect one.
-        </p>
-      ) : (
-        <div className="space-y-3">
-          {online.map((s: CodeSession) => {
-            const info = (s.agent_info || {}) as AgentInfo
-            return (
-              <div key={s.id} className="bg-[var(--bg-primary)]/60 rounded-lg p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <span className={`w-2 h-2 rounded-full ${s.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`} />
-                  <span className="text-sm font-semibold text-[var(--text-primary)]">
-                    {info.hostname || s.name}
-                  </span>
-                  {info.agent_version && (
-                    <span className="text-[10px] font-mono text-[var(--text-muted)] ml-auto">v{info.agent_version}</span>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2 text-xs">
-                  <Spec label="OS" value={`${platformLabel(info.platform)}${info.os_release ? ` ${info.os_release}` : ''}`} />
-                  <Spec label="Arch" value={info.arch} />
-                  <Spec label="CPU" value={info.cpu_model} />
-                  <Spec label="Cores" value={info.cpu_cores?.toString()} />
-                  <Spec label="Memory" value={formatBytes(info.total_mem_bytes)} />
-                  <Spec label="Runtime" value={info.bun_version ? `Bun ${info.bun_version}` : info.node_version ? `Node ${info.node_version}` : '—'} />
-                  {s.project_dir && (
-                    <div className="col-span-2 sm:col-span-3">
-                      <div className="text-[var(--text-muted)] text-[10px] uppercase tracking-wider mb-0.5">Project</div>
-                      <div className="text-[var(--text-secondary)] font-mono break-all">{s.project_dir}</div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
-}
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    if (!/^image\//.test(f.type)) { setError('Pick an image file'); return }
+    if (f.size > MAX_BYTES) { setError(`Image must be under ${(MAX_BYTES / 1024 / 1024).toFixed(1)} MB`); return }
+    setError(null)
+    setBusy(true)
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const r = new FileReader()
+        r.onload = () => resolve(String(r.result))
+        r.onerror = () => reject(r.error)
+        r.readAsDataURL(f)
+      })
+      await onUpdateProfile({ avatar_url: dataUrl })
+    } catch (err: any) {
+      setError(err?.message || 'Upload failed')
+    } finally {
+      setBusy(false)
+    }
+  }
 
-function Spec({ label, value }: { label: string; value?: string }) {
+  const onClear = async () => {
+    setBusy(true)
+    setError(null)
+    try { await onUpdateProfile({ avatar_url: null }) }
+    finally { setBusy(false) }
+  }
+
   return (
     <div>
-      <div className="text-[var(--text-muted)] text-[10px] uppercase tracking-wider">{label}</div>
-      <div className="text-[var(--text-secondary)] truncate" title={value}>{value || '—'}</div>
+      <label className="block text-xs text-[var(--text-muted)] mb-1.5">Avatar</label>
+      <div className="flex items-center gap-4">
+        <div className="w-16 h-16 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-xl font-semibold overflow-hidden shrink-0">
+          {profile.avatar_url
+            ? <img src={profile.avatar_url} alt="avatar" className="w-full h-full object-cover" />
+            : initial}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onPick}
+            disabled={busy}
+            className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+          >
+            {busy ? 'Uploading…' : profile.avatar_url ? 'Replace' : 'Upload'}
+          </button>
+          {profile.avatar_url && (
+            <button
+              type="button"
+              onClick={onClear}
+              disabled={busy}
+              className="px-3 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors disabled:opacity-50"
+            >
+              Remove
+            </button>
+          )}
+          <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={onFile} className="hidden" />
+        </div>
+      </div>
+      <p className="text-[10px] text-[var(--text-muted)] mt-1.5">PNG/JPEG/WebP, max 1 MB. Stored inline in your account.</p>
+      {error && <p className="text-xs text-red-400 mt-1.5">{error}</p>}
     </div>
   )
+}
+
+/* ------------------------------------------------------------------ */
+/* Schedules tab — embeds SchedulesPage with WS for live runs           */
+/* ------------------------------------------------------------------ */
+
+function SchedulesTabEmbedded({ token }: { token: string }) {
+  const { subscribe } = useWebSocket(token)
+  return <SchedulesPage token={token} subscribe={subscribe} />
 }
 
 /* ------------------------------------------------------------------ */

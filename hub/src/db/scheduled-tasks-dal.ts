@@ -49,6 +49,12 @@ export interface ScheduledTask {
   last_fire_at: string | null
   next_fire_at: string | null
   post_run_actions: PostRunAction[]
+  // Auto-name parts. `name_prefix` is the server-computed locked portion
+  // (e.g. "Continue Dev on finedesignz/kh-hub every 4h"); `name_suffix` is
+  // the user's optional free-form note. The legacy `name` column stays
+  // authoritative for back-compat — DAL writes keep all three in sync.
+  name_prefix: string | null
+  name_suffix: string | null
   // Derived from latest finalized run via LATERAL JOIN in listTasksForUser/getTask.
   last_run_cost_usd?: number | null
   last_run_duration_ms?: number | null
@@ -198,12 +204,15 @@ export async function createTaskV2(input: {
   session_id: string | null
   cron_expression?: string
   prompt?: string
+  name_prefix?: string | null
+  name_suffix?: string | null
 }): Promise<ScheduledTask> {
   const rows = await sql<ScheduledTask[]>`
     INSERT INTO scheduled_tasks (
       user_id, session_id, name, cron_expression, prompt, enabled,
       task_type, target_kind, target_id, payload, cron_expr, timezone,
-      catchup_policy, max_concurrent, post_run_actions
+      catchup_policy, max_concurrent, post_run_actions,
+      name_prefix, name_suffix
     ) VALUES (
       ${input.user_id}, ${input.session_id}, ${input.name},
       ${input.cron_expression ?? input.cron_expr}, ${input.prompt ?? ''},
@@ -212,7 +221,8 @@ export async function createTaskV2(input: {
       ${sql.json((input.payload ?? {}) as any)}, ${input.cron_expr},
       ${input.timezone}, ${input.catchup_policy ?? 'skip'},
       ${input.max_concurrent ?? 1},
-      ${sql.json((input.post_run_actions ?? []) as any)}
+      ${sql.json((input.post_run_actions ?? []) as any)},
+      ${input.name_prefix ?? null}, ${input.name_suffix ?? null}
     )
     RETURNING *
   `
@@ -234,10 +244,14 @@ export async function updateTaskV2(
     catchup_policy: CatchupPolicy
     max_concurrent: number
     post_run_actions: PostRunAction[]
+    name_prefix: string | null
+    name_suffix: string | null
   }>,
 ): Promise<ScheduledTask | null> {
   const sets: any[] = []
   if (fields.name !== undefined) sets.push(sql`name = ${fields.name}`)
+  if (fields.name_prefix !== undefined) sets.push(sql`name_prefix = ${fields.name_prefix}`)
+  if (fields.name_suffix !== undefined) sets.push(sql`name_suffix = ${fields.name_suffix}`)
   if (fields.enabled !== undefined) sets.push(sql`enabled = ${fields.enabled}`)
   if (fields.task_type !== undefined) sets.push(sql`task_type = ${fields.task_type}`)
   if (fields.target_kind !== undefined) sets.push(sql`target_kind = ${fields.target_kind}`)
