@@ -46,17 +46,35 @@ export class SupervisorClient {
     }, cfg)
   }
 
+  /** Detach handlers + close any prior socket so reconnects don't leak listeners. */
+  private detachSocket(ws: WebSocket | null) {
+    if (!ws) return
+    try { ws.onopen = null as any } catch {}
+    try { ws.onmessage = null as any } catch {}
+    try { ws.onclose = null as any } catch {}
+    try { ws.onerror = null as any } catch {}
+    try { if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) ws.close() } catch {}
+  }
+
   connect() {
+    // Clean up any previous socket before reassigning — otherwise the old socket's
+    // event handlers keep closures (and this.cfg references) alive forever on reconnect.
+    this.detachSocket(this.ws)
+    this.ws = null
+
     const wsUrl = this.cfg.hubUrl.replace('https://', 'wss://').replace('http://', 'ws://') + '/ws/agent'
     this.log('info', `connecting to ${wsUrl}`)
+    let ws: WebSocket
     try {
-      this.ws = new WebSocket(wsUrl)
+      ws = new WebSocket(wsUrl)
     } catch (err: any) {
       this.log('error', `WebSocket construct failed: ${err.message}`)
       this.scheduleReconnect()
       return
     }
-    this.ws.onopen = () => {
+    this.ws = ws
+    ws.onopen = () => {
+      if (this.ws !== ws) return // stale handler from a replaced socket
       this.reconnectAttempts = 0
       this.send({
         type: 'auth',
@@ -66,17 +84,21 @@ export class SupervisorClient {
         role: 'supervisor',
       })
     }
-    this.ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
+      if (this.ws !== ws) return
       let msg: any
       try { msg = JSON.parse(typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data as any)) } catch { return }
       this.handleMessage(msg)
     }
-    this.ws.onclose = () => {
+    ws.onclose = () => {
+      if (this.ws !== ws) return // a newer socket has taken over
       this.authenticated = false
       this.log('warn', 'WebSocket closed')
+      this.detachSocket(ws)
+      this.ws = null
       this.scheduleReconnect()
     }
-    this.ws.onerror = () => {
+    ws.onerror = () => {
       // onclose will follow
     }
   }
