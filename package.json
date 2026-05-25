@@ -5,7 +5,8 @@
   "scripts": {
     "dev:hub": "cd hub && bun run dev",
     "dev:web": "cd web && bun run dev",
-    "build:web": "cd web && bun run build"
+    "build:web": "cd web && bun run build",
+    "docs:sync": "cd hub && bun run docs:openapi && cd .. && npx --yes widdershins@4.0.1 --search false --language_tabs 'shell:Shell' 'javascript:JavaScript' --summary docs/openapi.json -o docs/api.md"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.2",
