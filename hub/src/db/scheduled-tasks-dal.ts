@@ -11,7 +11,7 @@ export type OnCompleteAction =
 // the API layer.
 export type PostRunAction = any
 
-export type TaskType = 'prompt' | 'skill' | 'security_scan' | 'log_check' | 'continue_dev'
+export type TaskType = 'prompt' | 'skill' | 'security_scan' | 'log_check' | 'continue_dev' | 'triage'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
 export type CatchupPolicy = 'skip' | 'run_once'
 export type RunStatus =
