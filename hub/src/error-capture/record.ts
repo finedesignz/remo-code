@@ -1,0 +1,137 @@
+/**
+ * recordError — Wave 2 gating module for the Sentry-style intake.
+ *
+ * Called by `hub/src/api/sentry-intake.ts` after the envelope has been
+ * decoded and the first exception extracted. Applies the three pre-dispatch
+ * gates in fixed order, persists an `errors` row, and (in W3) hands off
+ * to the session dispatcher. For W2, accepted errors stay at
+ * `dispatch_status='pending'` and the dispatcher is the no-op the W3
+ * worker will pick up.
+ *
+ * Gate order (locked):
+ *   1. insert pending row, capture error_id
+ *   2. dedupe        → status='deduped',      notify 'dedupe_hit'
+ *   3. rate-limit    → status='rate_limited', notify 'rate_limit'
+ *   4. daily cap     → status='cap_exceeded', notify 'daily_cap'
+ *   5. accept → stays 'pending' for W3 dispatcher
+ *
+ * Silent-skip emails go through `./notify.ts` (emails4agents, throttled
+ * by `notifications_sent`).
+ */
+import type { ErrorProject } from '../db/error-capture-dal.ts'
+import {
+  insertError,
+  findRecentErrorByFingerprint,
+  countErrorsInLastHour,
+  countDispatchesToday,
+  updateErrorDispatchStatus,
+} from '../db/error-capture-dal.ts'
+import { getUserTimezone } from '../db/dal.ts'
+import { notifyThrottled } from './notify.ts'
+
+export interface RecordErrorFields {
+  fingerprint: string
+  error_type: string
+  error_value: string
+  stacktrace_json?: unknown
+  release?: string | null
+}
+
+export interface RecordErrorResult {
+  error_id: string
+  dispatch_status:
+    | 'pending'
+    | 'deduped'
+    | 'rate_limited'
+    | 'cap_exceeded'
+  skip_reason?: string
+}
+
+export async function recordError(
+  project: ErrorProject,
+  fields: RecordErrorFields,
+): Promise<RecordErrorResult> {
+  // 1. Insert pending. We always have a row to point notifications at, and
+  //    the row also participates in dedupe/rate-limit counts.
+  const row = await insertError(project.id, {
+    fingerprint: fields.fingerprint,
+    error_type: fields.error_type,
+    error_value: fields.error_value,
+    stacktrace_json: fields.stacktrace_json ?? [],
+    release: fields.release ?? null,
+    dispatch_status: 'pending',
+  })
+
+  // 2. Dedupe — match any earlier row in the window (excluding the one we just
+  //    inserted).
+  const recent = await findRecentErrorByFingerprint(
+    project.id,
+    fields.fingerprint,
+    project.dedupe_window_seconds,
+  )
+  if (recent && recent.id !== row.id) {
+    const reason = `dedupe_window_${project.dedupe_window_seconds}s`
+    await updateErrorDispatchStatus(row.id, 'deduped', reason)
+    await notifyThrottled(
+      'dedupe_hit',
+      `${project.id}:${fields.fingerprint}`,
+      project.dedupe_window_seconds,
+      project,
+      { error_type: fields.error_type, error_value: fields.error_value },
+    )
+    return { error_id: row.id, dispatch_status: 'deduped', skip_reason: reason }
+  }
+
+  // 3. Rate limit — hourly count includes this row, so the gate fires when
+  //    count *exceeds* the configured limit.
+  const lastHour = await countErrorsInLastHour(project.id)
+  if (lastHour > project.rate_limit_per_hour) {
+    const reason = `rate_limit_${project.rate_limit_per_hour}_per_hour`
+    await updateErrorDispatchStatus(row.id, 'rate_limited', reason)
+    await notifyThrottled(
+      'rate_limit',
+      `${project.id}`,
+      3600,
+      project,
+      { error_type: fields.error_type, error_value: fields.error_value },
+    )
+    return { error_id: row.id, dispatch_status: 'rate_limited', skip_reason: reason }
+  }
+
+  // 4. Daily cap — only `dispatched` rows consume budget, so this gate
+  //    measures *successful dispatches today* against the cap.
+  const tz = await getUserTimezone(project.user_id)
+  const dispatchedToday = await countDispatchesToday(project.id, tz)
+  if (dispatchedToday >= project.daily_dispatch_cap) {
+    const reason = `daily_cap_${project.daily_dispatch_cap}`
+    await updateErrorDispatchStatus(row.id, 'cap_exceeded', reason)
+    await notifyThrottled(
+      'daily_cap',
+      `${project.id}:${todayKey(tz)}`,
+      24 * 3600,
+      project,
+      { error_type: fields.error_type, error_value: fields.error_value },
+    )
+    return { error_id: row.id, dispatch_status: 'cap_exceeded', skip_reason: reason }
+  }
+
+  // 5. Accepted. Row stays 'pending'; Wave 3 dispatcher will fire it into
+  //    the configured session.
+  return { error_id: row.id, dispatch_status: 'pending' }
+}
+
+function todayKey(tz: string): string {
+  try {
+    // YYYY-MM-DD in the user's timezone — used so the daily-cap email
+    // throttle resets at local midnight, not UTC.
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz || 'UTC',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    })
+    return fmt.format(new Date())
+  } catch {
+    return new Date().toISOString().slice(0, 10)
+  }
+}
