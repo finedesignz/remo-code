@@ -153,6 +153,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
       <CostCapCard token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
       <NotificationsCard profile={profile} onUpdateProfile={onUpdateProfile} />
       <TimezoneCard profile={profile} onUpdateProfile={onUpdateProfile} />
+      <CoolifyWebhookCard token={token} />
 
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 xl:col-span-2">
         <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">System Prompt</h3>
@@ -912,6 +913,153 @@ function InstructionField({
       />
       <div className="mt-1.5 text-[10px] text-[var(--text-muted)] text-right">
         {value.length.toLocaleString()} / 100,000 chars
+      </div>
+    </div>
+  )
+}
+
+/* ───────── Coolify Webhook (Phase 06 / Plan 005) ───────── */
+
+function CoolifyWebhookCard({ token }: { token: string }) {
+  const [loading, setLoading] = useState(true)
+  const [configured, setConfigured] = useState(false)
+  const [webhookUrl, setWebhookUrl] = useState('')
+  const [rotating, setRotating] = useState(false)
+  const [revealedSecret, setRevealedSecret] = useState<string | null>(null)
+  const [copied, setCopied] = useState<'url' | 'secret' | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    hubFetch<{ configured: boolean; webhook_url: string }>(
+      token,
+      '/api/account/coolify-webhook-secret',
+    )
+      .then((data) => {
+        if (cancelled) return
+        setConfigured(data.configured)
+        setWebhookUrl(data.webhook_url)
+      })
+      .catch((e) => { if (!cancelled) setError(String(e?.message || e)) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [token])
+
+  const handleRotate = async () => {
+    setRotating(true)
+    setError(null)
+    try {
+      const data = await hubFetch<{ secret: string; webhook_url: string }>(
+        token,
+        '/api/account/coolify-webhook-secret/rotate',
+        { method: 'POST' },
+      )
+      setRevealedSecret(data.secret)
+      setWebhookUrl(data.webhook_url)
+      setConfigured(true)
+    } catch (e: any) {
+      setError(String(e?.message || e))
+    } finally {
+      setRotating(false)
+    }
+  }
+
+  const copy = async (kind: 'url' | 'secret', text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(kind)
+      setTimeout(() => setCopied((c) => (c === kind ? null : c)), 1500)
+    } catch {}
+  }
+
+  return (
+    <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 xl:col-span-2">
+      <div className="flex items-start justify-between gap-3 mb-1">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)]">Coolify Webhook</h3>
+        <span
+          className={`text-[10px] uppercase tracking-wide px-2 py-0.5 rounded ${
+            configured
+              ? 'bg-emerald-500/20 ring-1 ring-emerald-500/30 text-emerald-300'
+              : 'bg-gray-500/20 ring-1 ring-gray-500/30 text-[var(--text-muted)]'
+          }`}
+        >
+          {configured ? 'Configured' : 'Not configured'}
+        </span>
+      </div>
+      <p className="text-xs text-[var(--text-muted)] mb-4">
+        Lets Coolify push deploy + container events to your remo-code account so the self-heal pipeline can react.
+        Paste the URL below into Coolify Settings → Webhooks, then rotate to get a signing secret.
+      </p>
+
+      <div className="space-y-4">
+        {/* Webhook URL */}
+        <div>
+          <label className="block text-xs text-[var(--text-muted)] mb-1.5">Webhook URL</label>
+          <div className="flex gap-2">
+            <div className="flex-1 px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] font-mono truncate">
+              {loading ? '…' : webhookUrl}
+            </div>
+            <button
+              type="button"
+              onClick={() => copy('url', webhookUrl)}
+              disabled={loading || !webhookUrl}
+              className="px-3 py-2 text-xs rounded-lg bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] transition-colors disabled:opacity-50"
+            >
+              {copied === 'url' ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+        </div>
+
+        {/* Rotate button */}
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={handleRotate}
+            disabled={rotating || loading}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+          >
+            {rotating ? 'Rotating…' : configured ? 'Rotate Secret' : 'Generate Secret'}
+          </button>
+          {configured && !revealedSecret && (
+            <span className="text-xs text-[var(--text-muted)]">
+              The secret is stored hashed and only shown once on rotate.
+            </span>
+          )}
+        </div>
+
+        {/* One-time revealed secret */}
+        {revealedSecret && (
+          <div className="rounded-lg bg-amber-500/10 ring-1 ring-amber-500/30 p-3 space-y-2">
+            <div className="text-xs text-amber-300 font-semibold">
+              Copy this secret now — it is shown only once.
+            </div>
+            <div className="flex gap-2">
+              <input
+                readOnly
+                value={revealedSecret}
+                onFocus={(e) => e.currentTarget.select()}
+                className="flex-1 px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => copy('secret', revealedSecret)}
+                className="px-3 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[var(--text-on-accent)] font-medium transition-colors"
+              >
+                {copied === 'secret' ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+            <div className="text-[11px] text-[var(--text-muted)] leading-relaxed">
+              In Coolify, configure two request headers per webhook delivery:<br />
+              <code className="text-emerald-300">X-Coolify-Signature: sha256=&lt;hex&gt;</code> — HMAC-SHA256 of the raw body using this secret.<br />
+              <code className="text-emerald-300">X-Coolify-Timestamp: &lt;unix-seconds&gt;</code> — request timestamp (rejected if &gt;5min skew).
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="text-xs text-red-400">{error}</div>
+        )}
       </div>
     </div>
   )

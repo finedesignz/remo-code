@@ -18,6 +18,7 @@ import { scheduledTasks as scheduledTasksApi } from './api/scheduled-tasks'
 import { scheduledTaskRuns as scheduledTaskRunsApi } from './api/scheduled-task-runs'
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { instructions as instructionsApi } from './api/instructions'
+import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
 // V2 scheduler.
@@ -87,10 +88,16 @@ app.use('/api/plugin/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.
 app.use('/api/plugin/*', apiKeyMiddleware)
 app.route('/api/plugin', plugin)
 
+// Public Coolify deployment webhook (HMAC-signed, per-user secret in URL).
+// MUST be mounted BEFORE the JWT catch-all middleware below.
+app.route('/api/coolify', coolifyWebhookRoutes)
+
 // Protected API routes (JWT auth, then rate limit keyed on userId)
 // Skip /api/github/callback — it's hit by GitHub's redirect, not by an authed client.
+// Skip /api/coolify/webhook/* — public path, auth is per-user HMAC.
 app.use('/api/*', async (c, next) => {
   if (c.req.path === '/api/github/callback') return next()
+  if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   return authMiddleware(c, next)
 })
 app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('userId') || 'anon' }))

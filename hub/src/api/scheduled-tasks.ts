@@ -35,7 +35,7 @@ export const scheduledTasks = new Hono()
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
 
-const TaskTypeEnum = z.enum(['prompt', 'skill', 'security_scan', 'log_check', 'continue_dev'])
+const TaskTypeEnum = z.enum(['prompt', 'skill', 'security_scan', 'log_check', 'continue_dev', 'triage'])
 const TargetKindEnum = z.enum(['session', 'supervisor', 'all_agents', 'all_supervisors'])
 const CatchupPolicyEnum = z.enum(['skip', 'run_once'])
 

@@ -289,3 +289,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_rootless_unique ON sessions(user_
 ALTER TABLE users ADD COLUMN IF NOT EXISTS claude_global_md TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_agents_md TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_config_toml TEXT;
+
+-- ── Phase 06 plan 007: GitHub-issue post-run idempotency ─────────────────────
+-- Skips duplicate issue creation for the same (repo, app_uuid, deploy_uuid)
+-- within a 24h window. Hash = sha256(`${repo}|${app_uuid}|${deploy_uuid}`).
+CREATE TABLE IF NOT EXISTS github_issue_idempotency (
+  user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hash           TEXT NOT NULL,
+  repo_full_name TEXT NOT NULL,
+  issue_number   INTEGER NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, hash)
+);
+CREATE INDEX IF NOT EXISTS idx_gh_idem_created ON github_issue_idempotency(created_at);
+
