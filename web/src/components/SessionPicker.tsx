@@ -7,7 +7,7 @@
  */
 import { useEffect, useState } from 'react'
 import { useSessions } from '../hooks/useSessions'
-import { addSessionToTab, type TabWithSessions } from '../lib/chat-tabs-api'
+import { addSessionToTab, MAX_CELLS_PER_TAB, type TabWithSessions } from '../lib/chat-tabs-api'
 
 interface Props {
   token: string
@@ -24,7 +24,7 @@ export function SessionPicker({ token, tab, onClose, onAdded }: Props) {
 
   const inTab = new Set(tab.sessions.map(s => s.session_id))
   const availableCount = tab.sessions.length
-  const remainingSlots = Math.max(0, 12 - availableCount)
+  const remainingSlots = Math.max(0, MAX_CELLS_PER_TAB - availableCount)
 
   // Close on Escape
   useEffect(() => {
@@ -65,16 +65,19 @@ export function SessionPicker({ token, tab, onClose, onAdded }: Props) {
       onClick={onClose}
     >
       <div
-        className="bg-[var(--bg-secondary)] rounded-xl shadow-xl w-full max-w-md max-h-[80vh] flex flex-col ring-1 ring-[var(--border-color)]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="session-picker-title"
+        className="bg-[var(--bg-secondary)] rounded-xl shadow-xl w-full max-w-md max-h-[80dvh] flex flex-col ring-1 ring-[var(--border-color)]"
         onClick={e => e.stopPropagation()}
       >
         <div className="px-5 py-4 border-b border-[var(--border-color)] flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-semibold text-[var(--text-primary)]">Add sessions to “{tab.name}”</h3>
+            <h3 id="session-picker-title" className="text-sm font-semibold text-[var(--text-primary)]">Add sessions to “{tab.name}”</h3>
             <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
               {remainingSlots > 0
-                ? `${remainingSlots} slot${remainingSlots === 1 ? '' : 's'} remaining (max 12 per tab)`
-                : 'Tab is full (12 sessions max)'}
+                ? `${remainingSlots} slot${remainingSlots === 1 ? '' : 's'} remaining (max ${MAX_CELLS_PER_TAB} per tab)`
+                : `Tab is full (${MAX_CELLS_PER_TAB} sessions max)`}
             </p>
           </div>
           <button

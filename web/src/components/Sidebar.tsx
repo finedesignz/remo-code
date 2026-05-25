@@ -180,6 +180,22 @@ export function Sidebar({
                     s.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
                   }`} />
                   <span className="truncate font-medium flex-1">{sessionLabel(s)}</span>
+                  {s.cli_kind === 'codex' && (
+                    <span
+                      className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 shrink-0 font-semibold"
+                      title="Codex CLI session"
+                    >
+                      codex
+                    </span>
+                  )}
+                  {s.is_rootless && (
+                    <span
+                      className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)]/60 text-[var(--text-muted)] shrink-0 font-semibold"
+                      title={s.hostname ? `Ambient — ${s.hostname}` : 'Ambient session'}
+                    >
+                      ambient
+                    </span>
+                  )}
                   <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
                   <UnreadBadge count={unreadCounts[s.id] || 0} />
                   {/* Action buttons — always visible on mobile, hover on desktop */}

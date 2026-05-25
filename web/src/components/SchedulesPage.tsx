@@ -2,7 +2,9 @@ import { useMemo, useState } from 'react'
 import { useSchedules, type ScheduledTask } from '../hooks/useSchedules'
 import { ScheduleEditor } from './ScheduleEditor'
 import { ScheduleRunsDrawer } from './ScheduleRunsDrawer'
+import { UpcomingRunsPanel } from './UpcomingRunsPanel'
 import { humanizeCron } from '../lib/cron-humanize'
+import { formatCostUsd, formatDuration, formatRelativeAgo } from '../lib/format'
 
 interface Props {
   token: string
@@ -130,6 +132,12 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
       )}
 
       <div className="flex-1 overflow-y-auto px-4 md:px-6 lg:px-10 py-5 md:py-6">
+        {schedules.length > 0 && (
+          <UpcomingRunsPanel
+            schedules={schedules}
+            onOpen={(id) => setDrawerTaskId(id)}
+          />
+        )}
         {loading && schedules.length === 0 ? (
           <p className="text-sm text-[var(--text-muted)]">Loading...</p>
         ) : error ? (
@@ -259,6 +267,10 @@ function ScheduleRow({
             <h3 className="text-sm font-semibold text-[var(--text-primary)] truncate">{schedule.name}</h3>
             <TaskTypeChip type={schedule.task_type} />
             {schedule.last_run_status && <StatusChip status={schedule.last_run_status} />}
+            <LastRunMetrics
+              costUsd={schedule.last_run_cost_usd}
+              durationMs={schedule.last_run_duration_ms}
+            />
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-muted)]">
             <span className="inline-flex items-center gap-1">
@@ -277,7 +289,16 @@ function ScheduleRow({
             </span>
             {next && (
               <span className="inline-flex items-center gap-1">
-                Next: <span className="text-[var(--text-secondary)]">{formatLocalTs(next)}</span>
+                Next: <span className="text-[var(--text-secondary)]">{formatTsInTz(next, schedule.timezone)}</span>
+              </span>
+            )}
+            {schedule.last_fire_at && (
+              <span className="inline-flex items-center gap-1">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="6" cy="6" r="4.5" />
+                  <path d="M6 3.5v2.5l1.5 1.5" />
+                </svg>
+                Fired {formatRelativeAgo(new Date(schedule.last_fire_at))}
               </span>
             )}
           </div>
@@ -358,7 +379,7 @@ function ScheduleRow({
 /* Chips                                                              */
 /* ----------------------------------------------------------------- */
 
-function TaskTypeChip({ type }: { type: ScheduledTask['task_type'] }) {
+export function TaskTypeChip({ type }: { type: ScheduledTask['task_type'] }) {
   const label: Record<ScheduledTask['task_type'], string> = {
     prompt: 'prompt',
     skill: 'skill',
@@ -384,6 +405,26 @@ function StatusChip({ status }: { status: NonNullable<ScheduledTask['last_run_st
   const c = cfg[status] || cfg.pending
   return (
     <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ring-1 ${c.cls}`}>{c.label}</span>
+  )
+}
+
+function LastRunMetrics({
+  costUsd,
+  durationMs,
+}: {
+  costUsd: number | null | undefined
+  durationMs: number | null | undefined
+}) {
+  const costLabel = formatCostUsd(costUsd)
+  const hasDuration = durationMs !== null && durationMs !== undefined
+  if (!costLabel && !hasDuration) return null
+  const parts: string[] = []
+  if (costLabel) parts.push(costLabel)
+  if (hasDuration) parts.push(formatDuration(durationMs))
+  return (
+    <span className="text-[10px] text-[var(--text-muted)] font-mono">
+      {parts.join(' · ')}
+    </span>
   )
 }
 
@@ -414,5 +455,18 @@ export function formatLocalTs(d: Date): string {
     }).format(d)
   } catch {
     return d.toISOString()
+  }
+}
+
+export function formatTsInTz(d: Date, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      month: 'short', day: 'numeric',
+      hour: 'numeric', minute: '2-digit',
+      timeZone: tz,
+      timeZoneName: 'short',
+    }).format(d)
+  } catch {
+    return formatLocalTs(d)
   }
 }

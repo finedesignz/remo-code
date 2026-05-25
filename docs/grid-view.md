@@ -233,6 +233,45 @@ Paste/drop attachment handlers are scoped by the active cell:
 The scoping rule: if `document.activeElement.closest('[data-chat-surface-cell-id]')`
 matches ANY cell, the global handler bails and lets the cell handle it.
 
+## Accessibility & keyboard
+
+The grid is a WAI-ARIA tabs + grid widget:
+
+- **Tab bar** — `role="tablist"`. Each chip is `role="tab"` with
+  `aria-selected`, `aria-controls="grid-tab-panel"`, and a roving
+  `tabIndex` (only the active chip is 0). Arrow keys move focus, Home/End
+  jump to ends, Enter/Space activate, **F2** or **double-click** starts
+  inline rename. Enter commits, Escape cancels, blur commits.
+- **Grid** — `role="grid"` with `aria-label` carrying the visible count
+  vs. total. Each cell is `role="gridcell"` with `aria-selected` for the
+  active cell.
+- **Layout picker** — `role="listbox"` with `role="option"` children and
+  `aria-selected` on the current layout.
+- **Tab bar overflow** — `overflow-x-auto` with `scroll-snap-type:
+  x_proximity` so a long tab row scrolls cleanly without wrapping.
+
+### Tab delete confirmation
+
+The native confirm dialog now includes the count of session bindings that
+will be unbound (`"removes N session bindings"`) and warns when the user
+is about to delete their only remaining tab. **Last-tab protection:** if
+the user does delete the only tab, the page immediately creates a fresh
+empty tab and routes to it so the user is never left in an empty-state
+route with no active tab.
+
+### Unread indicator (inactive cells)
+
+Each cell tracks a per-session unread counter. It increments when a
+server-emitted assistant `message` event arrives for a visible cell that
+is **not** the currently-active cell. `text_delta` does NOT count — the
+goal is "one ding per reply," not one per token. Activating the cell
+clears its counter.
+
+A page-level `role="status" aria-live="polite"` region announces only the
+total unread count (e.g. `"3 unread messages across cells"`), never the
+message content. Screen readers stay quiet during high-frequency streams
+but still surface the fact that background work has progressed.
+
 ## Scheduled-task queue badge per cell
 
 Each cell header has a slot for a small badge when the cell's session has

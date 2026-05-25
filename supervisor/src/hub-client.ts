@@ -3,6 +3,7 @@ import { scanAll } from './repo-scanner'
 import { cloneRepo, pullRepo, pullLocal, checkoutBranch, listBranches, isDirty } from './git-ops'
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
+import { getHandler, nativeSupervisorCommands } from './commands/index'
 import type { SupervisorConfig } from './config'
 
 const VERSION = '0.2.0'
@@ -16,6 +17,9 @@ type OutboundMsg =
   | { type: 'repo.op_result'; req_id: string; op: string; ok: boolean; error?: string; data?: any }
   | { type: 'repo.clone_progress'; req_id: string; stage: string; percent?: number }
   | { type: 'supervisor.commands_sync'; commands: Array<{ kind: 'command' | 'skill'; name: string; description: string | null; source: string; path: string }> }
+  | { type: 'run_started'; run_id: string }
+  | { type: 'run_output'; run_id: string; chunk: string }
+  | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
   | { type: 'pong' }
 
 export class SupervisorClient {
@@ -125,9 +129,11 @@ export class SupervisorClient {
       })
       // Sync commands + skills (best-effort, async)
       try {
-        const cmds = scanAllCommands()
+        const scanned = scanAllCommands()
+        const native = nativeSupervisorCommands()
+        const cmds = [...native, ...scanned]
         this.send({ type: 'supervisor.commands_sync', commands: cmds })
-        this.log('info', `synced ${cmds.length} commands/skills`)
+        this.log('info', `synced ${cmds.length} commands/skills (${native.length} native)`)
       } catch (err: any) {
         this.log('warn', `commands scan failed: ${err.message}`)
       }
@@ -150,6 +156,7 @@ export class SupervisorClient {
       case 'session.start': await this.onSessionStart(msg); break
       case 'session.stop': await this.onSessionStop(msg); break
       case 'session.status': this.onSessionStatus(msg); break
+      case 'run_command': await this.onRunCommand(msg); break
       default:
         // unknown
         break
@@ -219,6 +226,37 @@ export class SupervisorClient {
   private async onSessionStop(msg: { run_id: string; reason: string }) {
     if (msg.run_id) await this.pm.stop(msg.run_id, msg.reason)
     else await this.pm.stopAll(msg.reason)
+  }
+
+  private async onRunCommand(msg: { run_id: string; command: string; args?: string[] }) {
+    const { run_id, command } = msg
+    const args = msg.args ?? []
+    const handler = getHandler(command)
+    if (!handler) {
+      this.send({ type: 'run_finished', run_id, exit_code: 1, error: 'unknown_command' })
+      return
+    }
+    const startedAt = Date.now()
+    this.send({ type: 'run_started', run_id })
+    try {
+      const result = await handler(args)
+      this.send({
+        type: 'run_finished',
+        run_id,
+        exit_code: result.exit_code,
+        duration_ms: Date.now() - startedAt,
+        snippet: result.snippet,
+        error: result.error,
+      })
+    } catch (err: any) {
+      this.send({
+        type: 'run_finished',
+        run_id,
+        exit_code: 1,
+        duration_ms: Date.now() - startedAt,
+        error: `handler_exception: ${err?.message || String(err)}`,
+      })
+    }
   }
 
   private onSessionStatus(msg: { req_id: string }) {

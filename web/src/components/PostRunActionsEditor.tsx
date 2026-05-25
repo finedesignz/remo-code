@@ -33,6 +33,42 @@ const TEMPLATE_VARS = [
   '{{run_url}}',
 ]
 
+function defaultActionConfig(type: PostRunActionType): Record<string, any> {
+  switch (type) {
+    case 'notify_email':
+      return {
+        to: '',
+        subject: '[{{status}}] {{task_name}}',
+        body:
+          'Scheduled task "{{task_name}}" finished with status: {{status}}.\n\n' +
+          'Duration: {{duration_ms}}ms\n' +
+          'Cost: ${{cost_usd}}\n' +
+          'Run: {{run_url}}\n\n' +
+          '--- Output snippet ---\n' +
+          '{{output_snippet}}',
+      }
+    case 'notify_telegram':
+      return {
+        body:
+          '*{{task_name}}* — {{status}}\n' +
+          'Duration: {{duration_ms}}ms · Cost: ${{cost_usd}}\n' +
+          '[View run]({{run_url}})\n\n' +
+          '`{{output_snippet}}`',
+      }
+    case 'notify_web_push':
+      return {
+        title: '{{task_name}} — {{status}}',
+        body: '{{output_snippet}}',
+      }
+    case 'webhook':
+      return { url: '' }
+    case 'chain_task':
+      return {}
+    default:
+      return {}
+  }
+}
+
 export function PostRunActionsEditor({
   actions, onChange, currentTaskId, allSchedules, cycleErrorPath,
 }: Props) {
@@ -78,7 +114,7 @@ export function PostRunActionsEditor({
   }
 
   const add = () => {
-    onChange([...actions, { type: 'notify_email', on: 'success', config: {} }])
+    onChange([...actions, { type: 'notify_email', on: 'success', config: defaultActionConfig('notify_email') }])
     setOpen(true)
   }
 
@@ -125,7 +161,10 @@ export function PostRunActionsEditor({
                 <div className="flex items-center gap-2">
                   <select
                     value={action.type}
-                    onChange={(e) => update(idx, { type: e.target.value as PostRunActionType, config: {} })}
+                    onChange={(e) => {
+                      const nextType = e.target.value as PostRunActionType
+                      update(idx, { type: nextType, config: defaultActionConfig(nextType) })
+                    }}
                     className="flex-1 px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     {ACTION_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}

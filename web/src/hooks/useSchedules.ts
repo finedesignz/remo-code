@@ -39,6 +39,8 @@ export interface ScheduledTask {
   next_fire_at: string | null
   next_3_runs: string[]
   last_run_status?: 'success' | 'failure' | 'skipped' | 'pending' | 'running' | null
+  last_run_cost_usd?: number | null
+  last_run_duration_ms?: number | null
   created_at?: string
 }
 

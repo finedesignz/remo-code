@@ -9,6 +9,7 @@ import { plugin } from './api/plugin'
 import { setup } from './api/setup'
 import { authRouter } from './api/auth'
 import { profile } from './api/profile'
+import { account } from './api/account'
 import { supervisors as supervisorsApi } from './api/supervisors'
 import { github as githubApi } from './api/github'
 import { commands as commandsApi } from './api/commands'
@@ -22,6 +23,7 @@ import { errorRunsRouter } from './api/error-runs'
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { instructions as instructionsApi } from './api/instructions'
 import { errorSetup as errorSetupApi } from './api/error-setup'
+import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
 // V2 scheduler.
@@ -97,12 +99,18 @@ app.route('/api/plugin', plugin)
 app.use('/api/sentry/*', rateLimit({ windowMs: 60_000, max: 600, keyFn: (c) => c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || 'anon' }))
 app.route('/api/sentry', sentryIntakeApi)
 
+// Public Coolify deployment webhook (HMAC-signed, per-user secret in URL).
+// MUST be mounted BEFORE the JWT catch-all middleware below.
+app.route('/api/coolify', coolifyWebhookRoutes)
+
 // Protected API routes (JWT auth, then rate limit keyed on userId)
 // Skip /api/github/callback — it's hit by GitHub's redirect, not by an authed client.
 // Skip /api/sentry — public Sentry-style intake authenticates via X-Sentry-Auth header.
+// Skip /api/coolify/webhook/* — public path, auth is per-user HMAC.
 app.use('/api/*', async (c, next) => {
   if (c.req.path === '/api/github/callback') return next()
   if (c.req.path.startsWith('/api/sentry/')) return next()
+  if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   return authMiddleware(c, next)
 })
 app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('userId') || 'anon' }))
@@ -110,6 +118,7 @@ app.route('/api/sessions', sessions)
 app.route('/api/api-keys', apiKeys)
 app.route('/api/messages', messages)
 app.route('/api/profile', profile)
+app.route('/api/account', account)
 app.route('/api/supervisors', supervisorsApi)
 app.route('/api/github', githubApi)
 app.route('/api/commands', commandsApi)
@@ -190,12 +199,25 @@ const server = Bun.serve({
       return new Response('forbidden', { status: 403 })
     }
 
-    const file = Bun.file(filePath)
-    if (await file.exists()) return new Response(file)
+    // Cache policy: hashed /assets/* are content-addressed → cache forever;
+    // index.html and other HTML must revalidate so deploys land immediately
+    // instead of leaving browsers pinned to old bundle hashes.
+    const isHtml = filePath.endsWith('.html') || requestedPath === '/'
+    const isHashedAsset = requestedPath.startsWith('/assets/')
+    const cacheHeaders: HeadersInit = isHtml
+      ? { 'Cache-Control': 'no-cache, no-store, must-revalidate' }
+      : isHashedAsset
+        ? { 'Cache-Control': 'public, max-age=31536000, immutable' }
+        : {}
 
-    // SPA fallback
+    const file = Bun.file(filePath)
+    if (await file.exists()) return new Response(file, { headers: cacheHeaders })
+
+    // SPA fallback — always index.html → no-cache
     const indexFile = Bun.file(join(webDist, 'index.html'))
-    if (await indexFile.exists()) return new Response(indexFile)
+    if (await indexFile.exists()) {
+      return new Response(indexFile, { headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' } })
+    }
 
     return new Response('not found', { status: 404 })
   },

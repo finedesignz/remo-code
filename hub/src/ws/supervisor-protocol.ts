@@ -108,6 +108,21 @@ export const RunFinished = z.object({
   error: z.string().max(2000).optional(),
 })
 
+// Host resource snapshot — agents/supervisors send periodically so the hub can
+// display CPU/RAM headroom. Phase 04 host_resources schema (stub for now —
+// imported by agent-protocol.ts and consumed by the hub WS handler).
+export const HostResourcesMessage = z.object({
+  type: z.literal('host_resources'),
+  hostname: z.string().optional(),
+  cpu_pct: z.number().min(0).max(100).optional(),
+  mem_used_bytes: z.number().nonnegative().optional(),
+  mem_total_bytes: z.number().nonnegative().optional(),
+  load_avg_1m: z.number().nonnegative().optional(),
+  load_avg_5m: z.number().nonnegative().optional(),
+  load_avg_15m: z.number().nonnegative().optional(),
+  measured_at: z.string().optional(),
+})
+
 export const SupervisorInbound = [
   SupervisorHello,
   SupervisorState,
@@ -120,6 +135,7 @@ export const SupervisorInbound = [
   RunStarted,
   RunOutput,
   RunFinished,
+  HostResourcesMessage,
 ]
 
 // -- Hub -> Supervisor (constructed by hub, not validated) --

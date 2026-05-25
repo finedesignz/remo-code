@@ -23,6 +23,7 @@ import { ChatSurface } from './ChatSurface'
 import {
   type TabWithSessions,
   type TabLayout,
+  MAX_CELLS_PER_TAB,
   listTabs,
   createTab,
   patchTab,
@@ -37,7 +38,6 @@ import type { ChatMessage } from '../hooks/useChat'
 import type { CodeSession } from '../hooks/useSessions'
 
 const ACTIVE_CELL_KEY = (tabId: string) => `grid:lastActiveCell:${tabId}`
-const MAX_CELLS_PER_TAB = 12
 
 interface Props {
   token: string
@@ -54,10 +54,24 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [seedByTab, setSeedByTab] = useState<Record<string, Record<string, ChatMessage[]>>>({})
   const [activeCellId, setActiveCellIdState] = useState<string | null>(null)
+  // Per-session unread counter — incremented when a 'message' event arrives
+  // for a cell that is NOT currently the active cell. Reset when the cell
+  // becomes active. Surfaced as a soft badge on the cell header and counted
+  // for a polite aria-live announcer (count only, never message body).
+  const [unreadBySession, setUnreadBySession] = useState<Record<string, number>>({})
 
   // Persist active cell per tab to sessionStorage (NOT URL).
   const setActiveCellId = useCallback((id: string | null) => {
     setActiveCellIdState(id)
+    if (id) {
+      // Activating a cell clears its unread count.
+      setUnreadBySession(prev => {
+        if (!prev[id]) return prev
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    }
     if (!activeTabId) return
     try {
       if (id) sessionStorage.setItem(ACTIVE_CELL_KEY(activeTabId), id)
@@ -142,6 +156,31 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
     return () => document.removeEventListener('paste', handlePaste)
   }, [activeCellId])
 
+  // Track unread messages for visible non-active cells. We only count
+  // server-emitted `message` events (the final persisted assistant message
+  // or a user echo) — never every text_delta, which would be too noisy.
+  // The active cell's counter is held at zero so the user's own focused
+  // cell never shows an "unread" badge.
+  const activeCellRef = useRef(activeCellId)
+  useEffect(() => { activeCellRef.current = activeCellId }, [activeCellId])
+  const visibleIdsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    visibleIdsRef.current = new Set()
+  }, [activeTabId])
+  useEffect(() => {
+    const unsub = subscribe((msg: any) => {
+      if (msg?.type !== 'message') return
+      const sid = msg.session_id as string | undefined
+      if (!sid) return
+      if (!visibleIdsRef.current.has(sid)) return
+      if (sid === activeCellRef.current) return
+      // Skip user's own outgoing message echoes — only count assistant replies.
+      if (msg.message?.role && msg.message.role !== 'assistant') return
+      setUnreadBySession(prev => ({ ...prev, [sid]: (prev[sid] ?? 0) + 1 }))
+    })
+    return unsub
+  }, [subscribe])
+
   // Restore active cell for current tab from sessionStorage.
   useEffect(() => {
     if (!activeTabId) {
@@ -169,6 +208,18 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   }, [activeTab])
 
   const overflowCount = (activeTab?.sessions.length ?? 0) - visibleSessions.length
+
+  // Keep ref in sync with currently rendered cells so the message subscriber
+  // can scope unread counting to visible-but-inactive cells only.
+  useEffect(() => {
+    visibleIdsRef.current = new Set(visibleSessions.map(s => s.session_id))
+  }, [visibleSessions])
+
+  // Polite announcer text — count only, never message body, per a11y rule.
+  const totalUnread = useMemo(
+    () => Object.values(unreadBySession).reduce((a, b) => a + b, 0),
+    [unreadBySession],
+  )
 
   // Default active cell = first visible cell.
   useEffect(() => {
@@ -220,14 +271,34 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   }, [token, tabs])
 
   const onDeleteTab = useCallback(async (id: string) => {
-    if (!confirm(`Delete tab "${tabs.find(t => t.id === id)?.name ?? id}"?`)) return
+    const target = tabs.find(t => t.id === id)
+    const cellCount = target?.sessions.length ?? 0
+    const isLast = tabs.length === 1
+    const msg = [
+      `Delete tab “${target?.name ?? id}”?`,
+      cellCount > 0 ? `Removes ${cellCount} session binding${cellCount === 1 ? '' : 's'} from this tab.` : null,
+      isLast ? 'This is your last tab — a fresh empty tab will be created.' : null,
+    ].filter(Boolean).join('\n\n')
+    if (!confirm(msg)) return
     await deleteTab(token, id)
     setTabs(prev => prev.filter(t => t.id !== id))
     if (activeTabId === id) {
       const rest = tabs.filter(t => t.id !== id)
       const next = rest[0]?.id
-      if (next) window.location.replace(`#/grid/${next}`)
-      else window.location.replace('#/grid')
+      if (next) {
+        window.location.replace(`#/grid/${next}`)
+      } else {
+        // Last-tab protection: never leave the user in route limbo. Create a
+        // fresh empty tab immediately and route to it.
+        try {
+          const fresh = await createTab(token, { name: 'New tab' })
+          setTabs([{ ...fresh, sessions: [] }])
+          setActiveTabId(fresh.id)
+          window.location.replace(`#/grid/${fresh.id}`)
+        } catch {
+          window.location.replace('#/grid')
+        }
+      }
     }
   }, [token, tabs, activeTabId])
 
@@ -300,6 +371,17 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
 
   return (
     <div className="flex flex-col h-full bg-[var(--bg-primary)] min-h-0">
+      {/* Polite SR-only announcer — count of unread messages in inactive
+          cells. Never the message body. Throttled to a short summary so
+          screen readers aren't spammed during high-frequency streams. */}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {totalUnread > 0 ? `${totalUnread} unread message${totalUnread === 1 ? '' : 's'} across cells` : ''}
+      </div>
       <GridTabBar
         tabs={tabs}
         activeTabId={activeTabId}
@@ -336,7 +418,12 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
       {tabs.length > 0 && activeTab && visibleSessions.length > 0 && (
         <>
           {/* Desktop: tab toolbar + CSS grid */}
-          <div className="hidden md:flex flex-col flex-1 min-h-0">
+          <div
+            id="grid-tab-panel"
+            role="tabpanel"
+            aria-labelledby={activeTabId}
+            className="hidden md:flex flex-col flex-1 min-h-0"
+          >
             <div className="px-4 pt-3 flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setPickerOpen(true)}
@@ -355,12 +442,14 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
                 }}
               />
               {overflowCount > 0 && (
-                <span className="text-[11px] text-amber-400">
-                  12-cell cap reached — {overflowCount} more hidden
+                <span className="text-[11px] text-amber-400" role="status">
+                  {MAX_CELLS_PER_TAB}-cell cap reached — {overflowCount} more hidden
                 </span>
               )}
             </div>
             <div
+              role="grid"
+              aria-label={`Session grid (${visibleSessions.length} of ${activeTab.sessions.length})`}
               className="flex-1 min-h-0 grid gap-3 p-4 auto-rows-fr"
               style={{
                 gridTemplateColumns:
@@ -382,6 +471,7 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
                   token={token}
                   wsConnected={connected}
                   seedMessages={seedByTab[activeTabId!]?.[s.session_id]}
+                  unreadCount={unreadBySession[s.session_id] ?? 0}
                 />
               ))}
             </div>
@@ -468,9 +558,34 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
     setRenamingId(null)
   }
 
+  const focusTabAt = (i: number) => {
+    if (i < 0 || i >= sorted.length) return
+    const id = sorted[i].id
+    onSelect(id)
+    // Move DOM focus to the chip so screen readers announce the new tab.
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(`[data-grid-tab-id="${id}"]`)
+      el?.focus()
+    })
+  }
+
+  const onTabKeyDown = (e: React.KeyboardEvent<HTMLDivElement>, i: number) => {
+    if (renamingId) return
+    if (e.key === 'ArrowRight') { e.preventDefault(); focusTabAt(i + 1 < sorted.length ? i + 1 : 0) }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); focusTabAt(i - 1 >= 0 ? i - 1 : sorted.length - 1) }
+    else if (e.key === 'Home') { e.preventDefault(); focusTabAt(0) }
+    else if (e.key === 'End') { e.preventDefault(); focusTabAt(sorted.length - 1) }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(sorted[i].id) }
+    else if (e.key === 'F2') { e.preventDefault(); startRename(sorted[i].id, sorted[i].name) }
+  }
+
   return (
-    <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0 overflow-x-auto">
-      <span className="text-xs text-[var(--text-muted)] mr-1 shrink-0">
+    <div
+      role="tablist"
+      aria-label="Grid tabs"
+      className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border-color)]/60 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0 overflow-x-auto scroll-smooth [scroll-snap-type:x_proximity]"
+    >
+      <span className="text-xs text-[var(--text-muted)] mr-1 shrink-0" aria-live="polite">
         {wsConnected ? '● Live' : <span className="text-amber-400">○ Reconnecting</span>}
       </span>
       {sorted.map((t, i) => {
@@ -479,14 +594,20 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
         return (
           <div
             key={t.id}
-            className={`group flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs shrink-0 cursor-pointer transition-colors ${
+            data-grid-tab-id={t.id}
+            role="tab"
+            aria-selected={isActive}
+            aria-controls="grid-tab-panel"
+            tabIndex={isActive ? 0 : -1}
+            onKeyDown={(e) => onTabKeyDown(e, i)}
+            className={`group flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs shrink-0 cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 [scroll-snap-align:start] ${
               isActive
                 ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-[var(--text-primary)]'
                 : 'bg-[var(--bg-secondary)]/60 text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'
             }`}
             onClick={() => !isRenaming && onSelect(t.id)}
             onDoubleClick={(e) => { e.stopPropagation(); startRename(t.id, t.name) }}
-            title="Double-click to rename"
+            title="Double-click or F2 to rename"
           >
             {isRenaming ? (
               <input
@@ -568,12 +689,16 @@ interface GridCellProps {
   token: string
   wsConnected: boolean
   seedMessages?: ChatMessage[]
+  unreadCount?: number
 }
 
-function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send, connectionId, token, wsConnected, seedMessages }: GridCellProps) {
+function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send, connectionId, token, wsConnected, seedMessages, unreadCount = 0 }: GridCellProps) {
   const isOnline = sessionRef.status === 'online' || sessionRef.status === 'thinking'
   return (
     <div
+      role="gridcell"
+      aria-label={`Session ${sessionRef.name}`}
+      aria-selected={isActive}
       data-chat-surface-cell-id={sessionRef.session_id}
       className={`flex flex-col min-h-0 rounded-xl bg-[var(--bg-secondary)]/60 overflow-hidden transition-shadow ${
         isActive ? 'ring-1 ring-indigo-500/30' : ''
@@ -589,14 +714,22 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
         <span className="text-xs font-medium text-[var(--text-primary)] truncate flex-1" title={sessionRef.project_dir ?? sessionRef.name}>
           {sessionRef.name}
         </span>
+        {unreadCount > 0 && !isActive && (
+          <span
+            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full bg-indigo-500/20 ring-1 ring-indigo-400/40 text-[10px] font-semibold text-indigo-300 tabular-nums"
+            aria-label={`${unreadCount} unread ${unreadCount === 1 ? 'message' : 'messages'}`}
+            title={`${unreadCount} unread`}
+          >
+            {unreadCount > 99 ? '99+' : unreadCount}
+          </span>
+        )}
         {/* TODO: scheduled-task queue badge — wire up once useSessionQueueState ships (PLAN-004 T7). */}
+        {/* TODO: ↗ open-in-single-chat — needs single-chat route to accept a sessionId param
+            before re-enabling (was navigating to `#/` and losing context). */}
         <button
-          onClick={() => { window.location.hash = `#/` }}
-          className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] px-1"
-          title="Open in single-chat view"
-        >↗</button>
-        <button
+          type="button"
           onClick={onRemove}
+          aria-label={`Remove ${sessionRef.name} from tab`}
           className="text-[10px] text-red-400 hover:text-red-300 px-1"
           title="Remove from tab"
         >×</button>
@@ -625,20 +758,37 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
 function LayoutPicker({ value, onChange }: { value: TabLayout; onChange: (next: TabLayout) => void | Promise<void> }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
+  const btnRef = useRef<HTMLButtonElement | null>(null)
   useEffect(() => {
     if (!open) return
     const onDoc = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
     }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        setOpen(false)
+        btnRef.current?.focus()
+      }
+    }
     document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onKey)
+    }
   }, [open])
   const label: Record<TabLayout, string> = { '3x3': '3 × 3', '4x3': '4 × 3', 'auto-fit': 'Auto-fit' }
   const options: TabLayout[] = ['3x3', '4x3', 'auto-fit']
   return (
     <div ref={ref} className="relative">
       <button
+        ref={btnRef}
+        type="button"
         onClick={() => setOpen(v => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`Grid layout: ${label[value]}`}
         className="px-3 py-1.5 rounded-lg bg-[var(--bg-secondary)]/60 hover:bg-[var(--bg-tertiary)]/50 text-[var(--text-secondary)] text-xs transition-colors flex items-center gap-1.5"
         title="Grid layout"
       >
@@ -651,10 +801,17 @@ function LayoutPicker({ value, onChange }: { value: TabLayout; onChange: (next: 
         {label[value]}
       </button>
       {open && (
-        <div className="absolute left-0 top-full mt-1 z-20 min-w-[120px] rounded-lg bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] shadow-xl py-1">
+        <div
+          role="listbox"
+          aria-label="Grid layout options"
+          className="absolute left-0 top-full mt-1 z-20 min-w-[120px] rounded-lg bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] shadow-xl py-1"
+        >
           {options.map(opt => (
             <button
               key={opt}
+              type="button"
+              role="option"
+              aria-selected={opt === value}
               onClick={() => { setOpen(false); onChange(opt) }}
               className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
                 opt === value

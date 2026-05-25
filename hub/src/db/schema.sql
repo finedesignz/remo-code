@@ -357,3 +357,16 @@ CREATE INDEX IF NOT EXISTS idx_notifications_sent_lookup ON notifications_sent(k
 ALTER TABLE notifications_sent DROP CONSTRAINT IF EXISTS notifications_sent_kind_check;
 ALTER TABLE notifications_sent ADD CONSTRAINT notifications_sent_kind_check
   CHECK (kind IN ('dedupe_hit','rate_limit','daily_cap','dispatch_failed','session_offline','stack_not_detected'));
+
+-- ── Phase 06 plan 007: GitHub-issue post-run idempotency ─────────────────────
+-- Skips duplicate issue creation for the same (repo, app_uuid, deploy_uuid)
+-- within a 24h window. Hash = sha256(`${repo}|${app_uuid}|${deploy_uuid}`).
+CREATE TABLE IF NOT EXISTS github_issue_idempotency (
+  user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hash           TEXT NOT NULL,
+  repo_full_name TEXT NOT NULL,
+  issue_number   INTEGER NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, hash)
+);
+CREATE INDEX IF NOT EXISTS idx_gh_idem_created ON github_issue_idempotency(created_at);

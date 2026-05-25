@@ -64,14 +64,18 @@ to the web UI over WebSocket.
 | `hub/src/scheduler/post-run/schema.ts`    | Zod schema for `post_run_actions` + chain-cycle detector (DFS)         |
 | `hub/src/scheduler/post-run/aggregator.ts`| Fan-out aggregator: collects child results, fires post-run actions once|
 | `hub/src/scheduler/post-run/template.ts`  | `{{var}}` substitution with optional HTML escape (email variant)       |
+| `web/src/components/CronBuilder.tsx`      | Dropdown-driven cron builder (8 modes + presets) used in editor        |
+| `web/src/lib/cron-humanize.ts`            | `humanizeCron(expr)` plain-English renderer (builder + list row)       |
+| `web/src/lib/format.ts`                   | `formatDuration`, `formatCostUsd`, `formatRelativeAgo` (list chips)    |
+| `web/src/lib/scheduled-message.ts`        | `parseScheduledPrefix(text)` — extracts `[scheduled: ...]` pill        |
 
 ### REST surface
 
 | Method | Path                                   | Notes                                                           |
 |--------|----------------------------------------|-----------------------------------------------------------------|
-| GET    | `/api/scheduled-tasks`                 | List user's tasks; each row includes `next_3_runs`              |
+| GET    | `/api/scheduled-tasks`                 | List user's tasks; each row includes `next_3_runs`, `last_run_cost_usd`, `last_run_duration_ms` |
 | POST   | `/api/scheduled-tasks`                 | Create. Validates cron + TZ + `post_run_actions` + cycle check  |
-| GET    | `/api/scheduled-tasks/:id`             | Get one (user-scoped)                                           |
+| GET    | `/api/scheduled-tasks/:id`             | Get one (user-scoped); includes `last_run_cost_usd`, `last_run_duration_ms` |
 | PATCH  | `/api/scheduled-tasks/:id`             | Partial update                                                  |
 | DELETE | `/api/scheduled-tasks/:id`             | Soft remove + unregister cron                                   |
 | POST   | `/api/scheduled-tasks/:id/run-now`     | Bypass cron, fire once                                          |
@@ -117,6 +121,18 @@ type ScheduledTask = {
 - **security_scan** — preset shortcut: skill `/security-review`
 - **continue_dev** — preset shortcut: `/gsd-fast` or similar
 - **log_check** — hub-local; pulls Coolify logs and analyzes (no agent)
+- **triage** — webhook-triggered Coolify deployment triage. Renders a structured
+  prompt (see `hub/src/scheduler/triage-prompt.ts`), forces Claude to emit a
+  `TriageResult` JSON (`error_type`, `severity`, `root_cause`, `suggested_fix`,
+  `confidence`, `affected_files?`), and stores the validated JSON in
+  `scheduled_task_runs.output_snippet`. On parse failure the run is marked
+  `status='failed', error='triage_parse_error'`. **Wire-up status:** the
+  `triage` task_kind, prompt template, schema, and parse helper are shipped
+  (`hub/src/scheduler/triage-schema.ts`, `triage-prompt.ts`); the
+  webhook-to-session routing (Phase 06 plan 008) is **pending Phase 04 plan
+  008** (`pickSessionTarget` + `POST /api/sessions/heal`) being merged. Until
+  then, triage runs from the webhook persist metadata but `dispatchTriageStub`
+  is a no-op — they do not dispatch to a session.
 
 ### Target kinds
 
@@ -145,6 +161,90 @@ validated by `Intl.DateTimeFormat`. The UI offers presets via
 The "next 3 runs" preview in the editor uses the same util as the hub —
 both `hub/src/scheduler/cron.ts` and `web/src/lib/cron.ts` are kept
 API-compatible.
+
+---
+
+## Web UI
+
+### Cron builder (`web/src/components/CronBuilder.tsx`)
+
+The editor no longer exposes a raw cron text input. `CronBuilder` is a
+dropdown-driven composer with 8 modes:
+
+| Mode              | Output                                          |
+|-------------------|-------------------------------------------------|
+| Every N minutes   | `*/N * * * *`                                   |
+| Every N hours     | `0 */N * * *`                                   |
+| Every N days      | `0 H * * *` (day-step folded into daily preset) |
+| Every N months    | `0 H 1 */N *`                                   |
+| Daily             | `M H * * *`                                     |
+| Weekly            | `M H * * DOW,DOW,...` (multi-select chips)      |
+| Monthly           | `M H D * *`; **`D = "Last day"`** maps to `L`   |
+| Custom (5-field)  | Passthrough; validated via `cron.ts`            |
+
+A common-presets quick row sits above the mode picker (hourly, every 15
+min, weekdays 9am, etc.). Below the controls the builder shows a
+read-only cron string, a plain-English summary from
+`humanizeCron(expr)`, and the next-3-runs preview rendered in the task's
+selected timezone.
+
+`humanizeCron` (`web/src/lib/cron-humanize.ts`) is shared with the list
+row, so "Every week on Mon, Wed, Fri at 09:30" appears in both surfaces.
+Unrecognized custom expressions fall back to the raw cron string.
+
+### Schedules list (`web/src/components/SchedulesPage.tsx`)
+
+Toolbar above the list:
+
+- **Search-by-name** — substring match on `task.name`
+- **Status segmented control** — `All | Enabled | Disabled`
+- **Task-type dropdown** — `All | prompt | skill | security_scan | log_check | continue_dev`
+
+Filters are client-side and AND-combined.
+
+Each row carries last-run metrics from the list endpoint:
+
+```
+<task name>                  Every weekday at 09:00 (PDT)
+<status> · $0.0034 · 12.3s   Next: May 25, 9:30 AM PDT · Fired 4m ago
+```
+
+- Cost/duration chips render with `formatCostUsd` / `formatDuration`
+  from `web/src/lib/format.ts`.
+- `Next:` is rendered in the task's own timezone with the short TZ
+  abbreviation.
+- `Fired Xm ago` appears via `formatRelativeAgo` when `last_fire_at` is
+  set on the task.
+
+### Runs drawer (`web/src/components/ScheduleRunsDrawer.tsx`)
+
+Status filter chips with live counts:
+`All | Success | Failure | Skipped | Running | Cancelled`. Filter is
+client-side over the currently loaded window.
+
+A summary stats banner sits above the run list and shows:
+
+- Total runs (in the loaded window)
+- Success rate (`success / total`, as a percentage)
+- Total cost in USD
+- Average duration in ms
+
+### Scheduled-run badge in chat
+
+When a scheduled task fires against an agent, the user message persisted
+to chat history is unchanged in shape:
+
+```
+[scheduled: <task name>]
+
+<original prompt>
+```
+
+In the web UI, `parseScheduledPrefix` (`web/src/lib/scheduled-message.ts`)
+splits that prefix off and renders it as a styled indigo pill —
+`Scheduled: <task name>` — above the prompt body inside the message
+bubble (`web/src/components/MessageBubble.tsx`). The prefix never appears
+inline as plain text.
 
 ---
 
@@ -200,6 +300,27 @@ its cadence.
 
 ---
 
+## Agent sender — summary directive
+
+`hub/src/scheduler/senders/agent.ts` sends two distinct strings:
+
+1. **Stored** in `messages` (chat history) — unchanged shape:
+   `"[scheduled: <task name>]\n\n<prompt>"`. The UI strips the prefix
+   into the indigo `Scheduled:` pill.
+2. **Sent to Claude's stdin** — the stored content plus a trailing
+   directive:
+
+   > When finished, end your response with a single line starting with
+   > `Summary:` describing in 1-2 sentences what you accomplished or
+   > any blocker.
+
+This forces every scheduled run to end with a one-line summary that the
+runs drawer, output snippet, and template variables can quote without
+parsing the whole assistant turn. Only the **sent** content carries the
+directive — chat history stays clean.
+
+---
+
 ## Offline grace
 
 When `resolveTargets` returns a target with `online: false`, the dispatcher
@@ -227,6 +348,7 @@ whose `on` condition matches. Each action has an optional `delay_seconds`
 | `notify_telegram`   | `{ body }`                                        | Sends via the user's Telegram integration       |
 | `notify_web_push`   | `{ title?, body }`                                | Broadcasts to subscribed browsers via WS        |
 | `webhook`           | `{ url }`                                         | POST JSON with `X-Remo-Signature: sha256=...`   |
+| `github_issue`      | `{ repo_full_name, labels?, assignees? }`         | Creates a GitHub issue from a `triage` run result; gateway-pair creds |
 
 ### `on` conditions
 
@@ -271,6 +393,99 @@ via `scheduler/post-run/aggregator.ts`:
 
 ---
 
+## Coolify webhook ingress (Phase 06)
+
+Public webhook endpoint that turns Coolify deployment events into
+`scheduled_task_runs` rows with deployment metadata. Failed deployments
+queue a `triage` run (routing wire-up pending — see status note in
+"Task types → triage" above); succeeded / in-progress events insert a
+metadata row only (no LLM spend).
+
+- **Endpoint:** `POST /api/coolify/webhook/:user_id` (public — auth is
+  per-user HMAC, not JWT)
+- **Module:** `hub/src/api/coolify-webhook.ts`
+- **Required headers:**
+  - `X-Coolify-Signature: sha256=<hex>` — HMAC-SHA256 over
+    `${X-Coolify-Timestamp}.${rawBody}`, constant-time compared
+  - `X-Coolify-Timestamp: <unix-seconds>` — rejected if skew > 5 minutes
+- **Secret management:** per-user secret in `users.coolify_webhook_secret`.
+  Rotated via `POST /api/account/coolify-webhook-secret/rotate` (JWT
+  authed); status fetched via `GET /api/account/coolify-webhook-secret`
+  (returns existence + last rotated, never the secret itself).
+- **Persisted deployment metadata** (new nullable columns on
+  `scheduled_task_runs`):
+  - `deployment_uuid TEXT`
+  - `application_uuid TEXT`
+  - `git_repository TEXT`
+  - `commit_sha TEXT`
+- **Event mapping:**
+  - `deployment.failed` → row inserted with metadata; triage dispatch
+    stubbed (awaits plan 008)
+  - `deployment.succeeded` / `deployment.in_progress` → metadata-only row,
+    `status='success'`, no spend
+- **Response:** `202 { ok: true, run_id }`
+
+See [coolify-webhook-migration.md](./coolify-webhook-migration.md) for the
+end-to-end migration plan from `coolify-ai-monitor` and full setup steps.
+
+---
+
+## Log classifier (Phase 06 — pending wire-up)
+
+`hub/src/scheduler/log-classifier.ts` is the planned 16-pattern regex gate
+that runs over `log_check` output BEFORE any LLM spend. If `hasErrors ===
+false`, the dispatcher finalizes the run as `status='success',
+output_snippet='[no errors detected]'` and **skips post-run actions
+entirely** to preserve the daily cost cap. Triage runs (from the webhook)
+bypass the classifier — they're already known-failed.
+
+**Status:** Phase 06 plans 002 (`log-classifier.ts`) and 003
+(coolify-sender wire-up) have **not yet shipped** to this branch. The
+patterns and severity tags are spec'd in
+`.planning/phases/06-self-heal-absorb/06-CONTEXT.md`; when the module
+lands, this section gets the file path + the final pattern set and the
+"When adding a new task type..." paragraph below stays accurate.
+
+---
+
+## GitHub-issue post-run action (Phase 06)
+
+`github_issue` is a new `post_run_actions` type that creates a GitHub
+issue from a `triage` run result.
+
+- **Module:** `hub/src/scheduler/post-run/github-issue.ts`
+- **Config (per scheduled task):**
+  ```ts
+  {
+    type: 'github_issue',
+    on: 'failure' | 'always' | ...,
+    config: {
+      repo_full_name: 'owner/repo',
+      labels?: string[],
+      assignees?: string[],
+    }
+  }
+  ```
+- **Credentials:** loaded from the gateway pair
+  (`GET {GATEWAY_URL}/api/credentials/service/github` → `{ token }`),
+  with `FALLBACK_GATEWAY_URL` used if the primary fails. There is **no
+  `GITHUB_TOKEN` env var on the hub** — per global rule #19 / the MCP
+  server auth architecture, third-party creds live in the gateway only.
+- **Idempotency:** `sha256(repo|application_uuid|deployment_uuid)`. The
+  `github_issue_idempotency` table records each issued hash with a
+  24-hour window — duplicate hashes inside that window are skipped (no
+  duplicate issues for the same failed deployment).
+- **Issue body:** rendered via `post-run/template.ts` using `TriageResult`
+  fields as template vars (`{{error_type}}`, `{{severity}}`,
+  `{{root_cause}}`, `{{suggested_fix}}`, `{{confidence}}`, plus the
+  standard run vars).
+- **Severity → label:** `severity:high`, `severity:critical`, etc. are
+  added on top of the user-supplied `labels`.
+- **Failure mode:** Octokit errors are logged only — they never fail the
+  parent run.
+
+---
+
 ## Environment variables
 
 The scheduler does not introduce new required env vars. Optional vars:
@@ -286,6 +501,28 @@ The scheduler does not introduce new required env vars. Optional vars:
 
 Per the global rule, email notifications always default to **emails4agents**
 — never SendGrid/Postmark/Mailgun/Resend without explicit user request.
+
+---
+
+## Notes-field templates (web editor UX)
+
+For structured task types (`continue_dev`, `log_check`, `security_scan`)
+the editor pre-fills the **Notes** textarea with a starter prompt template
+defined in `web/src/lib/task-templates.ts`. Behavior:
+
+- New schedule → notes pre-populated with the matching template.
+- Switching task type → swaps in the new template, but only if current
+  notes are empty OR still exactly match a known template (preserves user
+  edits via `isReplaceableNotes`).
+- Editing an existing schedule → never overwritten; saved value loads as-is.
+
+Post-run actions (`PostRunActionsEditor`) similarly pre-fill `config` with
+sensible `{{template_var}}` defaults on action create + type-change via
+`defaultActionConfig()` — email subject/body, Telegram body, web-push
+title/body, etc. Empty config is no longer the default.
+
+When adding a new templated task type, drop the prompt body into
+`web/src/lib/task-templates.ts` and register it in `TASK_TEMPLATES`.
 
 ---
 

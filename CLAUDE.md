@@ -149,7 +149,11 @@ Hub-side cron scheduler that fires user-defined tasks against connected agents/s
 
 - **Module:** `hub/src/scheduler/` (V2 dispatcher) — the legacy v0 scheduler at `hub/src/scheduler/index.ts` is still wired during the transition and will be removed in a follow-up.
 - **Key files:** `cron.ts` (croner wrapper + presets), `dispatcher.ts` (cost-cap + fan-out + route), `targets.ts` (resolve target_kind), `session-queue.ts` (1 in-flight + 1 waiter), `catchup.ts` (boot replay), `grace.ts` (10-min offline buffer), `senders/{agent,supervisor,coolify}.ts`, `post-run/{dispatcher,schema,template,aggregator,chain,email,telegram,webpush,webhook}.ts`.
+- **Agent sender directive:** `hub/src/scheduler/senders/agent.ts` appends a `Summary:` directive to the content sent to Claude's stdin (forces a 1-line summary at the end of every scheduled run). The content **stored** in `messages` is unchanged — `[scheduled: <task name>]\n\n<prompt>` — only the sent string carries the directive.
 - **Web mirror:** `web/src/lib/cron.ts` keeps the "next 3 runs" preview API-compatible with the hub.
+- **Web UI files:** `web/src/components/CronBuilder.tsx` (dropdown cron composer, 8 modes), `web/src/lib/cron-humanize.ts` (`humanizeCron` plain-English renderer shared by builder + list row), `web/src/lib/format.ts` (`formatDuration`, `formatCostUsd`, `formatRelativeAgo`), `web/src/lib/scheduled-message.ts` (`parseScheduledPrefix` → indigo `Scheduled:` pill in `MessageBubble`).
+- **List + drawer:** `web/src/components/SchedulesPage.tsx` (search + status + task-type filters; last-run cost/duration chips; tz-aware `Next:` + `Fired Xm ago`), `web/src/components/ScheduleRunsDrawer.tsx` (status filter chips with live counts + summary stats banner).
+- **API shape:** list + single-task endpoints include `last_run_cost_usd` and `last_run_duration_ms` (LATERAL JOIN on `scheduled_task_runs` keyed by `task_id`, most recent finalized run).
 - **REST:** `hub/src/api/scheduled-tasks.ts`, `hub/src/api/scheduled-task-runs.ts`. WS events extend `hub/src/ws/protocol.ts`.
 - **Tests:** `hub/test/scheduler.test.ts` (41 unit tests, no DB needed), `hub/test/scheduled-tasks.e2e.test.ts` (skipped without `REMO_E2E_DB_URL`).
 
@@ -195,6 +199,52 @@ Multichat grid view at `#/grid` and `#/grid/:tabId` — watch up to 12 Claude Co
 
 When adding a new ChatSurface density, layout mode, tab-membership op, or any grid behavior: update `docs/grid-view.md` in the same commit.
 
+## Phase 05: Codex CLI + Rootless Ambient Sessions
+
+Sessions can run either **Claude Code** or **Codex** (`sessions.cli_kind` — `'claude' | 'codex'`, pinned at create time). Each agent can also host **rootless ambient sessions** (one per CLI per host, no `project_dir`) advertised via `auth` payload `rootless_sessions: ['claude','codex']`. Partial unique index `idx_sessions_rootless_unique` enforces one-per-(user,host,cli). Rootless runners spawn lazily on first `user_message` with cwd `~/.remo-code/rootless/<cli>/`.
+
+**Codex transport:** `codex app-server` over child-process stdio JSON-RPC (newline-delimited with LSP `Content-Length:` fallback auto-detected). `CodexRunner` translates Codex notifications into the same `RunnerEvent` union Claude emits, so the web UI renders both identically. **Spike status:** framing + method names per research §1.3 — not yet live-verified.
+
+**Instructions sync (`seed_files` in `auth_ok`):** three `users.*` TEXT columns (`claude_global_md`, `codex_agents_md`, `codex_config_toml`) sync to the agent on connect. Agent writes each file **create-if-absent only** — it NEVER overwrites; on sha-256 drift it emits an `agent_log` warning. Edit blobs at Settings → Instructions. `PUT /api/instructions` strips secret-looking lines (`api_key`, `token`, `secret`, `password`) from `codex_config_toml`.
+
+**File map** (see [docs/codex-and-rootless.md](docs/codex-and-rootless.md) for the full architecture):
+- Agent: `agent/src/cli-runner.ts` (`CliRunner` interface + `RunnerEvent` union), `claude-runner.ts`, `codex-runner.ts`, `codex-jsonrpc.ts`, `seed.ts`, `index.ts` (per-session runner `Map<sessionId, CliRunner>`)
+- Hub: `hub/src/api/instructions.ts`, `hub/src/db/dal.ts` (`findOrCreateRootlessSession`, `getUserInstructions`, `updateUserInstructions`), `hub/src/ws/agent.ts` (auth handler builds `cli_kind` + `rootless_session_ids` + `seed_files`)
+- Web: `web/src/components/SettingsPage.tsx` (Instructions tab), `Sidebar.tsx` (codex/ambient badges), `useSessions.ts` (`CodeSession.cli_kind`, `is_rootless`, `hostname`)
+
+When adding a new CLI runner, modifying the Codex protocol mapping, changing seed semantics, or extending instruction blobs: update `docs/codex-and-rootless.md` in the same commit.
+
+## Phase 06: Coolify Self-Heal Absorb
+
+Absorbs the standalone `coolify-ai-monitor` Express service (port 3032, now retired) into the hub's scheduler + post-run pipeline. Public HMAC-signed Coolify webhook → `triage` run → structured `TriageResult` JSON → optional `github_issue` post-run action. Full architecture in [docs/scheduled-tasks.md](docs/scheduled-tasks.md) (sections "Coolify webhook ingress", "GitHub-issue post-run action", and the `triage` task_kind row) and the end-to-end migration plan in [docs/coolify-webhook-migration.md](docs/coolify-webhook-migration.md).
+
+**File map (shipped on this branch):**
+
+- `hub/src/api/coolify-webhook.ts` — public `POST /api/coolify/webhook/:user_id`; reads raw body BEFORE JSON parse, HMAC-verifies, persists deployment metadata, stubs triage dispatch.
+- `hub/src/api/account.ts` — `POST /api/account/coolify-webhook-secret/rotate` + `GET .../coolify-webhook-secret` (JWT-authed status).
+- `hub/src/scheduler/triage-schema.ts` — `TriageResult` Zod schema + `parseTriageOutput` (tolerates ```json fences, rejects bare prose).
+- `hub/src/scheduler/triage-prompt.ts` — `renderTriagePrompt` template for `task_kind: 'triage'` runs.
+- `hub/src/scheduler/post-run/schema.ts` — `github_issue` variant added to the discriminated union.
+- `hub/src/scheduler/post-run/github-issue.ts` — `executeGithubIssue`: loads creds from gateway pair, renders body via `template.ts`, sha256 idempotency over `(repo, application_uuid, deployment_uuid)` in `github_issue_idempotency` (24h window). Failures are log-only.
+- `hub/src/db/dal.ts` — `getUserCoolifyWebhookSecret`, `rotateUserCoolifyWebhookSecret`, `ensureInternalDeploymentTask`, `hasOpenIssueForHash`, `recordOpenIssueForHash`.
+- `hub/src/db/schema.sql` — new nullable columns on `scheduled_task_runs` (`deployment_uuid`, `application_uuid`, `git_repository`, `commit_sha`), `users.coolify_webhook_secret`, `github_issue_idempotency` table.
+- Tests: `hub/test/coolify-webhook.test.ts`, `coolify-webhook-secret.test.ts`, `triage-schema.test.ts`, `post-run-github-issue.test.ts`.
+
+**Pending (NOT shipped on this branch — depends on Phase 04 plan 008):**
+
+- `hub/src/scheduler/log-classifier.ts` (Phase 06 plans 002/003) — 16-pattern regex gate over `log_check` output before LLM spend.
+- `hub/src/scheduler/senders/triage.ts` + the real body of `dispatchTriageStub` (Phase 06 plan 008) — routes synthesized triage runs through `pickSessionTarget` (which lives in unmerged Phase 04 plan 008). Until plan 008 lands, the webhook persists rows but does NOT dispatch to a session.
+
+**Key invariants:**
+
+- **Cost cap.** All triage runs flow through `hub/src/scheduler/dispatcher.ts` `enforceCostCap`. No new fan-out path bypasses the daily cap. The classifier (when wired) skips post-run actions when no errors detected — preserves the cap.
+- **GitHub creds via gateway pair, ALWAYS.** Token fetched via `GET {GATEWAY_URL}/api/credentials/service/github`. There is no `GITHUB_TOKEN` env var on the hub. Per global CLAUDE.md MCP server auth architecture.
+- **Webhook HMAC.** `X-Coolify-Signature: sha256=<hex>` over `${X-Coolify-Timestamp}.${rawBody}`, constant-time compared; reject `>5 min` skew. Raw body must be read BEFORE any JSON parse.
+- **Idempotency.** `github_issue` skips when `sha256(repo|application_uuid|deployment_uuid)` exists in `github_issue_idempotency` within 24h — no duplicate issues for the same failed deployment.
+- **GitHub-issue failures never fail the parent run** — log-only; Octokit errors are swallowed.
+
+When adding a new triage payload field, post-run action, or webhook event type: update `docs/scheduled-tasks.md` and `docs/coolify-webhook-migration.md` in the same commit.
+
 ## PR Hygiene
 
 Periodically check for open PRs with `gh pr list`. Review them for conflicts with current work, stale branches, or changes that have already been applied to main. Flag any that should be closed or merged.
@@ -203,4 +253,4 @@ Periodically check for open PRs with `gh pr list`. Review them for conflicts wit
 
 Docker multi-stage build (see `Dockerfile`): installs deps → builds web → copies into production image with non-root user. Runs on Coolify at `app.remo-code.com`, port 3040.
 
-The agent runs locally on the dev machine — it is NOT deployed to the server.
+The agent runs locally on the dev machine — it is NOT deployed to the server. The agent may host multiple CLI subprocesses per process (one Claude project session + ambient Claude + ambient Codex).

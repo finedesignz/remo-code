@@ -1,0 +1,51 @@
+/**
+ * Triage prompt template (Phase 06, plan 006).
+ *
+ * Renders the user-facing prompt that drives `task_kind: 'triage'` runs.
+ * The model MUST respond with a single JSON object matching TriageResult
+ * (see triage-schema.ts). Caps the log snippet to the last 100 lines.
+ *
+ * No DB access, no side effects — pure string formatting.
+ */
+
+export interface RenderTriagePromptInput {
+  application_uuid: string
+  deployment_uuid: string
+  git_repository?: string
+  commit_sha?: string
+  log_snippet: string
+}
+
+export function renderTriagePrompt(input: RenderTriagePromptInput): string {
+  const tail = input.log_snippet.split(/\r?\n/).slice(-100).join('\n')
+
+  const repo = input.git_repository ?? '(unknown)'
+  const sha = input.commit_sha ?? '(unknown)'
+
+  return [
+    'You are a deployment triage assistant. A Coolify deployment failed and you must analyze the build/runtime logs to produce a structured root-cause report.',
+    '',
+    'Deployment context:',
+    `- application_uuid: ${input.application_uuid}`,
+    `- deployment_uuid: ${input.deployment_uuid}`,
+    `- git_repository: ${repo}`,
+    `- commit_sha: ${sha}`,
+    '',
+    'Failure logs (last 100 lines):',
+    '```',
+    tail,
+    '```',
+    '',
+    'Respond with a SINGLE JSON object — no markdown, no prose, no code fences around it — matching this exact shape:',
+    '{',
+    '  "error_type": string,                              // short identifier, e.g. "DatabaseConnectionError"',
+    '  "severity": "low" | "medium" | "high" | "critical",',
+    '  "root_cause": string,                              // 1-3 sentences explaining what went wrong',
+    '  "suggested_fix": string,                           // actionable next step',
+    '  "confidence": number,                              // 0..1, your confidence in this diagnosis',
+    '  "affected_files": string[]                         // OPTIONAL: repo-relative paths likely involved',
+    '}',
+    '',
+    'Do not wrap the JSON in markdown fences. Do not add commentary before or after. Output the JSON object only.',
+  ].join('\n')
+}
