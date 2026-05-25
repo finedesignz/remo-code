@@ -303,3 +303,34 @@ CREATE TABLE IF NOT EXISTS github_issue_idempotency (
 );
 CREATE INDEX IF NOT EXISTS idx_gh_idem_created ON github_issue_idempotency(created_at);
 
+-- ── Phase 04 plan 002: supervisor budget + preferred-supervisor routing ──────
+-- Columns the hub remembers for each supervisor's reported resource budget.
+-- A supervisor reports its cgroup-derived `concurrency_budget` periodically via
+-- the `host_resources` WS message (Plan 001). The hub may also store an
+-- admin/user-controlled `concurrency_override` that is hard-clamped server-side
+-- to [1, concurrency_budget * 2] (see ARCHITECTURE-REVIEW §3).
+-- `budget_source` records which cgroup/host path produced the budget.
+-- `budget_updated_at` lets the UI detect stale reports.
+ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS cpu_cores INTEGER;
+ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS total_mem_mb INTEGER;
+ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS free_mem_mb INTEGER;
+ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS concurrency_budget INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS concurrency_override INTEGER;
+ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS budget_source TEXT
+  CHECK (budget_source IS NULL OR budget_source IN ('cgroup_v2','cgroup_v1','host_fallback'));
+ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS budget_updated_at TIMESTAMPTZ;
+
+-- Per-user preferred supervisor for self-heal routing (Plan 008 consumer).
+-- NULL means "no preference — pick any online supervisor".
+ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_supervisor_id TEXT
+  REFERENCES supervisors(id) ON DELETE SET NULL;
+
+-- Per-user daily cost cap in cents (defaults to $20 per ARCHITECTURE-REVIEW §7).
+-- Note: schema also has a separate legacy `daily_cost_cap_usd NUMERIC` column
+-- used by the scheduler cost guard. This `_cents` column is Phase 04's
+-- integer-cent form for the hub-wide cap added by Plan 009.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_cost_cap_cents INTEGER NOT NULL DEFAULT 2000;
+
+CREATE INDEX IF NOT EXISTS idx_users_preferred_supervisor
+  ON users(preferred_supervisor_id) WHERE preferred_supervisor_id IS NOT NULL;
+
