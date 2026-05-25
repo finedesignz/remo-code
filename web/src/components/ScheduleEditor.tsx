@@ -7,6 +7,7 @@ import { nextRuns, validate as validateCron, browserTimezone } from '../lib/cron
 import { PostRunActionsEditor } from './PostRunActionsEditor'
 import { CronBuilder } from './CronBuilder'
 import { computeTaskAutoName } from '../lib/task-name'
+import { TASK_TEMPLATES, isReplaceableNotes } from '../lib/task-templates'
 
 interface Props {
   token: string
@@ -57,7 +58,20 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
   const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? 'prompt')
   const [prompt, setPrompt] = useState<string>(existing?.payload?.prompt ?? '')
   const [skillName, setSkillName] = useState<string>(existing?.payload?.command ?? '')
-  const [notes, setNotes] = useState<string>(existing?.payload?.notes ?? '')
+  const [notes, setNotes] = useState<string>(() => {
+    const existingNotes = existing?.payload?.notes ?? ''
+    if (existingNotes) return existingNotes
+    const initialType = existing?.task_type ?? 'prompt'
+    return TASK_TEMPLATES[initialType] ?? ''
+  })
+
+  // Swap in the template when user switches task type on a NEW schedule (or
+  // when current notes still exactly match a known template). Preserves
+  // manual edits — switching back doesn't clobber user-authored notes.
+  useEffect(() => {
+    if (existing) return
+    setNotes(prev => isReplaceableNotes(prev) ? (TASK_TEMPLATES[taskType] ?? '') : prev)
+  }, [taskType, existing])
 
   // Schedule — composed by <CronBuilder>; the cron string is the source of truth.
   const [cronExpr, setCronExpr] = useState<string>(existing?.cron_expr ?? '0 9 * * *')
