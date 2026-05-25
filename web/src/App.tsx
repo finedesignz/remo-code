@@ -10,12 +10,15 @@ import { ErrorCapturePage } from './components/ErrorCapturePage'
 import { ChatSurfaceShowcase } from './components/ChatSurfaceShowcase'
 import { MobileAccordionShowcase } from './components/MobileAccordionShowcase'
 import { GridPage } from './components/GridPage'
+import { Footer } from './components/Footer'
+import { Privacy } from './pages/Privacy'
+import { Terms } from './pages/Terms'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useBrowserNotifications } from './hooks/useBrowserNotifications'
 import type { Profile } from './hooks/useProfile'
 import type { AuthUser } from './lib/auth.ts'
 
-type Route = 'chat' | 'settings' | 'schedules' | 'error-capture' | 'grid' | 'dev-chat-surface' | 'dev-mobile-accordion'
+type Route = 'chat' | 'settings' | 'schedules' | 'error-capture' | 'grid' | 'privacy' | 'terms' | 'dev-chat-surface' | 'dev-mobile-accordion'
 
 function LoadingScreen() {
   return (
@@ -40,6 +43,8 @@ function getRoute(): Route {
   }
   if (hash.startsWith('#/error-capture')) return 'error-capture'
   if (hash.startsWith('#/grid')) return 'grid'
+  if (hash.startsWith('#/privacy')) return 'privacy'
+  if (hash.startsWith('#/terms')) return 'terms'
   if (hash.startsWith('#/dev/chat-surface')) return 'dev-chat-surface'
   if (hash.startsWith('#/dev/mobile-accordion')) return 'dev-mobile-accordion'
   return 'chat'
@@ -99,8 +104,9 @@ export default function App() {
   }
 
   return (
-    <>
+    <div className="flex flex-col h-screen">
       <NotificationsBridge token={token} profile={profile} />
+      <div className="flex-1 min-h-0 overflow-hidden">
       {route === 'settings' && (
         <SettingsPage
           token={token}
@@ -138,7 +144,12 @@ export default function App() {
           onNavigate={navigate}
         />
       )}
-    </>
+
+      {route === 'privacy' && <Privacy />}
+      {route === 'terms' && <Terms />}
+      </div>
+      <Footer />
+    </div>
   )
 }
 
