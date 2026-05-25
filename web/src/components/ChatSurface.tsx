@@ -158,9 +158,20 @@ const densityClasses = {
 } as const
 
 export function ChatSurface(props: ChatSurfaceProps) {
-  const { sessionId, density, wsConnected = true, token, className, onActivate } = props
+  const { sessionId, density, wsConnected = true, token, className, onActivate, onCancel } = props
   const isParentOwned = 'messages' in props && props.messages !== undefined
   const d = densityClasses[density]
+
+  // Unified cancel handler — parent-owned routes through onCancel prop;
+  // self-owned uses the `send` already in props to fire {type:'cancel',session_id}.
+  const handleCancel = useCallback(() => {
+    if (!sessionId) return
+    if (isParentOwned) {
+      onCancel?.()
+    } else {
+      ;(props as SelfOwnedDataProps).send({ type: 'cancel', session_id: sessionId })
+    }
+  }, [sessionId, isParentOwned, onCancel, props])
 
   // Self-owned data path
   const selfOwned = useChatSurface({
@@ -286,40 +297,49 @@ export function ChatSurface(props: ChatSurfaceProps) {
     if (anchored) setNewCount(0)
   }, [])
 
-  // Auto-scroll on new messages/activity
+  // Auto-scroll on new messages/activity. Always run inside rAF so layout
+  // settles before we measure scrollHeight. Forced/anchored scroll never
+  // depends on a stale prevMsgCountRef — only the "↓ N new" badge does.
   const prevMsgCountRef = useRef(messages.length)
   useEffect(() => {
     const delta = messages.length - prevMsgCountRef.current
     prevMsgCountRef.current = messages.length
-    const el = scrollRef.current
-    if (forceBottomRef.current) {
+
+    if (forceBottomRef.current || isNearBottom.current) {
       const raf = requestAnimationFrame(() => {
         const node = scrollRef.current
         if (node) node.scrollTo({ top: node.scrollHeight, behavior: 'auto' })
       })
-      if (messages.length > 0) forceBottomRef.current = false
+      if (forceBottomRef.current && messages.length > 0) forceBottomRef.current = false
       isNearBottom.current = true
       setNewCount(0)
       return () => cancelAnimationFrame(raf)
     }
-    if (isNearBottom.current && el) {
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    } else if (delta > 0) {
+    if (delta > 0) {
       setNewCount(c => c + delta)
     }
   }, [messages, activity])
 
-  // Session switch: re-arm forced bottom
+  // Session switch: re-arm forced bottom. Schedule TWO rAFs to allow
+  // virtualizer measurements to complete on the second frame.
   useEffect(() => {
     forceBottomRef.current = true
     isNearBottom.current = true
     setNewCount(0)
     prevMsgCountRef.current = 0
-    const raf = requestAnimationFrame(() => {
+    let raf2 = 0
+    const raf1 = requestAnimationFrame(() => {
       const el = scrollRef.current
       if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })
+      raf2 = requestAnimationFrame(() => {
+        const el2 = scrollRef.current
+        if (el2) el2.scrollTo({ top: el2.scrollHeight, behavior: 'auto' })
+      })
     })
-    return () => cancelAnimationFrame(raf)
+    return () => {
+      cancelAnimationFrame(raf1)
+      if (raf2) cancelAnimationFrame(raf2)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
@@ -608,7 +628,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
         onScroll={handleScroll}
         className={d.list}
       >
-        {loading && (
+        {loading && messages.length === 0 && (
           <div className={`text-center text-[var(--text-muted)] ${d.emptyText}`}>Loading messages...</div>
         )}
         {!loading && messages.length === 0 && (
@@ -700,7 +720,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
           </div>
         )}
         <div className={d.inputPad}>
-          <div className="flex gap-2 items-end">
+          <div className="flex gap-2 items-end flex-nowrap">
             <input
               ref={fileInputRef}
               type="file"
@@ -714,11 +734,11 @@ export function ChatSurface(props: ChatSurfaceProps) {
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="p-2 text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors shrink-0 rounded-lg hover:bg-[var(--bg-tertiary)]/50"
+              className={`${d.btnSquare} flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors shrink-0 rounded-lg hover:bg-[var(--bg-tertiary)]/50`}
               title="Attach files"
               aria-label="Attach files"
             >
-              <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <svg width={d.iconSize} height={d.iconSize} viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M15.5 9.2L9.2 15.5a3.5 3.5 0 0 1-5-5L10.9 3.8a2.3 2.3 0 1 1 3.3 3.3L7.5 13.8a1.2 1.2 0 0 1-1.7-1.7l6-6" />
               </svg>
             </button>
@@ -727,12 +747,12 @@ export function ChatSurface(props: ChatSurfaceProps) {
                 type="button"
                 onClick={() => (recording ? stopRecording(false) : startRecording())}
                 disabled={!wsConnected || transcribing}
-                className={`p-2.5 transition-colors shrink-0 rounded-lg hover:bg-[var(--bg-tertiary)]/50 disabled:opacity-40 ${recording ? 'text-red-400' : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'}`}
+                className={`${d.btnSquare} flex items-center justify-center transition-colors shrink-0 rounded-lg hover:bg-[var(--bg-tertiary)]/50 disabled:opacity-40 ${recording ? 'text-red-400' : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'}`}
                 title={recording ? 'Stop recording' : 'Record voice message'}
                 aria-label={recording ? 'Stop recording' : 'Record voice message'}
               >
                 {recording ? (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse">
+                  <svg width={d.iconSize} height={d.iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse">
                     <line x1="2" y1="2" x2="22" y2="22" />
                     <path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2" />
                     <path d="M5 10v2a7 7 0 0 0 12 5" />
@@ -741,7 +761,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
                     <line x1="12" y1="19" x2="12" y2="22" />
                   </svg>
                 ) : (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg width={d.iconSize} height={d.iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
                     <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
                     <line x1="12" y1="19" x2="12" y2="22" />
@@ -797,13 +817,28 @@ export function ChatSurface(props: ChatSurfaceProps) {
                 className={`${d.textarea} bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none max-h-32`}
               />
             </div>
-            <button
-              type="submit"
-              disabled={!input.trim() && attachedFiles.length === 0}
-              className={`${d.sendBtn} bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 rounded-lg text-[var(--text-on-accent)] font-medium transition-colors shrink-0`}
-            >
-              Send
-            </button>
+            {activity.status !== 'idle' ? (
+              <button
+                type="button"
+                onClick={handleCancel}
+                className={`${d.sendBtn} inline-flex items-center justify-center gap-1.5 bg-red-600 hover:bg-red-500 rounded-lg text-white font-medium transition-colors shrink-0`}
+                title="Stop"
+                aria-label="Stop"
+              >
+                <svg width={d.iconSize} height={d.iconSize} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                  <rect x="3" y="3" width="10" height="10" rx="1.5" />
+                </svg>
+                <span>Stop</span>
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!input.trim() && attachedFiles.length === 0}
+                className={`${d.sendBtn} bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 rounded-lg text-[var(--text-on-accent)] font-medium transition-colors shrink-0`}
+              >
+                Send
+              </button>
+            )}
           </div>
         </div>
       </form>
