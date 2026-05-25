@@ -25,6 +25,7 @@ import * as schedRegistry from './scheduler/registry.ts'
 import * as schedDispatcher from './scheduler/dispatcher.ts'
 import * as schedCatchup from './scheduler/catchup.ts'
 import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
+import { startErrorGraceSweep } from './error-capture/grace.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit } from './middleware/rate-limit'
 import {
@@ -227,6 +228,7 @@ runMigrations()
     schedDispatcher.init()
     await schedRegistry.loadAll()
     await schedCatchup.runOnce()
+    startErrorGraceSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {

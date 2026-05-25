@@ -256,6 +256,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       const g = await import('../scheduler/grace.ts')
       void g.drainForTarget(session.id, userId)
     } catch {}
+    // W3/T4 — drain any error-capture errors parked for this session.
+    try {
+      const eg = await import('../error-capture/grace.ts')
+      void eg.drainForSession(session.id)
+    } catch {}
     return
   }
 
