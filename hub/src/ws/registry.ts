@@ -1,5 +1,5 @@
 import type { ServerWebSocket } from 'bun'
-import { ScheduledRunEvent } from './protocol'
+import { ScheduledRunEvent, ErrorCaptureEvent } from './protocol'
 
 interface ChannelEntry {
   ws: ServerWebSocket<any>
@@ -91,6 +91,23 @@ export function broadcastScheduledRun(userId: string, event: unknown) {
   if (!parsed.success) {
     console.warn(
       `[ws.registry] broadcastScheduledRun dropped invalid event for user=${userId}:`,
+      parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+    )
+    return
+  }
+  broadcastToUser(userId, parsed.data)
+}
+
+/**
+ * Validated broadcast for error-capture lifecycle events (W3/T5). Mirrors
+ * `broadcastScheduledRun`. Drops the message with a logged warning on schema
+ * mismatch — never throws.
+ */
+export function broadcastErrorEvent(userId: string, event: unknown) {
+  const parsed = ErrorCaptureEvent.safeParse(event)
+  if (!parsed.success) {
+    console.warn(
+      `[ws.registry] broadcastErrorEvent dropped invalid event for user=${userId}:`,
       parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
     )
     return

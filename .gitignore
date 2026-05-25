@@ -14,3 +14,9 @@ supabase/.temp/
 .worktrees/
 .scratch/
 .playwright-mcp/
+
+# Phase 06 — Tauri supervisor tray
+supervisor/tauri/src-tauri/target/
+supervisor/tauri/src-tauri/gen/
+supervisor/tauri/ui/dist/
+

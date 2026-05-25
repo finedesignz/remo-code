@@ -1,0 +1,62 @@
+/**
+ * Supervisor-native command registry.
+ *
+ * These commands are NOT user-defined slash commands — they're built-in
+ * RPCs that the hub invokes over WS via `run_command`. The supervisor
+ * advertises them in `supervisor.commands_sync` so the hub can route
+ * scheduled tasks / API endpoints (e.g. `/api/error-setup`) to them.
+ */
+import type { ScannedCommand } from '../commands-scanner'
+import { runErrorSetupProbe } from './error-setup-probe'
+import { runErrorSetupApply } from './error-setup-apply'
+
+export interface CommandResult {
+  exit_code: number
+  snippet?: string
+  error?: string
+}
+
+export type CommandHandler = (args: string[]) => Promise<CommandResult>
+
+const HANDLERS: Record<string, CommandHandler> = {
+  error_setup_probe: async (args) => {
+    const r = await runErrorSetupProbe(args)
+    if (!r.ok) return { exit_code: 1, error: r.error || 'probe_failed' }
+    return { exit_code: 0, snippet: JSON.stringify({ files: r.files ?? [] }) }
+  },
+  error_setup_apply: async (args) => {
+    const r = await runErrorSetupApply(args)
+    if (!r.ok) return { exit_code: 1, error: r.error || 'apply_failed' }
+    if (r.nothing_to_commit) {
+      return { exit_code: 0, snippet: JSON.stringify({ nothing_to_commit: true }) }
+    }
+    return {
+      exit_code: 0,
+      snippet: JSON.stringify({
+        commit_sha: r.commit_sha,
+        branch: r.branch,
+        pushed: r.pushed,
+      }),
+    }
+  },
+}
+
+export function getHandler(name: string): CommandHandler | null {
+  return HANDLERS[name] ?? null
+}
+
+/** Supervisor-native commands advertised in `supervisor.commands_sync`. */
+const NATIVE: Array<{ name: string; description: string }> = [
+  { name: 'error_setup_probe', description: 'Read project files for error-tracking SDK detection' },
+  { name: 'error_setup_apply', description: 'Install error-tracking SDK files into a repo + commit + push' },
+]
+
+export function nativeSupervisorCommands(): ScannedCommand[] {
+  return NATIVE.map((c) => ({
+    kind: 'command' as const,
+    name: c.name,
+    description: c.description,
+    source: 'supervisor',
+    path: '',
+  }))
+}
