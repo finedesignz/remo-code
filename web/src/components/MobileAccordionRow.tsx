@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { ChatSurface } from './ChatSurface'
 import type { CodeSession } from '../hooks/useSessions'
 import { sessionLabel, shortId } from './SessionDropdown'
@@ -39,6 +40,26 @@ export function MobileAccordionRow({
   token,
   wsConnected,
 }: Props) {
+  const rootRef = useRef<HTMLDivElement | null>(null)
+
+  // When the row expands, scroll its header into view so the input field
+  // below (and the iOS soft keyboard) doesn't push it off-screen. The
+  // CSS max-height transition is 200ms; wait one frame so the new height
+  // is measured before scrolling.
+  useEffect(() => {
+    if (!expanded) return
+    const el = rootRef.current
+    if (!el) return
+    const raf = requestAnimationFrame(() => {
+      try {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      } catch {
+        el.scrollIntoView()
+      }
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [expanded])
+
   const statusDotClass =
     session.status === 'thinking'
       ? 'bg-amber-400 animate-pulse'
@@ -48,7 +69,8 @@ export function MobileAccordionRow({
 
   return (
     <div
-      className="rounded-lg overflow-hidden transition-[max-height] duration-200 ease-out"
+      ref={rootRef}
+      className="rounded-lg overflow-hidden transition-[max-height] duration-200 ease-out scroll-mt-2"
       style={{
         // Collapsed: just the row (~44px button + padding). Expanded:
         // row + square panel + safe-area inset, capped at viewport height
