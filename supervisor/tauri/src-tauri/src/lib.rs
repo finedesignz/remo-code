@@ -1,6 +1,6 @@
 //! Remo Code Supervisor — Tauri 2 shell.
 //!
-//! T2: tray icon + menu + hide-on-close.
+//! T3: managed Bun sidecar spawn (CREATE_NO_WINDOW + restart-on-crash).
 
 mod sidecar;
 mod tray;
@@ -38,9 +38,17 @@ pub fn run() {
                     }
                 });
             }
+
+            // Spawn the Bun supervisor as a managed sidecar.
+            sidecar::spawn_managed(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                sidecar::shutdown(app_handle);
+            }
+        });
 }
