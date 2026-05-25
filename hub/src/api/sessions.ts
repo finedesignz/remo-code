@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected } from '../db/dal'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
-import { hashToken } from '../ws/channel'
+import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
 import { generateToken } from '../utils/token'
 

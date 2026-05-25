@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { createPluginSession } from '../db/dal'
-import { hashToken } from '../ws/channel'
+import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 
 const plugin = new Hono()
