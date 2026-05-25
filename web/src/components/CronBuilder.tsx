@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { nextRuns, validate as validateCron } from '../lib/cron'
+import { describeMode, WEEKDAY_LABELS } from '../lib/cron-humanize'
 
 /**
  * CronBuilder — dropdown/input UI for composing 5-field cron strings.
@@ -68,7 +69,6 @@ const MIN_N_OPTIONS = [1, 2, 5, 10, 15, 20, 30, 45]
 const HOUR_N_OPTIONS = [1, 2, 3, 4, 6, 8, 12]
 const DAY_N_OPTIONS = Array.from({ length: 30 }, (_, i) => i + 1)
 const MONTH_N_OPTIONS = Array.from({ length: 12 }, (_, i) => i + 1)
-const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 const MODE_OPTIONS: Array<{ value: CronMode; label: string }> = [
   { value: 'every_n_minutes', label: 'Every N minutes' },
@@ -488,36 +488,3 @@ function parseDowList(s: string): number[] | null {
   return null
 }
 
-function describeMode(s: BuilderState): string {
-  switch (s.mode) {
-    case 'every_n_minutes':
-      return s.minN === 1 ? 'Every minute' : `Every ${s.minN} minutes`
-    case 'every_n_hours': {
-      const at = `:${String(s.hourMin).padStart(2, '0')}`
-      return s.hourN === 1 ? `Every hour at ${at}` : `Every ${s.hourN} hours at ${at}`
-    }
-    case 'daily':
-      return `Every day at ${fmtTime(s.hh, s.mm)}`
-    case 'every_n_days':
-      return s.dayN === 1
-        ? `Every day at ${fmtTime(s.hh, s.mm)}`
-        : `Every ${s.dayN} days at ${fmtTime(s.hh, s.mm)}`
-    case 'weekly': {
-      if (s.weekdays.length === 0) return 'Pick at least one weekday'
-      const names = s.weekdays.map((d) => WEEKDAY_LABELS[d]).join(', ')
-      return `Every week on ${names} at ${fmtTime(s.hh, s.mm)}`
-    }
-    case 'monthly':
-      return `Monthly on ${s.dom === 'L' ? 'the last day' : `day ${s.dom}`} at ${fmtTime(s.hh, s.mm)}`
-    case 'every_n_months':
-      return s.monthN === 1
-        ? `Monthly on day ${s.monthDom} at ${fmtTime(s.hh, s.mm)}`
-        : `Every ${s.monthN} months on day ${s.monthDom} at ${fmtTime(s.hh, s.mm)}`
-    case 'custom':
-      return 'Custom expression'
-  }
-}
-
-function fmtTime(hh: number, mm: number): string {
-  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
-}
