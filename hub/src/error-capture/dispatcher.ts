@@ -27,8 +27,7 @@ import {
 } from '../db/error-capture-dal.ts'
 import { sql } from '../db/postgres.ts'
 import type { ErrorProject, ErrorRow } from '../db/error-capture-dal.ts'
-import { getChannel } from '../ws/registry.ts'
-import { broadcastToUser } from '../ws/registry.ts'
+import { getChannel, broadcastErrorEvent } from '../ws/registry.ts'
 import { insertMessage } from '../db/dal.ts'
 import * as queue from '../scheduler/session-queue.ts'
 import { notifyThrottled } from './notify.ts'
@@ -81,7 +80,7 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
       project,
       { error_type: error.error_type, error_value: error.error_value },
     ).catch(() => {})
-    broadcastToUser(userId, {
+    broadcastErrorEvent(userId, {
       type: 'error_skipped',
       error_id: errorId,
       project_id: project.id,
@@ -102,7 +101,7 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
       project,
       { error_type: error.error_type, error_value: error.error_value, detail: 'session_busy' },
     ).catch(() => {})
-    broadcastToUser(userId, {
+    broadcastErrorEvent(userId, {
       type: 'error_skipped',
       error_id: errorId,
       project_id: project.id,
@@ -158,7 +157,7 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
   }
 
   await updateErrorDispatchStatus(errorId, 'dispatched')
-  broadcastToUser(userId, {
+  broadcastErrorEvent(userId, {
     type: 'error_dispatched',
     error_id: errorId,
     project_id: project.id,

@@ -12,7 +12,7 @@
  * assistant_message landing on this session ours?".
  */
 import { updateErrorRunStatus } from '../db/error-capture-dal.ts'
-import { broadcastToUser } from '../ws/registry.ts'
+import { broadcastErrorEvent } from '../ws/registry.ts'
 import * as queue from '../scheduler/session-queue.ts'
 
 interface ActiveRun {
@@ -57,7 +57,7 @@ export async function onAgentReply(sessionId: string, content: string): Promise<
     output_snippet: snippet,
   })
 
-  broadcastToUser(active.userId, {
+  broadcastErrorEvent(active.userId, {
     type: 'error_run_finished',
     error_id: active.errorId,
     project_id: active.projectId,
@@ -91,7 +91,7 @@ export async function onAgentError(sessionId: string, errorMsg: string): Promise
     finished_at: new Date(),
     error: errorMsg,
   })
-  broadcastToUser(active.userId, {
+  broadcastErrorEvent(active.userId, {
     type: 'error_run_finished',
     error_id: active.errorId,
     project_id: active.projectId,
