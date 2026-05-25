@@ -43,7 +43,7 @@ export class SupervisorClient {
       onLog: (level, message, runId) => {
         this.log(level, message, runId)
       },
-    })
+    }, cfg)
   }
 
   connect() {
@@ -186,7 +186,7 @@ export class SupervisorClient {
     }
   }
 
-  private async onSessionStart(msg: { run_id: string; repo_path: string; branch?: string; pull?: boolean; initial_prompt?: string; api_key: string; hub_url: string }) {
+  private async onSessionStart(msg: { run_id: string; repo_path: string; branch?: string; pull?: boolean; initial_prompt?: string; api_key: string; hub_url: string; dangerously_skip_permissions?: boolean }) {
     // Pre-flight: bring the worktree to the latest committed state on the requested branch.
     // pull=true → checkout + git pull --ff-only against existing remote (no token needed).
     // pull=false but branch set → just checkout. Both gates refuse if dirty.
@@ -213,6 +213,7 @@ export class SupervisorClient {
       initialPrompt: msg.initial_prompt ?? null,
       apiKey: this.cfg.apiKey,
       hubUrl: this.cfg.hubUrl,
+      dangerouslySkipPermissions: msg.dangerously_skip_permissions === true,
     })
   }
 

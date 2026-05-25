@@ -1,4 +1,9 @@
 import type { Subprocess } from 'bun'
+import { existsSync } from 'fs'
+import { join } from 'path'
+import type { SupervisorConfig } from './config'
+import { assertWithinRoots, SandboxEscapeError } from './sandbox'
+import { appendAudit, hashPrompt, type AuditEntry } from './audit'
 
 export type ProcState = 'idle' | 'starting' | 'running' | 'stopping' | 'crashed' | 'stopped'
 
@@ -9,6 +14,13 @@ export interface RunSpec {
   initialPrompt: string | null
   apiKey: string
   hubUrl: string
+  /** Hub-requested flag. Honored only when `cfg.allowDangerousSkipPermissions === true`; otherwise stripped + logged. */
+  dangerouslySkipPermissions?: boolean
+}
+
+export interface StartRejection {
+  reason: 'sandbox_escape' | 'not_git_repo' | 'concurrency_cap' | 'duplicate_run'
+  detail?: Record<string, unknown>
 }
 
 export interface ProcessManagerCallbacks {
@@ -35,9 +47,45 @@ interface RunInstance {
 export class ProcessManager {
   private runs = new Map<string, RunInstance>()
   private cb: ProcessManagerCallbacks
+  private cfg: SupervisorConfig
+  /** Test hook: when set, used instead of `Bun.spawn`. Receives (argv, opts) and returns a Subprocess-like object. */
+  spawnImpl: ((cmd: string[], opts: any) => Subprocess) | null = null
 
-  constructor(cb: ProcessManagerCallbacks) {
+  constructor(cb: ProcessManagerCallbacks, cfg: SupervisorConfig) {
     this.cb = cb
+    this.cfg = cfg
+  }
+
+  /** Swap config (called by the config watcher); affects next `start()`. */
+  updateConfig(cfg: SupervisorConfig) {
+    this.cfg = cfg
+  }
+
+  /** Count of runs occupying a concurrency slot (starting / running / crashed-pending-restart). */
+  private activeSlotCount(): number {
+    let n = 0
+    for (const r of this.runs.values()) {
+      if (r.state === 'starting' || r.state === 'running' || r.state === 'crashed') n++
+    }
+    return n
+  }
+
+  private writeAudit(spec: RunSpec, allowed: boolean, reason?: string): void {
+    const entry: AuditEntry = {
+      ts: new Date().toISOString(),
+      run_id: spec.runId,
+      repo_path: spec.repoPath,
+      branch: spec.branch ?? null,
+      prompt_hash: hashPrompt(spec.initialPrompt),
+      flags: {
+        dangerously_skip_permissions_requested: spec.dangerouslySkipPermissions === true,
+        dangerously_skip_permissions_applied:
+          spec.dangerouslySkipPermissions === true && this.cfg.allowDangerousSkipPermissions === true,
+      },
+      allowed,
+      ...(reason ? { reason } : {}),
+    }
+    appendAudit(entry, this.cfg)
   }
 
   /** Aggregate supervisor state — 'running' if any run is active, else 'idle'. */
@@ -64,11 +112,67 @@ export class ProcessManager {
       .map((r) => ({ runId: r.spec.runId, repoPath: r.spec.repoPath, state: r.state, pid: r.proc?.pid ?? null }))
   }
 
-  async start(spec: RunSpec) {
+  async start(spec: RunSpec): Promise<StartRejection | null> {
     if (this.runs.has(spec.runId)) {
       this.cb.onLog('warn', `Refusing duplicate start for run_id`, spec.runId)
-      return
+      this.writeAudit(spec, false, 'duplicate_run')
+      return { reason: 'duplicate_run' }
     }
+
+    // Sandbox-escape gate: repoPath must resolve inside at least one configured root.
+    try {
+      assertWithinRoots(spec.repoPath, this.cfg.roots)
+    } catch (err) {
+      const e = err as SandboxEscapeError
+      const detail = { repo_path: spec.repoPath, real_path: e.realPath, allowed_roots: e.allowedRoots }
+      this.cb.onLog('error', `[security] sandbox_escape: ${spec.repoPath} not within allowed roots ${JSON.stringify(e.allowedRoots)}`, spec.runId)
+      this.cb.onStateChange('stopped', {
+        runId: spec.runId,
+        repoPath: spec.repoPath,
+        lastExit: { code: null, reason: 'sandbox_escape' },
+      })
+      this.writeAudit(spec, false, 'sandbox_escape')
+      return { reason: 'sandbox_escape', detail }
+    }
+
+    // Git-only gate (opt-in).
+    if (this.cfg.requireGitRepo) {
+      if (!existsSync(join(spec.repoPath, '.git'))) {
+        this.cb.onLog('error', `[security] not_git_repo: ${spec.repoPath} has no .git`, spec.runId)
+        this.cb.onStateChange('stopped', {
+          runId: spec.runId,
+          repoPath: spec.repoPath,
+          lastExit: { code: null, reason: 'not_git_repo' },
+        })
+        this.writeAudit(spec, false, 'not_git_repo')
+        return { reason: 'not_git_repo', detail: { repo_path: spec.repoPath } }
+      }
+    }
+
+    // Concurrency cap.
+    const slots = this.activeSlotCount()
+    if (slots >= this.cfg.maxConcurrent) {
+      this.cb.onLog('warn', `[security] concurrency_cap: ${slots}/${this.cfg.maxConcurrent} slots in use`, spec.runId)
+      this.cb.onStateChange('stopped', {
+        runId: spec.runId,
+        repoPath: spec.repoPath,
+        lastExit: { code: null, reason: 'concurrency_cap' },
+      })
+      this.writeAudit(spec, false, 'concurrency_cap')
+      return { reason: 'concurrency_cap', detail: { limit: this.cfg.maxConcurrent } }
+    }
+
+    // --dangerously-skip-permissions HARD CAP — strip silently when cap is off.
+    if (spec.dangerouslySkipPermissions && !this.cfg.allowDangerousSkipPermissions) {
+      this.cb.onLog(
+        'warn',
+        `[security] hub requested --dangerously-skip-permissions but supervisor cap is OFF; flag stripped`,
+        spec.runId,
+      )
+    }
+
+    this.writeAudit(spec, true)
+
     const run: RunInstance = {
       spec,
       proc: null,
@@ -81,6 +185,7 @@ export class ProcessManager {
     }
     this.runs.set(spec.runId, run)
     this.spawn(run)
+    return null
   }
 
   private spawn(run: RunInstance) {
@@ -99,18 +204,22 @@ export class ProcessManager {
     if (spec.initialPrompt) {
       cmd.push('--initial-prompt', spec.initialPrompt)
     }
+    if (spec.dangerouslySkipPermissions && this.cfg.allowDangerousSkipPermissions) {
+      cmd.push('--dangerously-skip-permissions')
+    }
     const env = { ...process.env }
     delete (env as any).ANTHROPIC_API_KEY
 
+    const spawnOpts = {
+      cwd: spec.repoPath,
+      stdin: 'pipe' as const,
+      stdout: 'pipe' as const,
+      stderr: 'pipe' as const,
+      env,
+      windowsHide: true,
+    }
     try {
-      run.proc = Bun.spawn(cmd, {
-        cwd: spec.repoPath,
-        stdin: 'pipe',
-        stdout: 'pipe',
-        stderr: 'pipe',
-        env,
-        windowsHide: true,
-      })
+      run.proc = this.spawnImpl ? this.spawnImpl(cmd, spawnOpts) : Bun.spawn(cmd, spawnOpts)
     } catch (err: any) {
       this.cb.onLog('error', `failed to spawn agent: ${err.message}`, spec.runId)
       this.setState(run, 'crashed', { runId: spec.runId, repoPath: spec.repoPath, lastExit: { code: null, reason: `spawn_error: ${err.message}` } })
