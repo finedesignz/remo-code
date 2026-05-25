@@ -28,8 +28,10 @@ import { z } from 'zod'
 import {
   getUserCoolifyWebhookSecret,
   ensureInternalDeploymentTask,
+  ensureInternalTriageTask,
   insertDeploymentRun,
 } from '../db/dal.ts'
+import { runNow as dispatcherRunNow } from '../scheduler/dispatcher.ts'
 
 export const coolifyWebhookRoutes = new Hono()
 
@@ -46,21 +48,41 @@ const CoolifyWebhookPayload = z.object({
 export type CoolifyWebhookPayload = z.infer<typeof CoolifyWebhookPayload>
 
 /**
- * Stub triage dispatcher — Plan 008 replaces this body with the real
- * `pickSessionTarget(userId)` + dispatcher hand-off. Exported so tests can
- * spy on it.
+ * Phase 06 plan 008 — fires a real triage run through the scheduler:
+ *   1. lazy-create the per-user internal triage task (task_type='triage', disabled)
+ *   2. dispatcher.runNow with payloadOverride carrying deployment metadata
+ *   3. senders/triage.ts picks a target via pickSessionTarget, dispatches the
+ *      rendered prompt, and finalizes on the next assistant message
+ *
+ * `deploymentRunId` is the metadata row stored at webhook ingress; kept for
+ * UI telemetry. The triage run is a separate row owned by the triage task.
+ * Cost-cap is enforced inside dispatcher.runNow → fireTask.
+ *
+ * Note: log_snippet is empty — the webhook body does not carry logs. The
+ * model triages on metadata + repo context. A future enhancement can pull
+ * logs via the Coolify API before dispatch.
  */
-export function dispatchTriageStub(
+export async function dispatchTriage(
   userId: string,
-  runId: string,
+  deploymentRunId: string,
   payload: CoolifyWebhookPayload,
-): void {
-  console.log('[coolify-webhook] triage stub:', {
-    userId,
-    runId,
-    deployment_uuid: payload.deployment_uuid,
+): Promise<void> {
+  const taskId = await ensureInternalTriageTask(userId)
+  await dispatcherRunNow(taskId, userId, {
+    triggeredByRunId: deploymentRunId,
+    chainDepth: 0,
+    payloadOverride: {
+      application_uuid: payload.application_uuid,
+      deployment_uuid: payload.deployment_uuid,
+      git_repository: payload.git_repository,
+      commit_sha: payload.commit_sha,
+      log_snippet: '',
+    },
   })
 }
+
+// Back-compat export kept for tests that referenced the stub by name.
+export const dispatchTriageStub = dispatchTriage
 
 function constantTimeEqualStr(a: string, b: string): boolean {
   const aBuf = Buffer.from(a)
@@ -134,11 +156,11 @@ coolifyWebhookRoutes.post('/webhook/:user_id', async (c) => {
   })
 
   if (payload.event === 'deployment.failed') {
-    try {
-      dispatchTriageStub(userId, run.id, payload)
-    } catch (err: any) {
-      console.warn('[coolify-webhook] triage stub threw:', err?.message)
-    }
+    // Fire-and-forget — webhook responds 202 immediately. Triage failures
+    // surface in scheduled_task_runs and the WS run-finished broadcast.
+    void dispatchTriage(userId, run.id, payload).catch((err: any) => {
+      console.warn('[coolify-webhook] triage dispatch failed:', err?.message)
+    })
   }
 
   // (8) Accepted.

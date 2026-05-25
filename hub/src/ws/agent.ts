@@ -391,6 +391,13 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       const mod = await import('../scheduler/senders/agent.ts')
       void mod.onAssistantMessage(sessionId, msg.content)
     } catch {}
+    // Phase 06 plan 008 — finalize any pending triage run for this session.
+    try {
+      const tri = await import('../scheduler/senders/triage.ts')
+      if (tri.triageActiveForSession(sessionId)) {
+        void tri.onTriageAssistantMessage(sessionId, msg.content)
+      }
+    } catch {}
     // W3 — finalize any in-flight error-capture run for this session.
     try {
       const ec = await import('../error-capture/run-lifecycle.ts')

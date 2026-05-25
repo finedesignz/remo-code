@@ -62,11 +62,19 @@ export async function fire(taskId: string): Promise<void> {
 export async function runNow(
   taskId: string,
   userId: string,
-  opts: { triggeredByRunId?: string | null; chainDepth?: number } = {},
+  opts: {
+    triggeredByRunId?: string | null
+    chainDepth?: number
+    payloadOverride?: Record<string, unknown>
+  } = {},
 ): Promise<void> {
   const task = await getTaskById(taskId)
   if (!task) return
   if (task.user_id !== userId) return
+  // Phase 06 plan 008 — webhook-triggered triage passes per-event payload.
+  if (opts.payloadOverride) {
+    ;(task as any).payload = { ...(task.payload ?? {}), ...opts.payloadOverride }
+  }
   const chainDepth = opts.chainDepth ?? 0
   if (chainDepth > MAX_CHAIN_DEPTH) {
     await insertRunV2({
@@ -114,6 +122,53 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
       run_id: run.id, task_id: task.id, status: 'skipped', error: 'daily_cost_cap',
     })
     void onRunFinalized(task, run.id, 'skipped', 'daily_cost_cap')
+    if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
+    return
+  }
+
+  // Phase 06 plan 008 — triage tasks route through pickSessionTarget instead
+  // of resolveTargets. They have no fixed target_kind/target_id; the sender
+  // picks a supervisor (with capacity) or local agent at dispatch time.
+  if (task.task_type === 'triage') {
+    const run = await insertRunV2({
+      task_id: task.id,
+      user_id: userId,
+      status: 'pending',
+      scheduled_for: now,
+      target_kind: 'session',
+      target_id: null,
+      triggered_by_run_id: opts.triggeredByRunId ?? null,
+    })
+    const ctx: RunContext = {
+      runId: run.id,
+      taskId: task.id,
+      userId,
+      target: { kind: 'session', sessionId: null, online: true },
+      startedAt: now.getTime(),
+      parentFireId: null,
+      chainDepth: opts.chainDepth,
+      triggeredByRunId: opts.triggeredByRunId ?? null,
+    }
+    trackRun(ctx)
+    broadcastScheduledRun(userId, {
+      type: 'scheduled_run_started',
+      run_id: run.id,
+      task_id: task.id,
+      scheduled_for: now.toISOString(),
+      target_kind: 'session',
+      target_id: null,
+    })
+    try {
+      const { sendTriage } = await import('./senders/triage.ts')
+      void sendTriage(task, ctx, (task.payload ?? {}) as any).catch((err: any) => {
+        console.error(
+          `[scheduler.dispatcher] triage sender failed run=${run.id}: ${err?.message}`,
+        )
+        void finalizeRun(run.id, 'failed', err?.message || 'triage_threw')
+      })
+    } catch (err: any) {
+      void finalizeRun(run.id, 'failed', err?.message || 'triage_import_failed')
+    }
     if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
     return
   }
