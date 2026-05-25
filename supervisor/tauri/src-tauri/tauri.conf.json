@@ -4,7 +4,10 @@
   "version": "0.3.0",
   "identifier": "com.finedesignz.remo-code-supervisor",
   "build": {
-    "frontendDist": "scaffold-dist"
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../ui/dist"
   },
   "app": {
     "windows": [
