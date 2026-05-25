@@ -109,11 +109,11 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
       // Only nudge when agent is connected AND not currently generating a response.
       if (!target || target.status !== 'online') return
       // Gate: skip if last user message to this session WAS the nudge text (dedupe),
-      // and require >1h since the last user message (allow first-time / long-idle).
+      // and require >6h since the last user message (allow first-time / long-idle).
       const lastUserMsg = readLastUserMessage(id)
       if (lastUserMsg) {
         if (lastUserMsg.content === NUDGE_TEXT) return
-        if (Date.now() - lastUserMsg.ts <= 60 * 60 * 1000) return
+        if (Date.now() - lastUserMsg.ts <= 6 * 60 * 60 * 1000) return
       }
       // Defer so activeSessionId state + subscribe effect settle before send.
       setTimeout(() => {
