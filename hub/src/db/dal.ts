@@ -453,6 +453,40 @@ export async function updateProfile(userId: string, fields: { display_name?: str
   return rows[0] ?? null;
 }
 
+// ── GitHub-issue post-run idempotency (Phase 06 plan 007) ────────────────────
+//
+// Backed by `github_issue_idempotency` (see schema.sql). Skips duplicate
+// issue creation for the same (repo, application_uuid, deployment_uuid)
+// within `windowHours`.
+
+export async function hasOpenIssueForHash(
+  userId: string,
+  hash: string,
+  windowHours: number,
+): Promise<boolean> {
+  const rows = await sql`
+    SELECT 1 FROM github_issue_idempotency
+    WHERE user_id = ${userId}
+      AND hash = ${hash}
+      AND created_at > now() - (${String(windowHours)} || ' hours')::interval
+    LIMIT 1
+  `;
+  return rows.length > 0;
+}
+
+export async function recordOpenIssueForHash(
+  userId: string,
+  hash: string,
+  issueNumber: number,
+  repoFullName: string,
+): Promise<void> {
+  await sql`
+    INSERT INTO github_issue_idempotency (user_id, hash, repo_full_name, issue_number)
+    VALUES (${userId}, ${hash}, ${repoFullName}, ${issueNumber})
+    ON CONFLICT (user_id, hash) DO NOTHING
+  `;
+}
+
 // ── Channel token ─────────────────────────────────────────────────────────────
 
 export async function verifyChannelToken(sessionId: string) {
