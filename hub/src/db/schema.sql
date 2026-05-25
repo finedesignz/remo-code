@@ -270,3 +270,15 @@ CREATE TABLE IF NOT EXISTS chat_tab_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_tab_sessions_tab_position ON chat_tab_sessions(tab_id, position);
 CREATE INDEX IF NOT EXISTS idx_chat_tab_sessions_session ON chat_tab_sessions(session_id);
+
+-- ── Phase 05: per-session CLI selection + rootless ambient sessions ──────────
+-- cli_kind: which CLI the agent spawns for this session ('claude' | 'codex').
+-- is_rootless: ambient sessions that have no project_dir; at most one per
+--   (user_id, hostname, cli_kind) enforced by the partial unique index below.
+-- hostname: populated for rootless rows so the partial unique index can scope
+--   uniqueness per host. Project sessions leave it NULL.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cli_kind TEXT NOT NULL DEFAULT 'claude';
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WHERE constraint_name='sessions_cli_kind_check') THEN ALTER TABLE sessions ADD CONSTRAINT sessions_cli_kind_check CHECK (cli_kind IN ('claude','codex')); END IF; END $$;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_rootless BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS hostname TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_rootless_unique ON sessions(user_id, hostname, cli_kind) WHERE is_rootless = true AND deleted_at IS NULL;
