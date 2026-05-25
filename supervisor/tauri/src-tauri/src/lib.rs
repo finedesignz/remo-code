@@ -2,6 +2,7 @@
 //!
 //! T4: NSSM-service collision check + loopback mutex probe.
 
+mod first_run;
 mod mutex_probe;
 mod nssm;
 mod sidecar;
@@ -37,6 +38,11 @@ pub fn run() {
             }
 
             tray::build(&app.handle())?;
+
+            // First-run: enable autostart + one-time welcome dialog.
+            if let Err(e) = first_run::maybe_enable_autostart(&app.handle()) {
+                log::warn!("first_run setup failed: {e:#}");
+            }
 
             // Hide-on-close for the settings window.
             if let Some(win) = app.get_webview_window("settings") {
