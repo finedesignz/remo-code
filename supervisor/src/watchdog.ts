@@ -1,7 +1,15 @@
-// Watchdog: invoked by `index.ts run` to wrap the actual supervisor (`run-child`).
+#!/usr/bin/env bun
+// Watchdog: standalone entry point that wraps the supervisor.
+// Task Scheduler should invoke this file directly instead of `index.ts run`.
+//
+// Manual swap (one-time):
+//   schtasks /Change /TN '\RemoCodeSupervisor' /TR 'C:\Users\artic\scoop\shims\bun.exe "C:\Users\artic\GitHub\remo-code\supervisor\src\watchdog.ts"'
+//
+// (Requires admin in some configurations; if /Change is rejected,
+// delete-and-recreate the task with the updated /TR.)
 //
 // Flow:
-//   1. Spawn `index.ts run-child` as a subprocess (Bun.spawn, argv array, no shell).
+//   1. Spawn `index.ts run` as a subprocess (Bun.spawn, argv array, no shell).
 //   2. Clean exit (code 0) -> done.
 //   3. Healthy >=60s then crash -> treat as transient, exit with child's code so
 //      Task Scheduler can retry.
@@ -94,7 +102,7 @@ async function runSelfHeal(logTail: string): Promise<{ healed: boolean; reason: 
     'Do NOT start the supervisor yourself — the watchdog retries it after you exit.',
     '',
     `Repo root: ${REPO_ROOT}`,
-    'Supervisor entry: supervisor/src/index.ts (cmd=run-child runs the actual supervisor)',
+    'Supervisor entry: supervisor/src/index.ts (cmd=run runs the actual supervisor)',
     'Watchdog: supervisor/src/watchdog.ts',
     `Supervisor log: ${SUP_LOG}`,
     '',
@@ -172,7 +180,7 @@ export async function runWatchdog(): Promise<void> {
   ensureDirs()
   wlog(`[watchdog] v${VERSION} starting`)
 
-  const first = await runChild([process.execPath, SUPERVISOR_ENTRY, 'run-child'])
+  const first = await runChild([process.execPath, SUPERVISOR_ENTRY, 'run'])
   wlog(`[watchdog] supervisor exited code=${first.exitCode} runtimeMs=${first.runtimeMs}`)
   if (first.exitCode === 0) { wlog('[watchdog] clean exit'); return }
   if (first.runtimeMs >= MIN_HEALTHY_RUNTIME_MS) {
@@ -196,7 +204,7 @@ export async function runWatchdog(): Promise<void> {
   }
   wlog(`[watchdog] self-heal claims success: ${heal.reason} — retrying supervisor`)
 
-  const retry = await runChild([process.execPath, SUPERVISOR_ENTRY, 'run-child'])
+  const retry = await runChild([process.execPath, SUPERVISOR_ENTRY, 'run'])
   wlog(`[watchdog] retry exited code=${retry.exitCode} runtimeMs=${retry.runtimeMs}`)
   if (retry.exitCode !== 0 && retry.runtimeMs < MIN_HEALTHY_RUNTIME_MS) {
     const msg = `Self-heal applied but supervisor crashed again (exitCode=${retry.exitCode}, runtimeMs=${retry.runtimeMs}).`
@@ -205,4 +213,12 @@ export async function runWatchdog(): Promise<void> {
     process.exit(3)
   }
   wlog('[watchdog] retry stable; incident closed')
+}
+
+// Standalone entry: when invoked directly (Task Scheduler), run the watchdog.
+if (import.meta.main) {
+  runWatchdog().catch((err: any) => {
+    try { wlog(`[watchdog] fatal: ${err?.stack || err?.message || String(err)}`) } catch {}
+    process.exit(99)
+  })
 }
