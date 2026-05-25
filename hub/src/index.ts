@@ -21,6 +21,7 @@ import { errorsRouter } from './api/errors'
 import { errorRunsRouter } from './api/error-runs'
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { instructions as instructionsApi } from './api/instructions'
+import { errorSetup as errorSetupApi } from './api/error-setup'
 import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
 // V2 scheduler.
@@ -120,6 +121,7 @@ app.route('/api/errors', errorsRouter)
 app.route('/api/error-runs', errorRunsRouter)
 app.route('/api/chat-tabs', chatTabsApi)
 app.route('/api/instructions', instructionsApi)
+app.route('/api/error-setup', errorSetupApi)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
