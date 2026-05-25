@@ -1,5 +1,5 @@
 /**
- * Sentry-style error-intake (06-error-capture, Wave 1 shell).
+ * Sentry-style error-intake (06-error-capture, Wave 2).
  *
  * Public, unauthenticated at the network layer — the `sentry_key` carried in
  * the X-Sentry-Auth header IS the credential. Mounted at /api/sentry so it
@@ -10,13 +10,17 @@
  *   POST /api/sentry/:project_id/store/     — legacy "store" endpoint variant
  * Both point at the same handler.
  *
- * W1 SHELL: validates the sentry_key against `error_projects.sentry_key`,
- * confirms project enabled, returns 202. Envelope decoding, fingerprinting,
- * dedupe/rate-limit/cap gating, and dispatch to the agent socket all land
- * in W2 — see the TODO marker in the handler.
+ * W2: decodes the gzipped envelope, extracts the first exception, computes
+ * a fingerprint, and delegates to `recordError` for dedupe/rate-limit/cap
+ * gating. Non-exception envelopes (transactions, sessions, etc.) are
+ * acknowledged but ignored. Dispatch into the target Claude session
+ * lands in W3.
  */
 import { Hono } from 'hono'
 import { extractSentryKey } from '../error-capture/auth.ts'
+import { parseEnvelope } from '../error-capture/envelope.ts'
+import { fingerprint } from '../error-capture/fingerprint.ts'
+import { recordError } from '../error-capture/record.ts'
 import { getErrorProjectBySentryKey } from '../db/error-capture-dal.ts'
 
 export const sentryIntake = new Hono()
@@ -35,18 +39,69 @@ async function handleIntake(c: any) {
   if (project.id !== projectId) return c.json({ error: 'project_mismatch' }, 401)
   if (!project.enabled) return c.json({ error: 'project_disabled' }, 403)
 
-  // Body is gzipped multi-line JSON. Pulled here as bytes so it's available
-  // to the W2 decoder without re-reading the stream. (Not used by the shell.)
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _body = await c.req.arrayBuffer()
+  // Decode the envelope. Body is gzipped multi-line JSON; parseEnvelope handles
+  // both gzip and identity encodings via the content-encoding header.
+  const arrayBuf = await c.req.arrayBuffer()
+  const body = Buffer.from(arrayBuf)
+  let parsed
+  try {
+    parsed = await parseEnvelope(body, {
+      'content-encoding': c.req.header('content-encoding') ?? undefined,
+    })
+  } catch (err: any) {
+    return c.json({ error: 'bad_envelope', detail: err?.message }, 400)
+  }
 
-  // TODO(W2): decode envelope with parseEnvelope(), map first 'event' item to
-  // {type, value, stack, release}, compute fingerprint(), gate on dedupe →
-  // rate-limit → daily cap, insertError(), and on accept dispatch a
-  // user_message to `project.session_id` through the existing agent socket
-  // path (reuse `hub/src/scheduler/session-queue.ts` for 1-in-flight + 1-waiter).
+  // Find the first event item with an exception. Sentry envelopes can carry
+  // transactions, sessions, attachments, etc.; we ignore everything that
+  // isn't a real error event.
+  const eventItem = parsed.items.find(it => it.header?.type === 'event')
+  const event = (eventItem?.payload ?? null) as any
+  const firstExc = event?.exception?.values?.[0]
+  if (!firstExc) {
+    return c.json({ ok: true, ignored: 'non_exception' }, 202)
+  }
 
-  return c.json({ ok: true, project_id: project.id }, 202)
+  const errorType: string = firstExc.type ?? 'Error'
+  const errorValue: string = firstExc.value ?? ''
+  const frames = firstExc.stacktrace?.frames ?? []
+  // Stringify the top frames for the fingerprint stack input. parseEnvelope
+  // gives us raw frame objects from Sentry; we format `function (file:line)`.
+  const stackForFingerprint = frames
+    .slice()
+    .reverse() // Sentry stores callee-first; we want top-of-stack-first
+    .slice(0, 3)
+    .map((f: any) => {
+      const fn = f.function ?? '<anonymous>'
+      const file = f.filename ?? f.abs_path ?? ''
+      const line = f.lineno ?? ''
+      return `  at ${fn} (${file}:${line})`
+    })
+    .join('\n')
+
+  const fp = fingerprint(project.id, errorType, errorValue, stackForFingerprint)
+  const release: string | null = event?.release ?? null
+
+  // Delegate to the gating module. recordError persists the row, applies the
+  // three gates, fires silent-skip emails on hit, and returns the resulting
+  // dispatch_status. W3 will pick up rows that come back 'pending'.
+  const result = await recordError(project, {
+    fingerprint: fp,
+    error_type: errorType,
+    error_value: errorValue,
+    stacktrace_json: frames,
+    release,
+  })
+
+  return c.json(
+    {
+      ok: true,
+      error_id: result.error_id,
+      dispatch_status: result.dispatch_status,
+      ...(result.skip_reason ? { skip_reason: result.skip_reason } : {}),
+    },
+    202,
+  )
 }
 
 sentryIntake.post('/:project_id/envelope/', handleIntake)
