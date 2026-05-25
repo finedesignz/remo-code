@@ -9,6 +9,8 @@ import {
   sendRequest, sendToSupervisor, updateSupervisorState,
 } from '../ws/supervisor-registry'
 import { isGitHubAppConfigured, mintTokenizedCloneUrl } from '../auth/github-app'
+import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
+import { broadcastToUser } from '../ws/registry'
 
 export const supervisors = new Hono()
 
@@ -102,6 +104,21 @@ supervisors.post('/:id/start', async (c) => {
   const body = StartBody.safeParse(await c.req.json().catch(() => ({})))
   if (!body.success) return c.json({ error: 'bad body' }, 400)
 
+  // Phase 04 plan 003: hub-authoritative concurrency gate. Reserve atomically
+  // before creating the run row so concurrent /start calls at cap can't both
+  // win the race.
+  const reservation = await reserveSessionSlot(a.userId, a.supervisorId)
+  if (!reservation.ok) {
+    if (reservation.reason === 'supervisor_not_found') {
+      return c.json({ error: 'not found' }, 404)
+    }
+    return c.json({
+      error: 'at_capacity',
+      running: reservation.running,
+      cap: reservation.cap,
+    }, 429)
+  }
+
   // Concurrent runs allowed — supervisor manages N children.
   // We need an api_key to pass to the supervisor so it can spawn claude-remote
   // talking to this hub. We re-use the supervisor's own api_key (it has agent capability too).
@@ -133,6 +150,20 @@ supervisors.post('/:id/start', async (c) => {
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
+
+  // Broadcast capacity change so UI re-renders without polling.
+  try {
+    const snap = await getCapacitySnapshot(a.userId, a.supervisorId)
+    if (snap) {
+      broadcastToUser(a.userId, {
+        type: 'supervisor_capacity_changed',
+        supervisor_id: a.supervisorId,
+        running: snap.running,
+        cap: snap.cap,
+      })
+    }
+  } catch {}
+
   return c.json({ run_id: run.id })
 })
 

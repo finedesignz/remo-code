@@ -203,4 +203,9 @@ export type HubToClient =
       concurrency_budget: number; concurrency_override: number | null;
       budget_source: 'cgroup_v2' | 'cgroup_v1' | 'host_fallback';
       budget_updated_at: string }
+  // Phase 04 plan 003: hub-authoritative concurrency gate broadcasts the
+  // current running/cap pair on every reserve and release so the UI re-renders
+  // its capacity chip without polling.
+  | { type: 'supervisor_capacity_changed'; supervisor_id: string;
+      running: number; cap: number }
   | { type: 'ping' }
