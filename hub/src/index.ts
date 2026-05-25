@@ -19,6 +19,7 @@ import { scheduledTaskRuns as scheduledTaskRunsApi } from './api/scheduled-task-
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { instructions as instructionsApi } from './api/instructions'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
+import { openapi as openapiApp } from './api/_openapi'
 import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
 // V2 scheduler.
@@ -101,6 +102,11 @@ app.use('/api/*', async (c, next) => {
   return authMiddleware(c, next)
 })
 app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('userId') || 'anon' }))
+// OpenAPI sample route + /openapi.json + /docs (Scalar UI).
+// Mounted ahead of plain-Hono routers so the documented twin of
+// /api/profile/cost-today wins over the legacy plain version.
+app.route('/', openapiApp)
+
 app.route('/api/sessions', sessions)
 app.route('/api/api-keys', apiKeys)
 app.route('/api/messages', messages)

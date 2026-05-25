@@ -265,6 +265,16 @@ The Docker image builds the web frontend and serves it from the hub — one cont
 
 Your data stays in your Supabase instance. Your Claude Code sessions stay on your machine. The hub is just a relay — and you own it.
 
+## API docs
+
+The hub exposes its REST surface as an OpenAPI 3.1 spec at `/openapi.json` and a Scalar-rendered reference UI at `/docs` (e.g. `http://localhost:3040/docs`). The committed snapshots live at `docs/openapi.json` (machine) and `docs/api.md` (human). Regenerate after touching the OpenAPI sample route:
+
+```bash
+bun run docs:sync
+```
+
+CI fails PRs that drift the snapshots — see `.github/workflows/docs-drift.yml`. Only `/api/profile/cost-today` is in the spec today; other routes will be migrated incrementally.
+
 ## License
 
 Apache-2.0

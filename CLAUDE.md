@@ -207,6 +207,18 @@ Absorbs the standalone `coolify-ai-monitor` Express service (port 3032, now reti
 
 When adding a new triage payload field, post-run action, or webhook event type: update `docs/scheduled-tasks.md` and `docs/coolify-webhook-migration.md` in the same commit.
 
+## API docs convention
+
+The hub exposes OpenAPI 3.1 at `/openapi.json` and a Scalar UI at `/docs`. The spec is assembled in `hub/src/api/_openapi.ts` using `@hono/zod-openapi` `createRoute` declarations. **Only `/api/profile/cost-today` is currently in the spec** — the rest of the hub is plain Hono and gets migrated incrementally.
+
+When migrating a route:
+1. Add a `createRoute` declaration to `hub/src/api/_openapi.ts` (or a sibling `OpenAPIHono` subrouter mounted ahead of the plain twin in `hub/src/index.ts`).
+2. Delete the plain-Hono twin so it doesn't double-mount.
+3. Run `bun run docs:sync` from repo root; commit the updated `docs/openapi.json` and `docs/api.md`.
+4. CI workflow `.github/workflows/docs-drift.yml` fails PRs that change `hub/src/**` without a matching spec update.
+
+The dump script (`hub/scripts/dump-openapi.ts`) loads the OpenAPIHono sub-app in-process — no `Bun.serve`, no port, no DB. It needs placeholder `JWT_SECRET` + `DATABASE_URL` env vars to satisfy module-load-time validation; the npm script sets harmless values.
+
 ## PR Hygiene
 
 Periodically check for open PRs with `gh pr list`. Review them for conflicts with current work, stale branches, or changes that have already been applied to main. Flag any that should be closed or merged.
