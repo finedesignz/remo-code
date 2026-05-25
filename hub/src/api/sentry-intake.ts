@@ -16,7 +16,7 @@
  * in W2 — see the TODO marker in the handler.
  */
 import { Hono } from 'hono'
-import { extractSentryKey } from '../error-router/auth.ts'
+import { extractSentryKey } from '../error-capture/auth.ts'
 import { getErrorProjectBySentryKey } from '../db/error-capture-dal.ts'
 
 export const sentryIntake = new Hono()
