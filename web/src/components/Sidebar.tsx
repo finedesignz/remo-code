@@ -147,20 +147,33 @@ export function Sidebar({
           </button>
         </div>
 
-        {/* Session list header with refresh */}
+        {/* Session list header with refresh + add */}
         <div className="flex items-center justify-between px-3 pt-2 pb-1">
           <span className="text-[11px] font-medium text-[var(--text-muted)] uppercase tracking-wider">Sessions</span>
-          <button
-            onClick={onRefresh}
-            className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
-            title="Refresh sessions"
-            aria-label="Refresh sessions"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-              <path d="M1 4v-3h3" /><path d="M3.51 11a7 7 0 0 0 12.13-3.5" />
-              <path d="M15 12v3h-3" /><path d="M12.49 5a7 7 0 0 0-12.13 3.5" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={onRefresh}
+              className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
+              title="Refresh sessions"
+              aria-label="Refresh sessions"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <path d="M1 4v-3h3" /><path d="M3.51 11a7 7 0 0 0 12.13-3.5" />
+                <path d="M15 12v3h-3" /><path d="M12.49 5a7 7 0 0 0-12.13 3.5" />
+              </svg>
+            </button>
+            <button
+              onClick={() => onNavigate('#/settings?tab=supervisor')}
+              className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
+              title="Add connection"
+              aria-label="Add connection"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <line x1="8" y1="3" x2="8" y2="13" />
+                <line x1="3" y1="8" x2="13" y2="8" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Session list — only connected sessions */}
@@ -247,27 +260,8 @@ export function Sidebar({
           )}
         </div>
 
-        {/* Connect session — routes to Supervisor tab */}
-        <div className="p-3 border-t border-[var(--border-color)]">
-          <button
-            onClick={onShowConnect}
-            className="w-full py-2.5 text-sm text-indigo-400 hover:text-indigo-300 hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium flex items-center justify-center gap-2"
-            title="Connect a repository via the Supervisor"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M6.5 9.5l-2 2a2.5 2.5 0 1 1-3.5-3.5l2-2" />
-              <path d="M9.5 6.5l2-2a2.5 2.5 0 1 1 3.5 3.5l-2 2" />
-              <path d="M6 10l4-4" />
-            </svg>
-            Connect
-          </button>
-        </div>
-
-        {/* Footer trimmed — Grid/Schedules/Settings/Errors live in the header dropdown nav.
-            Sign-out also moved into the avatar dropdown. */}
-        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] text-[11px] text-[var(--text-muted)] truncate" title={user.email}>
-          {user.email}
-        </div>
+        {/* Sessions-only sidebar — Connect moved to the "+" button in the header,
+            email/sign-out moved to the avatar dropdown in the main app header. */}
       </div>
       {hoveredSession && hoverInfo && createPortal(
         <div
