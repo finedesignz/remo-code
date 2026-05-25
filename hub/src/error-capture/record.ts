@@ -28,6 +28,7 @@ import {
 } from '../db/error-capture-dal.ts'
 import { getUserTimezone } from '../db/dal.ts'
 import { notifyThrottled } from './notify.ts'
+import { dispatchPendingError } from './dispatcher.ts'
 
 export interface RecordErrorFields {
   fingerprint: string
@@ -115,8 +116,11 @@ export async function recordError(
     return { error_id: row.id, dispatch_status: 'cap_exceeded', skip_reason: reason }
   }
 
-  // 5. Accepted. Row stays 'pending'; Wave 3 dispatcher will fire it into
-  //    the configured session.
+  // 5. Accepted. Row stays 'pending'; W3 dispatcher fires it into the
+  //    configured session. Fire-and-forget — we never block the intake POST.
+  void dispatchPendingError(row.id).catch((err) => {
+    console.error(`[error-capture] dispatch failed error=${row.id}: ${err?.message ?? err}`)
+  })
   return { error_id: row.id, dispatch_status: 'pending' }
 }
 
