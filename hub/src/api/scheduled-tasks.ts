@@ -25,7 +25,6 @@ import {
 import { validate as validateCron, nextRuns, isValidTimezone } from '../scheduler/cron.ts'
 import * as registry from '../scheduler/registry.ts'
 import * as dispatcher from '../scheduler/dispatcher.ts'
-import { unregisterJob as unregisterLegacyJob } from '../scheduler/index.ts'
 import {
   validatePostRunActions,
   detectChainCycles,
@@ -270,7 +269,6 @@ scheduledTasks.delete('/:id', async (c) => {
   const existing = await getTask(id, userId)
   if (!existing) return c.json({ error: 'not_found' }, 404)
   registry.unregister(id)
-  try { unregisterLegacyJob(id) } catch {}
   await deleteTask(id, userId)
   return c.json({ ok: true })
 })

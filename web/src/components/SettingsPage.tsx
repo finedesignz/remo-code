@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import type { Profile } from '../hooks/useProfile'
+import { useWebPushPermission } from '../hooks/useWebPushPermission'
 import { useApiKey } from '../hooks/useApiKey'
 import { useSessions, type AgentInfo, type CodeSession } from '../hooks/useSessions'
 import { SupervisorPage } from './SupervisorPage'
@@ -596,8 +597,10 @@ function NotificationsCard({
 }) {
   const [webPush, setWebPush] = useState<boolean>(profile.web_push_enabled ?? true)
   const [saving, setSaving] = useState(false)
+  const { permission, request, isSupported } = useWebPushPermission()
 
   const toggleWebPush = async () => {
+    if (permission !== 'granted') return
     const next = !webPush
     setWebPush(next)
     setSaving(true)
@@ -605,6 +608,8 @@ function NotificationsCard({
     catch { setWebPush(!next) }
     finally { setSaving(false) }
   }
+
+  const toggleDisabled = saving || permission !== 'granted'
 
   return (
     <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
@@ -622,21 +627,59 @@ function NotificationsCard({
             Tasks with an email action default to this address when left blank.
           </p>
         </div>
+
+        {!isSupported && (
+          <p className="text-xs text-[var(--text-muted)]">
+            Your browser doesn't support notifications.
+          </p>
+        )}
+
+        {isSupported && permission === 'granted' && (
+          <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 text-[11px] font-medium ring-1 ring-emerald-500/30">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            Notifications enabled
+          </span>
+        )}
+
+        {isSupported && permission === 'denied' && (
+          <div>
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-red-500/15 text-red-300 text-[11px] font-medium ring-1 ring-red-500/30">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-400" />
+              Notifications blocked
+            </span>
+            <p className="text-[10px] text-[var(--text-muted)] mt-1">
+              Enable in your browser settings, then reload this page.
+            </p>
+          </div>
+        )}
+
+        {isSupported && permission === 'default' && (
+          <button
+            type="button"
+            onClick={() => { void request() }}
+            className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
+          >
+            Enable browser notifications
+          </button>
+        )}
+
         <button
           type="button"
           onClick={toggleWebPush}
           aria-pressed={webPush}
-          disabled={saving}
-          className="w-full flex items-center justify-between gap-3 group disabled:opacity-50"
+          disabled={toggleDisabled}
+          className="w-full flex items-center justify-between gap-3 group disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <span className="text-left">
             <span className="block text-sm text-[var(--text-primary)]">Web push (this tab)</span>
             <span className="block text-xs text-[var(--text-muted)] mt-0.5">
-              Show browser notifications for scheduled-task events when this tab is open.
+              {permission === 'granted'
+                ? 'Show browser notifications for scheduled-task events when this tab is backgrounded.'
+                : 'Grant notification permission above to enable this toggle.'}
             </span>
           </span>
-          <span className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${webPush ? 'bg-indigo-600' : 'bg-[var(--bg-tertiary)]'}`}>
-            <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${webPush ? 'translate-x-[1.125rem]' : 'translate-x-0.5'}`} />
+          <span className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${webPush && permission === 'granted' ? 'bg-indigo-600' : 'bg-[var(--bg-tertiary)]'}`}>
+            <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${webPush && permission === 'granted' ? 'translate-x-[1.125rem]' : 'translate-x-0.5'}`} />
           </span>
         </button>
         <p className="text-xs text-[var(--text-muted)] leading-relaxed">

@@ -7,6 +7,8 @@ import { Layout } from './components/Layout'
 import { SettingsPage } from './components/SettingsPage'
 import { SchedulesPage } from './components/SchedulesPage'
 import { useWebSocket } from './hooks/useWebSocket'
+import { useBrowserNotifications } from './hooks/useBrowserNotifications'
+import type { Profile } from './hooks/useProfile'
 import type { AuthUser } from './lib/auth.ts'
 
 type Route = 'chat' | 'settings' | 'schedules'
@@ -79,6 +81,7 @@ export default function App() {
 
   return (
     <>
+      <NotificationsBridge token={token} profile={profile} />
       {route === 'settings' && (
         <SettingsPage
           token={token}
@@ -107,4 +110,10 @@ export default function App() {
 function SchedulesRoute({ token, onBack }: { token: string; onBack: () => void }) {
   const { subscribe } = useWebSocket(token)
   return <SchedulesPage token={token} onBack={onBack} subscribe={subscribe} />
+}
+
+function NotificationsBridge({ token, profile }: { token: string; profile: Profile }) {
+  const { subscribe } = useWebSocket(token)
+  useBrowserNotifications({ subscribe, profile })
+  return null
 }

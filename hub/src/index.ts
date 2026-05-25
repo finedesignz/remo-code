@@ -16,9 +16,8 @@ import { transcribe as transcribeApi } from './api/transcribe'
 import { scheduledTasks as scheduledTasksApi } from './api/scheduled-tasks'
 import { scheduledTaskRuns as scheduledTaskRunsApi } from './api/scheduled-task-runs'
 import { runMigrations } from './db/migrate'
-import { loadAll as loadAllScheduledTasks } from './scheduler/index.ts'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
-// W2 scheduler — coexists with the legacy v0 scheduler during migration.
+// V2 scheduler.
 import * as schedRegistry from './scheduler/registry.ts'
 import * as schedDispatcher from './scheduler/dispatcher.ts'
 import * as schedCatchup from './scheduler/catchup.ts'
@@ -212,15 +211,11 @@ runMigrations()
   .then(() => markStreamingMessagesAsInterrupted())
   .then(() => markOrphanedRunsInterrupted())
   .then(async () => {
-    // W2 scheduler: wire dispatcher → queue, load enabled tasks, run catch-up.
-    // Coexists with the legacy v0 scheduler (loadAllScheduledTasks).
+    // V2 scheduler: wire dispatcher → queue, load enabled tasks, run catch-up.
     schedDispatcher.init()
     await schedRegistry.loadAll()
     await schedCatchup.runOnce()
-    await loadAllScheduledTasks().catch((err) =>
-      console.error('[startup] legacy scheduler load failed:', err?.message),
-    )
-    console.log('[startup] reset sessions/messages/runs; W2 + v0 schedulers ready')
+    console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
     console.error('[startup] migration/init error:', err.message)
