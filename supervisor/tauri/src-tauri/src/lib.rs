@@ -1,7 +1,9 @@
-//! Remo Code Supervisor — Tauri 2 shell (scaffold).
+//! Remo Code Supervisor — Tauri 2 shell.
 //!
-//! Phase 06 Wave 2 — T1 scaffold only. Tray, sidecar, mutex probe, first-run
-//! autostart, and Settings UI layout are wired in subsequent commits.
+//! T2: tray icon + menu + hide-on-close.
+
+mod sidecar;
+mod tray;
 
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
@@ -23,6 +25,21 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            tray::build(&app.handle())?;
+
+            // Hide-on-close for the settings window.
+            if let Some(win) = app.get_webview_window("settings") {
+                let win_clone = win.clone();
+                win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = win_clone.hide();
+                    }
+                });
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
