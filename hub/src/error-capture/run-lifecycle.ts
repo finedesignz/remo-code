@@ -55,6 +55,8 @@ export async function onAgentReply(sessionId: string, content: string): Promise<
     status: 'success',
     finished_at: new Date(),
     output_snippet: snippet,
+    cost_usd: null,
+    duration_ms: duration,
   })
 
   broadcastErrorEvent(active.userId, {
@@ -86,10 +88,12 @@ export async function onAgentError(sessionId: string, errorMsg: string): Promise
   if (!active) return
   bySession.delete(sessionId)
 
+  const duration = Date.now() - active.startedAt
   await updateErrorRunStatus(active.runId, {
     status: 'failed',
     finished_at: new Date(),
     error: errorMsg,
+    duration_ms: duration,
   })
   broadcastErrorEvent(active.userId, {
     type: 'error_run_finished',

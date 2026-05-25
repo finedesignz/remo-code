@@ -336,10 +336,15 @@ CREATE TABLE IF NOT EXISTS error_runs (
   finished_at     TIMESTAMPTZ NULL,
   output_snippet  TEXT NULL,
   error           TEXT NULL,
+  cost_usd        NUMERIC(10,6) NULL,
+  duration_ms     INTEGER NULL,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_error_runs_project ON error_runs(project_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_error_runs_error ON error_runs(error_id, created_at DESC);
+-- Idempotent column adds for existing prod DBs that pre-date cost/duration tracking.
+ALTER TABLE error_runs ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(10,6) NULL;
+ALTER TABLE error_runs ADD COLUMN IF NOT EXISTS duration_ms INTEGER NULL;
 
 CREATE TABLE IF NOT EXISTS notifications_sent (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),

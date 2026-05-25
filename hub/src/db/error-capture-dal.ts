@@ -66,6 +66,8 @@ export interface ErrorRun {
   finished_at: string | null
   output_snippet: string | null
   error: string | null
+  cost_usd: string | null // numeric returned as string by node-postgres
+  duration_ms: number | null
   created_at: string
 }
 
@@ -300,6 +302,8 @@ export async function updateErrorRunStatus(
     finished_at: Date | null
     output_snippet: string | null
     error: string | null
+    cost_usd: number | null
+    duration_ms: number | null
   }>,
 ): Promise<ErrorRun | null> {
   const sets: any[] = []
@@ -308,6 +312,8 @@ export async function updateErrorRunStatus(
   if (fields.finished_at !== undefined) sets.push(sql`finished_at = ${fields.finished_at}`)
   if (fields.output_snippet !== undefined) sets.push(sql`output_snippet = ${fields.output_snippet}`)
   if (fields.error !== undefined) sets.push(sql`error = ${fields.error}`)
+  if (fields.cost_usd !== undefined) sets.push(sql`cost_usd = ${fields.cost_usd}`)
+  if (fields.duration_ms !== undefined) sets.push(sql`duration_ms = ${fields.duration_ms}`)
   if (sets.length === 0) return null
 
   let q = sql`UPDATE error_runs SET `
