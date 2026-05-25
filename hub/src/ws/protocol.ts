@@ -77,7 +77,11 @@ export const ClientQuestionResponse = z.object({
   answer: z.string().min(1),
 })
 
-export const ClientInbound = z.discriminatedUnion('type', [
+// NOTE: `z.union` (not `discriminatedUnion`) because `ClientSubscribe` is a
+// `ZodEffects` (wrapped by `.refine`) and discriminatedUnion only accepts
+// raw ZodObject members with a literal discriminator. Behavior is equivalent
+// for our purposes; the handler still dispatches on `type`.
+export const ClientInbound = z.union([
   ClientAuth,
   ClientSendMessage,
   ClientSubscribe,
