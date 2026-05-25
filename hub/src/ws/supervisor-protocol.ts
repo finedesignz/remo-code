@@ -9,6 +9,11 @@ export const SupervisorHello = z.object({
   hostname: z.string(),
   roots: z.array(z.string()).max(50),
   capabilities: z.array(z.string()).optional(),
+  // Phase 06 — security capability advertisement (additive, optional for back-compat with <0.3 supervisors).
+  allow_dangerous_skip_permissions: z.boolean().optional(),
+  restrict_to_git: z.boolean().optional(),
+  max_concurrent: z.number().int().positive().optional(),
+  audit_log_enabled: z.boolean().optional(),
 })
 
 export const SupervisorState = z.object({
@@ -146,7 +151,7 @@ export type HubToSupervisor =
   | { type: 'repo.pull'; req_id: string; repo_path: string; branch: string; clone_url: string }
   | { type: 'repo.branch_checkout'; req_id: string; repo_path: string; branch: string; create: boolean }
   | { type: 'repo.list_branches'; req_id: string; repo_path: string }
-  | { type: 'session.start'; req_id: string; run_id: string; repo_path: string; branch?: string; pull: boolean; initial_prompt?: string; api_key: string; hub_url: string }
+  | { type: 'session.start'; req_id: string; run_id: string; repo_path: string; branch?: string; pull: boolean; initial_prompt?: string; api_key: string; hub_url: string; dangerously_skip_permissions?: boolean }
   | { type: 'session.stop'; req_id: string; run_id: string; reason: string }
   | { type: 'session.status'; req_id: string }
   // W2/T10 — execute a saved supervisor command; supervisor responds with

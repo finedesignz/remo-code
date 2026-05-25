@@ -248,6 +248,8 @@ The Docker image builds the web frontend and serves it from the hub — one cont
 │       ├── hub-client.ts     # WebSocket client to hub
 │       └── config.ts         # Config loading (CLI args, env vars, config file)
 ├── channel/            # (Legacy) Claude Code channel plugin
+├── supervisor/         # Local supervisor (Bun) + Tauri 2 desktop tray app (Phase 06)
+│   └── tauri/          # Windows tray shell (Rust + WebView2) — wraps Bun supervisor as sidecar
 ├── supabase/           # Database migrations
 └── Dockerfile          # Multi-stage production build
 ```
