@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { createApiKey, listApiKeys, revokeApiKey } from '../db/dal'
-import { hashToken } from '../ws/channel'
+import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 
 const apiKeys = new Hono()

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { recordUserMessage } from '../lib/lastUserMsg'
 
 export interface ChatMessage {
   id: string
@@ -185,6 +186,7 @@ export function useChat(
     const msg: any = { type: 'send_message', session_id: activeSessionId, content, id }
     if (images?.length) msg.images = images
     send(msg)
+    recordUserMessage(activeSessionId, content)
     // No optimistic add — the hub broadcasts the stored message back to us
     // which avoids duplicate messages (the DB generates a different UUID)
   }, [activeSessionId, send])

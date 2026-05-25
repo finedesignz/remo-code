@@ -202,6 +202,7 @@ Four packages in a Bun workspace:
 - **Multi-session** — run agents in multiple project directories, switch between them
 - **Session resume** — restart the agent and reconnect to the same session
 - **Scheduled tasks** — fire prompts, skills, or supervisor commands on a cron cadence against one session, one supervisor, or all of either. Per-target run history, daily cost cap, offline-grace replay, and post-run actions (chain, email, telegram, web push, webhook). See [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
+- **Grid View** — watch up to 12 Claude Code sessions side-by-side at `#/grid`. User-named tabs persist per account (`chat_tabs` + `chat_tab_sessions`), each with a layout mode (`3x3`, `4x3`, or `auto-fit`). One WebSocket subscribes to many sessions in one frame, message lists are virtualized, and streaming text is RAF-coalesced. On phones the grid auto-swaps to a single-pane accordion (only one chat mounted at a time). See [docs/grid-view.md](docs/grid-view.md). <!-- screenshot: docs/img/grid-view.png -->
 - **Unread badges** — know when sessions have new messages
 - **Light/dark theme** — toggle in the header
 - **Mobile-first** — responsive design with safe-area support for notched devices

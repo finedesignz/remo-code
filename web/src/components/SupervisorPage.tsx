@@ -70,6 +70,8 @@ interface Row {
 
 const hubUrl = import.meta.env.VITE_HUB_URL || ''
 const FILTER_LS_KEY = 'remo:repos-filter'
+const LOCAL_REPOS_LS_KEY = 'remo:local-repos'
+const GITHUB_REPOS_LS_KEY = 'remo:github-repos'
 
 function apiFetch(token: string, path: string, init?: RequestInit) {
   return fetch(`${hubUrl}${path}`, {
@@ -139,8 +141,14 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const [supervisors, setSupervisors] = useState<Supervisor[]>([])
   const [activeSupervisorId, setActiveSupervisorId] = useState<string | null>(null)
   const [activeRuns, setActiveRuns] = useState<ActiveRun[]>([])
-  const [localRepos, setLocalRepos] = useState<LocalRepo[]>([])
-  const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([])
+  const [localRepos, setLocalRepos] = useState<LocalRepo[]>(() => {
+    try { const v = localStorage.getItem(LOCAL_REPOS_LS_KEY); if (v) return JSON.parse(v) } catch {}
+    return []
+  })
+  const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>(() => {
+    try { const v = localStorage.getItem(GITHUB_REPOS_LS_KEY); if (v) return JSON.parse(v) } catch {}
+    return []
+  })
   const [githubConfigured, setGithubConfigured] = useState(false)
   const [installations, setInstallations] = useState<any[]>([])
   const [selectedInstallationId, setSelectedInstallationId] = useState<number | 'all'>('all')
@@ -153,8 +161,8 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     return 'all'
   })
   const [search, setSearch] = useState('')
-  const [sortKey, setSortKey] = useState<SortKey>('seen')
-  const [sortDir, setSortDir] = useState<SortDir>('desc')
+  const [sortKey, setSortKey] = useState<SortKey>('repo')
+  const [sortDir, setSortDir] = useState<SortDir>('asc')
   const { sessions } = useSessions(token)
   const lastActivityByPath = useMemo(() => {
     const m = new Map<string, number>()
@@ -174,6 +182,14 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   useEffect(() => {
     try { localStorage.setItem(FILTER_LS_KEY, filter) } catch {}
   }, [filter])
+
+  useEffect(() => {
+    try { localStorage.setItem(LOCAL_REPOS_LS_KEY, JSON.stringify(localRepos)) } catch {}
+  }, [localRepos])
+
+  useEffect(() => {
+    try { localStorage.setItem(GITHUB_REPOS_LS_KEY, JSON.stringify(githubRepos)) } catch {}
+  }, [githubRepos])
 
   const loadSupervisors = useCallback(async () => {
     const r = await apiFetch(token, '/api/supervisors')
@@ -320,11 +336,11 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     if (filter === 'running') filtered = filtered.filter((r) => r.status === 'running')
     else if (filter === 'idle') filtered = filtered.filter((r) => r.status !== 'running')
 
-    // Sort
+    // Sort: connected (local) repos always on top, then by chosen key
     const dir = sortDir === 'asc' ? 1 : -1
     filtered = [...filtered].sort((a, b) => {
+      if (a.hasLocal !== b.hasLocal) return a.hasLocal ? -1 : 1
       if (sortKey === 'status') {
-        // running first by default (asc = running first)
         const rank = (r: Row) => (r.status === 'running' ? 0 : r.status === 'starting' ? 1 : r.status === 'error' ? 2 : 3)
         const diff = rank(a) - rank(b)
         if (diff !== 0) return diff * dir

@@ -3,8 +3,57 @@ import { loadConfig, saveConfig, parseRoots, CONFIG_PATH } from './config'
 import { SupervisorClient } from './hub-client'
 import { installService, uninstallService, statusService, SERVICE_NAME } from './nssm-installer'
 import { scanAll } from './repo-scanner'
+import { existsSync, mkdirSync, renameSync, statSync, createWriteStream } from 'fs'
+import { join } from 'path'
+import { homedir } from 'os'
 
 const VERSION = '0.2.0'
+
+function logDir(): string {
+  if (process.platform === 'win32') {
+    const base = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')
+    return join(base, 'remo-code-supervisor')
+  }
+  return join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'remo-code-supervisor')
+}
+
+function setupFileLogging() {
+  try {
+    const dir = logDir()
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+    const logPath = join(dir, 'supervisor.log')
+    const prevPath = join(dir, 'supervisor.log.1')
+    if (existsSync(logPath)) {
+      try {
+        const sz = statSync(logPath).size
+        if (sz > 5 * 1024 * 1024) {
+          if (existsSync(prevPath)) { try { require('fs').unlinkSync(prevPath) } catch {} }
+          renameSync(logPath, prevPath)
+        }
+      } catch {}
+    }
+    const stream = createWriteStream(logPath, { flags: 'a' })
+    const tee = (orig: (...a: any[]) => void, level: string) => (...args: any[]) => {
+      orig(...args)
+      try {
+        const line = args.map((a) => typeof a === 'string' ? a : (a instanceof Error ? (a.stack || a.message) : JSON.stringify(a))).join(' ')
+        stream.write(`${new Date().toISOString()} ${level} ${line}\n`)
+      } catch {}
+    }
+    console.log = tee(console.log.bind(console), 'INFO')
+    console.error = tee(console.error.bind(console), 'ERROR')
+    console.warn = tee(console.warn.bind(console), 'WARN')
+    process.on('uncaughtException', (err) => {
+      console.error('uncaughtException:', err.stack || err.message)
+    })
+    process.on('unhandledRejection', (reason: any) => {
+      console.error('unhandledRejection:', reason?.stack || reason?.message || String(reason))
+    })
+    console.log(`[log] writing to ${logPath} (rotates at 5MB → supervisor.log.1)`)
+  } catch (err: any) {
+    console.error(`[log] file logging unavailable: ${err.message}`)
+  }
+}
 
 function parseArgs(argv: string[]): { cmd: string; flags: Record<string, string | boolean> } {
   const cmd = argv[0] || 'help'
@@ -90,6 +139,7 @@ async function main() {
   }
 
   if (cmd === 'run') {
+    setupFileLogging()
     const cfg = loadConfig()
     console.log(`[run] remo-code-supervisor v${VERSION}`)
     console.log(`[run] hub=${cfg.hubUrl} roots=${cfg.roots.length}`)

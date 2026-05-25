@@ -3,9 +3,10 @@ import type { ScheduledTask, ScheduleCreateInput, TaskType, TargetKind, CatchupP
 import { useCommands, type CommandRow } from '../hooks/useCommands'
 import { useSessions } from '../hooks/useSessions'
 import { hubFetch, HubFetchError } from '../lib/api'
-import { compilePreset, nextRuns, validate as validateCron, browserTimezone, type Preset } from '../lib/cron'
+import { nextRuns, validate as validateCron, browserTimezone } from '../lib/cron'
 import { PostRunActionsEditor } from './PostRunActionsEditor'
-import { formatLocalTs, describeCron } from './SchedulesPage'
+import { CronBuilder } from './CronBuilder'
+import { computeTaskAutoName } from '../lib/task-name'
 
 interface Props {
   token: string
@@ -14,8 +15,6 @@ interface Props {
   onClose: () => void
   onSave: (data: ScheduleCreateInput) => Promise<void>
 }
-
-type PresetKind = Preset['kind']
 
 interface Supervisor {
   id: string
@@ -53,19 +52,15 @@ const COMMON_TZS = [
 
 export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave }: Props) {
   // Basic fields
-  const [name, setName] = useState(existing?.name ?? '')
+  const [nameSuffix, setNameSuffix] = useState<string>(existing?.name ?? '')
+  const [suffixHydrated, setSuffixHydrated] = useState<boolean>(!existing)
   const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? 'prompt')
   const [prompt, setPrompt] = useState<string>(existing?.payload?.prompt ?? '')
   const [skillName, setSkillName] = useState<string>(existing?.payload?.command ?? '')
   const [notes, setNotes] = useState<string>(existing?.payload?.notes ?? '')
 
-  // Schedule
-  const initialPreset = existing ? detectPreset(existing.cron_expr) : { kind: 'daily' as const, hh: 9, mm: 0 }
-  const [presetKind, setPresetKind] = useState<PresetKind>(initialPreset.kind)
-  const [daily, setDaily] = useState({ hh: initialPreset.kind === 'daily' ? initialPreset.hh : 9, mm: initialPreset.kind === 'daily' ? initialPreset.mm : 0 })
-  const [everyN, setEveryN] = useState(initialPreset.kind === 'every_n_minutes' ? initialPreset.n : 30)
-  const [weekdays, setWeekdays] = useState({ hh: initialPreset.kind === 'weekdays' ? initialPreset.hh : 9, mm: initialPreset.kind === 'weekdays' ? initialPreset.mm : 0 })
-  const [customExpr, setCustomExpr] = useState(initialPreset.kind === 'custom' ? initialPreset.expr : (existing?.cron_expr ?? '0 9 * * *'))
+  // Schedule — composed by <CronBuilder>; the cron string is the source of truth.
+  const [cronExpr, setCronExpr] = useState<string>(existing?.cron_expr ?? '0 9 * * *')
 
   // Timezone
   const browserTz = browserTimezone()
@@ -91,16 +86,15 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
   const [error, setError] = useState<string | null>(null)
   const [cycleError, setCycleError] = useState<{ path: string[] } | null>(null)
 
-  // Compile cron from preset
-  const preset = buildPreset(presetKind, { daily, everyN, weekdays, customExpr })
-  const cronExpr = useMemo(() => {
-    try { return compilePreset(preset) } catch { return '' }
-  }, [preset.kind, (preset as any).hh, (preset as any).mm, (preset as any).n, (preset as any).expr])
   const cronValidation = useMemo(() => validateCron(cronExpr), [cronExpr])
-  const next3 = useMemo(() => cronValidation.ok ? nextRuns(cronExpr, tz, 3) : [], [cronExpr, tz, cronValidation.ok])
 
-  // Sub-15 warning for non-prompt
-  const intervalMinutes = estimateIntervalMinutes(preset)
+  // Sub-15 warning for non-prompt (best-effort: derived from next 2 runs)
+  const intervalMinutes = useMemo(() => {
+    if (!cronValidation.ok) return null
+    const r = nextRuns(cronExpr, tz, 2)
+    if (r.length < 2) return null
+    return Math.round((r[1].getTime() - r[0].getTime()) / 60000)
+  }, [cronExpr, tz, cronValidation.ok])
   const subFifteenWarn = intervalMinutes !== null && intervalMinutes < 15 && taskType !== 'prompt'
 
   // Fetch supervisors when needed
@@ -124,14 +118,53 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
   // Commands for skill picker
   const { rows: commands } = useCommands(taskType === 'skill' ? token : null)
 
+  // Auto-generated, locked name prefix — derived from type + target + cadence
+  const prefix = useMemo(() => {
+    const payload: Record<string, any> = {}
+    if (taskType === 'prompt') payload.prompt = prompt
+    if (taskType === 'skill') payload.command = skillName
+    if (taskType === 'security_scan' || taskType === 'log_check' || taskType === 'continue_dev') {
+      if (notes) payload.notes = notes
+    }
+    return computeTaskAutoName(
+      {
+        task_type: taskType,
+        target_kind: targetKind,
+        target_id: targetKind === 'session' || targetKind === 'supervisor' ? targetId : null,
+        payload,
+        cron_expr: cronExpr,
+      },
+      { sessions, supervisors },
+    )
+  }, [taskType, targetKind, targetId, prompt, skillName, notes, cronExpr, sessions, supervisors])
+
+  // For existing schedules: once the prefix can be computed, strip it from the loaded name
+  // so the user sees only the suffix portion in the input.
+  useEffect(() => {
+    if (suffixHydrated) return
+    if (!prefix) return
+    const raw = (existing?.name ?? '').trim()
+    if (!raw) { setSuffixHydrated(true); return }
+    const lowerRaw = raw.toLowerCase()
+    const lowerPrefix = prefix.toLowerCase()
+    if (lowerRaw.startsWith(lowerPrefix)) {
+      let rest = raw.slice(prefix.length).trim()
+      rest = rest.replace(/^[—\-:]+\s*/, '')
+      setNameSuffix(rest)
+    }
+    // else: keep nameSuffix = existing.name (legacy custom name, will be re-prefixed on save)
+    setSuffixHydrated(true)
+  }, [prefix, suffixHydrated, existing?.name])
+
   const handleSubmit = async () => {
     setError(null)
     setCycleError(null)
-    if (!name.trim()) { setError('Name is required'); return }
     if (!cronValidation.ok) { setError(cronValidation.error || 'Invalid cron expression'); return }
     if ((targetKind === 'session' || targetKind === 'supervisor') && !targetId) {
       setError(`Choose a ${targetKind}`); return
     }
+    if (!prefix) { setError('Pick a task type, target, and schedule first'); return }
+    const finalName = nameSuffix.trim() ? `${prefix} — ${nameSuffix.trim()}` : prefix
 
     const payload: Record<string, any> = {}
     if (taskType === 'prompt') payload.prompt = prompt.trim()
@@ -141,7 +174,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     }
 
     const input: ScheduleCreateInput = {
-      name: name.trim(),
+      name: finalName,
       task_type: taskType,
       target_kind: targetKind,
       target_id: targetKind === 'session' || targetKind === 'supervisor' ? targetId : null,
@@ -187,12 +220,25 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
         <div className="p-5 space-y-5">
           {/* Name */}
           <Field label="Name">
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Nightly security scan"
-              className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
+            <div className="flex items-stretch rounded-lg bg-[var(--bg-primary)]/60 ring-1 ring-transparent focus-within:ring-2 focus-within:ring-indigo-500 overflow-hidden">
+              <div
+                className="px-3 py-2 text-sm bg-[var(--bg-tertiary)]/50 border-r border-[var(--border-color)]/40 whitespace-nowrap font-medium select-text max-w-[60%] overflow-hidden text-ellipsis"
+                title={prefix || 'Auto-generated prefix'}
+              >
+                {prefix
+                  ? <span className="text-[var(--text-secondary)]">{prefix}</span>
+                  : <span className="text-[var(--text-muted)] italic">Auto…</span>}
+              </div>
+              <input
+                value={nameSuffix}
+                onChange={(e) => setNameSuffix(e.target.value)}
+                placeholder="(optional) add a note — e.g. nightly, high-priority"
+                className="flex-1 min-w-0 bg-transparent px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none"
+              />
+            </div>
+            <p className="mt-1.5 text-xs text-[var(--text-muted)]">
+              Name auto-updates when type, target, or schedule changes. The prefix is fixed; type to add your own note after it.
+            </p>
           </Field>
 
           {/* Task type */}
@@ -233,56 +279,9 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
             </Field>
           )}
 
-          {/* Schedule preset */}
+          {/* Schedule */}
           <Field label="Schedule">
-            <div className="space-y-2">
-              <select
-                value={presetKind}
-                onChange={(e) => setPresetKind(e.target.value as PresetKind)}
-                className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              >
-                <option value="hourly">Hourly</option>
-                <option value="daily">Daily at HH:MM</option>
-                <option value="every_n_minutes">Every N minutes</option>
-                <option value="weekdays">Weekdays at HH:MM</option>
-                <option value="custom">Custom cron expression</option>
-              </select>
-              {presetKind === 'daily' && (
-                <TimePicker hh={daily.hh} mm={daily.mm} onChange={(hh, mm) => setDaily({ hh, mm })} />
-              )}
-              {presetKind === 'weekdays' && (
-                <TimePicker hh={weekdays.hh} mm={weekdays.mm} onChange={(hh, mm) => setWeekdays({ hh, mm })} />
-              )}
-              {presetKind === 'every_n_minutes' && (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={1}
-                    max={59}
-                    value={everyN}
-                    onChange={(e) => setEveryN(Math.max(1, Math.min(59, parseInt(e.target.value || '1', 10))))}
-                    className="w-20 px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
-                  <span className="text-xs text-[var(--text-muted)]">minutes</span>
-                </div>
-              )}
-              {presetKind === 'custom' && (
-                <input
-                  value={customExpr}
-                  onChange={(e) => setCustomExpr(e.target.value)}
-                  placeholder="0 9 * * *"
-                  className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-              )}
-              {!cronValidation.ok && cronExpr && (
-                <p className="text-xs text-red-400">Invalid: {cronValidation.error}</p>
-              )}
-              {cronValidation.ok && (
-                <p className="text-xs text-[var(--text-muted)] font-mono">
-                  {describeCron(cronExpr)} <span className="text-[var(--text-muted)]/60">·</span> <span className="text-[var(--text-secondary)]">{cronExpr}</span>
-                </p>
-              )}
-            </div>
+            <CronBuilder value={cronExpr} timezone={tz} onChange={setCronExpr} />
           </Field>
 
           {/* Timezone */}
@@ -314,18 +313,6 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
               )}
             </div>
           </Field>
-
-          {/* Next 3 runs preview */}
-          {cronValidation.ok && next3.length > 0 && (
-            <div className="bg-[var(--bg-primary)]/60 rounded-lg p-3">
-              <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1.5">Next 3 runs</div>
-              <ul className="space-y-1">
-                {next3.map((d, i) => (
-                  <li key={i} className="text-xs text-[var(--text-secondary)] font-mono">{formatLocalTs(d)}</li>
-                ))}
-              </ul>
-            </div>
-          )}
 
           {subFifteenWarn && (
             <div className="bg-amber-500/10 ring-1 ring-amber-500/30 rounded-lg p-3 text-xs text-amber-300">
@@ -437,7 +424,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
           >Cancel</button>
           <button
             onClick={handleSubmit}
-            disabled={saving || !cronValidation.ok || !name.trim()}
+            disabled={saving || !cronValidation.ok || !prefix}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors"
           >
             {saving ? 'Saving...' : (existing ? 'Save changes' : 'Create schedule')}
@@ -485,25 +472,6 @@ function RadioGroup<T extends string>({
           {opt.desc && <div className="text-xs text-[var(--text-muted)] mt-0.5">{opt.desc}</div>}
         </button>
       ))}
-    </div>
-  )
-}
-
-function TimePicker({ hh, mm, onChange }: { hh: number; mm: number; onChange: (hh: number, mm: number) => void }) {
-  return (
-    <div className="flex items-center gap-2">
-      <input
-        type="number" min={0} max={23} value={hh}
-        onChange={(e) => onChange(clamp(parseInt(e.target.value || '0', 10), 0, 23), mm)}
-        className="w-16 px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
-      />
-      <span className="text-[var(--text-muted)]">:</span>
-      <input
-        type="number" min={0} max={59} value={mm}
-        onChange={(e) => onChange(hh, clamp(parseInt(e.target.value || '0', 10), 0, 59))}
-        className="w-16 px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
-      />
-      <span className="text-xs text-[var(--text-muted)] ml-1">24-hour</span>
     </div>
   )
 }
@@ -586,48 +554,3 @@ function CommandPicker({
 /* Helpers                                                             */
 /* ----------------------------------------------------------------- */
 
-function clamp(v: number, min: number, max: number): number {
-  if (Number.isNaN(v)) return min
-  return Math.max(min, Math.min(max, v))
-}
-
-function buildPreset(
-  kind: PresetKind,
-  state: { daily: { hh: number; mm: number }; everyN: number; weekdays: { hh: number; mm: number }; customExpr: string },
-): Preset {
-  switch (kind) {
-    case 'hourly': return { kind: 'hourly' }
-    case 'daily': return { kind: 'daily', hh: state.daily.hh, mm: state.daily.mm }
-    case 'every_n_minutes': return { kind: 'every_n_minutes', n: state.everyN }
-    case 'weekdays': return { kind: 'weekdays', hh: state.weekdays.hh, mm: state.weekdays.mm }
-    case 'custom': return { kind: 'custom', expr: state.customExpr }
-  }
-}
-
-function detectPreset(expr: string): Preset {
-  const parts = (expr || '').split(/\s+/)
-  if (parts.length !== 5) return { kind: 'custom', expr }
-  const [m, h, dom, mon, dow] = parts
-  if (m === '0' && h === '*' && dom === '*' && mon === '*' && dow === '*') return { kind: 'hourly' }
-  if (m.startsWith('*/') && h === '*' && dom === '*' && mon === '*' && dow === '*') {
-    const n = parseInt(m.slice(2), 10)
-    if (Number.isFinite(n) && n >= 1 && n <= 59) return { kind: 'every_n_minutes', n }
-  }
-  if (/^\d+$/.test(m) && /^\d+$/.test(h) && dom === '*' && mon === '*' && dow === '*') {
-    return { kind: 'daily', hh: parseInt(h, 10), mm: parseInt(m, 10) }
-  }
-  if (/^\d+$/.test(m) && /^\d+$/.test(h) && dom === '*' && mon === '*' && dow === '1-5') {
-    return { kind: 'weekdays', hh: parseInt(h, 10), mm: parseInt(m, 10) }
-  }
-  return { kind: 'custom', expr }
-}
-
-function estimateIntervalMinutes(preset: Preset): number | null {
-  switch (preset.kind) {
-    case 'hourly': return 60
-    case 'daily': return 60 * 24
-    case 'weekdays': return 60 * 24
-    case 'every_n_minutes': return preset.n
-    case 'custom': return null
-  }
-}

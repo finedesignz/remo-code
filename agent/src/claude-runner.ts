@@ -1,21 +1,10 @@
 import { spawn, type Subprocess } from 'bun'
 import type { CliEvent } from './types'
 import * as ui from './local-ui'
+import type { CliRunner, RunnerEvent } from './cli-runner'
 
-export type RunnerEvent =
-  | { type: 'thinking'; content: string }
-  | { type: 'text_delta'; content: string }
-  | { type: 'tool_use'; tool: string; tool_id: string; input: unknown }
-  | { type: 'tool_result'; tool_id: string; content: string; is_error?: boolean }
-  | { type: 'status'; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
-  | { type: 'assistant_message'; content: string }
-  | { type: 'permission_request'; request_id: string; tool_name: string; tool_input: unknown }
-  | { type: 'user_question'; request_id: string; question: string;
-      options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }
-  | { type: 'result'; cost: number; duration_ms: number }
-  | { type: 'error'; message: string }
-  | { type: 'log'; message: string }
-  | { type: 'ready' }
+// Barrel re-export so existing `import { RunnerEvent } from './claude-runner'` keeps compiling.
+export type { RunnerEvent } from './cli-runner'
 
 type EventCallback = (event: RunnerEvent) => void
 
@@ -53,7 +42,8 @@ function parseOptionsFromSchema(schema: unknown): Array<{ label: string; descrip
  * Persistent Claude runner — keeps a single interactive process alive.
  * Messages are sent via stdin in stream-json format, responses streamed from stdout.
  */
-export class ClaudeRunner {
+export class ClaudeRunner implements CliRunner {
+  readonly cliKind = 'claude' as const
   private proc: Subprocess | null = null
   private projectDir: string
   private listener: EventCallback | null = null
