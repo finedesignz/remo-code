@@ -504,6 +504,28 @@ Per the global rule, email notifications always default to **emails4agents**
 
 ---
 
+## Notes-field templates (web editor UX)
+
+For structured task types (`continue_dev`, `log_check`, `security_scan`)
+the editor pre-fills the **Notes** textarea with a starter prompt template
+defined in `web/src/lib/task-templates.ts`. Behavior:
+
+- New schedule → notes pre-populated with the matching template.
+- Switching task type → swaps in the new template, but only if current
+  notes are empty OR still exactly match a known template (preserves user
+  edits via `isReplaceableNotes`).
+- Editing an existing schedule → never overwritten; saved value loads as-is.
+
+Post-run actions (`PostRunActionsEditor`) similarly pre-fill `config` with
+sensible `{{template_var}}` defaults on action create + type-change via
+`defaultActionConfig()` — email subject/body, Telegram body, web-push
+title/body, etc. Empty config is no longer the default.
+
+When adding a new templated task type, drop the prompt body into
+`web/src/lib/task-templates.ts` and register it in `TASK_TEMPLATES`.
+
+---
+
 ## How to add a new task type
 
 1. Add the new enum value to `TaskTypeEnum` in
