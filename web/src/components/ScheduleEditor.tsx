@@ -53,8 +53,15 @@ const COMMON_TZS = [
 
 export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave }: Props) {
   // Basic fields
-  const [nameSuffix, setNameSuffix] = useState<string>(existing?.name ?? '')
-  const [suffixHydrated, setSuffixHydrated] = useState<boolean>(!existing)
+  // Prefer the server-stored `name_suffix` when present; fall back to the
+  // legacy `name` column for older rows (stripped against the computed
+  // prefix in the effect below).
+  const [nameSuffix, setNameSuffix] = useState<string>(
+    existing?.name_suffix ?? existing?.name ?? '',
+  )
+  const [suffixHydrated, setSuffixHydrated] = useState<boolean>(
+    !existing || existing?.name_suffix != null,
+  )
   const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? 'prompt')
   const [prompt, setPrompt] = useState<string>(existing?.payload?.prompt ?? '')
   const [skillName, setSkillName] = useState<string>(existing?.payload?.command ?? '')
@@ -178,7 +185,6 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
       setError(`Choose a ${targetKind}`); return
     }
     if (!prefix) { setError('Pick a task type, target, and schedule first'); return }
-    const finalName = nameSuffix.trim() ? `${prefix} — ${nameSuffix.trim()}` : prefix
 
     const payload: Record<string, any> = {}
     if (taskType === 'prompt') payload.prompt = prompt.trim()
@@ -188,7 +194,9 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     }
 
     const input: ScheduleCreateInput = {
-      name: finalName,
+      // Server recomputes the locked prefix and composes the final name as
+      // `<prefix> — <suffix>`. We send only the user-authored suffix.
+      name_suffix: nameSuffix.trim(),
       task_type: taskType,
       target_kind: targetKind,
       target_id: targetKind === 'session' || targetKind === 'supervisor' ? targetId : null,
