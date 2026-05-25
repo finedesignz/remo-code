@@ -126,7 +126,11 @@ Hub-side cron scheduler that fires user-defined tasks against connected agents/s
 
 - **Module:** `hub/src/scheduler/` (V2 dispatcher) — the legacy v0 scheduler at `hub/src/scheduler/index.ts` is still wired during the transition and will be removed in a follow-up.
 - **Key files:** `cron.ts` (croner wrapper + presets), `dispatcher.ts` (cost-cap + fan-out + route), `targets.ts` (resolve target_kind), `session-queue.ts` (1 in-flight + 1 waiter), `catchup.ts` (boot replay), `grace.ts` (10-min offline buffer), `senders/{agent,supervisor,coolify}.ts`, `post-run/{dispatcher,schema,template,aggregator,chain,email,telegram,webpush,webhook}.ts`.
+- **Agent sender directive:** `hub/src/scheduler/senders/agent.ts` appends a `Summary:` directive to the content sent to Claude's stdin (forces a 1-line summary at the end of every scheduled run). The content **stored** in `messages` is unchanged — `[scheduled: <task name>]\n\n<prompt>` — only the sent string carries the directive.
 - **Web mirror:** `web/src/lib/cron.ts` keeps the "next 3 runs" preview API-compatible with the hub.
+- **Web UI files:** `web/src/components/CronBuilder.tsx` (dropdown cron composer, 8 modes), `web/src/lib/cron-humanize.ts` (`humanizeCron` plain-English renderer shared by builder + list row), `web/src/lib/format.ts` (`formatDuration`, `formatCostUsd`, `formatRelativeAgo`), `web/src/lib/scheduled-message.ts` (`parseScheduledPrefix` → indigo `Scheduled:` pill in `MessageBubble`).
+- **List + drawer:** `web/src/components/SchedulesPage.tsx` (search + status + task-type filters; last-run cost/duration chips; tz-aware `Next:` + `Fired Xm ago`), `web/src/components/ScheduleRunsDrawer.tsx` (status filter chips with live counts + summary stats banner).
+- **API shape:** list + single-task endpoints include `last_run_cost_usd` and `last_run_duration_ms` (LATERAL JOIN on `scheduled_task_runs` keyed by `task_id`, most recent finalized run).
 - **REST:** `hub/src/api/scheduled-tasks.ts`, `hub/src/api/scheduled-task-runs.ts`. WS events extend `hub/src/ws/protocol.ts`.
 - **Tests:** `hub/test/scheduler.test.ts` (41 unit tests, no DB needed), `hub/test/scheduled-tasks.e2e.test.ts` (skipped without `REMO_E2E_DB_URL`).
 
