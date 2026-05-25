@@ -55,6 +55,8 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
   const content = buildContent(task)
   if (!content) { await finalizeRun(ctx.runId, 'failed', 'empty_content'); return }
 
+  const summaryDirective = `\n\n---\nWhen finished, end your response with a single line starting with "Summary:" describing in 1-2 sentences what you accomplished or any blocker. Keep it brief — this is a scheduled run and the user only needs the headline result.`
+  const sentContent = content + summaryDirective
   const storedContent = `[scheduled: ${task.name}]\n\n${content}`
   let msg: { id: string; created_at: string } | null = null
   try {
@@ -73,7 +75,7 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
 
   try {
     sock.send(JSON.stringify({
-      type: 'user_message', id: msg.id, content, ts: msg.created_at, run_id: ctx.runId,
+      type: 'user_message', id: msg.id, content: sentContent, ts: msg.created_at, run_id: ctx.runId,
     }))
   } catch (err: any) {
     await finalizeRun(ctx.runId, 'failed', `agent_send_failed: ${err?.message}`)
