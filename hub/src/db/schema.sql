@@ -289,3 +289,62 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_rootless_unique ON sessions(user_
 ALTER TABLE users ADD COLUMN IF NOT EXISTS claude_global_md TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_agents_md TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_config_toml TEXT;
+
+-- ── Error capture (06-error-capture) ────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS error_projects (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name            TEXT NOT NULL,
+  sentry_key      TEXT NOT NULL UNIQUE,
+  session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  dedupe_window_seconds  INTEGER NOT NULL DEFAULT 60,
+  rate_limit_per_hour    INTEGER NOT NULL DEFAULT 20,
+  daily_dispatch_cap     INTEGER NOT NULL DEFAULT 50,
+  enabled         BOOLEAN NOT NULL DEFAULT true,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_error_projects_user ON error_projects(user_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_error_projects_sentry_key ON error_projects(sentry_key);
+
+CREATE TABLE IF NOT EXISTS errors (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id      UUID NOT NULL REFERENCES error_projects(id) ON DELETE CASCADE,
+  fingerprint     TEXT NOT NULL,
+  error_type      TEXT NOT NULL,
+  error_value     TEXT NOT NULL,
+  stacktrace_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  release         TEXT NULL,
+  received_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  dispatch_status TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (dispatch_status IN ('pending','dispatched','skipped','failed','deduped','rate_limited','cap_exceeded')),
+  dispatched_at   TIMESTAMPTZ NULL,
+  skip_reason     TEXT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_errors_project_received ON errors(project_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_errors_fingerprint_dedupe ON errors(fingerprint, project_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_errors_pending ON errors(project_id) WHERE dispatch_status='pending';
+
+CREATE TABLE IF NOT EXISTS error_runs (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  error_id        UUID NOT NULL REFERENCES errors(id) ON DELETE CASCADE,
+  project_id      UUID NOT NULL REFERENCES error_projects(id) ON DELETE CASCADE,
+  session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending','in_flight','success','failed','skipped','cancelled')),
+  started_at      TIMESTAMPTZ NULL,
+  finished_at     TIMESTAMPTZ NULL,
+  output_snippet  TEXT NULL,
+  error           TEXT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_error_runs_project ON error_runs(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_error_runs_error ON error_runs(error_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS notifications_sent (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind            TEXT NOT NULL CHECK (kind IN ('dedupe_hit','rate_limit','daily_cap','dispatch_failed','session_offline')),
+  dedupe_key      TEXT NOT NULL,
+  sent_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_sent_lookup ON notifications_sent(kind, dedupe_key, sent_at DESC);
