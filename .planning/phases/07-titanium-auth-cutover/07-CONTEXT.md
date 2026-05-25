@@ -295,7 +295,7 @@ The Python original ported `@titanium/license-client`'s JWKS-verify + blocklist-
 
 ### New tables
 - `auth_events(id BIGSERIAL PK, user_id UUID NULL, event_type TEXT, ip TEXT, user_agent TEXT, ts TIMESTAMPTZ DEFAULT now(), metadata JSONB)` — indexes `(user_id, ts DESC)`, `(event_type, ts DESC)`
-- `sessions(id TEXT PK, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TIMESTAMPTZ DEFAULT now(), last_used_at TIMESTAMPTZ DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, ip TEXT, user_agent TEXT)` — indexes `(user_id)`, `(expires_at)`
+- `auth_sessions(id TEXT PK, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at TIMESTAMPTZ DEFAULT now(), last_used_at TIMESTAMPTZ DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, ip TEXT, user_agent TEXT)` — indexes `(user_id)`, `(expires_at)`. **NAMED `auth_sessions` NOT `sessions`** — the existing `sessions` table in `hub/src/db/schema.sql` already means "Claude Code conversation sessions" (a totally different concept). Collision would be catastrophic. Architect template's Python original used `sessions` because that repo had no name clash — here we must rename.
 - `mapping_conflicts` — folded INTO `auth_events` with `event_type='link_mismatch'` to keep the schema lean; planner confirms.
 
 ### Dependencies to add (hub)
