@@ -3,6 +3,7 @@ import { useErrorProjects, type ErrorProject, type ErrorProjectCreateInput } fro
 import { useSessions } from '../hooks/useSessions'
 import { ErrorProjectEditor } from './ErrorProjectEditor'
 import { ErrorDetailDrawer } from './ErrorDetailDrawer'
+import { ErrorSetupModal } from './ErrorSetupModal'
 
 interface Props {
   token: string
@@ -22,6 +23,7 @@ export function ErrorCapturePage({ token, onBack, subscribe }: Props) {
   const [editorOpen, setEditorOpen] = useState(false)
   const [editing, setEditing] = useState<ErrorProject | null>(null)
   const [drawerProject, setDrawerProject] = useState<ErrorProject | null>(null)
+  const [setupProject, setSetupProject] = useState<ErrorProject | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null)
   const [copiedId, setCopiedId] = useState<string | null>(null)
 
@@ -136,6 +138,13 @@ export function ErrorCapturePage({ token, onBack, subscribe }: Props) {
                     View errors
                   </button>
                   <button
+                    onClick={() => setSetupProject(p)}
+                    className="px-2.5 py-1.5 text-xs text-indigo-300 hover:text-indigo-200 hover:bg-[var(--bg-tertiary)]/40 rounded-lg transition-colors font-medium"
+                    title="Auto-install SDK in the target session"
+                  >
+                    Setup SDK
+                  </button>
+                  <button
                     onClick={() => toggle(p.id, !p.enabled)}
                     className={`p-1.5 rounded-lg transition-colors ${
                       p.enabled
@@ -227,6 +236,15 @@ export function ErrorCapturePage({ token, onBack, subscribe }: Props) {
           project={drawerProject}
           subscribe={subscribe}
           onClose={() => setDrawerProject(null)}
+        />
+      )}
+
+      {setupProject && (
+        <ErrorSetupModal
+          token={token}
+          projectId={setupProject.id}
+          projectName={setupProject.name}
+          onClose={() => setSetupProject(null)}
         />
       )}
     </div>
