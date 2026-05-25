@@ -181,6 +181,14 @@ ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS last_fire_at TIMESTAMPTZ;
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS next_fire_at TIMESTAMPTZ;
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS post_run_actions JSONB NOT NULL DEFAULT '[]'::jsonb;
 
+-- Auto-generated name parts. `name_prefix` is the server-computed, locked
+-- portion (e.g. "Continue Dev on finedesignz/kh-hub every 4h"); `name_suffix`
+-- is the user-authored free-form note. The legacy `name` column remains
+-- authoritative and is kept in sync by the DAL (name = coalesce(prefix || ' — ' || suffix, prefix, name)).
+-- Both columns are nullable so existing rows stay valid until next edit.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS name_prefix TEXT;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS name_suffix TEXT;
+
 -- W2/T8: drop legacy NOT NULL on session_id so fan-out tasks
 -- (all_agents/all_supervisors) and supervisor-targeted tasks can omit it.
 -- Idempotent — Postgres no-ops if the column is already nullable.

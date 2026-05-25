@@ -100,7 +100,9 @@ to the web UI over WebSocket.
 type ScheduledTask = {
   id: string
   user_id: string
-  name: string
+  name: string                        // composed as `<name_prefix> — <name_suffix>` (or just prefix)
+  name_prefix: string | null          // server-computed, locked (see "Auto-name" below)
+  name_suffix: string | null          // user-authored free-form note, optional
   task_type: 'prompt' | 'skill' | 'security_scan' | 'log_check' | 'continue_dev'
   target_kind: 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
   target_id: string | null            // required for session / supervisor
@@ -113,6 +115,26 @@ type ScheduledTask = {
   post_run_actions: PostRunAction[]
 }
 ```
+
+### Auto-name (prefix + suffix)
+
+The `name_prefix` is **server-computed and locked** on every POST/PATCH from
+`(task_type, target_kind, target_id, payload, cron_expr)` via
+`hub/src/scheduler/auto-name.ts` (mirrors `web/src/lib/task-name.ts` for the
+live preview in the editor). The user can append a free-form `name_suffix`
+in a separate editable field; the final stored `name` is
+`<prefix> — <suffix>` (or just `<prefix>` if no suffix).
+
+Examples of what the prefix renders to:
+
+- `Continue Dev on finedesignz/kh-hub every 4h`
+- `Skill /lint on supervisor-coolify-1 daily at 09:00`
+- `Log Check on app-abc123 every 15m`
+
+API contract: new clients send `name_suffix`; the legacy `name` field is
+still accepted for back-compat and is treated as a suffix when present.
+Existing rows have NULL prefix/suffix and keep the legacy `name` value
+until the next edit — at which point the server recomputes both columns.
 
 ### Task types
 

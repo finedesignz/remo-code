@@ -25,6 +25,8 @@ export interface PostRunAction {
 export interface ScheduledTask {
   id: string
   name: string
+  name_prefix?: string | null
+  name_suffix?: string | null
   task_type: TaskType
   target_kind: TargetKind
   target_id: string | null
@@ -45,7 +47,13 @@ export interface ScheduledTask {
 }
 
 export interface ScheduleCreateInput {
-  name: string
+  /**
+   * Optional, back-compat — server now derives the locked prefix from
+   * (task_type, target, cron) and composes the stored name as
+   * `<prefix> — <name_suffix>`. New callers should send `name_suffix`.
+   */
+  name?: string
+  name_suffix?: string
   task_type: TaskType
   target_kind: TargetKind
   target_id?: string | null
