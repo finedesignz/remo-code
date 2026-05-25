@@ -256,7 +256,8 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
             )}
           </button>
 
-          <ProfileMenu user={user} onNavigate={onNavigate} signOut={signOut} />
+          <UsageStrip token={token} />
+          <ProfileMenu user={user} onNavigate={onNavigate} signOut={signOut} token={token} />
         </header>
 
         <ChatPanel
@@ -278,9 +279,20 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
   )
 }
 
-function ProfileMenu({ user, onNavigate, signOut }: { user: AuthUser; onNavigate: (h: string) => void; signOut: () => void }) {
+function ProfileMenu({ user, onNavigate, signOut, token }: { user: AuthUser; onNavigate: (h: string) => void; signOut: () => void; token: string }) {
   const [open, setOpen] = useState(false)
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null)
   const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const hubUrl = import.meta.env.VITE_HUB_URL || ''
+    fetch(`${hubUrl}/api/profile`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(p => { if (!cancelled && p) setAvatarUrl(p.avatar_url ?? null) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [token])
 
   useEffect(() => {
     if (!open) return
@@ -298,7 +310,6 @@ function ProfileMenu({ user, onNavigate, signOut }: { user: AuthUser; onNavigate
 
   const go = (hash: string) => { setOpen(false); onNavigate(hash) }
   const initial = (user.email || '?')[0].toUpperCase()
-  // Derive first name: prefer display_name's first word, else email local-part first segment.
   const firstName = (() => {
     const dn = (user as any).display_name as string | undefined
     if (dn && dn.trim()) return dn.trim().split(/\s+/)[0]
@@ -314,16 +325,19 @@ function ProfileMenu({ user, onNavigate, signOut }: { user: AuthUser; onNavigate
         onClick={() => setOpen(o => !o)}
         className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-full hover:bg-[var(--bg-tertiary)]/50 transition-colors"
         title={user.email || 'Profile'}
-        aria-label="Profile menu"
+        aria-label="Open navigation menu"
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        <span className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-xs font-medium shrink-0">
-          {initial}
+        <span className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-xs font-medium shrink-0 overflow-hidden">
+          {avatarUrl ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" /> : initial}
         </span>
         {firstName && (
           <span className="text-sm text-[var(--text-secondary)] font-medium hidden sm:inline">{firstName}</span>
         )}
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" className="text-[var(--text-muted)]">
+          <path d="M2.5 4l2.5 2.5L7.5 4" />
+        </svg>
       </button>
       {open && (
         <div
@@ -334,22 +348,69 @@ function ProfileMenu({ user, onNavigate, signOut }: { user: AuthUser; onNavigate
             <div className="text-xs text-[var(--text-muted)]">Signed in as</div>
             <div className="text-sm text-[var(--text-primary)] truncate">{user.email}</div>
           </div>
-          <button
-            role="menuitem"
-            onClick={() => go('#/settings?tab=account')}
-            className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors"
-          >Profile</button>
-          <button
-            role="menuitem"
-            onClick={() => go('#/settings')}
-            className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors"
-          >Settings</button>
+          <button role="menuitem" onClick={() => go('#/')} className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors">Chat</button>
+          <button role="menuitem" onClick={() => go('#/grid')} className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors">Grid</button>
+          <button role="menuitem" onClick={() => go('#/settings?tab=schedules')} className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors">Schedules</button>
+          <div className="my-1 border-t border-[var(--border-color)]" />
+          <button role="menuitem" onClick={() => go('#/settings?tab=profile')} className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors">Profile</button>
+          <button role="menuitem" onClick={() => go('#/settings')} className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors">Settings</button>
           <div className="my-1 border-t border-[var(--border-color)]" />
           <button
             role="menuitem"
             onClick={() => { setOpen(false); signOut() }}
             className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
           >Logout</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* Usage strip — inline cost-today indicator with hover popover for breakdown. */
+function UsageStrip({ token }: { token: string }) {
+  const [data, setData] = useState<{ cost_usd: number; cap_usd: number; percent: number; timezone: string } | null>(null)
+  const [hover, setHover] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    const load = () => {
+      const hubUrl = import.meta.env.VITE_HUB_URL || ''
+      fetch(`${hubUrl}/api/profile/cost-today`, { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (!cancelled && d) setData(d) })
+        .catch(() => {})
+    }
+    load()
+    const iv = setInterval(load, 60_000)
+    return () => { cancelled = true; clearInterval(iv) }
+  }, [token])
+
+  if (!data) return null
+  const pct = Math.round(data.percent)
+  const color = pct < 50 ? 'text-emerald-300' : pct < 80 ? 'text-amber-300' : 'text-red-300'
+  const barColor = pct < 50 ? 'bg-emerald-400' : pct < 80 ? 'bg-amber-400' : 'bg-red-400'
+
+  return (
+    <div
+      className="hidden sm:flex relative items-center gap-2 px-2 py-1 rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors cursor-default"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title="Today's usage"
+    >
+      <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-medium">Today</span>
+      <span className={`text-xs font-mono ${color}`}>${data.cost_usd.toFixed(2)}</span>
+      <span className="w-16 h-1.5 rounded-full bg-[var(--bg-tertiary)] overflow-hidden">
+        <span className={`block h-full ${barColor} transition-all`} style={{ width: `${Math.min(100, pct)}%` }} />
+      </span>
+      {hover && (
+        <div className="absolute right-0 top-full mt-1 w-64 bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] rounded-lg shadow-xl z-50 p-3 text-xs space-y-1.5">
+          <div className="flex justify-between"><span className="text-[var(--text-muted)]">Today's cost</span><span className={`font-mono ${color}`}>${data.cost_usd.toFixed(4)}</span></div>
+          <div className="flex justify-between"><span className="text-[var(--text-muted)]">Daily cap</span><span className="font-mono text-[var(--text-secondary)]">${data.cap_usd.toFixed(2)}</span></div>
+          <div className="flex justify-between"><span className="text-[var(--text-muted)]">Used</span><span className={`font-mono ${color}`}>{pct}%</span></div>
+          <div className="flex justify-between"><span className="text-[var(--text-muted)]">Timezone</span><span className="font-mono text-[var(--text-secondary)]">{data.timezone}</span></div>
+          <div className="pt-1.5 border-t border-[var(--border-color)]/50 text-[10px] text-[var(--text-muted)]">
+            Scheduled tasks pause when cap is reached. Manual chat is not affected.
+          </div>
         </div>
       )}
     </div>

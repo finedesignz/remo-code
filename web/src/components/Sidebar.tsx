@@ -251,35 +251,10 @@ export function Sidebar({
           </button>
         </div>
 
-        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] flex items-center gap-2">
-          <button
-            onClick={() => onNavigate('#/grid')}
-            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
-            title="Multichat grid view"
-          >
-            Grid
-          </button>
-          <button
-            onClick={() => onNavigate('#/schedules')}
-            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
-            title="Scheduled tasks"
-          >
-            Schedules
-          </button>
-          <button
-            onClick={() => onNavigate('#/settings')}
-            className="flex-1 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium"
-          >
-            Settings
-          </button>
-          <button
-            onClick={signOut}
-            className="px-3 py-2 text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors"
-            title="Sign out"
-            aria-label="Sign out"
-          >
-            Sign out
-          </button>
+        {/* Footer trimmed — Grid/Schedules/Settings live in the header dropdown nav.
+            Sign-out also moved into the avatar dropdown. */}
+        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] text-[11px] text-[var(--text-muted)] truncate" title={user.email}>
+          {user.email}
         </div>
       </div>
       {hoveredSession && hoverInfo && createPortal(

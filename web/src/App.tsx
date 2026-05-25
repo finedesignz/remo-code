@@ -32,7 +32,11 @@ function getRoute(): Route {
     return 'settings'
   }
   if (hash.startsWith('#/settings')) return 'settings'
-  if (hash.startsWith('#/schedules')) return 'schedules'
+  // Legacy /#/schedules → settings with schedules tab
+  if (hash.startsWith('#/schedules')) {
+    window.location.hash = '#/settings?tab=schedules'
+    return 'settings'
+  }
   if (hash.startsWith('#/grid')) return 'grid'
   if (hash.startsWith('#/dev/chat-surface')) return 'dev-chat-surface'
   if (hash.startsWith('#/dev/mobile-accordion')) return 'dev-mobile-accordion'
