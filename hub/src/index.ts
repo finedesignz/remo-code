@@ -173,12 +173,25 @@ const server = Bun.serve({
       return new Response('forbidden', { status: 403 })
     }
 
-    const file = Bun.file(filePath)
-    if (await file.exists()) return new Response(file)
+    // Cache policy: hashed /assets/* are content-addressed → cache forever;
+    // index.html and other HTML must revalidate so deploys land immediately
+    // instead of leaving browsers pinned to old bundle hashes.
+    const isHtml = filePath.endsWith('.html') || requestedPath === '/'
+    const isHashedAsset = requestedPath.startsWith('/assets/')
+    const cacheHeaders: HeadersInit = isHtml
+      ? { 'Cache-Control': 'no-cache, no-store, must-revalidate' }
+      : isHashedAsset
+        ? { 'Cache-Control': 'public, max-age=31536000, immutable' }
+        : {}
 
-    // SPA fallback
+    const file = Bun.file(filePath)
+    if (await file.exists()) return new Response(file, { headers: cacheHeaders })
+
+    // SPA fallback — always index.html → no-cache
     const indexFile = Bun.file(join(webDist, 'index.html'))
-    if (await indexFile.exists()) return new Response(indexFile)
+    if (await indexFile.exists()) {
+      return new Response(indexFile, { headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' } })
+    }
 
     return new Response('not found', { status: 404 })
   },
