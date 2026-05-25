@@ -290,6 +290,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS claude_global_md TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_agents_md TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_config_toml TEXT;
 
+-- ── Nav reorg: avatar (stored as data URL, capped at 1MB server-side)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+
 -- ── Phase 06 plan 007: GitHub-issue post-run idempotency ─────────────────────
 -- Skips duplicate issue creation for the same (repo, app_uuid, deploy_uuid)
 -- within a 24h window. Hash = sha256(`${repo}|${app_uuid}|${deploy_uuid}`).
