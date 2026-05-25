@@ -244,3 +244,29 @@ CREATE INDEX IF NOT EXISTS idx_paused_repos_supervisor ON paused_repos(superviso
 
 -- Per-user timezone for daily cost-cap window + UI display.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC';
+
+-- ── Multichat grid view: chat tabs ───────────────────────────────────────────
+-- User-named tabs grouping multiple sessions into a grid view. Cascade chain:
+-- users → chat_tabs → chat_tab_sessions ← sessions. Deleting any of those rows
+-- cleans up downstream membership automatically.
+
+CREATE TABLE IF NOT EXISTS chat_tabs (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
+  layout     TEXT NOT NULL DEFAULT 'auto-fit' CHECK (layout IN ('3x3','4x3','auto-fit')),
+  position   INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_chat_tabs_user_position ON chat_tabs(user_id, position);
+
+CREATE TABLE IF NOT EXISTS chat_tab_sessions (
+  tab_id     UUID NOT NULL REFERENCES chat_tabs(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  position   INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tab_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_tab_sessions_tab_position ON chat_tab_sessions(tab_id, position);
+CREATE INDEX IF NOT EXISTS idx_chat_tab_sessions_session ON chat_tab_sessions(session_id);

@@ -49,10 +49,19 @@ export const ClientSendMessage = z.object({
   })).optional(),
 })
 
+// Multichat overload: accepts BOTH `session_id` (legacy single) AND
+// `session_ids` (multi, cap 12). Exactly one must be present. The handler
+// normalizes to a single id list. Do NOT add a `subscribe_many` op.
+export const SUBSCRIBE_MAX = 12
+
 export const ClientSubscribe = z.object({
   type: z.literal('subscribe'),
-  session_ids: z.array(z.string().min(1)).max(100),
-})
+  session_id: z.string().min(1).max(256).optional(),
+  session_ids: z.array(z.string().min(1)).max(SUBSCRIBE_MAX).optional(),
+}).refine(
+  (d) => !!d.session_id || (Array.isArray(d.session_ids) && d.session_ids.length >= 0),
+  { message: 'subscribe requires session_id or session_ids' },
+)
 
 export const ClientPermissionResponse = z.object({
   type: z.literal('permission_response'),
@@ -68,7 +77,11 @@ export const ClientQuestionResponse = z.object({
   answer: z.string().min(1),
 })
 
-export const ClientInbound = z.discriminatedUnion('type', [
+// NOTE: `z.union` (not `discriminatedUnion`) because `ClientSubscribe` is a
+// `ZodEffects` (wrapped by `.refine`) and discriminatedUnion only accepts
+// raw ZodObject members with a literal discriminator. Behavior is equivalent
+// for our purposes; the handler still dispatches on `type`.
+export const ClientInbound = z.union([
   ClientAuth,
   ClientSendMessage,
   ClientSubscribe,
@@ -151,6 +164,7 @@ export type HubToAgent =
 export type HubToClient =
   | { type: 'auth_ok' }
   | { type: 'auth_error'; error: string }
+  | { type: 'subscribe_error'; error: 'too_many_sessions' | 'invalid_subscribe'; max?: number }
   | { type: 'message'; session_id: string; message: { id: string; role: string; content: string; status?: string; created_at: string } }
   | { type: 'text_delta'; session_id: string; content: string; message_id?: string; run_id?: string }
   | { type: 'tool_use'; session_id: string; tool_name: string; tool_input?: unknown; message_id?: string; run_id?: string }
