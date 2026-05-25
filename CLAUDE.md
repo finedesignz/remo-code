@@ -2,6 +2,27 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow: always use git worktrees for new features
+
+**Mandatory.** When starting work on a new feature, phase, or non-trivial refactor, create a git worktree off `origin/main` and do ALL implementation work inside that worktree. Never build a new feature directly on the primary checkout — multiple Claude sessions and agents commonly run against this repo in parallel, and uncommitted/untracked files on the main checkout get wiped when another session switches branches or runs `git clean`.
+
+```bash
+cd C:/Users/artic/GitHub/remo-code
+git fetch origin
+git worktree add ../remo-code-feat-<slug> -b feat/<slug> origin/main
+cd ../remo-code-feat-<slug>
+# all subsequent work, commits, planning docs, agent dispatches happen here
+```
+
+Open the PR from `feat/<slug>` → `main` when ready. After merge, remove the worktree:
+
+```bash
+git worktree remove ../remo-code-feat-<slug>
+git branch -D feat/<slug>
+```
+
+Exceptions: trivial single-file bugfixes, doc edits, README tweaks. Everything else — including planning docs under `.planning/phases/<N>-<slug>/` — lives in the worktree from the start.
+
 ## What This Is
 
 Remo Code is a web app that lets you chat with Claude Code sessions remotely from any browser or phone. A local agent spawns Claude Code CLI with `--input-format stream-json --output-format stream-json`, giving the web UI full visibility into Claude's activity: thinking, tool calls, and streaming text responses.
