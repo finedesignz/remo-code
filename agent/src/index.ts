@@ -2,6 +2,7 @@
 import { loadConfig } from './config'
 import { HubClient } from './hub-client'
 import { ClaudeRunner } from './claude-runner'
+import { CodexRunner } from './codex-runner'
 import type { CliRunner, RunnerEvent } from './cli-runner'
 import type { HubToAgent } from './types'
 import * as ui from './local-ui'
@@ -9,6 +10,7 @@ import { spawnSync } from 'child_process'
 import { mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { writeSeedFiles } from './seed'
 
 const VERSION = '0.4.1'
 
@@ -25,7 +27,6 @@ type SessionInfo = { cliKind: 'claude' | 'codex'; isRootless: boolean; workingDi
 const sessionMeta = new Map<string, SessionInfo>()
 const runners = new Map<string, CliRunner>()
 const pendingSystemPrompts = new Map<string, string>()
-const codexWarnedSessions = new Set<string>()
 const preflightDone = new Set<'claude' | 'codex'>()
 let primarySessionId: string | null = null
 
@@ -81,22 +82,19 @@ function getOrStartRunner(sessionId: string): CliRunner | null {
     return null
   }
 
-  if (meta.cliKind === 'codex') {
-    if (!codexWarnedSessions.has(sessionId)) {
-      codexWarnedSessions.add(sessionId)
-      sendLog(`Codex runner pending Plan 004 — session ${sessionId.slice(0, 8)} cannot process messages yet`, sessionId)
-    }
-    return null
-  }
-
-  // Claude
-  preflight('claude')
+  preflight(meta.cliKind)
   try { mkdirSync(meta.workingDir, { recursive: true }) } catch {}
-  const runner = new ClaudeRunner(
-    meta.workingDir,
-    config.localOutput,
-    meta.isRootless ? undefined : config.resume,
-  )
+
+  let runner: CliRunner
+  if (meta.cliKind === 'codex') {
+    runner = new CodexRunner(meta.workingDir, config.localOutput)
+  } else {
+    runner = new ClaudeRunner(
+      meta.workingDir,
+      config.localOutput,
+      meta.isRootless ? undefined : config.resume,
+    )
+  }
   const sysPrompt = pendingSystemPrompts.get(sessionId)
   if (sysPrompt) runner.setSystemPrompt(sysPrompt)
   runner.start(makeHandler(sessionId))
@@ -137,6 +135,9 @@ function handleMessage(msg: HubToAgent) {
     }
 
     sendLog(`Remo Code Agent v${VERSION} connected — ${config.projectDir} (cli=${cliKind})`)
+
+    // Phase 05: write any hub-provided seed files (create-if-absent; never overwrite)
+    writeSeedFiles((msg as any).seed_files, (m) => sendLog(m))
 
     if (msg.system_prompt) {
       pendingSystemPrompts.set(msg.session_id, msg.system_prompt)

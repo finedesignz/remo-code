@@ -54,14 +54,21 @@ function wlog(msg: string) {
   process.stdout.write(line)
 }
 
-async function runChild(cmd: string[], opts: { cwd?: string } = {}): Promise<{ exitCode: number; runtimeMs: number; stdout: string; stderr: string }> {
+async function runChild(cmd: string[], opts: { cwd?: string; stdin?: string } = {}): Promise<{ exitCode: number; runtimeMs: number; stdout: string; stderr: string }> {
   const started = Date.now()
   const proc = Bun.spawn(cmd, {
     cwd: opts.cwd || REPO_ROOT,
     stdout: 'pipe',
     stderr: 'pipe',
-    stdin: 'ignore',
+    stdin: opts.stdin !== undefined ? 'pipe' : 'ignore',
   })
+  if (opts.stdin !== undefined && proc.stdin) {
+    try {
+      const writer = proc.stdin as unknown as { write: (s: string) => void; end: () => void }
+      writer.write(opts.stdin)
+      writer.end()
+    } catch {}
+  }
   let stdoutBuf = ''
   let stderrBuf = ''
   const drain = async (stream: ReadableStream<Uint8Array>, into: (s: string) => void, sink: (s: string) => void) => {
@@ -116,13 +123,13 @@ async function runSelfHeal(logTail: string): Promise<{ healed: boolean; reason: 
     '  "CANNOT_HEAL: <reason>"        if you could not.',
   ].join('\n')
 
+  // Pass the prompt via stdin (argv passing fails on long prompts / shell quoting on Windows).
   const res = await runChild([
     claude,
     '--print',
     '--dangerously-skip-permissions',
     '--add-dir', REPO_ROOT,
-    prompt,
-  ], { cwd: REPO_ROOT })
+  ], { cwd: REPO_ROOT, stdin: prompt })
 
   const combined = res.stdout + (res.stderr ? `\n[stderr]\n${res.stderr}` : '')
   const cannot = /CANNOT_HEAL:\s*(.+)/.exec(combined)

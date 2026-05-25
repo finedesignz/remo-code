@@ -16,6 +16,7 @@ import { transcribe as transcribeApi } from './api/transcribe'
 import { scheduledTasks as scheduledTasksApi } from './api/scheduled-tasks'
 import { scheduledTaskRuns as scheduledTaskRunsApi } from './api/scheduled-task-runs'
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
+import { instructions as instructionsApi } from './api/instructions'
 import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
 // V2 scheduler.
@@ -103,6 +104,7 @@ app.route('/api/transcribe', transcribeApi)
 app.route('/api/scheduled-tasks', scheduledTasksApi)
 app.route('/api/scheduled-task-runs', scheduledTaskRunsApi)
 app.route('/api/chat-tabs', chatTabsApi)
+app.route('/api/instructions', instructionsApi)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]

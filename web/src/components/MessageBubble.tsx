@@ -2,6 +2,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeSanitize from 'rehype-sanitize'
 import type { ChatMessage } from '../hooks/useChat'
+import { parseScheduledPrefix } from '../lib/scheduled-message'
 
 interface Props {
   message: ChatMessage
@@ -20,6 +21,8 @@ function extractImages(content: string): { images: string[]; text: string } {
 export function MessageBubble({ message }: Props) {
   const isUser = message.role === 'user'
   const { images, text } = extractImages(message.content)
+  const scheduled = isUser ? parseScheduledPrefix(text) : null
+  const displayText = scheduled ? scheduled.body : text
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -35,8 +38,16 @@ export function MessageBubble({ message }: Props) {
           <img key={i} src={src} alt="" className="rounded-lg max-h-64 w-auto mb-2" />
         ))}
 
+        {scheduled && (
+          <div className="mb-1.5">
+            <span className="bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300 text-[10px] uppercase tracking-wider px-2 py-0.5 rounded inline-flex items-center gap-1">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .2.08.39.22.53l3 3a.75.75 0 1 0 1.06-1.06l-2.78-2.78V5Z" clipRule="evenodd" /></svg>
+              Scheduled: {scheduled.taskName}
+            </span>
+          </div>
+        )}
         {isUser ? (
-          text ? <p className="whitespace-pre-wrap break-words">{text}</p> : null
+          displayText ? <p className="whitespace-pre-wrap break-words">{displayText}</p> : null
         ) : (
           <div className="max-w-none break-words text-[var(--text-primary)]
             [&_pre]:bg-[var(--code-bg)] [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:overflow-x-auto [&_pre]:my-2
