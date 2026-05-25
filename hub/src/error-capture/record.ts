@@ -28,6 +28,8 @@ import {
 } from '../db/error-capture-dal.ts'
 import { getUserTimezone } from '../db/dal.ts'
 import { notifyThrottled } from './notify.ts'
+import { dispatchPendingError } from './dispatcher.ts'
+import { broadcastErrorEvent } from '../ws/registry.ts'
 
 export interface RecordErrorFields {
   fingerprint: string
@@ -62,6 +64,16 @@ export async function recordError(
     dispatch_status: 'pending',
   })
 
+  // Emit error_received so the UI can flash a "new error" indicator before
+  // the gates resolve. Fires even on rows we'll immediately gate-skip.
+  broadcastErrorEvent(project.user_id, {
+    type: 'error_received',
+    error_id: row.id,
+    project_id: project.id,
+    fingerprint: fields.fingerprint,
+    received_at: row.received_at,
+  })
+
   // 2. Dedupe — match any earlier row in the window (excluding the one we just
   //    inserted).
   const recent = await findRecentErrorByFingerprint(
@@ -79,6 +91,10 @@ export async function recordError(
       project,
       { error_type: fields.error_type, error_value: fields.error_value },
     )
+    broadcastErrorEvent(project.user_id, {
+      type: 'error_skipped', error_id: row.id, project_id: project.id,
+      dispatch_status: 'deduped', skip_reason: reason,
+    })
     return { error_id: row.id, dispatch_status: 'deduped', skip_reason: reason }
   }
 
@@ -95,6 +111,10 @@ export async function recordError(
       project,
       { error_type: fields.error_type, error_value: fields.error_value },
     )
+    broadcastErrorEvent(project.user_id, {
+      type: 'error_skipped', error_id: row.id, project_id: project.id,
+      dispatch_status: 'rate_limited', skip_reason: reason,
+    })
     return { error_id: row.id, dispatch_status: 'rate_limited', skip_reason: reason }
   }
 
@@ -112,11 +132,18 @@ export async function recordError(
       project,
       { error_type: fields.error_type, error_value: fields.error_value },
     )
+    broadcastErrorEvent(project.user_id, {
+      type: 'error_skipped', error_id: row.id, project_id: project.id,
+      dispatch_status: 'cap_exceeded', skip_reason: reason,
+    })
     return { error_id: row.id, dispatch_status: 'cap_exceeded', skip_reason: reason }
   }
 
-  // 5. Accepted. Row stays 'pending'; Wave 3 dispatcher will fire it into
-  //    the configured session.
+  // 5. Accepted. Row stays 'pending'; W3 dispatcher fires it into the
+  //    configured session. Fire-and-forget — we never block the intake POST.
+  void dispatchPendingError(row.id).catch((err) => {
+    console.error(`[error-capture] dispatch failed error=${row.id}: ${err?.message ?? err}`)
+  })
   return { error_id: row.id, dispatch_status: 'pending' }
 }
 

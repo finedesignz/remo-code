@@ -5,8 +5,13 @@ import { insertMessage, listSessions, getSession } from '../db/dal'
 import {
   registerClient, unregisterClient, subscribeClient,
   getChannel, unregisterChannel, broadcastToSubscribers,
+  broadcastErrorEvent,
   type ClientEntry,
 } from './registry'
+
+// Re-export so error-capture modules can `import { broadcastErrorEvent }
+// from '../ws/client'` per the W3 contract.
+export { broadcastErrorEvent }
 
 const AUTH_TIMEOUT_MS = 5_000
 const MSG_RATE_WINDOW_MS = 10_000
