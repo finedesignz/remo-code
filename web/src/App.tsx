@@ -6,12 +6,13 @@ import { SetupForm } from './components/SetupForm'
 import { Layout } from './components/Layout'
 import { SettingsPage } from './components/SettingsPage'
 import { SchedulesPage } from './components/SchedulesPage'
+import { ChatSurfaceShowcase } from './components/ChatSurfaceShowcase'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useBrowserNotifications } from './hooks/useBrowserNotifications'
 import type { Profile } from './hooks/useProfile'
 import type { AuthUser } from './lib/auth.ts'
 
-type Route = 'chat' | 'settings' | 'schedules'
+type Route = 'chat' | 'settings' | 'schedules' | 'dev-chat-surface'
 
 function getRoute(): Route {
   const hash = window.location.hash
@@ -22,6 +23,7 @@ function getRoute(): Route {
   }
   if (hash.startsWith('#/settings')) return 'settings'
   if (hash.startsWith('#/schedules')) return 'schedules'
+  if (hash.startsWith('#/dev/chat-surface')) return 'dev-chat-surface'
   return 'chat'
 }
 
@@ -93,6 +95,10 @@ export default function App() {
 
       {route === 'schedules' && (
         <SchedulesRoute token={token} onBack={goToChat} />
+      )}
+
+      {route === 'dev-chat-surface' && (
+        <ChatSurfaceShowcase token={token} />
       )}
 
       {route === 'chat' && (
