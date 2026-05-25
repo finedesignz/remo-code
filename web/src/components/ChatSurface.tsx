@@ -320,25 +320,42 @@ export function ChatSurface(props: ChatSurfaceProps) {
     }
   }, [messages, activity])
 
-  // Session switch: re-arm forced bottom. Schedule TWO rAFs to allow
-  // virtualizer measurements to complete on the second frame.
+  // Session switch: re-arm forced bottom and pin to bottom UNCONDITIONALLY
+  // across several frames. The virtualizer measures rows progressively, so
+  // scrollHeight grows over multiple frames after a switch. We pin the
+  // scroll to the bottom for ~12 frames (~200ms) and on every measurement
+  // pass within a 600ms window to absorb late row measurements without
+  // running indefinitely.
   useEffect(() => {
     forceBottomRef.current = true
     isNearBottom.current = true
     setNewCount(0)
     prevMsgCountRef.current = 0
-    let raf2 = 0
-    const raf1 = requestAnimationFrame(() => {
+
+    let cancelled = false
+    let frameId = 0
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    const deadline = performance.now() + 600
+
+    const pin = () => {
+      if (cancelled) return
       const el = scrollRef.current
       if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })
-      raf2 = requestAnimationFrame(() => {
-        const el2 = scrollRef.current
-        if (el2) el2.scrollTo({ top: el2.scrollHeight, behavior: 'auto' })
-      })
-    })
+      if (performance.now() < deadline) {
+        frameId = requestAnimationFrame(pin)
+      }
+    }
+    frameId = requestAnimationFrame(pin)
+    // Final safety pass after layout fully settles
+    timeoutId = setTimeout(() => {
+      const el = scrollRef.current
+      if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })
+    }, 250)
+
     return () => {
-      cancelAnimationFrame(raf1)
-      if (raf2) cancelAnimationFrame(raf2)
+      cancelled = true
+      cancelAnimationFrame(frameId)
+      if (timeoutId) clearTimeout(timeoutId)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
@@ -720,7 +737,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
           </div>
         )}
         <div className={d.inputPad}>
-          <div className="flex gap-2 items-end flex-nowrap">
+          <div className="flex gap-2 items-center flex-nowrap w-full">
             <input
               ref={fileInputRef}
               type="file"
@@ -769,7 +786,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
                 )}
               </button>
             )}
-            <div className="flex-1 relative">
+            <div className="flex-1 min-w-0 relative">
               {slashVisible && (
                 <div className="absolute bottom-full left-0 right-0 mb-2 max-h-64 overflow-y-auto rounded-lg bg-[var(--bg-secondary)] shadow-xl ring-1 ring-[var(--border-color)] z-10">
                   {slashMatch!.matches.map((it, i) => (
