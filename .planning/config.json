@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "mode": "yolo",
+  "granularity": "fine",
+  "execution": "parallel",
+  "git_tracking": true,
+  "research_enabled": true,
+  "plan_checker_enabled": true,
+  "verifier_enabled": true,
+  "nyquist_validation_enabled": true,
+  "ai_models": "balanced",
+  "commit_docs": true,
+  "workflow": {
+    "tdd_mode": false,
+    "mvp_mode": false,
+    "ui_phase": true,
+    "ui_safety_gate": true,
+    "security_enforcement": true,
+    "discuss_mode": "discuss",
+    "pattern_mapper": true,
+    "ai_integration_phase": false
+  }
+}
