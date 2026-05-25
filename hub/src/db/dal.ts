@@ -116,7 +116,12 @@ export async function findOrCreateRootlessSession(
 
 // Find existing session by project_dir (reuse) or create a new one.
 // Returns { ...session, created: boolean }
-export async function findOrCreateAgentSession(userId: string, projectDir: string, tokenHash: string) {
+export async function findOrCreateAgentSession(
+  userId: string,
+  projectDir: string,
+  tokenHash: string,
+  cliKind: 'claude' | 'codex' = 'claude',
+) {
   const existing = await findSessionByProjectDir(userId, projectDir);
   if (existing) {
     // Update the token hash so the agent gets a fresh token
@@ -126,8 +131,8 @@ export async function findOrCreateAgentSession(userId: string, projectDir: strin
   // Derive a human-readable name from the last path segment
   const name = projectDir.split('/').filter(Boolean).pop() ?? 'session';
   const rows = await sql`
-    INSERT INTO sessions (user_id, name, project_dir, token_hash)
-    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash})
+    INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind)
+    VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash}, ${cliKind})
     RETURNING *
   `;
   return { ...rows[0], created: true };
@@ -269,6 +274,49 @@ export async function getUserTimezone(id: string): Promise<string> {
 export async function getUserSystemPrompt(id: string): Promise<string | null> {
   const rows = await sql`SELECT system_prompt FROM users WHERE id = ${id}`;
   return (rows[0]?.system_prompt as string | null) ?? null;
+}
+
+export type UserInstructions = {
+  claude_global_md: string | null;
+  codex_agents_md: string | null;
+  codex_config_toml: string | null;
+};
+
+export async function getUserInstructions(userId: string): Promise<UserInstructions> {
+  const rows = await sql<UserInstructions[]>`
+    SELECT claude_global_md, codex_agents_md, codex_config_toml
+    FROM users WHERE id = ${userId}
+  `;
+  const r = rows[0];
+  return {
+    claude_global_md: r?.claude_global_md ?? null,
+    codex_agents_md: r?.codex_agents_md ?? null,
+    codex_config_toml: r?.codex_config_toml ?? null,
+  };
+}
+
+export async function updateUserInstructions(
+  userId: string,
+  patch: Partial<UserInstructions>,
+): Promise<UserInstructions> {
+  // Dynamic SET clause — only update keys present in patch
+  const keys = Object.keys(patch) as Array<keyof UserInstructions>;
+  if (keys.length === 0) return getUserInstructions(userId);
+
+  // postgres.js does not support arbitrary identifier interpolation,
+  // so we branch by key set. Three columns => 7 combinations.
+  // Use a sequence of single-column updates inside a transaction-ish bundle.
+  for (const key of keys) {
+    const val = patch[key] ?? null;
+    if (key === 'claude_global_md') {
+      await sql`UPDATE users SET claude_global_md = ${val}, updated_at = now() WHERE id = ${userId}`;
+    } else if (key === 'codex_agents_md') {
+      await sql`UPDATE users SET codex_agents_md = ${val}, updated_at = now() WHERE id = ${userId}`;
+    } else if (key === 'codex_config_toml') {
+      await sql`UPDATE users SET codex_config_toml = ${val}, updated_at = now() WHERE id = ${userId}`;
+    }
+  }
+  return getUserInstructions(userId);
 }
 
 export async function getUserByEmail(email: string) {

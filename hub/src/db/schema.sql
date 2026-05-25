@@ -282,3 +282,10 @@ DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WH
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_rootless BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS hostname TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_rootless_unique ON sessions(user_id, hostname, cli_kind) WHERE is_rootless = true AND deleted_at IS NULL;
+
+-- ── Phase 05: per-user instruction blobs synced to agents via auth_ok.seed_files
+-- create_if_absent semantics; agents never overwrite existing local files.
+-- NEVER include API keys or auth tokens — codex_config_toml is secret-stripped on PUT.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS claude_global_md TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_agents_md TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS codex_config_toml TEXT;

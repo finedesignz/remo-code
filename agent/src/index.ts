@@ -10,6 +10,7 @@ import { spawnSync } from 'child_process'
 import { mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import { writeSeedFiles } from './seed'
 
 const VERSION = '0.4.1'
 
@@ -134,6 +135,9 @@ function handleMessage(msg: HubToAgent) {
     }
 
     sendLog(`Remo Code Agent v${VERSION} connected — ${config.projectDir} (cli=${cliKind})`)
+
+    // Phase 05: write any hub-provided seed files (create-if-absent; never overwrite)
+    writeSeedFiles((msg as any).seed_files, (m) => sendLog(m))
 
     if (msg.system_prompt) {
       pendingSystemPrompts.set(msg.session_id, msg.system_prompt)
