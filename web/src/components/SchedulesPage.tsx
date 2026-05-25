@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useSchedules, type ScheduledTask } from '../hooks/useSchedules'
 import { ScheduleEditor } from './ScheduleEditor'
 import { ScheduleRunsDrawer } from './ScheduleRunsDrawer'
+import { humanizeCron } from '../lib/cron-humanize'
 
 interface Props {
   token: string
@@ -169,7 +170,7 @@ function ScheduleRow({
 }: RowProps) {
   const next = schedule.next_fire_at ? new Date(schedule.next_fire_at) : null
   const targetSummary = useMemo(() => describeTarget(schedule), [schedule.target_kind, schedule.target_id])
-  const cronSummary = useMemo(() => describeCron(schedule.cron_expr), [schedule.cron_expr])
+  const cronSummary = useMemo(() => humanizeCron(schedule.cron_expr), [schedule.cron_expr])
 
   return (
     <button
@@ -327,29 +328,6 @@ export function describeTarget(s: Pick<ScheduledTask, 'target_kind' | 'target_id
 function shortId(id: string | null | undefined): string {
   if (!id) return '—'
   return id.length > 8 ? id.slice(0, 8) : id
-}
-
-export function describeCron(expr: string): string {
-  // Tiny humanizer — covers our presets. Anything else falls back to the raw expr.
-  if (!expr) return ''
-  const parts = expr.split(/\s+/)
-  if (parts.length !== 5) return expr
-  const [m, h, dom, mon, dow] = parts
-  if (m === '0' && h === '*' && dom === '*' && mon === '*' && dow === '*') return 'hourly'
-  if (m.startsWith('*/') && h === '*' && dom === '*' && mon === '*' && dow === '*') {
-    return `every ${m.slice(2)} min`
-  }
-  if (/^\d+$/.test(m) && /^\d+$/.test(h) && dom === '*' && mon === '*' && dow === '*') {
-    return `daily at ${pad2(h)}:${pad2(m)}`
-  }
-  if (/^\d+$/.test(m) && /^\d+$/.test(h) && dom === '*' && mon === '*' && dow === '1-5') {
-    return `weekdays at ${pad2(h)}:${pad2(m)}`
-  }
-  return expr
-}
-
-function pad2(s: string): string {
-  return s.length === 1 ? `0${s}` : s
 }
 
 export function formatLocalTs(d: Date): string {
