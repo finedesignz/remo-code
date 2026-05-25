@@ -2,11 +2,34 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Workflow: always use git worktrees for new features
+
+**Mandatory.** When starting work on a new feature, phase, or non-trivial refactor, create a git worktree off `origin/main` and do ALL implementation work inside that worktree. Never build a new feature directly on the primary checkout — multiple Claude sessions and agents commonly run against this repo in parallel, and uncommitted/untracked files on the main checkout get wiped when another session switches branches or runs `git clean`.
+
+```bash
+cd C:/Users/artic/GitHub/remo-code
+git fetch origin
+git worktree add ../remo-code-feat-<slug> -b feat/<slug> origin/main
+cd ../remo-code-feat-<slug>
+# all subsequent work, commits, planning docs, agent dispatches happen here
+```
+
+Open the PR from `feat/<slug>` → `main` when ready. After merge, remove the worktree:
+
+```bash
+git worktree remove ../remo-code-feat-<slug>
+git branch -D feat/<slug>
+```
+
+Exceptions: trivial single-file bugfixes, doc edits, README tweaks. Everything else — including planning docs under `.planning/phases/<N>-<slug>/` — lives in the worktree from the start.
+
 ## What This Is
 
 Remo Code is a web app that lets you chat with Claude Code sessions remotely from any browser or phone. A local agent spawns Claude Code CLI with `--input-format stream-json --output-format stream-json`, giving the web UI full visibility into Claude's activity: thinking, tool calls, and streaming text responses.
 
 It also ships **scheduled tasks** — a hub-side cron scheduler that fires user-defined prompts/skills/supervisor commands against one session, one supervisor, or all of either, with per-target run history, daily cost cap, offline-grace replay, and post-run actions. See [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
+
+It also ships **error capture** — a Sentry-style intake endpoint at `/api/sentry/:project_id/envelope/` that fingerprints, dedupes, rate-limits, and daily-caps runtime errors from your deployed apps, then dispatches them as structured `user_message` payloads into the Claude session bound to that repo so Claude can investigate, fix, commit, and push in-session. Includes one-click Sentry SDK auto-install for 4 stacks via supervisor git-ops + Coolify env PATCH. See [docs/error-capture.md](docs/error-capture.md).
 
 ## Architecture
 
@@ -135,6 +158,21 @@ Hub-side cron scheduler that fires user-defined tasks against connected agents/s
 - **Tests:** `hub/test/scheduler.test.ts` (41 unit tests, no DB needed), `hub/test/scheduled-tasks.e2e.test.ts` (skipped without `REMO_E2E_DB_URL`).
 
 When adding a new task type, post-run action, or any scheduler change: update `docs/scheduled-tasks.md` and `hub/test/scheduler.test.ts` in the same commit. The unit-test file is the contract — keep it green.
+
+## Error Capture
+
+Sentry-style error intake routed back into the Claude session bound to each repo. Full architecture in [docs/error-capture.md](docs/error-capture.md).
+
+- **Module:** `hub/src/error-capture/` (Phase 06). Public intake endpoint at `hub/src/api/sentry-intake.ts` mounted OUTSIDE the `/api/*` JWT catch-all — `sentry_key` in `X-Sentry-Auth` IS the credential.
+- **Key files:** `auth.ts` (header parser), `envelope.ts` (gunzip + multi-line JSON), `fingerprint.ts` (sha-256 of project + type + value + top-3 frames), `record.ts` (3 gates: dedupe → rate-limit → daily-cap), `notify.ts` (silent-skip emails via emails4agents, throttled), `prompt.ts` (dispatch prompt builder), `dispatcher.ts` (per-session queue claim + agent socket send — reuses `scheduler/session-queue.ts` verbatim), `run-lifecycle.ts` (finalize on next `assistant_message`), `grace.ts` (10-min offline buffer), `setup/{detect,snippet,coolify-env}.ts`.
+- **REST:** `hub/src/api/{sentry-intake,error-projects,errors,error-runs,error-setup}.ts`. WS events extend `hub/src/ws/protocol.ts` (`error_received`, `error_dispatched`, `error_run_finished`, `error_skipped`).
+- **DB tables** (`hub/src/db/schema.sql`, idempotent `CREATE TABLE IF NOT EXISTS`): `error_projects(id, user_id, name, sentry_key UNIQUE, session_id, dedupe_window_seconds=60, rate_limit_per_hour=20, daily_dispatch_cap=50, enabled)`, `errors(id, project_id, fingerprint, error_type, error_value, stacktrace_json, release, received_at, dispatch_status, dispatched_at, skip_reason)`, `error_runs(id, error_id, project_id, session_id, status, started_at, finished_at, output_snippet, error)`, `notifications_sent(id, kind, dedupe_key, sent_at)`.
+- **Web UI:** `web/src/components/{ErrorCapturePage,ErrorProjectEditor,ErrorDetailDrawer,ErrorSetupModal}.tsx` — Settings → Error Capture tab. Per-project row launches `ErrorSetupModal` for one-shot SDK install.
+- **Supported auto-install stacks** (`setup/detect.ts`, content-driven, no fs walk): Node+Express, Node+Next.js, Python+FastAPI, Python+Django. Order: nextjs > express > django > fastapi. Anything else → 422 + throttled `stack_not_detected` email with copy-paste snippet + DSN.
+- **Coolify integration:** `setup/coolify-env.ts → setCoolifyEnv(app_uuid, 'SENTRY_DSN', dsn)` + optional `redeployCoolifyApp`. `COOLIFY_TOKEN` + `COOLIFY_URL` env required for the auto-install path.
+- **Silent-skip emails always go through emails4agents** (per global rule #7). Throttle row is written BEFORE the send attempt to prevent retry storms.
+
+When adding a new dispatch gate, supported stack, supervisor companion command, or any error-capture change: update `docs/error-capture.md` in the same commit.
 
 ## Grid View
 

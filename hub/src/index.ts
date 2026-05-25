@@ -16,8 +16,13 @@ import { commands as commandsApi } from './api/commands'
 import { transcribe as transcribeApi } from './api/transcribe'
 import { scheduledTasks as scheduledTasksApi } from './api/scheduled-tasks'
 import { scheduledTaskRuns as scheduledTaskRunsApi } from './api/scheduled-task-runs'
+import { sentryIntake as sentryIntakeApi } from './api/sentry-intake'
+import { errorProjectsRouter } from './api/error-projects'
+import { errorsRouter } from './api/errors'
+import { errorRunsRouter } from './api/error-runs'
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { instructions as instructionsApi } from './api/instructions'
+import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
@@ -26,6 +31,7 @@ import * as schedRegistry from './scheduler/registry.ts'
 import * as schedDispatcher from './scheduler/dispatcher.ts'
 import * as schedCatchup from './scheduler/catchup.ts'
 import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
+import { startErrorGraceSweep } from './error-capture/grace.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit } from './middleware/rate-limit'
 import {
@@ -88,15 +94,22 @@ app.use('/api/plugin/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.
 app.use('/api/plugin/*', apiKeyMiddleware)
 app.route('/api/plugin', plugin)
 
+// Sentry-style error intake — public, sentry_key in X-Sentry-Auth IS the credential.
+// MUST be mounted before the JWT catch-all, and the catch-all MUST skip this path.
+app.use('/api/sentry/*', rateLimit({ windowMs: 60_000, max: 600, keyFn: (c) => c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || 'anon' }))
+app.route('/api/sentry', sentryIntakeApi)
+
 // Public Coolify deployment webhook (HMAC-signed, per-user secret in URL).
 // MUST be mounted BEFORE the JWT catch-all middleware below.
 app.route('/api/coolify', coolifyWebhookRoutes)
 
 // Protected API routes (JWT auth, then rate limit keyed on userId)
 // Skip /api/github/callback — it's hit by GitHub's redirect, not by an authed client.
+// Skip /api/sentry — public Sentry-style intake authenticates via X-Sentry-Auth header.
 // Skip /api/coolify/webhook/* — public path, auth is per-user HMAC.
 app.use('/api/*', async (c, next) => {
   if (c.req.path === '/api/github/callback') return next()
+  if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   return authMiddleware(c, next)
 })
@@ -112,8 +125,12 @@ app.route('/api/commands', commandsApi)
 app.route('/api/transcribe', transcribeApi)
 app.route('/api/scheduled-tasks', scheduledTasksApi)
 app.route('/api/scheduled-task-runs', scheduledTaskRunsApi)
+app.route('/api/error-projects', errorProjectsRouter)
+app.route('/api/errors', errorsRouter)
+app.route('/api/error-runs', errorRunsRouter)
 app.route('/api/chat-tabs', chatTabsApi)
 app.route('/api/instructions', instructionsApi)
+app.route('/api/error-setup', errorSetupApi)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
@@ -241,6 +258,7 @@ runMigrations()
     schedDispatcher.init()
     await schedRegistry.loadAll()
     await schedCatchup.runOnce()
+    startErrorGraceSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {

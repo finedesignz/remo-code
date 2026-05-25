@@ -73,6 +73,22 @@ export const SupervisorCommandsSync = z.object({
   })).max(2000),
 })
 
+/**
+ * Plan 04-001 — supervisor self-reports CPU/RAM/concurrency budget.
+ *
+ * Sent on connect and every 60s. Imported by `agent-protocol.ts` so the
+ * AgentInbound discriminated union accepts it on the same socket the
+ * supervisor uses.
+ */
+export const HostResourcesMessage = z.object({
+  type: z.literal('host_resources'),
+  cpu_cores: z.number().int().positive(),
+  total_mem_mb: z.number().int().positive(),
+  free_mem_mb: z.number().int().nonnegative(),
+  concurrency_budget: z.number().int().min(1),
+  source: z.enum(['cgroup_v2', 'cgroup_v1', 'host_fallback']),
+})
+
 // W2/T10 — scheduled-run command lifecycle (supervisor-side).
 export const RunStarted = z.object({
   type: z.literal('run_started'),
@@ -115,6 +131,7 @@ export const SupervisorInbound = [
   RepoCloneProgress,
   RepoOpResult,
   SupervisorCommandsSync,
+  HostResourcesMessage,
   RunStarted,
   RunOutput,
   RunFinished,
