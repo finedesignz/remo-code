@@ -3,6 +3,7 @@ import { useSchedules, type ScheduledTask } from '../hooks/useSchedules'
 import { ScheduleEditor } from './ScheduleEditor'
 import { ScheduleRunsDrawer } from './ScheduleRunsDrawer'
 import { humanizeCron } from '../lib/cron-humanize'
+import { formatCostUsd, formatDuration } from '../lib/format'
 
 interface Props {
   token: string
@@ -259,6 +260,10 @@ function ScheduleRow({
             <h3 className="text-sm font-semibold text-[var(--text-primary)] truncate">{schedule.name}</h3>
             <TaskTypeChip type={schedule.task_type} />
             {schedule.last_run_status && <StatusChip status={schedule.last_run_status} />}
+            <LastRunMetrics
+              costUsd={schedule.last_run_cost_usd}
+              durationMs={schedule.last_run_duration_ms}
+            />
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-muted)]">
             <span className="inline-flex items-center gap-1">
@@ -384,6 +389,26 @@ function StatusChip({ status }: { status: NonNullable<ScheduledTask['last_run_st
   const c = cfg[status] || cfg.pending
   return (
     <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ring-1 ${c.cls}`}>{c.label}</span>
+  )
+}
+
+function LastRunMetrics({
+  costUsd,
+  durationMs,
+}: {
+  costUsd: number | null | undefined
+  durationMs: number | null | undefined
+}) {
+  const costLabel = formatCostUsd(costUsd)
+  const hasDuration = durationMs !== null && durationMs !== undefined
+  if (!costLabel && !hasDuration) return null
+  const parts: string[] = []
+  if (costLabel) parts.push(costLabel)
+  if (hasDuration) parts.push(formatDuration(durationMs))
+  return (
+    <span className="text-[10px] text-[var(--text-muted)] font-mono">
+      {parts.join(' · ')}
+    </span>
   )
 }
 
