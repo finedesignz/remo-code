@@ -54,10 +54,24 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [seedByTab, setSeedByTab] = useState<Record<string, Record<string, ChatMessage[]>>>({})
   const [activeCellId, setActiveCellIdState] = useState<string | null>(null)
+  // Per-session unread counter — incremented when a 'message' event arrives
+  // for a cell that is NOT currently the active cell. Reset when the cell
+  // becomes active. Surfaced as a soft badge on the cell header and counted
+  // for a polite aria-live announcer (count only, never message body).
+  const [unreadBySession, setUnreadBySession] = useState<Record<string, number>>({})
 
   // Persist active cell per tab to sessionStorage (NOT URL).
   const setActiveCellId = useCallback((id: string | null) => {
     setActiveCellIdState(id)
+    if (id) {
+      // Activating a cell clears its unread count.
+      setUnreadBySession(prev => {
+        if (!prev[id]) return prev
+        const next = { ...prev }
+        delete next[id]
+        return next
+      })
+    }
     if (!activeTabId) return
     try {
       if (id) sessionStorage.setItem(ACTIVE_CELL_KEY(activeTabId), id)
@@ -142,6 +156,31 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
     return () => document.removeEventListener('paste', handlePaste)
   }, [activeCellId])
 
+  // Track unread messages for visible non-active cells. We only count
+  // server-emitted `message` events (the final persisted assistant message
+  // or a user echo) — never every text_delta, which would be too noisy.
+  // The active cell's counter is held at zero so the user's own focused
+  // cell never shows an "unread" badge.
+  const activeCellRef = useRef(activeCellId)
+  useEffect(() => { activeCellRef.current = activeCellId }, [activeCellId])
+  const visibleIdsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    visibleIdsRef.current = new Set()
+  }, [activeTabId])
+  useEffect(() => {
+    const unsub = subscribe((msg: any) => {
+      if (msg?.type !== 'message') return
+      const sid = msg.session_id as string | undefined
+      if (!sid) return
+      if (!visibleIdsRef.current.has(sid)) return
+      if (sid === activeCellRef.current) return
+      // Skip user's own outgoing message echoes — only count assistant replies.
+      if (msg.message?.role && msg.message.role !== 'assistant') return
+      setUnreadBySession(prev => ({ ...prev, [sid]: (prev[sid] ?? 0) + 1 }))
+    })
+    return unsub
+  }, [subscribe])
+
   // Restore active cell for current tab from sessionStorage.
   useEffect(() => {
     if (!activeTabId) {
@@ -169,6 +208,18 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   }, [activeTab])
 
   const overflowCount = (activeTab?.sessions.length ?? 0) - visibleSessions.length
+
+  // Keep ref in sync with currently rendered cells so the message subscriber
+  // can scope unread counting to visible-but-inactive cells only.
+  useEffect(() => {
+    visibleIdsRef.current = new Set(visibleSessions.map(s => s.session_id))
+  }, [visibleSessions])
+
+  // Polite announcer text — count only, never message body, per a11y rule.
+  const totalUnread = useMemo(
+    () => Object.values(unreadBySession).reduce((a, b) => a + b, 0),
+    [unreadBySession],
+  )
 
   // Default active cell = first visible cell.
   useEffect(() => {
@@ -320,6 +371,17 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
 
   return (
     <div className="flex flex-col h-full bg-[var(--bg-primary)] min-h-0">
+      {/* Polite SR-only announcer — count of unread messages in inactive
+          cells. Never the message body. Throttled to a short summary so
+          screen readers aren't spammed during high-frequency streams. */}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {totalUnread > 0 ? `${totalUnread} unread message${totalUnread === 1 ? '' : 's'} across cells` : ''}
+      </div>
       <GridTabBar
         tabs={tabs}
         activeTabId={activeTabId}
@@ -409,6 +471,7 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
                   token={token}
                   wsConnected={connected}
                   seedMessages={seedByTab[activeTabId!]?.[s.session_id]}
+                  unreadCount={unreadBySession[s.session_id] ?? 0}
                 />
               ))}
             </div>
@@ -626,9 +689,10 @@ interface GridCellProps {
   token: string
   wsConnected: boolean
   seedMessages?: ChatMessage[]
+  unreadCount?: number
 }
 
-function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send, connectionId, token, wsConnected, seedMessages }: GridCellProps) {
+function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send, connectionId, token, wsConnected, seedMessages, unreadCount = 0 }: GridCellProps) {
   const isOnline = sessionRef.status === 'online' || sessionRef.status === 'thinking'
   return (
     <div
@@ -650,6 +714,15 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
         <span className="text-xs font-medium text-[var(--text-primary)] truncate flex-1" title={sessionRef.project_dir ?? sessionRef.name}>
           {sessionRef.name}
         </span>
+        {unreadCount > 0 && !isActive && (
+          <span
+            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full bg-indigo-500/20 ring-1 ring-indigo-400/40 text-[10px] font-semibold text-indigo-300 tabular-nums"
+            aria-label={`${unreadCount} unread ${unreadCount === 1 ? 'message' : 'messages'}`}
+            title={`${unreadCount} unread`}
+          >
+            {unreadCount > 99 ? '99+' : unreadCount}
+          </span>
+        )}
         {/* TODO: scheduled-task queue badge — wire up once useSessionQueueState ships (PLAN-004 T7). */}
         {/* TODO: ↗ open-in-single-chat — needs single-chat route to accept a sessionId param
             before re-enabling (was navigating to `#/` and losing context). */}
