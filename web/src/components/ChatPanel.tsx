@@ -16,6 +16,7 @@ interface Props {
   onQuestionRespond: (requestId: string, answer: string) => void
   token?: string
   wsConnected?: boolean
+  online?: boolean
 }
 
 interface SlashItem {
@@ -61,7 +62,7 @@ function classifyFile(file: File): 'text' | 'image' | null {
   return null
 }
 
-export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionStatus, activity, onPermissionRespond, onQuestionRespond, token, wsConnected = true }: Props) {
+export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionStatus, activity, onPermissionRespond, onQuestionRespond, token, wsConnected = true, online = true }: Props) {
   const [input, setInput] = useState('')
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([])
   const [slashItems, setSlashItems] = useState<SlashItem[]>([])
@@ -531,7 +532,9 @@ export function ChatPanel({ messages, loading, onSend, activeSessionId, sessionS
       <form onSubmit={handleSubmit} className="border-t border-[var(--border-color)]">
         {!wsConnected && (
           <div className="px-4 py-1.5 text-xs text-amber-400 bg-amber-500/10 border-b border-[var(--border-color)]">
-            Reconnecting… your message will send once the connection is back.
+            {online
+              ? 'Reconnecting… your message will send once the connection is back.'
+              : 'Offline — your message will send when you’re back online.'}
           </div>
         )}
         <FileAttachmentBar files={attachedFiles} onRemove={handleRemoveFile} />
