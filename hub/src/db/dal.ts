@@ -319,6 +319,28 @@ export async function updateUserInstructions(
   return getUserInstructions(userId);
 }
 
+export async function rotateUserCoolifyWebhookSecret(userId: string): Promise<string> {
+  const rows = await sql<{ coolify_webhook_secret: string }[]>`
+    UPDATE users
+       SET coolify_webhook_secret = gen_random_uuid()::text,
+           updated_at = now()
+     WHERE id = ${userId}
+     RETURNING coolify_webhook_secret
+  `;
+  const secret = rows[0]?.coolify_webhook_secret;
+  if (!secret) throw new Error('rotate_failed: user not found');
+  return secret;
+}
+
+export async function getUserCoolifyWebhookStatus(userId: string): Promise<{ configured: boolean }> {
+  const rows = await sql<{ configured: boolean }[]>`
+    SELECT (coolify_webhook_secret IS NOT NULL) AS configured
+      FROM users
+     WHERE id = ${userId}
+  `;
+  return { configured: !!rows[0]?.configured };
+}
+
 export async function getUserByEmail(email: string) {
   const rows = await sql`SELECT * FROM users WHERE email = ${email}`;
   return rows[0] ?? null;

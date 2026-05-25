@@ -9,6 +9,7 @@ import { plugin } from './api/plugin'
 import { setup } from './api/setup'
 import { authRouter } from './api/auth'
 import { profile } from './api/profile'
+import { account } from './api/account'
 import { supervisors as supervisorsApi } from './api/supervisors'
 import { github as githubApi } from './api/github'
 import { commands as commandsApi } from './api/commands'
@@ -97,6 +98,7 @@ app.route('/api/sessions', sessions)
 app.route('/api/api-keys', apiKeys)
 app.route('/api/messages', messages)
 app.route('/api/profile', profile)
+app.route('/api/account', account)
 app.route('/api/supervisors', supervisorsApi)
 app.route('/api/github', githubApi)
 app.route('/api/commands', commandsApi)
