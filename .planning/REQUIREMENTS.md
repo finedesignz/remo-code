@@ -46,3 +46,49 @@ After the refactor, the existing single-chat experience at `#/chat` MUST behave 
 
 ### R13 — Performance budget
 The desktop grid SHALL render 12 simultaneous active cells without dropped events at a sustained inbound rate of 5 messages/second per session (60 msg/s total) on a modern laptop. Measured via a synthetic event flood test in `hub/test/` or a dev script.
+
+---
+
+## Phase 06 — supervisor-tray-app
+
+### R-06-01 — No visible console window
+When the supervisor runs as a tray app, NO console / terminal / cmd window SHALL be visible to the user — neither on launch, nor on autostart, nor while running. The Bun supervisor process is spawned as a hidden Tauri sidecar with `CREATE_NO_WINDOW`.
+
+### R-06-02 — Windows tray icon with right-click menu
+The tray app SHALL display a tray icon in the Windows notification area. Right-click SHALL open a menu with at minimum: **Open Settings**, **Start** / **Stop** (toggled by state), **Status** (shows current state inline), **Restart supervisor**, **Quit**. Left-click opens the Settings window.
+
+### R-06-03 — Settings UI surfaces security/sandbox controls
+The Settings UI SHALL expose, at minimum, the following user-editable controls:
+- Allowed / sandboxed folders (list with add + remove; advisory warning when adding the user-profile root or Desktop)
+- `--dangerously-skip-permissions` HARD CAP (boolean; when OFF, supervisor strips the flag from any session-launch request regardless of what the hub sends)
+- Max concurrent sessions (integer, 1–N; enforced in `process-manager.ts`)
+- Audit log on/off (append-only JSONL of every session launch to `%LOCALAPPDATA%\remo-code-supervisor\audit.jsonl`)
+- Restrict to git repos (boolean — refuse launching sessions in non-`.git` directories)
+- Kill-switch global hotkey (`Ctrl+Shift+Alt+K`, registered via `tauri-plugin-global-shortcut`, terminates all child processes immediately) — display the binding read-only in v1
+
+### R-06-04 — Settings persist and live-reload
+Saving in the Settings UI SHALL persist to the existing supervisor JSON config (`%APPDATA%\remo-code\supervisor.json` per `supervisor/src/config.ts`). The running Bun supervisor SHALL detect the file change and reload its in-memory config within 2 seconds without a process restart. Validation errors SHALL bubble back to the UI.
+
+### R-06-05 — Existing nssm-installer service path unaffected
+The Tauri tray app SHALL coexist with the legacy `nssm-installer.ts` service install. Running `npx remo-code-supervisor install` MUST still install and start the NSSM service exactly as it does today. The tray app is a NEW entrypoint, not a replacement of the CLI. On first launch the tray app SHALL detect an existing running NSSM service and offer a one-click "switch to tray mode" that uninstalls NSSM, enables Tauri autostart, and reuses the same `supervisor.json`.
+
+### R-06-06 — Auto-start on Windows login
+The tray app SHALL register a Windows autostart entry (HKCU `\Software\Microsoft\Windows\CurrentVersion\Run` via `tauri-plugin-autostart`) so it launches automatically when the user logs in. Autostart SHALL be ON by default after first install; the user can disable it from the Settings UI.
+
+### R-06-07 — Single-instance guarantee
+Launching the tray app while an instance is already running SHALL focus / show the existing tray app's Settings window instead of spawning a second instance. Implemented via `tauri-plugin-single-instance` (named mutex) for the shell AND the Bun sidecar binds `127.0.0.1:9106` as its own mutex — if either lock fails, the new instance exits immediately. The tray app SHALL refuse to start a sidecar if the NSSM service `RemoCodeSupervisor` is already running.
+
+### R-06-08 — Crash visibility
+If the Bun supervisor sidecar dies unexpectedly, the tray icon SHALL change state (distinct color or overlay), and the right-click menu SHALL offer a **Restart supervisor** action. The Settings UI SHALL display the last exit reason (code, signal, stderr tail of last 200 lines) when opened.
+
+### R-06-09 — No breaking changes to the supervisor WS protocol
+The Bun supervisor's outbound and inbound WebSocket protocol with the hub (`hub/src/ws/supervisor-protocol.ts`) MUST remain unchanged by this phase EXCEPT for ADDITIVE capability flags on `supervisor.hello` (e.g. `allow_dangerous_skip_permissions: boolean`, `restrict_to_git: boolean`). The hub is otherwise untouched.
+
+### R-06-10 — Update path
+The user SHALL be able to update the tray app to a newer version without manually uninstalling and reinstalling. Mechanism: `tauri-plugin-updater` consuming a signed manifest published with each GitHub Release; signed `.msi` deltas. v1 ships unsigned (SmartScreen prompt acknowledged); EV code-signing cert is a future phase. The `remo-code-supervisor` npm package keeps publishing for NSSM/headless users.
+
+### R-06-11 — First-run experience
+On first launch (no existing `supervisor.json`), the tray app SHALL open an onboarding flow that asks for: hub URL (default `https://app.remo-code.com`), API key (`olx_` token), and an initial allowed folder. After save, the supervisor sidecar starts and the tray icon goes green.
+
+### R-06-12 — Clean uninstall
+Uninstalling via the bundled uninstaller SHALL remove: the app binaries, the autostart Run-key entry, and the tray icon. It SHALL prompt the user before deleting `%APPDATA%\remo-code\supervisor.json` and the `%LOCALAPPDATA%\remo-code-supervisor\audit.jsonl` — those are preserved by default.
