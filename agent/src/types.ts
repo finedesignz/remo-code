@@ -20,7 +20,14 @@ export type AgentToHub =
 
 // Events the hub sends TO the agent
 export type HubToAgent =
-  | { type: 'auth_ok'; session_id: string; system_prompt?: string | null }
+  | {
+      type: 'auth_ok'
+      session_id: string
+      system_prompt?: string | null
+      cli_kind?: 'claude' | 'codex'
+      seed_files?: Array<{ path: string; content: string; sha256: string; mode: 'create_if_absent' | 'sync_if_unchanged' }>
+      rootless_session_ids?: { claude?: string; codex?: string }
+    }
   | { type: 'auth_error'; error: string }
   | { type: 'user_message'; session_id: string; id: string; content: string;
       images?: Array<{ media_type: string; data: string }>;
