@@ -378,6 +378,13 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       const mod = await import('../scheduler/senders/agent.ts')
       void mod.onAssistantMessage(sessionId, msg.content)
     } catch {}
+    // W3 — finalize any in-flight error-capture run for this session.
+    try {
+      const ec = await import('../error-capture/run-lifecycle.ts')
+      if (ec.errorRunActiveForSession(sessionId)) {
+        void ec.onAgentReply(sessionId, msg.content)
+      }
+    } catch {}
   }
 
   if (msg.type === 'pong') return
