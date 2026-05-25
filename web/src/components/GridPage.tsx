@@ -336,7 +336,12 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
       {tabs.length > 0 && activeTab && visibleSessions.length > 0 && (
         <>
           {/* Desktop: tab toolbar + CSS grid */}
-          <div className="hidden md:flex flex-col flex-1 min-h-0">
+          <div
+            id="grid-tab-panel"
+            role="tabpanel"
+            aria-labelledby={activeTabId}
+            className="hidden md:flex flex-col flex-1 min-h-0"
+          >
             <div className="px-4 pt-3 flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setPickerOpen(true)}
@@ -361,6 +366,8 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
               )}
             </div>
             <div
+              role="grid"
+              aria-label={`Session grid (${visibleSessions.length} of ${activeTab.sessions.length})`}
               className="flex-1 min-h-0 grid gap-3 p-4 auto-rows-fr"
               style={{
                 gridTemplateColumns:
@@ -468,9 +475,34 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
     setRenamingId(null)
   }
 
+  const focusTabAt = (i: number) => {
+    if (i < 0 || i >= sorted.length) return
+    const id = sorted[i].id
+    onSelect(id)
+    // Move DOM focus to the chip so screen readers announce the new tab.
+    requestAnimationFrame(() => {
+      const el = document.querySelector<HTMLElement>(`[data-grid-tab-id="${id}"]`)
+      el?.focus()
+    })
+  }
+
+  const onTabKeyDown = (e: React.KeyboardEvent<HTMLDivElement>, i: number) => {
+    if (renamingId) return
+    if (e.key === 'ArrowRight') { e.preventDefault(); focusTabAt(i + 1 < sorted.length ? i + 1 : 0) }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); focusTabAt(i - 1 >= 0 ? i - 1 : sorted.length - 1) }
+    else if (e.key === 'Home') { e.preventDefault(); focusTabAt(0) }
+    else if (e.key === 'End') { e.preventDefault(); focusTabAt(sorted.length - 1) }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(sorted[i].id) }
+    else if (e.key === 'F2') { e.preventDefault(); startRename(sorted[i].id, sorted[i].name) }
+  }
+
   return (
-    <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0 overflow-x-auto">
-      <span className="text-xs text-[var(--text-muted)] mr-1 shrink-0">
+    <div
+      role="tablist"
+      aria-label="Grid tabs"
+      className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border-color)]/60 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0 overflow-x-auto"
+    >
+      <span className="text-xs text-[var(--text-muted)] mr-1 shrink-0" aria-live="polite">
         {wsConnected ? '● Live' : <span className="text-amber-400">○ Reconnecting</span>}
       </span>
       {sorted.map((t, i) => {
@@ -479,14 +511,20 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
         return (
           <div
             key={t.id}
-            className={`group flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs shrink-0 cursor-pointer transition-colors ${
+            data-grid-tab-id={t.id}
+            role="tab"
+            aria-selected={isActive}
+            aria-controls="grid-tab-panel"
+            tabIndex={isActive ? 0 : -1}
+            onKeyDown={(e) => onTabKeyDown(e, i)}
+            className={`group flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs shrink-0 cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 ${
               isActive
                 ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-[var(--text-primary)]'
                 : 'bg-[var(--bg-secondary)]/60 text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'
             }`}
             onClick={() => !isRenaming && onSelect(t.id)}
             onDoubleClick={(e) => { e.stopPropagation(); startRename(t.id, t.name) }}
-            title="Double-click to rename"
+            title="Double-click or F2 to rename"
           >
             {isRenaming ? (
               <input
@@ -574,6 +612,9 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
   const isOnline = sessionRef.status === 'online' || sessionRef.status === 'thinking'
   return (
     <div
+      role="gridcell"
+      aria-label={`Session ${sessionRef.name}`}
+      aria-selected={isActive}
       data-chat-surface-cell-id={sessionRef.session_id}
       className={`flex flex-col min-h-0 rounded-xl bg-[var(--bg-secondary)]/60 overflow-hidden transition-shadow ${
         isActive ? 'ring-1 ring-indigo-500/30' : ''
@@ -590,13 +631,12 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
           {sessionRef.name}
         </span>
         {/* TODO: scheduled-task queue badge — wire up once useSessionQueueState ships (PLAN-004 T7). */}
+        {/* TODO: ↗ open-in-single-chat — needs single-chat route to accept a sessionId param
+            before re-enabling (was navigating to `#/` and losing context). */}
         <button
-          onClick={() => { window.location.hash = `#/` }}
-          className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] px-1"
-          title="Open in single-chat view"
-        >↗</button>
-        <button
+          type="button"
           onClick={onRemove}
+          aria-label={`Remove ${sessionRef.name} from tab`}
           className="text-[10px] text-red-400 hover:text-red-300 px-1"
           title="Remove from tab"
         >×</button>
@@ -625,20 +665,37 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
 function LayoutPicker({ value, onChange }: { value: TabLayout; onChange: (next: TabLayout) => void | Promise<void> }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement | null>(null)
+  const btnRef = useRef<HTMLButtonElement | null>(null)
   useEffect(() => {
     if (!open) return
     const onDoc = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
     }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        setOpen(false)
+        btnRef.current?.focus()
+      }
+    }
     document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onKey)
+    }
   }, [open])
   const label: Record<TabLayout, string> = { '3x3': '3 × 3', '4x3': '4 × 3', 'auto-fit': 'Auto-fit' }
   const options: TabLayout[] = ['3x3', '4x3', 'auto-fit']
   return (
     <div ref={ref} className="relative">
       <button
+        ref={btnRef}
+        type="button"
         onClick={() => setOpen(v => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`Grid layout: ${label[value]}`}
         className="px-3 py-1.5 rounded-lg bg-[var(--bg-secondary)]/60 hover:bg-[var(--bg-tertiary)]/50 text-[var(--text-secondary)] text-xs transition-colors flex items-center gap-1.5"
         title="Grid layout"
       >
@@ -651,10 +708,17 @@ function LayoutPicker({ value, onChange }: { value: TabLayout; onChange: (next: 
         {label[value]}
       </button>
       {open && (
-        <div className="absolute left-0 top-full mt-1 z-20 min-w-[120px] rounded-lg bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] shadow-xl py-1">
+        <div
+          role="listbox"
+          aria-label="Grid layout options"
+          className="absolute left-0 top-full mt-1 z-20 min-w-[120px] rounded-lg bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] shadow-xl py-1"
+        >
           {options.map(opt => (
             <button
               key={opt}
+              type="button"
+              role="option"
+              aria-selected={opt === value}
               onClick={() => { setOpen(false); onChange(opt) }}
               className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
                 opt === value
