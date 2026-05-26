@@ -117,6 +117,25 @@ describe('csrfGuard middleware', () => {
     expect(res.status).toBe(200);
   });
 
+  test('POST with Bearer token and no session cookie bypasses CSRF (legacy-JWT/plugin/agent)', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { authorization: 'Bearer eyJhbGciOiJIUzI1NiJ9.x.y' },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test('POST with Bearer AND session cookie still enforces CSRF (cookie wins)', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer eyJhbGciOiJIUzI1NiJ9.x.y',
+        cookie: '__Host-remo_sid=sid_123',
+      },
+    });
+    expect(res.status).toBe(403);
+  });
+
   test('allowlisted POST passes without CSRF', async () => {
     const res = await buildApp().request('/api/sentry/p/envelope/', { method: 'POST' });
     expect(res.status).toBe(200);

@@ -17,6 +17,13 @@ import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { config } from './config';
 
+// `__Host-remo_sid` is the only ambient credential browsers auto-attach. If
+// a request authenticates via `Authorization: Bearer …` (legacy JWT path,
+// MCP plugin, agent), it is NOT CSRF-vulnerable because the browser never
+// auto-attaches that header cross-origin — JS must opt-in. So we skip CSRF
+// enforcement when no session cookie is present AND a bearer token is.
+const HOST_SESSION_COOKIE = '__Host-remo_sid';
+
 export const CSRF_COOKIE_NAME = 'csrf_token';
 export const CSRF_HEADER_NAME = 'X-CSRF-Token';
 
@@ -91,6 +98,15 @@ export function csrfGuard() {
     const method = c.req.method.toUpperCase();
     if (!MUTATING_METHODS.has(method)) return next();
     if (isCsrfAllowlisted(c.req.path)) return next();
+
+    // Bearer-only requests (no session cookie present, Authorization header
+    // provided) are immune to CSRF: browsers never auto-attach Authorization
+    // headers, so a malicious cross-origin page cannot forge such a request.
+    // Without this bypass, every mutating call on the legacy-JWT soak path
+    // (and MCP plugin / agent paths that mount under /api/*) gets 403.
+    const hasSessionCookie = !!getCookie(c, HOST_SESSION_COOKIE);
+    const hasBearer = (c.req.header('Authorization') || '').startsWith('Bearer ');
+    if (!hasSessionCookie && hasBearer) return next();
 
     const cookieValue = readCsrfCookie(c);
     const headerValue = c.req.header(CSRF_HEADER_NAME) || c.req.header(CSRF_HEADER_NAME.toLowerCase());
