@@ -86,6 +86,15 @@ type JtiStore = { setNx(key: string, ttlSeconds: number): Promise<boolean>; has(
 let _jtiOverride: JtiStore | null = null;
 export function __setJtiStoreForTesting(store: JtiStore | null) { _jtiOverride = store; }
 
+// Phase 07-G hardening: when TITANIUM_REQUIRE_REDIS=true (default), absence of
+// Redis is a hard-fail at verify time — replay protection is load-bearing.
+// Set TITANIUM_REQUIRE_REDIS=false explicitly for local dev without Redis.
+const REQUIRE_REDIS = (process.env.TITANIUM_REQUIRE_REDIS ?? "true").toLowerCase() !== "false";
+
+export class MagicLinkStorageUnavailable extends Error {
+  constructor() { super("magic_link_storage_unavailable"); }
+}
+
 async function reserveJti(jti: string): Promise<boolean> {
   if (_jtiOverride) {
     if (await _jtiOverride.has(jti)) return false;
@@ -93,9 +102,11 @@ async function reserveJti(jti: string): Promise<boolean> {
   }
   const r = getRedis();
   if (!r) {
-    // No redis configured → silently allow (single-process dev). Acceptable
-    // since the link still expires after 15 min; replay window is bounded.
-    console.warn("[auth] no Redis configured for jti single-use; magic-link replay protection limited");
+    if (REQUIRE_REDIS) {
+      // Phase 07-G: hard-fail. Replay protection is load-bearing; no Redis = no auth.
+      throw new MagicLinkStorageUnavailable();
+    }
+    console.warn("[auth] no Redis configured for jti single-use; magic-link replay protection limited (TITANIUM_REQUIRE_REDIS=false)");
     return true;
   }
   // SET NX EX returns 'OK' on insert, null if key existed.
@@ -169,7 +180,8 @@ authRouter.post("/login/request-link", async (c) => {
       return c.json({ ok: true });
     }
 
-    const user = await getUserByEmail(email);
+    const rateLimited = c.get('rateLimited' as any) === true;
+    const user = rateLimited ? null : await getUserByEmail(email);
     let sent = false;
     if (user) {
       // Eligibility: linked, pending_verify, OR (during soak) any user — magic
@@ -217,7 +229,16 @@ authRouter.get("/login/callback", async (c) => {
   }
 
   // jti single-use
-  const reserved = await reserveJti(claims.jti);
+  let reserved: boolean;
+  try {
+    reserved = await reserveJti(claims.jti);
+  } catch (err) {
+    if (err instanceof MagicLinkStorageUnavailable) {
+      try { await recordAuthEvent({ userId: claims.sub, eventType: "login_failed", ip, userAgent: ua, metadata: { reason: "storage_unavailable" } }); } catch {}
+      return c.json({ error: "magic_link_storage_unavailable" }, 503);
+    }
+    throw err;
+  }
   if (!reserved) {
     try { await recordAuthEvent({ userId: claims.sub, eventType: "login_failed", ip, userAgent: ua, metadata: { reason: "link_reused", jti: claims.jti } }); } catch {}
     return c.json({ error: "link_reused" }, 409);

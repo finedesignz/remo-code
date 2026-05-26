@@ -1,9 +1,13 @@
 import { Hono } from 'hono'
-import { createApiKey, listApiKeys, revokeApiKey } from '../db/dal'
+import { createApiKey, listApiKeys, revokeApiKey, recordAuthEvent } from '../db/dal'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 
 const apiKeys = new Hono()
+
+function ipOf(c: any): string | null {
+  return c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || null
+}
 
 // List API keys (never returns raw key)
 apiKeys.get('/', async (c) => {
@@ -18,6 +22,16 @@ apiKeys.post('/', async (c) => {
   const rawKey = generateToken('remokey_')
   const keyHash = await hashToken(rawKey)
   const key = await createApiKey(userId, keyHash, 'default')
+  // Phase 07-G: audit token_create (createApiKey also revokes prior — token_rotate semantics).
+  try {
+    await recordAuthEvent({
+      userId,
+      eventType: 'token_create',
+      ip: ipOf(c),
+      userAgent: c.req.header('user-agent') ?? null,
+      metadata: { key_id: key.id, name: 'default' },
+    })
+  } catch {}
   return c.json({ ...key, key: rawKey }, 201)
 })
 
@@ -26,6 +40,15 @@ apiKeys.delete('/:id', async (c) => {
   const userId = c.get('userId') as string
   try {
     await revokeApiKey(userId)
+    try {
+      await recordAuthEvent({
+        userId,
+        eventType: 'token_delete',
+        ip: ipOf(c),
+        userAgent: c.req.header('user-agent') ?? null,
+        metadata: { key_id: c.req.param('id') },
+      })
+    } catch {}
     return c.json({ ok: true })
   } catch {
     return c.json({ error: 'not found' }, 404)

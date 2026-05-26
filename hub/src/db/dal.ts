@@ -259,6 +259,20 @@ export async function revokeApiKey(userId: string) {
   await sql`UPDATE api_keys SET revoked_at = now() WHERE user_id = ${userId} AND revoked_at IS NULL`;
 }
 
+// Phase 07-G: admin force-reissue. Revokes ALL active api_keys + deletes ALL
+// auth_sessions for the target user. Returns counts.
+export async function revokeAllUserCredentials(userId: string): Promise<{ revoked_api_keys: number; revoked_sessions: number }> {
+  const keyRows = await sql`
+    UPDATE api_keys SET revoked_at = now()
+    WHERE user_id = ${userId} AND revoked_at IS NULL
+    RETURNING id
+  `;
+  const sessionRows = await sql`
+    DELETE FROM auth_sessions WHERE user_id = ${userId} RETURNING id
+  `;
+  return { revoked_api_keys: keyRows.length, revoked_sessions: sessionRows.length };
+}
+
 // ── Users / Profiles ──────────────────────────────────────────────────────────
 
 export async function getUserById(id: string) {

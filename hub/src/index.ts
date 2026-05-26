@@ -36,9 +36,13 @@ import * as schedCatchup from './scheduler/catchup.ts'
 import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
 import { startErrorGraceSweep } from './error-capture/grace.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
-import { rateLimit } from './middleware/rate-limit'
+import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
+import { securityHeaders } from './middleware/security-headers'
 import { csrfGuard } from './csrf'
 import { requireRecentAuth } from './auth/reauth'
+import { requireAdmin } from './auth/require-admin'
+import { adminRouter } from './api/admin'
+import { recordAuthEvent } from './db/dal'
 import { parseSessionCookieFromHeader } from './session'
 import {
   createChannelWsData, handleChannelOpen, handleChannelMessage, handleChannelClose,
@@ -60,23 +64,10 @@ app.onError((err, c) => {
   return c.json({ error: 'internal error' }, 500)
 })
 
-// Security headers (C2 fix: CSP + HSTS)
-app.use('*', async (c, next) => {
-  await next()
-  c.header('X-Content-Type-Options', 'nosniff')
-  c.header('X-Frame-Options', 'DENY')
-  c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
-  c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload')
-  c.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
-  c.header('Content-Security-Policy', [
-    "default-src 'self'",
-    "script-src 'self'",
-    "style-src 'self' 'unsafe-inline'",
-    "connect-src 'self' wss:",
-    "img-src 'self' data:",
-    "frame-ancestors 'none'",
-  ].join('; '))
-})
+// Phase 07-G: security headers (HSTS 2yr+preload, CSP, COOP/CORP, Permissions-
+// Policy, X-Content-Type/Frame-Options, Referrer-Policy). Mounted FIRST so
+// every response — including those from later middleware errors — carries them.
+app.use('*', securityHeaders())
 
 // CORS
 app.use('/api/*', cors({
@@ -88,6 +79,51 @@ app.use('/api/*', cors({
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
+
+// Phase 07-G: rate-limit auth endpoints BEFORE mounting the router.
+// request-link: 3/min/IP + 5/hr/email — `silent: true` so the response still
+// looks identical to a normal 200 (login-enumeration prevention). The handler
+// itself checks `c.get('rateLimited')` to skip the email send if needed.
+async function readEmailForRateLimit(c: any): Promise<string | null> {
+  try {
+    const body = await c.req.json()
+    const email = body?.email?.toLowerCase?.().trim?.()
+    return typeof email === 'string' && email.includes('@') ? email : null
+  } catch { return null }
+}
+function ipKey(c: any): string {
+  return c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'anon'
+}
+
+app.use('/api/auth/login/request-link', async (c, next) => {
+  // We need to read the body but Hono lets us re-read via `c.req.json()` again.
+  const email = await readEmailForRateLimit(c)
+  const mw = rateLimitMulti({
+    silent: true,
+    buckets: [
+      { bucket: 'request-link-ip', windowMs: 60_000, max: 3, keyFn: () => ipKey(c) },
+      { bucket: 'request-link-email', windowMs: 3_600_000, max: 5, keyFn: () => email },
+    ],
+    onLimit: async (cc, bucket) => {
+      try {
+        await recordAuthEvent({
+          eventType: 'rate_limited',
+          ip: ipKey(cc),
+          userAgent: cc.req.header('user-agent') ?? null,
+          metadata: { route: 'request-link', bucket: bucket.bucket, email },
+        })
+      } catch {}
+    },
+  })
+  return mw(c, next)
+})
+
+app.use('/api/auth/login/callback', rateLimit({
+  bucket: 'login-callback',
+  windowMs: 60_000,
+  max: 10,
+  keyFn: ipKey,
+}))
 
 // Auth routes (no auth required)
 app.route('/api/auth', authRouter)
@@ -157,6 +193,34 @@ app.use('/api/error-projects/:id', async (c, next) => {
   if (c.req.method.toUpperCase() === 'DELETE') return requireRecentAuth()(c, next)
   return next()
 })
+
+// Phase 07-G: per-user mutation rate-limit. 10/min/user on mutating methods
+// of credential/state-bearing endpoints. Applied AFTER authMiddleware so the
+// userId key is populated.
+function isMutating(c: any): boolean {
+  const m = c.req.method.toUpperCase()
+  return m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE'
+}
+const userMutationLimit = rateLimit({
+  bucket: 'user-mutation',
+  windowMs: 60_000,
+  max: 10,
+  keyFn: (c) => c.get('userId') || 'anon',
+})
+app.use('/api/api-keys', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/api-keys/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/scheduled-tasks', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/scheduled-tasks/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/error-projects', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/error-projects/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/account/coolify-webhook-secret/rotate', userMutationLimit)
+
+// Phase 07-G: admin endpoints. requireAdmin enforces role; requireRecentAuth
+// enforces fresh session (≤5min). userMutationLimit applies to mutating ops.
+app.use('/api/admin/*', requireAdmin())
+app.use('/api/admin/*', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/admin/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.route('/api/admin', adminRouter)
 
 // OpenAPI sample route + /openapi.json + /docs (Scalar UI).
 // Mounted ahead of plain-Hono routers so the documented twin of
