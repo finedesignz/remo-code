@@ -185,7 +185,11 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     }
     return m
   }, [sessions])
-  const [startTarget, setStartTarget] = useState<{ kind: 'local'; repo: LocalRepo } | { kind: 'github'; repo: GitHubRepo } | null>(null)
+  const [startTarget, setStartTarget] = useState<
+    | { kind: 'local'; repo: LocalRepo; githubFallback?: GitHubRepo }
+    | { kind: 'github'; repo: GitHubRepo }
+    | null
+  >(null)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [refreshingGh, setRefreshingGh] = useState(false)
@@ -381,7 +385,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   }
 
   const startRow = (row: Row) => {
-    if (row.local) setStartTarget({ kind: 'local', repo: row.local })
+    if (row.local) setStartTarget({ kind: 'local', repo: row.local, githubFallback: row.github })
     else if (row.github) setStartTarget({ kind: 'github', repo: row.github })
   }
 
@@ -635,7 +639,9 @@ function RowActions({ row, online, onStart, onStop }: { row: Row; online: boolea
 interface StartDialogProps {
   token: string
   supervisorId: string
-  target: { kind: 'local'; repo: LocalRepo } | { kind: 'github'; repo: GitHubRepo }
+  target:
+    | { kind: 'local'; repo: LocalRepo; githubFallback?: GitHubRepo }
+    | { kind: 'github'; repo: GitHubRepo }
   onClose: () => void
   onStarted: (runId: string) => void
   onError: (msg: string) => void
@@ -645,6 +651,7 @@ function StartDialog(props: StartDialogProps) {
   const { token, supervisorId, target, onClose, onStarted, onError } = props
   const localRepo = target.kind === 'local' ? target.repo : null
   const githubRepo = target.kind === 'github' ? target.repo : null
+  const githubFallback = target.kind === 'local' ? target.githubFallback : null
 
   const [branch, setBranch] = useState<string>(localRepo?.branch || githubRepo?.default_branch || '')
   // Default ON so we always run from the latest committed state. User can opt out.
@@ -653,23 +660,47 @@ function StartDialog(props: StartDialogProps) {
   const [prompt, setPrompt] = useState('')
   const [busy, setBusy] = useState(false)
   const [branches, setBranches] = useState<string[]>([])
+  const [customBranch, setCustomBranch] = useState(false)
 
   useEffect(() => {
-    if (githubRepo) {
-      apiFetch(token, `/api/github/repos/${githubRepo.owner}/${githubRepo.name}/branches`)
+    let cancelled = false
+    const setIfMounted = (list: string[], preferred?: string | null) => {
+      if (cancelled) return
+      setBranches(list)
+      if (list.length) {
+        setBranch((prev) => list.includes(prev) ? prev : (preferred && list.includes(preferred) ? preferred : list[0]))
+      }
+    }
+    const fetchGithub = (repo: { owner: string; name: string; default_branch?: string }) =>
+      apiFetch(token, `/api/github/repos/${repo.owner}/${repo.name}/branches`)
         .then((r) => r.ok ? r.json() : { branches: [] })
-        .then((d) => setBranches(d.branches?.map((b: any) => b.name) || []))
+        .then((d) => {
+          const list: string[] = d.branches?.map((b: any) => b.name) || []
+          setIfMounted(list, repo.default_branch)
+        })
         .catch(() => {})
+
+    if (githubRepo) {
+      fetchGithub(githubRepo)
     } else if (localRepo) {
       apiFetch(token, `/api/supervisors/${supervisorId}/branches?repo_path=${encodeURIComponent(localRepo.path)}`)
         .then((r) => r.ok ? r.json() : { branches: [] })
         .then((d) => {
           const list: string[] = d.branches || []
-          setBranches(list)
-          if (list.length) setBranch((prev) => list.includes(prev) ? prev : (d.current || list[0]))
+          if (list.length) {
+            setIfMounted(list, d.current || localRepo.branch)
+            return
+          }
+          // Supervisor returned no branches (older supervisor version pre-list_branches, or git error).
+          // Fall back to GitHub branches when we have a matching installation — this restores the dropdown
+          // for users on supervisor < 0.3.2.
+          if (githubFallback) return fetchGithub(githubFallback)
         })
-        .catch(() => {})
+        .catch(() => {
+          if (githubFallback) return fetchGithub(githubFallback)
+        })
     }
+    return () => { cancelled = true }
   }, [])
 
   const handleStart = async () => {
@@ -735,12 +766,36 @@ function StartDialog(props: StartDialogProps) {
           )}
           <div>
             <label className="block text-xs text-[var(--text-muted)] mb-1">Branch</label>
-            {branches.length > 0 ? (
-              <select value={branch} onChange={(e) => setBranch(e.target.value)} className="w-full px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500/50 text-sm text-[var(--text-primary)]">
+            {branches.length > 0 && !customBranch ? (
+              <select
+                value={branches.includes(branch) ? branch : branches[0]}
+                onChange={(e) => {
+                  if (e.target.value === '__custom__') { setCustomBranch(true); return }
+                  setBranch(e.target.value)
+                }}
+                className="w-full px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500/50 text-sm text-[var(--text-primary)]"
+              >
                 {branches.map((b) => <option key={b} value={b}>{b}</option>)}
+                <option value="__custom__">Custom branch name…</option>
               </select>
             ) : (
-              <input value={branch} onChange={(e) => setBranch(e.target.value)} placeholder="main" className="w-full px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500/50 text-sm text-[var(--text-primary)]" />
+              <div className="flex items-center gap-2">
+                <input
+                  value={branch}
+                  onChange={(e) => setBranch(e.target.value)}
+                  placeholder="main"
+                  className="flex-1 px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500/50 text-sm text-[var(--text-primary)]"
+                />
+                {branches.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setCustomBranch(false)}
+                    className="px-2 py-2 text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40"
+                  >
+                    Pick from list
+                  </button>
+                )}
+              </div>
             )}
           </div>
           <label className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
