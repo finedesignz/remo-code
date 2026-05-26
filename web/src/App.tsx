@@ -142,7 +142,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex flex-col h-screen">
+    <div className="flex flex-col h-[100dvh]">
       <NotificationsBridge token={token} profile={profile} />
       {licenseRequired && <LicenseRequiredBanner onDismiss={() => setLicenseRequired(false)} />}
       <div className="flex-1 min-h-0 overflow-hidden">
