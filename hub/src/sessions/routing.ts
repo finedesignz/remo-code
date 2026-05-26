@@ -24,6 +24,7 @@ import { sql } from '../db/postgres.ts'
 import { reserveSessionSlot } from './budget.ts'
 import { isSupervisorOnline } from '../ws/supervisor-registry.ts'
 import { listOnlineAgentSessionsForUser } from '../ws/registry.ts'
+import { checkUserThreshold } from '../usage/threshold.ts'
 
 // Recency threshold for "supervisor is online". Belt-and-braces with the
 // in-memory registry check — guards against zombie rows whose WS closed
@@ -34,6 +35,13 @@ export type PickedTarget =
   | { kind: 'supervisor'; supervisor_id: string; running: number; cap: number }
   | { kind: 'local_agent'; agent_session_id: string }
   | { kind: 'none'; reason: string }
+  | {
+      kind: 'quota_blocked'
+      reason: 'session_threshold' | 'week_threshold'
+      utilization_pct: number
+      threshold_pct: number
+      resets_at: string
+    }
 
 interface SupervisorRow {
   id: string
@@ -52,6 +60,20 @@ export async function pickSessionTarget(
   opts: { excludeSupervisorIds?: string[] } = {},
 ): Promise<PickedTarget> {
   const exclude = new Set(opts.excludeSupervisorIds ?? [])
+
+  // Step 0: Claude usage threshold gate. Blocks new dispatch when the user
+  // is over their configured 5h or 7d cap. In-flight runs are not killed —
+  // only NEW target picks are refused. See review §3.
+  const t = await checkUserThreshold(userId)
+  if (!t.allowed) {
+    return {
+      kind: 'quota_blocked',
+      reason: t.reason!,
+      utilization_pct: t.utilization_pct ?? 0,
+      threshold_pct: t.threshold_pct ?? 0,
+      resets_at: t.resets_at ?? '',
+    }
+  }
 
   // Step 1: preferred supervisor.
   const userRows = await sql<{ preferred_supervisor_id: string | null }[]>`

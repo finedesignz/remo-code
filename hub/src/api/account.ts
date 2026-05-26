@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { z } from 'zod';
 import { authMiddleware } from '../auth/middleware.ts';
 import {
   getUserCoolifyWebhookStatus,
@@ -7,7 +8,11 @@ import {
   getUserCoolifyWebhookAllowedIps,
   setUserCoolifyWebhookAllowedIps,
   listCoolifyWebhookAttempts,
+  getUserClaudeThresholds,
+  setUserClaudeThresholds,
 } from '../db/dal.ts';
+import { getUsage } from '../usage/store.ts';
+import { evaluateThreshold } from '../usage/threshold.ts';
 
 export const accountRouter = new Hono();
 export { accountRouter as account };
@@ -92,6 +97,78 @@ accountRouter.get('/coolify-webhook-allowed-ips', async (c) => {
     return c.json({ allowed_ips });
   } catch (err: any) {
     console.error('[account] coolify-webhook-allowed-ips GET failed:', err?.code, err?.message);
+    return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
+  }
+});
+
+// ── Claude usage thresholds ──────────────────────────────────────────────────
+// GET /api/account/claude-thresholds → { session_pct, week_pct }
+accountRouter.get('/claude-thresholds', async (c) => {
+  const userId = c.get('userId') as string;
+  try {
+    const t = await getUserClaudeThresholds(userId);
+    return c.json({
+      session_pct: t.claude_session_threshold_pct,
+      week_pct: t.claude_week_threshold_pct,
+    });
+  } catch (err: any) {
+    console.error('[account] claude-thresholds GET failed:', err?.code, err?.message);
+    return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
+  }
+});
+
+const ThresholdSchema = z.object({
+  session_pct: z.number().int().min(1).max(100).nullable(),
+  week_pct: z.number().int().min(1).max(100).nullable(),
+}).strict();
+
+// PUT /api/account/claude-thresholds  body: { session_pct, week_pct }
+accountRouter.put('/claude-thresholds', async (c) => {
+  const userId = c.get('userId') as string;
+  let body: any;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const parsed = ThresholdSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_body', detail: parsed.error.flatten() }, 400);
+  }
+  try {
+    const saved = await setUserClaudeThresholds(userId, {
+      claude_session_threshold_pct: parsed.data.session_pct,
+      claude_week_threshold_pct: parsed.data.week_pct,
+    });
+    return c.json({
+      session_pct: saved.claude_session_threshold_pct,
+      week_pct: saved.claude_week_threshold_pct,
+    });
+  } catch (err: any) {
+    console.error('[account] claude-thresholds PUT failed:', err?.code, err?.message);
+    return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
+  }
+});
+
+// GET /api/account/usage → { usage, thresholds, paused, reason, ... }
+// Used by Layout.tsx on first paint before the WS event arrives.
+accountRouter.get('/usage', async (c) => {
+  const userId = c.get('userId') as string;
+  try {
+    const t = await getUserClaudeThresholds(userId);
+    const snap = getUsage(userId);
+    const decision = evaluateThreshold(snap, t);
+    return c.json({
+      usage: snap?.usage ?? null,
+      updated_at: snap?.updated_at ?? null,
+      thresholds: {
+        session_pct: t.claude_session_threshold_pct,
+        week_pct: t.claude_week_threshold_pct,
+      },
+      paused: !decision.allowed,
+      reason: decision.reason ?? null,
+      utilization_pct: decision.utilization_pct ?? null,
+      threshold_pct: decision.threshold_pct ?? null,
+      resets_at: decision.resets_at ?? null,
+    });
+  } catch (err: any) {
+    console.error('[account] usage GET failed:', err?.code, err?.message);
     return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
   }
 });

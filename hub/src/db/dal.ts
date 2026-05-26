@@ -276,7 +276,7 @@ export async function revokeAllUserCredentials(userId: string): Promise<{ revoke
 // ── Users / Profiles ──────────────────────────────────────────────────────────
 
 export async function getUserById(id: string) {
-  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, web_push_enabled, created_at, updated_at FROM users WHERE id = ${id}`;
+  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, created_at, updated_at FROM users WHERE id = ${id}`;
   return rows[0] ?? null;
 }
 
@@ -288,6 +288,39 @@ export async function getUserTimezone(id: string): Promise<string> {
 export async function getUserSystemPrompt(id: string): Promise<string | null> {
   const rows = await sql`SELECT system_prompt FROM users WHERE id = ${id}`;
   return (rows[0]?.system_prompt as string | null) ?? null;
+}
+
+// ── Claude usage thresholds ──────────────────────────────────────────────────
+export interface ClaudeThresholds {
+  claude_session_threshold_pct: number | null;
+  claude_week_threshold_pct: number | null;
+}
+
+export async function getUserClaudeThresholds(userId: string): Promise<ClaudeThresholds> {
+  const rows = await sql<ClaudeThresholds[]>`
+    SELECT claude_session_threshold_pct, claude_week_threshold_pct
+    FROM users WHERE id = ${userId}
+  `;
+  const row = rows[0];
+  return {
+    claude_session_threshold_pct: row?.claude_session_threshold_pct ?? null,
+    claude_week_threshold_pct: row?.claude_week_threshold_pct ?? null,
+  };
+}
+
+export async function setUserClaudeThresholds(
+  userId: string,
+  thresholds: ClaudeThresholds,
+): Promise<ClaudeThresholds> {
+  const rows = await sql<ClaudeThresholds[]>`
+    UPDATE users
+       SET claude_session_threshold_pct = ${thresholds.claude_session_threshold_pct},
+           claude_week_threshold_pct = ${thresholds.claude_week_threshold_pct},
+           updated_at = now()
+     WHERE id = ${userId}
+     RETURNING claude_session_threshold_pct, claude_week_threshold_pct
+  `;
+  return rows[0] ?? thresholds;
 }
 
 export type UserInstructions = {

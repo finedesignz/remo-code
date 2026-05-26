@@ -492,3 +492,31 @@ CREATE TABLE IF NOT EXISTS coolify_webhook_attempts (
 CREATE INDEX IF NOT EXISTS idx_coolify_webhook_attempts_user_recv
   ON coolify_webhook_attempts(user_id, received_at DESC);
 
+-- ── feat/claude-usage-thresholds ─────────────────────────────────────────────
+-- Per-user thresholds for the Anthropic OAuth usage gate. Compared against the
+-- in-memory snapshot from agent/src/usage-poller.ts (utilization is already a
+-- percentage 0-100). NULL = gate OFF (back-compat — existing users are not
+-- silently opted in on deploy).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS claude_session_threshold_pct INTEGER;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS claude_week_threshold_pct INTEGER;
+
+DO $$ BEGIN
+  ALTER TABLE users ADD CONSTRAINT users_claude_session_threshold_pct_range
+    CHECK (claude_session_threshold_pct IS NULL
+           OR (claude_session_threshold_pct BETWEEN 1 AND 100));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE users ADD CONSTRAINT users_claude_week_threshold_pct_range
+    CHECK (claude_week_threshold_pct IS NULL
+           OR (claude_week_threshold_pct BETWEEN 1 AND 100));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- New run status: 'skipped_quota' — distinguishes threshold-gated skips from
+-- daily-cost-cap skips so the run history drawer can filter them separately.
+DO $$ BEGIN
+  ALTER TABLE scheduled_task_runs DROP CONSTRAINT IF EXISTS scheduled_task_runs_status_check;
+  ALTER TABLE scheduled_task_runs ADD CONSTRAINT scheduled_task_runs_status_check
+    CHECK (status IN ('running','success','failed','skipped','pending','in_flight','cancelled','skipped_quota'));
+EXCEPTION WHEN others THEN NULL; END $$;
+
