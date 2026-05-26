@@ -172,11 +172,28 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
     const userId = await verifyApiKey(keyHash)
     if (!userId) {
+      // Surface silent auth failures — without this log the only signal a
+      // misconfigured/stale agent leaves on the hub is a bare `[agent]
+      // connection opened` with no follow-up, which is indistinguishable from
+      // a network blip. Hash prefix is safe to log (one-way SHA-256).
+      console.warn(`[agent] auth fail reason=invalid_api_key hash=${keyHash.slice(0, 8)}... host=${msg.hostname ?? 'unknown'}`)
       ws.send(JSON.stringify({ type: 'auth_error', error: 'invalid api key' }))
       ws.close(4001, 'auth failed')
       return
     }
-    const projectDir = msg.project_dir.replace(/\\/g, '/')
+    // Plan 05-002 made `project_dir` optional in the schema (rootless-only
+    // agents). Reject explicitly when BOTH project_dir AND rootless_sessions
+    // are missing — without this guard `msg.project_dir.replace(...)` below
+    // would throw and the connection would close with no diagnostic.
+    const rootlessAdvertised = Array.isArray((msg as any).rootless_sessions)
+      && (msg as any).rootless_sessions.length > 0
+    if (!msg.project_dir && !rootlessAdvertised) {
+      console.warn(`[agent] auth fail reason=no_project_or_rootless user=${userId} host=${msg.hostname ?? 'unknown'}`)
+      ws.send(JSON.stringify({ type: 'auth_error', error: 'missing project_dir or rootless_sessions' }))
+      ws.close(4001, 'auth failed')
+      return
+    }
+    const projectDir = (msg.project_dir ?? '').replace(/\\/g, '/')
 
     // Refuse stale reconnects: if the user just clicked "Disconnect" in the UI,
     // any agent process that was alive at that moment will try to reconnect.
