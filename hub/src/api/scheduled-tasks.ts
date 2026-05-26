@@ -383,10 +383,15 @@ scheduledTasks.post('/:id/run-now', async (c) => {
   const id = c.req.param('id')
   const task = await getTask(id, userId)
   if (!task) return c.json({ error: 'not_found' }, 404)
-  // Fire-and-forget. The dispatcher persists run rows and broadcasts WS
-  // events; client subscribes to those for live progress.
-  void dispatcher.runNow(id, userId).catch((err) =>
-    console.error(`[api.scheduled-tasks] run-now failed task=${id}: ${err?.message ?? err}`),
-  )
-  return c.json({ ok: true, status: 'dispatched' }, 202)
+  // Await dispatch so we can return the created run_ids the client uses to
+  // track progress via WS. Manual runs fail fast on offline targets instead
+  // of silently grace-queuing (the UI has no way to surface a pending
+  // grace-queued row otherwise).
+  try {
+    const res = await dispatcher.runNow(id, userId, { isManual: true })
+    return c.json({ ok: true, status: 'dispatched', run_ids: res.runIds }, 202)
+  } catch (err: any) {
+    console.error(`[api.scheduled-tasks] run-now failed task=${id}: ${err?.message ?? err}`)
+    return c.json({ error: 'dispatch_failed', message: err?.message ?? 'unknown' }, 500)
+  }
 })

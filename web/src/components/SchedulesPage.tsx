@@ -50,8 +50,16 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
 
   const handleRunNow = async (id: string) => {
     setBusy(b => ({ ...b, [id]: true }))
-    try { await runNow(id) } catch {}
-    finally { setBusy(b => ({ ...b, [id]: false })) }
+    try {
+      const res = await runNow(id)
+      if (!res || !res.run_ids || res.run_ids.length === 0) {
+        console.warn('[run-now] dispatched but no run rows created (task may have no target)')
+      }
+    } catch (err: any) {
+      console.error('[run-now] failed:', err?.message ?? err)
+    } finally {
+      setBusy(b => ({ ...b, [id]: false }))
+    }
   }
 
   const handleDelete = async (id: string) => {
