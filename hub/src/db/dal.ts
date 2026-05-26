@@ -488,6 +488,195 @@ export async function recordOpenIssueForHash(
   `;
 }
 
+// ── Phase 07: Titanium auth (additive) ────────────────────────────────────────
+//
+// Helpers for linking remo-code `users` rows to Titanium Licensing (Keygen)
+// subjects, recording opaque server-side auth sessions, and writing the
+// `auth_events` audit log. The `link_mismatch` event type folds in what an
+// earlier draft called `mapping_conflicts` — search
+// `WHERE event_type='link_mismatch'` for those rows.
+//
+// `auth_sessions` is the server-side session-id store (NOT the Claude
+// conversation `sessions` table). IDs in `auth_sessions` are stored as
+// sha-256 hashes of the opaque random token — same pattern as `api_keys`.
+// Callers handle the hashing (so the raw token never reaches the DAL).
+
+import { randomBytes, createHash } from 'crypto';
+
+export type AuthSessionRow = {
+  id: string;
+  user_id: string;
+  created_at: Date;
+  last_used_at: Date;
+  expires_at: Date;
+  ip: string | null;
+  user_agent: string | null;
+};
+
+export async function getUserByTitaniumSubject(subject: string) {
+  const rows = await sql`
+    SELECT * FROM users WHERE titanium_subject = ${subject} LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+export async function linkTitaniumSubject(
+  userId: string,
+  subject: string,
+  email: string,
+): Promise<void> {
+  await sql`
+    UPDATE users
+       SET titanium_subject = ${subject},
+           titanium_email = ${email},
+           last_titanium_sync_at = now(),
+           titanium_link_status = 'linked',
+           candidate_subject = NULL,
+           updated_at = now()
+     WHERE id = ${userId}
+  `;
+}
+
+export async function setPendingVerify(
+  userId: string,
+  candidateSubject: string,
+  candidateEmail: string,
+): Promise<void> {
+  await sql`
+    UPDATE users
+       SET candidate_subject = ${candidateSubject},
+           titanium_email = ${candidateEmail},
+           titanium_link_status = 'pending_verify',
+           updated_at = now()
+     WHERE id = ${userId}
+  `;
+}
+
+// Promote candidate_subject → titanium_subject. Only acts when the user is
+// currently in pending_verify state; returns true if promotion happened.
+export async function promoteCandidateSubject(userId: string): Promise<boolean> {
+  const rows = await sql`
+    UPDATE users
+       SET titanium_subject = candidate_subject,
+           titanium_link_status = 'linked',
+           candidate_subject = NULL,
+           last_titanium_sync_at = now(),
+           updated_at = now()
+     WHERE id = ${userId}
+       AND titanium_link_status = 'pending_verify'
+       AND candidate_subject IS NOT NULL
+     RETURNING id
+  `;
+  return rows.length > 0;
+}
+
+export async function updateLicenseStatus(
+  userId: string,
+  status: string,
+  licenseId: string | null,
+): Promise<void> {
+  await sql`
+    UPDATE users
+       SET license_status = ${status},
+           license_id = ${licenseId},
+           license_checked_at = now(),
+           updated_at = now()
+     WHERE id = ${userId}
+  `;
+}
+
+// Returns { updated: true } on success, { updated: false, conflict: true }
+// when a different user already owns the target email (UNIQUE violation 23505).
+export async function updateUserEmail(
+  userId: string,
+  newEmail: string,
+): Promise<{ updated: boolean; conflict: boolean }> {
+  try {
+    const rows = await sql`
+      UPDATE users SET email = ${newEmail}, updated_at = now()
+       WHERE id = ${userId}
+       RETURNING id
+    `;
+    return { updated: rows.length > 0, conflict: false };
+  } catch (err: any) {
+    if (err?.code === '23505') return { updated: false, conflict: true };
+    throw err;
+  }
+}
+
+// ── Auth sessions (opaque token, sha-256 stored — same pattern as api_keys) ──
+
+function hashSessionToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+export async function createAuthSession(opts: {
+  userId: string;
+  ip?: string | null;
+  userAgent?: string | null;
+  ttlSeconds: number;
+}): Promise<{ token: string; id: string; expiresAt: Date }> {
+  const token = 'remo_' + randomBytes(32).toString('base64url');
+  const id = hashSessionToken(token);
+  const ttl = Math.max(1, Math.floor(opts.ttlSeconds));
+  const rows = await sql<{ expires_at: Date }[]>`
+    INSERT INTO auth_sessions (id, user_id, expires_at, ip, user_agent)
+    VALUES (${id}, ${opts.userId}, now() + (${String(ttl)} || ' seconds')::interval, ${opts.ip ?? null}, ${opts.userAgent ?? null})
+    RETURNING expires_at
+  `;
+  return { token, id, expiresAt: rows[0].expires_at };
+}
+
+// Look up a session by its raw token. Returns null if missing OR expired.
+export async function getAuthSessionByToken(token: string): Promise<AuthSessionRow | null> {
+  const id = hashSessionToken(token);
+  const rows = await sql<AuthSessionRow[]>`
+    SELECT * FROM auth_sessions
+     WHERE id = ${id} AND expires_at > now()
+     LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+// Bump last_used_at. expires_at is NOT advanced here — PLAN-C governs idle
+// extension policy.
+export async function touchAuthSession(token: string): Promise<void> {
+  const id = hashSessionToken(token);
+  await sql`UPDATE auth_sessions SET last_used_at = now() WHERE id = ${id}`;
+}
+
+export async function deleteAuthSession(token: string): Promise<void> {
+  const id = hashSessionToken(token);
+  await sql`DELETE FROM auth_sessions WHERE id = ${id}`;
+}
+
+// Returns the number of rows deleted. Safe to call from a periodic cron.
+export async function purgeExpiredAuthSessions(): Promise<number> {
+  const rows = await sql`DELETE FROM auth_sessions WHERE expires_at <= now() RETURNING id`;
+  return rows.length;
+}
+
+// ── Audit log ────────────────────────────────────────────────────────────────
+
+export async function recordAuthEvent(opts: {
+  userId?: string | null;
+  eventType: string;
+  ip?: string | null;
+  userAgent?: string | null;
+  metadata?: Record<string, unknown> | null;
+}): Promise<void> {
+  await sql`
+    INSERT INTO auth_events (user_id, event_type, ip, user_agent, metadata)
+    VALUES (
+      ${opts.userId ?? null},
+      ${opts.eventType},
+      ${opts.ip ?? null},
+      ${opts.userAgent ?? null},
+      ${opts.metadata ? JSON.stringify(opts.metadata) : null}::jsonb
+    )
+  `;
+}
+
 // ── Channel token ─────────────────────────────────────────────────────────────
 
 export async function verifyChannelToken(sessionId: string) {
