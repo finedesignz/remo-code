@@ -1040,7 +1040,7 @@ function CoolifyWebhookCard({ token }: { token: string }) {
       </div>
       <p className="text-xs text-[var(--text-muted)] mb-4">
         Lets Coolify push deploy + container events to your remo-code account so the self-heal pipeline can react.
-        Paste the URL below into Coolify Settings → Webhooks, then rotate to get a signing secret.
+        Paste the URL below into Coolify Notifications → Webhooks, then rotate to get a signing secret.
       </p>
 
       <div className="space-y-4">
