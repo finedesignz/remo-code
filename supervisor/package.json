@@ -1,15 +1,14 @@
 {
   "name": "remo-code-supervisor",
   "version": "0.3.1",
-  "description": "Local supervisor for Remo Code — manage and remote-launch claude-code sessions in your local repos from the web UI",
+  "private": true,
+  "description": "Local supervisor runtime spawned by the Remo Code tray app (supervisor/tauri/). Not published to npm.",
   "type": "module",
   "main": "src/index.ts",
-  "bin": {
-    "remo-code-supervisor": "src/index.ts"
-  },
   "files": [
     "src",
-    "README.md"
+    "README.md",
+    "MIGRATION.md"
   ],
   "scripts": {
     "dev": "bun --watch src/index.ts run",

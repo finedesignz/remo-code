@@ -398,10 +398,18 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-3">
         {supervisors.length === 0 ? (
           <div className="text-sm text-[var(--text-muted)] p-2">
-            No supervisor registered. Run on the machine you want to control:
-            <code className="block mt-2 p-2 bg-[var(--code-bg)] rounded text-xs text-indigo-300 font-mono">
-              npx remo-code-supervisor install --api-key &lt;your_api_key&gt; --roots "C:\Users\you\GitHub"
-            </code>
+            No supervisor registered. Install the Remo Code tray app on the Windows machine you want to control:
+            <a
+              href="https://github.com/finedesignz/remo-code/releases/latest"
+              target="_blank"
+              rel="noreferrer"
+              className="block mt-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs text-[var(--text-on-accent)] font-medium text-center transition-colors"
+            >
+              Download .msi from GitHub Releases &rarr;
+            </a>
+            <p className="text-[10px] text-[var(--text-muted)] mt-2">
+              Paste your API key into the first-run wizard. The tray app starts on boot and connects automatically.
+            </p>
           </div>
         ) : (
           <>

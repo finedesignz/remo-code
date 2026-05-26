@@ -32,8 +32,7 @@ export function ApiKeyModal({ token, onClose }: Props) {
     setNewKey(null)
   }
 
-  const supervisorCmd = newKey ? `npx remo-code-supervisor install --api-key ${newKey} --roots "C:\\Users\\you\\GitHub"` : ''
-  const tauriCmd = `cd C:\\Users\\artic\\GitHub\\remo-code\\supervisor\\tauri && cargo tauri build`
+  const trayAppReleaseUrl = 'https://github.com/finedesignz/remo-code/releases/latest'
   const agentCmd = newKey ? `npx remo-code-agent --api-key ${newKey} --local-output` : ''
 
   return (
@@ -46,7 +45,7 @@ export function ApiKeyModal({ token, onClose }: Props) {
           </div>
 
           <p className="text-[var(--text-muted)] text-sm mb-6">
-            Your API key authenticates the Supervisor app (or legacy agent) when connecting Claude Code sessions. One key connects all your projects.
+            Your API key authenticates the Remo Code tray app (or the agent fallback) when connecting Claude Code sessions. One key connects all your projects.
           </p>
 
           {loading ? (
@@ -69,39 +68,25 @@ export function ApiKeyModal({ token, onClose }: Props) {
                 </div>
               </div>
 
-              {/* PRIMARY: Supervisor */}
+              {/* PRIMARY: Tray app download */}
               <div>
                 <div className="flex items-center gap-2 mb-2">
                   <span className="px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-indigo-300 bg-indigo-600/20 ring-1 ring-indigo-500/30 rounded">Recommended</span>
-                  <p className="text-xs font-semibold text-[var(--text-primary)]">Install the Supervisor app</p>
+                  <p className="text-xs font-semibold text-[var(--text-primary)]">Download the Remo Code tray app</p>
                 </div>
-                <p className="text-xs text-[var(--text-muted)] mb-2">
-                  Installs as a Windows service that auto-starts at boot, watches your repo roots, and lets you launch Claude Code sessions remotely from this web UI.
+                <p className="text-xs text-[var(--text-muted)] mb-3">
+                  Windows tray app — paste the API key above into its first-run wizard and it handles the rest. No PowerShell, no Bun install, no NSSM.
                 </p>
-                <p className="text-xs text-[var(--text-muted)] mb-2">
-                  Requires <a href="https://bun.sh" target="_blank" rel="noreferrer" className="text-indigo-300 hover:text-indigo-200 underline">bun</a> on PATH. Run from an <span className="text-amber-400">elevated</span> (Administrator) PowerShell. NSSM is auto-downloaded.
-                </p>
-                <div className="relative group">
-                  <pre className="bg-[var(--code-bg)] rounded-lg p-3 text-xs text-indigo-300 font-mono overflow-x-auto whitespace-pre">{supervisorCmd}</pre>
-                  <button
-                    onClick={() => copyText(supervisorCmd, 'sup')}
-                    className="absolute top-2 right-2 px-2 py-1 text-xs bg-[var(--bg-tertiary)] hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
-                  >
-                    {copied === 'sup' ? 'Copied!' : 'Copy'}
-                  </button>
-                </div>
-                <p className="text-xs text-[var(--text-muted)] mt-3 mb-2">Or build the desktop tray app:</p>
-                <div className="relative group">
-                  <pre className="bg-[var(--code-bg)] rounded-lg p-3 text-xs text-indigo-300 font-mono overflow-x-auto whitespace-pre">{tauriCmd}</pre>
-                  <button
-                    onClick={() => copyText(tauriCmd, 'tauri')}
-                    className="absolute top-2 right-2 px-2 py-1 text-xs bg-[var(--bg-tertiary)] hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
-                  >
-                    {copied === 'tauri' ? 'Copied!' : 'Copy'}
-                  </button>
-                </div>
+                <a
+                  href={trayAppReleaseUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs text-[var(--text-on-accent)] font-medium transition-colors"
+                >
+                  Download .msi from GitHub Releases &rarr;
+                </a>
                 <p className="text-[10px] text-[var(--text-muted)] mt-2">
-                  Produces an <code className="text-[var(--text-secondary)]">.msi</code> installer under <code className="text-[var(--text-secondary)]">src-tauri/target/release/bundle/msi/</code>.
+                  If the latest release doesn't yet include a <code className="text-[var(--text-secondary)]">.msi</code> asset, the first signed build is being prepared — use the agent fallback below in the meantime.
                 </p>
               </div>
 

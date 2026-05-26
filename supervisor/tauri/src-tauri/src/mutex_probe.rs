@@ -15,15 +15,22 @@ const PRIMARY_PORT: u16 = 9106;
 const FALLBACK_PORT: u16 = 9197;
 
 pub fn preflight(app: &AppHandle) -> Result<()> {
-    // 1) NSSM running -> hard refuse.
+    // 1) Legacy NSSM service detected -> hard refuse. The tray app replaced
+    // the old `npx remo-code-supervisor install` NSSM path. Anyone upgrading
+    // from that path needs to remove the legacy service before the tray app
+    // can take over (otherwise two supervisors fight over the same config).
     if crate::nssm::is_nssm_service_running() {
         show_blocking_dialog(
             app,
-            "Remo Code Supervisor is already running as a Windows service.\n\n\
-             Stop the service first, or uninstall it with:\n\
-             npx remo-code-supervisor uninstall",
+            "The legacy Remo Code Supervisor Windows service is still installed.\n\n\
+             It was replaced by this tray app. Stop and remove it before continuing:\n\
+             \n\
+             1. Open an elevated PowerShell\n\
+             2. Run:  Stop-Service RemoCodeSupervisor; sc.exe delete RemoCodeSupervisor\n\
+             \n\
+             Then relaunch the tray app.",
         );
-        return Err(anyhow!("NSSM service RemoCodeSupervisor is running"));
+        return Err(anyhow!("legacy NSSM service RemoCodeSupervisor is running"));
     }
 
     // 2) Loopback probe. If we can CONNECT to 9106, another supervisor owns it.
