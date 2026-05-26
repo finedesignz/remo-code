@@ -988,6 +988,8 @@ function CoolifyWebhookCard({ token }: { token: string }) {
   const [loading, setLoading] = useState(true)
   const [configured, setConfigured] = useState(false)
   const [webhookUrl, setWebhookUrl] = useState('')
+  const [legacyInUse, setLegacyInUse] = useState(false)
+  const [legacyHitAt, setLegacyHitAt] = useState<string | null>(null)
   const [rotating, setRotating] = useState(false)
   const [copied, setCopied] = useState<'url' | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -1021,7 +1023,12 @@ function CoolifyWebhookCard({ token }: { token: string }) {
   useEffect(() => {
     let cancelled = false
     setLoading(true)
-    hubFetch<{ configured: boolean; webhook_url: string }>(
+    hubFetch<{
+      configured: boolean
+      webhook_url: string
+      legacy_in_use?: boolean
+      legacy_hit_at?: string | null
+    }>(
       token,
       '/api/account/coolify-webhook-secret',
     )
@@ -1029,6 +1036,8 @@ function CoolifyWebhookCard({ token }: { token: string }) {
         if (cancelled) return
         setConfigured(data.configured)
         setWebhookUrl(data.webhook_url)
+        setLegacyInUse(!!data.legacy_in_use)
+        setLegacyHitAt(data.legacy_hit_at ?? null)
       })
       .catch((e) => { if (!cancelled) setError(String(e?.message || e)) })
       .finally(() => { if (!cancelled) setLoading(false) })
@@ -1057,6 +1066,10 @@ function CoolifyWebhookCard({ token }: { token: string }) {
       )
       setWebhookUrl(data.webhook_url)
       setConfigured(true)
+      // Rotate clears the legacy-hit flag server-side; mirror locally so the
+      // banner disappears immediately without a refresh.
+      setLegacyInUse(false)
+      setLegacyHitAt(null)
     } catch (e: any) {
       setError(String(e?.message || e))
     } finally {
@@ -1138,6 +1151,25 @@ function CoolifyWebhookCard({ token }: { token: string }) {
             </button>
           </div>
         </div>
+
+        {/* Legacy-HMAC deprecation banner */}
+        {legacyInUse && (
+          <div className="rounded-lg bg-amber-500/10 ring-1 ring-amber-500/30 px-3 py-2.5 text-xs text-amber-200">
+            <div className="font-semibold mb-0.5">
+              Your Coolify webhook is using the deprecated HMAC format.
+            </div>
+            <div className="text-amber-200/80">
+              Click <span className="font-medium">Rotate URL</span> below to mint a new URL-token webhook,
+              then paste the new URL into Coolify Notifications → Webhook. The legacy route is kept for 30
+              days but will be removed.
+              {legacyHitAt && (
+                <span className="block mt-1 text-amber-200/60">
+                  Last legacy hit: {new Date(legacyHitAt).toLocaleString()}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Rotate button */}
         <div className="flex items-center gap-3 flex-wrap">

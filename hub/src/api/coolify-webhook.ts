@@ -40,6 +40,7 @@ import {
   ensureInternalTriageTask,
   insertDeploymentRun,
   recordCoolifyWebhookAttempt,
+  markUserCoolifyWebhookLegacyHit,
 } from '../db/dal.ts'
 import { runNow as dispatcherRunNow } from '../scheduler/dispatcher.ts'
 import { ipAllowed, sourceIpFromHeaders } from '../lib/cidr.ts'
@@ -310,6 +311,13 @@ coolifyWebhookRoutes.post('/webhook/:user_id', async (c) => {
 
   // Allowlist on legacy too — same defense-in-depth applies.
   const cfg = await getUserCoolifyWebhookConfig(userId).catch(() => ({ secret, allowedIps: [] as string[] }))
+
+  // Flag user as still on the legacy HMAC format so the Settings UI can show
+  // a "rotate to migrate" banner. Best-effort — never block the webhook.
+  markUserCoolifyWebhookLegacyHit(userId).catch((err: any) => {
+    console.warn('[coolify-webhook] failed to mark legacy-hit flag:', err?.message)
+  })
+
   const result = await handleAuthenticated({
     userId,
     rawBody,
