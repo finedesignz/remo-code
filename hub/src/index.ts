@@ -267,18 +267,25 @@ function decrementIp(ip: string) {
   else wsConnectionsPerIp.set(ip, count - 1)
 }
 
-// Phase 07-A: warm Titanium JWKS BEFORE binding the port. The hub MUST NOT
-// serve traffic without JWKS available once Titanium is configured. While
-// `TITANIUM_KEYGEN_API_URL` is unset (Plan A pre-cutover state), this is a
-// no-op so dev environments without Titanium continue to boot.
+// Phase 07-A: warm Titanium JWKS at boot if configured. Previously this was a
+// hard refuse-to-bind gate — that was the wrong call. JWKS warm failure must
+// NOT block the hub from binding its port: the hub serves many surfaces that
+// don't need Titanium JWT verification (health checks, public webhooks, the
+// web SPA, the scheduler, agent WS), and a stalled/404 Titanium endpoint
+// should never take production down. Auth-gated routes fail closed at request
+// time via `verifyLicenseJwt`, which lazily warms on first use. We log
+// loudly so misconfiguration is still obvious in deploy logs.
 if (config.titanium.keygenApiUrl) {
   try {
     const { warmJwksCache } = await import('./titanium-client')
     const keyCount = await warmJwksCache()
     console.log(`[titanium] JWKS warmed (${keyCount} keys)`)
   } catch (err) {
-    console.error('[titanium] JWKS warm failed — refusing to bind port:', (err as Error).message)
-    process.exit(1)
+    console.error(
+      '[titanium] JWKS warm failed at boot — continuing to bind port; ' +
+      'auth-gated routes will retry warm on first verify and fail closed if still unavailable:',
+      (err as Error).message,
+    )
   }
 }
 
