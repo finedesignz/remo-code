@@ -47,11 +47,15 @@ export function Sidebar({
       <div className="w-14 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0 items-center py-3 gap-2">
         <button
           onClick={onToggleCollapsed}
-          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          className="p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors"
           title="Expand sidebar"
           aria-label="Expand sidebar"
         >
-          <img src="/logo.png" alt="Remo Code" className="h-8 w-auto" />
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <line x1="3" y1="5" x2="17" y2="5" />
+            <line x1="3" y1="10" x2="17" y2="10" />
+            <line x1="3" y1="15" x2="17" y2="15" />
+          </svg>
         </button>
         <div className="flex-1" />
         <button
@@ -124,17 +128,21 @@ export function Sidebar({
   return (
     <>
       <div className="w-72 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
-        {/* Header — large centered logo, minimal padding */}
-        <div className="relative flex items-center justify-center px-2 py-2 border-b border-[var(--border-color)]">
+        {/* Header — hamburger toggle left of logo */}
+        <div className="relative flex items-center justify-center gap-2 px-2 py-2 border-b border-[var(--border-color)]">
           <button
             onClick={onToggleCollapsed}
-            className="hidden md:inline-flex p-0.5 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+            className="hidden md:inline-flex p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors"
             title="Collapse sidebar"
             aria-label="Collapse sidebar"
           >
-            <img src="/logo.png" alt="Remo Code" className="h-10 w-auto" />
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <line x1="3" y1="5" x2="17" y2="5" />
+              <line x1="3" y1="10" x2="17" y2="10" />
+              <line x1="3" y1="15" x2="17" y2="15" />
+            </svg>
           </button>
-          <img src="/logo.png" alt="Remo Code" className="md:hidden h-10 w-auto" />
+          <img src="/logo.png" alt="Remo Code" className="h-10 w-auto" />
           <button
             onClick={onClose}
             className="md:hidden absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
