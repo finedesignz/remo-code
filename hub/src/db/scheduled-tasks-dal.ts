@@ -328,6 +328,8 @@ export async function insertRunV2(input: {
   // started_at is NOT NULL in the schema. Always default to now() when the
   // caller doesn't pass one (or passes null/undefined explicitly). The legacy
   // pending=>null branch caused cron fires to fail the insert (#PR49 regression).
+  // PR #55 fixed the JS-side default; this defends in SQL as well — COALESCE
+  // means an accidentally-null bound param still resolves to now() server-side.
   const startedAt = input.started_at ?? new Date()
   const finishedAt = input.finished_at ?? null
   const rows = await sql<ScheduledTaskRun[]>`
@@ -340,7 +342,7 @@ export async function insertRunV2(input: {
       ${input.status}, ${input.error ?? null},
       ${input.scheduled_for}, ${input.target_kind}, ${input.target_id ?? null},
       ${input.triggered_by_run_id ?? null},
-      ${startedAt}, ${finishedAt}, ${input.output_snippet ?? null}
+      COALESCE(${startedAt}, now()), ${finishedAt}, ${input.output_snippet ?? null}
     )
     RETURNING *
   `

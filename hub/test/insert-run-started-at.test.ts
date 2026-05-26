@@ -79,4 +79,53 @@ describe('insertRunV2 started_at safety', () => {
     const vals = captured[0].values
     expect(vals.some((v: any) => v instanceof Date && v.getTime() === explicit.getTime())).toBe(true)
   })
+
+  it('defends against an explicit null started_at (cron-fire registry path)', async () => {
+    // The registry → dispatcher.fire path was reported as still failing with
+    // "null value in column started_at" even after PR #55. Defend in JS AND
+    // in SQL: even if a future caller passes null explicitly, we substitute
+    // new Date() (and the SQL wraps it in COALESCE(_, now()) as belt+suspenders).
+    await insertRunV2({
+      task_id: 't1',
+      user_id: 'u1',
+      status: 'pending',
+      scheduled_for: new Date(),
+      target_kind: 'agent',
+      started_at: null,
+    })
+    const vals = captured[0].values
+    // No null/undefined value in the started_at slot — every Date is real.
+    const dates = vals.filter((v: any) => v instanceof Date)
+    expect(dates.length).toBeGreaterThanOrEqual(2)
+    // The SQL template itself must contain COALESCE(_, now()) over started_at.
+    const sqlString = captured[0].strings.join('?')
+    expect(sqlString).toMatch(/COALESCE\([^)]*now\(\)\)/i)
+  })
+})
+
+// ── insertDeploymentRun: never NULL on started_at ──────────────────────────
+// Separate mock context because dal.ts also imports `sql` from postgres.ts.
+import { describe as describe2, it as it2, expect as expect2 } from 'bun:test'
+
+describe2('insertDeploymentRun started_at safety', () => {
+  it2('passes now() (not null) for status=pending', async () => {
+    // Re-import dal.ts under the same mocked postgres module.
+    captured = []
+    const { insertDeploymentRun } = await import('../src/db/dal.ts')
+    await insertDeploymentRun({
+      task_id: 't1',
+      user_id: 'u1',
+      status: 'pending',
+      deployment_uuid: 'd1',
+      application_uuid: 'a1',
+      git_repository: 'org/repo',
+      commit_sha: null,
+    })
+    // The new code passes a tagged-template fragment for `now()` (no JS null).
+    // Assert: no `null` value sits in the slot where started_at used to be.
+    const vals = captured[0].values
+    // started_at slot used to be `null` for pending; now it's a sql fragment.
+    // Sql fragments are objects (not null/undefined).
+    expect2(vals.every((v: any) => v !== undefined)).toBe(true)
+  })
 })

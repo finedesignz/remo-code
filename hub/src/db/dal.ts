@@ -605,7 +605,7 @@ export async function insertDeploymentRun(input: {
     ) VALUES (
       ${input.task_id}, ${input.user_id}, NULL, ${input.status}, NULL, NULL,
       ${input.deployment_uuid}, ${input.application_uuid}, ${input.git_repository}, ${input.commit_sha},
-      ${input.status === 'pending' ? null : sql`now()`},
+      ${sql`now()`},
       ${input.status === 'success' ? sql`now()` : null},
       ${input.status === 'success' ? sql`now()` : null}
     )
