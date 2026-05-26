@@ -229,6 +229,11 @@ ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS output_snippet TEXT;
 ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS triggered_by_run_id TEXT REFERENCES scheduled_task_runs(id) ON DELETE SET NULL;
 ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
+-- Belt-and-suspenders for the cron-fire regression: ensure started_at always
+-- has a DB-side default so an accidentally-omitted JS value never trips the
+-- NOT NULL constraint. Idempotent.
+ALTER TABLE scheduled_task_runs ALTER COLUMN started_at SET DEFAULT now();
+
 CREATE INDEX IF NOT EXISTS idx_scheduled_runs_task_scheduled
   ON scheduled_task_runs(task_id, scheduled_for DESC);
 CREATE INDEX IF NOT EXISTS idx_scheduled_runs_user_scheduled

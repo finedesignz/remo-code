@@ -325,10 +325,10 @@ export async function insertRunV2(input: {
   started_at?: Date | null
   finished_at?: Date | null
 }): Promise<ScheduledTaskRun> {
-  const startedAt =
-    input.started_at !== undefined
-      ? input.started_at
-      : input.status === 'pending' ? null : new Date()
+  // started_at is NOT NULL in the schema. Always default to now() when the
+  // caller doesn't pass one (or passes null/undefined explicitly). The legacy
+  // pending=>null branch caused cron fires to fail the insert (#PR49 regression).
+  const startedAt = input.started_at ?? new Date()
   const finishedAt = input.finished_at ?? null
   const rows = await sql<ScheduledTaskRun[]>`
     INSERT INTO scheduled_task_runs (
