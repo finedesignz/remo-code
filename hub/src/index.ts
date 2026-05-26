@@ -283,7 +283,9 @@ function decrementIp(ip: string) {
 // should never take production down. Auth-gated routes fail closed at request
 // time via `verifyLicenseJwt`, which lazily warms on first use. We log
 // loudly so misconfiguration is still obvious in deploy logs.
-if (config.titanium.keygenApiUrl) {
+if (config.titaniumBypass) {
+  console.warn('[titanium] BYPASS mode active — JWKS warm skipped, license gate disabled, magic-link endpoints will 503')
+} else if (config.titanium.keygenApiUrl) {
   try {
     const { warmJwksCache } = await import('./titanium-client')
     const keyCount = await warmJwksCache()

@@ -9,6 +9,7 @@ const KEYS = [
   'TITANIUM_PORTAL_TOKEN',
   'TITANIUM_KEYGEN_ADMIN_TOKEN',
   'TITANIUM_ADMIN_TOKEN',
+  'TITANIUM_BYPASS',
 ] as const
 
 async function withEnv<T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -51,6 +52,21 @@ describe('Titanium env config', () => {
         expect(config.titanium.adminToken).toBe('portal_keygen')
       },
     )
+  })
+
+  test('TITANIUM_BYPASS defaults to false; parses true/false correctly', async () => {
+    await withEnv({ TITANIUM_BYPASS: undefined } as any, async () => {
+      const { config } = await importConfig('bypass-default')
+      expect(config.titaniumBypass).toBe(false)
+    })
+    await withEnv({ TITANIUM_BYPASS: 'true' } as any, async () => {
+      const { config } = await importConfig('bypass-true')
+      expect(config.titaniumBypass).toBe(true)
+    })
+    await withEnv({ TITANIUM_BYPASS: 'false' } as any, async () => {
+      const { config } = await importConfig('bypass-false')
+      expect(config.titaniumBypass).toBe(false)
+    })
   })
 
   test('ignores legacy unprefixed TITANIUM_* names (rename complete)', async () => {

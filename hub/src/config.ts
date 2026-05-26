@@ -59,6 +59,11 @@ const allowLegacyLogin = parseBool(process.env.ALLOW_LEGACY_LOGIN, true);
 // short-circuits to permissive mode (logs a warning once at boot). Used while
 // Keygen JWKS endpoint is unhealthy so identity/REST routes don't 402.
 const licenseRequired = parseBool(process.env.LICENSE_REQUIRED, true);
+// Phase 07 escape hatch (2026-05-26): TITANIUM_BYPASS=true disables JWKS warm
+// at boot, short-circuits the license gate, and 503s the magic-link endpoints.
+// Used while Keygen CE JWKS endpoint is unavailable. Legacy bcrypt login
+// (ALLOW_LEGACY_LOGIN=true) remains the only working auth path under bypass.
+const titaniumBypass = parseBool(process.env.TITANIUM_BYPASS, false);
 // Optional Titanium -> hub webhook for license-state changes. Inert (route
 // returns 503) until Titanium ships the webhook and the secret is provisioned.
 const titaniumWebhookSecret = requireMinLenIfSet(
@@ -96,4 +101,5 @@ export const config = {
   allowLegacyLogin,
   titaniumWebhookSecret,
   licenseRequired,
+  titaniumBypass,
 };

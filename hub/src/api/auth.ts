@@ -168,6 +168,9 @@ async function withEqualTime<T>(targetMs: number, work: () => Promise<T>): Promi
 
 // POST /api/auth/login/request-link
 authRouter.post("/login/request-link", async (c) => {
+  if (config.titaniumBypass) {
+    return c.json({ error: "titanium_disabled" }, 503);
+  }
   return withEqualTime(REQUEST_LINK_EQUAL_TIME_MS, async () => {
     const body = await c.req.json().catch(() => null) as { email?: string } | null;
     const email = body?.email?.toLowerCase().trim();
@@ -212,6 +215,9 @@ authRouter.post("/login/request-link", async (c) => {
 
 // GET /api/auth/login/callback?token=...
 authRouter.get("/login/callback", async (c) => {
+  if (config.titaniumBypass) {
+    return c.json({ error: "titanium_disabled" }, 503);
+  }
   const token = c.req.query("token");
   const ip = ipOf(c);
   const ua = c.req.header("user-agent") ?? null;

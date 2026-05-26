@@ -316,6 +316,20 @@ describe("requireActiveLicense — escape hatches", () => {
     expect(res.status).toBe(200);
   });
 
+  test("TITANIUM_BYPASS=true → bypass gate entirely", async () => {
+    const orig = (config as any).titaniumBypass;
+    (config as any).titaniumBypass = true;
+    __setDalForTesting({
+      getUserLicenseFields: async () => {
+        throw new Error("should not be called in bypass mode");
+      },
+    });
+    const app = makeApp();
+    const res = await app.request("/", { method: "POST" });
+    (config as any).titaniumBypass = orig;
+    expect(res.status).toBe(200);
+  });
+
   test("JWKS-unreachable verify error → preserve cached ACTIVE (no flip to INVALID)", async () => {
     const origTtl = config.titanium.licenseCacheTtlSeconds;
     // Force cache stale so refreshLicense runs.
