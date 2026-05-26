@@ -1,46 +1,50 @@
-# remo-code-supervisor
+# remo-code-supervisor (runtime)
 
-Local supervisor for Remo Code — manage and remote-launch `claude-code` sessions in your local repos from the Remo Code web UI.
+This directory is the **runtime** for the supervisor. It is NOT a stand-alone
+CLI — it ships exclusively as the sidecar inside the Remo Code tray app at
+[`supervisor/tauri/`](./tauri/).
 
-## Prerequisites
+For end users: download the Windows .msi from
+**[GitHub Releases](https://github.com/finedesignz/remo-code/releases/latest)**.
+The tray app handles install, auto-start, configuration, and lifecycle.
 
-- Windows 10/11 (other OSes can run the foreground mode but not the service)
-- [Bun](https://bun.sh) installed and on PATH
-- `claude` CLI installed and on PATH
-- `git` on PATH
-- A Remo Code account with an API key (https://app.remo-code.com → Settings → API Keys)
+For history on the migration from the old `npx remo-code-supervisor install`
+NSSM-backed CLI to the tray app, see [`MIGRATION.md`](./MIGRATION.md).
 
-## Install
+## What's in here
+
+| File | Purpose |
+| --- | --- |
+| `src/index.ts` | Foreground supervisor entrypoint. Subcommands: `run` (used by Tauri sidecar), `scan` (diagnostic). |
+| `src/hub-client.ts` | WS client that connects to the Remo Code hub. |
+| `src/process-manager.ts` | Spawns `claude` per session, enforces sandbox/concurrency caps. |
+| `src/sandbox.ts` | Allowed-folders + git-only gates. |
+| `src/audit.ts` | Append-only JSONL audit log. |
+| `src/repo-scanner.ts` | Discovers git repos under configured roots. |
+| `src/commands/` | Built-in supervisor commands (run, kill, status, etc.). |
+| `src/commands-scanner.ts` | Discovers user/plugin slash-commands. |
+| `src/git-ops.ts` | Git-ops helpers used by Coolify self-heal companion. |
+| `src/watchdog.ts` | Self-heal watchdog for spawned claude processes. |
+| `src/config.ts` | Reads/writes `%APPDATA%\remo-code\supervisor.json`. |
+| `test/` | Bun test suite. |
+
+## Running directly (developer inner-loop)
+
+The Tauri tray app spawns this with `bun src/index.ts run`. If you want to run
+the runtime directly while developing the tray app (or against a hand-written
+config file), the same command works:
 
 ```powershell
-npx remo-code-supervisor install `
-  --api-key olx_xxx `
-  --roots "C:\Users\you\GitHub" `
-  --service-user ".\you" `
-  --service-password "<your windows password>"
+bun src/index.ts run
 ```
 
-This installs a Windows Service named `RemoCodeSupervisor` (via NSSM) that runs as your user, auto-starts at boot, and stays connected to the hub.
+`bun src/index.ts scan` prints the list of git repos discovered under the
+configured `roots` and exits — useful for sanity-checking sandbox config.
 
-If you don't supply `--service-user`/`--service-password`, the service is created but runs as LocalSystem — which **cannot read your SSH keys, `gh` auth, or `~/.config`**. Strongly prefer running as your own user.
+## Config
 
-## Run in foreground (no service)
-
-```powershell
-npx remo-code-supervisor run
-```
-
-## Other commands
-
-```powershell
-npx remo-code-supervisor status      # service status
-npx remo-code-supervisor scan        # list discovered repos
-npx remo-code-supervisor uninstall   # remove the service
-```
-
-## Config file
-
-`%APPDATA%\remo-code\supervisor.json`
+`%APPDATA%\remo-code\supervisor.json` (Windows). The tray app writes this for
+you via its first-run wizard.
 
 ```json
 {
@@ -53,7 +57,7 @@ npx remo-code-supervisor uninstall   # remove the service
 
 ## Logs
 
-`%LOCALAPPDATA%\remo-code\logs\stdout.log` and `stderr.log` (rotating at 10MB).
+`%LOCALAPPDATA%\remo-code-supervisor\supervisor.log` (rotates at 5 MB → `supervisor.log.1`).
 
 ## License
 

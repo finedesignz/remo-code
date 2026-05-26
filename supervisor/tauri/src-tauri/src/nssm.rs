@@ -1,8 +1,10 @@
-//! NSSM service collision check.
+//! Legacy NSSM service collision check.
 //!
-//! If the legacy `RemoCodeSupervisor` Windows service (installed via
-//! `npx remo-code-supervisor install`) is running, the tray app must NOT
-//! spawn a second supervisor process. We detect via PowerShell.
+//! If the historical `RemoCodeSupervisor` Windows service (installed via the
+//! now-retired `npx remo-code-supervisor install` NSSM path — see
+//! `supervisor/MIGRATION.md`) is still running, the tray app must NOT spawn a
+//! second supervisor process. We detect via PowerShell. The dialog in
+//! `mutex_probe.rs` walks the user through removing the legacy service.
 
 #[cfg(target_os = "windows")]
 pub fn is_nssm_service_running() -> bool {

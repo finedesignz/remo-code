@@ -45,7 +45,7 @@ const DEFAULT_KILL_SWITCH_HOTKEY = 'Ctrl+Shift+Alt+K'
 
 export function loadConfig(): SupervisorConfig {
   if (!existsSync(CONFIG_PATH)) {
-    throw new Error(`Supervisor not configured. Run: npx remo-code-supervisor install --api-key <olx_...>`)
+    throw new Error(`Supervisor not configured. Open the Remo Code tray app and complete the first-run setup (or write ${CONFIG_PATH} manually).`)
   }
   const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
   if (!raw.api_key) throw new Error('config missing api_key')

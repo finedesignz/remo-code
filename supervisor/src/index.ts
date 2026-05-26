@@ -1,13 +1,12 @@
 #!/usr/bin/env bun
-import { loadConfig, saveConfig, parseRoots, CONFIG_PATH } from './config'
+import { loadConfig, parseRoots, CONFIG_PATH } from './config'
 import { SupervisorClient } from './hub-client'
-import { installService, uninstallService, statusService, SERVICE_NAME } from './nssm-installer'
 import { scanAll } from './repo-scanner'
 import { existsSync, mkdirSync, renameSync, statSync, createWriteStream } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 
-const VERSION = '0.2.0'
+const VERSION = '0.3.1'
 
 function logDir(): string {
   if (process.platform === 'win32') {
@@ -77,58 +76,28 @@ function parseArgs(argv: string[]): { cmd: string; flags: Record<string, string 
 function printHelp() {
   console.log(`remo-code-supervisor v${VERSION}
 
-Usage:
-  npx remo-code-supervisor install --api-key <olx_...> [--roots <paths>] [--hub-url <url>] [--service-user <user> --service-password <pwd>]
-  npx remo-code-supervisor uninstall
-  npx remo-code-supervisor run                     # foreground (used by the Windows service)
-  npx remo-code-supervisor status
-  npx remo-code-supervisor scan                    # one-shot: list discovered repos
+This binary is the runtime spawned by the Remo Code tray app
+(supervisor/tauri/). It is no longer distributed as a stand-alone CLI.
 
-Notes:
-  - --roots is comma- or semicolon-separated; e.g. "C:\\Users\\artic\\GitHub"
-  - On Windows, install creates an NSSM-backed service that auto-starts at boot.
-    Provide --service-user (e.g. .\\artic) and --service-password to run the
-    service as your own Windows user so SSH keys, gh auth, and ~/.config remain reachable.
-  - Config file: ${CONFIG_PATH}
+Subcommands (for diagnostics / sidecar use only):
+  run                              # foreground supervisor (invoked by the Tauri sidecar)
+  scan                             # one-shot: list discovered repos under configured roots
+  help                             # this message
+
+Distribution:
+  Download the Remo Code tray app .msi from
+  https://github.com/finedesignz/remo-code/releases/latest
+  The tray app bundles this runtime as a managed sidecar.
+
+Config file: ${CONFIG_PATH}
 `)
 }
 
 async function main() {
-  const { cmd, flags } = parseArgs(process.argv.slice(2))
+  const { cmd } = parseArgs(process.argv.slice(2))
 
   if (cmd === 'help' || cmd === '-h' || cmd === '--help') {
     printHelp(); return
-  }
-
-  if (cmd === 'install') {
-    const apiKey = (flags['api-key'] as string) || ''
-    if (!apiKey) { console.error('error: --api-key required'); process.exit(1) }
-    const hubUrl = (flags['hub-url'] as string) || undefined
-    const roots = parseRoots(flags['roots'] as string | undefined)
-    saveConfig({ apiKey, hubUrl, roots })
-    console.log(`[install] config saved to ${CONFIG_PATH}`)
-    const serviceUser = flags['service-user'] as string | undefined
-    const servicePassword = flags['service-password'] as string | undefined
-    try {
-      await installService({ apiKey, hubUrl, roots, serviceUser, servicePassword })
-    } catch (err: any) {
-      console.error(`[install] ${err.message}`)
-      console.error(`[install] You can still run the supervisor manually with: npx remo-code-supervisor run`)
-      process.exit(2)
-    }
-    return
-  }
-
-  if (cmd === 'uninstall') {
-    await uninstallService()
-    return
-  }
-
-  if (cmd === 'status') {
-    const s = await statusService().catch(() => 'unknown')
-    console.log(`service: ${s}`)
-    console.log(`config:  ${CONFIG_PATH}`)
-    return
   }
 
   if (cmd === 'scan') {
@@ -153,6 +122,8 @@ async function main() {
   }
 
   console.error(`unknown command: ${cmd}`)
+  console.error(`(note: install/uninstall/status were removed in v0.3.1 — the tray app at`)
+  console.error(`https://github.com/finedesignz/remo-code/releases/latest is now the sole installer)`)
   printHelp()
   process.exit(1)
 }

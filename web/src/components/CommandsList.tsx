@@ -45,8 +45,9 @@ export function CommandsList({ token }: Props) {
         {loading && <p className="text-xs text-[var(--text-muted)] mt-2">Loading...</p>}
         {!loading && rows.length === 0 && (
           <p className="text-xs text-[var(--text-muted)] mt-2">
-            No commands synced yet. Run <code className="text-emerald-300">remo-code-supervisor</code> on your machine
-            to sync built-ins, user commands, and plugins.
+            No commands synced yet. Install the Remo Code tray app
+            (<a href="https://github.com/finedesignz/remo-code/releases/latest" target="_blank" rel="noreferrer" className="text-indigo-300 hover:text-indigo-200 underline">download .msi</a>)
+            on your machine to sync built-ins, user commands, and plugins.
           </p>
         )}
       </div>

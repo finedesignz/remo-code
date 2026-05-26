@@ -7,7 +7,7 @@ Status as of 2026-05-22 ~12:20 PDT:
 | Spec | ✅ `docs/superpowers/specs/2026-05-22-supervisor-remote-control-design.md` |
 | Hub code | ✅ All routes, WS handlers, DB migration deployed to `app.remo-code.com` |
 | Web UI | ✅ `#/supervisor` route live (sidebar has a new icon — second from left in the footer) |
-| Supervisor npm package | ✅ Code on `main`; `publish-supervisor.yml` workflow triggered on push. Verify it published below. |
+| Supervisor distribution | ✅ Shipped as the Tauri tray app at `supervisor/tauri/`. The old `npx remo-code-supervisor install` / NSSM path was retired 2026-05-26 — see `supervisor/MIGRATION.md`. |
 | **GitHub App** | ❌ **Not registered yet — you must do this.** |
 | **Coolify env vars** | ❌ **Not set yet — you must do this.** |
 | **Supervisor installed on your PC** | ❌ **You must run install command.** |
@@ -16,19 +16,17 @@ The feature is gated behind these three steps. Until they're done, the UI will s
 
 ---
 
-## Step 1 — Verify the supervisor was published to npm
+## Step 1 — Verify the tray app release is published
 
-The `publish-supervisor.yml` workflow triggers on push and publishes via trusted publishing (OIDC). Check it succeeded:
+The supervisor is no longer published to npm. It ships as a Windows .msi via
+the Tauri tray app (`supervisor/tauri/`). Check the latest release at
+https://github.com/finedesignz/remo-code/releases/latest — the asset list
+should include a `Remo Code Supervisor_*.msi` and a `latest.json` (the
+in-app updater manifest).
 
-```powershell
-npm view remo-code-supervisor version
-```
-
-Expected: `0.1.0`. If you get a 404:
-
-- Look at https://github.com/finedesignz/remo-code/actions for the workflow run.
-- If trusted-publishing failed (new package), you may need to **pre-register the trusted publisher** at https://www.npmjs.com/package/remo-code-supervisor (it'll prompt you the first time). Re-run the failed workflow.
-- Or just publish manually once: `cd supervisor && npm publish --access public`.
+If the .msi is missing, the `release-supervisor.yml` workflow has not yet
+been run. Push a `supervisor-v<version>` tag to cut a release. See the
+workflow file for the exact tag pattern.
 
 ---
 
@@ -89,30 +87,24 @@ Redeploy the app. The "GitHub App not configured on hub" banner should disappear
 
 ## Step 5 — Install the supervisor on your Windows PC
 
-```powershell
-# 1. Make sure your API key is current; rotate if unsure:
-#    Visit https://app.remo-code.com/#/settings → API Key → Rotate Key
-
-# 2. Install the supervisor as a Windows Service:
-npx remo-code-supervisor install `
-  --api-key "olx_xxx_or_remokey_..." `
-  --roots "C:\Users\artic\GitHub" `
-  --service-user ".\artic" `
-  --service-password "<your Windows password>"
-```
+1. Make sure your API key is current; rotate if unsure:
+   Visit https://app.remo-code.com/#/settings → API Key → Rotate Key
+2. Download the latest **Remo Code Supervisor .msi** from
+   https://github.com/finedesignz/remo-code/releases/latest
+3. Run the installer. It deploys the tray app and starts it on the next
+   login (an autostart Run-key entry is set during install).
+4. On first launch, the tray app opens a Settings window. Paste the API key,
+   pick your repo roots, click Save. The tray icon turns green when the
+   supervisor sidecar is connected to the hub.
 
 Notes:
-- The `--service-user` / `--service-password` makes the service run as you, so `gh`, SSH keys, and `~/.config` work.
-- If you skip the user/password, the service runs as LocalSystem and `gh`/SSH won't work — strongly discouraged.
-- NSSM is required. The installer prints a message with a download link if it's not present at `%LOCALAPPDATA%\remo-code\nssm.exe`. Grab nssm-2.24, copy `win64/nssm.exe` to that path, then re-run install.
+- The tray app spawns the Bun supervisor as a managed sidecar, so `gh`, SSH
+  keys, and `~/.config` all work — it runs as your user, not LocalSystem.
+- No NSSM, no PowerShell-as-Admin, no `--service-user`/`--service-password`.
+- An in-app updater fetches signed updates from
+  `https://github.com/finedesignz/remo-code/releases/latest/download/latest.json`.
 
-Verify it's running:
-```powershell
-npx remo-code-supervisor status
-Get-Service RemoCodeSupervisor
-```
-
-Logs: `%LOCALAPPDATA%\remo-code\logs\stdout.log` and `stderr.log`.
+Logs: `%LOCALAPPDATA%\remo-code-supervisor\supervisor.log` (rotates at 5 MB).
 
 ---
 
@@ -132,7 +124,7 @@ If you want to clone a GitHub repo that's not local yet, switch the filter to `g
 
 - One inner Claude session per supervisor at a time (parallelism via Task tool inside Claude).
 - "Take over" of an existing VS Code Claude instance not implemented yet (you said v2).
-- macOS / Linux: supervisor runs in foreground mode (`npx remo-code-supervisor run`) but no service installer.
+- macOS / Linux: the tray app is Windows-only. On other OSes, run the supervisor runtime directly with `bun supervisor/src/index.ts run` from a checkout; no auto-start.
 - `git pull` from the Start dialog is best-effort — proper tokenized-URL pull from supervisor still needs the hub to send a one-shot URL; current build skips it with a log message. Easy follow-up.
 
 ---
@@ -141,8 +133,8 @@ If you want to clone a GitHub repo that's not local yet, switch the filter to `g
 
 | Symptom | Check |
 |---|---|
-| Supervisor doesn't appear in UI | `npx remo-code-supervisor status` — is the service running? `stderr.log` for connection errors. Verify API key is current. |
-| "Supervisor offline" 503 on Start | Service is down. Restart with `Restart-Service RemoCodeSupervisor`. |
+| Supervisor doesn't appear in UI | Open the tray app → check sidecar status; tail `%LOCALAPPDATA%\remo-code-supervisor\supervisor.log` for connection errors. Verify API key is current. |
+| "Supervisor offline" 503 on Start | Sidecar is down. Right-click tray icon → Restart, or quit and relaunch the tray app. |
 | GitHub repo list empty after install | Re-install the App to add specific repos. The hub re-fetches on each `/api/github/repos` hit (60s cache). |
 | "Claude not found" in stderr.log | `claude` CLI missing from the service user's PATH. Install Claude Code CLI for that user. |
 | Service crashed 5x in 10min → "Stopped" state | Circuit breaker tripped. Check the run's stderr tail in the UI runs drawer. Click Start again after fixing. |
