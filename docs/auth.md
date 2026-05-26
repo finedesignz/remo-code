@@ -67,7 +67,8 @@ All state-changing routes (`POST`/`PATCH`/`PUT`/`DELETE`) check **double-submit 
 - On any cookie-session request, the hub sets a `csrf_token` cookie (non-`HttpOnly`, `SameSite=Lax`) with a random 32-byte value.
 - The web client reads `csrf_token` from `document.cookie` and forwards it as `X-CSRF-Token: <value>` on every mutation.
 - The hub compares the header to the cookie using `crypto.timingSafeEqual`. Mismatch = 403.
-- Routes called only with the bearer-token legacy path skip the check (legacy clients never had it).
+- Routes called only with the bearer-token legacy path skip the check (legacy clients never had it). The web client always attaches `Authorization: Bearer <jwt>` whenever a legacy JWT is present in localStorage, even if a stale `csrf_token` cookie is also present — this guarantees `csrfGuard`'s Bearer-bypass fires for legacy-auth users who logged in via magic-link previously and still have the cookie around.
+- **Self-heal:** if a request carries a valid `__Host-remo_sid` cookie but no `csrf_token` cookie (drift state — csrf cookie cleared, expired, or never set), `csrfGuard` re-issues a fresh `csrf_token` in the response and allows the current request through. Safe because the session cookie's `SameSite=Lax` already blocks cross-site mutating requests, and the session token is verified against the DAL before self-heal triggers. Without this branch, the very next mutating call (e.g. `POST /api/account/coolify-webhook-secret/rotate`) would 403 with no in-app recovery short of logout+login.
 
 ### Re-auth (step-up) gate
 

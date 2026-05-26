@@ -98,10 +98,18 @@ export async function hubFetch<T = any>(
     finalHeaders['X-CSRF-Token'] = csrf
   }
 
-  // Soak-window fallback ONLY: if no csrf cookie present (i.e. user is still
-  // on a legacy bearer-token session) and a token was passed, attach it. Post
-  // cutover this branch is dead and `token` callers can pass null.
-  if (!csrf && token) {
+  // Soak-window: attach Authorization: Bearer whenever a legacy token is
+  // available AND it isn't the cookie-session sentinel. This must run
+  // INDEPENDENTLY of csrf-cookie presence — a legacy-JWT user can also have
+  // a stale `csrf_token` cookie hanging around (e.g. from a prior magic-link
+  // session that was later replaced by a bcrypt login). Without the Bearer
+  // header in that case, hub-side `csrfGuard` has no way to know this is a
+  // non-CSRF-eligible Bearer-authed request and falls back to double-submit
+  // enforcement, which fails because the stale `X-CSRF-Token` no longer
+  // matches the server cookie. PR #65 added the server-side Bearer bypass —
+  // this is the client-side half: always send the Bearer when we have a
+  // real legacy token so the bypass actually fires.
+  if (token && token !== 'cookie') {
     finalHeaders['Authorization'] = `Bearer ${token}`
   }
 

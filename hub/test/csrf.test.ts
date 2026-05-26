@@ -202,4 +202,32 @@ describe('csrfGuard middleware', () => {
     });
     expect(res.status).toBe(200);
   });
+
+  // Self-heal regression: a request that has a `__Host-remo_sid` session
+  // cookie but NO `csrf_token` cookie (the drift state that produced
+  // `csrf_failed` on POST /api/account/coolify-webhook-secret/rotate) must
+  // not 403 outright. The DAL lookup for the bogus token fails closed → we
+  // fall through to the normal 403. The positive self-heal (valid session
+  // token → re-issue + allow) is covered by the e2e test in
+  // hub/test/coolify-webhook-secret.test.ts when REMO_E2E_DB_URL is set.
+  test('POST with session cookie but BOGUS session token + no csrf → 403 (DB miss falls through)', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { cookie: `__Host-remo_sid=remo_bogus_token_will_not_resolve_in_DAL` },
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect((body as any).error).toBe('csrf_failed');
+  });
+
+  test('POST with session cookie + DB unavailable → does not crash, returns 403', async () => {
+    // The csrf middleware swallows DAL errors. With no DATABASE_URL test
+    // setup, the call throws inside verifyAuthSessionToken — must end as 403,
+    // never a 500.
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { cookie: `__Host-remo_sid=remo_anything` },
+    });
+    expect(res.status).toBe(403);
+  });
 });

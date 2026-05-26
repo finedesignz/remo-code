@@ -16,6 +16,7 @@ import type { Context, Next } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { config } from './config';
+import { readSessionCookie, verifyAuthSessionToken } from './session';
 
 export const CSRF_COOKIE_NAME = 'csrf_token';
 export const CSRF_HEADER_NAME = 'X-CSRF-Token';
@@ -135,6 +136,42 @@ export function csrfGuard() {
 
     const cookieValue = readCsrfCookie(c);
     const headerValue = c.req.header(CSRF_HEADER_NAME) || c.req.header(CSRF_HEADER_NAME.toLowerCase());
+
+    // Self-heal: cookie users can drift into a "valid `__Host-remo_sid` but
+    // no `csrf_token` cookie" state when the csrf cookie expires, is cleared
+    // by a privacy extension, or was never set (e.g. session created before
+    // the double-submit pattern was added, then survived across deploys via
+    // sliding-idle touch). Without this branch, the very next mutating call
+    // (e.g. POST /api/account/coolify-webhook-secret/rotate) fails 403 and
+    // there is NO client-side path to recover short of logout+login.
+    //
+    // This branch is safe to allow-through because:
+    //   1. The session cookie itself is `SameSite=Lax` — browsers do NOT
+    //      attach it on cross-site POST/PUT/PATCH/DELETE, so the CSRF
+    //      attacker can't even reach this code path with a valid session.
+    //   2. We verify the session token against the DAL row (idle/expiry/
+    //      user-exists checks all pass) before issuing — a forged/stale
+    //      session cookie never gets self-healed.
+    //   3. We re-issue a fresh `csrf_token` cookie in the same response so
+    //      subsequent requests use the normal double-submit path again.
+    if (!cookieValue) {
+      const sessionToken = readSessionCookie(c);
+      if (sessionToken) {
+        try {
+          const sessionCtx = await verifyAuthSessionToken(sessionToken);
+          if (sessionCtx) {
+            const fresh = issueCsrfToken(sessionToken);
+            setCsrfCookie(c, fresh);
+            return next();
+          }
+        } catch {
+          // DB unavailable or transient — fall through to normal 403.
+          // Self-heal is a best-effort recovery; never let it mask a real
+          // CSRF rejection or crash on infra issues.
+        }
+      }
+    }
+
     if (!verifyCsrfPair(cookieValue, headerValue ?? null)) {
       return c.json({ error: 'csrf_failed' }, 403);
     }
