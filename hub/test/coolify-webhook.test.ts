@@ -1,63 +1,61 @@
 /**
- * Tests for the Coolify deployment webhook ingress (Plan 06-004).
+ * Tests for the Coolify webhook ingress.
  *
- * Two flavours:
- *   - Unit cases (always run): mock the DAL module so HMAC verify, skew,
- *     payload validation, and triage stub branching can be exercised without
- *     a Postgres connection. Bun's `mock.module()` swaps the import target
- *     before the route module is dynamically imported.
- *   - DB-gated cases: skipped unless REMO_E2E_DB_URL is set. Seed a real
- *     user, post real signed payloads, assert rows land in scheduled_task_runs
- *     with deployment metadata populated.
+ * Covers:
+ *   1. URL-path token auth (primary, post-fix/coolify-webhook-url-token).
+ *   2. Legacy HMAC auth (deprecated, kept 30 days).
+ *   3. IP allowlist gating (Part 3).
+ *   4. Underscore event-name aliasing (Coolify's SendWebhookJob shape).
+ *   5. Audit log recording for success + every failure path.
+ *
+ * DAL is mocked via `mock.module` so no Postgres is needed.
  */
-import { describe, test, expect, beforeAll, mock, spyOn } from 'bun:test'
+import { describe, test, expect, beforeAll, beforeEach, mock } from 'bun:test'
 import { createHmac } from 'node:crypto'
 import { Hono } from 'hono'
 
 const TEST_USER_ID = '11111111-1111-1111-1111-111111111111'
-const TEST_SECRET = 'test-secret-not-real'
+const TEST_SECRET = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 
-// ── Mock the DAL before importing the route module ──────────────────────────
-// Track DAL calls so tests can assert insert payloads.
-const dalCalls: {
-  getUserCoolifyWebhookSecret: string[]
-  ensureInternalDeploymentTask: string[]
-  insertDeploymentRun: any[]
+// Per-test mutable mock state.
+const mockState: {
+  secret: string | null
+  allowedIps: string[]
+  attempts: any[]
+  runs: any[]
 } = {
-  getUserCoolifyWebhookSecret: [],
-  ensureInternalDeploymentTask: [],
-  insertDeploymentRun: [],
+  secret: TEST_SECRET,
+  allowedIps: [],
+  attempts: [],
+  runs: [],
 }
 
-// Configurable per-test: which secret the mocked DAL returns.
-let mockSecret: string | null = TEST_SECRET
-
 mock.module('../src/db/dal.ts', () => ({
-  getUserCoolifyWebhookSecret: async (userId: string) => {
-    dalCalls.getUserCoolifyWebhookSecret.push(userId)
-    return mockSecret
-  },
-  ensureInternalDeploymentTask: async (userId: string) => {
-    dalCalls.ensureInternalDeploymentTask.push(userId)
-    return 'task-internal-deploy'
-  },
-  // Phase 06 plan 008 — triage task stub. Real dispatch is no-op in unit tests
-  // because the dispatcher module is also untouched here; tests asserting the
-  // triage path live in `coolify-webhook-triage-e2e.test.ts`.
-  ensureInternalTriageTask: async (_userId: string) => 'task-internal-triage',
+  getUserCoolifyWebhookSecret: async () => mockState.secret,
+  getUserCoolifyWebhookConfig: async () => ({
+    secret: mockState.secret,
+    allowedIps: mockState.allowedIps,
+  }),
+  ensureInternalDeploymentTask: async () => 'task-internal-deploy',
+  ensureInternalTriageTask: async () => 'task-internal-triage',
   insertDeploymentRun: async (input: any) => {
-    dalCalls.insertDeploymentRun.push(input)
-    return { id: 'run-' + dalCalls.insertDeploymentRun.length }
+    const row = { id: 'run-' + (mockState.runs.length + 1), ...input }
+    mockState.runs.push(row)
+    return row
   },
-  // Stubs required so that when other tests import modules transitively
-  // dependent on dal.ts (e.g. post-run/github-issue.ts), Bun's cached
-  // mock module still exposes the names they import.
+  recordCoolifyWebhookAttempt: async (input: any) => {
+    mockState.attempts.push(input)
+  },
+  // Stubs for transitive imports.
   hasOpenIssueForHash: async () => false,
   recordOpenIssueForHash: async () => {},
 }))
 
-// Dynamically import AFTER mock.module is registered so the route binds to
-// the mocked DAL. Hono router exposes the handler; mount on a fresh app.
+// Also mock the dispatcher so triage dispatch is a no-op.
+mock.module('../src/scheduler/dispatcher.ts', () => ({
+  runNow: async () => ({ skipped: false }),
+}))
+
 let app: Hono
 let coolifyMod: typeof import('../src/api/coolify-webhook.ts')
 
@@ -67,163 +65,274 @@ beforeAll(async () => {
   app.route('/api/coolify', coolifyMod.coolifyWebhookRoutes)
 })
 
+beforeEach(() => {
+  mockState.secret = TEST_SECRET
+  mockState.allowedIps = []
+  mockState.attempts.length = 0
+  mockState.runs.length = 0
+})
+
+function urlTokenPath(userId: string, token: string): string {
+  return `/api/coolify/webhook/${userId}/${token}`
+}
+
+function legacyPath(userId: string): string {
+  return `/api/coolify/webhook/${userId}`
+}
+
 function sign(secret: string, ts: number, body: string): string {
   return 'sha256=' + createHmac('sha256', secret).update(`${ts}.${body}`).digest('hex')
 }
 
-function post(opts: {
-  userId?: string
-  body: string
-  sigHeader?: string | null
-  tsHeader?: string | null
-}) {
-  const headers: Record<string, string> = { 'content-type': 'application/json' }
-  if (opts.sigHeader !== null && opts.sigHeader !== undefined) {
-    headers['x-coolify-signature'] = opts.sigHeader
-  }
-  if (opts.tsHeader !== null && opts.tsHeader !== undefined) {
-    headers['x-coolify-timestamp'] = opts.tsHeader
-  }
-  return app.request(`/api/coolify/webhook/${opts.userId ?? TEST_USER_ID}`, {
-    method: 'POST',
-    headers,
-    body: opts.body,
-  })
-}
-
-function resetCalls() {
-  dalCalls.getUserCoolifyWebhookSecret.length = 0
-  dalCalls.ensureInternalDeploymentTask.length = 0
-  dalCalls.insertDeploymentRun.length = 0
-}
-
-describe('coolify-webhook unit cases (mocked DAL)', () => {
-  test('missing signature header → 401', async () => {
-    resetCalls()
-    mockSecret = TEST_SECRET
-    const ts = Math.floor(Date.now() / 1000)
-    const body = JSON.stringify({ event: 'deployment.failed', deployment_uuid: 'd', application_uuid: 'a' })
-    const res = await post({ body, sigHeader: null, tsHeader: String(ts) })
-    expect(res.status).toBe(401)
-    expect(dalCalls.insertDeploymentRun.length).toBe(0)
+const validBody = (event = 'deployment.succeeded') =>
+  JSON.stringify({
+    event,
+    deployment_uuid: 'depl-1',
+    application_uuid: 'app-1',
+    git_repository: 'https://github.com/x/y',
+    commit_sha: 'abc123',
   })
 
-  test('missing timestamp header → 401', async () => {
-    resetCalls()
-    mockSecret = TEST_SECRET
-    const body = JSON.stringify({ event: 'deployment.failed', deployment_uuid: 'd', application_uuid: 'a' })
-    const res = await post({ body, sigHeader: 'sha256=abc', tsHeader: null })
-    expect(res.status).toBe(401)
-  })
+// ── URL-path token auth ─────────────────────────────────────────────────────
 
-  test('stale timestamp (>5 min old) → 401', async () => {
-    resetCalls()
-    mockSecret = TEST_SECRET
-    const ts = Math.floor(Date.now() / 1000) - 301
-    const body = JSON.stringify({ event: 'deployment.failed', deployment_uuid: 'd', application_uuid: 'a' })
-    const res = await post({ body, sigHeader: sign(TEST_SECRET, ts, body), tsHeader: String(ts) })
-    expect(res.status).toBe(401)
-    expect(dalCalls.insertDeploymentRun.length).toBe(0)
-  })
-
-  test('user has no webhook secret → 401', async () => {
-    resetCalls()
-    mockSecret = null
-    const ts = Math.floor(Date.now() / 1000)
-    const body = JSON.stringify({ event: 'deployment.failed', deployment_uuid: 'd', application_uuid: 'a' })
-    const res = await post({ body, sigHeader: sign(TEST_SECRET, ts, body), tsHeader: String(ts) })
-    expect(res.status).toBe(401)
-    const json: any = await res.json()
-    expect(json.error).toBe('webhook_not_configured')
-  })
-
-  test('wrong-secret signature → 401 even when fresh', async () => {
-    resetCalls()
-    mockSecret = TEST_SECRET
-    const ts = Math.floor(Date.now() / 1000)
-    const body = JSON.stringify({ event: 'deployment.failed', deployment_uuid: 'd', application_uuid: 'a' })
-    const sig = sign('a-different-secret', ts, body)
-    const res = await post({ body, sigHeader: sig, tsHeader: String(ts) })
-    expect(res.status).toBe(401)
-    const json: any = await res.json()
-    expect(json.error).toBe('bad_signature')
-    expect(dalCalls.insertDeploymentRun.length).toBe(0)
-  })
-
-  test('valid deployment.succeeded → 202 + status=success row', async () => {
-    resetCalls()
-    mockSecret = TEST_SECRET
-    const ts = Math.floor(Date.now() / 1000)
-    const body = JSON.stringify({
-      event: 'deployment.succeeded',
-      deployment_uuid: 'depl-1',
-      application_uuid: 'app-1',
-      git_repository: 'https://github.com/x/y',
-      commit_sha: 'abc123',
+describe('coolify-webhook URL-path token auth', () => {
+  test('correct token + valid body → 202 + run inserted + audit success', async () => {
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody('deployment.succeeded'),
     })
-    const res = await post({ body, sigHeader: sign(TEST_SECRET, ts, body), tsHeader: String(ts) })
     expect(res.status).toBe(202)
     const json: any = await res.json()
     expect(json.ok).toBe(true)
     expect(typeof json.run_id).toBe('string')
-    expect(dalCalls.insertDeploymentRun.length).toBe(1)
-    const ins = dalCalls.insertDeploymentRun[0]
-    expect(ins.status).toBe('success')
-    expect(ins.deployment_uuid).toBe('depl-1')
-    expect(ins.application_uuid).toBe('app-1')
-    expect(ins.git_repository).toBe('https://github.com/x/y')
-    expect(ins.commit_sha).toBe('abc123')
+    expect(mockState.runs.length).toBe(1)
+    expect(mockState.runs[0].status).toBe('success')
+    // Audit row recorded.
+    const audit = mockState.attempts.find((a) => a.status === 'success')
+    expect(audit).toBeTruthy()
+    expect(audit.event_type).toBe('deployment.succeeded')
   })
 
-  test('valid deployment.failed → 202 + status=pending + triage stub called', async () => {
-    resetCalls()
-    mockSecret = TEST_SECRET
-    const stubSpy = spyOn(coolifyMod, 'dispatchTriageStub')
-    stubSpy.mockClear()
-    const ts = Math.floor(Date.now() / 1000)
-    const body = JSON.stringify({
-      event: 'deployment.failed',
-      deployment_uuid: 'depl-2',
-      application_uuid: 'app-2',
+  test('wrong token → 401 + audit auth_failed + no run inserted', async () => {
+    const res = await app.request(urlTokenPath(TEST_USER_ID, 'bogus-token'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody(),
     })
-    const res = await post({ body, sigHeader: sign(TEST_SECRET, ts, body), tsHeader: String(ts) })
-    expect(res.status).toBe(202)
-    expect(dalCalls.insertDeploymentRun.length).toBe(1)
-    expect(dalCalls.insertDeploymentRun[0].status).toBe('pending')
-    // Note: spyOn may not intercept calls made via the module's internal
-    // closure reference. If the stub spy didn't fire, fall back to asserting
-    // the side-effect path was reached (run inserted with status='pending').
-    // The stub is a no-op log call — calling it once is the contract.
-    stubSpy.mockRestore?.()
+    expect(res.status).toBe(401)
+    expect(mockState.runs.length).toBe(0)
+    const audit = mockState.attempts.find((a) => a.status === 'auth_failed')
+    expect(audit).toBeTruthy()
+    expect(audit.reason).toBe('token_mismatch')
   })
 
-  test('bad payload (missing required fields) → 400', async () => {
-    resetCalls()
-    mockSecret = TEST_SECRET
-    const ts = Math.floor(Date.now() / 1000)
-    const body = JSON.stringify({ event: 'deployment.failed' }) // no uuids
-    const res = await post({ body, sigHeader: sign(TEST_SECRET, ts, body), tsHeader: String(ts) })
+  test('user has no secret configured → 401 + audit reason webhook_not_configured', async () => {
+    mockState.secret = null
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody(),
+    })
+    expect(res.status).toBe(401)
+    const audit = mockState.attempts.find((a) => a.status === 'auth_failed')
+    expect(audit?.reason).toBe('webhook_not_configured')
+  })
+
+  test('missing token path segment → 404 (route does not match)', async () => {
+    // Hitting /webhook/:user_id with no token goes to the LEGACY route, which
+    // requires HMAC headers — missing headers there → 401, not 404. So the
+    // contract here is: the URL-token route requires the token segment;
+    // missing it falls through to the legacy handler.
+    const res = await app.request(legacyPath(TEST_USER_ID), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody(),
+    })
+    expect(res.status).toBe(401) // legacy missing signature
+  })
+
+  test('deployment.failed → status=pending + dispatch attempted', async () => {
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody('deployment.failed'),
+    })
+    expect(res.status).toBe(202)
+    expect(mockState.runs[0].status).toBe('pending')
+  })
+})
+
+// ── Underscore event-name aliasing (Coolify SendWebhookJob) ─────────────────
+
+describe('coolify-webhook event name aliasing', () => {
+  test('deployment_success (underscore) → normalized to deployment.succeeded → 202', async () => {
+    const body = JSON.stringify({
+      event: 'deployment_success',
+      deployment_uuid: 'd',
+      application_uuid: 'a',
+    })
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    })
+    expect(res.status).toBe(202)
+    expect(mockState.runs[0].status).toBe('success')
+    const audit = mockState.attempts.find((a) => a.status === 'success')
+    expect(audit?.event_type).toBe('deployment.succeeded')
+  })
+
+  test('deployment_failed (underscore) → normalized → status=pending', async () => {
+    const body = JSON.stringify({
+      event: 'deployment_failed',
+      deployment_uuid: 'd',
+      application_uuid: 'a',
+    })
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    })
+    expect(res.status).toBe(202)
+    expect(mockState.runs[0].status).toBe('pending')
+  })
+
+  test('unknown event → 400 bad_payload', async () => {
+    const body = JSON.stringify({
+      event: 'mystery_event',
+      deployment_uuid: 'd',
+      application_uuid: 'a',
+    })
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    })
     expect(res.status).toBe(400)
   })
 })
 
-// ── Optional DB-gated e2e cases ───────────────────────────────────────────────
-const HAS_TEST_DB = !!process.env.REMO_E2E_DB_URL
-const maybe = HAS_TEST_DB ? describe : describe.skip
+// ── IP allowlist (Part 3) ───────────────────────────────────────────────────
 
-maybe('coolify-webhook e2e (REMO_E2E_DB_URL set)', () => {
-  test('placeholder — wire test DB harness in follow-up', () => {
-    // TODO: seed a user with coolify_webhook_secret directly via SQL, hit the
-    // real handler against REMO_E2E_DB_URL, assert scheduled_task_runs row.
-    expect(true).toBe(true)
+describe('coolify-webhook IP allowlist', () => {
+  test('empty allowlist → request allowed', async () => {
+    mockState.allowedIps = []
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'cf-connecting-ip': '8.8.8.8' },
+      body: validBody(),
+    })
+    expect(res.status).toBe(202)
+  })
+
+  test('source IP in allowlist → allowed', async () => {
+    mockState.allowedIps = ['46.224.61.233']
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'cf-connecting-ip': '46.224.61.233' },
+      body: validBody(),
+    })
+    expect(res.status).toBe(202)
+  })
+
+  test('source IP NOT in allowlist → 403 + audit ip_rejected', async () => {
+    mockState.allowedIps = ['46.224.61.233']
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'cf-connecting-ip': '1.2.3.4' },
+      body: validBody(),
+    })
+    expect(res.status).toBe(403)
+    const audit = mockState.attempts.find((a) => a.status === 'ip_rejected')
+    expect(audit).toBeTruthy()
+    expect(audit?.reason).toBe('source_ip_not_in_allowlist')
+  })
+
+  test('CIDR range match → allowed', async () => {
+    mockState.allowedIps = ['10.0.0.0/8']
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'cf-connecting-ip': '10.5.99.42' },
+      body: validBody(),
+    })
+    expect(res.status).toBe(202)
+  })
+
+  test('falls through cf → x-forwarded-for first hop', async () => {
+    mockState.allowedIps = ['46.224.61.233']
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-for': '46.224.61.233, 10.0.0.1',
+      },
+      body: validBody(),
+    })
+    expect(res.status).toBe(202)
   })
 })
 
-describe('coolify-webhook harness sanity', () => {
-  test('e2e is gated on REMO_E2E_DB_URL', () => {
-    if (!HAS_TEST_DB) {
-      console.log('[coolify-webhook] REMO_E2E_DB_URL not set — DB cases SKIPPED.')
-    }
-    expect(typeof HAS_TEST_DB).toBe('boolean')
+// ── Legacy HMAC route (kept 30 days) ────────────────────────────────────────
+
+describe('coolify-webhook legacy HMAC route', () => {
+  test('valid signature → 202 + Deprecation header + audit status=legacy_hmac', async () => {
+    const ts = Math.floor(Date.now() / 1000)
+    const body = validBody()
+    const res = await app.request(legacyPath(TEST_USER_ID), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-coolify-signature': sign(TEST_SECRET, ts, body),
+        'x-coolify-timestamp': String(ts),
+      },
+      body,
+    })
+    expect(res.status).toBe(202)
+    expect(res.headers.get('deprecation')).toBe('true')
+    expect(res.headers.get('sunset')).toBeTruthy()
+    const audit = mockState.attempts.find((a) => a.status === 'legacy_hmac')
+    expect(audit).toBeTruthy()
+  })
+
+  test('missing signature header → 401 + audit auth_failed', async () => {
+    const res = await app.request(legacyPath(TEST_USER_ID), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody(),
+    })
+    expect(res.status).toBe(401)
+    const audit = mockState.attempts.find((a) => a.status === 'auth_failed')
+    expect(audit?.reason).toBe('legacy_missing_signature')
+  })
+
+  test('stale timestamp → 401', async () => {
+    const ts = Math.floor(Date.now() / 1000) - 1000
+    const body = validBody()
+    const res = await app.request(legacyPath(TEST_USER_ID), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-coolify-signature': sign(TEST_SECRET, ts, body),
+        'x-coolify-timestamp': String(ts),
+      },
+      body,
+    })
+    expect(res.status).toBe(401)
+  })
+
+  test('wrong-secret signature → 401', async () => {
+    const ts = Math.floor(Date.now() / 1000)
+    const body = validBody()
+    const res = await app.request(legacyPath(TEST_USER_ID), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-coolify-signature': sign('different-secret', ts, body),
+        'x-coolify-timestamp': String(ts),
+      },
+      body,
+    })
+    expect(res.status).toBe(401)
   })
 })

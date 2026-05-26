@@ -357,6 +357,126 @@ export async function getUserCoolifyWebhookSecret(userId: string): Promise<strin
 }
 
 /**
+ * fix/coolify-webhook-url-token (Part 3): unified per-user webhook config.
+ * Returns secret + parsed allowlist in a single round-trip. Allowlist is
+ * NULL or empty CSV → returned as []. Parse errors on stored data → [].
+ */
+export async function getUserCoolifyWebhookConfig(
+  userId: string,
+): Promise<{ secret: string | null; allowedIps: string[] }> {
+  const rows = await sql<{ coolify_webhook_secret: string | null; coolify_webhook_allowed_ips: string | null }[]>`
+    SELECT coolify_webhook_secret, coolify_webhook_allowed_ips
+      FROM users WHERE id = ${userId}
+  `;
+  if (!rows[0]) return { secret: null, allowedIps: [] };
+  const csv = rows[0].coolify_webhook_allowed_ips;
+  let allowedIps: string[] = [];
+  if (csv && csv.trim()) {
+    // Defensive: stored data is already validated on write, but parse safely.
+    try {
+      const { parseAllowlist } = await import('../lib/cidr.ts');
+      allowedIps = parseAllowlist(csv);
+    } catch {
+      allowedIps = [];
+    }
+  }
+  return { secret: rows[0].coolify_webhook_secret, allowedIps };
+}
+
+export async function getUserCoolifyWebhookAllowedIps(userId: string): Promise<string> {
+  const rows = await sql<{ coolify_webhook_allowed_ips: string | null }[]>`
+    SELECT coolify_webhook_allowed_ips FROM users WHERE id = ${userId}
+  `;
+  return rows[0]?.coolify_webhook_allowed_ips ?? '';
+}
+
+/**
+ * Validates + persists the allowlist. Empty string clears the column (NULL).
+ * Throws Error('invalid_cidr_entry: <entry>') on any bad input.
+ * Returns the cleaned CSV that was actually saved.
+ */
+export async function setUserCoolifyWebhookAllowedIps(
+  userId: string,
+  raw: string,
+): Promise<string> {
+  const { parseAllowlist } = await import('../lib/cidr.ts');
+  const entries = raw && raw.trim() ? parseAllowlist(raw) : [];
+  const csv = entries.length ? entries.join(',') : null;
+  await sql`UPDATE users SET coolify_webhook_allowed_ips = ${csv}, updated_at = now() WHERE id = ${userId}`;
+  return csv ?? '';
+}
+
+// ── fix/coolify-webhook-url-token (Part 2): webhook attempt audit log ────────
+
+export type CoolifyAttemptStatus =
+  | 'success'
+  | 'auth_failed'
+  | 'ip_rejected'
+  | 'bad_payload'
+  | 'rate_limited'
+  | 'legacy_hmac';
+
+export interface CoolifyAttemptInput {
+  user_id: string;
+  source_ip: string | null;
+  event_type: string | null;
+  status: CoolifyAttemptStatus;
+  reason: string | null;
+  raw_body_preview: string | null;
+}
+
+export interface CoolifyAttemptRow {
+  id: string;
+  received_at: string;
+  source_ip: string | null;
+  event_type: string | null;
+  status: string;
+  reason: string | null;
+}
+
+/**
+ * Insert one attempt row, then trim the user's history back to the 100 most
+ * recent rows. Both ops run independently; failure of the trim never
+ * blocks the insert response.
+ */
+export async function recordCoolifyWebhookAttempt(input: CoolifyAttemptInput): Promise<void> {
+  const preview = input.raw_body_preview ? input.raw_body_preview.slice(0, 500) : null;
+  await sql`
+    INSERT INTO coolify_webhook_attempts
+      (user_id, source_ip, event_type, status, reason, raw_body_preview)
+    VALUES
+      (${input.user_id}, ${input.source_ip}, ${input.event_type}, ${input.status}, ${input.reason}, ${preview})
+  `;
+  // Trim — keep last 100.
+  try {
+    await sql`
+      DELETE FROM coolify_webhook_attempts
+       WHERE user_id = ${input.user_id}
+         AND id IN (
+           SELECT id FROM coolify_webhook_attempts
+            WHERE user_id = ${input.user_id}
+            ORDER BY received_at DESC
+            OFFSET 100
+         )
+    `;
+  } catch (err: any) {
+    console.warn('[coolify-webhook] attempts trim failed:', err?.message);
+  }
+}
+
+export async function listCoolifyWebhookAttempts(userId: string, limit: number): Promise<CoolifyAttemptRow[]> {
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+  const rows = await sql<CoolifyAttemptRow[]>`
+    SELECT id, received_at, source_ip, event_type, status, reason
+      FROM coolify_webhook_attempts
+     WHERE user_id = ${userId}
+     ORDER BY received_at DESC
+     LIMIT ${safeLimit}
+  `;
+  return rows;
+}
+
+/**
  * Lazily find-or-create the per-user internal scheduled_tasks anchor used for
  * deployment-event runs. `scheduled_task_runs.task_id` is NOT NULL, so every
  * webhook-derived run needs a parent task. We allocate exactly one of these

@@ -221,8 +221,9 @@ Absorbs the standalone `coolify-ai-monitor` Express service (port 3032, now reti
 
 **File map (shipped on this branch):**
 
-- `hub/src/api/coolify-webhook.ts` — public `POST /api/coolify/webhook/:user_id`; reads raw body BEFORE JSON parse, HMAC-verifies, persists deployment metadata, stubs triage dispatch.
-- `hub/src/api/account.ts` — `POST /api/account/coolify-webhook-secret/rotate` + `GET .../coolify-webhook-secret` (JWT-authed status).
+- `hub/src/api/coolify-webhook.ts` — public ingress with TWO routes: primary `POST /api/coolify/webhook/:user_id/:token` (URL-path token, constant-time compare — matches Coolify's URL-only webhook UI) and legacy `POST /api/coolify/webhook/:user_id` (HMAC headers, deprecated 30-day grace, returns `Deprecation: true` + `Sunset:`). Both flow through a shared `handleAuthenticated` pipeline: optional IP allowlist (`users.coolify_webhook_allowed_ips`) → Zod validate (event-name `EVENT_ALIAS` normalizes `deployment_success`/`deployment_failed` underscore forms emitted by Coolify's `SendWebhookJob` to the dotted internal canonical) → persist run → triage on failure → audit row in `coolify_webhook_attempts` (every hit, capped 100/user). CIDR helper at `hub/src/lib/cidr.ts`.
+- `hub/src/api/account.ts` — `POST /api/account/coolify-webhook-secret/rotate` + `GET .../coolify-webhook-secret` (returns full URL with token embedded), `GET .../coolify-webhook-attempts?limit=10` (audit log), `GET`/`PUT .../coolify-webhook-allowed-ips`.
+- `hub/src/lib/cidr.ts` — zero-dep IPv4/IPv6 + CIDR allowlist helper. `parseAllowlist`, `ipAllowed`, `sourceIpFromHeaders` (cf-connecting-ip → x-real-ip → first x-forwarded-for hop).
 - `hub/src/scheduler/triage-schema.ts` — `TriageResult` Zod schema + `parseTriageOutput` (tolerates ```json fences, rejects bare prose).
 - `hub/src/scheduler/triage-prompt.ts` — `renderTriagePrompt` template for `task_kind: 'triage'` runs.
 - `hub/src/scheduler/post-run/schema.ts` — `github_issue` variant added to the discriminated union.

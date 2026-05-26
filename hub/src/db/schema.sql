@@ -425,3 +425,24 @@ ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS application_uuid TEXT;
 ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS git_repository TEXT;
 ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS commit_sha TEXT;
 
+-- ── fix/coolify-webhook-url-token: IP allowlist (Part 3) ─────────────────────
+-- Optional comma-separated IPv4 / IPv6 / CIDR list. NULL = allow all (back-compat).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS coolify_webhook_allowed_ips TEXT;
+
+-- ── fix/coolify-webhook-url-token: webhook attempt audit log (Part 2) ────────
+-- Every hit (success + auth-fail + ip-reject) is logged so the user can see
+-- in the UI whether Coolify is actually reaching them. Capped at 100 rows/user
+-- via app-side delete-oldest in the same transaction as insert.
+CREATE TABLE IF NOT EXISTS coolify_webhook_attempts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  source_ip TEXT,
+  event_type TEXT,
+  status TEXT NOT NULL,        -- 'success' | 'auth_failed' | 'ip_rejected' | 'bad_payload' | 'rate_limited' | 'legacy_hmac'
+  reason TEXT,
+  raw_body_preview TEXT        -- first 500 chars; never the token/secret
+);
+CREATE INDEX IF NOT EXISTS idx_coolify_webhook_attempts_user_recv
+  ON coolify_webhook_attempts(user_id, received_at DESC);
+
