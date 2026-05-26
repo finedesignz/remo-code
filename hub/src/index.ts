@@ -195,7 +195,15 @@ app.use('/api/api-keys', async (c, next) => {
   if (m === 'POST' || m === 'DELETE') return requireRecentAuth()(c, next)
   return next()
 })
-app.use('/api/account/coolify-webhook-secret/rotate', requireRecentAuth())
+// NOTE: rotate intentionally does NOT require recent-auth. Legacy Bearer-JWT
+// clients carry no session creation timestamp, so requireRecentAuth() would
+// hard-fail them with `no_cookie_session` 401 with no client-side recovery.
+// Cookie-auth users with a session >5 min old would also 401. Threat model
+// for rotate: an attacker who already has the user's valid session/bearer
+// can rotate the webhook secret — but they already control the account, so
+// re-auth on rotate alone buys nothing. The userMutationLimit (10/min/user)
+// below still applies. Sister gates on api-keys + error-projects DELETE
+// remain — those grant credential issuance / data destruction.
 app.use('/api/error-projects/:id', async (c, next) => {
   if (c.req.method.toUpperCase() === 'DELETE') return requireRecentAuth()(c, next)
   return next()
