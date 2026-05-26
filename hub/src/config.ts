@@ -3,11 +3,11 @@
 // New env vars validated at module-load (matches jwt.ts pattern). Boot fails
 // fast with a clear error naming the missing/invalid var.
 //
-// Optional vars (TITANIUM_*): the entire titanium config block is OPTIONAL
-// today. The hub stays bootable without it for the duration of Plan A — only
-// when titanium-client is actually used (Plan C+) does the absence of these
-// vars surface as a clear runtime error. Validation here ONLY fires when the
-// var IS set (e.g. an invalid URL is rejected even if titanium is otherwise
+// Optional vars (TITANIUM_KEYGEN_*): the entire titanium config block is
+// OPTIONAL today. The hub stays bootable without it for the duration of Plan A.
+// Only when titanium-client is actually used (Plan C+) does the absence of
+// these vars surface as a clear runtime error. Validation here ONLY fires when
+// the var IS set (e.g. an invalid URL is rejected even if titanium is otherwise
 // off). This mirrors the OPENAI_API_KEY pattern already in the file.
 
 function parseBool(v: string | undefined, dflt: boolean): boolean {
@@ -48,10 +48,17 @@ const titaniumLicenseCacheTtlSeconds = parsePositiveInt(
   process.env.TITANIUM_LICENSE_CACHE_TTL_SECONDS,
   300,
 );
+const titaniumAccountId = process.env.TITANIUM_KEYGEN_ACCOUNT_ID || process.env.TITANIUM_ACCOUNT_ID || "";
+const titaniumProductId = process.env.TITANIUM_KEYGEN_PRODUCT_ID || process.env.TITANIUM_PRODUCT_ID || "";
+const titaniumPortalToken = process.env.TITANIUM_KEYGEN_PORTAL_TOKEN || process.env.TITANIUM_PORTAL_TOKEN || "";
+const titaniumAdminToken =
+  process.env.TITANIUM_KEYGEN_ADMIN_TOKEN ||
+  process.env.TITANIUM_ADMIN_TOKEN ||
+  titaniumPortalToken;
 const magicLinkSecret = requireMinLenIfSet("MAGIC_LINK_SECRET", process.env.MAGIC_LINK_SECRET, 32);
 const sessionSecret = requireMinLenIfSet("SESSION_SECRET", process.env.SESSION_SECRET, 32);
 const allowLegacyLogin = parseBool(process.env.ALLOW_LEGACY_LOGIN, true);
-// Optional Titanium → hub webhook for license-state changes. Inert (route
+// Optional Titanium -> hub webhook for license-state changes. Inert (route
 // returns 503) until Titanium ships the webhook and the secret is provisioned.
 const titaniumWebhookSecret = requireMinLenIfSet(
   "TITANIUM_WEBHOOK_SECRET",
@@ -73,12 +80,13 @@ export const config = {
   // verifyLicenseJwt) must assert non-empty themselves and emit a clear error.
   titanium: {
     keygenApiUrl: titaniumKeygenApiUrl,
-    accountId: process.env.TITANIUM_ACCOUNT_ID || "",
-    productId: process.env.TITANIUM_PRODUCT_ID || "",
-    portalToken: process.env.TITANIUM_PORTAL_TOKEN || "",
-    // ADMIN_TOKEN is script-time only (migration job). Runtime callers MUST
-    // NOT depend on it. See 07-CONTEXT.md §specifics.
-    adminToken: process.env.TITANIUM_ADMIN_TOKEN || "",
+    accountId: titaniumAccountId,
+    productId: titaniumProductId,
+    portalToken: titaniumPortalToken,
+    // Admin token is script-time only (migration job). Runtime callers MUST
+    // NOT depend on it. The portal token is accepted as a fallback because the
+    // migration runbook provisions TITANIUM_KEYGEN_PORTAL_TOKEN with admin scope.
+    adminToken: titaniumAdminToken,
     redisUrl: process.env.TITANIUM_REDIS_URL || "",
     licenseCacheTtlSeconds: titaniumLicenseCacheTtlSeconds,
   },

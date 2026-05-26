@@ -168,6 +168,9 @@ The one-shot script `hub/scripts/migrate-users-to-titanium.ts` (Plan E) backfill
 
 ### Pre-flight
 
+- Runtime env uses the canonical Keygen-prefixed names:
+  `TITANIUM_KEYGEN_API_URL`, `TITANIUM_KEYGEN_ACCOUNT_ID`,
+  `TITANIUM_KEYGEN_PRODUCT_ID`, and `TITANIUM_KEYGEN_PORTAL_TOKEN`.
 - Have `TITANIUM_KEYGEN_PORTAL_TOKEN` (admin scope) in the shell env, NOT in `.env`.
 - Have a fresh `pg_dump` of the prod DB.
 - Coolify env: confirm `ALLOW_LEGACY_LOGIN=true` and the Titanium env vars are set.

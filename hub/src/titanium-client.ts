@@ -10,7 +10,7 @@
  *     via jose's `createRemoteJWKSet` (in-memory cache + single-flight +
  *     refetch on `kid` miss). Warmed during hub bootstrap BEFORE port bind.
  *   - Claims pinned: `iss == TITANIUM_KEYGEN_API_URL`, `aud` includes
- *     `TITANIUM_PRODUCT_ID`, `exp/nbf/iat` (±30s skew).
+ *     `TITANIUM_KEYGEN_PRODUCT_ID`, `exp/nbf/iat` (±30s skew).
  *   - Revocation: Redis SISMEMBER on `titanium:blocklist` — checked on every
  *     verify. Real-time. No cache.
  *
@@ -102,7 +102,7 @@ function assertTitaniumConfigured(): void {
   if (!config.titanium.keygenApiUrl || !config.titanium.accountId || !config.titanium.productId) {
     throw new TitaniumVerifyError(
       'config',
-      'Titanium config missing: TITANIUM_KEYGEN_API_URL, TITANIUM_ACCOUNT_ID, TITANIUM_PRODUCT_ID required',
+      'Titanium config missing: TITANIUM_KEYGEN_API_URL, TITANIUM_KEYGEN_ACCOUNT_ID, TITANIUM_KEYGEN_PRODUCT_ID required',
     )
   }
 }

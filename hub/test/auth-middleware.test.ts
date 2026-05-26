@@ -5,8 +5,8 @@ process.env.MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || 'magic-link-sec
 // Pre-set TITANIUM_* envs so a later-loaded titanium-client test in the same
 // bun process sees a configured config (config.ts captures env at module-load).
 process.env.TITANIUM_KEYGEN_API_URL = process.env.TITANIUM_KEYGEN_API_URL || 'https://keygen.titaniumlabs.us';
-process.env.TITANIUM_ACCOUNT_ID = process.env.TITANIUM_ACCOUNT_ID || 'acct_test_0000000000';
-process.env.TITANIUM_PRODUCT_ID = process.env.TITANIUM_PRODUCT_ID || 'prod_test_remo';
+process.env.TITANIUM_KEYGEN_ACCOUNT_ID = process.env.TITANIUM_KEYGEN_ACCOUNT_ID || 'acct_test_0000000000';
+process.env.TITANIUM_KEYGEN_PRODUCT_ID = process.env.TITANIUM_KEYGEN_PRODUCT_ID || 'prod_test_remo';
 
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
 import { Hono } from 'hono';
