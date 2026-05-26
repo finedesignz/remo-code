@@ -1,0 +1,60 @@
+name: release-supervisor
+
+# Cuts a GitHub Release for the Remo Code Supervisor (Tauri 2) app when a tag
+# matching `supervisor-v*.*.*` is pushed. Builds the MSI, signs it with the
+# Tauri updater private key, and uploads both the MSI and the signed
+# `latest.json` manifest the in-app updater fetches.
+
+on:
+  push:
+    tags:
+      - 'supervisor-v*.*.*'
+
+permissions:
+  contents: write   # tauri-action creates a GitHub Release
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: supervisor/tauri/src-tauri
+
+      - name: Install UI deps
+        working-directory: supervisor/tauri/ui
+        run: bun install
+
+      - name: Build UI
+        working-directory: supervisor/tauri/ui
+        run: bun run build
+
+      - name: Build, sign, and release with tauri-action
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: supervisor/tauri
+          tagName: supervisor-v__VERSION__
+          releaseName: 'Supervisor v__VERSION__'
+          releaseBody: 'See the assets to download and install. The Windows MSI auto-updates existing installs via the in-app updater.'
+          releaseDraft: false
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc

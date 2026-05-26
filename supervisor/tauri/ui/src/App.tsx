@@ -2,10 +2,12 @@ import { NavLink, Route, Routes } from "react-router-dom";
 import GeneralPage from "./pages/GeneralPage";
 import FoldersPage from "./pages/FoldersPage";
 import SecurityPage from "./pages/SecurityPage";
+import UpdateNotifier from "./UpdateNotifier";
 
 export default function App() {
   return (
     <div className="h-full flex bg-[var(--bg-primary)] text-[var(--text-primary)]">
+      <UpdateNotifier />
       <aside className="w-48 shrink-0 p-4 space-y-1 bg-[var(--bg-secondary)]/40">
         <div className="px-3 pb-3 text-xs uppercase tracking-wide text-[var(--text-muted)]">
           Supervisor

@@ -40,7 +40,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://example.invalid/updates/{{target}}/{{current_version}}"
+        "https://github.com/finedesignz/remo-code/releases/latest/download/latest.json"
       ],
       "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBKEY"
     }
