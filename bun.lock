@@ -34,13 +34,6 @@
         "@types/jsonwebtoken": "^9.0.10",
       },
     },
-    "supervisor": {
-      "name": "remo-code-supervisor",
-      "version": "0.3.1",
-      "bin": {
-        "remo-code-supervisor": "src/index.ts",
-      },
-    },
     "web": {
       "name": "remo-code-web",
       "version": "0.0.1",
@@ -660,8 +653,6 @@
     "remark-stringify": ["remark-stringify@11.0.0", "", { "dependencies": { "@types/mdast": "^4.0.0", "mdast-util-to-markdown": "^2.0.0", "unified": "^11.0.0" } }, "sha512-1OSmLd3awB/t8qdoEOMazZkNsfVTeY4fTsgzcQFdXNq8ToTN4ZGwrMnlda4K6smTFKD+GRV6O48i6Z4iKgPPpw=="],
 
     "remo-code-hub": ["remo-code-hub@workspace:hub"],
-
-    "remo-code-supervisor": ["remo-code-supervisor@workspace:supervisor"],
 
     "remo-code-web": ["remo-code-web@workspace:web"],
 
