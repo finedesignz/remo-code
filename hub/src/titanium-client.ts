@@ -53,6 +53,13 @@ export interface KeygenUser {
   id: string
   email: string
   metadata?: Record<string, unknown>
+  /**
+   * Whether the email is verified inside Keygen. Optional — Keygen CE returns
+   * this as `emailVerified` (camelCase) in user `attributes`; older snapshots
+   * use `email_verified`. Migration script (Plan E) uses this to gate the
+   * pending-verify branch per CONTEXT email-collision policy.
+   */
+  emailVerified?: boolean | null
 }
 
 export type ErrorKind =
@@ -322,7 +329,14 @@ export const keygenAdmin = {
     const data = body?.data
     if (!Array.isArray(data) || data.length === 0) return null
     const u = data[0]
-    return { id: u.id, email: u.attributes?.email ?? email, metadata: u.attributes?.metadata }
+    const attrs = u.attributes ?? {}
+    const emailVerified =
+      typeof attrs.emailVerified === 'boolean'
+        ? attrs.emailVerified
+        : typeof attrs.email_verified === 'boolean'
+        ? attrs.email_verified
+        : null
+    return { id: u.id, email: attrs.email ?? email, metadata: attrs.metadata, emailVerified }
   },
 
   async createUser(input: { email: string; metadata?: Record<string, unknown> }): Promise<KeygenUser> {
