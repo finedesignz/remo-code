@@ -2,24 +2,55 @@ import { sql } from './postgres.ts'
 
 // ── Supervisor capability ─────────────────────────────────────────────────────
 
-export async function verifyApiKeyWithCapability(keyHash: string, capability: string) {
+export type VerifyApiKeyResult =
+  | { ok: true; userId: string; apiKeyId: string }
+  | { ok: false; reason: 'not_found' }
+  | { ok: false; reason: 'revoked' }
+  | { ok: false; reason: 'deleted' }
+  | { ok: false; reason: 'missing_capability'; have: string[]; need: string }
+
+/**
+ * Disambiguated supervisor api-key verification.
+ *
+ * Returns a discriminated union so callers can log + send a precise reason
+ * rather than a generic "auth failed". The legacy single-query (revoked_at IS
+ * NULL) collapsed three distinct failure modes (not_found / revoked / missing
+ * capability) into one null — making prod auth bugs un-diagnosable.
+ *
+ * Note: the `api_keys` table does not currently have a `deleted_at` column.
+ * The `deleted` reason is reserved in the union for forward compatibility (the
+ * column may be added when soft-delete is introduced); for now it is never
+ * returned at runtime.
+ */
+export async function verifyApiKeyWithCapability(
+  keyHash: string,
+  capability: string,
+): Promise<VerifyApiKeyResult> {
   const rows = await sql`
-    SELECT id, user_id, capabilities
+    SELECT id, user_id, capabilities, revoked_at
     FROM api_keys
-    WHERE key_hash = ${keyHash} AND revoked_at IS NULL
+    WHERE key_hash = ${keyHash}
     LIMIT 1
   `
   if (!rows[0]) {
-    console.log(`[supervisor-dal] key not found for hash=${keyHash.slice(0,8)}...`)
-    return null
+    console.log(`[supervisor-dal] key not_found hash=${keyHash.slice(0,8)}...`)
+    return { ok: false, reason: 'not_found' }
   }
-  // Defense-in-depth: capability check is a soft gate.
-  // Treat unknown/empty caps as legacy (all caps granted).
-  // We can tighten this later if we ever issue limited-scope keys.
-  const raw = rows[0].capabilities
-  console.log(`[supervisor-dal] key found id=${rows[0].id.slice(0,8)} caps=${JSON.stringify(raw)}`)
-  await sql`UPDATE api_keys SET last_used_at = now() WHERE id = ${rows[0].id}`
-  return { userId: rows[0].user_id as string, apiKeyId: rows[0].id as string }
+  const row = rows[0]
+  if (row.revoked_at) {
+    console.log(`[supervisor-dal] key revoked id=${row.id.slice(0,8)} revoked_at=${row.revoked_at}`)
+    return { ok: false, reason: 'revoked' }
+  }
+  const caps: string[] = Array.isArray(row.capabilities) ? row.capabilities : []
+  // Empty/null caps = legacy keys, treated as all-caps. Non-empty caps must
+  // contain the requested capability.
+  if (caps.length > 0 && !caps.includes(capability)) {
+    console.log(`[supervisor-dal] key missing_capability id=${row.id.slice(0,8)} have=${JSON.stringify(caps)} need=${capability}`)
+    return { ok: false, reason: 'missing_capability', have: caps, need: capability }
+  }
+  console.log(`[supervisor-dal] key ok id=${row.id.slice(0,8)} caps=${JSON.stringify(caps)}`)
+  await sql`UPDATE api_keys SET last_used_at = now() WHERE id = ${row.id}`
+  return { ok: true, userId: row.user_id as string, apiKeyId: row.id as string }
 }
 
 // ── Supervisors ───────────────────────────────────────────────────────────────
