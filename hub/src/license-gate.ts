@@ -46,6 +46,10 @@ import {
 const GRACE_DAYS_DEFAULT = 7;
 const LICENSE_CHECK_FAILED_THROTTLE_MS = 60_000;
 
+// One-shot boot warning when LICENSE_REQUIRED=false. Logged on first request,
+// not on every request, to keep prod logs scannable.
+let permissiveWarned = false;
+
 // Per-user throttle of `license_check_failed` audit writes — at most one
 // every 60s to keep the log scannable during a burst of mutating requests.
 const lastLogged = new Map<string, number>();
@@ -154,7 +158,25 @@ async function refreshLicense(
       };
     }
     if (err instanceof TitaniumVerifyError) {
-      // Map verify errors to a sensible state and persist.
+      // Transient verify failures (JWKS endpoint down / network blip surfaced
+      // as a verify error rather than TitaniumApiError) MUST NOT flip ACTIVE
+      // → INVALID. Treat 'network', 'malformed' (covers jose's
+      // JWKSInvalid / fetch errors), and unknown-kind verify errors as
+      // transient: keep cached value, log, continue with grace logic.
+      const transient =
+        err.kind === "network" ||
+        err.kind === "malformed" ||
+        /jwks/i.test(err.message);
+      if (transient) {
+        console.warn(
+          `[license-gate] transient verify error (${err.kind}: ${err.message}) — preserving cached status=${fields.license_status ?? "NONE"}`,
+        );
+        return {
+          status: fields.license_status ?? "NONE",
+          license_id: fields.license_id,
+        };
+      }
+      // Map definitive verify errors to a sensible state and persist.
       const kindStatus =
         err.kind === "expired" ? "EXPIRED"
         : err.kind === "blocked" ? "BANNED"
@@ -205,6 +227,18 @@ export function requireActiveLicense(
   const readOnlyOk = opts.readOnlyOk ?? false;
 
   return async (c: Context, next: Next) => {
+    // Escape hatch: when LICENSE_REQUIRED=false, bypass the gate entirely.
+    // Used while Keygen JWKS is unhealthy so REST identity routes don't 402.
+    if (!config.licenseRequired) {
+      if (!permissiveWarned) {
+        permissiveWarned = true;
+        console.warn(
+          "[license-gate] LICENSE_REQUIRED=false → permissive mode (all authed requests pass)",
+        );
+      }
+      return next();
+    }
+
     const userId = c.get("userId") as string | undefined;
     if (!userId) {
       // Auth missing — defer to the upstream 401 shape.
