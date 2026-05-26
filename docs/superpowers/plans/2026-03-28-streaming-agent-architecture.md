@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Note (Phase 09, 2026-05-26):** This plan is historical. The `agent/` workspace and `channel/` plugin it describes have been retired. The CLI streaming runner is now in `supervisor/src/` and ships as a Tauri MSI desktop app. The `/ws/agent` protocol is unchanged. See `.planning/phases/09-retire-npm-packages/`.
+
 **Goal:** Replace the channel plugin with a local streaming agent that spawns Claude Code CLI, giving the web UI full visibility into Claude's activity (thinking, tool calls, text), plus file attachments and unread messages.
 
 **Architecture:** Local agent spawns `claude -p --output-format stream-json --verbose`, parses the JSON event stream, and relays events to the hub via WebSocket. The hub broadcasts activity events to subscribed browser clients. Frontend renders thinking blocks, tool call indicators, and streaming text.

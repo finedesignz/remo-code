@@ -1,8 +1,10 @@
 # Supervisor — Remote Control of Local Claude Code Sessions
 
 **Date:** 2026-05-22
-**Status:** Approved
+**Status:** Historical (Phase 09, 2026-05-26)
 **Author:** brainstorming session
+
+> **Note (Phase 09, 2026-05-26):** The `npx remo-code-supervisor install` / NSSM distribution model documented in this spec has been retired. The supervisor now ships exclusively as a Tauri Windows MSI from https://github.com/finedesignz/remo-code/releases/latest. The supervisor protocol over `/ws/agent` is unchanged; only the install/distribution surface changed. See `supervisor/MIGRATION.md` and `.planning/phases/09-retire-npm-packages/`.
 
 ## Problem
 

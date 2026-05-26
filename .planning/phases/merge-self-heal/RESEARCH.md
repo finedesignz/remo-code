@@ -1,5 +1,8 @@
 # Research: merge-self-heal
 
+> **Note (Phase 09, 2026-05-26):** This historical phase plan references the retired agent/ workspace and channel/ plugin. See .planning/phases/09-retire-npm-packages/ for the retirement details.
+
+
 ## Source repos surveyed
 
 - `C:\Users\artic\GitHub\remo-code` — target platform (this repo)

@@ -84,82 +84,19 @@ Open `http://localhost:5173` and create your account on the setup form.
 
 ### 6. Connect Claude Code
 
-Generate an API key in Settings, then run the agent in your project directory:
+Generate an API key in Settings, then install the **Remo Code Supervisor** desktop app on the Windows machine you want to control:
 
-```bash
-npx remo-code-agent --api-key YOUR_API_KEY --local-output
-```
+- Download the latest `.msi` from [GitHub Releases](https://github.com/finedesignz/remo-code/releases/latest).
+- Run the installer.
+- Paste the API key into the first-run wizard. Pick the repo roots the supervisor should scan (typically `C:\Users\you\GitHub`).
 
-That's it. The agent spawns a Claude Code process, and everything streams to your browser in real-time — thinking, tool calls, file edits, and responses. You get both terminal output and web UI.
+The supervisor auto-starts at login, watches your repo roots, and lets you launch Claude Code (or Codex) sessions remotely from the web UI. One supervisor connects all your repos — sessions auto-register and auto-resume by repo.
 
-**Each agent = one Claude Code session.** To connect multiple projects, run the agent in each project directory. Each gets its own session in the web UI. Sessions auto-resume by project directory.
-
-### Set up a shell alias (recommended)
-
-Add an alias so you can run `claude-remote` instead of the full command:
-
-<details>
-<summary><b>Windows (PowerShell)</b></summary>
-
-Add to your PowerShell profile (`$PROFILE`):
-```powershell
-# Open profile in editor (creates it if it doesn't exist)
-if (!(Test-Path $PROFILE)) { New-Item -Path $PROFILE -Force }
-notepad $PROFILE
-```
-
-Add this line:
-```powershell
-function claude-remote { npx remo-code-agent --api-key YOUR_API_KEY --local-output }
-```
-
-Reload: `. $PROFILE` or open a new terminal.
-</details>
-
-<details>
-<summary><b>macOS / Linux (bash)</b></summary>
-
-Add to `~/.bashrc` (or `~/.bash_profile` on macOS):
-```bash
-alias claude-remote='npx remo-code-agent --api-key YOUR_API_KEY --local-output'
-```
-
-Reload: `source ~/.bashrc`
-</details>
-
-<details>
-<summary><b>macOS / Linux (zsh)</b></summary>
-
-Add to `~/.zshrc`:
-```bash
-alias claude-remote='npx remo-code-agent --api-key YOUR_API_KEY --local-output'
-```
-
-Reload: `source ~/.zshrc`
-</details>
-
-<details>
-<summary><b>fish</b></summary>
-
-Add to `~/.config/fish/config.fish`:
-```fish
-alias claude-remote 'npx remo-code-agent --api-key YOUR_API_KEY --local-output'
-```
-
-Reload: `source ~/.config/fish/config.fish`
-</details>
-
-Then just run `claude-remote` in any project directory — same as running `claude` but with remote streaming to the web UI.
+> The legacy `npx remo-code-agent` / `claude-remote` shell-alias flow has been retired as of 2026-05-26. The Tauri Supervisor desktop app is the only supported local app.
 
 ### Using the hosted version
 
-If you don't want to self-host, use the hosted hub at [app.remo-code.com](https://app.remo-code.com):
-
-```bash
-npx remo-code-agent --api-key YOUR_API_KEY --local-output
-```
-
-The default hub URL is `https://app.remo-code.com` — no `--hub-url` needed.
+If you don't want to self-host, use the hosted hub at [app.remo-code.com](https://app.remo-code.com). Sign up, generate an API key in Settings, then install the [Remo Code Supervisor desktop app](https://github.com/finedesignz/remo-code/releases/latest) — same flow as above. The supervisor's default hub URL is `https://app.remo-code.com`.
 
 ## Architecture
 
@@ -167,33 +104,32 @@ The default hub URL is `https://app.remo-code.com` — no `--hub-url` needed.
 Browser (React SPA)
     ↕ WebSocket + REST API
 Hub Server (Bun + Hono)
-    ↕ WebSocket
-Local Agent (one per project)
+    ↕ WebSocket /ws/agent
+Supervisor desktop app (Tauri MSI — one per host)
     ↕ subprocess stdin/stdout (stream-json)
-Claude Code CLI
+Claude Code CLI / Codex CLI (one process per session)
 ```
 
-Four packages in a Bun workspace:
+Three packages in a Bun workspace:
 
 - **hub/** — Bun + Hono server handling auth (Titanium Licensing magic-link + opaque cookie sessions — see [docs/auth.md](docs/auth.md)), message relay, and session management. Broadcasts Claude's activity events (thinking, tool use, text) to subscribed browsers.
 - **web/** — React 19 + Vite + Tailwind CSS 4 chat UI with activity feed, session switching, file attachments, light/dark theme, and unread badges.
-- **agent/** — Local streaming agent that runs on your dev machine. Spawns a persistent Claude Code CLI process with `--input-format stream-json --output-format stream-json`, parses events, and relays to the hub. Published as [`remo-code-agent`](https://www.npmjs.com/package/remo-code-agent) on npm.
-- **channel/** — (Legacy) Claude Code channel plugin. Kept for backward compatibility.
+- **supervisor/** — Local supervisor source. `supervisor/src/` is compiled by `bun build --compile` into the sidecar binary that `supervisor/tauri/` bundles into a Windows MSI installer (Rust + WebView2 tray app). Each running host has exactly one supervisor; the supervisor hosts every session for that machine.
 
 ## How It Works
 
-1. You run `npx remo-code-agent --api-key xxx` in your project directory
-2. The agent connects to the hub via WebSocket and registers a session
-3. The agent spawns `claude --input-format stream-json --output-format stream-json --verbose`
-4. When you send a message in the web UI, the hub forwards it to the agent
-5. The agent writes the message to Claude's stdin as JSON
-6. Claude responds — thinking, tool calls, text stream out via stdout
-7. The agent parses the stream-json events and relays them to the hub
-8. The hub broadcasts to all subscribed browsers in real-time
+1. You install the Remo Code Supervisor MSI on the Windows machine you want to control, paste your API key into the first-run wizard, and pick repo roots.
+2. The supervisor connects to the hub via WebSocket (`/ws/agent`) and registers as an agent for your account.
+3. When you click "Start session" for a repo from the web UI, the supervisor spawns `claude --input-format stream-json --output-format stream-json --verbose` (or `codex app-server` for Codex sessions) in that repo directory.
+4. When you send a message in the web UI, the hub forwards it to the supervisor.
+5. The supervisor writes the message to the CLI's stdin as JSON.
+6. The CLI responds — thinking, tool calls, text stream out via stdout.
+7. The supervisor parses the stream-json events and relays them to the hub.
+8. The hub broadcasts to all subscribed browsers in real-time.
 
-**Session resume:** The agent reuses existing sessions by matching the project directory. Restart the agent and it reconnects to the same session with full message history.
+**Session resume:** The supervisor reuses existing sessions by matching the repo directory. Restart the supervisor and it reconnects to the same sessions with full message history.
 
-**Conversation memory:** The agent keeps a single persistent Claude process — full conversation context is maintained across messages, just like the terminal.
+**Conversation memory:** The supervisor keeps each session's CLI process alive between messages — full conversation context is maintained across messages, just like the terminal.
 
 ## Features
 
@@ -206,7 +142,7 @@ Four packages in a Bun workspace:
 - **Grid View** — watch up to 12 Claude Code sessions side-by-side at `#/grid`. User-named tabs persist per account (`chat_tabs` + `chat_tab_sessions`), each with a layout mode (`3x3`, `4x3`, or `auto-fit`). One WebSocket subscribes to many sessions in one frame, message lists are virtualized, and streaming text is RAF-coalesced. On phones the grid auto-swaps to a single-pane accordion (only one chat mounted at a time). See [docs/grid-view.md](docs/grid-view.md). <!-- screenshot: docs/img/grid-view.png -->
 - **Coolify deployment self-heal (Phase 06, partial)** — a public HMAC-signed webhook endpoint (`POST /api/coolify/webhook/:user_id`) turns `deployment.failed` events into structured `triage` runs that ask Claude to emit a typed `TriageResult` (error_type, severity, root_cause, suggested_fix, confidence). A `github_issue` post-run action then files a labelled issue on the failing repo via the gateway-pair credentials (no `GITHUB_TOKEN` on the hub) with 24-hour idempotency. Webhook ingress, secret rotation, triage schema, and the GitHub-issue action are shipped; the final session-routing wire-up (`pickSessionTarget`) is pending the Phase 04 self-heal-routing plan landing. See [docs/coolify-webhook-migration.md](docs/coolify-webhook-migration.md) and the "Coolify webhook ingress" / "GitHub-issue post-run action" sections in [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
 - **Codex CLI + rootless ambient sessions** — sessions can run either Claude Code or [Codex](https://github.com/openai/codex) (`cli_kind` column). Each agent can also host "ambient" rootless sessions (one Claude + one Codex per host) with no project directory required, lazy-spawned on first message. Global instruction files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.codex/config.toml`) sync from the hub on connect via `create_if_absent` — the agent never overwrites local files. Edit blobs in Settings → Instructions. See [docs/codex-and-rootless.md](docs/codex-and-rootless.md). Requires `npm i -g @openai/codex` + `codex login` (or `OPENAI_API_KEY`).
-- **Subscription quota strip** — the header shows live Anthropic Claude subscription utilization (5-hour + 7-day windows) reported by the local agent's poll of `/api/oauth/usage`. Hover for exact %, reset countdowns, and Opus / OAuth-app sub-quotas when present. See [docs/agent.md](docs/agent.md).
+- **Subscription quota strip** — the header shows live Anthropic Claude subscription utilization (5-hour + 7-day windows) reported by the supervisor's poll of `/api/oauth/usage`. Hover for exact %, reset countdowns, and Opus / OAuth-app sub-quotas when present.
 - **Unread badges** — know when sessions have new messages
 - **Light/dark theme** — toggle in the header
 - **Mobile-first** — responsive design with safe-area support for notched devices
@@ -225,7 +161,7 @@ docker run -p 3040:3040 \
   remo-code
 ```
 
-The Docker image builds the web frontend and serves it from the hub — one container, one port. The agent runs on your dev machine, not on the server.
+The Docker image builds the web frontend and serves it from the hub — one container, one port. The supervisor runs on your dev machine, not on the server.
 
 ## Project Structure
 
@@ -237,20 +173,14 @@ The Docker image builds the web frontend and serves it from the hub — one cont
 │       ├── db/         # Supabase clients and data access layer
 │       ├── middleware/  # Rate limiting
 │       ├── utils/      # Shared utilities (token generation)
-│       └── ws/         # WebSocket handlers (agent, channel, client) + Zod schemas
+│       └── ws/         # WebSocket handlers (agent, client) + Zod schemas
 ├── web/                # React 19 + Vite + Tailwind CSS 4 SPA
 │   └── src/
 │       ├── components/ # Layout, ChatPanel, ActivityFeed, Sidebar, etc.
 │       └── hooks/      # useAuth, useWebSocket, useSessions, useChat, useActivity
-├── agent/              # Local streaming agent (npm: remo-code-agent)
-│   └── src/
-│       ├── index.ts    # Entry point — wires hub client, Claude runner
-│       ├── claude-runner.ts  # Persistent Claude CLI process management
-│       ├── hub-client.ts     # WebSocket client to hub
-│       └── config.ts         # Config loading (CLI args, env vars, config file)
-├── channel/            # (Legacy) Claude Code channel plugin
-├── supervisor/         # Local supervisor (Bun) + Tauri 2 desktop tray app (Phase 06)
-│   └── tauri/          # Windows tray shell (Rust + WebView2) — wraps Bun supervisor as sidecar
+├── supervisor/         # Local supervisor — Tauri 2 desktop tray app
+│   ├── src/            # Bun TypeScript source (compiled to sidecar binary by Tauri)
+│   └── tauri/          # Windows tray shell (Rust + WebView2) → MSI installer
 ├── supabase/           # Database migrations
 └── Dockerfile          # Multi-stage production build
 ```

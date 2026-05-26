@@ -1,5 +1,8 @@
 # Phase: upstream-fixes-merge
 
+> **Note (Phase 09, 2026-05-26):** This historical phase plan references the retired agent/ workspace and channel/ plugin. See .planning/phases/09-retire-npm-packages/ for the retirement details.
+
+
 ## Goal
 
 Resolve stale PR #1 (`upstream-fixes`, b2f1870, open ~14 days). Cherry-pick fixes still valid on current main; drop the rest; close the PR. Branch diverged 126 files / -11640 lines vs main — a straight merge is not viable.

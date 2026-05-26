@@ -1,7 +1,9 @@
 # Remo Code v2: Streaming Agent Architecture
 
 **Date:** 2026-03-28
-**Status:** Draft — awaiting approval
+**Status:** Historical (Phase 09, 2026-05-26)
+
+> **Note (Phase 09, 2026-05-26):** The `remo-code-agent` npm package and `channel/` plugin described in this spec have been retired. The local CLI runner now lives in `supervisor/src/` and is shipped as a Tauri MSI desktop app. The hub-side streaming protocol over `/ws/agent` is unchanged. See `.planning/phases/09-retire-npm-packages/`.
 
 ## Summary
 

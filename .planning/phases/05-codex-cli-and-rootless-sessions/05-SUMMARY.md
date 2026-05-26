@@ -1,5 +1,8 @@
 # Phase 05 — Codex CLI + Rootless Ambient Sessions — Summary
 
+> **Note (Phase 09, 2026-05-26):** This historical phase plan references the retired agent/ workspace and channel/ plugin. See .planning/phases/09-retire-npm-packages/ for the retirement details.
+
+
 **Status:** ~85% shipped on `feat/scheduler-enhancements`. Hub + agent + protocol + docs landed. Web UI surface needs re-application (drafted, reverted by concurrent commits — see Risks).
 
 ## What landed (commits, in order)

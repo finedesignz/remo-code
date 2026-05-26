@@ -1,6 +1,9 @@
 <!-- refreshed: 2026-05-22 -->
 # Architecture
 
+> **Note (Phase 09, 2026-05-26):** The agent/ workspace and channel/ plugin are retired. The local CLI runner now lives in supervisor/src/ and ships exclusively as a Tauri MSI desktop app. The hub /ws/agent route is unchanged. References below to agent/, npx remo-code-agent, claude-remote, or /ws/channel are historical. See .planning/phases/09-retire-npm-packages/.
+
+
 **Analysis Date:** 2026-05-22
 
 ## System Overview
