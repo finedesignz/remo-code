@@ -129,7 +129,7 @@ export function Sidebar({
     <>
       <div className="w-72 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
         {/* Header — hamburger toggle left of logo */}
-        <div className="relative flex items-center justify-center gap-2 px-2 py-2 border-b border-[var(--border-color)]">
+        <div className="relative flex items-center gap-2 px-3 py-2 border-b border-[var(--border-color)]">
           <button
             onClick={onToggleCollapsed}
             className="hidden md:inline-flex p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors"
