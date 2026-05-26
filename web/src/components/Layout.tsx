@@ -9,6 +9,7 @@ import { Sidebar } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
 import { ApiKeyModal } from './ApiKeyModal'
 import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
+import { UsageStrip } from './UsageStrip'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
 
 const NUDGE_TEXT = "Status update? Briefly: what's the current state, what would you recommend doing next, or what input do you need from me?"
@@ -256,7 +257,7 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
             )}
           </button>
 
-          <UsageStrip token={token} />
+          <UsageStrip subscribe={subscribe} />
           <ProfileMenu user={user} onNavigate={onNavigate} signOut={signOut} token={token} />
         </header>
 
@@ -367,57 +368,3 @@ function ProfileMenu({ user, onNavigate, signOut, token }: { user: AuthUser; onN
   )
 }
 
-/* Usage strip — inline cost-today indicator with hover popover for breakdown. */
-function UsageStrip({ token }: { token: string }) {
-  const [data, setData] = useState<{ cost_usd: number; cap_usd: number; percent: number; timezone: string } | null>(null)
-  const [hover, setHover] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    const load = () => {
-      const hubUrl = import.meta.env.VITE_HUB_URL || ''
-      fetch(`${hubUrl}/api/profile/cost-today`, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.ok ? r.json() : null)
-        .then(d => { if (!cancelled && d) setData(d) })
-        .catch(() => {})
-    }
-    load()
-    const iv = setInterval(load, 60_000)
-    return () => { cancelled = true; clearInterval(iv) }
-  }, [token])
-
-  if (!data) return null
-  const pct = Math.round(data.percent)
-  const color = pct < 50 ? 'text-emerald-300' : pct < 80 ? 'text-amber-300' : 'text-red-300'
-  const barColor = pct < 50 ? 'bg-emerald-400' : pct < 80 ? 'bg-amber-400' : 'bg-red-400'
-
-  return (
-    <div
-      className="hidden sm:flex relative items-center gap-2 px-2 py-1 rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors cursor-default"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title="Today's subscription usage"
-    >
-      <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-medium">Today</span>
-      <span className="w-20 h-1.5 rounded-full bg-[var(--bg-tertiary)] overflow-hidden">
-        <span className={`block h-full ${barColor} transition-all`} style={{ width: `${Math.min(100, pct)}%` }} />
-      </span>
-      <span className={`text-xs font-mono ${color}`}>{pct}%</span>
-      {hover && (
-        <div className="absolute right-0 top-full mt-1 w-64 bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] rounded-lg shadow-xl z-50 p-3 text-xs space-y-1.5">
-          <div className="flex justify-between"><span className="text-[var(--text-muted)]">Used</span><span className={`font-mono ${color}`}>{pct}%</span></div>
-          <div className="flex justify-between"><span className="text-[var(--text-muted)]">Today's cost</span><span className={`font-mono ${color}`}>${data.cost_usd.toFixed(4)}</span></div>
-          <div className="flex justify-between"><span className="text-[var(--text-muted)]">Daily cap</span><span className="font-mono text-[var(--text-secondary)]">${data.cap_usd.toFixed(2)}</span></div>
-          <div className="pt-1.5 border-t border-[var(--border-color)]/50 space-y-1">
-            <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-medium">Tokens</div>
-            <div className="flex justify-between"><span className="text-[var(--text-muted)]">Input / output</span><span className="font-mono text-[var(--text-muted)] italic">TBD</span></div>
-          </div>
-          <div className="flex justify-between pt-1.5 border-t border-[var(--border-color)]/50"><span className="text-[var(--text-muted)]">Timezone</span><span className="font-mono text-[var(--text-secondary)]">{data.timezone}</span></div>
-          <div className="pt-1.5 border-t border-[var(--border-color)]/50 text-[10px] text-[var(--text-muted)]">
-            Scheduled tasks pause when cap is reached. Manual chat is not affected.
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}

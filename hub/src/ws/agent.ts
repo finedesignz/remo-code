@@ -407,6 +407,22 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     } catch {}
   }
 
+  if (msg.type === 'usage_report') {
+    if (!ws.data.userId) return
+    try {
+      const { setUsage } = await import('../usage/store')
+      const snap = setUsage(ws.data.userId, msg.usage as any)
+      broadcastToUser(ws.data.userId, {
+        type: 'subscription_usage',
+        usage: snap.usage,
+        updated_at: snap.updated_at,
+      })
+    } catch (err: any) {
+      console.error('[agent] usage_report handler failed', err?.message)
+    }
+    return
+  }
+
   if (msg.type === 'pong') return
 }
 

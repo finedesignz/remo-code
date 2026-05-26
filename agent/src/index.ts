@@ -11,6 +11,7 @@ import { mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { writeSeedFiles } from './seed'
+import { startUsagePoller } from './usage-poller'
 
 const VERSION = '0.4.1'
 
@@ -209,6 +210,12 @@ function sendUserMessage(runner: CliRunner, msg: Extract<HubToAgent, { type: 'us
   runner.sendMessage(prompt, msg.images)
 }
 
+// Subscription quota poller — reads ~/.claude/.credentials.json and reports
+// 5h + 7d utilization to the hub every 5 minutes (and immediately on startup).
+const usagePoller = startUsagePoller((usage) => {
+  hub.send({ type: 'usage_report', usage })
+})
+
 // Connect to hub — runners are started after auth_ok so system prompt + cli_kind
 // are honored on the first spawn. Fallback timer in case auth_ok never arrives.
 hub.connect()
@@ -246,6 +253,7 @@ if (config.initialPrompt) {
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[remo-agent] Shutting down...')
+  try { usagePoller.stop() } catch {}
   for (const r of runners.values()) {
     try { r.stop() } catch {}
   }

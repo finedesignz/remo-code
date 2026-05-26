@@ -16,6 +16,12 @@ export type AgentToHub =
   | { type: 'user_question'; session_id: string; request_id: string; question: string;
       options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }
   | { type: 'agent_log'; session_id: string; message: string }
+  | { type: 'usage_report'; usage: {
+        five_hour: { utilization: number; resets_at: string }
+        seven_day: { utilization: number; resets_at: string }
+        seven_day_opus?: { utilization: number; resets_at: string } | null
+        seven_day_oauth_apps?: { utilization: number; resets_at: string } | null
+      } }
   | { type: 'pong' }
 
 // Events the hub sends TO the agent

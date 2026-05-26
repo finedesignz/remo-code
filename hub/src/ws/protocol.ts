@@ -267,4 +267,12 @@ export type HubToClient =
   | { type: 'error_skipped'; error_id: string; project_id: string;
       dispatch_status: 'skipped' | 'failed' | 'deduped' | 'rate_limited' | 'cap_exceeded';
       skip_reason: string }
+  // Phase 06: Anthropic Claude subscription usage snapshot from the local
+  // agent's poll of /api/oauth/usage. Broadcast to all clients of the user.
+  | { type: 'subscription_usage'; usage: {
+        five_hour: { utilization: number; resets_at: string }
+        seven_day: { utilization: number; resets_at: string }
+        seven_day_opus?: { utilization: number; resets_at: string } | null
+        seven_day_oauth_apps?: { utilization: number; resets_at: string } | null
+      }; updated_at: string }
   | { type: 'ping' }

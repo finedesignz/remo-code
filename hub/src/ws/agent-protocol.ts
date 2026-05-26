@@ -113,6 +113,24 @@ export const AgentLog = z.object({
   message: z.string().max(1000),
 })
 
+// Phase 06: Anthropic Claude subscription quota snapshot reported by the agent
+// every 5 minutes. Utilization is a 0-100 percentage from Anthropic's
+// /api/oauth/usage endpoint. Opus + OAuth-apps windows are optional.
+const UsageWindow = z.object({
+  utilization: z.number(),
+  resets_at: z.string(),
+})
+export const AgentUsageReport = z.object({
+  type: z.literal('usage_report'),
+  usage: z.object({
+    five_hour: UsageWindow,
+    seven_day: UsageWindow,
+    seven_day_opus: UsageWindow.nullable().optional(),
+    seven_day_oauth_apps: UsageWindow.nullable().optional(),
+  }),
+})
+export type AgentUsageReportT = z.infer<typeof AgentUsageReport>
+
 export const AgentInbound = z.discriminatedUnion('type', [
   AgentAuth,
   AgentThinking,
@@ -124,6 +142,7 @@ export const AgentInbound = z.discriminatedUnion('type', [
   AgentPermissionRequest,
   AgentUserQuestion,
   AgentLog,
+  AgentUsageReport,
   z.object({ type: z.literal('pong') }),
   SupervisorHello,
   SupervisorState,
