@@ -1,32 +1,5 @@
 import { z } from 'zod'
 
-// -- Channel <-> Hub --
-
-export const ChannelAuth = z.object({
-  type: z.literal('auth'),
-  session_id: z.string().min(1).max(256),
-  token: z.string().regex(/^remo_[A-Za-z0-9_\-]{43}$/),
-})
-
-export const AssistantMessage = z.object({
-  type: z.literal('assistant_message'),
-  id: z.string().min(1),
-  content: z.string().min(1).max(65536),
-  ts: z.string(),
-})
-
-export const ChannelStatus = z.object({
-  type: z.literal('status'),
-  status: z.enum(['thinking', 'idle']),
-})
-
-export const ChannelInbound = z.discriminatedUnion('type', [
-  ChannelAuth,
-  AssistantMessage,
-  ChannelStatus,
-  z.object({ type: z.literal('pong') }),
-])
-
 // -- Client <-> Hub --
 
 // Phase 07-C: token is now OPTIONAL. When the upgrade carried a valid
