@@ -58,6 +58,10 @@ const titaniumAdminToken =
 const magicLinkSecret = requireMinLenIfSet("MAGIC_LINK_SECRET", process.env.MAGIC_LINK_SECRET, 32);
 const sessionSecret = requireMinLenIfSet("SESSION_SECRET", process.env.SESSION_SECRET, 32);
 const allowLegacyLogin = parseBool(process.env.ALLOW_LEGACY_LOGIN, true);
+// Phase 07-D escape hatch: when LICENSE_REQUIRED=false, requireActiveLicense
+// short-circuits to permissive mode (logs a warning once at boot). Used while
+// Keygen JWKS endpoint is unhealthy so identity/REST routes don't 402.
+const licenseRequired = parseBool(process.env.LICENSE_REQUIRED, true);
 // Optional Titanium -> hub webhook for license-state changes. Inert (route
 // returns 503) until Titanium ships the webhook and the secret is provisioned.
 const titaniumWebhookSecret = requireMinLenIfSet(
@@ -94,4 +98,5 @@ export const config = {
   sessionSecret,
   allowLegacyLogin,
   titaniumWebhookSecret,
+  licenseRequired,
 };

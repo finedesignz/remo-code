@@ -13,7 +13,7 @@ import {
   __resetDalForTesting,
 } from "../src/license-gate";
 import { config } from "../src/config";
-import { BlockedSubjectError } from "../src/titanium-client";
+import { BlockedSubjectError, TitaniumVerifyError } from "../src/titanium-client";
 
 type Fields = {
   license_status: string | null;
@@ -297,5 +297,55 @@ describe("requireActiveLicense — audit log on denial", () => {
     const app = makeApp();
     await app.request("/", { method: "POST" });
     expect(recordCalls.length).toBe(0);
+  });
+});
+
+describe("requireActiveLicense — escape hatches", () => {
+  test("LICENSE_REQUIRED=false → bypass gate entirely", async () => {
+    const orig = (config as any).licenseRequired;
+    (config as any).licenseRequired = false;
+    // No DAL stubs needed — gate must not consult them.
+    __setDalForTesting({
+      getUserLicenseFields: async () => {
+        throw new Error("should not be called in permissive mode");
+      },
+    });
+    const app = makeApp();
+    const res = await app.request("/", { method: "POST" });
+    (config as any).licenseRequired = orig;
+    expect(res.status).toBe(200);
+  });
+
+  test("JWKS-unreachable verify error → preserve cached ACTIVE (no flip to INVALID)", async () => {
+    const origTtl = config.titanium.licenseCacheTtlSeconds;
+    // Force cache stale so refreshLicense runs.
+    (config.titanium as any).licenseCacheTtlSeconds = 1;
+    __setDalForTesting({
+      getUserLicenseFields: async () => ({
+        license_status: "ACTIVE",
+        license_id: "lic-1",
+        license_checked_at: daysAgo(1), // stale
+        titanium_subject: SUBJECT,
+      }),
+      updateLicenseStatus: async (uid, status, lid) => {
+        updateCalls.push([uid, status, lid]);
+      },
+      recordAuthEvent: async (opts: any) => {
+        recordCalls.push(opts);
+      },
+      validateLicenseKey: async () => {
+        throw new TitaniumVerifyError(
+          "malformed",
+          "Unknown verify error: JWKS fetch failed: 404 Not Found",
+        );
+      },
+      assertNotBlocked: async () => {},
+    });
+    const app = makeApp({ readOnlyOk: true });
+    const res = await app.request("/", { method: "GET" });
+    (config.titanium as any).licenseCacheTtlSeconds = origTtl;
+    expect(res.status).toBe(200);
+    // Critical: must NOT have persisted INVALID to the DB.
+    expect(updateCalls).toEqual([]);
   });
 });
