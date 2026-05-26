@@ -6,7 +6,7 @@ import { scanAllCommands } from './commands-scanner'
 import { getHandler, nativeSupervisorCommands } from './commands/index'
 import type { SupervisorConfig } from './config'
 
-const VERSION = '0.3.0'
+const VERSION = '0.3.1'
 
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
@@ -94,12 +94,24 @@ export class SupervisorClient {
       try { msg = JSON.parse(typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data as any)) } catch { return }
       this.handleMessage(msg)
     }
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (this.ws !== ws) return // a newer socket has taken over
       this.authenticated = false
-      this.log('warn', 'WebSocket closed')
+      const code = (ev as any)?.code as number | undefined
+      const reason = (ev as any)?.reason as string | undefined
+      this.log('warn', `WebSocket closed code=${code ?? '?'} reason=${reason || '(none)'}`)
       this.detachSocket(ws)
       this.ws = null
+      // Hub-issued auth failures (4001 invalid key) and explicit user disconnect
+      // (4002) shouldn't burn through retry budget — the credential or session
+      // state won't change in seconds. Park for 5 minutes so the supervisor
+      // logs loudly without flooding the hub. If the operator fixes the key
+      // or re-enables the session, the next attempt picks up cleanly.
+      if (code === 4001 || code === 4002) {
+        this.log('error', `hub closed with terminal-ish code ${code}; parking reconnect for 5 minutes`)
+        this.scheduleReconnect(5 * 60_000)
+        return
+      }
       this.scheduleReconnect()
     }
     ws.onerror = () => {
@@ -107,18 +119,21 @@ export class SupervisorClient {
     }
   }
 
-  private static MAX_RECONNECT_ATTEMPTS = 5
-
-  private scheduleReconnect() {
+  // Reconnect forever. A long-running daemon must survive arbitrarily long
+  // hub outages (Coolify redeploys take 60-120s, network blips happen). The
+  // previous design exited after 5 attempts (~62s) and relied on the OS
+  // service manager to restart the process — that proved fragile when
+  // (a) NSSM throttle / Task Scheduler restart configuration wasn't explicit
+  // and (b) the watchdog's "healthy ≥60s → exit on child crash" path
+  // skipped self-heal for processes that had been alive for hours.
+  // Exponential backoff is capped at 60s, so steady-state reconnect load on
+  // the hub is bounded regardless of total duration.
+  private scheduleReconnect(extraDelayMs = 0) {
     if (this.reconnectTimer) return
-    if (this.reconnectAttempts >= SupervisorClient.MAX_RECONNECT_ATTEMPTS) {
-      this.log('error', `reconnect failed after ${SupervisorClient.MAX_RECONNECT_ATTEMPTS} attempts — exiting (Task Scheduler will restart)`)
-      setTimeout(() => process.exit(1), 500)
-      return
-    }
-    const delay = Math.min(60_000, 1000 * Math.pow(2, Math.min(this.reconnectAttempts, 6)))
+    const backoff = Math.min(60_000, 1000 * Math.pow(2, Math.min(this.reconnectAttempts, 6)))
+    const delay = Math.max(backoff, extraDelayMs)
     this.reconnectAttempts++
-    this.log('info', `reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${SupervisorClient.MAX_RECONNECT_ATTEMPTS})`)
+    this.log('info', `reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`)
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       this.connect()
