@@ -974,14 +974,68 @@ function InstructionField({
 
 /* ───────── Coolify Webhook (Phase 06 / Plan 005) ───────── */
 
+type AttemptRow = {
+  id: string
+  received_at: string
+  source_ip: string | null
+  event_type: string | null
+  status: string
+  reason: string | null
+}
+
+function formatAgo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime()
+  if (ms < 0) return 'just now'
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return `${s}s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.floor(h / 24)
+  return `${d}d ago`
+}
+
+function attemptStatusClasses(status: string): string {
+  if (status === 'success') return 'bg-emerald-500/20 ring-1 ring-emerald-500/30 text-emerald-300'
+  if (status === 'legacy_hmac') return 'bg-amber-500/20 ring-1 ring-amber-500/30 text-amber-300'
+  if (status === 'auth_failed' || status === 'ip_rejected') return 'bg-red-500/20 ring-1 ring-red-500/30 text-red-300'
+  return 'bg-gray-500/20 ring-1 ring-gray-500/30 text-[var(--text-muted)]'
+}
+
 function CoolifyWebhookCard({ token }: { token: string }) {
   const [loading, setLoading] = useState(true)
   const [configured, setConfigured] = useState(false)
   const [webhookUrl, setWebhookUrl] = useState('')
   const [rotating, setRotating] = useState(false)
-  const [revealedSecret, setRevealedSecret] = useState<string | null>(null)
-  const [copied, setCopied] = useState<'url' | 'secret' | null>(null)
+  const [copied, setCopied] = useState<'url' | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // Attempts log
+  const [attempts, setAttempts] = useState<AttemptRow[]>([])
+  const [attemptsLoading, setAttemptsLoading] = useState(false)
+
+  // Allowlist
+  const [allowedIps, setAllowedIps] = useState('')
+  const [allowedIpsSaved, setAllowedIpsSaved] = useState('')
+  const [savingIps, setSavingIps] = useState(false)
+  const [ipsError, setIpsError] = useState<string | null>(null)
+  const [ipsSavedFlash, setIpsSavedFlash] = useState(false)
+
+  const loadAttempts = async () => {
+    setAttemptsLoading(true)
+    try {
+      const data = await hubFetch<{ attempts: AttemptRow[] }>(
+        token,
+        '/api/account/coolify-webhook-attempts?limit=10',
+      )
+      setAttempts(data.attempts ?? [])
+    } catch {
+      // Silent — empty state handles this.
+    } finally {
+      setAttemptsLoading(false)
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -997,6 +1051,17 @@ function CoolifyWebhookCard({ token }: { token: string }) {
       })
       .catch((e) => { if (!cancelled) setError(String(e?.message || e)) })
       .finally(() => { if (!cancelled) setLoading(false) })
+
+    // Allowlist
+    hubFetch<{ allowed_ips: string }>(token, '/api/account/coolify-webhook-allowed-ips')
+      .then((d) => {
+        if (cancelled) return
+        setAllowedIps(d.allowed_ips ?? '')
+        setAllowedIpsSaved(d.allowed_ips ?? '')
+      })
+      .catch(() => {})
+
+    void loadAttempts()
     return () => { cancelled = true }
   }, [token])
 
@@ -1009,7 +1074,6 @@ function CoolifyWebhookCard({ token }: { token: string }) {
         '/api/account/coolify-webhook-secret/rotate',
         { method: 'POST' },
       )
-      setRevealedSecret(data.secret)
       setWebhookUrl(data.webhook_url)
       setConfigured(true)
     } catch (e: any) {
@@ -1019,13 +1083,41 @@ function CoolifyWebhookCard({ token }: { token: string }) {
     }
   }
 
-  const copy = async (kind: 'url' | 'secret', text: string) => {
+  const handleSaveAllowedIps = async () => {
+    setSavingIps(true)
+    setIpsError(null)
+    try {
+      const data = await hubFetch<{ allowed_ips: string }>(
+        token,
+        '/api/account/coolify-webhook-allowed-ips',
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ allowed_ips: allowedIps }),
+        },
+      )
+      setAllowedIps(data.allowed_ips)
+      setAllowedIpsSaved(data.allowed_ips)
+      setIpsSavedFlash(true)
+      setTimeout(() => setIpsSavedFlash(false), 1500)
+    } catch (e: any) {
+      const msg = String(e?.message || e)
+      // hubFetch surfaces server error body — show the CIDR detail if present.
+      setIpsError(msg)
+    } finally {
+      setSavingIps(false)
+    }
+  }
+
+  const copy = async (kind: 'url', text: string) => {
     try {
       await navigator.clipboard.writeText(text)
       setCopied(kind)
       setTimeout(() => setCopied((c) => (c === kind ? null : c)), 1500)
     } catch {}
   }
+
+  const ipsDirty = allowedIps.trim() !== allowedIpsSaved.trim()
 
   return (
     <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 xl:col-span-2">
@@ -1042,8 +1134,9 @@ function CoolifyWebhookCard({ token }: { token: string }) {
         </span>
       </div>
       <p className="text-xs text-[var(--text-muted)] mb-4">
-        Lets Coolify push deploy + container events to your remo-code account so the self-heal pipeline can react.
-        Paste the URL below into Coolify Notifications → Webhooks, then rotate to get a signing secret.
+        Lets Coolify push deploy events to your remo-code account so the self-heal pipeline can react.
+        Generate a webhook URL below and paste it into Coolify Notifications → Webhook (single URL field, no headers required).
+        The URL itself is the credential — treat it as a secret.
       </p>
 
       <div className="space-y-4">
@@ -1066,54 +1159,94 @@ function CoolifyWebhookCard({ token }: { token: string }) {
         </div>
 
         {/* Rotate button */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <button
             type="button"
             onClick={handleRotate}
             disabled={rotating || loading}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
           >
-            {rotating ? 'Rotating…' : configured ? 'Rotate Secret' : 'Generate Secret'}
+            {rotating ? 'Rotating…' : configured ? 'Rotate URL' : 'Generate URL'}
           </button>
-          {configured && !revealedSecret && (
+          {configured && (
             <span className="text-xs text-[var(--text-muted)]">
-              The secret is stored hashed and only shown once on rotate.
+              Rotating invalidates the old URL. You'll need to update Coolify with the new one.
             </span>
           )}
         </div>
 
-        {/* One-time revealed secret */}
-        {revealedSecret && (
-          <div className="rounded-lg bg-amber-500/10 ring-1 ring-amber-500/30 p-3 space-y-2">
-            <div className="text-xs text-amber-300 font-semibold">
-              Copy this secret now — it is shown only once.
-            </div>
-            <div className="flex gap-2">
-              <input
-                readOnly
-                value={revealedSecret}
-                onFocus={(e) => e.currentTarget.select()}
-                className="flex-1 px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] font-mono"
-              />
-              <button
-                type="button"
-                onClick={() => copy('secret', revealedSecret)}
-                className="px-3 py-2 text-xs rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[var(--text-on-accent)] font-medium transition-colors"
-              >
-                {copied === 'secret' ? 'Copied' : 'Copy'}
-              </button>
-            </div>
-            <div className="text-[11px] text-[var(--text-muted)] leading-relaxed">
-              In Coolify, configure two request headers per webhook delivery:<br />
-              <code className="text-emerald-300">X-Coolify-Signature: sha256=&lt;hex&gt;</code> — HMAC-SHA256 of the raw body using this secret.<br />
-              <code className="text-emerald-300">X-Coolify-Timestamp: &lt;unix-seconds&gt;</code> — request timestamp (rejected if &gt;5min skew).
-            </div>
-          </div>
-        )}
-
         {error && (
           <div className="text-xs text-red-400">{error}</div>
         )}
+
+        {/* Recent webhook attempts */}
+        <div className="pt-2">
+          <div className="flex items-center justify-between mb-2">
+            <label className="block text-xs text-[var(--text-muted)]">Recent webhook attempts</label>
+            <button
+              type="button"
+              onClick={() => void loadAttempts()}
+              disabled={attemptsLoading}
+              className="text-[11px] text-indigo-300 hover:text-indigo-200 disabled:opacity-50"
+            >
+              {attemptsLoading ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
+          {attempts.length === 0 ? (
+            <div className="rounded-lg bg-[var(--bg-primary)]/60 p-3 text-xs text-[var(--text-muted)]">
+              No webhook attempts yet. Paste the URL into Coolify's Notifications → Webhook,
+              save, then send a test notification.
+            </div>
+          ) : (
+            <div className="rounded-lg bg-[var(--bg-primary)]/60 divide-y divide-[var(--border-color)]/30">
+              {attempts.map((a) => (
+                <div key={a.id} className="flex items-center gap-2 px-3 py-2 text-[11px]">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide ${attemptStatusClasses(a.status)}`}>
+                    {a.status}
+                  </span>
+                  <span className="text-[var(--text-secondary)] font-mono truncate flex-1">
+                    {a.event_type ?? '—'}
+                  </span>
+                  <span className="text-[var(--text-muted)] font-mono">{a.source_ip ?? 'unknown'}</span>
+                  <span className="text-[var(--text-muted)] whitespace-nowrap">{formatAgo(a.received_at)}</span>
+                  {a.reason && (
+                    <span className="text-[var(--text-muted)] truncate max-w-[200px]" title={a.reason}>
+                      {a.reason}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Allowed source IPs (defense in depth) */}
+        <div className="pt-2">
+          <label className="block text-xs text-[var(--text-muted)] mb-1.5">Allowed source IPs</label>
+          <textarea
+            value={allowedIps}
+            onChange={(e) => setAllowedIps(e.target.value)}
+            rows={2}
+            placeholder="46.224.61.233, 10.0.0.0/8"
+            className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] font-mono resize-y"
+          />
+          <div className="text-[11px] text-[var(--text-muted)] mt-1.5 leading-relaxed">
+            Comma-separated IPs or CIDR ranges. Leave blank to allow any source.
+            Your Coolify server's IP is likely <code className="text-emerald-300">46.224.61.233</code> (titaniumlabs.us).
+          </div>
+          <div className="flex items-center gap-3 mt-2">
+            <button
+              type="button"
+              onClick={handleSaveAllowedIps}
+              disabled={savingIps || !ipsDirty}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+            >
+              {savingIps ? 'Saving…' : 'Save allowlist'}
+            </button>
+            {ipsSavedFlash && <span className="text-[11px] text-emerald-300">Saved</span>}
+            {ipsError && <span className="text-[11px] text-red-400 truncate">{ipsError}</span>}
+          </div>
+        </div>
       </div>
     </div>
   )
