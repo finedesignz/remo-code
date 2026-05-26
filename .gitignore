@@ -20,3 +20,8 @@ supervisor/tauri/src-tauri/target/
 supervisor/tauri/src-tauri/gen/
 supervisor/tauri/ui/dist/
 
+# Tauri signing keys — must never be committed
+**/.tauri/
+*.key
+*.key.pub
+

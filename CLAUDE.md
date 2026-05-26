@@ -308,3 +308,7 @@ Periodically check for open PRs with `gh pr list`. Review them for conflicts wit
 Docker multi-stage build (see `Dockerfile`): installs deps → builds web → copies into production image with non-root user. Runs on Coolify at `app.remo-code.com`, port 3040.
 
 The agent runs locally on the dev machine — it is NOT deployed to the server. The agent may host multiple CLI subprocesses per process (one Claude project session + ambient Claude + ambient Codex).
+
+## Releases
+
+**Supervisor (Tauri tray app):** push a `supervisor-v*.*.*` tag — `.github/workflows/release-supervisor.yml` builds the MSI on `windows-latest`, signs it with the Tauri updater key, and publishes a GitHub Release with `latest.json` for the in-app auto-updater. Local builds: `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. First-time signing-key setup: `supervisor/tauri/UPDATER-SETUP.md`.
