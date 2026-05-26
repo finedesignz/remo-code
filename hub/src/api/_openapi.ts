@@ -14,6 +14,7 @@ import { Scalar } from "@scalar/hono-api-reference";
 import { authMiddleware } from "../auth/middleware.ts";
 import { sumTodayCostForUser } from "../db/scheduled-tasks-dal.ts";
 import { sql } from "../db/postgres.ts";
+import { getUserLicenseFields } from "../db/dal.ts";
 
 export const openapi = new OpenAPIHono();
 
@@ -76,6 +77,86 @@ openapi.openapi(costTodayRoute, async (c) => {
   );
 });
 
+// GET /api/profile/license — license status snapshot for the authenticated user.
+// NOT license-gated (this IS the license-status endpoint — circular dep otherwise).
+// Auth-gated only. Reads users row via Plan D's getUserLicenseFields DAL helper.
+const licenseStatusRoute = createRoute({
+  method: "get",
+  path: "/api/profile/license",
+  tags: ["profile"],
+  summary: "License status for the authenticated user",
+  description:
+    "Returns the user's current license status (mirrored from Titanium Licensing), license id, and the timestamp of the last sync. Used by the web UI's license badge. Auth-gated; NOT license-gated — needed even when the license is expired so the user can see why.",
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: {
+      description: "License snapshot",
+      content: {
+        "application/json": {
+          schema: z.object({
+            status: z.enum([
+              "active",
+              "expired",
+              "suspended",
+              "banned",
+              "none",
+              "unknown",
+            ]),
+            license_id: z.string().nullable(),
+            checked_at: z.string().nullable(),
+          }),
+        },
+      },
+    },
+    401: {
+      description: "Missing or invalid session",
+      content: {
+        "application/json": { schema: z.object({ error: z.string() }) },
+      },
+    },
+  },
+});
+
+type LicenseStatus =
+  | "active"
+  | "expired"
+  | "suspended"
+  | "banned"
+  | "none"
+  | "unknown";
+
+function normalizeLicenseStatus(raw: string | null | undefined): LicenseStatus {
+  if (!raw) return "none";
+  const s = String(raw).toLowerCase();
+  if (s === "active" || s === "valid") return "active";
+  if (s === "expired") return "expired";
+  if (s === "suspended") return "suspended";
+  if (s === "banned") return "banned";
+  if (s === "none") return "none";
+  return "unknown";
+}
+
+openapi.openapi(licenseStatusRoute, async (c) => {
+  const userId = c.get("userId") as string;
+  const row = await getUserLicenseFields(userId);
+  if (!row) {
+    return c.json(
+      { status: "none" as const, license_id: null, checked_at: null },
+      200,
+    );
+  }
+  return c.json(
+    {
+      status: normalizeLicenseStatus(row.license_status),
+      license_id: row.license_id ?? null,
+      checked_at: row.license_checked_at
+        ? row.license_checked_at.toISOString()
+        : null,
+    },
+    200,
+  );
+});
+
 // OpenAPI security scheme registration.
 openapi.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
   type: "http",
@@ -90,7 +171,7 @@ openapi.doc("/openapi.json", {
     title: "remo-code hub",
     version: "0.1.0",
     description:
-      "REST API for the remo-code hub. NOTE: Only the sample `/api/profile/cost-today` route is currently in the spec; the rest of the hub is plain Hono and will be migrated incrementally.",
+      "REST API for the remo-code hub. Routes are migrated to the OpenAPI surface incrementally; currently covers `/api/profile/cost-today` and `/api/profile/license`. The rest of the hub is plain Hono.",
   },
   servers: [
     { url: "https://app.remo-code.com", description: "Production" },

@@ -245,9 +245,49 @@ Absorbs the standalone `coolify-ai-monitor` Express service (port 3032, now reti
 
 When adding a new triage payload field, post-run action, or webhook event type: update `docs/scheduled-tasks.md` and `docs/coolify-webhook-migration.md` in the same commit.
 
+## Phase 07: Titanium Licensing Auth Cutover
+
+Replaces bcrypt + JWT user-auth with **Titanium Licensing** (Keygen-backed) magic-link login + opaque cookie sessions, and gates feature endpoints on a synced `license_status` mirror. The legacy path stays alive behind `ALLOW_LEGACY_LOGIN` for one release as the rollback. Full architecture in [docs/auth.md](docs/auth.md).
+
+**File map (hub):**
+
+- `hub/src/config.ts` — typed `config.titanium.*`, `config.magicLinkSecret`, `config.sessionSecret`, `config.allowLegacyLogin` parsed from env at boot. Missing required vars = fatal.
+- `hub/src/titanium-client.ts` — JWKS-cached EdDSA verifier for Keygen tokens + license `validate` calls. Tests live in `hub/test/titanium-client.test.ts` (offline vectors at `hub/test/fixtures/titanium-vectors.json`).
+- `hub/src/session.ts` — opaque cookie sessions (random token, sha-256 in DB, sliding refresh). `createAuthSession`, `verifyAuthSessionCookie`, `revokeAuthSession`. Persists to the `auth_sessions` table.
+- `hub/src/csrf.ts` — double-submit cookie + `X-CSRF-Token` header check on all state-changing routes.
+- `hub/src/license-gate.ts` — middleware factory. Reads `license_status` from `users` via `getUserLicenseFields`, refreshes through `titanium-client` if stale (TTL `TITANIUM_LICENSE_CACHE_TTL_SECONDS`), 402s when not `active`. **Exclusion list** (NEVER license-gated): `/api/auth/*`, `/api/profile/license`, `/api/profile`, `/healthz`, the Sentry intake, the Coolify webhook, the Titanium license-changed webhook, and `/ws/agent` (agent traffic is keyed by `api_keys`, not user license).
+- `hub/src/auth/middleware.ts` — dual-auth. Tries cookie first, falls back to `Authorization: Bearer <jwt>` ONLY when `config.allowLegacyLogin === true`. Sets `c.set('userId')` and `c.set('authMethod')` (`session_cookie` | `legacy_jwt`).
+- `hub/src/auth/reauth.ts` — short-window step-up gate. Required by sensitive ops (api-key creation, email change, account delete).
+- `hub/src/api/auth.ts` — new routes: `POST /request-link`, `GET /callback`, `POST /logout`. Legacy `POST /login` + `POST /register` are still mounted but return 410 when `!config.allowLegacyLogin`.
+- `hub/src/api/profile.ts` — plain Hono. Excluded from license gate.
+- `hub/src/api/_openapi.ts` — `GET /api/profile/cost-today` and `GET /api/profile/license` are OpenAPI-aware (zod schemas). Both are mounted ahead of the plain `profile.ts` twin and excluded from license gating.
+- `hub/src/api/webhooks-titanium.ts` — `POST /webhooks/titanium/license-changed`. HMAC over `${ts}.${rawBody}`, raw body read BEFORE JSON parse. Returns 503 when `TITANIUM_WEBHOOK_SECRET` is unset.
+- `hub/scripts/migrate-users-to-titanium.ts` — one-shot script: looks up each user in the Titanium portal, writes `titanium_subject` + initial `license_status`, marks unmatched rows `titanium_link_status='pending_verify'`.
+- `hub/src/db/schema.sql` — additive only this phase: `users.titanium_subject`, `users.license_status`, `users.license_id`, `users.license_checked_at`, `users.titanium_link_status`, `users.candidate_subject`; new `auth_sessions` table; new `auth_events` audit table. `password_hash` STAYS.
+- `hub/src/db/dal.ts` — `getUserByTitaniumSubject`, `linkTitaniumSubject`, `setPendingVerify`, `promoteCandidateSubject`, `getUserLicenseFields`, `updateLicenseStatus`, `updateUserEmail`, `createAuthSession`, `getAuthSessionByToken`, `touchAuthSession`, `deleteAuthSession`, `purgeExpiredAuthSessions`, `recordAuthEvent`.
+
+**File map (web):**
+
+- `web/src/lib/auth.ts` — cookie-aware fetch helpers; magic-link `requestLink` + `completeCallback`; portal URL helper reading `VITE_TITANIUM_PORTAL_URL`.
+- `web/src/hooks/useLicense.ts` — polls `GET /api/profile/license` every 5 min; returns `'active' | 'expired' | 'suspended' | 'banned' | 'none' | 'unknown'`. 404 is treated silently as `unknown` (back-compat with pre-endpoint deploys); 402 maps to `expired`.
+- `web/src/components/Layout.tsx` — renders the license badge (color + tooltip) from `useLicense`.
+- `web/src/App.tsx` — magic-link request page + callback route; "Manage account" link to the Titanium portal.
+
+**Key invariants:**
+
+- **Legacy path is gated, NOT deleted this phase.** `ALLOW_LEGACY_LOGIN`, `password_hash`, `bcrypt`, `hub/src/auth/password.ts`, and `JWT_SECRET` all stay alive through the soak. Phase 07.5 deletes them.
+- **`SESSION_SECRET` is never rotated as part of a routine cutover** — that would log out every Titanium-cookie user. D14's force-reissue rotates `JWT_SECRET` (kills legacy bearer JWTs) and leaves `SESSION_SECRET` alone.
+- **`/api/profile/license` is auth-gated, NOT license-gated** — it IS the license-status endpoint; gating it on itself is a circular dep. Same exclusion applies to `/api/auth/*`, `/healthz`, and webhooks.
+- **`/ws/agent` traffic is keyed by `api_keys`, never by user license.** A user with `license_status='expired'` can still observe agent traffic in read-only mode; only user-initiated mutations are blocked.
+- **Magic-link jti single-use.** `TITANIUM_REQUIRE_REDIS=true` (default) hard-fails boot when Redis is absent, preventing silent replay-protection degradation. Set `false` only for local dev.
+- **Webhook HMAC and raw-body discipline mirror the Coolify webhook** (Phase 06): raw body MUST be read before JSON parse, signature over `${ts}.${rawBody}`, constant-time compare, reject >5 min skew. Unset secret → 503.
+- **Per-stack rules #16, #17, #18 from global CLAUDE.md apply.** This phase is the implementation of #16 (auth/billing → Titanium) on this app.
+
+When adding a new license-gated endpoint, exclusion-list entry, magic-link claim, webhook event, session-lifecycle hook, or any Phase 07 surface: update `docs/auth.md` in the same commit. Phase 07.5 cleanup items (password/JWT removal) get appended to `docs/auth.md`'s "07.5 follow-up" section so the cutover plan is preserved alongside the doc.
+
 ## API docs convention
 
-The hub exposes OpenAPI 3.1 at `/openapi.json` and a Scalar UI at `/docs`. The spec is assembled in `hub/src/api/_openapi.ts` using `@hono/zod-openapi` `createRoute` declarations. **Only `/api/profile/cost-today` is currently in the spec** — the rest of the hub is plain Hono and gets migrated incrementally.
+The hub exposes OpenAPI 3.1 at `/openapi.json` and a Scalar UI at `/docs`. The spec is assembled in `hub/src/api/_openapi.ts` using `@hono/zod-openapi` `createRoute` declarations. Currently covers `/api/profile/cost-today` and `/api/profile/license` — the rest of the hub is plain Hono and gets migrated incrementally.
 
 When migrating a route:
 1. Add a `createRoute` declaration to `hub/src/api/_openapi.ts` (or a sibling `OpenAPIHono` subrouter mounted ahead of the plain twin in `hub/src/index.ts`).

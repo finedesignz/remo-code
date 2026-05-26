@@ -175,7 +175,7 @@ Claude Code CLI
 
 Four packages in a Bun workspace:
 
-- **hub/** — Bun + Hono server handling auth (Supabase JWT), message relay, and session management. Broadcasts Claude's activity events (thinking, tool use, text) to subscribed browsers.
+- **hub/** — Bun + Hono server handling auth (Titanium Licensing magic-link + opaque cookie sessions — see [docs/auth.md](docs/auth.md)), message relay, and session management. Broadcasts Claude's activity events (thinking, tool use, text) to subscribed browsers.
 - **web/** — React 19 + Vite + Tailwind CSS 4 chat UI with activity feed, session switching, file attachments, light/dark theme, and unread badges.
 - **agent/** — Local streaming agent that runs on your dev machine. Spawns a persistent Claude Code CLI process with `--input-format stream-json --output-format stream-json`, parses events, and relays to the hub. Published as [`remo-code-agent`](https://www.npmjs.com/package/remo-code-agent) on npm.
 - **channel/** — (Legacy) Claude Code channel plugin. Kept for backward compatibility.
@@ -256,7 +256,7 @@ The Docker image builds the web frontend and serves it from the hub — one cont
 
 ## Security
 
-- **Supabase JWT auth** on all API and WebSocket endpoints
+- **Titanium Licensing magic-link auth** on all user-facing API and WebSocket endpoints (see [docs/auth.md](docs/auth.md)). Agent endpoints (`/ws/agent`) use API keys.
 - **Row-Level Security** on all database tables — multi-tenant by default
 - **API keys** stored as SHA-256 hashes with timing-safe comparison
 - **CSP, HSTS, and security headers** on all responses
