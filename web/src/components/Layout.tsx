@@ -217,18 +217,8 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">
         <header className="relative z-40 flex items-center gap-3 px-3 py-2.5 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/60 backdrop-blur-sm shrink-0">
-          {/* Hamburger — desktop only (mobile uses dropdown switcher) */}
-          <button
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-            className="hidden md:inline-flex text-[var(--text-muted)] hover:text-[var(--text-primary)] p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
-            aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
-          >
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-              <line x1="3" y1="5" x2="17" y2="5" />
-              <line x1="3" y1="10" x2="17" y2="10" />
-              <line x1="3" y1="15" x2="17" y2="15" />
-            </svg>
-          </button>
+          {/* Desktop sidebar toggle lives in the Sidebar header itself.
+              Mobile uses the dropdown switcher below. */}
 
           {/* Mobile: session dropdown */}
           <div className="md:hidden flex-1 min-w-0">
