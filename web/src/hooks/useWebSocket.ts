@@ -186,6 +186,16 @@ export function useWebSocket(token: string | null) {
         return
       }
 
+      // The hub refused a send (offline session, quota threshold, etc.).
+      // Clear the in-flight entry so we don't replay on reconnect, then fall
+      // through to handlers so chat-level UI can surface the reason.
+      if (msg.type === 'send_refused' && typeof msg.client_id === 'string') {
+        if (inFlightRef.current.delete(msg.client_id)) {
+          persistInFlight()
+        }
+        // fall through — handlers below render the error in the chat surface
+      }
+
       for (const handler of handlersRef.current) {
         handler(msg)
       }

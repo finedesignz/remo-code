@@ -170,6 +170,31 @@ export function useChat(
         }
       }
 
+      // Hub refused this send (offline session, quota threshold, etc.).
+      // Surface as a transient assistant bubble so the user sees WHY their
+      // message didn't get a response. Only render in the currently active
+      // session — refusals for background sessions stay silent.
+      if (msg.type === 'send_refused' && typeof msg.session_id === 'string') {
+        const incomingSessionId = msg.session_id as string
+        if (incomingSessionId !== activeSessionRef.current) return
+        const reason = (msg.reason as string) || (msg.error as string) || 'Send refused.'
+        const synthetic: ChatMessage = {
+          id: `refused-${msg.client_id || Date.now()}`,
+          session_id: incomingSessionId,
+          role: 'assistant',
+          content: `⚠ ${reason}`,
+          status: 'interrupted',
+          created_at: new Date().toISOString(),
+        }
+        setMessages(prev => {
+          if (prev.some(m => m.id === synthetic.id)) return prev
+          const next = [...prev, synthetic]
+          cacheRef.current[incomingSessionId] = next
+          return next
+        })
+        return
+      }
+
       // Live token streaming: append delta to the corresponding placeholder
       // message so the user sees the response build up in real time. The
       // bubble is already persisted to Postgres so a hub restart preserves

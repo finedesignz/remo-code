@@ -138,6 +138,25 @@ export function useChatSurface({
         return
       }
 
+      // Hub refused this send — surface as a transient assistant bubble so
+      // the cell visibly reflects WHY the runner never replied.
+      if (msg.type === 'send_refused') {
+        const reason = (msg.reason as string) || (msg.error as string) || 'Send refused.'
+        const synthetic: ChatMessage = {
+          id: `refused-${msg.client_id || Date.now()}`,
+          session_id: sessionIdRef.current!,
+          role: 'assistant',
+          content: `⚠ ${reason}`,
+          status: 'interrupted',
+          created_at: new Date().toISOString(),
+        }
+        setMessages(prev => {
+          if (prev.some(m => m.id === synthetic.id)) return prev
+          return [...prev, synthetic]
+        })
+        return
+      }
+
       // Activity events — minimal reducer mirroring useActivity
       if (msg.type === 'status') {
         const state = msg.state as ActivityState['status']
