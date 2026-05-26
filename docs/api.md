@@ -20,7 +20,7 @@ headingLevel: 2
 
 > Scroll down for code samples, example requests and responses. Select a language for code samples from the tabs above or the mobile navigation menu.
 
-REST API for the remo-code hub. NOTE: Only the sample `/api/profile/cost-today` route is currently in the spec; the rest of the hub is plain Hono and will be migrated incrementally.
+REST API for the remo-code hub. Routes are migrated to the OpenAPI surface incrementally; currently covers `/api/profile/cost-today` and `/api/profile/license`. The rest of the hub is plain Hono.
 
 Base URLs:
 
@@ -101,6 +101,94 @@ Status Code **200**
 |» cap_usd|number|true|none|none|
 |» percent|number|true|none|none|
 |» timezone|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## License status for the authenticated user
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/profile/license \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/profile/license',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/profile/license`
+
+Returns the user's current license status (mirrored from Titanium Licensing), license id, and the timestamp of the last sync. Used by the web UI's license badge. Auth-gated; NOT license-gated — needed even when the license is expired so the user can see why.
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "status": "active",
+  "license_id": "string",
+  "checked_at": "string"
+}
+```
+
+<h3 id="license-status-for-the-authenticated-user-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|License snapshot|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid session|Inline|
+
+<h3 id="license-status-for-the-authenticated-user-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» status|string|true|none|none|
+|» license_id|string¦null|true|none|none|
+|» checked_at|string¦null|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|status|active|
+|status|expired|
+|status|suspended|
+|status|banned|
+|status|none|
+|status|unknown|
 
 Status Code **401**
 
