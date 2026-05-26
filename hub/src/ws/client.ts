@@ -300,29 +300,75 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       message,
     })
 
-    // Forward to channel or agent (Claude Code session)
+    // Forward to channel or agent (Claude Code session).
+    // Detect three failure modes so the UI never silently swallows a send:
+    //   (a) no channel registered for this session (agent never connected, or
+    //       was cleaned up by a close handler)
+    //   (b) channel's underlying socket is not OPEN (readyState !== 1) — a
+    //       half-open TCP connection where the agent process is gone but the
+    //       hub hasn't observed the close yet
+    //   (c) ws.send returns -1 (Bun backpressure / closed) — existing path
+    // In all three cases: clean up registry (if stale), broadcast offline,
+    // and emit a structured `send_refused` to the SENDER so the chat UI can
+    // surface "session offline — no runner connected" instead of spinning.
     const channel = getChannel(msg.session_id)
-    if (channel) {
-      const forwardPayload: Record<string, unknown> = {
-        type: 'user_message',
-        id: message.id,
-        content: msg.content,
-        ts: message.created_at,
-      }
-      // Include images/attachments if present (used by agent connections)
-      if (msg.images) forwardPayload.images = msg.images
-      if (msg.attachments) forwardPayload.attachments = msg.attachments
-      const sent = channel.ws.send(JSON.stringify(forwardPayload))
-      if (sent === -1) {
-        // Socket is closed/dead — clean up the stale registry entry
-        console.log(`[client] channel send failed (socket dead), unregistering session=${msg.session_id}`)
+    const readyState = channel ? (channel.ws as any).readyState : undefined
+    const channelLive = !!channel && readyState === 1 // 1 = WebSocket.OPEN
+
+    if (!channelLive) {
+      const reason = !channel
+        ? 'no_channel'
+        : `socket_not_open(readyState=${readyState})`
+      console.log(`[client] cannot forward session=${msg.session_id} reason=${reason}`)
+      if (channel && readyState !== 1) {
+        // Stale half-open entry — purge it so the next reconnect can register
+        // cleanly and existing clients re-render as offline.
         unregisterChannel(msg.session_id)
-        broadcastToSubscribers(msg.session_id, { type: 'session_status', session_id: msg.session_id, status: 'offline' })
-      } else {
-        console.log(`[client] forwarding to channel session=${msg.session_id}`)
       }
+      broadcastToSubscribers(msg.session_id, {
+        type: 'session_status',
+        session_id: msg.session_id,
+        status: 'offline',
+      })
+      try {
+        ws.send(JSON.stringify({
+          type: 'send_refused',
+          client_id: msg.id,
+          session_id: msg.session_id,
+          error: 'session_offline',
+          reason: 'No live runner is attached to this session. Start `claude-remote` in the project directory to reconnect.',
+        }))
+      } catch {}
+      return
+    }
+
+    const forwardPayload: Record<string, unknown> = {
+      type: 'user_message',
+      id: message.id,
+      content: msg.content,
+      ts: message.created_at,
+    }
+    // Include images/attachments if present (used by agent connections)
+    if (msg.images) forwardPayload.images = msg.images
+    if (msg.attachments) forwardPayload.attachments = msg.attachments
+    const sent = channel!.ws.send(JSON.stringify(forwardPayload))
+    if (sent === -1) {
+      // Socket reported OPEN moments ago but send failed — backpressure or
+      // a race with close. Treat as offline and notify the sender.
+      console.log(`[client] channel send failed (sent=-1), unregistering session=${msg.session_id}`)
+      unregisterChannel(msg.session_id)
+      broadcastToSubscribers(msg.session_id, { type: 'session_status', session_id: msg.session_id, status: 'offline' })
+      try {
+        ws.send(JSON.stringify({
+          type: 'send_refused',
+          client_id: msg.id,
+          session_id: msg.session_id,
+          error: 'session_offline',
+          reason: 'Send to runner failed (socket closed mid-send). Reconnect your agent and retry.',
+        }))
+      } catch {}
     } else {
-      console.log(`[client] no channel connected for session=${msg.session_id}`)
+      console.log(`[client] forwarding to channel session=${msg.session_id} bytes=${sent}`)
     }
   }
 }
