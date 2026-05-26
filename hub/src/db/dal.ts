@@ -367,9 +367,12 @@ export async function updateUserInstructions(
 }
 
 export async function rotateUserCoolifyWebhookSecret(userId: string): Promise<string> {
+  // Rotating also clears the legacy-hit flag: the user is moving to URL-token
+  // auth, so the deprecation banner should disappear on next status fetch.
   const rows = await sql<{ coolify_webhook_secret: string }[]>`
     UPDATE users
        SET coolify_webhook_secret = gen_random_uuid()::text,
+           coolify_webhook_legacy_hit_at = NULL,
            updated_at = now()
      WHERE id = ${userId}
      RETURNING coolify_webhook_secret
@@ -379,13 +382,39 @@ export async function rotateUserCoolifyWebhookSecret(userId: string): Promise<st
   return secret;
 }
 
-export async function getUserCoolifyWebhookStatus(userId: string): Promise<{ configured: boolean }> {
-  const rows = await sql<{ configured: boolean }[]>`
-    SELECT (coolify_webhook_secret IS NOT NULL) AS configured
+export async function getUserCoolifyWebhookStatus(
+  userId: string,
+): Promise<{ configured: boolean; legacy_in_use: boolean; legacy_hit_at: string | null }> {
+  const rows = await sql<{
+    configured: boolean;
+    legacy_hit_at: string | null;
+  }[]>`
+    SELECT
+      (coolify_webhook_secret IS NOT NULL) AS configured,
+      coolify_webhook_legacy_hit_at AS legacy_hit_at
       FROM users
      WHERE id = ${userId}
   `;
-  return { configured: !!rows[0]?.configured };
+  const row = rows[0];
+  const hitAt = row?.legacy_hit_at ?? null;
+  return {
+    configured: !!row?.configured,
+    legacy_in_use: hitAt != null,
+    legacy_hit_at: hitAt ? new Date(hitAt).toISOString() : null,
+  };
+}
+
+/**
+ * Set/refresh the legacy-HMAC-route-hit marker on the user row. Idempotent —
+ * each successful hit just bumps the timestamp. Cleared by
+ * `rotateUserCoolifyWebhookSecret`.
+ */
+export async function markUserCoolifyWebhookLegacyHit(userId: string): Promise<void> {
+  await sql`
+    UPDATE users
+       SET coolify_webhook_legacy_hit_at = now()
+     WHERE id = ${userId}
+  `;
 }
 
 // ── Coolify webhook ingress (Phase 06 / plan 004) ─────────────────────────────

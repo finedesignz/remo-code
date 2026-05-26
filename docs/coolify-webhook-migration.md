@@ -40,6 +40,8 @@ Your Coolify server's IP is likely `46.224.61.233` (titaniumlabs.us). Rejected r
 
 The pre-fix HMAC route at `POST /api/coolify/webhook/:user_id` is still mounted for 30 days. It now returns `Deprecation: true` + `Sunset:` headers and logs a warning per hit. After grace, the route will be removed. Re-rotate to migrate.
 
+**In-UI deprecation banner.** Every successful legacy-HMAC hit stamps `users.coolify_webhook_legacy_hit_at` (idempotent — just bumps the timestamp). `GET /api/account/coolify-webhook-secret` returns this as `legacy_in_use: boolean` + `legacy_hit_at: string | null`, and the Settings → Coolify Webhook card renders an amber callout above the rotate button telling the user to re-rotate. `POST /api/account/coolify-webhook-secret/rotate` clears the flag in the same UPDATE that mints the new URL-token secret, so the banner disappears on next status fetch.
+
 ### Audit log
 
 Every webhook hit — success, auth-fail, ip-reject, bad-payload — writes one row to `coolify_webhook_attempts` (capped at 100 rows/user via app-side trim). Surfaced in the UI and via `GET /api/account/coolify-webhook-attempts?limit=10`.

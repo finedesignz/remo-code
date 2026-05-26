@@ -48,6 +48,8 @@ accountRouter.get('/coolify-webhook-secret', async (c) => {
       configured: status.configured,
       webhook_url: webhookUrlFor(userId, secret),
       auth_mode: 'url_token',
+      legacy_in_use: status.legacy_in_use,
+      legacy_hit_at: status.legacy_hit_at,
     });
   } catch (err: any) {
     console.error('[account] coolify-webhook-secret GET failed:', err?.code, err?.message);

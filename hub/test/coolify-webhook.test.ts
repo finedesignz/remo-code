@@ -23,11 +23,13 @@ const mockState: {
   allowedIps: string[]
   attempts: any[]
   runs: any[]
+  legacyHitCount: number
 } = {
   secret: TEST_SECRET,
   allowedIps: [],
   attempts: [],
   runs: [],
+  legacyHitCount: 0,
 }
 
 mock.module('../src/db/dal.ts', () => ({
@@ -45,6 +47,9 @@ mock.module('../src/db/dal.ts', () => ({
   },
   recordCoolifyWebhookAttempt: async (input: any) => {
     mockState.attempts.push(input)
+  },
+  markUserCoolifyWebhookLegacyHit: async () => {
+    mockState.legacyHitCount += 1
   },
   // Stubs for transitive imports.
   hasOpenIssueForHash: async () => false,
@@ -75,6 +80,7 @@ beforeEach(() => {
   mockState.allowedIps = []
   mockState.attempts.length = 0
   mockState.runs.length = 0
+  mockState.legacyHitCount = 0
 })
 
 function urlTokenPath(userId: string, token: string): string {
@@ -298,6 +304,28 @@ describe('coolify-webhook legacy HMAC route', () => {
     expect(res.headers.get('sunset')).toBeTruthy()
     const audit = mockState.attempts.find((a) => a.status === 'legacy_hmac')
     expect(audit).toBeTruthy()
+    // Successful legacy auth must flag the user so the Settings UI shows the
+    // "rotate to migrate" banner. markUserCoolifyWebhookLegacyHit is fire-and-
+    // forget — we await a microtask to let the unawaited promise resolve.
+    await new Promise((r) => setImmediate(r))
+    expect(mockState.legacyHitCount).toBe(1)
+  })
+
+  test('failed legacy auth (bad signature) → DOES NOT mark legacy hit', async () => {
+    const ts = Math.floor(Date.now() / 1000)
+    const body = validBody()
+    const res = await app.request(legacyPath(TEST_USER_ID), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-coolify-signature': sign('wrong-secret', ts, body),
+        'x-coolify-timestamp': String(ts),
+      },
+      body,
+    })
+    expect(res.status).toBe(401)
+    await new Promise((r) => setImmediate(r))
+    expect(mockState.legacyHitCount).toBe(0)
   })
 
   test('missing signature header → 401 + audit auth_failed', async () => {

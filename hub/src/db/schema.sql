@@ -488,6 +488,13 @@ ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS commit_sha TEXT;
 -- Optional comma-separated IPv4 / IPv6 / CIDR list. NULL = allow all (back-compat).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS coolify_webhook_allowed_ips TEXT;
 
+-- ── fix/coolify-webhook-deprecation-banner ───────────────────────────────────
+-- Set whenever the legacy HMAC route ingests a valid webhook (deprecated
+-- format). The Settings UI reads this to surface a "rotate to migrate" amber
+-- banner. Cleared on rotate (new URL-token secret minted). NULL = never hit
+-- the legacy route OR already migrated.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS coolify_webhook_legacy_hit_at TIMESTAMPTZ;
+
 -- ── fix/coolify-webhook-url-token: webhook attempt audit log (Part 2) ────────
 -- Every hit (success + auth-fail + ip-reject) is logged so the user can see
 -- in the UI whether Coolify is actually reaching them. Capped at 100 rows/user
