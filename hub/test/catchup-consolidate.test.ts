@@ -22,6 +22,14 @@ mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
     calls.push(input)
     return { id: `run_${calls.length}`, ...input }
   },
+  getRun: async (_runId: string, _userId: string) => ({
+    id: 'run_1',
+    user_id: 'user_1',
+    application_uuid: 'app-abc',
+    deployment_uuid: 'deploy-xyz',
+    git_repository: 'finedesignz/remo-code',
+    commit_sha: 'abc123',
+  }),
 }))
 
 // Import AFTER the mock so the module binds to the stub.

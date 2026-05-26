@@ -50,9 +50,9 @@ if (!READY) {
   // Wire test env BEFORE importing the hub so module-load-time validation passes.
   process.env.DATABASE_URL = process.env.REMO_E2E_DB_URL!;
   process.env.TITANIUM_KEYGEN_API_URL = process.env.REMO_E2E_KEYGEN_URL!;
-  process.env.TITANIUM_ACCOUNT_ID =
+  process.env.TITANIUM_KEYGEN_ACCOUNT_ID =
     process.env.REMO_E2E_KEYGEN_ACCOUNT || 'acct_e2e_placeholder';
-  process.env.TITANIUM_PRODUCT_ID =
+  process.env.TITANIUM_KEYGEN_PRODUCT_ID =
     process.env.REMO_E2E_KEYGEN_PRODUCT || 'prod_e2e_placeholder';
   process.env.JWT_SECRET =
     process.env.JWT_SECRET || 'e2e-jwt-secret-at-least-32-chars-long-x';

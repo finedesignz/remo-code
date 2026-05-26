@@ -23,8 +23,8 @@ import { importJWK } from 'jose'
 const ISSUER = 'https://keygen.titaniumlabs.us'
 const PRODUCT_ID = 'prod_test_remo'
 process.env.TITANIUM_KEYGEN_API_URL = ISSUER
-process.env.TITANIUM_ACCOUNT_ID = 'acct_test_0000000000'
-process.env.TITANIUM_PRODUCT_ID = PRODUCT_ID
+process.env.TITANIUM_KEYGEN_ACCOUNT_ID = 'acct_test_0000000000'
+process.env.TITANIUM_KEYGEN_PRODUCT_ID = PRODUCT_ID
 
 const {
   verifyLicenseJwt,
