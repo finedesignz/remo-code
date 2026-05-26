@@ -413,6 +413,52 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_cost_cap_cents INTEGER NOT NULL
 CREATE INDEX IF NOT EXISTS idx_users_preferred_supervisor
   ON users(preferred_supervisor_id) WHERE preferred_supervisor_id IS NOT NULL;
 
+-- ── Phase 07: Titanium auth cutover (additive only) ───────────────────────────
+-- Links remo-code users to Titanium Licensing (Keygen) subjects + tracks the
+-- license cache + opaque server-side session tokens. password_hash is made
+-- nullable so future magic-link-only users can exist without one. The full
+-- removal of password_hash + bcrypt is deferred to Phase 07.5.
+-- NOTE: `auth_sessions` is intentionally NOT named `sessions` — the existing
+-- `sessions` table above means "Claude Code conversation sessions".
+ALTER TABLE users ADD COLUMN IF NOT EXISTS titanium_subject TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_titanium_subject
+  ON users(titanium_subject) WHERE titanium_subject IS NOT NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS titanium_email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_titanium_sync_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS license_status TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS license_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS license_checked_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS titanium_link_status TEXT
+  CHECK (titanium_link_status IN ('linked','pending_verify','mismatch') OR titanium_link_status IS NULL);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS candidate_subject TEXT;
+
+-- Drop NOT NULL on password_hash only if currently NOT NULL (idempotent guard).
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='password_hash' AND is_nullable='NO') THEN ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL; END IF; END $$;
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id           TEXT PRIMARY KEY,
+  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at   TIMESTAMPTZ NOT NULL,
+  ip           TEXT,
+  user_agent   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS auth_events (
+  id         BIGSERIAL PRIMARY KEY,
+  user_id    UUID REFERENCES users(id) ON DELETE SET NULL,
+  event_type TEXT NOT NULL,
+  ip         TEXT,
+  user_agent TEXT,
+  ts         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  metadata   JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_auth_events_user_ts ON auth_events(user_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_events_type_ts ON auth_events(event_type, ts DESC);
+
 -- ── Phase 06 plan 001: Coolify webhook HMAC secret + deployment metadata ─────
 -- Missing ALTERs that shipped in code but never landed in schema.sql.
 -- Result: GET /api/account/coolify-webhook-secret 500'd on prod (column

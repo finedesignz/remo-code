@@ -87,3 +87,19 @@ Source of truth for phase ordering, status, and dependencies. The GSD SDK parses
   - `06-PLAN-005-protocol-enforcement` — wave 3 — Bun supervisor enforces security toggles in `process-manager.ts`: allowed-folders gate (with `realpath` symlink-escape check), git-only gate, max-concurrent cap, `--dangerously-skip-permissions` hard-strip when cap off, audit JSONL to `%LOCALAPPDATA%\remo-code-supervisor\audit.jsonl`, surface capability flags via `supervisor.hello`
   - `06-PLAN-006-installer-and-autostart` — wave 3 — MSI installer via Tauri bundler; autostart Run-key on by default; coexist with NSSM (auto-detect existing service + offer one-click migrate to tray mode); uninstall removes autostart + binaries, prompts before deleting config/audit log
   - `06-PLAN-007-docs-and-tests` — wave 4 — README + CLAUDE.md + new `docs/supervisor-tray.md`; Windows tray smoke checklist; Rust unit tests for IPC bridge pure logic; integration test for the sandbox-escape rejection
+
+## Phase 07: titanium-auth-cutover
+
+- Status: Pending
+- Mode: standard
+- Goal: Every remo-code user login goes through Titanium Licensing (Keygen CE-backed). Existing bcrypt users keep working with zero password resets. Hub verifies Titanium-issued EdDSA JWTs locally via JWKS + Redis blocklist; 2-week dual-auth soak; then legacy `/api/auth/login` and `JWT_SECRET`-signed user tokens removed. Agent `api_keys` stay local (out of scope).
+- Depends on: [Phase 06]
+- Requirements: [R-AUTH-01, R-AUTH-02, R-AUTH-03, R-AUTH-04, R-AUTH-05, R-AUTH-06, R-AUTH-07, R-AUTH-08, R-AUTH-09]
+- Phase dir: `.planning/phases/07-titanium-auth-cutover/`
+- Plans:
+  - `07-PLAN-001-schema-migration` — wave 1 — additive `users.titanium_user_id TEXT UNIQUE NULL`, drop NOT NULL from `users.password_hash`, optional `mapping_conflicts` table
+  - `07-PLAN-002-jwks-verify-and-blocklist` — wave 1 — `jose`-based EdDSA verifier with JWKS cache, Redis blocklist (`titanium:blocklist`) check, warm-cache on `bootstrap()` before port bind
+  - `07-PLAN-003-mapping-job` — wave 2 — idempotent one-shot `hub/scripts/map-users-to-titanium.ts` with `--dry-run`; create-if-not-exists in Titanium; never auto-merge collisions; conflict log
+  - `07-PLAN-004-dual-auth-middleware` — wave 2 — REST + WS auth handlers detect `alg` and branch between EdDSA (Titanium) verify and legacy HS256 (`JWT_SECRET`) verify; on-first-request linking by email for unlinked rows; email-sync-on-verify
+  - `07-PLAN-005-web-login-cutover` — wave 3 — web ships Titanium magic-link flow as the default; "use password" fallback link visible during soak; WS auth payload and REST headers attach Titanium token
+  - `07-PLAN-006-cutover-and-cleanup` — wave 4 — after ≥14d green soak: disable `/api/auth/login`, remove `JWT_SECRET` user-token verify code path (gated behind `ALLOW_LEGACY_LOGIN` flag for 1 release), update docs/README/CLAUDE.md

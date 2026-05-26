@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { hubFetch } from '../lib/api'
 
 export interface Profile {
   id: string
@@ -19,15 +20,10 @@ export function useProfile(token: string | null) {
 
   const fetchProfile = useCallback(async () => {
     if (!token) return
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
     try {
-      const res = await fetch(`${hubUrl}/api/profile`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (res.ok) setProfile(await res.json())
-    } catch {
-      // ignore
-    }
+      const p = await hubFetch<Profile>(token, '/api/profile')
+      setProfile(p)
+    } catch { /* swallow */ }
     setLoading(false)
   }, [token])
 
@@ -42,21 +38,16 @@ export function useProfile(token: string | null) {
     timezone?: string
   }) => {
     if (!token) return
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/profile`, {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(data),
-    })
-    if (res.ok) {
-      const updated = await res.json()
+    try {
+      const updated = await hubFetch<Profile>(token, '/api/profile', {
+        method: 'PATCH',
+        json: data,
+      })
       setProfile(updated)
       return updated
+    } catch {
+      return null
     }
-    return null
   }, [token])
 
   return { profile, loading, fetchProfile, updateProfile }

@@ -92,3 +92,34 @@ On first launch (no existing `supervisor.json`), the tray app SHALL open an onbo
 
 ### R-06-12 — Clean uninstall
 Uninstalling via the bundled uninstaller SHALL remove: the app binaries, the autostart Run-key entry, and the tray icon. It SHALL prompt the user before deleting `%APPDATA%\remo-code\supervisor.json` and the `%LOCALAPPDATA%\remo-code-supervisor\audit.jsonl` — those are preserved by default.
+
+---
+
+## Phase 07 — titanium-auth-cutover
+
+### R-AUTH-01 — Hub verifies Titanium EdDSA JWTs locally via JWKS
+The hub SHALL verify every incoming Titanium-issued JWT locally using JWKS fetched from `${TITANIUM_KEYGEN_API_URL}/v1/accounts/${TITANIUM_ACCOUNT_ID}/.well-known/jwks.json`. Algorithm pinned to EdDSA (Ed25519) — RS*/ES*/HS* tokens claiming to be from Titanium SHALL be rejected. JWKS is cached in-memory with TTL ≥15 minutes; cache MISS on a presented `kid` triggers a single re-fetch (no stampede). Warm-cache fetch SHALL run during hub `bootstrap()` BEFORE the port is bound. Claims verified on every token: `iss == TITANIUM_KEYGEN_API_URL`, `aud` includes `TITANIUM_PRODUCT_ID`, `exp` valid, `nbf` valid, `iat` within ±30s skew, signature against the `kid`-matched key. No call to Titanium on the per-request hot path.
+
+### R-AUTH-02 — Additive DB schema, zero data loss
+Schema migration SHALL be additive only: add `users.titanium_user_id TEXT UNIQUE NULL`, drop NOT NULL from `users.password_hash` (column kept nullable). Existing rows SHALL retain their `password_hash` and bcrypt verification SHALL continue to work for any user during the soak. No column is dropped in this phase. `email UNIQUE` constraint preserved. Migration is idempotent (`ALTER TABLE … IF NOT EXISTS` patterns where Postgres supports it; gated migration otherwise).
+
+### R-AUTH-03 — Idempotent mapping job, never auto-merges
+A one-shot script `hub/scripts/map-users-to-titanium.ts` SHALL run before the dual-auth release. For each existing `users` row: (a) if no matching Keygen User by email exists, create one and write its UUID into `users.titanium_user_id`; (b) if a matching Keygen User exists AND was created by remo-code (verifiable via admin-API metadata or product scope), link by writing the UUID; (c) if a matching Keygen User exists AND was NOT created by remo-code (collision), `titanium_user_id` is left NULL and the row is appended to a `mapping_conflicts` log (table or file). The job SHALL support `--dry-run` (mandatory flag during first execution) and SHALL be safe to re-run (idempotent). Final output: counts of linked / created / conflicted.
+
+### R-AUTH-04 — 2-week dual-auth soak window
+Following the dual-auth release, the hub SHALL accept BOTH (a) Titanium EdDSA-signed JWTs and (b) legacy `JWT_SECRET`-signed HS256 JWTs for at least 14 days. Token type SHALL be detected by inspecting the `alg` header. The web SHALL default to Titanium magic-link login during the soak, with a visible "use password" fallback link routing to the legacy login form. Telemetry SHALL log per-login: token type, success/failure, latency. The soak ends only after ≥14 consecutive days with zero auth-related regressions.
+
+### R-AUTH-05 — Post-soak cutover removes legacy login endpoint
+After a successful ≥14d soak, the hub SHALL: (a) disable `/api/auth/login` (404 or 410), (b) remove the `JWT_SECRET`-signed user-token verify code path from REST + WS handlers, (c) remove the legacy login UI from the web (or hide behind `ALLOW_LEGACY_LOGIN` flag). Existing legacy JWTs in browsers SHALL continue to verify until natural expiry (≤7 days) during a brief overlap, OR clients SHALL be force-logged-out at cutover — planner picks based on traffic profile. `JWT_SECRET` env var stays if grep finds non-user-auth uses; otherwise removed.
+
+### R-AUTH-06 — Revocation via Redis blocklist
+The hub SHALL maintain a Redis blocklist (`titanium:blocklist` set with `titanium:blocklist:{subject_uuid}` keys) and check it on every token verify, in addition to the EdDSA signature check. A subject present in the blocklist SHALL be refused even if its JWT is technically unexpired. Redis client SHALL be in the hub process. Cache TTL for negative lookups (subject NOT blocked) is allowed to keep hot-path latency low; planner picks a safe default (≤60s).
+
+### R-AUTH-07 — Rollback feature flag for ≥1 release post-cutover
+A feature flag env var `ALLOW_LEGACY_LOGIN=true|false` SHALL be present and respected for at least one full release after cutover. When `true`, the bcrypt-verify code path and `/api/auth/login` endpoint are re-enabled. Default is `false` post-cutover. The bcrypt verify code SHALL stay present in the codebase (guarded by the flag) for the entire rollback window. `password_hash` column stays present (nullable) for the same window. Dropping either the flag, the bcrypt code, or the column happens in a follow-up phase — NOT this one.
+
+### R-AUTH-08 — Stable identity by Titanium subject UUID, not email
+The persistent identity key SHALL be the Titanium subject UUID (`sub` claim), stored in `users.titanium_user_id`. Email SHALL NOT be the identity key. On every authenticated request, the hub SHALL re-read `email` from the verified JWT claims; if it differs from the stored `users.email`, the hub SHALL update `users.email` keyed by `titanium_user_id`. `users.email UNIQUE` collision on update SHALL be logged and rejected (stale email kept until manual resolution). Brand-new Titanium logins (no matching remo-code row by `titanium_user_id` and no unlinked row matched by email) SHALL auto-create a `users` row keyed by the Titanium UUID with the default role.
+
+### R-AUTH-09 — WS `/ws/client` accepts Titanium tokens with no protocol shape change
+The `/ws/client` auth message SHALL accept the Titanium EdDSA JWT in the same shape it currently accepts the legacy JWT (`{ type: "auth", token }`). The verify branch SHALL inspect `alg` and route to either the JWKS-backed EdDSA verifier or the legacy HS256 verifier. Verify SHALL stay local (no Titanium round-trip per connection). Existing 30s heartbeat ping/pong, per-IP connection cap, and per-connection rate limits SHALL remain unchanged.

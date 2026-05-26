@@ -24,6 +24,8 @@ import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { instructions as instructionsApi } from './api/instructions'
 import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
+import { webhooksTitanium } from './api/webhooks-titanium'
+import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
 import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
@@ -34,7 +36,14 @@ import * as schedCatchup from './scheduler/catchup.ts'
 import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
 import { startErrorGraceSweep } from './error-capture/grace.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
-import { rateLimit } from './middleware/rate-limit'
+import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
+import { securityHeaders } from './middleware/security-headers'
+import { csrfGuard } from './csrf'
+import { requireRecentAuth } from './auth/reauth'
+import { requireAdmin } from './auth/require-admin'
+import { adminRouter } from './api/admin'
+import { recordAuthEvent } from './db/dal'
+import { parseSessionCookieFromHeader } from './session'
 import {
   createChannelWsData, handleChannelOpen, handleChannelMessage, handleChannelClose,
 } from './ws/channel'
@@ -55,23 +64,10 @@ app.onError((err, c) => {
   return c.json({ error: 'internal error' }, 500)
 })
 
-// Security headers (C2 fix: CSP + HSTS)
-app.use('*', async (c, next) => {
-  await next()
-  c.header('X-Content-Type-Options', 'nosniff')
-  c.header('X-Frame-Options', 'DENY')
-  c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
-  c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload')
-  c.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
-  c.header('Content-Security-Policy', [
-    "default-src 'self'",
-    "script-src 'self'",
-    "style-src 'self' 'unsafe-inline'",
-    "connect-src 'self' wss:",
-    "img-src 'self' data:",
-    "frame-ancestors 'none'",
-  ].join('; '))
-})
+// Phase 07-G: security headers (HSTS 2yr+preload, CSP, COOP/CORP, Permissions-
+// Policy, X-Content-Type/Frame-Options, Referrer-Policy). Mounted FIRST so
+// every response — including those from later middleware errors — carries them.
+app.use('*', securityHeaders())
 
 // CORS
 app.use('/api/*', cors({
@@ -83,6 +79,51 @@ app.use('/api/*', cors({
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
+
+// Phase 07-G: rate-limit auth endpoints BEFORE mounting the router.
+// request-link: 3/min/IP + 5/hr/email — `silent: true` so the response still
+// looks identical to a normal 200 (login-enumeration prevention). The handler
+// itself checks `c.get('rateLimited')` to skip the email send if needed.
+async function readEmailForRateLimit(c: any): Promise<string | null> {
+  try {
+    const body = await c.req.json()
+    const email = body?.email?.toLowerCase?.().trim?.()
+    return typeof email === 'string' && email.includes('@') ? email : null
+  } catch { return null }
+}
+function ipKey(c: any): string {
+  return c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'anon'
+}
+
+app.use('/api/auth/login/request-link', async (c, next) => {
+  // We need to read the body but Hono lets us re-read via `c.req.json()` again.
+  const email = await readEmailForRateLimit(c)
+  const mw = rateLimitMulti({
+    silent: true,
+    buckets: [
+      { bucket: 'request-link-ip', windowMs: 60_000, max: 3, keyFn: () => ipKey(c) },
+      { bucket: 'request-link-email', windowMs: 3_600_000, max: 5, keyFn: () => email },
+    ],
+    onLimit: async (cc, bucket) => {
+      try {
+        await recordAuthEvent({
+          eventType: 'rate_limited',
+          ip: ipKey(cc),
+          userAgent: cc.req.header('user-agent') ?? null,
+          metadata: { route: 'request-link', bucket: bucket.bucket, email },
+        })
+      } catch {}
+    },
+  })
+  return mw(c, next)
+})
+
+app.use('/api/auth/login/callback', rateLimit({
+  bucket: 'login-callback',
+  windowMs: 60_000,
+  max: 10,
+  keyFn: ipKey,
+}))
 
 // Auth routes (no auth required)
 app.route('/api/auth', authRouter)
@@ -104,6 +145,10 @@ app.route('/api/sentry', sentryIntakeApi)
 // MUST be mounted BEFORE the JWT catch-all middleware below.
 app.route('/api/coolify', coolifyWebhookRoutes)
 
+// Public Titanium license-changed webhook (HMAC-signed, shared secret).
+// MUST be mounted BEFORE the JWT catch-all. Inert (503) until secret set.
+app.route('/webhooks/titanium', webhooksTitanium)
+
 // Protected API routes (JWT auth, then rate limit keyed on userId)
 // Skip /api/github/callback — it's hit by GitHub's redirect, not by an authed client.
 // Skip /api/sentry — public Sentry-style intake authenticates via X-Sentry-Auth header.
@@ -115,6 +160,68 @@ app.use('/api/*', async (c, next) => {
   return authMiddleware(c, next)
 })
 app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('userId') || 'anon' }))
+
+// Phase 07-D: License gate runs AFTER authMiddleware so it can read userId.
+// `readOnlyOk: true` lets GET requests pass during the 7-day EXPIRED grace
+// window; mutations always require ACTIVE. Same exclusion list as auth:
+// /api/github/callback, /api/sentry/*, /api/coolify/webhook/* skip auth and
+// therefore also skip the gate. /openapi.json and /docs are mounted outside
+// /api/* so they are unaffected.
+app.use('/api/*', async (c, next) => {
+  if (c.req.path === '/api/github/callback') return next()
+  if (c.req.path.startsWith('/api/sentry/')) return next()
+  if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
+  return requireActiveLicense({ readOnlyOk: true })(c, next)
+})
+
+// CSRF (Phase 07-C): double-submit cookie on mutating /api/* requests.
+// Allowlist (sentry intake, coolify webhook, login/logout, plugin api-key,
+// setup bootstrap, github oauth callback, health) lives in hub/src/csrf.ts.
+// GET/HEAD/OPTIONS pass through.
+app.use('/api/*', csrfGuard())
+
+// Re-auth gate (Phase 07-C / C.5): elevated-impact ops require a session that
+// is younger than 5 minutes (re-auth via fresh magic-link). Cookie-only —
+// legacy bearer JWTs cannot satisfy because they carry no creation-time.
+app.use('/api/api-keys', async (c, next) => {
+  const m = c.req.method.toUpperCase()
+  if (m === 'POST' || m === 'DELETE') return requireRecentAuth()(c, next)
+  return next()
+})
+app.use('/api/account/coolify-webhook-secret/rotate', requireRecentAuth())
+app.use('/api/error-projects/:id', async (c, next) => {
+  if (c.req.method.toUpperCase() === 'DELETE') return requireRecentAuth()(c, next)
+  return next()
+})
+
+// Phase 07-G: per-user mutation rate-limit. 10/min/user on mutating methods
+// of credential/state-bearing endpoints. Applied AFTER authMiddleware so the
+// userId key is populated.
+function isMutating(c: any): boolean {
+  const m = c.req.method.toUpperCase()
+  return m === 'POST' || m === 'PUT' || m === 'PATCH' || m === 'DELETE'
+}
+const userMutationLimit = rateLimit({
+  bucket: 'user-mutation',
+  windowMs: 60_000,
+  max: 10,
+  keyFn: (c) => c.get('userId') || 'anon',
+})
+app.use('/api/api-keys', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/api-keys/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/scheduled-tasks', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/scheduled-tasks/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/error-projects', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/error-projects/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/account/coolify-webhook-secret/rotate', userMutationLimit)
+
+// Phase 07-G: admin endpoints. requireAdmin enforces role; requireRecentAuth
+// enforces fresh session (≤5min). userMutationLimit applies to mutating ops.
+app.use('/api/admin/*', requireAdmin())
+app.use('/api/admin/*', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/admin/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.route('/api/admin', adminRouter)
+
 // OpenAPI sample route + /openapi.json + /docs (Scalar UI).
 // Mounted ahead of plain-Hono routers so the documented twin of
 // /api/profile/cost-today wins over the legacy plain version.
@@ -153,6 +260,21 @@ function decrementIp(ip: string) {
   else wsConnectionsPerIp.set(ip, count - 1)
 }
 
+// Phase 07-A: warm Titanium JWKS BEFORE binding the port. The hub MUST NOT
+// serve traffic without JWKS available once Titanium is configured. While
+// `TITANIUM_KEYGEN_API_URL` is unset (Plan A pre-cutover state), this is a
+// no-op so dev environments without Titanium continue to boot.
+if (config.titanium.keygenApiUrl) {
+  try {
+    const { warmJwksCache } = await import('./titanium-client')
+    const keyCount = await warmJwksCache()
+    console.log(`[titanium] JWKS warmed (${keyCount} keys)`)
+  } catch (err) {
+    console.error('[titanium] JWKS warm failed — refusing to bind port:', (err as Error).message)
+    process.exit(1)
+  }
+}
+
 // Start Bun server with WebSocket upgrade handling
 const server = Bun.serve({
   port: config.port,
@@ -184,7 +306,23 @@ const server = Bun.serve({
       } else if (url.pathname === '/ws/channel') {
         wsData = { type: 'channel' as const, ip, ...createChannelWsData() }
       } else {
-        wsData = { type: 'client' as const, ip, ...createClientWsData() }
+        // Phase 07-C: extract __Host-remo_sid + csrf_token cookies at the
+        // upgrade so /ws/client can authenticate from cookie alone (preferred
+        // path) and enforce CSRF on mutating WS messages.
+        const cookieHeader = req.headers.get('cookie')
+        const cookieToken = parseSessionCookieFromHeader(cookieHeader)
+        let csrfCookie: string | null = null
+        if (cookieHeader) {
+          for (const part of cookieHeader.split(/;\s*/)) {
+            const eq = part.indexOf('=')
+            if (eq < 0) continue
+            if (part.slice(0, eq) === 'csrf_token') {
+              csrfCookie = decodeURIComponent(part.slice(eq + 1))
+              break
+            }
+          }
+        }
+        wsData = { type: 'client' as const, ip, cookieToken, csrfCookie, ...createClientWsData() }
       }
 
       const upgraded = server.upgrade(req, { data: wsData })

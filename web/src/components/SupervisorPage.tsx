@@ -74,13 +74,26 @@ const LOCAL_REPOS_LS_KEY = 'remo:local-repos'
 const GITHUB_REPOS_LS_KEY = 'remo:github-repos'
 
 function apiFetch(token: string, path: string, init?: RequestInit) {
+  // Read csrf_token cookie (double-submit) and attach to mutating requests.
+  let csrf: string | null = null
+  if (typeof document !== 'undefined') {
+    for (const part of (document.cookie || '').split(';')) {
+      const c = part.trim()
+      if (c.startsWith('csrf_token=')) { csrf = decodeURIComponent(c.slice('csrf_token='.length)); break }
+    }
+  }
+  const method = (init?.method || 'GET').toUpperCase()
+  const mutating = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE'
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+    ...((init?.headers || {}) as Record<string, string>),
+  }
+  if (mutating && csrf) headers['X-CSRF-Token'] = csrf
   return fetch(`${hubUrl}${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      ...(init?.headers || {}),
-    },
+    headers,
+    credentials: 'include',
   })
 }
 

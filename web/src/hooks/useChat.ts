@@ -62,6 +62,7 @@ export function useChat(
     const sid = activeSessionId
     fetch(`${hubUrl}/api/messages/${sid}?limit=50`, {
       headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include',
     })
       .then(r => r.ok ? r.json() : [])
       .then(data => {

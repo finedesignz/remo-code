@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { hubFetch } from '../lib/api'
 
 export interface AgentInfo {
   hostname?: string
@@ -32,13 +33,10 @@ export function useSessions(token: string | null) {
 
   const fetchSessions = useCallback(async () => {
     if (!token) return
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/sessions`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    if (res.ok) {
-      setSessions(await res.json())
-    }
+    try {
+      const data = await hubFetch<CodeSession[]>(token, '/api/sessions')
+      setSessions(data)
+    } catch { /* swallow */ }
     setLoading(false)
   }, [token])
 
@@ -46,42 +44,31 @@ export function useSessions(token: string | null) {
 
   const createSession = async (name: string, projectDir?: string): Promise<any> => {
     if (!token) return null
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/sessions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ name, project_dir: projectDir }),
-    })
-    if (res.ok) {
-      const data = await res.json()
+    try {
+      const data = await hubFetch<any>(token, '/api/sessions', {
+        method: 'POST',
+        json: { name, project_dir: projectDir },
+      })
       await fetchSessions()
       return data // includes { ...session, token: "remo_..." }
+    } catch {
+      return null
     }
-    return null
   }
 
   const deleteSession = async (id: string) => {
     if (!token) return
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    await fetch(`${hubUrl}/api/sessions/${id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    try { await hubFetch(token, `/api/sessions/${id}`, { method: 'DELETE' }) } catch {}
     await fetchSessions()
   }
 
   const rotateToken = async (id: string) => {
     if (!token) return null
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/sessions/${id}/rotate-token`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    if (res.ok) return res.json() // { token: "remo_..." }
-    return null
+    try {
+      return await hubFetch<{ token: string }>(token, `/api/sessions/${id}/rotate-token`, { method: 'POST' })
+    } catch {
+      return null
+    }
   }
 
   const updateSessionStatus = (sessionId: string, status: string) => {

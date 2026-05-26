@@ -1,0 +1,16 @@
+{
+  "total_users": 1,
+  "created": 1,
+  "existing_skipped": 0,
+  "errors": 0,
+  "generated_at": "2026-05-26T03:38:54.174Z",
+  "results": [
+    {
+      "user_id": "233c6d63-5f44-43f4-9eae-efc34a00735a",
+      "email": "articulatedesigns@gmail.com",
+      "action": "created",
+      "license_id": "f04603fd-6ce4-4467-a866-103eec2c00c2",
+      "license_key_preview": "key/eyJh…"
+    }
+  ]
+}

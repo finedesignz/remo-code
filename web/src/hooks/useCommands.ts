@@ -27,7 +27,7 @@ export function useCommands(token: string | null) {
   const refetch = () => {
     if (!token) return
     setLoading(true)
-    fetch(`${hubUrl}/api/commands`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`${hubUrl}/api/commands`, { headers: { Authorization: `Bearer ${token}` }, credentials: 'include' })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((d) => { setRows(d.commands || []); setError(null) })
       .catch((e) => setError(e.message))

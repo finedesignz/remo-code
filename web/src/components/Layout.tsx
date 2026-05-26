@@ -11,6 +11,30 @@ import { ApiKeyModal } from './ApiKeyModal'
 import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 import { UsageStrip } from './UsageStrip'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
+import { hubFetch } from '../lib/api'
+import { useLicense, type LicenseStatus } from '../hooks/useLicense'
+import { titaniumPortalUrl } from '../lib/auth'
+
+function licenseDotClass(s: LicenseStatus): string {
+  switch (s) {
+    case 'active': return 'bg-emerald-400'
+    case 'expired': return 'bg-amber-400'
+    case 'suspended':
+    case 'banned': return 'bg-red-400'
+    case 'none': return 'bg-[var(--text-muted)]'
+    default: return 'bg-transparent'
+  }
+}
+
+function licenseTextClass(s: LicenseStatus): string {
+  switch (s) {
+    case 'active': return 'text-emerald-400'
+    case 'expired': return 'text-amber-400'
+    case 'suspended':
+    case 'banned': return 'text-red-400'
+    default: return 'text-[var(--text-muted)]'
+  }
+}
 
 const NUDGE_TEXT = "Status update? Briefly: what's the current state, what would you recommend doing next, or what input do you need from me?"
 
@@ -283,13 +307,12 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
 function ProfileMenu({ user, onNavigate, signOut, token }: { user: AuthUser; onNavigate: (h: string) => void; signOut: () => void; token: string }) {
   const [open, setOpen] = useState(false)
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null)
+  const { license } = useLicense(token)
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let cancelled = false
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    fetch(`${hubUrl}/api/profile`, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.ok ? r.json() : null)
+    hubFetch<{ avatar_url?: string | null }>(token, '/api/profile')
       .then(p => { if (!cancelled && p) setAvatarUrl(p.avatar_url ?? null) })
       .catch(() => {})
     return () => { cancelled = true }
@@ -330,8 +353,14 @@ function ProfileMenu({ user, onNavigate, signOut, token }: { user: AuthUser; onN
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        <span className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-xs font-medium shrink-0 overflow-hidden">
+        <span className="relative w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-xs font-medium shrink-0 overflow-hidden">
           {avatarUrl ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" /> : initial}
+          {license && license.status !== 'unknown' && (
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-[var(--bg-primary)] ${licenseDotClass(license.status)}`}
+              title={`License: ${license.status}`}
+            />
+          )}
         </span>
         {firstName && (
           <span className="text-sm text-[var(--text-secondary)] font-medium hidden sm:inline">{firstName}</span>
@@ -348,6 +377,12 @@ function ProfileMenu({ user, onNavigate, signOut, token }: { user: AuthUser; onN
           <div className="px-3 py-2 border-b border-[var(--border-color)]">
             <div className="text-xs text-[var(--text-muted)]">Signed in as</div>
             <div className="text-sm text-[var(--text-primary)] truncate">{user.email}</div>
+            {license && license.status !== 'unknown' && (
+              <div className="flex items-center gap-1.5 mt-1.5">
+                <span className={`w-1.5 h-1.5 rounded-full ${licenseDotClass(license.status)}`} />
+                <span className={`text-[11px] ${licenseTextClass(license.status)}`}>License: {license.status}</span>
+              </div>
+            )}
           </div>
           <button role="menuitem" onClick={() => go('#/')} className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors">Chat</button>
           <button role="menuitem" onClick={() => go('#/grid')} className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors">Grid</button>
@@ -357,6 +392,14 @@ function ProfileMenu({ user, onNavigate, signOut, token }: { user: AuthUser; onN
           <button role="menuitem" onClick={() => go('#/settings?tab=profile')} className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors">Profile</button>
           <button role="menuitem" onClick={() => go('#/settings')} className="w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors">Settings</button>
           <div className="my-1 border-t border-[var(--border-color)]" />
+          <a
+            role="menuitem"
+            href={`${titaniumPortalUrl()}/account`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block w-full text-left px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)] transition-colors"
+            onClick={() => setOpen(false)}
+          >Manage account in Titanium ↗</a>
           <button
             role="menuitem"
             onClick={() => { setOpen(false); signOut() }}
@@ -368,3 +411,6 @@ function ProfileMenu({ user, onNavigate, signOut, token }: { user: AuthUser; onN
   )
 }
 
+// UsageStrip is now a standalone module — see ./UsageStrip.tsx.
+// Phase 07 merge: the inline duplicate was removed in favor of the
+// subscription-aware version that lives in its own file.

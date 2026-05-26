@@ -3,7 +3,7 @@
   "info": {
     "title": "remo-code hub",
     "version": "0.1.0",
-    "description": "REST API for the remo-code hub. NOTE: Only the sample `/api/profile/cost-today` route is currently in the spec; the rest of the hub is plain Hono and will be migrated incrementally."
+    "description": "REST API for the remo-code hub. Routes are migrated to the OpenAPI surface incrementally; currently covers `/api/profile/cost-today` and `/api/profile/license`. The rest of the hub is plain Hono."
   },
   "servers": [
     {
@@ -72,6 +72,76 @@
           },
           "401": {
             "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profile/license": {
+      "get": {
+        "tags": [
+          "profile"
+        ],
+        "summary": "License status for the authenticated user",
+        "description": "Returns the user's current license status (mirrored from Titanium Licensing), license id, and the timestamp of the last sync. Used by the web UI's license badge. Auth-gated; NOT license-gated — needed even when the license is expired so the user can see why.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "License snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "active",
+                        "expired",
+                        "suspended",
+                        "banned",
+                        "none",
+                        "unknown"
+                      ]
+                    },
+                    "license_id": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "checked_at": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "license_id",
+                    "checked_at"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid session",
             "content": {
               "application/json": {
                 "schema": {
