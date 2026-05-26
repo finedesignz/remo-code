@@ -51,6 +51,13 @@ const titaniumLicenseCacheTtlSeconds = parsePositiveInt(
 const magicLinkSecret = requireMinLenIfSet("MAGIC_LINK_SECRET", process.env.MAGIC_LINK_SECRET, 32);
 const sessionSecret = requireMinLenIfSet("SESSION_SECRET", process.env.SESSION_SECRET, 32);
 const allowLegacyLogin = parseBool(process.env.ALLOW_LEGACY_LOGIN, true);
+// Optional Titanium → hub webhook for license-state changes. Inert (route
+// returns 503) until Titanium ships the webhook and the secret is provisioned.
+const titaniumWebhookSecret = requireMinLenIfSet(
+  "TITANIUM_WEBHOOK_SECRET",
+  process.env.TITANIUM_WEBHOOK_SECRET,
+  16,
+);
 
 export const config = {
   port: parseInt(process.env.PORT || "3040"),
@@ -78,4 +85,5 @@ export const config = {
   magicLinkSecret,
   sessionSecret,
   allowLegacyLogin,
+  titaniumWebhookSecret,
 };

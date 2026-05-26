@@ -570,6 +570,25 @@ export async function promoteCandidateSubject(userId: string): Promise<boolean> 
   return rows.length > 0;
 }
 
+export type UserLicenseFields = {
+  license_status: string | null;
+  license_id: string | null;
+  license_checked_at: Date | null;
+  titanium_subject: string | null;
+};
+
+export async function getUserLicenseFields(
+  userId: string,
+): Promise<UserLicenseFields | null> {
+  const rows = await sql<UserLicenseFields[]>`
+    SELECT license_status, license_id, license_checked_at, titanium_subject
+      FROM users
+     WHERE id = ${userId}
+     LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
 export async function updateLicenseStatus(
   userId: string,
   status: string,

@@ -50,6 +50,11 @@ mock.module('../src/db/dal.ts', () => ({
   // mock module still exposes the names they import.
   hasOpenIssueForHash: async () => false,
   recordOpenIssueForHash: async () => {},
+  // Phase 07-D stubs — webhooks-titanium.ts imports these from dal.ts.
+  recordAuthEvent: async () => {},
+  getUserByTitaniumSubject: async () => null,
+  updateLicenseStatus: async () => {},
+  getUserLicenseFields: async () => null,
 }))
 
 // Dynamically import AFTER mock.module is registered so the route binds to

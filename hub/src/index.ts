@@ -24,6 +24,8 @@ import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { instructions as instructionsApi } from './api/instructions'
 import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
+import { webhooksTitanium } from './api/webhooks-titanium'
+import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
 import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
@@ -104,6 +106,10 @@ app.route('/api/sentry', sentryIntakeApi)
 // MUST be mounted BEFORE the JWT catch-all middleware below.
 app.route('/api/coolify', coolifyWebhookRoutes)
 
+// Public Titanium license-changed webhook (HMAC-signed, shared secret).
+// MUST be mounted BEFORE the JWT catch-all. Inert (503) until secret set.
+app.route('/webhooks/titanium', webhooksTitanium)
+
 // Protected API routes (JWT auth, then rate limit keyed on userId)
 // Skip /api/github/callback — it's hit by GitHub's redirect, not by an authed client.
 // Skip /api/sentry — public Sentry-style intake authenticates via X-Sentry-Auth header.
@@ -115,6 +121,19 @@ app.use('/api/*', async (c, next) => {
   return authMiddleware(c, next)
 })
 app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('userId') || 'anon' }))
+
+// Phase 07-D: License gate runs AFTER authMiddleware so it can read userId.
+// `readOnlyOk: true` lets GET requests pass during the 7-day EXPIRED grace
+// window; mutations always require ACTIVE. Same exclusion list as auth:
+// /api/github/callback, /api/sentry/*, /api/coolify/webhook/* skip auth and
+// therefore also skip the gate. /openapi.json and /docs are mounted outside
+// /api/* so they are unaffected.
+app.use('/api/*', async (c, next) => {
+  if (c.req.path === '/api/github/callback') return next()
+  if (c.req.path.startsWith('/api/sentry/')) return next()
+  if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
+  return requireActiveLicense({ readOnlyOk: true })(c, next)
+})
 // OpenAPI sample route + /openapi.json + /docs (Scalar UI).
 // Mounted ahead of plain-Hono routers so the documented twin of
 // /api/profile/cost-today wins over the legacy plain version.
