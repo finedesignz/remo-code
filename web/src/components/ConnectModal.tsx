@@ -68,6 +68,9 @@ export function ConnectModal({ apiKey, onGenerateKey, onClose }: Props) {
             <p className="text-xs text-[var(--text-muted)] mb-3">
               Installs as a Windows service that auto-starts at boot, watches your repo roots, and lets you launch Claude Code sessions remotely from this web UI.
             </p>
+            <p className="text-xs text-[var(--text-muted)] mb-3">
+              Requires <a href="https://bun.sh" target="_blank" rel="noreferrer" className="text-indigo-300 hover:text-indigo-200 underline">bun</a> on PATH. Run the install command from an <span className="text-amber-400">elevated</span> (Administrator) PowerShell so the Windows service can register. NSSM is auto-downloaded on first install.
+            </p>
 
             <div className="relative group mb-3">
               <pre className="bg-[var(--code-bg)] rounded-lg p-3 text-sm text-emerald-300 font-mono overflow-x-auto whitespace-pre">{supervisorCmd}</pre>
