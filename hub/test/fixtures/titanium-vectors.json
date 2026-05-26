@@ -1,0 +1,256 @@
+{
+  "$generated": "hub/test/fixtures/titanium-vectors.json — Phase 07-A golden-vector tests",
+  "$issuer": "https://keygen.titaniumlabs.us",
+  "$account_id": "acct_test_0000000000",
+  "$product_id": "prod_test_remo",
+  "$coverage": [
+    "valid_eddsa_fresh — Valid EdDSA-signed token, all claims correct, kid matches JWKS",
+    "expired — exp 60 seconds before now (beyond 30s clockTolerance)",
+    "wrong_iss — iss does not match TITANIUM_KEYGEN_API_URL",
+    "wrong_aud — aud does not include PRODUCT_ID",
+    "nbf_future — nbf 5 minutes ahead — beyond 30s tolerance",
+    "tampered_signature — Last byte of signature flipped",
+    "alg_none — alg: none MUST be rejected (load-bearing security invariant)",
+    "alg_hs256_masquerade — HS256 must be rejected — only EdDSA accepted (load-bearing)",
+    "kid_unknown — kid not present in JWKS — verifier rejects",
+    "post_rotation_kid_matched — Token signed by rotated key-2; JWKS includes both key-1 and key-2",
+    "wrong_key_for_kid — Token claims kid key-1 but is signed by a different private key"
+  ],
+  "vectors": [
+    {
+      "name": "valid_eddsa_fresh",
+      "description": "Valid EdDSA-signed token, all claims correct, kid matches JWKS",
+      "jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6ImtleS0xIn0.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8va2V5Z2VuLnRpdGFuaXVtbGFicy51cyIsImF1ZCI6InByb2RfdGVzdF9yZW1vIiwiaWF0IjoxNzQ3OTk5OTQwLCJuYmYiOjE3NDc5OTk5NDAsImV4cCI6MTc0ODAwMzYwMH0.EKM_WCATs-bReLvUOtZ9JBFpUMGwp5f3oV2QR8IaPbQOVv5KDVnSmvmkyJo4iGXLgICbI9g_MyBPGbxUIY8BBQ",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": "valid"
+    },
+    {
+      "name": "expired",
+      "description": "exp 60 seconds before now (beyond 30s clockTolerance)",
+      "jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6ImtleS0xIn0.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8va2V5Z2VuLnRpdGFuaXVtbGFicy51cyIsImF1ZCI6InByb2RfdGVzdF9yZW1vIiwiaWF0IjoxNzQ3OTk5OTQwLCJuYmYiOjE3NDc5OTk5NDAsImV4cCI6MTc0Nzk5OTk0MH0.yNitWP4MTwt4PUSSVo3fsm1W0WWFpmlIi59O_p1BBCo-ijMab4KrJF3Q2T_OiWtxasGZneHOt1LXhVHFCn75CQ",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": {
+        "error": "expired"
+      }
+    },
+    {
+      "name": "wrong_iss",
+      "description": "iss does not match TITANIUM_KEYGEN_API_URL",
+      "jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6ImtleS0xIn0.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8vZXZpbC5leGFtcGxlLmNvbSIsImF1ZCI6InByb2RfdGVzdF9yZW1vIiwiaWF0IjoxNzQ3OTk5OTQwLCJuYmYiOjE3NDc5OTk5NDAsImV4cCI6MTc0ODAwMzYwMH0.X7ScCEB4Qw8laAJu8NDYTFkHU_C91Iu40O6wRkDucKAEDCbK0DIXadJlSfnct4ne6VciJqmrv_UbVvwWJgjxAw",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": {
+        "error": "claim"
+      }
+    },
+    {
+      "name": "wrong_aud",
+      "description": "aud does not include PRODUCT_ID",
+      "jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6ImtleS0xIn0.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8va2V5Z2VuLnRpdGFuaXVtbGFicy51cyIsImF1ZCI6InByb2Rfb3RoZXIiLCJpYXQiOjE3NDc5OTk5NDAsIm5iZiI6MTc0Nzk5OTk0MCwiZXhwIjoxNzQ4MDAzNjAwfQ.VtknvnLTCZi2QfMsFj4dgcYIj9rLEOMI7eJrpP8JwII5m1INHoTfZcH1B7EZtRKhWeoXgnGOEMjLZwJe-KyIDA",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": {
+        "error": "claim"
+      }
+    },
+    {
+      "name": "nbf_future",
+      "description": "nbf 5 minutes ahead — beyond 30s tolerance",
+      "jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6ImtleS0xIn0.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8va2V5Z2VuLnRpdGFuaXVtbGFicy51cyIsImF1ZCI6InByb2RfdGVzdF9yZW1vIiwiaWF0IjoxNzQ4MDAwMzAwLCJuYmYiOjE3NDgwMDAzMDAsImV4cCI6MTc0ODAwMzYwMH0.Blg6mzXQqmnF46I_Brd74QsH8Q6SJzouyrcF_AyPiRYJK1dgI8btM7gP_yh45Gg3SW38J6AH_ChzT3HNObj-Cg",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": {
+        "error": "claim"
+      }
+    },
+    {
+      "name": "tampered_signature",
+      "description": "Last byte of signature flipped",
+      "jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6ImtleS0xIn0.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8va2V5Z2VuLnRpdGFuaXVtbGFicy51cyIsImF1ZCI6InByb2RfdGVzdF9yZW1vIiwiaWF0IjoxNzQ3OTk5OTQwLCJuYmYiOjE3NDc5OTk5NDAsImV4cCI6MTc0ODAwMzYwMH0.EKM_WCATs-bReLvUOtZ9JBFpUMGwp5f3oV2QR8IaPbQOVv5KDVnSmvmkyJo4iGXLgICbI9g_MyBPGbxUIY8BBA",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": {
+        "error": "signature"
+      }
+    },
+    {
+      "name": "alg_none",
+      "description": "alg: none MUST be rejected (load-bearing security invariant)",
+      "jwt": "eyJhbGciOiJub25lIiwia2lkIjoia2V5LTEifQ.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8va2V5Z2VuLnRpdGFuaXVtbGFicy51cyIsImF1ZCI6InByb2RfdGVzdF9yZW1vIiwiaWF0IjoxNzQ3OTk5OTQwLCJuYmYiOjE3NDc5OTk5NDAsImV4cCI6MTc0ODAwMzYwMH0.",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": {
+        "error": "alg"
+      }
+    },
+    {
+      "name": "alg_hs256_masquerade",
+      "description": "HS256 must be rejected — only EdDSA accepted (load-bearing)",
+      "jwt": "eyJhbGciOiJIUzI1NiIsImtpZCI6ImtleS0xIn0.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8va2V5Z2VuLnRpdGFuaXVtbGFicy51cyIsImF1ZCI6InByb2RfdGVzdF9yZW1vIiwiaWF0IjoxNzQ3OTk5OTQwLCJuYmYiOjE3NDc5OTk5NDAsImV4cCI6MTc0ODAwMzYwMH0.gHd7uuE6shRcqTJYAw3esnkpPvZjj4Qymjk0MlkuKnI",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": {
+        "error": "alg"
+      }
+    },
+    {
+      "name": "kid_unknown",
+      "description": "kid not present in JWKS — verifier rejects",
+      "jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6ImtleS11bmtub3duIn0.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8va2V5Z2VuLnRpdGFuaXVtbGFicy51cyIsImF1ZCI6InByb2RfdGVzdF9yZW1vIiwiaWF0IjoxNzQ3OTk5OTQwLCJuYmYiOjE3NDc5OTk5NDAsImV4cCI6MTc0ODAwMzYwMH0.-h4YM1qWjZnRO0eDdlHl9ZshD1on7k9RoLrG-dV5EPnrGI3dWYKH-A0n2IX3qeLZppbtvjpAYcBgJxl_AXdlAg",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": {
+        "error": "kid"
+      }
+    },
+    {
+      "name": "post_rotation_kid_matched",
+      "description": "Token signed by rotated key-2; JWKS includes both key-1 and key-2",
+      "jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6ImtleS0yLXJvdGF0ZWQifQ.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8va2V5Z2VuLnRpdGFuaXVtbGFicy51cyIsImF1ZCI6InByb2RfdGVzdF9yZW1vIiwiaWF0IjoxNzQ3OTk5OTQwLCJuYmYiOjE3NDc5OTk5NDAsImV4cCI6MTc0ODAwMzYwMH0.zc8cQLtvUXvJnw0pVg_N3jAnc91jpjYPkLRI6x5tHk1BfjHGxb4j29weWuaku8QhdGWTTYgFmNhrzDs9d4y9Bg",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          },
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "Y_kcwt_mLmCOFVzl0KhiMujbdzcsqKNmVbWY2UUnUIE",
+            "kid": "key-2-rotated",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": "valid"
+    },
+    {
+      "name": "wrong_key_for_kid",
+      "description": "Token claims kid key-1 but is signed by a different private key",
+      "jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6ImtleS0xIn0.eyJzdWIiOiJ1c2VyX2FiYzEyMyIsImVtYWlsIjoiamFuZUBleGFtcGxlLmNvbSIsImlzcyI6Imh0dHBzOi8va2V5Z2VuLnRpdGFuaXVtbGFicy51cyIsImF1ZCI6InByb2RfdGVzdF9yZW1vIiwiaWF0IjoxNzQ3OTk5OTQwLCJuYmYiOjE3NDc5OTk5NDAsImV4cCI6MTc0ODAwMzYwMH0.rWLgEDuKFh7rWaXf4InN2OPOIZh964j6O76-WBAsXMMKwcsrOJ_yF4RpfNJnrUdaEpCkSLHTQlQvomxTwzQaDw",
+      "jwks": {
+        "keys": [
+          {
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x": "ZRuLdjPni6-S3h-S-SH9yUPzJJRBAs37Jt-8TMYbuSY",
+            "kid": "key-1",
+            "alg": "EdDSA",
+            "use": "sig"
+          }
+        ]
+      },
+      "now": 1748000000,
+      "expected": {
+        "error": "signature"
+      }
+    }
+  ]
+}

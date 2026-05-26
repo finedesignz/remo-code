@@ -153,6 +153,21 @@ function decrementIp(ip: string) {
   else wsConnectionsPerIp.set(ip, count - 1)
 }
 
+// Phase 07-A: warm Titanium JWKS BEFORE binding the port. The hub MUST NOT
+// serve traffic without JWKS available once Titanium is configured. While
+// `TITANIUM_KEYGEN_API_URL` is unset (Plan A pre-cutover state), this is a
+// no-op so dev environments without Titanium continue to boot.
+if (config.titanium.keygenApiUrl) {
+  try {
+    const { warmJwksCache } = await import('./titanium-client')
+    const keyCount = await warmJwksCache()
+    console.log(`[titanium] JWKS warmed (${keyCount} keys)`)
+  } catch (err) {
+    console.error('[titanium] JWKS warm failed — refusing to bind port:', (err as Error).message)
+    process.exit(1)
+  }
+}
+
 // Start Bun server with WebSocket upgrade handling
 const server = Bun.serve({
   port: config.port,
