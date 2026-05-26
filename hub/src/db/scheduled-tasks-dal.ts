@@ -56,6 +56,10 @@ export interface ScheduledTask {
   // authoritative for back-compat — DAL writes keep all three in sync.
   name_prefix: string | null
   name_suffix: string | null
+  // Simpler-cron picker: structured rules. NULL on legacy rows (UI falls
+  // back to deriving a single rule from `cron_expr`). Array of
+  // `{interval, unit, start_at}`.
+  schedule_rules: any[] | null
   // Derived from latest finalized run via LATERAL JOIN in listTasksForUser/getTask.
   last_run_cost_usd?: number | null
   last_run_duration_ms?: number | null
@@ -152,6 +156,12 @@ function normalize(row: any): ScheduledTask {
     typeof row.post_run_actions === 'string'
       ? JSON.parse(row.post_run_actions)
       : (row.post_run_actions ?? [])
+  const schedule_rules =
+    row.schedule_rules == null
+      ? null
+      : typeof row.schedule_rules === 'string'
+        ? JSON.parse(row.schedule_rules)
+        : row.schedule_rules
   // node-postgres returns NUMERIC as string; coerce when present. EXTRACT(EPOCH ...)
   // comes back as a number (double precision) but normalize defensively.
   const last_run_cost_usd =
@@ -167,6 +177,7 @@ function normalize(row: any): ScheduledTask {
     on_complete,
     payload,
     post_run_actions,
+    schedule_rules,
     last_run_cost_usd,
     last_run_duration_ms,
   }
@@ -207,13 +218,14 @@ export async function createTaskV2(input: {
   prompt?: string
   name_prefix?: string | null
   name_suffix?: string | null
+  schedule_rules?: any[] | null
 }): Promise<ScheduledTask> {
   const rows = await sql<ScheduledTask[]>`
     INSERT INTO scheduled_tasks (
       user_id, session_id, name, cron_expression, prompt, enabled,
       task_type, target_kind, target_id, payload, cron_expr, timezone,
       catchup_policy, max_concurrent, post_run_actions,
-      name_prefix, name_suffix
+      name_prefix, name_suffix, schedule_rules
     ) VALUES (
       ${input.user_id}, ${input.session_id}, ${input.name},
       ${input.cron_expression ?? input.cron_expr}, ${input.prompt ?? ''},
@@ -223,7 +235,8 @@ export async function createTaskV2(input: {
       ${input.timezone}, ${input.catchup_policy ?? 'skip'},
       ${input.max_concurrent ?? 1},
       ${sql.json((input.post_run_actions ?? []) as any)},
-      ${input.name_prefix ?? null}, ${input.name_suffix ?? null}
+      ${input.name_prefix ?? null}, ${input.name_suffix ?? null},
+      ${input.schedule_rules ? sql.json(input.schedule_rules as any) : null}
     )
     RETURNING *
   `
@@ -247,6 +260,7 @@ export async function updateTaskV2(
     post_run_actions: PostRunAction[]
     name_prefix: string | null
     name_suffix: string | null
+    schedule_rules: any[] | null
   }>,
 ): Promise<ScheduledTask | null> {
   const sets: any[] = []
@@ -267,6 +281,9 @@ export async function updateTaskV2(
   if (fields.max_concurrent !== undefined) sets.push(sql`max_concurrent = ${fields.max_concurrent}`)
   if (fields.post_run_actions !== undefined) {
     sets.push(sql`post_run_actions = ${sql.json(fields.post_run_actions as any)}`)
+  }
+  if (fields.schedule_rules !== undefined) {
+    sets.push(sql`schedule_rules = ${fields.schedule_rules ? sql.json(fields.schedule_rules as any) : null}`)
   }
   if (sets.length === 0) return getTask(id, userId)
   sets.push(sql`updated_at = now()`)
