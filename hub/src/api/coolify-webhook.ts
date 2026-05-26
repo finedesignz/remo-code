@@ -37,10 +37,24 @@ export const coolifyWebhookRoutes = new Hono()
 
 const SKEW_SECONDS = 300
 
+// Coolify's built-in notification sender uses underscore notation
+// (deployment_failed, deployment_success) with no git/commit fields.
+// We also accept the dot-notation variants in case a future Coolify
+// version or a custom sender uses them.
 const CoolifyWebhookPayload = z.object({
-  event: z.enum(['deployment.failed', 'deployment.succeeded', 'deployment.in_progress']),
+  event: z.enum([
+    // underscore (Coolify built-in sender)
+    'deployment_failed',
+    'deployment_success',
+    'deployment_in_progress',
+    // dot-notation (custom / future)
+    'deployment.failed',
+    'deployment.succeeded',
+    'deployment.in_progress',
+  ]),
   deployment_uuid: z.string().min(1),
   application_uuid: z.string().min(1),
+  // Coolify's built-in sender does not include these; custom senders may.
   git_repository: z.string().optional(),
   commit_sha: z.string().optional(),
 })
@@ -97,34 +111,38 @@ coolifyWebhookRoutes.post('/webhook/:user_id', async (c) => {
   // (1) Raw body — MUST happen before any JSON parse so HMAC sees exact bytes.
   const rawBody = await c.req.text()
 
-  // (2) Required headers.
+  // (2) Optional HMAC headers — Coolify's built-in webhook sender does NOT
+  // sign requests (as of 4.0.0-beta). We support both modes:
+  //   • Signed:   X-Coolify-Signature + X-Coolify-Timestamp present → full HMAC verify
+  //   • Unsigned: headers absent → skip HMAC, but still require a valid
+  //               user_id with a configured secret so random POST attempts fail
   const sigHeader = c.req.header('x-coolify-signature')
   const tsHeader = c.req.header('x-coolify-timestamp')
-  if (!sigHeader || !tsHeader) {
-    return c.json({ error: 'missing_signature' }, 401)
-  }
 
-  // (3) Skew check.
-  const ts = Number(tsHeader)
-  if (!Number.isFinite(ts)) {
-    return c.json({ error: 'bad_timestamp' }, 401)
-  }
-  const nowSec = Math.floor(Date.now() / 1000)
-  if (Math.abs(nowSec - ts) > SKEW_SECONDS) {
-    return c.json({ error: 'stale_timestamp' }, 401)
-  }
-
-  // (4) Per-user secret.
+  // (4) Per-user secret — required in both signed and unsigned paths.
   const secret = await getUserCoolifyWebhookSecret(userId)
   if (!secret) {
     return c.json({ error: 'webhook_not_configured' }, 401)
   }
 
-  // (5) HMAC verify with constant-time compare.
-  const expected = 'sha256=' + createHmac('sha256', secret).update(`${ts}.${rawBody}`).digest('hex')
-  if (!constantTimeEqualStr(sigHeader, expected)) {
-    return c.json({ error: 'bad_signature' }, 401)
+  if (sigHeader || tsHeader) {
+    // (3) Skew check — only when timestamp header is present.
+    const ts = Number(tsHeader)
+    if (!Number.isFinite(ts)) {
+      return c.json({ error: 'bad_timestamp' }, 401)
+    }
+    const nowSec = Math.floor(Date.now() / 1000)
+    if (Math.abs(nowSec - ts) > SKEW_SECONDS) {
+      return c.json({ error: 'stale_timestamp' }, 401)
+    }
+
+    // (5) HMAC verify with constant-time compare.
+    const expected = 'sha256=' + createHmac('sha256', secret).update(`${ts}.${rawBody}`).digest('hex')
+    if (!constantTimeEqualStr(sigHeader!, expected)) {
+      return c.json({ error: 'bad_signature' }, 401)
+    }
   }
+  // else: unsigned path — user_id existence + configured secret is the guard.
 
   // (6) Validate payload.
   let parsedBody: unknown
@@ -142,8 +160,8 @@ coolifyWebhookRoutes.post('/webhook/:user_id', async (c) => {
   // (7) Persist deployment metadata. task_id FK is NOT NULL, so we lazily
   // ensure a per-user internal "deployment" task row and attach runs to it.
   const taskId = await ensureInternalDeploymentTask(userId)
-  const status: 'pending' | 'success' =
-    payload.event === 'deployment.failed' ? 'pending' : 'success'
+  const isFailure = payload.event === 'deployment.failed' || payload.event === 'deployment_failed'
+  const status: 'pending' | 'success' = isFailure ? 'pending' : 'success'
 
   const run = await insertDeploymentRun({
     task_id: taskId,
@@ -155,7 +173,7 @@ coolifyWebhookRoutes.post('/webhook/:user_id', async (c) => {
     commit_sha: payload.commit_sha ?? null,
   })
 
-  if (payload.event === 'deployment.failed') {
+  if (isFailure) {
     // Fire-and-forget — webhook responds 202 immediately. Triage failures
     // surface in scheduled_task_runs and the WS run-finished broadcast.
     void dispatchTriage(userId, run.id, payload).catch((err: any) => {
