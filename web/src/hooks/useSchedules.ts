@@ -32,6 +32,7 @@ export interface ScheduledTask {
   target_id: string | null
   payload: Record<string, any>
   cron_expr: string
+  schedule_rules?: Array<{ interval: number; unit: 'hours'|'days'|'weeks'; start_at: string }> | null
   timezone: string
   catchup_policy: CatchupPolicy
   max_concurrent: number
@@ -58,7 +59,13 @@ export interface ScheduleCreateInput {
   target_kind: TargetKind
   target_id?: string | null
   payload?: Record<string, any>
-  cron_expr: string
+  /**
+   * EITHER `cron_expr` (legacy) OR `schedule_rules` (new shape). Server
+   * derives the missing side: when `schedule_rules` is sent, `cron_expr`
+   * is built from `rules[0]` and stored alongside for the croner engine.
+   */
+  cron_expr?: string
+  schedule_rules?: Array<{ interval: number; unit: 'hours'|'days'|'weeks'; start_at: string }>
   timezone: string
   catchup_policy?: CatchupPolicy
   max_concurrent?: number

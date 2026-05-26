@@ -189,6 +189,14 @@ ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS post_run_actions JSONB NOT 
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS name_prefix TEXT;
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS name_suffix TEXT;
 
+-- Simpler-cron picker (feat/simpler-cron-ui): structured rules array. Each
+-- rule shape: { interval: int, unit: 'hours'|'days'|'weeks', start_at: ISO }.
+-- Legacy `cron_expr`/`cron_expression` columns are still populated from
+-- rule[0] on write for back-compat with the croner engine. Multiple rules
+-- arm multiple cron registrations; fires from any rule route through the
+-- same dispatcher.fire(task.id).
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS schedule_rules JSONB;
+
 -- W2/T8: drop legacy NOT NULL on session_id so fan-out tasks
 -- (all_agents/all_supervisors) and supervisor-targeted tasks can omit it.
 -- Idempotent — Postgres no-ops if the column is already nullable.

@@ -5,7 +5,8 @@ import { useSessions } from '../hooks/useSessions'
 import { hubFetch, HubFetchError } from '../lib/api'
 import { nextRuns, validate as validateCron, browserTimezone } from '../lib/cron'
 import { PostRunActionsEditor } from './PostRunActionsEditor'
-import { CronBuilder } from './CronBuilder'
+import { ScheduleRulesBuilder } from './ScheduleRulesBuilder'
+import { type ScheduleRule, ruleToCron, defaultRule, validateRule } from '../lib/schedule-rules'
 import { computeTaskAutoName } from '../lib/task-name'
 import { TASK_TEMPLATES, isReplaceableNotes } from '../lib/task-templates'
 
@@ -80,8 +81,14 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     setNotes(prev => isReplaceableNotes(prev) ? (TASK_TEMPLATES[taskType] ?? '') : prev)
   }, [taskType, existing])
 
-  // Schedule — composed by <CronBuilder>; the cron string is the source of truth.
-  const [cronExpr, setCronExpr] = useState<string>(existing?.cron_expr ?? '0 9 * * *')
+  // Schedule — composed by <ScheduleRulesBuilder>. Hydrate from
+  // `schedule_rules` when present; otherwise start with one default rule.
+  // The legacy cron string is derived from rule[0] on submit.
+  const [scheduleRules, setScheduleRules] = useState<ScheduleRule[]>(() => {
+    const r = existing?.schedule_rules
+    if (Array.isArray(r) && r.length > 0) return r as ScheduleRule[]
+    return [defaultRule()]
+  })
 
   // Timezone
   const browserTz = browserTimezone()
@@ -107,9 +114,21 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
   const [error, setError] = useState<string | null>(null)
   const [cycleError, setCycleError] = useState<{ path: string[] } | null>(null)
 
-  const cronValidation = useMemo(() => validateCron(cronExpr), [cronExpr])
+  // Derive cron from rule[0] for the auto-name + legacy back-compat.
+  const cronExpr = useMemo(() => {
+    if (!scheduleRules[0]) return ''
+    try { return ruleToCron(scheduleRules[0], tz) } catch { return '' }
+  }, [scheduleRules, tz])
+  const rulesValid = useMemo(
+    () => scheduleRules.length > 0 && scheduleRules.every(r => validateRule(r) === null),
+    [scheduleRules],
+  )
+  const cronValidation = useMemo(() => {
+    if (!rulesValid) return { ok: false, error: 'Pick a valid date/time for each rule' } as const
+    return validateCron(cronExpr)
+  }, [cronExpr, rulesValid])
 
-  // Sub-15 warning for non-prompt (best-effort: derived from next 2 runs)
+  // Sub-15 warning for non-prompt (best-effort: derived from next 2 runs of rule[0])
   const intervalMinutes = useMemo(() => {
     if (!cronValidation.ok) return null
     const r = nextRuns(cronExpr, tz, 2)
@@ -226,7 +245,9 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
       target_kind: targetKind,
       target_id: targetKind === 'session' || targetKind === 'supervisor' ? targetId : null,
       payload,
-      cron_expr: cronExpr,
+      // New shape: send the structured rules. Server derives cron_expr from
+      // rule[0] and persists both for back-compat with the croner engine.
+      schedule_rules: scheduleRules,
       timezone: tz,
       catchup_policy: catchup,
       max_concurrent: maxConcurrent,
@@ -328,7 +349,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
 
           {/* Schedule */}
           <Field label="Schedule">
-            <CronBuilder value={cronExpr} timezone={tz} onChange={setCronExpr} />
+            <ScheduleRulesBuilder rules={scheduleRules} timezone={tz} onChange={setScheduleRules} />
           </Field>
 
           {/* Timezone */}
