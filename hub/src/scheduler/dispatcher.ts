@@ -66,18 +66,19 @@ export async function runNow(
     triggeredByRunId?: string | null
     chainDepth?: number
     payloadOverride?: Record<string, unknown>
+    isManual?: boolean
   } = {},
-): Promise<void> {
+): Promise<{ runIds: string[] }> {
   const task = await getTaskById(taskId)
-  if (!task) return
-  if (task.user_id !== userId) return
+  if (!task) return { runIds: [] }
+  if (task.user_id !== userId) return { runIds: [] }
   // Phase 06 plan 008 — webhook-triggered triage passes per-event payload.
   if (opts.payloadOverride) {
     ;(task as any).payload = { ...(task.payload ?? {}), ...opts.payloadOverride }
   }
   const chainDepth = opts.chainDepth ?? 0
   if (chainDepth > MAX_CHAIN_DEPTH) {
-    await insertRunV2({
+    const r = await insertRunV2({
       task_id: task.id,
       user_id: userId,
       status: 'failed',
@@ -87,12 +88,13 @@ export async function runNow(
       triggered_by_run_id: opts.triggeredByRunId ?? null,
       error: 'chain_depth_exceeded',
     })
-    return
+    return { runIds: [r.id] }
   }
-  await fireTask(task, {
+  return await fireTask(task, {
     chainDepth,
     triggeredByRunId: opts.triggeredByRunId ?? null,
     skipCronUpdate: true,
+    isManual: opts.isManual === true,
   })
 }
 
@@ -100,11 +102,14 @@ interface FireOpts {
   chainDepth: number
   triggeredByRunId?: string | null
   skipCronUpdate?: boolean
+  isManual?: boolean
 }
 
-async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
+async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: string[] }> {
   const now = new Date()
   const userId = task.user_id
+  const runIds: string[] = []
+  const isManual = opts.isManual === true
 
   if (await isOverCostCap(userId, task.timezone)) {
     const run = await insertRunV2({
@@ -123,7 +128,8 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
     })
     void onRunFinalized(task, run.id, 'skipped', 'daily_cost_cap')
     if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
-    return
+    runIds.push(run.id)
+    return { runIds }
   }
 
   // Phase 06 plan 008 — triage tasks route through pickSessionTarget instead
@@ -170,7 +176,8 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
       void finalizeRun(run.id, 'failed', err?.message || 'triage_import_failed')
     }
     if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
-    return
+    runIds.push(run.id)
+    return { runIds }
   }
 
   const targets = await resolveTargets(task, userId)
@@ -183,11 +190,17 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
       target_kind: task.target_kind,
       target_id: task.target_id,
       triggered_by_run_id: opts.triggeredByRunId ?? null,
-      error: 'no_targets',
+      error: isManual ? 'target_offline' : 'no_targets',
     })
-    void onRunFinalized(task, run.id, 'failed', 'no_targets')
+    broadcastScheduledRun(userId, {
+      type: 'scheduled_run_finished',
+      run_id: run.id, task_id: task.id, status: 'failed',
+      error: isManual ? 'target_offline' : 'no_targets',
+    })
+    void onRunFinalized(task, run.id, 'failed', isManual ? 'target_offline' : 'no_targets')
     if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
-    return
+    runIds.push(run.id)
+    return { runIds }
   }
 
   const isFanOut = task.target_kind === 'all_agents' || task.target_kind === 'all_supervisors'
@@ -225,6 +238,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
       triggeredByRunId: opts.triggeredByRunId ?? null,
     }
     trackRun(ctx)
+    runIds.push(run.id)
 
     broadcastScheduledRun(userId, {
       type: 'scheduled_run_started',
@@ -236,6 +250,20 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
     })
 
     if (!target.online) {
+      if (isManual) {
+        // Manual run: fail fast with target_offline so the UI gets immediate
+        // feedback instead of a row that lingers pending until grace expires.
+        await updateRunStatus(run.id, {
+          status: 'failed', error: 'target_offline', finished_at: new Date(),
+        })
+        broadcastScheduledRun(userId, {
+          type: 'scheduled_run_finished',
+          run_id: run.id, task_id: task.id, status: 'failed', error: 'target_offline',
+        })
+        inFlightByRun.delete(run.id)
+        void onRunFinalized(task, run.id, 'failed', 'target_offline')
+        continue
+      }
       const key = target.sessionId ?? target.supervisorId
       if (key) {
         try {
@@ -292,6 +320,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<void> {
   }
 
   if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
+  return { runIds }
 }
 
 function updateFireTimestamps(taskId: string, fired: Date): void {
