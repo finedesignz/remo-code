@@ -128,6 +128,7 @@ All WS messages validated with Zod schemas in `hub/src/ws/protocol.ts` and `hub/
 - Light/dark theme via CSS custom properties (--bg-primary, --text-primary, etc.)
 - Session tokens use `remo_` prefix + 32 random bytes (base64url), stored as SHA-256 hashes
 - The hub serves the built web SPA as static files (no separate web server in production)
+- Subscription quota (5h + 7d Anthropic utilization) is polled by the **local agent**, not the hub — the OAuth access token lives only in `~/.claude/.credentials.json` on the dev machine and never leaves it. Hub keeps a per-user in-memory snapshot (`hub/src/usage/store.ts`) and rebroadcasts to web clients via WS event `subscription_usage`. See [docs/agent.md](docs/agent.md).
 
 ## Environment Variables
 

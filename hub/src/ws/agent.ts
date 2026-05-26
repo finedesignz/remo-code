@@ -391,6 +391,13 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       const mod = await import('../scheduler/senders/agent.ts')
       void mod.onAssistantMessage(sessionId, msg.content)
     } catch {}
+    // Phase 06 plan 008 — finalize any pending triage run for this session.
+    try {
+      const tri = await import('../scheduler/senders/triage.ts')
+      if (tri.triageActiveForSession(sessionId)) {
+        void tri.onTriageAssistantMessage(sessionId, msg.content)
+      }
+    } catch {}
     // W3 — finalize any in-flight error-capture run for this session.
     try {
       const ec = await import('../error-capture/run-lifecycle.ts')
@@ -398,6 +405,22 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
         void ec.onAgentReply(sessionId, msg.content)
       }
     } catch {}
+  }
+
+  if (msg.type === 'usage_report') {
+    if (!ws.data.userId) return
+    try {
+      const { setUsage } = await import('../usage/store')
+      const snap = setUsage(ws.data.userId, msg.usage as any)
+      broadcastToUser(ws.data.userId, {
+        type: 'subscription_usage',
+        usage: snap.usage,
+        updated_at: snap.updated_at,
+      })
+    } catch (err: any) {
+      console.error('[agent] usage_report handler failed', err?.message)
+    }
+    return
   }
 
   if (msg.type === 'pong') return
@@ -626,7 +649,9 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
   if (ws.data.heartbeatTimer) clearInterval(ws.data.heartbeatTimer)
 
   if (ws.data.role === 'supervisor' && ws.data.supervisorId) {
-    unregisterSupervisor(ws.data.supervisorId)
+    // Pass the closing ws so unregister can ignore stale closes from sockets
+    // that have already been replaced by a reconnect.
+    unregisterSupervisor(ws.data.supervisorId, ws)
     return
   }
 

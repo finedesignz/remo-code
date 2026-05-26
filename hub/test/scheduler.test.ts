@@ -235,6 +235,33 @@ describe('scheduler/post-run/schema', () => {
     expect(r.ok).toBe(false)
   })
 
+  // Regression: web editor defaults `to: ''` (UX = "blank = your account
+  // email"). The previous strict `.email().optional()` rejected `''` and
+  // produced a 400 on POST /api/scheduled-tasks. Empty/whitespace must be
+  // accepted and normalized to undefined.
+  test('validatePostRunActions accepts empty `to` for notify_email (blank = account email)', () => {
+    const r = validatePostRunActions([
+      { type: 'notify_email', on: 'success', config: { to: '', subject: 's', body: 'b' } },
+    ])
+    expect(r.ok).toBe(true)
+    if (r.ok) expect((r.value[0] as any).config.to).toBeUndefined()
+  })
+
+  test('validatePostRunActions accepts whitespace-only `to` for notify_email', () => {
+    const r = validatePostRunActions([
+      { type: 'notify_email', on: 'success', config: { to: '   ', subject: 's', body: 'b' } },
+    ])
+    expect(r.ok).toBe(true)
+    if (r.ok) expect((r.value[0] as any).config.to).toBeUndefined()
+  })
+
+  test('validatePostRunActions still rejects malformed `to` for notify_email', () => {
+    const r = validatePostRunActions([
+      { type: 'notify_email', on: 'success', config: { to: 'not-an-email', subject: 's', body: 'b' } },
+    ])
+    expect(r.ok).toBe(false)
+  })
+
   test('detectChainCycles allows linear chain A→B→C', () => {
     const r = detectChainCycles([
       { id: 'A', actions: [{ type: 'chain_task', on: 'success', config: { task_id: 'B' } }] as any },

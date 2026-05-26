@@ -45,9 +45,18 @@ export function registerSupervisor(args: {
   return entry
 }
 
-export function unregisterSupervisor(supervisorId: string) {
+export function unregisterSupervisor(supervisorId: string, ws?: ServerWebSocket<any>) {
   const entry = supervisors.get(supervisorId)
   if (!entry) return
+  // Reconnect-race guard: when a supervisor reconnects, `registerSupervisor`
+  // closes the prior socket. That close fires `handleAgentClose` →
+  // `unregisterSupervisor` AFTER the new entry has already replaced the old
+  // one in the map. If we unconditionally deleted by supervisorId, the stale
+  // close would wipe the live entry, leaving the supervisor invisible to the
+  // in-memory registry (`isSupervisorOnline` → false) even though the new WS
+  // is fully connected and serving traffic. Compare ws identity so only the
+  // *current* socket's close clears the entry.
+  if (ws && entry.ws !== ws) return
   for (const [, p] of entry.pendingReqs) {
     clearTimeout(p.timer)
     p.reject(new Error('supervisor disconnected'))

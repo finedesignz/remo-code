@@ -459,3 +459,15 @@ CREATE TABLE IF NOT EXISTS auth_events (
 CREATE INDEX IF NOT EXISTS idx_auth_events_user_ts ON auth_events(user_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_auth_events_type_ts ON auth_events(event_type, ts DESC);
 
+-- ── Phase 06 plan 001: Coolify webhook HMAC secret + deployment metadata ─────
+-- Missing ALTERs that shipped in code but never landed in schema.sql.
+-- Result: GET /api/account/coolify-webhook-secret 500'd on prod (column
+-- "coolify_webhook_secret" does not exist) and POST /api/coolify/webhook/:uid
+-- would also fail at insertDeploymentRun. Idempotent.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS coolify_webhook_secret TEXT;
+
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS deployment_uuid TEXT;
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS application_uuid TEXT;
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS git_repository TEXT;
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS commit_sha TEXT;
+

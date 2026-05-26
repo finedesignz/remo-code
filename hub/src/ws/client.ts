@@ -117,6 +117,20 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // Send session list immediately
     const sessions = await listSessions(data.userId!)
     ws.send(JSON.stringify({ type: 'session_list', sessions }))
+
+    // Phase 06: send current subscription usage snapshot if any agent has
+    // reported one (skipped silently when no agent has connected yet).
+    try {
+      const { getUsage } = await import('../usage/store')
+      const snap = getUsage(data.userId!)
+      if (snap) {
+        ws.send(JSON.stringify({
+          type: 'subscription_usage',
+          usage: snap.usage,
+          updated_at: snap.updated_at,
+        }))
+      }
+    } catch {}
     return
   }
 

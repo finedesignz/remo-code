@@ -379,6 +379,33 @@ export async function getUserCoolifyWebhookSecret(userId: string): Promise<strin
  * line 187).
  */
 const INTERNAL_DEPLOY_TASK_NAME = '__internal_coolify_deployment';
+const INTERNAL_TRIAGE_TASK_NAME = '__internal_triage';
+
+/**
+ * Phase 06 plan 008 — lazy per-user internal triage task. task_type='triage'
+ * so dispatcher.fireTask routes through senders/triage.ts; enabled=false so
+ * cron never auto-fires it.
+ */
+export async function ensureInternalTriageTask(userId: string): Promise<string> {
+  const existing = await sql<{ id: string }[]>`
+    SELECT id FROM scheduled_tasks
+    WHERE user_id = ${userId} AND name = ${INTERNAL_TRIAGE_TASK_NAME}
+    LIMIT 1
+  `;
+  if (existing[0]) return existing[0].id;
+  const NEVER = '0 0 31 2 *';
+  const rows = await sql<{ id: string }[]>`
+    INSERT INTO scheduled_tasks (
+      user_id, session_id, name, cron_expression, prompt,
+      enabled, task_type, target_kind, payload, cron_expr, timezone
+    ) VALUES (
+      ${userId}, NULL, ${INTERNAL_TRIAGE_TASK_NAME}, ${NEVER}, '',
+      false, 'triage', 'session', '{}'::jsonb, ${NEVER}, 'UTC'
+    )
+    RETURNING id
+  `;
+  return rows[0].id;
+}
 
 export async function ensureInternalDeploymentTask(userId: string): Promise<string> {
   const existing = await sql<{ id: string }[]>`

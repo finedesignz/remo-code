@@ -186,6 +186,31 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     }
     if (!prefix) { setError('Pick a task type, target, and schedule first'); return }
 
+    // Validate post-run actions client-side so users see actionable errors
+    // instead of a generic 400 from the server's Zod check.
+    for (let i = 0; i < postRunActions.length; i++) {
+      const a = postRunActions[i]
+      if (a.type === 'webhook' && !(a.config?.url ?? '').trim()) {
+        setError(`Post-run action #${i + 1}: webhook URL is required`); return
+      }
+      if (a.type === 'chain_task' && !(a.config?.task_id ?? '').trim()) {
+        setError(`Post-run action #${i + 1}: choose a task to chain`); return
+      }
+    }
+
+    // Strip empty optional fields from post-run actions so the server's Zod
+    // validator (which rejects `to: ''` as not-a-valid-email) sees a clean
+    // shape. The editor leaves `to: ''` as a default for the "blank = your
+    // account email" UX — we honor that by dropping the key entirely.
+    const cleanedActions: PostRunAction[] = postRunActions.map(a => {
+      if (a.type === 'notify_email') {
+        const cfg = { ...(a.config || {}) }
+        if (typeof cfg.to === 'string' && cfg.to.trim() === '') delete cfg.to
+        return { ...a, config: cfg }
+      }
+      return a
+    })
+
     const payload: Record<string, any> = {}
     if (taskType === 'prompt') payload.prompt = prompt.trim()
     if (taskType === 'skill') payload.command = skillName.trim()
@@ -206,7 +231,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
       catchup_policy: catchup,
       max_concurrent: maxConcurrent,
       enabled,
-      post_run_actions: postRunActions,
+      post_run_actions: cleanedActions,
     }
 
     setSaving(true)

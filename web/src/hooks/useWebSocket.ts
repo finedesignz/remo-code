@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getStoredToken, hasSessionCookie } from '../lib/auth.ts'
+import { getStoredToken, hasSessionCookie, clearAuth } from '../lib/auth.ts'
 import { readCookie } from '../lib/api'
 
 /** WS messages that mutate server state — must carry csrf_token (cookie echo). */
@@ -9,6 +9,12 @@ const CSRF_REQUIRED_TYPES = new Set([
   'question_response',
   'cancel',
 ])
+
+// Close codes the hub uses to terminate the connection for non-retryable reasons.
+// We must NOT auto-reconnect on these — doing so produces a tight loop (e.g. a
+// stale JWT in localStorage → 4001 → reconnect → 4001 → ...).
+const TERMINAL_CLOSE_CODES = new Set([4000, 4001, 4002, 4003])
+const MIN_RECONNECT_DELAY_MS = 1000
 
 type WsMessage = {
   type: string
@@ -102,7 +108,15 @@ export function useWebSocket(token: string | null) {
     // either bootstrapped a user via cookie or hydrated from localStorage.
     const cookieAuth = hasSessionCookie()
     const authToken = token || getStoredToken()
-    if (!cookieAuth && !authToken) return
+    if (!cookieAuth && !authToken) {
+      // No cookie session AND no bearer token — don't open the WS at all.
+      // Surfaces a clean disconnected state and lets the app shell redirect
+      // to login. Prevents the "open → 4001 → reconnect" loop from ever
+      // starting on first paint after a token expiry.
+      setReconnecting(false)
+      setConnected(false)
+      return
+    }
 
     authedRef.current = false
     setReconnecting(false)
@@ -177,13 +191,35 @@ export function useWebSocket(token: string | null) {
       }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       authedRef.current = false
       setConnected(false)
-      setReconnecting(true)
       wsRef.current = null
-      // Exponential backoff: 1s -> 2s -> 4s -> ... capped at 30s
-      const delay = backoffRef.current
+
+      // Terminal close codes from the hub (auth timeout / bad JWT / session
+      // taken over / replaced). DO NOT reconnect — that's how we end up in a
+      // tight reconnect loop with a stale token in localStorage.
+      if (TERMINAL_CLOSE_CODES.has(event.code)) {
+        setReconnecting(false)
+        // 4001 specifically means "your JWT is bad" → nuke it so the app shell
+        // can fall through to the login screen instead of replaying the same
+        // bad token on the next page load.
+        if (event.code === 4001) {
+          try { clearAuth() } catch {}
+          if (typeof window !== 'undefined') {
+            // Hard reload so React state resets and ProtectedRoute kicks the
+            // user to /login. Hash-router-safe.
+            try { window.location.reload() } catch {}
+          }
+        }
+        return
+      }
+
+      setReconnecting(true)
+      // Exponential backoff: 1s -> 2s -> 4s -> ... capped at 30s.
+      // Floor at MIN_RECONNECT_DELAY_MS so even if backoffRef somehow ends up
+      // at 0, we can never spin a tight loop.
+      const delay = Math.max(backoffRef.current, MIN_RECONNECT_DELAY_MS)
       backoffRef.current = Math.min(delay * 2, 30000)
       reconnectRef.current = setTimeout(connect, delay)
     }

@@ -41,6 +41,10 @@ mock.module('../src/db/dal.ts', () => ({
     dalCalls.ensureInternalDeploymentTask.push(userId)
     return 'task-internal-deploy'
   },
+  // Phase 06 plan 008 — triage task stub. Real dispatch is no-op in unit tests
+  // because the dispatcher module is also untouched here; tests asserting the
+  // triage path live in `coolify-webhook-triage-e2e.test.ts`.
+  ensureInternalTriageTask: async (_userId: string) => 'task-internal-triage',
   insertDeploymentRun: async (input: any) => {
     dalCalls.insertDeploymentRun.push(input)
     return { id: 'run-' + dalCalls.insertDeploymentRun.length }

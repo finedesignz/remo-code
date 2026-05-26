@@ -47,11 +47,15 @@ export function Sidebar({
       <div className="w-14 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0 items-center py-3 gap-2">
         <button
           onClick={onToggleCollapsed}
-          className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          className="p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors"
           title="Expand sidebar"
           aria-label="Expand sidebar"
         >
-          <img src="/logo.png" alt="Remo Code" className="h-6 w-6 object-contain" />
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <line x1="3" y1="5" x2="17" y2="5" />
+            <line x1="3" y1="10" x2="17" y2="10" />
+            <line x1="3" y1="15" x2="17" y2="15" />
+          </svg>
         </button>
         <div className="flex-1" />
         <button
@@ -124,17 +128,21 @@ export function Sidebar({
   return (
     <>
       <div className="w-72 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
-        {/* Header — large centered logo, minimal padding */}
-        <div className="relative flex items-center justify-center px-2 py-2 border-b border-[var(--border-color)]">
+        {/* Header — hamburger toggle left of logo */}
+        <div className="relative flex items-center justify-center gap-2 px-2 py-2 border-b border-[var(--border-color)]">
           <button
             onClick={onToggleCollapsed}
-            className="hidden md:inline-flex p-0.5 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+            className="hidden md:inline-flex p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors"
             title="Collapse sidebar"
             aria-label="Collapse sidebar"
           >
-            <img src="/logo.png" alt="Remo Code" className="h-14 w-14 object-contain" />
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+              <line x1="3" y1="5" x2="17" y2="5" />
+              <line x1="3" y1="10" x2="17" y2="10" />
+              <line x1="3" y1="15" x2="17" y2="15" />
+            </svg>
           </button>
-          <img src="/logo.png" alt="Remo Code" className="md:hidden h-14 w-14 object-contain" />
+          <img src="/logo.png" alt="Remo Code" className="h-10 w-auto" />
           <button
             onClick={onClose}
             className="md:hidden absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
@@ -147,20 +155,33 @@ export function Sidebar({
           </button>
         </div>
 
-        {/* Session list header with refresh */}
+        {/* Session list header with refresh + add */}
         <div className="flex items-center justify-between px-3 pt-2 pb-1">
           <span className="text-[11px] font-medium text-[var(--text-muted)] uppercase tracking-wider">Sessions</span>
-          <button
-            onClick={onRefresh}
-            className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
-            title="Refresh sessions"
-            aria-label="Refresh sessions"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-              <path d="M1 4v-3h3" /><path d="M3.51 11a7 7 0 0 0 12.13-3.5" />
-              <path d="M15 12v3h-3" /><path d="M12.49 5a7 7 0 0 0-12.13 3.5" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-0.5">
+            <button
+              onClick={onRefresh}
+              className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
+              title="Refresh sessions"
+              aria-label="Refresh sessions"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <path d="M1 4v-3h3" /><path d="M3.51 11a7 7 0 0 0 12.13-3.5" />
+                <path d="M15 12v3h-3" /><path d="M12.49 5a7 7 0 0 0-12.13 3.5" />
+              </svg>
+            </button>
+            <button
+              onClick={() => onNavigate('#/settings?tab=supervisor')}
+              className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
+              title="Add connection"
+              aria-label="Add connection"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <line x1="8" y1="3" x2="8" y2="13" />
+                <line x1="3" y1="8" x2="13" y2="8" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Session list — only connected sessions */}
@@ -247,27 +268,8 @@ export function Sidebar({
           )}
         </div>
 
-        {/* Connect session — routes to Supervisor tab */}
-        <div className="p-3 border-t border-[var(--border-color)]">
-          <button
-            onClick={onShowConnect}
-            className="w-full py-2.5 text-sm text-indigo-400 hover:text-indigo-300 hover:bg-[var(--bg-tertiary)]/50 rounded-lg transition-colors font-medium flex items-center justify-center gap-2"
-            title="Connect a repository via the Supervisor"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M6.5 9.5l-2 2a2.5 2.5 0 1 1-3.5-3.5l2-2" />
-              <path d="M9.5 6.5l2-2a2.5 2.5 0 1 1 3.5 3.5l-2 2" />
-              <path d="M6 10l4-4" />
-            </svg>
-            Connect
-          </button>
-        </div>
-
-        {/* Footer trimmed — Grid/Schedules/Settings/Errors live in the header dropdown nav.
-            Sign-out also moved into the avatar dropdown. */}
-        <div className="p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] border-t border-[var(--border-color)] text-[11px] text-[var(--text-muted)] truncate" title={user.email}>
-          {user.email}
-        </div>
+        {/* Sessions-only sidebar — Connect moved to the "+" button in the header,
+            email/sign-out moved to the avatar dropdown in the main app header. */}
       </div>
       {hoveredSession && hoverInfo && createPortal(
         <div

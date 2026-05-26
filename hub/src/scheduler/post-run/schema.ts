@@ -20,11 +20,19 @@ export const ChainTaskAction = z.object({
   config: z.object({ task_id: z.string().min(1) }),
 })
 
+// `to` is "blank = your account email" per the editor UX. We accept either a
+// valid email OR an empty/whitespace string, normalizing empty → undefined so
+// downstream code uses the configured account email automatically.
+const EmptyOrEmail = z.preprocess(
+  (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+  z.string().email().optional(),
+)
+
 export const NotifyEmailAction = z.object({
   type: z.literal('notify_email'),
   ...Base,
   config: z.object({
-    to: z.string().email().optional(),
+    to: EmptyOrEmail,
     subject: z.string().min(1).max(200),
     body: z.string().min(1).max(20_000),
   }),
