@@ -55,7 +55,7 @@ export function SetupForm({ onComplete }: Props) {
   return (
     <div className="flex items-center justify-center min-h-screen bg-[var(--bg-primary)]">
       <div className="w-full max-w-md p-8">
-        <img src="/logo.png" alt="Remo Code" className="h-12 mx-auto mb-4" />
+        <img src="/logo.png" alt="Remo Code" className="h-16 w-auto mx-auto mb-4" />
         <h1 className="text-3xl font-bold text-center mb-2 text-[var(--text-primary)]">Remo Code</h1>
         <p className="text-center text-[var(--text-muted)] mb-2">
           Welcome! Create your account to get started.

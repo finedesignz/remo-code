@@ -51,7 +51,7 @@ export function Sidebar({
           title="Expand sidebar"
           aria-label="Expand sidebar"
         >
-          <img src="/logo.png" alt="Remo Code" className="h-6 w-6 object-contain" />
+          <img src="/logo.png" alt="Remo Code" className="h-8 w-auto" />
         </button>
         <div className="flex-1" />
         <button
@@ -132,9 +132,9 @@ export function Sidebar({
             title="Collapse sidebar"
             aria-label="Collapse sidebar"
           >
-            <img src="/logo.png" alt="Remo Code" className="h-14 w-14 object-contain" />
+            <img src="/logo.png" alt="Remo Code" className="h-10 w-auto" />
           </button>
-          <img src="/logo.png" alt="Remo Code" className="md:hidden h-14 w-14 object-contain" />
+          <img src="/logo.png" alt="Remo Code" className="md:hidden h-10 w-auto" />
           <button
             onClick={onClose}
             className="md:hidden absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
