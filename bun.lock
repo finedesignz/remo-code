@@ -12,13 +12,6 @@
         "pg": "^8.20.0",
       },
     },
-    "agent": {
-      "name": "remo-code-agent",
-      "version": "0.4.1",
-      "bin": {
-        "remo-agent": "./src/index.ts",
-      },
-    },
     "hub": {
       "name": "remo-code-hub",
       "version": "0.0.1",
@@ -39,13 +32,6 @@
       "devDependencies": {
         "@types/bcryptjs": "^3.0.0",
         "@types/jsonwebtoken": "^9.0.10",
-      },
-    },
-    "supervisor": {
-      "name": "remo-code-supervisor",
-      "version": "0.3.0",
-      "bin": {
-        "remo-code-supervisor": "src/index.ts",
       },
     },
     "web": {
@@ -666,11 +652,7 @@
 
     "remark-stringify": ["remark-stringify@11.0.0", "", { "dependencies": { "@types/mdast": "^4.0.0", "mdast-util-to-markdown": "^2.0.0", "unified": "^11.0.0" } }, "sha512-1OSmLd3awB/t8qdoEOMazZkNsfVTeY4fTsgzcQFdXNq8ToTN4ZGwrMnlda4K6smTFKD+GRV6O48i6Z4iKgPPpw=="],
 
-    "remo-code-agent": ["remo-code-agent@workspace:agent"],
-
     "remo-code-hub": ["remo-code-hub@workspace:hub"],
-
-    "remo-code-supervisor": ["remo-code-supervisor@workspace:supervisor"],
 
     "remo-code-web": ["remo-code-web@workspace:web"],
 

@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Note (Phase 09, 2026-05-26):** References to `verifyChannelToken` and the `channel/` plugin in this plan are historical. Phase 09 removed the dead `/ws/channel` route and `verifyChannelToken` DAL helper. See `.planning/phases/09-retire-npm-packages/`.
+
 **Goal:** Replace Supabase (hosted DB + Auth) with a self-hosted PostgreSQL on Coolify and a custom JWT auth system.
 
 **Architecture:** The hub currently uses Supabase for two things: database storage (via the JS client with RLS) and authentication (Supabase Auth / JWT verification). We replace the DB client with `postgres.js` pointing at a local PG instance, add a `users` table with bcrypt-hashed passwords, issue our own JWTs with `jsonwebtoken`, and replace the Supabase Auth UI in the frontend with a custom login form. RLS is dropped entirely — all queries gain explicit `WHERE user_id = $1` clauses instead.

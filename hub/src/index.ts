@@ -45,9 +45,6 @@ import { adminRouter } from './api/admin'
 import { recordAuthEvent } from './db/dal'
 import { parseSessionCookieFromHeader } from './session'
 import {
-  createChannelWsData, handleChannelOpen, handleChannelMessage, handleChannelClose,
-} from './ws/channel'
-import {
   createClientWsData, handleClientOpen, handleClientMessage, handleClientClose,
 } from './ws/client'
 import {
@@ -304,7 +301,7 @@ const server = Bun.serve({
     const url = new URL(req.url)
 
     // WebSocket upgrades — with origin validation (C2 fix) and connection limits
-    if (url.pathname === '/ws/channel' || url.pathname === '/ws/client' || url.pathname === '/ws/agent') {
+    if (url.pathname === '/ws/client' || url.pathname === '/ws/agent') {
       // Origin check for browser clients
       if (url.pathname === '/ws/client') {
         const origin = req.headers.get('origin')
@@ -325,8 +322,6 @@ const server = Bun.serve({
       let wsData: any
       if (url.pathname === '/ws/agent') {
         wsData = { type: 'agent' as const, ip, ...createAgentWsData() }
-      } else if (url.pathname === '/ws/channel') {
-        wsData = { type: 'channel' as const, ip, ...createChannelWsData() }
       } else {
         // Phase 07-C: extract __Host-remo_sid + csrf_token cookies at the
         // upgrade so /ws/client can authenticate from cookie alone (preferred
@@ -392,14 +387,12 @@ const server = Bun.serve({
     maxPayloadLength: 10 * 1024 * 1024, // 10 MB (supports image attachments)
     open(ws) {
       if (ws.data.type === 'agent') handleAgentOpen(ws as any)
-      else if (ws.data.type === 'channel') handleChannelOpen(ws as any)
       else if (ws.data.type === 'client') handleClientOpen(ws as any)
     },
     async message(ws, raw) {
       const text = typeof raw === 'string' ? raw : new TextDecoder().decode(raw)
 
       if (ws.data.type === 'agent') await handleAgentMessage(ws as any, text)
-      else if (ws.data.type === 'channel') await handleChannelMessage(ws as any, text)
       else if (ws.data.type === 'client') await handleClientMessage(ws as any, text)
     },
     close(ws) {
@@ -407,7 +400,6 @@ const server = Bun.serve({
       if (ip) decrementIp(ip)
 
       if (ws.data.type === 'agent') handleAgentClose(ws as any)
-      else if (ws.data.type === 'channel') handleChannelClose(ws as any)
       else if (ws.data.type === 'client') handleClientClose(ws as any)
     },
   },

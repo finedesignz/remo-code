@@ -1,5 +1,8 @@
 # Phase 05: codex-cli-and-rootless-sessions — Research
 
+> **Note (Phase 09, 2026-05-26):** This historical phase plan references the retired agent/ workspace and channel/ plugin. See .planning/phases/09-retire-npm-packages/ for the retirement details.
+
+
 **Researched:** 2026-05-25
 **Domain:** CLI agent integration, session schema, cross-host config seeding
 **Confidence:** MEDIUM-HIGH (Codex protocol facts cited from official docs; integration design assumed)

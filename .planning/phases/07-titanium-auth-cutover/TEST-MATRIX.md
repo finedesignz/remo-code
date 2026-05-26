@@ -1,5 +1,8 @@
 # Phase 07 — Titanium Auth Cutover: 16-Row Test Matrix
 
+> **Note (Phase 09, 2026-05-26):** This historical phase plan references the retired agent/ workspace and channel/ plugin. See .planning/phases/09-retire-npm-packages/ for the retirement details.
+
+
 **Audience:** human operator running the cutover smoke before D0 deploy, D14 cutover, and any rollback.
 **Not:** a unit-test contract. Plans A–G already shipped unit + middleware tests in `hub/test/`. This matrix is the **end-to-end + manual smoke** that exercises real flows against a deployed hub (staging or prod).
 

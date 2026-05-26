@@ -1,6 +1,9 @@
 <!-- updated: 2026-05-24 -->
 # Project State — remo-code
 
+> **Note (Phase 09, 2026-05-26):** The agent/ workspace and channel/ plugin are retired. The local CLI runner now lives in supervisor/src/ and ships exclusively as a Tauri MSI desktop app. The hub /ws/agent route is unchanged. References below to agent/, npx remo-code-agent, claude-remote, or /ws/channel are historical. See .planning/phases/09-retire-npm-packages/.
+
+
 ## What it is
 
 Remo Code is a web app that lets a user chat with their local Claude Code CLI sessions from any browser or phone. A local **agent** (`npx remo-code-agent`) spawns Claude Code with `--input-format stream-json --output-format stream-json` and relays activity (thinking, tool calls, streaming text, permission prompts) to a **hub** (Bun + Hono on port 3040) over a WebSocket. The browser subscribes to one or more sessions and renders the live activity feed.

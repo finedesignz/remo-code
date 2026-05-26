@@ -1,3 +1,6 @@
+
+> **Note (Phase 09, 2026-05-26):** This historical phase plan references the retired agent/ workspace and channel/ plugin. See .planning/phases/09-retire-npm-packages/ for the retirement details.
+
 ---
 phase: 05-codex-cli-and-rootless-sessions
 plan: 02

@@ -919,9 +919,3 @@ export async function recordAuthEvent(opts: {
   `;
 }
 
-// ── Channel token ─────────────────────────────────────────────────────────────
-
-export async function verifyChannelToken(sessionId: string) {
-  const rows = await sql`SELECT token_hash, user_id FROM sessions WHERE id = ${sessionId}`;
-  return rows[0] ?? null;
-}

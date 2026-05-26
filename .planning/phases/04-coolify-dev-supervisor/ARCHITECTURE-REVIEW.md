@@ -1,5 +1,8 @@
 # Phase 04 — Coolify Dev Supervisor — Architecture Review
 
+> **Note (Phase 09, 2026-05-26):** This historical phase plan references the retired agent/ workspace and channel/ plugin. See .planning/phases/09-retire-npm-packages/ for the retirement details.
+
+
 **Reviewer:** Backend Architect
 **Date:** 2026-05-25
 **Status:** Opinionated. Incorporate before planning.

@@ -1,6 +1,9 @@
 <!-- updated: 2026-05-24 -->
 # Roadmap
 
+> **Note (Phase 09, 2026-05-26):** The agent/ workspace and channel/ plugin are retired. The local CLI runner now lives in supervisor/src/ and ships exclusively as a Tauri MSI desktop app. The hub /ws/agent route is unchanged. References below to agent/, npx remo-code-agent, claude-remote, or /ws/channel are historical. See .planning/phases/09-retire-npm-packages/.
+
+
 Project: **remo-code**
 Owner: jsmithfd@gmail.com
 Source of truth for phase ordering, status, and dependencies. The GSD SDK parses this file — keep the `Phase NN: <slug>` heading and the `Status:` / `Goal:` / `Depends on:` / `Requirements:` lines exactly as shown.

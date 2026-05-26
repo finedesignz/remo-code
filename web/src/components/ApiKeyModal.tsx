@@ -33,7 +33,6 @@ export function ApiKeyModal({ token, onClose }: Props) {
   }
 
   const trayAppReleaseUrl = 'https://github.com/finedesignz/remo-code/releases/latest'
-  const agentCmd = newKey ? `npx remo-code-agent --api-key ${newKey} --local-output` : ''
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
@@ -45,7 +44,7 @@ export function ApiKeyModal({ token, onClose }: Props) {
           </div>
 
           <p className="text-[var(--text-muted)] text-sm mb-6">
-            Your API key authenticates the Remo Code tray app (or the agent fallback) when connecting Claude Code sessions. One key connects all your projects.
+            Your API key authenticates the Remo Code Supervisor desktop app when connecting Claude Code sessions. One key connects all your projects.
           </p>
 
           {loading ? (
@@ -85,31 +84,7 @@ export function ApiKeyModal({ token, onClose }: Props) {
                 >
                   Download .msi from GitHub Releases &rarr;
                 </a>
-                <p className="text-[10px] text-[var(--text-muted)] mt-2">
-                  If the latest release doesn't yet include a <code className="text-[var(--text-secondary)]">.msi</code> asset, the first signed build is being prepared — use the agent fallback below in the meantime.
-                </p>
               </div>
-
-              {/* SECONDARY: legacy agent */}
-              <details className="bg-[var(--bg-tertiary)]/30 rounded-lg">
-                <summary className="cursor-pointer px-3 py-2 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors select-none">
-                  Alternative: run the agent manually per project
-                </summary>
-                <div className="px-3 pb-3 pt-1 space-y-2">
-                  <p className="text-[10px] text-[var(--text-muted)]">
-                    Runs a single agent in the foreground tied to the current directory. Useful for quick tests; not recommended for daily use.
-                  </p>
-                  <div className="relative group">
-                    <pre className="bg-[var(--code-bg)] rounded-lg p-3 text-xs text-indigo-300 font-mono overflow-x-auto">{agentCmd}</pre>
-                    <button
-                      onClick={() => copyText(agentCmd, 'cmd')}
-                      className="absolute top-2 right-2 px-2 py-1 text-xs bg-[var(--bg-tertiary)] hover:bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded transition-colors opacity-100 md:opacity-0 md:group-hover:opacity-100"
-                    >
-                      {copied === 'cmd' ? 'Copied!' : 'Copy'}
-                    </button>
-                  </div>
-                </div>
-              </details>
 
               <button
                 onClick={() => { setNewKey(null); onClose() }}

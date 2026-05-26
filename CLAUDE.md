@@ -38,16 +38,15 @@ Browser (React SPA)
     ↕ WebSocket /ws/client  +  REST /api/*
 Hub Server (Bun + Hono, port 3040)
     ↕ WebSocket /ws/agent
-Local Agent (Bun, runs on dev machine)
+Remo Code Supervisor desktop app (Tauri MSI, one per host)
     ↕ subprocess stdin/stdout (stream-json)
-Claude Code CLI (persistent interactive process)
+Claude Code CLI / Codex CLI (one persistent process per session)
 ```
 
-Four packages in a Bun workspace:
-- **hub/** — Bun + Hono HTTP/WS server. Authenticates users via Supabase JWT, manages sessions, relays messages and activity events between web clients and agents.
+Three packages in a Bun workspace:
+- **hub/** — Bun + Hono HTTP/WS server. Authenticates users via Titanium Licensing magic-link + opaque cookie sessions, manages sessions, relays messages and activity events between web clients and supervisors.
 - **web/** — React 19 + Vite + Tailwind CSS 4 SPA. Connects to hub via WebSocket for real-time chat with activity feed (thinking blocks, tool call indicators, streaming text).
-- **agent/** — Local streaming agent. Runs on the dev machine, spawns a persistent Claude Code CLI process, parses stream-json events, and relays them to the hub. Authenticates with an API key.
-- **channel/** — (Legacy) Claude Code channel plugin. Kept for backward compatibility but no longer the recommended connection method.
+- **supervisor/** — Local supervisor. `supervisor/src/` is the Bun TypeScript source; the Tauri build (`supervisor/tauri/`) compiles it via `bun build --compile` into a sidecar binary and bundles a Windows MSI installer. One supervisor per host. Connects to `/ws/agent` with an API key, spawns Claude/Codex CLIs on demand, parses stream-json events, and relays them to the hub.
 
 ## Commands
 
@@ -64,46 +63,38 @@ bun run dev:web
 # Build web for production
 bun run build:web
 
-# Run the local agent (recommended: set up a shell alias)
-# alias claude-remote='npx remo-code-agent --api-key <your_api_key> --local-output'
-claude-remote
-
-# Or run directly (connects to production hub, output to terminal + web)
-npx remo-code-agent --api-key <your_api_key> --local-output
-
-# Connect to local hub for development
-npx remo-code-agent --hub-url http://localhost:3040 --api-key <your_api_key> --local-output
-
-# Web UI only (no terminal output)
-npx remo-code-agent --api-key <your_api_key>
+# Build the Tauri Supervisor desktop app (produces a Windows .msi installer)
+cd supervisor/tauri && cargo tauri build
 ```
 
-## Local Agent (Recommended Connection Method)
+The legacy `npx remo-code-agent` / `claude-remote` shell-alias flow is retired as of 2026-05-26. Install the Tauri Supervisor MSI from https://github.com/finedesignz/remo-code/releases/latest instead.
 
-The agent (`agent/src/index.ts`) runs on the same machine as Claude Code. It:
+## Local Supervisor (only supported connection)
 
-1. Connects to the hub via WebSocket at `/ws/agent`, authenticates with an API key
-2. Spawns Claude Code CLI: `claude --input-format stream-json --output-format stream-json --verbose`
-3. Keeps a single persistent Claude process alive (full conversation memory)
-4. Receives user messages from the hub, writes them to Claude's stdin as JSON
-5. Parses Claude's stdout stream-json events and relays to the hub in real-time
-6. Hub broadcasts activity events (thinking, text_delta, tool_use, tool_result) to subscribed browsers
+The supervisor (`supervisor/src/index.ts`, compiled into the Tauri sidecar binary) runs on the dev machine as a tray app. It:
 
-**Session resume:** The agent reuses existing sessions by matching `project_dir`. Restarting the agent in the same directory reconnects to the same session with full message history.
+1. Connects to the hub via WebSocket at `/ws/agent`, authenticates with an API key.
+2. Hosts one CLI subprocess per active session (Claude Code or Codex), spawning `claude --input-format stream-json --output-format stream-json --verbose` (or `codex app-server`) lazily on first user message.
+3. Keeps each CLI process alive between messages (full conversation memory per session).
+4. Receives user messages from the hub, writes them to the CLI's stdin as JSON.
+5. Parses the CLI's stdout stream-json events and relays them to the hub in real-time.
+6. Hub broadcasts activity events (thinking, text_delta, tool_use, tool_result) to subscribed browsers.
 
-**Config priority:** CLI args > env vars (`REMO_HUB_URL`, `REMO_API_KEY`) > config file (`~/.config/remo-code/config.json`)
+**Session resume:** The supervisor reuses existing sessions by matching `project_dir`. Restarting the supervisor reconnects to the same sessions with full message history.
+
+**Config:** stored in `%LOCALAPPDATA%\remo-code-supervisor\config.json` on Windows (managed by the Tauri first-run wizard).
 
 ## Database
 
 Uses **PostgreSQL** (self-hosted). Schema in `hub/src/db/schema.sql` — run once on a fresh database.
 
-Tables: `users` (email + bcrypt password, role), `sessions` (Claude Code sessions), `messages` (chat history), `api_keys` (agent authentication). All queries are scoped by `user_id` with explicit WHERE clauses.
+Tables: `users` (email + bcrypt password, role), `sessions` (Claude Code sessions), `messages` (chat history), `api_keys` (supervisor authentication). All queries are scoped by `user_id` with explicit WHERE clauses.
 
 ## WebSocket Protocol
 
-**`/ws/agent`** (local agent connects here):
+**`/ws/agent`** (supervisor connects here):
 - Auth: `{ type: "auth", api_key, project_dir, hostname }` → API key verified via SHA-256 hash, session found-or-created by project_dir
-- Agent sends: `thinking`, `text_delta`, `tool_use`, `tool_result`, `status`, `assistant_message`
+- Supervisor sends: `thinking`, `text_delta`, `tool_use`, `tool_result`, `status`, `assistant_message`
 - Hub sends: `user_message` (with optional `images`/`attachments`), `cancel`, `ping`
 - 30s heartbeat ping/pong
 
@@ -113,22 +104,19 @@ Tables: `users` (email + bcrypt password, role), `sessions` (Claude Code session
 - Hub sends `message`, `session_status`, `session_list`, plus activity events (`thinking`, `text_delta`, `tool_use`, `tool_result`, `status`)
 - Both endpoints have 5s auth timeout, per-IP connection limits (20), per-connection message rate limits
 
-**`/ws/channel`** (legacy channel plugin):
-- Kept for backward compatibility. Same protocol as before.
-
 All WS messages validated with Zod schemas in `hub/src/ws/protocol.ts` and `hub/src/ws/agent-protocol.ts`.
 
 ## Key Design Decisions
 
-- Agent spawns Claude CLI with `--input-format stream-json --output-format stream-json` for full activity streaming
-- Persistent Claude process per agent (conversation memory preserved across messages)
-- Session resume by project_dir (agent reconnects to existing session on restart)
+- Supervisor spawns Claude CLI with `--input-format stream-json --output-format stream-json` for full activity streaming
+- Persistent CLI process per session (conversation memory preserved across messages)
+- Session resume by project_dir (supervisor reconnects to existing sessions on restart)
 - Activity events (thinking, tool use) are ephemeral — only the final assistant_message is persisted
 - File attachments: text files embedded in message content, images as base64 data URIs
 - Light/dark theme via CSS custom properties (--bg-primary, --text-primary, etc.)
 - Session tokens use `remo_` prefix + 32 random bytes (base64url), stored as SHA-256 hashes
 - The hub serves the built web SPA as static files (no separate web server in production)
-- Subscription quota (5h + 7d Anthropic utilization) is polled by the **local agent**, not the hub — the OAuth access token lives only in `~/.claude/.credentials.json` on the dev machine and never leaves it. Hub keeps a per-user in-memory snapshot (`hub/src/usage/store.ts`) and rebroadcasts to web clients via WS event `subscription_usage`. See [docs/agent.md](docs/agent.md).
+- Subscription quota (5h + 7d Anthropic utilization) is polled by the **supervisor**, not the hub — the OAuth access token lives only in `~/.claude/.credentials.json` on the dev machine and never leaves it. Hub keeps a per-user in-memory snapshot (`hub/src/usage/store.ts`) and rebroadcasts to web clients via WS event `subscription_usage`.
 
 ## Environment Variables
 
@@ -136,7 +124,7 @@ All WS messages validated with Zod schemas in `hub/src/ws/protocol.ts` and `hub/
 
 **web/.env**: `VITE_HUB_URL`
 
-**Agent config**: CLI args, env vars (`REMO_HUB_URL`, `REMO_API_KEY`), or `~/.config/remo-code/config.json`
+**Supervisor config**: managed by the Tauri first-run wizard; stored at `%LOCALAPPDATA%\remo-code-supervisor\config.json` on Windows. Holds hub URL, API key, repo roots.
 
 **Scheduled tasks (optional):**
 - `REMO_PUBLIC_URL` — prefix for `{{run_url}}` template var in post-run actions (default `https://app.remo-code.com`).

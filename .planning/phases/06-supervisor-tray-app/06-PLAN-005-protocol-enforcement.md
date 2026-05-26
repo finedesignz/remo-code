@@ -15,6 +15,9 @@ requirements: [R-06-03, R-06-09]
 
 # Plan 06-005 — Protocol-level enforcement of security toggles (sandbox gate, dangerous-cap, concurrency, git-only, audit, kill-switch)
 
+> **Note (Phase 09, 2026-05-26):** This historical phase plan references the retired agent/ workspace and channel/ plugin. See .planning/phases/09-retire-npm-packages/ for the retirement details.
+
+
 <tasks>
 
 <task id="T1">

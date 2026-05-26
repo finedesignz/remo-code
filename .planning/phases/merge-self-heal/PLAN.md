@@ -1,5 +1,8 @@
 # Plan: upstream-fixes-merge
 
+> **Note (Phase 09, 2026-05-26):** This historical phase plan references the retired agent/ workspace and channel/ plugin. See .planning/phases/09-retire-npm-packages/ for the retirement details.
+
+
 Reference: CONTEXT.md. Branch off `main` as `chore/upstream-fixes-replay`. One commit per task.
 
 ## Wave 1 — Investigate (VERIFY_THEN_APPLY items)
