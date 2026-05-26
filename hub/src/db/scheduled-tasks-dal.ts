@@ -303,18 +303,26 @@ export async function insertRunV2(input: {
   session_id?: string | null
   triggered_by_run_id?: string | null
   error?: string | null
+  output_snippet?: string | null
+  started_at?: Date | null
+  finished_at?: Date | null
 }): Promise<ScheduledTaskRun> {
+  const startedAt =
+    input.started_at !== undefined
+      ? input.started_at
+      : input.status === 'pending' ? null : new Date()
+  const finishedAt = input.finished_at ?? null
   const rows = await sql<ScheduledTaskRun[]>`
     INSERT INTO scheduled_task_runs (
       task_id, user_id, session_id, status, error,
       scheduled_for, target_kind, target_id, triggered_by_run_id,
-      started_at
+      started_at, finished_at, output_snippet
     ) VALUES (
       ${input.task_id}, ${input.user_id}, ${input.session_id ?? null},
       ${input.status}, ${input.error ?? null},
       ${input.scheduled_for}, ${input.target_kind}, ${input.target_id ?? null},
       ${input.triggered_by_run_id ?? null},
-      ${input.status === 'pending' ? null : sql`now()`}
+      ${startedAt}, ${finishedAt}, ${input.output_snippet ?? null}
     )
     RETURNING *
   `
