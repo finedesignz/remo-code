@@ -227,13 +227,15 @@ export function requireActiveLicense(
   const readOnlyOk = opts.readOnlyOk ?? false;
 
   return async (c: Context, next: Next) => {
-    // Escape hatch: when LICENSE_REQUIRED=false, bypass the gate entirely.
+    // Escape hatch: TITANIUM_BYPASS=true (Phase 07 bypass mode) OR
+    // LICENSE_REQUIRED=false. Either disables the gate entirely.
     // Used while Keygen JWKS is unhealthy so REST identity routes don't 402.
-    if (!config.licenseRequired) {
+    if (config.titaniumBypass || !config.licenseRequired) {
       if (!permissiveWarned) {
         permissiveWarned = true;
+        const reason = config.titaniumBypass ? "TITANIUM_BYPASS=true" : "LICENSE_REQUIRED=false";
         console.warn(
-          "[license-gate] LICENSE_REQUIRED=false → permissive mode (all authed requests pass)",
+          `[license-gate] ${reason} → permissive mode (all authed requests pass)`,
         );
       }
       return next();

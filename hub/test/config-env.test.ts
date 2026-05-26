@@ -9,6 +9,7 @@ const KEYS = [
   'TITANIUM_PORTAL_TOKEN',
   'TITANIUM_KEYGEN_ADMIN_TOKEN',
   'TITANIUM_ADMIN_TOKEN',
+  'TITANIUM_BYPASS',
 ] as const
 
 async function withEnv<T>(env: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -36,15 +37,12 @@ async function importConfig(caseName: string) {
 }
 
 describe('Titanium env config', () => {
-  test('prefers canonical TITANIUM_KEYGEN_* env names', async () => {
+  test('reads canonical TITANIUM_KEYGEN_* env names', async () => {
     await withEnv(
       {
         TITANIUM_KEYGEN_ACCOUNT_ID: 'acct_keygen',
-        TITANIUM_ACCOUNT_ID: 'acct_legacy',
         TITANIUM_KEYGEN_PRODUCT_ID: 'prod_keygen',
-        TITANIUM_PRODUCT_ID: 'prod_legacy',
         TITANIUM_KEYGEN_PORTAL_TOKEN: 'portal_keygen',
-        TITANIUM_PORTAL_TOKEN: 'portal_legacy',
       },
       async () => {
         const { config } = await importConfig('canonical')
@@ -56,7 +54,22 @@ describe('Titanium env config', () => {
     )
   })
 
-  test('keeps legacy unprefixed names as fallback', async () => {
+  test('TITANIUM_BYPASS defaults to false; parses true/false correctly', async () => {
+    await withEnv({ TITANIUM_BYPASS: undefined } as any, async () => {
+      const { config } = await importConfig('bypass-default')
+      expect(config.titaniumBypass).toBe(false)
+    })
+    await withEnv({ TITANIUM_BYPASS: 'true' } as any, async () => {
+      const { config } = await importConfig('bypass-true')
+      expect(config.titaniumBypass).toBe(true)
+    })
+    await withEnv({ TITANIUM_BYPASS: 'false' } as any, async () => {
+      const { config } = await importConfig('bypass-false')
+      expect(config.titaniumBypass).toBe(false)
+    })
+  })
+
+  test('ignores legacy unprefixed TITANIUM_* names (rename complete)', async () => {
     await withEnv(
       {
         TITANIUM_ACCOUNT_ID: 'acct_legacy',
@@ -66,10 +79,10 @@ describe('Titanium env config', () => {
       },
       async () => {
         const { config } = await importConfig('legacy')
-        expect(config.titanium.accountId).toBe('acct_legacy')
-        expect(config.titanium.productId).toBe('prod_legacy')
-        expect(config.titanium.portalToken).toBe('portal_legacy')
-        expect(config.titanium.adminToken).toBe('admin_legacy')
+        expect(config.titanium.accountId).toBe('')
+        expect(config.titanium.productId).toBe('')
+        expect(config.titanium.portalToken).toBe('')
+        expect(config.titanium.adminToken).toBe('')
       },
     )
   })
