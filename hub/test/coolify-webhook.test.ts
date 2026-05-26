@@ -174,6 +174,54 @@ describe('coolify-webhook URL-path token auth', () => {
   })
 })
 
+// ── Test event (Coolify "Send Test Notification") ───────────────────────────
+
+describe('coolify-webhook test event', () => {
+  const testPayload = JSON.stringify({
+    success: true,
+    message: 'This is a test webhook notification from Coolify.',
+    event: 'test',
+    url: 'https://coolify.titaniumlabs.us',
+  })
+
+  test('test payload via URL-token → 200 + ok:true + audit success/test_ok + no run inserted', async () => {
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: testPayload,
+    })
+    expect(res.status).toBe(200)
+    const json: any = await res.json()
+    expect(json.ok).toBe(true)
+    expect(json.message).toBe('test received')
+    // No deployment run should be inserted.
+    expect(mockState.runs.length).toBe(0)
+    // Audit row must record status=success, reason=test_ok, event_type=test.
+    const audit = mockState.attempts.find((a: any) => a.event_type === 'test')
+    expect(audit).toBeTruthy()
+    expect(audit.status).toBe('success')
+    expect(audit.reason).toBe('test_ok')
+  })
+
+  test('test payload via legacy HMAC route → 200 + no run inserted', async () => {
+    const ts = Math.floor(Date.now() / 1000)
+    const sig = sign(TEST_SECRET, ts, testPayload)
+    const res = await app.request(legacyPath(TEST_USER_ID), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-coolify-signature': sig,
+        'x-coolify-timestamp': String(ts),
+      },
+      body: testPayload,
+    })
+    expect(res.status).toBe(200)
+    const json: any = await res.json()
+    expect(json.ok).toBe(true)
+    expect(mockState.runs.length).toBe(0)
+  })
+})
+
 // ── Underscore event-name aliasing (Coolify SendWebhookJob) ─────────────────
 
 describe('coolify-webhook event name aliasing', () => {

@@ -175,6 +175,15 @@ async function handleAuthenticated(opts: {
     await logAttempt(userId, sourceIp, null, 'bad_payload', 'invalid_json', preview)
     return { status: 400 as const, body: { error: 'bad_json' } }
   }
+
+  // (2a) Test ping — Coolify sends this when user clicks "Send Test Notification".
+  // Shape: { success: true, message: "...", event: "test", url: "..." }
+  // No run inserted, no triage. Just audit + 200.
+  if (typeof parsedBody === 'object' && parsedBody !== null && (parsedBody as any).event === 'test') {
+    await logAttempt(userId, sourceIp, 'test', 'success', 'test_ok', preview)
+    return { status: 200 as const, body: { ok: true, message: 'test received' } }
+  }
+
   const result = CoolifyWebhookPayload.safeParse(parsedBody)
   if (!result.success) {
     const eventType = typeof (parsedBody as any)?.event === 'string' ? (parsedBody as any).event : null
