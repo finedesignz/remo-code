@@ -6,6 +6,7 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import { SupervisorPage } from './SupervisorPage'
 import { CommandsList } from './CommandsList'
 import { SchedulesPage } from './SchedulesPage'
+import { ClaudeUsageCard } from './ClaudeUsageCard'
 import { hubFetch } from '../lib/api'
 
 interface Props {
@@ -154,6 +155,8 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
           </div>
         </div>
       </div>
+
+      <ClaudeUsageCard token={token} />
 
       <CostCapCard token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
       <NotificationsCard profile={profile} onUpdateProfile={onUpdateProfile} />

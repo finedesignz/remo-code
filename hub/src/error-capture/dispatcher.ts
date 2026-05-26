@@ -33,6 +33,7 @@ import * as queue from '../scheduler/session-queue.ts'
 import { notifyThrottled } from './notify.ts'
 import { buildErrorMessage } from './prompt.ts'
 import { registerErrorRunForSession } from './run-lifecycle.ts'
+import { checkUserThreshold } from '../usage/threshold.ts'
 
 export type DispatchOutcome =
   | { status: 'dispatched'; run_id: string }
@@ -66,6 +67,24 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
 
   const sessionId = project.session_id
   const userId = project.user_id
+
+  // Claude usage threshold gate — refuses dispatch with skip_reason that
+  // includes the breach details. Matches the cost-cap audit pattern: we
+  // persist the skip on the error row rather than silently dropping.
+  const threshold = await checkUserThreshold(userId)
+  if (!threshold.allowed) {
+    const skipReason = `quota_threshold_reached:${threshold.reason}`
+    await updateErrorDispatchStatus(errorId, 'skipped', skipReason)
+    broadcastErrorEvent(userId, {
+      type: 'error_skipped',
+      error_id: errorId,
+      project_id: project.id,
+      dispatch_status: 'skipped',
+      skip_reason: skipReason,
+    })
+    return { status: 'skipped', skip_reason: skipReason }
+  }
+
   const channel = getChannel(sessionId)
 
   // 3. Offline target → grace + skip.

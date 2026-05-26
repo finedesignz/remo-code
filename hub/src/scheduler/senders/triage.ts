@@ -60,6 +60,14 @@ export async function sendTriage(
   payload: TriagePayload,
 ): Promise<void> {
   const pick = await pickSessionTarget(ctx.userId)
+  if (pick.kind === 'quota_blocked') {
+    await finalizeRun(
+      ctx.runId,
+      'skipped_quota',
+      `quota_threshold_reached:${pick.reason}:${pick.utilization_pct}>=${pick.threshold_pct}`,
+    )
+    return
+  }
   if (pick.kind === 'none') {
     await finalizeRun(ctx.runId, 'failed', 'no_target_available')
     return

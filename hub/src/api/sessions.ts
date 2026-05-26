@@ -159,6 +159,16 @@ sessions.post('/heal', async (c) => {
       excludeSupervisorIds: Array.from(exclude),
     })
 
+    if (pick.kind === 'quota_blocked') {
+      return c.json({
+        error: 'quota_threshold_reached',
+        reason: pick.reason,
+        utilization_pct: pick.utilization_pct,
+        threshold_pct: pick.threshold_pct,
+        resets_at: pick.resets_at,
+      }, 503)
+    }
+
     if (pick.kind === 'none') {
       return c.json({ error: 'no_target_available' }, 503)
     }

@@ -5,6 +5,7 @@ import { verifyAuthSessionToken } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
 import { insertMessage, listSessions, getSession } from '../db/dal'
+import { checkUserThreshold } from '../usage/threshold.ts'
 import {
   registerClient, unregisterClient, subscribeClient,
   getChannel, unregisterChannel, broadcastToSubscribers,
@@ -242,6 +243,26 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     const session = await getSession(msg.session_id, data.userId!)
     if (!session) {
       console.log(`[client] session not found or not owned: ${msg.session_id}`)
+      return
+    }
+
+    // Claude usage threshold gate — refuses NEW manual dispatches when the
+    // user is over their configured cap. Send a structured refusal back so
+    // the UI can surface the "paused" banner inline.
+    const threshold = await checkUserThreshold(data.userId!)
+    if (!threshold.allowed) {
+      try {
+        ws.send(JSON.stringify({
+          type: 'send_refused',
+          client_id: msg.id,
+          session_id: msg.session_id,
+          error: 'quota_threshold_reached',
+          reason: threshold.reason,
+          utilization_pct: threshold.utilization_pct,
+          threshold_pct: threshold.threshold_pct,
+          resets_at: threshold.resets_at,
+        }))
+      } catch {}
       return
     }
 

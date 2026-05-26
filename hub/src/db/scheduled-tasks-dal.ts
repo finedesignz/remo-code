@@ -21,6 +21,7 @@ export type RunStatus =
   | 'success'
   | 'failed'
   | 'skipped'
+  | 'skipped_quota'
   | 'cancelled'
 
 export interface ScheduledTask {

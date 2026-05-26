@@ -22,6 +22,7 @@ import * as registry from './registry.ts'
 import * as queue from './session-queue.ts'
 import { broadcastScheduledRun, broadcastToUser } from '../ws/registry.ts'
 import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget.ts'
+import { checkUserThreshold } from '../usage/threshold.ts'
 
 const MAX_CHAIN_DEPTH = 5
 
@@ -110,6 +111,32 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
   const userId = task.user_id
   const runIds: string[] = []
   const isManual = opts.isManual === true
+
+  // Claude usage threshold gate — sits in front of the cost-cap gate.
+  // Same shape, distinct status ('skipped_quota'). Persisting the run row
+  // (rather than silently dropping) is required for the run-history drawer
+  // and matches the cost-cap audit pattern.
+  const threshold = await checkUserThreshold(userId)
+  if (!threshold.allowed) {
+    const errMsg = `quota_threshold_reached:${threshold.reason}:${threshold.utilization_pct}>=${threshold.threshold_pct}`
+    const run = await insertRunV2({
+      task_id: task.id,
+      user_id: userId,
+      status: 'skipped_quota',
+      scheduled_for: now,
+      target_kind: task.target_kind,
+      target_id: task.target_id,
+      triggered_by_run_id: opts.triggeredByRunId ?? null,
+      error: errMsg,
+    })
+    broadcastScheduledRun(userId, {
+      type: 'scheduled_run_finished',
+      run_id: run.id, task_id: task.id, status: 'skipped_quota', error: errMsg,
+    })
+    void onRunFinalized(task, run.id, 'skipped_quota', errMsg)
+    if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
+    return
+  }
 
   if (await isOverCostCap(userId, task.timezone)) {
     const run = await insertRunV2({
@@ -466,6 +493,14 @@ export function init(): void {
     if (!ctx) return
     const task = await getTaskById(ctx.taskId)
     if (!task) return
+    // Re-evaluate the threshold gate at waiter promotion — the user may have
+    // crossed the cap while the run was queued. Drop with skipped_quota.
+    const t = await checkUserThreshold(ctx.userId)
+    if (!t.allowed) {
+      const errMsg = `quota_threshold_reached:${t.reason}:${t.utilization_pct}>=${t.threshold_pct}`
+      await finalizeRun(runId, 'skipped_quota', errMsg)
+      return
+    }
     void routeToSender(task, ctx).catch((err) =>
       console.error(
         `[scheduler.dispatcher] promoted send failed run=${runId} session=${sessionId}: ${err?.message}`,
