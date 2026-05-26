@@ -5,8 +5,6 @@ WORKDIR /app
 COPY package.json bun.lock ./
 COPY hub/package.json hub/
 COPY web/package.json web/
-COPY agent/package.json agent/
-COPY supervisor/package.json supervisor/
 
 # Install all workspace dependencies
 RUN bun install --frozen-lockfile
@@ -34,8 +32,6 @@ ENV DATABASE_URL=$DATABASE_URL \
 COPY package.json bun.lock ./
 COPY hub/package.json hub/
 COPY web/package.json web/
-COPY agent/package.json agent/
-COPY supervisor/package.json supervisor/
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 RUN bun install --frozen-lockfile --production
 
