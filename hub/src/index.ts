@@ -157,6 +157,11 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path === '/api/github/callback') return next()
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
+  // Phase 07: public auth endpoints (login request-link, callback, logout, me).
+  // The authRouter handles its own auth state internally where needed.
+  if (c.req.path.startsWith('/api/auth/')) return next()
+  // Public setup bootstrap (guarded by user-count check inside).
+  if (c.req.path.startsWith('/api/setup')) return next()
   return authMiddleware(c, next)
 })
 app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('userId') || 'anon' }))
@@ -171,6 +176,8 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path === '/api/github/callback') return next()
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
+  if (c.req.path.startsWith('/api/auth/')) return next()
+  if (c.req.path.startsWith('/api/setup')) return next()
   return requireActiveLicense({ readOnlyOk: true })(c, next)
 })
 
