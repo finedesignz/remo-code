@@ -84,13 +84,54 @@ export function verifyCsrfPair(cookieValue: string | null, headerValue: string |
   return constantTimeEqualHex(cookieValue, headerValue);
 }
 
+// Bearer-auth bypass: matches `Authorization: Bearer <non-empty>` (case-insensitive
+// scheme, any whitespace, any non-empty token). Empty/missing/non-Bearer schemes
+// fall through to normal CSRF enforcement.
+const BEARER_RE = /^Bearer\s+\S+/i;
+
 // Hono middleware: enforces CSRF on mutating methods except allowlisted paths.
 // Pass-through on GET/HEAD/OPTIONS and on allowlisted paths.
+//
+// Threat model for the Bearer bypass (legacy JWT auth path):
+//   CSRF attacks exploit the browser's ambient-credential behavior — a victim
+//   visits evil.com, evil.com triggers a cross-origin POST to app.remo-code.com,
+//   and the BROWSER attaches the victim's cookies automatically. The attacker
+//   never needs to read the cookie value; they just ride it.
+//
+//   The double-submit cookie pattern defends against this by requiring the
+//   attacker to ALSO present the CSRF nonce in a header — which the browser
+//   does NOT attach automatically; only same-origin JS that can read the
+//   csrf_token cookie can echo it.
+//
+//   `Authorization: Bearer <token>` headers are NOT in the browser's
+//   ambient-credential set. Browsers never attach them automatically — JS
+//   must explicitly set the header on each request. Cross-origin JS on
+//   evil.com cannot read the bearer token from app.remo-code.com's
+//   localStorage (same-origin policy), so it cannot forge a Bearer-authed
+//   request even if the user is logged in.
+//
+//   Therefore: a request that carries a Bearer token is, by construction,
+//   not a CSRF-eligible request. The bypass is safe AND necessary — legacy
+//   JWT-auth users never receive a csrf_token cookie (only the new
+//   session-cookie auth issues one), so without this bypass every mutating
+//   call from a legacy-auth client fails closed with 403.
+//
+//   Scope guardrails:
+//     - ONLY Bearer scheme. Custom headers (X-Auth, etc.) do NOT qualify —
+//       a CSRF attacker can set arbitrary custom headers via fetch() if CORS
+//       allows it, so "presence of a custom header" is not a safe proxy.
+//     - Empty `Authorization:` header does NOT bypass.
+//     - Cookie-auth users continue to use double-submit. We do not loosen
+//       enforcement for them.
 export function csrfGuard() {
   return async (c: Context, next: Next) => {
     const method = c.req.method.toUpperCase();
     if (!MUTATING_METHODS.has(method)) return next();
     if (isCsrfAllowlisted(c.req.path)) return next();
+
+    // Bearer-auth bypass — see threat model above.
+    const authHeader = c.req.header('Authorization') || c.req.header('authorization');
+    if (authHeader && BEARER_RE.test(authHeader)) return next();
 
     const cookieValue = readCsrfCookie(c);
     const headerValue = c.req.header(CSRF_HEADER_NAME) || c.req.header(CSRF_HEADER_NAME.toLowerCase());

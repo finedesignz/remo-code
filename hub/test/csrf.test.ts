@@ -129,4 +129,77 @@ describe('csrfGuard middleware', () => {
     const res = await app.request('/api/foo', { method: 'DELETE' });
     expect(res.status).toBe(403);
   });
+
+  // Bearer-auth bypass (legacy JWT path) — see threat model in csrf.ts.
+  test('POST with Authorization: Bearer <token> bypasses CSRF', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig' },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test('POST with Bearer bypass works without any csrf cookie or header', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer token-xyz' },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test('POST with lowercase authorization header still bypasses (HTTP is case-insensitive)', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { authorization: 'bearer abc.def.ghi' },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test('POST with empty Authorization header does NOT bypass → 403', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { Authorization: '' },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test('POST with non-Bearer scheme (Basic) does NOT bypass → 403', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { Authorization: 'Basic dXNlcjpwYXNz' },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test('POST with "Bearer" but no token does NOT bypass → 403', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test('POST with "Bearer" alone (no space, no token) does NOT bypass → 403', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer' },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  test('Bearer bypass does NOT apply to GET (irrelevant — GET is already passthrough)', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'GET',
+      headers: { Authorization: 'Bearer abc' },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test('cookie-auth double-submit still works when no Authorization header present', async () => {
+    const res = await buildApp().request('/api/foo', {
+      method: 'POST',
+      headers: { cookie: `${CSRF_COOKIE_NAME}=match-me-123`, [CSRF_HEADER_NAME]: 'match-me-123' },
+    });
+    expect(res.status).toBe(200);
+  });
 });
