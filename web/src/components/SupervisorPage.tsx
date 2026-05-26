@@ -409,7 +409,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 </div>
                 <div className="text-xs text-[var(--text-secondary)] mt-1">
                   {activeSupervisor.hostname} hasn't checked in since {activeSupervisor.last_seen_at ? new Date(activeSupervisor.last_seen_at).toLocaleString() : 'never'}.
-                  The supervisor process retries the hub up to 5 times then exits; the Task Scheduler restarts it shortly after. Active sessions auto-resume on the next successful reconnect.
+                  The supervisor reconnects automatically with exponential backoff (capped at 60s). Active sessions auto-resume on the next successful reconnect.
                 </div>
               </div>
             )}
