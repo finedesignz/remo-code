@@ -37,6 +37,9 @@ import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/d
 import { startErrorGraceSweep } from './error-capture/grace.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit } from './middleware/rate-limit'
+import { csrfGuard } from './csrf'
+import { requireRecentAuth } from './auth/reauth'
+import { parseSessionCookieFromHeader } from './session'
 import {
   createChannelWsData, handleChannelOpen, handleChannelMessage, handleChannelClose,
 } from './ws/channel'
@@ -134,6 +137,27 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   return requireActiveLicense({ readOnlyOk: true })(c, next)
 })
+
+// CSRF (Phase 07-C): double-submit cookie on mutating /api/* requests.
+// Allowlist (sentry intake, coolify webhook, login/logout, plugin api-key,
+// setup bootstrap, github oauth callback, health) lives in hub/src/csrf.ts.
+// GET/HEAD/OPTIONS pass through.
+app.use('/api/*', csrfGuard())
+
+// Re-auth gate (Phase 07-C / C.5): elevated-impact ops require a session that
+// is younger than 5 minutes (re-auth via fresh magic-link). Cookie-only —
+// legacy bearer JWTs cannot satisfy because they carry no creation-time.
+app.use('/api/api-keys', async (c, next) => {
+  const m = c.req.method.toUpperCase()
+  if (m === 'POST' || m === 'DELETE') return requireRecentAuth()(c, next)
+  return next()
+})
+app.use('/api/account/coolify-webhook-secret/rotate', requireRecentAuth())
+app.use('/api/error-projects/:id', async (c, next) => {
+  if (c.req.method.toUpperCase() === 'DELETE') return requireRecentAuth()(c, next)
+  return next()
+})
+
 // OpenAPI sample route + /openapi.json + /docs (Scalar UI).
 // Mounted ahead of plain-Hono routers so the documented twin of
 // /api/profile/cost-today wins over the legacy plain version.
@@ -218,7 +242,23 @@ const server = Bun.serve({
       } else if (url.pathname === '/ws/channel') {
         wsData = { type: 'channel' as const, ip, ...createChannelWsData() }
       } else {
-        wsData = { type: 'client' as const, ip, ...createClientWsData() }
+        // Phase 07-C: extract __Host-remo_sid + csrf_token cookies at the
+        // upgrade so /ws/client can authenticate from cookie alone (preferred
+        // path) and enforce CSRF on mutating WS messages.
+        const cookieHeader = req.headers.get('cookie')
+        const cookieToken = parseSessionCookieFromHeader(cookieHeader)
+        let csrfCookie: string | null = null
+        if (cookieHeader) {
+          for (const part of cookieHeader.split(/;\s*/)) {
+            const eq = part.indexOf('=')
+            if (eq < 0) continue
+            if (part.slice(0, eq) === 'csrf_token') {
+              csrfCookie = decodeURIComponent(part.slice(eq + 1))
+              break
+            }
+          }
+        }
+        wsData = { type: 'client' as const, ip, cookieToken, csrfCookie, ...createClientWsData() }
       }
 
       const upgraded = server.upgrade(req, { data: wsData })

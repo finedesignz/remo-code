@@ -1,6 +1,9 @@
 import type { ServerWebSocket } from 'bun'
 import { ClientInbound, SUBSCRIBE_MAX } from './protocol'
 import { verifyJwt } from '../auth/jwt.ts'
+import { verifyAuthSessionToken } from '../session.ts'
+import { verifyCsrfPair } from '../csrf.ts'
+import { config } from '../config.ts'
 import { insertMessage, listSessions, getSession } from '../db/dal'
 import {
   registerClient, unregisterClient, subscribeClient,
@@ -24,6 +27,12 @@ interface ClientWsData {
   authTimer: ReturnType<typeof setTimeout> | null
   msgCount: number
   msgWindowStart: number
+  // Phase 07-C: populated by the HTTP upgrade in hub/src/index.ts so the WS
+  // auth handler can do cookie-based auth without trusting the client payload.
+  cookieToken?: string | null
+  csrfCookie?: string | null
+  // Auth method (set after auth succeeds) — drives CSRF enforcement decisions.
+  authMethod?: 'session_cookie' | 'legacy_jwt' | null
 }
 
 export function createClientWsData(): ClientWsData {
@@ -34,6 +43,9 @@ export function createClientWsData(): ClientWsData {
     authTimer: null,
     msgCount: 0,
     msgWindowStart: Date.now(),
+    cookieToken: null,
+    csrfCookie: null,
+    authMethod: null,
   }
 }
 
@@ -62,19 +74,44 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   if (msg.type === 'auth') {
     if (data.authenticated) return
 
-    try {
-      const payload = verifyJwt(msg.token)
-      data.userId = payload.sub
-      data.authenticated = true
-    } catch {
-      ws.close(4001, 'Unauthorized')
-      return
+    // Phase 07-C: cookie wins. If the upgrade carried a valid session cookie,
+    // resolve identity from it and ignore any token in the auth payload.
+    let resolvedUserId: string | null = null
+    if (data.cookieToken) {
+      try {
+        const ctx = await verifyAuthSessionToken(data.cookieToken)
+        if (ctx) {
+          resolvedUserId = ctx.userId
+          data.authMethod = 'session_cookie'
+        }
+      } catch {
+        // fall through to bearer
+      }
     }
+
+    if (!resolvedUserId) {
+      // Legacy bearer path — gated by soak flag.
+      if (!config.allowLegacyLogin || !msg.token) {
+        ws.close(4001, 'Unauthorized')
+        return
+      }
+      try {
+        const payload = verifyJwt(msg.token)
+        resolvedUserId = payload.sub
+        data.authMethod = 'legacy_jwt'
+      } catch {
+        ws.close(4001, 'Unauthorized')
+        return
+      }
+    }
+
+    data.userId = resolvedUserId
+    data.authenticated = true
 
     if (data.authTimer) clearTimeout(data.authTimer)
 
     data.clientEntry = registerClient(data.userId!, ws)
-    console.log(`[client] authenticated user=${data.userId}`)
+    console.log(`[client] authenticated user=${data.userId} method=${data.authMethod}`)
     ws.send(JSON.stringify({ type: 'auth_ok' }))
 
     // Send session list immediately
@@ -84,6 +121,19 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   }
 
   if (!data.authenticated || !data.userId || !data.clientEntry) return
+
+  // Phase 07-C: CSRF on mutating message types when authed via cookie.
+  // Legacy bearer connections (during soak) are exempt — no csrf cookie was
+  // ever set for them. `subscribe` is read-only and is exempt.
+  const MUTATING_WS_TYPES = new Set(['send_message', 'permission_response', 'question_response'])
+  if (data.authMethod === 'session_cookie' && MUTATING_WS_TYPES.has(msg.type)) {
+    const supplied = (msg as any).csrf_token as string | undefined
+    if (!verifyCsrfPair(data.csrfCookie ?? null, supplied ?? null)) {
+      console.log(`[client] csrf_failed type=${msg.type} user=${data.userId}`)
+      ws.send(JSON.stringify({ type: 'auth_error', error: 'csrf_failed' }))
+      return
+    }
+  }
 
   // Per-connection message rate limiting
   const now = Date.now()

@@ -29,9 +29,13 @@ export const ChannelInbound = z.discriminatedUnion('type', [
 
 // -- Client <-> Hub --
 
+// Phase 07-C: token is now OPTIONAL. When the upgrade carried a valid
+// `__Host-remo_sid` cookie, the client sends `{ type: 'auth' }` (empty) and
+// the server resolves identity from the cookie. Legacy bearer remains supported
+// (gated by ALLOW_LEGACY_LOGIN) for the dual-auth soak window.
 export const ClientAuth = z.object({
   type: z.literal('auth'),
-  token: z.string().min(1),
+  token: z.string().min(1).optional(),
 })
 
 export const ClientSendMessage = z.object({
@@ -47,6 +51,9 @@ export const ClientSendMessage = z.object({
     filename: z.string(),
     content: z.string(),
   })).optional(),
+  // Phase 07-C: required when authed via cookie. Legacy bearer connections
+  // (during soak) are exempt — they never received a csrf cookie.
+  csrf_token: z.string().min(1).optional(),
 })
 
 // Multichat overload: accepts BOTH `session_id` (legacy single) AND
@@ -68,6 +75,7 @@ export const ClientPermissionResponse = z.object({
   session_id: z.string().min(1),
   request_id: z.string().min(1),
   approved: z.boolean(),
+  csrf_token: z.string().min(1).optional(),
 })
 
 export const ClientQuestionResponse = z.object({
@@ -75,6 +83,7 @@ export const ClientQuestionResponse = z.object({
   session_id: z.string().min(1),
   request_id: z.string().min(1),
   answer: z.string().min(1),
+  csrf_token: z.string().min(1).optional(),
 })
 
 // NOTE: `z.union` (not `discriminatedUnion`) because `ClientSubscribe` is a
