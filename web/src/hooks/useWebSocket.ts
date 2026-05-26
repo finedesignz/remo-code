@@ -1,5 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getStoredToken } from '../lib/auth.ts'
+import { getStoredToken, hasSessionCookie } from '../lib/auth.ts'
+import { readCookie } from '../lib/api'
+
+/** WS messages that mutate server state — must carry csrf_token (cookie echo). */
+const CSRF_REQUIRED_TYPES = new Set([
+  'send_message',
+  'permission_response',
+  'question_response',
+  'cancel',
+])
 
 type WsMessage = {
   type: string
@@ -88,8 +97,12 @@ export function useWebSocket(token: string | null) {
   }
 
   const connect = useCallback(() => {
+    // Cookie auth requires no token; legacy bearer auth needs one. If neither
+    // signal is present, defer the connect — useAuth will retry once it has
+    // either bootstrapped a user via cookie or hydrated from localStorage.
+    const cookieAuth = hasSessionCookie()
     const authToken = token || getStoredToken()
-    if (!authToken) return
+    if (!cookieAuth && !authToken) return
 
     authedRef.current = false
     setReconnecting(false)
@@ -104,7 +117,11 @@ export function useWebSocket(token: string | null) {
     wsRef.current = ws
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'auth', token: authToken }))
+      // Cookie path: empty auth — the hub reads __Host-remo_sid off the
+      // upgrade request. Soak path: include bearer token.
+      const authMsg: any = { type: 'auth' }
+      if (!cookieAuth && authToken) authMsg.token = authToken
+      ws.send(JSON.stringify(authMsg))
     }
 
     ws.onmessage = (event) => {
@@ -209,6 +226,12 @@ export function useWebSocket(token: string | null) {
 
   const send = useCallback((msg: object) => {
     const m = msg as any
+    // Attach csrf_token (double-submit) to mutating WS messages whenever the
+    // cookie is present. Soak path with bearer-only: no cookie, no csrf needed.
+    if (m && typeof m.type === 'string' && CSRF_REQUIRED_TYPES.has(m.type) && !m.csrf_token) {
+      const csrf = readCookie('csrf_token')
+      if (csrf) m.csrf_token = csrf
+    }
     if (wsRef.current?.readyState === WebSocket.OPEN && authedRef.current) {
       // Track send_message in-flight until ACK so a half-open socket doesn't
       // silently drop the message.

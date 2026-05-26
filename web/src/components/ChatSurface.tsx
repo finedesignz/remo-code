@@ -226,7 +226,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
   useEffect(() => {
     if (!token) return
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    fetch(`${hubUrl}/api/commands`, { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`${hubUrl}/api/commands`, { headers: { Authorization: `Bearer ${token}` }, credentials: 'include' })
       .then(r => r.ok ? r.json() : { commands: [] })
       .then(d => setSlashItems(d.commands || []))
       .catch(() => {})
@@ -488,10 +488,21 @@ export function ChatSurface(props: ChatSurfaceProps) {
       const ext = type.includes('webm') ? 'webm' : (type.includes('mp4') || type.includes('m4a') ? 'm4a' : 'webm')
       const fd = new FormData()
       fd.append('audio', blob, `recording.${ext}`)
+      const csrf = (() => {
+        if (typeof document === 'undefined') return null
+        for (const part of (document.cookie || '').split(';')) {
+          const c = part.trim()
+          if (c.startsWith('csrf_token=')) return decodeURIComponent(c.slice('csrf_token='.length))
+        }
+        return null
+      })()
+      const txHeaders: Record<string, string> = { Authorization: `Bearer ${token}` }
+      if (csrf) txHeaders['X-CSRF-Token'] = csrf
       const resp = await fetch(`${hubUrl}/api/transcribe`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: txHeaders,
         body: fd,
+        credentials: 'include',
       })
       const data = await resp.json().catch(() => ({} as any))
       if (!resp.ok) {

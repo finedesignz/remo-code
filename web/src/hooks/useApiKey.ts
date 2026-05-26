@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { hubFetch } from '../lib/api'
 
 export interface ApiKey {
   id: string
@@ -14,11 +15,10 @@ export function useApiKey(token: string | null) {
 
   const fetchKeys = useCallback(async () => {
     if (!token) return
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/api-keys`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    if (res.ok) setKeys(await res.json())
+    try {
+      const data = await hubFetch<ApiKey[]>(token, '/api/api-keys')
+      setKeys(data)
+    } catch { /* swallow — caller can retry */ }
     setLoading(false)
   }, [token])
 
@@ -26,26 +26,18 @@ export function useApiKey(token: string | null) {
 
   const generateKey = async () => {
     if (!token) return null
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    const res = await fetch(`${hubUrl}/api/api-keys`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    if (res.ok) {
-      const data = await res.json()
+    try {
+      const data = await hubFetch<any>(token, '/api/api-keys', { method: 'POST' })
       await fetchKeys()
       return data // { id, name, created_at, key: "remokey_..." }
+    } catch {
+      return null
     }
-    return null
   }
 
   const revokeKey = async (id: string) => {
     if (!token) return
-    const hubUrl = import.meta.env.VITE_HUB_URL || ''
-    await fetch(`${hubUrl}/api/api-keys/${id}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
-    })
+    try { await hubFetch(token, `/api/api-keys/${id}`, { method: 'DELETE' }) } catch {}
     await fetchKeys()
   }
 

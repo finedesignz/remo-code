@@ -76,6 +76,7 @@ export function useChatSurface({
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
     fetch(`${hubUrl}/api/messages/${sessionId}?limit=${historyLimit}`, {
       headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include',
     })
       .then(r => r.ok ? r.json() : [])
       .then((data: ChatMessage[]) => {
