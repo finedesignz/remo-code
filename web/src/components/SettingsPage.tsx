@@ -448,6 +448,9 @@ function ApiKeyTab({ token }: { token: string }) {
               <p className="text-xs text-[var(--text-muted)] mb-2">
                 Installs as a Windows service that auto-starts at boot, watches your repo roots, and lets you launch Claude Code sessions remotely from this web UI.
               </p>
+              <p className="text-xs text-[var(--text-muted)] mb-2">
+                Requires <a href="https://bun.sh" target="_blank" rel="noreferrer" className="text-indigo-300 hover:text-indigo-200 underline">bun</a> on PATH. Run from an <span className="text-amber-400">elevated</span> (Administrator) PowerShell. NSSM is auto-downloaded.
+              </p>
               <div className="relative group">
                 <pre className="bg-[var(--code-bg)] rounded-lg p-3 text-xs text-indigo-300 font-mono overflow-x-auto whitespace-pre">{supervisorCmd}</pre>
                 <button
