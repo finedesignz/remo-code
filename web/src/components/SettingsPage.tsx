@@ -219,36 +219,29 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
       </header>
 
       <div className="flex-1 overflow-y-auto">
-        {/* MOBILE: accordion of all sections, no tab bar */}
-        <div className="md:hidden p-4 space-y-3">
-          {tabs.map((t) => (
-            <details
-              key={t.id}
-              open={t.id === tab}
-              onToggle={(e) => {
-                if ((e.target as HTMLDetailsElement).open) setTab(t.id)
-              }}
-              className="bg-[var(--bg-secondary)]/60 rounded-xl overflow-hidden group"
+        {/* MOBILE: sticky dropdown picker + active section */}
+        <div className="md:hidden">
+          <div className="sticky top-0 z-10 bg-[var(--bg-primary)] px-4 pt-4 pb-3 border-b border-[var(--border-color)]">
+            <label htmlFor="settings-tab-select" className="sr-only">
+              Settings section
+            </label>
+            <select
+              id="settings-tab-select"
+              value={tab}
+              onChange={(e) => setTab(e.target.value as Tab)}
+              className="w-full bg-[var(--bg-secondary)] text-[var(--text-primary)] border border-[var(--border-color)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
             >
-              <summary className="cursor-pointer list-none px-4 py-3 flex items-center justify-between hover:bg-[var(--bg-tertiary)]/40 transition-colors">
-                <div>
-                  <div className="text-sm font-semibold text-[var(--text-primary)]">{t.label}</div>
-                  <div className="text-xs text-[var(--text-muted)] mt-0.5">{t.desc}</div>
-                </div>
-                <svg
-                  width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
-                  strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                  className="text-[var(--text-muted)] transition-transform group-open:rotate-180 shrink-0"
-                  aria-hidden="true"
-                >
-                  <path d="M4 6l4 4 4-4" />
-                </svg>
-              </summary>
-              <div className="px-4 pb-4 pt-1">
-                {sectionFor(t.id)}
-              </div>
-            </details>
-          ))}
+              {tabs.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+            <div className="text-xs text-[var(--text-muted)] mt-1.5 px-1">
+              {tabs.find((t) => t.id === tab)?.desc}
+            </div>
+          </div>
+          <div className="p-4">{sectionFor(tab)}</div>
         </div>
 
         {/* DESKTOP: sticky vertical tabs + content area */}
