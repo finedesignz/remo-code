@@ -127,9 +127,34 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
     if (msg.role === 'supervisor') {
       const verified = await verifyApiKeyWithCapability(keyHash, 'supervisor')
-      if (!verified) {
-        ws.send(JSON.stringify({ type: 'auth_error', error: 'invalid api key or missing supervisor capability' }))
-        ws.close(4001, 'auth failed')
+      if (!verified.ok) {
+        // Map disambiguated reasons → close-code reason text + log line.
+        let closeReason: string
+        let errorMsg: string
+        switch (verified.reason) {
+          case 'not_found':
+            closeReason = 'api_key_not_found'
+            errorMsg = 'invalid api key'
+            console.warn(`[supervisor] auth fail reason=not_found hash=${keyHash.slice(0,8)}...`)
+            break
+          case 'revoked':
+            closeReason = 'api_key_revoked'
+            errorMsg = 'api key revoked'
+            console.warn(`[supervisor] auth fail reason=revoked hash=${keyHash.slice(0,8)}...`)
+            break
+          case 'deleted':
+            closeReason = 'api_key_not_found'
+            errorMsg = 'api key not found'
+            console.warn(`[supervisor] auth fail reason=deleted hash=${keyHash.slice(0,8)}...`)
+            break
+          case 'missing_capability':
+            closeReason = 'missing_supervisor_capability'
+            errorMsg = `missing capability: need=${verified.need} have=${JSON.stringify(verified.have)}`
+            console.warn(`[supervisor] auth fail reason=missing_capability need=${verified.need} have=${JSON.stringify(verified.have)}`)
+            break
+        }
+        ws.send(JSON.stringify({ type: 'auth_error', error: errorMsg, reason: verified.reason }))
+        ws.close(4001, closeReason)
         return
       }
       ws.data.authenticated = true
