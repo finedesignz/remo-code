@@ -48,13 +48,10 @@ const titaniumLicenseCacheTtlSeconds = parsePositiveInt(
   process.env.TITANIUM_LICENSE_CACHE_TTL_SECONDS,
   300,
 );
-const titaniumAccountId = process.env.TITANIUM_KEYGEN_ACCOUNT_ID || process.env.TITANIUM_ACCOUNT_ID || "";
-const titaniumProductId = process.env.TITANIUM_KEYGEN_PRODUCT_ID || process.env.TITANIUM_PRODUCT_ID || "";
-const titaniumPortalToken = process.env.TITANIUM_KEYGEN_PORTAL_TOKEN || process.env.TITANIUM_PORTAL_TOKEN || "";
-const titaniumAdminToken =
-  process.env.TITANIUM_KEYGEN_ADMIN_TOKEN ||
-  process.env.TITANIUM_ADMIN_TOKEN ||
-  titaniumPortalToken;
+const titaniumAccountId = process.env.TITANIUM_KEYGEN_ACCOUNT_ID || "";
+const titaniumProductId = process.env.TITANIUM_KEYGEN_PRODUCT_ID || "";
+const titaniumPortalToken = process.env.TITANIUM_KEYGEN_PORTAL_TOKEN || "";
+const titaniumAdminToken = process.env.TITANIUM_KEYGEN_ADMIN_TOKEN || titaniumPortalToken;
 const magicLinkSecret = requireMinLenIfSet("MAGIC_LINK_SECRET", process.env.MAGIC_LINK_SECRET, 32);
 const sessionSecret = requireMinLenIfSet("SESSION_SECRET", process.env.SESSION_SECRET, 32);
 const allowLegacyLogin = parseBool(process.env.ALLOW_LEGACY_LOGIN, true);
