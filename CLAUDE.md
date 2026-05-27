@@ -69,6 +69,14 @@ cd supervisor/tauri && cargo tauri build
 
 The legacy `npx remo-code-agent` / `claude-remote` shell-alias flow is retired as of 2026-05-26. Install the Tauri Supervisor MSI from https://github.com/finedesignz/remo-code/releases/latest instead.
 
+**Phase 09 follow-up (2026-05-27): legacy spawn path is hard-disabled in supervisor.** The supervisor's `process-manager.ts:spawn()` no longer invokes the retired CLI agent at all — it immediately finalizes every `session.start` as `stopped` with `exit_reason='legacy_agent_spawn_disabled'`. The in-process claude-runner that will replace it (direct `claude --input-format stream-json` spawn bridged over the supervisor WS) is a separate follow-up phase. Until that lands, `session.start` rolls cleanly to stopped instead of trapping the supervisor in a respawn loop against a cached buggy v0.4.1 agent.
+
+**Guards added in the same fix:**
+
+- Supervisor `BACKOFF_SCHEDULE` now caps at `MAX_RESTART_COUNT = 10` — after 10 consecutive restart attempts the run finalizes as `max_restarts_exceeded` and stops respawning.
+- Hub auto-resume on `supervisor.hello` (in `hub/src/ws/agent.ts`) now (a) filters orphan `session_runs` to rows newer than 24h, sweeping older rows as `exit_reason='stale'`, and (b) finalizes any orphan with `restart_count >= 10` as `max_restarts_exceeded` and skips the replay.
+- Canary test `supervisor/test/no-legacy-agent-spawn.test.ts` greps `supervisor/src/**` for the retired `remo-code-agent` package name and `--append-system-prompt` flag; the build FAILS if either reappears.
+
 ## Local Supervisor (only supported connection)
 
 The supervisor (`supervisor/src/index.ts`, compiled into the Tauri sidecar binary) runs on the dev machine as a tray app. It:

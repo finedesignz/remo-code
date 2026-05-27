@@ -116,11 +116,18 @@ describe('ProcessManager security gates', () => {
     expect(calls.length).toBe(0)
   })
 
-  test('allows a legitimate path inside a root', async () => {
-    const { pm } = makePM(makeCfg())
+  test('legacy spawn path is disabled — gates pass but no subprocess is spawned', async () => {
+    // Phase 09 follow-up: the npx -y remo-code-agent path was retired and the
+    // in-process claude-runner has not yet landed. start() still passes the
+    // security gates (returns null) and writes a positive audit row, but the
+    // run is immediately finalized as stopped + legacy_agent_spawn_disabled
+    // and no child process is ever spawned.
+    const { pm, events } = makePM(makeCfg())
     const r = await pm.start(spec({ repoPath: REPO_GIT }))
     expect(r).toBeNull()
-    expect(calls.length).toBe(1)
+    expect(calls.length).toBe(0)
+    const stoppedEvt = events.find((e) => e.state === 'stopped')
+    expect(stoppedEvt?.info?.lastExit?.reason).toBe('legacy_agent_spawn_disabled')
   })
 
   test('not_git_repo: rejects when restrictToGit=true and no .git', async () => {
@@ -130,48 +137,52 @@ describe('ProcessManager security gates', () => {
     expect(calls.length).toBe(0)
   })
 
-  test('git gate is opt-in: with restrictToGit=false a non-git dir is allowed', async () => {
+  test('git gate is opt-in: with restrictToGit=false a non-git dir passes gates', async () => {
     const { pm } = makePM(makeCfg({ requireGitRepo: false }))
     const r = await pm.start(spec({ repoPath: REPO_NOGIT }))
     expect(r).toBeNull()
-    expect(calls.length).toBe(1)
+    expect(calls.length).toBe(0) // legacy spawn disabled
   })
 
-  test('concurrency_cap: second start rejected with cap=1', async () => {
+  test('concurrency_cap: enforced before the spawn gate fires', async () => {
+    // With the legacy spawn disabled, the first start finalizes immediately
+    // and releases its slot before the second start is attempted — so a
+    // sequential second start no longer hits the cap. To exercise the
+    // concurrency_cap gate itself, we monkey-patch the spawn() method to
+    // hold the run in 'starting' state instead of finalizing. This simulates
+    // the future inline-runner state where spawn() keeps the slot occupied.
     const { pm } = makePM(makeCfg({ maxConcurrent: 1 }))
+    // Replace spawn with a no-op so runs stay in the map after start().
+    ;(pm as any).spawn = (run: any) => { run.state = 'starting' /* hold the slot */ }
     const r1 = await pm.start(spec({ runId: 'a' }))
     expect(r1).toBeNull()
     const r2 = await pm.start(spec({ runId: 'b' }))
     expect(r2?.reason).toBe('concurrency_cap')
-    expect(calls.length).toBe(1)
+    expect(calls.length).toBe(0)
   })
 
-  test('--dangerously-skip-permissions stripped when cap OFF', async () => {
-    const { pm } = makePM(makeCfg({ allowDangerousSkipPermissions: false }))
+  test('--dangerously-skip-permissions stripped when cap OFF (gate still logs, but no spawn)', async () => {
+    const { pm, logs } = makePM(makeCfg({ allowDangerousSkipPermissions: false }))
     await pm.start(spec({ dangerouslySkipPermissions: true }))
-    expect(calls.length).toBe(1)
-    expect(calls[0].cmd).not.toContain('--dangerously-skip-permissions')
+    expect(calls.length).toBe(0)
+    expect(logs.some((l) => l.msg.includes('flag stripped'))).toBe(true)
   })
 
-  test('--dangerously-skip-permissions kept when cap ON and hub requests', async () => {
+  test('--dangerously-skip-permissions is NEVER spawned, even with cap ON (legacy path is disabled)', async () => {
     const { pm } = makePM(makeCfg({ allowDangerousSkipPermissions: true }))
     await pm.start(spec({ dangerouslySkipPermissions: true }))
-    expect(calls.length).toBe(1)
-    expect(calls[0].cmd).toContain('--dangerously-skip-permissions')
-  })
-
-  test('--dangerously-skip-permissions absent when cap ON but hub does not request', async () => {
-    const { pm } = makePM(makeCfg({ allowDangerousSkipPermissions: true }))
-    await pm.start(spec({ dangerouslySkipPermissions: false }))
-    expect(calls.length).toBe(1)
-    expect(calls[0].cmd).not.toContain('--dangerously-skip-permissions')
+    // Legacy spawn refused → nothing in calls[]; the flag never reaches a real argv.
+    expect(calls.length).toBe(0)
   })
 
   test('audit log appends one JSONL entry per decision (allow + reject)', async () => {
     const { pm } = makePM(makeCfg({ maxConcurrent: 1 }))
-    await pm.start(spec({ runId: 'a', repoPath: REPO_GIT }))
-    await pm.start(spec({ runId: 'b', repoPath: REPO_GIT })) // hits cap
-    await pm.start(spec({ runId: 'c', repoPath: TMP })) // sandbox escape
+    // Hold the slot so the second start hits concurrency_cap (without the
+    // monkey-patch, spawn() finalizes immediately and releases the slot).
+    ;(pm as any).spawn = (run: any) => { run.state = 'starting' /* hold the slot */ }
+    await pm.start(spec({ runId: 'a', repoPath: REPO_GIT }))      // allowed
+    await pm.start(spec({ runId: 'b', repoPath: REPO_GIT }))      // concurrency_cap
+    await pm.start(spec({ runId: 'c', repoPath: TMP }))           // sandbox escape
     const lines = readFileSync(AUDIT_PATH, 'utf-8').trim().split('\n')
     expect(lines.length).toBe(3)
     const parsed = lines.map((l) => JSON.parse(l))
@@ -197,12 +208,14 @@ describe('ProcessManager security gates', () => {
     expect(existsSync(AUDIT_PATH)).toBe(false)
   })
 
-  test('updateConfig() takes effect on next start', async () => {
+  test('updateConfig() takes effect on next start (config swap reaches the audit decision path)', async () => {
     const { pm } = makePM(makeCfg({ allowDangerousSkipPermissions: false }))
     await pm.start(spec({ runId: 'a', dangerouslySkipPermissions: true }))
-    expect(calls[0].cmd).not.toContain('--dangerously-skip-permissions')
     pm.updateConfig(makeCfg({ allowDangerousSkipPermissions: true, maxConcurrent: 5 }))
     await pm.start(spec({ runId: 'b', dangerouslySkipPermissions: true }))
-    expect(calls[1].cmd).toContain('--dangerously-skip-permissions')
+    const lines = readFileSync(AUDIT_PATH, 'utf-8').trim().split('\n')
+    const entries = lines.map((l) => JSON.parse(l))
+    expect(entries[0].flags.dangerously_skip_permissions_applied).toBe(false)
+    expect(entries[1].flags.dangerously_skip_permissions_applied).toBe(true)
   })
 })

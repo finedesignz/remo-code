@@ -512,17 +512,53 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     // These were orphaned by a reboot/restart. We end the old run row and send a
     // fresh session.start to the now-online supervisor. The new run reuses the
     // same project_dir, so the UI session row is reused and history persists.
+    //
+    // Guards added 2026-05-27 after the autonomous-loop RCA:
+    //   1. AGE CAP — only resume runs that started in the last 24h. Older
+    //      open rows are stale carryovers from a long-gone session; replaying
+    //      them produces zombie sessions the user has forgotten about.
+    //   2. RESTART CAP — when restart_count >= 10, finalize the run as
+    //      `max_restarts_exceeded` and skip the replay. Prevents the hub from
+    //      feeding the same broken spawn back into the supervisor over and
+    //      over after a reconnect.
     try {
       const { sql } = await import('../db/postgres')
+      const MAX_RESTART_COUNT = 10
       const orphans = await sql`
-        SELECT id, repo_path, branch, initial_prompt
+        SELECT id, repo_path, branch, initial_prompt, restart_count, started_at
         FROM session_runs
-        WHERE supervisor_id = ${row.id} AND ended_at IS NULL
+        WHERE supervisor_id = ${row.id}
+          AND ended_at IS NULL
+          AND started_at > now() - interval '24 hours'
         ORDER BY started_at ASC
       `
+      // Sweep any open rows that fell outside the 24h window — finalize them
+      // as `stale` so they don't reappear on the next reconnect.
+      const staleSweep = await sql`
+        UPDATE session_runs
+        SET ended_at = now(), exit_reason = 'stale'
+        WHERE supervisor_id = ${row.id}
+          AND ended_at IS NULL
+          AND started_at <= now() - interval '24 hours'
+        RETURNING id
+      `
+      if (staleSweep.length > 0) {
+        console.log(`[supervisor] auto-resume finalized ${staleSweep.length} stale run(s) older than 24h`)
+      }
       if (orphans.length > 0) {
         console.log(`[supervisor] auto-resuming ${orphans.length} orphan session(s)`)
         for (const o of orphans) {
+          // Restart-count cap — if this run has already been restarted too
+          // many times, finalize it instead of replaying. Stops runaway loops.
+          if (typeof o.restart_count === 'number' && o.restart_count >= MAX_RESTART_COUNT) {
+            await sql`
+              UPDATE session_runs
+              SET ended_at = now(), exit_reason = 'max_restarts_exceeded'
+              WHERE id = ${o.id}
+            `
+            console.warn(`[supervisor] auto-resume skipped run=${o.id} reason=max_restarts_exceeded restart_count=${o.restart_count}`)
+            continue
+          }
           // End the orphan FIRST so it doesn't count against the cap when we
           // reserve a slot for its replacement.
           await sql`UPDATE session_runs SET ended_at = now(), exit_reason = 'reboot' WHERE id = ${o.id}`
