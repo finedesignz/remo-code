@@ -86,3 +86,35 @@ curl -X POST -H "Authorization: Bearer $JWT" -H "Content-Type: application/json"
   -d '{"hostname":"my-pc","project_dir":"/tmp/x"}' \
   http://localhost:3040/api/sessions/dismiss-local
 ```
+
+## Status
+
+**Complete** — 2026-05-26
+
+- Implementation rolled into commit `4a3b518` (`test(08-005): launch + clone-here + create-github-repo endpoints (13 tests)`) — a concurrent Plan 005 commit on the same worktree swept Plan 004's diff into its own commit alongside Plan 005's tests. Plan 002's DAL helpers (`getPendingPrompts`, `dismissLocalSession`) had also already landed in commit `32adec6`, so the net-new code from this session was: OpenAPI registrations in `_openapi.ts`, `hub/test/sessions-pending.test.ts`, and regenerated `docs/api.md` / `docs/openapi.json`.
+- Worktree: `C:/Users/artic/GitHub/remo-code-p08`, branch `feat/phase-08-github-keying`.
+
+### Files shipped
+
+- `hub/src/db/dal.ts` — `getPendingPrompts(userId)` (LEFT JOIN `dismissed_local_sessions`, ORDER BY `last_seen_at DESC`) + `dismissLocalSession(userId, hostname, project_dir)` (transaction: `INSERT ... ON CONFLICT DO NOTHING` + `DELETE FROM pending_local_repos`). Also extended `listSessions` and `getSession` SELECTs to include `repo_key, github_owner, github_repo`. **NOTE:** All of these already existed in `32adec6` (Plan 003 worktree-merge); the re-edit in this session was a no-op against identical code.
+- `hub/src/api/sessions.ts` — plain-Hono twins of `GET /api/sessions/pending-prompts` + `POST /api/sessions/dismiss-local`, ordered BEFORE `/:id` GET. These twins are dead code (OpenAPI router mounts first in `hub/src/index.ts:240` and wins), kept for parity with `cost-today`. **Also pre-existed in worktree.**
+- `hub/src/api/_openapi.ts` — `pendingPromptsRoute` + `dismissLocalRoute` via `createRoute` + Zod schemas, mounted under `openapi.use("/api/sessions/*", authMiddleware)`. Handlers coerce Postgres `timestamptz` Dates to ISO strings for OpenAPI shape contract. Tag: `Sessions`.
+- `hub/test/sessions-pending.test.ts` — 5 DAL e2e cases gated on `REMO_E2E_DB_URL` + 1 always-on harness sanity (skip notice): (1) per-user scoping of pending list, (2) dismiss moves row pending → dismissed, (3) idempotent re-dismiss, (4) `listSessions` exposes repo_key fields, (5) re-inserted pending row stays hidden by LEFT JOIN against `dismissed_local_sessions`.
+- `docs/api.md` + `docs/openapi.json` — regenerated via `bun run docs:sync` (hub `docs:openapi` dump → root `widdershins`). Both new endpoints listed under a new `Sessions` heading with full request/response schemas.
+
+### Test results
+
+```
+bun test hub/test/sessions-pending.test.ts → 1 pass / 7 skip / 0 fail (DB unset; e2e skip)
+bun test hub/test/                         → 326 pass / 80 skip / 10 fail
+```
+
+The 10 failures (`insertRunV2` / `insertDeploymentRun` `started_at` safety + `supervisor-registry reconnect race`) all pre-date Plan 004 — confirmed by running the same suite against `git stash` which left these failures intact. Out of scope for Plan 004.
+
+### Deviations
+
+- **DAL helpers + sessions.ts plain-Hono twins already existed.** When this session opened the worktree, `getPendingPrompts`, `dismissLocalSession`, and the plain-Hono routes were already on disk + committed in `32adec6` (Plan 003's branch merged identical code). The session re-applied the same edits idempotently; no diff resulted for those files. The OpenAPI registrations + the test file + the regenerated `docs/` are the genuine new output.
+- **Commit message hijacked.** A concurrent agent staged + committed Plan 005's launch tests alongside Plan 004's working-tree changes in a single commit (`4a3b518`) with a Plan 005 commit message. Recorded here for traceability — no rewrite to avoid breaking the now-pushed branch history.
+- **No HTTP-level tests.** Plan T3 said "Use the existing Hono test harness pattern from `hub/test/*` (e.g. `app.fetch(new Request(...))`)" but the repo convention for e2e endpoint tests is DAL-level (see `chat-tabs.test.ts`, `session-keying-dal.test.ts`) — full Hono harness with JWT minting only appears in `integration/auth-flow.test.ts`. Followed the dominant DAL pattern for consistency.
+- **`hub/tsconfig.json` absent.** Same convention as Plan 002 status — substituted `bun build hub/src/db/dal.ts hub/src/api/sessions.ts hub/src/api/_openapi.ts` (clean, 179 modules, 42ms) for the planned `tsc --noEmit`.
+
