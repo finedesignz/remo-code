@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { hubFetch, HubFetchError } from '../lib/api'
 
-export type TaskType = 'prompt' | 'skill' | 'security_scan' | 'log_check' | 'continue_dev'
+// Phase 11: mirrors hub `TaskType` (hub/src/db/scheduled-tasks-dal.ts).
+// User-pickable roots + 9 chained step kinds + internal `triage`.
+export type TaskType =
+  | 'dev' | 'security' | 'log_check'
+  | 'dev_plan' | 'dev_execute' | 'dev_ship'
+  | 'security_scan' | 'security_triage' | 'security_fix_or_issue'
+  | 'log_pull' | 'log_classify' | 'log_triage'
+  | 'triage'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
 export type CatchupPolicy = 'skip' | 'run_once'
 

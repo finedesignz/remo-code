@@ -11,7 +11,15 @@ export type OnCompleteAction =
 // the API layer.
 export type PostRunAction = any
 
-export type TaskType = 'prompt' | 'skill' | 'security_scan' | 'log_check' | 'continue_dev' | 'triage'
+// Phase 11: narrowed to the three user-pickable roots + nine chained
+// workflow step kinds + internal `triage`. Legacy values were rewritten by
+// the schema.sql migration (commit b9edb82). DB CHECK constraint matches.
+export type TaskType =
+  | 'dev' | 'security' | 'log_check'
+  | 'dev_plan' | 'dev_execute' | 'dev_ship'
+  | 'security_scan' | 'security_triage' | 'security_fix_or_issue'
+  | 'log_pull' | 'log_classify' | 'log_triage'
+  | 'triage'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
 export type CatchupPolicy = 'skip' | 'run_once'
 export type RunStatus =

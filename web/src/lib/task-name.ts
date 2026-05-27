@@ -19,12 +19,21 @@ export interface TaskNameInput {
   cron_expr: string
 }
 
+// Phase 11: mirrors hub/src/scheduler/auto-name.ts TYPE_LABELS.
 const TYPE_LABELS: Record<TaskType, string> = {
-  prompt: 'Prompt',
-  skill: 'Skill',
-  security_scan: 'Security Scan',
+  dev: 'Dev',
+  security: 'Security',
   log_check: 'Log Check',
-  continue_dev: 'Continue Dev',
+  dev_plan: 'Dev · Plan',
+  dev_execute: 'Dev · Execute',
+  dev_ship: 'Dev · Ship',
+  security_scan: 'Security · Scan',
+  security_triage: 'Security · Triage',
+  security_fix_or_issue: 'Security · Fix/Issue',
+  log_pull: 'Log · Pull',
+  log_classify: 'Log · Classify',
+  log_triage: 'Log · Triage',
+  triage: 'Triage',
 }
 
 function shortenPath(p: string | null | undefined): string {
@@ -103,11 +112,7 @@ export function computeTaskAutoName(task: TaskNameInput, ctx: TaskNameContext): 
   const target = targetLabel(task.target_kind, task.target_id ?? null, ctx)
   const cadence = cronCadence(task.cron_expr)
 
-  let leading = typeLbl
-  if (task.task_type === 'skill') {
-    const cmd = (task.payload?.command || '').trim()
-    if (cmd) leading = 'Skill ' + cmd
-  }
+  const leading = typeLbl
 
   if (!target) return ''
   if (!cadence) return leading + ' on ' + target

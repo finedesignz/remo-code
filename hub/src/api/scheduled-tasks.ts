@@ -39,7 +39,20 @@ export const scheduledTasks = new Hono()
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
 
-const TaskTypeEnum = z.enum(['prompt', 'skill', 'security_scan', 'log_check', 'continue_dev', 'triage'])
+// Phase 11: enum narrowed to the three user-pickable roots + nine chained
+// workflow step kinds + internal `triage`. Legacy values
+// (prompt/skill/continue_dev) were rewritten to the new triad by the
+// schema.sql migration in commit b9edb82.
+const TaskTypeEnum = z.enum([
+  // User-pickable roots
+  'dev', 'security', 'log_check',
+  // Chained workflow step kinds
+  'dev_plan', 'dev_execute', 'dev_ship',
+  'security_scan', 'security_triage', 'security_fix_or_issue',
+  'log_pull', 'log_classify', 'log_triage',
+  // Internal (synthesized by Coolify webhook)
+  'triage',
+])
 const TargetKindEnum = z.enum(['session', 'supervisor', 'all_agents', 'all_supervisors'])
 const CatchupPolicyEnum = z.enum(['skip', 'run_once'])
 

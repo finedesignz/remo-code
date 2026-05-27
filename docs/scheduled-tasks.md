@@ -136,13 +136,22 @@ still accepted for back-compat and is treated as a suffix when present.
 Existing rows have NULL prefix/suffix and keep the legacy `name` value
 until the next edit — at which point the server recomputes both columns.
 
-### Task types
+### Task types (Phase 11)
 
-- **prompt** — sends a free-form prompt to a Claude Code agent
-- **skill** — sends `/<skill-name>` to invoke a registered skill
-- **security_scan** — preset shortcut: skill `/security-review`
-- **continue_dev** — preset shortcut: `/gsd-fast` or similar
-- **log_check** — hub-local; pulls Coolify logs and analyzes (no agent)
+User-pickable roots (three only — see Phase 11 narrowing):
+
+- **dev** — general development run (replaces legacy `prompt`/`skill`/`continue_dev`)
+- **security** — security scan workflow (replaces `security_scan`)
+- **log_check** — Coolify log analysis workflow
+
+Chained workflow step kinds (auto-created when a root is saved — PLAN.md decision #3):
+
+- `dev_plan` → `dev_execute` → `dev_ship`
+- `security_scan` → `security_triage` → `security_fix_or_issue`
+- `log_pull` → `log_classify` → `log_triage`
+
+Internal kind (NOT user-pickable; synthesized by Coolify webhook + classifier):
+
 - **triage** — webhook-triggered Coolify deployment triage. Renders a structured
   prompt (see `hub/src/scheduler/triage-prompt.ts`), forces Claude to emit a
   `TriageResult` JSON (`error_type`, `severity`, `root_cause`, `suggested_fix`,
@@ -589,6 +598,55 @@ When adding a new templated task type, drop the prompt body into
   template renderer, condition matcher, aggregator, chain depth cap.
 - **E2E:** `cd hub && REMO_E2E_DB_URL=... bun test test/scheduled-tasks.e2e.test.ts`.
   Without `REMO_E2E_DB_URL`, the e2e cases are skipped.
+
+---
+
+## Phase 11 — Structured workflows + runtime context
+
+**Task-type narrowing.** Three user-pickable roots (`dev`, `security`,
+`log_check`) plus nine chained step kinds plus internal `triage`. Legacy
+`prompt`/`skill`/`continue_dev` rewritten to `dev` by the schema migration
+in `hub/src/db/schema.sql` (commit `b9edb82`) and the standalone data
+script `hub/scripts/migrate-task-kinds.ts`. The legacy `prompt` column
+is preserved verbatim — no auto-explosion (PLAN.md decision #7).
+
+**Workflow chaining.** A `dev`/`security`/`log_check` save creates three
+pre-chained `scheduled_tasks` rows; each step has its own `chain_task`
+post-run action pointing at the next step's task id. `nextStepInWorkflow`
+in `hub/src/scheduler/workflows.ts` is the canonical ordering table and
+is consulted by `post-run/chain.ts` for audit logging (mismatched edges
+are logged, never blocked — chain_task remains authoritative).
+
+**Workflow templates.** Prompt templates live as static repo `.md` files
+under `hub/src/scheduler/prompts/<workflow>/<step>.md`. Loader at
+`hub/src/scheduler/prompts/loader.ts`. Nine step files shipped:
+
+- `dev/plan.md`, `dev/execute.md`, `dev/ship.md`
+- `security/scan.md`, `security/triage.md`, `security/fix-or-issue.md`
+- `log_check/pull.md`, `log_check/classify.md`, `log_check/triage.md`
+
+Each template is interpolated with `{{user_prompt}}` (one shared slot
+across all three steps per PLAN.md decision #2), `{{runtime_context}}`,
+and `{{prior_step_output}}`.
+
+**Runtime context injection.** `hub/src/scheduler/context/build.ts`
+assembles a JSON object from: project type (`context/project-type.ts`),
+deploy target (`context/deploy-target.ts`), version (`context/version.ts`),
+global-rules digest (`context/global-rules-digest.ts`), design preferences
+(`context/design-preferences.ts`). The agent sender prepends a
+`## RUNTIME CONTEXT` block BEFORE `## TASK`; the `Summary:` directive
+stays at the very end. The exact JSON is persisted to
+`scheduled_task_runs.runtime_context_snapshot` (new nullable JSONB) for
+audit + repro; the rendered string is NOT written to `messages` (the
+existing invariant that runtime-only directives never enter chat history).
+
+**UI compaction.** `web/src/components/ScheduleEditor.tsx` replaced the
+card-grid task-type picker with a single `<select>` (three options) and
+the target picker with a sibling `<select>`. Desktop layout switched to
+`md:grid-cols-2`/`md:grid-cols-3` groupings; mobile stacking unchanged.
+
+**Cost cap.** Per-user-per-day. A workflow CAN be cut mid-chain when the
+cap trips between steps (PLAN.md decision #4 — status quo).
 
 ---
 

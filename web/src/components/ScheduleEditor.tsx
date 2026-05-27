@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ScheduledTask, ScheduleCreateInput, TaskType, TargetKind, CatchupPolicy, PostRunAction } from '../hooks/useSchedules'
-import { useCommands, type CommandRow } from '../hooks/useCommands'
 import { useSessions } from '../hooks/useSessions'
 import { hubFetch, HubFetchError } from '../lib/api'
 import { nextRuns, validate as validateCron, browserTimezone } from '../lib/cron'
@@ -24,19 +23,17 @@ interface Supervisor {
   online: boolean
 }
 
-const TASK_TYPES: Array<{ value: TaskType; label: string; desc: string }> = [
-  { value: 'prompt', label: 'Prompt', desc: 'Send a freeform prompt' },
-  { value: 'skill', label: 'Skill / slash command', desc: 'Invoke a synced command' },
-  { value: 'security_scan', label: 'Security scan', desc: 'Routine security audit' },
-  { value: 'log_check', label: 'Log check', desc: 'Pull and analyze server logs' },
-  { value: 'continue_dev', label: 'Continue dev', desc: 'Keep development moving' },
+const TASK_TYPES: Array<{ value: TaskType; label: string }> = [
+  { value: 'dev', label: 'Dev' },
+  { value: 'security', label: 'Security scan' },
+  { value: 'log_check', label: 'Log check' },
 ]
 
-const TARGET_KINDS: Array<{ value: TargetKind; label: string; desc: string }> = [
-  { value: 'session', label: 'A specific session', desc: 'One Claude Code session' },
-  { value: 'supervisor', label: 'A specific supervisor', desc: 'One supervisor host' },
-  { value: 'all_agents', label: 'All connected agents', desc: 'Fan out to every online session' },
-  { value: 'all_supervisors', label: 'All supervisors', desc: 'Fan out to every supervisor' },
+const TARGET_KINDS: Array<{ value: TargetKind; label: string }> = [
+  { value: 'session', label: 'One session' },
+  { value: 'supervisor', label: 'One supervisor' },
+  { value: 'all_agents', label: 'All sessions' },
+  { value: 'all_supervisors', label: 'All supervisors' },
 ]
 
 const COMMON_TZS = [
@@ -54,67 +51,51 @@ const COMMON_TZS = [
 
 export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave }: Props) {
   // Basic fields
-  // Prefer the server-stored `name_suffix` when present; fall back to the
-  // legacy `name` column for older rows (stripped against the computed
-  // prefix in the effect below).
   const [nameSuffix, setNameSuffix] = useState<string>(
     existing?.name_suffix ?? existing?.name ?? '',
   )
   const [suffixHydrated, setSuffixHydrated] = useState<boolean>(
     !existing || existing?.name_suffix != null,
   )
-  const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? 'prompt')
+  const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? 'dev')
   const [prompt, setPrompt] = useState<string>(existing?.payload?.prompt ?? '')
-  const [skillName, setSkillName] = useState<string>(existing?.payload?.command ?? '')
   const [notes, setNotes] = useState<string>(() => {
     const existingNotes = existing?.payload?.notes ?? ''
     if (existingNotes) return existingNotes
-    const initialType = existing?.task_type ?? 'prompt'
+    const initialType = existing?.task_type ?? 'dev'
     return TASK_TEMPLATES[initialType] ?? ''
   })
 
-  // Swap in the template when user switches task type on a NEW schedule (or
-  // when current notes still exactly match a known template). Preserves
-  // manual edits — switching back doesn't clobber user-authored notes.
   useEffect(() => {
     if (existing) return
     setNotes(prev => isReplaceableNotes(prev) ? (TASK_TEMPLATES[taskType] ?? '') : prev)
   }, [taskType, existing])
 
-  // Schedule — composed by <ScheduleRulesBuilder>. Hydrate from
-  // `schedule_rules` when present; otherwise start with one default rule.
-  // The legacy cron string is derived from rule[0] on submit.
   const [scheduleRules, setScheduleRules] = useState<ScheduleRule[]>(() => {
     const r = existing?.schedule_rules
     if (Array.isArray(r) && r.length > 0) return r as ScheduleRule[]
     return [defaultRule()]
   })
 
-  // Timezone
   const browserTz = browserTimezone()
   const initialTz = existing?.timezone ?? browserTz
   const tzInList = COMMON_TZS.includes(initialTz) || initialTz === browserTz
   const [tzMode, setTzMode] = useState<'preset' | 'custom'>(tzInList ? 'preset' : 'custom')
   const [tz, setTz] = useState(initialTz)
 
-  // Target
   const [targetKind, setTargetKind] = useState<TargetKind>(existing?.target_kind ?? 'session')
   const [targetId, setTargetId] = useState<string | null>(existing?.target_id ?? null)
 
-  // Options
   const [catchup, setCatchup] = useState<CatchupPolicy>(existing?.catchup_policy ?? 'skip')
   const [maxConcurrent, setMaxConcurrent] = useState(existing?.max_concurrent ?? 1)
   const [enabled, setEnabled] = useState(existing?.enabled ?? true)
 
-  // Post-run actions
   const [postRunActions, setPostRunActions] = useState<PostRunAction[]>(existing?.post_run_actions ?? [])
 
-  // Submit
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cycleError, setCycleError] = useState<{ path: string[] } | null>(null)
 
-  // Derive cron from rule[0] for the auto-name + legacy back-compat.
   const cronExpr = useMemo(() => {
     if (!scheduleRules[0]) return ''
     try { return ruleToCron(scheduleRules[0], tz) } catch { return '' }
@@ -128,16 +109,14 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     return validateCron(cronExpr)
   }, [cronExpr, rulesValid])
 
-  // Sub-15 warning for non-prompt (best-effort: derived from next 2 runs of rule[0])
   const intervalMinutes = useMemo(() => {
     if (!cronValidation.ok) return null
     const r = nextRuns(cronExpr, tz, 2)
     if (r.length < 2) return null
     return Math.round((r[1].getTime() - r[0].getTime()) / 60000)
   }, [cronExpr, tz, cronValidation.ok])
-  const subFifteenWarn = intervalMinutes !== null && intervalMinutes < 15 && taskType !== 'prompt'
+  const subFifteenWarn = intervalMinutes !== null && intervalMinutes < 15 && taskType !== 'dev'
 
-  // Fetch supervisors when needed
   const [supervisors, setSupervisors] = useState<Supervisor[]>([])
   useEffect(() => {
     if (targetKind !== 'supervisor' || !token) return
@@ -152,18 +131,12 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     return () => { cancelled = true }
   }, [targetKind, token])
 
-  // Sessions for picker
   const { sessions } = useSessions(token)
 
-  // Commands for skill picker
-  const { rows: commands } = useCommands(taskType === 'skill' ? token : null)
-
-  // Auto-generated, locked name prefix — derived from type + target + cadence
   const prefix = useMemo(() => {
     const payload: Record<string, any> = {}
-    if (taskType === 'prompt') payload.prompt = prompt
-    if (taskType === 'skill') payload.command = skillName
-    if (taskType === 'security_scan' || taskType === 'log_check' || taskType === 'continue_dev') {
+    if (taskType === 'dev') payload.prompt = prompt
+    if (taskType === 'security' || taskType === 'log_check') {
       if (notes) payload.notes = notes
     }
     return computeTaskAutoName(
@@ -176,10 +149,8 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
       },
       { sessions, supervisors },
     )
-  }, [taskType, targetKind, targetId, prompt, skillName, notes, cronExpr, sessions, supervisors])
+  }, [taskType, targetKind, targetId, prompt, notes, cronExpr, sessions, supervisors])
 
-  // For existing schedules: once the prefix can be computed, strip it from the loaded name
-  // so the user sees only the suffix portion in the input.
   useEffect(() => {
     if (suffixHydrated) return
     if (!prefix) return
@@ -192,7 +163,6 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
       rest = rest.replace(/^[—\-:]+\s*/, '')
       setNameSuffix(rest)
     }
-    // else: keep nameSuffix = existing.name (legacy custom name, will be re-prefixed on save)
     setSuffixHydrated(true)
   }, [prefix, suffixHydrated, existing?.name])
 
@@ -205,8 +175,6 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     }
     if (!prefix) { setError('Pick a task type, target, and schedule first'); return }
 
-    // Validate post-run actions client-side so users see actionable errors
-    // instead of a generic 400 from the server's Zod check.
     for (let i = 0; i < postRunActions.length; i++) {
       const a = postRunActions[i]
       if (a.type === 'webhook' && !(a.config?.url ?? '').trim()) {
@@ -217,10 +185,6 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
       }
     }
 
-    // Strip empty optional fields from post-run actions so the server's Zod
-    // validator (which rejects `to: ''` as not-a-valid-email) sees a clean
-    // shape. The editor leaves `to: ''` as a default for the "blank = your
-    // account email" UX — we honor that by dropping the key entirely.
     const cleanedActions: PostRunAction[] = postRunActions.map(a => {
       if (a.type === 'notify_email') {
         const cfg = { ...(a.config || {}) }
@@ -231,22 +195,17 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     })
 
     const payload: Record<string, any> = {}
-    if (taskType === 'prompt') payload.prompt = prompt.trim()
-    if (taskType === 'skill') payload.command = skillName.trim()
-    if (taskType === 'security_scan' || taskType === 'log_check' || taskType === 'continue_dev') {
+    if (taskType === 'dev') payload.prompt = prompt.trim()
+    if (taskType === 'security' || taskType === 'log_check') {
       if (notes.trim()) payload.notes = notes.trim()
     }
 
     const input: ScheduleCreateInput = {
-      // Server recomputes the locked prefix and composes the final name as
-      // `<prefix> — <suffix>`. We send only the user-authored suffix.
       name_suffix: nameSuffix.trim(),
       task_type: taskType,
       target_kind: targetKind,
       target_id: targetKind === 'session' || targetKind === 'supervisor' ? targetId : null,
       payload,
-      // New shape: send the structured rules. Server derives cron_expr from
-      // rule[0] and persists both for back-compat with the croner engine.
       schedule_rules: scheduleRules,
       timezone: tz,
       catchup_policy: catchup,
@@ -275,22 +234,164 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     }
   }
 
+  const selectCls = 'w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-orange-500'
+  const previewNext = cronValidation.ok ? nextRuns(cronExpr, tz, 1)[0] : null
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] rounded-2xl shadow-2xl max-w-2xl w-full max-h-[92vh] overflow-y-auto">
-        <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-3.5 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/95 backdrop-blur-sm">
+      <div className="bg-[var(--bg-secondary)] rounded-2xl shadow-2xl max-w-3xl w-full max-h-[92vh] overflow-y-auto">
+        <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-3.5 bg-[var(--bg-secondary)]/95 backdrop-blur-sm">
           <h2 className="text-base font-semibold text-[var(--text-primary)]">
             {existing ? 'Edit schedule' : 'New schedule'}
           </h2>
           <button onClick={onClose} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-2xl leading-none">&times;</button>
         </div>
 
-        <div className="p-5 space-y-5">
+        <div className="p-5 space-y-4">
+          {/* Row: Task type + Target kind */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label="Task type">
+              <select
+                value={taskType}
+                onChange={(e) => setTaskType(e.target.value as TaskType)}
+                className={selectCls}
+              >
+                {TASK_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+              </select>
+            </Field>
+            <Field label="Target">
+              <select
+                value={targetKind}
+                onChange={(e) => { setTargetKind(e.target.value as TargetKind); setTargetId(null) }}
+                className={selectCls}
+              >
+                {TARGET_KINDS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+              </select>
+            </Field>
+          </div>
+
+          {/* Row: Target selector + Timezone */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <Field label={targetKind === 'session' ? 'Session' : targetKind === 'supervisor' ? 'Supervisor' : 'Scope'}>
+              {targetKind === 'session' && (
+                <select
+                  value={targetId ?? ''}
+                  onChange={(e) => setTargetId(e.target.value || null)}
+                  className={selectCls}
+                >
+                  <option value="">Choose a session...</option>
+                  {sessions.map(s => (
+                    <option key={s.id} value={s.id}>{s.name}{s.project_dir ? ` — ${s.project_dir}` : ''}</option>
+                  ))}
+                </select>
+              )}
+              {targetKind === 'supervisor' && (
+                <select
+                  value={targetId ?? ''}
+                  onChange={(e) => setTargetId(e.target.value || null)}
+                  className={selectCls}
+                >
+                  <option value="">Choose a supervisor...</option>
+                  {supervisors.map(s => (
+                    <option key={s.id} value={s.id}>{s.hostname}{s.online ? '' : ' (offline)'}</option>
+                  ))}
+                </select>
+              )}
+              {(targetKind === 'all_agents' || targetKind === 'all_supervisors') && (
+                <div className="px-3 py-2 text-sm text-[var(--text-muted)] bg-[var(--bg-primary)]/40 rounded-lg">
+                  Fans out to every {targetKind === 'all_agents' ? 'online session' : 'supervisor'}.
+                </div>
+              )}
+            </Field>
+            <Field label="Timezone">
+              <div className="space-y-2">
+                <select
+                  value={tzMode === 'preset' ? tz : '__other__'}
+                  onChange={(e) => {
+                    if (e.target.value === '__other__') { setTzMode('custom') }
+                    else { setTzMode('preset'); setTz(e.target.value) }
+                  }}
+                  className={selectCls}
+                >
+                  {!COMMON_TZS.includes(browserTz) && (
+                    <option value={browserTz}>{browserTz} (browser)</option>
+                  )}
+                  {COMMON_TZS.map(t => <option key={t} value={t}>{t}{t === browserTz ? ' (browser)' : ''}</option>)}
+                  <option value="__other__">Other...</option>
+                </select>
+                {tzMode === 'custom' && (
+                  <input
+                    value={tz}
+                    onChange={(e) => setTz(e.target.value)}
+                    placeholder="e.g. Africa/Cairo"
+                    className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  />
+                )}
+              </div>
+            </Field>
+          </div>
+
+          {/* Schedule + next-run preview */}
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 md:items-start">
+            <Field label="Schedule">
+              <ScheduleRulesBuilder rules={scheduleRules} timezone={tz} onChange={setScheduleRules} />
+            </Field>
+            {previewNext && (
+              <div className="md:mt-6 inline-flex items-center px-3 py-2 rounded-lg bg-orange-600/20 ring-1 ring-orange-500/30 text-xs text-orange-300 whitespace-nowrap self-start">
+                Next: {previewNext.toLocaleString(undefined, { timeZone: tz, dateStyle: 'short', timeStyle: 'short' })}
+              </div>
+            )}
+          </div>
+
+          {subFifteenWarn && (
+            <div className="bg-amber-500/10 ring-1 ring-amber-500/30 rounded-lg p-3 text-xs text-amber-300">
+              Running this task more often than every 15 minutes is generally not recommended for
+              non-prompt task types. Consider increasing the interval.
+            </div>
+          )}
+
+          {/* Row: catchup + max concurrent + enabled */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <Field label="Catchup policy">
+              <select
+                value={catchup}
+                onChange={(e) => setCatchup(e.target.value as CatchupPolicy)}
+                className={selectCls}
+              >
+                <option value="skip">Skip missed runs</option>
+                <option value="run_once">Run once on resume</option>
+              </select>
+            </Field>
+            <Field label="Max concurrent">
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={maxConcurrent}
+                onChange={(e) => setMaxConcurrent(Math.max(1, Math.min(10, parseInt(e.target.value || '1', 10))))}
+                className={selectCls}
+              />
+            </Field>
+            <Field label="Enabled">
+              <label className="flex items-center gap-3 cursor-pointer select-none h-[38px]">
+                <button
+                  type="button"
+                  onClick={() => setEnabled(!enabled)}
+                  aria-pressed={enabled}
+                  className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${enabled ? 'bg-orange-600' : 'bg-[var(--bg-tertiary)]'}`}
+                >
+                  <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${enabled ? 'translate-x-[1.125rem]' : 'translate-x-0.5'}`} />
+                </button>
+                <span className="text-sm text-[var(--text-primary)]">{enabled ? 'On' : 'Off'}</span>
+              </label>
+            </Field>
+          </div>
+
           {/* Name */}
           <Field label="Name">
-            <div className="flex items-stretch rounded-lg bg-[var(--bg-primary)]/60 ring-1 ring-transparent focus-within:ring-2 focus-within:ring-indigo-500 overflow-hidden">
+            <div className="flex items-stretch rounded-lg bg-[var(--bg-primary)]/60 focus-within:ring-2 focus-within:ring-orange-500 overflow-hidden">
               <div
-                className="px-3 py-2 text-sm bg-[var(--bg-tertiary)]/50 border-r border-[var(--border-color)]/40 whitespace-nowrap font-medium select-text max-w-[60%] overflow-hidden text-ellipsis"
+                className="px-3 py-2 text-sm bg-[var(--bg-tertiary)]/50 whitespace-nowrap font-medium select-text max-w-[60%] overflow-hidden text-ellipsis"
                 title={prefix || 'Auto-generated prefix'}
               >
                 {prefix
@@ -309,161 +410,29 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
             </p>
           </Field>
 
-          {/* Task type */}
-          <Field label="Task type">
-            <RadioGroup
-              options={TASK_TYPES}
-              value={taskType}
-              onChange={setTaskType}
-            />
-          </Field>
-
-          {/* Task body */}
-          {taskType === 'prompt' && (
+          {/* Prompt / Notes */}
+          {taskType === 'dev' && (
             <Field label="Prompt">
               <textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
                 rows={4}
                 placeholder="What should Claude do?"
-                className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-y min-h-[100px]"
+                className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-orange-500 resize-y min-h-[100px]"
               />
             </Field>
           )}
-          {taskType === 'skill' && (
-            <Field label="Slash command">
-              <CommandPicker token={token} commands={commands} value={skillName} onChange={setSkillName} />
-            </Field>
-          )}
-          {(taskType === 'security_scan' || taskType === 'log_check' || taskType === 'continue_dev') && (
+          {(taskType === 'security' || taskType === 'log_check') && (
             <Field label="Notes (optional)">
               <textarea
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 rows={3}
                 placeholder="Any custom instructions..."
-                className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-y"
+                className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-orange-500 resize-y"
               />
             </Field>
           )}
-
-          {/* Schedule */}
-          <Field label="Schedule">
-            <ScheduleRulesBuilder rules={scheduleRules} timezone={tz} onChange={setScheduleRules} />
-          </Field>
-
-          {/* Timezone */}
-          <Field label="Timezone">
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <select
-                  value={tzMode === 'preset' ? tz : '__other__'}
-                  onChange={(e) => {
-                    if (e.target.value === '__other__') { setTzMode('custom') }
-                    else { setTzMode('preset'); setTz(e.target.value) }
-                  }}
-                  className="flex-1 px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  {!COMMON_TZS.includes(browserTz) && (
-                    <option value={browserTz}>{browserTz} (browser)</option>
-                  )}
-                  {COMMON_TZS.map(t => <option key={t} value={t}>{t}{t === browserTz ? ' (browser)' : ''}</option>)}
-                  <option value="__other__">Other...</option>
-                </select>
-              </div>
-              {tzMode === 'custom' && (
-                <input
-                  value={tz}
-                  onChange={(e) => setTz(e.target.value)}
-                  placeholder="e.g. Africa/Cairo"
-                  className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-              )}
-            </div>
-          </Field>
-
-          {subFifteenWarn && (
-            <div className="bg-amber-500/10 ring-1 ring-amber-500/30 rounded-lg p-3 text-xs text-amber-300">
-              Running this task more often than every 15 minutes is generally not recommended for
-              non-prompt task types. Consider increasing the interval.
-            </div>
-          )}
-
-          {/* Target */}
-          <Field label="Target">
-            <RadioGroup
-              options={TARGET_KINDS}
-              value={targetKind}
-              onChange={(v) => { setTargetKind(v); setTargetId(null) }}
-            />
-            {targetKind === 'session' && (
-              <div className="mt-2">
-                <select
-                  value={targetId ?? ''}
-                  onChange={(e) => setTargetId(e.target.value || null)}
-                  className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  <option value="">Choose a session...</option>
-                  {sessions.map(s => (
-                    <option key={s.id} value={s.id}>{s.name}{s.project_dir ? ` — ${s.project_dir}` : ''}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-            {targetKind === 'supervisor' && (
-              <div className="mt-2">
-                <select
-                  value={targetId ?? ''}
-                  onChange={(e) => setTargetId(e.target.value || null)}
-                  className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  <option value="">Choose a supervisor...</option>
-                  {supervisors.map(s => (
-                    <option key={s.id} value={s.id}>{s.hostname}{s.online ? '' : ' (offline)'}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-          </Field>
-
-          {/* Options */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Catchup policy">
-              <select
-                value={catchup}
-                onChange={(e) => setCatchup(e.target.value as CatchupPolicy)}
-                className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              >
-                <option value="skip">Skip missed runs</option>
-                <option value="run_once">Run once on resume</option>
-              </select>
-            </Field>
-            <Field label="Max concurrent">
-              <input
-                type="number"
-                min={1}
-                max={10}
-                value={maxConcurrent}
-                onChange={(e) => setMaxConcurrent(Math.max(1, Math.min(10, parseInt(e.target.value || '1', 10))))}
-                className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </Field>
-          </div>
-
-          {/* Enabled toggle */}
-          <Field label="">
-            <label className="flex items-center gap-3 cursor-pointer select-none">
-              <button
-                type="button"
-                onClick={() => setEnabled(!enabled)}
-                aria-pressed={enabled}
-                className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${enabled ? 'bg-indigo-600' : 'bg-[var(--bg-tertiary)]'}`}
-              >
-                <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${enabled ? 'translate-x-[1.125rem]' : 'translate-x-0.5'}`} />
-              </button>
-              <span className="text-sm text-[var(--text-primary)]">Enabled</span>
-            </label>
-          </Field>
 
           {/* Post-run actions */}
           <PostRunActionsEditor
@@ -474,7 +443,6 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
             cycleErrorPath={cycleError?.path}
           />
 
-          {/* Errors */}
           {error && (
             <div className="bg-red-500/10 ring-1 ring-red-500/30 rounded-lg p-3 text-sm text-red-300">{error}</div>
           )}
@@ -485,7 +453,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
           )}
         </div>
 
-        <div className="sticky bottom-0 z-10 flex items-center justify-end gap-2 px-5 py-3 border-t border-[var(--border-color)] bg-[var(--bg-secondary)]/95 backdrop-blur-sm">
+        <div className="sticky bottom-0 z-10 flex items-center justify-end gap-2 px-5 py-3 bg-[var(--bg-secondary)]/95 backdrop-blur-sm">
           <button
             onClick={onClose}
             className="px-3 py-2 text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40 rounded-lg transition-colors"
@@ -493,7 +461,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
           <button
             onClick={handleSubmit}
             disabled={saving || !cronValidation.ok || !prefix}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors"
+            className="px-4 py-2 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors"
           >
             {saving ? 'Saving...' : (existing ? 'Save changes' : 'Create schedule')}
           </button>
@@ -515,110 +483,3 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     </div>
   )
 }
-
-function RadioGroup<T extends string>({
-  options, value, onChange,
-}: {
-  options: Array<{ value: T; label: string; desc?: string }>
-  value: T
-  onChange: (v: T) => void
-}) {
-  return (
-    <div className="space-y-1">
-      {options.map(opt => (
-        <button
-          key={opt.value}
-          type="button"
-          onClick={() => onChange(opt.value)}
-          className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
-            value === opt.value
-              ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-[var(--text-primary)]'
-              : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'
-          }`}
-        >
-          <div className="text-sm font-medium">{opt.label}</div>
-          {opt.desc && <div className="text-xs text-[var(--text-muted)] mt-0.5">{opt.desc}</div>}
-        </button>
-      ))}
-    </div>
-  )
-}
-
-function CommandPicker({
-  token, commands, value, onChange,
-}: {
-  token: string
-  commands: CommandRow[]
-  value: string
-  onChange: (v: string) => void
-}) {
-  const [search, setSearch] = useState('')
-  const hasCommands = commands.length > 0
-
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    if (!q) return commands.slice(0, 50)
-    return commands.filter(c =>
-      c.name.toLowerCase().includes(q) || (c.description || '').toLowerCase().includes(q)
-    ).slice(0, 50)
-  }, [commands, search])
-
-  if (!hasCommands) {
-    return (
-      <div className="space-y-2">
-        <input
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="/security-review"
-          className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm font-mono text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-        />
-        <p className="text-xs text-[var(--text-muted)]">
-          No synced commands yet. Type a slash command manually or connect a supervisor to sync commands.
-        </p>
-      </div>
-    )
-  }
-
-  return (
-    <div className="space-y-2">
-      <input
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        placeholder="Search commands..."
-        className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-      />
-      <div className="max-h-60 overflow-y-auto bg-[var(--bg-primary)]/60 rounded-lg divide-y divide-white/5">
-        {filtered.map(c => {
-          const display = c.kind === 'skill' ? `/${c.name}` : `/${c.name}`
-          const selected = value === display
-          return (
-            <button
-              key={c.id}
-              type="button"
-              onClick={() => onChange(display)}
-              className={`w-full text-left px-3 py-2 transition-colors ${
-                selected
-                  ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-[var(--text-primary)]'
-                  : 'hover:bg-[var(--bg-tertiary)]/40 text-[var(--text-secondary)]'
-              }`}
-            >
-              <div className="text-sm font-mono">{display}</div>
-              {c.description && <div className="text-xs text-[var(--text-muted)] mt-0.5 truncate">{c.description}</div>}
-            </button>
-          )
-        })}
-        {filtered.length === 0 && (
-          <div className="px-3 py-4 text-xs text-[var(--text-muted)] text-center">No matches</div>
-        )}
-      </div>
-      {value && (
-        <p className="text-xs text-[var(--text-muted)]">Selected: <span className="font-mono text-emerald-300">{value}</span></p>
-      )}
-    </div>
-  )
-}
-
-/* ----------------------------------------------------------------- */
-/* Helpers                                                             */
-/* ----------------------------------------------------------------- */
-

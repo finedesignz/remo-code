@@ -357,15 +357,25 @@ function updateFireTimestamps(taskId: string, fired: Date): void {
 
 export async function routeToSender(task: ScheduledTask, ctx: RunContext): Promise<void> {
   switch (task.task_type) {
-    case 'prompt':
-    case 'skill':
+    // Phase 11: user-pickable workflow roots + chained step kinds route to
+    // the agent sender. `log_check` (root) still routes to coolify log-pull
+    // until the `log_pull` chained step is wired in Wave 2.
+    case 'dev':
+    case 'security':
+    case 'dev_plan':
+    case 'dev_execute':
+    case 'dev_ship':
     case 'security_scan':
-    case 'continue_dev': {
+    case 'security_triage':
+    case 'security_fix_or_issue':
+    case 'log_classify':
+    case 'log_triage': {
       const { sendAgentTask } = await import('./senders/agent.ts')
       await sendAgentTask(task, ctx)
       return
     }
-    case 'log_check': {
+    case 'log_check':
+    case 'log_pull': {
       const { sendLogCheck } = await import('./senders/coolify.ts')
       await sendLogCheck(task, ctx)
       return

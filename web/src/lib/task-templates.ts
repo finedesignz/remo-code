@@ -229,10 +229,14 @@ Aggregate into \`.claude/autonomous/security-scans/<ISO>.md\`. Severity summary,
 Begin now.
 `
 
+// Phase 11: legacy continue_dev → dev, legacy security_scan → security.
+// log_check is unchanged. These web previews are non-authoritative; the
+// hub `.md` files under hub/src/scheduler/prompts/<workflow>/<step>.md are
+// source-of-truth.
 export const TASK_TEMPLATES: Partial<Record<TaskType, string>> = {
-  continue_dev: CONTINUE_DEV_TEMPLATE,
+  dev: CONTINUE_DEV_TEMPLATE,
   log_check: LOG_CHECK_TEMPLATE,
-  security_scan: SECURITY_SCAN_TEMPLATE,
+  security: SECURITY_SCAN_TEMPLATE,
 }
 
 /** True if notes is empty or exactly matches any known template (user hasn't edited). */

@@ -1,0 +1,103 @@
+/**
+ * Phase 11 — runtime context injector.
+ *
+ * Builds the JSON snapshot persisted to
+ * `scheduled_task_runs.runtime_context_snapshot` and rendered as the
+ * `## RUNTIME CONTEXT` markdown block prepended to every scheduled agent
+ * message.
+ *
+ * Hub-side data only. Fields fall back to `null`/`undefined` when the
+ * underlying source isn't reachable — DO NOT fabricate values.
+ */
+import { sql } from '../../db/postgres.ts'
+
+export interface RuntimeContext {
+  project_type?: 'tauri' | 'web-app' | 'api' | 'service' | 'unknown' | null
+  deploy_target?: string | null
+  coolify_app_name?: string | null
+  coolify_app_uuid?: string | null
+  notify_email?: string | null
+  repo?: string | null
+  branch?: string | null
+  last_commit_sha?: string | null
+  current_version?: string | null
+  latest_tag?: string | null
+  mode?: 'pre-v1' | 'post-v1' | null
+  design_preferences?: string | null
+  user_global_rules_digest?: string | null
+}
+
+// Hardcoded placeholders per scope brief — wired sources land in later phases.
+const USER_GLOBAL_RULES_DIGEST =
+  'Titanium auth (#16) | Coolify Postgres (#17) | emails4agents (#7) | ' +
+  'smallest-diff Karpathy (#11) | one branch per feature (#19) | ' +
+  'docs+version+release on phase done (#14)'
+const DESIGN_PREFERENCES = 'orange-accent-subtle-borderless'
+
+/**
+ * Build a RuntimeContext for a scheduled run. Pulls user email and (when
+ * available) session repo metadata. Unavailable fields stay undefined.
+ */
+export async function buildRuntimeContext(input: {
+  userId: string
+  sessionId?: string | null
+  taskKind: string
+}): Promise<RuntimeContext> {
+  const ctx: RuntimeContext = {
+    design_preferences: DESIGN_PREFERENCES,
+    user_global_rules_digest: USER_GLOBAL_RULES_DIGEST,
+  }
+
+  try {
+    const rows = await sql<{ email: string | null }[]>`
+      SELECT email FROM users WHERE id = ${input.userId} LIMIT 1
+    `
+    if (rows[0]?.email) ctx.notify_email = rows[0].email
+  } catch { /* fall back to undefined */ }
+
+  if (input.sessionId) {
+    try {
+      // sessions has `project_dir` and (additive) `repo_key`. branch /
+      // last_commit_sha / local_paths are NOT in the current hub schema —
+      // leave them undefined rather than faking.
+      const rows = await sql<{ repo_key: string | null; project_dir: string | null }[]>`
+        SELECT repo_key, project_dir FROM sessions WHERE id = ${input.sessionId} LIMIT 1
+      `
+      if (rows[0]) {
+        if (rows[0].repo_key) ctx.repo = rows[0].repo_key
+        else if (rows[0].project_dir) ctx.repo = rows[0].project_dir
+      }
+    } catch { /* fall back to undefined */ }
+  }
+
+  return ctx
+}
+
+/**
+ * Render a RuntimeContext as the `## RUNTIME CONTEXT` markdown block.
+ * Null/undefined/empty fields are SKIPPED (per scope brief).
+ */
+export function renderRuntimeContextBlock(ctx: RuntimeContext): string {
+  const order: (keyof RuntimeContext)[] = [
+    'project_type',
+    'deploy_target',
+    'coolify_app_name',
+    'coolify_app_uuid',
+    'notify_email',
+    'repo',
+    'branch',
+    'last_commit_sha',
+    'current_version',
+    'latest_tag',
+    'mode',
+    'design_preferences',
+    'user_global_rules_digest',
+  ]
+  const lines: string[] = ['## RUNTIME CONTEXT']
+  for (const key of order) {
+    const val = ctx[key]
+    if (val == null || val === '') continue
+    lines.push(`- ${key}: ${val}`)
+  }
+  return lines.join('\n')
+}

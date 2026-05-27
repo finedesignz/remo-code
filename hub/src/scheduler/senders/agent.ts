@@ -11,9 +11,11 @@
  */
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
 import { insertMessage } from '../../db/dal.ts'
+import { sql } from '../../db/postgres.ts'
 import { broadcastToSubscribers } from '../../ws/registry.ts'
 import * as queue from '../session-queue.ts'
 import { finalizeRun, removeRunContext, getRunContext } from '../dispatcher.ts'
+import { buildRuntimeContext, renderRuntimeContextBlock, type RuntimeContext } from '../context/runtime-context.ts'
 
 interface PendingTurn {
   runId: string
@@ -33,13 +35,13 @@ interface RunCtxLike {
 }
 
 function buildContent(task: ScheduledTask): string {
-  if (task.task_type === 'skill') {
-    const cmd = (task.payload as any)?.command || (task.payload as any)?.skill
-    if (cmd) return `/${String(cmd).replace(/^\/+/, '')}`
-  }
+  // Phase 11: legacy `skill`/`security_scan`(root)/`continue_dev` rewritten to
+  // `dev`/`security` by the DB migration; their `prompt` column carries the
+  // original text verbatim. The `security_scan` chained step (under the
+  // `security` workflow) keeps the `/security-review` slash-command shortcut.
   if (task.task_type === 'security_scan') return '/security-review'
-  if (task.task_type === 'continue_dev') {
-    return (task.payload as any)?.prompt || 'Continue where you left off.'
+  if (task.task_type === 'dev') {
+    return (task.payload as any)?.prompt || task.prompt || 'Continue where you left off.'
   }
   return (task.payload as any)?.prompt || task.prompt || ''
 }
@@ -55,8 +57,33 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
   const content = buildContent(task)
   if (!content) { await finalizeRun(ctx.runId, 'failed', 'empty_content'); return }
 
+  // Phase 11: build + persist runtime context snapshot, prepend block to
+  // the sent message. The STORED content (chat history) does NOT carry
+  // the runtime block — per agent.ts invariant, ephemeral directives never
+  // enter `messages`. The snapshot lives in `scheduled_task_runs`.
+  let runtimeCtx: RuntimeContext = {}
+  try {
+    runtimeCtx = await buildRuntimeContext({
+      userId: ctx.userId,
+      sessionId,
+      taskKind: task.task_type,
+    })
+  } catch {
+    // Best-effort. Fall through with an empty ctx; renderer emits just the header.
+  }
+  const runtimeBlock = renderRuntimeContextBlock(runtimeCtx)
+  try {
+    await sql`
+      UPDATE scheduled_task_runs
+      SET runtime_context_snapshot = ${JSON.stringify(runtimeCtx)}::jsonb
+      WHERE id = ${ctx.runId}
+    `
+  } catch {
+    // Best-effort. Failure to persist snapshot must not fail the run.
+  }
+
   const summaryDirective = `\n\n---\nWhen finished, end your response with a single line starting with "Summary:" describing in 1-2 sentences what you accomplished or any blocker. Keep it brief — this is a scheduled run and the user only needs the headline result.`
-  const sentContent = content + summaryDirective
+  const sentContent = `${runtimeBlock}\n\n## TASK\n${content}${summaryDirective}`
   const storedContent = `[scheduled: ${task.name}]\n\n${content}`
   let msg: { id: string; created_at: string } | null = null
   try {
