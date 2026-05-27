@@ -525,31 +525,30 @@ describe('scheduler/auto-name', () => {
     expect(cronCadence('')).toBe('')
   })
 
-  test('continue_dev on session repo (locked example from spec)', () => {
+  test('dev on session repo (locked example from spec)', () => {
     const out = computeTaskAutoName(
       {
-        task_type: 'continue_dev',
+        task_type: 'dev',
         target_kind: 'session',
         target_id: 's1',
         cron_expr: '0 */4 * * *',
       },
       ctx,
     )
-    expect(out).toBe('Continue Dev on finedesignz/kh-hub every 4h')
+    expect(out).toBe('Dev on finedesignz/kh-hub every 4h')
   })
 
-  test('skill prefix uses /command label', () => {
+  test('security workflow uses Security label', () => {
     const out = computeTaskAutoName(
       {
-        task_type: 'skill',
+        task_type: 'security',
         target_kind: 'supervisor',
         target_id: 'sup1',
-        payload: { command: '/lint' },
         cron_expr: '0 9 * * *',
       },
       ctx,
     )
-    expect(out).toBe('Skill /lint on supervisor-coolify-1 daily at 09:00')
+    expect(out).toBe('Security on supervisor-coolify-1 daily at 09:00')
   })
 
   test('log_check on supervisor with sub-15m cadence', () => {
@@ -568,30 +567,30 @@ describe('scheduler/auto-name', () => {
   test('fan-out kinds render readable target labels', () => {
     expect(
       computeTaskAutoName(
-        { task_type: 'prompt', target_kind: 'all_agents', cron_expr: '0 * * * *' },
+        { task_type: 'dev', target_kind: 'all_agents', cron_expr: '0 * * * *' },
         ctx,
       ),
-    ).toBe('Prompt on all agents hourly')
+    ).toBe('Dev on all agents hourly')
     expect(
       computeTaskAutoName(
-        { task_type: 'prompt', target_kind: 'all_supervisors', cron_expr: '0 9 * * *' },
+        { task_type: 'dev', target_kind: 'all_supervisors', cron_expr: '0 9 * * *' },
         ctx,
       ),
-    ).toBe('Prompt on all supervisors daily at 09:00')
+    ).toBe('Dev on all supervisors daily at 09:00')
   })
 
   test('returns empty when target_id is missing for session/supervisor kinds', () => {
     expect(
       computeTaskAutoName(
-        { task_type: 'prompt', target_kind: 'session', target_id: null, cron_expr: '0 * * * *' },
+        { task_type: 'dev', target_kind: 'session', target_id: null, cron_expr: '0 * * * *' },
         ctx,
       ),
     ).toBe('')
   })
 
   test('composeTaskName joins with em-dash and trims', () => {
-    expect(composeTaskName('Continue Dev on x every 4h', 'high-priority')).toBe(
-      'Continue Dev on x every 4h — high-priority',
+    expect(composeTaskName('Dev on x every 4h', 'high-priority')).toBe(
+      'Dev on x every 4h — high-priority',
     )
     expect(composeTaskName('Prefix only', '')).toBe('Prefix only')
     expect(composeTaskName('Prefix only', '   ')).toBe('Prefix only')
@@ -601,7 +600,7 @@ describe('scheduler/auto-name', () => {
   test('buildTaskName end-to-end with suffix', () => {
     const out = buildTaskName(
       {
-        task_type: 'continue_dev',
+        task_type: 'dev',
         target_kind: 'session',
         target_id: 's1',
         cron_expr: '0 */4 * * *',
@@ -609,8 +608,8 @@ describe('scheduler/auto-name', () => {
       ' nightly ',
       ctx,
     )
-    expect(out.prefix).toBe('Continue Dev on finedesignz/kh-hub every 4h')
+    expect(out.prefix).toBe('Dev on finedesignz/kh-hub every 4h')
     expect(out.suffix).toBe('nightly')
-    expect(out.name).toBe('Continue Dev on finedesignz/kh-hub every 4h — nightly')
+    expect(out.name).toBe('Dev on finedesignz/kh-hub every 4h — nightly')
   })
 })

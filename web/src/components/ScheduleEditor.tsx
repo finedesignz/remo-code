@@ -63,13 +63,13 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
   const [suffixHydrated, setSuffixHydrated] = useState<boolean>(
     !existing || existing?.name_suffix != null,
   )
-  const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? 'prompt')
+  const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? 'dev')
   const [prompt, setPrompt] = useState<string>(existing?.payload?.prompt ?? '')
   const [skillName, setSkillName] = useState<string>(existing?.payload?.command ?? '')
   const [notes, setNotes] = useState<string>(() => {
     const existingNotes = existing?.payload?.notes ?? ''
     if (existingNotes) return existingNotes
-    const initialType = existing?.task_type ?? 'prompt'
+    const initialType = existing?.task_type ?? 'dev'
     return TASK_TEMPLATES[initialType] ?? ''
   })
 

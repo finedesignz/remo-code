@@ -9,12 +9,14 @@
  * Pure function. Callers resolve sessions/supervisors and pass via ctx.
  */
 
+// Phase 11: narrowed to dev/security/log_check roots + chained step kinds
+// + internal triage. Legacy prompt/skill/continue_dev/security_scan(root)
+// were migrated by the DB rewrite in commit b9edb82.
 export type TaskType =
-  | 'prompt'
-  | 'skill'
-  | 'security_scan'
-  | 'log_check'
-  | 'continue_dev'
+  | 'dev' | 'security' | 'log_check'
+  | 'dev_plan' | 'dev_execute' | 'dev_ship'
+  | 'security_scan' | 'security_triage' | 'security_fix_or_issue'
+  | 'log_pull' | 'log_classify' | 'log_triage'
   | 'triage'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
 
@@ -43,11 +45,18 @@ export interface TaskNameInput {
 }
 
 const TYPE_LABELS: Record<TaskType, string> = {
-  prompt: 'Prompt',
-  skill: 'Skill',
-  security_scan: 'Security Scan',
+  dev: 'Dev',
+  security: 'Security',
   log_check: 'Log Check',
-  continue_dev: 'Continue Dev',
+  dev_plan: 'Dev · Plan',
+  dev_execute: 'Dev · Execute',
+  dev_ship: 'Dev · Ship',
+  security_scan: 'Security · Scan',
+  security_triage: 'Security · Triage',
+  security_fix_or_issue: 'Security · Fix/Issue',
+  log_pull: 'Log · Pull',
+  log_classify: 'Log · Classify',
+  log_triage: 'Log · Triage',
   triage: 'Triage',
 }
 
@@ -131,11 +140,7 @@ export function computeTaskAutoName(task: TaskNameInput, ctx: TaskNameContext): 
   const target = targetLabel(task.target_kind, task.target_id ?? null, ctx)
   const cadence = cronCadence(task.cron_expr)
 
-  let leading = typeLbl
-  if (task.task_type === 'skill') {
-    const cmd = (task.payload?.command || '').trim()
-    if (cmd) leading = 'Skill ' + cmd
-  }
+  const leading = typeLbl
 
   if (!target) return ''
   if (!cadence) return leading + ' on ' + target

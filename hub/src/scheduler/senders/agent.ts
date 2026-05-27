@@ -33,13 +33,13 @@ interface RunCtxLike {
 }
 
 function buildContent(task: ScheduledTask): string {
-  if (task.task_type === 'skill') {
-    const cmd = (task.payload as any)?.command || (task.payload as any)?.skill
-    if (cmd) return `/${String(cmd).replace(/^\/+/, '')}`
-  }
+  // Phase 11: legacy `skill`/`security_scan`(root)/`continue_dev` rewritten to
+  // `dev`/`security` by the DB migration; their `prompt` column carries the
+  // original text verbatim. The `security_scan` chained step (under the
+  // `security` workflow) keeps the `/security-review` slash-command shortcut.
   if (task.task_type === 'security_scan') return '/security-review'
-  if (task.task_type === 'continue_dev') {
-    return (task.payload as any)?.prompt || 'Continue where you left off.'
+  if (task.task_type === 'dev') {
+    return (task.payload as any)?.prompt || task.prompt || 'Continue where you left off.'
   }
   return (task.payload as any)?.prompt || task.prompt || ''
 }
