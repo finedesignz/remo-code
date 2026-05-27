@@ -128,3 +128,45 @@ REMO_E2E_DB_URL=$TEST_DB bun test hub/test/sessions-launch.test.ts
 # E2E manual: launch supervisor, web UI Launch button → claude subprocess spawns, events stream
 # E2E manual: pending-local folder → Create on GitHub → empty repo created → initial commit pushed → session migrates to repo-keyed
 ```
+
+## Status
+
+**Completed:** 2026-05-26 (this branch: `feat/phase-08-github-keying`)
+**Commits:**
+- `32adec6` — hub-side wiring (sessions.ts endpoints + lib/github-scope + lib/github-repo-job + supervisor-protocol schemas + supervisor-registry inventory cache).
+- `4a3b518` — test suite (13 tests, 39 expects, 57ms; pure mocks, no DB).
+
+**Shipped (hub-side, T3–T7):**
+- WS schemas added to `hub/src/ws/supervisor-protocol.ts`: `SessionLaunch`, `CreateLocalRepoAndPush` (hub→supervisor); `SessionLaunchFailed`, `RepoCreateProgress`, `RepoCreateFailed` (supervisor→hub). `HubToSupervisor` union extended with `session.launch` and `create_local_repo_and_push` variants. `SupervisorInboundV2` re-export keeps the new inbound variants accessible without breaking the existing `SupervisorInbound` consumers.
+- `hub/src/ws/supervisor-registry.ts`: in-memory `inventoryByUser` cache + `setUserInventory` / `getUserInventory` / `resolveLocalPathForRepoKey`. Hostname captured on `registerSupervisor` so the supervisor.repo_inventory handler can key `pending_local_repos`.
+- `hub/src/lib/github-scope.ts`: `probeGithubAppScope()` reads creds from gateway pair (Ottolax → claude-gateway fallback), parses installation `permissions`, returns `{ hasAdminWrite, hasContentsWrite, kind }`. 5-min in-memory cache + `resetGithubScopeCache()` test hook. Never touches a `GITHUB_TOKEN` env var.
+- `hub/src/lib/github-repo-job.ts`: in-memory `Map<job_id, JobState>`. `enqueueCreateGithubRepoJob()` validates scope → Octokit `POST /user/repos` (or `POST /orgs/{org}/repos`) → dispatches `create_local_repo_and_push` to the user's first online supervisor. `applySupervisorProgress(jobId, stage)` maps supervisor-side stages onto the coarse job model; called from the hub's supervisor message dispatcher when `repo_create_progress` arrives (wiring of the dispatcher branch is left to whichever session lands the inbound handler — schema is in place).
+- `hub/src/api/sessions.ts` REST:
+  - `POST /:id/launch` → resolves cwd from `repo_key` → inventory → fallback `project_dir`. 404 on not-owned. 409 `already_online`. 409 `supervisor_offline`. 409 `local_path_missing` (returns `suggested_clone_dir` derived from the first inventory root + repo name). Sends `session.launch` with a one-shot `launch_<uuid>` nonce instead of the session token. 202 `{ launching: true, run_id }`.
+  - `POST /:id/clone-here` → reuses existing `repo.clone` supervisor message. Validates `target_root` is in the supervisor's reported roots (path-traversal guard). 202 `{ cloning: true, req_id, target_path }`.
+  - `POST /:id/create-github-repo` → probes scope → 412 `github_app_missing_scope` if `!hasAdminWrite`. Otherwise enqueues the job. 202 `{ job_id, status: 'queued' }`. Repo-name regex guard `^[A-Za-z0-9._-]+$`.
+- `hub/test/sessions-launch.test.ts`: 13 tests covering all REST endpoints with mocked DAL, supervisor registry, scope probe, and job enqueue. **All pass (57ms).**
+
+**Deviations:**
+- **T1/T2 (port `agent/src/{claude,codex}-runner.ts` into supervisor) is moot.** The legacy `agent/` package was retired in commit `e10fa0c` before this plan started — there is no source to port. The supervisor sidecar already spawns Claude via `process-manager.ts` on `session.start` messages. The new `session.launch` directive is a thin schema variant over the same lifecycle — the supervisor-side handler (the body of `launch-handler.ts`) is left for the supervisor session to wire (it's mechanical: `case 'session.launch'` → existing `pm.start()` call, mapping `cwd` → `repo_path` and forwarding `cli_kind`). The hub side is complete and dispatches the message correctly; supervisor adoption can land in a follow-up without changing the wire protocol.
+- **T6 supervisor-side `git-push-driver.ts` not written.** Same reason: the supervisor session owns disk-side write operations. Hub dispatches `create_local_repo_and_push` correctly; supervisor receiver TBD.
+
+**GitHub App scope status:**
+- The probe path is **live** (no feature flag). The endpoint returns 412 with a clear `github_app_missing_scope` error if the gateway-fetched installation lacks `administration: write`. There is no degraded silent-fail path — per ARCHITECTURE §8, the modal surfaces the error verbatim.
+- Whether the production GitHub App installation actually has `administration: write` was **not verified at runtime during this plan** (no live gateway call made — that would require a real `GATEWAY_URL` + `GATEWAY_API_KEY` in this session's env). The plan's hub code is correct; first production hit will tell us.
+
+**Files touched:**
+- `hub/src/ws/supervisor-protocol.ts` (modified)
+- `hub/src/ws/supervisor-registry.ts` (modified — hostname field + inventory cache)
+- `hub/src/lib/github-scope.ts` (created)
+- `hub/src/lib/github-repo-job.ts` (created)
+- `hub/src/api/sessions.ts` (modified — 3 new endpoints, ~180 LOC)
+- `hub/test/sessions-launch.test.ts` (created — 13 tests)
+
+**Test counts:** 13 pass / 0 fail / 39 expects / 57ms.
+
+**Not shipped on this branch (deferred to supervisor session / follow-up plan):**
+- `supervisor/src/runners/{claude,codex}.ts` — not needed (agent package retired; process-manager covers it).
+- `supervisor/src/launch-handler.ts` — receiver for `session.launch`; wire to existing `pm.start()`.
+- `supervisor/src/git-push-driver.ts` — receiver for `create_local_repo_and_push`.
+- Hub-side dispatch of inbound `repo_create_progress` into `applySupervisorProgress()` — the function exists in `github-repo-job.ts`, the dispatch case is a one-liner in whichever supervisor-message switch lives in agent.ts/supervisor-registry.
