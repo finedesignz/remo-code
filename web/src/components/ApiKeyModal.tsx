@@ -20,8 +20,8 @@ export function ApiKeyModal({ token, onClose }: Props) {
 
   const handleGenerate = async () => {
     const result = await generateKey()
-    if (result?.key) {
-      setNewKey(result.key)
+    if (result.ok && result.data?.key) {
+      setNewKey(result.data.key)
       setConfirming(false)
     }
   }

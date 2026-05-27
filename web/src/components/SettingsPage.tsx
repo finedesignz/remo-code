@@ -382,6 +382,7 @@ function ApiKeyTab({ token }: { token: string }) {
   const [newKey, setNewKey] = useState<string | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)
+  const [opError, setOpError] = useState<string | null>(null)
 
   const copyText = (text: string, label: string) => {
     navigator.clipboard.writeText(text)
@@ -390,17 +391,25 @@ function ApiKeyTab({ token }: { token: string }) {
   }
 
   const handleGenerate = async () => {
+    setOpError(null)
     const result = await generateKey()
-    if (result?.key) {
-      setNewKey(result.key)
+    if (result.ok && result.data?.key) {
+      setNewKey(result.data.key)
       setConfirming(false)
+    } else if (!result.ok) {
+      setOpError(result.message)
     }
   }
 
   const handleRevoke = async () => {
     if (!activeKey) return
-    await revokeKey(activeKey.id)
-    setNewKey(null)
+    setOpError(null)
+    const result = await revokeKey(activeKey.id)
+    if (result.ok) {
+      setNewKey(null)
+    } else {
+      setOpError(result.message)
+    }
   }
 
   const trayAppReleaseUrl = 'https://github.com/finedesignz/remo-code/releases/latest'
@@ -491,6 +500,9 @@ function ApiKeyTab({ token }: { token: string }) {
                 </button>
               )}
             </div>
+            {opError && (
+              <p className="text-red-300/80 text-xs">{opError}</p>
+            )}
           </div>
         ) : (
           <div className="space-y-4">
@@ -504,6 +516,9 @@ function ApiKeyTab({ token }: { token: string }) {
             >
               Generate API Key
             </button>
+            {opError && (
+              <p className="text-red-300/80 text-xs">{opError}</p>
+            )}
           </div>
         )}
       </div>
