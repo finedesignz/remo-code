@@ -13,6 +13,7 @@ import {
   listOnlineSupervisorIdsForUser,
   resolveLocalPathForRepoKey,
   getUserInventory,
+  getKnownLocalPathsForRepoKey,
 } from '../ws/supervisor-registry.ts'
 import { releaseSessionSlot } from '../sessions/budget.ts'
 import { probeGithubAppScope } from '../lib/github-scope.ts'
@@ -37,7 +38,18 @@ const sessions = new Hono()
 sessions.get('/', async (c) => {
   const userId = c.get('userId') as string
   const data = await listSessions(userId)
-  return c.json(data)
+  // Phase 08.6 — enrich each GitHub-keyed session with the known local working
+  // trees from the supervisor inventory cache so the sidebar can collapse to
+  // one row per repo and the Launch flow can offer a worktree/branch picker.
+  // Non-GitHub-keyed sessions get an empty array (the field is always present
+  // so the web type is non-optional).
+  const enriched = (data as any[]).map((s) => {
+    if (s.repo_key) {
+      return { ...s, local_paths: getKnownLocalPathsForRepoKey(userId, s.repo_key) }
+    }
+    return { ...s, local_paths: [] }
+  })
+  return c.json(enriched)
 })
 
 // Batch-fetch messages for up to 12 sessions at once. Used by the multichat
@@ -281,6 +293,12 @@ sessions.post('/heal', async (c) => {
 
 const LaunchBody = z.object({
   cli_kind: z.enum(['claude', 'codex']).optional(),
+  /**
+   * Phase 08.6 — user-picked worktree path. Must be one of the supervisor's
+   * known local paths for this session's `repo_key`; falls back to the
+   * canonical inventory path when omitted.
+   */
+  local_path: z.string().max(4096).optional(),
 })
 
 // In-memory one-shot launch nonces (per ARCHITECTURE §16 — the session token
@@ -317,13 +335,17 @@ sessions.post('/:id/launch', async (c) => {
   }
   const supervisorId = supervisorIds[0]
 
-  // Resolve cwd: prefer repo_key → inventory canonical path; fall back to
-  // session.project_dir (legacy / pre-inventory rows).
+  // Resolve cwd: prefer caller-supplied local_path (must match inventory),
+  // then repo_key → inventory canonical, then session.project_dir (legacy).
   const repoKey = (session as any).repo_key as string | null
   let cwd: string | null = null
-  if (repoKey) {
-    cwd = resolveLocalPathForRepoKey(userId, repoKey)
+  if (parsed.data.local_path && repoKey) {
+    const known = getKnownLocalPathsForRepoKey(userId, repoKey)
+    const requested = parsed.data.local_path
+    if (known.some((k) => k.local_path === requested)) cwd = requested
+    else return c.json({ error: 'invalid_local_path', detail: 'path not in supervisor inventory for this repo' }, 400)
   }
+  if (!cwd && repoKey) cwd = resolveLocalPathForRepoKey(userId, repoKey)
   if (!cwd) cwd = (session as any).project_dir ?? null
   if (!cwd) {
     // Suggest where to clone (first known root for this user).

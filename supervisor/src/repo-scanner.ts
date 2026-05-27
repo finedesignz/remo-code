@@ -100,6 +100,8 @@ export interface RepoEntry {
   worktree_parent_path: string | null
   git_remote: string | null
   git_origin_github: { owner: string; repo: string } | null
+  /** Current branch (null when detached or unreadable). */
+  branch: string | null
   /**
    * True for the canonical entry within a GitHub-keyed worktree group:
    * non-worktree wins; tiebreak by shorter `local_path.length`. Always `true`
@@ -242,6 +244,7 @@ export async function scanRoots(cfg: {
       worktree_parent_path: gi.worktree_parent_path,
       git_remote: gi.git_remote,
       git_origin_github: gi.git_origin_github,
+      branch: gi.branch,
       canonical: true, // overwritten below for grouped entries
     })
   }

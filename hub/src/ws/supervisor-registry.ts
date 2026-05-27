@@ -32,7 +32,17 @@ export interface InventoryRepoEntry {
   worktree_parent_path: string | null
   git_remote: string | null
   git_origin_github: { owner: string; repo: string } | null
+  /** Current branch on disk (null when detached / unknown / pre-0.5 supervisor). */
+  branch?: string | null
   canonical?: boolean
+}
+
+/** One known local working tree for a given repo_key. */
+export interface KnownLocalPath {
+  local_path: string
+  branch: string | null
+  is_worktree: boolean
+  canonical: boolean
 }
 export interface UserInventory {
   scanned_at: string
@@ -67,6 +77,42 @@ export function resolveLocalPathForRepoKey(userId: string, repoKey: string): str
   if (matches.length === 0) return null
   const canonical = matches.find((m) => m.canonical)
   return (canonical ?? matches[0]).local_path
+}
+
+/**
+ * Return every known local working tree for a repo_key — used to populate the
+ * Sidebar Launch dropdown so the user picks WHICH worktree/branch to run.
+ *
+ * Capped at MAX_KNOWN_LOCAL_PATHS to keep the UI bounded; the canonical entry
+ * is always first when present.
+ */
+const MAX_KNOWN_LOCAL_PATHS = 20
+export function getKnownLocalPathsForRepoKey(userId: string, repoKey: string): KnownLocalPath[] {
+  const inv = inventoryByUser.get(userId)
+  if (!inv) return []
+  const target = repoKey.toLowerCase()
+  const matches = inv.repos.filter((r) => {
+    if (!r.git_origin_github) return false
+    const k = `github://${r.git_origin_github.owner.toLowerCase()}/${r.git_origin_github.repo.toLowerCase()}`
+    return k === target
+  })
+  if (matches.length === 0) return []
+  const sorted = [...matches].sort((a, b) => {
+    // canonical first, then non-worktree, then shorter path.
+    const ac = a.canonical ? 0 : 1
+    const bc = b.canonical ? 0 : 1
+    if (ac !== bc) return ac - bc
+    const aw = a.is_worktree ? 1 : 0
+    const bw = b.is_worktree ? 1 : 0
+    if (aw !== bw) return aw - bw
+    return a.local_path.length - b.local_path.length
+  })
+  return sorted.slice(0, MAX_KNOWN_LOCAL_PATHS).map((r) => ({
+    local_path: r.local_path,
+    branch: r.branch ?? null,
+    is_worktree: r.is_worktree,
+    canonical: !!r.canonical,
+  }))
 }
 
 export function registerSupervisor(args: {

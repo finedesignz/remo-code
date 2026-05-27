@@ -74,6 +74,21 @@ mock.module('../src/ws/supervisor-registry.ts', () => ({
     return m?.local_path ?? null
   },
   getUserInventory: () => state.inventory,
+  getKnownLocalPathsForRepoKey: (_uid: string, repoKey: string) => {
+    if (!state.inventory) return []
+    const target = repoKey.toLowerCase()
+    const matches = state.inventory.repos.filter((r: any) => {
+      if (!r.git_origin_github) return false
+      const k = `github://${r.git_origin_github.owner.toLowerCase()}/${r.git_origin_github.repo.toLowerCase()}`
+      return k === target
+    })
+    return matches.map((r: any) => ({
+      local_path: r.local_path,
+      branch: r.branch ?? null,
+      is_worktree: !!r.is_worktree,
+      canonical: !!r.canonical,
+    }))
+  },
 }))
 
 mock.module('../src/lib/github-scope.ts', () => ({
@@ -213,6 +228,36 @@ describe('POST /api/sessions/:id/launch', () => {
     expect(body.error).toBe('local_path_missing')
     expect(body.repo_key).toBe('github://someorg/missingrepo')
     expect(body.suggested_clone_dir).toContain('missingrepo')
+  })
+
+  test('local_path body param pins worktree cwd when in inventory', async () => {
+    state.inventory.repos.push({
+      local_path: 'C:/Users/artic/GitHub/remo-code-feat',
+      is_git_repo: true,
+      is_worktree: true,
+      worktree_parent_path: 'C:/Users/artic/GitHub/remo-code',
+      git_remote: 'git@github.com:finedesignz/remo-code.git',
+      git_origin_github: { owner: 'finedesignz', repo: 'remo-code' },
+      branch: 'feat/x',
+      canonical: false,
+    })
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ local_path: 'C:/Users/artic/GitHub/remo-code-feat' }),
+    })
+    expect(res.status).toBe(202)
+    expect(state.sentMessages[0].msg.cwd).toBe('C:/Users/artic/GitHub/remo-code-feat')
+  })
+
+  test('local_path body param rejected when not in inventory → 400', async () => {
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ local_path: 'C:/totally/unknown' }),
+    })
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as any).error).toBe('invalid_local_path')
   })
 
   test('cli_kind override applied', async () => {

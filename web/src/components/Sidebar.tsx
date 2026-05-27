@@ -31,7 +31,7 @@ interface Props {
   /** Hub WS subscribe — forwarded to PendingLocalRepoPrompt/CreateGithubRepoModal for progress. */
   subscribe?: (handler: (msg: any) => void) => () => void
   /** Phase 08.5 launch-flow helpers (from useSessions). Optional so existing callers keep compiling. */
-  launchSession?: (id: string) => Promise<{ ok: boolean; error?: string; detail?: string }>
+  launchSession?: (id: string, body?: { cli_kind?: 'claude' | 'codex'; local_path?: string }) => Promise<{ ok: boolean; error?: string; detail?: string }>
   cloneHere?: (id: string, targetRoot: string) => Promise<{ ok: boolean; error?: string; target_path?: string }>
 }
 
@@ -153,8 +153,28 @@ export function Sidebar({
     )
   }
 
+  // Phase 08.6 — defensive UI-side collapse: if the session list ever surfaces
+  // two rows sharing the same `repo_key` (shouldn't happen post-Phase 08 dedupe
+  // but legacy data can drift), keep only the most-recently-active one. Local
+  // sessions with NULL repo_key remain as-is, keyed by id.
+  const collapseByRepoKey = (list: CodeSession[]): CodeSession[] => {
+    const byKey = new Map<string, CodeSession>()
+    const out: CodeSession[] = []
+    for (const s of list) {
+      if (!s.repo_key) { out.push(s); continue }
+      const prev = byKey.get(s.repo_key)
+      if (!prev) { byKey.set(s.repo_key, s); continue }
+      const a = prev.last_activity ? Date.parse(prev.last_activity) : 0
+      const b = s.last_activity ? Date.parse(s.last_activity) : 0
+      if (b > a) byKey.set(s.repo_key, s)
+    }
+    for (const s of byKey.values()) out.push(s)
+    return out
+  }
+  const connectedList = collapseByRepoKey(connectedSessions(sessions))
+
   const hoveredSession =
-    hoverInfo ? connectedSessions(sessions).find(s => s.id === hoverInfo.id) : null
+    hoverInfo ? connectedList.find(s => s.id === hoverInfo.id) : null
 
   return (
     <>
@@ -225,7 +245,7 @@ export function Sidebar({
 
         {/* Session list — only connected sessions */}
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-          {connectedSessions(sessions).map(s => {
+          {connectedList.map(s => {
             const ownerRepo = githubOwnerRepo(s)
             const primaryLabel = ownerRepo ?? sessionLabel(s)
             return (
@@ -310,8 +330,27 @@ export function Sidebar({
                   <div className="text-[11px] text-[var(--text-muted)] mt-0.5 truncate pl-4" title={s.project_dir}>
                     {ownerRepo ? (
                       <>
-                        <span className="opacity-70">from </span>
-                        {s.project_dir}
+                        {(() => {
+                          // Phase 08.6 — when the supervisor inventory knows the
+                          // branch for the running cwd, surface it inline.
+                          const lp = (s.local_paths ?? []).find((p) => p.local_path === s.project_dir)
+                          if (lp?.branch) {
+                            return (
+                              <>
+                                <span className="opacity-70">on </span>
+                                <span className="font-medium text-[var(--text-secondary)]">{lp.branch}</span>
+                                <span className="opacity-70"> · </span>
+                                {s.project_dir}
+                              </>
+                            )
+                          }
+                          return (
+                            <>
+                              <span className="opacity-70">from </span>
+                              {s.project_dir}
+                            </>
+                          )
+                        })()}
                       </>
                     ) : s.project_dir}
                   </div>
@@ -321,7 +360,7 @@ export function Sidebar({
             )
           })}
 
-          {connectedSessions(sessions).length === 0 && (
+          {connectedList.length === 0 && (
             <p className="text-sm text-[var(--text-muted)] text-center py-8">
               No active sessions. Connect a Claude Code instance to get started.
             </p>
@@ -375,7 +414,7 @@ interface OfflineSessionsProps {
   sessions: CodeSession[]
   activeSessionId: string | null
   onSelectSession: (id: string) => void
-  launchSession?: (id: string) => Promise<{ ok: boolean; error?: string; detail?: string }>
+  launchSession?: (id: string, body?: { cli_kind?: 'claude' | 'codex'; local_path?: string }) => Promise<{ ok: boolean; error?: string; detail?: string }>
   cloneHere?: (id: string, targetRoot: string) => Promise<{ ok: boolean; error?: string; target_path?: string }>
   onOpenClone: (sessionId: string, repoLabel: string) => void
   onToast: (msg: string) => void
@@ -392,9 +431,21 @@ interface OfflineSessionsProps {
 function OfflineSessions({
   sessions, activeSessionId, onSelectSession, launchSession, cloneHere, onOpenClone, onToast,
 }: OfflineSessionsProps) {
-  const offline = sessions.filter(s =>
+  // Filter to offline GitHub-keyed sessions, then defensive UI-side dedupe by
+  // repo_key (keep most-recently-active row).
+  const offlineRaw = sessions.filter(s =>
     s.status !== 'online' && s.status !== 'thinking' && !!s.repo_key,
   )
+  const offlineByKey = new Map<string, CodeSession>()
+  for (const s of offlineRaw) {
+    const k = s.repo_key as string
+    const prev = offlineByKey.get(k)
+    if (!prev) { offlineByKey.set(k, s); continue }
+    const a = prev.last_activity ? Date.parse(prev.last_activity) : 0
+    const b = s.last_activity ? Date.parse(s.last_activity) : 0
+    if (b > a) offlineByKey.set(k, s)
+  }
+  const offline = Array.from(offlineByKey.values())
   if (offline.length === 0) return null
 
   return (
