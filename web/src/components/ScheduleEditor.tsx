@@ -24,12 +24,13 @@ interface Supervisor {
   online: boolean
 }
 
+// Phase 11 narrowing: stopgap list using the three user-pickable roots.
+// Next agent (UI dropdown redesign per PLAN.md §3.7) replaces this with a
+// single <select> of dev/security/log_check.
 const TASK_TYPES: Array<{ value: TaskType; label: string; desc: string }> = [
-  { value: 'prompt', label: 'Prompt', desc: 'Send a freeform prompt' },
-  { value: 'skill', label: 'Skill / slash command', desc: 'Invoke a synced command' },
-  { value: 'security_scan', label: 'Security scan', desc: 'Routine security audit' },
-  { value: 'log_check', label: 'Log check', desc: 'Pull and analyze server logs' },
-  { value: 'continue_dev', label: 'Continue dev', desc: 'Keep development moving' },
+  { value: 'dev', label: 'Dev', desc: 'Plan → execute → ship workflow' },
+  { value: 'security', label: 'Security', desc: 'Scan → triage → fix-or-issue workflow' },
+  { value: 'log_check', label: 'Log check', desc: 'Pull → classify → triage workflow' },
 ]
 
 const TARGET_KINDS: Array<{ value: TargetKind; label: string; desc: string }> = [
@@ -135,7 +136,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     if (r.length < 2) return null
     return Math.round((r[1].getTime() - r[0].getTime()) / 60000)
   }, [cronExpr, tz, cronValidation.ok])
-  const subFifteenWarn = intervalMinutes !== null && intervalMinutes < 15 && taskType !== 'prompt'
+  const subFifteenWarn = intervalMinutes !== null && intervalMinutes < 15 && taskType !== 'dev'
 
   // Fetch supervisors when needed
   const [supervisors, setSupervisors] = useState<Supervisor[]>([])
@@ -156,14 +157,15 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
   const { sessions } = useSessions(token)
 
   // Commands for skill picker
-  const { rows: commands } = useCommands(taskType === 'skill' ? token : null)
+  // Skill picker retired in Phase 11; CommandPicker block below is dead code
+  // until the UI redesign agent removes it. Keep the hook call disabled.
+  const { rows: commands } = useCommands(null)
 
   // Auto-generated, locked name prefix — derived from type + target + cadence
   const prefix = useMemo(() => {
     const payload: Record<string, any> = {}
-    if (taskType === 'prompt') payload.prompt = prompt
-    if (taskType === 'skill') payload.command = skillName
-    if (taskType === 'security_scan' || taskType === 'log_check' || taskType === 'continue_dev') {
+    if (taskType === 'dev') payload.prompt = prompt
+    if (taskType === 'security' || taskType === 'log_check') {
       if (notes) payload.notes = notes
     }
     return computeTaskAutoName(
@@ -231,9 +233,8 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     })
 
     const payload: Record<string, any> = {}
-    if (taskType === 'prompt') payload.prompt = prompt.trim()
-    if (taskType === 'skill') payload.command = skillName.trim()
-    if (taskType === 'security_scan' || taskType === 'log_check' || taskType === 'continue_dev') {
+    if (taskType === 'dev') payload.prompt = prompt.trim()
+    if (taskType === 'security' || taskType === 'log_check') {
       if (notes.trim()) payload.notes = notes.trim()
     }
 
@@ -319,7 +320,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
           </Field>
 
           {/* Task body */}
-          {taskType === 'prompt' && (
+          {taskType === 'dev' && (
             <Field label="Prompt">
               <textarea
                 value={prompt}
@@ -330,12 +331,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
               />
             </Field>
           )}
-          {taskType === 'skill' && (
-            <Field label="Slash command">
-              <CommandPicker token={token} commands={commands} value={skillName} onChange={setSkillName} />
-            </Field>
-          )}
-          {(taskType === 'security_scan' || taskType === 'log_check' || taskType === 'continue_dev') && (
+          {(taskType === 'security' || taskType === 'log_check') && (
             <Field label="Notes (optional)">
               <textarea
                 value={notes}

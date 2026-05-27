@@ -388,12 +388,13 @@ function ScheduleRow({
 /* ----------------------------------------------------------------- */
 
 export function TaskTypeChip({ type }: { type: ScheduledTask['task_type'] }) {
-  const label: Record<ScheduledTask['task_type'], string> = {
-    prompt: 'prompt',
-    skill: 'skill',
-    security_scan: 'security scan',
+  // Phase 11: only the three user-pickable roots get pretty labels here.
+  // Chain step kinds (dev_plan, security_triage, log_classify, …) and the
+  // internal `triage` kind fall through to the raw type via `|| type` below.
+  const label: Partial<Record<ScheduledTask['task_type'], string>> = {
+    dev: 'dev',
+    security: 'security',
     log_check: 'log check',
-    continue_dev: 'continue dev',
   }
   return (
     <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[var(--bg-tertiary)]/60 text-[var(--text-muted)]">
