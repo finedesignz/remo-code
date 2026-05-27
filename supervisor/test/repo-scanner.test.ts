@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { spawnSync } from 'child_process'
-import { scanRoots, type RepoEntry } from '../src/repo-scanner'
+import { scanRoots, scanAll, type RepoEntry } from '../src/repo-scanner'
 import { DEFAULT_SCAN_SETTINGS } from '../src/config'
 
 function git(cwd: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
@@ -117,6 +117,16 @@ describe('scanRoots', () => {
     expect(found!.is_git_repo).toBe(false)
     expect(found!.git_origin_github).toBeNull()
     expect(found!.canonical).toBe(true)
+  })
+
+  test('legacy scanAll filters out git worktrees (worktree has .git as file, not dir)', () => {
+    // repo-a has `.git` as a directory → kept. repo-a-worktree has `.git` as a
+    // FILE (gitdir: pointer) → filtered. Fix for app.remo-code.com 2026-05-27
+    // showing `<repo>-<branch>` dirs in the picker as if they were repos.
+    const repos = scanAll([root])
+    const names = repos.map((r) => r.name)
+    expect(names).toContain('repo-a')
+    expect(names).not.toContain('repo-a-worktree')
   })
 
   test('default ignore_globs include node_modules, .next, dist, target', () => {

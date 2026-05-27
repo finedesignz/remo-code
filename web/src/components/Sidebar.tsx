@@ -366,16 +366,10 @@ export function Sidebar({
             </p>
           )}
 
-          {/* Phase 08.5 — offline GitHub-keyed sessions: surface Launch / Clone-here */}
-          <OfflineSessions
-            sessions={sessions}
-            onSelectSession={onSelectSession}
-            activeSessionId={activeSessionId}
-            launchSession={launchSession}
-            cloneHere={cloneHere}
-            onOpenClone={(id, label) => setCloneModal({ sessionId: id, repoLabel: label })}
-            onToast={showToast}
-          />
+          {/* Phase 08.5 offline-sessions section removed from sidebar 2026-05-27 —
+              launching belongs on Settings → Supervisor (per-repo Launch buttons).
+              Sidebar shows ACTIVE sessions only. OfflineSessions component kept
+              below for reference / potential reuse but not rendered. */}
         </div>
 
         {toast && (
