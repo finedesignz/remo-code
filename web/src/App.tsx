@@ -43,6 +43,14 @@ function LoadingScreen() {
   )
 }
 
+// Hash-router app: the SPA fallback serves index.html for ANY pathname, so URLs
+// like `/login#/settings?tab=supervisor` (stale bookmarks, external links, or
+// browser autocomplete) leave a stray pathname that confuses users post-login.
+// Normalize pathname to `/` on boot while preserving hash + search.
+if (typeof window !== 'undefined' && window.location.pathname !== '/') {
+  window.history.replaceState(null, '', '/' + window.location.search + window.location.hash)
+}
+
 function getRoute(): Route {
   const hash = window.location.hash
   if (hash.startsWith('#/auth/callback')) return 'auth-callback'
