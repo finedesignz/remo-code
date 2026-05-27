@@ -3,9 +3,11 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-char
 process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'session-secret-at-least-32-chars-long-x';
 process.env.MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || 'magic-link-secret-at-least-32-chars-x';
 process.env.TITANIUM_KEYGEN_API_URL = process.env.TITANIUM_KEYGEN_API_URL || 'https://keygen.titaniumlabs.us';process.env.TITANIUM_KEYGEN_ACCOUNT_ID = process.env.TITANIUM_KEYGEN_ACCOUNT_ID || 'acct_test_0000000000';process.env.TITANIUM_KEYGEN_PRODUCT_ID = process.env.TITANIUM_KEYGEN_PRODUCT_ID || 'prod_test_remo';
+process.env.ALLOW_LEGACY_LOGIN = process.env.ALLOW_LEGACY_LOGIN || 'true';
 
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
 import { Hono } from 'hono';
+import jwt from 'jsonwebtoken';
 
 const verifyAuthSessionCookie = mock(async (_c: any) => null as any);
 const realSession = await import('../src/session');
@@ -71,6 +73,59 @@ describe('requireRecentAuth', () => {
     const body = await res.json();
     expect(body.error).toBe('re_auth_required');
     expect(body.max_age_seconds).toBe(900);
+  });
+
+  // ── Legacy bearer JWT path (ALLOW_LEGACY_LOGIN=true soak) ──────────────
+  // Regression: prior to this fix, requireRecentAuth hard-failed every legacy
+  // bearer JWT user with `no_cookie_session` 401 because they have no cookie
+  // session row. With ALLOW_LEGACY_LOGIN + TITANIUM_BYPASS both =true in prod
+  // (2026-05-27), this hard-blocked api-key create/delete + admin mutations.
+
+  test('legacy JWT with fresh iat → pass-through', async () => {
+    verifyAuthSessionCookie.mockImplementation(async () => null);
+    const token = jwt.sign(
+      { sub: 'u-legacy', email: 'l@b.com', role: 'admin' },
+      process.env.JWT_SECRET!,
+      { expiresIn: '30d' },
+    );
+    const res = await buildApp().request('/sensitive', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.userId).toBe('u-legacy');
+  });
+
+  test('legacy JWT with stale iat (>15min) → 401 re_auth_required', async () => {
+    verifyAuthSessionCookie.mockImplementation(async () => null);
+    const staleIat = Math.floor(Date.now() / 1000) - 20 * 60; // 20 min ago
+    // jsonwebtoken's `expiresIn` + explicit `iat` requires the option to honor
+    // the payload-provided iat. Pass it raw without expiresIn so iat is preserved.
+    const token = jwt.sign(
+      { sub: 'u-legacy', email: 'l@b.com', role: 'admin', iat: staleIat, exp: staleIat + 30 * 24 * 3600 },
+      process.env.JWT_SECRET!,
+    );
+    const res = await buildApp().request('/sensitive', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toBe('re_auth_required');
+    expect(body.max_age_seconds).toBe(900);
+  });
+
+  test('legacy JWT with invalid signature → 401 invalid_legacy_token', async () => {
+    verifyAuthSessionCookie.mockImplementation(async () => null);
+    const res = await buildApp().request('/sensitive', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer not.a.jwt' },
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toBe('re_auth_required');
+    expect(body.reason).toBe('invalid_legacy_token');
   });
 
   test('custom maxAge honored', async () => {
