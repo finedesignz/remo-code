@@ -151,6 +151,85 @@ export const SupervisorInbound = [
   SupervisorRepoInventory,
 ]
 
+/**
+ * Phase 08 §16 — Launch directive: hub asks supervisor to spawn a runner
+ * (claude or codex) for an existing session with the canonical cwd resolved
+ * from the most recent SupervisorRepoInventory. The supervisor reuses the
+ * existing single WS to multiplex run_started/run_output/run_finished events
+ * tagged by run_id back to the hub. On `cwd` missing → session.launch_failed.
+ */
+export const SessionLaunch = z.object({
+  type: z.literal('session.launch'),
+  run_id: z.string(),
+  session_id: z.string(),
+  cli_kind: z.enum(['claude', 'codex']),
+  cwd: z.string(),
+  api_key: z.string(),
+  system_prompt: z.string().nullable().optional(),
+  seed_files: z.array(z.object({
+    relative_path: z.string(),
+    contents: z.string(),
+    sha256: z.string().optional(),
+  })).optional(),
+})
+
+/**
+ * Phase 08 §6 — Create-on-GitHub: hub already created the empty remote;
+ * supervisor runs `git init` (if needed) → commit → `remote add origin` →
+ * `git push -u origin HEAD`. Emits `repo_create_progress` per stage.
+ */
+export const CreateLocalRepoAndPush = z.object({
+  type: z.literal('create_local_repo_and_push'),
+  job_id: z.string(),
+  session_id: z.string(),
+  owner: z.string(),
+  name: z.string(),
+  visibility: z.enum(['private', 'public']),
+  remote_url: z.string(),
+  local_path: z.string(),
+})
+
+// Supervisor → hub progress for §6 and §16 failure path.
+export const SessionLaunchFailed = z.object({
+  type: z.literal('session.launch_failed'),
+  run_id: z.string(),
+  session_id: z.string(),
+  error: z.string(),
+})
+
+export const RepoCreateProgress = z.object({
+  type: z.literal('repo_create_progress'),
+  job_id: z.string(),
+  stage: z.enum([
+    'validating_scope',
+    'creating_remote',
+    'init',
+    'commit',
+    'remote_add',
+    'pushing_locally',
+    'pushed',
+    'reindexing',
+    'done',
+  ]),
+  percent: z.number().min(0).max(100).optional(),
+  message: z.string().max(2000).optional(),
+})
+
+export const RepoCreateFailed = z.object({
+  type: z.literal('repo_create_failed'),
+  job_id: z.string(),
+  stage: z.string(),
+  error: z.string().max(2000),
+})
+
+// (Re-export the union additions; existing SupervisorInbound stays exported above.)
+export const SupervisorInboundV2 = [
+  ...SupervisorInbound,
+  SessionLaunchFailed,
+  RepoCreateProgress,
+  RepoCreateFailed,
+]
+
 // -- Hub -> Supervisor (constructed by hub, not validated) --
 
 export type HubToSupervisor =
@@ -162,6 +241,28 @@ export type HubToSupervisor =
   | { type: 'session.start'; req_id: string; run_id: string; repo_path: string; branch?: string; pull: boolean; initial_prompt?: string; api_key: string; hub_url: string; dangerously_skip_permissions?: boolean }
   | { type: 'session.stop'; req_id: string; run_id: string; reason: string }
   | { type: 'session.status'; req_id: string }
+  // Phase 08 §16 — Launch on demand. Carries cwd resolved from inventory.
+  | {
+      type: 'session.launch'
+      run_id: string
+      session_id: string
+      cli_kind: 'claude' | 'codex'
+      cwd: string
+      api_key: string
+      system_prompt?: string | null
+      seed_files?: Array<{ relative_path: string; contents: string; sha256?: string }>
+    }
+  // Phase 08 §6 — Create local repo + push to fresh GitHub remote.
+  | {
+      type: 'create_local_repo_and_push'
+      job_id: string
+      session_id: string
+      owner: string
+      name: string
+      visibility: 'private' | 'public'
+      remote_url: string
+      local_path: string
+    }
   // W2/T10 — execute a saved supervisor command; supervisor responds with
   // run_started → 0..N run_output chunks → run_finished.
   | { type: 'run_command'; run_id: string; command: string; args?: string[] }

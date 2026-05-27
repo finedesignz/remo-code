@@ -10,11 +10,64 @@ interface SupervisorEntry {
   apiKeyId: string
   state: string
   roots: string[]
+  /** Phase 08 §15 — needed by the `supervisor.repo_inventory` handler when
+   * upserting `pending_local_repos(user_id, hostname, project_dir)` rows. */
+  hostname: string
   pendingReqs: Map<string, { resolve: (v: any) => void; reject: (e: any) => void; timer: ReturnType<typeof setTimeout> }>
 }
 
 const supervisors = new Map<string, SupervisorEntry>() // supervisorId -> entry
 const supervisorsByApiKey = new Map<string, string>()   // apiKeyId -> supervisorId
+
+// ── Phase 08 §15/§16 — per-user inventory cache ────────────────────────────
+// The most recent SupervisorRepoInventory the supervisor has uploaded, keyed
+// by userId. Plan 005 reads this to resolve a session's canonical local_path
+// at launch time and to suggest `clone-here` targets. Memory-only by design
+// (matches §6 in-memory job state). Lost on hub restart → supervisor re-emits
+// inventory on next connect.
+export interface InventoryRepoEntry {
+  local_path: string
+  is_git_repo: boolean
+  is_worktree: boolean
+  worktree_parent_path: string | null
+  git_remote: string | null
+  git_origin_github: { owner: string; repo: string } | null
+  canonical?: boolean
+}
+export interface UserInventory {
+  scanned_at: string
+  supervisor_id: string
+  repos: InventoryRepoEntry[]
+  roots: string[]
+}
+const inventoryByUser = new Map<string, UserInventory>()
+
+export function setUserInventory(userId: string, inv: UserInventory) {
+  inventoryByUser.set(userId, inv)
+}
+export function getUserInventory(userId: string): UserInventory | undefined {
+  return inventoryByUser.get(userId)
+}
+/**
+ * Look up the canonical local path the supervisor has reported for a given
+ * `repo_key` (`github://owner/repo`). Returns null when the supervisor hasn't
+ * reported the repo OR has reported it but the entry was never marked
+ * canonical (worktree-only with no parent on disk).
+ */
+export function resolveLocalPathForRepoKey(userId: string, repoKey: string): string | null {
+  const inv = inventoryByUser.get(userId)
+  if (!inv) return null
+  const target = repoKey.toLowerCase()
+  // Prefer entries explicitly flagged canonical; fall back to first matching.
+  const matches = inv.repos.filter((r) => {
+    if (!r.git_origin_github) return false
+    const k = `github://${r.git_origin_github.owner.toLowerCase()}/${r.git_origin_github.repo.toLowerCase()}`
+    return k === target
+  })
+  if (matches.length === 0) return null
+  const canonical = matches.find((m) => m.canonical)
+  return (canonical ?? matches[0]).local_path
+}
 
 export function registerSupervisor(args: {
   ws: ServerWebSocket<any>
@@ -22,6 +75,7 @@ export function registerSupervisor(args: {
   userId: string
   apiKeyId: string
   roots: string[]
+  hostname?: string
 }): SupervisorEntry {
   // Replace any existing
   const existing = supervisorsByApiKey.get(args.apiKeyId)
@@ -38,6 +92,7 @@ export function registerSupervisor(args: {
     apiKeyId: args.apiKeyId,
     state: 'idle',
     roots: args.roots,
+    hostname: args.hostname ?? '',
     pendingReqs: new Map(),
   }
   supervisors.set(args.supervisorId, entry)
