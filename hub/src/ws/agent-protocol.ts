@@ -26,6 +26,22 @@ export const AgentInfo = z.object({
 export const CliKind = z.enum(['claude', 'codex'])
 export type CliKindT = z.infer<typeof CliKind>
 
+// Phase 08: agent-reported git introspection for the connecting `project_dir`.
+// Used by the hub to collapse N worktrees of the same GitHub repo into a single
+// session. Passthrough so future supervisor fields don't break old hubs. All
+// fields are nullable / optional — a no-git agent omits the whole block.
+export const GitIntrospection = z.object({
+  is_git_repo: z.boolean(),
+  is_worktree: z.boolean(),
+  worktree_parent_path: z.string().nullable(),
+  git_remote: z.string().nullable(),
+  git_origin_github: z.object({
+    owner: z.string().min(1).max(100),
+    repo: z.string().min(1).max(100),
+  }).nullable(),
+}).passthrough()
+export type GitIntrospectionT = z.infer<typeof GitIntrospection>
+
 // NOTE: AgentAuth is a member of a discriminatedUnion below, which requires a
 // raw ZodObject (no .refine wrappers). The "project_dir OR rootless_sessions"
 // invariant is enforced in hub/src/ws/agent.ts after parse.
@@ -45,6 +61,11 @@ export const AgentAuth = z.object({
   // Plan 05-002: agent advertises ambient (hostname-scoped) session capability.
   // Hub find-or-creates one row per entry, scoped to (user, hostname, cli_kind).
   rootless_sessions: z.array(CliKind).max(2).optional(),
+  // Phase 08: optional git introspection of the connecting project_dir. When
+  // present AND `git_origin_github != null`, the hub upserts sessions keyed by
+  // `github://owner/repo` (collapsing worktrees). When absent or no GitHub
+  // remote, the hub falls back to the legacy project_dir path.
+  git: GitIntrospection.optional(),
 })
 
 export const AgentThinking = z.object({

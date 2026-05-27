@@ -1,4 +1,5 @@
 import { sql } from "./postgres.ts";
+import { buildRepoKey, type GitOriginGithub } from "../lib/repo-key.ts";
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
@@ -136,6 +137,162 @@ export async function findOrCreateAgentSession(
     RETURNING *
   `;
   return { ...rows[0], created: true };
+}
+
+// Phase 08: GitHub-keyed session resolution. Wraps the priority-1/2/3
+// algorithm from ARCHITECTURE §4 in a single transaction with `FOR UPDATE`
+// locks so that two worktrees of the same GitHub repo authenticating in
+// parallel converge on ONE session row.
+//
+// - No `git` field, or not a git repo, or no GitHub remote → upsert
+//   `pending_local_repos` and fall through to legacy `findOrCreateAgentSession`.
+// - GitHub remote → check existing repo-keyed row (P1); else upgrade matching
+//   legacy row(s) in place and supersede siblings (P2); else insert new
+//   repo-keyed row protected by the partial unique index (P3).
+//
+// Returns the existing session shape plus `created`, `repo_keyed`, and
+// `migrated` flags so the WS handler can log the rollout signal.
+export type FindOrCreateV2Result = {
+  // session row (postgres.js returns plain row objects)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [k: string]: any
+  id: string
+  created: boolean
+  repo_keyed: boolean
+  migrated?: boolean
+}
+
+export type GitIntrospectionInput = {
+  is_git_repo: boolean
+  is_worktree: boolean
+  worktree_parent_path: string | null
+  git_remote: string | null
+  git_origin_github: GitOriginGithub | null
+}
+
+export async function findOrCreateAgentSessionV2(
+  userId: string,
+  projectDir: string,
+  tokenHash: string,
+  cliKind: 'claude' | 'codex' = 'claude',
+  git?: GitIntrospectionInput,
+  hostname: string | null = null,
+): Promise<FindOrCreateV2Result> {
+  // Step 1: no usable github identity → legacy path + pending_local_repos.
+  if (!git || !git.is_git_repo || !git.git_origin_github) {
+    if (hostname) {
+      try {
+        await sql`
+          INSERT INTO pending_local_repos (user_id, hostname, project_dir, is_git_repo)
+          VALUES (${userId}, ${hostname}, ${projectDir}, ${git?.is_git_repo ?? false})
+          ON CONFLICT (user_id, hostname, project_dir) DO UPDATE
+            SET last_seen_at = now(),
+                is_git_repo = EXCLUDED.is_git_repo
+        `
+      } catch (err: any) {
+        console.warn('[session-v2] pending_local_repos upsert failed:', err?.message)
+      }
+    }
+    const legacy = await findOrCreateAgentSession(userId, projectDir, tokenHash, cliKind)
+    return { ...legacy, repo_keyed: false }
+  }
+
+  const repoKey = buildRepoKey(git.git_origin_github)
+  const owner = git.git_origin_github.owner.toLowerCase()
+  const repo = git.git_origin_github.repo.toLowerCase()
+  const candidatePaths = [projectDir, git.worktree_parent_path].filter((p): p is string => !!p)
+
+  return sql.begin(async (tx) => {
+    // Priority 1: existing github-keyed row for this user.
+    const p1 = await tx`
+      SELECT * FROM sessions
+      WHERE user_id = ${userId}
+        AND repo_key = ${repoKey}
+        AND is_rootless = false
+        AND deleted_at IS NULL
+      FOR UPDATE
+    `
+    if (p1[0]) {
+      const row = p1[0]
+      const updated = await tx`
+        UPDATE sessions
+           SET token_hash = ${tokenHash},
+               project_dir = ${projectDir},
+               last_activity = now()
+         WHERE id = ${row.id}
+         RETURNING *
+      `
+      return { ...updated[0], created: false, repo_keyed: true }
+    }
+
+    // Priority 2: legacy rows (repo_key IS NULL) whose project_dir matches
+    // the connecting path OR the worktree parent. Pick the most-recently-
+    // active as the keeper and supersede the rest.
+    let legacyRows: any[] = []
+    if (candidatePaths.length > 0) {
+      legacyRows = await tx`
+        SELECT * FROM sessions
+        WHERE user_id = ${userId}
+          AND repo_key IS NULL
+          AND is_rootless = false
+          AND deleted_at IS NULL
+          AND project_dir = ANY(${candidatePaths}::text[])
+        ORDER BY last_activity DESC NULLS LAST
+        FOR UPDATE
+      `
+    }
+
+    if (legacyRows.length > 0) {
+      const keeper = legacyRows[0]
+      const updated = await tx`
+        UPDATE sessions
+           SET repo_key = ${repoKey},
+               github_owner = ${owner},
+               github_repo = ${repo},
+               token_hash = ${tokenHash},
+               project_dir = ${projectDir},
+               last_activity = now()
+         WHERE id = ${keeper.id}
+         RETURNING *
+      `
+      for (let i = 1; i < legacyRows.length; i++) {
+        const other = legacyRows[i]
+        await tx`
+          UPDATE sessions
+             SET superseded_by = ${keeper.id},
+                 deleted_at = now()
+           WHERE id = ${other.id}
+        `
+      }
+      return { ...updated[0], created: false, repo_keyed: true, migrated: true }
+    }
+
+    // Priority 3: brand-new repo-keyed row. ON CONFLICT handles the final-mile
+    // race where two transactions both miss P1 but only one wins the INSERT.
+    const name = `${owner}/${repo}`
+    const inserted = await tx`
+      INSERT INTO sessions (
+        user_id, name, project_dir, token_hash, cli_kind,
+        repo_key, github_owner, github_repo
+      )
+      VALUES (
+        ${userId}, ${name}, ${projectDir}, ${tokenHash}, ${cliKind},
+        ${repoKey}, ${owner}, ${repo}
+      )
+      ON CONFLICT (user_id, repo_key)
+        WHERE repo_key IS NOT NULL AND is_rootless = false AND deleted_at IS NULL
+        DO UPDATE SET
+          token_hash = EXCLUDED.token_hash,
+          project_dir = EXCLUDED.project_dir,
+          last_activity = now()
+      RETURNING *, (xmax = 0) AS inserted_fresh
+    `
+    const row = inserted[0]
+    const created = row?.inserted_fresh === true
+    // strip the diagnostic column before returning
+    const { inserted_fresh, ...clean } = row
+    return { ...clean, created, repo_keyed: true }
+  }) as Promise<FindOrCreateV2Result>
 }
 
 // Create a session for a legacy channel/plugin connection

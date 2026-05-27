@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, findOrCreateAgentSession, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo } from '../db/dal'
 import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
@@ -209,7 +209,15 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     const rawToken = generateToken('remo_')
     const tokenHash = await hashToken(rawToken)
     const cliKind: 'claude' | 'codex' = (msg as any).cli_kind ?? 'claude'
-    const session = await findOrCreateAgentSession(userId, projectDir, tokenHash, cliKind)
+    const gitInput = (msg as any).git as Parameters<typeof findOrCreateAgentSessionV2>[4]
+    const session = await findOrCreateAgentSessionV2(
+      userId,
+      projectDir,
+      tokenHash,
+      cliKind,
+      gitInput,
+      msg.hostname ?? null,
+    )
 
     if (!session.created) {
       unregisterChannel(session.id)
@@ -221,7 +229,7 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     ws.data.userId = userId
     if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
 
-    console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir} cli=${cliKind} reused=${!session.created}`)
+    console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir} cli=${cliKind} reused=${!session.created} repo_keyed=${session.repo_keyed} migrated=${session.migrated ?? false}`)
     registerChannel(session.id, userId, ws as any)
     await setSessionStatus(session.id, 'online')
 
