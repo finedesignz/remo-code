@@ -1,5 +1,7 @@
 import { useState } from 'react'
-import { usePendingLocalRepos, type CreateGithubRepoError, type PendingLocalRepo } from '../hooks/usePendingLocalRepos'
+import { usePendingLocalRepos, type PendingLocalRepo } from '../hooks/usePendingLocalRepos'
+import { CreateGithubRepoModal } from './CreateGithubRepoModal'
+import { useSessions } from '../hooks/useSessions'
 
 interface Props {
   token: string | null
@@ -10,6 +12,14 @@ interface Props {
    * tooltip.
    */
   resolveSessionId?: (hostname: string, project_dir: string) => string | null
+  /**
+   * Hub WS subscribe — forwarded to CreateGithubRepoModal so it can render a
+   * progress bar driven by `repo_create_progress` events. When omitted the
+   * modal falls back to a "Creating…" indeterminate state.
+   */
+  subscribe?: (handler: (msg: any) => void) => () => void
+  /** Called after a create job finishes successfully (so caller can refetch). */
+  onCreated?: () => void
 }
 
 /**
@@ -21,53 +31,36 @@ interface Props {
  *
  * Hidden entirely when there's nothing pending.
  */
-export function PendingLocalRepoPrompt({ token, resolveSessionId }: Props) {
-  const { pending, dismiss, createGithubRepo } = usePendingLocalRepos(token)
+export function PendingLocalRepoPrompt({ token, resolveSessionId, subscribe, onCreated }: Props) {
+  const { pending, dismiss, refetch } = usePendingLocalRepos(token)
+  // Reuse the launch-flow hook for `createGithubRepo` so the modal sees the
+  // same wire surface across entry points (Sidebar prompt + future "Create"
+  // CTAs on the session detail view).
+  const { createGithubRepo } = useSessions(token)
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [errorFor, setErrorFor] = useState<{ key: string; msg: string; scopeMissing: boolean } | null>(null)
   const [toast, setToast] = useState<string | null>(null)
+  const [modalFor, setModalFor] = useState<{ sessionId: string; defaultName: string } | null>(null)
 
   if (pending.length === 0) return null
 
   const rowKey = (p: PendingLocalRepo) => `${p.hostname}::${p.project_dir}`
 
-  const handleCreate = async (p: PendingLocalRepo) => {
+  const handleCreate = (p: PendingLocalRepo) => {
     const sessionId = resolveSessionId?.(p.hostname, p.project_dir) ?? null
+    const k = rowKey(p)
     if (!sessionId) {
       setErrorFor({
-        key: rowKey(p),
+        key: k,
         msg: 'No session yet — open this folder in Remo Code first.',
         scopeMissing: false,
       })
       return
     }
-    const k = rowKey(p)
-    setBusy(k)
     setErrorFor(null)
-    try {
-      const basename = p.project_dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'repo'
-      await createGithubRepo(sessionId, { name: basename, visibility: 'private' })
-      setToast(`Creating ${basename} on GitHub…`)
-      window.setTimeout(() => setToast(null), 4000)
-    } catch (err) {
-      const ce = err as CreateGithubRepoError
-      if (ce && typeof ce === 'object' && 'scopeMissing' in ce && ce.scopeMissing) {
-        setErrorFor({
-          key: k,
-          msg: 'GitHub App needs administration:write — contact admin.',
-          scopeMissing: true,
-        })
-      } else {
-        setErrorFor({
-          key: k,
-          msg: (err as Error)?.message || 'Failed to create repo.',
-          scopeMissing: false,
-        })
-      }
-    } finally {
-      setBusy(null)
-    }
+    const basename = p.project_dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'repo'
+    setModalFor({ sessionId, defaultName: basename })
   }
 
   const handleDismiss = async (p: PendingLocalRepo) => {
@@ -152,6 +145,22 @@ export function PendingLocalRepoPrompt({ token, resolveSessionId }: Props) {
         <div className="px-3 py-1.5 text-[11px] text-emerald-300 border-t border-amber-500/10">
           {toast}
         </div>
+      )}
+      {modalFor && token && (
+        <CreateGithubRepoModal
+          token={token}
+          sessionId={modalFor.sessionId}
+          defaultName={modalFor.defaultName}
+          createGithubRepo={createGithubRepo}
+          subscribe={subscribe ?? (() => () => {})}
+          onClose={() => setModalFor(null)}
+          onCompleted={() => {
+            setToast(`Created ${modalFor.defaultName} on GitHub`)
+            window.setTimeout(() => setToast(null), 4000)
+            refetch()
+            onCreated?.()
+          }}
+        />
       )}
     </div>
   )
