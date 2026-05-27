@@ -11,6 +11,13 @@ import {
   getUserClaudeThresholds,
   setUserClaudeThresholds,
 } from '../db/dal.ts';
+import {
+  getUserRevanoteWebhookSecret,
+  getUserRevanoteWebhookStatus,
+  rotateUserRevanoteWebhookSecret,
+  setUserRevanoteBudgetPct,
+  listRevanoteWebhookAttempts,
+} from '../db/revanote-dal.ts';
 import { getUsage } from '../usage/store.ts';
 import { evaluateThreshold } from '../usage/threshold.ts';
 
@@ -171,6 +178,82 @@ accountRouter.get('/usage', async (c) => {
     });
   } catch (err: any) {
     console.error('[account] usage GET failed:', err?.code, err?.message);
+    return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
+  }
+});
+
+// ── Phase 08: Revanote webhook secret + budget + attempts ────────────────────
+
+function revanoteWebhookUrlFor(userId: string, token: string | null): string {
+  const base = publicBase();
+  if (!token) return `${base}/api/revanote/webhook/${userId}`;
+  return `${base}/api/revanote/webhook/${userId}/${token}`;
+}
+
+accountRouter.get('/revanote-webhook-secret', async (c) => {
+  const userId = c.get('userId') as string;
+  try {
+    const status = await getUserRevanoteWebhookStatus(userId);
+    const secret = status.configured ? await getUserRevanoteWebhookSecret(userId) : null;
+    return c.json({
+      configured: status.configured,
+      webhook_url: revanoteWebhookUrlFor(userId, secret),
+      auth_mode: 'url_token+hmac',
+      budget_pct: status.budget_pct,
+    });
+  } catch (err: any) {
+    console.error('[account] revanote-webhook-secret GET failed:', err?.code, err?.message);
+    return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
+  }
+});
+
+accountRouter.post('/revanote-webhook-secret/rotate', async (c) => {
+  const userId = c.get('userId') as string;
+  try {
+    const secret = await rotateUserRevanoteWebhookSecret(userId);
+    return c.json({
+      user_id: userId,
+      token: secret,
+      webhook_secret: secret,
+      webhook_url: revanoteWebhookUrlFor(userId, secret),
+      auth_mode: 'url_token+hmac',
+      note:
+        'Paste webhook_url + webhook_secret into Revanote. The secret doubles as the URL-path token AND the X-Revuu-Signature HMAC key, AND the Bearer credential on outbound callbacks.',
+    });
+  } catch (err: any) {
+    console.error('[account] revanote-webhook-secret rotate failed:', err?.code, err?.message);
+    return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
+  }
+});
+
+accountRouter.get('/revanote-webhook-attempts', async (c) => {
+  const userId = c.get('userId') as string;
+  const limitRaw = c.req.query('limit');
+  const limit = limitRaw ? Math.min(100, Math.max(1, Number(limitRaw) || 10)) : 10;
+  try {
+    const attempts = await listRevanoteWebhookAttempts(userId, limit);
+    return c.json({ attempts });
+  } catch (err: any) {
+    console.error('[account] revanote-webhook-attempts GET failed:', err?.code, err?.message);
+    return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
+  }
+});
+
+const RevanoteBudgetSchema = z.object({
+  budget_pct: z.number().int().min(1).max(100).nullable(),
+}).strict();
+
+accountRouter.put('/revanote-budget-pct', async (c) => {
+  const userId = c.get('userId') as string;
+  let body: any;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const parsed = RevanoteBudgetSchema.safeParse(body);
+  if (!parsed.success) return c.json({ error: 'invalid_body', detail: parsed.error.flatten() }, 400);
+  try {
+    const saved = await setUserRevanoteBudgetPct(userId, parsed.data.budget_pct);
+    return c.json({ budget_pct: saved });
+  } catch (err: any) {
+    console.error('[account] revanote-budget-pct PUT failed:', err?.code, err?.message);
     return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
   }
 });

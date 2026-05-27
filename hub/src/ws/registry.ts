@@ -1,5 +1,5 @@
 import type { ServerWebSocket } from 'bun'
-import { ScheduledRunEvent, ErrorCaptureEvent } from './protocol'
+import { ScheduledRunEvent, ErrorCaptureEvent, RevanoteEvent } from './protocol'
 
 interface ChannelEntry {
   ws: ServerWebSocket<any>
@@ -118,6 +118,22 @@ export function broadcastErrorEvent(userId: string, event: unknown) {
   if (!parsed.success) {
     console.warn(
       `[ws.registry] broadcastErrorEvent dropped invalid event for user=${userId}:`,
+      parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+    )
+    return
+  }
+  broadcastToUser(userId, parsed.data)
+}
+
+/**
+ * Validated broadcast for Revanote annotation lifecycle events (Phase 08).
+ * Mirrors `broadcastErrorEvent`. Drops on schema mismatch, never throws.
+ */
+export function broadcastRevanoteEvent(userId: string, event: unknown) {
+  const parsed = RevanoteEvent.safeParse(event)
+  if (!parsed.success) {
+    console.warn(
+      `[ws.registry] broadcastRevanoteEvent dropped invalid event for user=${userId}:`,
       parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
     )
     return

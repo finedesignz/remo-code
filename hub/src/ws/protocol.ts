@@ -170,6 +170,63 @@ export const ErrorCaptureEvent = z.discriminatedUnion('type', [
 ])
 export type ErrorCaptureEvent = z.infer<typeof ErrorCaptureEvent>
 
+// -- Revanote outbound events (Phase 08) --
+// Lifecycle: revanote_received → (revanote_dispatched | revanote_skipped) →
+// revanote_resolved → revanote_callback_sent.
+
+export const RevanoteReceived = z.object({
+  type: z.literal('revanote_received'),
+  annotation_id: z.string().min(1),
+  annotation_id_external: z.string().min(1),
+  page_url: z.string().min(1),
+  comment_preview: z.string(),
+  received_at: z.string(),
+})
+
+export const RevanoteDispatched = z.object({
+  type: z.literal('revanote_dispatched'),
+  annotation_id: z.string().min(1),
+  run_id: z.string().min(1),
+  session_id: z.string().min(1),
+  dispatched_at: z.string(),
+})
+
+export const RevanoteSkipped = z.object({
+  type: z.literal('revanote_skipped'),
+  annotation_id: z.string().min(1),
+  skip_reason: z.string().min(1),
+})
+
+export const RevanoteResolved = z.object({
+  type: z.literal('revanote_resolved'),
+  annotation_id: z.string().min(1),
+  run_id: z.string().min(1),
+  resolved: z.boolean(),
+  action_taken: z.string().nullable().optional(),
+  files_changed: z.array(z.string()).optional(),
+  deployed: z.boolean().optional(),
+  finished_at: z.string(),
+})
+
+export const RevanoteCallbackSent = z.object({
+  type: z.literal('revanote_callback_sent'),
+  annotation_id: z.string().min(1),
+  attempt_no: z.number().int().min(0),
+  http_status: z.number().int().nullable().optional(),
+  delivered: z.boolean(),
+  dead: z.boolean().optional(),
+  next_retry_at: z.string().nullable().optional(),
+})
+
+export const RevanoteEvent = z.discriminatedUnion('type', [
+  RevanoteReceived,
+  RevanoteDispatched,
+  RevanoteSkipped,
+  RevanoteResolved,
+  RevanoteCallbackSent,
+])
+export type RevanoteEvent = z.infer<typeof RevanoteEvent>
+
 // -- Hub outbound types (not validated, we construct them) --
 
 export type HubToChannel =
@@ -249,6 +306,18 @@ export type HubToClient =
   | { type: 'error_skipped'; error_id: string; project_id: string;
       dispatch_status: 'skipped' | 'failed' | 'deduped' | 'rate_limited' | 'cap_exceeded';
       skip_reason: string }
+  // Phase 08: Revanote annotation lifecycle.
+  | { type: 'revanote_received'; annotation_id: string; annotation_id_external: string;
+      page_url: string; comment_preview: string; received_at: string }
+  | { type: 'revanote_dispatched'; annotation_id: string; run_id: string;
+      session_id: string; dispatched_at: string }
+  | { type: 'revanote_skipped'; annotation_id: string; skip_reason: string }
+  | { type: 'revanote_resolved'; annotation_id: string; run_id: string;
+      resolved: boolean; action_taken?: string | null; files_changed?: string[];
+      deployed?: boolean; finished_at: string }
+  | { type: 'revanote_callback_sent'; annotation_id: string; attempt_no: number;
+      http_status?: number | null; delivered: boolean; dead?: boolean;
+      next_retry_at?: string | null }
   // Phase 06: Anthropic Claude subscription usage snapshot from the local
   // agent's poll of /api/oauth/usage. Broadcast to all clients of the user.
   | { type: 'subscription_usage'; usage: {

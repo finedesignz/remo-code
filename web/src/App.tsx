@@ -9,6 +9,7 @@ import { AppChrome } from './components/AppChrome'
 import { SettingsPage } from './components/SettingsPage'
 import { SchedulesPage } from './components/SchedulesPage'
 import { ErrorCapturePage } from './components/ErrorCapturePage'
+import { RevanotePage } from './components/RevanotePage'
 import { ChatSurfaceShowcase } from './components/ChatSurfaceShowcase'
 import { MobileAccordionShowcase } from './components/MobileAccordionShowcase'
 import { GridPage } from './components/GridPage'
@@ -25,6 +26,7 @@ type Route =
   | 'settings'
   | 'schedules'
   | 'error-capture'
+  | 'revanote'
   | 'grid'
   | 'privacy'
   | 'terms'
@@ -57,6 +59,7 @@ function getRoute(): Route {
     return 'settings'
   }
   if (hash.startsWith('#/error-capture')) return 'error-capture'
+  if (hash.startsWith('#/revanote')) return 'revanote'
   if (hash.startsWith('#/grid')) return 'grid'
   if (hash.startsWith('#/privacy')) return 'privacy'
   if (hash.startsWith('#/terms')) return 'terms'
@@ -170,6 +173,12 @@ export default function App() {
         </AppChrome>
       )}
 
+      {route === 'revanote' && (
+        <AppChrome token={token} user={user} signOut={signOut} onNavigate={navigate} headerContent={<h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">Revanote</h2>}>
+          <RevanoteRoute token={token} onBack={goToChat} />
+        </AppChrome>
+      )}
+
       {route === 'dev-chat-surface' && (
         <ChatSurfaceShowcase token={token} />
       )}
@@ -228,6 +237,11 @@ function SchedulesRoute({ token, onBack }: { token: string; onBack: () => void }
 function ErrorCaptureRoute({ token, onBack }: { token: string; onBack: () => void }) {
   const { subscribe } = useWebSocket(token)
   return <ErrorCapturePage token={token} onBack={onBack} subscribe={subscribe} />
+}
+
+function RevanoteRoute({ token, onBack }: { token: string; onBack: () => void }) {
+  const { subscribe } = useWebSocket(token)
+  return <RevanotePage token={token} onBack={onBack} subscribe={subscribe} />
 }
 
 function NotificationsBridge({ token, profile }: { token: string; profile: Profile }) {

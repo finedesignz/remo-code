@@ -277,6 +277,30 @@ When adding a new license-gated endpoint, exclusion-list entry, magic-link claim
 
 **Titanium bypass active as of 2026-05-26** (commit `5e3674d`, PR #71). `TITANIUM_BYPASS=true` is set on the prod Coolify app: it skips `warmJwksCache()` at boot, short-circuits `requireActiveLicense` to permissive mode, and 503s the magic-link endpoints (`/api/auth/login/request-link`, `/api/auth/login/callback`) with `{ error: "titanium_disabled" }`. Legacy bcrypt `/api/auth/login` (`ALLOW_LEGACY_LOGIN=true`) is the only working auth path under bypass. The flag stays on until titanium-licensing Phase 09 ships a working Keygen JWKS endpoint; then set to `false` and the full magic-link + license-gate flow resumes.
 
+## Phase 08: Revanote Integration
+
+Inbound visual annotations from Revanote → routed as `user_message` into the Claude session bound to the page's repo → agent replies with a `<<JSON>>…<<END>>` envelope → hub posts a callback back to Revanote (with exponential retry). Full architecture in [docs/revanote.md](docs/revanote.md).
+
+- **Module:** `hub/src/revanote/` (parallel to `error-capture/` and `scheduler/`). NOT folded into `scheduler/task_kind` — annotation lifecycle is 1:1 + callback-bound, different from cron fan-out.
+- **Inbound webhook:** `POST /api/revanote/webhook/:user_id/:token` mounted OUTSIDE the JWT + license + CSRF catch-alls (mirrors `coolify-webhook` + `sentry-intake`). URL-token constant-time compare + optional `X-Revuu-Signature: sha256=<hex>` HMAC. Raw body MUST be read before `JSON.parse` (Hono `c.req.text()` pattern). 5-min timestamp skew if `timestamp` present.
+- **Single secret, triple duty:** `users.revanote_webhook_secret` (UUID) IS the URL token AND the HMAC key AND the outbound callback Bearer. `POST /api/account/revanote-webhook-secret/rotate` returns `{ user_id, token, webhook_secret, webhook_url }` in one call.
+- **File map (hub):** `revanote/payload-schema.ts` (inbound zod), `result-schema.ts` (`<<JSON>>…<<END>>` envelope parser + `stripRevanoteEnvelope`, modeled on `triage-schema.parseTriageOutput`), `prompt.ts` (storage prefix `[revanote: <30-grapheme preview via Intl.Segmenter>]\n\n<full prompt>` + per-strategy agent prompt), `dispatcher.ts` (mapping resolve → cost-cap + per-source budget + threshold gate → session-queue claim → grace if offline → send), `run-lifecycle.ts` (assistant_message finalize + callback enqueue, mirrors `error-capture/run-lifecycle.ts`), `grace.ts` (10-min offline buffer), `callback.ts` (retry curve `1m → 5m → 15m → 1h → 4h → 12h → dead-letter`, jittered ±10%, `FOR UPDATE SKIP LOCKED` claim).
+- **REST:** `hub/src/api/{revanote-webhook,revanote-mappings,revanote-annotations}.ts`. Account-level helpers in `hub/src/api/account.ts` (`/revanote-webhook-secret*`, `/revanote-webhook-attempts`, `/revanote-budget-pct`).
+- **WS events:** added 5 lifecycle events to `hub/src/ws/protocol.ts` (`revanote_received`, `revanote_dispatched`, `revanote_skipped`, `revanote_resolved`, `revanote_callback_sent`) + `broadcastRevanoteEvent` in `hub/src/ws/registry.ts`. The agent ws `assistant_message` handler calls `revanote/run-lifecycle.onAgentReply` after the error-capture finalize.
+- **DB tables (`hub/src/db/schema.sql`, idempotent):** `users.revanote_webhook_secret`, `users.revanote_budget_pct` (1..100, default 60), `revanote_app_mappings(hostname_pattern, repo_path, supervisor_id?, deploy_strategy pr|direct|none, auto_merge, enabled, auto_created)`, `annotations(annotation_id_external, page_url, annotation_url, screenshot_url, comment, replies_json, callback_url, mapping_id, session_id, status pending|dispatched|resolved|failed|failed_offline, payload_raw JSONB)` UNIQUE `(user_id, annotation_id_external)`, `annotation_runs`, `revanote_callback_attempts` (partial index on `next_retry_at IS NOT NULL`), `revanote_webhook_attempts` (audit log capped 100/user).
+- **Web UI:** `web/src/components/RevanotePage.tsx` route at `#/revanote`. `MessageBubble.tsx` renders the violet **Annotation** pill via `parseRevanotePrefix` (modeled on `parseScheduledPrefix`) and strips the agent's `<<JSON>>…<<END>>` envelope from the displayed text via `stripRevanoteEnvelope`. `web/src/lib/revanote-message.ts` houses both helpers.
+
+**Key invariants:**
+
+- **Cost cap is non-negotiable.** All annotation dispatches flow through the same `enforceCostCap` + `checkUserThreshold` + `session-queue.enqueue` pipeline as scheduled tasks. The per-source `revanote_budget_pct` gate is layered on top, NOT a substitute.
+- **Webhook raw body MUST be read before any JSON parse** (mirrors Coolify webhook + Sentry intake — required for both HMAC verification and audit log preview).
+- **Audit-log every hit** (success + auth_failed + hmac_failed + bad_payload + stale_timestamp). Capped 100/user, oldest-deleted on each insert.
+- **Outbound callback ALWAYS includes `annotation_id`**, even on pre-dispatch rejections (`budget_threshold`, `no_target`, `session_busy`).
+- **`deployed: true` means "pushed", not "Coolify serving traffic"** — documented contract in `docs/revanote.md`.
+- **GitHub-issue / Coolify deploy-status enrichment** is out of scope this phase — deferred to Phase 09+.
+
+When adding a new annotation status, callback retry bucket, deploy strategy, or any revanote-side change: update `docs/revanote.md` in the same commit.
+
 ## API docs convention
 
 The hub exposes OpenAPI 3.1 at `/openapi.json` and a Scalar UI at `/docs`. The spec is assembled in `hub/src/api/_openapi.ts` using `@hono/zod-openapi` `createRoute` declarations. Currently covers `/api/profile/cost-today` and `/api/profile/license` — the rest of the hub is plain Hono and gets migrated incrementally.
