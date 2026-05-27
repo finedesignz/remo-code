@@ -113,6 +113,29 @@ export const RunFinished = z.object({
   error: z.string().max(2000).optional(),
 })
 
+/**
+ * Phase 08 §15 — supervisor pushes its full repo inventory after each scan.
+ * Each entry carries the introspection metadata the hub needs to
+ * findOrCreateAgentSessionV2 (for GitHub-keyed entries) or upsert
+ * `pending_local_repos` (for everything else). `canonical` flags the entry
+ * the supervisor picks as the launch cwd for a github-origin group; the hub
+ * still receives sibling worktrees so the "Connected from" tooltip + legacy
+ * migration matching have the full set.
+ */
+export const SupervisorRepoInventory = z.object({
+  type: z.literal('supervisor.repo_inventory'),
+  scanned_at: z.string(),
+  repos: z.array(z.object({
+    local_path: z.string(),
+    is_git_repo: z.boolean(),
+    is_worktree: z.boolean(),
+    worktree_parent_path: z.string().nullable(),
+    git_remote: z.string().nullable(),
+    git_origin_github: z.object({ owner: z.string(), repo: z.string() }).nullable(),
+    canonical: z.boolean().optional(),
+  })).max(2000),
+})
+
 export const SupervisorInbound = [
   SupervisorHello,
   SupervisorState,
@@ -125,6 +148,7 @@ export const SupervisorInbound = [
   RunStarted,
   RunOutput,
   RunFinished,
+  SupervisorRepoInventory,
 ]
 
 // -- Hub -> Supervisor (constructed by hub, not validated) --
