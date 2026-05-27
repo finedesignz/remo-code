@@ -116,6 +116,8 @@ Three packages in a Bun workspace:
 - **web/** — React 19 + Vite + Tailwind CSS 4 chat UI with activity feed, session switching, file attachments, light/dark theme, and unread badges.
 - **supervisor/** — Local supervisor source. `supervisor/src/` is compiled by `bun build --compile` into the sidecar binary that `supervisor/tauri/` bundles into a Windows MSI installer (Rust + WebView2 tray app). Each running host has exactly one supervisor; the supervisor hosts every session for that machine.
 
+**GitHub-keyed sessions:** as of Phase 08, sessions are identified by their GitHub origin (`github://owner/repo`) rather than by their local path. All worktrees, clones, and checkouts of the same repo on the same machine — or across machines for the same user — collapse to one session row, one conversation history, one sidebar entry. Folders without a GitHub remote land in a **Needs attention** section in the sidebar where you can either Create-on-GitHub or Dismiss them. See [docs/github-session-keying.md](docs/github-session-keying.md) for the resolution algorithm, schema additions, and the REST surface (`/api/sessions/pending-prompts`, `/api/sessions/dismiss-local`, `/api/sessions/:id/launch`, `/api/sessions/:id/clone-here`, `/api/sessions/:id/create-github-repo`).
+
 ## How It Works
 
 1. You install the Remo Code Supervisor MSI on the Windows machine you want to control, paste your API key into the first-run wizard, and pick repo roots.
