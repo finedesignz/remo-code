@@ -1,42 +1,37 @@
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdir, writeFile, rm } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { describe, it, expect } from 'bun:test';
 import { loadPromptTemplate } from '../src/scheduler/prompts/loader';
 
-// Wave 1 stub: covers load-success + load-missing + invalid-workflow +
-// invalid-step. Wave 2 ships the 9 real `.md` templates; at that point
-// this file is rewritten to assert against the on-disk fixtures directly.
-
-const promptsDir = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  'src',
-  'scheduler',
-  'prompts',
-);
-const fakeFile = join(promptsDir, 'security', 'scan.md');
+// Wave 2: 9 real templates now ship in `hub/src/scheduler/prompts/<workflow>/<step>.md`.
+// Tests run against the real on-disk files. No tmp fixtures — those would race
+// against shipped templates (afterAll rm could delete them).
 
 describe('loadPromptTemplate', () => {
-  beforeAll(async () => {
-    await mkdir(dirname(fakeFile), { recursive: true });
-    await writeFile(fakeFile, '## ROLE\nfixture\n', 'utf8');
-  });
-
-  afterAll(async () => {
-    await rm(fakeFile, { force: true });
-  });
-
-  it('loads an existing template', async () => {
-    const txt = await loadPromptTemplate('security', 'scan');
+  it('loads dev/plan with the documented skeleton sections', async () => {
+    const txt = await loadPromptTemplate('dev', 'plan');
     expect(txt).toContain('## ROLE');
+    expect(txt).toContain('## RUNTIME CONTEXT');
+    expect(txt).toContain('## DELIVERABLES');
+    expect(txt).toContain('{{user_prompt}}');
+    expect(txt.length).toBeGreaterThan(200);
   });
 
-  it('throws on missing template file (ENOENT path)', async () => {
-    // log_check/pull is declared valid but not shipped on this Wave 1 branch.
-    await expect(loadPromptTemplate('log_check', 'pull')).rejects.toThrow(
-      /failed to read template/,
-    );
+  it('loads every declared workflow + step', async () => {
+    const matrix: Array<[Parameters<typeof loadPromptTemplate>[0], string]> = [
+      ['dev', 'plan'],
+      ['dev', 'execute'],
+      ['dev', 'ship'],
+      ['security', 'scan'],
+      ['security', 'triage'],
+      ['security', 'fix-or-issue'],
+      ['log_check', 'pull'],
+      ['log_check', 'classify'],
+      ['log_check', 'triage'],
+    ];
+    for (const [wf, step] of matrix) {
+      const txt = await loadPromptTemplate(wf, step);
+      expect(txt).toContain('## ROLE');
+      expect(txt).toContain('## DELIVERABLES');
+    }
   });
 
   it('throws on unknown workflow', async () => {
