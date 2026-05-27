@@ -582,3 +582,139 @@ CREATE TABLE IF NOT EXISTS pending_local_repos (
 );
 CREATE INDEX IF NOT EXISTS idx_pending_local_repos_user ON pending_local_repos(user_id);
 
+-- ── Phase 08: Revanote annotation integration ────────────────────────────────
+-- Per-user webhook secret (UUID). NULL = unconfigured. Doubles as URL-path
+-- token AND Bearer credential on outbound callbacks. Mirrors the coolify-
+-- webhook secret shape exactly; rotation is a single round-trip.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS revanote_webhook_secret TEXT;
+
+-- Optional per-user revanote-cost split as a percentage of daily_cost_cap_usd.
+-- NULL = default 60. 1..100. Sub-cap enforced inside the revanote dispatcher
+-- so revanote storms cannot starve scheduled tasks (and vice versa).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS revanote_budget_pct INTEGER;
+DO $$ BEGIN
+  ALTER TABLE users ADD CONSTRAINT users_revanote_budget_pct_range
+    CHECK (revanote_budget_pct IS NULL OR (revanote_budget_pct BETWEEN 1 AND 100));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Repo→app mapping. Hostname pattern matches the annotation's page_url host
+-- (supports literal + leading-glob `*.example.com`). Most-specific wins (tie
+-- breaker: most-recently-updated). `auto_created=true` rows are inserted by
+-- the smart-fallback path and surfaced to the user for confirmation before
+-- being treated as authoritative.
+CREATE TABLE IF NOT EXISTS revanote_app_mappings (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hostname_pattern  TEXT NOT NULL,
+  repo_path         TEXT NOT NULL,
+  supervisor_id     TEXT REFERENCES supervisors(id) ON DELETE SET NULL,
+  deploy_strategy   TEXT NOT NULL DEFAULT 'pr'
+    CHECK (deploy_strategy IN ('pr', 'direct', 'none')),
+  auto_merge        BOOLEAN NOT NULL DEFAULT false,
+  enabled           BOOLEAN NOT NULL DEFAULT true,
+  auto_created      BOOLEAN NOT NULL DEFAULT false,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_revanote_app_mappings_user
+  ON revanote_app_mappings(user_id);
+CREATE INDEX IF NOT EXISTS idx_revanote_app_mappings_user_host
+  ON revanote_app_mappings(user_id, hostname_pattern);
+
+-- Annotation rows are the durable record of every inbound revanote webhook.
+-- `annotation_id_external` is revanote's own id; we UNIQUE on (user_id, that)
+-- so revanote-side retries are idempotent. `payload_raw` preserves the entire
+-- webhook body so any future field (element_meta, capture_viewport, …) is
+-- available to the agent prompt without schema churn.
+CREATE TABLE IF NOT EXISTS annotations (
+  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  annotation_id_external   TEXT NOT NULL,
+  page_url                 TEXT NOT NULL,
+  annotation_url           TEXT,
+  screenshot_url           TEXT,
+  x                        DOUBLE PRECISION,
+  y                        DOUBLE PRECISION,
+  element_selector         TEXT,
+  comment                  TEXT NOT NULL,
+  replies_json             JSONB NOT NULL DEFAULT '[]'::jsonb,
+  callback_url             TEXT NOT NULL,
+  mapping_id               UUID REFERENCES revanote_app_mappings(id) ON DELETE SET NULL,
+  session_id               TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  status                   TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'dispatched', 'resolved', 'failed', 'failed_offline')),
+  skip_reason              TEXT,
+  source_ip                TEXT,
+  payload_raw              JSONB NOT NULL,
+  received_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  dispatched_at            TIMESTAMPTZ,
+  resolved_at              TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_annotations_user_external
+  ON annotations(user_id, annotation_id_external);
+CREATE INDEX IF NOT EXISTS idx_annotations_user_recv
+  ON annotations(user_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_annotations_status
+  ON annotations(status) WHERE status IN ('pending', 'dispatched');
+
+CREATE TABLE IF NOT EXISTS annotation_runs (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  annotation_id   UUID NOT NULL REFERENCES annotations(id) ON DELETE CASCADE,
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id      TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  status          TEXT NOT NULL DEFAULT 'in_flight'
+    CHECK (status IN ('in_flight', 'success', 'failed', 'cancelled')),
+  resolved        BOOLEAN,
+  action_taken    TEXT,
+  agent_reply     TEXT,
+  files_changed   JSONB,
+  deployed        BOOLEAN NOT NULL DEFAULT false,
+  error           TEXT,
+  cost_usd        NUMERIC(10, 6),
+  duration_ms     INTEGER,
+  output_snippet  TEXT,
+  started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_annotation_runs_annotation
+  ON annotation_runs(annotation_id);
+CREATE INDEX IF NOT EXISTS idx_annotation_runs_user_started
+  ON annotation_runs(user_id, started_at DESC);
+
+-- Callback retry queue. `next_retry_at IS NULL` means terminal (delivered or
+-- dead-lettered). Worker scans the partial index for next_retry_at <= now().
+CREATE TABLE IF NOT EXISTS revanote_callback_attempts (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  annotation_id  UUID NOT NULL REFERENCES annotations(id) ON DELETE CASCADE,
+  attempt_no     INTEGER NOT NULL DEFAULT 0,
+  http_status    INTEGER,
+  error          TEXT,
+  attempted_at   TIMESTAMPTZ,
+  next_retry_at  TIMESTAMPTZ,
+  delivered      BOOLEAN NOT NULL DEFAULT false,
+  dead           BOOLEAN NOT NULL DEFAULT false,
+  payload_json   JSONB,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_revanote_callback_attempts_pending
+  ON revanote_callback_attempts(next_retry_at)
+  WHERE next_retry_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_revanote_callback_attempts_annotation
+  ON revanote_callback_attempts(annotation_id);
+
+-- Audit log for every webhook hit (success + auth-fail + ip-reject). Capped
+-- app-side to 100 rows/user, oldest-deleted on each insert. Mirrors
+-- coolify_webhook_attempts.
+CREATE TABLE IF NOT EXISTS revanote_webhook_attempts (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  received_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  source_ip         TEXT,
+  event_type        TEXT,
+  status            TEXT NOT NULL,
+  reason            TEXT,
+  raw_body_preview  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_revanote_webhook_attempts_user_recv
+  ON revanote_webhook_attempts(user_id, received_at DESC);
+

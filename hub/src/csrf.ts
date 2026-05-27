@@ -28,6 +28,7 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const CSRF_PATH_ALLOWLIST: Array<string | RegExp> = [
   /^\/api\/sentry\//,
   /^\/api\/coolify\/webhook\//,
+  /^\/api\/revanote\/webhook\//,
   /^\/api\/auth\/login\//, // login itself gated by magic-link
   /^\/api\/auth\/logout$/, // logout reads cookie, kills it — no CSRF needed
   /^\/api\/github\/callback$/, // GitHub redirect

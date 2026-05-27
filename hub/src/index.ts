@@ -24,6 +24,9 @@ import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { instructions as instructionsApi } from './api/instructions'
 import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
+import { revanoteWebhookRoutes } from './api/revanote-webhook'
+import { revanoteMappings } from './api/revanote-mappings'
+import { revanoteAnnotations } from './api/revanote-annotations'
 import { webhooksTitanium } from './api/webhooks-titanium'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
@@ -35,6 +38,8 @@ import * as schedDispatcher from './scheduler/dispatcher.ts'
 import * as schedCatchup from './scheduler/catchup.ts'
 import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
 import { startErrorGraceSweep } from './error-capture/grace.ts'
+import { startRevanoteGraceSweep } from './revanote/grace.ts'
+import { startRevanoteCallbackWorker } from './revanote/callback.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -142,6 +147,10 @@ app.route('/api/sentry', sentryIntakeApi)
 // MUST be mounted BEFORE the JWT catch-all middleware below.
 app.route('/api/coolify', coolifyWebhookRoutes)
 
+// Phase 08: Public Revanote annotation webhook (URL-token + HMAC, per-user
+// secret embedded in path). MUST be mounted BEFORE the JWT catch-all.
+app.route('/api/revanote', revanoteWebhookRoutes)
+
 // Public Titanium license-changed webhook (HMAC-signed, shared secret).
 // MUST be mounted BEFORE the JWT catch-all. Inert (503) until secret set.
 app.route('/webhooks/titanium', webhooksTitanium)
@@ -154,6 +163,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path === '/api/github/callback') return next()
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
+  if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
   // Phase 07: public auth endpoints (login request-link, callback, logout, me).
   // The authRouter handles its own auth state internally where needed.
   if (c.req.path.startsWith('/api/auth/')) return next()
@@ -173,6 +183,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path === '/api/github/callback') return next()
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
+  if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
   if (c.req.path.startsWith('/api/setup')) return next()
   return requireActiveLicense({ readOnlyOk: true })(c, next)
@@ -226,6 +237,10 @@ app.use('/api/scheduled-tasks/*', async (c, next) => isMutating(c) ? userMutatio
 app.use('/api/error-projects', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/error-projects/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/account/coolify-webhook-secret/rotate', userMutationLimit)
+app.use('/api/account/revanote-webhook-secret/rotate', userMutationLimit)
+app.use('/api/revanote/mappings', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/revanote/mappings/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/revanote/annotations/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 
 // Phase 07-G: admin endpoints. requireAdmin enforces role; requireRecentAuth
 // enforces fresh session (≤5min). userMutationLimit applies to mutating ops.
@@ -257,6 +272,10 @@ app.route('/api/error-runs', errorRunsRouter)
 app.route('/api/chat-tabs', chatTabsApi)
 app.route('/api/instructions', instructionsApi)
 app.route('/api/error-setup', errorSetupApi)
+// Phase 08: JWT-authed revanote sub-routes (mappings + annotations).
+// The public webhook route lives at /api/revanote/webhook/* (mounted above).
+app.route('/api/revanote/mappings', revanoteMappings)
+app.route('/api/revanote/annotations', revanoteAnnotations)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
@@ -420,6 +439,8 @@ runMigrations()
     await schedRegistry.loadAll()
     await schedCatchup.runOnce()
     startErrorGraceSweep()
+    startRevanoteGraceSweep()
+    startRevanoteCallbackWorker()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {

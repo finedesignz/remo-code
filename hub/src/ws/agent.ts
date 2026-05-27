@@ -319,6 +319,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       const eg = await import('../error-capture/grace.ts')
       void eg.drainForSession(session.id)
     } catch {}
+    // Phase 08 — drain any revanote annotations parked for this session.
+    try {
+      const rg = await import('../revanote/grace.ts')
+      void rg.drainForSession(session.id)
+    } catch {}
     return
   }
 
@@ -453,6 +458,13 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       const ec = await import('../error-capture/run-lifecycle.ts')
       if (ec.errorRunActiveForSession(sessionId)) {
         void ec.onAgentReply(sessionId, msg.content)
+      }
+    } catch {}
+    // Phase 08 — finalize any in-flight revanote annotation run for this session.
+    try {
+      const rev = await import('../revanote/run-lifecycle.ts')
+      if (rev.annotationRunActiveForSession(sessionId)) {
+        void rev.onAgentReply(sessionId, msg.content)
       }
     } catch {}
   }
