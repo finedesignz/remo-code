@@ -9,7 +9,7 @@ import { getHandler, nativeSupervisorCommands } from './commands/index'
 import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
 
 // Keep in sync with supervisor/tauri/src-tauri/tauri.conf.json version
-const VERSION = '0.4.3'
+const VERSION = '0.5.0'
 
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
@@ -20,7 +20,7 @@ type OutboundMsg =
   | { type: 'repo.op_result'; req_id: string; op: string; ok: boolean; error?: string; data?: any }
   | { type: 'repo.clone_progress'; req_id: string; stage: string; percent?: number }
   | { type: 'supervisor.commands_sync'; commands: Array<{ kind: 'command' | 'skill'; name: string; description: string | null; source: string; path: string }> }
-  | { type: 'supervisor.repo_inventory'; scanned_at: string; repos: Array<{ local_path: string; is_git_repo: boolean; is_worktree: boolean; worktree_parent_path: string | null; git_remote: string | null; git_origin_github: { owner: string; repo: string } | null; canonical?: boolean }> }
+  | { type: 'supervisor.repo_inventory'; scanned_at: string; repos: Array<{ local_path: string; is_git_repo: boolean; is_worktree: boolean; worktree_parent_path: string | null; git_remote: string | null; git_origin_github: { owner: string; repo: string } | null; branch?: string | null; canonical?: boolean }> }
   | { type: 'run_started'; run_id: string }
   | { type: 'run_output'; run_id: string; chunk: string }
   | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
@@ -259,6 +259,7 @@ export class SupervisorClient {
       worktree_parent_path: e.worktree_parent_path,
       git_remote: e.git_remote,
       git_origin_github: e.git_origin_github,
+      branch: e.branch,
       canonical: e.canonical,
     }))
     this.send({ type: 'supervisor.repo_inventory', scanned_at: scannedAt, repos })

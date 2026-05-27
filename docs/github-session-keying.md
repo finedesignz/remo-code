@@ -91,11 +91,14 @@ Sessions are never auto-spawned. The user clicks **Launch Claude Code** / **Laun
 
 ```
 Web UI
-  POST /api/sessions/:id/launch   { cli_kind? }
+  POST /api/sessions/:id/launch   { cli_kind?, local_path? }
 Hub
   - look up session (must be user's, not online, has cwd)
-  - resolve cwd: repo_key → supervisor inventory canonical path,
-    else session.project_dir
+  - resolve cwd:
+      1. caller-supplied `local_path` — must match an entry in the supervisor
+         inventory for this session's repo_key, else 400 invalid_local_path
+      2. repo_key → supervisor inventory canonical path
+      3. session.project_dir (legacy)
   - if no cwd → 409 local_path_missing { repo_key, suggested_clone_dir }
   - mint launch nonce (5 min)
   - WS send to supervisor:
@@ -108,7 +111,13 @@ Supervisor
     hub flips sessions.status (offline → thinking → online)
 ```
 
-Canonical cwd selection (see ARCHITECTURE §15): when multiple local checkouts of the same repo exist, the supervisor prefers a non-worktree over a worktree, and shorter paths over longer ones.
+Canonical cwd selection (see ARCHITECTURE §15): when multiple local checkouts of the same repo exist, the supervisor prefers a non-worktree over a worktree, and shorter paths over longer ones. The user can override that choice via the Sidebar's Launch dropdown (Phase 08.6); the picker is populated from `session.local_paths[]` which mirrors `getKnownLocalPathsForRepoKey()` in `hub/src/ws/supervisor-registry.ts`.
+
+## Phase 08.6 — one row per repo + worktree picker
+
+`GET /api/sessions` enriches each row with a `local_paths: Array<{ local_path, branch, is_worktree, canonical }>` field, sourced from the per-user inventory cache. The web Sidebar collapses any duplicate `repo_key` rows (defensive — DB dedupe via the partial unique index on `(user_id, repo_key)` is the primary mechanism) and the `LaunchButton` shows a `<select>` next to the button when `local_paths.length > 1` so the user picks a worktree/branch before launching. The selected path is sent as `local_path` in the `POST /api/sessions/:id/launch` body and validated against the inventory cache server-side (no arbitrary cwd injection).
+
+To populate `branch`, `supervisor/src/git-introspect.ts` now runs `git symbolic-ref --short HEAD` per scanned repo (null on detached HEAD). The wire field is optional/back-compat — pre-0.5 supervisors that don't ship branch info still work; the picker simply omits the branch suffix.
 
 ## Create-on-GitHub flow
 

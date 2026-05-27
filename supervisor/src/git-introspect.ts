@@ -18,6 +18,8 @@ export type GitIntrospection = {
   worktree_parent_path: string | null
   git_remote: string | null
   git_origin_github: GitOriginGithub | null
+  /** Current branch name (e.g. `main`, `feat/foo`) or null when detached/unknown. */
+  branch: string | null
 }
 
 function runGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {
@@ -43,6 +45,7 @@ export function introspect(cwd: string): GitIntrospection {
     worktree_parent_path: null,
     git_remote: null,
     git_origin_github: null,
+    branch: null,
   }
 
   // 1. Is a git repo?
@@ -99,6 +102,15 @@ export function introspect(cwd: string): GitIntrospection {
 
   // 5. Parse → github origin (or null).
   out.git_origin_github = parseGitRemote(out.git_remote)
+
+  // 6. Current branch name. `symbolic-ref --short HEAD` returns the branch on
+  //    success and exits non-zero on detached-HEAD — runGit swallows that and
+  //    we leave `branch` as null.
+  const br = runGit(cwd, ['symbolic-ref', '--short', 'HEAD'])
+  if (br.ok) {
+    const name = br.stdout.trim()
+    if (name) out.branch = name
+  }
 
   return out
 }

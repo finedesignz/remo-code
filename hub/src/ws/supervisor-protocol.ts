@@ -132,6 +132,8 @@ export const SupervisorRepoInventory = z.object({
     worktree_parent_path: z.string().nullable(),
     git_remote: z.string().nullable(),
     git_origin_github: z.object({ owner: z.string(), repo: z.string() }).nullable(),
+    /** Current branch (null for detached HEAD; missing on pre-0.5 supervisors). */
+    branch: z.string().nullable().optional(),
     canonical: z.boolean().optional(),
   })).max(2000),
 })

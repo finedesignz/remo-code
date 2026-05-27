@@ -30,6 +30,15 @@ export interface CodeSession {
   repo_key?: string | null
   github_owner?: string | null
   github_repo?: string | null
+  // ── Phase 08.6 — known local working trees for this repo ──────────────────
+  // Populated from the supervisor inventory cache. Empty for legacy sessions
+  // and when the supervisor hasn't uploaded inventory yet. Capped at 20.
+  local_paths?: Array<{
+    local_path: string
+    branch: string | null
+    is_worktree: boolean
+    canonical: boolean
+  }>
 }
 
 /**
@@ -97,7 +106,7 @@ export function useSessions(token: string | null) {
 
   const launchSession = useCallback(async (
     id: string,
-    body: { cli_kind?: 'claude' | 'codex' } = {},
+    body: { cli_kind?: 'claude' | 'codex'; local_path?: string } = {},
   ): Promise<{ ok: boolean; error?: string; detail?: string }> => {
     if (!token) return { ok: false, error: 'unauthorized' }
     try {
