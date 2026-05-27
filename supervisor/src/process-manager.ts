@@ -19,7 +19,7 @@ export interface RunSpec {
 }
 
 export interface StartRejection {
-  reason: 'sandbox_escape' | 'not_git_repo' | 'concurrency_cap' | 'duplicate_run'
+  reason: 'sandbox_escape' | 'not_git_repo' | 'concurrency_cap' | 'duplicate_run' | 'legacy_agent_spawn_disabled'
   detail?: Record<string, unknown>
 }
 
@@ -31,6 +31,10 @@ export interface ProcessManagerCallbacks {
 const BACKOFF_SCHEDULE = [1000, 2000, 4000, 8000, 16000, 30000]
 const CIRCUIT_WINDOW_MS = 10 * 60_000
 const CIRCUIT_THRESHOLD = 5
+/** Phase 09 follow-up — hard cap on restart attempts. After this, the run is
+ *  finalized as `max_restarts_exceeded` and the supervisor stops respawning it.
+ *  Prevents runaway loops when the same broken spawn keeps crashing. */
+const MAX_RESTART_COUNT = 10
 
 interface RunInstance {
   spec: RunSpec
@@ -193,76 +197,49 @@ export class ProcessManager {
     this.setState(run, 'starting', { runId: spec.runId, repoPath: spec.repoPath })
 
     run.stderrTail = []
-    // Windows resolves npx → npx.cmd via PATHEXT; Bun.spawn doesn't, so name it explicitly.
-    const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx'
-    const cmd = [
-      npx, '-y', 'remo-code-agent',
-      '--api-key', spec.apiKey,
-      '--hub-url', spec.hubUrl,
-      '--project-dir', spec.repoPath,
-    ]
-    if (spec.initialPrompt) {
-      cmd.push('--initial-prompt', spec.initialPrompt)
-    }
-    if (spec.dangerouslySkipPermissions && this.cfg.allowDangerousSkipPermissions) {
-      cmd.push('--dangerously-skip-permissions')
-    }
-    const env = { ...process.env }
-    delete (env as any).ANTHROPIC_API_KEY
-
-    const spawnOpts = {
-      cwd: spec.repoPath,
-      stdin: 'pipe' as const,
-      stdout: 'pipe' as const,
-      stderr: 'pipe' as const,
-      env,
-      windowsHide: true,
-    }
-    try {
-      run.proc = this.spawnImpl ? this.spawnImpl(cmd, spawnOpts) : Bun.spawn(cmd, spawnOpts)
-    } catch (err: any) {
-      this.cb.onLog('error', `failed to spawn agent: ${err.message}`, spec.runId)
-      this.setState(run, 'crashed', { runId: spec.runId, repoPath: spec.repoPath, lastExit: { code: null, reason: `spawn_error: ${err.message}` } })
-      this.scheduleRestart(run, null, 'spawn_error')
-      return
-    }
-
-    const pid = run.proc.pid
-    this.cb.onLog('info', `agent spawned pid=${pid} in ${spec.repoPath}`, spec.runId)
-    this.setState(run, 'running', { runId: spec.runId, repoPath: spec.repoPath, pid })
-
-    this.consumeStdout(run)
-    this.consumeStderr(run)
-
-    run.proc.exited.then((code) => {
-      const reason = run.userStop ? 'user' : code === 0 ? 'clean' : 'crash'
-      const tail = run.stderrTail.slice(-40).join('\n')
-      this.cb.onLog(reason === 'crash' ? 'error' : 'info', `agent exited code=${code} reason=${reason}`, spec.runId)
-
-      if (run.userStop) {
-        this.setState(run, 'idle', { runId: spec.runId, lastExit: { code: code ?? null, reason, stderrTail: tail } })
-        this.runs.delete(spec.runId)
-        return
-      }
-      if (reason === 'clean') {
-        this.setState(run, 'idle', { runId: spec.runId, lastExit: { code: code ?? null, reason, stderrTail: tail } })
-        this.runs.delete(spec.runId)
-        return
-      }
-      // crash
-      run.recentCrashes.push(Date.now())
-      run.recentCrashes = run.recentCrashes.filter((t) => Date.now() - t < CIRCUIT_WINDOW_MS)
-      if (run.recentCrashes.length >= CIRCUIT_THRESHOLD) {
-        this.cb.onLog('error', `circuit breaker open — stopping`, spec.runId)
-        this.setState(run, 'stopped', { runId: spec.runId, lastExit: { code: code ?? null, reason: 'circuit_open', stderrTail: tail } })
-        this.runs.delete(spec.runId)
-        return
-      }
-      this.scheduleRestart(run, code ?? null, 'crash', tail)
+    // Phase 09 retired the user-facing legacy CLI agent on 2026-05-26. The
+    // cached v0.4.1 of that retired package contained the "Always delegate"
+    // autonomous-loop bug. Until the in-process claude-runner (stream-json
+    // over stdin/stdout, bridged to the hub WS) is built as its own follow-up
+    // phase, this spawn path is DISABLED. The supervisor refuses the run and
+    // emits a structured stopped state so the hub finalizes the run row
+    // cleanly instead of trapping it in an indefinite respawn loop.
+    //
+    // Test canary: supervisor/test/no-legacy-agent-spawn.test.ts greps the
+    // tree for the retired package name and forbidden flags; if any reappear
+    // in supervisor source, that test FAILS the build.
+    this.cb.onLog(
+      'error',
+      `[security] legacy_agent_spawn_disabled: the retired CLI spawn path is disabled in Phase 09; session.start cannot proceed until the in-process claude-runner lands. Run will be finalized as stopped.`,
+      spec.runId,
+    )
+    this.setState(run, 'stopped', {
+      runId: spec.runId,
+      repoPath: spec.repoPath,
+      lastExit: { code: null, reason: 'legacy_agent_spawn_disabled' },
     })
+    this.runs.delete(spec.runId)
+    return
   }
 
   private scheduleRestart(run: RunInstance, exitCode: number | null, reason: string, stderrTail = '') {
+    // Hard cap on restart attempts. After MAX_RESTART_COUNT consecutive
+    // restarts the supervisor stops respawning the run and finalizes it
+    // as `max_restarts_exceeded`. Prevents runaway loops (e.g. the cached
+    // buggy v0.4.1 agent that triggered this fix in the first place).
+    if (run.restartCount >= MAX_RESTART_COUNT) {
+      this.cb.onLog(
+        'error',
+        `max_restarts_exceeded — giving up after ${run.restartCount} restart attempts`,
+        run.spec.runId,
+      )
+      this.setState(run, 'stopped', {
+        runId: run.spec.runId,
+        lastExit: { code: exitCode, reason: 'max_restarts_exceeded', stderrTail },
+      })
+      this.runs.delete(run.spec.runId)
+      return
+    }
     const delay = BACKOFF_SCHEDULE[Math.min(run.restartCount, BACKOFF_SCHEDULE.length - 1)]
     run.restartCount++
     this.cb.onLog('warn', `restarting in ${delay}ms (attempt ${run.restartCount})`, run.spec.runId)
