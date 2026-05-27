@@ -40,6 +40,20 @@ function readBranch(repoPath: string): string | null {
 // makes scan O(N) slow on Windows (~200ms per spawn). dirty/last_commit can be loaded
 // lazily on demand if needed; for the picker we only need name, remote, branch.
 
+/**
+ * `.git` as a FILE (not directory) means this is a git WORKTREE attached to
+ * another canonical repo. We filter those out of the picker so worktrees like
+ * `remo-code-fix-ui-cleanups-post-phase08` don't show up alongside the canonical
+ * `remo-code`. Cheap FS-only check (no git spawn) — keeps the legacy picker hot.
+ */
+function isWorktreeMarker(repoPath: string): boolean {
+  try {
+    const dotGit = join(repoPath, '.git')
+    const st = statSync(dotGit)
+    return st.isFile()
+  } catch { return false }
+}
+
 export function scanRoot(root: string): ScannedRepo[] {
   const out: ScannedRepo[] = []
   if (!isDir(root)) return out
@@ -50,6 +64,7 @@ export function scanRoot(root: string): ScannedRepo[] {
     const path = join(root, entry)
     if (!isDir(path)) continue
     if (!existsSync(join(path, '.git'))) continue
+    if (isWorktreeMarker(path)) continue // skip git worktrees — canonical repo will be listed separately
     out.push({
       path: path.replace(/\\/g, '/'),
       name: basename(path),
