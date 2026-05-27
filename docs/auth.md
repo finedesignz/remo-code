@@ -78,7 +78,9 @@ All state-changing routes (`POST`/`PATCH`/`PUT`/`DELETE`) check **double-submit 
 - Email change
 - Account delete
 
-When the gate fails (`405 reauth_required`), the web client prompts for a fresh magic-link and resumes the original action on success.
+**Window: 15 min** (default `maxAgeSeconds = 900`). Measured against `auth_sessions.created_at`, which is set fresh by the magic-link callback. Under Titanium magic-link there is no password to re-enter, so a fresh login IS the step-up signal. The previous 5-min default left users stranded when they browsed for >5 min between login and the sensitive op (no recovery path other than re-running the full magic-link round-trip). 15 min matches typical step-up windows (sudo TTL, banking) while still bounding the post-login elevated-write surface.
+
+When the gate fails (`401 re_auth_required`), the web client prompts for a fresh magic-link and resumes the original action on success.
 
 ---
 
