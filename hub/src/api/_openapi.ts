@@ -14,7 +14,7 @@ import { Scalar } from "@scalar/hono-api-reference";
 import { authMiddleware } from "../auth/middleware.ts";
 import { sumTodayCostForUser } from "../db/scheduled-tasks-dal.ts";
 import { sql } from "../db/postgres.ts";
-import { getUserLicenseFields } from "../db/dal.ts";
+import { getUserLicenseFields, getPendingPrompts, dismissLocalSession } from "../db/dal.ts";
 
 export const openapi = new OpenAPIHono();
 
@@ -155,6 +155,104 @@ openapi.openapi(licenseStatusRoute, async (c) => {
     },
     200,
   );
+});
+
+// ── Phase 08 plan 004 — sessions: pending-prompts + dismiss-local ────────────
+
+const PendingPromptSchema = z.object({
+  hostname: z.string(),
+  project_dir: z.string(),
+  is_git_repo: z.boolean(),
+  first_seen_at: z.string(),
+  last_seen_at: z.string(),
+});
+
+const pendingPromptsRoute = createRoute({
+  method: "get",
+  path: "/api/sessions/pending-prompts",
+  tags: ["Sessions"],
+  summary: "List local folders awaiting GitHub classification",
+  description:
+    "Returns folders the user's agent/supervisor has reported as not-yet-on-GitHub (or not a git repo at all) and that the user has NOT dismissed. Drives the 'Needs attention' section of the sidebar. See Phase 08 ARCHITECTURE §6.",
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: {
+      description: "Pending local repos for the authenticated user",
+      content: {
+        "application/json": {
+          schema: z.object({ pending: z.array(PendingPromptSchema) }),
+        },
+      },
+    },
+    401: {
+      description: "Missing or invalid JWT",
+      content: { "application/json": { schema: z.object({ error: z.string() }) } },
+    },
+  },
+});
+
+const dismissLocalRoute = createRoute({
+  method: "post",
+  path: "/api/sessions/dismiss-local",
+  tags: ["Sessions"],
+  summary: "Dismiss a pending local folder",
+  description:
+    "Records a user dismissal for `(hostname, project_dir)` and removes the row from `pending_local_repos`. Idempotent — repeated calls return 200 without duplicating dismissals.",
+  security: [{ bearerAuth: [] }],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            hostname: z.string().min(1).max(255),
+            project_dir: z.string().min(1).max(4096),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Dismissed",
+      content: {
+        "application/json": { schema: z.object({ dismissed: z.literal(true) }) },
+      },
+    },
+    400: {
+      description: "Invalid body",
+      content: { "application/json": { schema: z.object({ error: z.string() }) } },
+    },
+    401: {
+      description: "Missing or invalid JWT",
+      content: { "application/json": { schema: z.object({ error: z.string() }) } },
+    },
+  },
+});
+
+openapi.use("/api/sessions/*", authMiddleware);
+
+openapi.openapi(pendingPromptsRoute, async (c) => {
+  const userId = c.get("userId") as string;
+  const pending = await getPendingPrompts(userId);
+  // postgres `timestamptz` round-trips as Date — coerce to ISO string for the
+  // OpenAPI shape contract.
+  const serialized = pending.map((p) => ({
+    hostname: p.hostname,
+    project_dir: p.project_dir,
+    is_git_repo: p.is_git_repo,
+    first_seen_at:
+      p.first_seen_at instanceof Date ? p.first_seen_at.toISOString() : String(p.first_seen_at),
+    last_seen_at:
+      p.last_seen_at instanceof Date ? p.last_seen_at.toISOString() : String(p.last_seen_at),
+  }));
+  return c.json({ pending: serialized }, 200);
+});
+
+openapi.openapi(dismissLocalRoute, async (c) => {
+  const userId = c.get("userId") as string;
+  const body = c.req.valid("json");
+  await dismissLocalSession(userId, body.hostname, body.project_dir);
+  return c.json({ dismissed: true as const }, 200);
 });
 
 // OpenAPI security scheme registration.
