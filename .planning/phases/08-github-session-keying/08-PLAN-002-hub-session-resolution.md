@@ -96,3 +96,35 @@ bun test hub/test/session-keying.test.ts
 REMO_E2E_DB_URL=$TEST_DB bun test hub/test/session-keying-dal.test.ts
 bun run dev:hub   # connect a legacy agent → still works
 ```
+
+## Status
+
+**Complete** — 2026-05-26
+
+- Implementation commit: `35cc745` (`feat(08-002): hub session resolution v2 with GitHub repo-keying`)
+- Worktree: `C:/Users/artic/GitHub/remo-code-p08`, branch `feat/phase-08-github-keying`
+
+### Files shipped
+
+- `hub/src/ws/agent-protocol.ts` — exports `GitIntrospection` Zod schema (`.passthrough()`) and adds `git: GitIntrospection.optional()` to `AgentAuth`. Old agents without `git` still parse.
+- `hub/src/db/dal.ts` — new `findOrCreateAgentSessionV2(userId, projectDir, tokenHash, cliKind, git?, hostname?)`. Single `sql.begin` transaction implements ARCHITECTURE §4 priority 1/2/3 with `FOR UPDATE` locks + `ON CONFLICT (user_id, repo_key) DO UPDATE` final-mile guard. The pre-existing partial unique index `idx_sessions_user_repo_key` (Plan 001) backs the conflict target. P3 uses `(xmax = 0) AS inserted_fresh` to distinguish a fresh INSERT from an ON-CONFLICT update for the `created` flag.
+- `hub/src/ws/agent.ts` — swaps the `findOrCreateAgentSession` call for the v2 variant, forwarding `msg.git` + `msg.hostname`. Auth log now includes `repo_keyed=<bool> migrated=<bool>` for the rollout watch.
+- `hub/test/session-keying-dal.test.ts` — 4 e2e cases gated on `REMO_E2E_DB_URL`: (1) two parallel worktree connects collapse to one repo-keyed row, (2) legacy `project_dir` row upgraded in-place when matching `git` arrives, (3) sibling legacy rows pick a keeper + soft-delete the rest via `superseded_by`, (4) no-git auth → legacy path + `pending_local_repos` populated. Per-test user UUID + `afterAll` cascade keeps the suite hermetic. Skips cleanly without `REMO_E2E_DB_URL`.
+
+### Test results
+
+```
+bun test hub/test/session-keying.test.ts        → 16 pass / 0 fail
+bun test hub/test/session-keying-dal.test.ts    → 1 pass / 6 skip (DB unset; e2e skip)
+bun test hub/test/                              → 330 pass / 73 skip / 5 fail
+```
+
+The 5 failures (`insertRunV2` / `insertDeploymentRun` `started_at` safety) pre-date this plan — verified by re-running with `git stash` against the same commit base. Out of scope for plan 002.
+
+### Deviations
+
+- **Hostname plumbing through DAL.** The plan text said hostname for `pending_local_repos` "comes from the auth frame (already on `AgentAuth`)" but did not specify the DAL signature. Added an explicit `hostname: string | null = null` final parameter so the DAL never reaches into the WS message. `hub/src/ws/agent.ts` passes `msg.hostname ?? null`. No behavior change.
+- **`created` flag on P3.** Plan text didn't specify how to detect a fresh INSERT vs. an ON-CONFLICT-DO-UPDATE branch — needed for the `created` return field used by the WS handler to decide whether to unregister the previous channel. Added `(xmax = 0) AS inserted_fresh` to the RETURNING clause (standard Postgres convention) and strip it before returning. Rule 2 — required for correctness of downstream `if (!session.created) unregisterChannel(...)` logic.
+- **TSC step skipped.** No `hub/tsconfig.json` exists (Bun-native package), so typecheck via `bunx tsc --noEmit -p hub/` is not available. Substituted `bun build` on the three changed files as a smoke (no type errors → clean bundle). Pre-existing convention across the repo.
+- **`supervisor/src/repo-scanner.ts`** is also modified in the worktree, but belongs to Plan 003 (already merged as commit `ba8880f`) — left untouched per scope boundary.
+
