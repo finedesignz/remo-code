@@ -57,6 +57,12 @@ impl Default for State {
 static STATE: once_cell::sync::Lazy<Arc<Mutex<State>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(State::default())));
 
+/// Phase 08 — read-only accessor for the General page IPC. Returns the
+/// current lifecycle status of the Bun sidecar.
+pub fn current_status() -> Status {
+    STATE.lock().status
+}
+
 pub fn spawn_managed(app: AppHandle) {
     set_status(&app, Status::Starting);
     let app_clone = app.clone();

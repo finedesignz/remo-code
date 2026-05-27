@@ -6,6 +6,7 @@ mod config_cmds;
 mod first_run;
 mod mutex_probe;
 mod nssm;
+mod runtime_cmds;
 mod sidecar;
 mod tray;
 
@@ -66,6 +67,10 @@ pub fn run() {
             config_cmds::add_root,
             config_cmds::remove_root,
             config_cmds::rescan_now,
+            runtime_cmds::get_runtime_status,
+            runtime_cmds::get_inventory,
+            runtime_cmds::open_external_url,
+            runtime_cmds::sidecar_control,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
