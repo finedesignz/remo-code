@@ -1,5 +1,5 @@
 import { hostname, platform, release } from 'os'
-import { scanAll } from './repo-scanner'
+import { scanAll, scanRoots } from './repo-scanner'
 import { cloneRepo, pullRepo, pullLocal, checkoutBranch, listBranches, isDirty } from './git-ops'
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
@@ -17,6 +17,7 @@ type OutboundMsg =
   | { type: 'repo.op_result'; req_id: string; op: string; ok: boolean; error?: string; data?: any }
   | { type: 'repo.clone_progress'; req_id: string; stage: string; percent?: number }
   | { type: 'supervisor.commands_sync'; commands: Array<{ kind: 'command' | 'skill'; name: string; description: string | null; source: string; path: string }> }
+  | { type: 'supervisor.repo_inventory'; scanned_at: string; repos: Array<{ local_path: string; is_git_repo: boolean; is_worktree: boolean; worktree_parent_path: string | null; git_remote: string | null; git_origin_github: { owner: string; repo: string } | null; canonical?: boolean }> }
   | { type: 'run_started'; run_id: string }
   | { type: 'run_output'; run_id: string; chunk: string }
   | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
@@ -178,6 +179,12 @@ export class SupervisorClient {
       } catch (err: any) {
         this.log('warn', `commands scan failed: ${err.message}`)
       }
+      // Phase 08 §15 — push full repo inventory to the hub. The hub upserts
+      // sessions (github-keyed) + pending_local_repos (local-only). When roots
+      // is empty, we emit a needs-roots log instead so the UI can prompt.
+      void this.sendRepoInventory().catch((err) => {
+        this.log('warn', `repo_inventory failed: ${err.message}`)
+      })
       return
     }
     if (msg.type === 'auth_error') {
@@ -202,6 +209,36 @@ export class SupervisorClient {
         // unknown
         break
     }
+  }
+
+  /**
+   * Phase 08 §15 — run the new introspection-aware scanner across configured
+   * roots and emit `supervisor.repo_inventory`. When `roots` is empty we emit
+   * a `supervisor.needs_roots` log line so the Tauri UI can listen and prompt;
+   * we still send an empty inventory so the hub clears any stale cache.
+   */
+  public async sendRepoInventory(): Promise<void> {
+    if (!this.authenticated) return
+    if (!this.cfg.roots || this.cfg.roots.length === 0) {
+      this.log('warn', 'supervisor.needs_roots — no roots configured; inventory empty')
+      this.send({ type: 'supervisor.repo_inventory', scanned_at: new Date().toISOString(), repos: [] })
+      return
+    }
+    const entries = await scanRoots({ roots: this.cfg.roots, scan: this.cfg.scan })
+    this.send({
+      type: 'supervisor.repo_inventory',
+      scanned_at: new Date().toISOString(),
+      repos: entries.map((e) => ({
+        local_path: e.local_path,
+        is_git_repo: e.is_git_repo,
+        is_worktree: e.is_worktree,
+        worktree_parent_path: e.worktree_parent_path,
+        git_remote: e.git_remote,
+        git_origin_github: e.git_origin_github,
+        canonical: e.canonical,
+      })),
+    })
+    this.log('info', `repo_inventory sent: ${entries.length} entries`)
   }
 
   private async onRepoScan(msg: { req_id: string }) {
