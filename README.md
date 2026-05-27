@@ -90,7 +90,7 @@ Generate an API key in Settings, then install the **Remo Code Supervisor** deskt
 - Run the installer.
 - Paste the API key into the first-run wizard. Pick the repo roots the supervisor should scan (typically `C:\Users\you\GitHub`).
 
-The supervisor auto-starts at login, watches your repo roots, and lets you launch Claude Code (or Codex) sessions remotely from the web UI. One supervisor connects all your repos — sessions auto-register and auto-resume by repo.
+The supervisor auto-starts at login via a per-user HKCU `Run` registry entry (no Windows service, no shell alias needed), watches your repo roots, and lets you launch Claude Code (or Codex) sessions remotely from the web UI. One supervisor connects all your repos — sessions auto-register and auto-resume by repo.
 
 > The legacy `npx remo-code-agent` / `claude-remote` shell-alias flow has been retired as of 2026-05-26. The Tauri Supervisor desktop app is the only supported local app.
 
