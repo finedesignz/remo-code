@@ -275,6 +275,8 @@ Replaces bcrypt + JWT user-auth with **Titanium Licensing** (Keygen-backed) magi
 
 When adding a new license-gated endpoint, exclusion-list entry, magic-link claim, webhook event, session-lifecycle hook, or any Phase 07 surface: update `docs/auth.md` in the same commit. Phase 07.5 cleanup items (password/JWT removal) get appended to `docs/auth.md`'s "07.5 follow-up" section so the cutover plan is preserved alongside the doc.
 
+**Titanium bypass active as of 2026-05-26** (commit `5e3674d`, PR #71). `TITANIUM_BYPASS=true` is set on the prod Coolify app: it skips `warmJwksCache()` at boot, short-circuits `requireActiveLicense` to permissive mode, and 503s the magic-link endpoints (`/api/auth/login/request-link`, `/api/auth/login/callback`) with `{ error: "titanium_disabled" }`. Legacy bcrypt `/api/auth/login` (`ALLOW_LEGACY_LOGIN=true`) is the only working auth path under bypass. The flag stays on until titanium-licensing Phase 09 ships a working Keygen JWKS endpoint; then set to `false` and the full magic-link + license-gate flow resumes.
+
 ## API docs convention
 
 The hub exposes OpenAPI 3.1 at `/openapi.json` and a Scalar UI at `/docs`. The spec is assembled in `hub/src/api/_openapi.ts` using `@hono/zod-openapi` `createRoute` declarations. Currently covers `/api/profile/cost-today` and `/api/profile/license` — the rest of the hub is plain Hono and gets migrated incrementally.
