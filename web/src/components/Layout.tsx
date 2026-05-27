@@ -211,6 +211,10 @@ export function Layout({ token, user, signOut, onNavigate }: Props) {
           unreadCounts={unreadCounts}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={toggleCollapsed}
+          token={token}
+          subscribe={subscribe}
+          launchSession={sessionsHook.launchSession}
+          cloneHere={sessionsHook.cloneHere}
         />
       </div>
 

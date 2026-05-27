@@ -7,6 +7,8 @@ import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
 import { UnreadBadge } from './UnreadBadge'
 import { SessionTooltip } from './SessionTooltip'
 import { PendingLocalRepoPrompt } from './PendingLocalRepoPrompt'
+import { LaunchButton } from './LaunchButton'
+import { CloneHereModal } from './CloneHereModal'
 
 interface Props {
   sessions: CodeSession[]
@@ -26,6 +28,11 @@ interface Props {
   onToggleCollapsed?: () => void
   /** JWT for the pending-prompts hook (Phase 08). When null, the prompt section is silently skipped. */
   token?: string | null
+  /** Hub WS subscribe — forwarded to PendingLocalRepoPrompt/CreateGithubRepoModal for progress. */
+  subscribe?: (handler: (msg: any) => void) => () => void
+  /** Phase 08.5 launch-flow helpers (from useSessions). Optional so existing callers keep compiling. */
+  launchSession?: (id: string) => Promise<{ ok: boolean; error?: string; detail?: string }>
+  cloneHere?: (id: string, targetRoot: string) => Promise<{ ok: boolean; error?: string; target_path?: string }>
 }
 
 export function Sidebar({
@@ -35,7 +42,16 @@ export function Sidebar({
   connected, user, signOut, onClose, unreadCounts = {},
   collapsed = false, onToggleCollapsed,
   token = null,
+  subscribe,
+  launchSession,
+  cloneHere,
 }: Props) {
+  const [cloneModal, setCloneModal] = useState<{ sessionId: string; repoLabel: string } | null>(null)
+  const [toast, setToast] = useState<string | null>(null)
+  const showToast = (msg: string) => {
+    setToast(msg)
+    window.setTimeout(() => setToast(null), 3500)
+  }
   // Phase 08 — resolve a sessionId from a (hostname, project_dir) pair so the
   // PendingLocalRepoPrompt can call POST /api/sessions/:id/create-github-repo.
   // We try to match against the user's current session list first; if no row
@@ -200,7 +216,12 @@ export function Sidebar({
         </div>
 
         {/* Phase 08 — "Needs attention" pending local folders banner */}
-        <PendingLocalRepoPrompt token={token} resolveSessionId={resolveSessionId} />
+        <PendingLocalRepoPrompt
+          token={token}
+          resolveSessionId={resolveSessionId}
+          subscribe={subscribe}
+          onCreated={onRefresh}
+        />
 
         {/* Session list — only connected sessions */}
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
@@ -305,11 +326,38 @@ export function Sidebar({
               No active sessions. Connect a Claude Code instance to get started.
             </p>
           )}
+
+          {/* Phase 08.5 — offline GitHub-keyed sessions: surface Launch / Clone-here */}
+          <OfflineSessions
+            sessions={sessions}
+            onSelectSession={onSelectSession}
+            activeSessionId={activeSessionId}
+            launchSession={launchSession}
+            cloneHere={cloneHere}
+            onOpenClone={(id, label) => setCloneModal({ sessionId: id, repoLabel: label })}
+            onToast={showToast}
+          />
         </div>
+
+        {toast && (
+          <div className="mx-2 mb-2 rounded-lg bg-emerald-500/10 ring-1 ring-emerald-500/30 px-3 py-1.5 text-[11px] text-emerald-300">
+            {toast}
+          </div>
+        )}
 
         {/* Sessions-only sidebar — Connect moved to the "+" button in the header,
             email/sign-out moved to the avatar dropdown in the main app header. */}
       </div>
+      {cloneModal && token && cloneHere && (
+        <CloneHereModal
+          token={token}
+          sessionId={cloneModal.sessionId}
+          repoLabel={cloneModal.repoLabel}
+          cloneHere={cloneHere}
+          onClose={() => setCloneModal(null)}
+          onToast={showToast}
+        />
+      )}
       {hoveredSession && hoverInfo && createPortal(
         <div
           style={{ position: 'fixed', top: hoverInfo.top, left: hoverInfo.left, zIndex: 60, pointerEvents: 'none' }}
@@ -320,5 +368,87 @@ export function Sidebar({
         document.body
       )}
     </>
+  )
+}
+
+interface OfflineSessionsProps {
+  sessions: CodeSession[]
+  activeSessionId: string | null
+  onSelectSession: (id: string) => void
+  launchSession?: (id: string) => Promise<{ ok: boolean; error?: string; detail?: string }>
+  cloneHere?: (id: string, targetRoot: string) => Promise<{ ok: boolean; error?: string; target_path?: string }>
+  onOpenClone: (sessionId: string, repoLabel: string) => void
+  onToast: (msg: string) => void
+}
+
+/**
+ * Lists offline GitHub-keyed sessions in the sidebar with two CTAs:
+ *  • Launch       — when `project_dir` is known (i.e. the supervisor has the repo)
+ *  • Clone here   — when `project_dir` is missing (i.e. repo is not yet on the host)
+ *
+ * Only renders rows whose `repo_key` is set; legacy local-only offline sessions
+ * stay hidden (they don't have an actionable Launch/Clone surface yet).
+ */
+function OfflineSessions({
+  sessions, activeSessionId, onSelectSession, launchSession, cloneHere, onOpenClone, onToast,
+}: OfflineSessionsProps) {
+  const offline = sessions.filter(s =>
+    s.status !== 'online' && s.status !== 'thinking' && !!s.repo_key,
+  )
+  if (offline.length === 0) return null
+
+  return (
+    <div className="mt-2 pt-2 border-t border-[var(--border-color)]/40">
+      <div className="px-3 pb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">
+        Offline ({offline.length})
+      </div>
+      <div className="space-y-0.5">
+        {offline.map(s => {
+          const ownerRepo = githubOwnerRepo(s)
+          const primaryLabel = ownerRepo ?? sessionLabel(s)
+          const hasLocal = !!s.project_dir
+          return (
+            <div key={s.id} className="group relative">
+              <button
+                onClick={() => onSelectSession(s.id)}
+                className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                  s.id === activeSessionId
+                    ? 'bg-indigo-600/10 text-[var(--text-primary)]'
+                    : 'text-[var(--text-secondary)]/80 hover:bg-[var(--bg-tertiary)]/40'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full flex-shrink-0 bg-[var(--text-muted)]/50" title="offline" />
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" className="text-[var(--text-muted)] shrink-0" aria-hidden="true">
+                    <path d="M8 .25a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.42 7.42 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8.25 8 8 0 0 0 8 .25z" />
+                  </svg>
+                  <span className="truncate font-medium flex-1" title={primaryLabel}>{primaryLabel}</span>
+                  <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
+                </div>
+                <div className="mt-1.5 pl-4 flex items-center gap-1.5">
+                  {hasLocal && launchSession && (
+                    <LaunchButton session={s} launchSession={launchSession} onToast={onToast} />
+                  )}
+                  {!hasLocal && cloneHere && ownerRepo && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onOpenClone(s.id, ownerRepo) }}
+                      className="px-2 py-1 text-[11px] font-medium rounded bg-[var(--bg-tertiary)]/80 hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)] transition-colors"
+                      title="Not on this machine — clone the repo to a configured root"
+                    >
+                      Clone here
+                    </button>
+                  )}
+                  {s.project_dir && (
+                    <span className="text-[10px] text-[var(--text-muted)] truncate" title={s.project_dir}>
+                      {s.project_dir}
+                    </span>
+                  )}
+                </div>
+              </button>
+            </div>
+          )
+        })}
+      </div>
+    </div>
   )
 }
