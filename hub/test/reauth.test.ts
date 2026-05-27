@@ -36,7 +36,7 @@ describe('requireRecentAuth', () => {
     expect(body.error).toBe('re_auth_required');
   });
 
-  test('fresh session (<5min) → pass-through', async () => {
+  test('fresh session (<15min) → pass-through', async () => {
     verifyAuthSessionCookie.mockImplementation(async () => ({
       userId: 'u-1',
       sessionRow: { created_at: new Date(Date.now() - 60_000) }, // 1 min old
@@ -48,17 +48,29 @@ describe('requireRecentAuth', () => {
     expect(body.userId).toBe('u-1');
   });
 
-  test('stale session (>5min) → 401', async () => {
+  test('session within new 15min window (was failing under old 5min) → pass-through', async () => {
+    // Regression: under Titanium magic-link, a user who logs in, browses for
+    // 10 min, then clicks Rotate must succeed. Old 5min default broke this.
     verifyAuthSessionCookie.mockImplementation(async () => ({
       userId: 'u-1',
       sessionRow: { created_at: new Date(Date.now() - 10 * 60_000) }, // 10 min
       user: { id: 'u-1', email: 'a@b.com', role: 'admin' },
     }));
     const res = await buildApp().request('/sensitive', { method: 'POST' });
+    expect(res.status).toBe(200);
+  });
+
+  test('stale session (>15min) → 401', async () => {
+    verifyAuthSessionCookie.mockImplementation(async () => ({
+      userId: 'u-1',
+      sessionRow: { created_at: new Date(Date.now() - 20 * 60_000) }, // 20 min
+      user: { id: 'u-1', email: 'a@b.com', role: 'admin' },
+    }));
+    const res = await buildApp().request('/sensitive', { method: 'POST' });
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.error).toBe('re_auth_required');
-    expect(body.max_age_seconds).toBe(300);
+    expect(body.max_age_seconds).toBe(900);
   });
 
   test('custom maxAge honored', async () => {

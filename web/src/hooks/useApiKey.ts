@@ -17,7 +17,7 @@ function classifyError(e: unknown): { code: 're_auth_required' | 'unknown'; mess
   if (e instanceof HubFetchError) {
     const body: any = (e as any).body
     if (e.status === 401 && body?.error === 're_auth_required') {
-      return { code: 're_auth_required', message: 'Session expired — log out and back in to rotate keys.' }
+      return { code: 're_auth_required', message: 'Session too old for sensitive action — request a fresh magic link, then retry.' }
     }
     return { code: 'unknown', message: typeof body?.error === 'string' ? body.error : e.message }
   }
