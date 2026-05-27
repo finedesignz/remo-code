@@ -5,6 +5,7 @@ import { Login } from './pages/Login'
 import { AuthCallback } from './pages/AuthCallback'
 import { SetupForm } from './components/SetupForm'
 import { Layout } from './components/Layout'
+import { AppChrome } from './components/AppChrome'
 import { SettingsPage } from './components/SettingsPage'
 import { SchedulesPage } from './components/SchedulesPage'
 import { ErrorCapturePage } from './components/ErrorCapturePage'
@@ -147,20 +148,26 @@ export default function App() {
       {licenseRequired && <LicenseRequiredBanner onDismiss={() => setLicenseRequired(false)} />}
       <div className="flex-1 min-h-0 overflow-hidden">
       {route === 'settings' && (
-        <SettingsPage
-          token={token}
-          profile={profile}
-          onUpdateProfile={updateProfile}
-          onBack={goToChat}
-        />
+        <AppChrome token={token} user={user} signOut={signOut} onNavigate={navigate} headerContent={<h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">Settings</h2>}>
+          <SettingsPage
+            token={token}
+            profile={profile}
+            onUpdateProfile={updateProfile}
+            onBack={goToChat}
+          />
+        </AppChrome>
       )}
 
       {route === 'schedules' && (
-        <SchedulesRoute token={token} onBack={goToChat} />
+        <AppChrome token={token} user={user} signOut={signOut} onNavigate={navigate} headerContent={<h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">Schedules</h2>}>
+          <SchedulesRoute token={token} onBack={goToChat} />
+        </AppChrome>
       )}
 
       {route === 'error-capture' && (
-        <ErrorCaptureRoute token={token} onBack={goToChat} />
+        <AppChrome token={token} user={user} signOut={signOut} onNavigate={navigate} headerContent={<h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">Error Capture</h2>}>
+          <ErrorCaptureRoute token={token} onBack={goToChat} />
+        </AppChrome>
       )}
 
       {route === 'dev-chat-surface' && (
@@ -172,7 +179,9 @@ export default function App() {
       )}
 
       {route === 'grid' && (
-        <GridPage token={token} tabId={gridTabId} />
+        <AppChrome token={token} user={user} signOut={signOut} onNavigate={navigate} headerContent={<h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">Grid</h2>}>
+          <GridPage token={token} tabId={gridTabId} />
+        </AppChrome>
       )}
 
       {(route === 'chat' || route === 'login') && (
