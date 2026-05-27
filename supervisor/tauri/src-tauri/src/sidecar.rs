@@ -191,29 +191,66 @@ async fn backoff_then_continue(schedule: &[u64], max: u32) -> bool {
     true
 }
 
-fn spawn_child(app: &AppHandle) -> Result<Child, anyhow::Error> {
-    let supervisor_dir = resolve_supervisor_dir(app)?;
-    let mut cmd = Command::new("bun");
-    cmd.arg("src/index.ts").arg("run");
-    cmd.current_dir(&supervisor_dir);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.kill_on_drop(true);
+fn spawn_child(_app: &AppHandle) -> Result<Child, anyhow::Error> {
+    // Two paths:
+    //   release  → spawn the bundled Bun-compiled sidecar binary that ships
+    //              alongside the main app exe (Tauri 2 `bundle.externalBin`).
+    //   debug    → spawn `bun src/index.ts run` against the workspace source so
+    //              `cargo tauri dev` / local `cargo run` still iterate quickly
+    //              without recompiling the Bun binary on every change.
+    //
+    // Both branches converge on a `tokio::process::Child` so the rest of the
+    // lifecycle loop (ring buffer, restart backoff, graceful kill) is shared.
 
-    #[cfg(target_os = "windows")]
+    #[cfg(debug_assertions)]
     {
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        let supervisor_dir = resolve_supervisor_dir(_app)?;
+        let mut cmd = Command::new("bun");
+        cmd.arg("src/index.ts").arg("run");
+        cmd.current_dir(&supervisor_dir);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
+
+        #[cfg(target_os = "windows")]
+        {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let child = cmd.spawn()?;
+        return Ok(child);
     }
 
-    let child = cmd.spawn()?;
-    Ok(child)
+    #[cfg(not(debug_assertions))]
+    {
+        let exe = resolve_sidecar_exe()?;
+        let mut cmd = Command::new(&exe);
+        cmd.arg("run");
+        // Working dir = directory containing the sidecar (next to main exe in
+        // the installed MSI). The compiled Bun binary is self-contained, so
+        // cwd only matters for relative file lookups it may do.
+        if let Some(parent) = exe.parent() {
+            cmd.current_dir(parent);
+        }
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
+
+        #[cfg(target_os = "windows")]
+        {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let child = cmd.spawn()?;
+        Ok(child)
+    }
 }
 
+#[cfg(debug_assertions)]
 fn resolve_supervisor_dir(_app: &AppHandle) -> Result<PathBuf, anyhow::Error> {
     // Dev: walk up from CARGO_MANIFEST_DIR to find /supervisor.
-    // Bundled: the MSI ships the supervisor src alongside the exe under
-    // resources/supervisor — handled in PLAN-006 (installer wiring).
     if let Ok(dir) = std::env::var("REMO_SUPERVISOR_DIR") {
         return Ok(PathBuf::from(dir));
     }
@@ -224,6 +261,38 @@ fn resolve_supervisor_dir(_app: &AppHandle) -> Result<PathBuf, anyhow::Error> {
         .and_then(|p| p.parent())
         .map(|p| p.to_path_buf());
     supervisor_dir.ok_or_else(|| anyhow::anyhow!("cannot resolve supervisor dir"))
+}
+
+#[cfg(not(debug_assertions))]
+fn resolve_sidecar_exe() -> Result<PathBuf, anyhow::Error> {
+    // Tauri 2 `bundle.externalBin` ships the sidecar next to the main app
+    // executable, with the target-triple suffix stripped at install time.
+    // On Windows: `<InstallDir>/remo-code-supervisor.exe`.
+    let main_exe = std::env::current_exe()?;
+    let dir = main_exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("current_exe has no parent"))?;
+
+    #[cfg(target_os = "windows")]
+    let candidates = [
+        dir.join("remo-code-supervisor.exe"),
+        dir.join("binaries").join("remo-code-supervisor.exe"),
+        dir.join("remo-code-supervisor-x86_64-pc-windows-msvc.exe"),
+    ];
+    #[cfg(not(target_os = "windows"))]
+    let candidates = [
+        dir.join("remo-code-supervisor"),
+        dir.join("binaries").join("remo-code-supervisor"),
+    ];
+
+    for c in &candidates {
+        if c.exists() {
+            return Ok(c.clone());
+        }
+    }
+    Err(anyhow::anyhow!(
+        "sidecar binary not found next to main exe (looked in {dir:?})"
+    ))
 }
 
 async fn graceful_kill(child: &mut Child) -> Result<(), anyhow::Error> {

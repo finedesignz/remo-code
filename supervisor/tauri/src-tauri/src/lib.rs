@@ -4,6 +4,7 @@
 
 mod config_cmds;
 mod first_run;
+mod legacy_cleanup;
 mod mutex_probe;
 mod nssm;
 mod runtime_cmds;
@@ -32,6 +33,11 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // One-time scrub of the legacy `RemoCodeSupervisor` NSSM service
+            // (or scheduled-task equivalent) left behind by pre-Tauri installs.
+            // Idempotent and gated by a per-version marker file.
+            legacy_cleanup::run_once();
+
             // Pre-flight: refuse to spawn if NSSM service is running OR another
             // supervisor instance already holds the loopback mutex on
             // 127.0.0.1:9106 (fallback 9197).
