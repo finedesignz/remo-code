@@ -80,6 +80,8 @@ All state-changing routes (`POST`/`PATCH`/`PUT`/`DELETE`) check **double-submit 
 
 **Window: 15 min** (default `maxAgeSeconds = 900`). Measured against `auth_sessions.created_at`, which is set fresh by the magic-link callback. Under Titanium magic-link there is no password to re-enter, so a fresh login IS the step-up signal. The previous 5-min default left users stranded when they browsed for >5 min between login and the sensitive op (no recovery path other than re-running the full magic-link round-trip). 15 min matches typical step-up windows (sudo TTL, banking) while still bounding the post-login elevated-write surface.
 
+**Fresh-session invariant.** `GET /api/auth/login/callback` ALWAYS issues a brand-new `auth_sessions` row and revokes any inbound session cookie's row first (`deleteAuthSession(inboundToken)`, best-effort). This guarantees that "log out + log back in" — or even "click a new magic link while a stale cookie is still present" — produces a fresh `created_at` and resets the 15-min step-up window. Without the explicit revoke, the orphan row would linger until `purgeExpiredAuthSessions` swept it up. Both the callback and `POST /api/auth/logout` log the resulting session lifecycle (`fresh_session_expires=…`, `session_row_deleted=true`) so step-up gate behavior is observable in hub logs.
+
 When the gate fails (`401 re_auth_required`), the web client prompts for a fresh magic-link and resumes the original action on success.
 
 ---

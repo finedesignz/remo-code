@@ -25,7 +25,8 @@ import {
 import { verifyPassword, hashPassword } from "../auth/password.ts";
 import { signJwt } from "../auth/jwt.ts";
 import { config } from "../config.ts";
-import { createAndSetSession, destroySession } from "../session.ts";
+import { createAndSetSession, destroySession, readSessionCookie } from "../session.ts";
+import { deleteAuthSession } from "../db/dal.ts";
 import { issueCsrfToken, setCsrfCookie, clearCsrfCookie } from "../csrf.ts";
 import { sendEmail } from "../lib/email.ts";
 
@@ -274,12 +275,27 @@ authRouter.get("/login/callback", async (c) => {
     try { await recordAuthEvent({ userId: user.id, eventType: "link_success", ip, userAgent: ua }); } catch {}
   }
 
+  // Revoke any inbound session cookie BEFORE creating a fresh one. The
+  // re-auth gate (`hub/src/auth/reauth.ts`) keys on `auth_sessions.created_at`
+  // — if the user re-authenticates while still holding a stale cookie, we
+  // MUST issue a brand-new row so step-up windows reset. Best-effort: orphan
+  // rows are cleaned by purgeExpiredAuthSessions, so a failed delete is
+  // non-fatal.
+  const inboundToken = readSessionCookie(c);
+  if (inboundToken) {
+    try { await deleteAuthSession(inboundToken); } catch (err: any) {
+      console.warn("[auth] failed to revoke inbound session before re-login:", err?.message);
+    }
+  }
+
   // Create the dashboard session.
-  const { token: rawSessionToken } = await createAndSetSession(c, { userId: user.id, ip, userAgent: ua });
+  const { token: rawSessionToken, expiresAt } = await createAndSetSession(c, { userId: user.id, ip, userAgent: ua });
   const csrf = issueCsrfToken(rawSessionToken);
   setCsrfCookie(c, csrf);
 
-  try { await recordAuthEvent({ userId: user.id, eventType: "login_success", ip, userAgent: ua, metadata: { method: "magic_link" } }); } catch {}
+  console.log(`[auth] magic-link login_success user=${user.id} fresh_session_expires=${expiresAt.toISOString()} revoked_prior=${!!inboundToken}`);
+
+  try { await recordAuthEvent({ userId: user.id, eventType: "login_success", ip, userAgent: ua, metadata: { method: "magic_link", revoked_prior_session: !!inboundToken } }); } catch {}
 
   // Redirect to the SPA root. SPA reads csrf cookie + connects WS via cookie.
   return c.redirect("/");
@@ -300,6 +316,7 @@ authRouter.post("/logout", async (c) => {
   await destroySession(c);
   clearCsrfCookie(c);
 
+  console.log(`[auth] logout user=${userId ?? "anon"} session_row_deleted=true`);
   try { await recordAuthEvent({ userId, eventType: "logout", ip, userAgent: ua }); } catch {}
   return c.json({ ok: true });
 });
