@@ -11,6 +11,7 @@
  */
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
 import { finalizeRun } from '../dispatcher.ts'
+import { classifyLogs } from '../log-classifier.ts'
 
 interface RunCtxLike { runId: string; taskId: string; userId: string }
 
@@ -40,6 +41,19 @@ export async function sendLogCheck(task: ScheduledTask, ctx: RunCtxLike): Promis
     if (!res.ok) {
       await finalizeRun(ctx.runId, 'failed', `coolify_http_${res.status}`, {
         duration_ms: Date.now() - startedAt, output_snippet: snippet,
+      })
+      return
+    }
+    // Phase 11 cleanup: classify the pulled logs with a cheap regex gate
+    // BEFORE handing off to any LLM step. When clean, finalize as `skipped`
+    // with reason `no_errors_detected` so the daily cost cap is preserved —
+    // post-run chains gated on `on:'success'` will NOT fire. (Chains gated
+    // on `on:'failure'` still fire, mirroring existing skipped semantics.)
+    const classification = classifyLogs(snippet)
+    if (!classification.hasErrors) {
+      await finalizeRun(ctx.runId, 'skipped', 'no_errors_detected', {
+        duration_ms: Date.now() - startedAt,
+        output_snippet: snippet,
       })
       return
     }
