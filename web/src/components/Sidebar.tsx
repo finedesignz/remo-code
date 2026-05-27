@@ -2,9 +2,11 @@ import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { AuthUser } from '../lib/auth.ts'
 import type { CodeSession } from '../hooks/useSessions'
+import { githubOwnerRepo } from '../hooks/useSessions'
 import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
 import { UnreadBadge } from './UnreadBadge'
 import { SessionTooltip } from './SessionTooltip'
+import { PendingLocalRepoPrompt } from './PendingLocalRepoPrompt'
 
 interface Props {
   sessions: CodeSession[]
@@ -22,6 +24,8 @@ interface Props {
   unreadCounts?: Record<string, number>
   collapsed?: boolean
   onToggleCollapsed?: () => void
+  /** JWT for the pending-prompts hook (Phase 08). When null, the prompt section is silently skipped. */
+  token?: string | null
 }
 
 export function Sidebar({
@@ -30,7 +34,18 @@ export function Sidebar({
   onNavigate, onRefresh,
   connected, user, signOut, onClose, unreadCounts = {},
   collapsed = false, onToggleCollapsed,
+  token = null,
 }: Props) {
+  // Phase 08 — resolve a sessionId from a (hostname, project_dir) pair so the
+  // PendingLocalRepoPrompt can call POST /api/sessions/:id/create-github-repo.
+  // We try to match against the user's current session list first; if no row
+  // matches, the prompt renders the Create button with an inline hint.
+  const resolveSessionId = (hostname: string, project_dir: string): string | null => {
+    const match = sessions.find(s =>
+      s.hostname === hostname && s.project_dir === project_dir,
+    )
+    return match ? match.id : null
+  }
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [hoverInfo, setHoverInfo] = useState<{ id: string; top: number; left: number } | null>(null)
 
@@ -184,12 +199,20 @@ export function Sidebar({
           </div>
         </div>
 
+        {/* Phase 08 — "Needs attention" pending local folders banner */}
+        <PendingLocalRepoPrompt token={token} resolveSessionId={resolveSessionId} />
+
         {/* Session list — only connected sessions */}
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-          {connectedSessions(sessions).map(s => (
+          {connectedSessions(sessions).map(s => {
+            const ownerRepo = githubOwnerRepo(s)
+            const primaryLabel = ownerRepo ?? sessionLabel(s)
+            return (
             <div key={s.id} className="group relative">
               <button
                 onClick={() => onSelectSession(s.id)}
+                onMouseEnter={(e) => handleRowEnter(s.id, e.currentTarget)}
+                onMouseLeave={() => handleRowLeave(s.id)}
                 className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
                   s.id === activeSessionId
                     ? 'bg-indigo-600/20 text-[var(--text-primary)] ring-1 ring-indigo-500/30'
@@ -200,7 +223,17 @@ export function Sidebar({
                   <span className={`w-2 h-2 rounded-full flex-shrink-0 ${
                     s.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
                   }`} />
-                  <span className="truncate font-medium flex-1">{sessionLabel(s)}</span>
+                  {/* Phase 08 — GitHub mark for keyed sessions, folder icon for legacy/local-only */}
+                  {ownerRepo ? (
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" className="text-[var(--text-muted)] shrink-0" aria-label="GitHub-keyed session">
+                      <path d="M8 .25a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.42 7.42 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8.25 8 8 0 0 0 8 .25z" />
+                    </svg>
+                  ) : (
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" className="text-[var(--text-muted)] shrink-0" aria-label="Local-only session">
+                      <path d="M1.5 4a1 1 0 0 1 1-1h3l1.5 1.5H13.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" />
+                    </svg>
+                  )}
+                  <span className="truncate font-medium flex-1" title={primaryLabel}>{primaryLabel}</span>
                   {s.cli_kind === 'codex' && (
                     <span
                       className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 shrink-0 font-semibold"
@@ -253,13 +286,19 @@ export function Sidebar({
                   </span>
                 </div>
                 {s.project_dir && (
-                  <div className="text-[11px] text-[var(--text-muted)] mt-0.5 truncate pl-4">
-                    {s.project_dir}
+                  <div className="text-[11px] text-[var(--text-muted)] mt-0.5 truncate pl-4" title={s.project_dir}>
+                    {ownerRepo ? (
+                      <>
+                        <span className="opacity-70">from </span>
+                        {s.project_dir}
+                      </>
+                    ) : s.project_dir}
                   </div>
                 )}
               </button>
             </div>
-          ))}
+            )
+          })}
 
           {connectedSessions(sessions).length === 0 && (
             <p className="text-sm text-[var(--text-muted)] text-center py-8">
