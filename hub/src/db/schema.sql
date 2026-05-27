@@ -166,8 +166,41 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_session ON scheduled_tasks(sessio
 -- created via the new API may target supervisors or fan-outs and set
 -- session_id to a synthetic/placeholder value to satisfy the NOT NULL until
 -- a follow-up migration drops that constraint.
-ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS task_type TEXT NOT NULL DEFAULT 'prompt'
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS task_type TEXT NOT NULL DEFAULT 'dev'
   CHECK (task_type IN ('prompt','skill','security_scan','log_check','continue_dev'));
+
+-- ── Phase 11: structured task workflows ──────────────────────────────────────
+-- Collapse user-pickable types to three (dev / security / log_check) and add
+-- chained workflow step kinds (dev_plan/execute/ship, security_scan/triage/
+-- fix_or_issue, log_pull/classify/triage). Internal kinds: triage (synthesized
+-- by Coolify webhook). Data migration is idempotent: re-running the schema is
+-- a no-op once the new constraint is in place because the UPDATE WHERE clause
+-- only touches rows still on legacy values.
+--
+-- Step A — rewrite legacy user-pickable rows to the new triad. Prompt text is
+-- preserved verbatim in payload.prompt (no payload changes here).
+UPDATE scheduled_tasks SET task_type = 'dev'
+  WHERE task_type IN ('prompt', 'skill', 'continue_dev');
+UPDATE scheduled_tasks SET task_type = 'security'
+  WHERE task_type = 'security_scan';
+-- log_check and triage are unchanged.
+--
+-- Step B — swap the CHECK constraint. Postgres auto-named the constraint from
+-- the inline CHECK on the original ADD COLUMN; the name is deterministic
+-- ("<table>_<col>_check"). DROP IF EXISTS makes this safe on fresh DBs that
+-- never had the legacy constraint and on prod DBs that do.
+ALTER TABLE scheduled_tasks DROP CONSTRAINT IF EXISTS scheduled_tasks_task_type_check;
+ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
+  CHECK (task_type IN (
+    -- User-pickable workflow roots
+    'dev', 'security', 'log_check',
+    -- Chained workflow steps (created by the workflow auto-explosion in W2)
+    'dev_plan', 'dev_execute', 'dev_ship',
+    'security_scan', 'security_triage', 'security_fix_or_issue',
+    'log_pull', 'log_classify', 'log_triage',
+    -- Internal: synthesized by Coolify webhook
+    'triage'
+  ));
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS target_kind TEXT NOT NULL DEFAULT 'session'
   CHECK (target_kind IN ('session','supervisor','all_agents','all_supervisors'));
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS target_id TEXT;
@@ -228,6 +261,12 @@ ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
 ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS output_snippet TEXT;
 ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS triggered_by_run_id TEXT REFERENCES scheduled_task_runs(id) ON DELETE SET NULL;
 ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+-- Phase 11: full snapshot of the runtime-context block the agent sender
+-- prepended to this run's stdin. Stored as JSON (project_type, deploy_target,
+-- version info, global_rules_digest, design_preferences, _stale flag, etc.)
+-- for audit + repro. NULL on historical rows and on runs predating Wave 2.
+ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS runtime_context_snapshot JSONB;
 
 -- Belt-and-suspenders for the cron-fire regression: ensure started_at always
 -- has a DB-side default so an accidentally-omitted JS value never trips the
