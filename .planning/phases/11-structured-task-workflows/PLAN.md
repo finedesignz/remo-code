@@ -239,3 +239,16 @@ Resolutions for §9 open questions:
 - Version bump (feat → minor) + tag + Coolify redeploy of `app.remo-code.com` verified `/healthz` 200.
 - DB migration applied to prod Postgres on Coolify; pre/post `task_type` counts logged in the phase PR body.
 - One end-to-end smoke: schedule a `dev` workflow with cron `*/5 * * * *`, observe three run rows with `chain_task` edges firing in order, with `runtime_context_snapshot` populated on each.
+
+## Completion log
+
+- `8f61547` phase-11: plan + autonomous decisions for open questions
+- `b9edb82` phase-11(db): migrate task_type to dev/security/log_check + add runtime_context_snapshot
+- `9451fc1` phase-11(types): narrow TaskType to dev/security/log_check + chain step kinds
+- `3106e3f` phase-11 WIP (early type narrowing)
+- `a9d74c3` phase-11(types): complete task_kind narrowing across hub+web
+- `9ca4421` phase-11(prompts): scaffold prompt template loader + dirs
+- `b1af0f0` phase-11(prompts): loader + 9 workflow step templates
+- `22218f2` phase-11(ui): task-type + target dropdowns, compact md:grid layout
+- `f3b1d11` phase-11(context): runtime context injector + project-type detector
+- _next_ phase-11(workflows): WORKFLOWS table + chain audit + migration script + docs

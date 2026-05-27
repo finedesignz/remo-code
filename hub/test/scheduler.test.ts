@@ -613,3 +613,36 @@ describe('scheduler/auto-name', () => {
     expect(out.name).toBe('Dev on finedesignz/kh-hub every 4h — nightly')
   })
 })
+
+// Phase 11: workflow ordering contract — the chain audit in
+// post-run/chain.ts and the UI auto-create flow depend on this table.
+describe('scheduler/workflows (Phase 11)', () => {
+  test('WORKFLOWS declares 3 steps per root', async () => {
+    const { WORKFLOWS } = await import('../src/scheduler/workflows.ts')
+    expect(WORKFLOWS.dev).toEqual(['dev_plan', 'dev_execute', 'dev_ship'])
+    expect(WORKFLOWS.security).toEqual([
+      'security_scan',
+      'security_triage',
+      'security_fix_or_issue',
+    ])
+    expect(WORKFLOWS.log_check).toEqual([
+      'log_pull',
+      'log_classify',
+      'log_triage',
+    ])
+  })
+
+  test('nextStepInWorkflow chains then terminates', async () => {
+    const { nextStepInWorkflow } = await import(
+      '../src/scheduler/workflows.ts'
+    )
+    expect(nextStepInWorkflow('dev_plan')).toBe('dev_execute')
+    expect(nextStepInWorkflow('dev_execute')).toBe('dev_ship')
+    expect(nextStepInWorkflow('dev_ship')).toBeNull()
+    expect(nextStepInWorkflow('security_fix_or_issue')).toBeNull()
+    expect(nextStepInWorkflow('log_triage')).toBeNull()
+    // Roots are not chained steps.
+    expect(nextStepInWorkflow('dev')).toBeNull()
+    expect(nextStepInWorkflow('triage')).toBeNull()
+  })
+})

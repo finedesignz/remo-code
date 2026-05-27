@@ -309,6 +309,39 @@ Inbound visual annotations from Revanote → routed as `user_message` into the C
 
 When adding a new annotation status, callback retry bucket, deploy strategy, or any revanote-side change: update `docs/revanote.md` in the same commit.
 
+## Phase 11: Structured Task Workflows + Runtime Context Injection
+
+Collapses the scheduled-task type enum from six options to **three** user-pickable roots (`dev`, `security`, `log_check`) plus **nine chained step kinds** plus internal `triage`. Each root expands into a 3-step workflow glued via the existing `chain_task` post-run action — no new sender. Adds a `## RUNTIME CONTEXT` block to every agent-bound scheduled run, persisted to `scheduled_task_runs.runtime_context_snapshot` for audit. Full architecture in [docs/scheduled-tasks.md](docs/scheduled-tasks.md) "Phase 11" section.
+
+**File map (hub):**
+
+- `hub/src/scheduler/workflows.ts` — `WORKFLOWS` ordering table + `nextStepInWorkflow` / `stepsForWorkflow` / `workflowRootForStep` helpers.
+- `hub/src/scheduler/prompts/loader.ts` + `prompts/<workflow>/<step>.md` (9 files: `dev/{plan,execute,ship}`, `security/{scan,triage,fix-or-issue}`, `log_check/{pull,classify,triage}`).
+- `hub/src/scheduler/context/{project-type,deploy-target,version,global-rules-digest,design-preferences,build}.ts` — runtime context builders.
+- `hub/src/scheduler/post-run/chain.ts` — workflow-aware audit log; chain_task remains authoritative.
+- `hub/src/scheduler/senders/agent.ts` — prepends `## RUNTIME CONTEXT` block; storedContent unchanged.
+- `hub/src/db/schema.sql` — `scheduled_task_runs.runtime_context_snapshot JSONB` (nullable); `task_type` CHECK tightened to the new enum.
+- `hub/src/db/scheduled-tasks-dal.ts` — narrowed `TaskType` union (3 roots + 9 steps + `triage`).
+- `hub/scripts/migrate-task-kinds.ts` — one-shot data migration (`prompt|skill|continue_dev` → `dev`). Idempotent.
+
+**File map (web):**
+
+- `web/src/components/ScheduleEditor.tsx` — `<select>` task-type + `<select>` target; `md:grid-cols-{2,3}` compact layout.
+- `web/src/components/SchedulesPage.tsx`, `web/src/hooks/useSchedules.ts`, `web/src/lib/task-name.ts`, `web/src/lib/task-templates.ts` — narrowed enum + label swaps.
+
+**Key invariants:**
+
+- **Templates are repo `.md` files only** (PLAN.md decision #1). No DB override in v1.
+- **Single `{{user_prompt}}` slot** shared across all three step templates per workflow (decision #2).
+- **Auto-create three pre-chained rows** on workflow save; single-row legacy rows stay legal (decision #3).
+- **Cost cap is per-user-per-day** — workflows can be cut mid-chain (decision #4).
+- **No auto-explosion of legacy rows** during migration; they stay single-step `dev` with prompt verbatim (decision #7).
+- **`triage` is hidden from create-task `<select>`** but visible in run history with "(internal)" label (decision #6).
+- **Hub NEVER reads user home dirs.** `design-preferences.md` is read from repo-vendored `docs/design-preferences.md` if present (decision #9).
+- **`runtime_context_snapshot` is NEVER persisted to `messages`.** It is sent to Claude stdin and stored on the run row only.
+
+When adding a new workflow step, root, runtime-context field, or template: update `docs/scheduled-tasks.md` AND `hub/test/scheduler.test.ts` in the same commit.
+
 ## API docs convention
 
 The hub exposes OpenAPI 3.1 at `/openapi.json` and a Scalar UI at `/docs`. The spec is assembled in `hub/src/api/_openapi.ts` using `@hono/zod-openapi` `createRoute` declarations. Currently covers `/api/profile/cost-today` and `/api/profile/license` — the rest of the hub is plain Hono and gets migrated incrementally.
