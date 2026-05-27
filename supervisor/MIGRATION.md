@@ -1,7 +1,7 @@
 # Supervisor Distribution Migration — NSSM/npm → Tauri Tray App
 
 **Date:** 2026-05-26
-**Status:** In-progress (this PR retires the install path; release engineering is a separate concern).
+**Status:** Completed 2026-05-26 (Phase 09 — `claude-remote` / `npx remo-code-agent` / `npx remo-code-supervisor install` / NSSM all retired; Tauri MSI is the sole distribution channel).
 
 ## TL;DR
 
