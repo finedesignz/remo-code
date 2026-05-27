@@ -11,9 +11,11 @@
  */
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
 import { insertMessage } from '../../db/dal.ts'
+import { sql } from '../../db/postgres.ts'
 import { broadcastToSubscribers } from '../../ws/registry.ts'
 import * as queue from '../session-queue.ts'
 import { finalizeRun, removeRunContext, getRunContext } from '../dispatcher.ts'
+import { buildRuntimeContext, renderRuntimeContextBlock, type RuntimeContext } from '../context/runtime-context.ts'
 
 interface PendingTurn {
   runId: string
@@ -55,8 +57,33 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
   const content = buildContent(task)
   if (!content) { await finalizeRun(ctx.runId, 'failed', 'empty_content'); return }
 
+  // Phase 11: build + persist runtime context snapshot, prepend block to
+  // the sent message. The STORED content (chat history) does NOT carry
+  // the runtime block — per agent.ts invariant, ephemeral directives never
+  // enter `messages`. The snapshot lives in `scheduled_task_runs`.
+  let runtimeCtx: RuntimeContext = {}
+  try {
+    runtimeCtx = await buildRuntimeContext({
+      userId: ctx.userId,
+      sessionId,
+      taskKind: task.task_type,
+    })
+  } catch {
+    // Best-effort. Fall through with an empty ctx; renderer emits just the header.
+  }
+  const runtimeBlock = renderRuntimeContextBlock(runtimeCtx)
+  try {
+    await sql`
+      UPDATE scheduled_task_runs
+      SET runtime_context_snapshot = ${JSON.stringify(runtimeCtx)}::jsonb
+      WHERE id = ${ctx.runId}
+    `
+  } catch {
+    // Best-effort. Failure to persist snapshot must not fail the run.
+  }
+
   const summaryDirective = `\n\n---\nWhen finished, end your response with a single line starting with "Summary:" describing in 1-2 sentences what you accomplished or any blocker. Keep it brief — this is a scheduled run and the user only needs the headline result.`
-  const sentContent = content + summaryDirective
+  const sentContent = `${runtimeBlock}\n\n## TASK\n${content}${summaryDirective}`
   const storedContent = `[scheduled: ${task.name}]\n\n${content}`
   let msg: { id: string; created_at: string } | null = null
   try {
