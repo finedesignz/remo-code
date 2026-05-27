@@ -396,6 +396,7 @@ function ApiKeyTab({ token }: { token: string }) {
   const [newKey, setNewKey] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [opError, setOpError] = useState<string | null>(null)
 
   const copy = (text: string) => {
     navigator.clipboard.writeText(text)
@@ -404,15 +405,26 @@ function ApiKeyTab({ token }: { token: string }) {
   }
 
   const handleGenerate = async () => {
+    setOpError(null)
     const result = await generateKey()
-    if (result?.key) { setNewKey(result.key); setConfirming(false) }
+    if (result.ok && result.data?.key) {
+      setNewKey(result.data.key)
+      setConfirming(false)
+    } else if (!result.ok) {
+      setOpError(result.message)
+    }
   }
 
   const handleRevoke = async () => {
     if (!activeKey) return
-    await revokeKey(activeKey.id)
-    setNewKey(null)
-    setConfirming(false)
+    setOpError(null)
+    const result = await revokeKey(activeKey.id)
+    if (result.ok) {
+      setNewKey(null)
+      setConfirming(false)
+    } else {
+      setOpError(result.message)
+    }
   }
 
   if (loading) return <p className="text-sm text-[var(--text-muted)]">Loading…</p>
@@ -439,6 +451,9 @@ function ApiKeyTab({ token }: { token: string }) {
             {newKey}
           </code>
         </div>
+      )}
+      {opError && (
+        <p className="text-red-300/80 text-xs">{opError}</p>
       )}
 
       <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">

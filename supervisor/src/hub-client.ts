@@ -8,7 +8,8 @@ import { scanAllCommands } from './commands-scanner'
 import { getHandler, nativeSupervisorCommands } from './commands/index'
 import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
 
-const VERSION = '0.3.1'
+// Keep in sync with supervisor/tauri/src-tauri/tauri.conf.json version
+const VERSION = '0.4.2'
 
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
