@@ -1,11 +1,13 @@
 import { sql } from "./postgres.ts";
+import { buildRepoKey, type GitOriginGithub } from "../lib/repo-key.ts";
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
 export async function listSessions(userId: string) {
   return sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info,
-           cli_kind, is_rootless, hostname
+           cli_kind, is_rootless, hostname,
+           repo_key, github_owner, github_repo
     FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST
   `;
@@ -17,10 +19,54 @@ export async function updateSessionAgentInfo(sessionId: string, info: unknown) {
 
 export async function getSession(sessionId: string, userId: string) {
   const rows = await sql`
-    SELECT id, name, project_dir, status, token_hash, last_activity, created_at
+    SELECT id, name, project_dir, status, token_hash, last_activity, created_at,
+           cli_kind, is_rootless, hostname,
+           repo_key, github_owner, github_repo
     FROM sessions WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
   `;
   return rows[0] ?? null;
+}
+
+// ── Phase 08 plan 004 — pending local repos + dismiss-local ───────────────────
+
+export type PendingPrompt = {
+  hostname: string
+  project_dir: string
+  is_git_repo: boolean
+  first_seen_at: string
+  last_seen_at: string
+}
+
+export async function getPendingPrompts(userId: string): Promise<PendingPrompt[]> {
+  const rows = await sql`
+    SELECT p.hostname, p.project_dir, p.is_git_repo, p.first_seen_at, p.last_seen_at
+    FROM pending_local_repos p
+    LEFT JOIN dismissed_local_sessions d
+      ON d.user_id = p.user_id
+     AND d.hostname = p.hostname
+     AND d.project_dir = p.project_dir
+    WHERE p.user_id = ${userId} AND d.user_id IS NULL
+    ORDER BY p.last_seen_at DESC
+  `
+  return rows as unknown as PendingPrompt[]
+}
+
+export async function dismissLocalSession(
+  userId: string,
+  hostname: string,
+  projectDir: string,
+): Promise<void> {
+  await sql.begin(async (tx) => {
+    await tx`
+      INSERT INTO dismissed_local_sessions (user_id, hostname, project_dir)
+      VALUES (${userId}, ${hostname}, ${projectDir})
+      ON CONFLICT (user_id, hostname, project_dir) DO NOTHING
+    `
+    await tx`
+      DELETE FROM pending_local_repos
+      WHERE user_id = ${userId} AND hostname = ${hostname} AND project_dir = ${projectDir}
+    `
+  })
 }
 
 export async function getSessionById(sessionId: string) {
@@ -136,6 +182,270 @@ export async function findOrCreateAgentSession(
     RETURNING *
   `;
   return { ...rows[0], created: true };
+}
+
+// Phase 08: GitHub-keyed session resolution. Wraps the priority-1/2/3
+// algorithm from ARCHITECTURE §4 in a single transaction with `FOR UPDATE`
+// locks so that two worktrees of the same GitHub repo authenticating in
+// parallel converge on ONE session row.
+//
+// - No `git` field, or not a git repo, or no GitHub remote → upsert
+//   `pending_local_repos` and fall through to legacy `findOrCreateAgentSession`.
+// - GitHub remote → check existing repo-keyed row (P1); else upgrade matching
+//   legacy row(s) in place and supersede siblings (P2); else insert new
+//   repo-keyed row protected by the partial unique index (P3).
+//
+// Returns the existing session shape plus `created`, `repo_keyed`, and
+// `migrated` flags so the WS handler can log the rollout signal.
+export type FindOrCreateV2Result = {
+  // session row (postgres.js returns plain row objects)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [k: string]: any
+  id: string
+  created: boolean
+  repo_keyed: boolean
+  migrated?: boolean
+}
+
+export type GitIntrospectionInput = {
+  is_git_repo: boolean
+  is_worktree: boolean
+  worktree_parent_path: string | null
+  git_remote: string | null
+  git_origin_github: GitOriginGithub | null
+}
+
+/**
+ * Plan 08-003 (T4): tokenHash may be null when the caller is the supervisor
+ * inventory path — no runner is attached yet, so we don't have a token to
+ * bind. Whenever tokenHash is null we skip overwriting the existing
+ * `token_hash` column (preserving whatever a prior runner-bound connect set).
+ */
+export async function findOrCreateAgentSessionV2(
+  userId: string,
+  projectDir: string,
+  tokenHash: string | null,
+  cliKind: 'claude' | 'codex' = 'claude',
+  git?: GitIntrospectionInput,
+  hostname: string | null = null,
+): Promise<FindOrCreateV2Result> {
+  // Step 1: no usable github identity → legacy path + pending_local_repos.
+  if (!git || !git.is_git_repo || !git.git_origin_github) {
+    if (hostname) {
+      try {
+        await sql`
+          INSERT INTO pending_local_repos (user_id, hostname, project_dir, is_git_repo)
+          VALUES (${userId}, ${hostname}, ${projectDir}, ${git?.is_git_repo ?? false})
+          ON CONFLICT (user_id, hostname, project_dir) DO UPDATE
+            SET last_seen_at = now(),
+                is_git_repo = EXCLUDED.is_git_repo
+        `
+      } catch (err: any) {
+        console.warn('[session-v2] pending_local_repos upsert failed:', err?.message)
+      }
+    }
+    // Plan 08-003 T4: supervisor-inventory callers pass tokenHash=null and
+    // only want pending_local_repos populated — they're not opening a runner.
+    // Skip the legacy findOrCreateAgentSession upsert in that case.
+    if (tokenHash === null) {
+      return {
+        id: '',
+        user_id: userId,
+        name: '',
+        project_dir: projectDir,
+        token_hash: '',
+        cli_kind: cliKind,
+        is_rootless: false,
+        status: 'offline',
+        last_activity: null,
+        created_at: new Date(),
+        repo_key: null,
+        github_owner: null,
+        github_repo: null,
+        superseded_by: null,
+        deleted_at: null,
+        created: false,
+        repo_keyed: false,
+      } as any
+    }
+    const legacy = await findOrCreateAgentSession(userId, projectDir, tokenHash, cliKind)
+    return { ...legacy, repo_keyed: false }
+  }
+
+  const repoKey = buildRepoKey(git.git_origin_github)
+  const owner = git.git_origin_github.owner.toLowerCase()
+  const repo = git.git_origin_github.repo.toLowerCase()
+  const candidatePaths = [projectDir, git.worktree_parent_path].filter((p): p is string => !!p)
+
+  return sql.begin(async (tx) => {
+    // Priority 1: existing github-keyed row for this user.
+    const p1 = await tx`
+      SELECT * FROM sessions
+      WHERE user_id = ${userId}
+        AND repo_key = ${repoKey}
+        AND is_rootless = false
+        AND deleted_at IS NULL
+      FOR UPDATE
+    `
+    if (p1[0]) {
+      const row = p1[0]
+      // Plan 08-003 T4: when tokenHash is null (supervisor inventory path)
+      // preserve the existing token_hash so a previously-attached runner row
+      // keeps its binding. Otherwise overwrite.
+      const updated = tokenHash === null
+        ? await tx`
+            UPDATE sessions
+               SET project_dir = ${projectDir},
+                   last_activity = now()
+             WHERE id = ${row.id}
+             RETURNING *
+          `
+        : await tx`
+            UPDATE sessions
+               SET token_hash = ${tokenHash},
+                   project_dir = ${projectDir},
+                   last_activity = now()
+             WHERE id = ${row.id}
+             RETURNING *
+          `
+      return { ...updated[0], created: false, repo_keyed: true }
+    }
+
+    // Priority 2: legacy rows (repo_key IS NULL) whose project_dir matches
+    // the connecting path OR the worktree parent. Pick the most-recently-
+    // active as the keeper and supersede the rest.
+    let legacyRows: any[] = []
+    if (candidatePaths.length > 0) {
+      legacyRows = await tx`
+        SELECT * FROM sessions
+        WHERE user_id = ${userId}
+          AND repo_key IS NULL
+          AND is_rootless = false
+          AND deleted_at IS NULL
+          AND project_dir = ANY(${candidatePaths}::text[])
+        ORDER BY last_activity DESC NULLS LAST
+        FOR UPDATE
+      `
+    }
+
+    if (legacyRows.length > 0) {
+      const keeper = legacyRows[0]
+      const updated = tokenHash === null
+        ? await tx`
+            UPDATE sessions
+               SET repo_key = ${repoKey},
+                   github_owner = ${owner},
+                   github_repo = ${repo},
+                   project_dir = ${projectDir},
+                   last_activity = now()
+             WHERE id = ${keeper.id}
+             RETURNING *
+          `
+        : await tx`
+            UPDATE sessions
+               SET repo_key = ${repoKey},
+                   github_owner = ${owner},
+                   github_repo = ${repo},
+                   token_hash = ${tokenHash},
+                   project_dir = ${projectDir},
+                   last_activity = now()
+             WHERE id = ${keeper.id}
+             RETURNING *
+          `
+      for (let i = 1; i < legacyRows.length; i++) {
+        const other = legacyRows[i]
+        await tx`
+          UPDATE sessions
+             SET superseded_by = ${keeper.id},
+                 deleted_at = now()
+           WHERE id = ${other.id}
+        `
+      }
+      return { ...updated[0], created: false, repo_keyed: true, migrated: true }
+    }
+
+    // Priority 3: brand-new repo-keyed row. ON CONFLICT handles the final-mile
+    // race where two transactions both miss P1 but only one wins the INSERT.
+    // Plan 08-003 T4: when called from supervisor inventory, tokenHash is null
+    // — the sessions.token_hash column is NOT NULL so we insert a synthetic
+    // marker. The marker tells `/api/sessions/:id/launch` there is no runner
+    // attached yet (status stays 'offline'). When a real runner connects later
+    // via /ws/agent → findOrCreateAgentSessionV2, the P1 path overwrites the
+    // marker with the runner's real tokenHash. ON CONFLICT in the null-token
+    // case preserves the existing token_hash (don't clobber a real runner
+    // binding with our marker).
+    const PENDING_TOKEN_MARKER = 'pending_supervisor_inventory'
+    const insertTokenValue = tokenHash ?? PENDING_TOKEN_MARKER
+    const name = `${owner}/${repo}`
+    const inserted = tokenHash === null
+      ? await tx`
+          INSERT INTO sessions (
+            user_id, name, project_dir, token_hash, cli_kind,
+            repo_key, github_owner, github_repo
+          )
+          VALUES (
+            ${userId}, ${name}, ${projectDir}, ${insertTokenValue}, ${cliKind},
+            ${repoKey}, ${owner}, ${repo}
+          )
+          ON CONFLICT (user_id, repo_key)
+            WHERE repo_key IS NOT NULL AND is_rootless = false AND deleted_at IS NULL
+            DO UPDATE SET
+              project_dir = EXCLUDED.project_dir,
+              last_activity = now()
+          RETURNING *, (xmax = 0) AS inserted_fresh
+        `
+      : await tx`
+          INSERT INTO sessions (
+            user_id, name, project_dir, token_hash, cli_kind,
+            repo_key, github_owner, github_repo
+          )
+          VALUES (
+            ${userId}, ${name}, ${projectDir}, ${insertTokenValue}, ${cliKind},
+            ${repoKey}, ${owner}, ${repo}
+          )
+          ON CONFLICT (user_id, repo_key)
+            WHERE repo_key IS NOT NULL AND is_rootless = false AND deleted_at IS NULL
+            DO UPDATE SET
+              token_hash = EXCLUDED.token_hash,
+              project_dir = EXCLUDED.project_dir,
+              last_activity = now()
+          RETURNING *, (xmax = 0) AS inserted_fresh
+        `
+    const row = inserted[0]
+    const created = row?.inserted_fresh === true
+    // strip the diagnostic column before returning
+    const { inserted_fresh, ...clean } = row
+    return { ...clean, created, repo_keyed: true }
+  }) as Promise<FindOrCreateV2Result>
+}
+
+/**
+ * Plan 08-003 (T4): batch-upsert local-only / non-git folders into
+ * `pending_local_repos`. Called from the supervisor `supervisor.repo_inventory`
+ * handler for every entry without a GitHub origin. Uses a single multi-row
+ * INSERT … ON CONFLICT DO UPDATE so a 200-repo inventory hits the DB once.
+ */
+export async function upsertPendingLocalRepoBatch(
+  rows: Array<{ user_id: string; hostname: string; project_dir: string; is_git_repo: boolean }>,
+): Promise<number> {
+  if (rows.length === 0) return 0
+  // postgres.js arg-array form: each row's values are positional.
+  const userIds = rows.map((r) => r.user_id)
+  const hostnames = rows.map((r) => r.hostname)
+  const projectDirs = rows.map((r) => r.project_dir)
+  const isGit = rows.map((r) => r.is_git_repo)
+  const result = await sql`
+    INSERT INTO pending_local_repos (user_id, hostname, project_dir, is_git_repo)
+    SELECT
+      unnest(${userIds}::uuid[]),
+      unnest(${hostnames}::text[]),
+      unnest(${projectDirs}::text[]),
+      unnest(${isGit}::boolean[])
+    ON CONFLICT (user_id, hostname, project_dir) DO UPDATE
+      SET last_seen_at = now(),
+          is_git_repo = EXCLUDED.is_git_repo
+  `
+  return result.count ?? rows.length
 }
 
 // Create a session for a legacy channel/plugin connection

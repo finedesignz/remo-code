@@ -25,6 +25,20 @@ export interface CodeSession {
   cli_kind?: 'claude' | 'codex'
   is_rootless?: boolean
   hostname?: string | null
+  // ── Phase 08 — GitHub-keyed session fields ────────────────────────────────
+  // All nullable: legacy/local-only sessions have repo_key === null.
+  repo_key?: string | null
+  github_owner?: string | null
+  github_repo?: string | null
+}
+
+/**
+ * Derive a `owner/repo` label from a session's GitHub identity, or null when
+ * the session is not GitHub-keyed.
+ */
+export function githubOwnerRepo(s: CodeSession): string | null {
+  if (s.github_owner && s.github_repo) return `${s.github_owner}/${s.github_repo}`
+  return null
 }
 
 export function useSessions(token: string | null) {

@@ -2,6 +2,22 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir, platform } from 'os'
 
+/**
+ * Phase 08 §15 — scan settings used by `repo-scanner.scanRoots`.
+ * Defaults: max_depth=2, sensible ignore_globs, no symlink follow.
+ */
+export interface ScanSettings {
+  max_depth: number
+  ignore_globs: string[]
+  follow_symlinks: boolean
+}
+
+export const DEFAULT_SCAN_SETTINGS: ScanSettings = {
+  max_depth: 2,
+  ignore_globs: ['**/node_modules/**', '**/.next/**', '**/dist/**', '**/target/**'],
+  follow_symlinks: false,
+}
+
 export interface SupervisorConfig {
   hubUrl: string
   apiKey: string
@@ -19,6 +35,10 @@ export interface SupervisorConfig {
   killSwitchHotkey: string
   /** Tauri autostart toggle (mirrored to plugin). */
   autostart: boolean
+  /** Phase 08 §15 — scan settings for `repo-scanner`. */
+  scan: ScanSettings
+  /** Phase 08 §15 — ISO timestamp of the most recent scan; null when never scanned. */
+  lastScanAt: string | null
 }
 
 function defaultConfigDir(): string {
@@ -43,6 +63,20 @@ export const CONFIG_PATH = join(CONFIG_DIR, 'supervisor.json')
 const DEFAULT_HUB_URL = 'https://app.remo-code.com'
 const DEFAULT_KILL_SWITCH_HOTKEY = 'Ctrl+Shift+Alt+K'
 
+/** Phase 08 §15 — explicit accessor for the resolved supervisor.json path. */
+export function getConfigPath(): string {
+  return CONFIG_PATH
+}
+
+function readScanFromRaw(raw: any): ScanSettings {
+  const s = raw?.scan ?? {}
+  return {
+    max_depth: typeof s.max_depth === 'number' && s.max_depth > 0 ? s.max_depth : DEFAULT_SCAN_SETTINGS.max_depth,
+    ignore_globs: Array.isArray(s.ignore_globs) ? s.ignore_globs.map(String) : DEFAULT_SCAN_SETTINGS.ignore_globs,
+    follow_symlinks: s.follow_symlinks === true,
+  }
+}
+
 export function loadConfig(): SupervisorConfig {
   if (!existsSync(CONFIG_PATH)) {
     throw new Error(`Supervisor not configured. Open the Remo Code tray app and complete the first-run setup (or write ${CONFIG_PATH} manually).`)
@@ -60,6 +94,31 @@ export function loadConfig(): SupervisorConfig {
     auditLogPath: raw.audit_log_path || defaultAuditLogPath(),
     killSwitchHotkey: raw.kill_switch_hotkey || DEFAULT_KILL_SWITCH_HOTKEY,
     autostart: raw.autostart !== false, // default TRUE
+    scan: readScanFromRaw(raw),
+    lastScanAt: typeof raw.last_scan_at === 'string' ? raw.last_scan_at : null,
+  }
+}
+
+/**
+ * Phase 08 §15 — defaults used when `supervisor.json` is absent. Callers that
+ * need a config object before first-run (e.g. the welcome window backing
+ * Tauri) can use this without throwing. The api_key/hub_url are intentionally
+ * empty — `loadConfig()` still throws on a missing file in normal runtime.
+ */
+export function defaultConfig(): SupervisorConfig {
+  return {
+    hubUrl: DEFAULT_HUB_URL,
+    apiKey: '',
+    roots: [],
+    maxConcurrent: 1,
+    allowDangerousSkipPermissions: false,
+    requireGitRepo: false,
+    auditLogEnabled: true,
+    auditLogPath: defaultAuditLogPath(),
+    killSwitchHotkey: DEFAULT_KILL_SWITCH_HOTKEY,
+    autostart: true,
+    scan: { ...DEFAULT_SCAN_SETTINGS },
+    lastScanAt: null,
   }
 }
 
@@ -79,6 +138,15 @@ export function saveConfig(cfg: Partial<SupervisorConfig> & { apiKey: string }) 
     audit_log_path: cfg.auditLogPath || existing.audit_log_path || defaultAuditLogPath(),
     kill_switch_hotkey: cfg.killSwitchHotkey || existing.kill_switch_hotkey || DEFAULT_KILL_SWITCH_HOTKEY,
     autostart: cfg.autostart ?? existing.autostart ?? true,
+    // Phase 08 §15
+    scan: cfg.scan
+      ? {
+          max_depth: cfg.scan.max_depth ?? DEFAULT_SCAN_SETTINGS.max_depth,
+          ignore_globs: cfg.scan.ignore_globs ?? DEFAULT_SCAN_SETTINGS.ignore_globs,
+          follow_symlinks: cfg.scan.follow_symlinks ?? DEFAULT_SCAN_SETTINGS.follow_symlinks,
+        }
+      : existing.scan ?? { ...DEFAULT_SCAN_SETTINGS },
+    last_scan_at: cfg.lastScanAt ?? existing.last_scan_at ?? null,
   }
   writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2), 'utf-8')
 }

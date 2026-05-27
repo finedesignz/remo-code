@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, findOrCreateAgentSession, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo } from '../db/dal'
 import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
@@ -9,7 +9,7 @@ import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisor
 import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
 import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
-  updateSupervisorState, heartbeatSupervisor,
+  updateSupervisorState, heartbeatSupervisor, getSupervisor,
 } from './supervisor-registry'
 
 const AUTH_TIMEOUT_MS = 5_000
@@ -209,7 +209,15 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     const rawToken = generateToken('remo_')
     const tokenHash = await hashToken(rawToken)
     const cliKind: 'claude' | 'codex' = (msg as any).cli_kind ?? 'claude'
-    const session = await findOrCreateAgentSession(userId, projectDir, tokenHash, cliKind)
+    const gitInput = (msg as any).git as Parameters<typeof findOrCreateAgentSessionV2>[4]
+    const session = await findOrCreateAgentSessionV2(
+      userId,
+      projectDir,
+      tokenHash,
+      cliKind,
+      gitInput,
+      msg.hostname ?? null,
+    )
 
     if (!session.created) {
       unregisterChannel(session.id)
@@ -221,7 +229,7 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     ws.data.userId = userId
     if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
 
-    console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir} cli=${cliKind} reused=${!session.created}`)
+    console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir} cli=${cliKind} reused=${!session.created} repo_keyed=${session.repo_keyed} migrated=${session.migrated ?? false}`)
     registerChannel(session.id, userId, ws as any)
     await setSessionStatus(session.id, 'online')
 
@@ -482,7 +490,7 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       roots: msg.roots,
     })
     ws.data.supervisorId = row.id
-    registerSupervisor({ ws, supervisorId: row.id, userId, apiKeyId, roots: msg.roots })
+    registerSupervisor({ ws, supervisorId: row.id, userId, apiKeyId, roots: msg.roots, hostname: msg.hostname })
     // Reset state to idle on (re)connect — any previously running session was
     // owned by the supervisor process which has since restarted.
     await updateSupervisorState(row.id, 'idle', null)
@@ -613,6 +621,85 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
 
   if (msg.type === 'repo.scan_result' || msg.type === 'repo.op_result') {
     resolveRequest(supervisorId, msg.req_id, msg)
+    return
+  }
+
+  if (msg.type === 'supervisor.repo_inventory') {
+    // Phase 08 §15 (Plan 003 T4): fan inventory into sessions + pending_local_repos.
+    try {
+      const { findOrCreateAgentSessionV2, upsertPendingLocalRepoBatch } = await import('../db/dal')
+      const { setUserInventory } = await import('./supervisor-registry')
+      const entry = getSupervisor(supervisorId)
+      const hostname = entry?.hostname || ''
+
+      // 1. Cache the inventory so Plan 005's launch/clone-here resolver can read it.
+      setUserInventory(userId, {
+        scanned_at: msg.scanned_at,
+        supervisor_id: supervisorId,
+        repos: msg.repos,
+        roots: entry?.roots ?? [],
+      })
+
+      // 2. Partition: github-keyed → session upsert; everything else → pending_local_repos.
+      const githubEntries: any[] = []
+      const pendingRows: Array<{ user_id: string; hostname: string; project_dir: string; is_git_repo: boolean }> = []
+      for (const repo of msg.repos) {
+        if (repo.git_origin_github) {
+          githubEntries.push(repo)
+        } else if (hostname) {
+          pendingRows.push({
+            user_id: userId,
+            hostname,
+            project_dir: repo.local_path,
+            is_git_repo: repo.is_git_repo,
+          })
+        }
+      }
+
+      let sessionsTouched = 0
+      for (const repo of githubEntries) {
+        try {
+          // tokenHash=null → no runner bound; session lives in 'offline' until Launch.
+          await findOrCreateAgentSessionV2(
+            userId,
+            repo.local_path,
+            null,
+            'claude',
+            {
+              is_git_repo: true,
+              is_worktree: repo.is_worktree,
+              worktree_parent_path: repo.worktree_parent_path,
+              git_remote: repo.git_remote,
+              git_origin_github: repo.git_origin_github,
+            },
+            hostname || null,
+          )
+          sessionsTouched++
+        } catch (err: any) {
+          console.warn(`[supervisor] repo_inventory v2 upsert failed local=${repo.local_path} err=${err?.message}`)
+        }
+      }
+
+      let pendingTouched = 0
+      if (pendingRows.length > 0) {
+        try {
+          pendingTouched = await upsertPendingLocalRepoBatch(pendingRows)
+        } catch (err: any) {
+          console.warn(`[supervisor] pending_local_repos batch failed err=${err?.message}`)
+        }
+      }
+
+      console.log(`[supervisor] repo_inventory received supervisor=${supervisorId} repos=${msg.repos.length} sessions=${sessionsTouched} pending=${pendingTouched}`)
+
+      // 3. Push a fresh session_list to the user's connected web clients.
+      try {
+        const { listSessions } = await import('../db/dal')
+        const sessions = await listSessions(userId)
+        broadcastToUser(userId, { type: 'session_list', sessions })
+      } catch {}
+    } catch (err: any) {
+      console.error('[supervisor] repo_inventory handler failed', err?.message)
+    }
     return
   }
 

@@ -1,10 +1,12 @@
 import { hostname, platform, release } from 'os'
-import { scanAll } from './repo-scanner'
+import { writeFileSync, mkdirSync, watch as fsWatch, existsSync, readFileSync } from 'fs'
+import { dirname, join } from 'path'
+import { scanAll, scanRoots } from './repo-scanner'
 import { cloneRepo, pullRepo, pullLocal, checkoutBranch, listBranches, isDirty } from './git-ops'
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
 import { getHandler, nativeSupervisorCommands } from './commands/index'
-import type { SupervisorConfig } from './config'
+import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
 
 const VERSION = '0.3.1'
 
@@ -17,6 +19,7 @@ type OutboundMsg =
   | { type: 'repo.op_result'; req_id: string; op: string; ok: boolean; error?: string; data?: any }
   | { type: 'repo.clone_progress'; req_id: string; stage: string; percent?: number }
   | { type: 'supervisor.commands_sync'; commands: Array<{ kind: 'command' | 'skill'; name: string; description: string | null; source: string; path: string }> }
+  | { type: 'supervisor.repo_inventory'; scanned_at: string; repos: Array<{ local_path: string; is_git_repo: boolean; is_worktree: boolean; worktree_parent_path: string | null; git_remote: string | null; git_origin_github: { owner: string; repo: string } | null; canonical?: boolean }> }
   | { type: 'run_started'; run_id: string }
   | { type: 'run_output'; run_id: string; chunk: string }
   | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
@@ -30,8 +33,31 @@ export class SupervisorClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pm: ProcessManager
 
+  /** Phase 08 §15 — fs.watch handle on supervisor.json so Tauri "Rescan now"
+   * (which nulls `last_scan_at`) triggers a fresh inventory emission. */
+  private configWatcher: ReturnType<typeof fsWatch> | null = null
+
   constructor(cfg: SupervisorConfig) {
     this.cfg = cfg
+    // Watch supervisor.json for external edits (Tauri Roots panel writes here
+    // when the user adds/removes roots or clicks "Rescan now").
+    try {
+      const cfgPath = CONFIG_PATH
+      if (existsSync(cfgPath)) {
+        this.configWatcher = fsWatch(cfgPath, { persistent: false }, () => {
+          // Coalesce rapid double-fires.
+          if ((this as any)._cfgReloadTimer) return
+          ;(this as any)._cfgReloadTimer = setTimeout(() => {
+            ;(this as any)._cfgReloadTimer = null
+            this.onConfigChanged()
+          }, 250)
+        })
+      }
+    } catch (err: any) {
+      // Non-fatal — fall back to "next reconnect" cadence.
+      // eslint-disable-next-line no-console
+      console.warn('[hub-client] config watch failed:', err?.message ?? err)
+    }
     this.pm = new ProcessManager({
       onStateChange: (state, info) => {
         this.send({
@@ -178,6 +204,12 @@ export class SupervisorClient {
       } catch (err: any) {
         this.log('warn', `commands scan failed: ${err.message}`)
       }
+      // Phase 08 §15 — push full repo inventory to the hub. The hub upserts
+      // sessions (github-keyed) + pending_local_repos (local-only). When roots
+      // is empty, we emit a needs-roots log instead so the UI can prompt.
+      void this.sendRepoInventory().catch((err) => {
+        this.log('warn', `repo_inventory failed: ${err.message}`)
+      })
       return
     }
     if (msg.type === 'auth_error') {
@@ -202,6 +234,86 @@ export class SupervisorClient {
         // unknown
         break
     }
+  }
+
+  /**
+   * Phase 08 §15 — run the new introspection-aware scanner across configured
+   * roots and emit `supervisor.repo_inventory`. When `roots` is empty we emit
+   * a `supervisor.needs_roots` log line so the Tauri UI can listen and prompt;
+   * we still send an empty inventory so the hub clears any stale cache.
+   */
+  public async sendRepoInventory(): Promise<void> {
+    if (!this.authenticated) return
+    if (!this.cfg.roots || this.cfg.roots.length === 0) {
+      this.log('warn', 'supervisor.needs_roots — no roots configured; inventory empty')
+      this.send({ type: 'supervisor.repo_inventory', scanned_at: new Date().toISOString(), repos: [] })
+      return
+    }
+    const entries = await scanRoots({ roots: this.cfg.roots, scan: this.cfg.scan })
+    const scannedAt = new Date().toISOString()
+    const repos = entries.map((e) => ({
+      local_path: e.local_path,
+      is_git_repo: e.is_git_repo,
+      is_worktree: e.is_worktree,
+      worktree_parent_path: e.worktree_parent_path,
+      git_remote: e.git_remote,
+      git_origin_github: e.git_origin_github,
+      canonical: e.canonical,
+    }))
+    this.send({ type: 'supervisor.repo_inventory', scanned_at: scannedAt, repos })
+    // Persist to <CONFIG_DIR>/last_inventory.json so the Tauri UI can render
+    // the same data via the `get_inventory` IPC command. Best-effort.
+    try {
+      const dir = dirname(CONFIG_PATH)
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        join(dir, 'last_inventory.json'),
+        JSON.stringify({ scanned_at: scannedAt, repos }, null, 2),
+        'utf-8',
+      )
+    } catch (err: any) {
+      this.log('warn', `last_inventory.json write failed: ${err?.message ?? err}`)
+    }
+    // Stamp last_scan_at into supervisor.json so Roots panel + General page
+    // see the fresh timestamp without re-watching the inventory file.
+    try {
+      saveConfig({ ...this.cfg, apiKey: this.cfg.apiKey, lastScanAt: scannedAt })
+      this.cfg.lastScanAt = scannedAt
+    } catch (err: any) {
+      this.log('warn', `saveConfig(lastScanAt) failed: ${err?.message ?? err}`)
+    }
+    this.log('info', `repo_inventory sent: ${entries.length} entries`)
+  }
+
+  /**
+   * Phase 08 §15 — react to external supervisor.json edits from the Tauri UI.
+   *
+   * Trigger semantics:
+   *   - `last_scan_at` flipped to null → user clicked "Rescan now"; re-emit.
+   *   - `roots` changed → re-emit so the hub sees the new shape.
+   *   - Anything else → swallow.
+   *
+   * We never crash the live socket; failures fall back to next reconnect.
+   */
+  private onConfigChanged() {
+    let raw: any
+    try { raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) } catch { return }
+    const newRoots: string[] = Array.isArray(raw.roots) ? raw.roots.map(String) : []
+    const prevRoots = this.cfg.roots ?? []
+    const rootsChanged = newRoots.length !== prevRoots.length ||
+      newRoots.some((r, i) => r !== prevRoots[i])
+    const lastScanCleared = raw.last_scan_at === null && this.cfg.lastScanAt !== null
+    if (!rootsChanged && !lastScanCleared) return
+    this.cfg.roots = newRoots
+    if (raw.scan) {
+      this.cfg.scan = {
+        max_depth: typeof raw.scan.max_depth === 'number' ? raw.scan.max_depth : this.cfg.scan.max_depth,
+        ignore_globs: Array.isArray(raw.scan.ignore_globs) ? raw.scan.ignore_globs.map(String) : this.cfg.scan.ignore_globs,
+        follow_symlinks: raw.scan.follow_symlinks === true,
+      }
+    }
+    this.log('info', `config changed (rootsChanged=${rootsChanged} rescanRequest=${lastScanCleared}); re-emitting inventory`)
+    void this.sendRepoInventory().catch((err) => this.log('warn', `inventory re-emit failed: ${err?.message ?? err}`))
   }
 
   private async onRepoScan(msg: { req_id: string }) {

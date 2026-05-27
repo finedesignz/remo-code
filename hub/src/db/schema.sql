@@ -540,3 +540,45 @@ DO $$ BEGIN
     CHECK (status IN ('running','success','failed','skipped','pending','in_flight','cancelled','skipped_quota'));
 EXCEPTION WHEN others THEN NULL; END $$;
 
+-- ── Phase 08: GitHub-backed session keying ───────────────────────────────────
+-- Additive: collapses N worktrees of one GitHub repo into ONE session per user.
+-- NULL repo_key = legacy / local-only / unclassified — partial unique index
+-- excludes those rows so we never collide on NULL. Lazy migration via the DAL
+-- on next agent connect (see ARCHITECTURE.md §4–§5).
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS repo_key TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS github_owner TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS github_repo TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS superseded_by TEXT
+  REFERENCES sessions(id) ON DELETE SET NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_repo_key
+  ON sessions(user_id, repo_key)
+  WHERE repo_key IS NOT NULL AND is_rootless = false AND deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_sessions_superseded
+  ON sessions(superseded_by) WHERE superseded_by IS NOT NULL;
+
+-- Per-(user, hostname, project_dir) dismissals so the "create or dismiss"
+-- prompt never re-appears for a folder the user said no to.
+CREATE TABLE IF NOT EXISTS dismissed_local_sessions (
+  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hostname     TEXT NOT NULL,
+  project_dir  TEXT NOT NULL,
+  dismissed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, hostname, project_dir)
+);
+
+-- Folders the agent/supervisor has reported as "not on GitHub yet". Surfaced
+-- in the Connect modal so the user can pick Create or Dismiss without the
+-- agent re-announcing. Refreshed on every agent connect.
+CREATE TABLE IF NOT EXISTS pending_local_repos (
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hostname      TEXT NOT NULL,
+  project_dir   TEXT NOT NULL,
+  is_git_repo   BOOLEAN NOT NULL,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, hostname, project_dir)
+);
+CREATE INDEX IF NOT EXISTS idx_pending_local_repos_user ON pending_local_repos(user_id);
+

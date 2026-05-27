@@ -1,14 +1,24 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected } from '../db/dal'
+import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, getPendingPrompts, dismissLocalSession } from '../db/dal'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
 import { generateToken } from '../utils/token'
 import { pickSessionTarget } from '../sessions/routing.ts'
 import { createRun } from '../db/supervisor-dal.ts'
-import { sendToSupervisor, updateSupervisorState } from '../ws/supervisor-registry.ts'
+import {
+  sendToSupervisor,
+  updateSupervisorState,
+  listOnlineSupervisorIdsForUser,
+  resolveLocalPathForRepoKey,
+  getUserInventory,
+} from '../ws/supervisor-registry.ts'
 import { releaseSessionSlot } from '../sessions/budget.ts'
+import { probeGithubAppScope } from '../lib/github-scope.ts'
+import { enqueueCreateGithubRepoJob } from '../lib/github-repo-job.ts'
+import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 
 const CreateSessionBody = z.object({
   name: z.string().min(1).max(100).trim(),
@@ -54,6 +64,30 @@ sessions.get('/messages', async (c) => {
   // dropped, so the response simply omits them (no existence leak).
   const grouped = await getMessagesForSessions(userId, ids, limit)
   return c.json(grouped)
+})
+
+// ── Phase 08 plan 004 — pending-prompts + dismiss-local ──────────────────────
+// MUST be declared BEFORE the `/:id` GET so the path segments don't collide.
+
+const DismissLocalBody = z.object({
+  hostname: z.string().min(1).max(255),
+  project_dir: z.string().min(1).max(4096),
+})
+
+sessions.get('/pending-prompts', async (c) => {
+  const userId = c.get('userId') as string
+  const pending = await getPendingPrompts(userId)
+  return c.json({ pending })
+})
+
+sessions.post('/dismiss-local', async (c) => {
+  const userId = c.get('userId') as string
+  const parsed = DismissLocalBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_input', detail: parsed.error.issues[0]?.message }, 400)
+  }
+  await dismissLocalSession(userId, parsed.data.hostname, parsed.data.project_dir)
+  return c.json({ dismissed: true })
 })
 
 // Get a single session
@@ -236,6 +270,213 @@ sessions.post('/heal', async (c) => {
 
   // Exhausted hop budget — every supervisor we tried failed to dispatch.
   return c.json({ error: 'no_target_available', reason: 'all_dispatches_failed' }, 503)
+})
+
+// ── Phase 08 §16 — POST /api/sessions/:id/launch ─────────────────────────────
+// Hub→supervisor `session.launch` directive. The supervisor spawns the runner
+// against the canonical local_path resolved from its most recent inventory.
+// Returns 202 immediately; the UI listens for `session.launch_failed` (e.g.
+// `local_path_missing`) over its websocket. Per ARCHITECTURE §16, the hub does
+// NOT pre-validate `cwd` existence on disk — the supervisor owns disk truth.
+
+const LaunchBody = z.object({
+  cli_kind: z.enum(['claude', 'codex']).optional(),
+})
+
+// In-memory one-shot launch nonces (per ARCHITECTURE §16 — the session token
+// is never exposed to clients; we mint a per-run nonce instead). The
+// supervisor doesn't validate this against anything today; it's reserved for
+// future supervisor → hub re-auth. Memory-only.
+const launchNonces = new Map<string, { user_id: string; session_id: string; expires: number }>()
+function mintLaunchNonce(userId: string, sessionId: string): string {
+  const nonce = `launch_${randomUUID()}`
+  launchNonces.set(nonce, { user_id: userId, session_id: sessionId, expires: Date.now() + 5 * 60_000 })
+  return nonce
+}
+
+sessions.post('/:id/launch', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const body = await c.req.json().catch(() => ({}))
+  const parsed = LaunchBody.safeParse(body)
+  if (!parsed.success) return c.json({ error: 'invalid_input' }, 400)
+
+  const session = await getSession(sessionId, userId)
+  if (!session) return c.json({ error: 'not_found' }, 404)
+
+  // Already online? Refuse — caller should disconnect first.
+  if ((session as any).status === 'online') {
+    return c.json({ error: 'already_online' }, 409)
+  }
+
+  // Resolve target supervisor (first online for this user — multi-host out of
+  // scope for v1; future plan can extend with a `hostname` filter).
+  const supervisorIds = listOnlineSupervisorIdsForUser(userId)
+  if (supervisorIds.length === 0) {
+    return c.json({ error: 'supervisor_offline' }, 409)
+  }
+  const supervisorId = supervisorIds[0]
+
+  // Resolve cwd: prefer repo_key → inventory canonical path; fall back to
+  // session.project_dir (legacy / pre-inventory rows).
+  const repoKey = (session as any).repo_key as string | null
+  let cwd: string | null = null
+  if (repoKey) {
+    cwd = resolveLocalPathForRepoKey(userId, repoKey)
+  }
+  if (!cwd) cwd = (session as any).project_dir ?? null
+  if (!cwd) {
+    // Suggest where to clone (first known root for this user).
+    const inv = getUserInventory(userId)
+    const suggestedRoot = inv?.roots?.[0] ?? null
+    return c.json({
+      error: 'local_path_missing',
+      repo_key: repoKey,
+      suggested_clone_dir: suggestedRoot && repoKey
+        ? path.join(suggestedRoot, repoKey.replace(/^github:\/\//i, '').split('/').pop() || 'repo')
+        : null,
+    }, 409)
+  }
+
+  const cli_kind = (parsed.data.cli_kind ?? (session as any).cli_kind ?? 'claude') as 'claude' | 'codex'
+  const run_id = randomUUID()
+  const nonce = mintLaunchNonce(userId, sessionId)
+
+  try {
+    sendToSupervisor(supervisorId, {
+      type: 'session.launch',
+      run_id,
+      session_id: sessionId,
+      cli_kind,
+      cwd,
+      api_key: nonce,
+      system_prompt: (session as any).system_prompt ?? null,
+    })
+  } catch (err: any) {
+    return c.json({ error: 'dispatch_failed', detail: err?.message ?? 'unknown' }, 503)
+  }
+
+  return c.json({ launching: true, run_id }, 202)
+})
+
+// ── Phase 08 §16 — POST /api/sessions/:id/clone-here ────────────────────────
+// Reuses the existing `repo.clone` supervisor message; supervisor re-scans
+// after clone completes and emits a fresh `supervisor.repo_inventory`.
+
+const CloneHereBody = z.object({
+  target_root: z.string().max(1024).optional(),
+})
+
+sessions.post('/:id/clone-here', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const session = await getSession(sessionId, userId)
+  if (!session) return c.json({ error: 'not_found' }, 404)
+
+  const repoKey = (session as any).repo_key as string | null
+  if (!repoKey) {
+    return c.json({ error: 'no_repo_key', detail: 'session is not GitHub-keyed' }, 400)
+  }
+  const owner = (session as any).github_owner as string | null
+  const repoName = (session as any).github_repo as string | null
+  if (!owner || !repoName) {
+    return c.json({ error: 'missing_owner_or_repo' }, 400)
+  }
+
+  const inv = getUserInventory(userId)
+  if (!inv) return c.json({ error: 'supervisor_offline_or_no_inventory' }, 409)
+  const supervisorIds = listOnlineSupervisorIdsForUser(userId)
+  if (supervisorIds.length === 0) return c.json({ error: 'supervisor_offline' }, 409)
+  const supervisorId = supervisorIds[0]
+
+  const body = await c.req.json().catch(() => ({}))
+  const parsed = CloneHereBody.safeParse(body)
+  if (!parsed.success) return c.json({ error: 'invalid_input' }, 400)
+
+  const targetRoot = parsed.data.target_root ?? inv.roots[0]
+  if (!targetRoot) return c.json({ error: 'no_root_configured' }, 400)
+  if (!inv.roots.includes(targetRoot)) {
+    return c.json({ error: 'target_root_not_in_inventory' }, 400)
+  }
+  const targetPath = path.join(targetRoot, repoName)
+  const cloneUrl = `https://github.com/${owner}/${repoName}.git`
+  const reqId = randomUUID()
+
+  try {
+    sendToSupervisor(supervisorId, {
+      type: 'repo.clone',
+      req_id: reqId,
+      clone_url: cloneUrl,
+      target_path: targetPath,
+      repo_full_name: `${owner}/${repoName}`,
+    })
+  } catch (err: any) {
+    return c.json({ error: 'dispatch_failed', detail: err?.message }, 503)
+  }
+  return c.json({ cloning: true, req_id: reqId, target_path: targetPath }, 202)
+})
+
+// ── Phase 08 §6 — POST /api/sessions/:id/create-github-repo ─────────────────
+// Validates GitHub App scope via the gateway pair; if missing
+// `administration: write` → 412. Otherwise enqueues an in-memory background
+// job that creates the empty remote via Octokit and asks the supervisor to
+// push the initial commit. Progress streams to the user via WS
+// `repo_create_progress { job_id, stage, percent }`.
+
+const CreateGithubRepoBody = z.object({
+  visibility: z.enum(['private', 'public']).default('private'),
+  org: z.string().min(1).max(100).optional(),
+  name: z.string().min(1).max(100).optional(),
+})
+
+sessions.post('/:id/create-github-repo', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const session = await getSession(sessionId, userId)
+  if (!session) return c.json({ error: 'not_found' }, 404)
+
+  const body = await c.req.json().catch(() => ({}))
+  const parsed = CreateGithubRepoBody.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_input', detail: parsed.error.issues[0]?.message }, 400)
+  }
+
+  // Gate: must have a local_path to push from.
+  const projectDir = (session as any).project_dir as string | null
+  const repoKey = (session as any).repo_key as string | null
+  let localPath: string | null = repoKey ? resolveLocalPathForRepoKey(userId, repoKey) : null
+  if (!localPath) localPath = projectDir
+  if (!localPath) return c.json({ error: 'local_path_missing' }, 409)
+
+  const supervisorIds = listOnlineSupervisorIdsForUser(userId)
+  if (supervisorIds.length === 0) return c.json({ error: 'supervisor_offline' }, 409)
+
+  // Probe GitHub App scope (cached 5min).
+  const scope = await probeGithubAppScope()
+  if (!scope.hasAdminWrite) {
+    return c.json({
+      error: 'github_app_missing_scope',
+      missing_scope: 'administration:write',
+      kind: scope.kind,
+      detail: 'GitHub App installation does not have `administration: write`. Re-install with the required permission or configure a PAT in Settings → Integrations → GitHub.',
+    }, 412)
+  }
+
+  const name = parsed.data.name ?? path.basename(localPath)
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) {
+    return c.json({ error: 'invalid_repo_name' }, 400)
+  }
+
+  const job = enqueueCreateGithubRepoJob({
+    user_id: userId,
+    session_id: sessionId,
+    local_path: localPath,
+    name,
+    visibility: parsed.data.visibility,
+    org: parsed.data.org,
+  })
+
+  return c.json({ job_id: job.job_id, status: 'queued' as const }, 202)
 })
 
 export { sessions }
