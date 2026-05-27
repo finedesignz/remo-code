@@ -16,6 +16,16 @@
     "updater:default",
     "process:default",
     "shell:default",
-    "dialog:default"
+    "dialog:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "remo-code-supervisor",
+          "sidecar": true,
+          "args": true
+        }
+      ]
+    }
   ]
 }

@@ -44,6 +44,15 @@ jobs:
         working-directory: supervisor/tauri/ui
         run: bun run build
 
+      - name: Compile supervisor sidecar binary
+        working-directory: supervisor
+        shell: bash
+        run: |
+          bun install
+          mkdir -p tauri/src-tauri/binaries
+          bun build --compile --target=bun-windows-x64 ./src/index.ts --outfile tauri/src-tauri/binaries/remo-code-supervisor-x86_64-pc-windows-msvc.exe
+          ls -la tauri/src-tauri/binaries/
+
       - name: Build, sign, and release with tauri-action
         uses: tauri-apps/tauri-action@v0
         env:

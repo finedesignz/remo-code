@@ -1,0 +1,4 @@
+# Compiled sidecar binaries — built in CI / locally before `cargo tauri build`.
+# Never commit; they're large (>100MB) and target-specific.
+binaries/
+target/
