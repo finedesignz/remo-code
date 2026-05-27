@@ -2,6 +2,7 @@
 //!
 //! T4: NSSM-service collision check + loopback mutex probe.
 
+mod config_cmds;
 mod first_run;
 mod mutex_probe;
 mod nssm;
@@ -60,7 +61,12 @@ pub fn run() {
             sidecar::spawn_managed(app.handle().clone());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![])
+        .invoke_handler(tauri::generate_handler![
+            config_cmds::get_config,
+            config_cmds::add_root,
+            config_cmds::remove_root,
+            config_cmds::rescan_now,
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {

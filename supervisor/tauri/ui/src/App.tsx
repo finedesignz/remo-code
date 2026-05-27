@@ -1,6 +1,6 @@
 import { NavLink, Route, Routes } from "react-router-dom";
 import GeneralPage from "./pages/GeneralPage";
-import FoldersPage from "./pages/FoldersPage";
+import RootsPanel from "./components/RootsPanel";
 import SecurityPage from "./pages/SecurityPage";
 import UpdateNotifier from "./UpdateNotifier";
 
@@ -13,13 +13,13 @@ export default function App() {
           Supervisor
         </div>
         <NavItem to="/" label="General" />
-        <NavItem to="/folders" label="Folders" />
+        <NavItem to="/folders" label="Roots" />
         <NavItem to="/security" label="Security" />
       </aside>
       <main className="flex-1 p-6 overflow-y-auto">
         <Routes>
           <Route path="/" element={<GeneralPage />} />
-          <Route path="/folders" element={<FoldersPage />} />
+          <Route path="/folders" element={<RootsPanel />} />
           <Route path="/security" element={<SecurityPage />} />
         </Routes>
       </main>
