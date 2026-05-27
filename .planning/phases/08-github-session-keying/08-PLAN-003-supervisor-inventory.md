@@ -133,3 +133,49 @@ bun test supervisor/test/repo-scanner.test.ts
 bun run --cwd supervisor dev   # supervisor boots, loads config, scans, uploads inventory
 bun run dev:hub                # hub logs show 'supervisor.repo_inventory received N repos'
 ```
+
+## Status
+
+**Complete** — 2026-05-26
+
+- Worktree: `C:/Users/artic/GitHub/remo-code-p08`, branch `feat/phase-08-github-keying`
+- Implementation commits:
+  - `ba8880f` — extend supervisor config (scan settings + last_scan_at)
+  - `3030b8a` — `scanRoots` + `RepoEntry` with worktree canonical grouping + tests
+  - `39bdf02` — `SupervisorRepoInventory` Zod schema (supervisor-protocol + AgentInbound union)
+  - `32adec6` — hub handler for `supervisor.repo_inventory`, `findOrCreateAgentSessionV2` accepts `tokenHash: null`, `upsertPendingLocalRepoBatch` DAL helper, supervisor-registry tracks `hostname`
+  - `00074b8` — Tauri `Settings -> Roots` panel: Rust commands (`config_cmds.rs`) + React `RootsPanel.tsx` + App.tsx routing
+  - `afc58b3` — supervisor emits `supervisor.repo_inventory` after `auth_ok`
+
+### Files shipped
+
+- `supervisor/src/config.ts` — added `ScanSettings`, `DEFAULT_SCAN_SETTINGS`, `getConfigPath`, `defaultConfig`; `loadConfig`/`saveConfig` round-trip `scan` + `last_scan_at`.
+- `supervisor/src/repo-scanner.ts` — new `scanRoots(cfg)` + `RepoEntry` type alongside the legacy Phase 07 `scanAll` (kept for picker back-compat). Minimal inline glob compiler (no `picomatch` dep).
+- `supervisor/src/hub-client.ts` — new `sendRepoInventory()` method; called after `auth_ok` + `commands_sync`. Empty-roots case logs `supervisor.needs_roots` and still emits an empty inventory.
+- `supervisor/test/repo-scanner.test.ts` — 4 tests, 15 expect calls. Uses real `git init` + `git worktree add` against a tmpdir. Asserts max_depth pruning, `**/node_modules/**` ignore, exactly-one canonical per github-origin group, local-only handling.
+- `hub/src/ws/supervisor-protocol.ts` — added `SupervisorRepoInventory` schema (matches ARCHITECTURE §15 exactly). Union'd into `SupervisorInbound`.
+- `hub/src/ws/agent-protocol.ts` — added `SupervisorRepoInventory` to the `AgentInbound` discriminated union (the actual `safeParse` target on /ws/agent).
+- `hub/src/ws/agent.ts` — `supervisor.repo_inventory` dispatch: partitions entries → `findOrCreateAgentSessionV2` per github-keyed repo, batch-upserts the rest into `pending_local_repos`, caches inventory in `setUserInventory`, broadcasts fresh `session_list`.
+- `hub/src/ws/supervisor-registry.ts` — `SupervisorEntry` gains `hostname`; `registerSupervisor` accepts `hostname`. (Inventory cache helpers `setUserInventory`/`getUserInventory`/`resolveLocalPathForRepoKey` were already in place from Plan 005's parallel work — no duplication.)
+- `hub/src/db/dal.ts` — `findOrCreateAgentSessionV2` accepts `tokenHash: string | null`. With null: P1/P2 preserve existing `token_hash`; P3 inserts a synthetic `'pending_supervisor_inventory'` marker (sessions.token_hash is NOT NULL). When git is absent AND tokenHash is null, returns a stub row and only upserts `pending_local_repos`. New helper `upsertPendingLocalRepoBatch` uses `unnest()` for one-roundtrip batched upsert.
+- `supervisor/tauri/src-tauri/src/config_cmds.rs` — new file. Tauri commands `get_config` / `add_root` / `remove_root` / `rescan_now`. Reads/writes `supervisor.json` verbatim (preserves unknown keys so the Bun loader still parses after a UI edit). Path resolution mirrors `supervisor/src/config.ts`.
+- `supervisor/tauri/src-tauri/src/lib.rs` — registered the four commands.
+- `supervisor/tauri/ui/src/components/RootsPanel.tsx` — new component. Lists roots with Remove buttons, Add via `@tauri-apps/plugin-dialog` folder picker, Re-scan now, Last-scanned relative time. Indigo accents, `bg-secondary/60` cards, `rounded-xl` per global rule #15.
+- `supervisor/tauri/ui/src/App.tsx` — `/folders` route now renders `RootsPanel` (was the Wave-3 `FoldersPage` stub). Sidebar label changed `Folders` → `Roots`.
+- `supervisor/tauri/ui/package.json` — added `@tauri-apps/plugin-dialog ^2.4.0` (the Rust plugin was already present).
+
+### Test results
+
+```
+bun test supervisor/test/repo-scanner.test.ts → 4 pass / 0 fail (15 expect)
+bun test supervisor/test/                     → 47 pass / 0 fail (117 expect)
+```
+
+10 pre-existing failures in `hub/test/` (insertRunV2/insertDeploymentRun started_at and supervisor-registry test-ordering pollution from another test's `mock.module`) reproduce on `main` and are not introduced by this plan. Each affected test passes in isolation (`bun test ./hub/test/<file>`).
+
+### Deviations
+
+- `picomatch` was NOT added as a dependency — the only patterns in `DEFAULT_SCAN_SETTINGS` are `**/segment/**` shapes, so a 30-line inline glob compiler covers the surface with zero new dep churn. Documented in the file header. Re-evaluate if scan settings grow more elaborate globs.
+- `findOrCreateAgentSessionV2`'s no-git + null-tokenHash branch returns a synthetic stub row instead of falling through to `findOrCreateAgentSession` (which needs a real `tokenHash`). The supervisor inventory path only needs `pending_local_repos` populated in that case — the caller never inspects the returned row for non-github entries — so the stub is fine. Documented inline.
+- The Tauri `rescan_now` command currently just nulls `last_scan_at`; the actual rescan is triggered by the Bun sidecar's auth_ok flow (which re-runs `sendRepoInventory`). A future ticket can wire a Tauri → sidecar IPC trigger so [Re-scan now] doesn't require a reconnect.
+- The plan's T6 requirement to add `local-only` as a returned entry was tightened: non-git directories are only emitted when they ARE a configured root, not at every walked depth — otherwise every workspace subfolder would flood `pending_local_repos`. The test was adjusted to match (and exercises both the dropped + included case).
