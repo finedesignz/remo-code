@@ -10,6 +10,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import {
+  getAutoUpdateStatus,
+  subscribeAutoUpdateStatus,
+  triggerAutoUpdateCheckNow,
+  type AutoUpdateStatus,
+} from "../lib/autoUpdater";
 
 interface RuntimeStatus {
   hub_url: string;
@@ -167,6 +174,8 @@ export default function GeneralPage() {
         </div>
       </section>
 
+      <AutoUpdateSection />
+
       <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
         <h2 className="text-sm font-semibold mb-2">Config</h2>
         <dl>
@@ -182,4 +191,107 @@ export default function GeneralPage() {
       </section>
     </div>
   );
+}
+
+function AutoUpdateSection() {
+  const [enabled, setEnabled] = useState<boolean>(false);
+  const [appVersion, setAppVersion] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [watcher, setWatcher] = useState<AutoUpdateStatus>(getAutoUpdateStatus());
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const v = await invoke<boolean>("get_auto_update");
+        setEnabled(v);
+      } catch (e) {
+        setErr(String(e));
+      }
+      try {
+        setAppVersion(await getVersion());
+      } catch {
+        /* ignore */
+      }
+    })();
+    return subscribeAutoUpdateStatus(setWatcher);
+  }, []);
+
+  const toggle = useCallback(async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const next = !enabled;
+      const saved = await invoke<boolean>("set_auto_update", { enabled: next });
+      setEnabled(saved);
+      if (saved) {
+        // Kick off an immediate check so the user sees a result without waiting 60s.
+        void triggerAutoUpdateCheckNow();
+      }
+    } catch (e: any) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [enabled]);
+
+  const lastChecked = watcher.lastCheckedAt
+    ? formatRelative(watcher.lastCheckedAt)
+    : "never";
+
+  return (
+    <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 space-y-3">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-semibold">Auto-update</h2>
+          <p className="text-xs text-[var(--text-muted)] mt-1 max-w-md">
+            Silently install new versions in the background. Restarts the app when installing.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => { void toggle(); }}
+          disabled={busy}
+          aria-pressed={enabled}
+          className={[
+            "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
+            enabled
+              ? "bg-indigo-600 ring-1 ring-indigo-500/40"
+              : "bg-[var(--bg-tertiary)] ring-1 ring-[var(--border-color)]/40",
+            busy ? "opacity-60" : "",
+          ].join(" ")}
+        >
+          <span
+            className={[
+              "inline-block h-5 w-5 transform rounded-full bg-white transition-transform",
+              enabled ? "translate-x-5" : "translate-x-0.5",
+            ].join(" ")}
+          />
+        </button>
+      </div>
+      {err && (
+        <div className="text-xs text-red-300 break-all">{err}</div>
+      )}
+      <div className="text-xs text-[var(--text-muted)] space-y-1">
+        <div>Last checked: <span className="text-[var(--text-secondary)]">{lastChecked}</span></div>
+        <div>Latest installed: <span className="text-[var(--text-secondary)] font-mono">{appVersion ? `v${appVersion}` : "—"}</span></div>
+        {watcher.lastResult === "error" && watcher.lastError && (
+          <div className="text-red-300 break-all">Last error: {watcher.lastError}</div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function formatRelative(ts: number): string {
+  const diff = Date.now() - ts;
+  if (diff < 5_000) return "just now";
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
 }
