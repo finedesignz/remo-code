@@ -39,7 +39,7 @@ export const ClientSubscribe = z.object({
   session_id: z.string().min(1).max(256).optional(),
   session_ids: z.array(z.string().min(1)).max(SUBSCRIBE_MAX).optional(),
 }).refine(
-  (d) => !!d.session_id || (Array.isArray(d.session_ids) && d.session_ids.length >= 0),
+  (d) => !!d.session_id || Array.isArray(d.session_ids),
   { message: 'subscribe requires session_id or session_ids' },
 )
 

@@ -128,6 +128,14 @@ export function registerSupervisor(args: {
   if (existing) {
     const e = supervisors.get(existing)
     if (e && e.ws !== args.ws) {
+      // Drain pending requests BEFORE closing the old socket so callers see a
+      // structured rejection instead of an unresolved timeout. Each pending
+      // entry owns its own setTimeout that must be cleared first.
+      for (const [, p] of e.pendingReqs) {
+        clearTimeout(p.timer)
+        p.reject(new Error('supervisor_replaced'))
+      }
+      e.pendingReqs.clear()
       try { e.ws.close(4003, 'replaced') } catch {}
     }
   }
