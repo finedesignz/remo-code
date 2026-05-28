@@ -28,6 +28,7 @@ import { revanoteWebhookRoutes } from './api/revanote-webhook'
 import { revanoteMappings } from './api/revanote-mappings'
 import { revanoteAnnotations } from './api/revanote-annotations'
 import { webhooksTitanium } from './api/webhooks-titanium'
+import { wellKnown } from './api/well-known'
 import { orchestrator as orchestratorApi } from './api/orchestrator'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
@@ -82,6 +83,11 @@ app.use('/api/*', cors({
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
+
+// Phase 12.1: public deep-link association files for iOS Universal Links and
+// Android App Links. No auth, no license gate. Mounted at root before any
+// /api/* middleware so Apple/Google can fetch them anonymously.
+app.route('/.well-known', wellKnown)
 
 // Phase 07-G: rate-limit auth endpoints BEFORE mounting the router.
 // request-link: 3/min/IP + 5/hr/email — `silent: true` so the response still

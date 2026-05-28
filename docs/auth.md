@@ -196,6 +196,86 @@ The script is **idempotent** — running it twice produces the same result.
 
 ---
 
+## Mobile finalize endpoint (Phase 12.1)
+
+The mobile Tauri shell cannot directly receive the browser session cookie set
+by `GET /api/auth/login/callback` — the OAuth-style hop happens in the system
+browser, not the WebView. To bridge that gap, the callback supports an opt-in
+`?platform=ios|android` query that triggers a deep-link handoff instead of a
+cookie + 302 to `/`.
+
+### Flow
+
+1. The Tauri shell opens `https://app.remo-code.com/api/auth/login/request-link?platform=ios`
+   in the system browser (regular magic-link email request — `platform` is
+   echoed back through the email link by the SPA / link builder).
+2. The user taps the link in their email. The browser hits
+   `GET /api/auth/login/callback?platform=ios&token=<jwt>`.
+3. The hub verifies the magic-link JWT and reserves the `jti` (same path the
+   browser callback uses), then mints a one-time row in
+   `auth_handoff_tokens` (60-second TTL, single-use).
+4. The hub 302s the browser to `remo-code://auth/callback?token=<opaque>`.
+   The OS hands the URL off to the registered Tauri app.
+5. The Tauri shell POSTs the opaque token to `/api/auth/finalize-mobile` with
+   `Origin: tauri://localhost` (iOS) or `https://tauri.localhost` (Android).
+6. The hub consumes the row (atomic `UPDATE … WHERE consumed_at IS NULL`),
+   creates a normal `auth_sessions` row via `createAuthSession`, and emits a
+   Tauri-variant cookie: `Set-Cookie: remo_sid=…; HttpOnly; Secure;
+   SameSite=None; Partitioned; Path=/; Max-Age=…`. The body returns
+   `{ ok: true, expires_at, user }`.
+
+### Why a separate cookie name
+
+The default browser cookie uses the `__Host-` prefix, which forbids
+`SameSite=None`. The Tauri WebView is a cross-origin context (the SPA at
+`app.remo-code.com` is "third-party" from `tauri://localhost`'s perspective),
+so we need `SameSite=None; Secure; Partitioned`. The unprefixed `remo_sid`
+name carries those attributes without violating the `__Host-` contract.
+
+Both names are read by `readSessionCookie` and
+`parseSessionCookieFromHeader`, so the WS upgrade and middleware paths handle
+either cookie transparently.
+
+### Audit log
+
+`recordAuthEvent` writes three new event types:
+
+- `mobile_handoff_minted` — the callback minted a one-time token. Metadata
+  carries `{ platform: 'ios' | 'android' }`.
+- `mobile_finalize` — `finalize-mobile` succeeded. Metadata carries `origin`.
+- `mobile_finalize_failed` — invalid token, expired, double-consume, or
+  missing user. Metadata carries `reason`.
+
+### Exclusion list
+
+`/api/auth/finalize-mobile` is under the existing `/api/auth/*` exclusion in
+`hub/src/index.ts`, so it skips both the JWT catch-all and the
+`requireActiveLicense` gate.
+
+### Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS auth_handoff_tokens (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash    TEXT NOT NULL,
+  purpose       TEXT NOT NULL DEFAULT 'mobile_handoff',
+  expires_at    TIMESTAMPTZ NOT NULL,
+  consumed_at   TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_auth_handoff_tokens_hash
+  ON auth_handoff_tokens(token_hash);
+```
+
+The opaque token is sha-256-hashed before storage (same pattern as
+`auth_sessions.id` and `api_keys.key_hash`).
+
+See [docs/mobile-client.md](mobile-client.md) for the full Phase 12 architecture
+including `.well-known/*` routes and the Tauri-origin CORS additions.
+
+---
+
 ## Phase 07.5 follow-up (DO NOT do during Phase 07)
 
 Filed as a separate GitHub issue at the end of Phase 07 with this checklist:

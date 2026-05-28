@@ -423,6 +423,34 @@ When migrating a route:
 
 The dump script (`hub/scripts/dump-openapi.ts`) loads the OpenAPIHono sub-app in-process — no `Bun.serve`, no port, no DB. It needs placeholder `JWT_SECRET` + `DATABASE_URL` env vars to satisfy module-load-time validation; the npm script sets harmless values.
 
+## Phase 12: Mobile Tauri Client
+
+Wraps the existing `web/` SPA as a native iOS + Android app via Tauri 2.
+Connection path is unchanged: phone → `https://app.remo-code.com` (hub) →
+user's supervisor over `/ws/agent`. The phone is a pure hub client; no CLI
+runs on-device. Full architecture in [docs/mobile-client.md](docs/mobile-client.md);
+sub-phase plan in `.planning/phases/12-mobile-tauri-client/PLAN.md`.
+
+### 12.1 — Hub-side enablement (this PR)
+
+Hub-only changes that unblock the Tauri shell. No mobile scaffold yet.
+
+- **`hub/src/api/well-known.ts`** — public `GET /.well-known/apple-app-site-association` + `GET /.well-known/assetlinks.json`. Both return `application/json`, no auth, no license gate. Mounted at root in `hub/src/index.ts` before any `/api/*` middleware. Driven by `MOBILE_APPLE_TEAM_ID`, `MOBILE_ANDROID_SHA256_FINGERPRINT`, `MOBILE_BUNDLE_ID` env (dev defaults `TEAMID` / `SHA256_PLACEHOLDER` / `com.finedesignz.remo-code`).
+- **`hub/src/api/auth.ts`** — `GET /api/auth/login/callback` accepts an optional `?platform=ios|android` query. When set, it mints a one-time `auth_handoff_tokens` row and 302s to `remo-code://auth/callback?token=<opaque>` instead of setting the browser cookie. New endpoint `POST /api/auth/finalize-mobile` consumes the opaque token (atomic single-use UPDATE), creates a normal auth session, and emits the Tauri-variant cookie. Excluded from the license gate via the existing `/api/auth/*` rule.
+- **`hub/src/session.ts`** — `sessionCookieAttrsForOrigin(origin)` centralizes the cookie-attribute decision. Browser default stays `__Host-remo_sid; SameSite=Lax`. Requests originating from `tauri://localhost` (iOS) or `https://tauri.localhost` (Android) get `remo_sid; SameSite=None; Secure; Partitioned` — the `__Host-` prefix forbids `SameSite=None`, so the Tauri variant uses an unprefixed name. `readSessionCookie` + `parseSessionCookieFromHeader` accept both names so WS upgrade + middleware paths are transport-agnostic.
+- **`hub/src/db/schema.sql`** — new idempotent `auth_handoff_tokens` table (uuid pk, fk to `users`, sha-256 `token_hash`, `purpose` default `'mobile_handoff'`, 60s `expires_at`, nullable `consumed_at`, index on `token_hash`).
+- **`hub/src/db/dal.ts`** — `createAuthHandoffToken(userId)` returns the opaque token (prefix `mh_`, base64url-encoded 32 bytes). `consumeAuthHandoffToken(token)` performs an atomic `UPDATE … WHERE consumed_at IS NULL AND expires_at > now() RETURNING …` so a second concurrent caller can never also succeed.
+- **`hub/src/config.ts`** — new env: `MOBILE_TAURI_ORIGINS_ENABLED` (default `true`, adds Tauri origins to `allowedOrigins`), `MOBILE_BUNDLE_ID`, `MOBILE_APPLE_TEAM_ID`, `MOBILE_ANDROID_SHA256_FINGERPRINT`.
+
+### Key invariants
+
+- **Tauri origins are ADDITIONAL.** `HUB_ALLOWED_ORIGINS` parsing semantics are unchanged; Tauri origins are appended in-process based on `MOBILE_TAURI_ORIGINS_ENABLED`. Set the env to `false` to revert to browser-only.
+- **Single-use semantics are atomic.** `consumeAuthHandoffToken` relies on the `UPDATE … RETURNING` form — no read-then-write race. Double-consume returns `null`.
+- **`/api/auth/finalize-mobile` is NOT license-gated.** Same rationale as the rest of `/api/auth/*`: acquiring a session must not depend on license state.
+- **No changes to `/ws/agent` or `/ws/client` this phase.** Tauri WebView traffic is identical to browser traffic at the WS layer.
+
+When adding a new mobile endpoint, deep-link target, `.well-known` route, or any Phase 12 surface: update `docs/mobile-client.md` in the same commit, and `docs/auth.md` "Mobile finalize endpoint" subsection if the auth flow changes.
+
 ## PR Hygiene
 
 Periodically check for open PRs with `gh pr list`. Review them for conflicts with current work, stale branches, or changes that have already been applied to main. Flag any that should be closed or merged.
