@@ -25,11 +25,15 @@ import { instructions as instructionsApi } from './api/instructions'
 import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { revanoteWebhookRoutes } from './api/revanote-webhook'
+import { telegramWebhookRoutes } from './api/telegram-webhook'
+import { telegram as telegramApi } from './api/telegram'
 import { revanoteMappings } from './api/revanote-mappings'
 import { revanoteAnnotations } from './api/revanote-annotations'
 import { webhooksTitanium } from './api/webhooks-titanium'
 import { tasks as tasksApi } from './api/tasks'
 import { usage as usageApi } from './api/usage'
+import { wellKnown } from './api/well-known'
+import { orchestrator as orchestratorApi } from './api/orchestrator'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
 import { runMigrations } from './db/migrate'
@@ -42,6 +46,7 @@ import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/d
 import { startErrorGraceSweep } from './error-capture/grace.ts'
 import { startRevanoteGraceSweep } from './revanote/grace.ts'
 import { startRevanoteCallbackWorker } from './revanote/callback.ts'
+import { startTelegramBridge } from './telegram/bridge.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -83,6 +88,11 @@ app.use('/api/*', cors({
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
+
+// Phase 12.1: public deep-link association files for iOS Universal Links and
+// Android App Links. No auth, no license gate. Mounted at root before any
+// /api/* middleware so Apple/Google can fetch them anonymously.
+app.route('/.well-known', wellKnown)
 
 // Phase 07-G: rate-limit auth endpoints BEFORE mounting the router.
 // request-link: 3/min/IP + 5/hr/email — `silent: true` so the response still
@@ -153,6 +163,11 @@ app.route('/api/coolify', coolifyWebhookRoutes)
 // secret embedded in path). MUST be mounted BEFORE the JWT catch-all.
 app.route('/api/revanote', revanoteWebhookRoutes)
 
+// Phase 12: Public Telegram inbound webhook (URL-path secret). MUST be
+// mounted BEFORE the JWT catch-all. Auth is :secret in the URL, constant-time
+// compared to config.telegram.webhookSecret.
+app.route('/api/telegram', telegramWebhookRoutes)
+
 // Public Titanium license-changed webhook (HMAC-signed, shared secret).
 // MUST be mounted BEFORE the JWT catch-all. Inert (503) until secret set.
 app.route('/webhooks/titanium', webhooksTitanium)
@@ -166,6 +181,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
+  if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   // Phase 07: public auth endpoints (login request-link, callback, logout, me).
   // The authRouter handles its own auth state internally where needed.
   if (c.req.path.startsWith('/api/auth/')) return next()
@@ -186,6 +202,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
+  if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
   if (c.req.path.startsWith('/api/setup')) return next()
   return requireActiveLicense({ readOnlyOk: true })(c, next)
@@ -257,6 +274,11 @@ app.use('/api/users/me/profile', async (c, next) =>
   isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/supervisors/:id/roots', async (c, next) =>
   isMutating(c) ? userMutationLimit(c, next) : next())
+// Orchestrator: mutating endpoints require fresh login (15-min step-up).
+app.use('/api/orchestrator', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/orchestrator/*', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/orchestrator', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/orchestrator/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/mappings', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/mappings/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/annotations/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
@@ -295,8 +317,17 @@ app.route('/api/instructions', instructionsApi)
 app.route('/api/error-setup', errorSetupApi)
 // Phase 08: JWT-authed revanote sub-routes (mappings + annotations).
 // The public webhook route lives at /api/revanote/webhook/* (mounted above).
+app.route('/api/orchestrator', orchestratorApi)
 app.route('/api/revanote/mappings', revanoteMappings)
 app.route('/api/revanote/annotations', revanoteAnnotations)
+// Phase 12 Wave 4: authed Telegram REST. Mounted INSIDE the /api/* auth +
+// CSRF + license-gate catch-alls above. The public webhook router was
+// already mounted earlier at the same prefix (line ~160) and handles only
+// /api/telegram/webhook/:secret — non-matching paths fall through to this
+// router. The webhook is in the auth+CSRF+license skip lists; status /
+// link-code / link / default-session are NOT — they require a valid cookie
+// session and a matching X-CSRF-Token on mutating methods.
+app.route('/api/telegram', telegramApi)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
@@ -472,6 +503,9 @@ runMigrations()
     startErrorGraceSweep()
     startRevanoteGraceSweep()
     startRevanoteCallbackWorker()
+    // Phase 12 W3 — outbound Telegram bridge. No-op when TELEGRAM_BOT_TOKEN
+    // is unset; otherwise subscribes to assistant_message:final events.
+    startTelegramBridge()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {

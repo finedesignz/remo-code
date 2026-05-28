@@ -36,6 +36,7 @@ import { SessionPicker } from './SessionPicker'
 import { MobileAccordion } from './MobileAccordion'
 import type { ChatMessage } from '../hooks/useChat'
 import type { CodeSession } from '../hooks/useSessions'
+import { useSessions } from '../hooks/useSessions'
 
 const ACTIVE_CELL_KEY = (tabId: string) => `grid:lastActiveCell:${tabId}`
 
@@ -201,12 +202,28 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
     [tabs, activeTabId],
   )
 
-  // Visible session ids (capped at 12 per Phase 03 lock).
+  // Look up the user's sessions so we can identify the orchestrator and pin it
+  // to the first cell when it's a member of the active tab.
+  const { sessions: allSessions } = useSessions(token)
+  const orchestratorId = useMemo(
+    () => allSessions.find((s) => s.is_orchestrator)?.id ?? null,
+    [allSessions],
+  )
+
+  // Visible session ids (capped at 12 per Phase 03 lock). Orchestrator (when
+  // present) always pins to cell 0.
   const visibleSessions = useMemo(() => {
     if (!activeTab) return []
     const sorted = [...activeTab.sessions].sort((a, b) => a.position - b.position)
+    if (orchestratorId) {
+      const idx = sorted.findIndex((s) => s.session_id === orchestratorId)
+      if (idx > 0) {
+        const [orch] = sorted.splice(idx, 1)
+        sorted.unshift(orch)
+      }
+    }
     return sorted.slice(0, MAX_CELLS_PER_TAB)
-  }, [activeTab])
+  }, [activeTab, orchestratorId])
 
   const overflowCount = (activeTab?.sessions.length ?? 0) - visibleSessions.length
 

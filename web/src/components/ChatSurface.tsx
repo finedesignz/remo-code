@@ -721,7 +721,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
         </button>
       )}
 
-      <form onSubmit={handleSubmit} className="border-t border-[var(--border-color)]">
+      <form onSubmit={handleSubmit} className="safe-bottom border-t border-[var(--border-color)]">
         {!wsConnected && (
           <div className="px-3 py-1 text-[11px] text-amber-400 bg-amber-500/10 border-b border-[var(--border-color)]">
             {online ? 'Reconnecting…' : 'Offline — messages will send when you’re back online.'}

@@ -217,6 +217,20 @@ export async function endRun(runId: string, exitCode: number | null, exitReason:
   `
 }
 
+/**
+ * Bundle 3 — zombie-run cleanup. When a supervisor's WebSocket closes, any
+ * `session_runs` rows it left open (`ended_at IS NULL`) are unreachable: the
+ * runner is gone, no `runner.exit` will ever land. Mark them ended with
+ * exit_reason='socket_close' so the UI/scheduler stop treating them as live.
+ */
+export async function finalizeOpenRunsForSupervisor(supervisorId: string) {
+  await sql`
+    UPDATE session_runs
+    SET ended_at = now(), exit_reason = 'socket_close'
+    WHERE supervisor_id = ${supervisorId} AND ended_at IS NULL
+  `
+}
+
 export async function listRunsForSupervisor(supervisorId: string, userId: string, limit = 50) {
   return sql`
     SELECT * FROM session_runs

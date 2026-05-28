@@ -6,7 +6,7 @@ import { buildRepoKey, type GitOriginGithub } from "../lib/repo-key.ts";
 export async function listSessions(userId: string) {
   return sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info,
-           cli_kind, is_rootless, hostname,
+           cli_kind, is_rootless, hostname, is_orchestrator,
            repo_key, github_owner, github_repo
     FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST
@@ -20,7 +20,7 @@ export async function updateSessionAgentInfo(sessionId: string, info: unknown) {
 export async function getSession(sessionId: string, userId: string) {
   const rows = await sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at,
-           cli_kind, is_rootless, hostname,
+           cli_kind, is_rootless, hostname, is_orchestrator,
            repo_key, github_owner, github_repo
     FROM sessions WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
   `;
@@ -439,14 +439,16 @@ export async function upsertPendingLocalRepoBatch(
   const userIds = rows.map((r) => r.user_id)
   const hostnames = rows.map((r) => r.hostname)
   const projectDirs = rows.map((r) => r.project_dir)
-  const isGit = rows.map((r) => r.is_git_repo)
+  // postgres.js infers boolean[] params with an OID PG refuses to cast back
+  // to boolean[]; round-trip through text[] ('t'/'f') instead.
+  const isGitTxt = rows.map((r) => (r.is_git_repo ? 't' : 'f'))
   const result = await sql`
     INSERT INTO pending_local_repos (user_id, hostname, project_dir, is_git_repo)
     SELECT
       unnest(${userIds}::uuid[]),
       unnest(${hostnames}::text[]),
       unnest(${projectDirs}::text[]),
-      unnest(${isGit}::boolean[])
+      unnest(${isGitTxt}::text[])::boolean
     ON CONFLICT (user_id, hostname, project_dir) DO UPDATE
       SET last_seen_at = now(),
           is_git_repo = EXCLUDED.is_git_repo
@@ -1277,6 +1279,8 @@ export async function recordOpenIssueForHash(
 // same (repo, app_uuid, deploy_uuid) could both pass hasOpenIssueForHash and
 // both call octokit.issues.create → duplicate issues. The placeholder write
 // (issue_number=0) narrows the race window: only one caller wins the claim.
+// updateOpenIssuePlaceholder overwrites on success; deleteOpenIssuePlaceholder
+// removes on terminal failure (issue_number 0 = sentinel).
 export async function placeOpenIssuePlaceholder(
   userId: string,
   hash: string,
@@ -1500,6 +1504,47 @@ export async function purgeExpiredAuthSessions(): Promise<number> {
   return rows.length;
 }
 
+// ── Phase 12.1: mobile auth handoff tokens (one-time, single-use, 60s TTL) ──
+
+const HANDOFF_TTL_SECONDS = 60;
+
+export async function createAuthHandoffToken(
+  userId: string,
+  opts: { purpose?: string; ttlSeconds?: number } = {},
+): Promise<{ token: string; expiresAt: Date }> {
+  const token = 'mh_' + randomBytes(32).toString('base64url');
+  const tokenHash = hashSessionToken(token);
+  const ttl = Math.max(1, Math.floor(opts.ttlSeconds ?? HANDOFF_TTL_SECONDS));
+  const purpose = opts.purpose ?? 'mobile_handoff';
+  const rows = await sql<{ expires_at: Date }[]>`
+    INSERT INTO auth_handoff_tokens (user_id, token_hash, purpose, expires_at)
+    VALUES (${userId}, ${tokenHash}, ${purpose}, now() + (${String(ttl)} || ' seconds')::interval)
+    RETURNING expires_at
+  `;
+  return { token, expiresAt: rows[0].expires_at };
+}
+
+// Atomic single-use claim. Returns { userId } when the token existed, was
+// unexpired, and was unconsumed; returns null otherwise. The UPDATE …
+// RETURNING with `consumed_at IS NULL` guarantees that a second concurrent
+// caller cannot also succeed.
+export async function consumeAuthHandoffToken(
+  token: string,
+): Promise<{ userId: string; purpose: string } | null> {
+  if (!token) return null;
+  const tokenHash = hashSessionToken(token);
+  const rows = await sql<{ user_id: string; purpose: string }[]>`
+    UPDATE auth_handoff_tokens
+       SET consumed_at = now()
+     WHERE token_hash = ${tokenHash}
+       AND consumed_at IS NULL
+       AND expires_at > now()
+    RETURNING user_id, purpose
+  `;
+  if (rows.length === 0) return null;
+  return { userId: rows[0].user_id, purpose: rows[0].purpose };
+}
+
 // ── Audit log ────────────────────────────────────────────────────────────────
 
 export async function recordAuthEvent(opts: {
@@ -1521,3 +1566,147 @@ export async function recordAuthEvent(opts: {
   `;
 }
 
+// ── Phase 12: Telegram bridge DAL ────────────────────────────────────────────
+
+export type TelegramUserRow = {
+  id: string;
+  email: string;
+  telegram_chat_id: string | number | null;
+  telegram_default_session_id: string | null;
+};
+
+export async function getUserByTelegramChatId(chatId: number | bigint | string): Promise<TelegramUserRow | null> {
+  const rows = await sql<TelegramUserRow[]>`
+    SELECT id, email, telegram_chat_id, telegram_default_session_id
+      FROM users
+     WHERE telegram_chat_id = ${chatId as any}
+     LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+export async function setTelegramChatId(userId: string, chatId: number | bigint | string): Promise<void> {
+  await sql`
+    UPDATE users
+       SET telegram_chat_id = ${chatId as any},
+           telegram_link_code = NULL,
+           telegram_link_code_expires_at = NULL
+     WHERE id = ${userId}
+  `;
+}
+
+export async function clearTelegramChatId(userId: string): Promise<void> {
+  await sql`
+    UPDATE users
+       SET telegram_chat_id = NULL,
+           telegram_default_session_id = NULL
+     WHERE id = ${userId}
+  `;
+}
+
+/**
+ * Phase 12 W3 — Outbound bridge lookup. Returns every user whose
+ * `telegram_default_session_id` points at the given session AND who has a
+ * non-null `telegram_chat_id` (i.e. a usable Telegram destination).
+ *
+ * In practice a session can match at most one user (default-session is per-
+ * user and a session belongs to one user), but the signature is an array to
+ * keep the helper general and to make the SQL straightforward.
+ */
+export async function getUsersWithTelegramDefaultSession(
+  sessionId: string,
+): Promise<Array<{ id: string; telegram_chat_id: string | number }>> {
+  const rows = await sql<Array<{ id: string; telegram_chat_id: string | number }>>`
+    SELECT id, telegram_chat_id
+      FROM users
+     WHERE telegram_default_session_id = ${sessionId}
+       AND telegram_chat_id IS NOT NULL
+  `;
+  return rows;
+}
+
+export async function setTelegramDefaultSession(userId: string, sessionId: string | null): Promise<void> {
+  await sql`
+    UPDATE users
+       SET telegram_default_session_id = ${sessionId}
+     WHERE id = ${userId}
+  `;
+}
+
+export async function setTelegramLinkCode(
+  userId: string,
+  code: string | null,
+  expiresAt: Date | null,
+): Promise<void> {
+  await sql`
+    UPDATE users
+       SET telegram_link_code = ${code},
+           telegram_link_code_expires_at = ${expiresAt}
+     WHERE id = ${userId}
+  `;
+}
+
+export async function findUserByLinkCode(code: string): Promise<{ id: string; expiresAt: Date | null } | null> {
+  const rows = await sql<{ id: string; telegram_link_code_expires_at: Date | null }[]>`
+    SELECT id, telegram_link_code_expires_at
+      FROM users
+     WHERE telegram_link_code = ${code}
+     LIMIT 1
+  `;
+  if (!rows[0]) return null;
+  return { id: rows[0].id, expiresAt: rows[0].telegram_link_code_expires_at };
+}
+
+export interface TelegramInboundLogInput {
+  user_id: string | null;
+  chat_id: number | bigint | string | null;
+  update_id: number | bigint | null;
+  outcome: string;
+  error?: string | null;
+  raw?: unknown;
+}
+
+/**
+ * Insert one inbound-log row, then trim the user's history to 100. Mirrors
+ * recordCoolifyWebhookAttempt. Inserts on (chat_id, update_id) UNIQUE
+ * collide silently — Telegram retries the same update_id when we 5xx, so
+ * the dispatch path checks for an existing row before re-firing.
+ */
+export async function logTelegramInbound(input: TelegramInboundLogInput): Promise<{ inserted: boolean }> {
+  let inserted = false;
+  try {
+    const rows = await sql<{ id: string }[]>`
+      INSERT INTO telegram_inbound_log
+        (user_id, chat_id, update_id, outcome, error, raw)
+      VALUES
+        (${input.user_id},
+         ${input.chat_id as any},
+         ${input.update_id as any},
+         ${input.outcome},
+         ${input.error ?? null},
+         ${input.raw === undefined ? null : JSON.stringify(input.raw)}::jsonb)
+      ON CONFLICT (chat_id, update_id) DO NOTHING
+      RETURNING id
+    `;
+    inserted = rows.length > 0;
+  } catch (err: any) {
+    console.warn("[telegram] inbound log insert failed:", err?.message);
+    return { inserted: false };
+  }
+  if (!input.user_id) return { inserted };
+  try {
+    await sql`
+      DELETE FROM telegram_inbound_log
+       WHERE user_id = ${input.user_id}
+         AND id IN (
+           SELECT id FROM telegram_inbound_log
+            WHERE user_id = ${input.user_id}
+            ORDER BY received_at DESC
+            OFFSET 100
+         )
+    `;
+  } catch (err: any) {
+    console.warn("[telegram] inbound log trim failed:", err?.message);
+  }
+  return { inserted };
+}

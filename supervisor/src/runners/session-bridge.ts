@@ -34,10 +34,21 @@ export interface SessionBridgeOptions {
   apiKey: string
   hubUrl: string
   allowDangerousSkipPermissions: boolean
+  /**
+   * When set, the bridge spawns Claude with the orchestrator-specific env
+   * (REMO_HUB_API_KEY, REMO_HUB_URL) and writes a `.remo-orchestrator.md`
+   * system-prompt file into cwd that Claude picks up via CLAUDE.md-style
+   * convention.
+   */
+  orchestrator?: {
+    systemPrompt: string
+    hubApiKey: string
+    hubUrl: string
+  }
   /** Test hook — when set, used instead of `new WebSocket()`. */
   wsFactory?: (url: string) => WebSocket
   /** Test hook — when set, used instead of `new ClaudeRunner()`. */
-  runnerFactory?: (repoPath: string, allowDangerous: boolean) => CliRunner
+  runnerFactory?: (repoPath: string, allowDangerous: boolean, orchestrator?: SessionBridgeOptions['orchestrator']) => CliRunner
 }
 
 const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000]
@@ -224,8 +235,8 @@ export class SessionBridge {
 
   private ensureRunner(): CliRunner | null {
     if (this.runner) return this.runner
-    const factory = this.opts.runnerFactory ?? ((repo, dangerous) => new ClaudeRunner(repo, dangerous))
-    const runner = factory(this.opts.repoPath, this.opts.allowDangerousSkipPermissions)
+    const factory = this.opts.runnerFactory ?? ((repo, dangerous, orch) => new ClaudeRunner(repo, dangerous, orch))
+    const runner = factory(this.opts.repoPath, this.opts.allowDangerousSkipPermissions, this.opts.orchestrator)
     this.runner = runner
     runner.start((e) => this.handleRunnerEvent(e))
     return runner

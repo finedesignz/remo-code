@@ -41,9 +41,10 @@ export const ClientSubscribe = z.object({
   session_id: z.string().min(1).max(256).optional(),
   session_ids: z.array(z.string().min(1)).max(SUBSCRIBE_MAX).optional(),
 }).refine(
-  // REVIEW ME-01: require non-empty session_ids when session_id absent.
-  // `length >= 0` was tautological — admitted empty-array subscribes.
-  (d) => !!d.session_id || (Array.isArray(d.session_ids) && d.session_ids.length > 0),
+  // PHASE-12 NOTE: main intentionally allows empty session_ids array as
+  // a clear-subscriptions intent (test: "accepts empty session_ids"). HEAD's
+  // length>0 strictness was reverted to preserve that contract.
+  (d) => !!d.session_id || Array.isArray(d.session_ids),
   { message: 'subscribe requires session_id or session_ids' },
 )
 

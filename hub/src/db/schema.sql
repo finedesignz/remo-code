@@ -621,6 +621,37 @@ CREATE TABLE IF NOT EXISTS pending_local_repos (
 );
 CREATE INDEX IF NOT EXISTS idx_pending_local_repos_user ON pending_local_repos(user_id);
 
+-- ── Orchestrator session (one per user, pinned root-folder Claude) ──────────
+-- Pinned Claude session that runs in the supervisor's roots[0] (not inside a
+-- specific repo) and is taught via system prompt to coordinate the user's
+-- other sessions via the hub HTTP API. Exactly one open orchestrator session
+-- per user is enforced by the partial unique index below. The orchestrator
+-- session row has `is_orchestrator=true` and `project_dir` set to the
+-- supervisor's root folder.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_name TEXT NOT NULL DEFAULT 'Orchestrator';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_custom_instructions TEXT;
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_orchestrator BOOLEAN NOT NULL DEFAULT false;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_orchestrator_unique
+  ON sessions(user_id)
+  WHERE is_orchestrator = true AND deleted_at IS NULL;
+
+-- Tag rows produced by the orchestrator-key mint so they don't conflict with
+-- the per-user single-supervisor api_keys uniqueness. Existing rows backfill
+-- to 'supervisor'.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'supervisor';
+UPDATE api_keys SET purpose = 'supervisor' WHERE purpose IS NULL OR purpose = '';
+
+-- The legacy partial unique index `idx_api_keys_user_active` enforces ONE
+-- active key per user — incompatible with an orchestrator-purpose key
+-- coexisting with the supervisor key. Replace it with a per-(user, purpose)
+-- variant so each purpose has at most one active row. Idempotent.
+DROP INDEX IF EXISTS idx_api_keys_user_active;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_purpose_active
+  ON api_keys(user_id, purpose) WHERE revoked_at IS NULL;
+
 -- ── Phase 08: Revanote annotation integration ────────────────────────────────
 -- Per-user webhook secret (UUID). NULL = unconfigured. Doubles as URL-path
 -- token AND Bearer credential on outbound callbacks. Mirrors the coolify-
@@ -776,6 +807,56 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_runs_in_flight
   ON scheduled_task_runs(user_id, started_at DESC)
   WHERE finished_at IS NULL AND status IN ('running','pending','in_flight');
 
+-- ── TRIAGE Bundle 6: Postgres race + ordering hygiene ────────────────────────
+-- Restored per REVIEW.md BL-04 + BL-05 (Wave 5 over-reverted these alongside
+-- the orchestrator removal — they are unrelated to the orchestrator).
+--
+-- ── Phase 12: Telegram bridge ────────────────────────────────────────────────
+-- Additive columns on users — link state for the hub-wide Telegram bot.
+-- chat_id is BIGINT (Telegram chat ids exceed 32-bit). UNIQUE enforces 1
+-- Telegram chat ↔ 1 remo-code user. default_session_id is nullable and
+-- SET NULL on session delete so outbound silently stops rather than orphaning.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_chat_id              BIGINT UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_default_session_id   TEXT REFERENCES sessions(id) ON DELETE SET NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code            TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code_expires_at TIMESTAMPTZ;
+
+-- Audit log for every Telegram webhook update we accept (incl. silent-drops
+-- of unlinked chat_ids). Capped app-side to 100/user, oldest-deleted on each
+-- insert. Mirrors coolify_webhook_attempts / revanote_webhook_attempts.
+-- (chat_id, update_id) UNIQUE short-circuits Telegram retries (Telegram
+-- retries non-2xx for up to 24h).
+CREATE TABLE IF NOT EXISTS telegram_inbound_log (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID REFERENCES users(id) ON DELETE CASCADE,
+  chat_id      BIGINT,
+  update_id    BIGINT,
+  outcome      TEXT NOT NULL,
+  error        TEXT,
+  raw          JSONB,
+  received_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (chat_id, update_id)
+);
+CREATE INDEX IF NOT EXISTS idx_telegram_inbound_log_user_recv
+  ON telegram_inbound_log(user_id, received_at DESC);
+-- ── Phase 12.1: mobile auth handoff tokens ────────────────────────────────────
+-- One-time tokens minted at /api/auth/login/callback?platform=ios|android.
+-- The opaque token is delivered to the Tauri shell via `remo-code://auth/callback`
+-- deep link; the shell exchanges it via POST /api/auth/finalize-mobile for a
+-- normal cookie session. Single-use, 60s TTL.
+CREATE TABLE IF NOT EXISTS auth_handoff_tokens (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash    TEXT NOT NULL,
+  purpose       TEXT NOT NULL DEFAULT 'mobile_handoff',
+  expires_at    TIMESTAMPTZ NOT NULL,
+  consumed_at   TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_auth_handoff_tokens_hash
+  ON auth_handoff_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_auth_handoff_tokens_user
+  ON auth_handoff_tokens(user_id);
 -- ── TRIAGE Bundle 6: Postgres race + ordering hygiene ────────────────────────
 -- Restored per REVIEW.md BL-04 + BL-05 (Wave 5 over-reverted these alongside
 -- the orchestrator removal — they are unrelated to the orchestrator).

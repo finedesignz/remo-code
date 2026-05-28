@@ -77,6 +77,54 @@ The legacy `npx remo-code-agent` / `claude-remote` shell-alias flow is retired a
 - Hub auto-resume on `supervisor.hello` (in `hub/src/ws/agent.ts`) now (a) filters orphan `session_runs` to rows newer than 24h, sweeping older rows as `exit_reason='stale'`, and (b) finalizes any orphan with `restart_count >= 10` as `max_restarts_exceeded` and skips the replay.
 - Canary test `supervisor/test/no-legacy-agent-spawn.test.ts` greps `supervisor/src/**` for the retired `remo-code-agent` package name and `--append-system-prompt` flag; the build FAILS if either reappears.
 
+## Mobile Tauri Client (mobile/tauri/)
+
+Thin Tauri 2.x WebView wrapper for iOS and Android. The real UI is the hosted SPA at `https://app.remo-code.com`; this shell exists to ship a binary through the App Store / Play Store and to own the `remo-code://auth/callback?token=<X>` deep link that closes the magic-link sign-in loop on mobile. One codebase, one UI — re-implementing the web SPA natively is explicitly out of scope.
+
+**Architecture:**
+
+1. OS receives `remo-code://auth/callback?token=<X>` (from a magic-link email).
+2. `mobile/tauri/src-tauri/src/lib.rs::handle_deep_link` parses the URL, extracts the `token`, and evals JS in the WebView that POSTs `{ token }` to `https://app.remo-code.com/api/auth/finalize-mobile` with `credentials: 'include'`.
+3. On 200, the WebView `location.replace`s to the SPA root with the opaque session cookie set on its cookie jar. On error, alert + reload.
+
+**File map:**
+
+- `mobile/tauri/src-tauri/Cargo.toml` — Tauri 2.11.2 + `tauri-plugin-deep-link` 2.4.1. Pinned in lockstep with `supervisor/tauri/src-tauri/Cargo.toml`.
+- `mobile/tauri/src-tauri/tauri.conf.json` — identifier `com.finedesignz.remo-code`, scheme `remo-code://`, productName `Remo Code`, version `0.1.0`. CSP `connect-src` allows `https://app.remo-code.com` + `wss://app.remo-code.com`.
+- `mobile/tauri/src-tauri/src/lib.rs` — `#[cfg_attr(mobile, tauri::mobile_entry_point)] pub fn run()` + the deep-link handler. Token is JSON-escaped via `serde_json::to_string` before being embedded in eval'd JS — never string-concatenated raw.
+- `mobile/tauri/src-tauri/src/main.rs` — desktop fallback entry that calls `remo_code_mobile_lib::run()`.
+- `mobile/tauri/src-tauri/capabilities/default.json` — grants `deep-link:default`, `shell:default`, `os:default`, `http:default`, and core window/webview/event/app perms to the `main` window.
+- `mobile/tauri/ui/` — minimal Vite shell whose `src/main.ts` immediately `location.replace`s to `VITE_REMO_URL` (defaults to `https://app.remo-code.com`). Stashes `window.__REMO_APP_VERSION__` in `sessionStorage` so the redirected SPA can render "Mobile vX.Y.Z".
+
+**Build commands:**
+
+```bash
+cd mobile/tauri/ui && bun install
+cd mobile/tauri && cargo check --manifest-path src-tauri/Cargo.toml   # host typecheck
+cargo tauri ios init && cargo tauri ios build --release               # Mac host only
+cargo tauri android init && cargo tauri android build --release       # SDK+NDK host
+```
+
+**Deferred to Phase 12.4 (NOT on this branch):**
+
+- `gen/apple/` (`cargo tauri ios init` on a Mac).
+- `gen/android/` (`cargo tauri android init` on an SDK+NDK host).
+- `src-tauri/icons/icon.png` (1024×1024 source PNG + `cargo tauri icon`).
+- Hub-side `POST /api/auth/finalize-mobile` endpoint.
+- `.github/workflows/mobile-shell-release.yml` for tagged `mobile-v*.*.*` builds.
+- Apple Developer + Google Play signing key setup.
+
+**CI:** `.github/workflows/mobile-shell-typecheck.yml` runs `cargo check` + `cargo test --lib` against `x86_64-unknown-linux-gnu` on `ubuntu-latest` (installs `libwebkit2gtk-4.1-dev` + `libgtk-3-dev` to satisfy `tauri-build`). Catches Rust regressions without Android NDK / Xcode.
+
+**Invariants:**
+
+- NEVER touch `supervisor/tauri/`, `hub/`, or `web/` from a mobile-shell PR. Cross-package work goes through its own phase.
+- Tauri dep versions track `supervisor/tauri/` exactly — when bumping there, bump here in the same PR.
+- The shell is "dumb": all business logic stays in the web SPA. The shell's only jobs are deep-link handoff and WebView hosting.
+- Token strings from deep links are NEVER concatenated into JS — always `serde_json::to_string`-escaped first to prevent XSS via crafted callback URLs.
+
+When adding native capabilities (push notifications, biometric unlock, camera), updating the deep-link contract, or touching the hub-side `finalize-mobile` endpoint: update `docs/mobile-client.md` in the same commit.
+
 ## Local Supervisor (only supported connection)
 
 The supervisor (`supervisor/src/index.ts`, compiled into the Tauri sidecar binary) runs on the dev machine as a tray app. It:
@@ -366,6 +414,27 @@ Top-level nav collapsed to **Home / Tasks / Settings** (three hash routes: `#/`,
 
 When adding a new top-level route, tab, primitive, or design-token-affecting style: extend the shared primitives, register the redirect in `App.tsx::resolveHashWithRedirects` if a legacy URL needs to map to it, and update this section in the same commit.
 
+## Orchestrator Session
+
+Pinned root-folder Claude session that coordinates the user's other Claude sessions via the hub REST API. Exactly one open orchestrator per user, enforced by the `idx_sessions_orchestrator_unique` partial index on `sessions(user_id) WHERE is_orchestrator=true AND deleted_at IS NULL`.
+
+**File map:**
+
+- Hub: `hub/src/api/orchestrator.ts` (REST), `hub/src/db/orchestrator-dal.ts` (DAL), `hub/src/orchestrator/seed-prompt.ts` (system-prompt builder).
+- Hub schema: `users.orchestrator_{enabled,name,custom_instructions}`, `sessions.is_orchestrator`, `api_keys.purpose` (default `'supervisor'`; orchestrator-issued rows = `'orchestrator'`). The legacy per-user `idx_api_keys_user_active` is replaced by `idx_api_keys_user_purpose_active` so an orchestrator key and a supervisor key can coexist.
+- Supervisor: `supervisor/src/hub-client.ts` recognizes an optional `orchestrator` field on `session.start` and routes through `ProcessManager.start({ orchestrator })`. `supervisor/src/runners/claude-runner.ts` injects `REMO_HUB_API_KEY` + `REMO_HUB_URL` into the spawned env and writes `.remo-orchestrator.md` into cwd as a CLAUDE.md-style anchor.
+- Web: `web/src/components/OrchestratorTab.tsx` (Settings → Orchestrator tab with red-ring confirm modal on enable). Sidebar pins the orchestrator row to position 0 with an indigo ring + `Orchestrator` pill. GridPage enforces orchestrator-in-cell-0 when the orchestrator session is a member of the active tab.
+
+**Key invariants:**
+
+- `GET /api/orchestrator` is license-gate-exempt (read-only via `readOnlyOk:true`). `PUT`/`POST start`/`POST stop` require `requireRecentAuth()` (15-min step-up window) + active license + per-user mutation rate-limit.
+- The hub API key minted for the orchestrator is full-power (capabilities `['agent','supervisor','orchestrator']`) and lives ONLY in the supervisor's spawned Claude process env. The hub never echoes it back over WS; the system prompt teaches Claude to use it without logging it.
+- `cwd` resolution is hub-side: the user's preferred supervisor (when online) else first online, then `roots[0]`. No UI cwd picker.
+- `requireGitRepo` gate is bypassed for orchestrator runs (the cwd is a repos parent, not a repo). Sandbox `assertWithinRoots` still applies.
+- Only Claude is supported this phase. Codex orchestrator is out of scope.
+
+When adding orchestrator-specific endpoints, prompt sections, or env vars: update this rollup in the same commit.
+
 ## API docs convention
 
 The hub exposes OpenAPI 3.1 at `/openapi.json` and a Scalar UI at `/docs`. The spec is assembled in `hub/src/api/_openapi.ts` using `@hono/zod-openapi` `createRoute` declarations. Currently covers `/api/profile/cost-today` and `/api/profile/license` — the rest of the hub is plain Hono and gets migrated incrementally.
@@ -377,6 +446,34 @@ When migrating a route:
 4. CI workflow `.github/workflows/docs-drift.yml` fails PRs that change `hub/src/**` without a matching spec update.
 
 The dump script (`hub/scripts/dump-openapi.ts`) loads the OpenAPIHono sub-app in-process — no `Bun.serve`, no port, no DB. It needs placeholder `JWT_SECRET` + `DATABASE_URL` env vars to satisfy module-load-time validation; the npm script sets harmless values.
+
+## Phase 12: Mobile Tauri Client
+
+Wraps the existing `web/` SPA as a native iOS + Android app via Tauri 2.
+Connection path is unchanged: phone → `https://app.remo-code.com` (hub) →
+user's supervisor over `/ws/agent`. The phone is a pure hub client; no CLI
+runs on-device. Full architecture in [docs/mobile-client.md](docs/mobile-client.md);
+sub-phase plan in `.planning/phases/12-mobile-tauri-client/PLAN.md`.
+
+### 12.1 — Hub-side enablement (this PR)
+
+Hub-only changes that unblock the Tauri shell. No mobile scaffold yet.
+
+- **`hub/src/api/well-known.ts`** — public `GET /.well-known/apple-app-site-association` + `GET /.well-known/assetlinks.json`. Both return `application/json`, no auth, no license gate. Mounted at root in `hub/src/index.ts` before any `/api/*` middleware. Driven by `MOBILE_APPLE_TEAM_ID`, `MOBILE_ANDROID_SHA256_FINGERPRINT`, `MOBILE_BUNDLE_ID` env (dev defaults `TEAMID` / `SHA256_PLACEHOLDER` / `com.finedesignz.remo-code`).
+- **`hub/src/api/auth.ts`** — `GET /api/auth/login/callback` accepts an optional `?platform=ios|android` query. When set, it mints a one-time `auth_handoff_tokens` row and 302s to `remo-code://auth/callback?token=<opaque>` instead of setting the browser cookie. New endpoint `POST /api/auth/finalize-mobile` consumes the opaque token (atomic single-use UPDATE), creates a normal auth session, and emits the Tauri-variant cookie. Excluded from the license gate via the existing `/api/auth/*` rule.
+- **`hub/src/session.ts`** — `sessionCookieAttrsForOrigin(origin)` centralizes the cookie-attribute decision. Browser default stays `__Host-remo_sid; SameSite=Lax`. Requests originating from `tauri://localhost` (iOS) or `https://tauri.localhost` (Android) get `remo_sid; SameSite=None; Secure; Partitioned` — the `__Host-` prefix forbids `SameSite=None`, so the Tauri variant uses an unprefixed name. `readSessionCookie` + `parseSessionCookieFromHeader` accept both names so WS upgrade + middleware paths are transport-agnostic.
+- **`hub/src/db/schema.sql`** — new idempotent `auth_handoff_tokens` table (uuid pk, fk to `users`, sha-256 `token_hash`, `purpose` default `'mobile_handoff'`, 60s `expires_at`, nullable `consumed_at`, index on `token_hash`).
+- **`hub/src/db/dal.ts`** — `createAuthHandoffToken(userId)` returns the opaque token (prefix `mh_`, base64url-encoded 32 bytes). `consumeAuthHandoffToken(token)` performs an atomic `UPDATE … WHERE consumed_at IS NULL AND expires_at > now() RETURNING …` so a second concurrent caller can never also succeed.
+- **`hub/src/config.ts`** — new env: `MOBILE_TAURI_ORIGINS_ENABLED` (default `true`, adds Tauri origins to `allowedOrigins`), `MOBILE_BUNDLE_ID`, `MOBILE_APPLE_TEAM_ID`, `MOBILE_ANDROID_SHA256_FINGERPRINT`.
+
+### Key invariants
+
+- **Tauri origins are ADDITIONAL.** `HUB_ALLOWED_ORIGINS` parsing semantics are unchanged; Tauri origins are appended in-process based on `MOBILE_TAURI_ORIGINS_ENABLED`. Set the env to `false` to revert to browser-only.
+- **Single-use semantics are atomic.** `consumeAuthHandoffToken` relies on the `UPDATE … RETURNING` form — no read-then-write race. Double-consume returns `null`.
+- **`/api/auth/finalize-mobile` is NOT license-gated.** Same rationale as the rest of `/api/auth/*`: acquiring a session must not depend on license state.
+- **No changes to `/ws/agent` or `/ws/client` this phase.** Tauri WebView traffic is identical to browser traffic at the WS layer.
+
+When adding a new mobile endpoint, deep-link target, `.well-known` route, or any Phase 12 surface: update `docs/mobile-client.md` in the same commit, and `docs/auth.md` "Mobile finalize endpoint" subsection if the auth flow changes.
 
 ## PR Hygiene
 
@@ -391,3 +488,41 @@ The agent runs locally on the dev machine — it is NOT deployed to the server. 
 ## Releases
 
 **Supervisor (Tauri tray app):** push a `supervisor-v*.*.*` tag — `.github/workflows/release-supervisor.yml` builds the MSI on `windows-latest`, signs it with the Tauri updater key, and publishes a GitHub Release with `latest.json` for the in-app auto-updater. Local builds: `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. First-time signing-key setup: `supervisor/tauri/UPDATER-SETUP.md`.
+
+## Phase 12: Telegram Bridge
+
+Bidirectional Telegram ↔ Claude Code session bridge. Inbound `POST /api/telegram/webhook/:secret` lands Telegram updates, routes commands (`/start`, `/session`, `/list`, `/help`) or forwards text/photo/document as `user_message` to a linked default session. Outbound subscribes to an internal `assistant_message:final` event bus and pushes the final reply back to the linked `chat_id`. One hub-wide bot serves all users, keyed by `users.telegram_chat_id`. Full architecture in [docs/telegram-bridge.md](docs/telegram-bridge.md).
+
+**File map (hub):**
+
+- `hub/src/api/telegram-webhook.ts` — public ingress at `POST /api/telegram/webhook/:secret`. Mounted AHEAD of JWT + license + CSRF catch-alls (Phase 06 pattern). Raw body read before `JSON.parse`. Constant-time compare on `:secret` vs `config.telegram.webhookSecret`. Mismatch → 401, no DB write. Zod-validated `Update` envelope. Audit row per accepted request in `telegram_inbound_log`; `(chat_id, update_id)` short-circuits re-dispatch on Telegram retries.
+- `hub/src/api/telegram.ts` — authed REST under `/api/telegram/*` (cookie auth + CSRF double-submit, Phase 07 pattern): `GET /status`, `POST /link-code`, `DELETE /link`, `PUT /default-session`. Plain Hono in v1.
+- `hub/src/telegram/client.ts` — `sendMessage` / `getFile` / `getFileContent` wrapper, `escapeMarkdownV2`, `splitForTelegram` (4096-char split preferring `\n\n` / `\n` / ` ` boundaries within last 200 chars), per-chat outbound serial queue. `AbortSignal.timeout(10_000)`. Bot token never logged.
+- `hub/src/telegram/commands.ts` — `parse(text)` + handlers for `/start <code>`, `/session <arg>`, `/list`, `/help`.
+- `hub/src/telegram/dispatch.ts` — inbound → session dispatch. `enforceCostCap` → `session-queue.enqueue` → agent socket send. Photos: largest-by-area + `getFile` + base64 data URI in `images[]`. Documents: text/* → `attachments[]`; binary → polite reject. Throttled "cap reached" reply via `notifications_sent` dedupe key `telegram_cap_throttle:<user>:<utc_date>`.
+- `hub/src/telegram/bridge.ts` — outbound subscriber on `assistant_message:final`. Gates on `default_session_id === emitting_session_id` (no leakage across sessions). `splitForTelegram` → MarkdownV2 `sendMessage` chunks. Errors swallowed — broken Telegram link MUST NOT break a live session.
+- `hub/src/telegram/link-codes.ts` — 8-char Crockford base32 (~40 bits), 10-min TTL, single-active-per-user, single-use consume, constant-time compare.
+- `hub/src/events/assistant-events.ts` — internal `EventEmitter` carrying `{ userId, sessionId, content, message_id, cost_usd?, duration_ms? }`. Emit point lives in `hub/src/ws/agent.ts` at the existing assistant-message finalize branch. Additive — does NOT change the WS broadcast path.
+- `hub/src/config.ts` — `config.telegram.{botToken,webhookSecret,botUsername}` (all optional). Bridge silently no-ops if any is unset.
+- `hub/src/db/schema.sql` — additive: `users.telegram_chat_id` (BIGINT UNIQUE), `telegram_default_session_id` (REFERENCES sessions ON DELETE SET NULL), `telegram_link_code`, `telegram_link_code_expires_at`; new `telegram_inbound_log(user_id, chat_id, update_id, outcome, error, raw JSONB, received_at)` capped 100/user via DAL housekeeping.
+- `hub/src/db/dal.ts` — Telegram helpers folded into the existing module (deviation from PLAN.md which suggested a separate `telegram-dal.ts`): `getUserByTelegramChatId`, `getUserByLinkCode`, `setLinkCode`, `linkChatId`, `unlinkChatId`, `setDefaultSession`, `getTelegramStatus`, `appendInboundLog`, `trimInboundLog`, `getUsersWithTelegramDefaultSession`.
+- `hub/src/index.ts` — mounts webhook ahead of the auth catch-all, mounts authed REST inside, starts the outbound bridge at boot.
+
+**File map (web):**
+
+- `web/src/components/SettingsPage.tsx` — Telegram subsection inline (decision: NOT a new page). States: `bot_configured=false` (grey card), `linked=false` (Link Telegram → mint code → open `https://t.me/<bot_username>?start=<code>` deep link), `linked=true` (default-session `<select>`, Unlink with confirm).
+
+**Key invariants:**
+
+- **Cost cap is non-bypassable.** Every inbound user→session dispatch flows through `enforceCostCap` (`hub/src/scheduler/dispatcher.ts`). No path under `dispatch.ts` reaches the agent socket without the cap call.
+- **Webhook raw-body-before-parse + constant-time URL-secret compare** mirror the Coolify webhook (Phase 06). Auth-fail (401) writes NO audit row — avoids table-fill DoS via a 401 flood.
+- **Outbound forwards ONLY `assistant_message:final`.** `thinking`, `tool_use`, `tool_result`, `text_delta` are NEVER forwarded. Streaming partial replies would burn the cost cap and Telegram's per-chat rate limit instantly.
+- **Default-session match gate on outbound.** Bridge sends only when `users.telegram_default_session_id === emitting_session_id`. Switching default cleanly stops the previous session's stream.
+- **Per-chat serial queue on outbound** (in `client.ts`) — one in-flight `sendMessage` per `chat_id`. Prevents Telegram's per-chat rate-limit from shedding chunks of a split message.
+- **Telegram retry dedupe.** Every accepted-but-skipped path returns 200; `(chat_id, update_id)` audit-row check short-circuits re-dispatch within the day.
+- **`chat_id` UNIQUE constraint** prevents cross-user impersonation. One chat can only ever belong to one user.
+- **Link codes:** 8-char Crockford base32, 10-min TTL, single-active-per-user, single-use, constant-time compare.
+- **Legacy `hub/src/scheduler/post-run/telegram.ts` per-user-bot-token path is preserved for one release** as the rollback envelope. Unset `TELEGRAM_BOT_TOKEN` in Coolify to disable the hub-wide bridge; per-user post-run integrations continue working untouched.
+- **Telegram routes stay plain Hono in v1.** OpenAPI migration of authed `/api/telegram/*` routes is a deferred refactor. The public webhook is intentionally undocumented in `docs/openapi.json` (surfacing the URL-secret shape would be the wrong move).
+
+When adding a new Telegram command, payload type, link-code field, outbound channel filter, or any Phase 12 surface: update `docs/telegram-bridge.md` in the same commit.

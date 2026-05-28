@@ -221,6 +221,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
     if (!session.created) {
       unregisterChannel(session.id)
+      // Clear any in-flight streaming state from a prior (now-closing) channel
+      // for this session. Without this, a half-finalized streaming message
+      // from the previous socket can collide with the new socket's first
+      // text_delta, double-broadcasting placeholders.
+      streamingBySession.delete(session.id)
     }
 
     ws.data.authenticated = true
@@ -414,6 +419,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
   if (msg.type === 'assistant_message') {
     console.log(`[agent] assistant_message session=${sessionId} len=${msg.content.length}`)
+    // Phase 12 W3 — emit final-message event for server-side consumers
+    // (Telegram bridge etc.). FINAL only — text_delta/thinking are NEVER
+    // forwarded. Errors inside listeners are isolated by the emitter helper
+    // so they cannot tear down the WS handler.
+    let finalEventMessageId: string | undefined
     const st = streamingBySession.get(sessionId)
     if (st) {
       // Cancel any pending throttled flush and overwrite with the fully
@@ -425,6 +435,7 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       const message = await finalizeMessage(st.id, msg.content)
       streamingBySession.delete(sessionId)
       if (message) {
+        finalEventMessageId = (message as any).id
         broadcastToSubscribers(sessionId, {
           type: 'message',
           session_id: sessionId,
@@ -435,11 +446,24 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       // No prior text_delta (e.g. agent reconnect between Claude's response
       // and the result event). Fall back to a one-shot insert.
       const message = await insertMessage(sessionId, 'assistant', msg.content)
+      finalEventMessageId = (message as any)?.id
       broadcastToSubscribers(sessionId, {
         type: 'message',
         session_id: sessionId,
         message,
       })
+    }
+    // Phase 12 W3 — fan out to server-side subscribers (Telegram bridge etc.)
+    try {
+      const { emitAssistantMessageFinal } = await import('../events/assistant-events.ts')
+      emitAssistantMessageFinal({
+        sessionId,
+        userId: ws.data.userId!,
+        text: msg.content,
+        messageId: finalEventMessageId,
+      })
+    } catch (err: any) {
+      console.warn('[agent] emitAssistantMessageFinal failed', err?.message)
     }
     // V2 — finalize any pending scheduled run for this session.
     try {
@@ -837,6 +861,19 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
   if (ws.data.heartbeatTimer) clearInterval(ws.data.heartbeatTimer)
 
   if (ws.data.role === 'supervisor' && ws.data.supervisorId) {
+    // Drop streaming state for any session this socket was advancing (legacy
+    // path where supervisor wrote ws.data.sessionId). Supervisor sockets that
+    // multiplex sessions don't carry a single sessionId — those entries are
+    // cleared elsewhere by the next text_delta replacing placeholder state.
+    if (ws.data.sessionId) streamingBySession.delete(ws.data.sessionId)
+    // Bundle 3: finalize any open session_runs for this supervisor so they
+    // don't sit as zombies forever after a socket close.
+    try {
+      const { finalizeOpenRunsForSupervisor } = await import('../db/supervisor-dal')
+      await finalizeOpenRunsForSupervisor(ws.data.supervisorId)
+    } catch (err: any) {
+      console.warn(`[agent] finalizeOpenRunsForSupervisor failed supervisor=${ws.data.supervisorId} err=${err?.message}`)
+    }
     // Pass the closing ws so unregister can ignore stale closes from sockets
     // that have already been replaced by a reconnect.
     unregisterSupervisor(ws.data.supervisorId, ws)
@@ -845,6 +882,7 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
 
   if (ws.data.sessionId) {
     unregisterChannel(ws.data.sessionId)
+    streamingBySession.delete(ws.data.sessionId)
     await setSessionStatus(ws.data.sessionId, 'offline')
 
     broadcastToSubscribers(ws.data.sessionId, {
