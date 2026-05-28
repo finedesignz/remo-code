@@ -788,3 +788,32 @@ CREATE TABLE IF NOT EXISTS revanote_webhook_attempts (
 CREATE INDEX IF NOT EXISTS idx_revanote_webhook_attempts_user_recv
   ON revanote_webhook_attempts(user_id, received_at DESC);
 
+-- ── Phase 12: Telegram bridge ────────────────────────────────────────────────
+-- Additive columns on users — link state for the hub-wide Telegram bot.
+-- chat_id is BIGINT (Telegram chat ids exceed 32-bit). UNIQUE enforces 1
+-- Telegram chat ↔ 1 remo-code user. default_session_id is nullable and
+-- SET NULL on session delete so outbound silently stops rather than orphaning.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_chat_id              BIGINT UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_default_session_id   TEXT REFERENCES sessions(id) ON DELETE SET NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code            TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code_expires_at TIMESTAMPTZ;
+
+-- Audit log for every Telegram webhook update we accept (incl. silent-drops
+-- of unlinked chat_ids). Capped app-side to 100/user, oldest-deleted on each
+-- insert. Mirrors coolify_webhook_attempts / revanote_webhook_attempts.
+-- (chat_id, update_id) UNIQUE short-circuits Telegram retries (Telegram
+-- retries non-2xx for up to 24h).
+CREATE TABLE IF NOT EXISTS telegram_inbound_log (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      UUID REFERENCES users(id) ON DELETE CASCADE,
+  chat_id      BIGINT,
+  update_id    BIGINT,
+  outcome      TEXT NOT NULL,
+  error        TEXT,
+  raw          JSONB,
+  received_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (chat_id, update_id)
+);
+CREATE INDEX IF NOT EXISTS idx_telegram_inbound_log_user_recv
+  ON telegram_inbound_log(user_id, received_at DESC);
+
