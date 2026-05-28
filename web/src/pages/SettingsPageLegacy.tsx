@@ -3,10 +3,10 @@ import type { Profile } from '../hooks/useProfile'
 import { useWebPushPermission } from '../hooks/useWebPushPermission'
 import { useApiKey } from '../hooks/useApiKey'
 import { useWebSocket } from '../hooks/useWebSocket'
-import { SupervisorPage } from './SupervisorPage'
-import { CommandsList } from './CommandsList'
-import { SchedulesPage } from './SchedulesPage'
-import { ClaudeUsageCard } from './ClaudeUsageCard'
+import { SupervisorPage } from '../components/SupervisorPage'
+import { CommandsList } from '../components/CommandsList'
+import { SchedulesPage } from '../components/SchedulesPage'
+import { ClaudeUsageCard } from '../components/ClaudeUsageCard'
 import { hubFetch } from '../lib/api'
 
 interface Props {
@@ -108,7 +108,7 @@ function SaveIndicator({ status }: { status: 'idle' | 'saving' | 'saved' | 'erro
   return <span className="text-[11px] text-red-400">Error</span>
 }
 
-export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props) {
+export function SettingsPageLegacy({ token, profile, onUpdateProfile, onBack }: Props) {
   const [tab, setTab] = useState<Tab>(readTabFromHash)
 
   useEffect(() => {

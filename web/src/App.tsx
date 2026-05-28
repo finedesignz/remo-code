@@ -4,16 +4,11 @@ import { useProfile } from './hooks/useProfile'
 import { Login } from './pages/Login'
 import { AuthCallback } from './pages/AuthCallback'
 import { SetupForm } from './components/SetupForm'
-import { Layout } from './components/Layout'
-import { AppChrome } from './components/AppChrome'
-import { SettingsPage } from './components/SettingsPage'
-import { SchedulesPage } from './components/SchedulesPage'
-import { ErrorCapturePage } from './components/ErrorCapturePage'
-import { RevanotePage } from './components/RevanotePage'
+import { HomePage } from './pages/HomePage'
+import { TasksPage } from './pages/TasksPage'
+import { SettingsPage } from './pages/SettingsPage'
 import { ChatSurfaceShowcase } from './components/ChatSurfaceShowcase'
 import { MobileAccordionShowcase } from './components/MobileAccordionShowcase'
-import { GridPage } from './components/GridPage'
-import { Footer } from './components/Footer'
 import { Privacy } from './pages/Privacy'
 import { Terms } from './pages/Terms'
 import { useWebSocket } from './hooks/useWebSocket'
@@ -22,12 +17,9 @@ import type { Profile } from './hooks/useProfile'
 import { onAuthEvent } from './lib/api'
 
 type Route =
-  | 'chat'
+  | 'home'
+  | 'tasks'
   | 'settings'
-  | 'schedules'
-  | 'error-capture'
-  | 'revanote'
-  | 'grid'
   | 'privacy'
   | 'terms'
   | 'dev-chat-surface'
@@ -51,34 +43,60 @@ if (typeof window !== 'undefined' && window.location.pathname !== '/') {
   window.history.replaceState(null, '', '/' + window.location.search + window.location.hash)
 }
 
-function getRoute(): Route {
+/**
+ * Phase 12 W3 — Deep-link redirects. These map every legacy hash to the new
+ * Home/Tasks/Settings shells while preserving back-button history (replaceState
+ * not assign). They are kept FOREVER — scheduled-task `{{run_url}}` template
+ * emails embed these paths.
+ *
+ * Returns the canonical hash AFTER redirect resolution.
+ */
+function resolveHashWithRedirects(): string {
   const hash = window.location.hash
+  let canonical = hash || '#/'
+
+  // #/schedules → #/tasks?tab=schedule
+  if (hash.startsWith('#/schedules')) canonical = '#/tasks?tab=schedule'
+  // #/error-capture → #/tasks?tab=activity
+  else if (hash.startsWith('#/error-capture')) canonical = '#/tasks?tab=activity'
+  // #/revanote → #/settings?tab=connections
+  else if (hash.startsWith('#/revanote')) canonical = '#/settings?tab=connections'
+  // Legacy #/supervisor → #/settings?tab=connections (was supervisor tab)
+  else if (hash.startsWith('#/supervisor')) canonical = '#/settings?tab=connections'
+  // #/grid/:tabId → #/?tab=grid&grid_tab=:tabId
+  else {
+    const gm = hash.match(/^#\/grid\/([^/?#]+)/)
+    if (gm) canonical = `#/?tab=grid&grid_tab=${encodeURIComponent(gm[1])}`
+    // bare #/grid → #/?tab=grid
+    else if (hash === '#/grid' || hash.startsWith('#/grid?')) {
+      const q = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1) : ''
+      canonical = q ? `#/?tab=grid&${q}` : '#/?tab=grid'
+    }
+  }
+
+  if (canonical !== hash) {
+    window.history.replaceState(null, '', window.location.pathname + window.location.search + canonical)
+  }
+  return canonical
+}
+
+function getRoute(): Route {
+  const hash = resolveHashWithRedirects()
   if (hash.startsWith('#/auth/callback')) return 'auth-callback'
   if (hash.startsWith('#/login')) return 'login'
-  // Legacy /#/supervisor → settings with supervisor tab
-  if (hash.startsWith('#/supervisor')) {
-    window.location.hash = '#/settings?tab=supervisor'
-    return 'settings'
-  }
+  if (hash.startsWith('#/tasks')) return 'tasks'
   if (hash.startsWith('#/settings')) return 'settings'
-  // Legacy /#/schedules → settings with schedules tab
-  if (hash.startsWith('#/schedules')) {
-    window.location.hash = '#/settings?tab=schedules'
-    return 'settings'
-  }
-  if (hash.startsWith('#/error-capture')) return 'error-capture'
-  if (hash.startsWith('#/revanote')) return 'revanote'
-  if (hash.startsWith('#/grid')) return 'grid'
   if (hash.startsWith('#/privacy')) return 'privacy'
   if (hash.startsWith('#/terms')) return 'terms'
   if (hash.startsWith('#/dev/chat-surface')) return 'dev-chat-surface'
   if (hash.startsWith('#/dev/mobile-accordion')) return 'dev-mobile-accordion'
-  return 'chat'
+  // #/, #/home, #/?tab=list, #/?tab=grid all map to home.
+  return 'home'
 }
 
 function getGridTabId(): string | undefined {
   const hash = window.location.hash
-  const m = hash.match(/^#\/grid\/([^/?#]+)/)
+  const m = hash.match(/[?&]grid_tab=([^&]+)/)
   return m ? decodeURIComponent(m[1]) : undefined
 }
 
@@ -109,8 +127,6 @@ export default function App() {
   useEffect(() => {
     onAuthEvent((kind) => {
       if (kind === 'unauthorized') {
-        // Session is gone — punt back to login. Stay silent on re_auth_required
-        // (the calling component is expected to handle it locally).
         if (route !== 'login' && route !== 'auth-callback') {
           window.location.hash = '#/login'
         }
@@ -125,11 +141,6 @@ export default function App() {
     window.location.hash = hash
   }, [])
 
-  const goToChat = useCallback(() => {
-    window.location.hash = '#/'
-  }, [])
-
-  // Auth-callback page must render regardless of session state — that's the whole point.
   if (route === 'auth-callback') {
     return <AuthCallback />
   }
@@ -142,79 +153,40 @@ export default function App() {
     return <SetupForm onComplete={() => setNeedsSetup(false)} />
   }
 
-  // Unauth → login page. Soak window: useAuth may already have a localStorage
-  // token + user, so we still treat that as signed-in for the legacy path.
   if (!token || !user) {
     return <Login onLegacyAuth={signIn} />
   }
 
-  // Wait for profile to load before rendering gated routes
   if (profileLoading || !profile) {
     return <LoadingScreen />
   }
 
   return (
-    <div className="flex flex-col h-[100dvh]">
+    <>
       <NotificationsBridge token={token} profile={profile} />
       {licenseRequired && <LicenseRequiredBanner onDismiss={() => setLicenseRequired(false)} />}
-      <div className="flex-1 min-h-0 overflow-hidden">
+
+      {route === 'home' && (
+        <HomePage token={token} user={user} signOut={signOut} onNavigate={navigate} gridTabId={gridTabId} />
+      )}
+      {route === 'tasks' && (
+        <TasksPage token={token} user={user} signOut={signOut} onNavigate={navigate} />
+      )}
       {route === 'settings' && (
-        <AppChrome token={token} user={user} signOut={signOut} onNavigate={navigate} headerContent={<h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">Settings</h2>}>
-          <SettingsPage
-            token={token}
-            profile={profile}
-            onUpdateProfile={updateProfile}
-            onBack={goToChat}
-          />
-        </AppChrome>
-      )}
-
-      {route === 'schedules' && (
-        <AppChrome token={token} user={user} signOut={signOut} onNavigate={navigate} headerContent={<h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">Schedules</h2>}>
-          <SchedulesRoute token={token} onBack={goToChat} />
-        </AppChrome>
-      )}
-
-      {route === 'error-capture' && (
-        <AppChrome token={token} user={user} signOut={signOut} onNavigate={navigate} headerContent={<h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">Error Capture</h2>}>
-          <ErrorCaptureRoute token={token} onBack={goToChat} />
-        </AppChrome>
-      )}
-
-      {route === 'revanote' && (
-        <AppChrome token={token} user={user} signOut={signOut} onNavigate={navigate} headerContent={<h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">Revanote</h2>}>
-          <RevanoteRoute token={token} onBack={goToChat} />
-        </AppChrome>
-      )}
-
-      {route === 'dev-chat-surface' && (
-        <ChatSurfaceShowcase token={token} />
-      )}
-
-      {route === 'dev-mobile-accordion' && (
-        <MobileAccordionShowcase token={token} />
-      )}
-
-      {route === 'grid' && (
-        <AppChrome token={token} user={user} signOut={signOut} onNavigate={navigate} headerContent={<h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate">Grid</h2>}>
-          <GridPage token={token} tabId={gridTabId} />
-        </AppChrome>
-      )}
-
-      {(route === 'chat' || route === 'login') && (
-        <Layout
+        <SettingsPage
           token={token}
           user={user}
+          profile={profile}
           signOut={signOut}
           onNavigate={navigate}
+          onUpdateProfile={updateProfile}
         />
       )}
-
+      {route === 'dev-chat-surface' && <ChatSurfaceShowcase token={token} />}
+      {route === 'dev-mobile-accordion' && <MobileAccordionShowcase token={token} />}
       {route === 'privacy' && <Privacy />}
       {route === 'terms' && <Terms />}
-      </div>
-      <Footer />
-    </div>
+    </>
   )
 }
 
@@ -235,21 +207,6 @@ function LicenseRequiredBanner({ onDismiss }: { onDismiss: () => void }) {
       <button onClick={onDismiss} className="ml-2 text-amber-300 hover:text-amber-100" aria-label="Dismiss">×</button>
     </div>
   )
-}
-
-function SchedulesRoute({ token, onBack }: { token: string; onBack: () => void }) {
-  const { subscribe } = useWebSocket(token)
-  return <SchedulesPage token={token} onBack={onBack} subscribe={subscribe} />
-}
-
-function ErrorCaptureRoute({ token, onBack }: { token: string; onBack: () => void }) {
-  const { subscribe } = useWebSocket(token)
-  return <ErrorCapturePage token={token} onBack={onBack} subscribe={subscribe} />
-}
-
-function RevanoteRoute({ token, onBack }: { token: string; onBack: () => void }) {
-  const { subscribe } = useWebSocket(token)
-  return <RevanotePage token={token} onBack={onBack} subscribe={subscribe} />
 }
 
 function NotificationsBridge({ token, profile }: { token: string; profile: Profile }) {
