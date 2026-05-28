@@ -152,6 +152,9 @@ async function refreshLicense(
     // the existing grace logic handle it. We DON'T flip ACTIVE → EXPIRED on
     // a transient network blip — that would break decoupled-for-read.
     if (err instanceof TitaniumApiError) {
+      console.warn(
+        `[license-gate] refresh failed; serving cached status=${fields.license_status ?? "NONE"}: ${err.message}`,
+      );
       return {
         status: fields.license_status ?? "NONE",
         license_id: fields.license_id,

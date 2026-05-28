@@ -98,6 +98,8 @@ When the gate fails (`401 re_auth_required`), the web client prompts for a fresh
 
 The webhook `POST /webhooks/titanium/license-changed` lets Titanium push state changes immediately so the user does not have to wait for the TTL to expire.
 
+`/ws/client` mutations (`send_message`, `permission_response`, `question_response`) are gated identically to HTTP mutations — refused with `{type:'send_refused', reason:'license_inactive'}` when `license_status !== 'active'`. Read-only WS ops (`subscribe`, `pong`) are exempt. License state is cached on the connection, opportunistically refreshed past the same TTL.
+
 ### Exclusion list (NEVER license-gated)
 
 These routes are deliberately **outside** the license gate. Removing any of them from this list breaks the rollback path or creates a circular dependency.

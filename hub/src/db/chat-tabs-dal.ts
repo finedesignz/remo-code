@@ -256,8 +256,8 @@ export async function getMessagesForSessions(
   if (sessionIds.length === 0) return {}
   const rows = await sql<(BatchMessage & { rn: number })[]>`
     WITH ranked AS (
-      SELECT m.id, m.session_id, m.role, m.content, m.status, m.created_at,
-             ROW_NUMBER() OVER (PARTITION BY m.session_id ORDER BY m.created_at DESC) AS rn
+      SELECT m.id, m.session_id, m.role, m.content, m.status, m.created_at, m.seq,
+             ROW_NUMBER() OVER (PARTITION BY m.session_id ORDER BY m.created_at DESC, m.seq DESC) AS rn
       FROM messages m
       WHERE m.session_id = ANY(${sessionIds})
         AND m.session_id IN (
@@ -268,7 +268,7 @@ export async function getMessagesForSessions(
     SELECT id, session_id, role, content, status, created_at
     FROM ranked
     WHERE rn <= ${limit}
-    ORDER BY session_id, created_at ASC
+    ORDER BY session_id, created_at ASC, seq ASC
   `
   const grouped: Record<string, BatchMessage[]> = {}
   for (const r of rows) {

@@ -165,6 +165,77 @@ hub/
 
 ---
 
+## Mobile WebView surface (Phase 12.2)
+
+The same `web/` SPA bundle ships to the desktop browser and to the Tauri 2 mobile
+WebView. All mobile-only behavior is gated behind a runtime check so the
+desktop browser build is unaffected.
+
+### Platform shim — `web/src/lib/platform.ts`
+
+Single source of truth for runtime platform detection. Pure module, no side
+effects on import, no React.
+
+```ts
+import { isMobileApp, platform, appVersion } from './lib/platform'
+
+isMobileApp()  // boolean — true iff window.__TAURI_INTERNALS__ is present
+platform()     // 'ios' | 'android' | 'web' — sniffs UA only when isMobileApp()
+appVersion()   // string | null — reads window.__REMO_APP_VERSION__ (injected by shell)
+```
+
+**Rule:** the web build MUST NOT import `@tauri-apps/api`. All Tauri APIs are
+accessed via `window.__TAURI__` feature detection so the same bundle still
+loads in a normal browser.
+
+### Safe-area CSS contract — `web/src/index.css`
+
+Three utility classes consume the iOS/Android safe-area insets. Browsers
+without notches resolve `env()` to `0`, so the classes are zero-cost on
+desktop.
+
+| class         | effect                                          |
+| ------------- | ----------------------------------------------- |
+| `.safe-top`   | `padding-top: env(safe-area-inset-top)`         |
+| `.safe-bottom`| `padding-bottom: env(safe-area-inset-bottom)`   |
+| `.safe-x`     | `padding-left/right: env(safe-area-inset-...)`  |
+
+Wired in: `AppChrome.tsx` top header (`safe-top safe-x`), `Layout.tsx` chat
+header (`safe-top safe-x`), `ChatSurface.tsx` composer form (`safe-bottom`).
+`web/index.html` already sets `viewport-fit=cover`. The root chrome uses
+`100dvh` (not `100vh`) to survive the iOS Safari keyboard collapse.
+
+### External-link interception — `web/src/lib/external-link.ts`
+
+When `isMobileApp()` is true, a delegated `click` listener on `document`
+captures anchor clicks that either carry `target="_blank"` OR point at a
+different origin, and hands the URL to `window.__TAURI__.shell.open(href)`.
+Same-origin in-app links pass through. Modifier-key clicks, non-primary mouse
+buttons, and `defaultPrevented` events also pass through.
+
+`shouldOpenExternally(event, anchor, pageOrigin, mobile?)` is exported as a
+pure function so it can be unit-tested without a DOM.
+
+Installed once at boot from `web/src/main.tsx` via
+`installExternalLinkInterceptor()`. No-op in a plain browser.
+
+### Push registration stub — `web/src/lib/push.ts`
+
+`async function registerForPush(): Promise<void>` — empty stub today. Logs one
+line when `isMobileApp()` is true so dev-build callers are greppable. Real
+implementation lands in Phase 12 v1.1; the surface is declared now so v1.1 is
+a one-file change.
+
+### Tests
+
+- `web/src/lib/platform.test.ts` — `bun test`, mutates `window` / `navigator`.
+- `web/src/lib/external-link.test.ts` — `bun test`, exercises the pure helper
+  with synthetic click + anchor records.
+
+Run from repo root: `bun test web/src/lib/platform.test.ts web/src/lib/external-link.test.ts`.
+
+---
+
 ## Related docs
 
 - [docs/auth.md](auth.md) — magic-link cookie session architecture (Phase 07)
