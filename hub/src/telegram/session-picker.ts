@@ -26,6 +26,7 @@ export interface PickerSessionRow {
   id: string;
   name: string | null;
   project_dir: string | null;
+  status?: string | null;
 }
 
 /**
@@ -77,8 +78,10 @@ export function buildSessionKeyboard(opts: {
     for (let j = 0; j < BUTTONS_PER_ROW && i + j < page.length; j++) {
       const s = page[i + j]!;
       const label = deriveLabel(s);
-      const prefix = defaultId && s.id === defaultId ? "✓ " : "";
-      const text = truncate(prefix + label, MAX_LABEL_LEN);
+      const isOnline = s.status === "online" || s.status === "thinking";
+      const checkMark = defaultId && s.id === defaultId ? "✓ " : "";
+      const statusDot = isOnline ? "🟢 " : "";
+      const text = truncate(checkMark + statusDot + label, MAX_LABEL_LEN);
       row.push({ text, callback_data: `s:${s.id}` });
     }
     keyboard.push(row);
@@ -117,10 +120,11 @@ export function renderPickerText(opts: {
     `Your sessions (${offset + 1}–${lastIdx} of ${total}):`,
     "Tap a button to set it as your default.",
   ];
-  if (defaultId) {
-    lines.push("");
-    lines.push(`Current default marked with ✓.`);
-  }
+  const legend: string[] = [];
+  legend.push("🟢 = launched");
+  if (defaultId) legend.push("✓ = current default");
+  lines.push("");
+  lines.push(legend.join("    "));
   return lines.join("\n");
 }
 
