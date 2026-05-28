@@ -22,7 +22,13 @@ import type { PostRunAction } from './schema.ts'
 import { parseTriageOutput } from '../triage-schema.ts'
 import { render } from './template.ts'
 import { getRun } from '../../db/scheduled-tasks-dal.ts'
-import { hasOpenIssueForHash, recordOpenIssueForHash } from '../../db/dal.ts'
+import {
+  hasOpenIssueForHash,
+  recordOpenIssueForHash,
+  placeOpenIssuePlaceholder,
+  updateOpenIssuePlaceholder,
+  deleteOpenIssuePlaceholder,
+} from '../../db/dal.ts'
 
 interface GhIssueCtx {
   userId: string
@@ -160,7 +166,12 @@ export async function executeGithubIssue(action: PostRunAction, ctx: GhIssueCtx)
   const title = `[${severity}] ${errorType} — ${appUuid || 'app'}`
   const body = render(ISSUE_BODY_TEMPLATE, templateVars)
 
-  // Idempotency check — only meaningful when we have a real (app, deploy) pair.
+  // Idempotency gate — only meaningful when we have a real (app, deploy) pair.
+  // We claim a placeholder row (issue_number=0) BEFORE the octokit call so a
+  // second concurrent failure webhook for the same deploy can't slip through
+  // between the check and the create. The placeholder is updated to the real
+  // issue_number on success and deleted on terminal failure.
+  let placeholderHash: string | null = null
   if (appUuid && deployUuid) {
     const hash = buildHash(repo, appUuid, deployUuid)
     try {
@@ -171,9 +182,16 @@ export async function executeGithubIssue(action: PostRunAction, ctx: GhIssueCtx)
         )
         return
       }
-      // Record placeholder before API call to narrow the race window.
-      // (Best-effort — Octokit failure still leaves a 0 row that gets overwritten on next success.)
-      void hash
+      const claimed = await placeOpenIssuePlaceholder(ctx.userId, hash, repo)
+      if (!claimed) {
+        // Another concurrent caller claimed it between hasOpenIssueForHash
+        // and now — treat as duplicate, no create.
+        console.info(
+          `[post-run.github-issue] dedupe: placeholder lost race for ${repo} app=${appUuid} deploy=${deployUuid}`,
+        )
+        return
+      }
+      placeholderHash = hash
     } catch (err: any) {
       console.warn(`[post-run.github-issue] idempotency check failed: ${err?.message}`)
     }
@@ -182,6 +200,9 @@ export async function executeGithubIssue(action: PostRunAction, ctx: GhIssueCtx)
   const token = await loadGithubToken()
   if (!token) {
     console.warn('[post-run.github-issue] no github token from gateway pair; skipping')
+    if (placeholderHash) {
+      try { await deleteOpenIssuePlaceholder(ctx.userId, placeholderHash) } catch {}
+    }
     return
   }
 
@@ -205,7 +226,15 @@ export async function executeGithubIssue(action: PostRunAction, ctx: GhIssueCtx)
       assignees: action.config.assignees,
     })
     const issueNumber: number = res.data?.number ?? 0
-    if (appUuid && deployUuid && issueNumber > 0) {
+    if (placeholderHash && issueNumber > 0) {
+      try {
+        await updateOpenIssuePlaceholder(ctx.userId, placeholderHash, issueNumber)
+      } catch (err: any) {
+        console.warn(`[post-run.github-issue] update placeholder failed: ${err?.message}`)
+      }
+    } else if (appUuid && deployUuid && issueNumber > 0) {
+      // No placeholder was claimed (idempotency check threw); fall back to
+      // the legacy unconditional record so we still dedupe future webhooks.
       const hash = buildHash(repo, appUuid, deployUuid)
       try {
         await recordOpenIssueForHash(ctx.userId, hash, issueNumber, repo)
@@ -220,5 +249,8 @@ export async function executeGithubIssue(action: PostRunAction, ctx: GhIssueCtx)
     console.error(
       `[post-run.github-issue] Octokit create failed repo=${repo}: ${err?.status ?? ''} ${err?.message}`,
     )
+    if (placeholderHash) {
+      try { await deleteOpenIssuePlaceholder(ctx.userId, placeholderHash) } catch {}
+    }
   }
 }
