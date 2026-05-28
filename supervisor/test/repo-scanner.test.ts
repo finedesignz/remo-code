@@ -129,6 +129,38 @@ describe('scanRoots', () => {
     expect(names).not.toContain('repo-a-worktree')
   })
 
+  test('descent guard: does not recurse into subdirs of a repo (no phantom entries for .github/.planning/.turbo/src)', async () => {
+    // repo-a contains `.git` (a real init from beforeAll). Sprinkle the kinds
+    // of subdirs that triggered the 869-phantom-repos bug: `.github`,
+    // `.planning`, `.turbo`, `src/components`. Pre-fix, the walker descended
+    // into these, ran introspect() on each, and (because they sit under a
+    // repo that has a remote configured) every one was reported with the
+    // SAME `origin` — flooding the inventory.
+    const repoA = join(root, 'repo-a')
+    mkdirSync(join(repoA, '.github'), { recursive: true })
+    mkdirSync(join(repoA, '.planning'), { recursive: true })
+    mkdirSync(join(repoA, '.turbo'), { recursive: true })
+    mkdirSync(join(repoA, 'src', 'components'), { recursive: true })
+
+    const entries = await scanRoots({
+      roots: [root],
+      scan: { max_depth: 4, ignore_globs: ['**/node_modules/**'], follow_symlinks: false },
+    })
+
+    // None of the subpaths under repo-a should appear as entries.
+    const phantoms = entries.filter((e) =>
+      e.local_path.toLowerCase().includes('/repo-a/.github') ||
+      e.local_path.toLowerCase().includes('/repo-a/.planning') ||
+      e.local_path.toLowerCase().includes('/repo-a/.turbo') ||
+      e.local_path.toLowerCase().includes('/repo-a/src')
+    )
+    expect(phantoms.length).toBe(0)
+
+    // The repo itself is still recorded.
+    const repoEntry = entries.find((e) => e.local_path.toLowerCase().endsWith('/repo-a'))
+    expect(repoEntry).toBeTruthy()
+  })
+
   test('default ignore_globs include node_modules, .next, dist, target', () => {
     expect(DEFAULT_SCAN_SETTINGS.ignore_globs).toContain('**/node_modules/**')
     expect(DEFAULT_SCAN_SETTINGS.ignore_globs).toContain('**/.next/**')

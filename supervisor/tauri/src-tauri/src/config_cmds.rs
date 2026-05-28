@@ -201,3 +201,4 @@ pub fn rescan_now() -> Result<RootsConfig, String> {
     write_raw(&map)?;
     get_config()
 }
+
