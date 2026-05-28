@@ -81,7 +81,7 @@ All commands work after the user has linked. Unlinked chats can ONLY send
 |---|---|
 | `/start <code>` | Bind the current Telegram chat to the remo-code user that minted `<code>`. One active code per user, 10-min TTL, single-use. Replies `Linked to <email>. Send /help for commands.` On miss/expired: `Link code invalid or expired. Generate a fresh one from Settings → Telegram.` |
 | `/session <id-or-name>` | Override the default session for subsequent messages. Matches against session id-prefix or `project_dir` basename. Ambiguous match → reply lists candidates. No arg → reply shows the current default plus a numbered list. |
-| `/list` | Numbered list of the user's sessions with `last_active_at` relative time. |
+| `/list` | Inline-keyboard session picker. Each button = one session (label = repo name from `project_dir`'s last path segment, truncated to 28 chars). Tap a button to set it as your default — Telegram fires a `callback_query` that the hub validates, persists, and confirms with a toast + a leading ✓ on the chosen button. Paginated 20-per-page (2 buttons per row, 10 rows + a `« Prev` / `Next »` nav row). Currently-default session shown with a leading ✓ before any taps. See "Inline-keyboard session picker" below for `callback_data` encoding + authorization rules. |
 | `/help` | Static command reference. |
 | *plain text* | Forwarded as `user_message` content (prefixed `[telegram] ` in the persisted `messages` row) to the user's default session. |
 | *photo* | Largest size is downloaded via `getFile` + `getFileContent`, attached as a base64 data-URI in `images[]` on the `user_message`. The Telegram `caption` becomes the text. 10MB hard cap (matches hub WS limit). |
@@ -89,6 +89,25 @@ All commands work after the user has linked. Unlinked chats can ONLY send
 | *voice / video / sticker / animation / video_note* | Polite reject — not supported in v1. |
 
 Unknown command from a linked chat → `Unknown command. /help for list.`
+
+### Inline-keyboard session picker
+
+`/list` now sends a [Telegram InlineKeyboardMarkup](https://core.telegram.org/bots/api#inlinekeyboardmarkup) instead of a plain bullet list. Tapping a button does NOT post a chat message — Telegram delivers a `callback_query` update to the same webhook, and the hub edits the existing message in-place (no chat clutter).
+
+**`callback_data` encoding** (≤64 bytes per Telegram limit, defined in `hub/src/telegram/session-picker.ts`):
+
+| Prefix | Payload | Action |
+|---|---|---|
+| `s:<session_id>` | UUID of the session | Set default session for this Telegram user. |
+| `p:<offset>` | Non-negative integer | Paginate the session list to a new offset. Snapped to the nearest 20-multiple via `snapOffsetToPage` so stale keyboards from a prior page-size are still safe. |
+
+**Authorization on every callback** — `s:<session_id>` is gated on `getSession(sessionId, userId)`. A user can't spoof another user's session by guessing the UUID; the denial path replies `Not allowed` with `show_alert: true`. Unlinked callbacks are silently dropped (matches the unlinked-text-message path).
+
+**Audit + dedupe** — every callback gets a `telegram_inbound_log` row keyed by `(chat_id, update_id)` exactly like inbound messages. Duplicate Telegram retries short-circuit to `{ deduped: true }`. Outcomes: `callback_session_set`, `callback_session_denied`, `callback_paginate`, `callback_unknown`, `callback_silent_drop_unlinked`.
+
+**Cost cap is NOT involved.** Picker callbacks are state changes on the `users` row, not session dispatches — the `enforceCostCap` gate only fires when a user actually messages a session.
+
+`/session <id>` still works for power users who want to type an id-prefix. The no-arg form now nudges users toward `/list`.
 
 ## Architecture
 
