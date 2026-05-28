@@ -42,6 +42,7 @@ import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/d
 import { startErrorGraceSweep } from './error-capture/grace.ts'
 import { startRevanoteGraceSweep } from './revanote/grace.ts'
 import { startRevanoteCallbackWorker } from './revanote/callback.ts'
+import { startTelegramBridge } from './telegram/bridge.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -465,6 +466,9 @@ runMigrations()
     startErrorGraceSweep()
     startRevanoteGraceSweep()
     startRevanoteCallbackWorker()
+    // Phase 12 W3 — outbound Telegram bridge. No-op when TELEGRAM_BOT_TOKEN
+    // is unset; otherwise subscribes to assistant_message:final events.
+    startTelegramBridge()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
