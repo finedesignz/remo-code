@@ -16,12 +16,21 @@ import { config } from "../config.ts";
 
 export const wellKnown = new Hono();
 
+// Read at request time so tests (and admins rotating ids without a redeploy)
+// see fresh values. Falls through to `config.*` so the typed env-validation
+// path is still the source of truth in production.
+function teamId(): string { return process.env.MOBILE_APPLE_TEAM_ID || config.mobileAppleTeamId; }
+function bundleId(): string { return process.env.MOBILE_BUNDLE_ID || config.mobileBundleId; }
+function androidFingerprint(): string {
+  return process.env.MOBILE_ANDROID_SHA256_FINGERPRINT || config.mobileAndroidSha256Fingerprint;
+}
+
 const CACHE_HEADERS = {
   "Cache-Control": "public, max-age=300",
 } as const;
 
 wellKnown.get("/apple-app-site-association", (c) => {
-  const appID = `${config.mobileAppleTeamId}.${config.mobileBundleId}`;
+  const appID = `${teamId()}.${bundleId()}`;
   const body = {
     applinks: {
       apps: [],
@@ -57,8 +66,8 @@ wellKnown.get("/assetlinks.json", (c) => {
       ],
       target: {
         namespace: "android_app",
-        package_name: config.mobileBundleId,
-        sha256_cert_fingerprints: [config.mobileAndroidSha256Fingerprint],
+        package_name: bundleId(),
+        sha256_cert_fingerprints: [androidFingerprint()],
       },
     },
   ];
