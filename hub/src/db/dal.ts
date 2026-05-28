@@ -489,7 +489,7 @@ export async function listMessages(sessionId: string, userId: string) {
     FROM messages m
     JOIN sessions s ON s.id = m.session_id
     WHERE m.session_id = ${sessionId} AND s.user_id = ${userId}
-    ORDER BY m.created_at ASC
+    ORDER BY m.created_at ASC, m.seq ASC
   `;
 }
 
