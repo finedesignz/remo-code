@@ -37,6 +37,10 @@ struct State {
     attempt: u32,
     last_start: Option<Instant>,
     shutdown: bool,
+    /// Set by `lifecycle_loop` when it returns. `shutdown_blocking` polls
+    /// this flag with a deadline so `ExitRequested` actually awaits the
+    /// Bun child's reap before letting the Tauri process exit.
+    lifecycle_exited: bool,
     log_ring: VecDeque<String>,
     stop_notify: Arc<Notify>,
 }
@@ -48,6 +52,7 @@ impl Default for State {
             attempt: 0,
             last_start: None,
             shutdown: false,
+            lifecycle_exited: false,
             log_ring: VecDeque::with_capacity(200),
             stop_notify: Arc::new(Notify::new()),
         }
@@ -63,12 +68,24 @@ pub fn current_status() -> Status {
     STATE.lock().status
 }
 
+/// True once `shutdown_blocking` has observed the lifecycle thread exiting.
+/// Used by the `ExitRequested` handler to avoid re-entering the wait loop
+/// when the second exit attempt fires (after `app.exit(code)` re-emits).
+pub fn is_shutdown_complete() -> bool {
+    let st = STATE.lock();
+    st.shutdown && st.lifecycle_exited
+}
+
 pub fn spawn_managed(app: AppHandle) {
     set_status(&app, Status::Starting);
+    // Mark lifecycle as running before the thread starts — `shutdown_blocking`
+    // checks this flag and we must not race a fast-spawn.
+    STATE.lock().lifecycle_exited = false;
     let app_clone = app.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async move { lifecycle_loop(app_clone).await });
+        STATE.lock().lifecycle_exited = true;
     });
 }
 
@@ -373,4 +390,33 @@ pub fn shutdown(app: &AppHandle) {
     let n = STATE.lock().stop_notify.clone();
     n.notify_one();
     let _ = app.emit("supervisor:log", "[sidecar] shutdown".to_string());
+}
+
+/// Like `shutdown`, but blocks the caller until the lifecycle thread observes
+/// the shutdown flag, kills the Bun child, and exits — or `max_wait` elapses.
+/// Returns `true` when the lifecycle thread finished cleanly, `false` on
+/// timeout (caller should still proceed with process exit; the OS will reap
+/// any straggler children).
+///
+/// This is the `ExitRequested` path: previously `app.exit(0)` returned
+/// synchronously while the lifecycle thread was mid-`tokio::select!`, racing
+/// the Bun → Claude grandchild chain on Windows (orphan claude.exe seen in
+/// the wild per CLAUDE.md memory rule #23). Per supervisor audit 2026-05-28.
+pub fn shutdown_blocking(app: &AppHandle, max_wait: Duration) -> bool {
+    shutdown(app);
+    // Poll the lifecycle_exited flag at 50ms granularity until either the
+    // thread reports exit or the deadline expires.
+    let deadline = Instant::now() + max_wait;
+    while Instant::now() < deadline {
+        if STATE.lock().lifecycle_exited {
+            let _ = app.emit("supervisor:log", "[sidecar] lifecycle thread exited cleanly".to_string());
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = app.emit(
+        "supervisor:log",
+        format!("[sidecar] shutdown_blocking timed out after {:?}", max_wait),
+    );
+    false
 }

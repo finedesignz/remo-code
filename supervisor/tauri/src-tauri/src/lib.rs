@@ -82,8 +82,31 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                sidecar::shutdown(app_handle);
+            // Graceful shutdown: actually await the Bun sidecar's reap before
+            // the Tauri process exits. Previously `shutdown(app)` only set a
+            // flag and `app.exit(0)` raced the `tokio::select!` in the
+            // lifecycle thread — leaving orphan claude.exe processes on
+            // Windows. Per supervisor audit 2026-05-28.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // If we're already mid-shutdown (lifecycle thread is done),
+                // don't loop — let the runtime exit normally.
+                if sidecar::is_shutdown_complete() {
+                    return;
+                }
+                api.prevent_exit();
+                let app_for_thread = app_handle.clone();
+                let exit_code = code.unwrap_or(0);
+                // Move the blocking wait off the runtime thread; signalling
+                // exit from within an `ExitRequested` handler that also blocks
+                // it is fragile. Spawn an OS thread that waits + then re-emits
+                // exit.
+                std::thread::spawn(move || {
+                    let _ = sidecar::shutdown_blocking(
+                        &app_for_thread,
+                        std::time::Duration::from_secs(5),
+                    );
+                    app_for_thread.exit(exit_code);
+                });
             }
         });
 }
