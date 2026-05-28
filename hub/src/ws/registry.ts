@@ -66,6 +66,28 @@ export function subscribeClient(entry: ClientEntry, sessionIds: string[]) {
   entry.subscriptions = new Set(sessionIds) // Replace, don't accumulate (M6 fix)
 }
 
+/**
+ * Bug B (2026-05-28) — count distinct client connections currently subscribed
+ * to a session_id. Used by the idle-teardown module to decide when the last
+ * web UI walked away from a runner.
+ */
+export function countSubscribers(sessionId: string): number {
+  let n = 0
+  for (const c of clients) if (c.subscriptions.has(sessionId)) n++
+  return n
+}
+
+/**
+ * All session_ids any web client of any user is currently subscribed to.
+ * Used after a client disconnects to recompute counts for everything that
+ * client cared about.
+ */
+export function snapshotSubscribedSessionIds(): Set<string> {
+  const out = new Set<string>()
+  for (const c of clients) for (const id of c.subscriptions) out.add(id)
+  return out
+}
+
 // Broadcast to all clients subscribed to a session
 export function broadcastToSubscribers(sessionId: string, message: object) {
   const json = JSON.stringify(message)

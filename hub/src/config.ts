@@ -64,6 +64,20 @@ const licenseRequired = parseBool(process.env.LICENSE_REQUIRED, true);
 // Used while Keygen CE JWKS endpoint is unavailable. Legacy bcrypt login
 // (ALLOW_LEGACY_LOGIN=true) remains the only working auth path under bypass.
 const titaniumBypass = parseBool(process.env.TITANIUM_BYPASS, false);
+// Bug B (2026-05-28) — when the last web subscriber for a session leaves, wait
+// this many seconds before sending `shutdown` to the agent so its runner is
+// terminated (idle_no_subscribers). Cancelled if a new subscriber arrives
+// inside the window. Default 300s (5 min) is conservative — covers refreshes
+// + grid-view tab swaps. 0 disables idle teardown entirely.
+const sessionIdleGraceSeconds = (() => {
+  const v = process.env.REMO_SESSION_IDLE_GRACE_SECONDS;
+  if (v === undefined || v === "") return 300;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`REMO_SESSION_IDLE_GRACE_SECONDS must be a non-negative integer; got ${JSON.stringify(v)}`);
+  }
+  return n;
+})();
 // Phase 12.1: Tauri mobile WebView origins. iOS WKWebView shows
 // `tauri://localhost`; Android System WebView shows `https://tauri.localhost`.
 // Treated as additional first-party origins (CORS allow + Tauri cookie variant).
@@ -145,6 +159,7 @@ export const config = {
   titaniumWebhookSecret,
   licenseRequired,
   titaniumBypass,
+  sessionIdleGraceSeconds,
 
   // Phase 12: Telegram bridge. Feature is gated off when botToken === "".
   telegram: {
