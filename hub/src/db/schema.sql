@@ -788,3 +788,22 @@ CREATE TABLE IF NOT EXISTS revanote_webhook_attempts (
 CREATE INDEX IF NOT EXISTS idx_revanote_webhook_attempts_user_recv
   ON revanote_webhook_attempts(user_id, received_at DESC);
 
+-- ── Phase 12.1: mobile auth handoff tokens ────────────────────────────────────
+-- One-time tokens minted at /api/auth/login/callback?platform=ios|android.
+-- The opaque token is delivered to the Tauri shell via `remo-code://auth/callback`
+-- deep link; the shell exchanges it via POST /api/auth/finalize-mobile for a
+-- normal cookie session. Single-use, 60s TTL.
+CREATE TABLE IF NOT EXISTS auth_handoff_tokens (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash    TEXT NOT NULL,
+  purpose       TEXT NOT NULL DEFAULT 'mobile_handoff',
+  expires_at    TIMESTAMPTZ NOT NULL,
+  consumed_at   TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_auth_handoff_tokens_hash
+  ON auth_handoff_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_auth_handoff_tokens_user
+  ON auth_handoff_tokens(user_id);
+

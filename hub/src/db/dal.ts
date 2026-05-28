@@ -1208,6 +1208,47 @@ export async function purgeExpiredAuthSessions(): Promise<number> {
   return rows.length;
 }
 
+// ── Phase 12.1: mobile auth handoff tokens (one-time, single-use, 60s TTL) ──
+
+const HANDOFF_TTL_SECONDS = 60;
+
+export async function createAuthHandoffToken(
+  userId: string,
+  opts: { purpose?: string; ttlSeconds?: number } = {},
+): Promise<{ token: string; expiresAt: Date }> {
+  const token = 'mh_' + randomBytes(32).toString('base64url');
+  const tokenHash = hashSessionToken(token);
+  const ttl = Math.max(1, Math.floor(opts.ttlSeconds ?? HANDOFF_TTL_SECONDS));
+  const purpose = opts.purpose ?? 'mobile_handoff';
+  const rows = await sql<{ expires_at: Date }[]>`
+    INSERT INTO auth_handoff_tokens (user_id, token_hash, purpose, expires_at)
+    VALUES (${userId}, ${tokenHash}, ${purpose}, now() + (${String(ttl)} || ' seconds')::interval)
+    RETURNING expires_at
+  `;
+  return { token, expiresAt: rows[0].expires_at };
+}
+
+// Atomic single-use claim. Returns { userId } when the token existed, was
+// unexpired, and was unconsumed; returns null otherwise. The UPDATE …
+// RETURNING with `consumed_at IS NULL` guarantees that a second concurrent
+// caller cannot also succeed.
+export async function consumeAuthHandoffToken(
+  token: string,
+): Promise<{ userId: string; purpose: string } | null> {
+  if (!token) return null;
+  const tokenHash = hashSessionToken(token);
+  const rows = await sql<{ user_id: string; purpose: string }[]>`
+    UPDATE auth_handoff_tokens
+       SET consumed_at = now()
+     WHERE token_hash = ${tokenHash}
+       AND consumed_at IS NULL
+       AND expires_at > now()
+    RETURNING user_id, purpose
+  `;
+  if (rows.length === 0) return null;
+  return { userId: rows[0].user_id, purpose: rows[0].purpose };
+}
+
 // ── Audit log ────────────────────────────────────────────────────────────────
 
 export async function recordAuthEvent(opts: {
