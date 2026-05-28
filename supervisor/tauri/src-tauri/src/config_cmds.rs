@@ -77,6 +77,27 @@ pub struct RootsConfig {
     pub configured: bool,
 }
 
+/// Read the `auto_update` preference. Defaults to `false` when absent so
+/// existing configs (and brand-new installs) never auto-install without
+/// explicit opt-in.
+#[tauri::command]
+pub fn get_auto_update() -> Result<bool, String> {
+    let map = read_raw()?;
+    Ok(map
+        .get("auto_update")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
+}
+
+/// Write the `auto_update` preference. Idempotent — preserves all other keys.
+#[tauri::command]
+pub fn set_auto_update(enabled: bool) -> Result<bool, String> {
+    let mut map = read_raw()?;
+    map.insert("auto_update".to_string(), Value::Bool(enabled));
+    write_raw(&map)?;
+    Ok(enabled)
+}
+
 #[tauri::command]
 pub fn get_config() -> Result<RootsConfig, String> {
     let p = config_path()?;

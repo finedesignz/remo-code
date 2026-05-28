@@ -73,6 +73,8 @@ pub fn run() {
             config_cmds::add_root,
             config_cmds::remove_root,
             config_cmds::rescan_now,
+            config_cmds::get_auto_update,
+            config_cmds::set_auto_update,
             runtime_cmds::get_runtime_status,
             runtime_cmds::get_inventory,
             runtime_cmds::open_external_url,
