@@ -26,6 +26,28 @@ process.env.TITANIUM_KEYGEN_API_URL = ISSUER
 process.env.TITANIUM_KEYGEN_ACCOUNT_ID = 'acct_test_0000000000'
 process.env.TITANIUM_KEYGEN_PRODUCT_ID = PRODUCT_ID
 
+// Defeat process-wide `mock.module('../src/config.ts', …)` pollution from
+// sibling test files (telegram-api.test.ts) that stub config with a
+// telegram-only shape lacking `titanium`. Bun's `mock.module` is
+// process-global + first-write-wins across files; by the time this test runs,
+// `config.titanium` may be `undefined`. Strategy: import the (possibly-mocked)
+// config and mutate it in place to graft on a working `titanium` block. The
+// exported `config` is a plain object (not Object.freezed), so this works
+// regardless of which mock fired first. Avoids registering a *new*
+// mock.module that would shadow other fields ws-client-license-gate etc.
+// depend on.
+const { config: _cfg } = await import('../src/config') as any
+if (!_cfg.titanium) {
+  _cfg.titanium = {
+    keygenApiUrl: ISSUER,
+    accountId: 'acct_test_0000000000',
+    productId: PRODUCT_ID,
+    portalToken: '',
+    adminToken: '',
+    licenseCacheTtlSeconds: 300,
+  }
+}
+
 const {
   verifyLicenseJwt,
   __setJwksResolverForTesting,
