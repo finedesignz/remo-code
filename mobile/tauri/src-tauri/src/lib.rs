@@ -64,11 +64,16 @@ fn handle_deep_link(window: &WebviewWindow, url_str: &str) {
         }
     };
 
-    // Accept remo-code://auth/callback?token=... (desktop scheme) and
-    // https-app-link variants where host is "auth" and path is "/callback".
-    let is_callback = (parsed.host_str() == Some("auth")
-        || parsed.scheme() == "remo-code")
-        && parsed.path().ends_with("/callback");
+    // Accept either form:
+    //   - Custom scheme: remo-code://auth/callback?token=...
+    //       scheme = "remo-code", host parsed as "auth", path = "/callback"
+    //   - Universal Link / App Link: https://app.remo-code.com/auth/callback?token=...
+    //       scheme = "https", host = "app.remo-code.com", path = "/auth/callback"
+    // The handler keys off scheme + path-ends-with-/callback, which works for
+    // both regardless of plugin-config host registration.
+    let scheme_ok = parsed.scheme() == "remo-code"
+        || (parsed.scheme() == "https" && parsed.host_str() == Some("app.remo-code.com"));
+    let is_callback = scheme_ok && parsed.path().ends_with("/callback");
     if !is_callback {
         log::warn!("[mobile] deep link not a callback: {}", url_str);
         return;

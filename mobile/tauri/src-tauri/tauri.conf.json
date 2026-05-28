@@ -25,8 +25,8 @@
     "deep-link": {
       "mobile": [
         {
-          "host": "auth",
-          "pathPrefix": ["/callback"]
+          "host": "app.remo-code.com",
+          "pathPrefix": ["/auth/callback"]
         }
       ],
       "desktop": {
