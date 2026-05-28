@@ -1,9 +1,10 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ProcessManager, type RunSpec } from '../src/process-manager'
 import type { SupervisorConfig } from '../src/config'
+import type { SessionBridgeCallbacks, SessionBridgeOptions } from '../src/runners/session-bridge'
 
 let TMP: string
 let ROOT: string
@@ -11,28 +12,27 @@ let REPO_GIT: string
 let REPO_NOGIT: string
 let AUDIT_PATH: string
 
-// ---------- spawn spy ----------
-interface SpawnCall { cmd: string[]; opts: any }
-const calls: SpawnCall[] = []
+// ---------- bridge factory spy ----------
+interface BridgeCall {
+  opts: SessionBridgeOptions
+  cb: SessionBridgeCallbacks
+  fake: FakeBridge
+}
+const bridges: BridgeCall[] = []
 
-/** Minimal fake Subprocess. exit code resolves only when `.kill()` is invoked. */
-function makeFakeProc(): any {
-  let resolveExit!: (code: number) => void
-  const exited = new Promise<number>((r) => { resolveExit = r })
-  return {
-    pid: 12345 + calls.length,
-    stdin: { write: () => {}, end: () => {} },
-    stdout: null,
-    stderr: null,
-    exited,
-    kill: (_sig?: string) => { resolveExit(0) },
-    _resolveExit: (c: number) => resolveExit(c),
-  }
+/** Minimal fake SessionBridge — counts start/stop calls, lets the test fire
+ *  `onSpawned` / `onExit` callbacks manually to simulate runner lifecycle. */
+class FakeBridge {
+  startCalls = 0
+  stopCalls = 0
+  start() { this.startCalls++ }
+  async stop() { this.stopCalls++ }
 }
 
-const spawnSpy = (cmd: string[], opts: any) => {
-  calls.push({ cmd: [...cmd], opts })
-  return makeFakeProc()
+function bridgeFactorySpy(opts: SessionBridgeOptions, cb: SessionBridgeCallbacks): any {
+  const fake = new FakeBridge()
+  bridges.push({ opts, cb, fake })
+  return fake
 }
 
 function makeCfg(overrides: Partial<SupervisorConfig> = {}): SupervisorConfig {
@@ -61,7 +61,7 @@ function makePM(cfg: SupervisorConfig) {
     },
     cfg,
   )
-  pm.spawnImpl = spawnSpy
+  pm.bridgeFactory = bridgeFactorySpy as any
   return { pm, events, logs }
 }
 
@@ -93,7 +93,7 @@ afterAll(() => {
 })
 
 beforeEach(() => {
-  calls.length = 0
+  bridges.length = 0
   if (existsSync(AUDIT_PATH)) {
     try { rmSync(AUDIT_PATH) } catch {}
   }
@@ -105,7 +105,7 @@ describe('ProcessManager security gates', () => {
     const outsidePath = TMP // outside ROOT
     const r = await pm.start(spec({ repoPath: outsidePath }))
     expect(r?.reason).toBe('sandbox_escape')
-    expect(calls.length).toBe(0)
+    expect(bridges.length).toBe(0)
     expect(events.find((e) => e.state === 'stopped')).toBeTruthy()
   })
 
@@ -113,73 +113,68 @@ describe('ProcessManager security gates', () => {
     const { pm } = makePM(makeCfg())
     const r = await pm.start(spec({ repoPath: 'C:\\Windows\\System32' }))
     expect(r?.reason).toBe('sandbox_escape')
-    expect(calls.length).toBe(0)
+    expect(bridges.length).toBe(0)
   })
 
-  test('legacy spawn path is disabled — gates pass but no subprocess is spawned', async () => {
-    // Phase 09 follow-up: the npx -y remo-code-agent path was retired and the
-    // in-process claude-runner has not yet landed. start() still passes the
-    // security gates (returns null) and writes a positive audit row, but the
-    // run is immediately finalized as stopped + legacy_agent_spawn_disabled
-    // and no child process is ever spawned.
+  test('session.start spawns SessionBridge via in-process claude-runner (NOT legacy npx agent)', async () => {
+    // Post-2026-05-27 fix: gates pass → bridge is constructed via the factory.
+    // Once `onSpawned` fires, the run transitions to 'running' and stays
+    // there until the bridge reports exit.
     const { pm, events } = makePM(makeCfg())
-    const r = await pm.start(spec({ repoPath: REPO_GIT }))
+    const r = await pm.start(spec({ repoPath: REPO_GIT, runId: 'rspawn' }))
     expect(r).toBeNull()
-    expect(calls.length).toBe(0)
-    const stoppedEvt = events.find((e) => e.state === 'stopped')
-    expect(stoppedEvt?.info?.lastExit?.reason).toBe('legacy_agent_spawn_disabled')
+    expect(bridges.length).toBe(1)
+    expect(bridges[0].opts.repoPath).toBe(REPO_GIT)
+    expect(bridges[0].opts.runId).toBe('rspawn')
+    expect(bridges[0].fake.startCalls).toBe(1)
+    expect(bridges[0].opts.allowDangerousSkipPermissions).toBe(false)
+    // Bridge reports spawn; PM should transition to running.
+    bridges[0].cb.onSpawned({ pid: 4242 })
+    expect(events.some((e) => e.state === 'running')).toBe(true)
   })
 
   test('not_git_repo: rejects when restrictToGit=true and no .git', async () => {
     const { pm } = makePM(makeCfg({ requireGitRepo: true }))
     const r = await pm.start(spec({ repoPath: REPO_NOGIT }))
     expect(r?.reason).toBe('not_git_repo')
-    expect(calls.length).toBe(0)
+    expect(bridges.length).toBe(0)
   })
 
-  test('git gate is opt-in: with restrictToGit=false a non-git dir passes gates', async () => {
+  test('git gate is opt-in: with restrictToGit=false a non-git dir passes gates + spawns bridge', async () => {
     const { pm } = makePM(makeCfg({ requireGitRepo: false }))
     const r = await pm.start(spec({ repoPath: REPO_NOGIT }))
     expect(r).toBeNull()
-    expect(calls.length).toBe(0) // legacy spawn disabled
+    expect(bridges.length).toBe(1)
   })
 
-  test('concurrency_cap: enforced before the spawn gate fires', async () => {
-    // With the legacy spawn disabled, the first start finalizes immediately
-    // and releases its slot before the second start is attempted — so a
-    // sequential second start no longer hits the cap. To exercise the
-    // concurrency_cap gate itself, we monkey-patch the spawn() method to
-    // hold the run in 'starting' state instead of finalizing. This simulates
-    // the future inline-runner state where spawn() keeps the slot occupied.
+  test('concurrency_cap: second start refused while first is active', async () => {
     const { pm } = makePM(makeCfg({ maxConcurrent: 1 }))
-    // Replace spawn with a no-op so runs stay in the map after start().
-    ;(pm as any).spawn = (run: any) => { run.state = 'starting' /* hold the slot */ }
     const r1 = await pm.start(spec({ runId: 'a' }))
     expect(r1).toBeNull()
+    expect(bridges.length).toBe(1)
+    // First run is in 'starting' state (no onSpawned yet) — still occupies a slot.
     const r2 = await pm.start(spec({ runId: 'b' }))
     expect(r2?.reason).toBe('concurrency_cap')
-    expect(calls.length).toBe(0)
+    expect(bridges.length).toBe(1) // no second bridge constructed
   })
 
-  test('--dangerously-skip-permissions stripped when cap OFF (gate still logs, but no spawn)', async () => {
+  test('dangerous-skip flag stripped when cap OFF; bridge still receives allowDangerous=false', async () => {
     const { pm, logs } = makePM(makeCfg({ allowDangerousSkipPermissions: false }))
     await pm.start(spec({ dangerouslySkipPermissions: true }))
-    expect(calls.length).toBe(0)
+    expect(bridges.length).toBe(1)
+    expect(bridges[0].opts.allowDangerousSkipPermissions).toBe(false)
     expect(logs.some((l) => l.msg.includes('flag stripped'))).toBe(true)
   })
 
-  test('--dangerously-skip-permissions is NEVER spawned, even with cap ON (legacy path is disabled)', async () => {
+  test('dangerous-skip honored when cap ON: bridge receives allowDangerous=true', async () => {
     const { pm } = makePM(makeCfg({ allowDangerousSkipPermissions: true }))
     await pm.start(spec({ dangerouslySkipPermissions: true }))
-    // Legacy spawn refused → nothing in calls[]; the flag never reaches a real argv.
-    expect(calls.length).toBe(0)
+    expect(bridges.length).toBe(1)
+    expect(bridges[0].opts.allowDangerousSkipPermissions).toBe(true)
   })
 
   test('audit log appends one JSONL entry per decision (allow + reject)', async () => {
     const { pm } = makePM(makeCfg({ maxConcurrent: 1 }))
-    // Hold the slot so the second start hits concurrency_cap (without the
-    // monkey-patch, spawn() finalizes immediately and releases the slot).
-    ;(pm as any).spawn = (run: any) => { run.state = 'starting' /* hold the slot */ }
     await pm.start(spec({ runId: 'a', repoPath: REPO_GIT }))      // allowed
     await pm.start(spec({ runId: 'b', repoPath: REPO_GIT }))      // concurrency_cap
     await pm.start(spec({ runId: 'c', repoPath: TMP }))           // sandbox escape
@@ -208,8 +203,8 @@ describe('ProcessManager security gates', () => {
     expect(existsSync(AUDIT_PATH)).toBe(false)
   })
 
-  test('updateConfig() takes effect on next start (config swap reaches the audit decision path)', async () => {
-    const { pm } = makePM(makeCfg({ allowDangerousSkipPermissions: false }))
+  test('updateConfig() takes effect on next start', async () => {
+    const { pm } = makePM(makeCfg({ allowDangerousSkipPermissions: false, maxConcurrent: 5 }))
     await pm.start(spec({ runId: 'a', dangerouslySkipPermissions: true }))
     pm.updateConfig(makeCfg({ allowDangerousSkipPermissions: true, maxConcurrent: 5 }))
     await pm.start(spec({ runId: 'b', dangerouslySkipPermissions: true }))
@@ -217,5 +212,16 @@ describe('ProcessManager security gates', () => {
     const entries = lines.map((l) => JSON.parse(l))
     expect(entries[0].flags.dangerously_skip_permissions_applied).toBe(false)
     expect(entries[1].flags.dangerously_skip_permissions_applied).toBe(true)
+  })
+
+  test('bridge onExit with non-zero code triggers scheduleRestart (crash path)', async () => {
+    const { pm, events } = makePM(makeCfg({ maxConcurrent: 5 }))
+    await pm.start(spec({ runId: 'crashy' }))
+    expect(bridges.length).toBe(1)
+    bridges[0].cb.onSpawned({ pid: 1 })
+    // Simulate a crash.
+    bridges[0].cb.onExit({ code: 137, reason: 'runner_exit' })
+    // Should transition to 'crashed' and schedule a restart (we don't await the timer).
+    expect(events.some((e) => e.state === 'crashed')).toBe(true)
   })
 })
