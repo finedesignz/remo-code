@@ -14,6 +14,7 @@ import {
   resolveLocalPathForRepoKey,
   getUserInventory,
   getKnownLocalPathsForRepoKey,
+  getActiveSessionIdsForUser,
 } from '../ws/supervisor-registry.ts'
 import { releaseSessionSlot } from '../sessions/budget.ts'
 import { probeGithubAppScope } from '../lib/github-scope.ts'
@@ -38,16 +39,23 @@ const sessions = new Hono()
 sessions.get('/', async (c) => {
   const userId = c.get('userId') as string
   const data = await listSessions(userId)
+  // Bug A (2026-05-28) — `active` flag derives from the supervisor's
+  // session_inventory push (authoritative ground-truth: the supervisor is
+  // currently hosting a runner for this session_id). Falls back to the DB
+  // status column for pre-0.5.7 supervisors that don't push inventory.
+  const activeIds = getActiveSessionIdsForUser(userId)
   // Phase 08.6 — enrich each GitHub-keyed session with the known local working
   // trees from the supervisor inventory cache so the sidebar can collapse to
   // one row per repo and the Launch flow can offer a worktree/branch picker.
   // Non-GitHub-keyed sessions get an empty array (the field is always present
   // so the web type is non-optional).
   const enriched = (data as any[]).map((s) => {
+    const active = activeIds.has(s.id) || s.status === 'online' || s.status === 'thinking'
+    const base = { ...s, active }
     if (s.repo_key) {
-      return { ...s, local_paths: getKnownLocalPathsForRepoKey(userId, s.repo_key) }
+      return { ...base, local_paths: getKnownLocalPathsForRepoKey(userId, s.repo_key) }
     }
-    return { ...s, local_paths: [] }
+    return { ...base, local_paths: [] }
   })
   return c.json(enriched)
 })

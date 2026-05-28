@@ -138,6 +138,33 @@ export const SupervisorRepoInventory = z.object({
   })).max(2000),
 })
 
+/**
+ * Bug A (2026-05-28) — supervisor pushes its live runner set every ~10s so
+ * the hub has authoritative ground truth for which sessions are actually
+ * running on disk (independent of the per-session WS bridge state). The hub
+ * uses this to flag sessions `active=true` in GET /api/sessions even when the
+ * row's `status` column lags behind the runner reality (e.g. status hasn't
+ * been updated by the bridge yet, or DB row was created without an explicit
+ * status flip).
+ *
+ * Payload must stay <10KB. Only include sessions with a live runner — drop
+ * stopped/finalized entries. Pre-0.5.7 supervisors don't send this message
+ * (back-compat: hub treats missing inventory as "use status column truth").
+ */
+export const SupervisorSessionInventory = z.object({
+  type: z.literal('session_inventory'),
+  sessions: z.array(z.object({
+    session_id: z.string().min(1).max(256),
+    cli_kind: z.enum(['claude', 'codex']),
+    project_dir: z.string().max(4096),
+    pid: z.number().int().nullable().optional(),
+    started_at: z.string(),
+    last_activity_at: z.string().nullable().optional(),
+    status: z.enum(['spawning', 'running', 'idle', 'stopping']),
+  })).max(64),
+})
+export type SupervisorSessionInventoryT = z.infer<typeof SupervisorSessionInventory>
+
 export const SupervisorInbound = [
   SupervisorHello,
   SupervisorState,
@@ -151,6 +178,7 @@ export const SupervisorInbound = [
   RunOutput,
   RunFinished,
   SupervisorRepoInventory,
+  SupervisorSessionInventory,
 ]
 
 /**

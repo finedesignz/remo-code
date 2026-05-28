@@ -10,7 +10,10 @@ import { getHandler, nativeSupervisorCommands } from './commands/index'
 import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
 
 // Keep in sync with supervisor/tauri/src-tauri/tauri.conf.json version
-const VERSION = '0.5.6'
+const VERSION = '0.5.7'
+
+/** Bug A — push the live runner set to the hub every 10s after auth_ok. */
+const SESSION_INVENTORY_INTERVAL_MS = 10_000
 
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
@@ -22,6 +25,7 @@ type OutboundMsg =
   | { type: 'repo.clone_progress'; req_id: string; stage: string; percent?: number }
   | { type: 'supervisor.commands_sync'; commands: Array<{ kind: 'command' | 'skill'; name: string; description: string | null; source: string; path: string }> }
   | { type: 'supervisor.repo_inventory'; scanned_at: string; repos: Array<{ local_path: string; is_git_repo: boolean; is_worktree: boolean; worktree_parent_path: string | null; git_remote: string | null; git_origin_github: { owner: string; repo: string } | null; branch?: string | null; canonical?: boolean }> }
+  | { type: 'session_inventory'; sessions: Array<{ session_id: string; cli_kind: 'claude' | 'codex'; project_dir: string; pid: number | null; started_at: string; last_activity_at: string | null; status: 'spawning' | 'running' | 'idle' | 'stopping' }> }
   | { type: 'run_started'; run_id: string }
   | { type: 'run_output'; run_id: string; chunk: string }
   | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
@@ -39,6 +43,9 @@ export class SupervisorClient {
   /** Phase 08 §15 — fs.watch handle on supervisor.json so Tauri "Rescan now"
    * (which nulls `last_scan_at`) triggers a fresh inventory emission. */
   private configWatcher: ReturnType<typeof fsWatch> | null = null
+
+  /** Bug A — interval handle for session_inventory pushes; null when not auth'd. */
+  private sessionInventoryTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(cfg: SupervisorConfig) {
     this.cfg = cfg
@@ -126,6 +133,7 @@ export class SupervisorClient {
     ws.onclose = (ev) => {
       if (this.ws !== ws) return // a newer socket has taken over
       this.authenticated = false
+      this.stopSessionInventoryPush()
       const code = (ev as any)?.code as number | undefined
       const reason = (ev as any)?.reason as string | undefined
       this.log('warn', `WebSocket closed code=${code ?? '?'} reason=${reason || '(none)'}`)
@@ -210,6 +218,9 @@ export class SupervisorClient {
       void this.sendRepoInventory().catch((err) => {
         this.log('warn', `repo_inventory failed: ${err.message}`)
       })
+      // Bug A — start the session_inventory push interval. Fires once
+      // immediately + every 10s; cancels on disconnect.
+      this.startSessionInventoryPush()
       return
     }
     if (msg.type === 'auth_error') {
@@ -358,6 +369,49 @@ export class SupervisorClient {
       this.log('warn', `saveConfig(lastScanAt) failed: ${err?.message ?? err}`)
     }
     this.log('info', `repo_inventory sent: ${entries.length} entries`)
+  }
+
+  /**
+   * Bug A (2026-05-28) — start the 10s session_inventory push loop. Idempotent
+   * (no-op if already running). Stopped on every disconnect.
+   */
+  private startSessionInventoryPush() {
+    if (this.sessionInventoryTimer) return
+    // Fire immediately so the hub gets a snapshot on the same frame as hello.
+    this.pushSessionInventory()
+    this.sessionInventoryTimer = setInterval(() => {
+      this.pushSessionInventory()
+    }, SESSION_INVENTORY_INTERVAL_MS)
+  }
+
+  private stopSessionInventoryPush() {
+    if (!this.sessionInventoryTimer) return
+    clearInterval(this.sessionInventoryTimer)
+    this.sessionInventoryTimer = null
+  }
+
+  /**
+   * Bug A — snapshot the ProcessManager's live runner set and send it to the
+   * hub. Drops entries that haven't received a session_id from the hub yet
+   * (those would be unaddressable on the hub side). Best-effort; ws.send
+   * failures are swallowed because the next interval will retry.
+   */
+  private pushSessionInventory() {
+    if (!this.authenticated) return
+    if (this.ws?.readyState !== WebSocket.OPEN) return
+    const snap = this.pm.inventorySnapshot()
+    const sessions = snap
+      .filter((r) => r.sessionId !== null)
+      .map((r) => ({
+        session_id: r.sessionId as string,
+        cli_kind: r.cliKind,
+        project_dir: r.projectDir,
+        pid: r.pid,
+        started_at: r.startedAt,
+        last_activity_at: r.lastActivityAt,
+        status: r.status,
+      }))
+    this.send({ type: 'session_inventory', sessions })
   }
 
   /**

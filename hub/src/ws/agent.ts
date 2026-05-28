@@ -10,6 +10,7 @@ import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
 import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
   updateSupervisorState, heartbeatSupervisor, getSupervisor,
+  setSupervisorSessionInventory,
 } from './supervisor-registry'
 
 const AUTH_TIMEOUT_MS = 5_000
@@ -796,6 +797,33 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       } catch {}
     } catch (err: any) {
       console.error('[supervisor] repo_inventory handler failed', err?.message)
+    }
+    return
+  }
+
+  // Bug A (2026-05-28) — supervisor's live runner inventory. Stored in-memory
+  // keyed by supervisor; `GET /api/sessions` folds this into the `active` flag
+  // and we broadcast `session_inventory_changed` to the user's web clients so
+  // the sidebar refreshes without polling. Empty / pre-0.5.7 supervisors never
+  // send this; back-compat path is to fall back to `sessions.status`.
+  if (msg.type === 'session_inventory') {
+    try {
+      const scannedAt = new Date().toISOString()
+      const { changedSessionIds, userId: ownerId } = setSupervisorSessionInventory(
+        supervisorId,
+        msg.sessions,
+        scannedAt,
+      )
+      if (ownerId && changedSessionIds.length > 0) {
+        broadcastToUser(ownerId, {
+          type: 'session_inventory_changed',
+          supervisor_id: supervisorId,
+          changed_session_ids: changedSessionIds,
+          scanned_at: scannedAt,
+        })
+      }
+    } catch (err: any) {
+      console.error('[supervisor] session_inventory handler failed', err?.message)
     }
     return
   }
