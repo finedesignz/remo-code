@@ -1229,3 +1229,122 @@ export async function recordAuthEvent(opts: {
   `;
 }
 
+// ── Phase 12: Telegram bridge DAL ────────────────────────────────────────────
+
+export type TelegramUserRow = {
+  id: string;
+  email: string;
+  telegram_chat_id: string | number | null;
+  telegram_default_session_id: string | null;
+};
+
+export async function getUserByTelegramChatId(chatId: number | bigint | string): Promise<TelegramUserRow | null> {
+  const rows = await sql<TelegramUserRow[]>`
+    SELECT id, email, telegram_chat_id, telegram_default_session_id
+      FROM users
+     WHERE telegram_chat_id = ${chatId as any}
+     LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+export async function setTelegramChatId(userId: string, chatId: number | bigint | string): Promise<void> {
+  await sql`
+    UPDATE users
+       SET telegram_chat_id = ${chatId as any},
+           telegram_link_code = NULL,
+           telegram_link_code_expires_at = NULL
+     WHERE id = ${userId}
+  `;
+}
+
+export async function clearTelegramChatId(userId: string): Promise<void> {
+  await sql`
+    UPDATE users
+       SET telegram_chat_id = NULL,
+           telegram_default_session_id = NULL
+     WHERE id = ${userId}
+  `;
+}
+
+export async function setTelegramDefaultSession(userId: string, sessionId: string | null): Promise<void> {
+  await sql`
+    UPDATE users
+       SET telegram_default_session_id = ${sessionId}
+     WHERE id = ${userId}
+  `;
+}
+
+export async function setTelegramLinkCode(
+  userId: string,
+  code: string | null,
+  expiresAt: Date | null,
+): Promise<void> {
+  await sql`
+    UPDATE users
+       SET telegram_link_code = ${code},
+           telegram_link_code_expires_at = ${expiresAt}
+     WHERE id = ${userId}
+  `;
+}
+
+export async function findUserByLinkCode(code: string): Promise<{ id: string; expiresAt: Date | null } | null> {
+  const rows = await sql<{ id: string; telegram_link_code_expires_at: Date | null }[]>`
+    SELECT id, telegram_link_code_expires_at
+      FROM users
+     WHERE telegram_link_code = ${code}
+     LIMIT 1
+  `;
+  if (!rows[0]) return null;
+  return { id: rows[0].id, expiresAt: rows[0].telegram_link_code_expires_at };
+}
+
+export interface TelegramInboundLogInput {
+  user_id: string | null;
+  chat_id: number | bigint | string | null;
+  update_id: number | bigint | null;
+  outcome: string;
+  error?: string | null;
+  raw?: unknown;
+}
+
+/**
+ * Insert one inbound-log row, then trim the user's history to 100. Mirrors
+ * recordCoolifyWebhookAttempt. Inserts on (chat_id, update_id) UNIQUE
+ * collide silently — Telegram retries the same update_id when we 5xx, so
+ * the dispatch path checks for an existing row before re-firing.
+ */
+export async function logTelegramInbound(input: TelegramInboundLogInput): Promise<void> {
+  try {
+    await sql`
+      INSERT INTO telegram_inbound_log
+        (user_id, chat_id, update_id, outcome, error, raw)
+      VALUES
+        (${input.user_id},
+         ${input.chat_id as any},
+         ${input.update_id as any},
+         ${input.outcome},
+         ${input.error ?? null},
+         ${input.raw === undefined ? null : JSON.stringify(input.raw)}::jsonb)
+      ON CONFLICT (chat_id, update_id) DO NOTHING
+    `;
+  } catch (err: any) {
+    console.warn("[telegram] inbound log insert failed:", err?.message);
+    return;
+  }
+  if (!input.user_id) return;
+  try {
+    await sql`
+      DELETE FROM telegram_inbound_log
+       WHERE user_id = ${input.user_id}
+         AND id IN (
+           SELECT id FROM telegram_inbound_log
+            WHERE user_id = ${input.user_id}
+            ORDER BY received_at DESC
+            OFFSET 100
+         )
+    `;
+  } catch (err: any) {
+    console.warn("[telegram] inbound log trim failed:", err?.message);
+  }
+}
