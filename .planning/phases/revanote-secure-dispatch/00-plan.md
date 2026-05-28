@@ -3,7 +3,7 @@
 **Cross-repo plan:** `C:/Users/artic/GitHub/revanote/.planning/phases/batched-secure-dispatch/00-plan.md`
 **Branch:** `feat/phase5-agent-sandbox`
 **Owner:** remo-code hub
-**Status:** Phase 5 in progress
+**Status:** Phase 5 shipped; Phase 6 in progress (this branch)
 
 ## Context
 
@@ -80,13 +80,44 @@ New optional fields on `RevanoteCallbackPayload`:
    - `revanote-merge-gate.test.ts`: clean+minor → `auto_merged`; clean+major →
      `pr_opened`; dirty → `blocked`. PR-open + git stubbed via `mock.module`.
 
-## Phase 6 deliverables (next PR — NOT THIS BRANCH)
+## Phase 6 deliverables (shipped — `feat/phase6-deploy-decouple`)
 
-- Coolify-deploy decoupling: only auto-merge for `repo_kind='github'` writes to
-  default branch; major/breaking opens PR and posts emails4agents notification.
-- Wire LLM escalation in the classifier.
-- Surface `agent_paused` short-circuit on inbound webhook side (revanote ships
-  the kill switch in Phase 3; this side honors it by reading `users` flag).
+- ✅ `hub/src/revanote/deploy-policy.ts` — Coolify deploy decoupling:
+  `minor` + ci_green → squash-merge to `REVANOTE_AUTOMERGE_BRANCH`; `major`/
+  `breaking` → PR with `base=REVANOTE_STAGING_BRANCH` + emails4agents notify;
+  `local_path` repos never auto-merge / never notify.
+- ✅ `hub/src/revanote/ci-gate.ts` — real GitHub CI gate replacing Phase 5
+  stub. Polls `/repos/{owner}/{repo}/commits/{sha}/check-runs` until success
+  / failure / `CI_GATE_TIMEOUT_MS`; treats "no checks after 60s" as green
+  with a warn (backward compat with repos that have no CI configured).
+- ✅ `hub/src/revanote/notify-pr.ts` — emails4agents notification on
+  `pr_opened` for non-local risk≥major. Recipient: payload `org_notify_email`
+  → env `REVANOTE_PR_NOTIFY_EMAIL` → log+skip. Never blocks the callback.
+- ✅ `hub/src/revanote/local-path-stash.ts` — top-level secret stash
+  (`.env*`, `secrets/`, `.aws/`, `.ssh/`) before agent spawn on
+  `repo_kind='local_path'`. Restore-on-finally; refuse-on-prior-stash;
+  critical-failure log on restore failure.
+- ✅ `hub/src/revanote/llm-escalator.ts` — LLM second-opinion implementing
+  the `LlmEscalator` interface stubbed in Phase 5. Triggered when heuristic
+  → `minor` AND diff is large; sha256-keyed 1h cache; defaults to `major`
+  on parse / API failure.
+- ✅ `hub/src/revanote/run-lifecycle.ts` — wired to `runMergeGate(...)` +
+  `applyGateToCallback(...)`. Gate runs only when inbound `payload_raw`
+  carries `repo_slug` + `repo_kind` + `sandbox_dir`; legacy single-shot
+  paths bypass the gate (back-compat).
+
+### Deferred to a follow-up (out of scope for Phase 6)
+
+- `agent_paused` short-circuit on inbound webhook side — revanote ships the
+  kill switch in its own Phase 3; this side reads `users.agent_paused`.
+- Real `openPr` / `squashMerge` plumbing — `defaultMergeOps()` currently
+  warns + returns synthetic URLs; integration paths that need real GitHub
+  writes inject their own `MergeOps`. The CI gate IS real.
+- Wiring `prepareSandbox()` into `dispatcher.ts` — Phase 5 added the
+  sandbox primitives but the dispatcher still ships prompts to long-lived
+  Claude sessions over WS, not into ephemeral clones. The gate honors
+  whatever `payload_raw.sandbox_dir` is set to; orchestrator-side wiring
+  to actually prepare the sandbox per-batch is the next increment.
 
 ## Constraints
 
@@ -98,19 +129,17 @@ New optional fields on `RevanoteCallbackPayload`:
 - If the LLM client isn't trivially reusable, **stub the interface** and document
   the gap here for Phase 6 — do not invent it.
 
-## Known gaps documented for Phase 6
+## Known gaps from Phase 5 — RESOLVED IN PHASE 6
 
-- **LLM escalation** in `risk-classifier.ts`: currently heuristic-only. The
-  existing `hub/src/scheduler/post-run/*` paths use an internal Anthropic
-  client; risk-classifier accepts an injected `llm?: LlmEscalator` callback so
-  Phase 6 can wire it without changing the signature.
-- **Local-path sandboxing of host secrets**: when `repo_kind='local_path'` the
-  worktree shares an inode tree with the user's working copy. Env-var stripping
-  protects against in-process exfil, but the user must accept that their local
-  uncommitted files are on the same disk. Documented limitation.
-- **CI-green gate** for auto-merge: this PR detects `merge_decision='auto_merged'`
-  optimistically when classifier says `minor` AND diff-sandbox clean. Phase 6
-  will gate on `GET /repos/:owner/:repo/commits/:sha/check-runs` before merge.
+- ~~**LLM escalation** in `risk-classifier.ts`~~ — RESOLVED. `llm-escalator.ts`
+  implements the `LlmEscalator` interface and is auto-wired by
+  `run-lifecycle.ts` via `createLlmEscalator()`.
+- ~~**Local-path sandboxing of host secrets**~~ — RESOLVED via
+  `local-path-stash.ts`. Top-level secrets (`.env*`, `secrets/`, `.aws/`,
+  `.ssh/`) are renamed before the agent spawns. Documented limitation
+  remains for non-top-level secrets — caller still owns their disk.
+- ~~**CI-green gate** for auto-merge~~ — RESOLVED in `ci-gate.ts` with
+  real `/check-runs` polling.
 
 ## Acceptance for Phase 5
 
