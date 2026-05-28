@@ -35,17 +35,35 @@ import { z } from "zod";
 import { config } from "../config.ts";
 import {
   getUserByTelegramChatId,
+  getSession,
   logTelegramInbound,
+  setTelegramDefaultSession,
   type TelegramUserRow,
 } from "../db/dal.ts";
-import { sendMessage, getFile, downloadFile } from "../telegram/client.ts";
+import {
+  sendMessage,
+  sendMessageWithKeyboard,
+  answerCallbackQuery,
+  editMessageText,
+  editMessageReplyMarkup,
+  getFile,
+  downloadFile,
+  type InlineKeyboard,
+} from "../telegram/client.ts";
 import {
   parseCommand,
   handleStart,
   handleList,
+  handleListPicker,
   handleSession,
+  listUserSessionsForPicker,
   HELP_TEXT,
 } from "../telegram/commands.ts";
+import {
+  buildSessionKeyboard,
+  renderPickerText,
+  parseCallbackData,
+} from "../telegram/session-picker.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
 
 export const telegramWebhookRoutes = new Hono();
@@ -83,15 +101,30 @@ const Message = z.object({
   animation: z.unknown().optional(),
 });
 
+const CallbackQuery = z.object({
+  id: z.string(),
+  from: z.object({ id: z.number() }),
+  // message is optional in Telegram's schema when the original message is too old.
+  message: z
+    .object({
+      message_id: z.number(),
+      chat: z.object({ id: z.number() }),
+    })
+    .optional(),
+  data: z.string().optional(),
+});
+
 const Update = z.object({
   update_id: z.number(),
   message: Message.optional(),
-  // We intentionally ignore edited_message, channel_post, callback_query, etc. (out of scope per plan).
+  callback_query: CallbackQuery.optional(),
+  // We intentionally ignore edited_message, channel_post, etc. (out of scope per plan).
   edited_message: z.unknown().optional(),
 });
 
 type UpdateT = z.infer<typeof Update>;
 type MessageT = z.infer<typeof Message>;
+type CallbackQueryT = z.infer<typeof CallbackQuery>;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -245,6 +278,124 @@ async function dispatchInbound(
   }
 }
 
+// ── Callback-query handler (inline-keyboard session picker) ───────────────
+
+async function safeAnswerCallback(
+  id: string,
+  opts: { text?: string; show_alert?: boolean } = {},
+): Promise<void> {
+  try {
+    await answerCallbackQuery(id, opts);
+  } catch (err: any) {
+    console.warn("[telegram-webhook] answerCallbackQuery failed:", err?.status ?? "?", err?.message);
+  }
+}
+
+async function safeEditMessageText(
+  chatId: number | string,
+  messageId: number,
+  text: string,
+  keyboard: InlineKeyboard | null,
+): Promise<void> {
+  try {
+    await editMessageText(chatId, messageId, text, keyboard ? { inline_keyboard: keyboard } : {});
+  } catch (err: any) {
+    console.warn("[telegram-webhook] editMessageText failed:", err?.status ?? "?", err?.message);
+  }
+}
+
+async function safeEditReplyMarkup(
+  chatId: number | string,
+  messageId: number,
+  keyboard: InlineKeyboard,
+): Promise<void> {
+  try {
+    await editMessageReplyMarkup(chatId, messageId, keyboard);
+  } catch (err: any) {
+    console.warn("[telegram-webhook] editMessageReplyMarkup failed:", err?.status ?? "?", err?.message);
+  }
+}
+
+/**
+ * Handle a callback_query payload (inline-keyboard button tap).
+ * Returns an audit outcome string. Authorization is enforced on every branch:
+ * unlinked chat → silent drop, foreign session_id → denial toast.
+ */
+async function handleCallbackQuery(
+  cb: CallbackQueryT,
+  user: TelegramUserRow | null,
+): Promise<{ outcome: string }> {
+  // Unlinked chat → silent drop (mirrors unlinked text path).
+  if (!user) {
+    await safeAnswerCallback(cb.id);
+    return { outcome: "callback_silent_drop_unlinked" };
+  }
+
+  const action = parseCallbackData(cb.data);
+  if (!action) {
+    await safeAnswerCallback(cb.id, { text: "Unknown action", show_alert: false });
+    return { outcome: "callback_unknown" };
+  }
+
+  const chatId = cb.message?.chat.id;
+  const messageId = cb.message?.message_id;
+
+  if (action.kind === "set_session") {
+    // Authorization: user must own the session.
+    const owned = await getSession(action.sessionId, user.id);
+    if (!owned) {
+      await safeAnswerCallback(cb.id, { text: "Not allowed", show_alert: true });
+      return { outcome: "callback_session_denied" };
+    }
+    await setTelegramDefaultSession(user.id, action.sessionId);
+    await safeAnswerCallback(cb.id, { text: "✓ Default session set" });
+
+    // Re-render the keyboard with the new ✓ mark, if we have a message ref.
+    if (chatId !== undefined && messageId !== undefined) {
+      try {
+        const rows = await listUserSessionsForPicker(user.id);
+        const total = rows.length;
+        // Keep the same page the user was on — find the offset that contains
+        // the picked session, fall back to 0.
+        const idx = rows.findIndex((r) => r.id === action.sessionId);
+        const offset = idx >= 0 ? Math.floor(idx / 20) * 20 : 0;
+        const keyboard = buildSessionKeyboard({ rows, offset, defaultId: action.sessionId });
+        const text = renderPickerText({ total, offset, defaultId: action.sessionId });
+        await safeEditMessageText(chatId, messageId, text, keyboard);
+      } catch (err: any) {
+        console.warn("[telegram-webhook] picker re-render failed:", err?.message);
+      }
+    }
+    return { outcome: "callback_session_set" };
+  }
+
+  // paginate
+  if (chatId === undefined || messageId === undefined) {
+    await safeAnswerCallback(cb.id);
+    return { outcome: "callback_paginate_no_msg" };
+  }
+  try {
+    const rows = await listUserSessionsForPicker(user.id);
+    const total = rows.length;
+    const offset = Math.min(action.offset, Math.max(0, total - 1));
+    const keyboard = buildSessionKeyboard({
+      rows,
+      offset,
+      defaultId: user.telegram_default_session_id,
+    });
+    const text = renderPickerText({
+      total,
+      offset,
+      defaultId: user.telegram_default_session_id,
+    });
+    await safeEditMessageText(chatId, messageId, text, keyboard);
+  } catch (err: any) {
+    console.warn("[telegram-webhook] paginate failed:", err?.message);
+  }
+  await safeAnswerCallback(cb.id);
+  return { outcome: "callback_paginate" };
+}
+
 // ── Route ──────────────────────────────────────────────────────────────────
 
 telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
@@ -275,12 +426,18 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
     return c.json({ ok: true });
   }
   const update: UpdateT = result.data;
-  if (!update.message) {
+  if (!update.message && !update.callback_query) {
     // edited_message, channel_post, etc. — ignored per plan.
     return c.json({ ok: true });
   }
+  // chat_id source: callback_query uses cb.message.chat.id (or cb.from.id when
+  // the original message is too old for Telegram to send back).
+  const chatId =
+    update.message?.chat.id ??
+    update.callback_query?.message?.chat.id ??
+    update.callback_query?.from.id ??
+    0;
   const msg = update.message;
-  const chatId = msg.chat.id;
 
   // (4) Resolve user.
   let user: TelegramUserRow | null = null;
@@ -308,6 +465,17 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
 
   // Wrap the entire post-auth pipeline so transient errors never escape as 5xx.
   try {
+    // ── CALLBACK QUERY branch (inline-keyboard tap) ─────────────────────────
+    if (update.callback_query) {
+      const r = await handleCallbackQuery(update.callback_query, user);
+      return c.json({ ok: true, outcome: r.outcome });
+    }
+
+    if (!msg) {
+      // Defensive — we already checked above, but TypeScript needs the narrowing.
+      return c.json({ ok: true });
+    }
+
     // ── UNLINKED branch ────────────────────────────────────────────────────
     if (!user) {
       const text = msg.text ?? "";
@@ -334,8 +502,19 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
           return c.json({ ok: true, outcome: "cmd_help" });
         }
         case "list": {
-          const r = await handleList({ user });
-          await safeSend(chatId, r.reply);
+          const r = await handleListPicker({ user, offset: 0 });
+          if (r.keyboard) {
+            try {
+              await sendMessageWithKeyboard(chatId, r.text, r.keyboard);
+            } catch (err: any) {
+              console.warn("[telegram-webhook] sendMessageWithKeyboard failed:", err?.status ?? "?", err?.message);
+              // Fall back to plain text list if the keyboard send blew up.
+              const fb = await handleList({ user });
+              await safeSend(chatId, fb.reply);
+            }
+          } else {
+            await safeSend(chatId, r.text);
+          }
           return c.json({ ok: true, outcome: "cmd_list" });
         }
         case "session": {
