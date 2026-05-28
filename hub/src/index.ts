@@ -25,6 +25,7 @@ import { instructions as instructionsApi } from './api/instructions'
 import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { revanoteWebhookRoutes } from './api/revanote-webhook'
+import { telegramWebhookRoutes } from './api/telegram-webhook'
 import { revanoteMappings } from './api/revanote-mappings'
 import { revanoteAnnotations } from './api/revanote-annotations'
 import { webhooksTitanium } from './api/webhooks-titanium'
@@ -152,6 +153,11 @@ app.route('/api/coolify', coolifyWebhookRoutes)
 // secret embedded in path). MUST be mounted BEFORE the JWT catch-all.
 app.route('/api/revanote', revanoteWebhookRoutes)
 
+// Phase 12: Public Telegram inbound webhook (URL-path secret). MUST be
+// mounted BEFORE the JWT catch-all. Auth is :secret in the URL, constant-time
+// compared to config.telegram.webhookSecret.
+app.route('/api/telegram', telegramWebhookRoutes)
+
 // Public Titanium license-changed webhook (HMAC-signed, shared secret).
 // MUST be mounted BEFORE the JWT catch-all. Inert (503) until secret set.
 app.route('/webhooks/titanium', webhooksTitanium)
@@ -165,6 +171,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
+  if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   // Phase 07: public auth endpoints (login request-link, callback, logout, me).
   // The authRouter handles its own auth state internally where needed.
   if (c.req.path.startsWith('/api/auth/')) return next()
@@ -185,6 +192,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
+  if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
   if (c.req.path.startsWith('/api/setup')) return next()
   return requireActiveLicense({ readOnlyOk: true })(c, next)
