@@ -9,7 +9,7 @@ import { getHandler, nativeSupervisorCommands } from './commands/index'
 import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
 
 // Keep in sync with supervisor/tauri/src-tauri/tauri.conf.json version
-const VERSION = '0.5.3'
+const VERSION = '0.5.4'
 
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
@@ -231,10 +231,37 @@ export class SupervisorClient {
       case 'session.stop': await this.onSessionStop(msg); break
       case 'session.status': this.onSessionStatus(msg); break
       case 'run_command': await this.onRunCommand(msg); break
+      case 'key_rotated': this.onKeyRotated(msg); break
       default:
         // unknown
         break
     }
+  }
+
+  /**
+   * v0.5.4 — hub pushed a new plaintext API key (the user rotated via the
+   * web Settings page, OR via the Tauri Update API Key dialog which hits the
+   * same hub endpoint). Swap in-memory, persist to supervisor.json (no BOM —
+   * Bun's writeFileSync with utf-8 writes no BOM natively), and reconnect
+   * with the new key so subsequent /ws/agent auths succeed.
+   */
+  private onKeyRotated(msg: { new_api_key: string; key_id: string }) {
+    const next = (msg.new_api_key ?? '').trim()
+    if (!/^(remokey_|remo_)[A-Za-z0-9_-]+$/.test(next)) {
+      this.log('warn', `key_rotated ignored: malformed key`)
+      return
+    }
+    this.cfg.apiKey = next
+    try {
+      saveConfig({ ...this.cfg, apiKey: next })
+    } catch (err: any) {
+      this.log('warn', `key_rotated: saveConfig failed: ${err?.message ?? err}`)
+    }
+    this.log('info', `api key rotated (id=${msg.key_id}); reconnecting`)
+    // Close + reconnect; ws.onclose schedules the reconnect via the existing
+    // backoff path. Force the next attempt to be immediate.
+    this.reconnectAttempts = 0
+    try { this.ws?.close(4002, 'key_rotated') } catch {}
   }
 
   /**

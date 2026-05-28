@@ -204,6 +204,13 @@ function walkRoot(root: string, settings: ScanSettings, compiledGlobs: RegExp[])
       if (shouldIgnore(child, compiledGlobs)) continue
       if (!isDirSafe(child, settings.follow_symlinks)) continue
       out.push(norm(child))
+      // Descent guard: if `child` is itself a git repo or worktree (has `.git`
+      // as a dir or a file), record it as a candidate but DO NOT recurse into
+      // its subdirs. Otherwise the walker walks into `.github`, `.planning`,
+      // `.turbo`, `src/`, etc., and `introspect()` reports each as a separate
+      // repo (with the same origin) — producing hundreds of phantom entries.
+      // The repo itself is the boundary.
+      if (existsSync(join(child, '.git'))) continue
       visit(child, depth + 1)
     }
   }

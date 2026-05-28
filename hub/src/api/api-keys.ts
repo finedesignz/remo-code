@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { createApiKey, listApiKeys, revokeApiKey, recordAuthEvent } from '../db/dal'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
+import { pushKeyRotatedToUser } from '../ws/supervisor-registry'
 
 const apiKeys = new Hono()
 
@@ -32,6 +33,11 @@ apiKeys.post('/', async (c) => {
       metadata: { key_id: key.id, name: 'default' },
     })
   } catch {}
+  // v0.5.4 — push the new plaintext to every supervisor socket owned by this
+  // user so the tray app can hot-swap the key without the user re-pasting.
+  // Best-effort; offline supervisors are caught by the user re-pasting via
+  // the Tauri Update API Key dialog.
+  try { pushKeyRotatedToUser(userId, rawKey, key.id) } catch {}
   return c.json({ ...key, key: rawKey }, 201)
 })
 

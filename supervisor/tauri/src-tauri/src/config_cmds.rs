@@ -201,3 +201,33 @@ pub fn rescan_now() -> Result<RootsConfig, String> {
     write_raw(&map)?;
     get_config()
 }
+
+/// v0.5.4 — write a new plaintext API key into supervisor.json and signal the
+/// sidecar to restart so it picks the new key up on the next /ws/agent
+/// connect. Key format is locked to the hub's `generateToken('remokey_')` /
+/// legacy `remo_` shape — anything else is rejected. `fs::write` is no-BOM
+/// UTF-8 by default; we never round-trip through PowerShell or
+/// `Out-File`/`Set-Content`, which would prepend a BOM and break the Bun
+/// `JSON.parse(readFileSync(..., 'utf-8'))` on load.
+#[tauri::command]
+pub fn update_api_key(new_key: String) -> Result<(), String> {
+    let trimmed = new_key.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("api key is empty".to_string());
+    }
+    // Mirror the schema enforced by `hub-client.ts::onKeyRotated` and the
+    // hub's `generateToken` output. Single source of truth lives in the hub,
+    // but the supervisor double-checks before persisting to avoid pasting
+    // garbage that would lock the user out on next connect.
+    let valid = trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && (trimmed.starts_with("remokey_") || trimmed.starts_with("remo_"))
+        && trimmed.len() >= 16
+        && trimmed.len() <= 256;
+    if !valid {
+        return Err("invalid api key format (expected remokey_… or remo_…)".to_string());
+    }
+    let mut map = read_raw()?;
+    map.insert("api_key".to_string(), Value::String(trimmed));
+    write_raw(&map)?;
+    Ok(())
+}

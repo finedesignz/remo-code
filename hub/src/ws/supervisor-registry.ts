@@ -187,6 +187,27 @@ export function listOnlineSupervisorIdsForUser(userId: string): string[] {
   return out
 }
 
+/**
+ * v0.5.4 — push a rotated API key to every supervisor socket owned by this
+ * user. Ownership is verified via the in-memory entry's `userId`, which is
+ * written from the authenticated `auth` payload — only sockets that proved
+ * ownership of `userId` at connect time receive the new plaintext. Returns
+ * the number of sockets the message was delivered to. Best-effort: per-socket
+ * send errors are swallowed (offline / closing supervisors will reconnect
+ * with the old key and silently fail auth → user re-pastes through the UI).
+ */
+export function pushKeyRotatedToUser(userId: string, newApiKey: string, keyId: string): number {
+  let delivered = 0
+  for (const [, e] of supervisors) {
+    if (e.userId !== userId) continue
+    try {
+      e.ws.send(JSON.stringify({ type: 'key_rotated', new_api_key: newApiKey, key_id: keyId }))
+      delivered++
+    } catch {}
+  }
+  return delivered
+}
+
 let reqCounter = 0
 function nextReqId() { return `req_${Date.now()}_${++reqCounter}` }
 

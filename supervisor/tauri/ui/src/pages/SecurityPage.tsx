@@ -40,11 +40,16 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
+const KEY_FORMAT = /^(remokey_|remo_)[A-Za-z0-9_-]+$/;
+
 export default function SecurityPage() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+  const [newKey, setNewKey] = useState("");
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateState, setUpdateState] = useState<"idle" | "saved">("idle");
 
   const refresh = useCallback(async () => {
     try {
@@ -76,6 +81,35 @@ export default function SecurityPage() {
       setErr(String(e));
     }
   }, [status]);
+
+  const onUpdateKey = useCallback(async () => {
+    const trimmed = newKey.trim();
+    if (!KEY_FORMAT.test(trimmed)) {
+      setErr("invalid api key format (expected remokey_… or remo_…)");
+      return;
+    }
+    setUpdateBusy(true);
+    setErr(null);
+    try {
+      await invoke("update_api_key", { newKey: trimmed });
+      // Restart the sidecar so it re-reads supervisor.json and reconnects
+      // with the new key. The existing General/Restart button does this; we
+      // call the same IPC for parity.
+      try {
+        await invoke("sidecar_control", { action: "restart" });
+      } catch {
+        // Non-fatal — the sidecar will pick the key up on its next reconnect.
+      }
+      setNewKey("");
+      setUpdateState("saved");
+      window.setTimeout(() => setUpdateState("idle"), 2000);
+      void refresh();
+    } catch (e: any) {
+      setErr(String(e));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [newKey, refresh]);
 
   return (
     <div className="max-w-2xl space-y-5">
@@ -141,6 +175,41 @@ export default function SecurityPage() {
           <span className="text-xs text-[var(--text-muted)]">
             Opens the hub's API keys page in your browser.
           </span>
+        </div>
+
+        <div className="pt-3 border-t border-[var(--border-color)]/30 space-y-2">
+          <h3 className="text-xs uppercase tracking-wide text-[var(--text-muted)]">
+            Update API key
+          </h3>
+          <p className="text-xs text-[var(--text-muted)]">
+            Paste a key generated on the hub. The sidecar restarts and
+            reconnects with the new credential. The hub will also push a key
+            rotation here automatically when you rotate from the web UI.
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              type="password"
+              value={newKey}
+              onChange={(e) => setNewKey(e.target.value)}
+              placeholder="remokey_… or remo_…"
+              autoComplete="off"
+              spellCheck={false}
+              className="flex-1 px-3 py-2 rounded-lg text-sm font-mono bg-[var(--bg-tertiary)]/40 ring-1 ring-[var(--border-color)]/40 focus:ring-indigo-500/40 outline-none"
+            />
+            <button
+              type="button"
+              onClick={onUpdateKey}
+              disabled={updateBusy || !newKey.trim()}
+              className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40"
+            >
+              {updateBusy ? "Updating…" : "Update"}
+            </button>
+          </div>
+          {updateState === "saved" && (
+            <p className="text-xs text-emerald-300">
+              Saved. Sidecar restart requested.
+            </p>
+          )}
         </div>
       </section>
 

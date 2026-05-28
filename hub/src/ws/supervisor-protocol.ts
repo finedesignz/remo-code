@@ -269,3 +269,7 @@ export type HubToSupervisor =
   // run_started → 0..N run_output chunks → run_finished.
   | { type: 'run_command'; run_id: string; command: string; args?: string[] }
   | { type: 'run_cancel'; run_id: string }
+  // v0.5.4 — hub-pushed API key rotation. Supervisor swaps the in-memory key,
+  // writes supervisor.json (no BOM), and reconnects with the new key. Sent
+  // only to supervisor sockets owned by the same user as the rotated key.
+  | { type: 'key_rotated'; new_api_key: string; key_id: string }
