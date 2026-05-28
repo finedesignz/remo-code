@@ -97,7 +97,7 @@ export const ScheduledRunFinished = z.object({
   type: z.literal('scheduled_run_finished'),
   run_id: z.string().min(1),
   task_id: z.string().min(1).nullable().optional(),
-  status: z.enum(['pending', 'in_flight', 'running', 'success', 'failed', 'skipped', 'cancelled']),
+  status: z.enum(['pending', 'in_flight', 'running', 'success', 'failed', 'skipped', 'skipped_quota', 'cancelled']),
   cost_usd: z.number().nullable().optional(),
   duration_ms: z.number().nullable().optional(),
   output_snippet: z.string().nullable().optional(),

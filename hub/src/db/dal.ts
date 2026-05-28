@@ -1028,6 +1028,48 @@ export async function recordOpenIssueForHash(
   `;
 }
 
+// Placeholder write BEFORE the octokit.issues.create call narrows the race
+// window: two concurrent failure webhooks for the same (repo, app, deploy)
+// can't both win the gate. Returns true if WE claimed the row (other caller
+// loses); false if someone else already had a row. Issue_number 0 is a
+// sentinel that updateOpenIssuePlaceholder overwrites on success or
+// deleteOpenIssuePlaceholder removes on terminal failure.
+export async function placeOpenIssuePlaceholder(
+  userId: string,
+  hash: string,
+  repoFullName: string,
+): Promise<boolean> {
+  const rows = await sql`
+    INSERT INTO github_issue_idempotency (user_id, hash, repo_full_name, issue_number)
+    VALUES (${userId}, ${hash}, ${repoFullName}, 0)
+    ON CONFLICT (user_id, hash) DO NOTHING
+    RETURNING user_id
+  `;
+  return rows.length > 0;
+}
+
+export async function updateOpenIssuePlaceholder(
+  userId: string,
+  hash: string,
+  issueNumber: number,
+): Promise<void> {
+  await sql`
+    UPDATE github_issue_idempotency
+    SET issue_number = ${issueNumber}
+    WHERE user_id = ${userId} AND hash = ${hash}
+  `;
+}
+
+export async function deleteOpenIssuePlaceholder(
+  userId: string,
+  hash: string,
+): Promise<void> {
+  await sql`
+    DELETE FROM github_issue_idempotency
+    WHERE user_id = ${userId} AND hash = ${hash} AND issue_number = 0
+  `;
+}
+
 // ── Phase 07: Titanium auth (additive) ────────────────────────────────────────
 //
 // Helpers for linking remo-code `users` rows to Titanium Licensing (Keygen)
