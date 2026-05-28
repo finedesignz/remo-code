@@ -66,6 +66,7 @@ import {
   snapOffsetToPage,
 } from "../telegram/session-picker.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
+import { runDoctor } from "../telegram/doctor.ts";
 
 export const telegramWebhookRoutes = new Hono();
 
@@ -523,6 +524,10 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
           await safeSend(chatId, r.reply);
           return c.json({ ok: true, outcome: "cmd_session" });
         }
+        case "doctor": {
+          const r = await runDoctor({ user, chatId });
+          return c.json({ ok: true, outcome: r.outcome });
+        }
         case "start": {
           // Already linked — replies politely, no-op.
           await safeSend(chatId, "This chat is already linked. Use /unlink from Settings → Telegram on remo-code to detach.");
@@ -539,6 +544,18 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
     }
 
     const r = await dispatchInbound(user, msg, update.update_id);
+    // Auto-heal: on agent_offline, immediately walk the user through /doctor
+    // and try to auto-launch the runner. The plain "supervisor offline" reply
+    // already fired from dispatchInbound; runDoctor's first line is the
+    // header so the two messages compose naturally.
+    if (r.outcome === "agent_offline") {
+      try {
+        const dr = await runDoctor({ user, chatId: msg.chat.id });
+        return c.json({ ok: true, outcome: "agent_offline_autoheal", doctor: dr.outcome });
+      } catch (err: any) {
+        console.warn("[telegram-webhook] autoheal runDoctor failed:", err?.message);
+      }
+    }
     return c.json({ ok: true, outcome: r.outcome, ...(r.error ? { error: r.error } : {}) });
   } catch (err: any) {
     console.error("[telegram-webhook] pipeline error:", err?.message, err?.stack);

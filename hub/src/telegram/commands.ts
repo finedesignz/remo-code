@@ -32,6 +32,7 @@ export type ParsedCommand =
   | { kind: "session"; arg: string | null }
   | { kind: "list" }
   | { kind: "help" }
+  | { kind: "doctor" }
   | { kind: "unknown"; raw: string }
   | { kind: "none" };
 
@@ -52,6 +53,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand {
       return { kind: "list" };
     case "help":
       return { kind: "help" };
+    case "doctor":
+      return { kind: "doctor" };
     default:
       return { kind: "unknown", raw: name };
   }
@@ -62,6 +65,7 @@ export const HELP_TEXT = [
   "",
   "/list — tap-to-pick session list (inline buttons)",
   "/session <id> — set default by typed id-prefix (power users; /list is easier)",
+  "/doctor — diagnose and auto-fix supervisor/session offline issues",
   "/help — this message",
   "",
   "Send any plain text to forward it to your default session.",
