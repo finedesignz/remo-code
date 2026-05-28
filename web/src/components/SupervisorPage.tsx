@@ -290,13 +290,34 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     // helper: locate run by github full_name (matches via repo_path basename or local mapping)
     const runByLocal = (l: LocalRepo | undefined) => (l ? runByPath(l.path) : undefined)
 
+    // Dedupe githubRepos by full_name — the same repo can be visible through
+    // multiple installations (personal + org with overlapping access), which
+    // is how the page was ballooning to 800+ rows. Keep the first occurrence;
+    // the installation filter still works because ghDeduped preserves
+    // installation_id from whichever entry won.
+    const ghByName = new Map<string, GitHubRepo>()
+    for (const g of githubRepos) {
+      if (!ghByName.has(g.full_name)) ghByName.set(g.full_name, g)
+    }
+    const ghDeduped = Array.from(ghByName.values())
+
+    // Dedupe localRepos by canonical path (lower-case on Windows). The scanner
+    // already dedupes per-scan, but cached localStorage state from older
+    // sessions plus a fresh scan can collide if roots overlap.
+    const localByPath = new Map<string, LocalRepo>()
+    for (const l of localRepos) {
+      const k = l.path.replace(/\\/g, '/').toLowerCase()
+      if (!localByPath.has(k)) localByPath.set(k, l)
+    }
+    const localDeduped = Array.from(localByPath.values())
+
     const ghFiltered = selectedInstallationId === 'all'
-      ? githubRepos
-      : githubRepos.filter((g) => g.installation_id === selectedInstallationId)
+      ? ghDeduped
+      : ghDeduped.filter((g) => g.installation_id === selectedInstallationId)
 
     // 1) Locals (always shown if scanned)
-    for (const l of localRepos) {
-      const matchedGh = githubRepos.find((g) => l.remote?.includes(g.full_name))
+    for (const l of localDeduped) {
+      const matchedGh = ghDeduped.find((g) => l.remote?.includes(g.full_name))
       // installation filter: if user picked one and local has matched gh from another install, hide
       if (selectedInstallationId !== 'all' && matchedGh && matchedGh.installation_id !== selectedInstallationId) continue
       // if installation filter is set and local has no matched gh, still show (it's local-only)
@@ -330,6 +351,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     for (const g of ghFiltered) {
       const key = `gh:${g.full_name}`
       if (seen.has(key)) continue
+      seen.add(key)
       out.push({
         key,
         name: g.full_name,
