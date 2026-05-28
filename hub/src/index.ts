@@ -26,6 +26,7 @@ import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { revanoteWebhookRoutes } from './api/revanote-webhook'
 import { telegramWebhookRoutes } from './api/telegram-webhook'
+import { telegram as telegramApi } from './api/telegram'
 import { revanoteMappings } from './api/revanote-mappings'
 import { revanoteAnnotations } from './api/revanote-annotations'
 import { webhooksTitanium } from './api/webhooks-titanium'
@@ -292,6 +293,14 @@ app.route('/api/error-setup', errorSetupApi)
 app.route('/api/orchestrator', orchestratorApi)
 app.route('/api/revanote/mappings', revanoteMappings)
 app.route('/api/revanote/annotations', revanoteAnnotations)
+// Phase 12 Wave 4: authed Telegram REST. Mounted INSIDE the /api/* auth +
+// CSRF + license-gate catch-alls above. The public webhook router was
+// already mounted earlier at the same prefix (line ~160) and handles only
+// /api/telegram/webhook/:secret — non-matching paths fall through to this
+// router. The webhook is in the auth+CSRF+license skip lists; status /
+// link-code / link / default-session are NOT — they require a valid cookie
+// session and a matching X-CSRF-Token on mutating methods.
+app.route('/api/telegram', telegramApi)
 
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
