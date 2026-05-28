@@ -63,7 +63,8 @@ function RootsEditor({ token }: { token: string }) {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const rows = await hubFetch<SupervisorRow[]>(token, "/api/supervisors");
+      const res = await hubFetch<{ supervisors: SupervisorRow[] } | SupervisorRow[]>(token, "/api/supervisors");
+      const rows = Array.isArray(res) ? res : (res?.supervisors ?? []);
       setSupervisors(rows);
       if (rows.length > 0 && !selectedId) {
         setSelectedId(rows[0].id);
