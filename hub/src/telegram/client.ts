@@ -82,6 +82,16 @@ export interface SendMessageOptions {
   disable_web_page_preview?: boolean;
 }
 
+/** Telegram inline keyboard button. callback_data must be ≤64 bytes. */
+export interface InlineKeyboardButton {
+  text: string;
+  callback_data?: string;
+  url?: string;
+}
+
+/** A grid of inline buttons. Outer array = rows, inner array = buttons in row. */
+export type InlineKeyboard = InlineKeyboardButton[][];
+
 export async function sendMessage(
   chatId: number | string,
   text: string,
@@ -106,6 +116,129 @@ export async function sendMessage(
       const body = await res.text().catch(() => "");
       throw new TelegramClientError(res.status, body);
     }
+  }
+}
+
+/**
+ * Send a message with an inline keyboard attached. Long text splits the same
+ * way as sendMessage, but the keyboard ONLY attaches to the LAST chunk
+ * (Telegram supports one reply_markup per message).
+ */
+export async function sendMessageWithKeyboard(
+  chatId: number | string,
+  text: string,
+  inlineKeyboard: InlineKeyboard,
+  opts: SendMessageOptions = {},
+): Promise<void> {
+  const token = tokenOrThrow();
+  const url = `${API_BASE}/bot${token}/sendMessage`;
+  const chunks = splitForTelegram(text);
+  if (chunks.length === 0) chunks.push("");
+  for (let i = 0; i < chunks.length; i++) {
+    const isLast = i === chunks.length - 1;
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      text: chunks[i],
+      ...(opts.parse_mode ? { parse_mode: opts.parse_mode } : {}),
+      ...(opts.disable_web_page_preview ? { disable_web_page_preview: true } : {}),
+    };
+    if (isLast) body.reply_markup = { inline_keyboard: inlineKeyboard };
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      const respBody = await res.text().catch(() => "");
+      throw new TelegramClientError(res.status, respBody);
+    }
+  }
+}
+
+/**
+ * Reply to a callback_query. Shown as toast in Telegram client (or alert if
+ * `show_alert: true`). MUST be called within ~15s of receiving the callback
+ * or Telegram shows a stale-callback warning to the user.
+ */
+export async function answerCallbackQuery(
+  callbackQueryId: string,
+  opts: { text?: string; show_alert?: boolean } = {},
+): Promise<void> {
+  const token = tokenOrThrow();
+  const url = `${API_BASE}/bot${token}/answerCallbackQuery`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      callback_query_id: callbackQueryId,
+      ...(opts.text ? { text: opts.text } : {}),
+      ...(opts.show_alert ? { show_alert: true } : {}),
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new TelegramClientError(res.status, body);
+  }
+}
+
+/**
+ * Edit a previously-sent message's text + optionally its keyboard. Used by
+ * paginated session picker to swap pages without spamming new messages.
+ */
+export async function editMessageText(
+  chatId: number | string,
+  messageId: number,
+  text: string,
+  opts: SendMessageOptions & { inline_keyboard?: InlineKeyboard } = {},
+): Promise<void> {
+  const token = tokenOrThrow();
+  const url = `${API_BASE}/bot${token}/editMessageText`;
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    ...(opts.parse_mode ? { parse_mode: opts.parse_mode } : {}),
+    ...(opts.disable_web_page_preview ? { disable_web_page_preview: true } : {}),
+  };
+  if (opts.inline_keyboard) body.reply_markup = { inline_keyboard: opts.inline_keyboard };
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const respBody = await res.text().catch(() => "");
+    throw new TelegramClientError(res.status, respBody);
+  }
+}
+
+/**
+ * Replace only the inline keyboard on an existing message. Used to mark the
+ * picked session button with a ✓ after a session-set callback succeeds.
+ */
+export async function editMessageReplyMarkup(
+  chatId: number | string,
+  messageId: number,
+  inlineKeyboard: InlineKeyboard,
+): Promise<void> {
+  const token = tokenOrThrow();
+  const url = `${API_BASE}/bot${token}/editMessageReplyMarkup`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: { inline_keyboard: inlineKeyboard },
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const respBody = await res.text().catch(() => "");
+    throw new TelegramClientError(res.status, respBody);
   }
 }
 
