@@ -433,14 +433,16 @@ export async function upsertPendingLocalRepoBatch(
   const userIds = rows.map((r) => r.user_id)
   const hostnames = rows.map((r) => r.hostname)
   const projectDirs = rows.map((r) => r.project_dir)
-  const isGit = rows.map((r) => r.is_git_repo)
+  // postgres.js infers boolean[] params with an OID PG refuses to cast back
+  // to boolean[]; round-trip through text[] ('t'/'f') instead.
+  const isGitTxt = rows.map((r) => (r.is_git_repo ? 't' : 'f'))
   const result = await sql`
     INSERT INTO pending_local_repos (user_id, hostname, project_dir, is_git_repo)
     SELECT
       unnest(${userIds}::uuid[]),
       unnest(${hostnames}::text[]),
       unnest(${projectDirs}::text[]),
-      unnest(${isGit}::boolean[])
+      unnest(${isGitTxt}::text[])::boolean
     ON CONFLICT (user_id, hostname, project_dir) DO UPDATE
       SET last_seen_at = now(),
           is_git_repo = EXCLUDED.is_git_repo
