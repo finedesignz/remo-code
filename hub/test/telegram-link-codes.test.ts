@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { __test } from "../src/telegram/link-codes";
+// Cache-bust: telegram-api.test.ts top-level `mock.module("../src/telegram/link-codes.ts", …)`
+// replaces the module with a partial stub that omits `__test`, and Bun's
+// mock.module is process-global + first-write-wins. The cache-busted
+// specifier re-resolves to the real source. See feedback_bun_mock_pollution.md.
+const { __test } = await import(`../src/telegram/link-codes.ts?bust=${Date.now()}`);
 
 const { generateCode, CODE_LEN, LINK_CODE_TTL_MS } = __test;
 

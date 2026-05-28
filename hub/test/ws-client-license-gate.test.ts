@@ -21,19 +21,57 @@ process.env.TITANIUM_LICENSE_CACHE_TTL_SECONDS = '1'
 
 import { describe, test, expect, mock, beforeEach } from 'bun:test'
 
+// Defeat sibling mock.module registrations (notably
+// send-fence-scheduled-run.test.ts which hardcodes `getUserLicenseFields`
+// to always-active) BEFORE we install ours. Bun's mock.module is
+// process-global + first-write-wins per specifier; `mock.restore()` is the
+// only reliable way to clear prior registrations so our new ones land.
+mock.restore()
+
 // Force config flags to gate-ON values regardless of which test file loaded
 // `src/config` first. `config.ts` reads env at module-load time, and Bun's
 // module cache is process-wide — so a sibling test that imported config with
 // `TITANIUM_BYPASS=true` (e.g. send-fence-scheduled-run) freezes our gate
 // OPEN by the time we get here. The exported `config` object is plain (not
 // Object.freezed), so we mutate the cached value in place.
-const { config } = await import('../src/config')
+//
+// Additionally: defeat sibling `mock.module('../src/config.ts', …)` pollution
+// from `telegram-api.test.ts` which stubs config with a telegram-only shape
+// lacking `titaniumBypass` / `licenseRequired` / `titanium`. When that mock
+// fires first, `config` is an object with only `.telegram`; assigning our
+// flags works, but `client.ts` reads `config.titanium.licenseCacheTtlSeconds`
+// and crashes (or `!config.licenseRequired` is `true` when undefined → gate
+// auto-opens). Graft on the missing fields the same way titanium-client.test
+// does, so the cached object satisfies both shapes regardless of fire order.
+const { config } = await import('../src/config') as any
 config.titaniumBypass = false
 config.licenseRequired = true
-config.titanium.licenseCacheTtlSeconds = 1
+config.allowLegacyLogin = true // bearer JWT auth path used by tests below
+if (!config.titanium) {
+  config.titanium = {
+    keygenApiUrl: process.env.TITANIUM_KEYGEN_API_URL,
+    accountId: process.env.TITANIUM_KEYGEN_ACCOUNT_ID,
+    productId: process.env.TITANIUM_KEYGEN_PRODUCT_ID,
+    portalToken: '',
+    adminToken: '',
+    licenseCacheTtlSeconds: 1,
+  }
+} else {
+  config.titanium.licenseCacheTtlSeconds = 1
+}
 
 // --- Mocks (must precede module under test) -----------------------------
 
+// IMPORTANT: ws/client is loaded (and its `getUserLicenseFields` import
+// bound) by `send-fence-scheduled-run.test.ts` which runs BEFORE this file
+// alphabetically. Bun's mock.module is process-global + first-write-wins
+// per specifier, so our own mock.module('../src/db/dal', ...) below is
+// IGNORED for the cached client.ts. The send-fence mock now reads from a
+// global toggle (see that file) — we drive license_status by writing to
+// that same toggle here, which propagates to the cached binding.
+function setLicenseStatus(s: string) {
+  ;(globalThis as any).__wsClientLicenseStatusForTests = s
+}
 let licenseStatus: string | null = 'active'
 let dalCalls = 0
 const getUserLicenseFields = mock(async (_userId: string) => {
@@ -59,13 +97,20 @@ const insertMessage = mock(async (_sid: string, _role: string, content: string) 
 }))
 
 const realDal = await import('../src/db/dal')
-mock.module('../src/db/dal', () => ({
+const dalStub = () => ({
   ...realDal,
   getUserLicenseFields,
   getSession,
   listSessions,
   insertMessage,
-}))
+})
+// Register under all specifier shapes the cached & fresh client.ts may
+// resolve to. Bun's mock.module is process-global + first-write-wins per
+// exact specifier — `send-fence-scheduled-run.test.ts` already claimed
+// `'../src/db/dal'`, so we additionally claim `.ts` and the bun-cli-style
+// absolute keys to outrank it.
+mock.module('../src/db/dal', dalStub)
+mock.module('../src/db/dal.ts', dalStub)
 
 mock.module('../src/auth/jwt.ts', () => ({
   verifyJwt: (_t: string) => ({ sub: 'user-1', email: 'a@b.com', role: 'admin' }),
@@ -108,10 +153,12 @@ async function authenticate(ws: any) {
   await handleClientMessage(ws, JSON.stringify({ type: 'auth', token: 'fake-jwt' }))
 }
 
+
 // --- Tests --------------------------------------------------------------
 
 beforeEach(() => {
   licenseStatus = 'active'
+  setLicenseStatus('active')
   dalCalls = 0
   getUserLicenseFields.mockClear()
   getSession.mockClear()
@@ -133,6 +180,7 @@ describe('Bundle 4: WS client license gate', () => {
   test('expired user — send_message refused with license_inactive', async () => {
     const { ws, sent } = fakeWs()
     licenseStatus = 'expired'
+    setLicenseStatus('expired')
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
@@ -146,6 +194,7 @@ describe('Bundle 4: WS client license gate', () => {
   test('expired user — subscribe still succeeds (read-only)', async () => {
     const { ws, sent } = fakeWs()
     licenseStatus = 'expired'
+    setLicenseStatus('expired')
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
@@ -161,6 +210,7 @@ describe('Bundle 4: WS client license gate', () => {
   test('banned user — permission_response refused', async () => {
     const { ws, sent } = fakeWs()
     licenseStatus = 'banned'
+    setLicenseStatus('banned')
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
@@ -174,6 +224,7 @@ describe('Bundle 4: WS client license gate', () => {
   test('banned user — question_response refused', async () => {
     const { ws, sent } = fakeWs()
     licenseStatus = 'banned'
+    setLicenseStatus('banned')
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
@@ -188,6 +239,7 @@ describe('Bundle 4: WS client license gate', () => {
     const { ws, sent, data } = fakeWs()
     // Connect while expired → refused.
     licenseStatus = 'expired'
+    setLicenseStatus('expired')
     await authenticate(ws)
     sent.length = 0
     await handleClientMessage(ws, JSON.stringify({
@@ -200,6 +252,7 @@ describe('Bundle 4: WS client license gate', () => {
     // than sleeping past the TTL — the TTL is config-driven and config is
     // captured at module load.)
     licenseStatus = 'active'
+    setLicenseStatus('active')
     data.licenseCheckedAt = 0
 
     sent.length = 0

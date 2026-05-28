@@ -6,7 +6,12 @@
  * scheduler/error-capture/manual-send code paths in scheduled-tasks.e2e.test.ts.
  */
 import { describe, test, expect } from 'bun:test'
-import { evaluateThreshold } from '../src/usage/threshold.ts'
+// Cache-bust: ws-client-license-gate.test.ts / send-fence-scheduled-run.test.ts
+// install process-global `mock.module('../src/usage/threshold.ts', …)` stubs
+// that only expose `checkUserThreshold`, so a plain import of
+// `evaluateThreshold` fails with SyntaxError when those siblings load first.
+// See feedback_bun_mock_pollution.md.
+const { evaluateThreshold } = await import(`../src/usage/threshold.ts?bust=${Date.now()}`)
 import type { UsageSnapshot } from '../src/usage/store.ts'
 
 function snap(fivePct: number, sevenPct: number, opusPct?: number | null): UsageSnapshot {

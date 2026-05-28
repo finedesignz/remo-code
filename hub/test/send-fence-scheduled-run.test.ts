@@ -30,14 +30,23 @@ const insertMessage = mock(async (_sid: string, _role: string, content: string) 
 }))
 
 const realDal = await import('../src/db/dal')
+// Export a mutable holder so ws-client-license-gate.test.ts (which runs
+// AFTER this file alphabetically and re-uses the cached ws/client module
+// this file loaded) can override `license_status` per-test. Without this
+// shared toggle, Bun's process-global mock.module + first-write-wins keeps
+// THIS file's hardcoded 'active' wired into ws/client forever, and the
+// downstream license-gate tests can't drive expired/banned cases.
+;(globalThis as any).__wsClientLicenseStatusForTests = (globalThis as any).__wsClientLicenseStatusForTests ?? 'active'
 mock.module('../src/db/dal', () => ({
   ...realDal,
   getSession,
   insertMessage,
   listSessions: async () => [],
   getUserLicenseFields: async () => ({
-    license_status: 'active', license_id: 'lic-1',
-    license_checked_at: new Date(), titanium_subject: 'subj-1',
+    license_status: (globalThis as any).__wsClientLicenseStatusForTests ?? 'active',
+    license_id: 'lic-1',
+    license_checked_at: new Date(),
+    titanium_subject: 'subj-1',
   }),
 }))
 

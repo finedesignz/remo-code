@@ -1,8 +1,13 @@
 import { describe, expect, test, beforeEach } from 'bun:test'
-import {
+// Cache-bust: sibling tests install process-global
+// `mock.module('../src/usage/store', …)` partial stubs that only expose
+// `getUsage`, so a plain import of `clearUsage` / `setUsage` /
+// `_resetUsageStoreForTests` fails with SyntaxError when those siblings load
+// first. See feedback_bun_mock_pollution.md.
+import type { UsagePayload } from '../src/usage/store'
+const {
   setUsage, getUsage, clearUsage, _resetUsageStoreForTests,
-  type UsagePayload,
-} from '../src/usage/store'
+} = await import(`../src/usage/store.ts?bust=${Date.now()}`)
 
 const PAYLOAD: UsagePayload = {
   five_hour: { utilization: 42.5, resets_at: '2026-05-25T20:00:00Z' },
