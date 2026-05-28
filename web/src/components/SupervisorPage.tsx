@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import { useSessions } from '../hooks/useSessions'
+import { useSupervisors } from '../hooks/useSupervisors'
+import { useWebSocketContext } from '../hooks/useWebSocket'
 
 interface Props {
   token: string
@@ -151,7 +153,23 @@ function StatusDot({ status, online = true }: { status: Row['status']; online?: 
 }
 
 export function SupervisorPage({ token, onBack, embedded = false }: Props) {
-  const [supervisors, setSupervisors] = useState<Supervisor[]>([])
+  const { subscribe, connectionId } = useWebSocketContext()
+  const { supervisors: supervisorsRaw } = useSupervisors(token, subscribe, connectionId)
+  const supervisors: Supervisor[] = useMemo(
+    () =>
+      (supervisorsRaw || []).map((r) => ({
+        id: r.id,
+        hostname: r.hostname || '',
+        version: r.version,
+        os: r.os,
+        roots: r.roots || [],
+        state: r.state,
+        current_run_id: r.current_run_id,
+        last_seen_at: r.last_seen_at || '',
+        online: r.online,
+      })),
+    [supervisorsRaw],
+  )
   const [activeSupervisorId, setActiveSupervisorId] = useState<string | null>(null)
   const [activeRuns, setActiveRuns] = useState<ActiveRun[]>([])
   const [localRepos, setLocalRepos] = useState<LocalRepo[]>(() => {
@@ -176,7 +194,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const [search, setSearch] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('repo')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
-  const { sessions } = useSessions(token)
+  const { sessions } = useSessions(token, subscribe, connectionId)
   const lastActivityByPath = useMemo(() => {
     const m = new Map<string, number>()
     for (const s of sessions) {
@@ -208,13 +226,12 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     try { localStorage.setItem(GITHUB_REPOS_LS_KEY, JSON.stringify(githubRepos)) } catch {}
   }, [githubRepos])
 
-  const loadSupervisors = useCallback(async () => {
-    const r = await apiFetch(token, '/api/supervisors')
-    if (!r.ok) return
-    const data = await r.json()
-    setSupervisors(data.supervisors || [])
-    if (!activeSupervisorId && data.supervisors?.[0]) setActiveSupervisorId(data.supervisors[0].id)
-  }, [token, activeSupervisorId])
+  // Auto-select the first supervisor once useSupervisors() resolves.
+  useEffect(() => {
+    if (!activeSupervisorId && supervisors.length > 0) {
+      setActiveSupervisorId(supervisors[0].id)
+    }
+  }, [activeSupervisorId, supervisors])
 
   const loadGitHub = useCallback(async () => {
     setRefreshingGh(true)
@@ -256,7 +273,6 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   }, [token, activeSupervisorId])
 
   useEffect(() => {
-    loadSupervisors()
     loadGitHub()
     const onFocus = () => { loadGitHub() }
     window.addEventListener('focus', onFocus)
@@ -264,7 +280,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   }, [])
   useEffect(() => { if (activeSupervisorId && activeSupervisor?.online) scan() }, [activeSupervisorId])
   useEffect(() => { loadActiveRuns() }, [loadActiveRuns])
-  useEffect(() => { const t = setInterval(loadSupervisors, 10_000); return () => clearInterval(t) }, [loadSupervisors])
+  // supervisor list polling removed — useSupervisors() is WS-reactive.
   useEffect(() => { const t = setInterval(loadActiveRuns, 5_000); return () => clearInterval(t) }, [loadActiveRuns])
 
   const stopRun = async (runId: string) => {
@@ -605,7 +621,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           supervisorId={activeSupervisor.id}
           target={startTarget}
           onClose={() => setStartTarget(null)}
-          onStarted={(runId) => { setStartTarget(null); setInfo(`Started run ${runId.slice(0, 8)}`); setTimeout(() => setInfo(null), 4000); loadSupervisors(); loadActiveRuns() }}
+          onStarted={(runId) => { setStartTarget(null); setInfo(`Started run ${runId.slice(0, 8)}`); setTimeout(() => setInfo(null), 4000); loadActiveRuns() }}
           onError={(msg) => { setError(msg); setTimeout(() => setError(null), 6000) }}
         />
       )}
