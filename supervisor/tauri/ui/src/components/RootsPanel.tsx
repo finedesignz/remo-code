@@ -13,14 +13,8 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
-interface ScanSettings {
-  max_depth: number;
-  ignore_globs: string[];
-  follow_symlinks: boolean;
-}
 interface RootsConfig {
   roots: string[];
-  scan: ScanSettings;
   last_scan_at: string | null;
   config_path: string;
   configured: boolean;
@@ -172,24 +166,11 @@ export default function RootsPanel() {
         </div>
       </section>
 
-      <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 space-y-2">
-        <h2 className="text-sm font-semibold">Scan settings</h2>
-        <dl className="grid grid-cols-2 gap-y-1 text-sm">
-          <dt className="text-[var(--text-muted)]">Max depth</dt>
-          <dd className="text-[var(--text-secondary)]">{cfg?.scan.max_depth ?? "—"}</dd>
-          <dt className="text-[var(--text-muted)]">Follow symlinks</dt>
-          <dd className="text-[var(--text-secondary)]">{cfg?.scan.follow_symlinks ? "yes" : "no"}</dd>
-          <dt className="text-[var(--text-muted)]">Ignore globs</dt>
-          <dd className="text-[var(--text-secondary)] font-mono text-xs">
-            {cfg?.scan.ignore_globs.join(", ") ?? "—"}
-          </dd>
-        </dl>
-        {cfg?.config_path && (
-          <p className="text-xs text-[var(--text-muted)] pt-1">
-            Config: <span className="font-mono">{cfg.config_path}</span>
-          </p>
-        )}
-      </section>
+      {cfg?.config_path && (
+        <p className="text-xs text-[var(--text-muted)] pt-1">
+          Config: <span className="font-mono">{cfg.config_path}</span>
+        </p>
+      )}
     </div>
   );
 }

@@ -185,20 +185,138 @@ pub fn remove_root(path: String) -> Result<RootsConfig, String> {
     get_config()
 }
 
-/// Phase 08 §15 — fires `supervisor.needs_roots` if applicable; in this Tauri
-/// build we just stamp `last_scan_at` to a placeholder of "" → the Bun sidecar
-/// owns the real scan. This command is invoked by the UI's [Re-scan now]
-/// button so the user gets immediate feedback; the actual rescan is delivered
-/// by the sidecar process on the next tick (or on receipt of a future
-/// SIGHUP-style trigger when one is plumbed).
+/// Single-depth scan: walks each configured root one level deep, treats any
+/// child directory containing `.git` as a repo, writes `last_inventory.json`
+/// next to `supervisor.json`, and stamps `last_scan_at` to now. Shape of the
+/// inventory file matches what `runtime_cmds.rs::parse_inventory_value`
+/// expects so the Repos page picks it up immediately.
 #[tauri::command]
 pub fn rescan_now() -> Result<RootsConfig, String> {
-    // For now this is a hint the UI can act on; the sidecar process polls
-    // config + scans on its own loop (Plan 003 T7). We touch last_scan_at to
-    // null so the UI's "Last scanned" caption updates immediately.
+    let cfg = get_config()?;
+    let now = current_iso_timestamp();
+    let repos = scan_roots_single_depth(&cfg.roots);
+
+    let inv_path = config_path()?.with_file_name("last_inventory.json");
+    let inv = serde_json::json!({
+        "scanned_at": now,
+        "repos": repos,
+    });
+    fs::write(&inv_path, serde_json::to_string_pretty(&inv).unwrap_or_default())
+        .map_err(|e| format!("write inventory failed: {e}"))?;
+
     let mut map = read_raw()?;
-    map.insert("last_scan_at".to_string(), Value::Null);
+    map.insert("last_scan_at".to_string(), Value::String(now));
     write_raw(&map)?;
     get_config()
+}
+
+fn current_iso_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // Compact ISO-8601 UTC, second precision; the UI only needs Date.parse compat.
+    let (y, mo, d, h, mi, s) = epoch_to_ymdhms(secs);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+fn epoch_to_ymdhms(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+    // Civil-from-days algorithm (Howard Hinnant). No chrono dep.
+    let days = (secs / 86400) as i64;
+    let sod = (secs % 86400) as u32;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = (y + if m <= 2 { 1 } else { 0 }) as i32;
+    (y, m, d, sod / 3600, (sod / 60) % 60, sod % 60)
+}
+
+fn scan_roots_single_depth(roots: &[String]) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for root in roots {
+        let root_pb = PathBuf::from(root);
+        let Ok(entries) = fs::read_dir(&root_pb) else { continue };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_dir() { continue }
+            let name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if name.starts_with('.') { continue }
+            if !p.join(".git").exists() { continue }
+            let local_path = p.to_string_lossy().replace('\\', "/");
+            let key = local_path.to_lowercase();
+            if !seen.insert(key) { continue }
+            let (remote, github) = read_git_origin(&p.join(".git"));
+            out.push(serde_json::json!({
+                "local_path": local_path,
+                "is_git_repo": true,
+                "is_worktree": p.join(".git").is_file(),
+                "worktree_parent_path": null,
+                "git_remote": remote,
+                "git_origin_github": github,
+                "canonical": true,
+            }));
+        }
+    }
+    out
+}
+
+fn read_git_origin(dotgit: &PathBuf) -> (Option<String>, Option<Value>) {
+    // .git can be a file (worktree) or directory. Only parse the directory case
+    // for origin URL; worktrees inherit from their parent which is good enough
+    // for our single-depth scan.
+    let cfg = dotgit.join("config");
+    if !cfg.exists() { return (None, None) }
+    let txt = match fs::read_to_string(&cfg) {
+        Ok(t) => t,
+        Err(_) => return (None, None),
+    };
+    let mut in_origin = false;
+    let mut url: Option<String> = None;
+    for line in txt.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_origin = line == "[remote \"origin\"]";
+            continue;
+        }
+        if in_origin {
+            if let Some(rest) = line.strip_prefix("url") {
+                let v = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=').trim();
+                url = Some(v.to_string());
+                break;
+            }
+        }
+    }
+    let github = url.as_ref().and_then(parse_github_origin);
+    (url, github)
+}
+
+fn parse_github_origin(url: &String) -> Option<Value> {
+    // Match git@github.com:owner/repo.git, https://github.com/owner/repo(.git)
+    let stripped = url.trim_end_matches(".git");
+    let tail = if let Some(rest) = stripped.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = stripped.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = stripped.strip_prefix("http://github.com/") {
+        rest
+    } else {
+        return None;
+    };
+    let mut parts = tail.splitn(2, '/');
+    let owner = parts.next()?.to_string();
+    let repo = parts.next()?.to_string();
+    if owner.is_empty() || repo.is_empty() { return None }
+    Some(serde_json::json!({ "owner": owner, "repo": repo }))
 }
 
