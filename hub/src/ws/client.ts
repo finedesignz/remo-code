@@ -7,6 +7,7 @@ import { config } from '../config.ts'
 import { insertMessage, listSessions, getSession, getUserLicenseFields } from '../db/dal'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
+import { isScheduledRunActive } from '../scheduler/senders/agent.ts'
 import {
   registerClient, unregisterClient, subscribeClient,
   getChannel, unregisterChannel, broadcastToSubscribers,
@@ -351,6 +352,22 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
           utilization_pct: threshold.utilization_pct,
           threshold_pct: threshold.threshold_pct,
           resets_at: threshold.resets_at,
+        }))
+      } catch {}
+      return
+    }
+
+    // Bundle 5 fallback (TRIAGE-2026-05-28): refuse manual sends while a
+    // scheduled run is the active turn for this session. Without this fence
+    // the user's reply would be processed as the scheduled run's completion
+    // (cross-attribution bug). User retries after the scheduled run finishes.
+    if (isScheduledRunActive(msg.session_id)) {
+      try {
+        ws.send(JSON.stringify({
+          type: 'send_refused',
+          client_id: msg.id,
+          session_id: msg.session_id,
+          reason: 'scheduled_run_active',
         }))
       } catch {}
       return

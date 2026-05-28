@@ -145,3 +145,14 @@ setInterval(() => {
 
 export function _pendingTurns() { return pendingTurns }
 export { getRunContext }
+
+/**
+ * Bundle 5 fallback (TRIAGE-2026-05-28): true if a scheduled run is currently
+ * in flight for `sessionId` (i.e. waiting for its `assistant_message`). The
+ * `/ws/client` `send_message` handler uses this to refuse manual sends while
+ * a scheduled turn is the active turn — prevents the manual reply from being
+ * mis-attributed as the scheduled run's completion.
+ */
+export function isScheduledRunActive(sessionId: string): boolean {
+  return (pendingTurns.get(sessionId)?.length ?? 0) > 0
+}
