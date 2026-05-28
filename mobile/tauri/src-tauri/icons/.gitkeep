@@ -1,0 +1,1 @@
+Place a 1024x1024 source PNG at icon.png here, then run `cargo tauri icon icon.png` to generate the platform-specific icon set.
