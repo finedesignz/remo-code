@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Remo Code",
+  "version": "0.1.0",
+  "identifier": "com.finedesignz.remo-code",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Remo Code",
+        "width": 420,
+        "height": 800,
+        "resizable": true,
+        "visible": true,
+        "decorations": true,
+        "transparent": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://app.remo-code.com; script-src 'self' https://app.remo-code.com; img-src 'self' data: blob: https://app.remo-code.com; connect-src 'self' ipc: http://ipc.localhost https://app.remo-code.com wss://app.remo-code.com; frame-src https://app.remo-code.com"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "apk"],
+    "icon": [
+      "icons/icon.png"
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "mobile": [
+        {
+          "host": "auth",
+          "pathPrefix": ["/callback"]
+        }
+      ],
+      "desktop": {
+        "schemes": ["remo-code"]
+      }
+    }
+  }
+}
