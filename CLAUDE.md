@@ -388,3 +388,41 @@ The agent runs locally on the dev machine — it is NOT deployed to the server. 
 ## Releases
 
 **Supervisor (Tauri tray app):** push a `supervisor-v*.*.*` tag — `.github/workflows/release-supervisor.yml` builds the MSI on `windows-latest`, signs it with the Tauri updater key, and publishes a GitHub Release with `latest.json` for the in-app auto-updater. Local builds: `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. First-time signing-key setup: `supervisor/tauri/UPDATER-SETUP.md`.
+
+## Phase 12: Telegram Bridge
+
+Bidirectional Telegram ↔ Claude Code session bridge. Inbound `POST /api/telegram/webhook/:secret` lands Telegram updates, routes commands (`/start`, `/session`, `/list`, `/help`) or forwards text/photo/document as `user_message` to a linked default session. Outbound subscribes to an internal `assistant_message:final` event bus and pushes the final reply back to the linked `chat_id`. One hub-wide bot serves all users, keyed by `users.telegram_chat_id`. Full architecture in [docs/telegram-bridge.md](docs/telegram-bridge.md).
+
+**File map (hub):**
+
+- `hub/src/api/telegram-webhook.ts` — public ingress at `POST /api/telegram/webhook/:secret`. Mounted AHEAD of JWT + license + CSRF catch-alls (Phase 06 pattern). Raw body read before `JSON.parse`. Constant-time compare on `:secret` vs `config.telegram.webhookSecret`. Mismatch → 401, no DB write. Zod-validated `Update` envelope. Audit row per accepted request in `telegram_inbound_log`; `(chat_id, update_id)` short-circuits re-dispatch on Telegram retries.
+- `hub/src/api/telegram.ts` — authed REST under `/api/telegram/*` (cookie auth + CSRF double-submit, Phase 07 pattern): `GET /status`, `POST /link-code`, `DELETE /link`, `PUT /default-session`. Plain Hono in v1.
+- `hub/src/telegram/client.ts` — `sendMessage` / `getFile` / `getFileContent` wrapper, `escapeMarkdownV2`, `splitForTelegram` (4096-char split preferring `\n\n` / `\n` / ` ` boundaries within last 200 chars), per-chat outbound serial queue. `AbortSignal.timeout(10_000)`. Bot token never logged.
+- `hub/src/telegram/commands.ts` — `parse(text)` + handlers for `/start <code>`, `/session <arg>`, `/list`, `/help`.
+- `hub/src/telegram/dispatch.ts` — inbound → session dispatch. `enforceCostCap` → `session-queue.enqueue` → agent socket send. Photos: largest-by-area + `getFile` + base64 data URI in `images[]`. Documents: text/* → `attachments[]`; binary → polite reject. Throttled "cap reached" reply via `notifications_sent` dedupe key `telegram_cap_throttle:<user>:<utc_date>`.
+- `hub/src/telegram/bridge.ts` — outbound subscriber on `assistant_message:final`. Gates on `default_session_id === emitting_session_id` (no leakage across sessions). `splitForTelegram` → MarkdownV2 `sendMessage` chunks. Errors swallowed — broken Telegram link MUST NOT break a live session.
+- `hub/src/telegram/link-codes.ts` — 8-char Crockford base32 (~40 bits), 10-min TTL, single-active-per-user, single-use consume, constant-time compare.
+- `hub/src/events/assistant-events.ts` — internal `EventEmitter` carrying `{ userId, sessionId, content, message_id, cost_usd?, duration_ms? }`. Emit point lives in `hub/src/ws/agent.ts` at the existing assistant-message finalize branch. Additive — does NOT change the WS broadcast path.
+- `hub/src/config.ts` — `config.telegram.{botToken,webhookSecret,botUsername}` (all optional). Bridge silently no-ops if any is unset.
+- `hub/src/db/schema.sql` — additive: `users.telegram_chat_id` (BIGINT UNIQUE), `telegram_default_session_id` (REFERENCES sessions ON DELETE SET NULL), `telegram_link_code`, `telegram_link_code_expires_at`; new `telegram_inbound_log(user_id, chat_id, update_id, outcome, error, raw JSONB, received_at)` capped 100/user via DAL housekeeping.
+- `hub/src/db/dal.ts` — Telegram helpers folded into the existing module (deviation from PLAN.md which suggested a separate `telegram-dal.ts`): `getUserByTelegramChatId`, `getUserByLinkCode`, `setLinkCode`, `linkChatId`, `unlinkChatId`, `setDefaultSession`, `getTelegramStatus`, `appendInboundLog`, `trimInboundLog`, `getUsersWithTelegramDefaultSession`.
+- `hub/src/index.ts` — mounts webhook ahead of the auth catch-all, mounts authed REST inside, starts the outbound bridge at boot.
+
+**File map (web):**
+
+- `web/src/components/SettingsPage.tsx` — Telegram subsection inline (decision: NOT a new page). States: `bot_configured=false` (grey card), `linked=false` (Link Telegram → mint code → open `https://t.me/<bot_username>?start=<code>` deep link), `linked=true` (default-session `<select>`, Unlink with confirm).
+
+**Key invariants:**
+
+- **Cost cap is non-bypassable.** Every inbound user→session dispatch flows through `enforceCostCap` (`hub/src/scheduler/dispatcher.ts`). No path under `dispatch.ts` reaches the agent socket without the cap call.
+- **Webhook raw-body-before-parse + constant-time URL-secret compare** mirror the Coolify webhook (Phase 06). Auth-fail (401) writes NO audit row — avoids table-fill DoS via a 401 flood.
+- **Outbound forwards ONLY `assistant_message:final`.** `thinking`, `tool_use`, `tool_result`, `text_delta` are NEVER forwarded. Streaming partial replies would burn the cost cap and Telegram's per-chat rate limit instantly.
+- **Default-session match gate on outbound.** Bridge sends only when `users.telegram_default_session_id === emitting_session_id`. Switching default cleanly stops the previous session's stream.
+- **Per-chat serial queue on outbound** (in `client.ts`) — one in-flight `sendMessage` per `chat_id`. Prevents Telegram's per-chat rate-limit from shedding chunks of a split message.
+- **Telegram retry dedupe.** Every accepted-but-skipped path returns 200; `(chat_id, update_id)` audit-row check short-circuits re-dispatch within the day.
+- **`chat_id` UNIQUE constraint** prevents cross-user impersonation. One chat can only ever belong to one user.
+- **Link codes:** 8-char Crockford base32, 10-min TTL, single-active-per-user, single-use, constant-time compare.
+- **Legacy `hub/src/scheduler/post-run/telegram.ts` per-user-bot-token path is preserved for one release** as the rollback envelope. Unset `TELEGRAM_BOT_TOKEN` in Coolify to disable the hub-wide bridge; per-user post-run integrations continue working untouched.
+- **Telegram routes stay plain Hono in v1.** OpenAPI migration of authed `/api/telegram/*` routes is a deferred refactor. The public webhook is intentionally undocumented in `docs/openapi.json` (surfacing the URL-secret shape would be the wrong move).
+
+When adding a new Telegram command, payload type, link-code field, outbound channel filter, or any Phase 12 surface: update `docs/telegram-bridge.md` in the same commit.
