@@ -176,6 +176,31 @@ supervisors.post('/:id/stop', async (c) => {
   const body = StopBody.safeParse(await c.req.json().catch(() => ({})))
   const reason = (body.success ? body.data.reason : 'user') || 'user'
   const runId = body.success ? body.data.run_id : undefined
+
+  // Mark the affected open session_runs as `user_stopped` BEFORE telling the
+  // supervisor to kill the CLI. This is the sacred sentinel that prevents the
+  // orphan-resume path (agent.ts supervisor.hello + client.ts client connect)
+  // from resurrecting a session the user explicitly killed.
+  try {
+    const { sql } = await import('../db/postgres')
+    if (runId) {
+      await sql`
+        UPDATE session_runs
+        SET ended_at = COALESCE(ended_at, now()), exit_reason = 'user_stopped'
+        WHERE id = ${runId} AND supervisor_id = ${a.supervisorId} AND ended_at IS NULL
+      `
+    } else {
+      // empty run_id = stop all open runs for this supervisor
+      await sql`
+        UPDATE session_runs
+        SET ended_at = COALESCE(ended_at, now()), exit_reason = 'user_stopped'
+        WHERE supervisor_id = ${a.supervisorId} AND ended_at IS NULL
+      `
+    }
+  } catch (err: any) {
+    console.error('[stop] failed to mark user_stopped', err?.message)
+  }
+
   try {
     sendToSupervisor(a.supervisorId, {
       type: 'session.stop',
