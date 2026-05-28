@@ -34,6 +34,13 @@ export interface RevanoteCallbackPayload {
   needs_clarification?: boolean
   clarification_question?: string | null
   error?: string | null
+  // Phase 5 batched-secure-dispatch additions (all optional, additive).
+  batch_id?: string | null
+  risk_class?: 'minor' | 'major' | 'breaking' | null
+  merge_decision?: 'auto_merged' | 'pr_opened' | 'blocked' | null
+  pr_url?: string | null
+  diff_summary?: string | null
+  diff_hash?: string | null
 }
 
 // Retry schedule in ms. Last bucket is the dead-letter cap.
