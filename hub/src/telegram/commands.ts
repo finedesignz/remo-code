@@ -138,11 +138,11 @@ async function listUserSessions(userId: string): Promise<TgSessionRow[]> {
  * single response bounded.
  */
 export async function listUserSessionsForPicker(userId: string): Promise<PickerSessionRow[]> {
-  const rows = await sql<{ id: string; name: string | null; project_dir: string | null }[]>`
-    SELECT id, name, project_dir
+  const rows = await sql<{ id: string; name: string | null; project_dir: string | null; status: string }[]>`
+    SELECT id, name, project_dir, status
       FROM sessions
      WHERE user_id = ${userId} AND deleted_at IS NULL
-     ORDER BY last_activity DESC NULLS LAST
+     ORDER BY (status IN ('online','thinking')) DESC, last_activity DESC NULLS LAST
      LIMIT 200
   `;
   return rows;
