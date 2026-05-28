@@ -2,8 +2,9 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import {
   listSupervisorsForUser, getSupervisor, createRun, listRunsForSupervisor,
-  setSupervisorOverride, setPreferredSupervisor,
+  setSupervisorOverride, setPreferredSupervisor, setSupervisorRoots,
 } from '../db/supervisor-dal'
+import { validateRoots } from '../lib/roots-validate'
 import {
   getSupervisor as getSupervisorRegistryEntry, isSupervisorOnline,
   sendRequest, sendToSupervisor, updateSupervisorState,
@@ -204,6 +205,73 @@ supervisors.get('/:id/active', async (c) => {
   return c.json({ runs: rows })
 })
 
+// Phase 12 W2 — PATCH /api/supervisors/:id/roots. Set the supervisor's root
+// repo folder paths from the web UI. Persists to DB, then pushes set_roots
+// over WS to the live supervisor connection if online (best-effort with a
+// 5s timeout). Broadcasts supervisor.roots_changed so other client tabs
+// re-render. CSRF is enforced by the global guard; license-gated by the
+// global gate; auth verified by middleware. No requireRecentAuth — low-risk.
+const RootsBody = z.object({
+  roots: z.array(z.string()).max(50),
+})
+
+supervisors.patch('/:id/roots', async (c) => {
+  const userId = c.get('userId') as string
+  const supervisorId = c.req.param('id')
+  const row = await getSupervisor(supervisorId, userId)
+  if (!row) return c.json({ error: 'not_found' }, 404)
+
+  const raw = await c.req.json().catch(() => ({}))
+  const parsed = RootsBody.safeParse(raw)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_body', details: parsed.error.flatten() }, 400)
+  }
+  const v = validateRoots(parsed.data.roots)
+  if (!v.ok) {
+    return c.json({ error: v.error, index: (v as any).index, value: (v as any).value }, 400)
+  }
+
+  const updated = await setSupervisorRoots({ supervisorId, userId, roots: v.roots })
+  if (!updated) return c.json({ error: 'not_found' }, 404)
+
+  // Push to the live supervisor connection if any. Best-effort: a 5s timeout
+  // covers most apply+ack round-trips; if offline OR ack times out, the
+  // updated value remains in DB and the supervisor will pick it up on next
+  // auth_ok via the standard upsert path.
+  let applied: 'live' | 'queued' = 'queued'
+  let supervisorError: string | null = null
+  if (isSupervisorOnline(supervisorId)) {
+    try {
+      const ack: any = await sendRequest(
+        supervisorId,
+        { type: 'supervisor.set_roots', roots: v.roots } as any,
+        5_000,
+      )
+      if (ack?.ok) applied = 'live'
+      else supervisorError = ack?.error || 'set_roots_ack_failed'
+    } catch (err: any) {
+      supervisorError = err?.message || String(err)
+    }
+  }
+
+  // Broadcast to the user's other browser tabs so the new value reflects
+  // everywhere without a refresh.
+  try {
+    broadcastToUser(userId, {
+      type: 'supervisor.roots_changed',
+      supervisor_id: supervisorId,
+      roots: v.roots,
+    } as any)
+  } catch {}
+
+  return c.json({
+    ok: true,
+    applied,
+    roots: v.roots,
+    supervisor_error: supervisorError,
+  })
+})
+
 // Phase 04 plan 002 — concurrency override (hub clamps to [1, budget*2]).
 // Setting null clears the override (hub then uses raw concurrency_budget).
 const OverrideBody = z.object({
@@ -241,6 +309,101 @@ export const usersMe = new Hono()
 
 const PreferredBody = z.object({
   supervisor_id: z.string().nullable(),
+})
+
+// Phase 12 W2 — PATCH /api/users/me/prompts. Persists auto_nudge_idle_sessions
+// + instruction blobs (claude_global_md, codex_agents_md, codex_config_toml).
+// codex_config_toml is secret-stripped via the same pattern as PUT /api/instructions
+// (keys: api_key/apikey/token/secret/password).
+const PromptsBody = z.object({
+  auto_nudge_idle_sessions: z.boolean().optional(),
+  claude_global_md: z.string().max(100_000).nullable().optional(),
+  codex_agents_md: z.string().max(100_000).nullable().optional(),
+  codex_config_toml: z.string().max(100_000).nullable().optional(),
+})
+
+const SECRET_LINE_RE = /^\s*(api[_-]?key|apikey|token|secret|password)\s*=/i
+function stripSecretLines(input: string | null | undefined): { sanitized: string | null; stripped: number } {
+  if (input == null) return { sanitized: null, stripped: 0 }
+  const kept: string[] = []
+  let stripped = 0
+  for (const line of input.split(/\r?\n/)) {
+    if (SECRET_LINE_RE.test(line)) { stripped++; continue }
+    kept.push(line)
+  }
+  return { sanitized: kept.join('\n'), stripped }
+}
+
+usersMe.patch('/prompts', async (c) => {
+  const userId = c.get('userId') as string
+  const raw = await c.req.json().catch(() => ({}))
+  const parsed = PromptsBody.safeParse(raw)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_body', details: parsed.error.flatten() }, 400)
+  }
+  const patch = { ...parsed.data } as any
+  let stripped = 0
+  if (patch.codex_config_toml !== undefined) {
+    const r = stripSecretLines(patch.codex_config_toml)
+    patch.codex_config_toml = r.sanitized
+    stripped = r.stripped
+  }
+  const { updateUserPrompts } = await import('../db/dal')
+  const updated = await updateUserPrompts(userId, patch)
+  return c.json({ ...updated, stripped_secret_lines: stripped })
+})
+
+// Phase 12 W2 — PATCH /api/users/me/profile. Extended profile editor for the
+// Settings → Profile tab. Validates timezone, avatar shape, notifications shape.
+// (Existing PATCH /api/profile remains the canonical narrower endpoint; this
+// one adds the `notifications` JSONB blob and accepts `name` as an alias for
+// `display_name` for the new UI's nomenclature.)
+const ProfileExtBody = z.object({
+  name: z.string().max(200).nullable().optional(),
+  display_name: z.string().max(200).nullable().optional(),
+  avatar_url: z.string().nullable().optional(),
+  timezone: z.string().max(80).optional(),
+  notifications: z.record(z.unknown()).optional(),
+})
+
+const MAX_AVATAR_BYTES_PROFILE = 1_400_000
+function isValidTz(tz: string): boolean {
+  try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true } catch { return false }
+}
+
+usersMe.patch('/profile', async (c) => {
+  const userId = c.get('userId') as string
+  const raw = await c.req.json().catch(() => ({}))
+  const parsed = ProfileExtBody.safeParse(raw)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_body', details: parsed.error.flatten() }, 400)
+  }
+  const b = parsed.data
+  const fields: any = {}
+  // `name` is sugar for display_name. If both are provided, display_name wins.
+  if (b.name !== undefined) fields.display_name = b.name
+  if (b.display_name !== undefined) fields.display_name = b.display_name
+  if (b.avatar_url !== undefined) {
+    const v = b.avatar_url
+    if (v === null || v === '') fields.avatar_url = null
+    else if (typeof v !== 'string') return c.json({ error: 'invalid_avatar_url' }, 400)
+    else if (!/^data:image\/(png|jpe?g|gif|webp);base64,/i.test(v)) {
+      return c.json({ error: 'invalid_avatar_format', message: 'avatar_url must be a data:image/* URL' }, 400)
+    } else if (v.length > MAX_AVATAR_BYTES_PROFILE) {
+      return c.json({ error: 'avatar_too_large', max_bytes: MAX_AVATAR_BYTES_PROFILE }, 413)
+    } else {
+      fields.avatar_url = v
+    }
+  }
+  if (b.timezone !== undefined) {
+    if (!isValidTz(b.timezone)) return c.json({ error: 'invalid_timezone' }, 400)
+    fields.timezone = b.timezone
+  }
+  if (b.notifications !== undefined) fields.notifications = b.notifications
+
+  const { updateUserProfileExt } = await import('../db/dal')
+  const updated = await updateUserProfileExt(userId, fields)
+  return c.json(updated)
 })
 
 usersMe.patch('/preferred-supervisor', async (c) => {

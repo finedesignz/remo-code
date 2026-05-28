@@ -49,6 +49,14 @@ mock.module('../src/db/chat-tabs-dal.ts', () => ({
 mock.module('../src/db/supervisor-dal.ts', () => ({
   createRun: async () => ({ id: 'run_x' }),
   endRun: async () => ({}),
+  // Phase 12 W2 — keep full export surface so the api/supervisors import in
+  // cross-test load order resolves setSupervisorRoots.
+  setSupervisorRoots: async () => null,
+  listSupervisorsForUser: async () => [],
+  getSupervisor: async () => null,
+  listRunsForSupervisor: async () => [],
+  setSupervisorOverride: async () => null,
+  setPreferredSupervisor: async () => null,
 }))
 
 mock.module('../src/ws/registry.ts', () => ({
@@ -106,6 +114,11 @@ mock.module('../src/sessions/routing.ts', () => ({
 
 mock.module('../src/sessions/budget.ts', () => ({
   releaseSessionSlot: async () => {},
+  // Phase 12 W2 — keep full surface so cross-test imports of api/supervisors
+  // (which imports reserveSessionSlot + getCapacitySnapshot) don't break when
+  // this stub is the active mock.
+  reserveSessionSlot: async () => ({ ok: false as const, reason: 'noop' as const }),
+  getCapacitySnapshot: async () => null,
 }))
 
 mock.module('../src/utils/token.ts', () => ({

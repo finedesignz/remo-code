@@ -28,6 +28,8 @@ import { revanoteWebhookRoutes } from './api/revanote-webhook'
 import { revanoteMappings } from './api/revanote-mappings'
 import { revanoteAnnotations } from './api/revanote-annotations'
 import { webhooksTitanium } from './api/webhooks-titanium'
+import { tasks as tasksApi } from './api/tasks'
+import { usage as usageApi } from './api/usage'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
 import { runMigrations } from './db/migrate'
@@ -266,6 +268,8 @@ app.route('/api/commands', commandsApi)
 app.route('/api/transcribe', transcribeApi)
 app.route('/api/scheduled-tasks', scheduledTasksApi)
 app.route('/api/scheduled-task-runs', scheduledTaskRunsApi)
+app.route('/api/tasks', tasksApi)
+app.route('/api/usage', usageApi)
 app.route('/api/error-projects', errorProjectsRouter)
 app.route('/api/errors', errorsRouter)
 app.route('/api/error-runs', errorRunsRouter)

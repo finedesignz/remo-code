@@ -24,6 +24,7 @@ type OutboundMsg =
   | { type: 'run_started'; run_id: string }
   | { type: 'run_output'; run_id: string; chunk: string }
   | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
+  | { type: 'supervisor.set_roots_ack'; req_id: string; ok: boolean; applied_roots?: string[]; error?: string }
   | { type: 'pong' }
 
 export class SupervisorClient {
@@ -232,6 +233,7 @@ export class SupervisorClient {
       case 'session.status': this.onSessionStatus(msg); break
       case 'run_command': await this.onRunCommand(msg); break
       case 'key_rotated': this.onKeyRotated(msg); break
+      case 'supervisor.set_roots': await this.onSetRoots(msg); break
       default:
         // unknown
         break
@@ -262,6 +264,52 @@ export class SupervisorClient {
     // backoff path. Force the next attempt to be immediate.
     this.reconnectAttempts = 0
     try { this.ws?.close(4002, 'key_rotated') } catch {}
+  }
+
+  /**
+   * Phase 12 W2 — hub pushed an updated roots list from the web UI. Validate
+   * minimally (we already trust the hub, but defend against malformed payloads),
+   * persist to supervisor.json (no BOM — Bun's native writeFileSync writes
+   * UTF-8 without BOM), update the in-memory cfg, kick a re-scan, and ack.
+   */
+  private async onSetRoots(msg: { req_id: string; roots: unknown }) {
+    const reqId = msg.req_id
+    try {
+      if (!Array.isArray(msg.roots)) {
+        this.send({ type: 'supervisor.set_roots_ack', req_id: reqId, ok: false, error: 'roots_not_array' })
+        return
+      }
+      const cleaned: string[] = []
+      const seen = new Set<string>()
+      for (const r of msg.roots) {
+        if (typeof r !== 'string') continue
+        const t = r.trim()
+        if (!t) continue
+        if (seen.has(t)) continue
+        seen.add(t)
+        cleaned.push(t)
+      }
+      // Swap in-memory + write to disk. saveConfig() uses writeFileSync('utf-8')
+      // which emits UTF-8 with NO BOM (Node/Bun default — verified).
+      this.cfg.roots = cleaned
+      try {
+        saveConfig({ ...this.cfg, apiKey: this.cfg.apiKey })
+      } catch (err: any) {
+        this.log('warn', `set_roots: saveConfig failed: ${err?.message ?? err}`)
+        this.send({ type: 'supervisor.set_roots_ack', req_id: reqId, ok: false, error: `saveConfig: ${err?.message ?? err}` })
+        return
+      }
+      this.log('info', `roots updated via hub (${cleaned.length} entries); rescanning`)
+      // Fire-and-forget the re-scan so the ack returns quickly. Inventory will
+      // arrive on a separate frame.
+      void this.sendRepoInventory().catch((err) => {
+        this.log('warn', `set_roots: rescan failed: ${err?.message ?? err}`)
+      })
+      this.send({ type: 'supervisor.set_roots_ack', req_id: reqId, ok: true, applied_roots: cleaned })
+    } catch (err: any) {
+      this.log('error', `set_roots: ${err?.message ?? err}`)
+      this.send({ type: 'supervisor.set_roots_ack', req_id: reqId, ok: false, error: String(err?.message ?? err) })
+    }
   }
 
   /**

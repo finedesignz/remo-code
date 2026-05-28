@@ -757,3 +757,22 @@ CREATE TABLE IF NOT EXISTS revanote_webhook_attempts (
 CREATE INDEX IF NOT EXISTS idx_revanote_webhook_attempts_user_recv
   ON revanote_webhook_attempts(user_id, received_at DESC);
 
+-- ── Phase 12 (Wave 2): UI restructure backend deltas ─────────────────────────
+-- All additive, idempotent. Consumed by the new Home/Tasks/Settings nav.
+--
+-- auto_nudge_idle_sessions: per-user preference to auto-nudge idle Claude
+--   sessions (consumed by Prompts tab). False default keeps existing behavior.
+-- notifications: per-user notifications config blob (web push, email digest,
+--   per-channel toggles). Empty object default — UI fills schema lazily.
+--
+-- NOTE: supervisors.roots, users.timezone, users.avatar_url, users.display_name,
+-- users.claude_global_md / codex_agents_md / codex_config_toml all exist
+-- already (earlier phases). This block only adds what was missing.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_nudge_idle_sessions BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- Partial index for the Tasks → Activity "in-flight" filter chip.
+CREATE INDEX IF NOT EXISTS idx_scheduled_runs_in_flight
+  ON scheduled_task_runs(user_id, started_at DESC)
+  WHERE finished_at IS NULL AND status IN ('running','pending','in_flight');
+

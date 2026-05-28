@@ -7,6 +7,14 @@ mock.module('../src/db/supervisor-dal', () => ({
   setSupervisorState: async () => {},
   touchSupervisor: async () => {},
   listSupervisorsForUser: async () => [],
+  // Phase 12 W2 — full surface so api/supervisors imports don't break.
+  setSupervisorRoots: async () => null,
+  createRun: async () => ({ id: 'r_stub' }),
+  endRun: async () => ({}),
+  getSupervisor: async () => null,
+  listRunsForSupervisor: async () => [],
+  setSupervisorOverride: async () => null,
+  setPreferredSupervisor: async () => null,
 }))
 
 const {

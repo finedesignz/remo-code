@@ -16,6 +16,17 @@ mock.module('../src/db/supervisor-dal', () => ({
   setSupervisorState: async () => {},
   touchSupervisor: async () => {},
   listSupervisorsForUser: async () => [],
+  // Phase 12 W2 — keep the full export surface so cross-test imports of
+  // api/supervisors.ts (which binds setSupervisorRoots / createRun / etc. at
+  // module-eval time) don't fail with "Export not found" when this stub is
+  // the active mock in shared test-process state.
+  setSupervisorRoots: async () => null,
+  createRun: async () => ({ id: 'r_stub' }),
+  endRun: async () => ({}),
+  getSupervisor: async () => null,
+  listRunsForSupervisor: async () => [],
+  setSupervisorOverride: async () => null,
+  setPreferredSupervisor: async () => null,
 }))
 
 const {

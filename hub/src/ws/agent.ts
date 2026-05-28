@@ -672,6 +672,17 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     return
   }
 
+  // Phase 12 W2 — set_roots ack from supervisor → resolve the pending request
+  // that the PATCH /api/supervisors/:id/roots handler is awaiting.
+  if (msg.type === 'supervisor.set_roots_ack') {
+    if (msg.ok) {
+      resolveRequest(supervisorId, msg.req_id, msg)
+    } else {
+      rejectRequest(supervisorId, msg.req_id, msg.error || 'set_roots_failed')
+    }
+    return
+  }
+
   if (msg.type === 'supervisor.repo_inventory') {
     // Phase 08 §15 (Plan 003 T4): fan inventory into sessions + pending_local_repos.
     try {
