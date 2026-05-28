@@ -11,18 +11,12 @@
  * the Wave 2 endpoint and reflects `applied: 'live' | 'queued'` returned by
  * the hub.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { hubFetch } from "../../lib/api";
 import { Card, Button, Field, StatusPill, LoadingState } from "../../components/ui";
 import { SupervisorPage } from "../../components/SupervisorPage";
-
-interface SupervisorRow {
-  id: string;
-  hostname: string | null;
-  roots: string[] | null;
-  status?: string;
-  last_seen_at?: string | null;
-}
+import { useSupervisors } from "../../hooks/useSupervisors";
+import { useWebSocketContext } from "../../hooks/useWebSocket";
 
 interface Props {
   token: string;
@@ -45,13 +39,18 @@ export function ConnectionsTab({ token }: Props) {
 /* ─────────────────────────── Roots editor ─────────────────────────── */
 
 function RootsEditor({ token }: { token: string }) {
-  const [supervisors, setSupervisors] = useState<SupervisorRow[] | null>(null);
+  const { subscribe, connectionId } = useWebSocketContext();
+  const { supervisors, error: loadError, refetch } = useSupervisors(
+    token,
+    subscribe,
+    connectionId,
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<string>("");
   const [saving, setSaving] = useState(false);
   const [applied, setApplied] = useState<"live" | "queued" | null>(null);
   const [appliedAt, setAppliedAt] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(loadError);
   const [, force] = useState(0);
 
   // tick once a minute so "applied N min ago" stays fresh
@@ -60,24 +59,15 @@ function RootsEditor({ token }: { token: string }) {
     return () => clearInterval(id);
   }, []);
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
-      const res = await hubFetch<{ supervisors: SupervisorRow[] } | SupervisorRow[]>(token, "/api/supervisors");
-      const rows = Array.isArray(res) ? res : (res?.supervisors ?? []);
-      setSupervisors(rows);
-      if (rows.length > 0 && !selectedId) {
-        setSelectedId(rows[0].id);
-        setDraft((rows[0].roots || []).join("\n"));
-      }
-    } catch (e: any) {
-      setError(e?.message || "Failed to load supervisors");
-    }
-  }, [token, selectedId]);
+  useEffect(() => { setError(loadError) }, [loadError]);
 
+  // Default selection once the hook resolves.
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (!selectedId && supervisors && supervisors.length > 0) {
+      setSelectedId(supervisors[0].id);
+      setDraft((supervisors[0].roots || []).join("\n"));
+    }
+  }, [supervisors, selectedId]);
 
   const active = useMemo(
     () => supervisors?.find((s) => s.id === selectedId) ?? null,
@@ -114,12 +104,10 @@ function RootsEditor({ token }: { token: string }) {
       );
       setApplied(r.applied);
       setAppliedAt(Date.now());
-      // optimistically reflect the saved roots in our local copy
-      setSupervisors((prev) =>
-        prev
-          ? prev.map((s) => (s.id === selectedId ? { ...s, roots: r.roots } : s))
-          : prev,
-      );
+      // Re-fetch so the hook's cache reflects the saved roots; the hub also
+      // broadcasts a supervisor_update on a roots-PATCH path eventually, but
+      // an explicit refetch makes the chips list update immediately.
+      void refetch();
     } catch (e: any) {
       setError(e?.message || "Save failed");
     } finally {
