@@ -21,6 +21,17 @@ process.env.TITANIUM_LICENSE_CACHE_TTL_SECONDS = '1'
 
 import { describe, test, expect, mock, beforeEach } from 'bun:test'
 
+// Force config flags to gate-ON values regardless of which test file loaded
+// `src/config` first. `config.ts` reads env at module-load time, and Bun's
+// module cache is process-wide — so a sibling test that imported config with
+// `TITANIUM_BYPASS=true` (e.g. send-fence-scheduled-run) freezes our gate
+// OPEN by the time we get here. The exported `config` object is plain (not
+// Object.freezed), so we mutate the cached value in place.
+const { config } = await import('../src/config')
+config.titaniumBypass = false
+config.licenseRequired = true
+config.titanium.licenseCacheTtlSeconds = 1
+
 // --- Mocks (must precede module under test) -----------------------------
 
 let licenseStatus: string | null = 'active'
