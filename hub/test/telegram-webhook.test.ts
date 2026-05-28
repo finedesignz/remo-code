@@ -63,6 +63,7 @@ mock.module("../src/db/dal.ts", () => ({
   setTelegramDefaultSession: async (userId: string, sid: string | null) => {
     if (state.user && state.user.id === userId) state.user.telegram_default_session_id = sid;
   },
+  getSession: async (_sessionId: string, _userId: string) => null,
   logTelegramInbound: async (input: any) => {
     const uid = Number(input.update_id);
     if (state.dedupeOnUpdateId.has(uid)) return { inserted: false };
@@ -88,6 +89,12 @@ mock.module("../src/telegram/client.ts", () => ({
   sendMessage: async (chatId: number | string, text: string) => {
     state.sentMessages.push({ chat: chatId, text });
   },
+  sendMessageWithKeyboard: async (chatId: number | string, text: string) => {
+    state.sentMessages.push({ chat: chatId, text });
+  },
+  answerCallbackQuery: async () => {},
+  editMessageText: async () => {},
+  editMessageReplyMarkup: async () => {},
   getFile: async (fileId: string) => ({ file_id: fileId, file_path: "photos/file.jpg", file_size: 1024 }),
   downloadFile: async (_fp: string) => new ArrayBuffer(8),
   escapeMarkdownV2: (s: string) => s,
