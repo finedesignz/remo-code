@@ -77,6 +77,7 @@ pub fn run() {
             runtime_cmds::get_inventory,
             runtime_cmds::open_external_url,
             runtime_cmds::sidecar_control,
+            runtime_cmds::set_api_key,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

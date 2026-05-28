@@ -248,6 +248,41 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Update the supervisor's API key in `supervisor.json` and restart the
+/// sidecar so the new credential is picked up on its next /ws/agent handshake.
+///
+/// Writes UTF-8 WITHOUT BOM — `fs::write` does this by default, but the trap
+/// is real: PowerShell `Set-Content -Encoding utf8` writes a BOM, which the
+/// Bun sidecar's JSON.parse rejects with `Unrecognized token 'ï»¿'`. We
+/// preserve every other key in the file so existing roots/hub_url/etc. survive.
+#[tauri::command]
+pub fn set_api_key(app: tauri::AppHandle, api_key: String) -> Result<(), String> {
+    let trimmed = api_key.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("api key cannot be empty".to_string());
+    }
+    if !trimmed.starts_with("remo_") {
+        return Err("api key must start with `remo_`".to_string());
+    }
+    if trimmed.len() < 16 {
+        return Err("api key looks too short".to_string());
+    }
+
+    let path = supervisor_json()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+    }
+    let mut map = read_json_obj(&path).unwrap_or_default();
+    map.insert("api_key".to_string(), Value::String(trimmed));
+    let txt = serde_json::to_string_pretty(&Value::Object(map))
+        .map_err(|e| format!("serialize failed: {e}"))?;
+    fs::write(&path, txt).map_err(|e| format!("write failed: {e}"))?;
+
+    // Restart sidecar so the new key is used on the next /ws/agent handshake.
+    sidecar::restart(&app);
+    Ok(())
+}
+
 /// Stop / start / restart the Bun sidecar from the General page.
 #[tauri::command]
 pub fn sidecar_control(app: tauri::AppHandle, action: String) -> Result<(), String> {
