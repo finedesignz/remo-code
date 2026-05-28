@@ -41,6 +41,55 @@ export interface AuthSessionContext {
   user: { id: string; email: string; role: string; display_name?: string | null };
 }
 
+// Phase 12.1: detect Tauri WebView origins on the request so we can emit a
+// cross-origin-safe cookie variant (`SameSite=None; Secure; Partitioned`).
+// Browser requests (no Tauri origin) keep the strict `__Host-` + `SameSite=Lax`
+// default. Centralized so the auth callback, finalize-mobile, and re-login
+// flows make the same decision.
+export function isTauriOrigin(origin: string | null | undefined): boolean {
+  if (!origin) return false;
+  if (!config.mobileTauriOriginsEnabled) return false;
+  return config.mobileTauriOrigins.includes(origin);
+}
+
+export function originFromContext(c: Context): string | null {
+  return c.req.header('origin') ?? null;
+}
+
+export interface CookieAttrs {
+  name: string;
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: 'Lax' | 'None' | 'Strict';
+  path: string;
+  maxAge: number;
+  partitioned?: boolean;
+}
+
+export function sessionCookieAttrsForOrigin(origin: string | null | undefined): CookieAttrs {
+  if (isTauriOrigin(origin)) {
+    // The `__Host-` prefix mandates SameSite=Lax/Strict — incompatible with
+    // SameSite=None. So the Tauri variant uses an unprefixed cookie name.
+    return {
+      name: 'remo_sid',
+      httpOnly: true,
+      secure: true,
+      sameSite: 'None',
+      path: '/',
+      maxAge: SESSION_TTL_SECONDS,
+      partitioned: true,
+    };
+  }
+  return {
+    name: SESSION_COOKIE_NAME,
+    httpOnly: true,
+    secure: true,
+    sameSite: 'Lax',
+    path: '/',
+    maxAge: SESSION_TTL_SECONDS,
+  };
+}
+
 export async function createAndSetSession(
   c: Context,
   opts: { userId: string; ip?: string | null; userAgent?: string | null },
@@ -56,12 +105,29 @@ export async function createAndSetSession(
 }
 
 export function setSessionCookie(c: Context, token: string): void {
-  setCookie(c, SESSION_COOKIE_NAME, token, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'Lax',
-    path: '/',
-    maxAge: SESSION_TTL_SECONDS,
+  const attrs = sessionCookieAttrsForOrigin(originFromContext(c));
+  // hono/cookie's setCookie does not currently accept `partitioned`. Emit the
+  // Set-Cookie header by hand when we need that attribute so the Tauri WebView
+  // honors the CHIPS partitioned cookie semantics.
+  if (attrs.partitioned || attrs.sameSite === 'None') {
+    const parts = [
+      `${attrs.name}=${encodeURIComponent(token)}`,
+      `Path=${attrs.path}`,
+      `Max-Age=${attrs.maxAge}`,
+      `HttpOnly`,
+      `Secure`,
+      `SameSite=${attrs.sameSite}`,
+    ];
+    if (attrs.partitioned) parts.push('Partitioned');
+    c.header('Set-Cookie', parts.join('; '), { append: true });
+    return;
+  }
+  setCookie(c, attrs.name, token, {
+    httpOnly: attrs.httpOnly,
+    secure: attrs.secure,
+    sameSite: attrs.sameSite,
+    path: attrs.path,
+    maxAge: attrs.maxAge,
   });
 }
 
@@ -71,16 +137,24 @@ export function clearSessionCookie(c: Context): void {
     path: '/',
     secure: true,
   });
+  // Phase 12.1: also clear the Tauri-origin unprefixed cookie if present.
+  deleteCookie(c, MOBILE_SESSION_COOKIE_NAME, {
+    path: '/',
+    secure: true,
+  });
 }
 
+export const MOBILE_SESSION_COOKIE_NAME = 'remo_sid';
+
 export function readSessionCookie(c: Context): string | null {
-  return getCookie(c, SESSION_COOKIE_NAME) ?? null;
+  return getCookie(c, SESSION_COOKIE_NAME) ?? getCookie(c, MOBILE_SESSION_COOKIE_NAME) ?? null;
 }
 
 // Extract `__Host-remo_sid` from a raw Cookie header (used in WS upgrade where
 // we don't have a Hono Context). Returns null if absent.
 export function parseSessionCookieFromHeader(cookieHeader: string | null | undefined): string | null {
   if (!cookieHeader) return null;
+  let mobileToken: string | null = null;
   for (const part of cookieHeader.split(/;\s*/)) {
     const eq = part.indexOf('=');
     if (eq < 0) continue;
@@ -88,8 +162,11 @@ export function parseSessionCookieFromHeader(cookieHeader: string | null | undef
     if (name === SESSION_COOKIE_NAME) {
       return decodeURIComponent(part.slice(eq + 1));
     }
+    if (name === MOBILE_SESSION_COOKIE_NAME && mobileToken === null) {
+      mobileToken = decodeURIComponent(part.slice(eq + 1));
+    }
   }
-  return null;
+  return mobileToken;
 }
 
 // Look up + validate a session by raw token. Enforces idle (60m) and absolute
