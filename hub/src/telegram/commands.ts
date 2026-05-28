@@ -19,6 +19,13 @@ import {
   setTelegramDefaultSession,
   type TelegramUserRow,
 } from "../db/dal.ts";
+import {
+  buildSessionKeyboard,
+  renderPickerText,
+  PAGE_SIZE,
+  type PickerSessionRow,
+} from "./session-picker.ts";
+import type { InlineKeyboard } from "./client.ts";
 
 export type ParsedCommand =
   | { kind: "start"; arg: string }
@@ -53,8 +60,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand {
 export const HELP_TEXT = [
   "Remo Code Telegram bridge — commands:",
   "",
-  "/list — list your Claude Code sessions",
-  "/session <id> — set your default session (use the short id from /list)",
+  "/list — tap-to-pick session list (inline buttons)",
+  "/session <id> — set default by typed id-prefix (power users; /list is easier)",
   "/help — this message",
   "",
   "Send any plain text to forward it to your default session.",
@@ -125,6 +132,48 @@ async function listUserSessions(userId: string): Promise<TgSessionRow[]> {
   `;
 }
 
+/**
+ * Full session list for the inline-keyboard picker (no LIMIT 25 trim — the
+ * picker paginates client-side via callback_data). Capped at 200 to keep the
+ * single response bounded.
+ */
+export async function listUserSessionsForPicker(userId: string): Promise<PickerSessionRow[]> {
+  const rows = await sql<{ id: string; name: string | null; project_dir: string | null }[]>`
+    SELECT id, name, project_dir
+      FROM sessions
+     WHERE user_id = ${userId} AND deleted_at IS NULL
+     ORDER BY last_activity DESC NULLS LAST
+     LIMIT 200
+  `;
+  return rows;
+}
+
+/**
+ * Build the `/list` reply as a (text, keyboard) pair. The webhook handler
+ * sends this via `sendMessageWithKeyboard`. Returns `null` keyboard when the
+ * user has zero sessions (plain text reply).
+ */
+export async function handleListPicker(opts: {
+  user: TelegramUserRow;
+  offset?: number;
+}): Promise<{ text: string; keyboard: InlineKeyboard | null }> {
+  const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+  const rows = await listUserSessionsForPicker(opts.user.id);
+  if (rows.length === 0) {
+    return {
+      text: "No sessions found. Start one from the remo-code web UI first.",
+      keyboard: null,
+    };
+  }
+  const defaultId = opts.user.telegram_default_session_id;
+  const text = renderPickerText({ total: rows.length, offset, defaultId });
+  const keyboard = buildSessionKeyboard({ rows, offset, defaultId });
+  return { text, keyboard };
+}
+
+/** Re-export the page size so the webhook can validate paginate offsets. */
+export { PAGE_SIZE };
+
 function renderRelative(d: Date | null): string {
   if (!d) return "never";
   const ms = Date.now() - new Date(d).getTime();
@@ -163,7 +212,12 @@ export async function handleSession(opts: {
 }): Promise<{ reply: string }> {
   if (!opts.arg) {
     const rows = await listUserSessions(opts.user.id);
-    const lines = ["Usage: /session <id-prefix>. Your sessions:", ""];
+    const lines = [
+      "Usage: /session <id-prefix>. Tip: /list shows tap-to-pick buttons.",
+      "",
+      "Recent sessions:",
+      "",
+    ];
     for (const r of rows.slice(0, 10)) lines.push(sessionLabel(r));
     return { reply: lines.join("\n") };
   }
