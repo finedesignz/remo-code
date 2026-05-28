@@ -45,6 +45,10 @@ export default function SecurityPage() {
   const [err, setErr] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+  const [editing, setEditing] = useState(false);
+  const [draftKey, setDraftKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -66,6 +70,24 @@ export default function SecurityPage() {
       window.setTimeout(() => setCopyState("idle"), 1500);
     } catch {}
   }, [status]);
+
+  const onSave = useCallback(async () => {
+    setSaving(true);
+    setSaveMsg(null);
+    setErr(null);
+    try {
+      await invoke("set_api_key", { apiKey: draftKey });
+      setSaveMsg("Saved — sidecar restarting");
+      setDraftKey("");
+      setEditing(false);
+      window.setTimeout(() => { void refresh(); }, 600);
+      window.setTimeout(() => setSaveMsg(null), 3000);
+    } catch (e: any) {
+      setErr(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [draftKey, refresh]);
 
   const onRotate = useCallback(async () => {
     const base = status?.hub_url ?? "https://app.remo-code.com";
@@ -130,18 +152,64 @@ export default function SecurityPage() {
             </p>
           </Row>
         </dl>
-        <div className="flex items-center gap-2 pt-1">
-          <button
-            type="button"
-            onClick={onRotate}
-            className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white"
-          >
-            Rotate API key
-          </button>
-          <span className="text-xs text-[var(--text-muted)]">
-            Opens the hub's API keys page in your browser.
-          </span>
-        </div>
+        {editing ? (
+          <div className="space-y-2 pt-1">
+            <label className="block text-xs text-[var(--text-muted)]">
+              Paste the new API key (starts with <span className="font-mono">remo_</span>)
+            </label>
+            <input
+              type="text"
+              autoFocus
+              spellCheck={false}
+              autoComplete="off"
+              value={draftKey}
+              onChange={(e) => setDraftKey(e.target.value)}
+              placeholder="remo_…"
+              className="w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/60 text-[var(--text-primary)] outline-none ring-1 ring-transparent focus:ring-indigo-500/40"
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => { void onSave(); }}
+                disabled={saving || !draftKey.trim()}
+                className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40"
+              >
+                {saving ? "Saving…" : "Save & restart sidecar"}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setEditing(false); setDraftKey(""); }}
+                disabled={saving}
+                className="px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-40"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 pt-1 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white"
+            >
+              {status?.api_key_set ? "Update API key" : "Set API key"}
+            </button>
+            <button
+              type="button"
+              onClick={onRotate}
+              className="px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40"
+            >
+              Rotate on hub
+            </button>
+            <span className="text-xs text-[var(--text-muted)]">
+              Rotate in the browser, then paste the new key here.
+            </span>
+          </div>
+        )}
+        {saveMsg && (
+          <div className="text-xs text-emerald-300 pt-1">{saveMsg}</div>
+        )}
       </section>
 
       <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
