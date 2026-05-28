@@ -73,11 +73,11 @@ pub fn run() {
             config_cmds::add_root,
             config_cmds::remove_root,
             config_cmds::rescan_now,
-            config_cmds::update_api_key,
             runtime_cmds::get_runtime_status,
             runtime_cmds::get_inventory,
             runtime_cmds::open_external_url,
             runtime_cmds::sidecar_control,
+            runtime_cmds::set_api_key,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

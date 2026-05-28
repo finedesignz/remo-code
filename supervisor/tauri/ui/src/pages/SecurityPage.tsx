@@ -40,16 +40,15 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-const KEY_FORMAT = /^(remokey_|remo_)[A-Za-z0-9_-]+$/;
-
 export default function SecurityPage() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
-  const [newKey, setNewKey] = useState("");
-  const [updateBusy, setUpdateBusy] = useState(false);
-  const [updateState, setUpdateState] = useState<"idle" | "saved">("idle");
+  const [editing, setEditing] = useState(false);
+  const [draftKey, setDraftKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -72,6 +71,24 @@ export default function SecurityPage() {
     } catch {}
   }, [status]);
 
+  const onSave = useCallback(async () => {
+    setSaving(true);
+    setSaveMsg(null);
+    setErr(null);
+    try {
+      await invoke("set_api_key", { apiKey: draftKey });
+      setSaveMsg("Saved — sidecar restarting");
+      setDraftKey("");
+      setEditing(false);
+      window.setTimeout(() => { void refresh(); }, 600);
+      window.setTimeout(() => setSaveMsg(null), 3000);
+    } catch (e: any) {
+      setErr(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [draftKey, refresh]);
+
   const onRotate = useCallback(async () => {
     const base = status?.hub_url ?? "https://app.remo-code.com";
     const url = `${base.replace(/\/$/, "")}/#/settings/api-keys`;
@@ -81,35 +98,6 @@ export default function SecurityPage() {
       setErr(String(e));
     }
   }, [status]);
-
-  const onUpdateKey = useCallback(async () => {
-    const trimmed = newKey.trim();
-    if (!KEY_FORMAT.test(trimmed)) {
-      setErr("invalid api key format (expected remokey_… or remo_…)");
-      return;
-    }
-    setUpdateBusy(true);
-    setErr(null);
-    try {
-      await invoke("update_api_key", { newKey: trimmed });
-      // Restart the sidecar so it re-reads supervisor.json and reconnects
-      // with the new key. The existing General/Restart button does this; we
-      // call the same IPC for parity.
-      try {
-        await invoke("sidecar_control", { action: "restart" });
-      } catch {
-        // Non-fatal — the sidecar will pick the key up on its next reconnect.
-      }
-      setNewKey("");
-      setUpdateState("saved");
-      window.setTimeout(() => setUpdateState("idle"), 2000);
-      void refresh();
-    } catch (e: any) {
-      setErr(String(e));
-    } finally {
-      setUpdateBusy(false);
-    }
-  }, [newKey, refresh]);
 
   return (
     <div className="max-w-2xl space-y-5">
@@ -164,53 +152,64 @@ export default function SecurityPage() {
             </p>
           </Row>
         </dl>
-        <div className="flex items-center gap-2 pt-1">
-          <button
-            type="button"
-            onClick={onRotate}
-            className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white"
-          >
-            Rotate API key
-          </button>
-          <span className="text-xs text-[var(--text-muted)]">
-            Opens the hub's API keys page in your browser.
-          </span>
-        </div>
-
-        <div className="pt-3 border-t border-[var(--border-color)]/30 space-y-2">
-          <h3 className="text-xs uppercase tracking-wide text-[var(--text-muted)]">
-            Update API key
-          </h3>
-          <p className="text-xs text-[var(--text-muted)]">
-            Paste a key generated on the hub. The sidecar restarts and
-            reconnects with the new credential. The hub will also push a key
-            rotation here automatically when you rotate from the web UI.
-          </p>
-          <div className="flex items-center gap-2">
+        {editing ? (
+          <div className="space-y-2 pt-1">
+            <label className="block text-xs text-[var(--text-muted)]">
+              Paste the new API key (starts with <span className="font-mono">remo_</span>)
+            </label>
             <input
-              type="password"
-              value={newKey}
-              onChange={(e) => setNewKey(e.target.value)}
-              placeholder="remokey_… or remo_…"
-              autoComplete="off"
+              type="text"
+              autoFocus
               spellCheck={false}
-              className="flex-1 px-3 py-2 rounded-lg text-sm font-mono bg-[var(--bg-tertiary)]/40 ring-1 ring-[var(--border-color)]/40 focus:ring-indigo-500/40 outline-none"
+              autoComplete="off"
+              value={draftKey}
+              onChange={(e) => setDraftKey(e.target.value)}
+              placeholder="remo_…"
+              className="w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/60 text-[var(--text-primary)] outline-none ring-1 ring-transparent focus:ring-indigo-500/40"
             />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => { void onSave(); }}
+                disabled={saving || !draftKey.trim()}
+                className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40"
+              >
+                {saving ? "Saving…" : "Save & restart sidecar"}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setEditing(false); setDraftKey(""); }}
+                disabled={saving}
+                className="px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-40"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 pt-1 flex-wrap">
             <button
               type="button"
-              onClick={onUpdateKey}
-              disabled={updateBusy || !newKey.trim()}
-              className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40"
+              onClick={() => setEditing(true)}
+              className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white"
             >
-              {updateBusy ? "Updating…" : "Update"}
+              {status?.api_key_set ? "Update API key" : "Set API key"}
             </button>
+            <button
+              type="button"
+              onClick={onRotate}
+              className="px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40"
+            >
+              Rotate on hub
+            </button>
+            <span className="text-xs text-[var(--text-muted)]">
+              Rotate in the browser, then paste the new key here.
+            </span>
           </div>
-          {updateState === "saved" && (
-            <p className="text-xs text-emerald-300">
-              Saved. Sidecar restart requested.
-            </p>
-          )}
-        </div>
+        )}
+        {saveMsg && (
+          <div className="text-xs text-emerald-300 pt-1">{saveMsg}</div>
+        )}
       </section>
 
       <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">

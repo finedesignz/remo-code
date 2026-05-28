@@ -7,7 +7,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 
 // Keep in sync with supervisor/tauri/src-tauri/tauri.conf.json version
-const VERSION = '0.5.4'
+const VERSION = '0.5.5'
 
 function logDir(): string {
   if (process.platform === 'win32') {
