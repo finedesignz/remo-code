@@ -139,7 +139,7 @@ minutes.
 
 ---
 
-## File map
+## File map (hub)
 
 ```
 hub/
@@ -233,6 +233,76 @@ a one-file change.
   with synthetic click + anchor records.
 
 Run from repo root: `bun test web/src/lib/platform.test.ts web/src/lib/external-link.test.ts`.
+
+---
+
+## Mobile shell (Phase 12.3)
+
+The native iOS/Android binary lives at `mobile/tauri/` — a thin Tauri 2.x
+WebView wrapper that loads the hosted SPA at `https://app.remo-code.com`. It's
+the only piece that needs to be rebuilt per native release; the SPA itself
+ships continuously through the hub's Docker image.
+
+### Why a shell, not a port
+
+- One UI codebase. The web SPA already runs in every browser; re-implementing
+  it in React Native / Flutter would duplicate every Phase 03 grid-view fix,
+  every scheduler UI tweak, every error-capture drawer.
+- Native deep links. The `remo-code://auth/callback?token=<X>` scheme can only
+  be claimed by a native binary registered with the OS. The shell exists
+  primarily to own that scheme.
+- App Store presence. Distribution + push-notification entitlements + biometric
+  unlock (deferred) all require a real binary.
+
+### Architecture
+
+```
+OS magic-link tap
+  → remo-code://auth/callback?token=<X>            (custom scheme)
+  OR
+  → https://app.remo-code.com/auth/callback?token=<X>   (Universal Link / App Link)
+  → mobile shell (src-tauri/src/lib.rs handle_deep_link)
+  → WebView eval: POST /api/auth/finalize-mobile { token } credentials: include
+  → hub sets opaque session cookie on WebView cookie jar
+  → location.replace(https://app.remo-code.com)
+  → full SPA loads, authenticated
+```
+
+### Files
+
+- `mobile/tauri/src-tauri/Cargo.toml` — Tauri 2.11 + `tauri-plugin-deep-link`.
+  Versions match `supervisor/tauri/src-tauri/Cargo.toml` exactly.
+- `mobile/tauri/src-tauri/tauri.conf.json` — identifier `com.finedesignz.remo-code`,
+  scheme `remo-code` (desktop) + Universal-Link/App-Link host
+  `app.remo-code.com` with `pathPrefix: /auth/callback` (mobile), productName
+  `Remo Code`, version `0.1.0`, CSP allowing `https://app.remo-code.com` and
+  `wss://app.remo-code.com`.
+- `mobile/tauri/src-tauri/src/lib.rs` — `#[tauri::mobile_entry_point]` `run()`
+  function + deep-link handler that escapes the token through `serde_json` and
+  evals a fetch+reload JS snippet in the WebView. Accepts both custom-scheme
+  and Universal-Link/App-Link wake forms (keyed off scheme + path ending in
+  `/callback`).
+- `mobile/tauri/src-tauri/capabilities/default.json` — grants `deep-link`,
+  `shell`, `os`, `http` to the `main` window.
+- `mobile/tauri/ui/` — minimal Vite entry whose `main.ts` immediately
+  `location.replace`s to `VITE_REMO_URL` (defaults to `https://app.remo-code.com`)
+  after stashing `window.__REMO_APP_VERSION__` in `sessionStorage`.
+
+### Deferred to Phase 12.4
+
+- `gen/apple/` (Xcode project) — `cargo tauri ios init` on a Mac.
+- `gen/android/` (Gradle project) — `cargo tauri android init` on an Android
+  SDK + NDK host.
+- `src-tauri/icons/icon.png` — 1024×1024 source PNG, then `cargo tauri icon`.
+- Release workflow for `mobile-v*.*.*` tags.
+- Code-signing setup (Apple Developer Program, Google Play upload key).
+
+### CI
+
+`.github/workflows/mobile-shell-typecheck.yml` runs `cargo check` against the
+host x86_64-unknown-linux-gnu target on every push that touches `mobile/tauri/`.
+This catches Rust regressions without needing Android NDK or Xcode in CI; the
+real mobile build matrix lands with Phase 12.4.
 
 ---
 

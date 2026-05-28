@@ -77,6 +77,54 @@ The legacy `npx remo-code-agent` / `claude-remote` shell-alias flow is retired a
 - Hub auto-resume on `supervisor.hello` (in `hub/src/ws/agent.ts`) now (a) filters orphan `session_runs` to rows newer than 24h, sweeping older rows as `exit_reason='stale'`, and (b) finalizes any orphan with `restart_count >= 10` as `max_restarts_exceeded` and skips the replay.
 - Canary test `supervisor/test/no-legacy-agent-spawn.test.ts` greps `supervisor/src/**` for the retired `remo-code-agent` package name and `--append-system-prompt` flag; the build FAILS if either reappears.
 
+## Mobile Tauri Client (mobile/tauri/)
+
+Thin Tauri 2.x WebView wrapper for iOS and Android. The real UI is the hosted SPA at `https://app.remo-code.com`; this shell exists to ship a binary through the App Store / Play Store and to own the `remo-code://auth/callback?token=<X>` deep link that closes the magic-link sign-in loop on mobile. One codebase, one UI — re-implementing the web SPA natively is explicitly out of scope.
+
+**Architecture:**
+
+1. OS receives `remo-code://auth/callback?token=<X>` (from a magic-link email).
+2. `mobile/tauri/src-tauri/src/lib.rs::handle_deep_link` parses the URL, extracts the `token`, and evals JS in the WebView that POSTs `{ token }` to `https://app.remo-code.com/api/auth/finalize-mobile` with `credentials: 'include'`.
+3. On 200, the WebView `location.replace`s to the SPA root with the opaque session cookie set on its cookie jar. On error, alert + reload.
+
+**File map:**
+
+- `mobile/tauri/src-tauri/Cargo.toml` — Tauri 2.11.2 + `tauri-plugin-deep-link` 2.4.1. Pinned in lockstep with `supervisor/tauri/src-tauri/Cargo.toml`.
+- `mobile/tauri/src-tauri/tauri.conf.json` — identifier `com.finedesignz.remo-code`, scheme `remo-code://`, productName `Remo Code`, version `0.1.0`. CSP `connect-src` allows `https://app.remo-code.com` + `wss://app.remo-code.com`.
+- `mobile/tauri/src-tauri/src/lib.rs` — `#[cfg_attr(mobile, tauri::mobile_entry_point)] pub fn run()` + the deep-link handler. Token is JSON-escaped via `serde_json::to_string` before being embedded in eval'd JS — never string-concatenated raw.
+- `mobile/tauri/src-tauri/src/main.rs` — desktop fallback entry that calls `remo_code_mobile_lib::run()`.
+- `mobile/tauri/src-tauri/capabilities/default.json` — grants `deep-link:default`, `shell:default`, `os:default`, `http:default`, and core window/webview/event/app perms to the `main` window.
+- `mobile/tauri/ui/` — minimal Vite shell whose `src/main.ts` immediately `location.replace`s to `VITE_REMO_URL` (defaults to `https://app.remo-code.com`). Stashes `window.__REMO_APP_VERSION__` in `sessionStorage` so the redirected SPA can render "Mobile vX.Y.Z".
+
+**Build commands:**
+
+```bash
+cd mobile/tauri/ui && bun install
+cd mobile/tauri && cargo check --manifest-path src-tauri/Cargo.toml   # host typecheck
+cargo tauri ios init && cargo tauri ios build --release               # Mac host only
+cargo tauri android init && cargo tauri android build --release       # SDK+NDK host
+```
+
+**Deferred to Phase 12.4 (NOT on this branch):**
+
+- `gen/apple/` (`cargo tauri ios init` on a Mac).
+- `gen/android/` (`cargo tauri android init` on an SDK+NDK host).
+- `src-tauri/icons/icon.png` (1024×1024 source PNG + `cargo tauri icon`).
+- Hub-side `POST /api/auth/finalize-mobile` endpoint.
+- `.github/workflows/mobile-shell-release.yml` for tagged `mobile-v*.*.*` builds.
+- Apple Developer + Google Play signing key setup.
+
+**CI:** `.github/workflows/mobile-shell-typecheck.yml` runs `cargo check` + `cargo test --lib` against `x86_64-unknown-linux-gnu` on `ubuntu-latest` (installs `libwebkit2gtk-4.1-dev` + `libgtk-3-dev` to satisfy `tauri-build`). Catches Rust regressions without Android NDK / Xcode.
+
+**Invariants:**
+
+- NEVER touch `supervisor/tauri/`, `hub/`, or `web/` from a mobile-shell PR. Cross-package work goes through its own phase.
+- Tauri dep versions track `supervisor/tauri/` exactly — when bumping there, bump here in the same PR.
+- The shell is "dumb": all business logic stays in the web SPA. The shell's only jobs are deep-link handoff and WebView hosting.
+- Token strings from deep links are NEVER concatenated into JS — always `serde_json::to_string`-escaped first to prevent XSS via crafted callback URLs.
+
+When adding native capabilities (push notifications, biometric unlock, camera), updating the deep-link contract, or touching the hub-side `finalize-mobile` endpoint: update `docs/mobile-client.md` in the same commit.
+
 ## Local Supervisor (only supported connection)
 
 The supervisor (`supervisor/src/index.ts`, compiled into the Tauri sidecar binary) runs on the dev machine as a tray app. It:
