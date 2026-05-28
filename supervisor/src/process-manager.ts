@@ -16,6 +16,17 @@ export interface RunSpec {
   hubUrl: string
   /** Hub-requested flag. Honored only when `cfg.allowDangerousSkipPermissions === true`; otherwise stripped + logged. */
   dangerouslySkipPermissions?: boolean
+  /**
+   * When set, this run is the user's orchestrator session: a Claude process
+   * spawned in a repos-parent cwd, taught how to coordinate other sessions.
+   * Carries the full-power hub API key the orchestrator needs to call the
+   * hub REST API at runtime + the seed system prompt.
+   */
+  orchestrator?: {
+    systemPrompt: string
+    hubApiKey: string
+    hubUrl: string
+  }
 }
 
 export interface StartRejection {
@@ -154,7 +165,7 @@ export class ProcessManager {
       return { reason: 'sandbox_escape', detail }
     }
 
-    if (this.cfg.requireGitRepo) {
+    if (this.cfg.requireGitRepo && !spec.orchestrator) {
       if (!existsSync(join(spec.repoPath, '.git'))) {
         this.cb.onLog('error', `[security] not_git_repo: ${spec.repoPath} has no .git`, spec.runId)
         this.cb.onStateChange('stopped', {
@@ -215,6 +226,7 @@ export class ProcessManager {
       apiKey: spec.apiKey,
       hubUrl: spec.hubUrl,
       allowDangerousSkipPermissions: allowDangerous,
+      orchestrator: spec.orchestrator,
     }
     const cb: SessionBridgeCallbacks = {
       onLog: (level, message) => this.cb.onLog(level, message, spec.runId),

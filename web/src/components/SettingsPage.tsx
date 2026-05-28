@@ -7,6 +7,7 @@ import { SupervisorPage } from './SupervisorPage'
 import { CommandsList } from './CommandsList'
 import { SchedulesPage } from './SchedulesPage'
 import { ClaudeUsageCard } from './ClaudeUsageCard'
+import { OrchestratorTab } from './OrchestratorTab'
 import { hubFetch } from '../lib/api'
 
 interface Props {
@@ -23,13 +24,13 @@ interface Props {
   onBack: () => void
 }
 
-type Tab = 'profile' | 'supervisor' | 'apikey' | 'commands' | 'instructions' | 'schedules'
+type Tab = 'profile' | 'supervisor' | 'apikey' | 'commands' | 'instructions' | 'schedules' | 'orchestrator'
 
 function readTabFromHash(): Tab {
   const m = window.location.hash.match(/[?&]tab=([a-z]+)/)
   const raw = m?.[1]
   if (raw === 'account') return 'profile'
-  if (raw === 'profile' || raw === 'supervisor' || raw === 'apikey' || raw === 'commands' || raw === 'instructions' || raw === 'schedules') return raw
+  if (raw === 'profile' || raw === 'supervisor' || raw === 'apikey' || raw === 'commands' || raw === 'instructions' || raw === 'schedules' || raw === 'orchestrator') return raw
   return 'supervisor'
 }
 
@@ -128,6 +129,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
     { id: 'commands', label: 'Commands' },
     { id: 'profile', label: 'Profile' },
     { id: 'instructions', label: 'Instructions' },
+    { id: 'orchestrator', label: 'Orchestrator' },
     { id: 'apikey', label: 'API Key' },
   ]
 
@@ -137,6 +139,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
     if (id === 'commands') return <CommandsList token={token} />
     if (id === 'instructions') return <InstructionsTab token={token} />
     if (id === 'schedules') return <SchedulesTabEmbedded token={token} />
+    if (id === 'orchestrator') return <OrchestratorTab token={token} />
     return <ApiKeyTab token={token} />
   }
 

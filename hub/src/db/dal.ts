@@ -6,7 +6,7 @@ import { buildRepoKey, type GitOriginGithub } from "../lib/repo-key.ts";
 export async function listSessions(userId: string) {
   return sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info,
-           cli_kind, is_rootless, hostname,
+           cli_kind, is_rootless, hostname, is_orchestrator,
            repo_key, github_owner, github_repo
     FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST
@@ -20,7 +20,7 @@ export async function updateSessionAgentInfo(sessionId: string, info: unknown) {
 export async function getSession(sessionId: string, userId: string) {
   const rows = await sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at,
-           cli_kind, is_rootless, hostname,
+           cli_kind, is_rootless, hostname, is_orchestrator,
            repo_key, github_owner, github_repo
     FROM sessions WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
   `;

@@ -621,6 +621,37 @@ CREATE TABLE IF NOT EXISTS pending_local_repos (
 );
 CREATE INDEX IF NOT EXISTS idx_pending_local_repos_user ON pending_local_repos(user_id);
 
+-- ── Orchestrator session (one per user, pinned root-folder Claude) ──────────
+-- Pinned Claude session that runs in the supervisor's roots[0] (not inside a
+-- specific repo) and is taught via system prompt to coordinate the user's
+-- other sessions via the hub HTTP API. Exactly one open orchestrator session
+-- per user is enforced by the partial unique index below. The orchestrator
+-- session row has `is_orchestrator=true` and `project_dir` set to the
+-- supervisor's root folder.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_name TEXT NOT NULL DEFAULT 'Orchestrator';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_custom_instructions TEXT;
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_orchestrator BOOLEAN NOT NULL DEFAULT false;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_orchestrator_unique
+  ON sessions(user_id)
+  WHERE is_orchestrator = true AND deleted_at IS NULL;
+
+-- Tag rows produced by the orchestrator-key mint so they don't conflict with
+-- the per-user single-supervisor api_keys uniqueness. Existing rows backfill
+-- to 'supervisor'.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'supervisor';
+UPDATE api_keys SET purpose = 'supervisor' WHERE purpose IS NULL OR purpose = '';
+
+-- The legacy partial unique index `idx_api_keys_user_active` enforces ONE
+-- active key per user — incompatible with an orchestrator-purpose key
+-- coexisting with the supervisor key. Replace it with a per-(user, purpose)
+-- variant so each purpose has at most one active row. Idempotent.
+DROP INDEX IF EXISTS idx_api_keys_user_active;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_purpose_active
+  ON api_keys(user_id, purpose) WHERE revoked_at IS NULL;
+
 -- ── Phase 08: Revanote annotation integration ────────────────────────────────
 -- Per-user webhook secret (UUID). NULL = unconfigured. Doubles as URL-path
 -- token AND Bearer credential on outbound callbacks. Mirrors the coolify-

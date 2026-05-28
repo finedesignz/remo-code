@@ -9,7 +9,7 @@ import { getHandler, nativeSupervisorCommands } from './commands/index'
 import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
 
 // Keep in sync with supervisor/tauri/src-tauri/tauri.conf.json version
-const VERSION = '0.5.5'
+const VERSION = '0.5.6'
 
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
@@ -375,7 +375,30 @@ export class SupervisorClient {
     }
   }
 
-  private async onSessionStart(msg: { run_id: string; repo_path: string; branch?: string; pull?: boolean; initial_prompt?: string; api_key: string; hub_url: string; dangerously_skip_permissions?: boolean }) {
+  private async onSessionStart(msg: { run_id: string; repo_path: string; branch?: string; pull?: boolean; initial_prompt?: string; api_key: string; hub_url: string; dangerously_skip_permissions?: boolean; orchestrator?: { session_id: string; name: string; cwd: string; system_prompt: string; hub_api_key: string; hub_url: string } }) {
+    // Orchestrator-session path: skip git pre-flight (cwd is a repos parent
+    // folder, not a repo), use the supplied cwd verbatim, and plumb the
+    // orchestrator-specific env + system prompt through ProcessManager.
+    if (msg.orchestrator) {
+      const orch = msg.orchestrator
+      this.log('info', `orchestrator session.start cwd=${orch.cwd} name=${orch.name}`, msg.run_id)
+      await this.pm.start({
+        runId: msg.run_id,
+        repoPath: orch.cwd,
+        branch: null,
+        initialPrompt: msg.initial_prompt ?? null,
+        apiKey: this.cfg.apiKey,
+        hubUrl: this.cfg.hubUrl,
+        dangerouslySkipPermissions: msg.dangerously_skip_permissions === true,
+        orchestrator: {
+          systemPrompt: orch.system_prompt,
+          hubApiKey: orch.hub_api_key,
+          hubUrl: orch.hub_url,
+        },
+      })
+      return
+    }
+
     // Pre-flight: bring the worktree to the latest committed state on the requested branch.
     // pull=true → checkout + git pull --ff-only against existing remote (no token needed).
     // pull=false but branch set → just checkout. Both gates refuse if dirty.

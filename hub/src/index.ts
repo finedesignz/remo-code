@@ -28,6 +28,7 @@ import { revanoteWebhookRoutes } from './api/revanote-webhook'
 import { revanoteMappings } from './api/revanote-mappings'
 import { revanoteAnnotations } from './api/revanote-annotations'
 import { webhooksTitanium } from './api/webhooks-titanium'
+import { orchestrator as orchestratorApi } from './api/orchestrator'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
 import { runMigrations } from './db/migrate'
@@ -238,6 +239,11 @@ app.use('/api/error-projects', async (c, next) => isMutating(c) ? userMutationLi
 app.use('/api/error-projects/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/account/coolify-webhook-secret/rotate', userMutationLimit)
 app.use('/api/account/revanote-webhook-secret/rotate', userMutationLimit)
+// Orchestrator: mutating endpoints require fresh login (15-min step-up).
+app.use('/api/orchestrator', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/orchestrator/*', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/orchestrator', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/orchestrator/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/mappings', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/mappings/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/annotations/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
@@ -274,6 +280,7 @@ app.route('/api/instructions', instructionsApi)
 app.route('/api/error-setup', errorSetupApi)
 // Phase 08: JWT-authed revanote sub-routes (mappings + annotations).
 // The public webhook route lives at /api/revanote/webhook/* (mounted above).
+app.route('/api/orchestrator', orchestratorApi)
 app.route('/api/revanote/mappings', revanoteMappings)
 app.route('/api/revanote/annotations', revanoteAnnotations)
 
