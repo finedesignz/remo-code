@@ -64,6 +64,19 @@ const licenseRequired = parseBool(process.env.LICENSE_REQUIRED, true);
 // Used while Keygen CE JWKS endpoint is unavailable. Legacy bcrypt login
 // (ALLOW_LEGACY_LOGIN=true) remains the only working auth path under bypass.
 const titaniumBypass = parseBool(process.env.TITANIUM_BYPASS, false);
+// Phase 12.1: Tauri mobile WebView origins. iOS WKWebView shows
+// `tauri://localhost`; Android System WebView shows `https://tauri.localhost`.
+// Treated as additional first-party origins (CORS allow + Tauri cookie variant).
+// Disable only for debug isolation — default ON.
+const mobileTauriOriginsEnabled = parseBool(process.env.MOBILE_TAURI_ORIGINS_ENABLED, true);
+const MOBILE_TAURI_ORIGINS = ["tauri://localhost", "https://tauri.localhost"] as const;
+// Placeholders for Universal Links / Android App Links. Defaults keep the
+// `.well-known/*` routes serving in dev where the real team id / fingerprint
+// have not yet been provisioned.
+const mobileAppleTeamId = process.env.MOBILE_APPLE_TEAM_ID || "TEAMID";
+const mobileAndroidSha256Fingerprint =
+  process.env.MOBILE_ANDROID_SHA256_FINGERPRINT || "SHA256_PLACEHOLDER";
+const mobileBundleId = process.env.MOBILE_BUNDLE_ID || "com.finedesignz.remo-code";
 // Optional Titanium -> hub webhook for license-state changes. Inert (route
 // returns 503) until Titanium ships the webhook and the secret is provisioned.
 const titaniumWebhookSecret = requireMinLenIfSet(
@@ -92,7 +105,21 @@ export const config = {
   port: parseInt(process.env.PORT || "3040"),
   databaseUrl: process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost:5432/remocode",
   jwtSecret: process.env.JWT_SECRET || "",
-  allowedOrigins: (process.env.HUB_ALLOWED_ORIGINS || "http://localhost:5173").split(",").map(s => s.trim()),
+  allowedOrigins: (() => {
+    const base = (process.env.HUB_ALLOWED_ORIGINS || "http://localhost:5173")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (mobileTauriOriginsEnabled) {
+      for (const o of MOBILE_TAURI_ORIGINS) if (!base.includes(o)) base.push(o);
+    }
+    return base;
+  })(),
+  mobileTauriOriginsEnabled,
+  mobileTauriOrigins: [...MOBILE_TAURI_ORIGINS] as string[],
+  mobileAppleTeamId,
+  mobileAndroidSha256Fingerprint,
+  mobileBundleId,
   // Optional: OPENAI_API_KEY enables POST /api/transcribe (Whisper voice-to-text).
   // Optional: OPENAI_TRANSCRIBE_MODEL overrides the default 'whisper-1'.
   openaiApiKey: process.env.OPENAI_API_KEY || "",

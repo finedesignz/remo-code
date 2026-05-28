@@ -14,7 +14,7 @@ export const ClientAuth = z.object({
 export const ClientSendMessage = z.object({
   type: z.literal('send_message'),
   session_id: z.string().min(1).max(256),
-  content: z.string().min(1).max(1_000_000),
+  content: z.string().trim().min(1).max(1_000_000),
   id: z.string().uuid(),
   images: z.array(z.object({
     media_type: z.string(),
@@ -39,7 +39,7 @@ export const ClientSubscribe = z.object({
   session_id: z.string().min(1).max(256).optional(),
   session_ids: z.array(z.string().min(1)).max(SUBSCRIBE_MAX).optional(),
 }).refine(
-  (d) => !!d.session_id || (Array.isArray(d.session_ids) && d.session_ids.length >= 0),
+  (d) => !!d.session_id || Array.isArray(d.session_ids),
   { message: 'subscribe requires session_id or session_ids' },
 )
 
@@ -97,7 +97,7 @@ export const ScheduledRunFinished = z.object({
   type: z.literal('scheduled_run_finished'),
   run_id: z.string().min(1),
   task_id: z.string().min(1).nullable().optional(),
-  status: z.enum(['pending', 'in_flight', 'running', 'success', 'failed', 'skipped', 'cancelled']),
+  status: z.enum(['pending', 'in_flight', 'running', 'success', 'failed', 'skipped', 'skipped_quota', 'cancelled']),
   cost_usd: z.number().nullable().optional(),
   duration_ms: z.number().nullable().optional(),
   output_snippet: z.string().nullable().optional(),

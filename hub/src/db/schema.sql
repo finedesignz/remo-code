@@ -816,4 +816,35 @@ CREATE TABLE IF NOT EXISTS telegram_inbound_log (
 );
 CREATE INDEX IF NOT EXISTS idx_telegram_inbound_log_user_recv
   ON telegram_inbound_log(user_id, received_at DESC);
+-- ── Phase 12.1: mobile auth handoff tokens ────────────────────────────────────
+-- One-time tokens minted at /api/auth/login/callback?platform=ios|android.
+-- The opaque token is delivered to the Tauri shell via `remo-code://auth/callback`
+-- deep link; the shell exchanges it via POST /api/auth/finalize-mobile for a
+-- normal cookie session. Single-use, 60s TTL.
+CREATE TABLE IF NOT EXISTS auth_handoff_tokens (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash    TEXT NOT NULL,
+  purpose       TEXT NOT NULL DEFAULT 'mobile_handoff',
+  expires_at    TIMESTAMPTZ NOT NULL,
+  consumed_at   TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_auth_handoff_tokens_hash
+  ON auth_handoff_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_auth_handoff_tokens_user
+  ON auth_handoff_tokens(user_id);
+-- ── TRIAGE Bundle 6: Postgres race + ordering hygiene ────────────────────────
+-- Partial unique index on (user_id, project_dir) for non-rootless, live rows.
+-- Backs the atomic ON CONFLICT in findOrCreateAgentSession (dal.ts) so two
+-- concurrent agent reconnects for the same project_dir converge on ONE row
+-- instead of racing into a duplicate.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_project_unique
+  ON sessions(user_id, project_dir)
+  WHERE deleted_at IS NULL AND is_rootless = false;
+
+-- Monotonic per-row sequence to disambiguate same-millisecond inserts in
+-- ORDER BY created_at queries. Nullable + DEFAULT nextval via BIGSERIAL so
+-- existing rows backfill cleanly on first scan.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
 

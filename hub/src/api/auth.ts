@@ -21,6 +21,8 @@ import {
   getUserById,
   recordAuthEvent,
   promoteCandidateSubject,
+  createAuthHandoffToken,
+  consumeAuthHandoffToken,
 } from "../db/dal.ts";
 import { verifyPassword, hashPassword } from "../auth/password.ts";
 import { signJwt } from "../auth/jwt.ts";
@@ -258,6 +260,33 @@ authRouter.get("/login/callback", async (c) => {
     return c.json({ error: "user_not_found" }, 401);
   }
 
+  // ── Phase 12.1: mobile deep-link handoff ───────────────────────────────────
+  // When ?platform=ios|android, do NOT set a browser cookie or redirect to
+  // the SPA. Mint a one-time handoff token and 302 to `remo-code://auth/
+  // callback?token=<opaque>` so the Tauri shell deep-link catches it and
+  // calls POST /api/auth/finalize-mobile to exchange for a real session.
+  const platformRaw = c.req.query("platform");
+  const platform = platformRaw === "ios" || platformRaw === "android" ? platformRaw : null;
+  if (platform) {
+    try {
+      const { token: handoff } = await createAuthHandoffToken(user.id);
+      try {
+        await recordAuthEvent({
+          userId: user.id,
+          eventType: "mobile_handoff_minted",
+          ip, userAgent: ua,
+          metadata: { platform },
+        });
+      } catch {}
+      const target = `remo-code://auth/callback?token=${encodeURIComponent(handoff)}`;
+      return c.redirect(target);
+    } catch (err: any) {
+      console.error("[auth] mobile handoff mint failed:", err?.message);
+      try { await recordAuthEvent({ userId: user.id, eventType: "login_failed", ip, userAgent: ua, metadata: { reason: "handoff_mint_failed", platform } }); } catch {}
+      return c.json({ error: "handoff_mint_failed" }, 500);
+    }
+  }
+
   // Email-collision policy: when the user is in pending_verify, the magic-link
   // sub MUST equal candidate_subject for promotion to happen. We don't have a
   // separate Keygen lookup at the callback — the magic-link itself is the
@@ -319,6 +348,56 @@ authRouter.post("/logout", async (c) => {
   console.log(`[auth] logout user=${userId ?? "anon"} session_row_deleted=true`);
   try { await recordAuthEvent({ userId, eventType: "logout", ip, userAgent: ua }); } catch {}
   return c.json({ ok: true });
+});
+
+// ── Phase 12.1: POST /api/auth/finalize-mobile ───────────────────────────────
+// Tauri shell calls this with the opaque token it received via deep link. We
+// consume the single-use row (atomic UPDATE), then mint a real auth session
+// using the Tauri-origin cookie variant. Excluded from the license gate (same
+// rationale as the rest of /api/auth/*).
+authRouter.post("/finalize-mobile", async (c) => {
+  const ip = ipOf(c);
+  const ua = c.req.header("user-agent") ?? null;
+  const body = (await c.req.json().catch(() => null)) as { token?: string } | null;
+  const token = typeof body?.token === "string" ? body.token : "";
+  if (!token || token.length < 8) {
+    try { await recordAuthEvent({ eventType: "mobile_finalize_failed", ip, userAgent: ua, metadata: { reason: "missing_token" } }); } catch {}
+    return c.json({ error: "missing_token" }, 400);
+  }
+  const claim = await consumeAuthHandoffToken(token);
+  if (!claim) {
+    try { await recordAuthEvent({ eventType: "mobile_finalize_failed", ip, userAgent: ua, metadata: { reason: "invalid_or_consumed" } }); } catch {}
+    return c.json({ error: "invalid_or_expired" }, 401);
+  }
+  const user = await getUserById(claim.userId);
+  if (!user) {
+    try { await recordAuthEvent({ userId: claim.userId, eventType: "mobile_finalize_failed", ip, userAgent: ua, metadata: { reason: "user_missing" } }); } catch {}
+    return c.json({ error: "user_not_found" }, 401);
+  }
+
+  // createAndSetSession reads the Origin header on `c` to pick the cookie
+  // variant. The Tauri shell sends Origin: tauri://localhost (iOS) or
+  // https://tauri.localhost (Android), which triggers the partitioned variant.
+  const { expiresAt } = await createAndSetSession(c, { userId: user.id, ip, userAgent: ua });
+  try {
+    await recordAuthEvent({
+      userId: user.id,
+      eventType: "mobile_finalize",
+      ip, userAgent: ua,
+      metadata: { origin: c.req.header("origin") ?? null },
+    });
+  } catch {}
+
+  return c.json({
+    ok: true,
+    expires_at: expiresAt.toISOString(),
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      display_name: user.display_name ?? null,
+    },
+  });
 });
 
 // Test seam: render the email body deterministically.

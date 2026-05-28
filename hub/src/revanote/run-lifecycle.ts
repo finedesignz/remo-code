@@ -95,7 +95,7 @@ export async function onAgentReply(sessionId: string, content: string): Promise<
     const ann = await getAnnotationById(active.annotationId, active.userId)
     if (ann) {
       const { scheduleImmediateCallback } = await import('./callback.ts')
-      await scheduleImmediateCallback(ann, {
+      let basePayload: import('./callback.ts').RevanoteCallbackPayload = {
         annotation_id: ann.annotation_id_external,
         resolved: result.resolved,
         action_taken: result.action_taken || null,
@@ -105,7 +105,44 @@ export async function onAgentReply(sessionId: string, content: string): Promise<
         needs_clarification: result.needs_clarification === true,
         clarification_question: result.clarification_question ?? null,
         error: parsed.ok ? null : `parse_${parsed.reason}`,
-      })
+      }
+
+      // Phase 6: run the merge gate if the inbound payload carried sandbox fields.
+      // Gate is additive — legacy single-shot annotations without batch/repo
+      // metadata bypass the gate entirely.
+      try {
+        const raw = (ann.payload_raw ?? {}) as Record<string, any>
+        const batchId: string | null = typeof raw.batch_id === 'string' ? raw.batch_id : null
+        const batchSize: number | null = typeof raw.batch_size === 'number' ? raw.batch_size : null
+        const repoSlug: string | null = typeof raw.repo_slug === 'string' ? raw.repo_slug : null
+        const repoKind: 'github' | 'local_path' | null =
+          raw.repo_kind === 'github' || raw.repo_kind === 'local_path' ? raw.repo_kind : null
+        // sandbox_dir is set by the dispatcher when it preps the sandbox.
+        // Until that wiring lands we tolerate its absence; gate uses repo_slug-derived
+        // path as a best-effort, otherwise skip.
+        const sandboxDir: string | null = typeof raw.sandbox_dir === 'string' ? raw.sandbox_dir : null
+
+        if (repoSlug && repoKind && sandboxDir) {
+          const { runMergeGate, applyGateToCallback, defaultMergeOps } = await import('./merge-gate.ts')
+          const { createLlmEscalator } = await import('./llm-escalator.ts')
+          const installationId: number | undefined = typeof raw.installation_id === 'number' ? raw.installation_id : undefined
+          const outcome = await runMergeGate({
+            batchId, batchSize, annotationId: ann.id,
+            sandboxDir, repoSlug, repoKind,
+            needsClarification: result.needs_clarification === true,
+            resolved: result.resolved,
+            mergeOps: defaultMergeOps({ installationId }),
+            llm: createLlmEscalator(),
+            annotationUrl: ann.annotation_url ?? null,
+            notifyEmail: typeof raw.org_notify_email === 'string' ? raw.org_notify_email : null,
+          })
+          basePayload = applyGateToCallback(basePayload, outcome, batchId)
+        }
+      } catch (gateErr: any) {
+        console.warn(`[revanote.lifecycle] merge gate failed (non-fatal): ${gateErr?.message ?? gateErr}`)
+      }
+
+      await scheduleImmediateCallback(ann, basePayload)
     }
   } catch (err: any) {
     console.warn(`[revanote.lifecycle] callback enqueue failed: ${err?.message ?? err}`)

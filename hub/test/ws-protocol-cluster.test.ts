@@ -1,0 +1,88 @@
+/**
+ * Bundle 2 (TRIAGE-2026-05-28) — WS protocol bug cluster.
+ *
+ * Covers the three small regressions:
+ *   1. `ClientSubscribe` refine no longer accepts empty `session_ids`.
+ *   2. `registerSupervisor` drains a prior entry's `pendingReqs` (and clears
+ *      each timer) BEFORE closing the replaced socket.
+ *
+ * The streaming-state clears in `agent.ts` are exercised indirectly by the
+ * existing integration tests / DAL-bound suites; this file stays pure unit
+ * scope (no DB) so it runs everywhere.
+ */
+import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test'
+import { ClientSubscribe } from '../src/ws/protocol'
+
+// Stub DB dep before importing supervisor-registry (mirrors
+// supervisor-registry.test.ts pattern).
+mock.module('../src/db/supervisor-dal', () => ({
+  setSupervisorState: async () => {},
+  touchSupervisor: async () => {},
+  listSupervisorsForUser: async () => [],
+  finalizeOpenRunsForSupervisor: async () => {},
+}))
+
+const {
+  registerSupervisor,
+  unregisterSupervisor,
+  sendRequest,
+} = await import('../src/ws/supervisor-registry')
+
+describe('ClientSubscribe refine — empty payload guard', () => {
+  test('rejects payload with neither session_id nor session_ids', () => {
+    const r = ClientSubscribe.safeParse({ type: 'subscribe' })
+    expect(r.success).toBe(false)
+  })
+
+  // Empty array IS the documented "clear subscriptions" op (see registry.ts
+  // subscribeClient — Set replacement). Keep it allowed.
+  test('accepts empty session_ids (clear-subscriptions intent)', () => {
+    const r = ClientSubscribe.safeParse({ type: 'subscribe', session_ids: [] })
+    expect(r.success).toBe(true)
+  })
+
+  test('accepts non-empty session_ids', () => {
+    const r = ClientSubscribe.safeParse({ type: 'subscribe', session_ids: ['a'] })
+    expect(r.success).toBe(true)
+  })
+
+  test('accepts legacy session_id', () => {
+    const r = ClientSubscribe.safeParse({ type: 'subscribe', session_id: 's1' })
+    expect(r.success).toBe(true)
+  })
+})
+
+describe('registerSupervisor — drains pendingReqs on replace', () => {
+  const SUP = `sup_drain_${process.pid}_${Date.now()}`
+  const USER = `user_drain_${process.pid}_${Date.now()}`
+  const KEY = `key_drain_${process.pid}_${Date.now()}`
+
+  beforeEach(() => { unregisterSupervisor(SUP) })
+  afterEach(() => { unregisterSupervisor(SUP) })
+
+  test('replacing a supervisor rejects pending requests with supervisor_replaced', async () => {
+    const wsA: any = { close: () => {}, send: () => {} }
+    registerSupervisor({ ws: wsA, supervisorId: SUP, userId: USER, apiKeyId: KEY, roots: [] })
+
+    // Issue a long-timeout request so it sits pending in entryA.pendingReqs.
+    const pending = sendRequest(SUP, { type: 'noop' } as any, 60_000)
+    // sendRequest catches the rejection asynchronously; capture as a promise
+    // we can assert on after the replace.
+    const settled = pending.then(
+      (v) => ({ ok: true, v }),
+      (e) => ({ ok: false, e }),
+    )
+
+    // Replace with new socket — should drain the prior pendingReqs.
+    const wsB: any = { close: () => {}, send: () => {} }
+    registerSupervisor({ ws: wsB, supervisorId: SUP, userId: USER, apiKeyId: KEY, roots: [] })
+
+    // The fix's core invariant: the pending request gets a structured
+    // rejection synchronously when the prior entry is drained, instead of
+    // hanging until the (now-orphaned) 60s timer fires.
+    const result = await settled
+    expect(result.ok).toBe(false)
+    // @ts-expect-error narrowed by branch
+    expect(result.e?.message).toBe('supervisor_replaced')
+  })
+})

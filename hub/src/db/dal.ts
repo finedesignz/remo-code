@@ -162,26 +162,31 @@ export async function findOrCreateRootlessSession(
 
 // Find existing session by project_dir (reuse) or create a new one.
 // Returns { ...session, created: boolean }
+//
+// Atomic upsert via the partial unique index idx_sessions_user_project_unique
+// (user_id, project_dir) WHERE deleted_at IS NULL AND is_rootless=false. Two
+// concurrent reconnects for the same project_dir converge on ONE row instead
+// of racing into duplicates. We use xmax=0 to detect insert-vs-update so we
+// can return the `created` flag correctly without a re-SELECT.
 export async function findOrCreateAgentSession(
   userId: string,
   projectDir: string,
   tokenHash: string,
   cliKind: 'claude' | 'codex' = 'claude',
 ) {
-  const existing = await findSessionByProjectDir(userId, projectDir);
-  if (existing) {
-    // Update the token hash so the agent gets a fresh token
-    await sql`UPDATE sessions SET token_hash = ${tokenHash}, last_activity = now() WHERE id = ${existing.id}`;
-    return { ...existing, token_hash: tokenHash, created: false };
-  }
-  // Derive a human-readable name from the last path segment
+  // Derive a human-readable name from the last path segment (only used when
+  // the row actually gets inserted; conflicting upserts keep the existing name).
   const name = projectDir.split('/').filter(Boolean).pop() ?? 'session';
   const rows = await sql`
     INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind)
     VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash}, ${cliKind})
-    RETURNING *
+    ON CONFLICT (user_id, project_dir)
+      WHERE deleted_at IS NULL AND is_rootless = false
+      DO UPDATE SET token_hash = EXCLUDED.token_hash, last_activity = now()
+    RETURNING *, (xmax = 0) AS created
   `;
-  return { ...rows[0], created: true };
+  const row = rows[0];
+  return { ...row, created: !!row.created };
 }
 
 // Phase 08: GitHub-keyed session resolution. Wraps the priority-1/2/3
@@ -433,14 +438,16 @@ export async function upsertPendingLocalRepoBatch(
   const userIds = rows.map((r) => r.user_id)
   const hostnames = rows.map((r) => r.hostname)
   const projectDirs = rows.map((r) => r.project_dir)
-  const isGit = rows.map((r) => r.is_git_repo)
+  // postgres.js infers boolean[] params with an OID PG refuses to cast back
+  // to boolean[]; round-trip through text[] ('t'/'f') instead.
+  const isGitTxt = rows.map((r) => (r.is_git_repo ? 't' : 'f'))
   const result = await sql`
     INSERT INTO pending_local_repos (user_id, hostname, project_dir, is_git_repo)
     SELECT
       unnest(${userIds}::uuid[]),
       unnest(${hostnames}::text[]),
       unnest(${projectDirs}::text[]),
-      unnest(${isGit}::boolean[])
+      unnest(${isGitTxt}::text[])::boolean
     ON CONFLICT (user_id, hostname, project_dir) DO UPDATE
       SET last_seen_at = now(),
           is_git_repo = EXCLUDED.is_git_repo
@@ -489,7 +496,7 @@ export async function listMessages(sessionId: string, userId: string) {
     FROM messages m
     JOIN sessions s ON s.id = m.session_id
     WHERE m.session_id = ${sessionId} AND s.user_id = ${userId}
-    ORDER BY m.created_at ASC
+    ORDER BY m.created_at ASC, m.seq ASC
   `;
 }
 
@@ -1021,6 +1028,48 @@ export async function recordOpenIssueForHash(
   `;
 }
 
+// Placeholder write BEFORE the octokit.issues.create call narrows the race
+// window: two concurrent failure webhooks for the same (repo, app, deploy)
+// can't both win the gate. Returns true if WE claimed the row (other caller
+// loses); false if someone else already had a row. Issue_number 0 is a
+// sentinel that updateOpenIssuePlaceholder overwrites on success or
+// deleteOpenIssuePlaceholder removes on terminal failure.
+export async function placeOpenIssuePlaceholder(
+  userId: string,
+  hash: string,
+  repoFullName: string,
+): Promise<boolean> {
+  const rows = await sql`
+    INSERT INTO github_issue_idempotency (user_id, hash, repo_full_name, issue_number)
+    VALUES (${userId}, ${hash}, ${repoFullName}, 0)
+    ON CONFLICT (user_id, hash) DO NOTHING
+    RETURNING user_id
+  `;
+  return rows.length > 0;
+}
+
+export async function updateOpenIssuePlaceholder(
+  userId: string,
+  hash: string,
+  issueNumber: number,
+): Promise<void> {
+  await sql`
+    UPDATE github_issue_idempotency
+    SET issue_number = ${issueNumber}
+    WHERE user_id = ${userId} AND hash = ${hash}
+  `;
+}
+
+export async function deleteOpenIssuePlaceholder(
+  userId: string,
+  hash: string,
+): Promise<void> {
+  await sql`
+    DELETE FROM github_issue_idempotency
+    WHERE user_id = ${userId} AND hash = ${hash} AND issue_number = 0
+  `;
+}
+
 // ── Phase 07: Titanium auth (additive) ────────────────────────────────────────
 //
 // Helpers for linking remo-code `users` rows to Titanium Licensing (Keygen)
@@ -1206,6 +1255,47 @@ export async function deleteAuthSession(token: string): Promise<void> {
 export async function purgeExpiredAuthSessions(): Promise<number> {
   const rows = await sql`DELETE FROM auth_sessions WHERE expires_at <= now() RETURNING id`;
   return rows.length;
+}
+
+// ── Phase 12.1: mobile auth handoff tokens (one-time, single-use, 60s TTL) ──
+
+const HANDOFF_TTL_SECONDS = 60;
+
+export async function createAuthHandoffToken(
+  userId: string,
+  opts: { purpose?: string; ttlSeconds?: number } = {},
+): Promise<{ token: string; expiresAt: Date }> {
+  const token = 'mh_' + randomBytes(32).toString('base64url');
+  const tokenHash = hashSessionToken(token);
+  const ttl = Math.max(1, Math.floor(opts.ttlSeconds ?? HANDOFF_TTL_SECONDS));
+  const purpose = opts.purpose ?? 'mobile_handoff';
+  const rows = await sql<{ expires_at: Date }[]>`
+    INSERT INTO auth_handoff_tokens (user_id, token_hash, purpose, expires_at)
+    VALUES (${userId}, ${tokenHash}, ${purpose}, now() + (${String(ttl)} || ' seconds')::interval)
+    RETURNING expires_at
+  `;
+  return { token, expiresAt: rows[0].expires_at };
+}
+
+// Atomic single-use claim. Returns { userId } when the token existed, was
+// unexpired, and was unconsumed; returns null otherwise. The UPDATE …
+// RETURNING with `consumed_at IS NULL` guarantees that a second concurrent
+// caller cannot also succeed.
+export async function consumeAuthHandoffToken(
+  token: string,
+): Promise<{ userId: string; purpose: string } | null> {
+  if (!token) return null;
+  const tokenHash = hashSessionToken(token);
+  const rows = await sql<{ user_id: string; purpose: string }[]>`
+    UPDATE auth_handoff_tokens
+       SET consumed_at = now()
+     WHERE token_hash = ${tokenHash}
+       AND consumed_at IS NULL
+       AND expires_at > now()
+    RETURNING user_id, purpose
+  `;
+  if (rows.length === 0) return null;
+  return { userId: rows[0].user_id, purpose: rows[0].purpose };
 }
 
 // ── Audit log ────────────────────────────────────────────────────────────────

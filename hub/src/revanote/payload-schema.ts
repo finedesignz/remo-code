@@ -38,6 +38,14 @@ export const RevanotePayload = z.object({
   // Optional clock sync field (epoch seconds). When present we enforce a
   // 5-min skew window (mirrors the legacy Coolify HMAC route).
   timestamp: z.number().optional(),
+  // Phase 5 batched-secure-dispatch additions (revanote ships these when
+  // batched; absent on single-fire dispatch). All optional, all persisted to
+  // `payload_raw` so existing code paths still work without touching schema.
+  batch_id: z.string().uuid().optional(),
+  batch_size: z.number().int().positive().optional(),
+  batch_index: z.number().int().min(0).optional(),
+  repo_slug: z.string().min(1).max(512).optional(),
+  repo_kind: z.enum(['github', 'local_path']).optional(),
 }).passthrough()
 
 export type RevanotePayload = z.infer<typeof RevanotePayload>
