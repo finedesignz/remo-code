@@ -30,22 +30,32 @@ const state: {
 
 // ── Mocks ─────────────────────────────────────────────────────────────────
 
+// Load the REAL modules first via cache-busted query so we can spread the
+// real exports and override only what the bridge tests need. Without this,
+// mock.module() replaces the entire module — and Bun's mock.module is
+// process-wide, so other test files that import unmocked exports (e.g.
+// telegram-webhook.test.ts → commands.ts → findUserByLinkCode) break.
+const _realDal = await import(`../src/db/dal.ts?nomock=${Date.now()}`);
+const _realClient = await import(`../src/telegram/client.ts?nomock=${Date.now()}`);
+
 mock.module("../src/db/dal.ts", () => ({
+  ..._realDal,
   getUsersWithTelegramDefaultSession: async (sessionId: string) => {
     return state.sessionUsers.get(sessionId) ?? [];
   },
 }));
 
 mock.module("../src/telegram/client.ts", () => ({
+  ..._realClient,
+  // Only override the network-touching helper. Keep real `escapeMarkdownV2`
+  // and `splitForTelegram` (Bun mock.module is process-wide; stubbing them
+  // here used to leak into telegram-client.test.ts).
   sendMessage: async (chatId: number | string, text: string) => {
     if (state.sendImpl) {
       await state.sendImpl(chatId, text);
     }
     state.sends.push({ chat: chatId, text, at: Date.now() });
   },
-  escapeMarkdownV2: (s: string) => s,
-  splitForTelegram: (s: string) => [s],
-  TelegramClientError: class extends Error {},
 }));
 
 // ── Imports (must come AFTER mock.module) ──────────────────────────────────
@@ -76,6 +86,7 @@ afterEach(() => {
   _stopBridge();
   _resetEvents();
 });
+
 
 // Yield a few microtask + macrotask ticks so the bridge's async listener,
 // DAL lookup, and per-chat queue have time to drain.
@@ -207,9 +218,26 @@ describe("Telegram outbound bridge", () => {
 
 describe("Telegram outbound bridge — disabled when token unset", () => {
   test("no listener registered when botToken is empty", async () => {
-    mock.module("../src/config.ts", () => ({
-      config: { telegram: { botToken: "", webhookSecret: "", botUsername: "" } },
-    }));
+    // Mutate the live config singleton instead of mock.module(config) —
+    // mock.module is process-wide and can't safely be unset, which leaks
+    // an empty botToken into other test files (notably
+    // telegram-webhook.test.ts which expects a non-empty token).
+    // Use defineProperty so this works even if some other test has frozen
+    // the config object.
+    const { config } = await import("../src/config.ts");
+    const _origBotToken = config.telegram.botToken;
+    Object.defineProperty(config.telegram, "botToken", {
+      value: "",
+      writable: true,
+      configurable: true,
+    });
+    const _restoreConfig = () => {
+      Object.defineProperty(config.telegram, "botToken", {
+        value: _origBotToken,
+        writable: true,
+        configurable: true,
+      });
+    };
 
     // Re-import a fresh copy of the bridge so it sees the empty token.
     delete require.cache?.[require.resolve?.("../src/telegram/bridge.ts") ?? ""];
@@ -226,5 +254,6 @@ describe("Telegram outbound bridge — disabled when token unset", () => {
     await settle();
 
     expect(state.sends).toHaveLength(0);
+    _restoreConfig();
   });
 });
