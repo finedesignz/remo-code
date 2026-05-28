@@ -138,6 +138,10 @@ The supervisor (`supervisor/src/index.ts`, compiled into the Tauri sidecar binar
 
 **Session resume:** The supervisor reuses existing sessions by matching `project_dir`. Restarting the supervisor reconnects to the same sessions with full message history.
 
+**Session inventory push (supervisor ≥0.5.7):** the supervisor sends `{type:'session_inventory', sessions:[…]}` to the hub every 10s (and once on connect). Each entry is one live runner — `session_id`, `cli_kind`, `project_dir`, `pid`, `started_at`, `last_activity_at`, `status` (`spawning`|`running`|`idle`|`stopping`). The hub stores this in-memory keyed by `supervisor_id` (`hub/src/ws/supervisor-registry.ts`) and folds it into `GET /api/sessions`'s `active` flag so the UI sidebar reflects supervisor-truth even when the per-bridge `sessions.status` lags. On change the hub broadcasts `{type:'session_inventory_changed', supervisor_id, changed_session_ids, scanned_at}` to the user's connected web clients. Pre-0.5.7 supervisors don't send this — the UI falls back to the DB status column.
+
+**Idle teardown (hub-side):** the hub maintains a per-session subscriber count from `/ws/client` `subscribe`/`unsubscribe`/close events (`hub/src/ws/idle-teardown.ts`). When the count drops to 0, a `REMO_SESSION_IDLE_GRACE_SECONDS` timer starts; if no new subscriber arrives, the hub sends `{type:'shutdown', reason:'idle_no_subscribers'}` to the agent channel, which causes the SessionBridge to call `runner.stopGracefully()` (SIGINT → SIGKILL after 3s). A new subscribe inside the window cancels the timer. Default grace 300s — covers refreshes and grid-view tab swaps.
+
 **Config:** stored in `%LOCALAPPDATA%\remo-code-supervisor\config.json` on Windows (managed by the Tauri first-run wizard).
 
 ## Database
@@ -187,6 +191,9 @@ All WS messages validated with Zod schemas in `hub/src/ws/protocol.ts` and `hub/
 - `COOLIFY_TOKEN` — required only if `log_check` tasks are configured.
 - `E4A_API_KEY`, `E4A_BASE_URL`, `E4A_INBOX_ID` — required only if `notify_email` post-run actions are configured. Email notifications always use emails4agents per the global rule.
 - `REMO_E2E_DB_URL` — disposable Postgres URL for the e2e test in `hub/test/scheduled-tasks.e2e.test.ts` (tests skip if unset).
+
+**Session lifecycle (optional):**
+- `REMO_SESSION_IDLE_GRACE_SECONDS` — seconds the hub waits after the last web client unsubscribes from a session before sending `shutdown` to the owning agent (kills the Claude/Codex runner with `idle_no_subscribers`). Default `300` (5 min). Set to `0` to disable idle teardown entirely. A new `subscribe` inside the grace window cancels the pending teardown.
 
 ## Scheduled Tasks
 
