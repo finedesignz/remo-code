@@ -3,6 +3,23 @@ import type { HubToSupervisor } from './supervisor-protocol'
 import { broadcastToUser } from './registry'
 import { setSupervisorState, touchSupervisor, listSupervisorsForUser } from '../db/supervisor-dal'
 
+/**
+ * Bug A (2026-05-28) — supervisor's live runner set, pushed every ~10s via
+ * the `session_inventory` agent-protocol message. Memory-only by design;
+ * cleared on supervisor disconnect. `GET /api/sessions` folds this into each
+ * row's `active` flag so the UI list shows sessions the supervisor is
+ * actually hosting, independent of the per-bridge `sessions.status` column.
+ */
+export interface SessionInventoryEntry {
+  session_id: string
+  cli_kind: 'claude' | 'codex'
+  project_dir: string
+  pid: number | null
+  started_at: string
+  last_activity_at: string | null
+  status: 'spawning' | 'running' | 'idle' | 'stopping'
+}
+
 interface SupervisorEntry {
   ws: ServerWebSocket<any>
   supervisorId: string
@@ -13,6 +30,10 @@ interface SupervisorEntry {
   /** Phase 08 §15 — needed by the `supervisor.repo_inventory` handler when
    * upserting `pending_local_repos(user_id, hostname, project_dir)` rows. */
   hostname: string
+  /** Bug A — most recent session_inventory push. Empty when supervisor
+   *  hasn't sent one yet (pre-0.5.7 supervisor). */
+  sessionInventory: SessionInventoryEntry[]
+  sessionInventoryAt: string | null
   pendingReqs: Map<string, { resolve: (v: any) => void; reject: (e: any) => void; timer: ReturnType<typeof setTimeout> }>
 }
 
@@ -147,6 +168,8 @@ export function registerSupervisor(args: {
     state: 'idle',
     roots: args.roots,
     hostname: args.hostname ?? '',
+    sessionInventory: [],
+    sessionInventoryAt: null,
     pendingReqs: new Map(),
   }
   supervisors.set(args.supervisorId, entry)
@@ -288,6 +311,63 @@ export async function updateSupervisorState(supervisorId: string, state: string,
 
 export async function heartbeatSupervisor(supervisorId: string) {
   await touchSupervisor(supervisorId)
+}
+
+// ── Bug A (2026-05-28) — session_inventory storage + lookup ───────────────────
+
+/**
+ * Replace the cached session_inventory for a supervisor. Returns the set of
+ * session_ids that changed (added, removed, or status-transitioned) vs. the
+ * previous snapshot so callers can emit a targeted `session_inventory_changed`
+ * broadcast instead of fanning every push at every subscriber.
+ */
+export function setSupervisorSessionInventory(
+  supervisorId: string,
+  sessions: SessionInventoryEntry[],
+  scannedAt: string,
+): { changedSessionIds: string[]; userId: string | null } {
+  const entry = supervisors.get(supervisorId)
+  if (!entry) return { changedSessionIds: [], userId: null }
+  const prev = new Map(entry.sessionInventory.map((s) => [s.session_id, s] as const))
+  const next = new Map(sessions.map((s) => [s.session_id, s] as const))
+  const changed = new Set<string>()
+  for (const [sid, s] of next) {
+    const before = prev.get(sid)
+    if (!before || before.status !== s.status || before.pid !== s.pid) changed.add(sid)
+  }
+  for (const sid of prev.keys()) {
+    if (!next.has(sid)) changed.add(sid)
+  }
+  entry.sessionInventory = sessions
+  entry.sessionInventoryAt = scannedAt
+  return { changedSessionIds: Array.from(changed), userId: entry.userId }
+}
+
+/**
+ * Set of session_ids currently reported as live by any of the user's online
+ * supervisors. Used by `GET /api/sessions` to mark rows `active=true`.
+ */
+export function getActiveSessionIdsForUser(userId: string): Set<string> {
+  const out = new Set<string>()
+  for (const [, e] of supervisors) {
+    if (e.userId !== userId) continue
+    for (const s of e.sessionInventory) out.add(s.session_id)
+  }
+  return out
+}
+
+/**
+ * Look up which supervisor (if any) is currently hosting a given session id.
+ * Used by the idle-teardown path to route `session.stop`/`shutdown` to the
+ * owning supervisor when subscriber count drops to zero.
+ */
+export function findSupervisorForSession(sessionId: string): { supervisorId: string; userId: string } | null {
+  for (const [supId, e] of supervisors) {
+    if (e.sessionInventory.some((s) => s.session_id === sessionId)) {
+      return { supervisorId: supId, userId: e.userId }
+    }
+  }
+  return null
 }
 
 export { listSupervisorsForUser }

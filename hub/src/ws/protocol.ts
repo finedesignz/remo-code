@@ -302,6 +302,11 @@ export type HubToClient =
   // its capacity chip without polling.
   | { type: 'supervisor_capacity_changed'; supervisor_id: string;
       running: number; cap: number }
+  // Bug A (2026-05-28): supervisor pushed a fresh session_inventory and at
+  // least one session entered/left/transitioned. Web clients refresh the
+  // sidebar's active flag without polling.
+  | { type: 'session_inventory_changed'; supervisor_id: string;
+      changed_session_ids: string[]; scanned_at: string }
   | { type: 'error_received'; error_id: string; project_id: string;
       fingerprint: string; received_at: string }
   | { type: 'error_dispatched'; error_id: string; project_id: string;

@@ -143,6 +143,74 @@ export class ProcessManager {
       .map((r) => ({ runId: r.spec.runId, repoPath: r.spec.repoPath, state: r.state, pid: r.pid }))
   }
 
+  /**
+   * Bug A (2026-05-28) — snapshot for the supervisor's `session_inventory`
+   * push. One entry per live runner. The hub keys these by `session_id` which,
+   * for in-process bridges, equals the run id (the SessionBridge auths against
+   * the hub with `project_dir = repoPath` and the hub returns a session row).
+   * For pre-0.5.7 callers the session_id is unknown until the bridge gets
+   * `auth_ok`; we surface the run id and let the hub correlate via the
+   * SessionBridge layer (see hub-client `pushSessionInventory`).
+   */
+  inventorySnapshot(): Array<{
+    runId: string
+    sessionId: string | null
+    cliKind: 'claude' | 'codex'
+    projectDir: string
+    pid: number | null
+    startedAt: string
+    lastActivityAt: string | null
+    status: 'spawning' | 'running' | 'idle' | 'stopping'
+  }> {
+    const out: Array<{
+      runId: string
+      sessionId: string | null
+      cliKind: 'claude' | 'codex'
+      projectDir: string
+      pid: number | null
+      startedAt: string
+      lastActivityAt: string | null
+      status: 'spawning' | 'running' | 'idle' | 'stopping'
+    }> = []
+    for (const r of this.runs.values()) {
+      if (r.state === 'stopped' || r.state === 'idle') continue
+      const status: 'spawning' | 'running' | 'idle' | 'stopping' =
+        r.state === 'starting' || r.state === 'crashed' ? 'spawning'
+        : r.state === 'running' ? 'running'
+        : 'stopping'
+      out.push({
+        runId: r.spec.runId,
+        sessionId: (r as any).sessionId ?? null,
+        cliKind: 'claude',
+        projectDir: r.spec.repoPath,
+        pid: r.pid,
+        startedAt: (r as any).startedAt ?? new Date().toISOString(),
+        lastActivityAt: (r as any).lastActivityAt ?? null,
+        status,
+      })
+    }
+    return out
+  }
+
+  /**
+   * Bug A — let the bridge report the session_id (received from the hub on
+   * auth_ok) back so future inventory pushes carry it.
+   */
+  noteSessionIdForRun(runId: string, sessionId: string) {
+    const r = this.runs.get(runId)
+    if (!r) return
+    ;(r as any).sessionId = sessionId
+  }
+
+  /**
+   * Bug A — bump last_activity_at when the bridge sees an outbound event.
+   */
+  noteActivityForRun(runId: string) {
+    const r = this.runs.get(runId)
+    if (!r) return
+    ;(r as any).lastActivityAt = new Date().toISOString()
+  }
+
   async start(spec: RunSpec): Promise<StartRejection | null> {
     if (this.runs.has(spec.runId)) {
       this.cb.onLog('warn', `Refusing duplicate start for run_id`, spec.runId)
@@ -210,6 +278,9 @@ export class ProcessManager {
       restartTimer: null,
       userStop: false,
     }
+    ;(run as any).startedAt = new Date().toISOString()
+    ;(run as any).lastActivityAt = null
+    ;(run as any).sessionId = null
     this.runs.set(spec.runId, run)
     this.spawn(run)
     return null
@@ -234,6 +305,8 @@ export class ProcessManager {
         run.pid = info.pid || null
         this.setState(run, 'running', { runId: spec.runId, repoPath: spec.repoPath, pid: run.pid ?? undefined })
       },
+      onSessionId: (sessionId) => this.noteSessionIdForRun(spec.runId, sessionId),
+      onActivity: () => this.noteActivityForRun(spec.runId),
       onExit: ({ code, reason }) => {
         if (!this.runs.has(spec.runId)) return // already finalized
         this.cb.onLog(code === 0 ? 'info' : 'error', `bridge exited code=${code} reason=${reason}`, spec.runId)

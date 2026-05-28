@@ -12,8 +12,10 @@ import {
   registerClient, unregisterClient, subscribeClient,
   getChannel, unregisterChannel, broadcastToSubscribers,
   broadcastErrorEvent,
+  countSubscribers,
   type ClientEntry,
 } from './registry'
+import { noteSubscriberCount } from './idle-teardown.ts'
 
 // Re-export so error-capture modules can `import { broadcastErrorEvent }
 // from '../ws/client'` per the W3 contract.
@@ -259,7 +261,11 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     }
 
     if (ids.length === 0) {
+      // Bug B — capture pre-subscribe set so we can recompute counts for
+      // sessions this client is dropping.
+      const prevIds = Array.from(data.clientEntry.subscriptions)
       subscribeClient(data.clientEntry, [])
+      for (const sid of prevIds) noteSubscriberCount(sid, countSubscribers(sid))
       return
     }
 
@@ -277,7 +283,13 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       return
     }
 
+    // Bug B — recompute subscriber counts for sessions affected by this swap.
+    // Old IDs may now have one fewer; new IDs gain one. Cancel pending
+    // teardowns for the new ids; schedule for dropped ones if count hit 0.
+    const prevIds = new Set(data.clientEntry.subscriptions)
     subscribeClient(data.clientEntry, ids)
+    const affected = new Set<string>([...prevIds, ...ids])
+    for (const sid of affected) noteSubscriberCount(sid, countSubscribers(sid))
     return
   }
 
@@ -486,6 +498,11 @@ export function handleClientClose(ws: ServerWebSocket<ClientWsData>) {
   console.log(`[client] closed user=${ws.data.userId}`)
   if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
   if (ws.data.clientEntry) {
+    // Bug B — capture the sessions this connection was subscribed to BEFORE
+    // unregistering, then recompute counts for each so idle-teardown timers
+    // start for any session that lost its last subscriber.
+    const dropped = Array.from(ws.data.clientEntry.subscriptions)
     unregisterClient(ws.data.clientEntry)
+    for (const sid of dropped) noteSubscriberCount(sid, countSubscribers(sid))
   }
 }

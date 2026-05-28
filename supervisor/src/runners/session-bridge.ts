@@ -26,6 +26,11 @@ export interface SessionBridgeCallbacks {
   onExit: (info: { code: number | null; reason: string }) => void
   /** Runner spawned successfully and reported its pid. */
   onSpawned: (info: { pid: number }) => void
+  /** Bug A — hub returned a session_id after auth; let ProcessManager stamp
+   *  it onto the run so the next session_inventory push carries it. */
+  onSessionId?: (sessionId: string) => void
+  /** Bug A — outbound runner event observed; bump last_activity_at. */
+  onActivity?: () => void
 }
 
 export interface SessionBridgeOptions {
@@ -182,6 +187,7 @@ export class SessionBridge {
     if (msg.type === 'auth_ok') {
       this.sessionId = msg.session_id
       this.cb.onLog('info', `agent-bridge: authenticated session=${this.sessionId.slice(0, 8)}`)
+      try { this.cb.onSessionId?.(this.sessionId) } catch {}
       this.ensureRunner()
       return
     }
@@ -274,6 +280,7 @@ export class SessionBridge {
     }
     if (!this.sessionId) return
     // Pass-through event types share the session_id stamping shape.
+    try { this.cb.onActivity?.() } catch {}
     const payload: any = { ...e, session_id: this.sessionId }
     this.sendToHub(payload)
   }
