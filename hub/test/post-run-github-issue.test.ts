@@ -28,6 +28,8 @@ mock.module('../src/db/dal.ts', () => ({
       idempotencyStore.set(key, { issueNumber, repo, createdAt: Date.now() })
     }
   },
+  // REVIEW HI-06: placeholder-claim race-prevention. Mirrors live DAL
+  // (user_id, hash) ON CONFLICT DO NOTHING semantics.
   placeOpenIssuePlaceholder: async (userId: string, hash: string, repo: string) => {
     const key = `${userId}|${hash}`
     if (idempotencyStore.has(key)) return false
@@ -37,7 +39,7 @@ mock.module('../src/db/dal.ts', () => ({
   updateOpenIssuePlaceholder: async (userId: string, hash: string, issueNumber: number) => {
     const key = `${userId}|${hash}`
     const row = idempotencyStore.get(key)
-    if (row) idempotencyStore.set(key, { ...row, issueNumber })
+    if (row) row.issueNumber = issueNumber
   },
   deleteOpenIssuePlaceholder: async (userId: string, hash: string) => {
     const key = `${userId}|${hash}`

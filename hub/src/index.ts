@@ -30,6 +30,8 @@ import { telegram as telegramApi } from './api/telegram'
 import { revanoteMappings } from './api/revanote-mappings'
 import { revanoteAnnotations } from './api/revanote-annotations'
 import { webhooksTitanium } from './api/webhooks-titanium'
+import { tasks as tasksApi } from './api/tasks'
+import { usage as usageApi } from './api/usage'
 import { wellKnown } from './api/well-known'
 import { orchestrator as orchestratorApi } from './api/orchestrator'
 import { requireActiveLicense } from './license-gate'
@@ -255,6 +257,23 @@ app.use('/api/error-projects', async (c, next) => isMutating(c) ? userMutationLi
 app.use('/api/error-projects/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/account/coolify-webhook-secret/rotate', userMutationLimit)
 app.use('/api/account/revanote-webhook-secret/rotate', userMutationLimit)
+
+// REVIEW HI-01/02/03: step-up auth on Phase 12 sensitive endpoints.
+// Prompts (claude_global_md / codex_agents_md / codex_config_toml) and
+// supervisor roots both reach the supervisor filesystem; profile mutates
+// user identity. Stolen-cookie attacker must re-auth before driving these.
+app.use('/api/users/me/prompts', async (c, next) =>
+  isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/users/me/profile', async (c, next) =>
+  isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/supervisors/:id/roots', async (c, next) =>
+  isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/users/me/prompts', async (c, next) =>
+  isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/users/me/profile', async (c, next) =>
+  isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/supervisors/:id/roots', async (c, next) =>
+  isMutating(c) ? userMutationLimit(c, next) : next())
 // Orchestrator: mutating endpoints require fresh login (15-min step-up).
 app.use('/api/orchestrator', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
 app.use('/api/orchestrator/*', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
@@ -288,6 +307,8 @@ app.route('/api/commands', commandsApi)
 app.route('/api/transcribe', transcribeApi)
 app.route('/api/scheduled-tasks', scheduledTasksApi)
 app.route('/api/scheduled-task-runs', scheduledTaskRunsApi)
+app.route('/api/tasks', tasksApi)
+app.route('/api/usage', usageApi)
 app.route('/api/error-projects', errorProjectsRouter)
 app.route('/api/errors', errorsRouter)
 app.route('/api/error-runs', errorRunsRouter)
@@ -348,13 +369,14 @@ if (config.titaniumBypass) {
 
 // Start Bun server with WebSocket upgrade handling.
 //
-// idleTimeout: Bun's default is 10s, which kills any HTTP request whose
-// upstream WS round-trip takes longer (notably POST /api/supervisors/:id/scan,
-// which fans out to the supervisor over WS with a 20s sendRequest budget, plus
-// /clone at 300s). Hitting Bun's 10s before the WS reply arrives terminates
-// the HTTP connection mid-flight, which Coolify's Traefik in turn surfaces as
-// 502 Bad Gateway. Bump to 305s (5s above the longest sendRequest budget) so
-// HTTP keep-alives never expire before the WS response can be serialized.
+// REVIEW BL-06: idleTimeout — Bun's default is 10s, which kills any HTTP
+// request whose upstream WS round-trip takes longer (notably
+// POST /api/supervisors/:id/scan, which fans out to the supervisor over WS
+// with a 20s sendRequest budget, plus /clone at 300s). Hitting Bun's 10s
+// before the WS reply arrives terminates the HTTP connection mid-flight,
+// which Coolify's Traefik in turn surfaces as 502 Bad Gateway. Bump to 255s
+// (5s above the longest sendRequest budget) so HTTP keep-alives never
+// expire before the WS response can be serialized.
 const server = Bun.serve({
   port: config.port,
   idleTimeout: 255,

@@ -14,6 +14,8 @@ export const ClientAuth = z.object({
 export const ClientSendMessage = z.object({
   type: z.literal('send_message'),
   session_id: z.string().min(1).max(256),
+  // REVIEW HI-07: .trim() restored so whitespace-only content is rejected
+  // instead of persisted + forwarded to the runner.
   content: z.string().trim().min(1).max(1_000_000),
   id: z.string().uuid(),
   images: z.array(z.object({
@@ -39,6 +41,9 @@ export const ClientSubscribe = z.object({
   session_id: z.string().min(1).max(256).optional(),
   session_ids: z.array(z.string().min(1)).max(SUBSCRIBE_MAX).optional(),
 }).refine(
+  // PHASE-12 NOTE: main intentionally allows empty session_ids array as
+  // a clear-subscriptions intent (test: "accepts empty session_ids"). HEAD's
+  // length>0 strictness was reverted to preserve that contract.
   (d) => !!d.session_id || Array.isArray(d.session_ids),
   { message: 'subscribe requires session_id or session_ids' },
 )
@@ -97,6 +102,8 @@ export const ScheduledRunFinished = z.object({
   type: z.literal('scheduled_run_finished'),
   run_id: z.string().min(1),
   task_id: z.string().min(1).nullable().optional(),
+  // REVIEW HI-08: re-add 'skipped_quota' — dispatcher.enforceCostCap still
+  // emits it; dropping it would cause silent zod parse-fail at broadcast time.
   status: z.enum(['pending', 'in_flight', 'running', 'success', 'failed', 'skipped', 'skipped_quota', 'cancelled']),
   cost_usd: z.number().nullable().optional(),
   duration_ms: z.number().nullable().optional(),

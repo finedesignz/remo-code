@@ -475,7 +475,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               </>
             )}
             {githubConfigured && installations.length === 0 && (
-              <button onClick={connectGitHub} className="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white">Connect GitHub</button>
+              <button onClick={connectGitHub} className="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded-lg text-[var(--text-on-accent)]">Connect GitHub</button>
             )}
             {!githubConfigured && (
               <span className="text-xs text-amber-400">GitHub App not configured on hub</span>
@@ -844,7 +844,7 @@ function StartDialog(props: StartDialogProps) {
         </div>
         <div className="mt-5 flex justify-end gap-2">
           <button onClick={onClose} disabled={busy} className="px-4 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 rounded-lg">Cancel</button>
-          <button onClick={handleStart} disabled={busy || (!!localRepo?.dirty && !allowDirty)} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-white">
+          <button onClick={handleStart} disabled={busy || (!!localRepo?.dirty && !allowDirty)} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-[var(--text-on-accent)]">
             {busy ? 'Starting…' : 'Start session'}
           </button>
         </div>

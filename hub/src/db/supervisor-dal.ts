@@ -170,6 +170,24 @@ export async function getSupervisor(supervisorId: string, userId: string) {
   return rows[0] ?? null
 }
 
+// Phase 12 W2 — update supervisor roots from the web UI. Caller MUST have
+// already verified ownership via getSupervisor(). Returns the updated row or
+// null if the supervisor disappeared mid-request.
+export async function setSupervisorRoots(args: {
+  supervisorId: string
+  userId: string
+  roots: string[]
+}) {
+  const rows = await sql`
+    UPDATE supervisors
+    SET roots = ${args.roots}::text[],
+        last_seen_at = now()
+    WHERE id = ${args.supervisorId} AND user_id = ${args.userId}
+    RETURNING id, user_id, hostname, version, os, roots, state, last_seen_at
+  `
+  return rows[0] ?? null
+}
+
 // ── Session runs ──────────────────────────────────────────────────────────────
 
 export async function createRun(args: {

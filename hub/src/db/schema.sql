@@ -788,6 +788,29 @@ CREATE TABLE IF NOT EXISTS revanote_webhook_attempts (
 CREATE INDEX IF NOT EXISTS idx_revanote_webhook_attempts_user_recv
   ON revanote_webhook_attempts(user_id, received_at DESC);
 
+-- ── Phase 12 (Wave 2): UI restructure backend deltas ─────────────────────────
+-- All additive, idempotent. Consumed by the new Home/Tasks/Settings nav.
+--
+-- auto_nudge_idle_sessions: per-user preference to auto-nudge idle Claude
+--   sessions (consumed by Prompts tab). False default keeps existing behavior.
+-- notifications: per-user notifications config blob (web push, email digest,
+--   per-channel toggles). Empty object default — UI fills schema lazily.
+--
+-- NOTE: supervisors.roots, users.timezone, users.avatar_url, users.display_name,
+-- users.claude_global_md / codex_agents_md / codex_config_toml all exist
+-- already (earlier phases). This block only adds what was missing.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_nudge_idle_sessions BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- Partial index for the Tasks → Activity "in-flight" filter chip.
+CREATE INDEX IF NOT EXISTS idx_scheduled_runs_in_flight
+  ON scheduled_task_runs(user_id, started_at DESC)
+  WHERE finished_at IS NULL AND status IN ('running','pending','in_flight');
+
+-- ── TRIAGE Bundle 6: Postgres race + ordering hygiene ────────────────────────
+-- Restored per REVIEW.md BL-04 + BL-05 (Wave 5 over-reverted these alongside
+-- the orchestrator removal — they are unrelated to the orchestrator).
+--
 -- ── Phase 12: Telegram bridge ────────────────────────────────────────────────
 -- Additive columns on users — link state for the hub-wide Telegram bot.
 -- chat_id is BIGINT (Telegram chat ids exceed 32-bit). UNIQUE enforces 1
@@ -835,6 +858,9 @@ CREATE INDEX IF NOT EXISTS idx_auth_handoff_tokens_hash
 CREATE INDEX IF NOT EXISTS idx_auth_handoff_tokens_user
   ON auth_handoff_tokens(user_id);
 -- ── TRIAGE Bundle 6: Postgres race + ordering hygiene ────────────────────────
+-- Restored per REVIEW.md BL-04 + BL-05 (Wave 5 over-reverted these alongside
+-- the orchestrator removal — they are unrelated to the orchestrator).
+--
 -- Partial unique index on (user_id, project_dir) for non-rootless, live rows.
 -- Backs the atomic ON CONFLICT in findOrCreateAgentSession (dal.ts) so two
 -- concurrent agent reconnects for the same project_dir converge on ONE row

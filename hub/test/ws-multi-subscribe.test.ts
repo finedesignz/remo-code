@@ -51,7 +51,10 @@ describe('ClientSubscribe — overload', () => {
     expect(r.success).toBe(true)
   })
 
-  test('accepts empty session_ids (clears subscriptions)', () => {
+  test('accepts empty session_ids (clear-subscriptions intent, main contract)', () => {
+    // PHASE-12 NOTE: main #109 deliberately accepts empty array as a
+    // clear-subscriptions intent. The REVIEW ME-01 stricter check was
+    // reverted to preserve that contract.
     const r = ClientSubscribe.safeParse({ type: 'subscribe', session_ids: [] })
     expect(r.success).toBe(true)
   })

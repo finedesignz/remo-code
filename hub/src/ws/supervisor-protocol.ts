@@ -225,11 +225,26 @@ export const RepoCreateFailed = z.object({
 })
 
 // (Re-export the union additions; existing SupervisorInbound stays exported above.)
+/**
+ * Phase 12 W2 — supervisor.set_roots ack from supervisor → hub.
+ * The hub sends a `set_roots` directive (see HubToSupervisor below) and
+ * supervisor replies with this ack carrying the actually-applied roots list
+ * (after dedupe/normalize on its side) and a re-scan trigger result.
+ */
+export const SetRootsAck = z.object({
+  type: z.literal('supervisor.set_roots_ack'),
+  req_id: z.string(),
+  ok: z.boolean(),
+  applied_roots: z.array(z.string()).max(50).optional(),
+  error: z.string().max(2000).optional(),
+})
+
 export const SupervisorInboundV2 = [
   ...SupervisorInbound,
   SessionLaunchFailed,
   RepoCreateProgress,
   RepoCreateFailed,
+  SetRootsAck,
 ]
 
 // -- Hub -> Supervisor (constructed by hub, not validated) --
@@ -273,3 +288,7 @@ export type HubToSupervisor =
   // writes supervisor.json (no BOM), and reconnects with the new key. Sent
   // only to supervisor sockets owned by the same user as the rotated key.
   | { type: 'key_rotated'; new_api_key: string; key_id: string }
+  // Phase 12 W2 — push updated root folder list from the web UI to the
+  // running supervisor. Supervisor writes supervisor.json (no BOM via
+  // Bun.write/native UTF-8 writeFileSync), re-scans, then emits set_roots_ack.
+  | { type: 'supervisor.set_roots'; req_id: string; roots: string[] }

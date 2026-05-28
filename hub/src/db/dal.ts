@@ -163,11 +163,12 @@ export async function findOrCreateRootlessSession(
 // Find existing session by project_dir (reuse) or create a new one.
 // Returns { ...session, created: boolean }
 //
-// Atomic upsert via the partial unique index idx_sessions_user_project_unique
-// (user_id, project_dir) WHERE deleted_at IS NULL AND is_rootless=false. Two
-// concurrent reconnects for the same project_dir converge on ONE row instead
-// of racing into duplicates. We use xmax=0 to detect insert-vs-update so we
-// can return the `created` flag correctly without a re-SELECT.
+// REVIEW BL-04: Atomic upsert via the partial unique index
+// idx_sessions_user_project_unique (user_id, project_dir) WHERE
+// deleted_at IS NULL AND is_rootless=false. Two concurrent reconnects for
+// the same project_dir converge on ONE row instead of racing into
+// duplicates. xmax=0 detects insert-vs-update so we can return the
+// `created` flag correctly without a re-SELECT.
 export async function findOrCreateAgentSession(
   userId: string,
   projectDir: string,
@@ -593,8 +594,253 @@ export async function revokeAllUserCredentials(userId: string): Promise<{ revoke
 // ── Users / Profiles ──────────────────────────────────────────────────────────
 
 export async function getUserById(id: string) {
-  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, created_at, updated_at FROM users WHERE id = ${id}`;
+  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, auto_nudge_idle_sessions, notifications, created_at, updated_at FROM users WHERE id = ${id}`;
   return rows[0] ?? null;
+}
+
+// Phase 12 W2 — preferences / prompts / profile (extended)
+// `auto_nudge_idle_sessions` lives on `users` as its own column (small,
+// frequently-read boolean). `notifications` is a JSONB blob — UI fills schema
+// lazily. `display_name` is the existing column used for the "name" field on
+// the new Profile tab.
+export type UserPromptsPatch = {
+  auto_nudge_idle_sessions?: boolean;
+  claude_global_md?: string | null;
+  codex_agents_md?: string | null;
+  codex_config_toml?: string | null;
+};
+
+export async function updateUserPrompts(userId: string, patch: UserPromptsPatch) {
+  if (patch.auto_nudge_idle_sessions !== undefined) {
+    await sql`UPDATE users SET auto_nudge_idle_sessions = ${patch.auto_nudge_idle_sessions}, updated_at = now() WHERE id = ${userId}`;
+  }
+  if (patch.claude_global_md !== undefined) {
+    await sql`UPDATE users SET claude_global_md = ${patch.claude_global_md ?? null}, updated_at = now() WHERE id = ${userId}`;
+  }
+  if (patch.codex_agents_md !== undefined) {
+    await sql`UPDATE users SET codex_agents_md = ${patch.codex_agents_md ?? null}, updated_at = now() WHERE id = ${userId}`;
+  }
+  if (patch.codex_config_toml !== undefined) {
+    await sql`UPDATE users SET codex_config_toml = ${patch.codex_config_toml ?? null}, updated_at = now() WHERE id = ${userId}`;
+  }
+  // Re-read so caller always sees a coherent post-write snapshot.
+  const rows = await sql<any[]>`
+    SELECT auto_nudge_idle_sessions, claude_global_md, codex_agents_md, codex_config_toml
+    FROM users WHERE id = ${userId}
+  `;
+  return rows[0] ?? null;
+}
+
+export type UserProfilePatch = {
+  display_name?: string | null;
+  avatar_url?: string | null;
+  timezone?: string;
+  notifications?: Record<string, unknown>;
+};
+
+export async function updateUserProfileExt(userId: string, patch: UserProfilePatch) {
+  if (patch.display_name !== undefined) {
+    await sql`UPDATE users SET display_name = ${patch.display_name}, updated_at = now() WHERE id = ${userId}`;
+  }
+  if (patch.avatar_url !== undefined) {
+    await sql`UPDATE users SET avatar_url = ${patch.avatar_url}, updated_at = now() WHERE id = ${userId}`;
+  }
+  if (patch.timezone !== undefined) {
+    await sql`UPDATE users SET timezone = ${patch.timezone}, updated_at = now() WHERE id = ${userId}`;
+  }
+  if (patch.notifications !== undefined) {
+    const json = JSON.stringify(patch.notifications);
+    await sql`UPDATE users SET notifications = ${json}::jsonb, updated_at = now() WHERE id = ${userId}`;
+  }
+  return getUserById(userId);
+}
+
+// Phase 12 W2 — aggregated cost rollup for /api/usage/summary.
+// Computed in the user's IANA timezone. Returns total cost in USD per window.
+export async function sumUserCostWindows(userId: string, timezone: string) {
+  const tz = timezone || 'UTC';
+  const rows = await sql<{ today: string; week: string; month: string }[]>`
+    SELECT
+      COALESCE(SUM(CASE WHEN scheduled_for >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz} THEN cost_usd ELSE 0 END), 0)::text AS today,
+      COALESCE(SUM(CASE WHEN scheduled_for >= date_trunc('week', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz} THEN cost_usd ELSE 0 END), 0)::text AS week,
+      COALESCE(SUM(CASE WHEN scheduled_for >= date_trunc('month', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz} THEN cost_usd ELSE 0 END), 0)::text AS month
+    FROM scheduled_task_runs
+    WHERE user_id = ${userId}
+      AND status IN ('success', 'failed', 'in_flight', 'running')
+  `;
+  const r = rows[0] ?? { today: '0', week: '0', month: '0' };
+  return {
+    today_usd: Number(r.today),
+    week_usd: Number(r.week),
+    month_usd: Number(r.month),
+  };
+}
+
+// Phase 12 W2 — list runs across user's tasks for Tasks → Activity feed.
+// Keyset pagination on (started_at, id) — DESC order. Status filter is
+// optional ('in_progress' is sugar for the in-flight set).
+export async function listUserActivityRuns(args: {
+  userId: string;
+  status?: string;
+  before?: Date;
+  limit?: number;
+}) {
+  const limit = Math.min(Math.max(args.limit ?? 50, 1), 200);
+  const inFlight = new Set(['running', 'pending', 'in_flight']);
+  const status = args.status;
+
+  // Build statement variants — postgres.js tagged template doesn't support
+  // arbitrary identifier interpolation, so we branch.
+  if (status === 'in_progress') {
+    if (args.before) {
+      return sql`
+        SELECT r.*, t.name AS task_name, t.task_type
+        FROM scheduled_task_runs r
+        LEFT JOIN scheduled_tasks t ON t.id = r.task_id
+        WHERE r.user_id = ${args.userId}
+          AND r.status IN ('running','pending','in_flight')
+          AND r.started_at < ${args.before}
+        ORDER BY r.started_at DESC
+        LIMIT ${limit}
+      `;
+    }
+    return sql`
+      SELECT r.*, t.name AS task_name, t.task_type
+      FROM scheduled_task_runs r
+      LEFT JOIN scheduled_tasks t ON t.id = r.task_id
+      WHERE r.user_id = ${args.userId}
+        AND r.status IN ('running','pending','in_flight')
+      ORDER BY r.started_at DESC
+      LIMIT ${limit}
+    `;
+  }
+  if (status === 'completed') {
+    if (args.before) {
+      return sql`
+        SELECT r.*, t.name AS task_name, t.task_type
+        FROM scheduled_task_runs r
+        LEFT JOIN scheduled_tasks t ON t.id = r.task_id
+        WHERE r.user_id = ${args.userId}
+          AND r.status = 'success'
+          AND r.started_at < ${args.before}
+        ORDER BY r.started_at DESC
+        LIMIT ${limit}
+      `;
+    }
+    return sql`
+      SELECT r.*, t.name AS task_name, t.task_type
+      FROM scheduled_task_runs r
+      LEFT JOIN scheduled_tasks t ON t.id = r.task_id
+      WHERE r.user_id = ${args.userId}
+        AND r.status = 'success'
+      ORDER BY r.started_at DESC
+      LIMIT ${limit}
+    `;
+  }
+  if (status === 'failed') {
+    if (args.before) {
+      return sql`
+        SELECT r.*, t.name AS task_name, t.task_type
+        FROM scheduled_task_runs r
+        LEFT JOIN scheduled_tasks t ON t.id = r.task_id
+        WHERE r.user_id = ${args.userId}
+          AND r.status = 'failed'
+          AND r.started_at < ${args.before}
+        ORDER BY r.started_at DESC
+        LIMIT ${limit}
+      `;
+    }
+    return sql`
+      SELECT r.*, t.name AS task_name, t.task_type
+      FROM scheduled_task_runs r
+      LEFT JOIN scheduled_tasks t ON t.id = r.task_id
+      WHERE r.user_id = ${args.userId}
+        AND r.status = 'failed'
+      ORDER BY r.started_at DESC
+      LIMIT ${limit}
+    `;
+  }
+  // No status filter — return all.
+  if (args.before) {
+    return sql`
+      SELECT r.*, t.name AS task_name, t.task_type
+      FROM scheduled_task_runs r
+      LEFT JOIN scheduled_tasks t ON t.id = r.task_id
+      WHERE r.user_id = ${args.userId}
+        AND r.started_at < ${args.before}
+      ORDER BY r.started_at DESC
+      LIMIT ${limit}
+    `;
+  }
+  return sql`
+    SELECT r.*, t.name AS task_name, t.task_type
+    FROM scheduled_task_runs r
+    LEFT JOIN scheduled_tasks t ON t.id = r.task_id
+    WHERE r.user_id = ${args.userId}
+    ORDER BY r.started_at DESC
+    LIMIT ${limit}
+  `;
+}
+
+// Phase 12 W2 — list upcoming tasks ordered by next_fire_at ASC.
+// Used by Tasks → Upcoming tab.
+export async function listUpcomingTasks(args: {
+  userId: string;
+  limit?: number;
+  offset?: number;
+}) {
+  const limit = Math.min(Math.max(args.limit ?? 50, 1), 100);
+  const offset = Math.max(args.offset ?? 0, 0);
+  return sql`
+    SELECT id, name, name_prefix, name_suffix, task_type, target_kind, target_id,
+           session_id, cron_expression, cron_expr, timezone, next_fire_at, next_run_at,
+           enabled, payload
+    FROM scheduled_tasks
+    WHERE user_id = ${args.userId}
+      AND enabled = true
+      AND next_fire_at IS NOT NULL
+      AND next_fire_at > now()
+    ORDER BY next_fire_at ASC
+    LIMIT ${limit} OFFSET ${offset}
+  `;
+}
+
+// Phase 12 W2 — list tasks grouped by repo (derived from sessions.project_dir).
+// Tasks targeting all_agents / all_supervisors / supervisor land in 'unassigned'.
+// Returned shape: { groups: [{ key, label, tasks: [...] }] }.
+export async function listTasksGroupedByRepo(userId: string) {
+  const rows = await sql<any[]>`
+    SELECT t.id, t.name, t.name_prefix, t.name_suffix, t.task_type,
+           t.target_kind, t.target_id, t.session_id,
+           t.cron_expression, t.cron_expr, t.timezone,
+           t.enabled, t.next_fire_at, t.last_fire_at,
+           s.project_dir AS session_project_dir,
+           s.name AS session_name
+    FROM scheduled_tasks t
+    LEFT JOIN sessions s ON s.id = t.session_id
+    WHERE t.user_id = ${userId}
+    ORDER BY t.created_at DESC
+  `;
+  // Group in JS — task counts per user are small (< few hundred).
+  const groups = new Map<string, { key: string; label: string; tasks: any[] }>();
+  for (const r of rows) {
+    let key: string;
+    let label: string;
+    if (r.target_kind === 'session' && r.session_project_dir) {
+      key = `repo:${r.session_project_dir}`;
+      label = r.session_project_dir;
+    } else {
+      key = 'unassigned';
+      label = 'Unassigned';
+    }
+    let g = groups.get(key);
+    if (!g) {
+      g = { key, label, tasks: [] };
+      groups.set(key, g);
+    }
+    g.tasks.push(r);
+  }
+  return Array.from(groups.values());
 }
 
 export async function getUserTimezone(id: string): Promise<string> {
@@ -1028,12 +1274,13 @@ export async function recordOpenIssueForHash(
   `;
 }
 
-// Placeholder write BEFORE the octokit.issues.create call narrows the race
-// window: two concurrent failure webhooks for the same (repo, app, deploy)
-// can't both win the gate. Returns true if WE claimed the row (other caller
-// loses); false if someone else already had a row. Issue_number 0 is a
-// sentinel that updateOpenIssuePlaceholder overwrites on success or
-// deleteOpenIssuePlaceholder removes on terminal failure.
+// REVIEW HI-06: placeholder-claim race-prevention restored. Wave 5 deleted
+// these and left a `void hash` stub; two concurrent failure webhooks for the
+// same (repo, app_uuid, deploy_uuid) could both pass hasOpenIssueForHash and
+// both call octokit.issues.create → duplicate issues. The placeholder write
+// (issue_number=0) narrows the race window: only one caller wins the claim.
+// updateOpenIssuePlaceholder overwrites on success; deleteOpenIssuePlaceholder
+// removes on terminal failure (issue_number 0 = sentinel).
 export async function placeOpenIssuePlaceholder(
   userId: string,
   hash: string,

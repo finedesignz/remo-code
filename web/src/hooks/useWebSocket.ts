@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, createContext, useContext, type ReactNode, createElement } from 'react'
 import { getStoredToken, hasSessionCookie, clearAuth } from '../lib/auth.ts'
 import { readCookie } from '../lib/api'
 
@@ -310,4 +310,30 @@ export function useWebSocket(token: string | null) {
   }, [])
 
   return { connected, connectionId, send, subscribe, reconnecting, online }
+}
+
+// REVIEW BL-01: A single WebSocket connection per browser tab is shared
+// across all consumers (NotificationsBridge, HomePage, TasksPage,
+// SettingsPage, ChatLayout, GridPage) via React context. Each useWebSocket()
+// call opens its OWN socket (no internal singleton), so without this
+// provider three concurrent /ws/client connections were opened on every
+// Home render — risking the hub's per-IP 20-connection cap and wasting
+// auth/license-fetch cycles.
+type WsContextValue = ReturnType<typeof useWebSocket>
+
+const WebSocketContext = createContext<WsContextValue | null>(null)
+
+export function WebSocketProvider({ token, children }: { token: string | null; children: ReactNode }) {
+  const value = useWebSocket(token)
+  return createElement(WebSocketContext.Provider, { value }, children)
+}
+
+export function useWebSocketContext(): WsContextValue {
+  const ctx = useContext(WebSocketContext)
+  if (!ctx) {
+    // Fallback: legacy callers without a provider get a no-op shape.
+    // Prefer wrapping the tree in <WebSocketProvider> instead.
+    throw new Error('useWebSocketContext must be used within <WebSocketProvider>')
+  }
+  return ctx
 }

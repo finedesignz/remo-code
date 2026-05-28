@@ -239,7 +239,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-[var(--bg-secondary)] rounded-2xl shadow-2xl max-w-3xl w-full max-h-[92vh] overflow-y-auto">
+      <div className="bg-[var(--bg-secondary)] rounded-xl ring-1 ring-white/5 max-w-3xl w-full max-h-[92vh] overflow-y-auto">
         <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-3.5 bg-[var(--bg-secondary)]/95 backdrop-blur-sm">
           <h2 className="text-base font-semibold text-[var(--text-primary)]">
             {existing ? 'Edit schedule' : 'New schedule'}
