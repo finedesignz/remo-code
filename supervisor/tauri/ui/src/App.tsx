@@ -1,11 +1,17 @@
+import { useEffect } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import GeneralPage from "./pages/GeneralPage";
 import RootsPanel from "./components/RootsPanel";
 import FoldersPage from "./pages/FoldersPage";
 import SecurityPage from "./pages/SecurityPage";
 import UpdateNotifier from "./UpdateNotifier";
+import { startAutoUpdateWatcher } from "./lib/autoUpdater";
 
 export default function App() {
+  useEffect(() => {
+    const stop = startAutoUpdateWatcher();
+    return () => stop();
+  }, []);
   return (
     <div className="h-full flex bg-[var(--bg-primary)] text-[var(--text-primary)]">
       <UpdateNotifier />

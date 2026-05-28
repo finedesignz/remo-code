@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { invoke } from "@tauri-apps/api/core";
 
 type State =
   | { kind: "idle" }
@@ -22,6 +23,18 @@ export default function UpdateNotifier() {
     const now = Date.now();
     if (!force && now - lastCheckRef.current < FOCUS_THROTTLE_MS) return;
     lastCheckRef.current = now;
+
+    // If the user opted into auto-update, the background watcher in
+    // lib/autoUpdater.ts owns the install flow — don't surface a manual prompt.
+    try {
+      const auto = await invoke<boolean>("get_auto_update");
+      if (auto) {
+        setState({ kind: "idle" });
+        return;
+      }
+    } catch {
+      /* fall through — treat as manual mode */
+    }
 
     setState((s) =>
       s.kind === "downloading" || s.kind === "installing" ? s : { kind: "checking" },
