@@ -5,7 +5,7 @@ import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
-import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands } from '../db/supervisor-dal'
+import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows } from '../db/supervisor-dal'
 import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
 import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
@@ -531,6 +531,20 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     // owned by the supervisor process which has since restarted.
     await updateSupervisorState(row.id, 'idle', null)
     console.log(`[supervisor] hello supervisor=${row.id} host=${msg.hostname} roots=${msg.roots.length}`)
+
+    // Stale-row reap: each MSI install/upgrade rotates the api_key → new
+    // supervisors row. Old rows from prior installs of the SAME host pile up
+    // in Settings → Connections. Delete siblings for (user_id, hostname)
+    // whose last_seen_at is older than 5 min, excluding the row we just
+    // upserted. CASCADE FKs handle dependents.
+    try {
+      const purged = await cleanupStaleSupervisorRows(userId, msg.hostname, row.id, 5)
+      if (purged.deleted_ids.length > 0) {
+        console.log(`[supervisor] purged ${purged.deleted_ids.length} stale rows for host=${msg.hostname}`)
+      }
+    } catch (e) {
+      console.error(`[supervisor] stale-row cleanup failed host=${msg.hostname}`, e)
+    }
 
     // Auto-resume: respawn any session_runs that were open (ended_at IS NULL).
     // These were orphaned by a reboot/restart. We end the old run row and send a
