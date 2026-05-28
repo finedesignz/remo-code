@@ -55,7 +55,7 @@ export function ScheduleRunsDrawer({ token, task, subscribe, onClose }: Props) {
       {/* Backdrop */}
       <div className="flex-1 bg-black/50 backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
       {/* Drawer */}
-      <div className="w-full max-w-xl bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] shadow-2xl overflow-y-auto">
+      <div className="w-full max-w-xl bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] overflow-y-auto">
         <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-3.5 border-b border-[var(--border-color)] bg-[var(--bg-secondary)]/95 backdrop-blur-sm">
           <div className="min-w-0">
             <h2 className="text-sm font-semibold text-[var(--text-primary)] truncate">{task.name}</h2>

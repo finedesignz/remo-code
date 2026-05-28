@@ -342,6 +342,30 @@ Collapses the scheduled-task type enum from six options to **three** user-pickab
 
 When adding a new workflow step, root, runtime-context field, or template: update `docs/scheduled-tasks.md` AND `hub/test/scheduler.test.ts` in the same commit.
 
+## Phase 12: UI restructure
+
+Top-level nav collapsed to **Home / Tasks / Settings** (three hash routes: `#/`, `#/tasks`, `#/settings`). Every other legacy hash (`#/schedules`, `#/error-capture`, `#/revanote`, `#/grid`, `#/grid/:tabId`, `#/supervisor`) hash-redirects to the canonical route via `replaceState` in `web/src/App.tsx::resolveHashWithRedirects`. SettingsPage god-component (1242 LOC) was fragmented into 5 tab modules; ~2900 LOC of dead Phase-08 + legacy chrome files were deleted; 10 shared UI primitives were extracted.
+
+**File map (web):**
+
+- `web/src/components/ui/AppShell.tsx`, `AppHeader.tsx`, `HeaderRight.tsx`, `ProfileMenu.tsx` — shared chrome mounted ONCE per page route. Header has Home / Tasks / Settings links + theme toggle + `UsageStrip` + `ProfileMenu` (avatar → license badge → manage account → logout).
+- `web/src/components/ui/{Card,Modal,Tabs,Button,Field,StatusPill,EmptyState,LoadingState,Drawer}.tsx` — 10 design-token-correct primitives. Modal/Drawer use `rounded-xl` + `ring-1 ring-white/5` (NEVER `rounded-2xl` / `shadow-2xl`). Tabs supports URL-hash sync via `syncHash="tab"`.
+- `web/src/pages/HomePage.tsx` — `#/` route. Tabs: List View (Sidebar + ChatPanel via `ChatLayout`) | Grid View (GridPage minus its own header).
+- `web/src/pages/TasksPage.tsx` + `web/src/pages/tasks/{UpcomingTab,ActivityTab,ScheduleTab}.tsx` — `#/tasks` route. Tabs: Upcoming (next 24h fires) | Activity (runs across all tasks) | Schedule (CRUD list grouped by repo).
+- `web/src/pages/SettingsPage.tsx` + `web/src/pages/settings/{ConnectionsTab,CredentialsTab,PromptsTab,UsageTab,ProfileTab}.tsx` — `#/settings` route. 5 tabs.
+- `web/src/lib/license-ui.ts` — `licenseTone`/`licenseLabel` shared between header badge and Settings → Profile.
+
+**Key invariants:**
+
+- **Three root routes forever.** `#/`, `#/tasks`, `#/settings`. Every legacy deep link is `replaceState`-redirected (NOT `assign`) so the browser back button still works. `{{run_url}}` template emails from the scheduler post-run pipeline embed redirect-target URLs — these redirects are permanent contract.
+- **Login / AuthCallback / Privacy / Terms / SetupForm bypass `<AppShell>`.** They render their own chrome.
+- **Design-token discipline (per `~/.claude/design-preferences.md`):** `rounded-xl` for cards/dialogs, `rounded-lg` for inputs/buttons/list items, `rounded` for chips. NEVER `rounded-2xl` or higher. NO `shadow-2xl` / `shadow-lg` / `shadow-md` — use `ring-1 ring-white/5` instead. Indigo button text uses `text-[var(--text-on-accent)]`, never `text-white`. Red destructive buttons may keep `text-white`.
+- **License gate excludes the 3 root routes from forced redirect.** `useLicense` shows a status badge in the header; only mutating API calls return 402, which surfaces the dismissible `<LicenseRequiredBanner>` overlay.
+- **`AppShell` mounts header/footer/license-banner-offset ONCE per render.** Tabs swap content under it. Mobile nav (hamburger / dropdown) lives in `AppHeader` and works identically across all three pages.
+- **`SchedulesPage.tsx` is retained as a module export** (re-exports `describeTarget`, `formatTsInTz`) consumed by `tasks/UpcomingTab.tsx` + `tasks/ScheduleTab.tsx`. Its standalone page rendering is dead; only the shared helpers remain.
+
+When adding a new top-level route, tab, primitive, or design-token-affecting style: extend the shared primitives, register the redirect in `App.tsx::resolveHashWithRedirects` if a legacy URL needs to map to it, and update this section in the same commit.
+
 ## API docs convention
 
 The hub exposes OpenAPI 3.1 at `/openapi.json` and a Scalar UI at `/docs`. The spec is assembled in `hub/src/api/_openapi.ts` using `@hono/zod-openapi` `createRoute` declarations. Currently covers `/api/profile/cost-today` and `/api/profile/license` — the rest of the hub is plain Hono and gets migrated incrementally.

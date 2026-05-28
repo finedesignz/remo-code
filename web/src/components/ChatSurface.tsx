@@ -715,7 +715,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
         <button
           type="button"
           onClick={() => scrollToBottom('smooth')}
-          className="absolute bottom-24 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 text-xs text-[var(--text-on-accent)] shadow-lg ring-1 ring-indigo-500/30 z-10"
+          className="absolute bottom-24 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 text-xs text-[var(--text-on-accent)] ring-1 ring-indigo-500/30 z-10"
         >
           ↓ {newCount} new
         </button>

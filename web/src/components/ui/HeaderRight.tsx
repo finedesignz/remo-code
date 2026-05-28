@@ -1,11 +1,8 @@
 /**
- * Phase 12 W3 — shared header-right cluster for the new top-level pages.
+ * Phase 12 — shared header-right cluster for the top-level pages.
  *
- * Mirrors AppChrome's right-side block: theme toggle + usage strip + profile menu.
- * Wave 5 will delete AppChrome.tsx; this file becomes the single source of truth.
- *
- * Lifted verbatim from `AppChrome.tsx` — same JSX, same hooks, same `ProfileMenu`.
- * No new behavior. Keep changes here in lockstep with AppChrome until Wave 5.
+ * Single source of truth for: theme toggle + usage strip + profile menu.
+ * Mounted by <AppShell> on Home/Tasks/Settings.
  */
 import { useState, useEffect, useRef } from "react";
 import type { AuthUser } from "../../lib/auth";
