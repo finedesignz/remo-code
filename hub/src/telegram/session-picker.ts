@@ -132,6 +132,18 @@ export type CallbackAction =
   | { kind: "set_session"; sessionId: string }
   | { kind: "paginate"; offset: number };
 
+/**
+ * Snap an arbitrary offset to the nearest PAGE_SIZE boundary, clamped to a
+ * valid page within [0, total). Lets the webhook safely consume a `p:<n>`
+ * callback emitted by a keyboard rendered before page_size changed.
+ */
+export function snapOffsetToPage(offset: number, total: number): number {
+  if (total <= 0) return 0;
+  const max = Math.max(0, Math.floor((total - 1) / PAGE_SIZE) * PAGE_SIZE);
+  const snapped = Math.max(0, Math.floor(offset / PAGE_SIZE) * PAGE_SIZE);
+  return Math.min(snapped, max);
+}
+
 export function parseCallbackData(data: string | undefined | null): CallbackAction | null {
   if (!data) return null;
   if (data.length > 64) return null; // Telegram hard limit; defensive.

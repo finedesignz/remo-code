@@ -63,6 +63,7 @@ import {
   buildSessionKeyboard,
   renderPickerText,
   parseCallbackData,
+  snapOffsetToPage,
 } from "../telegram/session-picker.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
 
@@ -377,7 +378,7 @@ async function handleCallbackQuery(
   try {
     const rows = await listUserSessionsForPicker(user.id);
     const total = rows.length;
-    const offset = Math.min(action.offset, Math.max(0, total - 1));
+    const offset = snapOffsetToPage(action.offset, total);
     const keyboard = buildSessionKeyboard({
       rows,
       offset,
