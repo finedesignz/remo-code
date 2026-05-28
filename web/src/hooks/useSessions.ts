@@ -51,7 +51,13 @@ export function githubOwnerRepo(s: CodeSession): string | null {
   return null
 }
 
-export function useSessions(token: string | null) {
+type Subscribe = (handler: (msg: any) => void) => () => void
+
+export function useSessions(
+  token: string | null,
+  subscribe?: Subscribe,
+  connectionId?: number,
+) {
   const [sessions, setSessions] = useState<CodeSession[]>([])
   const [loading, setLoading] = useState(true)
 
@@ -64,7 +70,20 @@ export function useSessions(token: string | null) {
     setLoading(false)
   }, [token])
 
-  useEffect(() => { fetchSessions() }, [fetchSessions])
+  useEffect(() => { fetchSessions() }, [fetchSessions, connectionId])
+
+  // When the hub broadcasts a fresh `session_list` (supervisor reconnect,
+  // repo_inventory upsert, session offline-close), replace our local copy.
+  // This is what makes the sidebar / supervisor page show launched sessions
+  // come back without a refresh after a supervisor restart.
+  useEffect(() => {
+    if (!subscribe) return
+    return subscribe((msg) => {
+      if (!msg || msg.type !== 'session_list' || !Array.isArray(msg.sessions)) return
+      setSessions(msg.sessions as CodeSession[])
+      setLoading(false)
+    })
+  }, [subscribe])
 
   const createSession = async (name: string, projectDir?: string): Promise<any> => {
     if (!token) return null
