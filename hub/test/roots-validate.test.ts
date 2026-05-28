@@ -122,4 +122,34 @@ describe('validateRoots', () => {
     const r = validateRoots(['/home/u/cool..code'])
     expect(r.ok).toBe(true)
   })
+
+  // REVIEW HI-04: drive-root + system-dir guards.
+  test('rejects bare Windows drive root C:\\', () => {
+    const r = validateRoots(['C:\\'])
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('root_is_drive_root')
+  })
+
+  test('rejects bare POSIX root /', () => {
+    const r = validateRoots(['/'])
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('root_is_drive_root')
+  })
+
+  test('rejects C:\\Windows\\System32 (system-dir prefix)', () => {
+    const r = validateRoots(['C:\\Windows\\System32'])
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('root_is_system_dir')
+  })
+
+  test('rejects /etc/foo (system-dir prefix)', () => {
+    const r = validateRoots(['/etc/foo'])
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error).toBe('root_is_system_dir')
+  })
+
+  test('does NOT reject /etcetera (separator-bounded prefix)', () => {
+    const r = validateRoots(['/etcetera/code'])
+    expect(r.ok).toBe(true)
+  })
 })

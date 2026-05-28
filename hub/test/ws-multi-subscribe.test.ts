@@ -51,9 +51,9 @@ describe('ClientSubscribe — overload', () => {
     expect(r.success).toBe(true)
   })
 
-  test('accepts empty session_ids (clears subscriptions)', () => {
+  test('rejects empty session_ids (REVIEW ME-01: must be non-empty)', () => {
     const r = ClientSubscribe.safeParse({ type: 'subscribe', session_ids: [] })
-    expect(r.success).toBe(true)
+    expect(r.success).toBe(false)
   })
 
   test('rejects message with neither session_id nor session_ids', () => {

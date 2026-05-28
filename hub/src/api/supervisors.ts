@@ -210,7 +210,10 @@ supervisors.get('/:id/active', async (c) => {
 // over WS to the live supervisor connection if online (best-effort with a
 // 5s timeout). Broadcasts supervisor.roots_changed so other client tabs
 // re-render. CSRF is enforced by the global guard; license-gated by the
-// global gate; auth verified by middleware. No requireRecentAuth — low-risk.
+// global gate; auth verified by middleware.
+// REVIEW HI-03: step-up auth (requireRecentAuth) IS now enforced via
+// app.use in hub/src/index.ts — roots determine which filesystems
+// supervisor scans/exposes, so stolen-cookie attack is a privilege primitive.
 const RootsBody = z.object({
   roots: z.array(z.string()).max(50),
 })

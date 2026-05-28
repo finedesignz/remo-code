@@ -240,6 +240,23 @@ app.use('/api/error-projects', async (c, next) => isMutating(c) ? userMutationLi
 app.use('/api/error-projects/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/account/coolify-webhook-secret/rotate', userMutationLimit)
 app.use('/api/account/revanote-webhook-secret/rotate', userMutationLimit)
+
+// REVIEW HI-01/02/03: step-up auth on Phase 12 sensitive endpoints.
+// Prompts (claude_global_md / codex_agents_md / codex_config_toml) and
+// supervisor roots both reach the supervisor filesystem; profile mutates
+// user identity. Stolen-cookie attacker must re-auth before driving these.
+app.use('/api/users/me/prompts', async (c, next) =>
+  isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/users/me/profile', async (c, next) =>
+  isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/supervisors/:id/roots', async (c, next) =>
+  isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/users/me/prompts', async (c, next) =>
+  isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/users/me/profile', async (c, next) =>
+  isMutating(c) ? userMutationLimit(c, next) : next())
+app.use('/api/supervisors/:id/roots', async (c, next) =>
+  isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/mappings', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/mappings/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/annotations/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
@@ -319,9 +336,19 @@ if (config.titaniumBypass) {
   }
 }
 
-// Start Bun server with WebSocket upgrade handling
+// Start Bun server with WebSocket upgrade handling.
+//
+// REVIEW BL-06: idleTimeout — Bun's default is 10s, which kills any HTTP
+// request whose upstream WS round-trip takes longer (notably
+// POST /api/supervisors/:id/scan, which fans out to the supervisor over WS
+// with a 20s sendRequest budget, plus /clone at 300s). Hitting Bun's 10s
+// before the WS reply arrives terminates the HTTP connection mid-flight,
+// which Coolify's Traefik in turn surfaces as 502 Bad Gateway. Bump to 255s
+// (5s above the longest sendRequest budget) so HTTP keep-alives never
+// expire before the WS response can be serialized.
 const server = Bun.serve({
   port: config.port,
+  idleTimeout: 255,
   async fetch(req, server) {
     const url = new URL(req.url)
 

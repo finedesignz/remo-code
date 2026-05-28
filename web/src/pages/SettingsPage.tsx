@@ -15,7 +15,7 @@ import type { Profile } from "../hooks/useProfile";
 import { AppShell } from "../components/ui/AppShell";
 import { Tabs } from "../components/ui/Tabs";
 import { HeaderRight } from "../components/ui/HeaderRight";
-import { useWebSocket } from "../hooks/useWebSocket";
+import { useWebSocketContext } from "../hooks/useWebSocket";
 import { activeTopRoute, buildTopNav, readTabParam, writeTabParam } from "../lib/ui/nav";
 
 import { ConnectionsTab } from "./settings/ConnectionsTab";
@@ -52,7 +52,8 @@ interface Props {
 
 export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpdateProfile }: Props) {
   const [tab, setTab] = useState<SettingsTab>(readSettingsTab);
-  const { subscribe } = useWebSocket(token);
+  // REVIEW BL-01: shared WS from context.
+  const { subscribe } = useWebSocketContext();
 
   useEffect(() => {
     const onHash = () => setTab(readSettingsTab());

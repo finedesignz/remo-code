@@ -1,5 +1,6 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { cn } from "../../lib/ui/cn";
+import { trapFocus, autoFocusFirst } from "../../lib/ui/focus-trap";
 
 export interface DrawerProps {
   open: boolean;
@@ -11,6 +12,8 @@ export interface DrawerProps {
   /** Desktop width. Default '480px'. Mobile is always full-screen. */
   width?: string;
   className?: string;
+  /** A11Y-HI-2: caller may supply explicit id for aria-labelledby. */
+  titleId?: string;
 }
 
 /**
@@ -25,7 +28,12 @@ export function Drawer({
   footer,
   width = "480px",
   className,
+  titleId,
 }: DrawerProps) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const generatedId = useId();
+  const resolvedTitleId = titleId ?? (title !== undefined ? generatedId : undefined);
+
   useEffect(() => {
     if (!open) return;
     const handler = (e: KeyboardEvent) => {
@@ -34,6 +42,14 @@ export function Drawer({
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [open, onClose]);
+
+  // A11Y-HI-2: focus trap + auto-focus first focusable on open.
+  useEffect(() => {
+    if (!open || !dialogRef.current) return;
+    const cleanup = trapFocus(dialogRef.current);
+    autoFocusFirst(dialogRef.current);
+    return cleanup;
+  }, [open]);
 
   if (!open) return null;
 
@@ -46,8 +62,10 @@ export function Drawer({
       onClick={onClose}
       role="dialog"
       aria-modal="true"
+      aria-labelledby={resolvedTitleId}
     >
       <div
+        ref={dialogRef}
         className={cn(
           "absolute top-0 right-0 h-full w-full md:w-auto",
           "bg-[var(--bg-secondary)] ring-1 ring-white/5",
@@ -63,7 +81,7 @@ export function Drawer({
         >
           {title !== undefined && (
             <div className="px-5 py-4 border-b border-[var(--border-color)]/40 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-[var(--text-primary)]">
+              <h2 id={resolvedTitleId} className="text-sm font-semibold text-[var(--text-primary)]">
                 {title}
               </h2>
               <button

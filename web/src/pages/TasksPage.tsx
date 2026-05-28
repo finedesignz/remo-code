@@ -10,7 +10,7 @@ import type { AuthUser } from "../lib/auth";
 import { AppShell } from "../components/ui/AppShell";
 import { Tabs } from "../components/ui/Tabs";
 import { HeaderRight } from "../components/ui/HeaderRight";
-import { useWebSocket } from "../hooks/useWebSocket";
+import { useWebSocketContext } from "../hooks/useWebSocket";
 import { activeTopRoute, buildTopNav, readTabParam, writeTabParam } from "../lib/ui/nav";
 import { UpcomingTab } from "./tasks/UpcomingTab";
 import { ActivityTab } from "./tasks/ActivityTab";
@@ -33,7 +33,8 @@ interface Props {
 
 export function TasksPage({ token, user, signOut, onNavigate }: Props) {
   const [tab, setTab] = useState<TasksTab>(readTasksTab);
-  const { subscribe } = useWebSocket(token);
+  // REVIEW BL-01: shared WS from context.
+  const { subscribe } = useWebSocketContext();
 
   useEffect(() => {
     const onHash = () => setTab(readTasksTab());

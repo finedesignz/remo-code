@@ -162,26 +162,32 @@ export async function findOrCreateRootlessSession(
 
 // Find existing session by project_dir (reuse) or create a new one.
 // Returns { ...session, created: boolean }
+//
+// REVIEW BL-04: Atomic upsert via the partial unique index
+// idx_sessions_user_project_unique (user_id, project_dir) WHERE
+// deleted_at IS NULL AND is_rootless=false. Two concurrent reconnects for
+// the same project_dir converge on ONE row instead of racing into
+// duplicates. xmax=0 detects insert-vs-update so we can return the
+// `created` flag correctly without a re-SELECT.
 export async function findOrCreateAgentSession(
   userId: string,
   projectDir: string,
   tokenHash: string,
   cliKind: 'claude' | 'codex' = 'claude',
 ) {
-  const existing = await findSessionByProjectDir(userId, projectDir);
-  if (existing) {
-    // Update the token hash so the agent gets a fresh token
-    await sql`UPDATE sessions SET token_hash = ${tokenHash}, last_activity = now() WHERE id = ${existing.id}`;
-    return { ...existing, token_hash: tokenHash, created: false };
-  }
-  // Derive a human-readable name from the last path segment
+  // Derive a human-readable name from the last path segment (only used when
+  // the row actually gets inserted; conflicting upserts keep the existing name).
   const name = projectDir.split('/').filter(Boolean).pop() ?? 'session';
   const rows = await sql`
     INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind)
     VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash}, ${cliKind})
-    RETURNING *
+    ON CONFLICT (user_id, project_dir)
+      WHERE deleted_at IS NULL AND is_rootless = false
+      DO UPDATE SET token_hash = EXCLUDED.token_hash, last_activity = now()
+    RETURNING *, (xmax = 0) AS created
   `;
-  return { ...rows[0], created: true };
+  const row = rows[0];
+  return { ...row, created: !!row.created };
 }
 
 // Phase 08: GitHub-keyed session resolution. Wraps the priority-1/2/3
@@ -489,7 +495,7 @@ export async function listMessages(sessionId: string, userId: string) {
     FROM messages m
     JOIN sessions s ON s.id = m.session_id
     WHERE m.session_id = ${sessionId} AND s.user_id = ${userId}
-    ORDER BY m.created_at ASC
+    ORDER BY m.created_at ASC, m.seq ASC
   `;
 }
 
@@ -1263,6 +1269,47 @@ export async function recordOpenIssueForHash(
     INSERT INTO github_issue_idempotency (user_id, hash, repo_full_name, issue_number)
     VALUES (${userId}, ${hash}, ${repoFullName}, ${issueNumber})
     ON CONFLICT (user_id, hash) DO NOTHING
+  `;
+}
+
+// REVIEW HI-06: placeholder-claim race-prevention restored. Wave 5 deleted
+// these and left a `void hash` stub; two concurrent failure webhooks for the
+// same (repo, app_uuid, deploy_uuid) could both pass hasOpenIssueForHash and
+// both call octokit.issues.create → duplicate issues. The placeholder write
+// (issue_number=0) narrows the race window: only one caller wins the claim.
+export async function placeOpenIssuePlaceholder(
+  userId: string,
+  hash: string,
+  repoFullName: string,
+): Promise<boolean> {
+  const rows = await sql`
+    INSERT INTO github_issue_idempotency (user_id, hash, repo_full_name, issue_number)
+    VALUES (${userId}, ${hash}, ${repoFullName}, 0)
+    ON CONFLICT (user_id, hash) DO NOTHING
+    RETURNING user_id
+  `;
+  return rows.length > 0;
+}
+
+export async function updateOpenIssuePlaceholder(
+  userId: string,
+  hash: string,
+  issueNumber: number,
+): Promise<void> {
+  await sql`
+    UPDATE github_issue_idempotency
+    SET issue_number = ${issueNumber}
+    WHERE user_id = ${userId} AND hash = ${hash}
+  `;
+}
+
+export async function deleteOpenIssuePlaceholder(
+  userId: string,
+  hash: string,
+): Promise<void> {
+  await sql`
+    DELETE FROM github_issue_idempotency
+    WHERE user_id = ${userId} AND hash = ${hash} AND issue_number = 0
   `;
 }
 

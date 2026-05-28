@@ -11,7 +11,7 @@ import { ChatSurfaceShowcase } from './components/ChatSurfaceShowcase'
 import { MobileAccordionShowcase } from './components/MobileAccordionShowcase'
 import { Privacy } from './pages/Privacy'
 import { Terms } from './pages/Terms'
-import { useWebSocket } from './hooks/useWebSocket'
+import { WebSocketProvider, useWebSocketContext } from './hooks/useWebSocket'
 import { useBrowserNotifications } from './hooks/useBrowserNotifications'
 import type { Profile } from './hooks/useProfile'
 import { onAuthEvent } from './lib/api'
@@ -162,8 +162,10 @@ export default function App() {
   }
 
   return (
-    <>
-      <NotificationsBridge token={token} profile={profile} />
+    // REVIEW BL-01: single shared /ws/client connection for all consumers
+    // (NotificationsBridge + page route + chat surfaces).
+    <WebSocketProvider token={token}>
+      <NotificationsBridge profile={profile} />
       {licenseRequired && <LicenseRequiredBanner onDismiss={() => setLicenseRequired(false)} />}
 
       {route === 'home' && (
@@ -186,7 +188,7 @@ export default function App() {
       {route === 'dev-mobile-accordion' && <MobileAccordionShowcase token={token} />}
       {route === 'privacy' && <Privacy />}
       {route === 'terms' && <Terms />}
-    </>
+    </WebSocketProvider>
   )
 }
 
@@ -209,8 +211,9 @@ function LicenseRequiredBanner({ onDismiss }: { onDismiss: () => void }) {
   )
 }
 
-function NotificationsBridge({ token, profile }: { token: string; profile: Profile }) {
-  const { subscribe } = useWebSocket(token)
+function NotificationsBridge({ profile }: { profile: Profile }) {
+  // REVIEW BL-01: reads the shared WS from context — no second connection.
+  const { subscribe } = useWebSocketContext()
   useBrowserNotifications({ subscribe, profile })
   return null
 }

@@ -18,7 +18,7 @@
  *    typing in cell A's input keeps paste routed to A, not the active cell.
  */
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { useWebSocket } from '../hooks/useWebSocket'
+import { useWebSocketContext } from '../hooks/useWebSocket'
 import { ChatSurface } from './ChatSurface'
 import {
   type TabWithSessions,
@@ -45,7 +45,8 @@ interface Props {
 }
 
 export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
-  const { connected, connectionId, send, subscribe } = useWebSocket(token)
+  // REVIEW BL-01: shared WS from context.
+  const { connected, connectionId, send, subscribe } = useWebSocketContext()
 
   const [tabs, setTabs] = useState<TabWithSessions[]>([])
   const [loading, setLoading] = useState(true)

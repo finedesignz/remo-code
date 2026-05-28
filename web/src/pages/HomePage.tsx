@@ -14,7 +14,7 @@ import { Tabs } from "../components/ui/Tabs";
 import { HeaderRight } from "../components/ui/HeaderRight";
 import { ChatLayout } from "../components/ChatLayout";
 import { GridPage } from "../components/GridPage";
-import { useWebSocket } from "../hooks/useWebSocket";
+import { useWebSocketContext } from "../hooks/useWebSocket";
 import { activeTopRoute, buildTopNav, readTabParam, writeTabParam } from "../lib/ui/nav";
 
 type HomeTab = "list" | "grid";
@@ -35,7 +35,8 @@ interface Props {
 
 export function HomePage({ token, user, signOut, onNavigate, gridTabId }: Props) {
   const [tab, setTab] = useState<HomeTab>(readHomeTab);
-  const { subscribe } = useWebSocket(token);
+  // REVIEW BL-01: shared WS from context (avoids per-render fresh socket).
+  const { subscribe } = useWebSocketContext();
 
   // Re-read on hashchange (other components may update tab=)
   useEffect(() => {

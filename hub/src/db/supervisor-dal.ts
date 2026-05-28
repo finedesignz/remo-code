@@ -180,7 +180,7 @@ export async function setSupervisorRoots(args: {
 }) {
   const rows = await sql`
     UPDATE supervisors
-    SET roots = ${args.roots},
+    SET roots = ${args.roots}::text[],
         last_seen_at = now()
     WHERE id = ${args.supervisorId} AND user_id = ${args.userId}
     RETURNING id, user_id, hostname, version, os, roots, state, last_seen_at

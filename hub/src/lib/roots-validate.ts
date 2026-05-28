@@ -27,6 +27,36 @@ const POSIX_ABSOLUTE = /^\//
 const WINDOWS_DRIVE = /^[A-Za-z]:[\\/]/
 const WINDOWS_UNC = /^\\\\[^\\/]+[\\/][^\\/]+/
 
+// REVIEW HI-04: drive-root-only paths (e.g. `C:\`, `C:/`, `/`) — refuse.
+// Scanning a drive root would expose every git repo on the host.
+const DRIVE_ROOT_ONLY = /^([A-Za-z]:[\\/]?|\/)$/
+
+// REVIEW HI-04: system directories that should NEVER be scan roots even if
+// the path is otherwise well-formed. Match is case-insensitive; the prefix
+// match treats `C:\Windows` and `C:\Windows\System32\...` identically.
+// Trailing separator-or-end check prevents `C:\Windows-not-system` from
+// matching `C:\Windows`.
+const SYSTEM_DIR_PREFIXES = [
+  // Windows
+  'c:\\windows', 'c:/windows',
+  'c:\\program files', 'c:/program files',
+  'c:\\program files (x86)', 'c:/program files (x86)',
+  'c:\\programdata', 'c:/programdata',
+  // POSIX
+  '/etc', '/sys', '/proc', '/dev', '/boot', '/root',
+  '/var/log', '/var/lib', '/usr/bin', '/usr/sbin', '/bin', '/sbin',
+]
+
+function isSystemDir(p: string): boolean {
+  const lower = p.toLowerCase()
+  for (const prefix of SYSTEM_DIR_PREFIXES) {
+    if (lower === prefix) return true
+    // Match prefix + separator (so `/etc/foo` matches but `/etcetera` does not).
+    if (lower.startsWith(prefix + '/') || lower.startsWith(prefix + '\\')) return true
+  }
+  return false
+}
+
 export function isAbsolutePath(p: string): boolean {
   return POSIX_ABSOLUTE.test(p) || WINDOWS_DRIVE.test(p) || WINDOWS_UNC.test(p)
 }
@@ -51,6 +81,13 @@ export function validateRoots(input: unknown): RootsValidationResult {
     }
     if (!isAbsolutePath(trimmed)) {
       return { ok: false, error: 'root_not_absolute', index: i, value: trimmed }
+    }
+    // REVIEW HI-04: refuse drive-root-only paths and system directories.
+    if (DRIVE_ROOT_ONLY.test(trimmed)) {
+      return { ok: false, error: 'root_is_drive_root', index: i, value: trimmed }
+    }
+    if (isSystemDir(trimmed)) {
+      return { ok: false, error: 'root_is_system_dir', index: i, value: trimmed }
     }
     out.push(trimmed)
   }

@@ -12,7 +12,7 @@
  */
 import { useState, useCallback, useEffect } from 'react'
 import type { AuthUser } from '../lib/auth.ts'
-import { useWebSocket } from '../hooks/useWebSocket'
+import { useWebSocketContext } from '../hooks/useWebSocket'
 import { useSessions } from '../hooks/useSessions'
 import { useChat } from '../hooks/useChat'
 import { useActivity } from '../hooks/useActivity'
@@ -46,7 +46,8 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
   }, [])
   const [showApiKey, setShowApiKey] = useState(false)
 
-  const { connected, connectionId, send, subscribe, online } = useWebSocket(token)
+  // REVIEW BL-01: shared WS from context.
+  const { connected, connectionId, send, subscribe, online } = useWebSocketContext()
   const sessionsHook = useSessions(token)
   const { messages, loading: chatLoading, sendMessage, unreadCounts } = useChat(
     token, activeSessionId, subscribe, send, connectionId
