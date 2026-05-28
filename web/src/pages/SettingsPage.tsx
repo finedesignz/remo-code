@@ -14,6 +14,7 @@ import type { AuthUser } from "../lib/auth";
 import type { Profile } from "../hooks/useProfile";
 import { AppShell } from "../components/ui/AppShell";
 import { Tabs } from "../components/ui/Tabs";
+import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { HeaderRight } from "../components/ui/HeaderRight";
 import { useWebSocketContext } from "../hooks/useWebSocket";
 import { activeTopRoute, buildTopNav, readTabParam, writeTabParam } from "../lib/ui/nav";
@@ -97,14 +98,30 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
         />
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto">
-        {tab === "connections" && <ConnectionsTab token={token} />}
-        {tab === "credentials" && <CredentialsTab token={token} />}
-        {tab === "prompts" && <PromptsTab token={token} />}
+        {tab === "connections" && (
+          <ErrorBoundary tabKey="settings:connections">
+            <ConnectionsTab token={token} />
+          </ErrorBoundary>
+        )}
+        {tab === "credentials" && (
+          <ErrorBoundary tabKey="settings:credentials">
+            <CredentialsTab token={token} />
+          </ErrorBoundary>
+        )}
+        {tab === "prompts" && (
+          <ErrorBoundary tabKey="settings:prompts">
+            <PromptsTab token={token} />
+          </ErrorBoundary>
+        )}
         {tab === "usage" && (
-          <UsageTab token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
+          <ErrorBoundary tabKey="settings:usage">
+            <UsageTab token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
+          </ErrorBoundary>
         )}
         {tab === "profile" && (
-          <ProfileTab token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
+          <ErrorBoundary tabKey="settings:profile">
+            <ProfileTab token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
+          </ErrorBoundary>
         )}
       </div>
     </AppShell>

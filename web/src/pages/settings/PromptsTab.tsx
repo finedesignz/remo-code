@@ -22,6 +22,10 @@ interface Props {
 }
 
 export function PromptsTab({ token }: Props) {
+  useEffect(() => {
+    console.log("[tab:settings:prompts] mounted");
+    return () => console.log("[tab:settings:prompts] unmounted");
+  }, []);
   return (
     <div className="px-4 md:px-6 lg:px-8 py-5 w-full max-w-7xl mx-auto space-y-5">
       <AutoNudgeCard token={token} />

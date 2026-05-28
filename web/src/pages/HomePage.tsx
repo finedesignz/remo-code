@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import type { AuthUser } from "../lib/auth";
 import { AppShell } from "../components/ui/AppShell";
 import { Tabs } from "../components/ui/Tabs";
+import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { HeaderRight } from "../components/ui/HeaderRight";
 import { ChatLayout } from "../components/ChatLayout";
 import { GridPage } from "../components/GridPage";
@@ -77,9 +78,13 @@ export function HomePage({ token, user, signOut, onNavigate, gridTabId }: Props)
       </div>
       <div className="flex-1 min-h-0">
         {tab === "list" ? (
-          <ChatLayout token={token} user={user} signOut={signOut} onNavigate={onNavigate} />
+          <ErrorBoundary tabKey="home:list">
+            <ChatLayout token={token} user={user} signOut={signOut} onNavigate={onNavigate} />
+          </ErrorBoundary>
         ) : (
-          <GridPage token={token} tabId={gridTabId} />
+          <ErrorBoundary tabKey="home:grid">
+            <GridPage token={token} tabId={gridTabId} />
+          </ErrorBoundary>
         )}
       </div>
     </AppShell>

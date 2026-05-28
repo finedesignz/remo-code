@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import type { AuthUser } from "../lib/auth";
 import { AppShell } from "../components/ui/AppShell";
 import { Tabs } from "../components/ui/Tabs";
+import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { HeaderRight } from "../components/ui/HeaderRight";
 import { useWebSocketContext } from "../hooks/useWebSocket";
 import { activeTopRoute, buildTopNav, readTabParam, writeTabParam } from "../lib/ui/nav";
@@ -74,9 +75,21 @@ export function TasksPage({ token, user, signOut, onNavigate }: Props) {
         />
       </div>
       <div className="px-4 md:px-6 py-6">
-        {tab === "upcoming" && <UpcomingTab token={token} subscribe={subscribe} />}
-        {tab === "activity" && <ActivityTab token={token} />}
-        {tab === "schedule" && <ScheduleTab token={token} subscribe={subscribe} />}
+        {tab === "upcoming" && (
+          <ErrorBoundary tabKey="tasks:upcoming">
+            <UpcomingTab token={token} subscribe={subscribe} />
+          </ErrorBoundary>
+        )}
+        {tab === "activity" && (
+          <ErrorBoundary tabKey="tasks:activity">
+            <ActivityTab token={token} />
+          </ErrorBoundary>
+        )}
+        {tab === "schedule" && (
+          <ErrorBoundary tabKey="tasks:schedule">
+            <ScheduleTab token={token} subscribe={subscribe} />
+          </ErrorBoundary>
+        )}
       </div>
     </AppShell>
   );

@@ -20,3 +20,5 @@ export { Drawer } from "./Drawer";
 export type { DrawerProps } from "./Drawer";
 export { AppShell } from "./AppShell";
 export type { AppShellProps, AppShellNavItem } from "./AppShell";
+export { ErrorBoundary } from "./ErrorBoundary";
+export type { ErrorBoundaryProps } from "./ErrorBoundary";
