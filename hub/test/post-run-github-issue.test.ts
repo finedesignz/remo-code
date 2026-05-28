@@ -28,6 +28,22 @@ mock.module('../src/db/dal.ts', () => ({
       idempotencyStore.set(key, { issueNumber, repo, createdAt: Date.now() })
     }
   },
+  placeOpenIssuePlaceholder: async (userId: string, hash: string, repo: string) => {
+    const key = `${userId}|${hash}`
+    if (idempotencyStore.has(key)) return false
+    idempotencyStore.set(key, { issueNumber: 0, repo, createdAt: Date.now() })
+    return true
+  },
+  updateOpenIssuePlaceholder: async (userId: string, hash: string, issueNumber: number) => {
+    const key = `${userId}|${hash}`
+    const row = idempotencyStore.get(key)
+    if (row) idempotencyStore.set(key, { ...row, issueNumber })
+  },
+  deleteOpenIssuePlaceholder: async (userId: string, hash: string) => {
+    const key = `${userId}|${hash}`
+    const row = idempotencyStore.get(key)
+    if (row && row.issueNumber === 0) idempotencyStore.delete(key)
+  },
 }))
 
 mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
