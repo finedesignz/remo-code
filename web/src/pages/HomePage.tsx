@@ -12,7 +12,7 @@ import type { AuthUser } from "../lib/auth";
 import { AppShell } from "../components/ui/AppShell";
 import { Tabs } from "../components/ui/Tabs";
 import { HeaderRight } from "../components/ui/HeaderRight";
-import { Layout } from "../components/Layout";
+import { ChatLayout } from "../components/ChatLayout";
 import { GridPage } from "../components/GridPage";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { activeTopRoute, buildTopNav, readTabParam, writeTabParam } from "../lib/ui/nav";
@@ -76,10 +76,7 @@ export function HomePage({ token, user, signOut, onNavigate, gridTabId }: Props)
       </div>
       <div className="flex-1 min-h-0">
         {tab === "list" ? (
-          // Layout currently owns its own header + chrome. Wave 4 extracts a
-          // header-free <ChatLayout>. For now we accept the duplicate header —
-          // QC will catch it; visual cleanup is Wave 4.
-          <Layout token={token} user={user} signOut={signOut} onNavigate={onNavigate} />
+          <ChatLayout token={token} user={user} signOut={signOut} onNavigate={onNavigate} />
         ) : (
           <GridPage token={token} tabId={gridTabId} />
         )}
