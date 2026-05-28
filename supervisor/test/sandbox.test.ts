@@ -2,7 +2,7 @@ import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { assertWithinRoots, SandboxEscapeError } from '../src/sandbox'
+import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError } from '../src/sandbox'
 
 let TMP: string
 let ROOT_A: string
@@ -67,5 +67,34 @@ describe('assertWithinRoots', () => {
     // A bogus root in the list shouldn't poison the others.
     const r = assertWithinRoots(INSIDE, [join(TMP, 'bogus'), ROOT_A])
     expect(r.realRepo).toContain('repoX')
+  })
+})
+
+describe('assertTargetWithinRoots (clone target — path does not yet exist)', () => {
+  test('allows a non-existent target under a root', () => {
+    expect(() => assertTargetWithinRoots(join(ROOT_A, 'newRepo'), [ROOT_A])).not.toThrow()
+  })
+
+  test('allows a deeply-nested non-existent target under a root', () => {
+    expect(() => assertTargetWithinRoots(join(ROOT_A, 'a', 'b', 'c'), [ROOT_A])).not.toThrow()
+  })
+
+  test('rejects a non-existent target outside every root', () => {
+    expect(() => assertTargetWithinRoots(join(TMP, 'evil', 'foo'), [ROOT_A, ROOT_B])).toThrow(SandboxEscapeError)
+  })
+
+  test('rejects C:\\Windows\\System32\\newRepo against a github root', () => {
+    expect(() => assertTargetWithinRoots('C:\\Windows\\System32\\newRepo', [ROOT_A])).toThrow(SandboxEscapeError)
+  })
+
+  test('rejects a target whose nearest existing ancestor escapes via realpath', () => {
+    // Skip silently if symlink couldn't be created.
+    try {
+      const { realpathSync } = require('fs')
+      realpathSync(SYM_TO_OUTSIDE)
+    } catch {
+      return
+    }
+    expect(() => assertTargetWithinRoots(join(SYM_TO_OUTSIDE, 'newRepo'), [ROOT_A])).toThrow(SandboxEscapeError)
   })
 })
