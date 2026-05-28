@@ -85,6 +85,39 @@ export async function upsertSupervisor(args: {
   return rows[0]
 }
 
+/**
+ * Stale-row auto-cleanup.
+ *
+ * Each MSI install/upgrade rotates the api_key → produces a new `supervisors`
+ * row for the same physical host. Old rows are never reaped and pile up in
+ * Settings → Connections. After every successful hello/auth we delete sibling
+ * rows for the same (user_id, hostname) whose last_seen_at is older than the
+ * staleness threshold, EXCLUDING the just-connected row (`keepId`).
+ *
+ * Conservative default: 5 min. Supervisor heartbeats every 30s, so any row
+ * with last_seen_at > 5 min is genuinely abandoned. CASCADE FKs on dependent
+ * tables (session_runs, supervisor_commands, paused_repos) clean up children.
+ *
+ * MUST be called AFTER the new supervisor row is upserted — never before —
+ * to avoid a race where we delete a sibling and then fail to insert.
+ */
+export async function cleanupStaleSupervisorRows(
+  userId: string,
+  hostname: string,
+  keepId: string,
+  stalenessMinutes = 5,
+): Promise<{ deleted_ids: string[] }> {
+  const rows = await sql`
+    DELETE FROM supervisors
+    WHERE user_id = ${userId}
+      AND hostname = ${hostname}
+      AND id != ${keepId}
+      AND last_seen_at < now() - (${stalenessMinutes} || ' minutes')::interval
+    RETURNING id
+  `
+  return { deleted_ids: rows.map((r: any) => r.id as string) }
+}
+
 export async function setSupervisorState(supervisorId: string, state: string, currentRunId: string | null = null) {
   await sql`
     UPDATE supervisors SET state = ${state}, current_run_id = ${currentRunId}, last_seen_at = now()
