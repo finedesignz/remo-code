@@ -29,6 +29,10 @@ interface Props {
 }
 
 export function ConnectionsTab({ token }: Props) {
+  useEffect(() => {
+    console.log("[tab:settings:connections] mounted");
+    return () => console.log("[tab:settings:connections] unmounted");
+  }, []);
   return (
     <div className="px-4 md:px-6 lg:px-8 py-5 w-full max-w-7xl mx-auto space-y-5">
       <RootsEditor token={token} />
