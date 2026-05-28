@@ -171,7 +171,12 @@ export function Sidebar({
     for (const s of byKey.values()) out.push(s)
     return out
   }
-  const connectedList = collapseByRepoKey(connectedSessions(sessions))
+  const rawConnected = collapseByRepoKey(connectedSessions(sessions))
+  // Pin the orchestrator session (if any) to the very top.
+  const orchestratorIdx = rawConnected.findIndex((s) => s.is_orchestrator)
+  const connectedList = orchestratorIdx >= 0
+    ? [rawConnected[orchestratorIdx], ...rawConnected.filter((_, i) => i !== orchestratorIdx)]
+    : rawConnected
 
   const hoveredSession =
     hoverInfo ? connectedList.find(s => s.id === hoverInfo.id) : null
@@ -257,7 +262,9 @@ export function Sidebar({
                 className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
                   s.id === activeSessionId
                     ? 'bg-indigo-600/20 text-[var(--text-primary)] ring-1 ring-indigo-500/30'
-                    : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 active:bg-[var(--bg-tertiary)]/70'
+                    : s.is_orchestrator
+                      ? 'bg-indigo-600/10 text-[var(--text-primary)] ring-1 ring-indigo-500/40 hover:bg-indigo-600/15'
+                      : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 active:bg-[var(--bg-tertiary)]/70'
                 }`}
               >
                 <div className="flex items-center gap-2">
@@ -275,6 +282,14 @@ export function Sidebar({
                     </svg>
                   )}
                   <span className="truncate font-medium flex-1" title={primaryLabel}>{primaryLabel}</span>
+                  {s.is_orchestrator && (
+                    <span
+                      className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 shrink-0 font-semibold"
+                      title="Orchestrator — coordinates your other sessions"
+                    >
+                      Orchestrator
+                    </span>
+                  )}
                   {s.cli_kind === 'codex' && (
                     <span
                       className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 shrink-0 font-semibold"

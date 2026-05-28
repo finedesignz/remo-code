@@ -24,6 +24,7 @@ export interface CodeSession {
   agent_info?: AgentInfo | null
   cli_kind?: 'claude' | 'codex'
   is_rootless?: boolean
+  is_orchestrator?: boolean
   hostname?: string | null
   // ── Phase 08 — GitHub-keyed session fields ────────────────────────────────
   // All nullable: legacy/local-only sessions have repo_key === null.
