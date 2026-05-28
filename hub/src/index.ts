@@ -315,9 +315,18 @@ if (config.titaniumBypass) {
   }
 }
 
-// Start Bun server with WebSocket upgrade handling
+// Start Bun server with WebSocket upgrade handling.
+//
+// idleTimeout: Bun's default is 10s, which kills any HTTP request whose
+// upstream WS round-trip takes longer (notably POST /api/supervisors/:id/scan,
+// which fans out to the supervisor over WS with a 20s sendRequest budget, plus
+// /clone at 300s). Hitting Bun's 10s before the WS reply arrives terminates
+// the HTTP connection mid-flight, which Coolify's Traefik in turn surfaces as
+// 502 Bad Gateway. Bump to 305s (5s above the longest sendRequest budget) so
+// HTTP keep-alives never expire before the WS response can be serialized.
 const server = Bun.serve({
   port: config.port,
+  idleTimeout: 255,
   async fetch(req, server) {
     const url = new URL(req.url)
 
