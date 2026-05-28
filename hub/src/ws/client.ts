@@ -4,7 +4,7 @@ import { verifyJwt } from '../auth/jwt.ts'
 import { verifyAuthSessionToken } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
-import { insertMessage, listSessions, getSession } from '../db/dal'
+import { insertMessage, listSessions, getSession, getUserLicenseFields } from '../db/dal'
 import { checkUserThreshold } from '../usage/threshold.ts'
 import {
   registerClient, unregisterClient, subscribeClient,
@@ -34,6 +34,12 @@ interface ClientWsData {
   csrfCookie?: string | null
   // Auth method (set after auth succeeds) — drives CSRF enforcement decisions.
   authMethod?: 'session_cookie' | 'legacy_jwt' | null
+  // Phase 07-D parity: license cache on the WS connection. Mirrors the HTTP
+  // license-gate semantics on /api/* — mutating WS messages refuse when
+  // status !== 'active'. Refreshed opportunistically when stale (TTL matches
+  // config.titanium.licenseCacheTtlSeconds).
+  licenseStatus?: string | null
+  licenseCheckedAt?: number | null
 }
 
 export function createClientWsData(): ClientWsData {
@@ -47,7 +53,52 @@ export function createClientWsData(): ClientWsData {
     cookieToken: null,
     csrfCookie: null,
     authMethod: null,
+    licenseStatus: null,
+    licenseCheckedAt: null,
   }
+}
+
+// Mutating WS handlers that require an active license. Mirrors the HTTP
+// gate's "not readOnlyOk" rule — `subscribe`, `unsubscribe`, and `pong` are
+// read-only and always allowed.
+const LICENSE_GATED_WS_TYPES = new Set([
+  'send_message',
+  'permission_response',
+  'question_response',
+])
+
+/**
+ * Returns true when the WS connection's user has an active license. When the
+ * cached value is stale (older than the configured TTL), refreshes via the
+ * DAL so a user who renews mid-session is unblocked without reconnecting.
+ *
+ * Fail-open on DAL errors — matches `license-gate.ts` decoupled-for-read
+ * principle: a Postgres blip should NOT lock out a previously-active user.
+ * The HTTP gate is still the authoritative ban for new requests.
+ */
+async function isLicenseActive(data: ClientWsData): Promise<boolean> {
+  // Permissive mode — TITANIUM_BYPASS or LICENSE_REQUIRED=false. Matches the
+  // HTTP gate's escape hatch. Prod currently runs with bypass=true.
+  if (config.titaniumBypass || !config.licenseRequired) return true
+
+  if (!data.userId) return false
+
+  const ttlMs = config.titanium.licenseCacheTtlSeconds * 1000
+  const checkedAt = data.licenseCheckedAt ?? 0
+  const stale = Date.now() - checkedAt >= ttlMs
+
+  if (stale) {
+    try {
+      const fields = await getUserLicenseFields(data.userId)
+      data.licenseStatus = (fields?.license_status ?? 'NONE').toLowerCase()
+      data.licenseCheckedAt = Date.now()
+    } catch {
+      // DAL unreachable — fail open if we had a prior active read.
+      return (data.licenseStatus ?? '').toLowerCase() === 'active'
+    }
+  }
+
+  return (data.licenseStatus ?? '').toLowerCase() === 'active'
 }
 
 export function handleClientOpen(ws: ServerWebSocket<ClientWsData>) {
@@ -109,6 +160,17 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     data.userId = resolvedUserId
     data.authenticated = true
 
+    // Phase 07-D WS parity: seed license cache from DAL at auth time. Failures
+    // are non-fatal — the per-message gate will re-query on next mutation.
+    try {
+      const fields = await getUserLicenseFields(resolvedUserId)
+      data.licenseStatus = (fields?.license_status ?? 'NONE').toLowerCase()
+      data.licenseCheckedAt = Date.now()
+    } catch {
+      data.licenseStatus = null
+      data.licenseCheckedAt = null
+    }
+
     if (data.authTimer) clearTimeout(data.authTimer)
 
     data.clientEntry = registerClient(data.userId!, ws)
@@ -146,6 +208,22 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     if (!verifyCsrfPair(data.csrfCookie ?? null, supplied ?? null)) {
       console.log(`[client] csrf_failed type=${msg.type} user=${data.userId}`)
       ws.send(JSON.stringify({ type: 'auth_error', error: 'csrf_failed' }))
+      return
+    }
+  }
+
+  // Phase 07-D WS parity: refuse mutating messages when license !== 'active'.
+  // Mirrors the HTTP `requireActiveLicense` gate. Read-only ops (subscribe,
+  // unsubscribe, pong) are always allowed. Connection stays open.
+  if (LICENSE_GATED_WS_TYPES.has(msg.type)) {
+    const ok = await isLicenseActive(data)
+    if (!ok) {
+      console.log(
+        `[license-gate] WS mutation refused user=${data.userId} handler=${msg.type} status=${data.licenseStatus ?? 'unknown'}`,
+      )
+      try {
+        ws.send(JSON.stringify({ type: 'send_refused', reason: 'license_inactive' }))
+      } catch {}
       return
     }
   }
