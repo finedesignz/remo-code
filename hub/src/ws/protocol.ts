@@ -302,6 +302,18 @@ export type HubToClient =
   // its capacity chip without polling.
   | { type: 'supervisor_capacity_changed'; supervisor_id: string;
       running: number; cap: number }
+  // Supervisor lifecycle / state change. Broadcast on hello (state=idle,
+  // includes hostname/version/os/roots), on subsequent state transitions
+  // (running/idle), and on socket close (state=offline). Web hooks subscribe
+  // and refetch /api/supervisors to update the Connections list without
+  // polling — see web/src/hooks/useSupervisors.ts.
+  | { type: 'supervisor_update'; supervisor_id: string;
+      state: string;
+      current_run_id?: string | null;
+      hostname?: string;
+      version?: string | null;
+      os?: string | null;
+      roots?: string[] }
   // Bug A (2026-05-28): supervisor pushed a fresh session_inventory and at
   // least one session entered/left/transitioned. Web clients refresh the
   // sidebar's active flag without polling.
