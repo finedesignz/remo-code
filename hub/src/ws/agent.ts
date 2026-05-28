@@ -836,6 +836,14 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
     // multiplex sessions don't carry a single sessionId — those entries are
     // cleared elsewhere by the next text_delta replacing placeholder state.
     if (ws.data.sessionId) streamingBySession.delete(ws.data.sessionId)
+    // Bundle 3: finalize any open session_runs for this supervisor so they
+    // don't sit as zombies forever after a socket close.
+    try {
+      const { finalizeOpenRunsForSupervisor } = await import('../db/supervisor-dal')
+      await finalizeOpenRunsForSupervisor(ws.data.supervisorId)
+    } catch (err: any) {
+      console.warn(`[agent] finalizeOpenRunsForSupervisor failed supervisor=${ws.data.supervisorId} err=${err?.message}`)
+    }
     // Pass the closing ws so unregister can ignore stale closes from sockets
     // that have already been replaced by a reconnect.
     unregisterSupervisor(ws.data.supervisorId, ws)
