@@ -198,6 +198,23 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
         }))
       }
     } catch {}
+
+    // Auto-resume orphan sessions on web client connect (page load / refresh).
+    // Sacred invariant: sessions whose last finalized run carries
+    // `exit_reason='user_stopped'` are NEVER resumed. Rate-limited to once per
+    // (user, 60s) inside the helper to absorb rapid refresh cycles. Errors
+    // swallowed — this is best-effort and must not break auth.
+    void (async () => {
+      try {
+        const { resumeOrphanSessionsForUser } = await import('../orchestrator/orphan-resume')
+        const r = await resumeOrphanSessionsForUser(data.userId!)
+        if (r.resumed.length > 0) {
+          console.log(`[client] resumed ${r.resumed.length} orphan session(s) for user=${data.userId}`)
+        }
+      } catch (err: any) {
+        console.error('[client] orphan resume failed', err?.message)
+      }
+    })()
     return
   }
 
