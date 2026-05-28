@@ -1314,9 +1314,10 @@ export interface TelegramInboundLogInput {
  * collide silently — Telegram retries the same update_id when we 5xx, so
  * the dispatch path checks for an existing row before re-firing.
  */
-export async function logTelegramInbound(input: TelegramInboundLogInput): Promise<void> {
+export async function logTelegramInbound(input: TelegramInboundLogInput): Promise<{ inserted: boolean }> {
+  let inserted = false;
   try {
-    await sql`
+    const rows = await sql<{ id: string }[]>`
       INSERT INTO telegram_inbound_log
         (user_id, chat_id, update_id, outcome, error, raw)
       VALUES
@@ -1327,12 +1328,14 @@ export async function logTelegramInbound(input: TelegramInboundLogInput): Promis
          ${input.error ?? null},
          ${input.raw === undefined ? null : JSON.stringify(input.raw)}::jsonb)
       ON CONFLICT (chat_id, update_id) DO NOTHING
+      RETURNING id
     `;
+    inserted = rows.length > 0;
   } catch (err: any) {
     console.warn("[telegram] inbound log insert failed:", err?.message);
-    return;
+    return { inserted: false };
   }
-  if (!input.user_id) return;
+  if (!input.user_id) return { inserted };
   try {
     await sql`
       DELETE FROM telegram_inbound_log
@@ -1347,4 +1350,5 @@ export async function logTelegramInbound(input: TelegramInboundLogInput): Promis
   } catch (err: any) {
     console.warn("[telegram] inbound log trim failed:", err?.message);
   }
+  return { inserted };
 }
