@@ -6,7 +6,7 @@ import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
 import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows } from '../db/supervisor-dal'
-import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
+import { getCapacitySnapshot } from '../sessions/budget'
 import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
   updateSupervisorState, heartbeatSupervisor, getSupervisor,
@@ -552,87 +552,30 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     // fresh session.start to the now-online supervisor. The new run reuses the
     // same project_dir, so the UI session row is reused and history persists.
     //
-    // Guards added 2026-05-27 after the autonomous-loop RCA:
-    //   1. AGE CAP — only resume runs that started in the last 24h. Older
-    //      open rows are stale carryovers from a long-gone session; replaying
-    //      them produces zombie sessions the user has forgotten about.
-    //   2. RESTART CAP — when restart_count >= 10, finalize the run as
-    //      `max_restarts_exceeded` and skip the replay. Prevents the hub from
-    //      feeding the same broken spawn back into the supervisor over and
-    //      over after a reconnect.
+    // Logic is in `hub/src/orchestrator/orphan-resume.ts` — shared with the
+    // client-side resume path (web client connect / page refresh).
+    // Sacred invariant: sessions whose last finalized run carries
+    // `exit_reason='user_stopped'` (Stop button) are NEVER resumed.
     try {
-      const { sql } = await import('../db/postgres')
-      const MAX_RESTART_COUNT = 10
-      const orphans = await sql`
-        SELECT id, repo_path, branch, initial_prompt, restart_count, started_at
-        FROM session_runs
-        WHERE supervisor_id = ${row.id}
-          AND ended_at IS NULL
-          AND started_at > now() - interval '24 hours'
-        ORDER BY started_at ASC
-      `
-      // Sweep any open rows that fell outside the 24h window — finalize them
-      // as `stale` so they don't reappear on the next reconnect.
-      const staleSweep = await sql`
-        UPDATE session_runs
-        SET ended_at = now(), exit_reason = 'stale'
-        WHERE supervisor_id = ${row.id}
-          AND ended_at IS NULL
-          AND started_at <= now() - interval '24 hours'
-        RETURNING id
-      `
-      if (staleSweep.length > 0) {
-        console.log(`[supervisor] auto-resume finalized ${staleSweep.length} stale run(s) older than 24h`)
+      const { resumeOrphansForSupervisor } = await import('../orchestrator/orphan-resume')
+      const r = await resumeOrphansForSupervisor({ userId, supervisorId: row.id })
+      if (r.finalized_stale.length > 0) {
+        console.log(`[supervisor] auto-resume finalized ${r.finalized_stale.length} stale run(s) older than 24h`)
       }
-      if (orphans.length > 0) {
-        console.log(`[supervisor] auto-resuming ${orphans.length} orphan session(s)`)
-        for (const o of orphans) {
-          // Restart-count cap — if this run has already been restarted too
-          // many times, finalize it instead of replaying. Stops runaway loops.
-          if (typeof o.restart_count === 'number' && o.restart_count >= MAX_RESTART_COUNT) {
-            await sql`
-              UPDATE session_runs
-              SET ended_at = now(), exit_reason = 'max_restarts_exceeded'
-              WHERE id = ${o.id}
-            `
-            console.warn(`[supervisor] auto-resume skipped run=${o.id} reason=max_restarts_exceeded restart_count=${o.restart_count}`)
-            continue
-          }
-          // End the orphan FIRST so it doesn't count against the cap when we
-          // reserve a slot for its replacement.
-          await sql`UPDATE session_runs SET ended_at = now(), exit_reason = 'reboot' WHERE id = ${o.id}`
-          // Plan 04-003: hub-authoritative gate. Skip auto-resume when at cap
-          // (a paused override or budget reduction since last boot). The orphan
-          // already ended above so the user can manually start it later.
-          const reservation = await reserveSessionSlot(userId, row.id)
-          if (!reservation.ok) {
-            console.warn(`[supervisor] auto-resume skipped run=${o.id} reason=${reservation.reason}`)
-            continue
-          }
-          const newRun = await sql`
-            INSERT INTO session_runs (user_id, supervisor_id, repo_path, branch, pulled, initial_prompt, restart_of)
-            VALUES (${userId}, ${row.id}, ${o.repo_path}, ${o.branch}, false, ${null}, ${o.id})
-            RETURNING id
-          `
-          const newRunId = newRun[0].id
-          try {
-            ws.send(JSON.stringify({
-              type: 'session.start',
-              req_id: newRunId,
-              run_id: newRunId,
-              repo_path: o.repo_path,
-              branch: o.branch ?? undefined,
-              pull: false,
-              api_key: '__use_local__',
-              hub_url: '__same__',
-            }))
-          } catch (err: any) {
-            console.error('[supervisor] auto-resume send failed', err.message)
-          }
-        }
+      if (r.resumed.length > 0) {
+        console.log(`[supervisor] auto-resumed ${r.resumed.length} orphan session(s)`)
+      }
+      if (r.skipped_user_stopped.length > 0) {
+        console.log(`[supervisor] auto-resume skipped ${r.skipped_user_stopped.length} user_stopped session(s)`)
+      }
+      if (r.skipped_max_restarts.length > 0) {
+        console.warn(`[supervisor] auto-resume skipped ${r.skipped_max_restarts.length} run(s) reason=max_restarts_exceeded`)
+      }
+      if (r.skipped_capacity.length > 0) {
+        console.warn(`[supervisor] auto-resume skipped ${r.skipped_capacity.length} run(s) reason=capacity`)
       }
     } catch (err: any) {
-      console.error('[supervisor] auto-resume query failed', err.message)
+      console.error('[supervisor] auto-resume failed', err.message)
     }
     broadcastToUser(userId, {
       type: 'supervisor_update',
