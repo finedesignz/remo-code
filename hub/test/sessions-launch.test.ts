@@ -64,6 +64,20 @@ mock.module('../src/ws/registry.ts', () => ({
   broadcastToUser: (..._args: any[]) => {},
 }))
 
+// Bundle 2 (PR #109) — `mock.module` is process-global in `bun test` and
+// FIRST-write-wins per spec across files. If this mock omits any export
+// that another test file (e.g. `supervisor-registry.test.ts`,
+// `ws-protocol-cluster.test.ts`) imports from
+// `../src/ws/supervisor-registry`, that file's dynamic import will see an
+// undefined binding and fail with "X is not a function". Keep the full
+// surface here. The functional register/unregister/isOnline/sendRequest
+// impls below mirror the real module narrowly — they exist purely so
+// cross-test imports get working symbols. This file's own tests never
+// exercise them; they use the state-driven getSupervisor stub.
+const _mockSupervisors = new Map<string, { ws: any; supervisorId: string; userId: string; apiKeyId: string; pendingReqs: Map<string, { resolve: (v: any) => void; reject: (e: any) => void; timer: ReturnType<typeof setTimeout> }> }>()
+const _mockSupervisorsByApiKey = new Map<string, string>()
+let _mockReqCounter = 0
+
 mock.module('../src/ws/supervisor-registry.ts', () => ({
   sendToSupervisor: (supId: string, msg: any) => {
     state.sentMessages.push({ supId, msg })
@@ -71,7 +85,12 @@ mock.module('../src/ws/supervisor-registry.ts', () => ({
   updateSupervisorState: async () => {},
   listOnlineSupervisorIdsForUser: () =>
     state.supervisorOnline ? [TEST_SUPERVISOR_ID] : [],
-  getSupervisor: () => (state.supervisorOnline ? { supervisorId: TEST_SUPERVISOR_ID } : undefined),
+  getSupervisor: (supervisorId: string) => {
+    if (state.supervisorOnline && supervisorId === TEST_SUPERVISOR_ID) {
+      return { supervisorId: TEST_SUPERVISOR_ID }
+    }
+    return _mockSupervisors.get(supervisorId)
+  },
   resolveLocalPathForRepoKey: (_uid: string, repoKey: string) => {
     if (!state.inventory) return null
     const m = state.inventory.repos.find((r: any) => {
@@ -97,6 +116,87 @@ mock.module('../src/ws/supervisor-registry.ts', () => ({
       canonical: !!r.canonical,
     }))
   },
+  // ── Real-enough impls so cross-test files get working bindings ──────────
+  registerSupervisor: (args: { ws: any; supervisorId: string; userId: string; apiKeyId: string; roots: string[]; hostname?: string }) => {
+    const existingId = _mockSupervisorsByApiKey.get(args.apiKeyId)
+    if (existingId) {
+      const e = _mockSupervisors.get(existingId)
+      if (e && e.ws !== args.ws) {
+        for (const [, p] of e.pendingReqs) {
+          clearTimeout(p.timer)
+          p.reject(new Error('supervisor_replaced'))
+        }
+        e.pendingReqs.clear()
+        try { e.ws.close(4003, 'replaced') } catch {}
+      }
+    }
+    const entry = {
+      ws: args.ws,
+      supervisorId: args.supervisorId,
+      userId: args.userId,
+      apiKeyId: args.apiKeyId,
+      pendingReqs: new Map<string, { resolve: (v: any) => void; reject: (e: any) => void; timer: ReturnType<typeof setTimeout> }>(),
+    }
+    _mockSupervisors.set(args.supervisorId, entry)
+    _mockSupervisorsByApiKey.set(args.apiKeyId, args.supervisorId)
+    return entry
+  },
+  unregisterSupervisor: (supervisorId: string, ws?: any) => {
+    const entry = _mockSupervisors.get(supervisorId)
+    if (!entry) return
+    if (ws && entry.ws !== ws) return
+    for (const [, p] of entry.pendingReqs) {
+      clearTimeout(p.timer)
+      p.reject(new Error('supervisor disconnected'))
+    }
+    _mockSupervisors.delete(supervisorId)
+    _mockSupervisorsByApiKey.delete(entry.apiKeyId)
+  },
+  isSupervisorOnline: (supervisorId: string) => _mockSupervisors.has(supervisorId),
+  sendRequest: (supervisorId: string, msg: any, timeoutMs = 30_000) => {
+    const entry = _mockSupervisors.get(supervisorId)
+    if (!entry) return Promise.reject(new Error('supervisor offline'))
+    const req_id = msg.req_id || `req_${Date.now()}_${++_mockReqCounter}`
+    const full = { ...msg, req_id }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        entry.pendingReqs.delete(req_id)
+        reject(new Error('supervisor request timed out'))
+      }, timeoutMs)
+      entry.pendingReqs.set(req_id, { resolve, reject, timer })
+      try { entry.ws.send(JSON.stringify(full)) } catch (err) {
+        clearTimeout(timer); entry.pendingReqs.delete(req_id); reject(err as Error)
+      }
+    })
+  },
+  resolveRequest: (supervisorId: string, reqId: string, payload: any) => {
+    const entry = _mockSupervisors.get(supervisorId)
+    if (!entry) return false
+    const p = entry.pendingReqs.get(reqId)
+    if (!p) return false
+    clearTimeout(p.timer)
+    entry.pendingReqs.delete(reqId)
+    p.resolve(payload)
+    return true
+  },
+  rejectRequest: (supervisorId: string, reqId: string, error: string) => {
+    const entry = _mockSupervisors.get(supervisorId)
+    if (!entry) return false
+    const p = entry.pendingReqs.get(reqId)
+    if (!p) return false
+    clearTimeout(p.timer)
+    entry.pendingReqs.delete(reqId)
+    p.reject(new Error(error))
+    return true
+  },
+  heartbeatSupervisor: async () => {},
+  pushKeyRotatedToUser: () => 0,
+  getSupervisorByApiKey: (apiKeyId: string) => {
+    const id = _mockSupervisorsByApiKey.get(apiKeyId)
+    return id ? _mockSupervisors.get(id) : undefined
+  },
+  setUserInventory: () => {},
+  listSupervisorsForUser: async () => [],
 }))
 
 mock.module('../src/lib/github-scope.ts', () => ({
