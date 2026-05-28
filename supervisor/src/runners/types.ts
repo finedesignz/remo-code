@@ -1,0 +1,126 @@
+/**
+ * In-process CLI runner types — restored 2026-05-27 to replace the retired
+ * external npm agent spawn path (Phase 09).
+ *
+ * Mirrors the shape the legacy `agent/src/cli-runner.ts` used so the hub-side
+ * agent-protocol is unchanged. The runner emits `RunnerEvent`s; the bridge
+ * (supervisor/src/runners/session-bridge.ts) translates those onto the hub's
+ * `/ws/agent` discriminated union.
+ */
+
+export type RunnerEvent =
+  | { type: 'thinking'; content: string }
+  | { type: 'text_delta'; content: string }
+  | { type: 'tool_use'; tool: string; tool_id: string; input: unknown }
+  | { type: 'tool_result'; tool_id: string; content: string; is_error?: boolean }
+  | { type: 'status'; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
+  | { type: 'assistant_message'; content: string }
+  | { type: 'permission_request'; request_id: string; tool_name: string; tool_input: unknown }
+  | {
+      type: 'user_question'
+      request_id: string
+      question: string
+      options?: Array<{ label: string; description?: string }>
+      is_multi_select?: boolean
+    }
+  | { type: 'result'; cost: number; duration_ms: number }
+  | { type: 'error'; message: string }
+  | { type: 'log'; message: string }
+  | { type: 'ready' }
+  | { type: 'exited'; code: number | null }
+
+export interface CliRunner {
+  readonly cliKind: 'claude' | 'codex'
+  readonly isReady: boolean
+  start(onEvent: (e: RunnerEvent) => void): void
+  sendMessage(prompt: string, images?: Array<{ media_type: string; data: string }>): void
+  respondToPermission(requestId: string, approved: boolean): void
+  respondToQuestion(requestId: string, answer: string): void
+  cancel(): void
+  stop(): void
+  stopGracefully(): Promise<void>
+}
+
+// Subset of Claude CLI stream-json shapes we care about
+export interface CliInitEvent {
+  type: 'system'
+  subtype: 'init'
+  session_id: string
+  cwd: string
+}
+export interface CliAssistantEvent {
+  type: 'assistant'
+  message: {
+    content: Array<
+      | { type: 'text'; text: string }
+      | { type: 'thinking'; thinking: string }
+      | { type: 'tool_use'; id: string; name: string; input: unknown }
+    >
+  }
+  session_id: string
+}
+export interface CliToolResultEvent {
+  type: 'tool_result'
+  tool_use_id: string
+  content: string
+  is_error?: boolean
+}
+export interface CliResultEvent {
+  type: 'result'
+  subtype: 'success' | 'error'
+  result: string
+  duration_ms: number
+  total_cost_usd: number
+}
+export type CliEvent =
+  | CliInitEvent
+  | CliAssistantEvent
+  | CliToolResultEvent
+  | CliResultEvent
+  | { type: string; [k: string]: unknown }
+
+// Hub → agent message shapes (subset). Hub sends these on /ws/agent after auth_ok.
+export type HubToAgent =
+  | { type: 'auth_ok'; session_id: string; system_prompt?: string | null; cli_kind?: 'claude' | 'codex' }
+  | { type: 'auth_error'; error: string }
+  | {
+      type: 'user_message'
+      id?: string
+      session_id?: string
+      content: string
+      images?: Array<{ media_type: string; data: string }>
+      attachments?: Array<{ filename: string; content: string }>
+    }
+  | { type: 'permission_response'; session_id?: string; request_id: string; approved: boolean }
+  | { type: 'question_response'; session_id?: string; request_id: string; answer: string }
+  | { type: 'cancel'; session_id?: string }
+  | { type: 'shutdown'; reason?: string }
+  | { type: 'ping' }
+
+// Agent → hub message shapes (subset). Bridge stamps session_id.
+export type AgentToHub =
+  | {
+      type: 'auth'
+      api_key: string
+      project_dir: string
+      hostname: string
+      role?: 'agent'
+      agent_info?: Record<string, unknown>
+    }
+  | { type: 'thinking'; session_id: string; content: string }
+  | { type: 'text_delta'; session_id: string; content: string }
+  | { type: 'tool_use'; session_id: string; tool: string; tool_id: string; input: unknown }
+  | { type: 'tool_result'; session_id: string; tool_id: string; content: string; is_error?: boolean }
+  | { type: 'status'; session_id: string; state: 'idle' | 'thinking' | 'tool_calling' | 'writing' }
+  | { type: 'assistant_message'; session_id: string; content: string }
+  | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
+  | {
+      type: 'user_question'
+      session_id: string
+      request_id: string
+      question: string
+      options?: Array<{ label: string; description?: string }>
+      is_multi_select?: boolean
+    }
+  | { type: 'agent_log'; session_id: string; message: string }
+  | { type: 'pong' }
