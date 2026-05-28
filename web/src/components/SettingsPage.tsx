@@ -9,6 +9,7 @@ import { SchedulesPage } from './SchedulesPage'
 import { ClaudeUsageCard } from './ClaudeUsageCard'
 import { OrchestratorTab } from './OrchestratorTab'
 import { hubFetch } from '../lib/api'
+import { useSessions } from '../hooks/useSessions'
 
 interface Props {
   token: string
@@ -24,13 +25,13 @@ interface Props {
   onBack: () => void
 }
 
-type Tab = 'profile' | 'supervisor' | 'apikey' | 'commands' | 'instructions' | 'schedules' | 'orchestrator'
+type Tab = 'profile' | 'supervisor' | 'apikey' | 'commands' | 'instructions' | 'schedules' | 'orchestrator' | 'telegram'
 
 function readTabFromHash(): Tab {
   const m = window.location.hash.match(/[?&]tab=([a-z]+)/)
   const raw = m?.[1]
   if (raw === 'account') return 'profile'
-  if (raw === 'profile' || raw === 'supervisor' || raw === 'apikey' || raw === 'commands' || raw === 'instructions' || raw === 'schedules' || raw === 'orchestrator') return raw
+  if (raw === 'profile' || raw === 'supervisor' || raw === 'apikey' || raw === 'commands' || raw === 'instructions' || raw === 'schedules' || raw === 'orchestrator' || raw === 'telegram') return raw
   return 'supervisor'
 }
 
@@ -130,6 +131,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
     { id: 'profile', label: 'Profile' },
     { id: 'instructions', label: 'Instructions' },
     { id: 'orchestrator', label: 'Orchestrator' },
+    { id: 'telegram', label: 'Telegram' },
     { id: 'apikey', label: 'API Key' },
   ]
 
@@ -140,6 +142,7 @@ export function SettingsPage({ token, profile, onUpdateProfile, onBack }: Props)
     if (id === 'instructions') return <InstructionsTab token={token} />
     if (id === 'schedules') return <SchedulesTabEmbedded token={token} />
     if (id === 'orchestrator') return <OrchestratorTab token={token} />
+    if (id === 'telegram') return <TelegramTab token={token} />
     return <ApiKeyTab token={token} />
   }
 
@@ -1070,5 +1073,220 @@ function CoolifyWebhookCard({ token }: { token: string }) {
         )}
       </div>
     </section>
+  )
+}
+
+/* ─────────────────────────── Telegram tab ─────────────────────────── */
+
+interface TelegramStatus {
+  linked: boolean
+  chat_id: string | null
+  default_session_id: string | null
+  bot_username: string | null
+  bot_configured: boolean
+}
+
+function TelegramTab({ token }: { token: string }) {
+  const [status, setStatus] = useState<TelegramStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [linkCode, setLinkCode] = useState<{ code: string; deepLink: string; expiresAt: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const { sessions } = useSessions(token)
+
+  const reload = useCallback(async () => {
+    setError(null)
+    try {
+      const s = await hubFetch<TelegramStatus>(token, '/api/telegram/status')
+      setStatus(s)
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load Telegram status')
+    } finally {
+      setLoading(false)
+    }
+  }, [token])
+
+  useEffect(() => { reload() }, [reload])
+
+  // Poll every 5s while a link code is outstanding so the UI flips to linked
+  // shortly after the user runs /start in Telegram.
+  useEffect(() => {
+    if (!linkCode || status?.linked) return
+    const id = setInterval(reload, 5000)
+    return () => clearInterval(id)
+  }, [linkCode, status?.linked, reload])
+
+  const handleLink = async () => {
+    setBusy(true); setError(null)
+    try {
+      const res = await hubFetch<{ code: string; deepLink: string; expiresAt: string }>(token, '/api/telegram/link-code', {
+        method: 'POST',
+        json: {},
+      })
+      setLinkCode(res)
+      // Open the deep link in a new tab so mobile users land directly in
+      // Telegram with the /start command pre-filled.
+      try { window.open(res.deepLink, '_blank', 'noopener,noreferrer') } catch {}
+    } catch (e: any) {
+      if (e?.status === 503) setError('Telegram bridge not enabled on this server.')
+      else setError(e?.message || 'Failed to generate link code')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleUnlink = async () => {
+    if (!window.confirm('Unlink Telegram from this account? Inbound messages will stop and the outbound bridge will silence.')) return
+    setBusy(true); setError(null)
+    try {
+      await hubFetch(token, '/api/telegram/link', { method: 'DELETE', raw: true })
+      setLinkCode(null)
+      await reload()
+    } catch (e: any) {
+      setError(e?.message || 'Failed to unlink')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDefaultSessionChange = async (sessionId: string | null) => {
+    setBusy(true); setError(null)
+    try {
+      await hubFetch(token, '/api/telegram/default-session', {
+        method: 'PUT',
+        json: { session_id: sessionId },
+      })
+      await reload()
+    } catch (e: any) {
+      setError(e?.message || 'Failed to set default session')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (loading) return <p className="text-sm text-[var(--text-muted)]">Loading…</p>
+
+  if (!status?.bot_configured) {
+    return (
+      <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 space-y-2">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)]">Telegram</h3>
+        <p className="text-sm text-[var(--text-muted)]">Telegram bridge not enabled on this server.</p>
+      </section>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {error && (
+        <div className="bg-red-900/20 ring-1 ring-red-800/40 rounded-lg px-3 py-2 text-xs text-red-300">{error}</div>
+      )}
+
+      {!status.linked && (
+        <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 space-y-3">
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)]">Link Telegram</h3>
+            <p className="text-xs text-[var(--text-muted)] mt-1">
+              Chat with your Claude Code sessions from Telegram. One-tap link via deep link, or paste the code manually.
+            </p>
+          </div>
+
+          {!linkCode && (
+            <button
+              onClick={handleLink}
+              disabled={busy}
+              className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium px-3 py-2 rounded-lg transition-colors"
+            >
+              {busy ? 'Generating…' : 'Link Telegram'}
+            </button>
+          )}
+
+          {linkCode && (
+            <div className="bg-[var(--bg-primary)] rounded-lg p-4 space-y-3">
+              <p className="text-xs text-[var(--text-secondary)]">
+                Tap the link below (or open Telegram and send <code className="bg-[var(--code-bg)] px-1 py-0.5 rounded">/start {linkCode.code}</code> to <span className="text-indigo-300">@{status.bot_username}</span>).
+                Code expires in 10 minutes.
+              </p>
+              <div className="flex items-center gap-2">
+                <a
+                  href={linkCode.deepLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium px-3 py-2 rounded-lg transition-colors"
+                >
+                  Open Telegram
+                </a>
+                <button
+                  onClick={() => { navigator.clipboard.writeText(linkCode.code) }}
+                  className="text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] px-2 py-2 rounded-lg hover:bg-[var(--bg-tertiary)]/50 inline-flex items-center gap-1.5 font-mono"
+                  title="Copy code"
+                >
+                  <CopyIcon />
+                  {linkCode.code}
+                </button>
+                <button
+                  onClick={handleLink}
+                  disabled={busy}
+                  className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] px-2 py-2 rounded-lg hover:bg-[var(--bg-tertiary)]/50 inline-flex items-center gap-1.5"
+                  title="Generate fresh code"
+                >
+                  <RotateIcon />
+                  New code
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {status.linked && (
+        <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-[var(--text-primary)] flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-400" aria-hidden />
+                Telegram linked
+              </h3>
+              <p className="text-xs text-[var(--text-muted)] mt-1">
+                Chat ID <span className="font-mono text-[var(--text-secondary)]">{status.chat_id}</span> · @{status.bot_username}
+              </p>
+            </div>
+            <button
+              onClick={handleUnlink}
+              disabled={busy}
+              className="text-xs text-red-300 hover:text-red-200 px-2 py-1.5 rounded-lg hover:bg-red-900/20 inline-flex items-center gap-1.5 disabled:opacity-50"
+              title="Unlink Telegram"
+            >
+              <TrashIcon />
+              Unlink
+            </button>
+          </div>
+
+          <div>
+            <label className="text-xs text-[var(--text-secondary)] block mb-1.5">
+              Default session
+              <HelpIcon title="Inbound Telegram messages route to this session. The outbound bridge forwards this session's final assistant messages back to your Telegram chat." />
+            </label>
+            <select
+              value={status.default_session_id ?? ''}
+              onChange={(e) => handleDefaultSessionChange(e.target.value || null)}
+              disabled={busy}
+              className="w-full bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50 disabled:opacity-50"
+            >
+              <option value="">— no default —</option>
+              {sessions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}{s.project_dir ? ` · ${s.project_dir}` : ''}
+                </option>
+              ))}
+            </select>
+            {!status.default_session_id && (
+              <p className="text-xs text-amber-300/80 mt-1.5">
+                Pick a default session — inbound messages have nowhere to land until you do.
+              </p>
+            )}
+          </div>
+        </section>
+      )}
+    </div>
   )
 }

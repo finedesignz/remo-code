@@ -85,6 +85,22 @@ const titaniumWebhookSecret = requireMinLenIfSet(
   16,
 );
 
+// Phase 12: Telegram bridge. All three are optional — the bridge no-ops
+// cleanly when botToken is unset (UI renders a "not enabled" card). Boot
+// emits a single warning if exactly one of botToken / webhookSecret is set.
+const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN || "";
+const telegramWebhookSecret = requireMinLenIfSet(
+  "TELEGRAM_WEBHOOK_SECRET",
+  process.env.TELEGRAM_WEBHOOK_SECRET,
+  16,
+);
+const telegramBotUsername = process.env.TELEGRAM_BOT_USERNAME || "";
+if ((telegramBotToken && !telegramWebhookSecret) || (!telegramBotToken && telegramWebhookSecret)) {
+  console.warn(
+    "[config] Telegram bridge partially configured: set BOTH TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET, or neither.",
+  );
+}
+
 export const config = {
   port: parseInt(process.env.PORT || "3040"),
   databaseUrl: process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost:5432/remocode",
@@ -129,4 +145,11 @@ export const config = {
   titaniumWebhookSecret,
   licenseRequired,
   titaniumBypass,
+
+  // Phase 12: Telegram bridge. Feature is gated off when botToken === "".
+  telegram: {
+    botToken: telegramBotToken,
+    webhookSecret: telegramWebhookSecret,
+    botUsername: telegramBotUsername,
+  },
 };

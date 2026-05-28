@@ -419,6 +419,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
   if (msg.type === 'assistant_message') {
     console.log(`[agent] assistant_message session=${sessionId} len=${msg.content.length}`)
+    // Phase 12 W3 — emit final-message event for server-side consumers
+    // (Telegram bridge etc.). FINAL only — text_delta/thinking are NEVER
+    // forwarded. Errors inside listeners are isolated by the emitter helper
+    // so they cannot tear down the WS handler.
+    let finalEventMessageId: string | undefined
     const st = streamingBySession.get(sessionId)
     if (st) {
       // Cancel any pending throttled flush and overwrite with the fully
@@ -430,6 +435,7 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       const message = await finalizeMessage(st.id, msg.content)
       streamingBySession.delete(sessionId)
       if (message) {
+        finalEventMessageId = (message as any).id
         broadcastToSubscribers(sessionId, {
           type: 'message',
           session_id: sessionId,
@@ -440,11 +446,24 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       // No prior text_delta (e.g. agent reconnect between Claude's response
       // and the result event). Fall back to a one-shot insert.
       const message = await insertMessage(sessionId, 'assistant', msg.content)
+      finalEventMessageId = (message as any)?.id
       broadcastToSubscribers(sessionId, {
         type: 'message',
         session_id: sessionId,
         message,
       })
+    }
+    // Phase 12 W3 — fan out to server-side subscribers (Telegram bridge etc.)
+    try {
+      const { emitAssistantMessageFinal } = await import('../events/assistant-events.ts')
+      emitAssistantMessageFinal({
+        sessionId,
+        userId: ws.data.userId!,
+        text: msg.content,
+        messageId: finalEventMessageId,
+      })
+    } catch (err: any) {
+      console.warn('[agent] emitAssistantMessageFinal failed', err?.message)
     }
     // V2 — finalize any pending scheduled run for this session.
     try {
