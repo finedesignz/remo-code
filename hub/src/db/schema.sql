@@ -788,3 +788,17 @@ CREATE TABLE IF NOT EXISTS revanote_webhook_attempts (
 CREATE INDEX IF NOT EXISTS idx_revanote_webhook_attempts_user_recv
   ON revanote_webhook_attempts(user_id, received_at DESC);
 
+-- ── TRIAGE Bundle 6: Postgres race + ordering hygiene ────────────────────────
+-- Partial unique index on (user_id, project_dir) for non-rootless, live rows.
+-- Backs the atomic ON CONFLICT in findOrCreateAgentSession (dal.ts) so two
+-- concurrent agent reconnects for the same project_dir converge on ONE row
+-- instead of racing into a duplicate.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_project_unique
+  ON sessions(user_id, project_dir)
+  WHERE deleted_at IS NULL AND is_rootless = false;
+
+-- Monotonic per-row sequence to disambiguate same-millisecond inserts in
+-- ORDER BY created_at queries. Nullable + DEFAULT nextval via BIGSERIAL so
+-- existing rows backfill cleanly on first scan.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
+
