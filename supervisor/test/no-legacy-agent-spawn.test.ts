@@ -13,10 +13,7 @@
  * Scope: ONLY `supervisor/src/**` and `supervisor/tauri/src-tauri/**` (the
  *   Rust + Tauri shell). `supervisor/test/**` is included so the test file
  *   itself can mention the strings in comments without tripping the canary
- *   we exclude this file by name. The watchdog's `--dangerously-skip-permissions`
- *   usage (operator-blessed headless Claude self-heal, NOT a session.start
- *   path) is an intentional exception and lives in `watchdog.ts`; the canary
- *   excludes that single file by path.
+ *   we exclude this file by name.
  */
 import { describe, test, expect } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'fs'
@@ -29,12 +26,8 @@ const SCAN_DIRS = [
 ]
 // Files allowed to contain the otherwise-forbidden strings, with rationale:
 //   - this test file itself (it names the strings to detect them)
-//   - watchdog.ts uses --dangerously-skip-permissions for the headless Claude
-//     self-heal invocation, which is an operator-blessed maintenance path
-//     and explicitly NOT a session.start spawn.
 const EXCLUDE_FILE_SUFFIXES = [
   'test/no-legacy-agent-spawn.test.ts',
-  'src/watchdog.ts',
 ]
 
 interface Finding { file: string; needle: string; line: number; preview: string }

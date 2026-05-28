@@ -1,12 +1,19 @@
-import { existsSync, writeFileSync, readFileSync } from 'fs'
+import { existsSync, writeFileSync, readFileSync, mkdtempSync, rmSync, chmodSync } from 'fs'
 import { join } from 'path'
+import { tmpdir } from 'os'
 
-async function runGit(args: string[], cwd?: string, timeoutMs = 60_000): Promise<{ stdout: string; stderr: string; code: number }> {
+async function runGit(
+  args: string[],
+  cwd?: string,
+  timeoutMs = 60_000,
+  env?: Record<string, string>,
+): Promise<{ stdout: string; stderr: string; code: number }> {
   const proc = Bun.spawn(['git', ...args], {
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
     windowsHide: true,
+    env: env ? { ...process.env, ...env } : undefined,
   })
   let timer: ReturnType<typeof setTimeout> | null = null
   const timeout = new Promise<never>((_, reject) => {
@@ -72,15 +79,86 @@ export interface GitOpResult {
   data?: any
 }
 
+/**
+ * Split `https://<token>@host/path` into `{ url: https://host/path, token }`
+ * so the token never lands in argv. Caller passes the token via GIT_ASKPASS
+ * env. When the URL has no embedded token we pass it through unchanged.
+ *
+ * Why: process command lines are world-readable on Windows for other users
+ * on the box (wmic / Process Explorer / WMI). Argv-borne tokens leak.
+ */
+export function splitTokenFromUrl(url: string): { url: string; token: string | null } {
+  const m = url.match(/^(https?:\/\/)([^@/\s]+)@(.+)$/)
+  if (!m) return { url, token: null }
+  const userinfo = decodeURIComponent(m[2]!)
+  // userinfo can be `user:token` or just `token` (GitHub PAT-only). We hand
+  // back the credential bytes verbatim; askpass returns them as the password
+  // and git asks for username separately (we just echo the same string to
+  // satisfy the username prompt — GitHub treats the PAT-as-username flow OK
+  // when paired with x-access-token as password, but the simple safe path
+  // here is to honor `token` as password regardless of user portion).
+  const colonIdx = userinfo.indexOf(':')
+  const token = colonIdx >= 0 ? userinfo.slice(colonIdx + 1) : userinfo
+  return { url: `${m[1]}${m[3]}`, token }
+}
+
+/**
+ * Run `op(cleanUrl, env)` with a temp GIT_ASKPASS script that echoes the
+ * token to stdin. Cleans up the temp dir afterward. When `tokenizedUrl` has
+ * no embedded token, the env is left untouched and the URL is passed through.
+ */
+async function withAskpass<T>(
+  tokenizedUrl: string,
+  op: (cleanUrl: string, env: Record<string, string>) => Promise<T>,
+): Promise<T> {
+  const { url: cleanUrl, token } = splitTokenFromUrl(tokenizedUrl)
+  if (!token) return op(cleanUrl, {})
+
+  const dir = mkdtempSync(join(tmpdir(), 'remo-askpass-'))
+  const isWin = process.platform === 'win32'
+  const script = isWin
+    ? join(dir, 'askpass.cmd')
+    : join(dir, 'askpass.sh')
+  // The askpass shim is invoked once per credential prompt. It must print
+  // the secret on stdout and exit. We do NOT echo the token directly in the
+  // script body — instead we read it from REMO_GIT_TOKEN in env. Other local
+  // users CAN read env of a process they don't own only via debugging
+  // privileges on Windows; argv is readable without privileges. This is a
+  // strict improvement.
+  if (isWin) {
+    // CMD batch: `@echo off` suppresses command echo. `%REMO_GIT_TOKEN%` is
+    // expanded by cmd at invocation time, not written to a file.
+    writeFileSync(script, '@echo off\r\necho %REMO_GIT_TOKEN%\r\n', 'utf-8')
+  } else {
+    writeFileSync(script, '#!/bin/sh\nprintf "%s\\n" "$REMO_GIT_TOKEN"\n', 'utf-8')
+    try { chmodSync(script, 0o700) } catch {}
+  }
+  try {
+    return await op(cleanUrl, {
+      GIT_ASKPASS: script,
+      GCM_INTERACTIVE: 'never',      // disable Git Credential Manager popups
+      GIT_TERMINAL_PROMPT: '0',       // never prompt on tty
+      REMO_GIT_TOKEN: token,
+    })
+  } finally {
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+}
+
 export async function cloneRepo(cloneUrl: string, targetPath: string): Promise<GitOpResult> {
   try {
     if (existsSync(targetPath)) return { ok: false, error: `target already exists: ${targetPath}` }
-    await runGit(['clone', '--no-recurse-submodules', cloneUrl, targetPath], undefined, 600_000)
+    await withAskpass(cloneUrl, (url, env) =>
+      runGit(['clone', '--no-recurse-submodules', url, targetPath], undefined, 600_000, env),
+    )
+    // Belt-and-braces: even though we no longer write the token into the
+    // remote URL (askpass path), older clones may have legacy tokenized
+    // remotes on disk. Sweep `.git/config` to be safe.
     const cfgPath = join(targetPath, '.git', 'config')
     if (existsSync(cfgPath)) {
       const raw = readFileSync(cfgPath, 'utf-8')
       const stripped = raw.replace(/https:\/\/[^@\s]+@github\.com/g, 'https://github.com')
-      writeFileSync(cfgPath, stripped, 'utf-8')
+      if (stripped !== raw) writeFileSync(cfgPath, stripped, 'utf-8')
     }
     return { ok: true, data: { path: targetPath } }
   } catch (err: any) {
@@ -91,7 +169,9 @@ export async function cloneRepo(cloneUrl: string, targetPath: string): Promise<G
 export async function pullRepo(repoPath: string, branch: string, tokenizedUrl: string): Promise<GitOpResult> {
   try {
     if (await isDirty(repoPath)) return { ok: false, error: 'worktree is dirty; refusing to pull' }
-    await runGit(['fetch', tokenizedUrl, branch], repoPath, 120_000)
+    await withAskpass(tokenizedUrl, (url, env) =>
+      runGit(['fetch', url, branch], repoPath, 120_000, env),
+    )
     await runGit(['checkout', branch], repoPath, 60_000)
     await runGit(['merge', '--ff-only', 'FETCH_HEAD'], repoPath, 60_000)
     return { ok: true }
