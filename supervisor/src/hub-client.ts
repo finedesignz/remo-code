@@ -150,10 +150,7 @@ export class SupervisorClient {
   // Reconnect forever. A long-running daemon must survive arbitrarily long
   // hub outages (Coolify redeploys take 60-120s, network blips happen). The
   // previous design exited after 5 attempts (~62s) and relied on the OS
-  // service manager to restart the process — that proved fragile when
-  // (a) NSSM throttle / Task Scheduler restart configuration wasn't explicit
-  // and (b) the watchdog's "healthy ≥60s → exit on child crash" path
-  // skipped self-heal for processes that had been alive for hours.
+  // service manager to restart the process — that proved fragile.
   // Exponential backoff is capped at 60s, so steady-state reconnect load on
   // the hub is bounded regardless of total duration.
   private scheduleReconnect(extraDelayMs = 0) {
