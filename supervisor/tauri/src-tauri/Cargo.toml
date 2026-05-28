@@ -1,6 +1,6 @@
 [package]
 name = "remo-supervisor-tauri"
-version = "0.5.5"
+version = "0.5.6"
 description = "Remo Code Supervisor — Windows tray app"
 authors = ["Fine Designz"]
 edition = "2021"

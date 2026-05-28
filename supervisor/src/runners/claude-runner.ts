@@ -1,5 +1,13 @@
 import { type Subprocess } from 'bun'
+import { writeFileSync } from 'fs'
+import { join } from 'path'
 import type { CliEvent, CliRunner, RunnerEvent } from './types'
+
+export type OrchestratorRunnerOpts = {
+  systemPrompt: string
+  hubApiKey: string
+  hubUrl: string
+}
 
 type EventCallback = (event: RunnerEvent) => void
 
@@ -51,14 +59,16 @@ export class ClaudeRunner implements CliRunner {
   private fullText = ''
   private ready = false
   private allowDangerousSkip: boolean
+  private orchestrator: OrchestratorRunnerOpts | undefined
   /** Test hook — replaces Bun.spawn. */
   spawnImpl: SpawnFn | null = null
   /** When stopped intentionally, suppress auto-restart. */
   private intentionalStop = false
 
-  constructor(projectDir: string, allowDangerousSkip = false) {
+  constructor(projectDir: string, allowDangerousSkip = false, orchestrator?: OrchestratorRunnerOpts) {
     this.projectDir = projectDir
     this.allowDangerousSkip = allowDangerousSkip
+    this.orchestrator = orchestrator
   }
 
   start(onEvent: EventCallback) {
@@ -81,6 +91,22 @@ export class ClaudeRunner implements CliRunner {
 
     const env = { ...process.env }
     delete (env as any).ANTHROPIC_API_KEY
+
+    if (this.orchestrator) {
+      // Plumb the hub creds the orchestrator's system prompt teaches Claude
+      // to use. These are NEVER logged; we keep them in env only.
+      ;(env as any).REMO_HUB_API_KEY = this.orchestrator.hubApiKey
+      ;(env as any).REMO_HUB_URL = this.orchestrator.hubUrl
+      // Drop the seed system prompt into cwd as a CLAUDE.md-style anchor so
+      // Claude picks it up on every turn without us needing a CLI flag that
+      // may not exist in all builds. The file is rewritten on every spawn so
+      // edits to the user's custom instructions land on the next start.
+      try {
+        writeFileSync(join(this.projectDir, '.remo-orchestrator.md'), this.orchestrator.systemPrompt, 'utf-8')
+      } catch (err: any) {
+        this.listener?.({ type: 'log', message: `orchestrator: failed to write .remo-orchestrator.md: ${err?.message ?? err}` })
+      }
+    }
 
     const opts = {
       cmd,
