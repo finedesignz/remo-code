@@ -22,6 +22,94 @@ mock.module('../src/db/supervisor-dal', () => ({
   finalizeOpenRunsForSupervisor: async () => {},
 }))
 
+// Bundle 2 (PR #109) — install THIS file's own mock for supervisor-registry
+// so the drain-on-replace assertion runs against a fresh real-like impl,
+// not the partial stub installed by `sessions-launch.test.ts` (whose
+// `mock.module` is process-global; without a per-file override, unmocked
+// files inherit the FIRST-registered mock and this suite's `sendRequest`
+// resolves through a stub that never sees the drain).
+mock.module('../src/ws/supervisor-registry.ts', () => {
+  interface Entry {
+    ws: any
+    supervisorId: string
+    userId: string
+    apiKeyId: string
+    pendingReqs: Map<string, { resolve: (v: any) => void; reject: (e: any) => void; timer: ReturnType<typeof setTimeout> }>
+  }
+  const supervisors = new Map<string, Entry>()
+  const supervisorsByApiKey = new Map<string, string>()
+  let reqCounter = 0
+
+  return {
+    registerSupervisor: (args: { ws: any; supervisorId: string; userId: string; apiKeyId: string; roots: string[]; hostname?: string }) => {
+      const existingId = supervisorsByApiKey.get(args.apiKeyId)
+      if (existingId) {
+        const e = supervisors.get(existingId)
+        if (e && e.ws !== args.ws) {
+          for (const [, p] of e.pendingReqs) {
+            clearTimeout(p.timer)
+            p.reject(new Error('supervisor_replaced'))
+          }
+          e.pendingReqs.clear()
+          try { e.ws.close(4003, 'replaced') } catch {}
+        }
+      }
+      const entry: Entry = {
+        ws: args.ws,
+        supervisorId: args.supervisorId,
+        userId: args.userId,
+        apiKeyId: args.apiKeyId,
+        pendingReqs: new Map(),
+      }
+      supervisors.set(args.supervisorId, entry)
+      supervisorsByApiKey.set(args.apiKeyId, args.supervisorId)
+      return entry
+    },
+    unregisterSupervisor: (supervisorId: string, ws?: any) => {
+      const entry = supervisors.get(supervisorId)
+      if (!entry) return
+      if (ws && entry.ws !== ws) return
+      for (const [, p] of entry.pendingReqs) {
+        clearTimeout(p.timer)
+        p.reject(new Error('supervisor disconnected'))
+      }
+      supervisors.delete(supervisorId)
+      supervisorsByApiKey.delete(entry.apiKeyId)
+    },
+    sendRequest: (supervisorId: string, msg: any, timeoutMs = 30_000) => {
+      const entry = supervisors.get(supervisorId)
+      if (!entry) return Promise.reject(new Error('supervisor offline'))
+      const req_id = msg.req_id || `req_${Date.now()}_${++reqCounter}`
+      const full = { ...msg, req_id }
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          entry.pendingReqs.delete(req_id)
+          reject(new Error('supervisor request timed out'))
+        }, timeoutMs)
+        entry.pendingReqs.set(req_id, { resolve, reject, timer })
+        try { entry.ws.send(JSON.stringify(full)) } catch (err) {
+          clearTimeout(timer); entry.pendingReqs.delete(req_id); reject(err as Error)
+        }
+      })
+    },
+    getSupervisor: (id: string) => supervisors.get(id),
+    isSupervisorOnline: (id: string) => supervisors.has(id),
+    sendToSupervisor: () => {},
+    updateSupervisorState: async () => {},
+    listOnlineSupervisorIdsForUser: () => [],
+    resolveLocalPathForRepoKey: () => null,
+    getUserInventory: () => undefined,
+    setUserInventory: () => {},
+    getKnownLocalPathsForRepoKey: () => [],
+    getSupervisorByApiKey: () => undefined,
+    resolveRequest: () => false,
+    rejectRequest: () => false,
+    heartbeatSupervisor: async () => {},
+    pushKeyRotatedToUser: () => 0,
+    listSupervisorsForUser: async () => [],
+  }
+})
+
 const {
   registerSupervisor,
   unregisterSupervisor,
