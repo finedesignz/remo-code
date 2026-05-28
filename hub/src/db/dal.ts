@@ -162,26 +162,31 @@ export async function findOrCreateRootlessSession(
 
 // Find existing session by project_dir (reuse) or create a new one.
 // Returns { ...session, created: boolean }
+//
+// Atomic upsert via the partial unique index idx_sessions_user_project_unique
+// (user_id, project_dir) WHERE deleted_at IS NULL AND is_rootless=false. Two
+// concurrent reconnects for the same project_dir converge on ONE row instead
+// of racing into duplicates. We use xmax=0 to detect insert-vs-update so we
+// can return the `created` flag correctly without a re-SELECT.
 export async function findOrCreateAgentSession(
   userId: string,
   projectDir: string,
   tokenHash: string,
   cliKind: 'claude' | 'codex' = 'claude',
 ) {
-  const existing = await findSessionByProjectDir(userId, projectDir);
-  if (existing) {
-    // Update the token hash so the agent gets a fresh token
-    await sql`UPDATE sessions SET token_hash = ${tokenHash}, last_activity = now() WHERE id = ${existing.id}`;
-    return { ...existing, token_hash: tokenHash, created: false };
-  }
-  // Derive a human-readable name from the last path segment
+  // Derive a human-readable name from the last path segment (only used when
+  // the row actually gets inserted; conflicting upserts keep the existing name).
   const name = projectDir.split('/').filter(Boolean).pop() ?? 'session';
   const rows = await sql`
     INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind)
     VALUES (${userId}, ${name}, ${projectDir}, ${tokenHash}, ${cliKind})
-    RETURNING *
+    ON CONFLICT (user_id, project_dir)
+      WHERE deleted_at IS NULL AND is_rootless = false
+      DO UPDATE SET token_hash = EXCLUDED.token_hash, last_activity = now()
+    RETURNING *, (xmax = 0) AS created
   `;
-  return { ...rows[0], created: true };
+  const row = rows[0];
+  return { ...row, created: !!row.created };
 }
 
 // Phase 08: GitHub-keyed session resolution. Wraps the priority-1/2/3
