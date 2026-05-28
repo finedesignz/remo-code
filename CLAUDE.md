@@ -342,6 +342,27 @@ Collapses the scheduled-task type enum from six options to **three** user-pickab
 
 When adding a new workflow step, root, runtime-context field, or template: update `docs/scheduled-tasks.md` AND `hub/test/scheduler.test.ts` in the same commit.
 
+## Orchestrator Session
+
+Pinned root-folder Claude session that coordinates the user's other Claude sessions via the hub REST API. Exactly one open orchestrator per user, enforced by the `idx_sessions_orchestrator_unique` partial index on `sessions(user_id) WHERE is_orchestrator=true AND deleted_at IS NULL`.
+
+**File map:**
+
+- Hub: `hub/src/api/orchestrator.ts` (REST), `hub/src/db/orchestrator-dal.ts` (DAL), `hub/src/orchestrator/seed-prompt.ts` (system-prompt builder).
+- Hub schema: `users.orchestrator_{enabled,name,custom_instructions}`, `sessions.is_orchestrator`, `api_keys.purpose` (default `'supervisor'`; orchestrator-issued rows = `'orchestrator'`). The legacy per-user `idx_api_keys_user_active` is replaced by `idx_api_keys_user_purpose_active` so an orchestrator key and a supervisor key can coexist.
+- Supervisor: `supervisor/src/hub-client.ts` recognizes an optional `orchestrator` field on `session.start` and routes through `ProcessManager.start({ orchestrator })`. `supervisor/src/runners/claude-runner.ts` injects `REMO_HUB_API_KEY` + `REMO_HUB_URL` into the spawned env and writes `.remo-orchestrator.md` into cwd as a CLAUDE.md-style anchor.
+- Web: `web/src/components/OrchestratorTab.tsx` (Settings → Orchestrator tab with red-ring confirm modal on enable). Sidebar pins the orchestrator row to position 0 with an indigo ring + `Orchestrator` pill. GridPage enforces orchestrator-in-cell-0 when the orchestrator session is a member of the active tab.
+
+**Key invariants:**
+
+- `GET /api/orchestrator` is license-gate-exempt (read-only via `readOnlyOk:true`). `PUT`/`POST start`/`POST stop` require `requireRecentAuth()` (15-min step-up window) + active license + per-user mutation rate-limit.
+- The hub API key minted for the orchestrator is full-power (capabilities `['agent','supervisor','orchestrator']`) and lives ONLY in the supervisor's spawned Claude process env. The hub never echoes it back over WS; the system prompt teaches Claude to use it without logging it.
+- `cwd` resolution is hub-side: the user's preferred supervisor (when online) else first online, then `roots[0]`. No UI cwd picker.
+- `requireGitRepo` gate is bypassed for orchestrator runs (the cwd is a repos parent, not a repo). Sandbox `assertWithinRoots` still applies.
+- Only Claude is supported this phase. Codex orchestrator is out of scope.
+
+When adding orchestrator-specific endpoints, prompt sections, or env vars: update this rollup in the same commit.
+
 ## API docs convention
 
 The hub exposes OpenAPI 3.1 at `/openapi.json` and a Scalar UI at `/docs`. The spec is assembled in `hub/src/api/_openapi.ts` using `@hono/zod-openapi` `createRoute` declarations. Currently covers `/api/profile/cost-today` and `/api/profile/license` — the rest of the hub is plain Hono and gets migrated incrementally.
