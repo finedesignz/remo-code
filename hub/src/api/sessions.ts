@@ -146,6 +146,19 @@ sessions.delete('/:id', async (c) => {
     if (channel) {
       try { channel.ws.send(JSON.stringify({ type: 'shutdown', reason: 'user_disconnect' })) } catch {}
     }
+    // Mark any open session_runs bound to this session as `user_stopped` so
+    // the orphan-resume path (agent.ts + client.ts) skips them. Sacred
+    // invariant: a session the user deleted is never auto-resurrected.
+    try {
+      const { sql } = await import('../db/postgres')
+      await sql`
+        UPDATE session_runs
+        SET ended_at = COALESCE(ended_at, now()), exit_reason = 'user_stopped'
+        WHERE session_id = ${sessionId} AND user_id = ${userId} AND ended_at IS NULL
+      `
+    } catch (err: any) {
+      console.error('[sessions.delete] failed to mark user_stopped', err?.message)
+    }
     await markSessionDisconnected(sessionId, userId)
     // Give the agent ~5s to gracefully exit before forcibly closing the socket.
     setTimeout(() => {
