@@ -1267,6 +1267,27 @@ export async function clearTelegramChatId(userId: string): Promise<void> {
   `;
 }
 
+/**
+ * Phase 12 W3 — Outbound bridge lookup. Returns every user whose
+ * `telegram_default_session_id` points at the given session AND who has a
+ * non-null `telegram_chat_id` (i.e. a usable Telegram destination).
+ *
+ * In practice a session can match at most one user (default-session is per-
+ * user and a session belongs to one user), but the signature is an array to
+ * keep the helper general and to make the SQL straightforward.
+ */
+export async function getUsersWithTelegramDefaultSession(
+  sessionId: string,
+): Promise<Array<{ id: string; telegram_chat_id: string | number }>> {
+  const rows = await sql<Array<{ id: string; telegram_chat_id: string | number }>>`
+    SELECT id, telegram_chat_id
+      FROM users
+     WHERE telegram_default_session_id = ${sessionId}
+       AND telegram_chat_id IS NOT NULL
+  `;
+  return rows;
+}
+
 export async function setTelegramDefaultSession(userId: string, sessionId: string | null): Promise<void> {
   await sql`
     UPDATE users
