@@ -14,7 +14,7 @@ export const ClientAuth = z.object({
 export const ClientSendMessage = z.object({
   type: z.literal('send_message'),
   session_id: z.string().min(1).max(256),
-  content: z.string().min(1).max(1_000_000),
+  content: z.string().trim().min(1).max(1_000_000),
   id: z.string().uuid(),
   images: z.array(z.object({
     media_type: z.string(),

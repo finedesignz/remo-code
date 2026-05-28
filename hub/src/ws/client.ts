@@ -5,6 +5,7 @@ import { verifyAuthSessionToken } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
 import { insertMessage, listSessions, getSession } from '../db/dal'
+import { checkDuplicate, recordSend } from './send-dedupe.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
 import {
   registerClient, unregisterClient, subscribeClient,
@@ -239,6 +240,17 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
 
   if (msg.type === 'send_message') {
     console.log(`[client] send_message session=${msg.session_id} user=${data.userId}`)
+
+    // Dedupe retries on (session_id, client_msg_id). A duplicate within the
+    // 5-min TTL replays the original ack and SKIPS the supervisor forward so
+    // the runner doesn't see the same prompt twice.
+    const replayed = checkDuplicate(msg.session_id, msg.id)
+    if (replayed) {
+      console.log(`[client] duplicate send_message client_id=${msg.id} — replaying ack`)
+      try { ws.send(JSON.stringify(replayed)) } catch {}
+      return
+    }
+
     // Verify ownership
     const session = await getSession(msg.session_id, data.userId!)
     if (!session) {
@@ -282,13 +294,15 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // queue. Without this, a half-open socket (readyState=OPEN but TCP dead)
     // would silently lose the message — the client would never retry on
     // reconnect because it believes the send succeeded.
+    const ack = {
+      type: 'send_ack' as const,
+      client_id: msg.id,
+      session_id: msg.session_id,
+      message_id: message.id,
+    }
+    recordSend(msg.session_id, msg.id, ack)
     try {
-      ws.send(JSON.stringify({
-        type: 'send_ack',
-        client_id: msg.id,
-        session_id: msg.session_id,
-        message_id: message.id,
-      }))
+      ws.send(JSON.stringify(ack))
     } catch {
       // socket closed mid-handle; client will resend on reconnect
     }
