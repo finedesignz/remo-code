@@ -92,6 +92,46 @@ export async function githubApiGet<T = any>(installationId: number, path: string
   return res.json() as Promise<T>
 }
 
+/**
+ * GitHub API call with body (POST/PUT/PATCH). Surfaces status code on error
+ * via the thrown error's `.status` property so callers can branch on 422/405/etc.
+ * 404 returns null (used by GET-or-create flows like `ensureBranch`).
+ */
+export class GitHubApiError extends Error {
+  status: number
+  body: string
+  constructor(status: number, body: string, msg: string) {
+    super(msg)
+    this.status = status
+    this.body = body
+  }
+}
+
+export async function githubApiRequest<T = any>(
+  installationId: number,
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const token = await getInstallationToken(installationId)
+  const res = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'remo-code-hub',
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new GitHubApiError(res.status, text, `github api ${method} ${path} ${res.status} ${text.slice(0, 200)}`)
+  }
+  if (res.status === 204) return undefined as T
+  return res.json() as Promise<T>
+}
+
 // App-level API calls (use app JWT directly, not installation token)
 export async function githubAppApiGet<T = any>(path: string): Promise<T> {
   const appJwt = signAppJwt()

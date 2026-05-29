@@ -10,6 +10,13 @@
  */
 import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
 
+// Cache-bust + grab real exports so partial mocks below don't strip
+// other functions (e.g. ensureSupervisorProject) that sibling test files
+// import from the same module. Per Bun mock.module pollution pattern.
+const realErrorCaptureDal = await import(`../src/db/error-capture-dal.ts?bust=${Date.now()}`)
+const realDal = await import(`../src/db/dal.ts?bust=${Date.now()}`)
+const realWsRegSC = await import(`../src/ws/registry.ts?bust=${Date.now()}`)
+
 const TEST_USER = '233c6d63-5f44-43f4-9eae-efc34a00735a'
 
 type Row = {
@@ -56,7 +63,6 @@ let rowSeq = 0
 // and first-write-wins; a partial mock here would otherwise make those exports
 // resolve to undefined and abort sibling files that import agent.ts in the full
 // suite (SyntaxError: Export named 'X' not found). See memory: bun-mock-pollution.
-const realErrorCaptureDal = await import(`../src/db/error-capture-dal.ts?real=${Date.now()}`)
 mock.module('../src/db/error-capture-dal.ts', () => ({
   ...realErrorCaptureDal,
   ensureSelfProject: async (_userId: string) => mockState.selfProject,
@@ -95,9 +101,8 @@ mock.module('../src/db/error-capture-dal.ts', () => ({
   },
 }))
 
-const realDalSC = await import(`../src/db/dal.ts?real=${Date.now()}`)
 mock.module('../src/db/dal.ts', () => ({
-  ...realDalSC,
+  ...realDal,
   getUserTimezone: async () => 'UTC',
 }))
 
@@ -111,19 +116,12 @@ mock.module('../src/error-capture/dispatcher.ts', () => ({
   },
 }))
 
-const realWsRegSC = await import(`../src/ws/registry.ts?real=${Date.now()}`)
 mock.module('../src/ws/registry.ts', () => ({
   ...realWsRegSC,
   broadcastErrorEvent: (_userId: string, event: any) => {
     mockState.broadcasts.push(event)
   },
 }))
-
-// Mock hygiene: Bun's mock.module is process-global and persists across test
-// files (first-write-wins). Restore after this file so partial mocks of shared
-// modules (dal.ts, error-capture-dal.ts, ws/registry.ts) don't shadow real
-// exports for sibling files in the full-suite run. See memory: bun-mock-pollution.
-afterAll(() => mock.restore())
 
 // Import AFTER mocks installed.
 const { installSelfCapture, captureSelfError, _resetForTest } = await import(
@@ -140,6 +138,8 @@ beforeEach(() => {
 })
 
 describe('hub self-capture', () => {
+  afterAll(() => mock.restore())
+
   test('install no-ops when HUB_SELF_OWNER_USER_ID unset', async () => {
     const app = new Hono()
     const ok = await installSelfCapture(app, '')

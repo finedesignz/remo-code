@@ -288,14 +288,19 @@ OS magic-link tap
   `location.replace`s to `VITE_REMO_URL` (defaults to `https://app.remo-code.com`)
   after stashing `window.__REMO_APP_VERSION__` in `sessionStorage`.
 
-### Deferred to Phase 12.4
+### Phase 12.4 status
 
-- `gen/apple/` (Xcode project) — `cargo tauri ios init` on a Mac.
-- `gen/android/` (Gradle project) — `cargo tauri android init` on an Android
-  SDK + NDK host.
-- `src-tauri/icons/icon.png` — 1024×1024 source PNG, then `cargo tauri icon`.
-- Release workflow for `mobile-v*.*.*` tags.
-- Code-signing setup (Apple Developer Program, Google Play upload key).
+- **Android — shipped on `feat/mobile-android`.** `gen/android/` Gradle project
+  committed; debug APK build verified with Android Studio SDK + NDK
+  `27.3.13750724` on Windows 11. Local artifact:
+  `mobile/tauri/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`
+  (~168 MB, ARM64). Sideload + toolchain bootstrap docs in
+  [`mobile/tauri/README.md`](../mobile/tauri/README.md).
+- **iOS — pending (MacInCloud track).** `gen/apple/` Xcode project + `cargo tauri
+  ios init` run separately.
+- **Deferred to 12.5.** Code-signing (Apple Developer Program; Google Play
+  upload key), `mobile-shell-release.yml` for `mobile-v*.*.*` tags, brand-icon
+  refresh, AAB packaging for Play Store.
 
 ### CI
 

@@ -1,11 +1,11 @@
 {
   "_comment": "Snapshot of expected hub test counts. Updated when intentionally adding/removing tests. CI fails if actual drifts beyond tolerance.",
   "captured_at": "2026-05-28",
-  "captured_from": "bun test (hub/) on fix/ci-baseline-mock-pollution — full suite now loads clean after mock.module hygiene fix (prev baseline 715/836 was captured before ~51 tests were silently aborted by leaked partial mocks)",
-  "pass": 758,
+  "captured_from": "bun test (hub/) on fix/ci-baseline-mock-pollution merged with main — full suite now loads clean after mock.module hygiene fix (prev baseline 715/836 was captured before ~64 tests were silently aborted by leaked partial mocks)",
+  "pass": 771,
   "skip": 129,
   "fail": 0,
-  "total": 887,
+  "total": 900,
   "tolerance": {
     "_comment": "Allow modest growth without churn; any fail > 0 always fails CI.",
     "pass_min": 700,
