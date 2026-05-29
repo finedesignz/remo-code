@@ -145,6 +145,20 @@ export default function App() {
     return () => onAuthEvent(null)
   }, [route, signOut])
 
+  // Dead-credential cleanup. If the profile load has SETTLED (not loading) but
+  // produced no profile while a token/user is still present, the credential is
+  // dead — a 401 the global onAuthEvent handler may have missed due to the
+  // effect-registration race. Clear it here (signOut, NOT during render) so the
+  // WS and other hooks stop hammering 401 with the stale token. signOut clears
+  // token+user → the `(token || user)` condition becomes false on the next
+  // render → this effect no-ops → no loop. The `!profile` render branch above
+  // shows Login in the meantime.
+  useEffect(() => {
+    if (!profileLoading && !profile && (token || user)) {
+      signOut()
+    }
+  }, [profileLoading, profile, token, user, signOut])
+
   const navigate = useCallback((hash: string) => {
     window.location.hash = hash
   }, [])
@@ -173,8 +187,17 @@ export default function App() {
     return <Login onLegacyAuth={signIn} />
   }
 
-  if (profileLoading || !profile) {
+  if (profileLoading) {
     return <LoadingScreen />
+  }
+
+  if (!profile) {
+    // Profile finished loading but is null → the token is dead (a 401 the
+    // global onAuthEvent handler may have missed due to the registration race
+    // between useProfile's fetch effect and App's onAuthEvent effect). Treat as
+    // unauthenticated and render Login deterministically rather than trapping
+    // on LoadingScreen forever. The effect below clears the dead credential.
+    return <Login onLegacyAuth={signIn} />
   }
 
   return (
