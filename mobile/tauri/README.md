@@ -76,6 +76,18 @@ cargo tauri android dev              # adb-attached device or emulator
 cargo tauri android build --release  # .apk / .aab for Play Store
 ```
 
+## iOS development without owning a Mac
+
+The Windows-only developer path: rent a Mac for ~30 minutes once to run
+`cargo tauri ios init`, then every subsequent build runs in GitHub Actions
+on `macos-14`, and the unsigned `.ipa` ships to a personal iPhone via
+AltStore re-signing with a free Apple ID. Full runbook in
+[`../../docs/ios-sideload.md`](../../docs/ios-sideload.md).
+
+The one-time MacInCloud step IS the Phase 12.4 iOS prep below — once
+`gen/apple/` is committed, the `.github/workflows/mobile-ios-build.yml`
+workflow handles every build after that.
+
 ## Deferred platform generation
 
 The `gen/apple/` and `gen/android/` trees are **not** committed on this branch.

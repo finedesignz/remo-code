@@ -304,6 +304,32 @@ host x86_64-unknown-linux-gnu target on every push that touches `mobile/tauri/`.
 This catches Rust regressions without needing Android NDK or Xcode in CI; the
 real mobile build matrix lands with Phase 12.4.
 
+### iOS distribution path (Windows-only developer)
+
+The lead maintainer develops on Windows full-time, so the iOS path is
+optimized for never needing a local Mac after a one-shot init step:
+
+- **MacInCloud first-time init** (~30 min, smallest plan ~$25/month on the
+  Managed Server tier — you cancel immediately after). Run
+  `cargo tauri ios init` on the rented Mac, commit the generated
+  `mobile/tauri/src-tauri/gen/apple/` tree on a `feat/mobile-ios-init`
+  branch, open a PR, disconnect.
+- **GitHub Actions `mobile-ios-build` workflow** (`.github/workflows/mobile-ios-build.yml`)
+  on `macos-14` produces an unsigned `.ipa` for every subsequent build.
+  Triggered by `workflow_dispatch`, by `mobile-ios-v*` tags (which also
+  publish a GitHub Release), and by PRs touching `mobile/tauri/**` for
+  typecheck-only. Gated behind repo variable `ENABLE_IOS_BUILD=true` to
+  avoid burning macOS minutes by accident.
+- **AltStore sideload on Windows** — install AltServer + AltStore, pair
+  the iPhone, drag the `.ipa` onto AltServer. AltStore re-signs with a
+  free Apple ID; the app refreshes every 7 days as long as AltServer is
+  running. Three-app sideload limit per Apple ID, no push notifications.
+- **App Store distribution** requires the paid Apple Developer Program
+  ($99/yr) and code-signing secrets in CI — out of scope for the
+  Windows-only path.
+
+Full runbook: [`docs/ios-sideload.md`](ios-sideload.md).
+
 ---
 
 ## Lifecycle expectations on mobile

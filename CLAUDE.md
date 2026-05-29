@@ -115,6 +115,19 @@ cargo tauri android init && cargo tauri android build --release       # SDK+NDK 
 - `.github/workflows/mobile-shell-release.yml` for tagged `mobile-v*.*.*` builds.
 - Apple Developer + Google Play signing key setup.
 
+**12.4 iOS path (Windows-only developer):** the maintainer doesn't own a
+Mac, so the 12.4 iOS prep is "rent MacInCloud for ~30 min to run
+`cargo tauri ios init` once, commit `gen/apple/`, then never touch a Mac
+again." Every subsequent iOS build runs in CI via
+`.github/workflows/mobile-ios-build.yml` (`macos-14`, gated by repo var
+`ENABLE_IOS_BUILD=true`), producing an unsigned `.ipa` that AltStore
+re-signs on Windows with a free Apple ID for sideload to a personal
+iPhone. App Store distribution stays out of scope until the paid Apple
+Developer Program signing path is wired. Full runbook:
+`docs/ios-sideload.md`. The 12.4 Android path is independent — it only
+needs Android Studio (SDK 34 + NDK r26+) installed locally on the
+Windows dev box, no rented host required.
+
 Hub-side `POST /api/auth/finalize-mobile` shipped in Phase 12.1 (PR #105)
 — see `hub/src/api/auth.ts`. A Windows desktop preview of the same crate
 is built per `mobile/tauri/README.md` "Desktop preview build" (Phase 12.3.1).
