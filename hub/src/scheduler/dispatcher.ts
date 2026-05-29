@@ -552,15 +552,3 @@ export async function cancelRun(runId: string, userId: string): Promise<boolean>
   await finalizeRun(runId, 'cancelled', 'cancelled_by_user')
   return true
 }
-
-export function init(): void {
-  // Round-2 migration: waiter promotion + the threshold re-check now live in the
-  // shared dispatch pipeline. When the in-flight session run finalizes, the agent
-  // ws `assistant_message` branch calls `dispatch.onSessionReply(sessionId,
-  // content)` → `RunStore.onFinalize` → `finalizeRun(success)`, then the pipeline
-  // promotes the queued waiter and RE-DISPATCHES it through the full gate list
-  // (`[thresholdGate, dailyCostCapGate]` in `senders/agent.ts`) — a user who
-  // crossed the cap while queued is skipped (IR-2). The legacy
-  // `queue.setOnPromote` seam is therefore dead; `init()` is retained as a no-op
-  // so the boot wiring in `index.ts` keeps compiling.
-}

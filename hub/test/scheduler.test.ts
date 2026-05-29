@@ -8,7 +8,6 @@
  * Coverage:
  *   - cron util: validate / nextRuns / compilePreset / isValidTimezone
  *   - catch-up math (via croner directly, mirroring catchup.computeMissed)
- *   - session-queue: dispatch / queue / drop semantics + promotion
  *   - post-run schema: zod validation + cycle detector
  *   - post-run template renderer: substitution + html escape
  *   - post-run condition matcher: success / failure / always / cost_exceeded
@@ -19,7 +18,7 @@
  * chance to leak. We don't import the dispatcher here precisely because it
  * pulls in postgres at module-load; tests that need it run in e2e.
  */
-import { describe, test, expect, beforeEach } from 'bun:test'
+import { describe, test, expect } from 'bun:test'
 import { Cron } from 'croner'
 
 import {
@@ -28,14 +27,6 @@ import {
   compilePreset,
   isValidTimezone,
 } from '../src/scheduler/cron.ts'
-import {
-  enqueue,
-  markFinished,
-  currentInFlight,
-  setOnPromote,
-  onSessionIdleAndPromote,
-  _reset as resetQueue,
-} from '../src/scheduler/session-queue.ts'
 import {
   validatePostRunActions,
   detectChainCycles,
@@ -150,53 +141,15 @@ describe('scheduler/catchup math (mirrors computeMissed)', () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // session-queue
+//
+// The per-session FIFO queue (dispatch / queue / drop semantics + promotion)
+// is no longer exercised here. The back-compat functional shim it was tested
+// through (`scheduler/session-queue.ts`) was deleted in the Round-2 collapse;
+// those queue-semantics cases were relocated VERBATIM to
+// `hub/test/session-queue.test.ts`, rewritten against the `SessionQueue` CLASS
+// in `hub/src/dispatch/session-queue.ts`. This file keeps ONLY genuine
+// scheduler-behavior tests (cron, catch-up, post-run, auto-name).
 // ─────────────────────────────────────────────────────────────────────────────
-describe('scheduler/session-queue', () => {
-  beforeEach(() => {
-    resetQueue()
-    setOnPromote(null)
-  })
-
-  test('1st enqueue dispatches, 2nd queues, 3rd drops', () => {
-    expect(enqueue('s1', 'r1')).toBe('dispatched')
-    expect(enqueue('s1', 'r2')).toBe('queued')
-    expect(enqueue('s1', 'r3')).toBe('dropped')
-    expect(currentInFlight('s1')).toBe('r1')
-  })
-
-  test('markFinished promotes the waiter to in-flight', () => {
-    enqueue('s1', 'r1')
-    enqueue('s1', 'r2')
-    const promoted = markFinished('s1')
-    expect(promoted).toBe('r2')
-    expect(currentInFlight('s1')).toBe('r2')
-  })
-
-  test('markFinished with no waiter clears the slot', () => {
-    enqueue('s1', 'r1')
-    const promoted = markFinished('s1')
-    expect(promoted).toBe(null)
-    expect(currentInFlight('s1')).toBe(null)
-  })
-
-  test('onSessionIdleAndPromote fires the registered handler', () => {
-    let calls: Array<[string, string]> = []
-    setOnPromote((sid, rid) => calls.push([sid, rid]))
-    enqueue('s1', 'r1')
-    enqueue('s1', 'r2')
-    const promoted = onSessionIdleAndPromote('s1')
-    expect(promoted).toBe('r2')
-    expect(calls).toEqual([['s1', 'r2']])
-  })
-
-  test('separate sessions have independent slots', () => {
-    expect(enqueue('a', 'ra1')).toBe('dispatched')
-    expect(enqueue('b', 'rb1')).toBe('dispatched')
-    expect(enqueue('a', 'ra2')).toBe('queued')
-    expect(currentInFlight('a')).toBe('ra1')
-    expect(currentInFlight('b')).toBe('rb1')
-  })
-})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // post-run schema + cycle detector

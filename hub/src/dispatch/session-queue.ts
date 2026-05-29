@@ -8,10 +8,11 @@
  * what to do with the promotion. No global mutable state, no `setOnPromote`
  * callback seam: the queue is an instance owned by the dispatch pipeline.
  *
- * Semantics are byte-identical to the legacy `scheduler/session-queue.ts`
+ * Semantics are byte-identical to the original `scheduler/session-queue.ts`
  * functional API (`enqueue` → dispatched/queued/dropped; `markFinished`
- * promotes the waiter). The back-compat shim in `scheduler/session-queue.ts`
- * delegates to a shared singleton instance so `scheduler.test.ts` stays green.
+ * promotes the waiter). That back-compat shim was deleted in the Round-2
+ * collapse; this class is now the single source of truth and is exercised
+ * directly by `hub/test/session-queue.test.ts`.
  */
 
 export type EnqueueResult = 'dispatched' | 'queued' | 'dropped'
