@@ -232,10 +232,12 @@ describe("Telegram default → orchestrator fallback", () => {
 
   test("C-1 REGRESSION: pre-existing default (backfilled explicit) is NOT overridden to the orchestrator", async () => {
     // The user picked `remo-code` via /session BEFORE telegram_default_explicit
-    // existed. The schema backfill (UPDATE ... SET explicit=true WHERE default
-    // IS NOT NULL) marks it explicit, so inbound MUST honor it — the exact
-    // override the user forbade. Without the backfill this row would read
-    // explicit=false and get silently re-pinned to the orchestrator.
+    // existed. The one-shot backfill (hub/scripts/migrate-telegram-default-explicit.ts:
+    // UPDATE ... SET explicit=true WHERE default IS NOT NULL) marks it explicit, so
+    // inbound MUST honor it — the exact override the user forbade. We set the flag
+    // directly here to simulate that post-backfill / explicit-pick state. Without
+    // it the row would read explicit=false and get silently re-pinned to the
+    // orchestrator.
     state.liveSessionIds.add("sess_remocode");
     state.user.telegram_default_session_id = "sess_remocode";
     state.user.telegram_default_explicit = true; // post-backfill state

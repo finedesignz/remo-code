@@ -93,15 +93,21 @@ The root **orchestrator** is the *preferred* Telegram target unless the user has
   no-choice users the orchestrator wins, so a fresh link / repo-less user lands
   in the root orchestrator instead of dead-ending on "No default session."
 
-**Migration backfill (critical):** the `telegram_default_explicit` column is
-added with `DEFAULT false`, so a one-shot `UPDATE users SET
-telegram_default_explicit = true WHERE telegram_default_session_id IS NOT NULL`
-runs in the same migration. Any default that existed BEFORE the column is treated
-as explicit — we cannot distinguish an old prewarm-auto-pin from an old
-`/session` pick post-hoc, and the user's hard constraint ("my prior pick must
-never be auto-overridden") forces erring toward honoring it. Without this
-backfill every pre-existing default would read false and get silently re-pinned
-to the orchestrator on the next inbound message.
+**Migration backfill (critical, ONE-SHOT — NOT in schema.sql):** the
+`telegram_default_explicit` column is added with `DEFAULT false`. The backfill of
+PRE-EXISTING prod pins (`UPDATE users SET telegram_default_explicit = true WHERE
+telegram_default_session_id IS NOT NULL`) lives in
+`hub/scripts/migrate-telegram-default-explicit.ts` and is run **manually exactly
+once** after the deploy that ships the column. It deliberately does NOT live in
+`schema.sql`, because `schema.sql` is re-applied on every hub boot
+(`hub/src/db/migrate.ts::runMigrations`) — a re-running `SET explicit=true WHERE
+default IS NOT NULL` would clobber legitimate POST-launch auto-pins (lazy-pin /
+prewarm write explicit=false on purpose) on every redeploy, permanently killing
+orchestrator-as-default for those users. Any default that existed BEFORE the
+column is treated as explicit — we cannot distinguish an old prewarm-auto-pin
+from an old `/session` pick post-hoc, and the user's hard constraint ("my prior
+pick must never be auto-overridden") forces erring toward honoring it. A fresh DB
+needs no backfill (no pre-existing pins).
 
 `setTelegramDefaultSession(userId, sessionId, explicit)` takes `explicit` as a
 **required** parameter so every call site must consciously decide (a silent

@@ -849,15 +849,14 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_default_session_id   TEXT RE
 -- resolution can still prefer the root orchestrator for a no-choice user, while
 -- an EXPLICIT repo choice is always honored and never surprise-switched.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_default_explicit     BOOLEAN NOT NULL DEFAULT false;
--- Backfill: any default that existed BEFORE this column was added must be
--- treated as explicit. We cannot distinguish an old prewarm-auto-pin from an
--- old /session-explicit pick post-hoc, and the user's hard constraint ("my
--- prior pick must never be auto-overridden") means we MUST err toward honoring
--- it. New auto-pins (lazy-pin / prewarm) write explicit=false going forward, so
--- this one-shot only affects pre-migration rows. Idempotent: re-runs no-op once
--- every non-null default is already true.
-UPDATE users SET telegram_default_explicit = true
-  WHERE telegram_default_session_id IS NOT NULL AND telegram_default_explicit = false;
+-- NOTE: there is intentionally NO backfill UPDATE here. schema.sql is re-applied
+-- on EVERY hub boot (hub/src/db/migrate.ts runMigrations), so a
+-- `SET explicit=true WHERE default IS NOT NULL` would re-run on every redeploy and
+-- clobber legitimate post-launch auto-pins (lazy-pin / prewarm write explicit=false
+-- on purpose so the orchestrator can still win for a no-choice user). The one-time
+-- backfill of PRE-EXISTING prod pins lives in
+-- hub/scripts/migrate-telegram-default-explicit.ts and is run manually exactly once.
+-- A fresh DB needs no backfill (no pre-existing pins) — DEFAULT false is correct.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code            TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code_expires_at TIMESTAMPTZ;
 
