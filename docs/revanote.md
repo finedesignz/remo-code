@@ -149,10 +149,14 @@ Session-offline is the exception: it parks in the 10-min grace buffer instead of
 
 ## Cost cap, thresholds, concurrency
 
-- All dispatches flow through `enforceCostCap` (`hub/src/scheduler/dispatcher.ts`).
-- A per-source split (`users.revanote_budget_pct`, default 60% of daily cap) prevents annotation storms from starving scheduled tasks.
-- Quota threshold (Claude usage caps) gates dispatch the same way as scheduled tasks.
-- The per-session queue from `hub/src/scheduler/session-queue.ts` keeps at most 1 in-flight + 1 waiter per session. Concurrent annotations against the same repo serialize through it.
+**Round-2 migration:** revanote dispatch now runs on the **shared session-dispatch pipeline** (`hub/src/dispatch/`) — the same deep module the error-capture pilot uses. `hub/src/revanote/dispatcher.ts` is a thin adapter that builds a `RunStore` + a `gates[]` array and calls `dispatch(req, deps)`. The hand-rolled threshold/budget/queue/grace/finalize machinery is gone.
+
+- Gate chain (first block wins, IR-2): `[thresholdGate, dailyCostCapGate, revanoteBudgetGate(userId, tz)]`.
+  - `thresholdGate` + `dailyCostCapGate` are the shared gates in `hub/src/dispatch/gates.ts`. The global daily cost cap is **non-bypassable** (IR-1) — the migration ADDS it (the legacy revanote dispatcher only had the Claude usage threshold + the per-source budget).
+  - `revanoteBudgetGate` is a revanote-specific `DispatchGate` (defined in `dispatcher.ts`, exported for unit test) that enforces the per-source split (`users.revanote_budget_pct`, default 60% of the daily cap) **layered ON TOP of** the global cost cap, never a substitute. Over-budget → `revanote_budget_exceeded:<detail>` skip + reject callback.
+- The per-session queue (1 in-flight + 1 waiter) lives in `hub/src/dispatch/session-queue.ts` (instance owned by the pipeline). Concurrent annotations against the same session serialize through it; a queued waiter does NOT open an `annotation_run` row until promotion re-dispatches it.
+- Offline target → parked in the **shared** `getGraceBuffer()` (`hub/src/dispatch/grace.ts`) keyed by `sessionId` (10-min TTL). On agent reconnect, `ws/agent.ts` calls `getGraceBuffer().drain(sessionId)` (one drain replays both error-capture and revanote). TTL lapse → annotation `failed_offline` / `target_offline_expired` via the adapter's `onParkExpire`.
+- Finalize: the agent ws assistant_message branch calls `dispatch.onSessionReply(sessionId, content)`, which fires the adapter's `RunStore.onFinalize`. That hook delegates to `run-lifecycle.finalizeAnnotationReply` — envelope parse (`<<JSON>>…<<END>>`) → annotation resolved/failed → merge gate → outbound callback enqueue (callback ALWAYS carries `annotation_id`). There is no longer a revanote-specific `onAgentReply` call in `ws/agent.ts`.
 
 ## WS events
 
@@ -187,13 +191,15 @@ Lifecycle events broadcast to all clients of the user (use `subscribe` from `use
 - `hub/src/revanote/payload-schema.ts` — inbound payload zod.
 - `hub/src/revanote/result-schema.ts` — `<<JSON>>…<<END>>` envelope parser + `stripRevanoteEnvelope`.
 - `hub/src/revanote/prompt.ts` — agent-prompt builder + `previewComment` + `storagePrefix`.
-- `hub/src/revanote/dispatcher.ts` — session/mapping resolve + cost/threshold/budget gate + queue claim + send.
-- `hub/src/revanote/run-lifecycle.ts` — assistant-reply finalize + callback enqueue.
-- `hub/src/revanote/grace.ts` — 10-min offline buffer.
-- `hub/src/revanote/callback.ts` — outbound delivery worker + retry curve.
+- `hub/src/dispatch/{pipeline,gates,session-queue,grace}.ts` — **shared** session-dispatch pipeline (revanote, error-capture both ride it). Round-2.
+- `hub/src/revanote/dispatcher.ts` — thin adapter on `dispatch()`: session/mapping resolve + `RunStore` (annotation_runs lifecycle) + `gates[]` (incl. `revanoteBudgetGate`) + offline `replay`/`onParkExpire` + `send` + outcome→WS-event mapping.
+- `hub/src/revanote/run-lifecycle.ts` — `finalizeAnnotationReply` (the `onFinalize` hook body): envelope parse → annotation status → merge gate → callback enqueue. No longer owns a session-keyed Map or queue promotion (the pipeline does).
+- `hub/src/revanote/callback.ts` — outbound delivery worker + retry curve (unchanged).
 - `hub/src/ws/protocol.ts` — adds 5 revanote lifecycle events to the `HubToClient` union and a `RevanoteEvent` zod union.
 - `hub/src/ws/registry.ts` — `broadcastRevanoteEvent`.
-- `hub/src/ws/agent.ts` — assistant_message hook + grace drain on agent connect.
+- `hub/src/ws/agent.ts` — `onSessionReply` (shared pipeline finalize fan-in) + shared `getGraceBuffer().drain()` on agent connect. The legacy revanote `onAgentReply` + `revanote/grace.ts` drain are removed.
+
+> **Removed in Round-2:** `hub/src/revanote/grace.ts` (replaced by the shared `getGraceBuffer()`); the revanote `onAgentReply`/`onAgentError` + session-registry path (replaced by the pipeline's `onSessionReply` + `RunStore.onFinalize`).
 - `web/src/components/RevanotePage.tsx` — annotations list at `#/revanote`.
 - `web/src/components/MessageBubble.tsx` — violet **Annotation** pill + envelope strip on assistant replies.
 - `web/src/lib/revanote-message.ts` — `parseRevanotePrefix` + `stripRevanoteEnvelope`.
@@ -205,6 +211,7 @@ Lifecycle events broadcast to all clients of the user (use `subscribe` from `use
 - `hub/test/revanote-callback.test.ts` — retry curve invariants + dead-letter threshold.
 - `hub/test/revanote-webhook.test.ts` — URL-token + HMAC + raw-body-before-parse + audit log + idempotency.
 - `hub/test/revanote-message.test.ts` — `[revanote: …]` prefix regex contract.
+- `hub/test/revanote-dispatch.test.ts` — **Round-2** adapter↔pipeline wiring: `open()` fires exactly once on dispatch (annotation_run lifecycle), `onSessionReply` finalizes + enqueues the callback (annotation_id always present), the `revanoteBudgetGate` blocks over-budget independently of the cost cap, and IR-1 cost-cap non-bypassable.
 
 ## Cross-side contract notes
 
