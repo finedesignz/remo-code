@@ -3,9 +3,12 @@
 Bidirectional chat bridge between a user's Telegram account and their Claude Code
 orchestrator session on remo-code. Talk to your hub-resident Claude session from
 any phone running Telegram — DM the bot, get a final reply back. Inbound
-messages route through the same cost-cap + session-queue plumbing as scheduled
-tasks; outbound forwards only the *final* `assistant_message` (no streaming,
-no `thinking`/`tool_use`/`text_delta` chatter).
+messages route through the **shared session-dispatch pipeline** (`hub/src/dispatch/`)
+— the same gate ordering (threshold → daily-cost-cap), per-session queue, and
+offline-grace buffer scheduled tasks and the other subsystems use — with
+`store: null` (Telegram writes no run row). Outbound forwards only the *final*
+`assistant_message` (no streaming, no `thinking`/`tool_use`/`text_delta` chatter)
+via the event bus, NOT a pipeline finalize hook.
 
 A single hub-wide bot serves every user, keyed by `users.telegram_chat_id`.
 One BotFather bot, one Telegram webhook secret, one redeploy.
@@ -155,9 +158,13 @@ hub/src/api/telegram-webhook.ts            ← URL-secret check (constant-time),
    ↓
 hub/src/telegram/commands.ts               ← /start /session /list /help parser
    ↓ (non-command, or after a successful link)
-hub/src/telegram/dispatch.ts               ← cost-cap (enforceCostCap)
-                                            → session-queue.enqueue()
-                                            → agent socket send
+hub/src/telegram/dispatch.ts               ← adapter over hub/src/dispatch/
+                                              dispatch({ store:null,
+                                                gates:[threshold, dailyCostCap],
+                                                token:'tg:<chat>:<update>' })
+                                            → gates → session-queue → grace/online
+                                            → send: insertMessage + broadcast +
+                                              agent socket user_message (+images)
    ↓
 supervisor → Claude CLI (existing pipe)
    ↓
@@ -181,8 +188,19 @@ Key boundaries:
   per `chat_id`, others wait. Prevents Telegram's per-chat rate-limit from
   shedding chunks of a split message.
 - **Cost cap is non-bypassable.** Every inbound user→session dispatch flows
-  through `enforceCostCap`. No code path under `dispatch.ts` sends to a session
-  socket without the cap call.
+  through the shared `dailyCostCapGate` (`hub/src/dispatch/gates.ts`) — the
+  single source of truth for the daily-USD SQL. The locally-replicated
+  `isOverCostCap` copy that used to live in `dispatch.ts` is gone. Over-cap →
+  the pipeline returns `{kind:'skipped'}` and `send` is NEVER called.
+- **Offline → grace buffer.** When the target agent is offline, the pipeline
+  parks the inbound message in the shared grace buffer keyed by `sessionId`. On
+  agent reconnect the `/ws/agent` drain re-runs the `replay` thunk, delivering
+  the buffered message once (#163 auto-replay-after-autoheal). Telegram passes
+  no `onParkExpire` (no run row to mark on TTL lapse).
+- **No finalize hook for Telegram.** The pipeline's `onSessionReply` no-ops for
+  Telegram (null store) — it has no run row to finalize — while still promoting
+  any queued same-session waiter. The reply is delivered by the outbound bridge
+  on the `assistant_message:final` event, not the finalize hook.
 
 ## Security model
 
@@ -190,7 +208,7 @@ Key boundaries:
 |---|---|
 | **Webhook URL-secret leak** | URL-path secret is the only credential. Constant-time compare on every request (`hub/src/api/telegram-webhook.ts`). Mismatch → 401, no DB write (no audit row on auth-fail → can't fill the table via a 401 flood). Rotate by regenerating the env var + re-calling Telegram's `setWebhook`. |
 | **Unlinked-chat spam / audit-log fill** | Unlinked messages audit but `telegram_inbound_log` is trimmed to 100/user via DAL housekeeping on every insert. Unknown chat_ids drop silently — no auto-create, no enumeration vector. |
-| **Cost-cap bypass** | Every inbound dispatch passes through `enforceCostCap` before any session-queue claim. Capped → throttled reply once per UTC day per user (uses `notifications_sent`-style dedupe key `telegram_cap_throttle:<user>:<utc_date>`); subsequent capped messages reply nothing. |
+| **Cost-cap bypass** | Every inbound dispatch passes through the shared `dailyCostCapGate` (`hub/src/dispatch/gates.ts`) before any session-queue claim — the gate runs first, the send never fires when capped (IR-1). Capped → throttled reply once per UTC day per user (uses `notifications_sent`-style dedupe key `telegram_cap_throttle:<user>:<utc_date>`); subsequent capped messages reply nothing. |
 | **Link-code brute force** | 8-char Crockford-style base32 = ~40 bits; 10-min TTL; single-use; one active code per user. Server-side constant-time compare. Brute force across the TTL is infeasible. |
 | **Telegram retry duplication** | Telegram retries non-2xx for up to 24h. Two defenses: (a) every accepted-but-skipped path returns 200, (b) `(chat_id, update_id)` audit-row check short-circuits re-dispatch. |
 | **Photo download → memory blow-up** | 10MB hard cap matches hub-wide WS limit. `AbortSignal.timeout(10_000)` on every `getFileContent`. Largest-by-area photo only. |
@@ -235,7 +253,7 @@ has soaked. Until then, both code paths coexist.
 - `hub/src/api/telegram.ts` — authed REST: `GET /status`, `POST /link-code`, `DELETE /link`, `PUT /default-session`. Cookie auth + CSRF double-submit (Phase 07 pattern).
 - `hub/src/telegram/client.ts` — `sendMessage` / `getFile` / `getFileContent`, `escapeMarkdownV2`, `splitForTelegram`. 10s `AbortSignal.timeout`. Per-chat outbound serial queue lives here.
 - `hub/src/telegram/commands.ts` — `parse(text)` + handlers for `/start` `/session` `/list` `/help`.
-- `hub/src/telegram/dispatch.ts` — inbound → session dispatch (cost-cap → session-queue → agent socket).
+- `hub/src/telegram/dispatch.ts` — inbound → session dispatch; thin adapter over the shared `hub/src/dispatch/` pipeline (`store:null`, gates `[thresholdGate, dailyCostCapGate]`, token `tg:<chat>:<update>`, grace-backed offline replay). Maps `DispatchOutcome` → Telegram replies: `skipped`→cost-capped, `dropped_busy`→session busy, `parked_offline`→buffered/agent_offline.
 - `hub/src/telegram/bridge.ts` — outbound subscriber on `assistant_message:final`. Default-session match gate. Errors swallowed.
 - `hub/src/telegram/link-codes.ts` — 8-char Crockford base32 generator, single-active-per-user, single-use consume, constant-time compare.
 - `hub/src/events/assistant-events.ts` — internal `EventEmitter` for `assistant_message:final`. Additive — does not change the WS broadcast path.
