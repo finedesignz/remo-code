@@ -50,7 +50,17 @@ jobs:
         run: |
           bun install
           mkdir -p tauri/src-tauri/binaries
-          bun build --compile --target=bun-windows-x64 ./src/index.ts --outfile tauri/src-tauri/binaries/remo-code-supervisor-x86_64-pc-windows-msvc.exe
+          # Single-source the reported version: read the authoritative version
+          # from tauri.conf.json and bake it into the compiled sidecar via
+          # Bun's --define. This is what supervisor/src/version.ts reads at
+          # runtime (process.env.REMO_SUPERVISOR_VERSION) so the version the
+          # supervisor reports to the hub can never drift from the MSI version.
+          SUP_VERSION="$(node -p "require('./tauri/src-tauri/tauri.conf.json').version")"
+          echo "Compiling supervisor sidecar at version ${SUP_VERSION}"
+          bun build --compile --target=bun-windows-x64 \
+            --define "process.env.REMO_SUPERVISOR_VERSION=\"${SUP_VERSION}\"" \
+            ./src/index.ts \
+            --outfile tauri/src-tauri/binaries/remo-code-supervisor-x86_64-pc-windows-msvc.exe
           ls -la tauri/src-tauri/binaries/
 
       - name: Build, sign, and release with tauri-action
