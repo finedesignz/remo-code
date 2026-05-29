@@ -23,6 +23,7 @@ import { launchSessionForUser } from "./launch.ts";
 import {
   buildSessionKeyboard,
   renderPickerText,
+  applySidebarParityFilter,
   PAGE_SIZE,
   type PickerSessionRow,
 } from "./session-picker.ts";
@@ -204,14 +205,36 @@ async function listUserSessions(userId: string): Promise<TgSessionRow[]> {
  * single response bounded.
  */
 export async function listUserSessionsForPicker(userId: string): Promise<PickerSessionRow[]> {
-  const rows = await sql<{ id: string; name: string | null; project_dir: string | null; status: string }[]>`
-    SELECT id, name, project_dir, status
+  const rows = await sql<{
+    id: string;
+    name: string | null;
+    project_dir: string | null;
+    status: string;
+    repo_key: string | null;
+    is_orchestrator: boolean | null;
+    github_owner: string | null;
+    github_repo: string | null;
+    last_activity: Date | string | null;
+  }[]>`
+    SELECT id, name, project_dir, status, repo_key, is_orchestrator,
+           github_owner, github_repo, last_activity
       FROM sessions
      WHERE user_id = ${userId} AND deleted_at IS NULL
      ORDER BY (status IN ('online','thinking')) DESC, last_activity DESC NULLS LAST
      LIMIT 200
   `;
-  return rows;
+  const mapped: PickerSessionRow[] = rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    project_dir: r.project_dir,
+    status: r.status,
+    repo_key: r.repo_key,
+    is_orchestrator: !!r.is_orchestrator,
+    github_owner: r.github_owner,
+    github_repo: r.github_repo,
+    last_activity_ms: r.last_activity ? new Date(r.last_activity as any).getTime() : null,
+  }));
+  return applySidebarParityFilter(mapped);
 }
 
 /**
@@ -232,7 +255,7 @@ export async function handleListPicker(opts: {
     };
   }
   const defaultId = opts.user.telegram_default_session_id;
-  const text = renderPickerText({ total: rows.length, offset, defaultId });
+  const text = renderPickerText({ total: rows.length, offset, defaultId, rows });
   const keyboard = buildSessionKeyboard({ rows, offset, defaultId });
   return { text, keyboard };
 }

@@ -27,6 +27,138 @@ export interface PickerSessionRow {
   name: string | null;
   project_dir: string | null;
   status?: string | null;
+  repo_key?: string | null;
+  is_orchestrator?: boolean;
+  github_owner?: string | null;
+  github_repo?: string | null;
+  /** ms epoch; used for repo_key dedupe survivor pick. */
+  last_activity_ms?: number | null;
+}
+
+/**
+ * Normalize a string for canonical-repo-name matching (Bug A): lowercase,
+ * strip leading dots, normalize hyphens. We compare a session's project_dir
+ * basename against `github_repo` to decide which row is the canonical clone
+ * vs a worktree clone like `<repo>-feat-X`.
+ */
+function normRepoName(s: string): string {
+  return s.toLowerCase().replace(/^\.+/, "").replace(/_/g, "-");
+}
+
+function projectBasename(dir: string | null | undefined): string | null {
+  if (!dir) return null;
+  const parts = dir.split(/[\\/]/).filter((s) => s.length > 0);
+  return parts[parts.length - 1] ?? null;
+}
+
+/**
+ * Bug A — collapse worktree rows by (github_owner, github_repo).
+ *
+ * Multiple worktree directories of the same GitHub repo (e.g.
+ * `remo-code`, `remo-code-feat-X`, `remo-code-fix-Y`) appear as distinct
+ * session rows. We collapse them to the canonical clone (project_dir
+ * basename matches github_repo case-/separator-insensitively). Ties or
+ * "no canonical present" → most-recently-active wins.
+ *
+ * Rows with null github_owner OR null github_repo are passed through
+ * untouched.
+ */
+function collapseWorktreesByRepo(rows: PickerSessionRow[]): PickerSessionRow[] {
+  const groups = new Map<string, PickerSessionRow[]>();
+  const passthrough: PickerSessionRow[] = [];
+  for (const s of rows) {
+    if (!s.github_owner || !s.github_repo) {
+      passthrough.push(s);
+      continue;
+    }
+    const key = `${s.github_owner.toLowerCase()}/${s.github_repo.toLowerCase()}`;
+    const arr = groups.get(key);
+    if (arr) arr.push(s);
+    else groups.set(key, [s]);
+  }
+  const survivors = new Set<PickerSessionRow>();
+  for (const arr of groups.values()) {
+    if (arr.length === 1) { survivors.add(arr[0]!); continue; }
+    // Prefer canonical: basename equals normalized github_repo.
+    const canonical = arr.filter((s) => {
+      const base = projectBasename(s.project_dir);
+      if (!base || !s.github_repo) return false;
+      return normRepoName(base) === normRepoName(s.github_repo);
+    });
+    const pool = canonical.length > 0 ? canonical : arr;
+    let best = pool[0]!;
+    for (const s of pool.slice(1)) {
+      if ((s.last_activity_ms ?? 0) > (best.last_activity_ms ?? 0)) best = s;
+    }
+    survivors.add(best);
+  }
+  // Preserve original order.
+  const out: PickerSessionRow[] = [];
+  for (const s of rows) {
+    if (!s.github_owner || !s.github_repo) { out.push(s); continue; }
+    if (survivors.has(s)) out.push(s);
+  }
+  void passthrough;
+  return out;
+}
+
+/**
+ * Match the web Sidebar's filtering (Sidebar.tsx lines 157–178, 437–446):
+ *
+ *  1. Drop rows that are simultaneously offline AND have no repo_key —
+ *     "legacy local offline" entries with no actionable surface.
+ *  2. Dedupe by repo_key, keeping the most-recently-active row. Rows with
+ *     null repo_key pass through keyed by id.
+ *  3. Pin the orchestrator row (is_orchestrator=true) to position 0.
+ *
+ * Returns a NEW array; input is not mutated.
+ */
+export function applySidebarParityFilter(rows: PickerSessionRow[]): PickerSessionRow[] {
+  // Step 1 — drop offline + no repo_key.
+  const isOnline = (s: PickerSessionRow): boolean => s.status === "online" || s.status === "thinking";
+  const filtered = rows.filter((s) => isOnline(s) || !!s.repo_key);
+
+  // Step 1b (Bug A) — collapse worktrees by (github_owner, github_repo).
+  const kept = collapseWorktreesByRepo(filtered);
+
+  // Step 2 — dedupe by repo_key, keep most-recently-active.
+  const byKey = new Map<string, PickerSessionRow>();
+  const passthrough: PickerSessionRow[] = [];
+  for (const s of kept) {
+    if (!s.repo_key) {
+      passthrough.push(s);
+      continue;
+    }
+    const prev = byKey.get(s.repo_key);
+    if (!prev) {
+      byKey.set(s.repo_key, s);
+      continue;
+    }
+    const a = prev.last_activity_ms ?? 0;
+    const b = s.last_activity_ms ?? 0;
+    if (b > a) byKey.set(s.repo_key, s);
+  }
+  // Preserve the original order: walk `kept` and emit each row only once.
+  const seen = new Set<PickerSessionRow>();
+  const dedupedOrdered: PickerSessionRow[] = [];
+  for (const s of kept) {
+    if (!s.repo_key) {
+      if (!seen.has(s)) { dedupedOrdered.push(s); seen.add(s); }
+      continue;
+    }
+    const survivor = byKey.get(s.repo_key)!;
+    if (!seen.has(survivor)) { dedupedOrdered.push(survivor); seen.add(survivor); }
+  }
+  // (passthrough already covered via the seen-set above)
+  void passthrough;
+
+  // Step 3 — pin orchestrator first.
+  const orchIdx = dedupedOrdered.findIndex((s) => s.is_orchestrator);
+  if (orchIdx > 0) {
+    const [orch] = dedupedOrdered.splice(orchIdx, 1);
+    dedupedOrdered.unshift(orch!);
+  }
+  return dedupedOrdered;
 }
 
 /**
@@ -81,7 +213,8 @@ export function buildSessionKeyboard(opts: {
       const isOnline = s.status === "online" || s.status === "thinking";
       const checkMark = defaultId && s.id === defaultId ? "✓ " : "";
       const statusDot = isOnline ? "🟢 " : "";
-      const text = truncate(checkMark + statusDot + label, MAX_LABEL_LEN);
+      const orchStar = s.is_orchestrator ? "⭐ " : "";
+      const text = truncate(orchStar + checkMark + statusDot + label, MAX_LABEL_LEN);
       row.push({ text, callback_data: `s:${s.id}` });
     }
     keyboard.push(row);
@@ -110,8 +243,10 @@ export function renderPickerText(opts: {
   total: number;
   offset: number;
   defaultId: string | null;
+  /** Optional — when present, legend includes ⭐ only if the visible page has the orchestrator row. */
+  rows?: PickerSessionRow[];
 }): string {
-  const { total, offset, defaultId } = opts;
+  const { total, offset, defaultId, rows } = opts;
   if (total === 0) {
     return "No sessions found. Start one from the remo-code web UI first.";
   }
@@ -123,6 +258,24 @@ export function renderPickerText(opts: {
   const legend: string[] = [];
   legend.push("🟢 = launched");
   if (defaultId) legend.push("✓ = current default");
+  let anyOrchestrator = false;
+  if (rows) {
+    const page = rows.slice(offset, offset + PAGE_SIZE);
+    if (page.some((s) => s.is_orchestrator)) {
+      legend.push("⭐ = orchestrator");
+      anyOrchestrator = true;
+    }
+    if (!anyOrchestrator) {
+      // Bug C — only check the full list once we've established the page has none.
+      if (!rows.some((s) => s.is_orchestrator)) {
+        lines.push("");
+        lines.push(legend.join("    "));
+        lines.push("");
+        lines.push("💡 Pin a root orchestrator from Settings → Connections for cross-repo coordination.");
+        return lines.join("\n");
+      }
+    }
+  }
   lines.push("");
   lines.push(legend.join("    "));
   return lines.join("\n");

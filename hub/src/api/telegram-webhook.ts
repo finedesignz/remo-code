@@ -311,7 +311,15 @@ async function safeEditMessageText(
   try {
     await editMessageText(chatId, messageId, text, keyboard ? { inline_keyboard: keyboard } : {});
   } catch (err: any) {
-    console.warn("[telegram-webhook] editMessageText failed:", err?.status ?? "?", err?.message);
+    // Telegram returns 400 "message is not modified" when the new content is
+    // byte-identical to the old. That's a no-op success for our flows
+    // (paginating to the same page, re-rendering after no state change).
+    const status = err?.status ?? 0;
+    const body = String(err?.message ?? "");
+    if (status === 400 && /not modified/i.test(body)) {
+      return;
+    }
+    console.error("[telegram-webhook] editMessageText failed:", status || "?", body);
   }
 }
 
@@ -371,7 +379,7 @@ async function handleCallbackQuery(
         const idx = rows.findIndex((r) => r.id === action.sessionId);
         const offset = idx >= 0 ? Math.floor(idx / 20) * 20 : 0;
         const keyboard = buildSessionKeyboard({ rows, offset, defaultId: action.sessionId });
-        const text = renderPickerText({ total, offset, defaultId: action.sessionId });
+        const text = renderPickerText({ total, offset, defaultId: action.sessionId, rows });
         await safeEditMessageText(chatId, messageId, text, keyboard);
       } catch (err: any) {
         console.warn("[telegram-webhook] picker re-render failed:", err?.message);
@@ -398,6 +406,7 @@ async function handleCallbackQuery(
       total,
       offset,
       defaultId: user.telegram_default_session_id,
+      rows,
     });
     await safeEditMessageText(chatId, messageId, text, keyboard);
   } catch (err: any) {
