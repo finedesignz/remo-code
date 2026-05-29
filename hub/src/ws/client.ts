@@ -5,6 +5,7 @@ import { verifyAuthSessionToken } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
 import { insertMessage, listSessions, getSession, getUserLicenseFields } from '../db/dal'
+import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
 import { isScheduledRunActive } from '../scheduler/senders/agent.ts'
@@ -118,7 +119,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
 
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch (e: any) {
-    console.error('[client] JSON parse error:', e.message)
+    log.error('client.json_parse_error', { error: e.message })
     return
   }
 
@@ -178,7 +179,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     if (data.authTimer) clearTimeout(data.authTimer)
 
     data.clientEntry = registerClient(data.userId!, ws)
-    console.log(`[client] authenticated user=${data.userId} method=${data.authMethod}`)
+    log.info('client.authenticated', { user_id: data.userId, auth_method: data.authMethod })
     ws.send(JSON.stringify({ type: 'auth_ok' }))
 
     // Send session list immediately
@@ -209,10 +210,10 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
         const { resumeOrphanSessionsForUser } = await import('../orchestrator/orphan-resume')
         const r = await resumeOrphanSessionsForUser(data.userId!)
         if (r.resumed.length > 0) {
-          console.log(`[client] resumed ${r.resumed.length} orphan session(s) for user=${data.userId}`)
+          log.info('client.orphan_resume', { user_id: data.userId, resumed_count: r.resumed.length })
         }
       } catch (err: any) {
-        console.error('[client] orphan resume failed', err?.message)
+        log.error('client.orphan_resume_failed', { user_id: data.userId, error: err?.message })
       }
     })()
     return
@@ -227,7 +228,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   if (data.authMethod === 'session_cookie' && MUTATING_WS_TYPES.has(msg.type)) {
     const supplied = (msg as any).csrf_token as string | undefined
     if (!verifyCsrfPair(data.csrfCookie ?? null, supplied ?? null)) {
-      console.log(`[client] csrf_failed type=${msg.type} user=${data.userId}`)
+      log.warn('client.csrf_failed', { msg_type: msg.type, user_id: data.userId })
       ws.send(JSON.stringify({ type: 'auth_error', error: 'csrf_failed' }))
       return
     }
@@ -269,6 +270,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     const ids = Array.from(new Set(requested))
 
     if (ids.length > SUBSCRIBE_MAX) {
+      log.warn('client.subscribe_error', { user_id: data.userId, error: 'too_many_sessions', requested: ids.length, max: SUBSCRIBE_MAX })
       ws.send(JSON.stringify({
         type: 'subscribe_error',
         error: 'too_many_sessions',
@@ -293,6 +295,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     )
     const allOwned = ownedChecks.every((s) => s !== null)
     if (!allOwned) {
+      log.warn('client.subscribe_error', { user_id: data.userId, error: 'invalid_subscribe', requested_count: ids.length })
       ws.send(JSON.stringify({
         type: 'subscribe_error',
         error: 'invalid_subscribe',
@@ -512,7 +515,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
 }
 
 export function handleClientClose(ws: ServerWebSocket<ClientWsData>) {
-  console.log(`[client] closed user=${ws.data.userId}`)
+  log.info('client.closed', { user_id: ws.data.userId })
   if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
   if (ws.data.clientEntry) {
     // Bug B — capture the sessions this connection was subscribed to BEFORE

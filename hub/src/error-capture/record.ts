@@ -30,6 +30,7 @@ import { getUserTimezone } from '../db/dal.ts'
 import { notifyThrottled } from './notify.ts'
 import { dispatchPendingError } from './dispatcher.ts'
 import { broadcastErrorEvent } from '../ws/registry.ts'
+import { log } from '../observability/logger'
 
 export interface RecordErrorFields {
   fingerprint: string
@@ -83,6 +84,10 @@ export async function recordError(
   )
   if (recent && recent.id !== row.id) {
     const reason = `dedupe_window_${project.dedupe_window_seconds}s`
+    log.info('error_capture.gate.deduped', {
+      project_id: project.id, user_id: project.user_id, error_id: row.id,
+      fingerprint: fields.fingerprint, dedupe_window_seconds: project.dedupe_window_seconds,
+    })
     await updateErrorDispatchStatus(row.id, 'deduped', reason)
     await notifyThrottled(
       'dedupe_hit',
@@ -103,6 +108,10 @@ export async function recordError(
   const lastHour = await countErrorsInLastHour(project.id)
   if (lastHour > project.rate_limit_per_hour) {
     const reason = `rate_limit_${project.rate_limit_per_hour}_per_hour`
+    log.warn('error_capture.gate.rate_limited', {
+      project_id: project.id, user_id: project.user_id, error_id: row.id,
+      hourly_count: lastHour, rate_limit_per_hour: project.rate_limit_per_hour,
+    })
     await updateErrorDispatchStatus(row.id, 'rate_limited', reason)
     await notifyThrottled(
       'rate_limit',
@@ -124,6 +133,10 @@ export async function recordError(
   const dispatchedToday = await countDispatchesToday(project.id, tz)
   if (dispatchedToday >= project.daily_dispatch_cap) {
     const reason = `daily_cap_${project.daily_dispatch_cap}`
+    log.warn('error_capture.gate.cap_exceeded', {
+      project_id: project.id, user_id: project.user_id, error_id: row.id,
+      dispatched_today: dispatchedToday, daily_dispatch_cap: project.daily_dispatch_cap,
+    })
     await updateErrorDispatchStatus(row.id, 'cap_exceeded', reason)
     await notifyThrottled(
       'daily_cap',
@@ -142,7 +155,7 @@ export async function recordError(
   // 5. Accepted. Row stays 'pending'; W3 dispatcher fires it into the
   //    configured session. Fire-and-forget — we never block the intake POST.
   void dispatchPendingError(row.id).catch((err) => {
-    console.error(`[error-capture] dispatch failed error=${row.id}: ${err?.message ?? err}`)
+    log.error('error_capture.dispatch_failed', { error_id: row.id, project_id: project.id, error: err?.message ?? String(err) })
   })
   return { error_id: row.id, dispatch_status: 'pending' }
 }

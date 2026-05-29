@@ -12,6 +12,7 @@ import {
   updateSupervisorState, heartbeatSupervisor, getSupervisor,
   setSupervisorSessionInventory,
 } from './supervisor-registry'
+import { log } from '../observability/logger'
 
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
@@ -36,7 +37,7 @@ async function flushStreaming(sessionId: string): Promise<void> {
   const chunk = st.buffer
   st.buffer = ''
   st.flushing = appendToMessage(st.id, chunk).catch((err: any) => {
-    console.error(`[agent] flushStreaming error session=${sessionId}`, err.message)
+    log.error('agent.flush_streaming_failed', { session_id: sessionId, error: err.message })
   })
   await st.flushing
   st.flushing = null
@@ -116,7 +117,13 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     // failures. Truncate payload preview to keep logs readable.
     const t = (parsed as any)?.type ?? 'unknown'
     const preview = JSON.stringify(parsed).slice(0, 200)
-    console.warn(`[agent] schema reject type=${t} authenticated=${ws.data.authenticated} role=${ws.data.role} errors=${result.error.issues.map(i => `${i.path.join('.')}:${i.message}`).join('; ')} payload=${preview}`)
+    log.warn('agent.schema_reject', {
+      msg_type: t,
+      authenticated: ws.data.authenticated,
+      role: ws.data.role,
+      errors: result.error.issues.map(i => `${i.path.join('.')}:${i.message}`).join('; '),
+      payload_preview: preview,
+    })
     return
   }
   const msg = result.data
@@ -136,22 +143,22 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
           case 'not_found':
             closeReason = 'api_key_not_found'
             errorMsg = 'invalid api key'
-            console.warn(`[supervisor] auth fail reason=not_found hash=${keyHash.slice(0,8)}...`)
+            log.warn('supervisor.auth_fail', { reason: 'not_found', hash_prefix: keyHash.slice(0,8) })
             break
           case 'revoked':
             closeReason = 'api_key_revoked'
             errorMsg = 'api key revoked'
-            console.warn(`[supervisor] auth fail reason=revoked hash=${keyHash.slice(0,8)}...`)
+            log.warn('supervisor.auth_fail', { reason: 'revoked', hash_prefix: keyHash.slice(0,8) })
             break
           case 'deleted':
             closeReason = 'api_key_not_found'
             errorMsg = 'api key not found'
-            console.warn(`[supervisor] auth fail reason=deleted hash=${keyHash.slice(0,8)}...`)
+            log.warn('supervisor.auth_fail', { reason: 'deleted', hash_prefix: keyHash.slice(0,8) })
             break
           case 'missing_capability':
             closeReason = 'missing_supervisor_capability'
             errorMsg = `missing capability: need=${verified.need} have=${JSON.stringify(verified.have)}`
-            console.warn(`[supervisor] auth fail reason=missing_capability need=${verified.need} have=${JSON.stringify(verified.have)}`)
+            log.warn('supervisor.auth_fail', { reason: 'missing_capability', need: verified.need, have: verified.have })
             break
         }
         ws.send(JSON.stringify({ type: 'auth_error', error: errorMsg, reason: verified.reason }))
@@ -177,7 +184,7 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       // misconfigured/stale agent leaves on the hub is a bare `[agent]
       // connection opened` with no follow-up, which is indistinguishable from
       // a network blip. Hash prefix is safe to log (one-way SHA-256).
-      console.warn(`[agent] auth fail reason=invalid_api_key hash=${keyHash.slice(0, 8)}... host=${msg.hostname ?? 'unknown'}`)
+      log.warn('agent.auth_fail', { reason: 'invalid_api_key', hash_prefix: keyHash.slice(0, 8), hostname: msg.hostname ?? 'unknown' })
       ws.send(JSON.stringify({ type: 'auth_error', error: 'invalid api key' }))
       ws.close(4001, 'auth failed')
       return
@@ -189,7 +196,7 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     const rootlessAdvertised = Array.isArray((msg as any).rootless_sessions)
       && (msg as any).rootless_sessions.length > 0
     if (!msg.project_dir && !rootlessAdvertised) {
-      console.warn(`[agent] auth fail reason=no_project_or_rootless user=${userId} host=${msg.hostname ?? 'unknown'}`)
+      log.warn('agent.auth_fail', { reason: 'no_project_or_rootless', user_id: userId, hostname: msg.hostname ?? 'unknown' })
       ws.send(JSON.stringify({ type: 'auth_error', error: 'missing project_dir or rootless_sessions' }))
       ws.close(4001, 'auth failed')
       return
@@ -841,7 +848,7 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
 }
 
 export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
-  console.log(`[agent] closed role=${ws.data.role} session=${ws.data.sessionId} supervisor=${ws.data.supervisorId}`)
+  log.info('agent.closed', { role: ws.data.role, session_id: ws.data.sessionId, supervisor_id: ws.data.supervisorId })
   if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
   if (ws.data.heartbeatTimer) clearInterval(ws.data.heartbeatTimer)
 
@@ -857,7 +864,7 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
       const { finalizeOpenRunsForSupervisor } = await import('../db/supervisor-dal')
       await finalizeOpenRunsForSupervisor(ws.data.supervisorId)
     } catch (err: any) {
-      console.warn(`[agent] finalizeOpenRunsForSupervisor failed supervisor=${ws.data.supervisorId} err=${err?.message}`)
+      log.warn('agent.finalize_open_runs_failed', { supervisor_id: ws.data.supervisorId, error: err?.message })
     }
     // Pass the closing ws so unregister can ignore stale closes from sockets
     // that have already been replaced by a reconnect.
