@@ -235,17 +235,31 @@ function blockGate(name: string, reason: string): DispatchGate {
 }
 
 interface RecordingStore extends RunStore {
+  /** request tokens passed to open() — one entry per actual dispatch */
+  opened: string[]
   skipped: Array<[string, string]>
   failed: Array<[string, string]>
   finalized: Array<[string, string]>
   dispatched: string[]
 }
-function recordingStore(): RecordingStore {
+/**
+ * Recording store. `open()` returns a run id derived from the request token
+ * (`run:<token>`), modelling a subsystem that inserts a run row and hands the
+ * pipeline the row id — so markDispatched / onFinalize / markFailed receive the
+ * RUN id, not the request token. `opts.openReturnsNull` exercises the
+ * `?? req.token` fallback (a store that has no row id of its own).
+ */
+function recordingStore(opts: { openReturnsNull?: boolean } = {}): RecordingStore {
   const s: RecordingStore = {
+    opened: [],
     skipped: [],
     failed: [],
     finalized: [],
     dispatched: [],
+    async open(req) {
+      s.opened.push(req.token)
+      return opts.openReturnsNull ? null : `run:${req.token}`
+    },
     async markSkipped(token, reason) { s.skipped.push([token, reason]) },
     async markFailed(token, error) { s.failed.push([token, error]) },
     async markDispatched(token) { s.dispatched.push(token) },
@@ -254,10 +268,10 @@ function recordingStore(): RecordingStore {
   return s
 }
 
-function deps(over: Partial<PipelineDeps> = {}): { deps: PipelineDeps; sends: DispatchRequest[]; replays: DispatchRequest[]; store: RecordingStore } {
+function deps(over: Partial<PipelineDeps> = {}, storeOpts: { openReturnsNull?: boolean } = {}): { deps: PipelineDeps; sends: DispatchRequest[]; replays: DispatchRequest[]; store: RecordingStore } {
   const sends: DispatchRequest[] = []
   const replays: DispatchRequest[] = []
-  const store = recordingStore()
+  const store = recordingStore(storeOpts)
   const d: PipelineDeps = {
     gates: [passGate('threshold'), passGate('daily_cost_cap')],
     store,
@@ -273,10 +287,12 @@ describe('dispatch/pipeline — gates', () => {
   beforeEach(() => resetPipeline())
 
   test('all gates pass → dispatched, send called once', async () => {
-    const { deps: d, sends } = deps()
+    const { deps: d, sends, store } = deps()
     const out = await dispatch(baseReq(), d)
-    expect(out).toEqual({ kind: 'dispatched' })
+    expect(out).toEqual({ kind: 'dispatched', runId: 'run:t1' })
     expect(sends).toHaveLength(1)
+    // open() fired exactly once, on the dispatched message.
+    expect(store.opened).toEqual(['t1'])
   })
 
   test('IR-1: cost-capped user → skipped, send NEVER called', async () => {
@@ -323,12 +339,14 @@ describe('dispatch/pipeline — queue claim + drop', () => {
   beforeEach(() => resetPipeline())
 
   test('second concurrent dispatch on same session → queued', async () => {
-    const { deps: d } = deps()
+    const { deps: d, store } = deps()
     const out1 = await dispatch(baseReq({ token: 't1' }), d)
     const out2 = await dispatch(baseReq({ token: 't2' }), d)
-    expect(out1).toEqual({ kind: 'dispatched' })
+    expect(out1).toEqual({ kind: 'dispatched', runId: 'run:t1' })
     expect(out2).toEqual({ kind: 'queued' })
     expect(getQueue().currentInFlight('s1')).toBe('t1')
+    // open() fired ONLY for the dispatched head (t1), NOT for the queued waiter.
+    expect(store.opened).toEqual(['t1'])
   })
 
   test('third concurrent dispatch → dropped_busy + markSkipped(session_busy)', async () => {
@@ -338,6 +356,8 @@ describe('dispatch/pipeline — queue claim + drop', () => {
     const out3 = await dispatch(baseReq({ token: 't3' }), d)
     expect(out3).toEqual({ kind: 'dropped_busy' })
     expect(store.skipped).toContainEqual(['t3', 'session_busy'])
+    // dropped message NEVER opens a run row.
+    expect(store.opened).toEqual(['t1'])
   })
 })
 
@@ -346,10 +366,12 @@ describe('dispatch/pipeline — offline park', () => {
 
   test('offline target → parked_offline, send not called, slot released, grace registered', async () => {
     ;(getGraceBuffer() as any)._reset()
-    const { deps: d, sends, replays } = deps({ isOnline: () => false })
+    const { deps: d, sends, replays, store } = deps({ isOnline: () => false })
     const out = await dispatch(baseReq(), d)
     expect(out).toEqual({ kind: 'parked_offline' })
     expect(sends).toHaveLength(0)
+    // parked message NEVER opens a run row (open fires only on actual send).
+    expect(store.opened).toHaveLength(0)
     // slot released so a later online dispatch can claim it
     expect(getQueue().currentInFlight('s1')).toBe(null)
     // draining grace runs the replay
@@ -399,19 +421,30 @@ describe('dispatch/pipeline — send failure', () => {
     })
     const out = await dispatch(baseReq(), d)
     expect(out).toEqual({ kind: 'failed', reason: 'socket_gone' })
-    expect(store.failed).toEqual([['t1', 'socket_gone']])
+    // open() ran (we were dispatching) so markFailed gets the RUN id, not token.
+    expect(store.opened).toEqual(['t1'])
+    expect(store.failed).toEqual([['run:t1', 'socket_gone']])
     expect(getQueue().currentInFlight('s1')).toBe(null)
+  })
+
+  test('store returning null from open() falls back to req.token as the run id', async () => {
+    const { deps: d, store } = deps({ send: async () => { throw new Error('x') } }, { openReturnsNull: true })
+    await dispatch(baseReq({ token: 't1' }), d)
+    // open returned null → pipeline used req.token as the finalize/fail key.
+    expect(store.failed).toEqual([['t1', 'x']])
   })
 })
 
 describe('dispatch/pipeline — onSessionReply finalize + promote + redispatch', () => {
   beforeEach(() => resetPipeline())
 
-  test('IR-7: onSessionReply finalizes the in-flight run', async () => {
+  test('IR-7: onSessionReply finalizes the in-flight run with the OPENED run id', async () => {
     const { deps: d, store } = deps()
     await dispatch(baseReq({ token: 't1' }), d)
     await onSessionReply('s1', 'done')
-    expect(store.finalized).toEqual([['t1', 'done']])
+    // open() returned run:t1; the pipeline threads that id into onFinalize.
+    expect(store.opened).toEqual(['t1'])
+    expect(store.finalized).toEqual([['run:t1', 'done']])
   })
 
   test('onSessionReply on a session with no active hook is a no-op', async () => {
@@ -426,10 +459,15 @@ describe('dispatch/pipeline — onSessionReply finalize + promote + redispatch',
     await dispatch(baseReq({ token: 't2' }), d) // queued
     expect(sends.map((r) => r.token)).toEqual(['t1'])
 
+    // while queued, t2's run row is NOT yet open.
+    expect(store.opened).toEqual(['t1'])
+
     await onSessionReply('s1', 'reply-1')
-    // t1 finalized; t2 promoted, re-dispatched, sent
-    expect(store.finalized).toEqual([['t1', 'reply-1']])
+    // t1 finalized (with its opened run id); t2 promoted, re-dispatched, sent —
+    // and ONLY NOW does t2 open its run row (exactly once, on actual dispatch).
+    expect(store.finalized).toEqual([['run:t1', 'reply-1']])
     expect(sends.map((r) => r.token)).toEqual(['t1', 't2'])
+    expect(store.opened).toEqual(['t1', 't2'])
     expect(getQueue().currentInFlight('s1')).toBe('t2')
   })
 
@@ -449,9 +487,11 @@ describe('dispatch/pipeline — onSessionReply finalize + promote + redispatch',
     capped = true // user crosses the cap while t2 waits
     await onSessionReply('s1', 'reply-1')
 
-    // t1 finalized; t2 promoted but re-runs gates → cost-cap blocks → skipped.
-    expect(store.finalized).toEqual([['t1', 'reply-1']])
+    // t1 finalized; t2 promoted but re-runs gates → cost-cap blocks → skipped
+    // BEFORE open(), so t2 never opens a run row and markSkipped gets the token.
+    expect(store.finalized).toEqual([['run:t1', 'reply-1']])
     expect(sends.map((r) => r.token)).toEqual(['t1']) // t2 NEVER sent
+    expect(store.opened).toEqual(['t1']) // t2 blocked before open
     expect(store.skipped).toContainEqual(['t2', 'daily_cost_cap'])
     expect(getQueue().currentInFlight('s1')).toBe(null)
   })
@@ -460,7 +500,7 @@ describe('dispatch/pipeline — onSessionReply finalize + promote + redispatch',
     const { deps: d, store } = deps()
     await dispatch(baseReq({ token: 't1' }), d)
     await onSessionReply('s1', 'r')
-    expect(store.finalized).toEqual([['t1', 'r']])
+    expect(store.finalized).toEqual([['run:t1', 'r']])
     expect(getQueue().currentInFlight('s1')).toBe(null)
   })
 })
