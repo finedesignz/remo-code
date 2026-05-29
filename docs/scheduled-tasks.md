@@ -52,14 +52,15 @@ to the web UI over WebSocket.
 | `hub/src/scheduler/cron.ts`               | croner wrapper: `validate`, `nextRuns`, `compilePreset`, IANA TZ check |
 | `web/src/lib/cron.ts`                     | API-compatible mirror used by the UI for the "next 3 runs" preview     |
 | `hub/src/scheduler/registry.ts`           | In-memory `Map<task_id, Cron>`; load-all on boot, register/replace     |
-| `hub/src/scheduler/session-queue.ts`      | Per-session FIFO (1 in-flight + 1 waiter; further dispatches dropped)  |
+| `hub/src/scheduler/session-queue.ts`      | **Back-compat shim** over `hub/src/dispatch/session-queue.ts` (1 in-flight + 1 waiter). Kept until the Round-2 collapse PR; the scheduler no longer enqueues on it at runtime — session sends use the shared `dispatch()` pipeline's own queue. `scheduler.test.ts` still exercises this shim's functional API as a standalone unit. |
 | `hub/src/scheduler/targets.ts`            | Resolves `target_kind` → list of `{kind, sessionId?, supervisorId?}`   |
-| `hub/src/scheduler/dispatcher.ts`         | Cost cap, fan-out, per-target run rows, route to sender                |
-| `hub/src/scheduler/senders/agent.ts`      | Writes `user_message` to an agent socket, captures result + cost       |
+| `hub/src/scheduler/dispatcher.ts`         | Cost cap, fan-out, per-target run rows, triage routing, route to sender. SESSION targets fall through to the agent sender (which parks offline in the shared grace buffer); SUPERVISOR targets keep the dispatcher's offline pre-check + concurrency gate (park via the shared grace buffer keyed by supervisorId). |
+| `hub/src/scheduler/senders/agent.ts`      | **Round-2: thin adapter over the shared `dispatch()` pipeline** for SESSION-targeted runs. Builds prompt + runtime context, a `RunStore` that finalizes the existing `scheduled_task_runs` row via `finalizeRun` (which fires the post-run pipeline), gates `[threshold, dailyCostCap]` (the promotion re-check), offline `replay`/`onParkExpire`, and the Summary directive + `## RUNTIME CONTEXT` block on the SENT string only. Finalize lands via `dispatch.onSessionReply`. |
 | `hub/src/scheduler/senders/supervisor.ts` | `run_command` against a supervisor socket (`run_started/output/finished`)|
+| `hub/src/scheduler/senders/triage.ts`     | LOCAL-AGENT triage runs through the shared `dispatch()` pipeline (RunStore.onFinalize parses `TriageResult`); SUPERVISOR-spawn triage stays on the legacy `pending` map + `onTriageAssistantMessage` hook (spawn-and-wait, not a queue dispatch). |
 | `hub/src/scheduler/senders/coolify.ts`    | Hub-local `log_check` via Coolify deploy/logs API                      |
 | `hub/src/scheduler/catchup.ts`            | On boot: walk missed fires per task (cap 100), respect `catchup_policy`|
-| `hub/src/scheduler/grace.ts`              | 10-min offline buffer; replays pending runs on agent/supervisor auth   |
+| _(deleted)_ `hub/src/scheduler/grace.ts`  | **Removed in Round-2.** Offline parking now uses the shared `hub/src/dispatch/grace.ts` buffer (`getGraceBuffer()`): session runs park keyed by sessionId, supervisor runs by supervisorId; drained on the respective reconnect in `hub/src/ws/agent.ts`. |
 | `hub/src/scheduler/post-run/dispatcher.ts`| Routes finalized runs to post-run executors per matching condition     |
 | `hub/src/scheduler/post-run/schema.ts`    | Zod schema for `post_run_actions` + chain-cycle detector (DFS)         |
 | `hub/src/scheduler/post-run/aggregator.ts`| Fan-out aggregator: collects child results, fires post-run actions once|
@@ -318,13 +319,24 @@ user adjust their cap on the Settings → Account tab.
 
 ---
 
-## Per-session queue
+## Per-session queue (Round-2: shared dispatch pipeline)
 
 A single agent session admits at most one in-flight scheduled run plus one
-waiter. The 3rd enqueue while a slot is still busy is **dropped** (the
-caller finalizes that run as `skipped(session_busy)`). When the agent
-transitions thinking → idle, `onSessionIdleAndPromote(sessionId)` promotes
-the waiter and notifies the dispatcher to ship it.
+waiter. The 3rd enqueue while a slot is still busy is **dropped** (finalized
+`skipped(session_busy)`). As of the Round-2 migration, this queue lives in the
+shared `hub/src/dispatch/` pipeline (`dispatch()` + `onSessionReply()`), not in
+the scheduler's own module: the agent sender (`senders/agent.ts`) is a thin
+adapter that calls `dispatch(req, deps)`.
+
+**Promotion** is now driven by the agent's `assistant_message`, not the
+`thinking → idle` status transition. When the in-flight run's reply lands, the
+agent ws branch calls `dispatch.onSessionReply(sessionId, content)` →
+`RunStore.onFinalize` (→ `finalizeRun(success)`, which fires the post-run
+pipeline) → the pipeline promotes the queued waiter and **re-dispatches it
+through the full gate list again** (`[thresholdGate, dailyCostCapGate]`). A user
+who crossed the cost cap while queued is therefore skipped on promotion (IR-2) —
+this replaces the legacy `session-queue.setOnPromote` + `onSessionIdleAndPromote`
+seam (now dead; `dispatcher.init()` is a retained no-op).
 
 This caps notification spam and prevents pile-ups when a long task overruns
 its cadence.
@@ -350,16 +362,34 @@ runs drawer, output snippet, and template variables can quote without
 parsing the whole assistant turn. Only the **sent** content carries the
 directive — chat history stays clean.
 
+Round-2 note: the directive + the Phase-11 `## RUNTIME CONTEXT` block are now
+applied inside the dispatch adapter's `send` thunk (`senders/agent.ts`), so they
+ride only on the `user_message` frame put on the agent socket. The
+`runtime_context_snapshot` persisted on `scheduled_task_runs` and the stored
+`messages` content are unchanged — neither carries the directive (Phase 11
+invariant: the snapshot lives on the run row, never in `messages`).
+
 ---
 
-## Offline grace
+## Offline grace (Round-2: shared grace buffer)
 
-When `resolveTargets` returns a target with `online: false`, the dispatcher
-inserts the run as `pending` and registers it in
-`scheduler/grace.ts` keyed by session/supervisor id. On agent/supervisor
-WebSocket auth success, `drainPending(key)` re-dispatches any runs created
-within the last 10 minutes. Older pending runs are swept to
-`skipped(target_offline)` by a 60-second background timer.
+Offline parking now uses the shared `hub/src/dispatch/grace.ts`
+`getGraceBuffer()` (the standalone `scheduler/grace.ts` was deleted):
+
+- **Session targets** (`session` / `all_agents`): the dispatcher no longer
+  pre-checks `online` — the run falls through to the agent sender, whose
+  `dispatch()` call parks an offline target in the shared buffer keyed by
+  `sessionId`. On agent reconnect, `getGraceBuffer().drain(sessionId)` re-runs
+  the parked `replay` thunk (`runNow(task.id)`). TTL lapse (10 min) fires
+  `onParkExpire` → `skipped(target_offline)`. **Manual ("run now") runs fail
+  fast** with `target_offline` and never park.
+- **Supervisor targets** (`supervisor` / `all_supervisors`): the dispatcher
+  keeps its offline pre-check + concurrency gate, but registers the offline
+  replay in the same shared buffer keyed by `supervisorId` (replay = mark old
+  row `replayed_on_reconnect` + `runNow`). Drained on supervisor reconnect.
+
+The shared buffer's 60-second sweep marks any entry past its 10-minute TTL via
+the registered `onExpire` side-effect (legacy parity).
 
 ---
 
@@ -562,14 +592,21 @@ When adding a new templated task type, drop the prompt body into
 1. Add the new enum value to `TaskTypeEnum` in
    `hub/src/api/scheduled-tasks.ts` and to the `TaskType` union in
    `hub/src/db/scheduled-tasks-dal.ts`.
-2. Add a sender at `hub/src/scheduler/senders/<name>.ts` exporting an
-   async function with signature `(task, runContext) => Promise<void>`.
-   The sender owns the lifecycle from "send to target" through
-   `finalizeRun(runId, status, error?, { cost_usd, duration_ms, output_snippet })`.
+2. Add a sender at `hub/src/scheduler/senders/<name>.ts`. For a SESSION-targeted
+   type, model it on the Round-2 `senders/agent.ts` adapter: build a `RunStore`
+   over the existing run row + `PipelineDeps` (gates `[thresholdGate,
+   dailyCostCapGate]`, `isOnline`, `replay`, `onParkExpire`, `send`) and call
+   `dispatch(req, deps)` from `hub/src/dispatch/pipeline.ts`. Finalize lands via
+   `RunStore.onFinalize` (driven by `dispatch.onSessionReply` in
+   `hub/src/ws/agent.ts`), which calls
+   `finalizeRun(runId, status, error?, { cost_usd, duration_ms, output_snippet })`
+   — that is the seam that fires the post-run action pipeline. A non-session
+   (supervisor/coolify) sender owns its own lifecycle directly.
 3. Add a `case 'your_type':` branch to `routeToSender` in
    `hub/src/scheduler/dispatcher.ts` that dynamically imports your sender.
-4. If the type fans out to agents, honor the per-session queue
-   (`scheduler/session-queue.ts`).
+4. A session-targeted type does NOT touch `scheduler/session-queue.ts` (the
+   back-compat shim) — the shared `dispatch()` pipeline owns the per-session
+   queue + promotion. Offline parking goes through `getGraceBuffer()`.
 5. Add a UI radio option in `web/src/components/ScheduleEditor.tsx` and a
    payload editor.
 6. Add a unit test in `hub/test/scheduler.test.ts` for any new pure-logic
