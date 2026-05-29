@@ -36,6 +36,8 @@ const CSRF_PATH_ALLOWLIST: Array<string | RegExp> = [
   /^\/api\/setup\b/, // first-user setup (pre-auth)
   /^\/api\/plugin\//, // api-key authed
   /^\/health$/,
+  /^\/healthz\/deep$/, // B4: bearer-gated, no cookies
+  /^\/metrics$/, // B4: bearer-gated, no cookies
 ];
 
 export function isCsrfAllowlisted(path: string): boolean {

@@ -1,5 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { ScheduledRunEvent, ErrorCaptureEvent, RevanoteEvent } from './protocol'
+import { wsConnections } from '../observability/metrics'
 
 interface ChannelEntry {
   ws: ServerWebSocket<any>
@@ -24,12 +25,17 @@ export function registerChannel(sessionId: string, userId: string, ws: ServerWeb
   const existing = channels.get(sessionId)
   if (existing) {
     try { existing.ws.close(4003, 'replaced') } catch {}
+    // replaced — gauge unchanged
+  } else {
+    wsConnections.inc({ role: 'agent' })
   }
   channels.set(sessionId, { ws, userId, sessionId })
 }
 
 export function unregisterChannel(sessionId: string) {
-  channels.delete(sessionId)
+  if (channels.delete(sessionId)) {
+    wsConnections.dec({ role: 'agent' })
+  }
 }
 
 export function getChannel(sessionId: string) {
@@ -55,11 +61,14 @@ export function listOnlineAgentSessionsForUser(userId: string): string[] {
 export function registerClient(userId: string, ws: ServerWebSocket<any>): ClientEntry {
   const entry: ClientEntry = { ws, userId, subscriptions: new Set() }
   clients.add(entry)
+  wsConnections.inc({ role: 'client' })
   return entry
 }
 
 export function unregisterClient(entry: ClientEntry) {
-  clients.delete(entry)
+  if (clients.delete(entry)) {
+    wsConnections.dec({ role: 'client' })
+  }
 }
 
 export function subscribeClient(entry: ClientEntry, sessionIds: string[]) {

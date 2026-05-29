@@ -46,6 +46,31 @@ import {
 const GRACE_DAYS_DEFAULT = 7;
 const LICENSE_CHECK_FAILED_THROTTLE_MS = 60_000;
 
+/**
+ * B4: paths that MUST NOT be license-gated. The current middleware mount is
+ * on `/api/*`, so root-mounted endpoints like `/healthz/deep` and `/metrics`
+ * already bypass naturally — this list exists as the contract.
+ */
+export const LICENSE_GATE_PATH_EXCLUSIONS: ReadonlyArray<string | RegExp> = [
+  /^\/api\/auth\//,
+  '/api/profile/license',
+  '/api/profile',
+  '/healthz/deep',
+  '/metrics',
+  '/health',
+  /^\/api\/sentry\//,
+  /^\/api\/coolify\/webhook\//,
+  /^\/webhooks\/titanium/,
+];
+
+export function isLicenseGateExcluded(path: string): boolean {
+  for (const m of LICENSE_GATE_PATH_EXCLUSIONS) {
+    if (typeof m === 'string') { if (path === m) return true; }
+    else if (m.test(path)) return true;
+  }
+  return false;
+}
+
 // One-shot boot warning when LICENSE_REQUIRED=false. Logged on first request,
 // not on every request, to keep prod logs scannable.
 let permissiveWarned = false;
