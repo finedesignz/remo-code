@@ -14,7 +14,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { hubFetch } from "../../lib/api";
-import { Card, StatusPill } from "../../components/ui";
+import { Card, StatusPill, Toggle } from "../../components/ui";
 import { CommandsList } from "../../components/CommandsList";
 
 interface Props {
@@ -110,12 +110,8 @@ function AutoNudgeCard({ token }: { token: string }) {
 
   return (
     <Card>
-      <button
-        type="button"
-        onClick={toggle}
-        aria-pressed={enabled === true}
-        disabled={saving || enabled === null}
-        className="w-full flex items-center justify-between gap-3 disabled:opacity-50 disabled:cursor-not-allowed"
+      <div
+        className="w-full flex items-center justify-between gap-3"
         title="When you switch to an idle session, automatically send a brief status-update prompt."
       >
         <div className="text-left">
@@ -127,18 +123,13 @@ function AutoNudgeCard({ token }: { token: string }) {
             prompt automatically.
           </span>
         </div>
-        <span
-          className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-            enabled ? "bg-indigo-600" : "bg-[var(--bg-tertiary)]"
-          }`}
-        >
-          <span
-            className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-              enabled ? "translate-x-[1.125rem]" : "translate-x-0.5"
-            }`}
-          />
-        </span>
-      </button>
+        <Toggle
+          checked={enabled === true}
+          onChange={() => void toggle()}
+          disabled={saving || enabled === null}
+          aria-label="Auto-nudge idle sessions"
+        />
+      </div>
       {error && <p className="text-xs text-red-400 mt-2">{error}</p>}
     </Card>
   );

@@ -12,6 +12,8 @@ export { Field } from "./Field";
 export type { FieldProps } from "./Field";
 export { StatusPill } from "./StatusPill";
 export type { StatusPillProps, StatusKind } from "./StatusPill";
+export { Toggle } from "./Toggle";
+export type { ToggleProps } from "./Toggle";
 export { EmptyState } from "./EmptyState";
 export type { EmptyStateProps } from "./EmptyState";
 export { LoadingState } from "./LoadingState";

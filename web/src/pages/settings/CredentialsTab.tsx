@@ -13,7 +13,14 @@
 import { useEffect, useState } from "react";
 import { hubFetch } from "../../lib/api";
 import { useApiKey } from "../../hooks/useApiKey";
-import { Card, Button, Field, StatusPill } from "../../components/ui";
+import {
+  Card,
+  Button,
+  Field,
+  StatusPill,
+  LoadingState,
+  EmptyState,
+} from "../../components/ui";
 
 interface Props {
   token: string;
@@ -74,32 +81,25 @@ function ApiKeyCard({ token }: { token: string }) {
   if (loading) {
     return (
       <Card>
-        <p className="text-sm text-[var(--text-muted)]">Loading…</p>
+        <LoadingState label="Loading…" />
       </Card>
     );
   }
 
   return (
     <Card className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-sm font-semibold text-[var(--text-primary)]">
-            API key
-          </h3>
-          <p className="text-xs text-[var(--text-muted)] mt-1">
-            Authenticates the Remo Code Supervisor / agent. One key connects all
-            your projects.
-          </p>
-        </div>
-        {!activeKey && (
-          <Button variant="primary" size="sm" onClick={handleGenerate}>
-            Generate key
-          </Button>
-        )}
+      <div>
+        <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+          API key
+        </h3>
+        <p className="text-xs text-[var(--text-muted)] mt-1">
+          Authenticates the Remo Code Supervisor / agent. One key connects all
+          your projects.
+        </p>
       </div>
 
       {newKey && (
-        <div className="bg-emerald-900/20 rounded-lg ring-1 ring-emerald-800/40 p-3">
+        <div className="bg-emerald-500/10 rounded-lg ring-1 ring-emerald-500/30 p-3">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs text-emerald-300 font-semibold">
               New API key (shown once)
@@ -108,7 +108,7 @@ function ApiKeyCard({ token }: { token: string }) {
               {copied ? "Copied" : "Copy"}
             </Button>
           </div>
-          <code className="block bg-[var(--code-bg)] rounded-lg p-3 text-xs text-emerald-200 font-mono break-all select-all">
+          <code className="block bg-[var(--code-bg)] rounded-lg p-3 text-xs text-emerald-300 font-mono break-all select-all">
             {newKey}
           </code>
         </div>
@@ -154,9 +154,11 @@ function ApiKeyCard({ token }: { token: string }) {
           </div>
         </div>
       ) : (
-        <p className="text-sm text-[var(--text-muted)] px-3 py-4 text-center bg-[var(--bg-tertiary)]/30 rounded-lg">
-          No active key. Generate one to connect an agent.
-        </p>
+        <EmptyState
+          title="No active key"
+          description="Generate one to connect a Remo Code Supervisor or agent."
+          action={{ label: "Generate key", onClick: handleGenerate }}
+        />
       )}
     </Card>
   );
