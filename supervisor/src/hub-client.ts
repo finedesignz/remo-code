@@ -11,7 +11,7 @@ import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
 import { log as obs } from './observability/logger'
 
 // Keep in sync with supervisor/tauri/src-tauri/tauri.conf.json version
-const VERSION = '0.5.7'
+const VERSION = '0.5.8'
 
 /** Bug A — push the live runner set to the hub every 10s after auth_ok. */
 const SESSION_INVENTORY_INTERVAL_MS = 10_000
@@ -47,6 +47,20 @@ export class SupervisorClient {
 
   /** Bug A — interval handle for session_inventory pushes; null when not auth'd. */
   private sessionInventoryTimer: ReturnType<typeof setInterval> | null = null
+
+  // ── B6: observability state ──────────────────────────────────────────────
+  /** Last `auth_ok` timestamp (ms). Drives `last_reconnect_ms_ago` in
+   *  /sup/status. Null until first auth. */
+  private lastConnectedAt: number | null = null
+  /** Most recent ws error / close event with non-clean code, captured for
+   *  the tray's "last error" line. Cleared on next successful auth_ok. */
+  private lastError: { message: string; at: string } | null = null
+  /** Per-host sentry_key seeded by hub on first supervisor.hello. Used by
+   *  the crash poster to authenticate against /api/sentry/<id>/envelope/. */
+  private selfSentryKey: string | null = null
+  private selfSentryProjectId: string | null = null
+  /** supervisors.id assigned by hub after upsert. Surfaced in /sup/status. */
+  private supervisorId: string | null = null
 
   constructor(cfg: SupervisorConfig) {
     this.cfg = cfg
@@ -138,6 +152,11 @@ export class SupervisorClient {
       const code = (ev as any)?.code as number | undefined
       const reason = (ev as any)?.reason as string | undefined
       this.log('warn', `WebSocket closed code=${code ?? '?'} reason=${reason || '(none)'}`)
+      // B6: surface non-clean closes to the tray. 1000/1001/1005 are normal
+      // shutdowns; everything else is operator-visible noise.
+      if (code !== 1000 && code !== 1001 && code !== 1005) {
+        this.lastError = { message: `ws_close code=${code ?? '?'} reason=${reason || '(none)'}`, at: new Date().toISOString() }
+      }
       this.detachSocket(ws)
       this.ws = null
       // Hub-issued auth failures (4001 invalid key) and explicit user disconnect
@@ -153,14 +172,17 @@ export class SupervisorClient {
       this.scheduleReconnect()
     }
     ws.onerror = (ev: any) => {
-      // The Bun WebSocket onerror event surfaces little structured info; record
-      // whatever we have so silent reconnect storms can be diagnosed from logs.
+      if (this.ws !== ws) return // stale handler from a replaced socket
+      // B1: structured log line so silent reconnect storms surface in logs.
+      const msg = ev?.message ?? ev?.error?.message ?? ev?.type ?? null
       obs.error('hub_client.ws_error', {
         url: wsUrl,
-        message: ev?.message ?? ev?.error?.message ?? null,
+        message: msg,
         reconnect_attempts: this.reconnectAttempts,
         authenticated: this.authenticated,
       })
+      // B6: capture for the tray's "last error" line + /sup/status response.
+      this.lastError = { message: `ws_error: ${msg ?? 'unknown'}`, at: new Date().toISOString() }
       // onclose will follow and drive the reconnect schedule.
     }
   }
@@ -197,8 +219,19 @@ export class SupervisorClient {
 
   private async handleMessage(msg: any) {
     if (msg.type === 'ping') { this.send({ type: 'pong' }); return }
+    // B6: hub plants per-supervisor sentry creds in hello_ack. Used by the
+    // crash poster to attribute uncaughtException reports to a host-scoped
+    // error_projects row.
+    if (msg.type === 'supervisor.hello_ack') {
+      if (typeof msg.supervisor_id === 'string') this.supervisorId = msg.supervisor_id
+      if (typeof msg.sentry_key === 'string') this.selfSentryKey = msg.sentry_key
+      if (typeof msg.sentry_project_id === 'string') this.selfSentryProjectId = msg.sentry_project_id
+      return
+    }
     if (msg.type === 'auth_ok') {
       this.authenticated = true
+      this.lastConnectedAt = Date.now()
+      this.lastError = null
       this.log('info', 'authenticated; sending hello')
       this.send({
         type: 'supervisor.hello',
@@ -611,4 +644,112 @@ export class SupervisorClient {
       repo_path: this.pm.currentRepoPath,
     })
   }
+
+  // ── B6: observability accessors (drive /sup/status) ─────────────────────
+  /** Snapshot of live runners (one per active run in the ProcessManager). */
+  getRunnersSnapshot(): Array<{ session_id: string | null; run_id: string; cli_kind: 'claude' | 'codex'; project_dir: string; pid: number | null; state: string; restart_count: number }> {
+    const inv = this.pm.inventorySnapshot()
+    return inv.map((e) => ({
+      session_id: e.sessionId,
+      run_id: e.runId,
+      cli_kind: e.cliKind,
+      project_dir: e.projectDir,
+      pid: e.pid,
+      state: e.status,
+      restart_count: 0,
+    }))
+  }
+
+  isHubConnected(): boolean {
+    return this.authenticated && this.ws?.readyState === WebSocket.OPEN
+  }
+
+  getHubState(): 'connecting' | 'authenticating' | 'connected' | 'reconnecting' | 'stopped' {
+    if (this.authenticated) return 'connected'
+    if (this.ws?.readyState === WebSocket.OPEN) return 'authenticating'
+    if (this.reconnectTimer) return 'reconnecting'
+    if (this.ws?.readyState === WebSocket.CONNECTING) return 'connecting'
+    return 'reconnecting'
+  }
+
+  getLastReconnectMsAgo(): number | null {
+    if (this.lastConnectedAt === null) return null
+    return Date.now() - this.lastConnectedAt
+  }
+
+  getLastError(): { message: string; at: string } | null {
+    return this.lastError
+  }
+
+  getSupervisorId(): string | null {
+    return this.supervisorId
+  }
+
+  /** B6: post an `uncaughtException` as a Sentry-style envelope to the hub's
+   *  intake. Fire-and-forget — failures are log-only because we're already
+   *  inside a fatal handler. Skips when sentry creds haven't been planted
+   *  yet (first-boot before supervisor.hello_ack). */
+  async postCrashEnvelope(err: { name?: string; message: string; stack?: string }): Promise<void> {
+    if (!this.selfSentryKey || !this.selfSentryProjectId) {
+      console.warn('[crash] no sentry creds yet; skipping post')
+      return
+    }
+    const hubUrl = this.cfg.hubUrl.replace(/\/$/, '')
+    const url = `${hubUrl}/api/sentry/${this.selfSentryProjectId}/envelope/`
+    const eventId = randomEventId()
+    const headerLine = JSON.stringify({ event_id: eventId, sent_at: new Date().toISOString() })
+    const itemHeader = JSON.stringify({ type: 'event' })
+    const payload = {
+      event_id: eventId,
+      platform: 'node',
+      release: VERSION,
+      level: 'error',
+      exception: {
+        values: [{
+          type: err.name || 'Error',
+          value: err.message,
+          stacktrace: err.stack ? { frames: parseStackFrames(err.stack) } : undefined,
+        }],
+      },
+      tags: { source: 'supervisor', hostname: hostname() },
+    }
+    const body = `${headerLine}\n${itemHeader}\n${JSON.stringify(payload)}\n`
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-sentry-envelope',
+          'x-sentry-auth': `Sentry sentry_key=${this.selfSentryKey}, sentry_version=7, sentry_client=remo-supervisor/${VERSION}`,
+        },
+        body,
+        signal: AbortSignal.timeout(5000),
+      })
+      if (!res.ok) console.warn(`[crash] hub intake returned ${res.status}`)
+    } catch (e: any) {
+      // Per B6 spec — crash-post failures must be log-only, never throw.
+      console.warn(`[crash] intake post failed: ${e?.message || String(e)}`)
+    }
+  }
+}
+
+function randomEventId(): string {
+  // 32 hex chars, Sentry's expected event_id shape.
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+function parseStackFrames(stack: string): Array<{ filename?: string; function?: string; lineno?: number; colno?: number }> {
+  // Best-effort V8 stack parse. Top 10 frames only.
+  const lines = stack.split('\n').slice(1, 11)
+  return lines.map((line) => {
+    const m = line.match(/^\s*at\s+(?:(.+?)\s+\()?(.+?):(\d+):(\d+)\)?$/)
+    if (!m) return { function: line.trim() }
+    return {
+      function: m[1] || undefined,
+      filename: m[2],
+      lineno: Number(m[3]),
+      colno: Number(m[4]),
+    }
+  })
 }
