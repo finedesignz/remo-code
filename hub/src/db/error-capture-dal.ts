@@ -129,6 +129,63 @@ export async function ensureSelfProject(userId: string): Promise<ErrorProject> {
   return existing[0]
 }
 
+/**
+ * B6: idempotent per-supervisor self-capture project, keyed by (user_id,
+ * hostname). The sentry_key is deterministic in shape — `sup_<hostname>_<short>`
+ * — so the supervisor can correlate intake URLs across reconnects, but the
+ * `<short>` half is a random suffix on the FIRST insert so different users
+ * can't enumerate each other's supervisors via the key.
+ *
+ * Returns the existing row when one already exists for (user_id, hostname);
+ * inserts a new row otherwise. NEVER overwrites the sentry_key — supervisors
+ * cache it and would 401 if the hub rotated it under them.
+ *
+ * `sessionId` must be a valid sessions.id owned by the user (NOT NULL FK
+ * enforced by schema). Callers should pass a stable rootless session id.
+ */
+export async function ensureSupervisorProject(
+  userId: string,
+  hostname: string,
+  sessionId: string,
+): Promise<ErrorProject> {
+  const sanitized = hostname.toLowerCase().replace(/[^a-z0-9._-]/g, '_').slice(0, 64)
+  // Fall back to `unknown` if sanitization left no useful identifier chars.
+  const safeHost = /[a-z0-9]/.test(sanitized) ? sanitized : 'unknown'
+  const projectName = `supervisor:${safeHost}`
+
+  // Idempotent lookup: (user_id, name) — name is deterministic per host.
+  const existing = await sql<ErrorProject[]>`
+    SELECT * FROM error_projects
+    WHERE user_id = ${userId} AND name = ${projectName}
+    LIMIT 1
+  `
+  if (existing[0]) return existing[0]
+
+  // Insert with a sentry_key whose prefix encodes "supervisor self-capture".
+  // The random suffix is from `randomBytes` so it's globally unique.
+  const sentryKey = `sup_${safeHost}_${randomBytes(8).toString('hex')}`
+  const rows = await sql<ErrorProject[]>`
+    INSERT INTO error_projects (
+      user_id, name, sentry_key, session_id,
+      dedupe_window_seconds, rate_limit_per_hour, daily_dispatch_cap, enabled
+    ) VALUES (
+      ${userId}, ${projectName}, ${sentryKey}, ${sessionId},
+      60, 20, 50, true
+    )
+    ON CONFLICT (sentry_key) DO NOTHING
+    RETURNING *
+  `
+  if (rows[0]) return rows[0]
+  // Race: a concurrent insert (same user, same host) won. Re-select.
+  const again = await sql<ErrorProject[]>`
+    SELECT * FROM error_projects
+    WHERE user_id = ${userId} AND name = ${projectName}
+    LIMIT 1
+  `
+  if (!again[0]) throw new Error('ensureSupervisorProject: insert raced + reselect found nothing')
+  return again[0]
+}
+
 export async function listErrorProjectsForUser(userId: string): Promise<ErrorProject[]> {
   return sql<ErrorProject[]>`
     SELECT * FROM error_projects WHERE user_id = ${userId} ORDER BY created_at DESC
