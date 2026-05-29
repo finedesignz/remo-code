@@ -29,6 +29,8 @@ remo-code/
 │   │   ├── usage/            # Anthropic quota snapshot + threshold gating
 │   │   ├── sessions/         # Budget + routing helpers
 │   │   ├── events/           # Internal EventEmitter (assistant_message:final)
+│   │   ├── dispatch/         # Shared session-dispatch pipeline (pipeline/session-queue/grace/gates) — foundation, unwired
+│   │   ├── webhooks/         # Shared public-webhook auth-gate (intake.ts) — foundation, unwired
 │   │   ├── middleware/       # Rate limit, security headers
 │   │   ├── lib/              # Crypto, CIDR, email, github helpers, repo-key
 │   │   ├── utils/            # Token gen + other small helpers
