@@ -11,6 +11,10 @@ on:
       - "mobile/tauri/**"
       - ".github/workflows/mobile-shell-typecheck.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   cargo-check:
     runs-on: ubuntu-latest
