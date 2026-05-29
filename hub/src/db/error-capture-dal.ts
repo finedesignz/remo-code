@@ -104,6 +104,31 @@ export async function createErrorProject(
   return rows[0]
 }
 
+/**
+ * B2 (obs): idempotent seed for the hub's self-capture project.
+ * sentry_key='__hub_self__' is a sentinel — there is at most one row per
+ * deployment. session_id is NULL because dispatch is permanently disabled
+ * for hub-internal errors (avoids feedback loop into a Claude session).
+ */
+export async function ensureSelfProject(userId: string): Promise<ErrorProject> {
+  const rows = await sql<ErrorProject[]>`
+    INSERT INTO error_projects (
+      user_id, name, sentry_key, session_id,
+      dedupe_window_seconds, rate_limit_per_hour, daily_dispatch_cap, enabled
+    ) VALUES (
+      ${userId}, 'Hub self-capture', '__hub_self__', NULL,
+      300, 60, 1000, true
+    )
+    ON CONFLICT (sentry_key) DO NOTHING
+    RETURNING *
+  `
+  if (rows[0]) return rows[0]
+  const existing = await sql<ErrorProject[]>`
+    SELECT * FROM error_projects WHERE sentry_key = '__hub_self__' LIMIT 1
+  `
+  return existing[0]
+}
+
 export async function listErrorProjectsForUser(userId: string): Promise<ErrorProject[]> {
   return sql<ErrorProject[]>`
     SELECT * FROM error_projects WHERE user_id = ${userId} ORDER BY created_at DESC

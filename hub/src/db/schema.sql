@@ -369,6 +369,16 @@ CREATE TABLE IF NOT EXISTS error_projects (
 );
 CREATE INDEX IF NOT EXISTS idx_error_projects_user ON error_projects(user_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_error_projects_sentry_key ON error_projects(sentry_key);
+-- B2 (obs): hub self-capture rows have no session (dispatch is disabled).
+-- Idempotent relax of NOT NULL — safe on re-run.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'error_projects' AND column_name = 'session_id' AND is_nullable = 'NO'
+  ) THEN
+    EXECUTE 'ALTER TABLE error_projects ALTER COLUMN session_id DROP NOT NULL';
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS errors (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
