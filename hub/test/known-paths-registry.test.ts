@@ -155,3 +155,67 @@ describe('getKnownLocalPathsForRepoKey', () => {
     expect(resolveLocalPathForRepoKey(USER, 'github://acme/foo')).toBe('/work/foo')
   })
 })
+
+// ── Bug fix 2026-05-28: resolveLocalPathForRepoKey must NEVER pick a worktree
+// when the real clone is present. Regression guard for sessions landing in
+// `…/remo-code-<slug>` instead of `…/remo-code`.
+describe('resolveLocalPathForRepoKey canonical preference', () => {
+  const U = 'user_resolve_canonical'
+  beforeEach(() => setUserInventory(U, inv([])))
+
+  test('canonical clone wins over a worktree of the same repo', () => {
+    setUserInventory(U, inv([
+      {
+        local_path: 'C:/Users/artic/GitHub/remo-code-refactor-hub-deepening',
+        is_git_repo: true,
+        is_worktree: true,
+        worktree_parent_path: 'C:/Users/artic/GitHub/remo-code',
+        git_remote: 'git@github.com:finedesignz/remo-code.git',
+        git_origin_github: { owner: 'finedesignz', repo: 'remo-code' },
+        branch: 'refactor/hub',
+        canonical: false,
+      },
+      {
+        local_path: 'C:/Users/artic/GitHub/remo-code',
+        is_git_repo: true,
+        is_worktree: false,
+        worktree_parent_path: null,
+        git_remote: 'git@github.com:finedesignz/remo-code.git',
+        git_origin_github: { owner: 'finedesignz', repo: 'remo-code' },
+        branch: 'main',
+        canonical: true,
+      },
+    ]))
+    expect(resolveLocalPathForRepoKey(U, 'github://finedesignz/remo-code'))
+      .toBe('C:/Users/artic/GitHub/remo-code')
+  })
+
+  test('canonical wins even when listed AFTER several worktrees', () => {
+    setUserInventory(U, inv([
+      { local_path: '/g/remo-code-a', is_git_repo: true, is_worktree: true, worktree_parent_path: '/g/remo-code', git_remote: null, git_origin_github: { owner: 'fd', repo: 'remo-code' }, canonical: false },
+      { local_path: '/g/remo-code-b', is_git_repo: true, is_worktree: true, worktree_parent_path: '/g/remo-code', git_remote: null, git_origin_github: { owner: 'fd', repo: 'remo-code' }, canonical: false },
+      { local_path: '/g/remo-code', is_git_repo: true, is_worktree: false, worktree_parent_path: null, git_remote: null, git_origin_github: { owner: 'fd', repo: 'remo-code' }, canonical: true },
+    ]))
+    expect(resolveLocalPathForRepoKey(U, 'github://fd/remo-code')).toBe('/g/remo-code')
+  })
+
+  test('no canonical flag: prefers non-worktree whose basename === repo name', () => {
+    setUserInventory(U, inv([
+      { local_path: '/g/remo-code-feat', is_git_repo: true, is_worktree: false, worktree_parent_path: null, git_remote: null, git_origin_github: { owner: 'fd', repo: 'remo-code' } },
+      { local_path: '/g/remo-code', is_git_repo: true, is_worktree: false, worktree_parent_path: null, git_remote: null, git_origin_github: { owner: 'fd', repo: 'remo-code' } },
+    ]))
+    expect(resolveLocalPathForRepoKey(U, 'github://fd/remo-code')).toBe('/g/remo-code')
+  })
+
+  test('only worktrees present, no canonical → null (refuse to guess)', () => {
+    setUserInventory(U, inv([
+      { local_path: '/g/remo-code-feat', is_git_repo: true, is_worktree: true, worktree_parent_path: '/g/remo-code', git_remote: null, git_origin_github: { owner: 'fd', repo: 'remo-code' }, canonical: false },
+      { local_path: '/g/remo-code-x', is_git_repo: true, is_worktree: true, worktree_parent_path: '/g/remo-code', git_remote: null, git_origin_github: { owner: 'fd', repo: 'remo-code' }, canonical: false },
+    ]))
+    expect(resolveLocalPathForRepoKey(U, 'github://fd/remo-code')).toBeNull()
+  })
+
+  test('no inventory at all → null', () => {
+    expect(resolveLocalPathForRepoKey('nobody-here', 'github://fd/remo-code')).toBeNull()
+  })
+})

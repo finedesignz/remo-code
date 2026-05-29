@@ -82,23 +82,54 @@ export function getUserInventory(userId: string): UserInventory | undefined {
 }
 /**
  * Look up the canonical local path the supervisor has reported for a given
- * `repo_key` (`github://owner/repo`). Returns null when the supervisor hasn't
- * reported the repo OR has reported it but the entry was never marked
- * canonical (worktree-only with no parent on disk).
+ * `repo_key` (`github://owner/repo`). Resolution order (Bug fix 2026-05-28 —
+ * sessions resolving to a worktree instead of the real clone):
+ *
+ *   1. An entry explicitly flagged `canonical && !is_worktree` — the primary
+ *      checkout. This is the ONLY thing that should ever back a session's cwd
+ *      when the real clone is present on disk.
+ *   2. Otherwise (no canonical entry — e.g. user only has worktrees of the
+ *      repo, or a pre-canonical-flag supervisor), prefer a NON-worktree entry
+ *      whose path basename exactly equals the repo name (e.g. `…/remo-code`,
+ *      never a suffixed worktree dir `…/remo-code-<slug>`).
+ *   3. Otherwise return null — we will NOT silently pick an arbitrary worktree
+ *      (`matches[0]`). A null tells the caller to fall back to the session's
+ *      last-recorded `project_dir`, which is itself overwrite-guarded in the
+ *      DAL to stay canonical.
+ *
+ * Never returns a worktree path when a canonical/primary candidate exists.
  */
 export function resolveLocalPathForRepoKey(userId: string, repoKey: string): string | null {
   const inv = inventoryByUser.get(userId)
   if (!inv) return null
   const target = repoKey.toLowerCase()
-  // Prefer entries explicitly flagged canonical; fall back to first matching.
+  const repoName = target.split('/').pop() ?? ''
   const matches = inv.repos.filter((r) => {
     if (!r.git_origin_github) return false
     const k = `github://${r.git_origin_github.owner.toLowerCase()}/${r.git_origin_github.repo.toLowerCase()}`
     return k === target
   })
   if (matches.length === 0) return null
-  const canonical = matches.find((m) => m.canonical)
-  return (canonical ?? matches[0]).local_path
+
+  // 1. Primary checkout: explicitly canonical AND not a worktree.
+  const primary = matches.find((m) => m.canonical && !m.is_worktree)
+  if (primary) return primary.local_path
+
+  // 2. No canonical flag — prefer a non-worktree whose dir basename IS the repo
+  //    name (the real clone dir), never a `<repo>-<slug>` worktree dir.
+  const byBasename = matches.find(
+    (m) => !m.is_worktree && basename(m.local_path).toLowerCase() === repoName,
+  )
+  if (byBasename) return byBasename.local_path
+
+  // 3. No trustworthy canonical candidate — refuse to guess a worktree.
+  return null
+}
+
+/** Last path segment, tolerant of both `/` and `\` separators. */
+function basename(p: string): string {
+  const parts = p.split(/[\\/]+/).filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : ''
 }
 
 /**
