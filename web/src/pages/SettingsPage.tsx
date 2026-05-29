@@ -14,7 +14,6 @@ import type { AuthUser } from "../lib/auth";
 import type { Profile } from "../hooks/useProfile";
 import { AppShell } from "../components/ui/AppShell";
 import { Brand } from "../components/ui/Brand";
-import { Tabs } from "../components/ui/Tabs";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { HeaderRight } from "../components/ui/HeaderRight";
 import { useWebSocketContext } from "../hooks/useWebSocket";
@@ -71,7 +70,18 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
     writeTabParam(t);
   };
 
-  const nav = buildTopNav(activeTopRoute());
+  const nav = buildTopNav(activeTopRoute(), {
+    route: "settings",
+    subTabs: [
+      { key: "connections", label: "Connections" },
+      { key: "credentials", label: "Credentials" },
+      { key: "prompts", label: "Prompts" },
+      { key: "usage", label: "Usage" },
+      { key: "profile", label: "Profile" },
+    ],
+    activeSubTab: tab,
+    onSubTabChange: handleTabChange,
+  });
 
   return (
     <AppShell
@@ -79,20 +89,6 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
       nav={nav}
       headerRight={<HeaderRight token={token} user={user} signOut={signOut} onNavigate={onNavigate} subscribe={subscribe} />}
     >
-      <div className="px-4 md:px-6 pt-3">
-        <Tabs
-          tabs={[
-            { key: "connections", label: "Connections" },
-            { key: "credentials", label: "Credentials" },
-            { key: "prompts", label: "Prompts" },
-            { key: "usage", label: "Usage" },
-            { key: "profile", label: "Profile" },
-          ]}
-          activeKey={tab}
-          onChange={handleTabChange}
-          renderContent={false}
-        />
-      </div>
       <div className="flex-1 min-h-0 overflow-y-auto">
         {tab === "connections" && (
           <ErrorBoundary tabKey="settings:connections">

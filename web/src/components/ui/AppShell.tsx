@@ -1,5 +1,10 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "../../lib/ui/cn";
+
+export interface AppShellSubTab {
+  key: string;
+  label: string;
+}
 
 export interface AppShellNavItem {
   key: string;
@@ -7,6 +12,16 @@ export interface AppShellNavItem {
   href: string;
   /** Provide active state — caller computes from route. */
   active?: boolean;
+  /**
+   * Optional sub-tabs for the page this nav item routes to. When present AND
+   * the item is `active`, the nav item renders as a dropdown trigger whose menu
+   * lists the sub-tabs (replacing the old full-width <Tabs> strip).
+   */
+  subTabs?: AppShellSubTab[];
+  /** Currently-selected sub-tab key (only meaningful with `subTabs`). */
+  activeSubTab?: string;
+  /** Called with the chosen sub-tab key. */
+  onSubTabChange?: (key: string) => void;
 }
 
 export interface AppShellProps {
@@ -28,6 +43,105 @@ export interface AppShellProps {
    * Home page — otherwise `overflow-y-auto` collapses `h-full` grid cells to 0.
    */
   scrollMain?: boolean;
+}
+
+/**
+ * Desktop nav item that opens a dropdown of sub-tabs when active. Mirrors the
+ * outside-click + Escape pattern from SessionDropdown. When the item has no
+ * sub-tabs (or isn't active) it renders as a plain nav link.
+ */
+function DesktopNavItem({ item }: { item: AppShellNavItem }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const hasMenu = item.active && !!item.subTabs && item.subTabs.length > 0;
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: Event) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointer);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const linkClass = cn(
+    "px-3 py-1.5 rounded-lg text-sm transition-colors",
+    item.active
+      ? "bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300"
+      : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
+  );
+
+  if (!hasMenu) {
+    return (
+      <a href={item.href} className={linkClass}>
+        {item.label}
+      </a>
+    );
+  }
+
+  const activeSubLabel = item.subTabs!.find((t) => t.key === item.activeSubTab)?.label;
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={cn(linkClass, "inline-flex items-center gap-1.5")}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
+        <span>{item.label}</span>
+        {activeSubLabel && (
+          <span className="text-[var(--text-secondary)]/70">· {activeSubLabel}</span>
+        )}
+        <svg
+          width="12" height="12" viewBox="0 0 12 12" fill="none"
+          stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+          className={cn("transition-transform", open && "rotate-180")}
+          aria-hidden="true"
+        >
+          <path d="M3 4.5L6 7.5L9 4.5" />
+        </svg>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute top-full left-0 mt-1 min-w-[12rem] bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl ring-1 ring-white/5 z-50 overflow-hidden py-1"
+          style={{ backgroundColor: "var(--bg-secondary)" }}
+        >
+          {item.subTabs!.map((t) => {
+            const selected = t.key === item.activeSubTab;
+            return (
+              <button
+                key={t.key}
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  item.onSubTabChange?.(t.key);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "w-full text-left px-3 py-2 text-sm transition-colors",
+                  selected
+                    ? "bg-indigo-600/20 text-indigo-300"
+                    : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)]"
+                )}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -95,22 +209,12 @@ export function AppShell({
 
         {brand && <div className="flex items-center gap-2 shrink-0">{brand}</div>}
 
-        {/* Desktop inline nav. */}
+        {/* Desktop inline nav. The active page's sub-tabs hang off its nav
+            item as a dropdown (replacing the old full-width <Tabs> strip). */}
         {hasNav && (
           <nav className="hidden md:flex items-center gap-1">
             {nav!.map((item) => (
-              <a
-                key={item.key}
-                href={item.href}
-                className={cn(
-                  "px-3 py-1.5 rounded-lg text-sm transition-colors",
-                  item.active
-                    ? "bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
-                )}
-              >
-                {item.label}
-              </a>
+              <DesktopNavItem key={item.key} item={item} />
             ))}
           </nav>
         )}
@@ -145,21 +249,52 @@ export function AppShell({
               </button>
             </div>
             <div className="p-2 space-y-1">
-              {nav!.map((item) => (
-                <a
-                  key={item.key}
-                  href={item.href}
-                  onClick={() => setNavOpen(false)}
-                  className={cn(
-                    "block px-3 py-2.5 rounded-lg text-sm transition-colors",
-                    item.active
-                      ? "bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300"
-                      : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
-                  )}
-                >
-                  {item.label}
-                </a>
-              ))}
+              {nav!.map((item) => {
+                const showSubTabs =
+                  item.active && !!item.subTabs && item.subTabs.length > 0;
+                return (
+                  <div key={item.key}>
+                    <a
+                      href={item.href}
+                      onClick={() => setNavOpen(false)}
+                      className={cn(
+                        "block px-3 py-2.5 rounded-lg text-sm transition-colors",
+                        item.active
+                          ? "bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300"
+                          : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
+                      )}
+                    >
+                      {item.label}
+                    </a>
+                    {/* Active page's sub-tabs, indented under its nav item. */}
+                    {showSubTabs && (
+                      <div className="mt-1 ml-3 pl-2 border-l border-[var(--border-color)]/40 space-y-0.5">
+                        {item.subTabs!.map((t) => {
+                          const selected = t.key === item.activeSubTab;
+                          return (
+                            <button
+                              key={t.key}
+                              type="button"
+                              onClick={() => {
+                                item.onSubTabChange?.(t.key);
+                                setNavOpen(false);
+                              }}
+                              className={cn(
+                                "block w-full text-left px-3 py-2 rounded-lg text-sm transition-colors",
+                                selected
+                                  ? "bg-indigo-600/20 text-indigo-300"
+                                  : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
+                              )}
+                            >
+                              {t.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </nav>
         </div>
