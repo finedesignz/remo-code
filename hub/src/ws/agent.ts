@@ -624,7 +624,30 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
         }
       } catch {}
     }
-    await updateSupervisorState(supervisorId, msg.state, msg.run_id ?? null)
+
+    // Per-run start-rejection reasons: the SUPERVISOR refused to spawn THIS run
+    // (concurrency_cap from its in-process maxConcurrent gate, sandbox_escape,
+    // not_git_repo, duplicate_run, legacy_agent_spawn_disabled). The supervisor
+    // process itself is still alive and reachable — the failure is scoped to
+    // the run, not the supervisor lifecycle. If we propagate `state='stopped'`
+    // to the supervisors row, the UI shows the supervisor as down and the row
+    // sticks at `stopped` until the next hello/reconnect, even though zero
+    // session_runs are actually open. Invariant: the supervisors.state field
+    // is a UX hint, NOT the authoritative concurrency gate (that's the live
+    // count in session_runs). Force state back to 'idle' + clear current_run_id
+    // so the row reflects reality.
+    const startRejection =
+      msg.last_exit?.reason === 'concurrency_cap' ||
+      msg.last_exit?.reason === 'sandbox_escape' ||
+      msg.last_exit?.reason === 'not_git_repo' ||
+      msg.last_exit?.reason === 'duplicate_run' ||
+      msg.last_exit?.reason === 'legacy_agent_spawn_disabled'
+    if (startRejection) {
+      console.warn(`[supervisor] start-rejection reason=${msg.last_exit?.reason} run=${msg.run_id} — keeping supervisor state=idle`)
+      await updateSupervisorState(supervisorId, 'idle', null)
+    } else {
+      await updateSupervisorState(supervisorId, msg.state, msg.run_id ?? null)
+    }
     if (msg.last_exit && msg.run_id) {
       await endRun(msg.run_id, msg.last_exit.code, msg.last_exit.reason)
       // Plan 04-003: a run just ended → recompute capacity + broadcast so the
