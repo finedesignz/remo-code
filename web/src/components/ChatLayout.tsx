@@ -198,10 +198,11 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Chat-specific session strip (kept — it's session chrome, not app chrome). */}
         <div className="relative z-40 flex items-center gap-3 px-3 py-2 border-b border-[var(--border-color)]/40 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0">
-          {/* Mobile: open the full session list (online + offline + manage). The
-              SessionDropdown only lists online sessions, so without this trigger
-              offline sessions were unreachable on mobile (no way to open the
-              slide-over sidebar). */}
+          {/* Mobile: open the active-session sidebar slide-over. The header
+              SessionDropdown only shows the current session, so this trigger is
+              how mobile users browse/switch between active sessions. Offline /
+              prior sessions are launched from Settings -> Supervisor, never the
+              sidebar (the sidebar is active-only by design). */}
           <button
             type="button"
             onClick={() => setSidebarOpen(true)}

@@ -95,7 +95,7 @@ function DesktopNavItem({ item }: { item: AppShellNavItem }) {
         onClick={() => setOpen((v) => !v)}
         className={cn(linkClass, "inline-flex items-center gap-1.5")}
         aria-expanded={open}
-        aria-haspopup="menu"
+        aria-haspopup="true"
       >
         <span>{item.label}</span>
         {activeSubLabel && (
@@ -111,8 +111,11 @@ function DesktopNavItem({ item }: { item: AppShellNavItem }) {
         </svg>
       </button>
       {open && (
+        // Plain disclosure (not an ARIA menu) — the menu-button pattern would
+        // require roving-tabindex + arrow-key nav + focus return, which is more
+        // than this simple sub-tab switcher warrants. aria-expanded +
+        // aria-haspopup on the trigger + native button focus order is correct.
         <div
-          role="menu"
           className="absolute top-full left-0 mt-1 min-w-[12rem] bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl ring-1 ring-white/5 z-50 overflow-hidden py-1"
           style={{ backgroundColor: "var(--bg-secondary)" }}
         >
@@ -122,7 +125,6 @@ function DesktopNavItem({ item }: { item: AppShellNavItem }) {
               <button
                 key={t.key}
                 type="button"
-                role="menuitem"
                 onClick={() => {
                   item.onSubTabChange?.(t.key);
                   setOpen(false);
