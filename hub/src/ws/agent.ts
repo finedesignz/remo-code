@@ -18,6 +18,45 @@ const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
 const RATE_LIMIT = { max: 120, windowMs: 10_000 }
 
+/**
+ * Set of `last_exit.reason` values that supervisor's `process-manager.ts`
+ * emits when it REJECTS a start request (the run never began). Kept in lock-
+ * step with `supervisor/src/process-manager.ts` `StartRejection.reason`.
+ *
+ * Supervisor wraps each rejection in `onStateChange('stopped', { lastExit })`
+ * — but that 'stopped' is per-rejected-run, not a supervisor-wide state. If
+ * the hub blindly persists it, a single stale-slot rejection marks the whole
+ * supervisor row as `state='stopped'`, breaking every subsequent launch path
+ * (`launchSessionForUser`, web start, scheduler) because the row no longer
+ * looks "idle/online" to downstream consumers. Symptom seen in prod
+ * 2026-05-28: `/doctor` retries each create a `session_runs` row that ends
+ * 200ms later with `exit_reason='concurrency_cap'` and the supervisor row
+ * stays at `state='stopped'` until something else writes idle.
+ */
+export const SUPERVISOR_START_REJECT_REASONS: ReadonlySet<string> = new Set([
+  'concurrency_cap',
+  'duplicate_run',
+  'sandbox_escape',
+  'not_git_repo',
+  'legacy_agent_spawn_disabled',
+])
+
+/**
+ * Returns true when a `supervisor.state` payload represents a per-run start
+ * rejection (and therefore must NOT overwrite the supervisor's aggregate
+ * `state` column with `'stopped'`).
+ */
+export function isStartRejectStateMessage(msg: {
+  state?: string
+  last_exit?: { code: number | null; reason: string } | null
+}): boolean {
+  return (
+    !!msg.last_exit &&
+    msg.state === 'stopped' &&
+    SUPERVISOR_START_REJECT_REASONS.has(msg.last_exit.reason)
+  )
+}
+
 // Per-session streaming assistant message state. Created lazily on first
 // text_delta of a turn, finalized on assistant_message. Survives hub restart
 // because every flush persists to Postgres.
@@ -624,26 +663,27 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
         }
       } catch {}
     }
-
-    // Per-run start-rejection reasons: the SUPERVISOR refused to spawn THIS run
-    // (concurrency_cap from its in-process maxConcurrent gate, sandbox_escape,
-    // not_git_repo, duplicate_run, legacy_agent_spawn_disabled). The supervisor
-    // process itself is still alive and reachable — the failure is scoped to
-    // the run, not the supervisor lifecycle. If we propagate `state='stopped'`
-    // to the supervisors row, the UI shows the supervisor as down and the row
+    // Per-run start-rejection reasons: the SUPERVISOR refused to spawn THIS
+    // run (concurrency_cap from its in-process maxConcurrent gate,
+    // sandbox_escape, not_git_repo, duplicate_run,
+    // legacy_agent_spawn_disabled). The supervisor process itself is still
+    // alive and reachable — the failure is scoped to the run, not the
+    // supervisor lifecycle. If we propagate `state='stopped'` to the
+    // supervisors row, the UI shows the supervisor as down and the row
     // sticks at `stopped` until the next hello/reconnect, even though zero
-    // session_runs are actually open. Invariant: the supervisors.state field
-    // is a UX hint, NOT the authoritative concurrency gate (that's the live
-    // count in session_runs). Force state back to 'idle' + clear current_run_id
-    // so the row reflects reality.
-    const startRejection =
-      msg.last_exit?.reason === 'concurrency_cap' ||
-      msg.last_exit?.reason === 'sandbox_escape' ||
-      msg.last_exit?.reason === 'not_git_repo' ||
-      msg.last_exit?.reason === 'duplicate_run' ||
-      msg.last_exit?.reason === 'legacy_agent_spawn_disabled'
-    if (startRejection) {
-      console.warn(`[supervisor] start-rejection reason=${msg.last_exit?.reason} run=${msg.run_id} — keeping supervisor state=idle`)
+    // session_runs are actually open. Force state back to 'idle' +
+    // clear current_run_id so the row reflects reality.
+    //
+    // The `SUPERVISOR_START_REJECT_REASONS` / `isStartRejectStateMessage`
+    // helpers at the top of this file are the canonical contract — kept in
+    // lock-step with `supervisor/src/process-manager.ts` `StartRejection`
+    // and asserted in `hub/test/supervisor-stopped-recovery.test.ts`.
+    if (msg.last_exit && SUPERVISOR_START_REJECT_REASONS.has(msg.last_exit.reason)) {
+      log.warn('supervisor.start_reject', {
+        supervisor_id: supervisorId,
+        reason: msg.last_exit.reason,
+        run_id: msg.run_id ?? null,
+      })
       await updateSupervisorState(supervisorId, 'idle', null)
     } else {
       await updateSupervisorState(supervisorId, msg.state, msg.run_id ?? null)
