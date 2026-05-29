@@ -1,63 +1,63 @@
 /**
- * Per-session FIFO queue (W2/T6).
+ * Per-session FIFO queue — BACK-COMPAT SHIM (Phase 1, C3).
  *
- * Each agent session admits AT MOST 1 in-flight scheduled run + 1 waiter.
- * Further enqueues are dropped (caller finalizes as `skipped(session_busy)`).
+ * The queue implementation moved to `hub/src/dispatch/session-queue.ts` as the
+ * `SessionQueue` class (instance-owned, no global mutable state, promotion via
+ * return value). This module preserves the original FUNCTIONAL API verbatim by
+ * delegating to a single shared `SessionQueue` instance, so `scheduler.test.ts`
+ * — the contract — stays green unchanged and the un-migrated scheduler keeps
+ * running on its own copy until its migration PR lands.
  *
- * When the agent goes idle (thinking→online), `onSessionIdleAndPromote`
- * promotes the waiter and notifies the registered handler so the dispatcher
- * can ship it. Wiring lives in `hub/src/ws/agent.ts` (status='idle' branch).
+ * The one piece that does NOT live in the class is the `setOnPromote` callback
+ * seam (the very thing C3 kills). It stays HERE in the shim only, scoped to the
+ * scheduler's legacy promotion path. When the scheduler migrates to the
+ * pipeline's `onSessionReply`, this shim is deleted entirely.
  */
+import { SessionQueue, type EnqueueResult } from '../dispatch/session-queue.ts'
 
-export type EnqueueResult = 'dispatched' | 'queued' | 'dropped'
+export type { EnqueueResult }
 
-interface Slot { inFlight: string | null; waiter: string | null }
-const slots = new Map<string, Slot>()
-
-function getOrCreate(sessionId: string): Slot {
-  let s = slots.get(sessionId)
-  if (!s) { s = { inFlight: null, waiter: null }; slots.set(sessionId, s) }
-  return s
-}
+const queue = new SessionQueue()
 
 export function enqueue(sessionId: string, runId: string): EnqueueResult {
-  const s = getOrCreate(sessionId)
-  if (s.inFlight === null) { s.inFlight = runId; return 'dispatched' }
-  if (s.waiter === null) { s.waiter = runId; return 'queued' }
-  return 'dropped'
+  return queue.enqueue(sessionId, runId)
 }
 
 export function markFinished(sessionId: string): string | null {
-  const s = slots.get(sessionId)
-  if (!s) return null
-  s.inFlight = s.waiter
-  s.waiter = null
-  if (s.inFlight === null) { slots.delete(sessionId); return null }
-  return s.inFlight
+  return queue.markFinished(sessionId)
 }
 
 export function onSessionIdle(sessionId: string): string | null {
-  return markFinished(sessionId)
+  return queue.markFinished(sessionId)
 }
 
 export function currentInFlight(sessionId: string): string | null {
-  return slots.get(sessionId)?.inFlight ?? null
+  return queue.currentInFlight(sessionId)
 }
 
 type PromoteHandler = (sessionId: string, runId: string) => void
 let onPromote: PromoteHandler | null = null
-export function setOnPromote(handler: PromoteHandler | null): void { onPromote = handler }
+export function setOnPromote(handler: PromoteHandler | null): void {
+  onPromote = handler
+}
 
 export function onSessionIdleAndPromote(sessionId: string): string | null {
-  const runId = markFinished(sessionId)
+  const runId = queue.markFinished(sessionId)
   if (runId && onPromote) {
-    try { onPromote(sessionId, runId) }
-    catch (err: any) {
+    try {
+      onPromote(sessionId, runId)
+    } catch (err: any) {
       console.error(`[scheduler.queue] onPromote failed session=${sessionId} run=${runId}: ${err?.message}`)
     }
   }
   return runId
 }
 
-export function abandon(sessionId: string): void { slots.delete(sessionId) }
-export function _reset(): void { slots.clear() }
+export function abandon(sessionId: string): void {
+  queue.abandon(sessionId)
+}
+
+export function _reset(): void {
+  queue._reset()
+  onPromote = null
+}
