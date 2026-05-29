@@ -148,6 +148,10 @@
 - Purpose: subsystem logic. Each owns its own DAL slice and prompt/template files.
 - Depends on: db, ws/registry, events, lib helpers.
 
+**`hub/{dispatch,webhooks}/` (shared deep modules — hub-deepening, 2026-05-28):**
+- Purpose: collapse the copied-N-times session-dispatch (gates → queue → grace → finalize) and public-webhook auth-gate (raw-body → secret compare → HMAC → skew → IP allowlist → audit) patterns into single deep modules: `dispatch/{pipeline,session-queue,grace,gates}.ts` (`dispatch()` / `onSessionReply()`) and `webhooks/intake.ts` (`runIntake(c, cfg)`).
+- FOUNDATION ONLY — landed + tested, not yet wired into any subsystem; round-2 migrations move scheduler/error-capture/revanote/telegram onto them and delete the per-subsystem copies. `hub/src/scheduler/session-queue.ts` is a back-compat shim over the shared `SessionQueue`. Mount order + the dispatch invariants are enforced by `hub/test/mount-order.test.ts` and `hub/test/scheduler.test.ts`.
+
 **`hub/db/` (data):**
 - Purpose: Postgres access. Per-subsystem DAL files all import the shared `sql` from `db/postgres.ts`.
 - Schema: `hub/src/db/schema.sql` — idempotent `CREATE TABLE IF NOT EXISTS`, applied by `db/migrate.ts` on boot.
