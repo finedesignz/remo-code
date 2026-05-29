@@ -28,10 +28,6 @@ mock.module('../src/db/supervisor-dal', () => ({
 // `mock.module` is process-global; without a per-file override, unmocked
 // files inherit the FIRST-registered mock and this suite's `sendRequest`
 // resolves through a stub that never sees the drain).
-// Spread real exports for any symbol this closure doesn't override, so sibling
-// files in the full suite that transitively import e.g. findSupervisorForSession
-// still resolve them (Bun mock.module is process-global). See bun-mock-pollution.
-const realSupRegWPC = await import('../src/ws/supervisor-registry.ts')
 mock.module('../src/ws/supervisor-registry.ts', () => {
   interface Entry {
     ws: any
@@ -45,7 +41,6 @@ mock.module('../src/ws/supervisor-registry.ts', () => {
   let reqCounter = 0
 
   return {
-    ...realSupRegWPC,
     registerSupervisor: (args: { ws: any; supervisorId: string; userId: string; apiKeyId: string; roots: string[]; hostname?: string }) => {
       const existingId = supervisorsByApiKey.get(args.apiKeyId)
       if (existingId) {

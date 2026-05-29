@@ -53,9 +53,7 @@ mock.module("../src/db/postgres.ts", () => ({
   },
 }));
 
-const realSupDalTD = await import(`../src/db/supervisor-dal.ts?real=${Date.now()}`);
 mock.module("../src/db/supervisor-dal.ts", () => ({
-  ...realSupDalTD,
   listSupervisorsForUser: async (userId: string) =>
     state.supervisors.filter((s) => s.user_id === userId).map((s) => ({
       id: s.id,
@@ -68,26 +66,15 @@ mock.module("../src/db/supervisor-dal.ts", () => ({
   },
 }));
 
-// Spread real shared modules so non-overridden exports stay resolvable for
-// sibling files in the full suite (Bun mock.module is process-global, first-
-// write-wins). See memory: bun-mock-pollution.
-const realBudgetTD = await import(`../src/sessions/budget.ts?real=${Date.now()}`);
-const realWsRegTD = await import('../src/ws/registry.ts');
-const realSupRegTD = await import('../src/ws/supervisor-registry.ts');
-const realTgClientTD = await import(`../src/telegram/client.ts?real=${Date.now()}`);
-
 mock.module("../src/sessions/budget.ts", () => ({
-  ...realBudgetTD,
   reserveSessionSlot: async (_uid: string, _sid: string) => state.reserveOutcome,
 }));
 
 mock.module("../src/ws/registry.ts", () => ({
-  ...realWsRegTD,
   getChannel: (sid: string) => state.channels.get(sid),
 }));
 
 mock.module("../src/ws/supervisor-registry.ts", () => ({
-  ...realSupRegTD,
   isSupervisorOnline: (sid: string) => {
     const s = state.supervisors.find((x) => x.id === sid);
     return !!s?.online;
@@ -102,7 +89,6 @@ mock.module("../src/ws/supervisor-registry.ts", () => ({
 }));
 
 mock.module("../src/telegram/client.ts", () => ({
-  ...realTgClientTD,
   sendMessage: async (chatId: number | string, text: string) => {
     state.sends.push({ chat: chatId, text });
   },
