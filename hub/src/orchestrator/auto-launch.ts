@@ -25,15 +25,11 @@
 // unique violation and reuses the winner's row — never a second spawn.
 
 import { sql } from '../db/postgres.ts';
-import { reserveSessionSlot } from '../sessions/budget.ts';
-import { createRun } from '../db/supervisor-dal.ts';
 import { generateToken } from '../utils/token.ts';
 import { hashToken } from '../lib/crypto.ts';
 import {
   getOrchestratorState,
   findOpenOrchestratorSession,
-  createOrchestratorSession,
-  mintOrchestratorApiKey,
 } from '../db/orchestrator-dal.ts';
 import { buildOrchestratorPrompt } from './seed-prompt.ts';
 import {
@@ -102,40 +98,6 @@ async function resolveTarget(
 }
 
 /**
- * Find-or-create the one open orchestrator session row, race-safe. On unique
- * violation (a concurrent connect won the INSERT) re-read and reuse.
- */
-async function findOrCreateOrchestratorSession(args: {
-  userId: string;
-  name: string;
-  cwd: string;
-  hostname: string;
-}): Promise<{ row: any; created: boolean }> {
-  const existing = await findOpenOrchestratorSession(args.userId);
-  if (existing) return { row: existing, created: false };
-
-  const rawSessionToken = generateToken('remo_');
-  const sessionTokenHash = await hashToken(rawSessionToken);
-  try {
-    const row = await createOrchestratorSession({
-      userId: args.userId,
-      name: args.name,
-      projectDir: args.cwd,
-      tokenHash: sessionTokenHash,
-      hostname: args.hostname,
-    });
-    return { row, created: true };
-  } catch (err: any) {
-    if (err?.code === '23505') {
-      // Lost the race — a sibling connect created the row. Reuse it.
-      const winner = await findOpenOrchestratorSession(args.userId);
-      if (winner) return { row: winner, created: false };
-    }
-    throw err;
-  }
-}
-
-/**
  * The shared launch primitive. Resolves target, reserves a slot, find-or-creates
  * the session row, creates a `session_runs` row LINKED to the session (so the
  * orphan-resume path can recognise + respawn it on reconnect), mints the key,
@@ -171,44 +133,122 @@ export async function launchOrchestrator(args: {
     const target = await resolveTarget(args.userId, args.preferSupervisorId);
     if (!target.ok) return { ok: false, reason: target.reason };
 
-    // Session row (race-safe). Reuses an existing offline row in place.
-    const { row: sessionRow } = await findOrCreateOrchestratorSession({
-      userId: args.userId,
-      name: prefs.orchestrator_name,
-      cwd: target.cwd,
-      hostname: target.hostname,
-    });
-    const reused = sessionRow.id === existing?.id;
+    const rawHubApiKey = generateToken('remokey_');
 
-    // Mark for idle-teardown exemption (the orchestrator is not a WS subscriber).
-    markOrchestratorSession(sessionRow.id);
+    // ── Serialized launch critical section ──────────────────────────────────
+    // `idx_sessions_orchestrator_unique` guarantees one SESSION row but NOT one
+    // RUN. Two DISTINCT supervisors helloing in the race window would otherwise
+    // BOTH reuse the session row and BOTH reserve + createRun + mint + send →
+    // two full-power Claude processes on one session_id, 2× cost, and the second
+    // mint revoking the first run's key mid-session. `reserveSessionSlot`'s
+    // FOR UPDATE is per-supervisor, so it does NOT serialize across supervisors.
+    //
+    // We close the window with a per-user `pg_advisory_xact_lock` held for the
+    // whole find-or-create → run-existence re-check → reserve → createRun → mint
+    // transaction. After the lock, if an OPEN orchestrator run already exists
+    // (the winner launched), the loser NO-OPS. Everything DB-side runs on `tx`
+    // so it's inside the locked transaction; the supervisor send happens after
+    // commit. Single-host users hit the lock uncontended → no added latency.
+    const txResult = await sql.begin(async (tx: any) => {
+      // Per-user mutex. hashtext → int4; bigint cast keeps the 1-arg signature.
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${'orchestrator:' + args.userId})::bigint)`;
 
-    // Concurrency gate — MUST precede createRun (Invariant I3).
-    const reservation = await reserveSessionSlot(args.userId, target.supervisorId);
-    if (!reservation.ok) {
-      if (reservation.reason === 'at_capacity') {
-        return { ok: false, reason: 'at_capacity', running: reservation.running, cap: reservation.cap };
+      // (1) find-or-create the session row, inside the lock.
+      let sessionRow = (await tx`
+        SELECT id, name, project_dir, status, cli_kind, is_rootless, hostname, is_orchestrator
+        FROM sessions
+        WHERE user_id = ${args.userId} AND is_orchestrator = true AND deleted_at IS NULL
+        LIMIT 1
+      `)[0] ?? null;
+      let createdRow = false;
+      if (!sessionRow) {
+        const tokenHash = await hashToken(generateToken('remo_'));
+        sessionRow = (await tx`
+          INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind, is_rootless, hostname, is_orchestrator)
+          VALUES (${args.userId}, ${prefs.orchestrator_name}, ${target.cwd}, ${tokenHash}, 'claude', false, ${target.hostname}, true)
+          RETURNING id, name, project_dir, status, cli_kind, is_rootless, hostname, is_orchestrator
+        `)[0];
+        createdRow = true;
       }
+
+      // (2) RE-CHECK: does an OPEN run already exist for this orchestrator
+      //     session? If so the winner already launched — loser no-ops.
+      const openRun = (await tx`
+        SELECT id FROM session_runs
+        WHERE session_id = ${sessionRow.id} AND ended_at IS NULL
+        LIMIT 1
+      `)[0] ?? null;
+      if (openRun) {
+        return { kind: 'noop_existing_run' as const, sessionId: sessionRow.id };
+      }
+
+      // (3) Concurrency gate — replicate reserveSessionSlot's cap math on `tx`
+      //     so it is INSIDE the advisory lock (the module helper opens its own
+      //     per-supervisor transaction and would not serialize across hosts).
+      const supRows = await tx`
+        SELECT concurrency_budget, concurrency_override
+        FROM supervisors
+        WHERE id = ${target.supervisorId} AND user_id = ${args.userId}
+        FOR UPDATE
+      `;
+      const sup = supRows[0];
+      if (!sup) return { kind: 'no_supervisor' as const };
+      const budget = Math.max(1, Number(sup.concurrency_budget ?? 1));
+      const override = sup.concurrency_override == null ? null : Math.max(1, Number(sup.concurrency_override));
+      const cap = Math.min(override ?? budget, budget * 2);
+      const running = Number((await tx`
+        SELECT COUNT(*)::text AS running FROM session_runs
+        WHERE supervisor_id = ${target.supervisorId} AND ended_at IS NULL
+      `)[0]?.running ?? 0);
+      if (running >= cap) {
+        return { kind: 'at_capacity' as const, running, cap };
+      }
+
+      // (4) Run row linked to the orchestrator session (orphan-resumable).
+      const run = (await tx`
+        INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, branch, pulled, initial_prompt, restart_of, restart_count)
+        VALUES (${args.userId}, ${sessionRow.id}, ${target.supervisorId}, ${target.cwd}, ${null}, false, ${null}, ${null}, 0)
+        RETURNING id
+      `)[0];
+
+      // (5) Mint the full-power hub key (revoke prior active orchestrator key).
+      //     Inside the lock so the loser can never revoke the winner's key.
+      const hubApiKeyHash = await hashToken(rawHubApiKey);
+      await tx`
+        UPDATE api_keys SET revoked_at = now()
+        WHERE user_id = ${args.userId} AND purpose = 'orchestrator' AND revoked_at IS NULL
+      `;
+      await tx`
+        INSERT INTO api_keys (user_id, key_hash, name, purpose, capabilities)
+        VALUES (${args.userId}, ${hubApiKeyHash}, 'orchestrator', 'orchestrator', ARRAY['agent','supervisor','orchestrator'])
+      `;
+
+      return {
+        kind: 'launched' as const,
+        sessionId: sessionRow.id as string,
+        runId: run.id as string,
+        createdRow,
+      };
+    });
+
+    if (txResult.kind === 'noop_existing_run') {
+      // The winning supervisor already launched this orchestrator. Mark exempt
+      // (idempotent) and report a non-spawning result so the loser does nothing.
+      markOrchestratorSession(txResult.sessionId);
+      return { ok: false, reason: 'already_running', sessionId: txResult.sessionId };
+    }
+    if (txResult.kind === 'no_supervisor') {
       return { ok: false, reason: 'no_online_supervisor' };
     }
+    if (txResult.kind === 'at_capacity') {
+      return { ok: false, reason: 'at_capacity', running: txResult.running, cap: txResult.cap };
+    }
 
-    // Run row linked to the orchestrator session so orphan-resume can find it.
-    const run = await createRun({
-      userId: args.userId,
-      sessionId: sessionRow.id,
-      supervisorId: target.supervisorId,
-      repoPath: target.cwd,
-      branch: null,
-      pulled: false,
-      initialPrompt: null,
-    });
-    const runId = run.id as string;
+    const { sessionId, runId, createdRow } = txResult;
+    const reused = !createdRow;
 
-    // Mint the full-power hub key (server-side only — raw value goes ONLY into
-    // the session.start.orchestrator.hub_api_key field, never echoed; I2).
-    const rawHubApiKey = generateToken('remokey_');
-    const hubApiKeyHash = await hashToken(rawHubApiKey);
-    await mintOrchestratorApiKey(args.userId, hubApiKeyHash);
+    // Mark for idle-teardown exemption (the orchestrator is not a WS subscriber).
+    markOrchestratorSession(sessionId);
 
     const systemPrompt = buildOrchestratorPrompt({
       name: prefs.orchestrator_name,
@@ -228,7 +268,7 @@ export async function launchOrchestrator(args: {
         api_key: '__use_local__',
         hub_url: '__same__',
         orchestrator: {
-          session_id: sessionRow.id,
+          session_id: sessionId,
           name: prefs.orchestrator_name,
           cwd: target.cwd,
           system_prompt: systemPrompt,
@@ -242,7 +282,7 @@ export async function launchOrchestrator(args: {
 
     return {
       ok: true,
-      sessionId: sessionRow.id,
+      sessionId,
       runId,
       supervisorId: target.supervisorId,
       cwd: target.cwd,

@@ -93,6 +93,10 @@ The orchestrator full-power hub API key (capabilities `['agent','supervisor','or
 
 **Why the machine path is safe without step-up.** A valid supervisor `api_keys` connection over `/ws/agent` already receives `session.start` and spawns arbitrary FS-access Claude processes on the host. The orchestrator key only lets a process the supervisor already spawned call the hub REST API as that user — no capability the supervisor connection didn't already imply. The one thing step-up genuinely protects is *enabling* the feature for a user who turned it off; that stays behind the interactive cookie+step-up `PUT`, and the auto-mint is gated on the resulting persisted flag. So: stolen supervisor key + feature enabled = orchestrator launches (no new power); stolen supervisor key + feature disabled = nothing. The raw key is never echoed over WS/HTTP — it goes ONLY into the `session.start.orchestrator.hub_api_key` field (the spawned process env).
 
+**Cross-supervisor serialization.** Two distinct supervisors helloing for the same user in the race window are serialized by a per-user `pg_advisory_xact_lock(hashtext('orchestrator:'||userId))` held across the whole find-or-create → open-run re-check → reserve → createRun → mint transaction. After the lock, if an open orchestrator run already exists the loser no-ops — exactly one full-power key + one run + one process per user. (`idx_sessions_orchestrator_unique` only guards the session row; `reserveSessionSlot`'s `FOR UPDATE` is per-supervisor and does not serialize across hosts.) Single-host users hit the lock uncontended.
+
+**Sentinel invariant (operational).** NEVER set `users.orchestrator_enabled = false` without also setting `users.orchestrator_disabled_explicitly = true`. `schema.sql`'s on-boot backfill re-enables any non-sentinel user with `orchestrator_enabled = false`, so a bare disable is undone on the next deploy. The interactive `PUT` disable path sets both; any manual/admin disable must too.
+
 ---
 
 ## License gating

@@ -650,7 +650,12 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_custom_instructions TEXT
 -- anyone already carrying the sentinel). All idempotent.
 ALTER TABLE users ALTER COLUMN orchestrator_enabled SET DEFAULT true;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_disabled_explicitly BOOLEAN NOT NULL DEFAULT false;
-UPDATE users SET orchestrator_enabled = true WHERE orchestrator_disabled_explicitly = false;
+-- Convergence guard (`AND orchestrator_enabled = false`): runMigrations() runs
+-- this whole file on EVERY hub boot — without the guard the UPDATE row-locks +
+-- rewrites every non-sentinel user row on every deploy (bloat/autovacuum churn).
+-- With it, the statement matches 0 rows once converged.
+UPDATE users SET orchestrator_enabled = true
+  WHERE orchestrator_disabled_explicitly = false AND orchestrator_enabled = false;
 
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_orchestrator BOOLEAN NOT NULL DEFAULT false;
 
