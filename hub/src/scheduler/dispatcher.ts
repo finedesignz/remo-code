@@ -19,7 +19,6 @@ import {
 import { sql } from '../db/postgres.ts'
 import { resolveTargets, type ResolvedTarget } from './targets.ts'
 import * as registry from './registry.ts'
-import * as queue from './session-queue.ts'
 import { broadcastScheduledRun, broadcastToUser } from '../ws/registry.ts'
 import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
@@ -36,6 +35,8 @@ interface RunContext {
   parentFireId?: string | null
   chainDepth: number
   triggeredByRunId?: string | null
+  /** Manual ("run now") dispatch — the agent sender fails fast on offline. */
+  isManual?: boolean
 }
 const inFlightByRun = new Map<string, RunContext>()
 
@@ -283,6 +284,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       parentFireId,
       chainDepth: opts.chainDepth,
       triggeredByRunId: opts.triggeredByRunId ?? null,
+      isManual,
     }
     trackRun(ctx)
     runIds.push(run.id)
@@ -296,7 +298,19 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       target_id: target.sessionId ?? target.supervisorId ?? null,
     })
 
-    if (!target.online) {
+    // Round-2 migration: SESSION-targeted runs (session / all_agents) no longer
+    // pre-check offline here — the agent sender routes online-check → per-session
+    // queue → grace park → send through the shared `dispatch()` pipeline, which
+    // parks offline targets in the shared grace buffer (keyed by sessionId,
+    // drained on agent reconnect) and fails manual runs fast. So fall through to
+    // routeToSender for online AND offline session targets.
+    //
+    // SUPERVISOR-targeted runs (supervisor / all_supervisors) keep the
+    // dispatcher's offline pre-check + concurrency gate; only their grace
+    // mechanism moved to the shared buffer (scheduler/grace.ts deleted).
+    const isSessionTarget = target.sessionId != null
+
+    if (!isSessionTarget && !target.online) {
       if (isManual) {
         // Manual run: fail fast with target_offline so the UI gets immediate
         // feedback instead of a row that lingers pending until grace expires.
@@ -311,15 +325,40 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
         void onRunFinalized(task, run.id, 'failed', 'target_offline')
         continue
       }
-      const key = target.sessionId ?? target.supervisorId
+      const key = target.supervisorId
       if (key) {
+        // Shared grace buffer: park a replay thunk keyed by supervisorId; the
+        // supervisor reconnect drain re-runs it (mark old row replayed +
+        // runNow), TTL lapse marks the run skipped/target_offline. Replaces the
+        // deleted scheduler/grace.ts registerPending/drainForTarget pair.
         try {
-          const grace = await import('./grace.ts')
-          grace.registerPending(key, run.id)
+          const { getGraceBuffer } = await import('../dispatch/grace.ts')
+          const runId = run.id
+          const taskId = task.id
+          getGraceBuffer().register(
+            key,
+            async () => {
+              await updateRunStatus(runId, {
+                status: 'skipped', error: 'replayed_on_reconnect', finished_at: new Date(),
+              })
+              await runNow(taskId, userId, {})
+            },
+            {
+              onExpire: async () => {
+                await updateRunStatus(runId, {
+                  status: 'skipped', error: 'target_offline', finished_at: new Date(),
+                })
+              },
+            },
+          )
         } catch {}
       }
       continue
     }
+
+    // Manual session runs that are offline: fail fast (the sender also guards
+    // this, but doing it here avoids inserting a pipeline grace entry path).
+    // Non-manual offline session runs fall through to the sender, which parks.
 
     // Plan 04-003: hub-authoritative concurrency gate. For supervisor-targeted
     // runs, reserve a session slot before dispatch. At-capacity skips the run
@@ -436,9 +475,10 @@ export async function finalizeRun(
   })
 
   if (ctx) {
-    if (ctx.target.kind === 'session' && ctx.target.sessionId) {
-      try { queue.markFinished(ctx.target.sessionId) } catch {}
-    }
+    // Round-2 migration: the per-session queue slot is released by the shared
+    // pipeline (`dispatch.onSessionReply` → `queue.markFinished` on its own
+    // queue) when the agent reply lands. The scheduler no longer owns a queue
+    // slot here, so there is nothing to release on this side.
     inFlightByRun.delete(runId); syncQueueDepthGauge()
   }
 
@@ -514,21 +554,13 @@ export async function cancelRun(runId: string, userId: string): Promise<boolean>
 }
 
 export function init(): void {
-  queue.setOnPromote(async (sessionId, runId) => {
-    const ctx = inFlightByRun.get(runId)
-    if (!ctx) return
-    const task = await getTaskById(ctx.taskId)
-    if (!task) return
-    // Re-evaluate the threshold gate at waiter promotion — the user may have
-    // crossed the cap while the run was queued. Drop with skipped_quota.
-    const t = await checkUserThreshold(ctx.userId)
-    if (!t.allowed) {
-      const errMsg = `quota_threshold_reached:${t.reason}:${t.utilization_pct}>=${t.threshold_pct}`
-      await finalizeRun(runId, 'skipped_quota', errMsg)
-      return
-    }
-    void routeToSender(task, ctx).catch((err) =>
-      log.error('scheduler.dispatcher.promoted_send_failed', { run_id: runId, session_id: sessionId, error: err?.message }),
-    )
-  })
+  // Round-2 migration: waiter promotion + the threshold re-check now live in the
+  // shared dispatch pipeline. When the in-flight session run finalizes, the agent
+  // ws `assistant_message` branch calls `dispatch.onSessionReply(sessionId,
+  // content)` → `RunStore.onFinalize` → `finalizeRun(success)`, then the pipeline
+  // promotes the queued waiter and RE-DISPATCHES it through the full gate list
+  // (`[thresholdGate, dailyCostCapGate]` in `senders/agent.ts`) — a user who
+  // crossed the cap while queued is skipped (IR-2). The legacy
+  // `queue.setOnPromote` seam is therefore dead; `init()` is retained as a no-op
+  // so the boot wiring in `index.ts` keeps compiling.
 }

@@ -362,15 +362,11 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       session_id: session.id,
       status: 'online',
     })
-    // W2/T12 — drain any scheduled runs parked for this session.
-    try {
-      const g = await import('../scheduler/grace.ts')
-      void g.drainForTarget(session.id, userId)
-    } catch {}
-    // W3/T4 — drain any errors/annotations parked for this session.
-    // Round-2 migration: error-capture AND revanote now park in the shared
-    // dispatch grace buffer keyed by sessionId; one drain replays both. (The
-    // legacy revanote/grace.ts buffer is retired.)
+    // W2/T12 + W3/T4 — drain everything parked for this session on reconnect.
+    // Round-2 migration: scheduled session runs, error-capture, AND revanote all
+    // park in the shared dispatch grace buffer keyed by sessionId; one drain
+    // replays them all. (The legacy scheduler/grace.ts + revanote/grace.ts
+    // buffers are retired.)
     try {
       const { getGraceBuffer } = await import('../dispatch/grace.ts')
       void getGraceBuffer().drain(session.id)
@@ -454,13 +450,12 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     await setSessionStatus(sessionId, dbStatus as any)
     broadcastToSubscribers(sessionId, msg)
     broadcastToUser(ws.data.userId!, { type: 'session_status', session_id: sessionId, status: dbStatus })
-    // W2/T6 — promote a waiting scheduled run on thinking→idle transition.
-    if (msg.state === 'idle') {
-      try {
-        const { onSessionIdleAndPromote } = await import('../scheduler/session-queue.ts')
-        onSessionIdleAndPromote(sessionId)
-      } catch {}
-    }
+    // Round-2 migration: scheduled-run waiter promotion no longer fires on the
+    // thinking→idle status transition. The shared dispatch pipeline promotes the
+    // queued waiter when the agent's assistant_message lands (via onSessionReply
+    // → queue.markFinished → re-dispatch), which is the correct completion
+    // signal — a status:idle can precede the final assistant_message. The legacy
+    // scheduler/session-queue.onSessionIdleAndPromote seam is retired here.
   }
 
   if (msg.type === 'assistant_message') {
@@ -511,26 +506,27 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     } catch (err: any) {
       console.warn('[agent] emitAssistantMessageFinal failed', err?.message)
     }
-    // V2 — finalize any pending scheduled run for this session.
-    try {
-      const mod = await import('../scheduler/senders/agent.ts')
-      void mod.onAssistantMessage(sessionId, msg.content)
-    } catch {}
-    // Phase 06 plan 008 — finalize any pending triage run for this session.
+    // Phase 06 plan 008 — finalize a SUPERVISOR-SPAWNED triage run for this
+    // session. The supervisor-spawn triage path is NOT a per-session-queue
+    // dispatch (it spawns a fresh session via the supervisor, parallel to
+    // sendSupervisorTask), so it stays on the legacy `pending` map +
+    // onTriageAssistantMessage hook. triageActiveForSession is true only for
+    // those spawned sessions; LOCAL-AGENT triage finalizes via onSessionReply
+    // below. Telegram's outbound bridge is also unmigrated (subsystem 4).
     try {
       const tri = await import('../scheduler/senders/triage.ts')
       if (tri.triageActiveForSession(sessionId)) {
         void tri.onTriageAssistantMessage(sessionId, msg.content)
       }
     } catch {}
-    // Round-2 migration: error-capture AND revanote finalize via the shared
-    // dispatch pipeline's finalize hook (RunStore.onFinalize) instead of their
-    // own run-lifecycle. onSessionReply no-ops for any session without an active
-    // pipeline hook, so it is safe to call alongside the not-yet-migrated
-    // scheduler/triage onAssistantMessage calls above.
-    // TODO(round2): collapse to onSessionReply once all subsystems migrated —
-    // then the scheduler/triage onAssistantMessage calls also route through this
-    // single fan-in point and the dual path goes away.
+    // Round-2: scheduler (session sends + local-agent triage), error-capture, and
+    // revanote ALL finalize via the shared dispatch pipeline's finalize hook
+    // (RunStore.onFinalize) + waiter promotion. onSessionReply no-ops for any
+    // session without an active pipeline hook, so it is safe to call alongside
+    // the supervisor-spawned triage hook above.
+    // TODO(round2): subsystem 4 (Telegram outbound bridge) is the last legacy
+    // finalize path; it forwards assistant_message:final via the assistant-events
+    // bus, not a run row, so it does not route through onSessionReply.
     try {
       const { onSessionReply } = await import('../dispatch/pipeline.ts')
       void onSessionReply(sessionId, msg.content)
@@ -711,9 +707,13 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       roots: msg.roots,
     })
     // W2/T12 — drain any scheduled runs parked for this supervisor.
+    // Round-2 migration: supervisor-targeted scheduled runs now park in the
+    // shared dispatch grace buffer keyed by supervisorId (the dispatcher
+    // registers a runNow replay thunk); one drain re-runs them. Replaces the
+    // deleted scheduler/grace.ts drainForTarget.
     try {
-      const g = await import('../scheduler/grace.ts')
-      void g.drainForTarget(row.id, userId)
+      const { getGraceBuffer } = await import('../dispatch/grace.ts')
+      void getGraceBuffer().drain(row.id)
     } catch {}
     return
   }
