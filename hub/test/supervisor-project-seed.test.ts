@@ -79,12 +79,8 @@ describe('ensureSupervisorProject', () => {
   beforeEach(async () => {
     store.clear()
     idCounter = 0
-    // Re-import after mock to pick up the stubbed sql binding. Cache-bust the
-    // specifier: a sibling test file (self-capture) registers a process-global
-    // partial mock.module('../src/db/error-capture-dal.ts', …) that omits
-    // ensureSupervisorProject. Without the ?bust= query the cached mocked
-    // instance leaks here and the export resolves to undefined in the full suite.
-    const mod = await import(`../src/db/error-capture-dal.ts?bust=${Date.now()}`)
+    // Re-import after mock to pick up the stubbed sql binding.
+    const mod = await import('../src/db/error-capture-dal.ts')
     ensureSupervisorProject = mod.ensureSupervisorProject
   })
 

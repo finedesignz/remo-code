@@ -23,9 +23,7 @@ const dalCalls = {
 // Per-test: which user the DAL returns from getUserByTitaniumSubject.
 let userToReturn: { id: string } | null = { id: USER_ID };
 
-const realDalWT = await import(`../src/db/dal.ts?real=${Date.now()}`);
 mock.module("../src/db/dal.ts", () => ({
-  ...realDalWT,
   getUserByTitaniumSubject: async (subject: string) => {
     dalCalls.getUserByTitaniumSubject.push(subject);
     return userToReturn;

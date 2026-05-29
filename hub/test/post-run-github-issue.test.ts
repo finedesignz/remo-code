@@ -16,11 +16,7 @@ import { describe, test, expect, beforeEach, mock } from 'bun:test'
 // ── In-memory idempotency store (mocked DAL) ────────────────────────────────
 const idempotencyStore = new Map<string, { issueNumber: number; repo: string; createdAt: number }>()
 
-// Spread real dal so unmocked exports stay resolvable for sibling files in the
-// full suite (Bun mock.module is process-global). See memory: bun-mock-pollution.
-const realDalPR = await import(`../src/db/dal.ts?real=${Date.now()}`)
 mock.module('../src/db/dal.ts', () => ({
-  ...realDalPR,
   hasOpenIssueForHash: async (userId: string, hash: string, _windowHours: number) => {
     const key = `${userId}|${hash}`
     const row = idempotencyStore.get(key)

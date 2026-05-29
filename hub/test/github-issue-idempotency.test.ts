@@ -12,11 +12,7 @@ type Row = { issueNumber: number; repo: string }
 const store = new Map<string, Row>()
 const events: string[] = []
 
-// Spread real dal so unmocked exports stay resolvable for sibling files in the
-// full suite (Bun mock.module is process-global). See memory: bun-mock-pollution.
-const realDalGI = await import(`../src/db/dal.ts?real=${Date.now()}`)
 mock.module('../src/db/dal.ts', () => ({
-  ...realDalGI,
   hasOpenIssueForHash: async (userId: string, hash: string, _w: number) => {
     return store.has(`${userId}|${hash}`)
   },

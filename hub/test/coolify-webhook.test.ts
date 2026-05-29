@@ -32,12 +32,7 @@ const mockState: {
   legacyHitCount: 0,
 }
 
-// Spread the real dal so unmocked exports stay defined — Bun's mock.module is
-// process-global and a partial mock here would shadow real dal exports for any
-// sibling file that transitively imports dal in the full suite. (mock-pollution)
-const realDalCW = await import(`../src/db/dal.ts?real=${Date.now()}`)
 mock.module('../src/db/dal.ts', () => ({
-  ...realDalCW,
   getUserCoolifyWebhookSecret: async () => mockState.secret,
   getUserCoolifyWebhookConfig: async () => ({
     secret: mockState.secret,

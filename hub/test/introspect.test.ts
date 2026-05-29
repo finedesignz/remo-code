@@ -18,12 +18,10 @@ mock.module('../src/db/postgres', () => {
   return { sql: tag }
 })
 
-// IMPORTANT: spread the real ../src/sessions/budget so this mock doesn't strip
-// exports that sibling test files depend on (Bun mock.module is sticky across
-// files). Only getInFlightRunCount needs a stub value.
-const realBudgetIN = await import(`../src/sessions/budget?real=${Date.now()}`)
+// IMPORTANT: include ALL exports from ../src/sessions/budget so this mock
+// doesn't strip exports that sibling test files depend on (Bun mock.module
+// is sticky across files). Only getInFlightRunCount needs a stub value.
 mock.module('../src/sessions/budget', () => ({
-  ...realBudgetIN,
   getInFlightRunCount: async () => 7,
   reserveSessionSlot: async () => ({ ok: false, reason: 'mocked' }),
   releaseSessionSlot: async () => undefined,

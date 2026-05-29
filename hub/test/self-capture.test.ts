@@ -15,7 +15,6 @@ import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
 // import from the same module. Per Bun mock.module pollution pattern.
 const realErrorCaptureDal = await import(`../src/db/error-capture-dal.ts?bust=${Date.now()}`)
 const realDal = await import(`../src/db/dal.ts?bust=${Date.now()}`)
-const realWsRegSC = await import(`../src/ws/registry.ts?bust=${Date.now()}`)
 
 const TEST_USER = '233c6d63-5f44-43f4-9eae-efc34a00735a'
 
@@ -58,11 +57,6 @@ const mockState: {
 }
 
 let rowSeq = 0
-// Spread the REAL module so non-overridden exports (e.g. ensureSupervisorProject,
-// consumed by src/ws/agent.ts) stay defined. Bun's mock.module is process-global
-// and first-write-wins; a partial mock here would otherwise make those exports
-// resolve to undefined and abort sibling files that import agent.ts in the full
-// suite (SyntaxError: Export named 'X' not found). See memory: bun-mock-pollution.
 mock.module('../src/db/error-capture-dal.ts', () => ({
   ...realErrorCaptureDal,
   ensureSelfProject: async (_userId: string) => mockState.selfProject,
@@ -117,7 +111,6 @@ mock.module('../src/error-capture/dispatcher.ts', () => ({
 }))
 
 mock.module('../src/ws/registry.ts', () => ({
-  ...realWsRegSC,
   broadcastErrorEvent: (_userId: string, event: any) => {
     mockState.broadcasts.push(event)
   },
