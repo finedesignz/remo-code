@@ -110,9 +110,15 @@ New optional fields on `RevanoteCallbackPayload`:
 
 - `agent_paused` short-circuit on inbound webhook side — revanote ships the
   kill switch in its own Phase 3; this side reads `users.agent_paused`.
-- Real `openPr` / `squashMerge` plumbing — `defaultMergeOps()` currently
-  warns + returns synthetic URLs; integration paths that need real GitHub
-  writes inject their own `MergeOps`. The CI gate IS real.
+- ~~Real `openPr` / `squashMerge` plumbing~~ — RESOLVED in follow-up PR
+  (this branch). `defaultMergeOps.openPr` now pushes the sandbox branch and
+  POSTs `/repos/{o}/{r}/pulls` (with idempotent 422 handling that returns the
+  existing open PR). `defaultMergeOps.squashMerge` does PUT
+  `/repos/{o}/{r}/pulls/{n}/merge` with `merge_method='squash'` and surfaces
+  405 (not mergeable) / 409 (head changed) as clear errors. Auth reuses
+  `getInstallationToken()` — no new env vars. `ensureBranch()` exported
+  separately so callers can bootstrap `agent-staging` before opening
+  major/breaking PRs. Tests: `hub/test/revanote-default-merge-ops.test.ts`.
 - Wiring `prepareSandbox()` into `dispatcher.ts` — Phase 5 added the
   sandbox primitives but the dispatcher still ships prompts to long-lived
   Claude sessions over WS, not into ephemeral clones. The gate honors
