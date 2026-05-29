@@ -1,5 +1,7 @@
 # Mobile Tauri client (Phase 12)
 
+> **Status: paused 2026-05-28.** See [phase-12-pause-state.md](./phase-12-pause-state.md) for the canonical "where everything is" doc, install commands, deferred items, and resume checklist.
+
 Native iOS + Android wrappers around the existing `web/` SPA, talking to
 `https://app.remo-code.com` as a normal hub client. The phone never spawns a
 CLI; it joins existing supervisor-hosted sessions over the same `/ws/client`
@@ -288,14 +290,19 @@ OS magic-link tap
   `location.replace`s to `VITE_REMO_URL` (defaults to `https://app.remo-code.com`)
   after stashing `window.__REMO_APP_VERSION__` in `sessionStorage`.
 
-### Deferred to Phase 12.4
+### Phase 12.4 status
 
-- `gen/apple/` (Xcode project) — `cargo tauri ios init` on a Mac.
-- `gen/android/` (Gradle project) — `cargo tauri android init` on an Android
-  SDK + NDK host.
-- `src-tauri/icons/icon.png` — 1024×1024 source PNG, then `cargo tauri icon`.
-- Release workflow for `mobile-v*.*.*` tags.
-- Code-signing setup (Apple Developer Program, Google Play upload key).
+- **Android — shipped on `feat/mobile-android`.** `gen/android/` Gradle project
+  committed; debug APK build verified with Android Studio SDK + NDK
+  `27.3.13750724` on Windows 11. Local artifact:
+  `mobile/tauri/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`
+  (~168 MB, ARM64). Sideload + toolchain bootstrap docs in
+  [`mobile/tauri/README.md`](../mobile/tauri/README.md).
+- **iOS — pending (MacInCloud track).** `gen/apple/` Xcode project + `cargo tauri
+  ios init` run separately.
+- **Deferred to 12.5.** Code-signing (Apple Developer Program; Google Play
+  upload key), `mobile-shell-release.yml` for `mobile-v*.*.*` tags, brand-icon
+  refresh, AAB packaging for Play Store.
 
 ### CI
 
@@ -303,6 +310,32 @@ OS magic-link tap
 host x86_64-unknown-linux-gnu target on every push that touches `mobile/tauri/`.
 This catches Rust regressions without needing Android NDK or Xcode in CI; the
 real mobile build matrix lands with Phase 12.4.
+
+### iOS distribution path (Windows-only developer)
+
+The lead maintainer develops on Windows full-time, so the iOS path is
+optimized for never needing a local Mac after a one-shot init step:
+
+- **MacInCloud first-time init** (~30 min, smallest plan ~$25/month on the
+  Managed Server tier — you cancel immediately after). Run
+  `cargo tauri ios init` on the rented Mac, commit the generated
+  `mobile/tauri/src-tauri/gen/apple/` tree on a `feat/mobile-ios-init`
+  branch, open a PR, disconnect.
+- **GitHub Actions `mobile-ios-build` workflow** (`.github/workflows/mobile-ios-build.yml`)
+  on `macos-14` produces an unsigned `.ipa` for every subsequent build.
+  Triggered by `workflow_dispatch`, by `mobile-ios-v*` tags (which also
+  publish a GitHub Release), and by PRs touching `mobile/tauri/**` for
+  typecheck-only. Gated behind repo variable `ENABLE_IOS_BUILD=true` to
+  avoid burning macOS minutes by accident.
+- **AltStore sideload on Windows** — install AltServer + AltStore, pair
+  the iPhone, drag the `.ipa` onto AltServer. AltStore re-signs with a
+  free Apple ID; the app refreshes every 7 days as long as AltServer is
+  running. Three-app sideload limit per Apple ID, no push notifications.
+- **App Store distribution** requires the paid Apple Developer Program
+  ($99/yr) and code-signing secrets in CI — out of scope for the
+  Windows-only path.
+
+Full runbook: [`docs/ios-sideload.md`](ios-sideload.md).
 
 ---
 

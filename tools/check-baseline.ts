@@ -14,7 +14,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -53,20 +53,63 @@ function parseJunit(xml: string): Counts {
   return { pass, skip, fail, total };
 }
 
-async function runHubTests(outPath: string): Promise<void> {
+// Recursively collect *.test.ts files under hub/test, relative to hub/.
+function collectTestFiles(hubDir: string): string[] {
+  const out: string[] = [];
+  const walk = (abs: string, rel: string) => {
+    for (const ent of readdirSync(abs, { withFileTypes: true })) {
+      const childAbs = join(abs, ent.name);
+      const childRel = rel ? `${rel}/${ent.name}` : ent.name;
+      if (ent.isDirectory()) walk(childAbs, childRel);
+      else if (ent.name.endsWith(".test.ts")) out.push(`test/${childRel}`);
+    }
+  };
+  walk(join(hubDir, "test"), "");
+  return out.sort();
+}
+
+function runOneFile(hubDir: string, relFile: string, outPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const proc = spawn(
       "bun",
-      ["test", "--reporter", "junit", "--reporter-outfile", outPath],
-      { cwd: join(process.cwd(), "hub"), stdio: "inherit", shell: process.platform === "win32" },
+      ["test", relFile, "--reporter", "junit", "--reporter-outfile", outPath],
+      { cwd: hubDir, stdio: "inherit", shell: process.platform === "win32" },
     );
     proc.on("error", reject);
-    proc.on("exit", (code) => {
-      // bun test exits non-zero when any test fails — we still parse junit and decide.
-      resolve();
-      void code;
-    });
+    proc.on("exit", () => resolve()); // non-zero on failures — we parse junit and decide.
   });
+}
+
+// Per-file process isolation: run EACH test file in its own `bun test <file>`
+// process and aggregate the junit totals. Bun's `mock.module()` is process-global
+// and first-write-wins, so a partial mock in one file otherwise leaks into the
+// next, making the full-suite run ORDER-DEPENDENT (passes on one platform's
+// file-glob order, cascades "Export named X not found" / stale stubs on another).
+// Separate processes share no module registry → zero cross-file leakage,
+// permanently, regardless of future polluting tests. Makes local == CI.
+async function runHubTestsIsolated(tmpDir: string): Promise<Counts> {
+  const hubDir = join(process.cwd(), "hub");
+  const files = collectTestFiles(hubDir);
+  const agg: Counts = { pass: 0, skip: 0, fail: 0, total: 0 };
+  let i = 0;
+  for (const rel of files) {
+    const outPath = join(tmpDir, `junit-${i++}.xml`);
+    await runOneFile(hubDir, rel, outPath);
+    let c: Counts;
+    try {
+      c = parseJunit(readFileSync(outPath, "utf8"));
+    } catch (e) {
+      // A file that fails to even produce junit (load crash) counts as a hard
+      // failure so the gate flags it rather than silently dropping its tests.
+      console.error(`[check-baseline] ${rel}: could not parse junit (${(e as Error).message}) — counting 1 fail`);
+      c = { pass: 0, skip: 0, fail: 1, total: 1 };
+    }
+    agg.pass += c.pass;
+    agg.skip += c.skip;
+    agg.fail += c.fail;
+    agg.total += c.total;
+  }
+  return agg;
 }
 
 async function main() {
@@ -80,11 +123,8 @@ async function main() {
   }
 
   const tmp = mkdtempSync(join(tmpdir(), "remo-baseline-"));
-  const junitPath = join(tmp, "junit.xml");
   try {
-    await runHubTests(junitPath);
-    const xml = readFileSync(junitPath, "utf8");
-    const got = parseJunit(xml);
+    const got = await runHubTestsIsolated(tmp);
 
     console.log("\n[check-baseline] results");
     console.log(`  baseline: pass=${baseline.pass} skip=${baseline.skip} fail=${baseline.fail} total=${baseline.total}`);

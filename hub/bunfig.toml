@@ -1,0 +1,5 @@
+[test]
+# Restore process-global module mocks between test files so the suite is
+# order-independent (mock.module is first-write-wins and leaks across files).
+# See test/_setup.ts for the full rationale.
+preload = ["./test/_setup.ts"]

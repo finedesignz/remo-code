@@ -114,6 +114,15 @@ const telegramBotUsername = process.env.TELEGRAM_BOT_USERNAME || "";
 // When unset, self-capture is inert (no row seeded, no hooks installed).
 // Must be a UUID of an existing users.id when set.
 const hubSelfOwnerUserId = process.env.HUB_SELF_OWNER_USER_ID || "";
+
+// B4 observability: bearer token gating `/healthz/deep` and `/metrics`. When
+// unset, both endpoints 503 (fail-closed). Min 16 chars when present.
+const hubIntrospectToken = requireMinLenIfSet(
+  "HUB_INTROSPECT_TOKEN",
+  process.env.HUB_INTROSPECT_TOKEN,
+  16,
+);
+
 if ((telegramBotToken && !telegramWebhookSecret) || (!telegramBotToken && telegramWebhookSecret)) {
   console.warn(
     "[config] Telegram bridge partially configured: set BOTH TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET, or neither.",
@@ -174,4 +183,7 @@ export const config = {
     webhookSecret: telegramWebhookSecret,
     botUsername: telegramBotUsername,
   },
+
+  // B4: observability bearer token (gates /healthz/deep + /metrics).
+  hubIntrospectToken,
 };

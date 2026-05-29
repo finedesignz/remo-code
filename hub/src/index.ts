@@ -30,6 +30,7 @@ import { telegram as telegramApi } from './api/telegram'
 import { revanoteMappings } from './api/revanote-mappings'
 import { revanoteAnnotations } from './api/revanote-annotations'
 import { webhooksTitanium } from './api/webhooks-titanium'
+import { introspect as introspectApi } from './api/introspect'
 import { tasks as tasksApi } from './api/tasks'
 import { usage as usageApi } from './api/usage'
 import { wellKnown } from './api/well-known'
@@ -67,6 +68,7 @@ import { join, resolve } from 'path'
 import { log as obsLog } from './observability/logger'
 import { withRequestId } from './observability/middleware'
 import { setOfflineStaleAgentSessions, markStreamingMessagesAsInterrupted } from './db/dal.ts'
+import { withHttpMetrics } from './observability/http-metrics'
 
 // ════════════════════════════════════════════════════════════════════════════
 // MOUNT-ORDER INVARIANT CONTRACT  (load-bearing — enforced by mount-order.test.ts)
@@ -112,6 +114,10 @@ export const app = new Hono()
 // every downstream log line carries it.
 app.use('*', withRequestId())
 
+// B4 (obs): record HTTP latency histogram. Mounted second so it sees the
+// final status_class after all downstream handlers run.
+app.use('*', withHttpMetrics())
+
 // Global error handler — never leak internals
 app.onError((err, c) => {
   obsLog.error('hono.onError', { error: err.message, path: c.req.path, method: c.req.method })
@@ -133,6 +139,11 @@ app.use('/api/*', cors({
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
+
+// B4 (obs): /healthz/deep + /metrics. Bearer-gated via HUB_INTROSPECT_TOKEN.
+// Mounted at root — bypasses /api/* auth, CSRF, license-gate, rate-limit
+// catch-alls. The bearer check IS the credential.
+app.route('/', introspectApi)
 
 // Phase 12.1: public deep-link association files for iOS Universal Links and
 // Android App Links. No auth, no license gate. Mounted at root before any

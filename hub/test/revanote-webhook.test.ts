@@ -33,7 +33,11 @@ const mockState: {
   broadcasts: [],
 }
 
+// Spread real shared modules so non-overridden exports stay resolvable for
+// sibling files in the full suite (Bun mock.module is process-global).
+const realRevanoteDalRW = await import(`../src/db/revanote-dal.ts?real=${Date.now()}`)
 mock.module('../src/db/revanote-dal.ts', () => ({
+  ...realRevanoteDalRW,
   getUserRevanoteWebhookSecret: async () => mockState.secret,
   recordRevanoteWebhookAttempt: async (row: any) => { mockState.attempts.push(row) },
   insertAnnotation: async (input: any) => {
