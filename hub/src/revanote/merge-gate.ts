@@ -449,17 +449,23 @@ export function applyGateToCallback(
 }
 
 /**
- * Default MergeOps using real GitHub CI gate (Phase 6) + thin git/PR stubs.
+ * Default MergeOps backed by the real GitHub App API (follow-up to PR #113).
  *
- * Phase 6 lands the CI gate as real (poll check-runs). PR open + squash
- * merge are still abstracted — the actual `gh pr create` / merge plumbing
- * is implemented elsewhere (existing supervisor → hub flow handles it for
- * non-revanote paths). Until that's wired, this default emits a deterministic
- * placeholder PR URL and logs the intended action; integration paths that
- * really need to ship to GitHub MUST inject their own MergeOps.
+ * openPr: pushes the sandbox's current branch to origin, then opens a PR via
+ *   POST /repos/{owner}/{repo}/pulls. On 422 ("already exists") it looks up
+ *   the existing open PR and returns its URL idempotently.
+ * squashMerge: PUT /repos/{owner}/{repo}/pulls/{number}/merge with
+ *   merge_method='squash'. On 405 (not mergeable) / 409 (head changed) surfaces
+ *   a clear error.
+ * ciGreen: polls check-runs via the Phase 6 ci-gate.
  *
- * Callers who want the real merge surface should construct their own
- * MergeOps and pass it through `RunGateOpts.mergeOps`.
+ * Auth: reuses `getInstallationToken()` (GitHub App installation token) — no
+ * new env vars. Callers that need a non-installation flow (e.g. PAT) should
+ * inject their own MergeOps.
+ *
+ * The base branch is parsed out of the PR body (the gate encodes
+ * `base_branch=<X>` per `deploy-policy.ts`). If the body is missing that line
+ * the call falls back to the repo's `default_branch`.
  */
 export interface DefaultMergeOpsOpts {
   installationId?: number
@@ -467,21 +473,144 @@ export interface DefaultMergeOpsOpts {
   headShaResolver?: (sandboxDir: string) => Promise<string>
   /** Override CI poll behavior (tests). */
   ciFetcher?: Parameters<typeof import('./ci-gate.ts')['waitForCiGreen']>[0]['fetcher']
+  /** Test seam: override the GitHub API call surface. */
+  apiRequest?: <T = any>(installationId: number, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown) => Promise<T>
+  /** Test seam: override git operations (push, current branch). */
+  gitOps?: {
+    currentBranch: (repoDir: string) => Promise<string>
+    push: (repoDir: string, remote: string, branch: string) => Promise<void>
+  }
+}
+
+interface ParsedSlug { owner: string; repo: string }
+
+function parseSlug(repoSlug: string): ParsedSlug | null {
+  const m = /^([\w.-]+)\/([\w.-]+?)(?:\.git)?$/.exec(repoSlug.trim())
+  if (!m) return null
+  return { owner: m[1], repo: m[2] }
+}
+
+function extractBaseBranch(body: string): string | null {
+  const m = /^base_branch=(.+)$/m.exec(body)
+  return m ? m[1].trim() : null
+}
+
+function parsePrUrl(prUrl: string): { owner: string; repo: string; number: number } | null {
+  // https://github.com/owner/repo/pull/123
+  const m = /github\.com\/([\w.-]+)\/([\w.-]+?)\/pull\/(\d+)/.exec(prUrl)
+  if (!m) return null
+  return { owner: m[1], repo: m[2], number: parseInt(m[3], 10) }
+}
+
+async function resolveGitDir(sandboxDir: string): Promise<string> {
+  // sandbox.ts puts the clone at <sandboxDir>/repo; some flows pass the
+  // git dir directly. Auto-detect by checking which has a .git entry.
+  const { existsSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const nested = join(sandboxDir, 'repo')
+  if (existsSync(join(nested, '.git'))) return nested
+  return sandboxDir
+}
+
+async function defaultCurrentBranch(repoDir: string): Promise<string> {
+  const { spawnSync } = await import('node:child_process')
+  const out = spawnSync('git', ['-C', repoDir, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf-8' })
+  if (out.status !== 0) throw new Error(`git rev-parse failed: ${out.stderr}`)
+  return (out.stdout || '').trim()
+}
+
+async function defaultGitPush(repoDir: string, remote: string, branch: string): Promise<void> {
+  const { spawnSync } = await import('node:child_process')
+  const out = spawnSync('git', ['-C', repoDir, 'push', '--force-with-lease', remote, `HEAD:refs/heads/${branch}`], { encoding: 'utf-8' })
+  if (out.status !== 0) {
+    const stderr = (out.stderr || '').replace(/x-access-token:[^@]+@/g, 'x-access-token:***@')
+    throw new Error(`git push failed: ${stderr.slice(0, 400)}`)
+  }
 }
 
 export function defaultMergeOps(extra: DefaultMergeOpsOpts = {}): MergeOps {
+  const gitOps = extra.gitOps ?? { currentBranch: defaultCurrentBranch, push: defaultGitPush }
+
+  async function api<T = any>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
+    if (extra.apiRequest) {
+      return extra.apiRequest<T>(extra.installationId!, method, path, body)
+    }
+    if (!extra.installationId) throw new Error('defaultMergeOps: installationId required for GitHub API calls')
+    const { githubApiRequest } = await import('../auth/github-app.ts')
+    return githubApiRequest<T>(extra.installationId, method, path, body)
+  }
+
   return {
     async openPr(opts) {
-      // Real PR opening is delegated to integration paths. Log + return a
-      // deterministic synthetic URL so the gate flow completes.
-      const synthetic = `https://github.com/${opts.repoSlug}/pull/synthetic-${opts.batchId.slice(0, 8)}`
-      console.warn(`[revanote.merge-gate.defaultMergeOps] openPr stub — wire real impl. would open: ${synthetic} title=${JSON.stringify(opts.title)}`)
-      return synthetic
+      const parsed = parseSlug(opts.repoSlug)
+      if (!parsed) throw new Error(`openPr: invalid repoSlug ${opts.repoSlug}`)
+      const { owner, repo } = parsed
+
+      const gitDir = await resolveGitDir(opts.sandboxDir)
+      const headBranch = await gitOps.currentBranch(gitDir)
+      if (!headBranch || headBranch === 'HEAD') {
+        throw new Error(`openPr: could not resolve current branch in ${gitDir}`)
+      }
+
+      // Resolve base branch — body line wins, else repo default.
+      let baseBranch = extractBaseBranch(opts.body)
+      if (!baseBranch) {
+        const repoMeta = await api<{ default_branch: string }>('GET', `/repos/${owner}/${repo}`)
+        baseBranch = repoMeta.default_branch
+      }
+
+      // Push the sandbox branch to origin so GitHub knows about it.
+      await gitOps.push(gitDir, 'origin', headBranch)
+
+      try {
+        const data = await api<{ html_url: string; number: number }>('POST', `/repos/${owner}/${repo}/pulls`, {
+          title: opts.title,
+          head: headBranch,
+          base: baseBranch,
+          body: opts.body,
+          maintainer_can_modify: true,
+        })
+        return data.html_url
+      } catch (err: any) {
+        // 422 = PR already exists (idempotency path).
+        if (err?.status === 422) {
+          const existing = await api<Array<{ html_url: string; number: number }>>(
+            'GET',
+            `/repos/${owner}/${repo}/pulls?head=${encodeURIComponent(owner + ':' + headBranch)}&base=${encodeURIComponent(baseBranch)}&state=open`,
+          )
+          if (existing.length > 0) {
+            console.warn(`[revanote.merge-gate.defaultMergeOps] openPr: PR already exists for ${owner}/${repo} ${headBranch}->${baseBranch}, returning #${existing[0].number}`)
+            return existing[0].html_url
+          }
+        }
+        throw err
+      }
     },
+
     async squashMerge(opts) {
-      console.warn(`[revanote.merge-gate.defaultMergeOps] squashMerge stub — wire real impl. would merge: ${opts.prUrl}`)
-      return `${opts.prUrl}/merged`
+      const parsed = parsePrUrl(opts.prUrl)
+      if (!parsed) throw new Error(`squashMerge: cannot parse PR URL ${opts.prUrl}`)
+      const { owner, repo, number } = parsed
+
+      try {
+        const data = await api<{ sha: string; merged: boolean; message: string }>(
+          'PUT',
+          `/repos/${owner}/${repo}/pulls/${number}/merge`,
+          { merge_method: 'squash' },
+        )
+        // PR merged-URL convention used by callers (kept consistent with prior stub).
+        return `${opts.prUrl}/merged`
+      } catch (err: any) {
+        if (err?.status === 405) {
+          throw new Error(`squashMerge: PR #${number} not mergeable (405) — CI / branch protection blocked. body=${(err.body || '').slice(0, 200)}`)
+        }
+        if (err?.status === 409) {
+          throw new Error(`squashMerge: PR #${number} head SHA changed during merge (409). Caller must refresh and re-decide. body=${(err.body || '').slice(0, 200)}`)
+        }
+        throw err
+      }
     },
+
     async ciGreen(opts) {
       const installationId = extra.installationId
       if (!installationId) {
@@ -512,6 +641,46 @@ export function defaultMergeOps(extra: DefaultMergeOpsOpts = {}): MergeOps {
       return result.green
     },
   }
+}
+
+/**
+ * Ensure a branch exists on the remote — no-op if present, otherwise create
+ * it pointing at `fromSha`. Used to bootstrap e.g. `agent-staging` before
+ * opening major/breaking PRs against it.
+ *
+ * Exposed separately from MergeOps so the interface stays stable for the
+ * existing merge-gate callers; callers that need branch bootstrap call this
+ * directly.
+ */
+export async function ensureBranch(opts: {
+  installationId: number
+  repoSlug: string
+  branch: string
+  fromSha: string
+  apiRequest?: <T = any>(installationId: number, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown) => Promise<T>
+}): Promise<void> {
+  const parsed = (() => {
+    const m = /^([\w.-]+)\/([\w.-]+?)(?:\.git)?$/.exec(opts.repoSlug.trim())
+    return m ? { owner: m[1], repo: m[2] } : null
+  })()
+  if (!parsed) throw new Error(`ensureBranch: invalid repoSlug ${opts.repoSlug}`)
+  const { owner, repo } = parsed
+
+  const api = opts.apiRequest ?? (async <T,>(installationId: number, method: any, path: string, body?: unknown) => {
+    const { githubApiRequest } = await import('../auth/github-app.ts')
+    return githubApiRequest<T>(installationId, method, path, body)
+  })
+
+  try {
+    await api(opts.installationId, 'GET', `/repos/${owner}/${repo}/git/ref/heads/${opts.branch}`)
+    return // branch exists
+  } catch (err: any) {
+    if (err?.status !== 404) throw err
+  }
+  await api(opts.installationId, 'POST', `/repos/${owner}/${repo}/git/refs`, {
+    ref: `refs/heads/${opts.branch}`,
+    sha: opts.fromSha,
+  })
 }
 
 async function defaultHeadSha(sandboxDir: string): Promise<string> {
