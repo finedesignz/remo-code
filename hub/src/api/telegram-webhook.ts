@@ -66,7 +66,7 @@ import {
   snapOffsetToPage,
 } from "../telegram/session-picker.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
-import { runDoctor } from "../telegram/doctor.ts";
+import { runDoctor, bufferReplay, hasBufferedReplay } from "../telegram/doctor.ts";
 
 export const telegramWebhookRoutes = new Hono();
 
@@ -193,7 +193,7 @@ async function dispatchInbound(
   user: TelegramUserRow,
   msg: MessageT,
   updateId: number,
-): Promise<{ outcome: string; error?: string }> {
+): Promise<{ outcome: string; error?: string; replayText?: string; replayImages?: string[] }> {
   const chatId = msg.chat.id;
 
   if (!user.telegram_default_session_id) {
@@ -272,8 +272,15 @@ async function dispatchInbound(
       await safeSend(chatId, "Session busy — try again in a moment.");
       return { outcome: "session_busy" };
     case "agent_offline":
-      await safeSend(chatId, "Your supervisor is offline. Reconnect it and try again.");
-      return { outcome: "agent_offline" };
+      // NOTE: no reply here — the caller fires autoheal (runDoctor) and the
+      // opener "🩺 Hold on — diagnosing & launching automatically…" replaces
+      // the legacy "Your supervisor is offline" pre-amble. The caller buffers
+      // text + images for auto-replay using the values surfaced below.
+      return {
+        outcome: "agent_offline",
+        replayText: text,
+        replayImages: images.length > 0 ? images : undefined,
+      };
     case "failed":
       await safeSend(chatId, "Something went wrong dispatching that message.");
       return { outcome: "failed", error: result.reason };
@@ -543,14 +550,45 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
       }
     }
 
+    // Pre-check: if a buffered replay is already pending for this chat and the
+    // user is just sending a second message before launch finishes, swap the
+    // buffer to most-recent and tell them quickly. Skip dispatchInbound to
+    // avoid re-firing autoheal.
+    if (hasBufferedReplay(msg.chat.id) && user.telegram_default_session_id) {
+      // Extract text + images cheaply enough — re-run the same resolution.
+      const text = msg.text ?? msg.caption ?? "";
+      const images: string[] = [];
+      if (msg.photo && msg.photo.length > 0) {
+        const largest = pickLargestPhoto(msg.photo);
+        const dataUri = await fetchPhotoAsDataUri(largest.file_id);
+        if (dataUri) images.push(dataUri);
+      }
+      if (text || images.length > 0) {
+        bufferReplay(msg.chat.id, {
+          text: text || "(photo from telegram)",
+          images: images.length > 0 ? images : undefined,
+          originalUpdateId: update.update_id,
+        });
+        await safeSend(msg.chat.id, "Queued — I'll send this one after the launch completes.");
+        return c.json({ ok: true, outcome: "replay_buffered_queue_swap" });
+      }
+    }
+
     const r = await dispatchInbound(user, msg, update.update_id);
     // Auto-heal: on agent_offline, immediately walk the user through /doctor
-    // and try to auto-launch the runner. The plain "supervisor offline" reply
-    // already fired from dispatchInbound; runDoctor's first line is the
-    // header so the two messages compose naturally.
+    // and try to auto-launch the runner. The legacy "supervisor offline" reply
+    // is suppressed — runDoctor's autoheal opener replaces it. The original
+    // user message is buffered for auto-replay once the launch completes.
     if (r.outcome === "agent_offline") {
+      if (r.replayText !== undefined || (r.replayImages && r.replayImages.length > 0)) {
+        bufferReplay(msg.chat.id, {
+          text: r.replayText ?? "",
+          images: r.replayImages,
+          originalUpdateId: update.update_id,
+        });
+      }
       try {
-        const dr = await runDoctor({ user, chatId: msg.chat.id });
+        const dr = await runDoctor({ user, chatId: msg.chat.id, autoheal: true });
         return c.json({ ok: true, outcome: "agent_offline_autoheal", doctor: dr.outcome });
       } catch (err: any) {
         console.warn("[telegram-webhook] autoheal runDoctor failed:", err?.message);
