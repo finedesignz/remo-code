@@ -41,7 +41,6 @@ import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
 // V2 scheduler.
 import * as schedRegistry from './scheduler/registry.ts'
-import * as schedDispatcher from './scheduler/dispatcher.ts'
 import * as schedCatchup from './scheduler/catchup.ts'
 import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
 import { getGraceBuffer as getDispatchGraceBuffer } from './dispatch/grace.ts'
@@ -577,8 +576,9 @@ runMigrations()
   .then(() => markStreamingMessagesAsInterrupted())
   .then(() => markOrphanedRunsInterrupted())
   .then(async () => {
-    // V2 scheduler: wire dispatcher → queue, load enabled tasks, run catch-up.
-    schedDispatcher.init()
+    // V2 scheduler: load enabled tasks, run catch-up. Waiter promotion lives in
+    // the shared dispatch pipeline (onSessionReply → queue.markFinished →
+    // re-dispatch); there is no dispatcher init step to wire anymore.
     await schedRegistry.loadAll()
     await schedCatchup.runOnce()
     // Round-2 migration: error-capture grace now lives in the shared dispatch

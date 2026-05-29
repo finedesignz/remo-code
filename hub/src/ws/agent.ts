@@ -450,12 +450,15 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     await setSessionStatus(sessionId, dbStatus as any)
     broadcastToSubscribers(sessionId, msg)
     broadcastToUser(ws.data.userId!, { type: 'session_status', session_id: sessionId, status: dbStatus })
-    // Round-2 migration: scheduled-run waiter promotion no longer fires on the
-    // thinking→idle status transition. The shared dispatch pipeline promotes the
-    // queued waiter when the agent's assistant_message lands (via onSessionReply
-    // → queue.markFinished → re-dispatch), which is the correct completion
-    // signal — a status:idle can precede the final assistant_message. The legacy
-    // scheduler/session-queue.onSessionIdleAndPromote seam is retired here.
+    // Round-2 collapse (final): scheduled-run waiter promotion does NOT fire on
+    // the thinking→idle status transition. All four inbound subsystems
+    // (error-capture, revanote, scheduler, telegram) run on the shared dispatch
+    // pipeline (hub/src/dispatch/). The pipeline promotes the queued waiter when
+    // the agent's assistant_message lands (onSessionReply → SessionQueue
+    // .markFinished → re-dispatch through the gate list) — the correct
+    // completion signal, since a status:idle can precede the final
+    // assistant_message. The old scheduler/session-queue.ts shim and its
+    // setOnPromote/onSessionIdleAndPromote callback seam are gone.
   }
 
   if (msg.type === 'assistant_message') {

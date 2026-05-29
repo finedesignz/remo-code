@@ -2,9 +2,9 @@
  * Dispatch pipeline contract tests (Phase 1 foundation, no DB).
  *
  * Covers:
- *   - SessionQueue FIFO semantics — MIRRORS the `scheduler/session-queue`
- *     describe-block in `scheduler.test.ts` VERBATIM so the relocated queue is
- *     provably identical.
+ *   - SessionQueue FIFO semantics — MIRRORS the queue-semantics cases now in
+ *     `session-queue.test.ts` (relocated from the deleted scheduler shim) so
+ *     the queue's behavior is pinned from the pipeline-integration angle too.
  *   - GraceBuffer register / drain / TTL-expire + the 60s sweep (driven
  *     synchronously via `_sweepNow`).
  *   - Pipeline gate ordering (threshold before cost-cap before queue; first
@@ -33,7 +33,7 @@ import {
 } from '../src/dispatch/pipeline.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SessionQueue — mirrors scheduler.test.ts `scheduler/session-queue` block
+// SessionQueue — mirrors the queue-semantics cases in session-queue.test.ts
 // ─────────────────────────────────────────────────────────────────────────────
 describe('dispatch/session-queue (mirrors scheduler contract)', () => {
   let q: SessionQueue
