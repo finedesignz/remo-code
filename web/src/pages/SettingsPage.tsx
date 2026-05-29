@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 import type { AuthUser } from "../lib/auth";
 import type { Profile } from "../hooks/useProfile";
 import { AppShell } from "../components/ui/AppShell";
+import { Brand } from "../components/ui/Brand";
 import { Tabs } from "../components/ui/Tabs";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { HeaderRight } from "../components/ui/HeaderRight";
@@ -71,15 +72,10 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
   };
 
   const nav = buildTopNav(activeTopRoute());
-  const brand = (
-    <a href="#/" className="text-sm font-semibold text-[var(--text-primary)] hover:text-indigo-300 transition-colors">
-      Remo Code
-    </a>
-  );
 
   return (
     <AppShell
-      brand={brand}
+      brand={<Brand />}
       nav={nav}
       headerRight={<HeaderRight token={token} user={user} signOut={signOut} onNavigate={onNavigate} subscribe={subscribe} />}
     >
