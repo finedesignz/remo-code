@@ -8,7 +8,13 @@
  *
  * DAL + WS registry are mocked so no Postgres / no live WS needed.
  */
-import { describe, test, expect, beforeEach, mock } from 'bun:test'
+import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
+
+// Cache-bust + grab real exports so partial mocks below don't strip
+// other functions (e.g. ensureSupervisorProject) that sibling test files
+// import from the same module. Per Bun mock.module pollution pattern.
+const realErrorCaptureDal = await import(`../src/db/error-capture-dal.ts?bust=${Date.now()}`)
+const realDal = await import(`../src/db/dal.ts?bust=${Date.now()}`)
 
 const TEST_USER = '233c6d63-5f44-43f4-9eae-efc34a00735a'
 
@@ -52,6 +58,7 @@ const mockState: {
 
 let rowSeq = 0
 mock.module('../src/db/error-capture-dal.ts', () => ({
+  ...realErrorCaptureDal,
   ensureSelfProject: async (_userId: string) => mockState.selfProject,
   insertError: async (projectId: string, fields: any) => {
     rowSeq += 1
@@ -89,6 +96,7 @@ mock.module('../src/db/error-capture-dal.ts', () => ({
 }))
 
 mock.module('../src/db/dal.ts', () => ({
+  ...realDal,
   getUserTimezone: async () => 'UTC',
 }))
 
@@ -123,6 +131,8 @@ beforeEach(() => {
 })
 
 describe('hub self-capture', () => {
+  afterAll(() => mock.restore())
+
   test('install no-ops when HUB_SELF_OWNER_USER_ID unset', async () => {
     const app = new Hono()
     const ok = await installSelfCapture(app, '')
