@@ -1,37 +1,73 @@
 /**
- * Agent sender (W2/T9).
+ * Agent sender (W2/T9) — Round-2 migration: now an adapter over the shared
+ * session-dispatch pipeline `hub/src/dispatch/`.
  *
- * Sends a prompt or slash-command to an agent socket via the existing
- * `user_message` path. Persists the message in chat history so it shows
- * up in the UI alongside human-typed prompts. Honors the per-session queue.
+ * Previously this module hand-rolled: per-session queue claim → runtime-context
+ * snapshot → agent-socket send → a local `pendingTurns` map finalized by a hook
+ * in `hub/src/ws/agent.ts` (`onAssistantMessage`). All of that machinery now
+ * lives behind `dispatch()` in `hub/src/dispatch/pipeline.ts`. This file is the
+ * thin scheduler adapter for SESSION-targeted runs: it builds the prompt +
+ * runtime context, a `RunStore` that finalizes the already-inserted
+ * `scheduled_task_runs` row (via the dispatcher's `finalizeRun`, which fires the
+ * post-run action pipeline), sets the gate list (threshold → cost-cap — the
+ * promotion re-check, IR-2), provides the offline `replay`/`onParkExpire`
+ * thunks, and applies the Summary directive + `## RUNTIME CONTEXT` block to the
+ * SENT string ONLY (never to stored `messages` / the snapshot).
  *
- * Finalize path: a hook in `hub/src/ws/agent.ts` calls `onAssistantMessage`
- * here when the next assistant_message lands for the session, finalizing
- * the head-of-queue scheduled run.
+ * Finalize is no longer wired here: the agent ws assistant_message branch calls
+ * `dispatch.onSessionReply(sessionId, content)`, which fires `RunStore.onFinalize`
+ * for the in-flight scheduled run and promotes/re-dispatches any queued run
+ * through the full gate list again (so a user who crossed the cap while queued
+ * is skipped — IR-2). `onFinalize` carries the exact legacy
+ * `onAssistantMessage` behaviour: `finalizeRun(success, …)` which triggers the
+ * post-run action pipeline (chain/email/telegram/webhook/github-issue).
+ *
+ * Scope: ONLY the session send→queue→grace→finalize path moved. Cron, fan-out,
+ * cost-cap audit rows, target resolution, supervisor/coolify senders, triage
+ * routing, the Summary directive, and Phase-11 workflows all stay in
+ * `dispatcher.ts` / their own modules.
  */
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
 import { insertMessage } from '../../db/dal.ts'
 import { sql } from '../../db/postgres.ts'
-import { broadcastToSubscribers } from '../../ws/registry.ts'
-import * as queue from '../session-queue.ts'
+import { getChannel, broadcastToSubscribers } from '../../ws/registry.ts'
 import { finalizeRun, removeRunContext, getRunContext } from '../dispatcher.ts'
 import { buildRuntimeContext, renderRuntimeContextBlock, type RuntimeContext } from '../context/runtime-context.ts'
-
-interface PendingTurn {
-  runId: string
-  taskId: string
-  userId: string
-  startedAt: number
-}
-const pendingTurns = new Map<string, PendingTurn[]>()
-
-const TURN_TIMEOUT_MS = 30 * 60 * 1000
+import {
+  dispatch,
+  type DispatchRequest,
+  type PipelineDeps,
+  type RunStore,
+} from '../../dispatch/pipeline.ts'
+import { thresholdGate, dailyCostCapGate } from '../../dispatch/gates.ts'
 
 interface RunCtxLike {
   runId: string
   taskId: string
   userId: string
   target: { sessionId?: string | null; agentSocket?: any }
+  isManual?: boolean
+}
+
+/**
+ * Sessions with a scheduled run currently in flight (waiting for the model's
+ * assistant_message). Bundle 5 fallback: the `/ws/client` `send_message`
+ * handler refuses manual sends while a scheduled turn is the active turn so the
+ * manual reply isn't mis-attributed as the scheduled run's completion. Tracked
+ * here (not via the shared pipeline's `activeBySession`, which is cross-
+ * subsystem) so the gate stays scheduler-specific.
+ */
+const activeScheduledSessions = new Map<string, Set<string>>()
+function markActive(sessionId: string, runId: string): void {
+  const set = activeScheduledSessions.get(sessionId) ?? new Set<string>()
+  set.add(runId)
+  activeScheduledSessions.set(sessionId, set)
+}
+function clearActive(sessionId: string, runId: string): void {
+  const set = activeScheduledSessions.get(sessionId)
+  if (!set) return
+  set.delete(runId)
+  if (set.size === 0) activeScheduledSessions.delete(sessionId)
 }
 
 function buildContent(task: ScheduledTask): string {
@@ -46,28 +82,29 @@ function buildContent(task: ScheduledTask): string {
   return (task.payload as any)?.prompt || task.prompt || ''
 }
 
+const SUMMARY_DIRECTIVE = `\n\n---\nWhen finished, end your response with a single line starting with "Summary:" describing in 1-2 sentences what you accomplished or any blocker. Keep it brief — this is a scheduled run and the user only needs the headline result.`
+
+/**
+ * Session-targeted scheduled send. The dispatcher has already inserted the
+ * `scheduled_task_runs` row (status='pending') and tracked the RunContext, so
+ * the RunStore here does NOT insert a new row — it threads `ctx.runId` as the
+ * dispatch token + finalize key, and translates pipeline outcomes onto the
+ * existing run via `finalizeRun`.
+ */
 export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promise<void> {
   const sessionId = ctx.target.sessionId
   if (!sessionId) { await finalizeRun(ctx.runId, 'failed', 'no_session_id'); return }
 
-  const claim = queue.enqueue(sessionId, ctx.runId)
-  if (claim === 'dropped') { await finalizeRun(ctx.runId, 'skipped', 'session_busy'); return }
-  if (claim === 'queued') return
-
   const content = buildContent(task)
   if (!content) { await finalizeRun(ctx.runId, 'failed', 'empty_content'); return }
 
-  // Phase 11: build + persist runtime context snapshot, prepend block to
-  // the sent message. The STORED content (chat history) does NOT carry
-  // the runtime block — per agent.ts invariant, ephemeral directives never
-  // enter `messages`. The snapshot lives in `scheduled_task_runs`.
+  // Phase 11: build + persist the runtime context snapshot, then prepend the
+  // `## RUNTIME CONTEXT` block to the SENT message only. The STORED content
+  // (chat history) and the snapshot column never carry the Summary directive;
+  // the snapshot lives on `scheduled_task_runs`, never in `messages`.
   let runtimeCtx: RuntimeContext = {}
   try {
-    runtimeCtx = await buildRuntimeContext({
-      userId: ctx.userId,
-      sessionId,
-      taskKind: task.task_type,
-    })
+    runtimeCtx = await buildRuntimeContext({ userId: ctx.userId, sessionId, taskKind: task.task_type })
   } catch {
     // Best-effort. Fall through with an empty ctx; renderer emits just the header.
   }
@@ -79,80 +116,118 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
       WHERE id = ${ctx.runId}
     `
   } catch {
-    // Best-effort. Failure to persist snapshot must not fail the run.
+    // Best-effort. Failure to persist the snapshot must not fail the run.
   }
 
-  const summaryDirective = `\n\n---\nWhen finished, end your response with a single line starting with "Summary:" describing in 1-2 sentences what you accomplished or any blocker. Keep it brief — this is a scheduled run and the user only needs the headline result.`
-  const sentContent = `${runtimeBlock}\n\n## TASK\n${content}${summaryDirective}`
+  const sentContent = `${runtimeBlock}\n\n## TASK\n${content}${SUMMARY_DIRECTIVE}`
   const storedContent = `[scheduled: ${task.name}]\n\n${content}`
-  let msg: { id: string; created_at: string } | null = null
-  try {
-    msg = await insertMessage(sessionId, 'user', storedContent)
-  } catch (err: any) {
-    await finalizeRun(ctx.runId, 'failed', `insert_message_failed: ${err?.message}`)
+
+  // Manual runs fail fast when the target is offline instead of parking in
+  // grace (immediate UI feedback) — legacy parity with the dispatcher's
+  // isManual offline branch. Checked BEFORE dispatch() so no grace entry is
+  // ever registered for a manual run.
+  if (ctx.isManual && getChannel(sessionId) == null) {
+    await finalizeRun(ctx.runId, 'failed', 'target_offline')
     return
   }
 
-  broadcastToSubscribers(sessionId, {
-    type: 'message', session_id: sessionId, message: msg, run_id: ctx.runId,
-  })
+  const startedAt = Date.now()
 
-  const sock = ctx.target.agentSocket
-  if (!sock) { await finalizeRun(ctx.runId, 'failed', 'agent_socket_missing'); return }
-
-  try {
-    sock.send(JSON.stringify({
-      type: 'user_message', id: msg.id, content: sentContent, ts: msg.created_at, run_id: ctx.runId,
-    }))
-  } catch (err: any) {
-    await finalizeRun(ctx.runId, 'failed', `agent_send_failed: ${err?.message}`)
-    return
+  const store: RunStore = {
+    // The run row already exists (dispatcher inserted it). Return ctx.runId so
+    // the pipeline threads it as the finalize key. No new row inserted.
+    async open() { return ctx.runId },
+    // Gate / queue rejection. The pipeline passes the gate reason (threshold /
+    // cost-cap re-check on promotion) or 'session_busy' (queue drop). Map onto
+    // the existing run via finalizeRun so post-run / history stay consistent.
+    async markSkipped(token, reason) {
+      const status = reason.startsWith('quota_threshold_reached') ? 'skipped_quota' : 'skipped'
+      await finalizeRun(token, status, reason)
+      clearActive(sessionId, token)
+    },
+    // The exact legacy `onAssistantMessage` body: finalize the run as success
+    // with the reply snippet. `finalizeRun` fires the post-run action pipeline.
+    async onFinalize(token, replyContent) {
+      const duration = Date.now() - startedAt
+      const snippet = replyContent.length > 500 ? replyContent.slice(0, 500) + '...' : replyContent
+      await finalizeRun(token, 'success', null, { duration_ms: duration, output_snippet: snippet })
+      removeRunContext(token)
+      clearActive(sessionId, token)
+    },
+    async markFailed(token, errMsg) {
+      await finalizeRun(token, 'failed', `agent_send_failed: ${errMsg}`)
+      clearActive(sessionId, token)
+    },
   }
 
-  const q = pendingTurns.get(sessionId) ?? []
-  q.push({ runId: ctx.runId, taskId: ctx.taskId, userId: ctx.userId, startedAt: Date.now() })
-  pendingTurns.set(sessionId, q)
-}
-
-/**
- * Called by ws/agent.ts when an assistant_message lands. Finalizes the
- * head-of-queue scheduled run. cost_usd is left null (agent stream protocol
- * doesn't carry per-turn cost yet); duration is recorded locally.
- */
-export async function onAssistantMessage(sessionId: string, content: string): Promise<void> {
-  const q = pendingTurns.get(sessionId)
-  if (!q || q.length === 0) return
-  const turn = q.shift()!
-  if (q.length === 0) pendingTurns.delete(sessionId)
-  const duration = Date.now() - turn.startedAt
-  const snippet = content.length > 500 ? content.slice(0, 500) + '...' : content
-  await finalizeRun(turn.runId, 'success', null, {
-    duration_ms: duration, output_snippet: snippet,
-  })
-  removeRunContext(turn.runId)
-}
-
-setInterval(() => {
-  const now = Date.now()
-  for (const [sid, q] of pendingTurns) {
-    while (q.length > 0 && now - q[0].startedAt > TURN_TIMEOUT_MS) {
-      const stale = q.shift()!
-      void finalizeRun(stale.runId, 'failed', 'turn_timeout')
-    }
-    if (q.length === 0) pendingTurns.delete(sid)
+  const deps: PipelineDeps = {
+    // IR-1: cost-cap non-bypassable. IR-2: threshold → cost-cap. Running the
+    // gates here IS the waiter-promotion re-check the legacy `setOnPromote`
+    // handler did — a user who crossed the cap while queued is skipped when the
+    // pipeline re-dispatches the promoted waiter through this same gate list.
+    gates: [thresholdGate, dailyCostCapGate],
+    store,
+    isOnline: (req) => getChannel(req.sessionId) != null,
+    // Offline replay: re-run the task via runNow (fresh run row), mirroring the
+    // legacy grace drain. Manual runs never park (handled below).
+    replay: async () => {
+      const { runNow } = await import('../dispatcher.ts')
+      await runNow(task.id, ctx.userId, {})
+    },
+    // Grace TTL lapse → legacy expire-mark (skipped/target_offline).
+    onParkExpire: async () => {
+      await finalizeRun(ctx.runId, 'skipped', 'target_offline')
+      clearActive(sessionId, ctx.runId)
+    },
+    // Ship the user_message: persist chat history, broadcast it, forward on the
+    // agent socket WITH the runtime block + Summary directive (sent string only).
+    send: async (req) => {
+      const channel = getChannel(req.sessionId)
+      if (!channel) throw new Error('agent_socket_missing')
+      const msg = await insertMessage(req.sessionId, 'user', storedContent)
+      broadcastToSubscribers(req.sessionId, {
+        type: 'message', session_id: req.sessionId, message: msg, run_id: ctx.runId,
+      })
+      channel.ws.send(JSON.stringify({
+        type: 'user_message', id: msg.id, content: sentContent, ts: msg.created_at, run_id: ctx.runId,
+      }))
+      markActive(req.sessionId, ctx.runId)
+    },
   }
-}, 60_000)
 
-export function _pendingTurns() { return pendingTurns }
-export { getRunContext }
+  const req: DispatchRequest = { userId: ctx.userId, sessionId, token: ctx.runId, prompt: sentContent }
+  const outcome = await dispatch(req, deps)
+
+  switch (outcome.kind) {
+    case 'dispatched':
+    case 'queued':
+      // dispatched: send fired, finalize lands via onSessionReply.
+      // queued: stays pending; promotion re-dispatches via onSessionReply.
+      return
+    case 'parked_offline':
+      // Scheduled run parked in grace; onParkExpire marks target_offline on TTL
+      // lapse, drain on reconnect re-dispatches via runNow. Manual runs already
+      // failed fast above and never reach here.
+      return
+    case 'dropped_busy':
+      // markSkipped(session_busy) already fired inside the pipeline.
+      return
+    case 'skipped':
+    case 'failed':
+      // markSkipped / markFailed already fired inside the pipeline.
+      return
+  }
+}
 
 /**
  * Bundle 5 fallback (TRIAGE-2026-05-28): true if a scheduled run is currently
- * in flight for `sessionId` (i.e. waiting for its `assistant_message`). The
- * `/ws/client` `send_message` handler uses this to refuse manual sends while
- * a scheduled turn is the active turn — prevents the manual reply from being
- * mis-attributed as the scheduled run's completion.
+ * in flight for `sessionId`. The `/ws/client` `send_message` handler uses this
+ * to refuse manual sends while a scheduled turn is the active turn.
  */
 export function isScheduledRunActive(sessionId: string): boolean {
-  return (pendingTurns.get(sessionId)?.length ?? 0) > 0
+  return (activeScheduledSessions.get(sessionId)?.size ?? 0) > 0
 }
+
+// Test-only — inspect the active-session map.
+export function _activeScheduledSessions() { return activeScheduledSessions }
+export { getRunContext }
