@@ -642,6 +642,16 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_enabled BOOLEAN NOT NULL
 ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_name TEXT NOT NULL DEFAULT 'Orchestrator';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_custom_instructions TEXT;
 
+-- orchestrator-autolaunch (2026-05-28): the orchestrator now auto-launches on
+-- supervisor connect and is on-by-default. Flip the column default to true for
+-- NEW users, add an explicit-disable sentinel so a user who turns it OFF in the
+-- UI is never re-enabled by a future migration or fought by the machine-
+-- triggered auto-launch, then backfill the existing fleet to enabled (except
+-- anyone already carrying the sentinel). All idempotent.
+ALTER TABLE users ALTER COLUMN orchestrator_enabled SET DEFAULT true;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_disabled_explicitly BOOLEAN NOT NULL DEFAULT false;
+UPDATE users SET orchestrator_enabled = true WHERE orchestrator_disabled_explicitly = false;
+
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_orchestrator BOOLEAN NOT NULL DEFAULT false;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_orchestrator_unique
