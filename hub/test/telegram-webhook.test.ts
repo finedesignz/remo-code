@@ -77,11 +77,46 @@ mock.module("../src/db/dal.ts", () => ({
 }));
 
 mock.module("../src/db/postgres.ts", () => ({
-  sql: async (_strings: TemplateStringsArray, ..._values: any[]) => {
-    // Only used for the email lookup in handleStart. Return whatever user we have.
+  sql: async (strings: TemplateStringsArray, ..._values: any[]) => {
+    const text = strings.join("?");
+    // Doctor's session SELECT — return a session row so check 3 passes when autoheal fires.
+    if (text.includes("FROM sessions")) {
+      if (state.user?.telegram_default_session_id) {
+        return [{
+          id: state.user.telegram_default_session_id,
+          name: "test-repo",
+          project_dir: "C:/repos/test-repo",
+          hostname: "devbox",
+          deleted_at: null,
+        }];
+      }
+      return [];
+    }
+    // Default — email lookup in handleStart, prewarm queries, etc.
     if (state.user) return [{ email: state.user.email }];
     return [];
   },
+}));
+
+// Doctor + launch + prewarm dependencies (only really hit by autoheal tests).
+mock.module("../src/db/supervisor-dal.ts", () => ({
+  listSupervisorsForUser: async () => [{ id: "sup-1", hostname: "devbox", last_seen_at: new Date() }],
+  createRun: async () => ({ id: "run-test" }),
+}));
+mock.module("../src/ws/supervisor-registry.ts", () => ({
+  isSupervisorOnline: () => true,
+  sendToSupervisor: () => {},
+  updateSupervisorState: async () => {},
+}));
+mock.module("../src/ws/registry.ts", () => ({
+  getChannel: () => undefined,
+  broadcastToSubscribers: () => {},
+}));
+mock.module("../src/sessions/budget.ts", () => ({
+  reserveSessionSlot: async () => ({ ok: true }),
+}));
+mock.module("../src/telegram/launch.ts", () => ({
+  launchSessionForUser: async () => ({ ok: true, runId: "r1", supervisorId: "sup-1", hostname: "devbox", repoPath: "/r" }),
 }));
 
 // Telegram client — record sends, never network.
@@ -151,14 +186,18 @@ function mkUpdate(opts: { update_id: number; chatId: number; text?: string; phot
 }
 
 let app: Hono;
+let _resetReplayBuffer: () => void = () => {};
 
 beforeAll(async () => {
   const mod = await import("../src/api/telegram-webhook.ts");
+  const doctorMod = await import("../src/telegram/doctor.ts");
+  _resetReplayBuffer = doctorMod._resetReplayBufferForTests;
   app = new Hono();
   app.route("/api/telegram", mod.telegramWebhookRoutes);
 });
 
 beforeEach(() => {
+  _resetReplayBuffer();
   state.linkCodeUser = null;
   state.user = null;
   state.insertedLogs = [];
@@ -301,6 +340,17 @@ describe("linked plain-text dispatch", () => {
     expect(res.status).toBe(200);
     expect(state.dispatchCalls.length).toBe(1);
     expect(state.sentMessages[0]?.text.toLowerCase()).toContain("daily cost cap");
+  });
+
+  test("agent_offline triggers autoheal opener — NOT 'supervisor is offline'", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_abc" };
+    state.dispatchOutcome = "agent_offline";
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkUpdate({ update_id: 600, chatId: LINKED_CHAT, text: "wake up" }));
+    expect(res.status).toBe(200);
+    // The legacy preamble is suppressed.
+    expect(state.sentMessages.find((m) => m.text.toLowerCase().includes("your supervisor is offline"))).toBeUndefined();
+    // The new opener is sent (first message from runDoctor with autoheal=true).
+    expect(state.sentMessages.find((m) => m.text.includes("Hold on") && m.text.includes("diagnosing"))).toBeDefined();
   });
 
   test("session_busy → polite busy reply", async () => {

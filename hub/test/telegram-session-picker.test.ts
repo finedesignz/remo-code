@@ -130,6 +130,134 @@ describe("session-picker pure", () => {
   });
 });
 
+// ── applySidebarParityFilter tests (Items 6 + Bug A + Bug C) ─────────────
+
+import { applySidebarParityFilter } from "../src/telegram/session-picker.ts";
+
+function mk(over: Partial<PickerSessionRow>): PickerSessionRow {
+  return {
+    id: over.id ?? "id-" + Math.random().toString(36).slice(2, 8),
+    name: over.name ?? null,
+    project_dir: over.project_dir ?? null,
+    status: over.status ?? "offline",
+    repo_key: over.repo_key ?? null,
+    is_orchestrator: over.is_orchestrator ?? false,
+    github_owner: over.github_owner ?? null,
+    github_repo: over.github_repo ?? null,
+    last_activity_ms: over.last_activity_ms ?? null,
+  };
+}
+
+describe("applySidebarParityFilter", () => {
+  test("drops offline rows with null repo_key (legacy local offline)", () => {
+    const out = applySidebarParityFilter([
+      mk({ id: "a", status: "offline", repo_key: null }),
+      mk({ id: "b", status: "online", repo_key: null }),
+      mk({ id: "c", status: "offline", repo_key: "github://x/y" }),
+    ]);
+    const ids = out.map((r) => r.id);
+    expect(ids).not.toContain("a");
+    expect(ids).toContain("b");
+    expect(ids).toContain("c");
+  });
+
+  test("dedupes by repo_key keeping most-recently-active", () => {
+    const out = applySidebarParityFilter([
+      mk({ id: "old", status: "online", repo_key: "k1", last_activity_ms: 100 }),
+      mk({ id: "new", status: "online", repo_key: "k1", last_activity_ms: 200 }),
+    ]);
+    expect(out.map((r) => r.id)).toEqual(["new"]);
+  });
+
+  test("pins orchestrator row to position 0", () => {
+    const out = applySidebarParityFilter([
+      mk({ id: "a", status: "online", repo_key: "k1" }),
+      mk({ id: "b", status: "online", repo_key: "k2" }),
+      mk({ id: "orch", status: "online", repo_key: "k3", is_orchestrator: true }),
+    ]);
+    expect(out[0]!.id).toBe("orch");
+  });
+
+  test("Bug A — one canonical + 3 worktrees → only canonical survives", () => {
+    const rows: PickerSessionRow[] = [
+      mk({ id: "canon", status: "online", repo_key: "k1", project_dir: "C:/g/remo-code", github_owner: "fd", github_repo: "remo-code", last_activity_ms: 100 }),
+      mk({ id: "wt1", status: "online", repo_key: "k2", project_dir: "C:/g/remo-code-feat-x", github_owner: "fd", github_repo: "remo-code", last_activity_ms: 200 }),
+      mk({ id: "wt2", status: "online", repo_key: "k3", project_dir: "C:/g/remo-code-fix-y", github_owner: "fd", github_repo: "remo-code", last_activity_ms: 300 }),
+      mk({ id: "wt3", status: "online", repo_key: "k4", project_dir: "C:/g/remo-code-feat-z", github_owner: "fd", github_repo: "remo-code", last_activity_ms: 50 }),
+    ];
+    const out = applySidebarParityFilter(rows);
+    expect(out.map((r) => r.id)).toEqual(["canon"]);
+  });
+
+  test("Bug A — no canonical, 3 worktrees → most-recently-active wins", () => {
+    const rows: PickerSessionRow[] = [
+      mk({ id: "wt1", status: "online", repo_key: "k1", project_dir: "C:/g/x-feat-a", github_owner: "fd", github_repo: "x", last_activity_ms: 100 }),
+      mk({ id: "wt2", status: "online", repo_key: "k2", project_dir: "C:/g/x-feat-b", github_owner: "fd", github_repo: "x", last_activity_ms: 300 }),
+      mk({ id: "wt3", status: "online", repo_key: "k3", project_dir: "C:/g/x-feat-c", github_owner: "fd", github_repo: "x", last_activity_ms: 200 }),
+    ];
+    const out = applySidebarParityFilter(rows);
+    expect(out.map((r) => r.id)).toEqual(["wt2"]);
+  });
+
+  test("Bug A — two repos × 3 worktrees each → 2 survivors", () => {
+    const rows: PickerSessionRow[] = [];
+    for (const repo of ["one", "two"]) {
+      for (let i = 0; i < 3; i++) {
+        rows.push(mk({
+          id: `${repo}-${i}`,
+          status: "online",
+          repo_key: `k-${repo}-${i}`,
+          project_dir: i === 0 ? `C:/g/${repo}` : `C:/g/${repo}-feat-${i}`,
+          github_owner: "fd",
+          github_repo: repo,
+          last_activity_ms: i * 100,
+        }));
+      }
+    }
+    const out = applySidebarParityFilter(rows);
+    expect(out.length).toBe(2);
+    expect(out.map((r) => r.id).sort()).toEqual(["one-0", "two-0"]);
+  });
+
+  test("Bug A — null github_repo rows untouched by worktree dedup", () => {
+    const out = applySidebarParityFilter([
+      mk({ id: "a", status: "online", repo_key: "k1", github_owner: null, github_repo: null }),
+      mk({ id: "b", status: "online", repo_key: "k2", github_owner: null, github_repo: null }),
+    ]);
+    expect(out.map((r) => r.id).sort()).toEqual(["a", "b"]);
+  });
+});
+
+describe("renderPickerText orchestrator + hint", () => {
+  test("legend shows ⭐ when page contains orchestrator", () => {
+    const rows = [
+      mk({ id: "orch", status: "online", repo_key: "k1", is_orchestrator: true }),
+      mk({ id: "b", status: "online", repo_key: "k2" }),
+    ];
+    const t = renderPickerText({ total: 2, offset: 0, defaultId: null, rows });
+    expect(t).toContain("⭐ = orchestrator");
+  });
+
+  test("Bug C — orchestrator hint shown when none exists in the user's list", () => {
+    const rows = [
+      mk({ id: "a", status: "online", repo_key: "k1" }),
+      mk({ id: "b", status: "online", repo_key: "k2" }),
+    ];
+    const t = renderPickerText({ total: 2, offset: 0, defaultId: null, rows });
+    expect(t).toContain("Pin a root orchestrator");
+    expect(t).not.toContain("⭐ = orchestrator");
+  });
+
+  test("hint suppressed when orchestrator exists (even if not on current page)", () => {
+    const rows = Array.from({ length: 25 }, (_, i) => mk({ id: `s${i}`, status: "online", repo_key: `k${i}` }));
+    rows[24]!.is_orchestrator = true;
+    const t = renderPickerText({ total: 25, offset: 0, defaultId: null, rows });
+    // Page 0 (first 20) has no orchestrator, but the full list does → no hint, no ⭐ on this page.
+    expect(t).not.toContain("Pin a root orchestrator");
+    expect(t).not.toContain("⭐ = orchestrator");
+  });
+});
+
 // ── Webhook integration tests ──────────────────────────────────────────────
 
 const TEST_SECRET = "test-secret-must-be-at-least-16-chars";
@@ -199,7 +327,17 @@ mock.module("../src/db/postgres.ts", () => ({
       const uid = values[0];
       return state.sessions
         .filter((s) => s.user_id === uid)
-        .map(({ id, name, project_dir }) => ({ id, name, project_dir }));
+        .map(({ id, name, project_dir }, i) => ({
+          id,
+          name,
+          project_dir,
+          status: "online",
+          repo_key: `test://${id}`,
+          is_orchestrator: false,
+          github_owner: null,
+          github_repo: null,
+          last_activity: new Date(Date.now() - i * 1000),
+        }));
     }
     // listUserSessions (LIMIT 25)
     if (q.includes("FROM sessions") && q.includes("LIMIT 25")) {
