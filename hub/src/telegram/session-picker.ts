@@ -114,9 +114,13 @@ function collapseWorktreesByRepo(rows: PickerSessionRow[]): PickerSessionRow[] {
  * Returns a NEW array; input is not mutated.
  */
 export function applySidebarParityFilter(rows: PickerSessionRow[]): PickerSessionRow[] {
-  // Step 1 — drop offline + no repo_key.
+  // Step 1 — drop offline + no repo_key, EXCEPT the orchestrator. The root
+  // orchestrator is a repo-less session (no repo_key) and is frequently offline
+  // (it launches lazily on first message). It MUST always be visible and pinned
+  // so the user can tap-to-select it — mirrors the web Sidebar position-0 pin,
+  // which never hides the orchestrator on offline/no-repo grounds.
   const isOnline = (s: PickerSessionRow): boolean => s.status === "online" || s.status === "thinking";
-  const filtered = rows.filter((s) => isOnline(s) || !!s.repo_key);
+  const filtered = rows.filter((s) => s.is_orchestrator || isOnline(s) || !!s.repo_key);
 
   // Step 1b (Bug A) — collapse worktrees by (github_owner, github_repo).
   const kept = collapseWorktreesByRepo(filtered);
@@ -209,12 +213,15 @@ export function buildSessionKeyboard(opts: {
     const row: InlineKeyboardButton[] = [];
     for (let j = 0; j < BUTTONS_PER_ROW && i + j < page.length; j++) {
       const s = page[i + j]!;
-      const label = deriveLabel(s);
       const isOnline = s.status === "online" || s.status === "thinking";
       const checkMark = defaultId && s.id === defaultId ? "✓ " : "";
       const statusDot = isOnline ? "🟢 " : "";
-      const orchStar = s.is_orchestrator ? "⭐ " : "";
-      const text = truncate(orchStar + checkMark + statusDot + label, MAX_LABEL_LEN);
+      // The orchestrator gets a fixed, self-describing label so the user can
+      // recognize + tap it even when it has no repo name. Non-orchestrator rows
+      // derive their label from project_dir/name.
+      const text = s.is_orchestrator
+        ? truncate(checkMark + "🧭 Orchestrator (root)", MAX_LABEL_LEN)
+        : truncate(checkMark + statusDot + deriveLabel(s), MAX_LABEL_LEN);
       row.push({ text, callback_data: `s:${s.id}` });
     }
     keyboard.push(row);
@@ -262,7 +269,7 @@ export function renderPickerText(opts: {
   if (rows) {
     const page = rows.slice(offset, offset + PAGE_SIZE);
     if (page.some((s) => s.is_orchestrator)) {
-      legend.push("⭐ = orchestrator");
+      legend.push("🧭 = orchestrator (root folder)");
       anyOrchestrator = true;
     }
     if (!anyOrchestrator) {

@@ -178,6 +178,17 @@ describe("applySidebarParityFilter", () => {
     expect(out[0]!.id).toBe("orch");
   });
 
+  test("keeps + pins an OFFLINE, repo_key-less orchestrator (exempt from step-1 drop)", () => {
+    // The root orchestrator has no repo_key and is frequently offline (lazy
+    // launch). It must NOT be dropped like other offline+no-repo rows.
+    const out = applySidebarParityFilter([
+      mk({ id: "a", status: "online", repo_key: "k1" }),
+      mk({ id: "orch", status: "offline", repo_key: null, is_orchestrator: true }),
+    ]);
+    expect(out.map((r) => r.id)).toContain("orch");
+    expect(out[0]!.id).toBe("orch"); // pinned first
+  });
+
   test("Bug A — one canonical + 3 worktrees → only canonical survives", () => {
     const rows: PickerSessionRow[] = [
       mk({ id: "canon", status: "online", repo_key: "k1", project_dir: "C:/g/remo-code", github_owner: "fd", github_repo: "remo-code", last_activity_ms: 100 }),
@@ -235,7 +246,7 @@ describe("renderPickerText orchestrator + hint", () => {
       mk({ id: "b", status: "online", repo_key: "k2" }),
     ];
     const t = renderPickerText({ total: 2, offset: 0, defaultId: null, rows });
-    expect(t).toContain("⭐ = orchestrator");
+    expect(t).toContain("🧭 = orchestrator (root folder)");
   });
 
   test("Bug C — orchestrator hint shown when none exists in the user's list", () => {
@@ -275,10 +286,13 @@ interface SessionRecord {
   user_id: string;
   name: string | null;
   project_dir: string | null;
+  is_orchestrator?: boolean;
+  status?: string;
+  repo_key?: string | null;
 }
 
 const state: {
-  user: { id: string; email: string; telegram_chat_id: number | null; telegram_default_session_id: string | null } | null;
+  user: { id: string; email: string; telegram_chat_id: number | null; telegram_default_session_id: string | null; telegram_default_explicit?: boolean } | null;
   sessions: SessionRecord[];
   insertedLogs: any[];
   dedupeOnUpdateId: Set<number>;
@@ -286,6 +300,16 @@ const state: {
   callbackAnswers: Array<{ id: string; text?: string; show_alert?: boolean }>;
   editedMessages: Array<{ chat: number | string; messageId: number; text: string; keyboard?: any }>;
   editedReplyMarkups: Array<{ chat: number | string; messageId: number; keyboard: any }>;
+  setDefaults: Array<{ userId: string; sessionId: string | null; explicit?: boolean }>;
+  // orchestrator state: a row in `sessions` flagged is_orchestrator is what the
+  // picker keys on; these toggle the synthetic-injection / enabled gates.
+  orchEnabled: boolean;
+  orchDisabledExplicitly: boolean;
+  launchCalls: number;
+  launchResult: any;
+  // When true, editMessageText throws a non-'not modified' 400 (drives the
+  // plain-text fallback path).
+  editFails: boolean;
 } = {
   user: null,
   sessions: [],
@@ -295,6 +319,12 @@ const state: {
   callbackAnswers: [],
   editedMessages: [],
   editedReplyMarkups: [],
+  setDefaults: [],
+  orchEnabled: false,
+  orchDisabledExplicitly: false,
+  launchCalls: 0,
+  launchResult: { ok: true, sessionId: "sess-orch-real", runId: "r1", supervisorId: "sup-1", cwd: "/root", reused: false },
+  editFails: false,
 };
 
 const realDalTSP = await import(`../src/db/dal.ts?real=${Date.now()}`);
@@ -307,8 +337,12 @@ mock.module("../src/db/dal.ts", () => ({
   getSession: async (sessionId: string, userId: string) => {
     return state.sessions.find((s) => s.id === sessionId && s.user_id === userId) ?? null;
   },
-  setTelegramDefaultSession: async (userId: string, sid: string | null) => {
-    if (state.user && state.user.id === userId) state.user.telegram_default_session_id = sid;
+  setTelegramDefaultSession: async (userId: string, sid: string | null, explicit = false) => {
+    state.setDefaults.push({ userId, sessionId: sid, explicit });
+    if (state.user && state.user.id === userId) {
+      state.user.telegram_default_session_id = sid;
+      state.user.telegram_default_explicit = explicit;
+    }
   },
   setTelegramChatId: async () => {},
   findUserByLinkCode: async () => null,
@@ -329,17 +363,26 @@ mock.module("../src/db/postgres.ts", () => ({
       const uid = values[0];
       return state.sessions
         .filter((s) => s.user_id === uid)
-        .map(({ id, name, project_dir }, i) => ({
-          id,
-          name,
-          project_dir,
-          status: "online",
-          repo_key: `test://${id}`,
-          is_orchestrator: false,
+        .map((s, i) => ({
+          id: s.id,
+          name: s.name,
+          project_dir: s.project_dir,
+          status: s.status ?? "online",
+          repo_key: s.repo_key !== undefined ? s.repo_key : `test://${s.id}`,
+          is_orchestrator: !!s.is_orchestrator,
           github_owner: null,
           github_repo: null,
           last_activity: new Date(Date.now() - i * 1000),
         }));
+    }
+    // getOrchestratorState query (SELECT ... FROM users WHERE id = ...)
+    if (q.includes("orchestrator_enabled") && q.includes("FROM users")) {
+      return [{
+        orchestrator_enabled: state.orchEnabled,
+        orchestrator_name: "Orchestrator",
+        orchestrator_custom_instructions: null,
+        orchestrator_disabled_explicitly: state.orchDisabledExplicitly,
+      }];
     }
     // listUserSessions (LIMIT 25)
     if (q.includes("FROM sessions") && q.includes("LIMIT 25")) {
@@ -367,6 +410,11 @@ mock.module("../src/telegram/client.ts", () => ({
     state.callbackAnswers.push({ id, ...opts });
   },
   editMessageText: async (chatId: number | string, messageId: number, text: string, opts: any = {}) => {
+    if (state.editFails) {
+      const e: any = new Error("Bad Request: can't parse entities");
+      e.status = 400;
+      throw e;
+    }
     state.editedMessages.push({ chat: chatId, messageId, text, keyboard: opts?.inline_keyboard });
   },
   editMessageReplyMarkup: async (chatId: number | string, messageId: number, keyboard: any) => {
@@ -383,6 +431,14 @@ mock.module("../src/telegram/dispatch.ts", () => ({
   dispatchToSession: async () => ({ kind: "dispatched" }),
   isOverCostCap: async () => false,
   nextUtcResetIso: () => "2026-05-29T00:00:00.000Z",
+}));
+
+mock.module("../src/orchestrator/auto-launch.ts", () => ({
+  launchOrchestrator: async () => {
+    state.launchCalls += 1;
+    return state.launchResult;
+  },
+  maybeAutoLaunchOrchestrator: async () => ({ launched: false }),
 }));
 
 let app: Hono;
@@ -402,6 +458,12 @@ beforeEach(() => {
   state.callbackAnswers = [];
   state.editedMessages = [];
   state.editedReplyMarkups = [];
+  state.setDefaults = [];
+  state.orchEnabled = false;
+  state.orchDisabledExplicitly = false;
+  state.launchCalls = 0;
+  state.launchResult = { ok: true, sessionId: "sess-orch-real", runId: "r1", supervisorId: "sup-1", cwd: "/root", reused: false };
+  state.editFails = false;
 });
 
 function post(path: string, body: any): Promise<Response> {
@@ -570,5 +632,129 @@ describe("callback_query routing", () => {
     expect(state.callbackAnswers.length).toBe(1);
     expect(state.callbackAnswers[0]!.text).toBe("Unknown action");
     expect(state.user!.telegram_default_session_id).toBeNull();
+  });
+
+  test("button tap sets the default as EXPLICIT", async () => {
+    linkUser({ sessionCount: 5 });
+    const targetId = state.sessions[2]!.id;
+    await post(`/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 16, chatId: LINKED_CHAT, data: `s:${targetId}` }));
+    expect(state.setDefaults).toEqual([{ userId: LINKED_USER_ID, sessionId: targetId, explicit: true }]);
+    expect(state.user!.telegram_default_explicit).toBe(true);
+  });
+});
+
+describe("orchestrator visibility in /list", () => {
+  test("offline, repo_key-less orchestrator row is shown + pinned FIRST", async () => {
+    state.user = {
+      id: LINKED_USER_ID,
+      email: "linked@example.com",
+      telegram_chat_id: LINKED_CHAT,
+      telegram_default_session_id: null,
+    };
+    // One online repo session + an OFFLINE orchestrator with null repo_key.
+    state.sessions = [
+      { id: "repo-1", user_id: LINKED_USER_ID, name: null, project_dir: "/u/repo-1", status: "online", repo_key: "k1" },
+      { id: "orch-real", user_id: LINKED_USER_ID, name: "Orchestrator", project_dir: "/root", status: "offline", repo_key: null, is_orchestrator: true },
+    ];
+    const res = await post(`/api/telegram/webhook/${TEST_SECRET}`, mkListMessage({ update_id: 20, chatId: LINKED_CHAT }));
+    expect(res.status).toBe(200);
+    const sent = state.sentMessages[0]!;
+    expect(sent.keyboard).toBeDefined();
+    // First button (row 0, col 0) is the orchestrator.
+    expect(sent.keyboard[0][0].callback_data).toBe("s:orch-real");
+    expect(sent.keyboard[0][0].text).toContain("🧭 Orchestrator");
+  });
+
+  test("zero sessions + orchestrator ENABLED → synthetic orchestrator row offered", async () => {
+    state.user = {
+      id: LINKED_USER_ID,
+      email: "linked@example.com",
+      telegram_chat_id: LINKED_CHAT,
+      telegram_default_session_id: null,
+    };
+    state.sessions = [];
+    state.orchEnabled = true;
+    const res = await post(`/api/telegram/webhook/${TEST_SECRET}`, mkListMessage({ update_id: 21, chatId: LINKED_CHAT }));
+    expect(res.status).toBe(200);
+    const sent = state.sentMessages[0]!;
+    // Keyboard present (not the "No sessions" plain text) with the synthetic row.
+    expect(sent.keyboard).toBeDefined();
+    expect(sent.keyboard[0][0].callback_data).toBe("s:__orchestrator__");
+  });
+
+  test("zero sessions + orchestrator DISABLED → plain 'No sessions' text", async () => {
+    state.user = {
+      id: LINKED_USER_ID,
+      email: "linked@example.com",
+      telegram_chat_id: LINKED_CHAT,
+      telegram_default_session_id: null,
+    };
+    state.sessions = [];
+    state.orchEnabled = false;
+    const res = await post(`/api/telegram/webhook/${TEST_SECRET}`, mkListMessage({ update_id: 22, chatId: LINKED_CHAT }));
+    expect(res.status).toBe(200);
+    expect(state.sentMessages[0]!.keyboard).toBeUndefined();
+    expect(state.sentMessages[0]!.text).toContain("No sessions");
+  });
+
+  test("tapping the synthetic orchestrator launches it + pins EXPLICITLY", async () => {
+    state.user = {
+      id: LINKED_USER_ID,
+      email: "linked@example.com",
+      telegram_chat_id: LINKED_CHAT,
+      telegram_default_session_id: null,
+    };
+    state.sessions = [];
+    state.orchEnabled = true;
+    state.launchResult = { ok: true, sessionId: "sess-orch-real", runId: "r1", supervisorId: "sup-1", cwd: "/root", reused: false };
+    const res = await post(
+      `/api/telegram/webhook/${TEST_SECRET}`,
+      mkCallback({ update_id: 23, chatId: LINKED_CHAT, data: "s:__orchestrator__" }),
+    );
+    expect(res.status).toBe(200);
+    expect(state.launchCalls).toBe(1);
+    // Pinned explicitly to the real launched session id.
+    expect(state.setDefaults).toEqual([{ userId: LINKED_USER_ID, sessionId: "sess-orch-real", explicit: true }]);
+    expect(state.user!.telegram_default_explicit).toBe(true);
+  });
+
+  test("tapping synthetic orchestrator with no online supervisor → friendly reply, no pin", async () => {
+    state.user = {
+      id: LINKED_USER_ID,
+      email: "linked@example.com",
+      telegram_chat_id: LINKED_CHAT,
+      telegram_default_session_id: null,
+    };
+    state.sessions = [];
+    state.orchEnabled = true;
+    state.launchResult = { ok: false, reason: "no_online_supervisor" };
+    const res = await post(
+      `/api/telegram/webhook/${TEST_SECRET}`,
+      mkCallback({ update_id: 24, chatId: LINKED_CHAT, data: "s:__orchestrator__" }),
+    );
+    expect(res.status).toBe(200);
+    expect(state.launchCalls).toBe(1);
+    expect(state.setDefaults.length).toBe(0); // no pin
+    expect(state.sentMessages.some((m) => /could not start the orchestrator/i.test(m.text))).toBe(true);
+  });
+});
+
+describe("pagination resilience", () => {
+  test("editMessageText failure falls back to a fresh sendMessage (page still renders)", async () => {
+    linkUser({ sessionCount: 70 });
+    state.editFails = true; // editMessageText throws a non-'not modified' 400.
+    const res = await post(
+      `/api/telegram/webhook/${TEST_SECRET}`,
+      mkCallback({ update_id: 25, chatId: LINKED_CHAT, data: "p:20" }),
+    );
+    expect(res.status).toBe(200);
+    // Edit was attempted but recorded nothing (it threw).
+    expect(state.editedMessages.length).toBe(0);
+    // Fallback path: a NEW message was sent carrying the page-2 keyboard.
+    const withKb = state.sentMessages.find((m) => m.keyboard);
+    expect(withKb).toBeDefined();
+    expect(withKb!.text).toContain("21–40 of 70");
+    // Callback still answered (button doesn't spin).
+    expect(state.callbackAnswers.length).toBe(1);
   });
 });

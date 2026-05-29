@@ -33,6 +33,7 @@ const state = {
     email: LINKED_EMAIL,
     telegram_chat_id: LINKED_CHAT as number | null,
     telegram_default_session_id: null as string | null,
+    telegram_default_explicit: false,
   },
   // sessions that "exist" (getSession returns a row for these ids).
   liveSessionIds: new Set<string>(),
@@ -40,7 +41,7 @@ const state = {
   orchEnabled: true,
   orchDisabledExplicitly: false,
   orchOpenSession: { id: ORCH_SESSION_ID, status: "offline", is_orchestrator: true } as any,
-  setDefaults: [] as Array<{ userId: string; sessionId: string | null }>,
+  setDefaults: [] as Array<{ userId: string; sessionId: string | null; explicit?: boolean }>,
   dispatchCalls: [] as any[],
   dispatchOutcome: "dispatched" as string,
   sentMessages: [] as Array<{ chat: number | string; text: string }>,
@@ -55,9 +56,12 @@ mock.module("../src/db/dal.ts", () => ({
     state.user.telegram_chat_id === Number(chatId) ? state.user : null,
   findUserByLinkCode: async () => null,
   setTelegramChatId: async () => {},
-  setTelegramDefaultSession: async (userId: string, sid: string | null) => {
-    state.setDefaults.push({ userId, sessionId: sid });
-    if (state.user.id === userId) state.user.telegram_default_session_id = sid;
+  setTelegramDefaultSession: async (userId: string, sid: string | null, explicit = false) => {
+    state.setDefaults.push({ userId, sessionId: sid, explicit });
+    if (state.user.id === userId) {
+      state.user.telegram_default_session_id = sid;
+      state.user.telegram_default_explicit = explicit;
+    }
   },
   getSession: async (sessionId: string) =>
     state.liveSessionIds.has(sessionId)
@@ -150,6 +154,7 @@ beforeEach(() => {
     email: LINKED_EMAIL,
     telegram_chat_id: LINKED_CHAT,
     telegram_default_session_id: null,
+    telegram_default_explicit: false,
   };
   state.liveSessionIds = new Set([ORCH_SESSION_ID]);
   state.orchEnabled = true;
@@ -168,8 +173,8 @@ describe("Telegram default → orchestrator fallback", () => {
     expect(res.status).toBe(200);
     expect(state.dispatchCalls.length).toBe(1);
     expect(state.dispatchCalls[0].sessionId).toBe(ORCH_SESSION_ID);
-    // Lazy-pin persisted.
-    expect(state.setDefaults).toEqual([{ userId: LINKED_USER_ID, sessionId: ORCH_SESSION_ID }]);
+    // Lazy-pin persisted as NON-explicit (auto-pin, not a deliberate choice).
+    expect(state.setDefaults).toEqual([{ userId: LINKED_USER_ID, sessionId: ORCH_SESSION_ID, explicit: false }]);
   });
 
   test("null default + orchestrator DISABLED → 'No default session' reply, no dispatch", async () => {
@@ -197,16 +202,31 @@ describe("Telegram default → orchestrator fallback", () => {
     expect(res.status).toBe(200);
     expect(state.dispatchCalls.length).toBe(1);
     expect(state.dispatchCalls[0].sessionId).toBe(ORCH_SESSION_ID);
-    expect(state.setDefaults).toEqual([{ userId: LINKED_USER_ID, sessionId: ORCH_SESSION_ID }]);
+    expect(state.setDefaults).toEqual([{ userId: LINKED_USER_ID, sessionId: ORCH_SESSION_ID, explicit: false }]);
   });
 
-  test("explicit live default (non-orchestrator) → dispatch targets it, no fallback, no re-pin", async () => {
+  test("EXPLICIT live default (non-orchestrator) → honored, no orchestrator override, no re-pin", async () => {
+    // The user deliberately picked this repo via /session or a /list tap.
     state.liveSessionIds.add("sess_project");
     state.user.telegram_default_session_id = "sess_project";
+    state.user.telegram_default_explicit = true;
     const res = await postUpdate("work on the project");
     expect(res.status).toBe(200);
     expect(state.dispatchCalls.length).toBe(1);
-    expect(state.dispatchCalls[0].sessionId).toBe("sess_project");
-    expect(state.setDefaults.length).toBe(0); // no lazy-pin when explicit default is live
+    expect(state.dispatchCalls[0].sessionId).toBe("sess_project"); // NOT overridden
+    expect(state.setDefaults.length).toBe(0); // explicit default honored, no re-pin
+  });
+
+  test("NON-explicit live default (auto-pinned repo) → orchestrator PREFERRED + re-pinned non-explicit", async () => {
+    // Simulates the user whose default was auto-pinned (prewarm / prior fallback)
+    // rather than explicitly chosen. The orchestrator wins for a no-choice user.
+    state.liveSessionIds.add("sess_autopinned");
+    state.user.telegram_default_session_id = "sess_autopinned";
+    state.user.telegram_default_explicit = false;
+    const res = await postUpdate("hey");
+    expect(res.status).toBe(200);
+    expect(state.dispatchCalls.length).toBe(1);
+    expect(state.dispatchCalls[0].sessionId).toBe(ORCH_SESSION_ID);
+    expect(state.setDefaults).toEqual([{ userId: LINKED_USER_ID, sessionId: ORCH_SESSION_ID, explicit: false }]);
   });
 });

@@ -59,6 +59,7 @@ import {
   listUserSessionsForPicker,
   prewarmAfterLink,
   HELP_TEXT,
+  ORCHESTRATOR_SENTINEL_ID,
 } from "../telegram/commands.ts";
 import {
   buildSessionKeyboard,
@@ -217,32 +218,45 @@ async function dispatchInbound(
 ): Promise<{ outcome: string; error?: string; replayText?: string; replayImages?: string[] }> {
   const chatId = msg.chat.id;
 
-  // Resolve the effective target: explicit default, else fall back to the
-  // user's open orchestrator session (orchestrator-autolaunch). Telegram then
-  // always tracks the orchestrator unless the user explicitly picked another
-  // default. On fallback we lazy-pin the orchestrator id into
-  // `telegram_default_session_id` so the OUTBOUND bridge (which matches on the
-  // column) forwards the reply too.
+  // Resolve the effective target. Rules (orchestrator-as-default, 2026-05-29):
+  //
+  //   1. EXPLICIT default (set via `/session` or a `/list` button tap) that is
+  //      still live → HONORED. Never surprise-switched to the orchestrator.
+  //   2. NON-explicit default (an auto-pin from a prior fallback / prewarm) OR
+  //      no default at all → the root orchestrator is PREFERRED, when enabled +
+  //      open. This makes a fresh link / no-choice user land in the orchestrator.
+  //   3. An explicit default pointing at a now-deleted session is dropped and
+  //      treated as no-choice → falls through to the orchestrator.
+  //
+  // On a fallback to the orchestrator we lazy-pin its id with explicit=false so
+  // the OUTBOUND bridge (which matches on `telegram_default_session_id`)
+  // forwards the reply, WITHOUT promoting the pin to an explicit choice.
   let targetSessionId = user.telegram_default_session_id;
+  let defaultIsExplicit = user.telegram_default_explicit === true;
 
-  // Self-healing pin: if the explicit default points at a now-deleted session,
-  // drop it so we fall back to the orchestrator below (avoids a dead pin →
-  // permanent agent_offline).
+  // Self-healing pin: if the default points at a now-deleted session, drop it
+  // (and its explicit flag) so we fall back to the orchestrator below.
   if (targetSessionId) {
     const live = await getSession(targetSessionId, user.id).catch(() => null);
     if (!live) {
       targetSessionId = null;
+      defaultIsExplicit = false;
       user.telegram_default_session_id = null;
+      user.telegram_default_explicit = false;
     }
   }
 
-  if (!targetSessionId) {
+  // Prefer the orchestrator UNLESS the user has an explicit, live choice.
+  if (!targetSessionId || !defaultIsExplicit) {
     const orch = await resolveOrchestratorTarget(user.id);
     if (orch) {
       targetSessionId = orch;
+      // Lazy-pin as NON-explicit so a later explicit `/session` repo choice
+      // still wins, and the user is never silently promoted off the orchestrator.
       try {
-        await setTelegramDefaultSession(user.id, orch);
+        await setTelegramDefaultSession(user.id, orch, false);
         user.telegram_default_session_id = orch; // keep the in-memory row coherent
+        user.telegram_default_explicit = false;
       } catch {
         /* swallow — dispatch still proceeds against the resolved id */
       }
@@ -360,6 +374,7 @@ async function safeEditMessageText(
 ): Promise<void> {
   try {
     await editMessageText(chatId, messageId, text, keyboard ? { inline_keyboard: keyboard } : {});
+    return;
   } catch (err: any) {
     // Telegram returns 400 "message is not modified" when the new content is
     // byte-identical to the old. That's a no-op success for our flows
@@ -369,7 +384,23 @@ async function safeEditMessageText(
     if (status === 400 && /not modified/i.test(body)) {
       return;
     }
+    // Any other failure (e.g. a parse/encoding edge case, transient 400) MUST
+    // NOT silently drop the page — the picker would appear frozen ("Next does
+    // nothing"). Log it AND retry once as a plain re-send so the page renders.
     console.error("[telegram-webhook] editMessageText failed:", status || "?", body);
+  }
+  // Fallback: re-send the page as a NEW message so the user still sees it.
+  // (editMessageText can fail when the original message is too old to edit, or
+  // on a transient Telegram 400; a fresh sendMessage with the keyboard always
+  // works.) Best-effort — never throws upstream.
+  try {
+    if (keyboard) {
+      await sendMessageWithKeyboard(chatId, text, keyboard);
+    } else {
+      await sendMessage(chatId, text);
+    }
+  } catch (err: any) {
+    console.error("[telegram-webhook] picker fallback re-send failed:", err?.status ?? "?", err?.message);
   }
 }
 
@@ -410,13 +441,55 @@ async function handleCallbackQuery(
   const messageId = cb.message?.message_id;
 
   if (action.kind === "set_session") {
+    // Synthetic orchestrator placeholder: the user tapped the root orchestrator
+    // before any orchestrator session row exists. Launch it (which creates the
+    // row + pins it explicitly) instead of a set-default against a fake id.
+    if (action.sessionId === ORCHESTRATOR_SENTINEL_ID) {
+      await safeAnswerCallback(cb.id, { text: "🧭 Starting orchestrator…" });
+      try {
+        const { launchOrchestrator } = await import("../orchestrator/auto-launch.ts");
+        const res = await launchOrchestrator({ userId: user.id, requireEnabled: true, skipIfRunning: true });
+        const sid =
+          res.ok ? res.sessionId
+          : res.reason === "already_running" ? res.sessionId
+          : null;
+        if (sid) {
+          // Explicit choice — the user deliberately tapped the orchestrator.
+          await setTelegramDefaultSession(user.id, sid, true);
+          user.telegram_default_session_id = sid;
+          user.telegram_default_explicit = true;
+        } else if (chatId !== undefined) {
+          await safeSend(chatId, "Could not start the orchestrator (no online supervisor?). Try again once a supervisor is connected.");
+        }
+      } catch (err: any) {
+        console.warn("[telegram-webhook] orchestrator launch from picker failed:", err?.message);
+      }
+      // Re-render so the ✓ moves to the orchestrator row.
+      if (chatId !== undefined && messageId !== undefined) {
+        try {
+          const rows = await listUserSessionsForPicker(user.id);
+          const total = rows.length;
+          const defaultId = user.telegram_default_session_id;
+          const keyboard = buildSessionKeyboard({ rows, offset: 0, defaultId });
+          const text = renderPickerText({ total, offset: 0, defaultId, rows });
+          await safeEditMessageText(chatId, messageId, text, keyboard);
+        } catch (err: any) {
+          console.warn("[telegram-webhook] picker re-render failed:", err?.message);
+        }
+      }
+      return { outcome: "callback_orchestrator_launched" };
+    }
+
     // Authorization: user must own the session.
     const owned = await getSession(action.sessionId, user.id);
     if (!owned) {
       await safeAnswerCallback(cb.id, { text: "Not allowed", show_alert: true });
       return { outcome: "callback_session_denied" };
     }
-    await setTelegramDefaultSession(user.id, action.sessionId);
+    // A button tap IS an explicit choice — sticks, never auto-overridden.
+    await setTelegramDefaultSession(user.id, action.sessionId, true);
+    user.telegram_default_session_id = action.sessionId;
+    user.telegram_default_explicit = true;
     await safeAnswerCallback(cb.id, { text: "✓ Default session set" });
 
     // Re-render the keyboard with the new ✓ mark, if we have a message ref.

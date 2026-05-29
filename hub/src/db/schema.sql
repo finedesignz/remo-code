@@ -843,6 +843,12 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_runs_in_flight
 -- SET NULL on session delete so outbound silently stops rather than orphaning.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_chat_id              BIGINT UNIQUE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_default_session_id   TEXT REFERENCES sessions(id) ON DELETE SET NULL;
+-- True ONLY when the user explicitly picked the default via `/session <id>` or
+-- by tapping a button in the `/list` inline picker. Auto-pins (lazy-pin in the
+-- inbound dispatcher, prewarm-on-link) leave it false so orchestrator-as-default
+-- resolution can still prefer the root orchestrator for a no-choice user, while
+-- an EXPLICIT repo choice is always honored and never surprise-switched.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_default_explicit     BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code            TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code_expires_at TIMESTAMPTZ;
 
