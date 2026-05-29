@@ -7,11 +7,20 @@
  * a fresh session, and finalizes the run when the model emits its first
  * assistant turn.
  *
- * Completion path: a hook in `hub/src/ws/agent.ts` calls
- * `onTriageAssistantMessage` for any session whose id is registered here.
- * The handler parses the model output via `parseTriageOutput` and finalizes:
- *   - ok → status='success', output_snippet = JSON.stringify(TriageResult)
- *   - parse error → status='failed', error='triage_parse_error'
+ * Completion path:
+ *   - LOCAL-AGENT pick (Round-2 migration): the send goes through the shared
+ *     `dispatch()` pipeline (gates → per-session queue → grace → send). The run
+ *     finalizes via the agent ws `assistant_message` branch → `onSessionReply`
+ *     → `RunStore.onFinalize`, which parses the model output with
+ *     `parseTriageOutput` and finalizes (success + TriageResult JSON, or
+ *     'triage_parse_error'). `finalizeRun` then fires the post-run pipeline
+ *     (e.g. the `github_issue` action with its 24h idempotency).
+ *   - SUPERVISOR pick: spawns a FRESH session via the supervisor
+ *     (`createRun` + `sendToSupervisor`) — NOT a per-session-queue dispatch, so
+ *     it stays on the legacy `pending` map + `onTriageAssistantMessage` hook
+ *     (parallel to `sendSupervisorTask`, which is also out of the migration
+ *     scope). When the spawned session replies, `triageActiveForSession` gates
+ *     the legacy finalize.
  *
  * Bypasses `resolveTargets`: triage tasks have no fixed target_kind/target_id
  * and the dispatcher calls us directly.
@@ -26,6 +35,13 @@ import { insertMessage } from '../../db/dal.ts'
 import { renderTriagePrompt } from '../triage-prompt.ts'
 import { parseTriageOutput } from '../triage-schema.ts'
 import { finalizeRun, removeRunContext } from '../dispatcher.ts'
+import {
+  dispatch,
+  type DispatchRequest,
+  type PipelineDeps,
+  type RunStore,
+} from '../../dispatch/pipeline.ts'
+import { thresholdGate, dailyCostCapGate } from '../../dispatch/gates.ts'
 
 export interface TriagePayload {
   application_uuid: string
@@ -125,42 +141,83 @@ export async function sendTriage(
     return
   }
 
-  // pick.kind === 'local_agent'
+  // pick.kind === 'local_agent' — Round-2 migration: route through the shared
+  // dispatch pipeline. The run row already exists (the dispatcher inserted it),
+  // so the RunStore returns ctx.runId as the finalize token; onFinalize does the
+  // TriageResult parse and calls finalizeRun (which fires the post-run pipeline).
   const sessionId = pick.agent_session_id
-  const ch = getChannel(sessionId)
-  if (!ch) {
+  // Triage carries per-event payload that would be stale if replayed later, so
+  // it never parks in grace — fail fast when the agent socket is gone (legacy
+  // parity: the old branch returned 'agent_socket_missing' immediately).
+  if (getChannel(sessionId) == null) {
     await finalizeRun(ctx.runId, 'failed', 'agent_socket_missing')
+    removeRunContext(ctx.runId)
     return
   }
+  const storedContent = `[triage: ${task.name}]\n\n${prompt}`
+  const startedAt = Date.now()
 
-  let msg: { id: string; created_at: string } | null = null
-  try {
-    msg = await insertMessage(sessionId, 'user', `[triage: ${task.name}]\n\n${prompt}`)
-  } catch (err: any) {
-    await finalizeRun(ctx.runId, 'failed', `insert_message_failed: ${err?.message}`)
-    return
+  const store: RunStore = {
+    async open() { return ctx.runId },
+    async markSkipped(token, reason) {
+      const status = reason.startsWith('quota_threshold_reached') ? 'skipped_quota' : 'skipped'
+      await finalizeRun(token, status, reason)
+      removeRunContext(token)
+    },
+    // Triage finalize: parse the model output as a TriageResult. ok → success +
+    // JSON snippet; parse failure → 'triage_parse_error'. Matches the legacy
+    // onTriageAssistantMessage body exactly.
+    async onFinalize(token, content) {
+      const duration = Date.now() - startedAt
+      const parsed = parseTriageOutput(content)
+      if (parsed.ok) {
+        await finalizeRun(token, 'success', null, {
+          duration_ms: duration, output_snippet: JSON.stringify(parsed.value),
+        })
+      } else {
+        await finalizeRun(token, 'failed', 'triage_parse_error', {
+          duration_ms: duration,
+          output_snippet: content.length > 4000 ? content.slice(0, 4000) : content,
+        })
+      }
+      removeRunContext(token)
+    },
+    async markFailed(token, errMsg) {
+      await finalizeRun(token, 'failed', `agent_send_failed: ${errMsg}`)
+      removeRunContext(token)
+    },
   }
 
-  broadcastToSubscribers(sessionId, {
-    type: 'message', session_id: sessionId, message: msg, run_id: ctx.runId,
-  })
-
-  try {
-    ch.ws.send(JSON.stringify({
-      type: 'user_message',
-      id: msg.id,
-      content: prompt,
-      ts: msg.created_at,
-      run_id: ctx.runId,
-    }))
-  } catch (err: any) {
-    await finalizeRun(ctx.runId, 'failed', `agent_send_failed: ${err?.message}`)
-    return
+  const deps: PipelineDeps = {
+    // IR-1 / IR-2: cost-cap non-bypassable; threshold → cost-cap (+ promotion re-check).
+    gates: [thresholdGate, dailyCostCapGate],
+    store,
+    isOnline: (req) => getChannel(req.sessionId) != null,
+    // Triage runs are not replayed on reconnect (they carry per-event payload
+    // that would be stale); offline → mark failed via onParkExpire.
+    replay: async () => { await finalizeRun(ctx.runId, 'failed', 'agent_socket_missing') },
+    onParkExpire: async () => { await finalizeRun(ctx.runId, 'failed', 'agent_socket_missing') },
+    send: async (req) => {
+      const ch = getChannel(req.sessionId)
+      if (!ch) throw new Error('agent_socket_missing')
+      const msg = await insertMessage(req.sessionId, 'user', storedContent)
+      broadcastToSubscribers(req.sessionId, {
+        type: 'message', session_id: req.sessionId, message: msg, run_id: ctx.runId,
+      })
+      ch.ws.send(JSON.stringify({
+        type: 'user_message', id: msg.id, content: req.prompt, ts: msg.created_at, run_id: ctx.runId,
+      }))
+    },
   }
 
-  pending.set(sessionId, {
-    runId: ctx.runId, taskId: ctx.taskId, userId: ctx.userId, startedAt: Date.now(),
-  })
+  const req: DispatchRequest = { userId: ctx.userId, sessionId, token: ctx.runId, prompt }
+  const outcome = await dispatch(req, deps)
+  if (outcome.kind === 'parked_offline') {
+    // No live agent socket; the pipeline parked a replay that fails fast.
+    // Mark immediately so the run doesn't sit pending.
+    await finalizeRun(ctx.runId, 'failed', 'agent_socket_missing')
+    removeRunContext(ctx.runId)
+  }
 }
 
 /**
