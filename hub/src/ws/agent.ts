@@ -6,6 +6,8 @@ import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
 import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows } from '../db/supervisor-dal'
+import { ensureSupervisorProject } from '../db/error-capture-dal'
+import { findOrCreateRootlessSession } from '../db/dal'
 import { getCapacitySnapshot } from '../sessions/budget'
 import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
@@ -578,6 +580,26 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     // owned by the supervisor process which has since restarted.
     await updateSupervisorState(row.id, 'idle', null)
     console.log(`[supervisor] hello supervisor=${row.id} host=${msg.hostname} roots=${msg.roots.length}`)
+
+    // B6: seed the per-supervisor self-capture project + ack with the
+    // sentry creds so the supervisor's uncaughtException handler can post
+    // crash envelopes back to the hub's intake. Best-effort — if either
+    // step fails the supervisor just doesn't get crash capture, which is
+    // strictly additive and must never tear down the hello flow.
+    try {
+      const rootless = await findOrCreateRootlessSession(userId, 'claude')
+      const proj = await ensureSupervisorProject(userId, msg.hostname, rootless.id)
+      try {
+        ws.send(JSON.stringify({
+          type: 'supervisor.hello_ack',
+          supervisor_id: row.id,
+          sentry_key: proj.sentry_key,
+          sentry_project_id: proj.id,
+        }))
+      } catch {}
+    } catch (err: any) {
+      console.warn(`[supervisor] ensureSupervisorProject failed host=${msg.hostname} err=${err?.message ?? err}`)
+    }
 
     // Stale-row reap: each MSI install/upgrade rotates the api_key → new
     // supervisors row. Old rows from prior installs of the SAME host pile up

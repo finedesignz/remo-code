@@ -283,6 +283,143 @@ pub fn set_api_key(app: tauri::AppHandle, api_key: String) -> Result<(), String>
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// B6: loopback poll of the Bun sidecar's /sup/status endpoint. Drives the
+// tray icon color (green/amber/red/grey) and the "last error" line. Plain
+// blocking TCP + minimal HTTP/1.1 so we don't pull a runtime-heavy HTTP
+// client into the IPC layer. 1.5s connect timeout, 1.5s read timeout — well
+// under the 5s poll cadence so a hung sidecar can't pile up.
+// ---------------------------------------------------------------------------
+
+const STATUS_PORTS: [u16; 2] = [9106, 9197];
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct SidecarStatus {
+    /// `green` = hub_connected, `amber` = connecting/reconnecting,
+    /// `red` = last_error present and hub not connected, `grey` = sidecar
+    /// unreachable (status server not bound yet, or process down).
+    pub dot: String,
+    pub reachable: bool,
+    pub hub_connected: bool,
+    pub hub_state: Option<String>,
+    pub last_error: Option<String>,
+    pub last_error_at: Option<String>,
+    pub last_reconnect_ms_ago: Option<i64>,
+    pub runner_count: usize,
+    pub version: Option<String>,
+    pub supervisor_id: Option<String>,
+}
+
+impl SidecarStatus {
+    fn unreachable() -> Self {
+        Self {
+            dot: "grey".into(),
+            reachable: false,
+            hub_connected: false,
+            hub_state: None,
+            last_error: None,
+            last_error_at: None,
+            last_reconnect_ms_ago: None,
+            runner_count: 0,
+            version: None,
+            supervisor_id: None,
+        }
+    }
+}
+
+fn fetch_status_once(port: u16) -> Result<Value, String> {
+    use std::io::{Read, Write};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(1500))
+        .map_err(|e| format!("connect: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_millis(1500))).ok();
+    stream.set_write_timeout(Some(Duration::from_millis(1500))).ok();
+
+    let req = b"GET /sup/status HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    stream.write_all(req).map_err(|e| format!("write: {e}"))?;
+
+    let mut buf = Vec::with_capacity(4096);
+    // Cap response at 64KiB to bound memory if something weird is on the port.
+    let mut tmp = [0u8; 4096];
+    let mut total = 0;
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                buf.extend_from_slice(&tmp[..n]);
+                if total > 64 * 1024 { break; }
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Split headers / body on first \r\n\r\n.
+    let sep = buf.windows(4).position(|w| w == b"\r\n\r\n").ok_or_else(|| "no headers terminator".to_string())?;
+    let head = &buf[..sep];
+    let body = &buf[sep + 4..];
+
+    // Status line check — only accept 200.
+    let head_str = std::str::from_utf8(head).unwrap_or("");
+    let status_line = head_str.lines().next().unwrap_or("");
+    if !status_line.contains(" 200") {
+        return Err(format!("non-200: {status_line}"));
+    }
+
+    let json: Value = serde_json::from_slice(body).map_err(|e| format!("parse: {e}"))?;
+    Ok(json)
+}
+
+#[tauri::command]
+pub fn get_sidecar_status() -> SidecarStatus {
+    let mut last_err: Option<String> = None;
+    for port in STATUS_PORTS.iter() {
+        match fetch_status_once(*port) {
+            Ok(v) => return classify_status(&v),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    // Both ports failed → grey.
+    log::debug!("get_sidecar_status unreachable: {last_err:?}");
+    SidecarStatus::unreachable()
+}
+
+fn classify_status(v: &Value) -> SidecarStatus {
+    let hub_connected = v.get("hub_connected").and_then(|x| x.as_bool()).unwrap_or(false);
+    let hub_state = v.get("hub_state").and_then(|x| x.as_str()).map(String::from);
+    let last_error_obj = v.get("last_error");
+    let last_error = last_error_obj.and_then(|e| e.get("message")).and_then(|x| x.as_str()).map(String::from);
+    let last_error_at = last_error_obj.and_then(|e| e.get("at")).and_then(|x| x.as_str()).map(String::from);
+    let last_reconnect_ms_ago = v.get("last_reconnect_ms_ago").and_then(|x| x.as_i64());
+    let runners = v.get("runners").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+    let version = v.get("version").and_then(|x| x.as_str()).map(String::from);
+    let supervisor_id = v.get("supervisor_id").and_then(|x| x.as_str()).map(String::from);
+
+    let dot = if hub_connected {
+        "green".to_string()
+    } else if last_error.is_some() {
+        "red".to_string()
+    } else {
+        "amber".to_string()
+    };
+
+    SidecarStatus {
+        dot,
+        reachable: true,
+        hub_connected,
+        hub_state,
+        last_error,
+        last_error_at,
+        last_reconnect_ms_ago,
+        runner_count: runners,
+        version,
+        supervisor_id,
+    }
+}
+
 /// Stop / start / restart the Bun sidecar from the General page.
 #[tauri::command]
 pub fn sidecar_control(app: tauri::AppHandle, action: String) -> Result<(), String> {
@@ -314,5 +451,39 @@ mod tests {
         let b = supervisor_id("HOST-A", "/tmp/x.json");
         assert_eq!(a, b);
         assert!(a.starts_with("sv_"));
+    }
+
+    #[test]
+    fn classify_connected_is_green() {
+        let v: Value = serde_json::from_str(r#"{"hub_connected":true,"runners":[]}"#).unwrap();
+        let s = classify_status(&v);
+        assert_eq!(s.dot, "green");
+        assert!(s.reachable);
+        assert!(s.hub_connected);
+        assert!(s.last_error.is_none());
+    }
+
+    #[test]
+    fn classify_with_error_is_red() {
+        let v: Value = serde_json::from_str(r#"{"hub_connected":false,"last_error":{"message":"ws_close code=4001","at":"2026-05-28T00:00:00Z"},"runners":[]}"#).unwrap();
+        let s = classify_status(&v);
+        assert_eq!(s.dot, "red");
+        assert_eq!(s.last_error.as_deref(), Some("ws_close code=4001"));
+        assert!(s.last_error_at.is_some());
+    }
+
+    #[test]
+    fn classify_connecting_is_amber() {
+        let v: Value = serde_json::from_str(r#"{"hub_connected":false,"hub_state":"connecting","runners":[]}"#).unwrap();
+        let s = classify_status(&v);
+        assert_eq!(s.dot, "amber");
+        assert_eq!(s.hub_state.as_deref(), Some("connecting"));
+    }
+
+    #[test]
+    fn unreachable_is_grey() {
+        let s = SidecarStatus::unreachable();
+        assert_eq!(s.dot, "grey");
+        assert!(!s.reachable);
     }
 }
