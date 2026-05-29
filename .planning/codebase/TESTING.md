@@ -1,134 +1,173 @@
 # Testing Patterns
 
-> **Note (Phase 09, 2026-05-26):** The agent/ workspace and channel/ plugin are retired. The local CLI runner now lives in supervisor/src/ and ships exclusively as a Tauri MSI desktop app. The hub /ws/agent route is unchanged. References below to agent/, npx remo-code-agent, claude-remote, or /ws/channel are historical. See .planning/phases/09-retire-npm-packages/.
-
-
-**Analysis Date:** 2026-05-22
+**Analysis Date:** 2026-05-28
 
 ## Test Framework
 
-**None configured.**
+**Runner:** `bun test` (built-in). No Jest, no Vitest.
 
-The repo has **zero project-owned tests**. No `vitest.config.*`, `jest.config.*`, `bun:test` files, or `*.test.ts` / `*.spec.ts` files exist under `hub/`, `web/`, `agent/`, or `channel/`. The only `*.test.ts` files in the tree live inside `node_modules/` (zod, fast-uri, style-to-js, etc.) and are not run by this project.
+**Assertion API:** `bun:test` — `describe`, `test`, `expect`, `beforeEach`, `afterEach`, `beforeAll`, `afterAll`.
 
-**Package scripts (root `package.json`):**
-```json
-"scripts": {
-  "dev:hub": "cd hub && bun run dev",
-  "dev:web": "cd web && bun run dev",
-  "build:web": "cd web && bun run build"
-}
+**Config:** None. Bun discovers `*.test.ts` automatically. No `jest.config` / `vitest.config` files.
+
+**Run commands:**
+```bash
+cd hub && bun test                     # all hub tests
+cd hub && bun test scheduler.test.ts   # single file
+cd supervisor && bun test              # all supervisor tests
 ```
-No `test`, `test:watch`, or `coverage` script in any package.json (root, `hub/`, `web/`, `agent/`).
 
-**Assertion library:** None installed.
-
-**Runner:** Bun ships with `bun test` out of the box and is the natural choice if tests are added — no install needed.
+There is NO root `bun test` script — tests run per-package.
 
 ## Test File Organization
 
-Not applicable — no convention has been established. If/when tests are added, the natural placement given the existing layout would be:
-- Co-located: `hub/src/auth/jwt.test.ts` next to `jwt.ts`
-- Or grouped: `hub/test/` mirroring `hub/src/`
+**Location — separate test dirs (NOT colocated):**
+- `hub/test/*.test.ts` — 80+ files. Unit + integration.
+- `hub/test/integration/` — multi-module flows (e.g. `auth-flow.test.ts`).
+- `hub/test/fixtures/` — static JSON vectors + generator scripts (`titanium-vectors.json`, `gen-titanium-vectors.ts`).
+- `supervisor/test/*.test.ts` — 11 files. Process-manager + runner + git + canaries.
+- **`web/` has NO test runner.** UI components are NOT unit-tested. Web is covered only by `tsc -b` (type check) + Vite build + manual QC sweeps documented in `.planning/phases/<NN>/QC-UI.md`.
 
-No precedent has been set.
+**Naming:**
+- Unit / module tests: `<feature>.test.ts` (`scheduler.test.ts`, `cidr.test.ts`).
+- End-to-end (DB-backed): `<feature>.e2e.test.ts` (`scheduled-tasks.e2e.test.ts`, `phase-08.e2e.test.ts`, `phase-11.e2e.test.ts`, `coolify-webhook-triage-e2e.test.ts`).
+- Canaries: descriptive (`no-legacy-agent-spawn.test.ts`).
 
-## What Is Tested
+## Test Structure
 
-**Nothing automatically.** All validation today is:
+Top-of-file module doc block explaining purpose + scope + DB requirements is the norm. Example pattern (`hub/test/scheduler.test.ts:1-22`):
 
-1. **TypeScript strict mode** — `strict: true` across all tsconfigs catches type errors at build time. Web build runs `tsc -b && vite build`.
-2. **Zod runtime validation** on WS inbound messages (`hub/src/ws/protocol.ts`, `hub/src/ws/agent-protocol.ts`). This is the closest thing to a test boundary in the codebase — schemas reject malformed payloads at the edge.
-3. **Manual smoke testing** via the dev hub + web + local agent loop documented in `CLAUDE.md` and `README.md`.
+```typescript
+/**
+ * Scheduler unit tests (W5/T23).
+ * Covers pure-logic modules of the scheduler that don't depend on DB or WS
+ * registries. Anything that requires a live Postgres or live socket lives in
+ * scheduled-tasks.e2e.test.ts. Run with `bun test` from `hub/`.
+ */
+import { describe, test, expect, beforeEach } from 'bun:test'
+import { /* SUT */ } from '../src/scheduler/cron.ts'
 
-## What Is NOT Tested (Gaps)
+describe('cron util', () => {
+  beforeEach(() => { /* reset module state */ })
+  test('validates expression', () => {
+    expect(validate('*/5 * * * *')).toBe(true)
+  })
+})
+```
 
-This is a thorough list because the gaps are total. Priorities reflect security/correctness impact.
+**Patterns:**
+- `_reset()` helpers exported from modules with process-wide state (session-queue, registry) for `beforeEach` cleanup.
+- Skip e2e files via `if (!process.env.REMO_E2E_DB_URL) { test.skip(...) }` rather than env-detect in `describe`.
 
-### High priority
+## Mocking
 
-- **Auth flow** (`hub/src/api/auth.ts`, `hub/src/auth/jwt.ts`, `hub/src/auth/password.ts`)
-  - bcrypt hash/verify round-trip
-  - JWT sign + verify, expiry behavior, tampered-token rejection
-  - Login lockout / generic error messages (currently returns same `"Invalid credentials"` for bad email vs bad password — verified by reading code, not by test)
-  - Registration-closed enforcement (`countUsers() > 0` check)
-- **API key lifecycle** (`hub/src/api/api-keys.ts`, `hub/src/auth/api-key-middleware.ts`, `hub/src/utils/token.ts`)
-  - SHA-256 hash storage and verification
-  - `remo_` prefix + 32-byte base64url format enforcement (the regex `/^remo_[A-Za-z0-9_\-]{43}$/` is asserted only at the protocol Zod boundary)
-  - Revocation
-- **WebSocket protocol schemas** (`hub/src/ws/protocol.ts`)
-  - Each discriminated-union variant accepts valid payloads and rejects:
-    - missing `type`
-    - oversize `content` (>1MB)
-    - >5 images
-    - oversize image data (>10MB base64)
-    - malformed UUID `id`
-    - bad token regex
-  - Outbound type construction (no runtime check today)
-- **Session ownership scoping** (`hub/src/db/dal.ts`)
-  - Every user-scoped DAL function (`listSessions`, `getSession`, `findSessionByProjectDir`, etc.) must refuse cross-user access. This is enforced by `WHERE user_id = $1` clauses — but there is no test that proves a userId mismatch returns null/empty.
-  - `findOrCreateAgentSession` token rotation behavior
-- **Rate limiting** (`hub/src/middleware/rate-limit.ts`)
-  - Window reset, 429 with `Retry-After` header, in-memory map purge
-  - Per-IP WS connection cap (20), per-connection message rate limit (referenced in `CLAUDE.md`, implemented in `hub/src/ws/`)
+**Framework:** Bun's built-in `mock()` / `spyOn()` from `bun:test`. No `jest.mock`, no `sinon`.
 
-### Medium priority
+**Conventions:**
+- Mock at the import boundary — replace exported functions of DAL / sender modules.
+- Prefer dependency injection (pass deps as args) over import-time mocks. The scheduler dispatcher accepts senders as a parameter set for this reason.
+- Fake clock: pass deterministic `now: Date` into pure functions (catchup, cost-cap) instead of mocking `Date.now`.
 
-- **Hub WS handlers** (`hub/src/ws/client.ts`, `agent.ts`, `channel.ts`)
-  - Auth timeout (5s)
-  - Heartbeat ping/pong
-  - Message relay between agent ↔ client subscribers
-  - Session resume by `project_dir`
-- **Agent stream-json parsing** (`agent/src/claude-runner.ts`)
-  - Parsing of `thinking`, `text_delta`, `tool_use`, `tool_result`, `assistant_message` events
-  - Behavior when Claude CLI exits unexpectedly
-  - Queueing of user messages while runner is not yet ready (`runner.isReady` branch in `agent/src/index.ts`)
-- **Agent config loading** (`agent/src/config.ts`) — precedence: CLI args > env vars > `~/.config/remo-code/config.json`
-- **File attachment handling** — text embedding vs base64 image data URI, 10MB cap
-- **Security headers** — CSP, HSTS, frame-ancestors actually emitted on every response
-- **CORS** — `allowedOrigins` enforcement
+**What to mock:**
+- Outbound network (Octokit, fetch to Coolify, fetch to gateway).
+- WS sockets (use a minimal `{ send, readyState }` stub).
+- Postgres (only when a pure-logic test accidentally pulls a DAL — prefer not to import DALs in unit tests).
 
-### Lower priority
+**What NOT to mock:**
+- `croner` — use it for real; its behavior is the contract.
+- `zod` schemas — never bypass; validate real inputs.
+- Crypto / HMAC — verify with real signatures over real raw bodies.
 
-- **React hooks** (`web/src/hooks/`) — `useChat`, `useWebSocket` reconnect logic, `useTheme` localStorage round-trip, `useSessions` polling/subscribe behavior
-- **React components** — `MessageBubble` markdown rendering with `rehype-sanitize`, `ToolUseBlock` / `ThinkingBlock` rendering, `FileAttachmentBar` drop/paste behavior
-- **Setup form** flow (`web/src/components/SetupForm.tsx` + `hub/src/api/setup.ts`) — only first-admin path
-- **Hash-based routing** in `web/src/App.tsx`
+## Fixtures and Factories
+
+- Static JSON in `hub/test/fixtures/` (e.g. `titanium-vectors.json` — EdDSA-signed Keygen tokens for offline JWKS verification tests).
+- Generators next to fixtures (`gen-titanium-vectors.ts`) — run to refresh vectors when keys rotate.
+- Inline factories at top of each test file for small shapes (mock sessions, mock tasks).
 
 ## Coverage
 
-**Coverage tool:** None. **Coverage requirement:** None enforced.
-
-Current effective coverage of production code: **0%** automated, 100% manual smoke.
+No enforced coverage threshold. No `bun test --coverage` in CI. Quality measured by test-count + behavioral assertions, not %.
 
 ## Test Types
 
-- **Unit tests:** None.
-- **Integration tests:** None.
-- **E2E tests:** None. No Playwright/Cypress config, though a `.playwright-mcp/` directory exists at repo root (likely MCP tooling, not a configured test suite).
-- **Type tests:** Implicit via `tsc -b` on web build only. Hub and agent rely on Bun's runtime TS — no separate `tsc --noEmit` check is wired into a script.
+**Unit tests** (no DB, no WS):
+- Pure logic modules: cron, fingerprint, classifier, schema validation, template render, CIDR, idempotency hashing.
+- ~50 files in `hub/test/`.
 
-## Recommended Minimum if Tests Are Introduced
+**Integration tests** (in-process, may touch DALs with mocked pg):
+- Hono router behavior, middleware chains (license-gate, csrf, reauth, require-admin).
+- WS protocol handshake + frame validation.
 
-If adding tests, use `bun test` (zero-config, already available):
+**E2E tests** (require live Postgres):
+- Gated on `REMO_E2E_DB_URL` env var. Skip silently when unset.
+- Files: `scheduled-tasks.e2e.test.ts`, `phase-08.e2e.test.ts`, `phase-11.e2e.test.ts`, `coolify-webhook-triage-e2e.test.ts`, `auth-flow.test.ts` (integration/), DAL migration tests.
+- These account for the 93 `skip` count in CI runs.
 
-```bash
-bun test                  # run all tests
-bun test --watch          # watch mode
-bun test --coverage       # coverage (built in)
+**Canary tests:**
+- `supervisor/test/no-legacy-agent-spawn.test.ts` — greps `supervisor/src/**` + `supervisor/tauri/src-tauri/**` for forbidden CLI tokens (`remo-code-agent`, retired npx invocations). FAILS the build if they reappear. Phase 09 regression guard.
+- `hub/test/known-paths-registry.test.ts` — similar canary for path registry drift.
+
+## Per-Phase QC Reports
+
+Each phase ships QC reports under `.planning/phases/<NN>-<slug>/`:
+- `QC-BUILD.md` — `bun install`, web tsc, web build, hub tsc (N/A), `hub/ bun test`, `supervisor/ bun test`. Counts + diff vs prior baseline.
+- `QC-UI.md` — manual UI sweep (when phase touches `web/`).
+- `REVIEW.md` — verifier subagent verdict.
+
+## Current Test Counts (Phase 12 baseline, 2026-05-28)
+
+From `.planning/phases/12-ui-restructure/QC-BUILD.md`:
+
+| Package | Pass | Fail | Skip | Expects | Files | Time |
+|---------|------|------|------|---------|-------|------|
+| `hub/` | 495 | 7 | 93 | 1335 | 64 | 1130ms |
+| `supervisor/` | 50 | 0 | — | 129 | 7 | 26.52s |
+
+**Pre-existing 7 hub failures (carried from main, NOT regressions):**
+1. `insertRunV2 started_at safety > passes a non-null Date for started_at when status=pending and started_at omitted`
+2. `insertRunV2 started_at safety > passes a non-null Date for status=success path`
+3. `insertRunV2 started_at safety > honors caller-provided started_at when given`
+4. `insertRunV2 started_at safety > defends against an explicit null started_at (cron-fire registry path)`
+5. `insertDeploymentRun started_at safety > passes now() (not null) for status=pending`
+6. `supervisor-registry reconnect race > new register replaces old entry; isSupervisorOnline true`
+7. `supervisor-registry reconnect race > stale close from replaced socket does NOT wipe live entry`
+
+(Cumulative across hub + supervisor: ~545 pass + 7 baseline fail + 93 skip. The "600+ pass" figure cited in earlier phase reports includes revanote suite additions counted in hub/test.)
+
+**93 skips:** all `*.e2e.test.ts` cases gated on missing `REMO_E2E_DB_URL`.
+
+## Common Patterns
+
+**Async testing:**
+```typescript
+test('promotes next waiter on idle', async () => {
+  await onSessionIdleAndPromote(sessionId)
+  expect(currentInFlight(sessionId)).toBe(null)
+})
 ```
 
-**Priority order for first tests:**
-1. `hub/src/ws/protocol.ts` Zod schemas — pure functions, highest leverage, no setup
-2. `hub/src/auth/jwt.ts` + `password.ts` — pure crypto, easy to assert
-3. `hub/src/utils/token.ts` — token format + hash
-4. `hub/src/db/dal.ts` against a throwaway Postgres (e.g. testcontainers or a dedicated test DB) — proves `user_id` scoping
-5. Agent stream-json parser — feed canned Claude output, assert emitted events
+**Error testing:**
+```typescript
+test('rejects HMAC skew >5min', () => {
+  const stale = Date.now() - 6 * 60 * 1000
+  expect(() => verify(body, sig, stale)).toThrow(/skew/)
+})
+```
 
-## Honest Summary
+**Schema validation:**
+```typescript
+test('rejects bare prose as triage output', () => {
+  expect(parseTriageOutput('looks broken')).toBeNull()
+})
+```
 
-This is a small, fast-moving open-source project where the author has chosen to skip automated tests in favor of TypeScript strictness, Zod boundary validation, and manual testing on `app.remo-code.com`. The codebase is structured cleanly enough that tests could be bolted on incrementally without a rewrite — but as of 2026-05-22, none exist, and there is no testing convention to follow.
+## What Is NOT Tested
+
+- **Web UI components** — no test runner in `web/`. Manual QC only. Adding Vitest + React Testing Library is a known gap; covered by Phase 12 QC-UI sweep instead.
+- **Tauri shell (`supervisor/tauri/src-tauri/**` Rust)** — no `cargo test` integration in CI. Only the TS sidecar in `supervisor/src/**` has unit coverage.
+- **End-to-end browser flows** — no Playwright / Cypress. Manual smoke against `app.remo-code.com`.
+- **CLI subprocess streaming behavior** — the actual `claude --input-format stream-json` and `codex app-server` JSON-RPC framing is mocked; real CLI integration is verified by manual session against the live supervisor MSI.
 
 ---
 
-*Testing analysis: 2026-05-22*
+*Testing analysis: 2026-05-28*

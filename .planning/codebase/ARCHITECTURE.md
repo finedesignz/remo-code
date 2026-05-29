@@ -1,268 +1,309 @@
-<!-- refreshed: 2026-05-22 -->
+<!-- refreshed: 2026-05-28 -->
 # Architecture
 
-> **Note (Phase 09, 2026-05-26):** The agent/ workspace and channel/ plugin are retired. The local CLI runner now lives in supervisor/src/ and ships exclusively as a Tauri MSI desktop app. The hub /ws/agent route is unchanged. References below to agent/, npx remo-code-agent, claude-remote, or /ws/channel are historical. See .planning/phases/09-retire-npm-packages/.
-
-
-**Analysis Date:** 2026-05-22
+**Analysis Date:** 2026-05-28
 
 ## System Overview
 
 ```text
-┌──────────────────────────────────────────────────────────────┐
-│                      Browser (React 19 SPA)                   │
-│              `web/src/App.tsx` + `web/src/components/*`       │
-│   WS client `useWebSocket.ts`  ·  REST client `lib/auth.ts`   │
-└────────────┬───────────────────────────┬──────────────────────┘
-             │ WS /ws/client (JWT)       │ HTTPS /api/*  (JWT)
-             ▼                           ▼
-┌──────────────────────────────────────────────────────────────┐
-│              Hub Server — Bun + Hono (port 3040)              │
-│   `hub/src/index.ts` (Bun.serve + Hono app + WS upgrades)     │
-│ ┌──────────────┬──────────────┬─────────────────────────────┐│
-│ │ REST API     │ WS endpoints │  In-memory registry         ││
-│ │ `api/*.ts`   │ ws/client.ts │  `ws/registry.ts`           ││
-│ │              │ ws/agent.ts  │  channels: sessionId→ws     ││
-│ │              │ ws/channel.ts│  clients: Set<ClientEntry>  ││
-│ └──────┬───────┴──────┬───────┴─────────────────────────────┘│
-│        │              │                                       │
-│        ▼              ▼                                       │
-│   `db/dal.ts` → `db/postgres.ts` → PostgreSQL                 │
-└────────────┬─────────────────────────────────────────────────┘
-             │ WS /ws/agent (API key, SHA-256 hashed)
-             ▼
-┌──────────────────────────────────────────────────────────────┐
-│         Local Agent — Bun (runs on dev machine)               │
-│   `agent/src/index.ts`                                        │
-│   ├─ `hub-client.ts` — WS to hub, auth + reconnect            │
-│   └─ `claude-runner.ts` — persistent Claude CLI subprocess    │
-└────────────┬─────────────────────────────────────────────────┘
-             │ subprocess stdin/stdout (newline-delimited JSON)
-             ▼
-┌──────────────────────────────────────────────────────────────┐
-│   Claude Code CLI                                             │
-│   `claude --input-format stream-json --output-format          │
-│    stream-json --verbose [--resume <id>]                      │
-│           --dangerously-skip-permissions`                     │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Browser SPA (web/, React 19 + Vite + Tailwind 4, hash-router)           │
+│                                                                          │
+│  3 top-level routes (Phase 12):                                          │
+│    #/         Home     → Tabs: List | Grid                               │
+│    #/tasks    Tasks    → Tabs: Upcoming | Activity | Schedule            │
+│    #/settings Settings → Tabs: Connections | Credentials | Prompts |     │
+│                                  Usage | Profile                          │
+│                                                                          │
+│  Mobile:  PWA + Capacitor wrapper (mobile/), MobileAccordion surface     │
+└────────────────────┬──────────────────────────────┬──────────────────────┘
+                     │ REST /api/*                  │ WS /ws/client
+                     │ (cookie session OR JWT)      │ (jwt OR session cookie)
+                     ▼                              ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Hub (hub/, Bun + Hono, port 3040, single process)                       │
+│  `hub/src/index.ts` — composition root                                   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │ HTTP/REST: api/*                                                  │    │
+│  │  auth, profile, account, sessions, messages, api-keys,            │    │
+│  │  scheduled-tasks, scheduled-task-runs,                            │    │
+│  │  sentry-intake (public), errors, error-projects, error-runs,      │    │
+│  │  error-setup, coolify-webhook (public), webhooks-titanium (pub),  │    │
+│  │  revanote-webhook (public), revanote-mappings, revanote-annot.,   │    │
+│  │  telegram-webhook (public), telegram, chat-tabs, instructions,    │    │
+│  │  supervisors, github, transcribe, commands, tasks, usage,         │    │
+│  │  orchestrator, plugin, setup, admin, well-known, _openapi         │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │ WebSocket:  /ws/client (browser)   /ws/agent (supervisor)         │    │
+│  │  ws/client.ts, ws/agent.ts, ws/registry.ts,                       │    │
+│  │  ws/supervisor-registry.ts, ws/send-dedupe.ts,                    │    │
+│  │  ws/idle-teardown.ts, ws/protocol.ts (Zod schemas)                │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │ Subsystems                                                        │    │
+│  │  scheduler/   — croner-driven dispatch + post-run actions         │    │
+│  │  error-capture/ — Sentry intake → fingerprint → dispatch          │    │
+│  │  revanote/    — annotations webhook → diff sandbox → CI gate      │    │
+│  │  telegram/    — bridge, link codes, dispatch, doctor              │    │
+│  │  orchestrator/ — multi-session orchestration + orphan resume      │    │
+│  │  usage/       — Anthropic quota snapshot + threshold gating       │    │
+│  │  sessions/    — budget + routing helpers                          │    │
+│  │  events/      — internal EventEmitter (assistant_message:final)   │    │
+│  │  auth/        — middleware, JWT, password (legacy), reauth, admin │    │
+│  │  license-gate.ts — Titanium license_status gate                   │    │
+│  │  titanium-client.ts — JWKS verifier + license validate            │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐    │
+│  │ Data: PostgreSQL (Coolify-hosted)                                 │    │
+│  │  db/postgres.ts (postgres.js client), db/schema.sql,              │    │
+│  │  db/migrate.ts, db/dal.ts + per-domain DALs                       │    │
+│  └──────────────────────────────────────────────────────────────────┘    │
+└────────────────────┬───────────────────────────────┬─────────────────────┘
+                     │ WS /ws/agent                  │ outbound HTTP
+                     │ (api_key + project_dir)       │ (Titanium, Coolify,
+                     ▼                               │  GitHub gateway,
+┌─────────────────────────────────────────────┐     │  emails4agents,
+│ Supervisor (supervisor/, Tauri tray app)    │     │  Telegram, KIE)
+│  supervisor/src/index.ts — Bun runtime,     │     │
+│  compiled to sidecar binary by Tauri.       │     ▼
+│  supervisor/tauri/src-tauri/ — Rust shell.  │    External APIs
+│  supervisor/tauri/ui/ — React settings UI.  │
+│                                              │
+│  One per dev host. Connects /ws/agent,        │
+│  spawns CLIs lazily per session.              │
+└────────────────────┬─────────────────────────┘
+                     │ stdio JSON
+                     ▼
+┌─────────────────────────────────────────────┐
+│ CLIs (one persistent process per session)   │
+│  Claude Code: claude --input-format          │
+│    stream-json --output-format stream-json   │
+│    --verbose   (supervisor/src/runners/      │
+│                 claude-runner.ts)            │
+│  Codex (spike): codex app-server JSON-RPC    │
+└─────────────────────────────────────────────┘
 ```
 
 ## Component Responsibilities
 
 | Component | Responsibility | File |
 |-----------|----------------|------|
-| Hub HTTP/WS server | Bun.serve entry, WS upgrade routing, static SPA serving | `hub/src/index.ts` |
-| Hono app | REST routes, auth + rate limit middleware, security headers | `hub/src/index.ts` (`app = new Hono()`) |
-| Agent WS handler | Auth via API key, session find-or-create, relay stream-json activity | `hub/src/ws/agent.ts` |
-| Client WS handler | JWT auth, subscribe/send_message, relay activity to subscribers | `hub/src/ws/client.ts` |
-| Legacy channel WS | Backward compat for older channel plugin | `hub/src/ws/channel.ts` |
-| WS registry | In-memory `channels` (sessionId→ws) + `clients` (Set) | `hub/src/ws/registry.ts` |
-| DAL | All Postgres queries, scoped by `user_id` | `hub/src/db/dal.ts` |
-| Postgres pool | Connection pool, `DATABASE_URL` | `hub/src/db/postgres.ts` |
-| JWT auth | Sign/verify session tokens | `hub/src/auth/jwt.ts`, `auth/middleware.ts` |
-| API key auth | SHA-256 hash compare for agent + plugin endpoints | `hub/src/auth/api-key-middleware.ts` |
-| Local agent entry | Pre-flight `claude --version`, wire hub↔runner | `agent/src/index.ts` |
-| Claude runner | Persistent subprocess, stream-json parser, auto-restart | `agent/src/claude-runner.ts` |
-| Hub client (agent side) | WS connect, auth payload, reconnect | `agent/src/hub-client.ts` |
-| React app shell | Routes, theme, auth gate | `web/src/App.tsx` |
-| Chat panel + activity feed | Messages + thinking/tool blocks | `web/src/components/ChatPanel.tsx`, `ActivityFeed.tsx` |
+| Hub HTTP root | App composition, middleware order, WS upgrades | `hub/src/index.ts` |
+| Hub WS — client | Browser session, subscribe set ≤12, broadcast routing | `hub/src/ws/client.ts` |
+| Hub WS — agent | Supervisor auth, stream-json relay, message persistence | `hub/src/ws/agent.ts` |
+| Hub WS protocols | Zod schemas for inbound/outbound messages | `hub/src/ws/protocol.ts`, `agent-protocol.ts`, `supervisor-protocol.ts` |
+| Auth middleware | Dual-auth (cookie + legacy JWT) | `hub/src/auth/middleware.ts` |
+| License gate | Per-route license_status check w/ exclusion list | `hub/src/license-gate.ts` |
+| Titanium client | JWKS-cached EdDSA verify + license validate | `hub/src/titanium-client.ts` |
+| Scheduler dispatcher | Croner trigger → cost cap → fan-out → sender | `hub/src/scheduler/dispatcher.ts` |
+| Scheduler senders | agent / supervisor / coolify / triage transports | `hub/src/scheduler/senders/*.ts` |
+| Post-run actions | email / telegram / webpush / webhook / github-issue | `hub/src/scheduler/post-run/*.ts` |
+| Error capture intake | Public Sentry envelope endpoint | `hub/src/api/sentry-intake.ts` |
+| Error capture pipeline | auth → envelope → fingerprint → record → dispatch | `hub/src/error-capture/*.ts` |
+| Revanote intake | Public annotations webhook | `hub/src/api/revanote-webhook.ts` |
+| Revanote pipeline | dispatch → sandbox → CI gate → merge gate → callback | `hub/src/revanote/*.ts` |
+| Telegram bridge | Outbound `assistant_message:final` → Telegram chat | `hub/src/telegram/bridge.ts` |
+| Coolify webhook | URL-token + legacy HMAC, triage on failure | `hub/src/api/coolify-webhook.ts` |
+| Supervisor runtime | WS to hub, spawn CLI per session, relay events | `supervisor/src/index.ts`, `hub-client.ts`, `runners/*.ts` |
+| Tauri shell | Tray icon, MSI installer, sidecar lifecycle | `supervisor/tauri/src-tauri/src/*.rs` |
+| Web app root | Hash router, auth state, page mounting | `web/src/App.tsx` |
+| AppShell | Header + nav + footer scaffold (Phase 12) | `web/src/components/ui/AppShell.tsx` |
+| Nav helpers | Active route + tab param parsing | `web/src/lib/ui/nav.ts` |
 
 ## Pattern Overview
 
-**Overall:** Three-tier message relay with a persistent subprocess at the edge.
+**Overall:** layered monolith hub (Hono) + thin desktop sidecar (Tauri+Bun) + SPA (React). Hub is the only network service; supervisor and web both speak to it via WS+REST.
 
 **Key Characteristics:**
-- Hub is a stateless relay backed by Postgres for durable state and in-memory registries for live socket routing.
-- Agent owns the only stateful long-lived resource: the Claude CLI subprocess (full conversation memory in-process).
-- Browser is a thin view — never talks to the agent directly; everything passes through the hub.
-- Activity events (thinking, text_delta, tool_use, tool_result) are ephemeral broadcast-only; only `assistant_message` is persisted.
-- One Claude process per agent per project_dir; multiple browsers can subscribe to the same session.
+- Single-binary hub; all subsystems live in one Bun process and share a Postgres pool.
+- WebSocket-first for real-time (no polling, no SSE for hub→browser activity).
+- Public, unauthenticated webhook intakes (Sentry, Coolify, Revanote, Telegram, Titanium) are mounted OUTSIDE the `/api/*` JWT catch-all; each owns its own credential model.
+- Stream-json subprocess is the universal CLI transport; Codex spike maps JSON-RPC notifications onto the same `RunnerEvent` union as Claude.
+- Per-session in-memory state (`streamingBySession`, `session-queue`) backed by Postgres flushes.
 
 ## Layers
 
-**Presentation (Browser):**
-- Purpose: User interaction, render chat + activity stream.
+**`web/` (presentation):**
+- Purpose: SPA delivered to browser/PWA.
 - Location: `web/src/`
-- Contains: React components, hooks, WS client.
-- Depends on: Hub REST + `/ws/client`.
-- Used by: End user.
+- Pages under `web/src/pages/`, primitives under `web/src/components/ui/`, feature components under `web/src/components/`, hooks under `web/src/hooks/`, helpers under `web/src/lib/`.
+- Depends on: hub REST + WS only.
 
-**Edge / Transport (Hub):**
-- Purpose: Auth, routing, broadcast, persistence.
-- Location: `hub/src/`
-- Contains: Hono routes, WS handlers, registries, DAL.
-- Depends on: PostgreSQL.
-- Used by: Browser clients and local agents.
+**`hub/api/` (HTTP):**
+- Purpose: REST endpoints, OpenAPI surface.
+- Location: `hub/src/api/`
+- Mounted in `hub/src/index.ts`; public webhooks mounted BEFORE auth, license-gated routes mounted AFTER `requireActiveLicense`.
 
-**Execution (Agent):**
-- Purpose: Spawn + drive Claude CLI, relay events.
-- Location: `agent/src/`
-- Contains: Subprocess manager, stream parser, hub WS client.
-- Depends on: Local `claude` binary, hub `/ws/agent`.
-- Used by: One developer machine per agent.
+**`hub/ws/` (real-time):**
+- Purpose: bidirectional WS for browser and supervisor.
+- Location: `hub/src/ws/`
+- Owns subscribe set, per-conn rate limiting, broadcast registry.
 
-**Engine (Claude CLI):**
-- Purpose: Reasoning, tool use.
-- Location: External binary (`claude`).
-- Stream-json over stdio.
+**`hub/{scheduler,error-capture,revanote,telegram,orchestrator,usage,sessions}/` (domain):**
+- Purpose: subsystem logic. Each owns its own DAL slice and prompt/template files.
+- Depends on: db, ws/registry, events, lib helpers.
+
+**`hub/db/` (data):**
+- Purpose: Postgres access. Per-subsystem DAL files all import the shared `sql` from `db/postgres.ts`.
+- Schema: `hub/src/db/schema.sql` — idempotent `CREATE TABLE IF NOT EXISTS`, applied by `db/migrate.ts` on boot.
+
+**`supervisor/` (host runtime):**
+- Purpose: spawns + relays CLIs.
+- Bun source under `supervisor/src/`, Rust+Tauri shell under `supervisor/tauri/src-tauri/`, settings UI under `supervisor/tauri/ui/`.
 
 ## Data Flow
 
-### Primary Request Path — Browser sends a message
+### Magic-link login (Phase 07)
 
-1. User types in `ChatPanel.tsx`, hook `useChat.ts` calls `useWebSocket.ts` sender.
-2. Browser sends `{type:"send_message", session_id, content, images?, attachments?}` over `/ws/client`.
-3. Hub `handleClientMessage` (`hub/src/ws/client.ts`) validates Zod schema, persists user message via `insertMessage` (`db/dal.ts`), looks up the agent channel via `getChannel(sessionId)` (`ws/registry.ts`).
-4. Hub forwards `{type:"user_message", ...}` to the agent ws.
-5. Agent `handleMessage` (`agent/src/index.ts:54`) calls `runner.sendMessage()` (`claude-runner.ts:143`) → writes `{type:"user", message:{role:"user", content}}` JSON line to Claude stdin.
-6. Claude stdout emits stream-json events; `ClaudeRunner.readStream` (`claude-runner.ts:250`) parses each line and invokes `handleEvent` (`claude-runner.ts:279`).
-7. Each event becomes a `RunnerEvent` → agent relays `{...event, session_id}` to hub over `/ws/agent`.
-8. Hub `handleAgentMessage` (`ws/agent.ts:44`) calls `broadcastToSubscribers(sessionId, ...)` (`ws/registry.ts:59`) → every browser subscribed to the session receives the activity event.
-9. On `result` event, runner emits final `assistant_message`; hub persists via `insertMessage` and broadcasts `{type:"message", ...}` so the UI swaps the streaming buffer for the saved record.
+1. Browser POST `/api/auth/login/request-link` with email (`hub/src/api/auth.ts`) — rate-limited 3/min/IP + 5/hr/email, silent.
+2. Hub asks Titanium for a magic-link JWT; emails the link via emails4agents.
+3. User clicks → `#/auth/callback?token=…` → SPA POST `/api/auth/callback`.
+4. Hub verifies JWT via `titanium-client.ts` (JWKS-cached EdDSA), links/promotes the user row (`dal.ts`), creates opaque session in `auth_sessions` (`session.ts`), sets cookie + CSRF pair (`csrf.ts`).
+5. SPA reloads, `useAuth` reads cookie, `useLicense` polls `/api/profile/license` every 5 min.
 
-### Session Resume Flow
+### Session start + message round-trip
 
-1. Agent starts in a project directory, sends `{type:"auth", api_key, project_dir, hostname}`.
-2. Hub hashes the API key (SHA-256 via `hashToken`), `verifyApiKey` returns `user_id`.
-3. `findOrCreateAgentSession(userId, projectDir, tokenHash)` (`db/dal.ts`) — single source of truth for resume: looks up `sessions` row by `(user_id, project_dir)`, returns existing or creates new.
-4. If reused, hub `unregisterChannel(sessionId)` to drop any stale socket entry.
-5. Hub `registerChannel`, sets status `online`, broadcasts `session_list` to all of the user's browser clients and `session_status` to subscribers.
-6. Claude CLI is spawned with `--resume <id>` only if the agent was started with the resume CLI flag (`config.resume` in `agent/src/index.ts`). Conversation memory is otherwise carried entirely by the live Claude process; restart of the agent re-spawns Claude with no resume id unless configured.
+1. Supervisor opens `/ws/agent`, sends `{type:'auth', api_key, project_dir, hostname, rootless_sessions, agent_info}` (`supervisor/src/hub-client.ts` → `hub/src/ws/agent.ts`).
+2. Hub verifies api_key (sha-256 hash in `api_keys`), calls `findOrCreateAgentSessionV2` / `findOrCreateRootlessSession`, sends `auth_ok` with `seed_files` (instructions sync).
+3. Browser opens `/ws/client`, authenticates via cookie or JWT, sends `subscribe` with up to 12 session_ids.
+4. Browser POSTs `/api/messages` or sends WS `send_message` (`hub/src/ws/client.ts`).
+5. Hub `insertMessage`, broadcasts to subscribers, ships `user_message` down `/ws/agent`.
+6. Supervisor writes JSON to CLI stdin; CLI emits stream-json events.
+7. Supervisor relays `thinking` / `text_delta` / `tool_use` / `tool_result` / `assistant_message` → hub → browser.
+8. Hub coalesces deltas into a single message row (`streamingBySession` + `appendToMessage`), finalizes on `assistant_message`, emits `assistant_message:final` on the internal event bus (`hub/src/events/assistant-events.ts`).
 
-### Status / Activity Flow
+### Scheduled task dispatch
 
-1. Runner emits `status` events on transitions (`idle | thinking | tool_calling | writing`).
-2. Hub maps `idle → online`, anything else → `thinking`, writes to `sessions.status` and broadcasts.
-3. Closing the agent socket → hub `setSessionStatus(sessionId, 'offline')` + broadcast.
-4. On hub boot, `setOfflineStaleAgentSessions()` (`hub/src/index.ts:184`) marks every session offline because in-memory registries are empty on restart.
+1. Croner ticker in `hub/src/scheduler/dispatcher.ts` fires from registry (`registry.ts`).
+2. `enforceCostCap` checks daily quota; `targets.ts` resolves `target_kind` (session / supervisor / coolify / all).
+3. Sender chosen: `senders/agent.ts` (CLI prompt with `Summary:` directive), `senders/supervisor.ts` (supervisor command), `senders/coolify.ts` (log_check), `senders/triage.ts` (coolify-webhook synth).
+4. Run row inserted, sent through `session-queue.ts` (1 in-flight + 1 waiter per session).
+5. On `assistant_message:final`, finalize run row; post-run dispatcher fires email / telegram / webpush / webhook / github-issue actions.
+6. Offline supervisor → `grace.ts` buffers up to 10 min, replays via `catchup.ts` on reconnect.
 
-**State Management:**
-- Durable: PostgreSQL (`users`, `sessions`, `messages`, `api_keys`).
-- Ephemeral live routing: in-memory `Map`/`Set` in `ws/registry.ts` (lost on restart, rebuilt as sockets reconnect).
-- Conversation memory: lives in the Claude CLI subprocess on the agent host. Not in the hub.
+### Error capture intake
+
+1. App SDK POSTs envelope to `/api/sentry/:project_id/envelope/` (`hub/src/api/sentry-intake.ts`) — OUTSIDE `/api/*` JWT scope.
+2. `error-capture/auth.ts` parses `X-Sentry-Auth`, looks up `error_projects.sentry_key`.
+3. `envelope.ts` gunzips multi-line JSON; `fingerprint.ts` sha-256 of project + type + value + top-3 frames.
+4. `record.ts` applies 3 gates: dedupe (60s) → rate-limit (20/hr) → daily cap (50).
+5. `notify.ts` throttled silent-skip emails (via emails4agents) when gates trip.
+6. On pass, `dispatcher.ts` claims session via `scheduler/session-queue.ts`, builds prompt (`prompt.ts`), ships to `/ws/agent`.
+7. `run-lifecycle.ts` finalizes on next `assistant_message`; offline → `grace.ts` 10-min buffer.
+
+### Revanote dispatch (Phase 08)
+
+1. Browser-extension annotation POSTs `/api/revanote/webhook` (`hub/src/api/revanote-webhook.ts`).
+2. `revanote/dispatcher.ts` resolves mapping (host → repo/session) via `revanote-dal.ts`, gates on per-user daily cost + per-source budget.
+3. Prompt rendered (`prompt.ts`), sandboxed if needed (`diff-sandbox.ts`, `sandbox.ts`), risk-classified (`risk-classifier.ts`).
+4. Dispatched via `session-queue.ts`; CI gate (`ci-gate.ts`) + merge gate (`merge-gate.ts`) + deploy policy (`deploy-policy.ts`) enforced.
+5. `callback.ts` POSTs result back to revanote; `notify-pr.ts` adds PR comment.
+
+### Coolify webhook triage (Phase 06)
+
+1. Coolify POSTs `/api/coolify/webhook/:user_id/:token` (or legacy HMAC route) — `hub/src/api/coolify-webhook.ts`.
+2. IP allowlist (`lib/cidr.ts`) → Zod validate → audit row in `coolify_webhook_attempts`.
+3. On `deployment.failed`, `triage` task synthesized through scheduler; result parsed by `triage-schema.ts`.
+4. `post-run/github-issue.ts` opens issue (24h idempotency via `github_issue_idempotency`), credentials from gateway pair.
+
+### Telegram chat bridge (Phase 12 W3)
+
+1. Inbound: Telegram POSTs `/api/telegram/webhook` → `telegram/commands.ts` (link, switch, status) or `telegram/dispatch.ts` (free text → session).
+2. Outbound: `telegram/bridge.ts` subscribes to `assistant_message:final`, per-chat serialized `Map<chatId, Promise>` to respect Telegram 1 msg/sec.
+3. Bridge is feature-gated on `config.telegram.botToken`; no-op when unset.
 
 ## Key Abstractions
 
-**Session:**
-- Purpose: One Claude conversation, scoped by `(user_id, project_dir)`.
-- Examples: rows in `sessions` table; `ChannelEntry` in `ws/registry.ts`.
-- Pattern: Find-or-create by `project_dir`; one live agent ws per session.
+**`CliRunner` (supervisor):**
+- Purpose: uniform interface over Claude Code + Codex CLIs.
+- Location: `supervisor/src/runners/types.ts`, implementations in `claude-runner.ts`, `session-bridge.ts`.
+- Emits a normalized `RunnerEvent` union consumed by the hub.
 
-**Channel (agent socket):**
-- Purpose: The single live WS through which a session is driven.
-- Examples: `channels: Map<sessionId, ChannelEntry>` in `ws/registry.ts`.
-- Pattern: `registerChannel` closes any pre-existing socket with code 4003 ("replaced") — one connection per session, last writer wins.
+**`session-queue` (hub):**
+- Purpose: 1 in-flight + 1 waiter per session_id; reused by scheduler + error-capture + revanote.
+- Location: `hub/src/scheduler/session-queue.ts`.
 
-**Subscription (client interest):**
-- Purpose: A browser client opts in to receive activity for a set of sessions.
-- Examples: `ClientEntry.subscriptions: Set<string>` in `ws/registry.ts`.
-- Pattern: `subscribeClient` replaces the set (does not accumulate — M6 fix).
+**Internal event bus:**
+- Purpose: decouple WS finalization from downstream consumers (telegram bridge, run-lifecycle, post-run).
+- Location: `hub/src/events/assistant-events.ts` — only fires on FINAL `assistant_message`, never streaming.
 
-**RunnerEvent:**
-- Purpose: Normalised activity event emitted by the runner, wire format shared with hub→browser broadcast.
-- Examples: `RunnerEvent` union in `agent/src/claude-runner.ts:5`.
-- Pattern: Discriminated union on `type`, validated on hub side via Zod (`ws/agent-protocol.ts`).
-
-**Token:**
-- Purpose: Secrets for auth (JWT for users, API keys for agents).
-- Examples: `utils/token.ts` `generateToken('remo_')`; SHA-256 hashes stored in DB.
-- Pattern: Raw token only ever shown once at issuance; only hash persisted.
+**AppShell + Tabs primitives:**
+- Purpose: shared frame for all 3 top-level web routes.
+- Location: `web/src/components/ui/AppShell.tsx`, `Tabs.tsx`, `HeaderRight.tsx`, `ErrorBoundary.tsx`.
 
 ## Entry Points
 
-**Hub HTTP/WS server:**
-- Location: `hub/src/index.ts`
-- Triggers: `bun run dev:hub` or Docker `CMD`.
-- Responsibilities: Boot Hono, mount routes, register WS upgrade for `/ws/{agent,client,channel}`, serve `web/dist` SPA.
+**Hub:**
+- `hub/src/index.ts` — `Bun.serve` with Hono `app`, WS upgrade for `/ws/client` and `/ws/agent`. Runs migrations + scheduler boot + grace sweepers in same process.
 
-**Local agent:**
-- Location: `agent/src/index.ts`
-- Triggers: `npx remo-code-agent` (shell alias `claude-remote`).
-- Responsibilities: Pre-flight `claude --version`, load config, connect to hub, spawn Claude after 2s, wire runner↔hub events.
+**Web:**
+- `web/src/main.tsx` → `web/src/App.tsx` — hash router, routes: `home | tasks | settings | privacy | terms | login | auth-callback | dev-chat-surface | dev-mobile-accordion`.
 
-**Browser SPA:**
-- Location: `web/src/main.tsx` → `web/src/App.tsx`
-- Triggers: User loads page (served by hub static handler).
-- Responsibilities: Auth flow, session list, chat panel, activity feed, settings.
+**Supervisor:**
+- `supervisor/src/index.ts` — CLI with `run` / `scan` / `help` subcommands; `run` is what the Tauri sidecar invokes.
+- `supervisor/tauri/src-tauri/src/main.rs` → `lib.rs` — Tauri app, tray, sidecar lifecycle, first-run wizard.
 
 ## Architectural Constraints
 
-- **Threading:** Single-threaded Bun event loop in both hub and agent. Claude CLI runs as a separate OS process via `Bun.spawn`. No worker threads.
-- **Global state:**
-  - Hub: `channels` Map and `clients` Set in `ws/registry.ts`; `wsConnectionsPerIp` Map in `hub/src/index.ts`. Module-level singletons.
-  - Agent: `hub` and `runner` singletons created at module load in `agent/src/index.ts`.
-- **One agent process owns one Claude subprocess.** Multi-project chat requires multiple agent invocations (one per `project_dir`).
-- **One channel per session.** Reconnecting agent forcibly displaces the previous socket (`registerChannel` closes existing with code 4003).
-- **Hub restart blows away live routing** — sessions show offline until each agent reconnects. Persisted state survives.
-- **10 MB WebSocket payload limit** (`maxPayloadLength` in `hub/src/index.ts:159`) — bounds attachment / image data URI size.
-- **Per-IP limits:** 100 WS connections per IP (`MAX_WS_CONNECTIONS_PER_IP`), 5s auth timeout, 120 msgs / 10s per agent connection rate limit (`hub/src/ws/agent.ts:10`).
-- **Origin check** only enforced on `/ws/client`, not on `/ws/agent` or `/ws/channel` (those use API key).
-- **`ANTHROPIC_API_KEY` stripped** from Claude CLI env (`claude-runner.ts:90`) — forces use of the user's OAuth subscription instead of a leaked project key.
+- **Single Bun event loop on the hub.** All subsystems share one process — no worker threads. CPU-heavy work (fingerprint, envelope gunzip) must stay sub-millisecond per request.
+- **Hash router on web.** SPA fallback serves `index.html` for any pathname; `App.tsx` normalizes pathname to `/` on boot. Legacy hash redirects (`#/schedules`, `#/error-capture`, `#/revanote`, `#/supervisor`, `#/grid/:id`) are kept FOREVER — scheduled-task email links depend on them.
+- **Subscribe set capped at 12.** `hub/src/ws/protocol.ts` `SUBSCRIBE_MAX = 12`; violations get `subscribe_error`. Grid view enforces same cap UI-side.
+- **Cost cap is the universal fan-out gate.** All dispatch paths (scheduler, error-capture, revanote, coolify triage) flow through `scheduler/dispatcher.ts` `enforceCostCap`. No bypass paths.
+- **Webhooks live outside `/api/*`.** Public intakes mount before the JWT catch-all in `hub/src/index.ts` and read raw body BEFORE JSON parse (HMAC needs bytes).
+- **`SESSION_SECRET` is never rotated routinely.** Rotation logs out every Titanium-cookie user. D14 rotates `JWT_SECRET` instead.
+- **`/api/profile/license` is auth-gated, never license-gated** (circular dep). Same exclusion for `/api/auth/*`, `/healthz`, public webhooks, `/ws/agent`.
+- **Streaming throttle is web-side only.** Hub-side throttling would break scheduler event ordering. ChatSurface RAF-coalesces deltas.
 
 ## Anti-Patterns
 
-### Persisting activity events
+### Mounting a license-gated route inside the webhook exclusion list
 
-**What happens:** Storing every `thinking` / `text_delta` / `tool_use` event to the `messages` table.
-**Why it's wrong:** They are deltas; the `messages` table holds finalized messages only. Storage would explode and replay would double-render.
-**Do this instead:** Only `assistant_message` (assembled at `result` time, `claude-runner.ts:364`) and the user's outbound message are persisted by the hub. See `ws/agent.ts:164` and `ws/client.ts`.
+**What happens:** New webhook added under `/api/*` and forgotten in the exclusion list.
+**Why it's wrong:** Third-party (Coolify, Sentry, Telegram) cannot send a cookie or JWT — license gate 402s the webhook and dispatches die silently.
+**Do this instead:** mount the webhook route OUTSIDE `/api/*` (e.g. `/api/coolify/webhook/...` is added to the gate's exclusion array in `hub/src/license-gate.ts`).
 
-### Calling Claude CLI directly from the hub
+### Throttling stream events server-side
 
-**What happens:** Spawning `claude` on the server.
-**Why it's wrong:** The hub is a multi-tenant relay; spawning Claude per user kills horizontal scaling and breaks the "agent runs locally" model. Claude needs the user's project directory and OAuth credentials, both of which live on the dev machine.
-**Do this instead:** All Claude execution happens in `agent/src/claude-runner.ts` on the user's host.
+**What happens:** Coalescing `text_delta` events in the hub to reduce browser load.
+**Why it's wrong:** Breaks scheduler `assistant_message:final` ordering and the run-lifecycle finalize.
+**Do this instead:** RAF-coalesce in `web/src/components/ChatSurface.tsx` using a ref accumulator.
 
-### Broadcasting to all clients
+### Reading req.json() before HMAC verify
 
-**What happens:** `for (client of clients) ws.send(...)` without filtering.
-**Why it's wrong:** Leaks one user's session traffic to other users.
-**Do this instead:** Use `broadcastToSubscribers(sessionId, ...)` (filters by `client.subscriptions`) or `broadcastToUser(userId, ...)` (filters by `client.userId`) from `ws/registry.ts`.
+**What happens:** Hono `c.req.json()` consumes the body; HMAC over a re-serialized body mismatches.
+**Why it's wrong:** All signed webhooks (Coolify, Titanium, Sentry envelopes) fail signature verification.
+**Do this instead:** call `c.req.raw.text()` (or arrayBuffer) FIRST, verify, then `JSON.parse`.
 
-### Storing raw tokens
+### New env var per third-party API
 
-**What happens:** Saving the literal `remo_…` token or API key in the DB.
-**Why it's wrong:** DB compromise leaks all live credentials.
-**Do this instead:** Hash via `hashToken` (SHA-256, `ws/channel.ts`) before storing. Compare hashes on auth. See `verifyApiKey` in `db/dal.ts`.
-
-### Accumulating subscriptions
-
-**What happens:** `entry.subscriptions.add(sessionId)` on every `subscribe` message.
-**Why it's wrong:** Old subscriptions linger, leaking events for sessions the user closed.
-**Do this instead:** Replace the set, do not accumulate — see `subscribeClient` in `ws/registry.ts:54` (the "M6 fix").
+**What happens:** Adding `GITHUB_TOKEN`, `STRIPE_KEY`, etc. directly to hub env.
+**Why it's wrong:** Violates the gateway-pair architecture (global rule).
+**Do this instead:** fetch via `GATEWAY_URL` / `GATEWAY_API_KEY` (see `scheduler/post-run/github-issue.ts`).
 
 ## Error Handling
 
-**Strategy:** Fail-closed at boundaries, swallow inside hot loops, log everything to stdout.
+**Strategy:** never leak internals to clients.
 
 **Patterns:**
-- Hono global `app.onError` returns `{error: 'internal error'}` 500 and logs message only — never leak stack (`hub/src/index.ts:29`).
-- WS handlers: malformed JSON → silent return; Zod parse failure → silent return; auth failure → `auth_error` then close with 4001.
-- Agent runner: `proc.exited` triggers auto-restart after 3s unless `stop()` was called (which nulls `listener` to prevent loop) — `claude-runner.ts:122`.
-- Agent stream reader: per-line `try/catch` skips malformed JSON (`claude-runner.ts:269`).
-- Browser: WS reconnect with backoff in `useWebSocket.ts`.
+- Global Hono handler in `hub/src/index.ts` returns `{error: 'internal error'}` 500.
+- Webhooks return generic 200 on dedupe/skip to avoid revealing project state.
+- Post-run action failures are log-only — never fail the parent run.
+- WS auth failures close with a generic code after 5s timeout, no detail.
 
 ## Cross-Cutting Concerns
 
-**Logging:** `console.log` / `console.error` with bracketed source tag (`[agent]`, `[runner]`, `[runner:stderr]`, `[error]`, `[startup]`). No structured logger.
-
-**Validation:** Zod schemas at every WS boundary — `hub/src/ws/protocol.ts` (client) and `hub/src/ws/agent-protocol.ts` (agent). REST routes validate per-route inside `hub/src/api/*.ts`.
-
-**Authentication:**
-- Browser → hub: JWT in `Authorization: Bearer` (REST) or `{type:"auth", token}` first WS message. Verified via `JWT_SECRET` (`hub/src/auth/jwt.ts`).
-- Agent → hub: API key, hashed SHA-256, compared against `api_keys.key_hash` (`hub/src/auth/api-key-middleware.ts`, also re-used inline in `ws/agent.ts:70`).
-- Plugin/channel: API key (legacy path).
-
-**Authorization:** All DAL queries take `user_id` and include explicit `WHERE user_id = $1`. Sessions and messages are never queried without user scoping.
-
-**Rate limiting:** Per-route middleware `hub/src/middleware/rate-limit.ts` (keyed by userId or auth prefix); per-WS message counters in each WS handler.
-
-**Security headers:** CSP, HSTS, X-Frame-Options DENY, Permissions-Policy, Referrer-Policy set in a Hono middleware in `hub/src/index.ts:35`.
-
-**Theming:** CSS custom properties (`--bg-primary`, `--text-primary`, …) in `web/src/index.css`, toggled by `useTheme.ts`.
-
-**Scheduled Tasks subsystem:** Cron-driven dispatcher under `hub/src/scheduler/` (added 2026-05). Croner-backed `Map<task_id, Cron>` registry; dispatcher resolves `target_kind` to sockets via the same `ws/registry.ts` + `ws/supervisor-registry.ts` used by the live chat path; per-session FIFO with 1 in-flight + 1 waiter; 10-min offline grace replay on reconnect; daily cost cap enforced via `sumTodayCostForUser` at fire time. Post-run action framework (`post-run/`) is a separate dispatcher with its own Zod schema, cycle detector (DFS), template renderer, and fan-out aggregator. See `docs/scheduled-tasks.md`.
+**Logging:** `console.log` / `console.error` with bracketed tags (`[agent]`, `[scheduler]`, etc.). Supervisor tees to file with 5MB rotation (`supervisor/src/index.ts` `setupFileLogging`).
+**Validation:** Zod schemas at every boundary (WS protocols, scheduler payloads, post-run actions, triage result, revanote payload).
+**Auth:** dual-mode middleware (cookie + legacy bearer) gated by `ALLOW_LEGACY_LOGIN`; api-key middleware for `/ws/agent`.
+**Security headers:** `securityHeaders()` mounted first in `hub/src/index.ts` — HSTS 2yr+preload, CSP, COOP/CORP, Permissions-Policy.
+**Rate limits:** per-IP WS connection cap 20, per-conn message rate, per-route REST rate-limit middleware (`hub/src/middleware/rate-limit.ts`).
+**OpenAPI:** spec assembled in `hub/src/api/_openapi.ts`; CI `.github/workflows/docs-drift.yml` enforces.
 
 ---
 
-*Architecture analysis: 2026-05-22 (scheduled-tasks subsystem added 2026-05-24)*
+*Architecture analysis: 2026-05-28*

@@ -1,216 +1,161 @@
 # Coding Conventions
 
-> **Note (Phase 09, 2026-05-26):** The agent/ workspace and channel/ plugin are retired. The local CLI runner now lives in supervisor/src/ and ships exclusively as a Tauri MSI desktop app. The hub /ws/agent route is unchanged. References below to agent/, npx remo-code-agent, claude-remote, or /ws/channel are historical. See .planning/phases/09-retire-npm-packages/.
-
-
-**Analysis Date:** 2026-05-22
+**Analysis Date:** 2026-05-28
 
 ## Naming Patterns
 
 **Files:**
-- TypeScript modules: `kebab-case.ts` — e.g. `hub/src/ws/agent-protocol.ts`, `hub/src/auth/api-key-middleware.ts`, `hub/src/middleware/rate-limit.ts`, `agent/src/claude-runner.ts`, `agent/src/hub-client.ts`, `web/src/lib/auth.ts`
-- React components: `PascalCase.tsx` — e.g. `web/src/components/ChatPanel.tsx`, `MessageBubble.tsx`, `ActivityFeed.tsx`, `ThinkingBlock.tsx`
-- React hooks: `useCamelCase.ts` in `web/src/hooks/` — `useAuth.ts`, `useChat.ts`, `useTheme.ts`, `useWebSocket.ts`, `useSessions.ts`
-- Schema/SQL: `lowercase.sql` — e.g. `hub/src/db/schema.sql`
+- TS source: `kebab-case.ts` (e.g. `session-queue.ts`, `coolify-webhook.ts`, `auto-name.ts`).
+- React components: `PascalCase.tsx` (e.g. `SettingsPage.tsx`, `MessageBubble.tsx`, `ChatSurface.tsx`).
+- UI primitives live in `web/src/components/ui/` and re-export through `index.ts`.
+- Tests: `<unit>.test.ts` colocated under `hub/test/` or `supervisor/test/` (NOT next to source).
+- E2E tests: `<feature>.e2e.test.ts` (e.g. `scheduled-tasks.e2e.test.ts`, `phase-08.e2e.test.ts`).
 
-**Functions:**
-- `camelCase` for normal functions: `getUserByEmail`, `signJwt`, `findOrCreateAgentSession`, `loadConfig`
-- `PascalCase` for React components: `function App()`, `export function AuthForm()`
+**Functions / vars:** `camelCase`. **Types / React components:** `PascalCase`. **Constants:** `SCREAMING_SNAKE_CASE` for env keys + module-scope literal sets (e.g. `SCAN_DIRS`, `EXCLUDE_FILE_SUFFIXES`).
 
-**Variables:**
-- `camelCase` locals: `tokenHash`, `sessionId`, `projectDir`
-- `UPPER_SNAKE_CASE` for module-level constants: `VERSION = '0.3.6'` in `agent/src/index.ts`
-
-**Types & Schemas:**
-- `PascalCase` for types and Zod schemas: `HubToAgent`, `HubToClient`, `ClientSendMessage`, `ChannelAuth`, `AssistantMessage`
-- Zod schemas declared in `PascalCase` matching the message `type` literal they validate (`hub/src/ws/protocol.ts`)
-
-**Database columns / JSON payloads:**
-- `snake_case` over the wire and in DB: `session_id`, `user_id`, `project_dir`, `token_hash`, `last_activity`, `created_at`, `password_hash`, `api_key`
-- Web/agent code uses `snake_case` for WS payload fields to match the protocol exactly; internal locals stay `camelCase`
+**Zod schemas:** `<Name>Schema` suffix (`CreateSchema`, `TaskTypeEnum`).
 
 ## Code Style
 
-**Formatting:**
-- No Prettier, ESLint, or Biome config in the repo. Style enforced by author convention only.
-- Indentation: 2 spaces.
-- Semicolons: **mixed** — hub `api/` files use semicolons (`hub/src/api/auth.ts`), hub `ws/` and most other files omit them (`hub/src/ws/protocol.ts`, `hub/src/index.ts`). When adding code, match the surrounding file.
-- Quotes: single quotes dominant in `hub/src/ws/`, `hub/src/index.ts`, `agent/`, `web/`; double quotes in `hub/src/api/auth.ts` and `hub/src/db/dal.ts`. Match the file.
-- Trailing commas in multi-line arrays/objects.
+**Formatting:** No prettier/eslint config committed at repo root. Style is consistent-by-convention:
+- 2-space indent.
+- Single quotes for strings.
+- No semicolons in TS (e.g. `hub/src/api/scheduled-tasks.ts`).
+- ESM imports with explicit `.ts` extension on intra-repo paths (Bun-native): `from '../db/dal.ts'`.
 
-**Linting:**
-- None configured. Do not introduce ESLint/Biome unless asked.
+**TypeScript:**
+- Hub has NO `tsconfig.json` and NO `typecheck` script — typing enforced at Bun runtime + `bun test`. Do NOT add `tsc --noEmit` to hub CI without first adding a tsconfig.
+- `web/` uses `tsc -b && vite build` for build-time type checking. Strict React 19 + TS 5.7.
+- Supervisor: TS source compiled to a sidecar binary via `bun build --compile`.
 
-## TypeScript Usage
+**Imports — order:**
+1. Node/Bun built-ins (`node:fs`, `bun:test`).
+2. Third-party (`hono`, `zod`, `croner`).
+3. Intra-repo relative paths (`../db/dal.ts`).
 
-**Strictness:**
-- `strict: true` everywhere. Confirmed in `web/tsconfig.json` (also `noFallthroughCasesInSwitch`, `forceConsistentCasingInFileNames`, `noEmit`, bundler resolution).
-- `noUnusedLocals` / `noUnusedParameters` are **off** — unused vars are allowed.
-
-**Module style:**
-- ESM only (`"type": "module"` in every package).
-- `allowImportingTsExtensions: true` — hub uses explicit `.ts` extensions in imports (`from "../db/dal.ts"`); web/agent typically omit extensions. Match the file.
-- `isolatedModules: true` + `moduleDetection: force` → each file must be a module.
-
-**Types:**
-- Prefer `type` aliases + discriminated unions for protocol messages (see `HubToClient`, `HubToAgent` in `hub/src/ws/protocol.ts`).
-- `interface` used for local option bags (e.g. `RateLimitOptions` in `hub/src/middleware/rate-limit.ts`).
-- `unknown` for opaque payloads (`tool_input: unknown`); avoid `any` (one `as any` cast in `agent/src/index.ts:51` is acknowledged as a shortcut).
-
-## Import Organization
-
-**Order (observed in `hub/src/index.ts`, `web/src/App.tsx`):**
-1. Third-party packages (`hono`, `react`, `zod`)
-2. Local modules by feature, grouped roughly by layer (config → auth → api → ws)
-3. Node built-ins last when present (`fs`, `path`)
-
-**Path style:**
-- Relative paths only (`./config`, `../db/dal.ts`). No path aliases configured.
-- React imports use named imports: `import { useState, useEffect, useCallback } from 'react'`.
-- Type-only imports use `import type { ... }` (`import type { AuthUser } from './lib/auth.ts'`, `import type { HubToAgent } from './types'`).
-
-## File Organization
-
-**Hub layout (`hub/src/`):**
-- `index.ts` — Hono app wiring, security headers, CORS, route mounting, WS upgrade
-- `config.ts` — env var loading
-- `api/<resource>.ts` — one Hono sub-router per resource (`auth.ts`, `sessions.ts`, `messages.ts`, `api-keys.ts`, `setup.ts`, `profile.ts`, `plugin.ts`); export named router (e.g. `export const authRouter = new Hono()`)
-- `auth/` — `jwt.ts`, `password.ts`, `middleware.ts`, `api-key-middleware.ts`
-- `db/` — `postgres.ts` (postgres.js client), `dal.ts` (all SQL queries), `schema.sql`
-- `middleware/` — cross-cutting (e.g. `rate-limit.ts`)
-- `ws/` — `protocol.ts` (Zod schemas + outbound types), `client.ts`, `agent.ts`, `channel.ts`, `agent-protocol.ts`, `registry.ts`
-- `utils/` — small helpers (`token.ts`)
-
-**Web layout (`web/src/`):**
-- `App.tsx`, `main.tsx`, `index.css`
-- `components/` — one PascalCase file per component, flat (no nested folders)
-- `hooks/` — one `useXxx.ts` per concern
-- `lib/` — pure helpers (`auth.ts`)
-
-**Agent layout (`agent/src/`):**
-- `index.ts` — entry, CLI startup, pre-flight checks
-- `config.ts`, `types.ts`, `hub-client.ts`, `claude-runner.ts`, `local-ui.ts`
-
-## WebSocket Protocol & Zod Validation
-
-All inbound WS messages MUST be validated with Zod before use. Pattern from `hub/src/ws/protocol.ts`:
-
-```ts
-export const ClientSendMessage = z.object({
-  type: z.literal('send_message'),
-  session_id: z.string().min(1).max(256),
-  content: z.string().min(1).max(1_000_000),
-  id: z.string().uuid(),
-  images: z.array(z.object({
-    media_type: z.string(),
-    data: z.string().max(10_000_000),
-  })).max(5).optional(),
-})
-
-export const ClientInbound = z.discriminatedUnion('type', [
-  ClientAuth, ClientSendMessage, ClientSubscribe,
-  ClientPermissionResponse, ClientQuestionResponse,
-  z.object({ type: z.literal('pong') }),
-])
-```
-
-**Rules:**
-- Inbound payloads → Zod schemas (`Client*`, `Channel*`, `Agent*`)
-- Outbound payloads → plain TypeScript discriminated union types (`HubToClient`, `HubToAgent`, `HubToChannel`). Hub constructs them, no runtime validation.
-- Every schema includes explicit bounds: `.min`, `.max`, `.uuid()`, `.regex(/^remo_[A-Za-z0-9_\-]{43}$/)` for tokens.
-- Use `z.discriminatedUnion('type', [...])` for top-level inbound messages.
-- Always include the trivial `{ type: 'pong' }` in the inbound union for heartbeat.
+Use named imports. Avoid default exports except for React components and Hono sub-apps.
 
 ## Error Handling
 
-**Hono routes:**
-- Validate inputs at top of handler; return `c.json({ error: '...' }, 4xx)` for client errors.
-- Generic message for auth failures: `"Invalid credentials"` (never reveal whether email exists) — see `hub/src/api/auth.ts`.
-- Setup/admin guarded by internal check (e.g. `countUsers() > 0` rejects registration after first admin).
-
-**Global handler (`hub/src/index.ts`):**
-```ts
-app.onError((err, c) => {
-  console.error('[error]', err.message)
-  return c.json({ error: 'internal error' }, 500)
-})
-```
-Never leak internal error details to clients. Log to `console.error` with a tag prefix `[error]`, `[remo-agent]`, etc.
-
-**WebSocket:**
-- Parse with `Schema.safeParse(...)`; on failure, close the socket or send `{ type: 'auth_error', error: '...' }`. Never throw out of a WS handler.
-- 5s auth timeout, per-IP connection caps (20), per-connection message rate limits — enforced in `hub/src/ws/`.
-
-**Agent:**
-- Pre-flight checks fail fast with `process.exit(1)` and a helpful message (see `agent/src/index.ts` claude CLI check).
-- Log prefix: `[remo-agent]`.
+**Patterns:**
+- Zod-validate all external boundaries: WS frames (`hub/src/ws/protocol.ts`, `agent-protocol.ts`), REST bodies (each `api/*.ts` declares its `*Schema`), webhook payloads, env config (`hub/src/config.ts`).
+- Webhook + intake endpoints: read RAW body BEFORE JSON parse for HMAC verification. Constant-time signature compare. Reject `>5 min` timestamp skew.
+- Internal errors: `try/catch` with structured `console.log`/`console.warn` prefixed by module (`[scheduler]`, `[supervisor]`, `[agent]`).
+- Post-run / side-effect failures are LOG-ONLY — never fail the parent run (see `hub/src/scheduler/post-run/github-issue.ts`).
+- Hono routes return JSON `{ error: '<code>' }` with HTTP status; never throw past the router boundary.
 
 ## Logging
 
-**Framework:** `console.log` / `console.error` only. No structured logger.
+**Framework:** `console.log` / `console.warn` / `console.error`. No structured logger lib.
 
 **Conventions:**
-- Tag prefix in brackets: `[error]`, `[remo-agent]`.
-- Hub logs errors via the global `onError` handler.
-- Agent forwards human-readable logs to the hub via `agent_log` WS messages (`sendLog(...)` in `agent/src/index.ts`).
+- Prefix with bracket tag: `[supervisor]`, `[hub]`, `[scheduler]`, `[agent]`, `[webhook]`.
+- Log security-relevant events (auth failures, HMAC mismatches, rate-limit hits, license-gate denials) at `warn`.
+- Never log secrets, tokens, full JWTs, full webhook signatures, or env values.
 
-## Security Headers & CORS
+## Comments
 
-All set centrally in `hub/src/index.ts`:
-- CSP, HSTS, X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy, Permissions-Policy
-- CORS scoped to `/api/*` only, origins from `config.allowedOrigins`
-- Auth ordering: `/api/auth` and `/api/setup` are public; `/api/plugin/*` uses API key middleware (must be mounted **before** the JWT catch-all); `/api/*` after that is JWT-protected.
+**When to comment:**
+- Module-level doc block at top of every `hub/src/**` file explaining purpose + invariants (see `hub/test/scheduler.test.ts:1-22`, `hub/src/api/scheduled-tasks.ts:1-13`).
+- Inline comments for non-obvious invariants (HMAC raw-body discipline, idempotency keys, cost-cap enforcement, license-gate exclusion list).
+- `// Phase NN:` comments mark behavior pinned to a specific delivery phase (do NOT remove without phase-aware review).
 
-## Theming (CSS Custom Properties)
-
-**Pattern:** Tailwind 4 + CSS variables on `<html>` class `.light` / `.dark`. Defined in `web/src/index.css`.
-
-**Variable names (always reference via `var(--name)` in JSX):**
-- Backgrounds: `--bg-primary`, `--bg-secondary`, `--bg-tertiary`, `--bg-input`
-- Text: `--text-primary`, `--text-secondary`, `--text-muted`, `--text-on-accent`
-- Chrome: `--border-color`, `--scrollbar-thumb`, `--scrollbar-hover`, `--code-bg`
-
-**Usage in components:**
-```tsx
-<div className="bg-[var(--bg-primary)] text-[var(--text-muted)]">...</div>
-```
-Never hardcode hex colors in components. If a new visual concern is needed, add a `--name` to both `.light` and `.dark` blocks in `index.css`.
-
-**Theme toggle:** `web/src/hooks/useTheme.ts` — persists to `localStorage` key `remo-theme`, falls back to `prefers-color-scheme`, toggles classes on `document.documentElement`.
+**JSDoc/TSDoc:** Used on exported helpers in `hub/src/scheduler/`, `hub/src/error-capture/`, and `supervisor/src/`. Plain `/** */` blocks, not full TSDoc tags.
 
 ## Function Design
 
-**Size:** Small route handlers (5–30 lines). DAL functions are single-query wrappers.
-
-**Parameters:**
-- Positional args for ≤3 parameters (e.g. `createUser(email, hash, role)`).
-- Object bag for option-heavy APIs (`rateLimit({ windowMs, max, keyFn })`).
-
-**Return values:**
-- DAL returns row objects or `null`, never throws on "not found" — use `rows[0] ?? null` pattern (`hub/src/db/dal.ts`).
-- Async by default; never mix callbacks.
-
-## Database Access
-
-**Client:** `postgres` (postgres.js) tagged-template. Single instance exported from `hub/src/db/postgres.ts` as `sql`.
-
-**Rules:**
-- All SQL lives in `hub/src/db/dal.ts`. Route handlers never write inline SQL.
-- Always parameterize: ``sql`SELECT ... WHERE id = ${sessionId}` `` — never string-concatenate.
-- Every user-scoped query MUST include `WHERE user_id = ${userId}` (see `listSessions`, `getSession`).
-- DAL function names: `verbResource` — `getSessionById`, `findSessionByProjectDir`, `findOrCreateAgentSession`, `countUsers`.
+- Pure logic modules (`scheduler/cron.ts`, `scheduler/auto-name.ts`, `error-capture/fingerprint.ts`) export small named functions, no classes.
+- DAL functions live in `*-dal.ts` files (`hub/src/db/dal.ts`, `scheduled-tasks-dal.ts`, `supervisor-dal.ts`, `revanote-dal.ts`). One function per query. Always `WHERE user_id = $1` for user-scoped tables.
+- Hono routers exported as named `Hono` instance per file (e.g. `export const scheduledTasks = new Hono()`).
 
 ## Module Design
 
-**Exports:**
-- Named exports throughout; default export only for React `App.tsx`.
-- No barrel (`index.ts` re-export) files; import directly from source module.
+- One Hono sub-router per concern under `hub/src/api/`, mounted in `hub/src/index.ts`.
+- OpenAPI-aware routes live in `hub/src/api/_openapi.ts` (or a sibling `OpenAPIHono`) and MUST be mounted BEFORE the plain-Hono twin or the twin must be deleted.
+- No barrel `index.ts` except for `web/src/components/ui/index.ts` (UI primitive re-exports).
 
-**React component conventions:**
-- Function components only; no class components.
-- Hooks at top of body; effects after state declarations.
-- Props typed inline or via local `type Props = { ... }`.
+## Design Tokens (UI)
+
+CSS custom properties on `:root` (defined in `web/src/index.css`):
+- BG: `--bg-primary` (page), `--bg-secondary` (cards/panels), `--bg-tertiary` (hover/inputs).
+- Text: `--text-primary`, `--text-secondary`, `--text-muted`, `--text-on-accent`.
+- Borders: `--border-color` (sparingly).
+- Code: `--code-bg`.
+
+**Aesthetic rules (per global `~/.claude/design-preferences.md` + repo CLAUDE.md):**
+- **Subtle, not bordered.** Cards = `bg-[var(--bg-secondary)]/60` over `bg-[var(--bg-primary)]`. Reserve borders for active state, modals, header separators.
+- **Radius:** `rounded-xl` cards/dialogs, `rounded-lg` inputs/buttons/list items, `rounded` chips. **NEVER** `rounded-2xl` or larger.
+- **Accent:** indigo. Primary buttons `bg-indigo-600 hover:bg-indigo-500`. Active `bg-indigo-600/20 ring-1 ring-indigo-500/30`.
+- **Status colors:** emerald (good), amber (warn), red (error), gray (offline). Solid icons at 400, soft bg at /20 + ring.
+- **Padding:** card `p-5`, input/button `px-3 py-2`, list item `px-3 py-2`.
+- **Spacing:** `space-y-4`/`5` between sections, `gap-2`/`3` inline.
+- **Headers:** card heading `text-sm font-semibold text-[var(--text-primary)]`. Captions `text-xs text-[var(--text-muted)]`.
+- **Forbidden:** custom hex, drop shadows beyond default, gradients, `shadow-2xl+`, `rounded-2xl+`.
+
+Canonical reference: `web/src/components/SettingsPage.tsx`.
+
+## UI Primitives
+
+All in `web/src/components/ui/` — re-exported via `index.ts`. Use these instead of bespoke markup:
+
+| Primitive | File | Use for |
+|-----------|------|---------|
+| `AppShell` | `AppShell.tsx` | Page chrome / sidebar layout |
+| `Card` | `Card.tsx` | Panel + section container |
+| `Modal` | `Modal.tsx` | Centered dialog |
+| `Drawer` | `Drawer.tsx` | Side-panel (run details, error detail) |
+| `Tabs` | `Tabs.tsx` | Settings sub-nav |
+| `Button` | `Button.tsx` | All buttons (variants: primary/secondary/ghost/danger) |
+| `Field` | `Field.tsx` | Form input wrapper (label + hint + error) |
+| `StatusPill` | `StatusPill.tsx` | Status chips (success / failure / pending / disabled) |
+| `EmptyState` | `EmptyState.tsx` | No-rows placeholder |
+| `LoadingState` | `LoadingState.tsx` | Spinner / skeleton |
+| `ErrorBoundary` | `ErrorBoundary.tsx` | Wrap pages to catch render errors |
+| `HeaderRight` | `HeaderRight.tsx` | Top-right header slot (license badge + nav) |
+
+When adding a new surface, compose primitives first; introduce a new primitive only if 3+ places need the same shape.
+
+## Git Workflow
+
+**Branch naming:**
+- `feat/<slug>` — new feature
+- `fix/<slug>` — bug fix
+- `refactor/<slug>` — non-behavioral change
+- `chore/<slug>` — deps / tooling / docs
+- `phase-<NN>-<slug>` — GSD phase work
+
+**Worktree discipline (MANDATORY — repo CLAUDE.md):**
+- Main session stays on `main` in `C:\Users\artic\GitHub\remo-code`.
+- Every feature/phase gets its own worktree: `git worktree add ../remo-code-<slug> -b <branch> origin/main`.
+- All implementation, planning docs (`.planning/phases/<NN>-<slug>/`), agent dispatches happen in the worktree — NEVER the main checkout (parallel sessions wipe untracked files).
+- After merge: `git worktree remove ../remo-code-<slug> ; git branch -D <branch>`.
+
+**Commit messages:**
+- Conventional-commit-ish: `feat(scope): summary`, `fix(scope): summary`, `chore(scope): summary`.
+- Scope examples: `scheduler`, `webhook`, `auth`, `web`, `supervisor`, `07-bypass`, `coolify-webhook`.
+- Body explains the WHY + invariants touched. Reference phase + plan IDs when applicable.
+
+**PR hygiene:**
+- One branch = one concern = one PR.
+- Run `gh pr list` periodically to surface stale branches.
+- Squash-merge with `--delete-branch`.
+
+## Docs Co-Update Rule
+
+Per repo CLAUDE.md, code changes in these areas MUST update the matching doc in the SAME commit:
+
+| Code area | Doc to update |
+|-----------|---------------|
+| `hub/src/scheduler/**`, scheduler tests | `docs/scheduled-tasks.md` |
+| `hub/src/error-capture/**`, error intake | `docs/error-capture.md` |
+| Grid / multichat (`GridPage`, `ChatSurface`, `MobileAccordion`) | `docs/grid-view.md` |
+| Codex runner / rootless / seed files | `docs/codex-and-rootless.md` |
+| Auth / license / magic-link / sessions | `docs/auth.md` |
+| Coolify webhook (`hub/src/api/coolify-webhook.ts`) | `docs/scheduled-tasks.md` + `docs/coolify-webhook-migration.md` |
+| Any `hub/src/api/**` route migrated to OpenAPI | run `bun run docs:sync`; commit `docs/openapi.json` + `docs/api.md` |
+
+CI workflow `.github/workflows/docs-drift.yml` fails PRs that change `hub/src/**` without a matching spec update.
 
 ---
 
-*Convention analysis: 2026-05-22*
+*Convention analysis: 2026-05-28*
