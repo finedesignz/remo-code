@@ -30,6 +30,32 @@ cd mobile/tauri/ui && bun install
 cd mobile/tauri && cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
+### Desktop preview build (Windows / macOS / Linux)
+
+`mobile/tauri/src-tauri/src/main.rs` is the desktop entry point; the same
+crate builds a normal native window that loads `https://app.remo-code.com`
+in a WebView, exercising the deep-link → finalize-mobile → SPA round-trip
+without an iOS or Android host. Use this for local iteration.
+
+```bash
+cd mobile/tauri/ui && bun install
+cd mobile/tauri && cargo tauri build --debug
+```
+
+Artifacts (Windows host, debug profile):
+
+- `src-tauri/target/debug/remo-code-mobile.exe`              — raw executable
+- `src-tauri/target/debug/bundle/msi/Remo Code_*.msi`        — MSI installer
+- `src-tauri/target/debug/bundle/nsis/Remo Code_*-setup.exe` — NSIS installer
+
+`tauri.windows.conf.json` opts `msi` + `nsis` bundle targets in for the
+Windows host only; `tauri.conf.json` keeps the mobile `app` + `apk` bundle
+targets canonical, and the `app.windows[main]` config is ignored by the
+mobile entry point at runtime.
+
+Preview installers are unsigned — Windows SmartScreen will flag them on
+first launch. That's expected; signed releases come with Phase 12.5.
+
 ### iOS (Mac host required)
 
 ```bash
@@ -62,9 +88,12 @@ Phase 12.4 owns:
 
 1. Run `cargo tauri ios init` on a Mac, commit `gen/apple/`.
 2. Run `cargo tauri android init` on an SDK-equipped host, commit `gen/android/`.
-3. Commit a 1024×1024 `src-tauri/icons/icon.png` and run `cargo tauri icon`.
-4. Configure code-signing (Apple Developer Program; Google Play upload key).
-5. Wire `mobile-shell-release.yml` for tagged `mobile-v*.*.*` builds.
+3. Re-fan-out iOS/Android icon variants from `src-tauri/icons/icon.png`
+   (the 1024×1024 source + Windows/macOS variants are in place from
+   Phase 12.3.1 — only the mobile mipmap/AppIcon trees are deferred).
+4. Replace the placeholder icon source with a real brand asset.
+5. Configure code-signing (Apple Developer Program; Google Play upload key).
+6. Wire `mobile-shell-release.yml` for tagged `mobile-v*.*.*` builds.
 
 ## Deep-link contract
 
@@ -74,9 +103,9 @@ POSTs `{ token }` to `https://app.remo-code.com/api/auth/finalize-mobile` with
 `credentials: 'include'`. On 200 → `location.replace('https://app.remo-code.com')`.
 On error → `alert(...)` + `location.reload()`.
 
-The hub-side `/api/auth/finalize-mobile` endpoint is **not yet implemented** —
-that endpoint is Phase 12.4's hub-side companion work and is listed in the PR
-body for this branch.
+The hub-side `/api/auth/finalize-mobile` endpoint shipped in PR #105
+(Phase 12.1) — see `hub/src/api/auth.ts` and `docs/mobile-client.md` for
+the request/response contract.
 
 ## CSP
 

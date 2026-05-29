@@ -306,7 +306,53 @@ real mobile build matrix lands with Phase 12.4.
 
 ---
 
+## Lifecycle expectations on mobile
+
+Three post-12.3 hub changes shape the mobile shell's runtime contract.
+The mobile WebView wrapper does NOT need to handle any of these explicitly
+— the hosted SPA already does — but they are documented here so anyone
+debugging "my session went quiet after I backgrounded the app" knows the
+expected sequence.
+
+### WS reconnect after backgrounding
+
+Mobile WebViews kill open WebSockets when the screen turns off or the app
+is backgrounded for any non-trivial period (iOS suspends the JS runtime
+within seconds; Android varies by OEM). The existing `/ws/client`
+reconnect loop in the hosted SPA detects the close, backs off, and
+reconnects on next foreground. No mobile-shell code change required.
+
+### 300s idle teardown (PR #128, commit `4e7d2fe`)
+
+`REMO_SESSION_IDLE_GRACE_SECONDS` defaults to 300. When the last web
+client subscribed to a session disconnects, the supervisor starts a 5-min
+grace timer; if no client reattaches within the window, the supervisor
+kills the underlying Claude / Codex CLI subprocess. A backgrounded mobile
+session that crosses the 5-min boundary will therefore find the runner
+dead on foreground.
+
+### Auto-resume orphans (PR #133, commit `35fa2c9`)
+
+When the SPA reconnects `/ws/client` and resubscribes to a session whose
+runner was torn down by the idle grace, the supervisor auto-respawns the
+runner from the persisted message history — unless the session is in the
+`user_stopped` state (explicit "Stop" press), which is honored. From the
+mobile UX perspective: foreground → reconnect → resubscribe → first
+typed message lands → runner respawns transparently.
+
+### License-gate WS check (PR #104, commit `9c9ebdc`)
+
+`/ws/client` rejects `send_message`, `permission_response`, and
+`question_response` payloads when `users.license_status != 'active'`.
+A license-expired mobile user can still observe activity (read-only) but
+any mutating action surfaces the same gate the desktop SPA already
+renders. The mobile shell does not need its own HTTP 402 surfacing — the
+SPA banner is the single source of truth.
+
+---
+
 ## Related docs
 
 - [docs/auth.md](auth.md) — magic-link cookie session architecture (Phase 07)
-- [.planning/phases/12-mobile-tauri-client/PLAN.md](../.planning/phases/12-mobile-tauri-client/PLAN.md) — full Phase 12 plan
+- [mobile/tauri/README.md](../mobile/tauri/README.md) — mobile shell build + deep-link contract
+- [.planning/phases/12-mobile-tauri-client/PLAN.md](../.planning/phases/12-mobile-tauri-client/PLAN.md) — Phase 12 plan (reconstructed 2026-05-28)
