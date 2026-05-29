@@ -109,10 +109,15 @@ cargo tauri android init && cargo tauri android build --release       # SDK+NDK 
 
 - `gen/apple/` (`cargo tauri ios init` on a Mac).
 - `gen/android/` (`cargo tauri android init` on an SDK+NDK host).
-- `src-tauri/icons/icon.png` (1024×1024 source PNG + `cargo tauri icon`).
-- Hub-side `POST /api/auth/finalize-mobile` endpoint.
+- iOS/Android icon variants (mobile mipmap + AppIcon fan-out). The
+  1024×1024 source PNG and Windows/macOS variants are in place from
+  Phase 12.3.1; only the per-platform mobile trees are deferred.
 - `.github/workflows/mobile-shell-release.yml` for tagged `mobile-v*.*.*` builds.
 - Apple Developer + Google Play signing key setup.
+
+Hub-side `POST /api/auth/finalize-mobile` shipped in Phase 12.1 (PR #105)
+— see `hub/src/api/auth.ts`. A Windows desktop preview of the same crate
+is built per `mobile/tauri/README.md` "Desktop preview build" (Phase 12.3.1).
 
 **CI:** `.github/workflows/mobile-shell-typecheck.yml` runs `cargo check` + `cargo test --lib` against `x86_64-unknown-linux-gnu` on `ubuntu-latest` (installs `libwebkit2gtk-4.1-dev` + `libgtk-3-dev` to satisfy `tauri-build`). Catches Rust regressions without Android NDK / Xcode.
 
