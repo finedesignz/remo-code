@@ -23,6 +23,26 @@ mobile/tauri/
     src/main.ts
 ```
 
+## Releases
+
+Tagged preview builds (Windows MSI + NSIS setup.exe + Android APK) are
+published to GitHub Releases by `.github/workflows/release-mobile.yml`.
+
+- **Cut a release:** push a tag matching `mobile-v*.*.*` to `main`.
+  ```bash
+  git tag mobile-v0.1.0
+  git push origin mobile-v0.1.0
+  ```
+  The workflow fans out to `build-windows` (Windows MSI + NSIS) and
+  `build-android` (universal APK) in parallel, then a `release` job uploads
+  every artifact to the GitHub Release page.
+- **Download:** <https://github.com/finedesignz/remo-code/releases?q=mobile-v>
+- **Artifacts are UNSIGNED.** Windows SmartScreen will warn on first run;
+  Android requires "Install unknown apps" permission. Code-signing for
+  both platforms is a follow-up PR.
+- **iOS** is a separate workflow (`mobile-ios-build.yml`), gated by repo
+  variable `ENABLE_IOS_BUILD=true` — see [`docs/ios-sideload.md`](../../docs/ios-sideload.md).
+
 ## Dev / build
 
 ```bash

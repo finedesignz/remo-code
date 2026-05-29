@@ -1,0 +1,305 @@
+# Release CI for the remo-code mobile Tauri client.
+#
+# Builds and publishes to a GitHub Release:
+#   - Windows MSI + NSIS setup.exe (desktop preview shell)
+#   - Android APK (universal release, unsigned)
+#
+# Triggered by pushing a tag matching `mobile-v*.*.*` (e.g. `mobile-v0.1.0`),
+# or manually via workflow_dispatch with an explicit `release_tag` input.
+#
+# IMPORTANT
+# ---------
+# - Artifacts produced here are UNSIGNED. Windows SmartScreen will flag the
+#   MSI/NSIS on first launch; the APK has no upload-keystore signature and
+#   cannot ship to the Play Store. Sideload (`adb install -r`) works fine.
+# - Code-signing is a follow-up PR:
+#     * Windows: Authenticode cert in repo secrets, passed via
+#       TAURI_SIGNING_PRIVATE_KEY-style env vars to tauri-action.
+#     * Android: upload keystore + key alias / key/store passwords in secrets,
+#       wired into gen/android/app/build.gradle.kts signing config.
+# - iOS lives in `.github/workflows/mobile-ios-build.yml` (gated by the
+#   `ENABLE_IOS_BUILD` repo variable). This workflow does NOT touch iOS.
+
+name: release-mobile
+
+on:
+  push:
+    tags:
+      - 'mobile-v*.*.*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Tag to (re)release, e.g. mobile-v0.1.0 — must already exist on the repo"
+        required: true
+        type: string
+
+permissions:
+  contents: write  # softprops/action-gh-release needs this to create the Release
+
+concurrency:
+  group: release-mobile-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job A: Windows MSI + NSIS setup.exe (desktop preview shell)
+  # ---------------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so tag inspection works on workflow_dispatch
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mobile/tauri/src-tauri
+          key: mobile-windows-v1
+
+      - name: Cache tauri-cli binary
+        id: cache-tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: cargo-tauri-cli-2.11.2-windows
+
+      - name: Install Tauri CLI 2.x
+        if: steps.cache-tauri-cli.outputs.cache-hit != 'true'
+        # Pinned to ^2.0 (matches `tauri = "2.11.2"` in mobile/tauri/src-tauri/Cargo.toml).
+        # Bump in lockstep when the supervisor/tauri crate is bumped.
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Install mobile UI deps
+        working-directory: mobile/tauri/ui
+        run: bun install --frozen-lockfile
+
+      - name: Build Windows installers (MSI + NSIS)
+        # Release profile, no code signing. `tauri.windows.conf.json` already
+        # selects `msi` + `nsis` bundle targets for the Windows host. If signing
+        # secrets are added later, set them on the env block below; tauri-cli
+        # picks them up automatically.
+        working-directory: mobile/tauri
+        run: cargo tauri build --bundles msi,nsis
+
+      - name: List Windows bundle outputs
+        shell: bash
+        run: |
+          set -e
+          echo "MSI:"
+          ls -la mobile/tauri/src-tauri/target/release/bundle/msi/ || true
+          echo "NSIS:"
+          ls -la mobile/tauri/src-tauri/target/release/bundle/nsis/ || true
+
+      - name: Upload Windows installers artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: |
+            mobile/tauri/src-tauri/target/release/bundle/msi/*.msi
+            mobile/tauri/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Job B: Android APK (universal release, unsigned)
+  # ---------------------------------------------------------------------------
+  build-android:
+    # ubuntu-22.04 is the most stable host for Android NDK + cargo-ndk today.
+    # ubuntu-24.04 has had intermittent ndk-build / linker issues on hosted
+    # runners; revisit once that settles.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    env:
+      # Match the toolchain that produced RemoCode-Mobile-Preview-0.1.0.apk
+      # locally (see mobile/tauri/README.md "Toolchain bootstrap" appendix).
+      NDK_VERSION: 27.3.13750724
+      ANDROID_PLATFORM_VERSION: "36"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''  # we install the precise packages below
+
+      - name: Install Android SDK packages (platform + build-tools + NDK)
+        run: |
+          set -euxo pipefail
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${ANDROID_PLATFORM_VERSION}" \
+            "build-tools;36.0.0" \
+            "ndk;${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Setup Rust toolchain + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # ARM64 is the only target shipped in the v0.1.0 preview APK.
+          # Add armv7-linux-androideabi here if/when we ship a fat APK for older devices.
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mobile/tauri/src-tauri
+          key: mobile-android-v1
+
+      - name: Cache tauri-cli binary
+        id: cache-tauri-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: cargo-tauri-cli-2.11.2-linux
+
+      - name: Install Tauri CLI 2.x
+        if: steps.cache-tauri-cli.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --version "^2.0" --locked
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install mobile UI deps
+        working-directory: mobile/tauri/ui
+        run: bun install --frozen-lockfile
+
+      - name: Build Android APK (release, unsigned)
+        # `--apk` forces APK output (vs the default AAB), which is what
+        # `adb install -r` consumes. No --target flag because gen/android's
+        # Gradle config already pins the ABIs; tauri-cli forwards through.
+        # TODO: signing — once Google Play upload keystore lives in repo
+        # secrets, switch to `--ci` and pass the keystore through env vars
+        # consumed by gen/android/app/build.gradle.kts.
+        working-directory: mobile/tauri
+        run: cargo tauri android build --apk
+
+      - name: List Android APK outputs
+        run: |
+          set -e
+          find mobile/tauri/src-tauri/gen/android/app/build/outputs/apk -name "*.apk" -print
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: mobile/tauri/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Job C: Publish GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [build-windows, build-android]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download Windows installers
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installers
+          path: artifacts/windows
+
+      - name: Download Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: artifacts/android
+
+      - name: Resolve release tag + version
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          case "$TAG" in
+            mobile-v*) ;;
+            *) echo "::error::Tag '$TAG' does not match mobile-v*.*.*"; exit 1 ;;
+          esac
+          VERSION="${TAG#mobile-v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: List downloaded assets
+        run: find artifacts -type f -print
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "Mobile Preview v${{ steps.meta.outputs.version }}"
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/windows/**/*.msi
+            artifacts/windows/**/*-setup.exe
+            artifacts/android/**/*.apk
+          body: |
+            # Remo Code mobile preview — v${{ steps.meta.outputs.version }}
+
+            Unsigned preview builds of the Tauri mobile shell. The real UI is the
+            hosted SPA at <https://app.remo-code.com>; these installers exist to
+            (a) own the `remo-code://auth/callback` deep link for magic-link
+            sign-in and (b) give early testers a one-click install.
+
+            > **These artifacts are UNSIGNED debug-quality releases.** Code
+            > signing (Authenticode for Windows, Play Store upload keystore for
+            > Android) lands in a follow-up release. Expect SmartScreen warnings
+            > and "Install unknown apps" prompts.
+
+            ## Windows (MSI or NSIS)
+
+            1. Download `RemoCode-Mobile-Preview-${{ steps.meta.outputs.version }}.msi`
+               (or the `-setup.exe` if you prefer NSIS).
+            2. Double-click to install.
+            3. SmartScreen: **More info → Run anyway** (unsigned).
+            4. Launch "Remo Code" from the Start menu.
+
+            ## Android (sideload via adb)
+
+            ```bash
+            adb install -r app-universal-release-unsigned.apk
+            ```
+
+            Or transfer the APK to the phone, then tap to install — Android will
+            ask you to allow "Install unknown apps" for your file manager.
+
+            Prerequisites: USB Debugging enabled (Settings → Developer Options).
+
+            ## iOS
+
+            Not shipped here. iOS preview builds live in the
+            `mobile-ios-build.yml` workflow and require an Apple ID + AltStore
+            sideload — see [`docs/ios-sideload.md`](https://github.com/finedesignz/remo-code/blob/main/docs/ios-sideload.md).
