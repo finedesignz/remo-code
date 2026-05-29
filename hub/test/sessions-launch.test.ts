@@ -205,6 +205,12 @@ mock.module('../src/ws/supervisor-registry.ts', () => ({
   },
   setUserInventory: () => {},
   listSupervisorsForUser: async () => [],
+  // Benign stubs so this file's own transitive imports (and any sibling's) can
+  // resolve these exports even when this partial mock is the active one.
+  findSupervisorForSession: () => null,
+  getActiveSessionIdsForUser: () => new Set<string>(),
+  setSupervisorSessionInventory: () => {},
+  listSupervisors: () => [],
 }))
 
 mock.module('../src/lib/github-scope.ts', () => ({
