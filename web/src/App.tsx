@@ -127,15 +127,23 @@ export default function App() {
   useEffect(() => {
     onAuthEvent((kind) => {
       if (kind === 'unauthorized') {
+        // A 401 means the credential is dead. Clearing token/user (signOut)
+        // is what makes the `!token || !user` render gate take the <Login>
+        // branch — a bare `hash = '#/login'` left the stale token truthy and
+        // fell through to the authenticated render block, which has no
+        // 'login' case → blank screen. signOut() also sets hash=#/login, so
+        // the redirect is preserved. Guarded by route so we don't loop while
+        // already on login/auth-callback. apiLogout() inside signOut uses a
+        // bare fetch (NOT hubFetch), so it can't re-fire this handler.
         if (route !== 'login' && route !== 'auth-callback') {
-          window.location.hash = '#/login'
+          signOut()
         }
       } else if (kind === 'license_required') {
         setLicenseRequired(true)
       }
     })
     return () => onAuthEvent(null)
-  }, [route])
+  }, [route, signOut])
 
   const navigate = useCallback((hash: string) => {
     window.location.hash = hash
@@ -151,6 +159,14 @@ export default function App() {
 
   if (needsSetup) {
     return <SetupForm onComplete={() => setNeedsSetup(false)} />
+  }
+
+  // Defensive: the login route is self-sufficient regardless of token state.
+  // Even if some path leaves a stale token truthy, `#/login` must render the
+  // Login page — never fall through to the authenticated block (which has no
+  // 'login' case and would render a blank <WebSocketProvider>).
+  if (route === 'login') {
+    return <Login onLegacyAuth={signIn} />
   }
 
   if (!token || !user) {
