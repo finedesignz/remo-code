@@ -8,6 +8,7 @@ import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
 import { getHandler, nativeSupervisorCommands } from './commands/index'
 import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
+import { log as obs } from './observability/logger'
 
 // Keep in sync with supervisor/tauri/src-tauri/tauri.conf.json version
 const VERSION = '0.5.7'
@@ -66,7 +67,7 @@ export class SupervisorClient {
     } catch (err: any) {
       // Non-fatal — fall back to "next reconnect" cadence.
       // eslint-disable-next-line no-console
-      console.warn('[hub-client] config watch failed:', err?.message ?? err)
+      obs.warn('hub_client.config_watch_failed', { error: err?.message ?? String(err) })
     }
     this.pm = new ProcessManager({
       onStateChange: (state, info) => {
@@ -151,8 +152,16 @@ export class SupervisorClient {
       }
       this.scheduleReconnect()
     }
-    ws.onerror = () => {
-      // onclose will follow
+    ws.onerror = (ev: any) => {
+      // The Bun WebSocket onerror event surfaces little structured info; record
+      // whatever we have so silent reconnect storms can be diagnosed from logs.
+      obs.error('hub_client.ws_error', {
+        url: wsUrl,
+        message: ev?.message ?? ev?.error?.message ?? null,
+        reconnect_attempts: this.reconnectAttempts,
+        authenticated: this.authenticated,
+      })
+      // onclose will follow and drive the reconnect schedule.
     }
   }
 
@@ -181,7 +190,8 @@ export class SupervisorClient {
   }
 
   private log(level: string, message: string, runId?: string) {
-    console.log(`[${level}] ${message}`)
+    const lvl = (level === 'debug' || level === 'info' || level === 'warn' || level === 'error') ? level : 'info'
+    obs[lvl]('hub_client.log', { run_id: runId, hostname: hostname(), text: message })
     this.send({ type: 'supervisor.log', level, message, run_id: runId, ts: new Date().toISOString() })
   }
 
