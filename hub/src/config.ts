@@ -109,6 +109,11 @@ const telegramWebhookSecret = requireMinLenIfSet(
   16,
 );
 const telegramBotUsername = process.env.TELEGRAM_BOT_USERNAME || "";
+
+// B2 (obs): owner user_id for the hub's self-capture error_project row.
+// When unset, self-capture is inert (no row seeded, no hooks installed).
+// Must be a UUID of an existing users.id when set.
+const hubSelfOwnerUserId = process.env.HUB_SELF_OWNER_USER_ID || "";
 if ((telegramBotToken && !telegramWebhookSecret) || (!telegramBotToken && telegramWebhookSecret)) {
   console.warn(
     "[config] Telegram bridge partially configured: set BOTH TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET, or neither.",
@@ -160,6 +165,8 @@ export const config = {
   licenseRequired,
   titaniumBypass,
   sessionIdleGraceSeconds,
+
+  hubSelfOwnerUserId,
 
   // Phase 12: Telegram bridge. Feature is gated off when botToken === "".
   telegram: {

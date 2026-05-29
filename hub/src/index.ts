@@ -367,6 +367,20 @@ if (config.titaniumBypass) {
   }
 }
 
+// B2 (obs): hub self-error capture. Installs uncaughtException +
+// unhandledRejection hooks, registers a wrapping app.onError that captures
+// before responding, and seeds the `__hub_self__` error_projects row.
+// Gated by HUB_SELF_OWNER_USER_ID; inert when unset. Dispatch is hard-off
+// for self-errors (no feedback loop into a Claude session).
+{
+  const { installSelfCapture } = await import('./observability/self-capture')
+  try {
+    await installSelfCapture(app, config.hubSelfOwnerUserId)
+  } catch (err) {
+    console.error('[self-capture] install failed; continuing:', (err as Error)?.message ?? err)
+  }
+}
+
 // Start Bun server with WebSocket upgrade handling.
 //
 // REVIEW BL-06: idleTimeout — Bun's default is 10s, which kills any HTTP
