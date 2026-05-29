@@ -93,13 +93,40 @@ export class ProcessManager {
     this.cfg = cfg
   }
 
-  /** Count of runs occupying a concurrency slot (starting / running / crashed-pending-restart). */
+  /**
+   * Count of runs currently occupying a concurrency slot.
+   *
+   * Bug fix 2026-05-29: `crashed` is EXCLUDED. A crashed entry sits in a
+   * `setTimeout` backoff window with no live process — counting it strands the
+   * slot whenever the restart timer is stalled, the supervisor was restarted
+   * mid-cycle, or the bridge errored out before reattaching. Real-prod symptom:
+   * `maxConcurrent=1` users seeing every `session.start` rejected with
+   * `concurrency_cap` despite no Claude CLI running.
+   *
+   * The crashed → restart path either evicts (max_restarts / circuit_open /
+   * userStop / clean exit, see `spawn()` onExit + `scheduleRestart`) or
+   * transitions back to `starting` → `running`. Since the slot check runs on
+   * every fresh `start()` and a respawning crashed entry will re-enter
+   * `starting` shortly after, the only window for N+1 concurrency is the
+   * backoff delay — bounded by `BACKOFF_SCHEDULE` (≤30s) and guarded below by
+   * the same-repoPath duplicate check.
+   */
   private activeSlotCount(): number {
     let n = 0
     for (const r of this.runs.values()) {
-      if (r.state === 'starting' || r.state === 'running' || r.state === 'crashed') n++
+      if (r.state === 'starting' || r.state === 'running') n++
     }
     return n
+  }
+
+  /** True if a crashed-pending-restart entry already targets this repoPath.
+   *  Prevents the N+1 race during the backoff window — the pending restart
+   *  will reclaim the slot on its own. */
+  private hasCrashedPendingForRepo(repoPath: string): boolean {
+    for (const r of this.runs.values()) {
+      if (r.state === 'crashed' && r.spec.repoPath === repoPath) return true
+    }
+    return false
   }
 
   private writeAudit(spec: RunSpec, allowed: boolean, reason?: string): void {
@@ -244,6 +271,15 @@ export class ProcessManager {
         this.writeAudit(spec, false, 'not_git_repo')
         return { reason: 'not_git_repo', detail: { repo_path: spec.repoPath } }
       }
+    }
+
+    // Don't race a crashed-pending-restart entry for the same repo — its
+    // backoff timer will reclaim the slot. Treat as duplicate to keep the
+    // N+1 window during backoff closed.
+    if (this.hasCrashedPendingForRepo(spec.repoPath)) {
+      this.cb.onLog('warn', `Refusing start for repo with crashed-pending restart: ${spec.repoPath}`, spec.runId)
+      this.writeAudit(spec, false, 'duplicate_run')
+      return { reason: 'duplicate_run', detail: { repo_path: spec.repoPath, pending_restart: true } }
     }
 
     const slots = this.activeSlotCount()
