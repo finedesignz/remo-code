@@ -1,137 +1,153 @@
 # External Integrations
 
-> **Note (Phase 09, 2026-05-26):** The agent/ workspace and channel/ plugin are retired. The local CLI runner now lives in supervisor/src/ and ships exclusively as a Tauri MSI desktop app. The hub /ws/agent route is unchanged. References below to agent/, npx remo-code-agent, claude-remote, or /ws/channel are historical. See .planning/phases/09-retire-npm-packages/.
-
-
-**Analysis Date:** 2026-05-22
+**Analysis Date:** 2026-05-28
 
 ## APIs & External Services
 
-**AI / Subprocess:**
-- Claude Code CLI — spawned as a long-lived child process by the local agent (`agent/src/index.ts`, `agent/src/claude-runner.ts`)
-  - Invocation: `claude --input-format stream-json --output-format stream-json --verbose`
-  - Pre-flight check: `spawnSync('claude', ['--version'])` at `agent/src/index.ts:12`
-  - Communication: JSON-per-line over stdin/stdout; one persistent process per agent session
-  - Install required: https://claude.ai/code (no SDK — direct CLI integration)
+### Identity / Auth — Titanium Licensing (Keygen-backed)
 
-**No third-party SaaS SDKs detected** (post-Supabase migration). Recent commits:
-- `2117dae chore: remove @supabase/* from web, update env examples`
-- `3450ad7 feat: replace supabase auth UI with custom JWT login form`
+- **Service:** Titanium Licensing magic-link + license verification (Keygen.sh under the hood)
+- **Used for:** all user auth (Phase 07 cutover); replaces bcrypt + JWT
+- **Endpoints called:** `${TITANIUM_KEYGEN_API_URL}` — license `validate` + JWKS (EdDSA)
+- **Client:** `hub/src/titanium-client.ts` — uses `jose` ^6.2 for JWKS verify, in-memory cache (TTL `TITANIUM_LICENSE_CACHE_TTL_SECONDS`)
+- **Auth:** `TITANIUM_KEYGEN_PORTAL_TOKEN`, `TITANIUM_KEYGEN_ADMIN_TOKEN`, `TITANIUM_KEYGEN_ACCOUNT_ID`, `TITANIUM_KEYGEN_PRODUCT_ID`
+- **Webhook in:** `POST /webhooks/titanium/license-changed` (HMAC over `${ts}.${rawBody}`, `TITANIUM_WEBHOOK_SECRET`, 503 if unset) — `hub/src/api/webhooks-titanium.ts`
+- **Replay protection:** Redis (ioredis) stores magic-link JTIs; hard-fails boot when `TITANIUM_REQUIRE_REDIS=true` and `TITANIUM_REDIS_URL` missing
+- **Bypass:** `TITANIUM_BYPASS=true` disables JWKS warm + license gate + magic-link (dev/test only — see commit `098a35c`)
+
+### GitHub — App + Octokit + Gateway-brokered token
+
+- **GitHub App auth (preferred):** `hub/src/auth/github-app.ts` — installation tokens via `https://api.github.com/app/installations/.../access_tokens` using `GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_SLUG`
+- **Gateway-brokered PAT (fallback / scoped ops):** `hub/src/lib/github-repo-job.ts`, `hub/src/lib/github-scope.ts` — `GET ${GATEWAY_URL}/api/credentials/service/github` with `GATEWAY_API_KEY`; falls back to `FALLBACK_GATEWAY_URL`/`FALLBACK_GATEWAY_API_KEY`. Per global rule #21 — no `GITHUB_TOKEN` env on hub.
+- **Used for:** issue creation in `scheduler/post-run/github-issue.ts` (Phase 06 Coolify webhook → triage); revanote PR notify (`revanote/notify-pr.ts`), merge gate (`revanote/merge-gate.ts`), CI gate (`revanote/ci-gate.ts`)
+- **Client:** `@octokit/rest` ^22
+
+### Coolify
+
+- **Used for:**
+  - Hub itself is deployed on Coolify (`coolify.titaniumlabs.us`)
+  - Webhook IN: `POST /api/coolify/webhook/:user_id/:token` (URL-path token, constant-time) + legacy HMAC route (deprecated 30d grace) — `hub/src/api/coolify-webhook.ts`
+  - Webhook → triage run → optional `github_issue` post-run action
+  - Error-capture SDK auto-install: PATCH Coolify env var `SENTRY_DSN`, optional redeploy — `hub/src/error-capture/setup/coolify-env.ts`
+  - Scheduler `log_check` task type pulls deploy logs
+  - Revanote deploy policy (`revanote/deploy-policy.ts`) drives staging/prod branch promotion
+- **Auth:** `COOLIFY_TOKEN` + `COOLIFY_BASE_URL`
+- **App UUID:** Per-project (stored on `error_projects.coolify_app_uuid`)
+
+### Anthropic (revanote LLM escalator only)
+
+- **Direct API calls:** `hub/src/revanote/llm-escalator.ts` — `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL`
+- **Cache TTL:** `LLM_ESCALATOR_CACHE_TTL_MS`
+- **Note:** Claude Code CLI subprocess (the main "AI" path) does NOT use this — supervisor spawns `claude` locally and that CLI handles its own OAuth via `~/.claude/.credentials.json` on the dev machine. No Anthropic key on hub for chat.
+
+### Codex CLI (OpenAI)
+
+- **Spawned by supervisor** (`supervisor/src/runners/`) — `codex app-server` over child-process stdio JSON-RPC (newline-delimited + LSP `Content-Length:` framing fallback)
+- **Auth:** Codex CLI handles its own auth locally on dev machine
+- **Translated to:** common `RunnerEvent` union so the web UI renders Claude + Codex identically
+
+### OpenAI (transcription)
+
+- **Endpoint:** `POST /api/transcribe` — `hub/src/api/transcribe.ts`
+- **Used for:** voice-message transcription in web UI
+- **Auth:** `OPENAI_API_KEY`; model from `OPENAI_TRANSCRIBE_MODEL`
+
+### Telegram
+
+- **Bot:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`
+- **Outbound:** `https://api.telegram.org` — `hub/src/telegram/client.ts` (MarkdownV2 escape + chunk splitter, see PR #120)
+- **Inbound webhook:** `POST /api/telegram/webhook` (`hub/src/api/telegram-webhook.ts`) — `TELEGRAM_WEBHOOK_SECRET` validates `X-Telegram-Bot-Api-Secret-Token` header
+- **Used for:** Phase 12 telegram chat bridge (PR #114), `/list` inline-keyboard session picker (#127), `/doctor` + auto-heal on `agent_offline` (#134)
+- **Bridge logic:** `hub/src/telegram/bridge.ts`
+
+### emails4agents (E4A)
+
+- **Used for:** all email — silent-skip notifications (`error-capture/notify.ts`), post-run `notify_email` action (`scheduler/post-run/email.ts`), revanote PR notify (`revanote/notify-pr.ts`)
+- **Helper:** `hub/src/lib/email.ts`
+- **Auth:** `E4A_API_KEY`, `E4A_BASE_URL` (`https://api.emails4agents.com`), `E4A_INBOX_ID`
+- **Header:** `X-API-Key`
+- **Endpoint:** `POST /v1/messages/send`
+- **Note:** AWS SES / SendGrid / Resend NEVER used (global rule #7)
+
+### Gateway pair (Ottolax + Claude Gateway)
+
+- **Primary:** Ottolax `${GATEWAY_URL}` with `GATEWAY_API_KEY` (`olx_…`)
+- **Fallback:** Claude Gateway `${FALLBACK_GATEWAY_URL}` with `FALLBACK_GATEWAY_API_KEY` (`cgw_…`)
+- **Used for:** GitHub creds brokerage (only path that consumes the gateway pair currently)
+- **Files:** `hub/src/lib/github-repo-job.ts`, `hub/src/lib/github-scope.ts`
+
+### KIE.ai
+
+- **Not used** in this repo. (Global rule #6 reserves it for image/video generation; remo-code does not generate media.)
+
+### ngrok
+
+- **Not used** in this repo. (Hub runs at `app.remo-code.com` behind Coolify TLS; no tunnel needed. ngrok is only for the `openclaw-hooks` service per global port map.)
 
 ## Data Storage
 
 **Databases:**
-- PostgreSQL (self-hosted)
-  - Connection: `DATABASE_URL` env var (`hub/src/config.ts`)
-  - Client: `postgres` ^3.4.9 (`hub/src/db/postgres.ts`)
-  - Schema: `hub/src/db/schema.sql` — tables: `users`, `sessions`, `messages`, `api_keys`
-  - Data access layer: `hub/src/db/dal.ts` (all queries scoped by `user_id`)
-  - Default for local dev: `postgresql://postgres:postgres@localhost:5432/remocode`
+- **Postgres** (Coolify-hosted) — `DATABASE_URL`; client `postgres` ^3.4 — `hub/src/db/`
+- **Redis** (optional) — `TITANIUM_REDIS_URL`, `ioredis` ^5.10 — JTI replay-protect only
 
 **File Storage:**
-- Local filesystem only. Web SPA static assets served from `web/dist` by Bun (`hub/src/index.ts:82-156`)
-- File attachments: text files embedded inline in message content; images as base64 data URIs (10 MB WS payload limit)
+- Local filesystem only. Attachments are inline in messages (text embedded, images as base64 data URIs over WS, 10MB limit).
+- Supervisor logs: `%LOCALAPPDATA%\remo-code-supervisor\supervisor.log` (5MB rotate → `.log.1`).
 
 **Caching:**
-- None — in-memory only (`wsConnectionsPerIp` Map, WS registry)
+- In-memory only (Titanium license cache, JWKS cache, LLM escalator cache, gateway creds).
+- No Redis cache — Redis is JTI-only.
 
 ## Authentication & Identity
 
-**User Auth:**
-- Custom JWT — `jsonwebtoken` ^9.0.3
-  - Issuer: `hub/src/auth/jwt.ts`
-  - Middleware: `hub/src/auth/middleware.ts` (gates `/api/*`)
-  - Secret: `JWT_SECRET` env (min 32 chars per CLAUDE.md)
-  - Passwords: bcrypt (`hub/src/auth/password.ts`) stored on `users` table
-  - Login UI: custom form (replaced Supabase Auth UI in commit `3450ad7`)
+**Users (web/api):** Titanium Licensing magic-link → opaque cookie session (`hub/src/session.ts`); double-submit CSRF (`hub/src/csrf.ts`); license-status gate (`hub/src/license-gate.ts`). Legacy bearer JWT only when `ALLOW_LEGACY_LOGIN=true`. Phase 07.5 deletes legacy.
 
-**Agent Auth:**
-- API key — `hub/src/auth/api-key-middleware.ts`
-  - Format: `remo_` prefix + 32 random bytes base64url
-  - Stored as SHA-256 hash in `api_keys` table
-  - Used by agent over `/ws/agent` and by plugin REST routes (`/api/plugin/*`)
-  - Token utility: `hub/src/utils/token.ts`
+**Supervisors:** SHA-256-hashed API key in `api_keys` table; authed at WS `auth` frame on `/ws/agent`. NOT license-gated (rule: agent traffic keyed by `api_keys`, not user license).
+
+**Web clients:** JWT (legacy) OR session cookie at WS `/ws/client` auth frame; 5s auth timeout.
 
 ## Monitoring & Observability
 
-**Error Tracking:**
-- None — global error handler logs to console only (`hub/src/index.ts:29-32`)
+**Error tracking (incoming, third-party apps → hub):**
+- Sentry-style intake at `POST /api/sentry/:project_id/envelope/` — `hub/src/api/sentry-intake.ts`
+- `X-Sentry-Auth` header with `sentry_key` IS the credential (mounted outside JWT catch-all)
+- Fingerprint → dedupe → rate-limit → daily-cap → dispatch as `user_message` to bound Claude session
 
-**Logs:**
-- stdout/stderr via `console.log` / `console.error`
-- Agent forwards log messages to hub as `agent_log` WS frames, persisted/relayed per session
+**Hub's own errors:** stdout/stderr only — no external APM. `SENTRY_DSN` env consumed by `error-capture/notify.ts` only for diagnostic logging.
+
+**Logs:** Coolify container logs (hub); rotating file log (supervisor).
 
 ## CI/CD & Deployment
 
 **Hosting:**
-- Coolify at `app.remo-code.com`, port 3040 (see global CLAUDE.md and project CLAUDE.md)
-- npm: agent published as `remo-code-agent` (v0.3.6) via trusted publishing
+- Hub → Coolify (`coolify.titaniumlabs.us`)
+- Supervisor → end-user Windows machines via GH Release MSI
+- Web → served as static assets from hub
 
-**CI Pipeline:**
-- Not detected in repo (no `.github/workflows` inspected here)
-
-**Container:**
-- `Dockerfile` — multi-stage Bun build, runs as non-root `appuser`, `CMD ["bun", "hub/src/index.ts"]`
+**CI:**
+- GitHub Actions (`docs-drift`, `release-supervisor`, `mobile-shell-typecheck`)
+- Coolify Git auto-deploys hub on `main` push
 
 ## Environment Configuration
 
-**Required env vars (hub):**
-- `DATABASE_URL` — PostgreSQL connection string
-- `JWT_SECRET` — min 32 chars, required for JWT sign/verify
-- `PORT` — defaults to 3040
-- `HUB_ALLOWED_ORIGINS` — comma-separated list, defaults to `http://localhost:5173`; used for CORS and `/ws/client` origin check
+**Required at hub boot (fatal if missing):** `DATABASE_URL`, `JWT_SECRET`, `MAGIC_LINK_SECRET`, `SESSION_SECRET`, all `TITANIUM_KEYGEN_*` unless `TITANIUM_BYPASS=true`.
 
-**Required env vars (web, build-time):**
-- `VITE_HUB_URL` — baked into bundle via Vite
-
-**Required env vars (agent):**
-- `REMO_HUB_URL` (optional, defaults to production hub)
-- `REMO_API_KEY`
-- Or CLI args: `--hub-url`, `--api-key`, `--local-output`
-- Or config file: `~/.config/remo-code/config.json`
-
-**Secrets location:**
-- `.env` files (not committed); Coolify env vars in production. No `.env*` present at inspection time.
+**Secrets location:** Coolify env (hub prod); `.env` files (dev); `~/.claude/secrets/services.json` (gateway tokens, external service creds per global rule).
 
 ## Webhooks & Callbacks
 
 **Incoming:**
-- None — communication is WebSocket-based
+| Path | Auth | Purpose |
+|------|------|---------|
+| `POST /api/coolify/webhook/:user_id/:token` | URL-path token (constant-time) | Coolify deploy events → triage |
+| `POST /api/coolify/webhook/:user_id` | HMAC `X-Coolify-Signature` (deprecated 30d) | Legacy route |
+| `POST /webhooks/titanium/license-changed` | HMAC `${ts}.${rawBody}`, `TITANIUM_WEBHOOK_SECRET` | License state sync |
+| `POST /api/telegram/webhook` | `X-Telegram-Bot-Api-Secret-Token` | Telegram updates |
+| `POST /api/sentry/:project_id/envelope/` | `X-Sentry-Auth` `sentry_key` | Sentry-style error envelopes |
+| `POST /api/revanote/webhook` | (see `revanote-webhook.ts`) | Revanote ingress |
 
-**Outgoing:**
-- None
-
-## WebSocket Endpoints
-
-All on hub at port 3040, upgraded by `Bun.serve` in `hub/src/index.ts:103-136`.
-
-| Path | Purpose | Auth | Handler |
-|------|---------|------|---------|
-| `/ws/agent` | Local agent connection (streams Claude CLI activity) | API key (`{type:"auth", api_key, project_dir, hostname}`) | `hub/src/ws/agent.ts` |
-| `/ws/client` | Browser SPA chat connection | JWT (`{type:"auth", token}`) + Origin allowlist | `hub/src/ws/client.ts` |
-| `/ws/channel` | Legacy Claude Code channel plugin | API key | `hub/src/ws/channel.ts` |
-
-**Common protocol traits:**
-- Zod-validated frames (`hub/src/ws/protocol.ts`, `hub/src/ws/agent-protocol.ts`)
-- 5s auth timeout
-- 30s heartbeat ping/pong
-- Per-IP connection limit: 100 (`MAX_WS_CONNECTIONS_PER_IP` in `hub/src/index.ts:88`)
-- Max payload: 10 MB (image attachments)
-- Per-connection message rate limits (`hub/src/middleware/rate-limit.ts`)
-
-**Agent → Hub events:** `thinking`, `text_delta`, `tool_use`, `tool_result`, `status`, `assistant_message`, `agent_log`
-**Hub → Agent events:** `auth_ok`, `user_message` (with `images`/`attachments`), `cancel`, `ping`, `permission_response`, `question_response`
-**Hub → Client events:** `message`, `session_status`, `session_list`, plus activity passthrough
-
-## REST API Surface
-
-Mounted in `hub/src/index.ts`:
-- `/api/auth/*` — login/signup (no auth)
-- `/api/setup/*` — first-user provisioning (gated by user count)
-- `/api/plugin/*` — API-key auth, rate-limited 30/min
-- `/api/sessions/*`, `/api/api-keys/*`, `/api/messages/*`, `/api/profile/*` — JWT-auth, rate-limited 120/min/user
-- `/health` — liveness probe
+**Outgoing:** GitHub App API, Coolify API, Telegram Bot API, emails4agents, Anthropic (revanote only), OpenAI (transcribe only), Titanium Keygen API, Ottolax/Claude-Gateway pair.
 
 ---
 
-*Integration audit: 2026-05-22*
+*Integration audit: 2026-05-28*
