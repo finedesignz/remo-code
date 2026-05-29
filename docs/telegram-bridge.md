@@ -79,12 +79,13 @@ All commands work after the user has linked. Unlinked chats can ONLY send
 
 | Command | Behavior |
 |---|---|
-| `/start <code>` | Bind the current Telegram chat to the remo-code user that minted `<code>`. One active code per user, 10-min TTL, single-use. Replies `Linked to <email>. Send /help for commands.` On miss/expired: `Link code invalid or expired. Generate a fresh one from Settings → Telegram.` |
+| `/start <code>` | Bind the current Telegram chat to the remo-code user that minted `<code>`. One active code per user, 10-min TTL, single-use. **Pre-warm:** on first link, the hub picks the user's most-recently-used session (online-first, then `last_activity DESC`), sets it as the Telegram default, and fires `session.start` so the runner is live by the first chat message. Reply: `✅ Linked to <email>. Pre-launching '<repo-name>' so your next message lands instantly…` When the user has zero sessions: `✅ Linked to <email>. Send /list to pick a session.` On miss/expired: `Link code invalid or expired. Generate a fresh one from Settings → Telegram.` Failures of the pre-warm are best-effort — the link itself is committed atomically and `/doctor` repairs anything broken on the first real message. |
 | `/session <id-or-name>` | Override the default session for subsequent messages. Matches against session id-prefix or `project_dir` basename. Ambiguous match → reply lists candidates. No arg → reply shows the current default plus a numbered list. |
 | `/list` | Inline-keyboard session picker. Each button = one session (label = repo name from `project_dir`'s last path segment, truncated to 28 chars). Tap a button to set it as your default — Telegram fires a `callback_query` that the hub validates, persists, and confirms with a toast + a leading ✓ on the chosen button. Paginated 20-per-page (2 buttons per row, 10 rows + a `« Prev` / `Next »` nav row). Currently-default session shown with a leading ✓ before any taps. See "Inline-keyboard session picker" below for `callback_data` encoding + authorization rules. |
-| `/doctor` | Diagnose and auto-fix "supervisor offline" / "session offline" failures. Walks 6 progressive checks (account link → default session → session row → supervisor connected → live runner channel → auto-launch), replying after each step. When the session row is bound but no Claude runner is alive, the doctor calls `launchSessionForUser` to emit `session.start` to the supervisor — going through `reserveSessionSlot` so the cost cap / concurrency gate is NEVER bypassed. A 20s deferred check polls the channel registry and replies once with success ("Launch complete — session online") or a timeout hint. Also auto-triggers when a plain dispatch returns `agent_offline` so the user gets one-tap diagnostics on every silent failure. See `hub/src/telegram/doctor.ts` + `hub/src/telegram/launch.ts`. |
+| `/doctor` | Diagnose and auto-fix "supervisor offline" / "session offline" failures. Walks 6 progressive checks (account link → default session → session row → supervisor connected → live runner channel → auto-launch), replying after each step. When the session row is bound but no Claude runner is alive, the doctor calls `launchSessionForUser` to emit `session.start` to the supervisor — going through `reserveSessionSlot` so the cost cap / concurrency gate is NEVER bypassed. A 20s deferred check polls the channel registry. **Autoheal opener:** when a plain user message returns `agent_offline`, the webhook suppresses the legacy "Your supervisor is offline" reply and lets `/doctor` open with `🩺 Hold on — diagnosing & launching automatically…`. **Auto-replay buffer:** the original message (text + images) is stashed in-memory per chat (60s TTL, most-recent-wins). When the deferred check sees the channel come online, the buffered message is replayed through `dispatchToSession` with a negated `update_id` (audit `(chat_id, update_id)` UNIQUE can't collide). Cost cap is still enforced on the replay. Reply: `✅ Launch complete — sent your message ('<first 40 chars>'). Reply coming up.` On timeout the buffer is dropped: `⚠ Launch is taking longer than expected. Try again in a moment.` A second user message while the buffer is pending overwrites it and replies `Queued — I'll send this one after the launch completes.` See `hub/src/telegram/doctor.ts` + `hub/src/telegram/launch.ts`. |
+| `/status` | Compact one-message report: linked email, default session label + short id, supervisor liveness, session channel state, and today's cost vs the user's daily cap. Reuses `sumTodayCostForUser` and `isSupervisorOnline` — no new DB columns, no duplicated cost math. User-scoped throughout. See `hub/src/telegram/status.ts`. |
 | `/help` | Static command reference. |
-| *plain text* | Forwarded as `user_message` content (prefixed `[telegram] ` in the persisted `messages` row) to the user's default session. |
+| *plain text* | Forwarded as `user_message` content (raw text — no `[telegram] ` prefix) to the user's default session. The Telegram origin is tracked separately in the `telegram_inbound_audit` row keyed by `(chat_id, update_id)`. |
 | *photo* | Largest size is downloaded via `getFile` + `getFileContent`, attached as a base64 data-URI in `images[]` on the `user_message`. The Telegram `caption` becomes the text. 10MB hard cap (matches hub WS limit). |
 | *document* | Text mime (`text/*`) → embedded as `attachments[]` text block. Any other binary → polite reject. |
 | *voice / video / sticker / animation / video_note* | Polite reject — not supported in v1. |
@@ -109,6 +110,22 @@ Unknown command from a linked chat → `Unknown command. /help for list.`
 **Cost cap is NOT involved.** Picker callbacks are state changes on the `users` row, not session dispatches — the `enforceCostCap` gate only fires when a user actually messages a session.
 
 `/session <id>` still works for power users who want to type an id-prefix. The no-arg form now nudges users toward `/list`.
+
+### Picker parity with web Sidebar
+
+`listUserSessionsForPicker` mirrors the filtering in `web/src/components/Sidebar.tsx` (lines 157–178, 437–446) so the Telegram inline keyboard shows the same rows the user sees in the browser:
+
+1. **Drop offline + null `repo_key`** — legacy local sessions with no actionable surface are hidden.
+2. **Collapse worktrees by `(github_owner, github_repo)`** — multiple worktree directories of the same GitHub repo (`<repo>`, `<repo>-feat-X`, `<repo>-fix-Y`) collapse to the canonical clone (project_dir basename matches `github_repo` case-/separator-insensitively). Ties or "no canonical present" → most-recently-active wins.
+3. **Dedupe by `repo_key`** — duplicate `repo_key` rows keep the most-recently-active row. Rows with null `repo_key` pass through keyed by id.
+4. **Pin orchestrator** — the row with `is_orchestrator=true` floats to position 0 of the page list. Its button gets a leading `⭐`.
+5. **Orchestrator hint** — when the user has zero `is_orchestrator` rows, the picker text appends `💡 Pin a root orchestrator from Settings → Connections for cross-repo coordination.`
+
+The filter is implemented in `applySidebarParityFilter` (pure, unit-testable) and applied by `listUserSessionsForPicker`. The picker never auto-creates an orchestrator from Telegram — that flow lives in the web UI.
+
+### Pagination edits
+
+`safeEditMessageText` swallows Telegram's `400 message is not modified` error (no-op success when the new payload is byte-identical to the previous). All other errors are surfaced via `console.error` instead of `console.warn`, so paginate-not-firing-silently bugs surface in logs.
 
 ## Architecture
 
