@@ -1,15 +1,21 @@
 name: mobile-shell-typecheck
 
+# PAUSED 2026-05-29: Phase 12 (mobile Tauri) is on hold and the mobile shell
+# does not currently compile, so this cargo-check was failing on every push to
+# main and every mobile/workflow-touching PR — pure wasted CI. Reduced to
+# manual-only (workflow_dispatch). RE-ENABLE the push/pull_request triggers
+# below when mobile work resumes (see docs/phase-12-pause-state.md).
 on:
-  push:
-    branches: [main]
-    paths:
-      - "mobile/tauri/**"
-      - ".github/workflows/mobile-shell-typecheck.yml"
-  pull_request:
-    paths:
-      - "mobile/tauri/**"
-      - ".github/workflows/mobile-shell-typecheck.yml"
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - "mobile/tauri/**"
+  #     - ".github/workflows/mobile-shell-typecheck.yml"
+  # pull_request:
+  #   paths:
+  #     - "mobile/tauri/**"
+  #     - ".github/workflows/mobile-shell-typecheck.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
