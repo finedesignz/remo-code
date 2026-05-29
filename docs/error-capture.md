@@ -25,9 +25,9 @@ Sentry-style error capture across the user's Coolify-hosted apps, routed back in
    │  │  error-       │  │  record      (gates)       │ │
    │  │  projects     │  │  notify      (e4a + ttl)   │ │
    │  │  errors       │  │  prompt      (build msg)   │ │
-   │  │  error-runs   │  │  dispatcher  (queue+send)  │ │
-   │  │  error-setup  │  │  run-lifecycle (finalize)  │ │
-   │  └───────────────┘  │  grace       (offline)     │ │
+   │  │  error-runs   │  │  dispatcher  (adapter over │ │
+   │  │  error-setup  │  │   shared dispatch pipeline)│ │
+   │  └───────────────┘  │                            │ │
    │                     │  setup/                    │ │
    │                     │    detect    (4 stacks)    │ │
    │                     │    snippet   (inject)      │ │
@@ -57,9 +57,9 @@ Sentry-style error capture across the user's Coolify-hosted apps, routed back in
 | `hub/src/error-capture/record.ts`          | Three pre-dispatch gates (dedupe → rate-limit → daily-cap); persists row|
 | `hub/src/error-capture/notify.ts`          | `notifyThrottled` — silent-skip emails via emails4agents (TTL gated)  |
 | `hub/src/error-capture/prompt.ts`          | `buildErrorMessage` — turns an error row + project into the dispatch prompt|
-| `hub/src/error-capture/dispatcher.ts`      | Resolves agent socket, claims per-session queue slot, sends `user_message`|
-| `hub/src/error-capture/run-lifecycle.ts`   | Finalizes the `error_run` when the agent emits `assistant_message`    |
-| `hub/src/error-capture/grace.ts`           | 10-min offline buffer keyed by session_id; replays on agent reconnect |
+| `hub/src/error-capture/dispatcher.ts`      | **Thin adapter** over the shared `hub/src/dispatch/` pipeline: resolves project→session, builds the prompt + a `RunStore` (persists `error_runs`), sets `gates: [thresholdGate, dailyCostCapGate]`, supplies `replay`/`onParkExpire`/`send`, calls `dispatch()`, maps the `DispatchOutcome` back to error-capture WS events + `dispatch_status` |
+| `hub/src/dispatch/pipeline.ts`             | Shared deep module (NOT error-capture-specific): gates → per-session queue → offline-grace park → agent-socket send → finalize hook. `onSessionReply` finalizes the in-flight run on `assistant_message` and promotes/re-dispatches any waiter |
+| `hub/src/dispatch/grace.ts`                | Shared 10-min offline buffer (replaces the deleted `error-capture/grace.ts`); single 60s sweep; `onParkExpire` fires the legacy `skipped(target_offline_expired)` mark on TTL lapse |
 | `hub/src/error-capture/setup/detect.ts`    | Content-driven stack detector (4 stacks); content-only, no fs walk    |
 | `hub/src/error-capture/setup/snippet.ts`   | `getSnippet`, `injectSnippet`, `addSentryDep`, `addPythonSentryRequirement`|
 | `hub/src/error-capture/setup/coolify-env.ts`| `setCoolifyEnv` (PATCH `SENTRY_DSN`) + `redeployCoolifyApp`           |
@@ -170,27 +170,34 @@ Knobs are per-project: `dedupe_window_seconds`, `rate_limit_per_hour`, `daily_di
 
 ## Dispatch into Claude session
 
+As of the Round-2 hub-deepening refactor, `dispatcher.ts` is a **thin adapter over the shared `hub/src/dispatch/` pipeline** — it no longer hand-rolls the queue, the offline grace, or the finalize hook. The pipeline (`dispatch()` in `hub/src/dispatch/pipeline.ts`) owns gate ordering, the per-session queue (1 in-flight + 1 waiter), the offline-grace park, the send, and finalize-then-promote-then-redispatch.
+
 `hub/src/error-capture/dispatcher.ts → dispatchPendingError(errorId)`:
 
 1. Re-load the `errors` row; bail if not `pending` (idempotent).
-2. Resolve the agent socket via `getChannel(project.session_id)`.
-3. **Offline target** → `grace.register(sessionId, errorId)` + status `skipped(session_offline)` + throttled `session_offline` email (TTL 30 min, keyed by `project_id:session_id`).
-4. **Per-session queue** (reuses `hub/src/scheduler/session-queue.ts` verbatim — 1 in-flight + 1 waiter):
-   - `dropped` → status `skipped(session_busy)` + throttled `dispatch_failed` email (TTL 15 min, key suffix `:busy`).
-   - `queued` → leave `pending`; queue promotion will re-enter `dispatchPendingError`.
-   - `dispatched` → proceed.
-5. **Insert `error_run` + register lifecycle hook** BEFORE sending — guards against a fast-reply race where `assistant_message` arrives before the run row exists.
-6. Build the prompt via `buildErrorMessage(error, project)`. Persist it as a user message:
-   - **Stored content** (chat history): `[error: <project.name> — <error_type>]\n\n<prompt>`
-   - **Sent content** (over the wire to Claude): the bare prompt (no prefix).
-7. Send `{ type: 'user_message', id, content, ts }` to the agent socket. On `send` failure → status `failed`, throttled `dispatch_failed` email (key suffix `:send`).
-8. On success → status `dispatched`, broadcast `error_dispatched` to subscribed browsers.
+2. Resolve the project → `session_id` + `user_id`. Build the prompt via `buildErrorMessage(error, project)` and the stored chat content `[error: <project.name> — <error_type>]\n\n<prompt>`.
+3. Construct the adapter pieces and call `dispatch(req, deps)`:
+   - **`gates: [thresholdGate, dailyCostCapGate]`** — threshold first, daily-cost-cap second (IR-2). The daily-cost-cap gate is **non-bypassable** (IR-1) and is NEW vs the legacy dispatcher (legacy gated only on the Claude usage threshold).
+   - **`RunStore`** — `open()` inserts the `error_run` (status `in_flight`) and captures its `runId`; `onFinalize()` moves it to `success` + writes `output_snippet` + broadcasts `error_run_finished`; `markSkipped()`/`markFailed()` set `dispatch_status` + broadcast `error_skipped` + throttled emails.
+   - **`isOnline(req)`** = `getChannel(sessionId) != null`.
+   - **`replay`** = re-run `dispatchPendingError(errorId)` (drained from grace on reconnect).
+   - **`onParkExpire`** = `updateErrorDispatchStatus(skipped, 'target_offline_expired')` — the legacy TTL-lapse mark.
+   - **`send`** = persist the user message (chat history) then `channel.ws.send({ type:'user_message', id, content:<bare prompt>, ts })`.
+4. Map the `DispatchOutcome`:
+   - `dispatched` → status `dispatched` (after the send succeeds) + broadcast `error_dispatched`.
+   - `queued` → leave `pending`; the pipeline's `onSessionReply` promotes + re-dispatches the waiter through the full gate list (IR-2).
+   - `parked_offline` → status `skipped(session_offline)` + throttled `session_offline` email (TTL 30 min, keyed `project_id:session_id`) + broadcast `error_skipped`. The pipeline parks the replay thunk in the shared grace buffer.
+   - `dropped_busy` → status `skipped(session_busy)` (the `RunStore.markSkipped` already broadcast + threw the throttled `dispatch_failed` email).
+   - `skipped` (gate block, e.g. cost-cap / threshold) → status `skipped(<reason>)`.
+   - `failed` (send threw) → status `failed` + run `failed` + throttled `dispatch_failed` email.
 
-Finalize happens in `run-lifecycle.ts`: when the agent emits the next `assistant_message` for that session, the registered hook moves the run to `success` (or `failed` on agent error), writes `output_snippet`, and broadcasts `error_run_finished`.
+Finalize happens via the **pipeline finalize hook**, not a per-subsystem run-lifecycle: the `/ws/agent` `assistant_message` branch calls `dispatch.onSessionReply(sessionId, content)`, which fires the in-flight error run's `RunStore.onFinalize` (→ `success`, `output_snippet`, `error_run_finished`) and then promotes/re-dispatches any queued errorId.
+
+> **Transitional dual-path (Round-2 pilot):** error-capture is the FIRST subsystem migrated onto the shared pipeline. The `assistant_message` branch in `hub/src/ws/agent.ts` calls `onSessionReply` AND still calls the not-yet-migrated scheduler/triage/revanote `onAssistantMessage`/`onAgentReply` hooks. `onSessionReply` no-ops for any session without an active pipeline hook, so the calls coexist safely. The `// TODO(round2): collapse to onSessionReply once all subsystems migrated` comment marks where the legacy calls are removed once revanote/scheduler/telegram land on the pipeline.
 
 ### Offline grace
 
-`grace.ts` keyed by `sessionId`. On `/ws/agent` auth success for a session, any errors registered within the last 10 minutes are re-dispatched in order. Older entries are swept to `skipped(session_offline)` by a background interval. Mirrors `scheduler/grace.ts` semantics.
+Now the **shared `hub/src/dispatch/grace.ts`** buffer (the old `error-capture/grace.ts` was deleted). When `dispatch()` finds the session offline it parks an opaque `replay()` thunk keyed by `sessionId` for 10 minutes. On `/ws/agent` auth success the agent handler calls `getGraceBuffer().drain(sessionId)` to re-run each live thunk; TTL-lapsed entries instead fire their `onExpire` (→ `skipped(target_offline_expired)`) exactly once, at drain-time or via the single 60s sweep — whichever observes the lapse first.
 
 ### Dispatch prompt template
 
@@ -315,6 +322,6 @@ If E4A env is missing, the throttle row is still written and the would-have-sent
 - **Supervisor companion commands.** `error-setup` depends on `error_setup_probe` (composite read) and `error_setup_apply` (write + git add/commit/push). They are not yet shipped in the supervisor — `error-setup` currently returns `412 supervisor_command_missing` against any production supervisor. Tracked for the next supervisor release.
 - **`notifications_sent.kind` CHECK constraint.** Schema CHECK currently omits `stack_not_detected`; `notify.ts` writes it at runtime. Either widen the CHECK or migrate the column to a softer constraint in a follow-up.
 - **Decommission `claude-code-self-heal`.** The standalone service is superseded by this pipeline. Removal lands in a follow-up PR alongside DNS/Coolify cleanup.
-- **`error_runs` cost + duration.** `cost_usd` and `duration_ms` are surfaced on `error_run_finished` but not yet persisted — finalize hook only writes `status`, `output_snippet`, `error`, and `finished_at`. Add columns + populate in `run-lifecycle.ts` when the scheduler's cost-capture helper is generalized.
+- **`error_runs` cost + duration.** `cost_usd` and `duration_ms` are surfaced on `error_run_finished` but left null — the `RunStore.onFinalize` adapter writes only `status`, `output_snippet`, `error`, and `finished_at` (the agent stream protocol carries no per-turn cost, and the pipeline finalize hook does not thread a start timestamp). Populate when the shared dispatch pipeline exposes per-run timing/cost.
 - **`target_kind`.** v1 is `session`-only. Post-v1: `supervisor` (background remediation) and `all_sessions` (org-wide error firehose).
 - **Auto-link by repo URL.** v1 requires explicit `session_id` at project-create time. Repo-URL match → session lookup is post-v1.
