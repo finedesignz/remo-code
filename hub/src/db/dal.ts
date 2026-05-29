@@ -296,13 +296,30 @@ export async function findOrCreateAgentSessionV2(
     `
     if (p1[0]) {
       const row = p1[0]
+      // ── Worktree overwrite guard (Bug fix 2026-05-28) ──────────────────────
+      // All worktrees of a repo share one origin → one repo_key → this single
+      // row. The previous code blindly overwrote `project_dir` with whichever
+      // checkout authenticated last (last-writer-wins), so a worktree connect
+      // could strand the row's path on `…/remo-code-<slug>` and every launch
+      // would then resolve to the worktree instead of the real clone.
+      //
+      // Rule: never downgrade a canonical/primary `project_dir` to a worktree
+      // path. When the connecting checkout IS a worktree, prefer its
+      // `worktree_parent_path` (the real clone) for the column; if the parent
+      // is unknown, keep whatever path the row already has rather than writing
+      // the worktree path. A primary (non-worktree) connect always wins and
+      // refreshes the column.
+      const incomingIsWorktree = !!git.is_worktree
+      const nextProjectDir = incomingIsWorktree
+        ? (git.worktree_parent_path ?? row.project_dir ?? projectDir)
+        : projectDir
       // Plan 08-003 T4: when tokenHash is null (supervisor inventory path)
       // preserve the existing token_hash so a previously-attached runner row
       // keeps its binding. Otherwise overwrite.
       const updated = tokenHash === null
         ? await tx`
             UPDATE sessions
-               SET project_dir = ${projectDir},
+               SET project_dir = ${nextProjectDir},
                    last_activity = now()
              WHERE id = ${row.id}
              RETURNING *
@@ -310,7 +327,7 @@ export async function findOrCreateAgentSessionV2(
         : await tx`
             UPDATE sessions
                SET token_hash = ${tokenHash},
-                   project_dir = ${projectDir},
+                   project_dir = ${nextProjectDir},
                    last_activity = now()
              WHERE id = ${row.id}
              RETURNING *

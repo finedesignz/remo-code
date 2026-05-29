@@ -367,7 +367,14 @@ sessions.post('/:id/launch', async (c) => {
     else return c.json({ error: 'invalid_local_path', detail: 'path not in supervisor inventory for this repo' }, 400)
   }
   if (!cwd && repoKey) cwd = resolveLocalPathForRepoKey(userId, repoKey)
-  if (!cwd) cwd = (session as any).project_dir ?? null
+  // Fall back to the session's recorded project_dir ONLY when the supervisor
+  // inventory has nothing for this repo (cold start, or pre-canonical-flag
+  // supervisor). If the inventory DOES list this repo but the resolver still
+  // returned null, every candidate was a worktree — trusting a stale
+  // project_dir here is exactly the bug that stranded sessions in a worktree,
+  // so we refuse and report local_path_missing instead.
+  const inventoryHasRepo = !!repoKey && getKnownLocalPathsForRepoKey(userId, repoKey).length > 0
+  if (!cwd && !inventoryHasRepo) cwd = (session as any).project_dir ?? null
   if (!cwd) {
     // Suggest where to clone (first known root for this user).
     const inv = getUserInventory(userId)

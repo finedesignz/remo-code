@@ -99,14 +99,23 @@ mock.module('../src/ws/supervisor-registry.ts', () => ({
     }
     return _mockSupervisors.get(supervisorId)
   },
+  // Mirror the real canonical-preference impl so the launch route's cwd
+  // resolution is exercised faithfully (Bug fix 2026-05-28).
   resolveLocalPathForRepoKey: (_uid: string, repoKey: string) => {
     if (!state.inventory) return null
-    const m = state.inventory.repos.find((r: any) => {
+    const target = repoKey.toLowerCase()
+    const repoName = target.split('/').pop() ?? ''
+    const matches = state.inventory.repos.filter((r: any) => {
       if (!r.git_origin_github) return false
       const k = `github://${r.git_origin_github.owner.toLowerCase()}/${r.git_origin_github.repo.toLowerCase()}`
-      return k === repoKey.toLowerCase()
+      return k === target
     })
-    return m?.local_path ?? null
+    if (matches.length === 0) return null
+    const primary = matches.find((m: any) => m.canonical && !m.is_worktree)
+    if (primary) return primary.local_path
+    const base = (p: string) => p.split(/[\\/]+/).filter(Boolean).pop() ?? ''
+    const byBasename = matches.find((m: any) => !m.is_worktree && base(m.local_path).toLowerCase() === repoName)
+    return byBasename?.local_path ?? null
   },
   getUserInventory: () => state.inventory,
   getKnownLocalPathsForRepoKey: (_uid: string, repoKey: string) => {
@@ -386,6 +395,73 @@ describe('POST /api/sessions/:id/launch', () => {
     })
     expect(res.status).toBe(400)
     expect(((await res.json()) as any).error).toBe('invalid_local_path')
+  })
+
+  test('resolves cwd to canonical clone, never a worktree, even when stale project_dir points at a worktree', async () => {
+    // Session row's project_dir was last overwritten by a worktree connect.
+    state.session.project_dir = 'C:/Users/artic/GitHub/remo-code-refactor-hub-deepening'
+    // Inventory lists BOTH the canonical clone and the worktree.
+    state.inventory.repos = [
+      {
+        local_path: 'C:/Users/artic/GitHub/remo-code-refactor-hub-deepening',
+        is_git_repo: true,
+        is_worktree: true,
+        worktree_parent_path: 'C:/Users/artic/GitHub/remo-code',
+        git_remote: 'git@github.com:finedesignz/remo-code.git',
+        git_origin_github: { owner: 'finedesignz', repo: 'remo-code' },
+        canonical: false,
+      },
+      {
+        local_path: 'C:/Users/artic/GitHub/remo-code',
+        is_git_repo: true,
+        is_worktree: false,
+        worktree_parent_path: null,
+        git_remote: 'git@github.com:finedesignz/remo-code.git',
+        git_origin_github: { owner: 'finedesignz', repo: 'remo-code' },
+        canonical: true,
+      },
+    ]
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(res.status).toBe(202)
+    expect(state.sentMessages[0].msg.cwd).toBe('C:/Users/artic/GitHub/remo-code')
+  })
+
+  test('inventory lists only worktrees (no canonical) → refuses stale worktree project_dir, 409 local_path_missing', async () => {
+    state.session.project_dir = 'C:/Users/artic/GitHub/remo-code-feat'
+    state.inventory.repos = [
+      {
+        local_path: 'C:/Users/artic/GitHub/remo-code-feat',
+        is_git_repo: true,
+        is_worktree: true,
+        worktree_parent_path: 'C:/Users/artic/GitHub/remo-code',
+        git_remote: 'git@github.com:finedesignz/remo-code.git',
+        git_origin_github: { owner: 'finedesignz', repo: 'remo-code' },
+        canonical: false,
+      },
+    ]
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as any).error).toBe('local_path_missing')
+  })
+
+  test('cold inventory (repo absent) → falls back to recorded project_dir', async () => {
+    state.session.project_dir = 'C:/Users/artic/GitHub/remo-code'
+    state.inventory.repos = [] // supervisor reported nothing for this repo
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(res.status).toBe(202)
+    expect(state.sentMessages[0].msg.cwd).toBe('C:/Users/artic/GitHub/remo-code')
   })
 
   test('cli_kind override applied', async () => {
