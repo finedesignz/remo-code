@@ -11,7 +11,6 @@ import { useEffect, useState } from "react";
 import type { AuthUser } from "../lib/auth";
 import { AppShell } from "../components/ui/AppShell";
 import { Brand } from "../components/ui/Brand";
-import { Tabs } from "../components/ui/Tabs";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { HeaderRight } from "../components/ui/HeaderRight";
 import { ChatLayout } from "../components/ChatLayout";
@@ -53,7 +52,15 @@ export function HomePage({ token, user, signOut, onNavigate, gridTabId }: Props)
     writeTabParam(t);
   };
 
-  const nav = buildTopNav(activeTopRoute());
+  const nav = buildTopNav(activeTopRoute(), {
+    route: "home",
+    subTabs: [
+      { key: "list", label: "List View" },
+      { key: "grid", label: "Grid View" },
+    ],
+    activeSubTab: tab,
+    onSubTabChange: handleTabChange,
+  });
 
   return (
     <AppShell
@@ -62,17 +69,6 @@ export function HomePage({ token, user, signOut, onNavigate, gridTabId }: Props)
       scrollMain={false}
       headerRight={<HeaderRight token={token} user={user} signOut={signOut} onNavigate={onNavigate} subscribe={subscribe} />}
     >
-      <div className="px-4 md:px-6 pt-3 shrink-0">
-        <Tabs
-          tabs={[
-            { key: "list", label: "List View" },
-            { key: "grid", label: "Grid View" },
-          ]}
-          activeKey={tab}
-          onChange={handleTabChange}
-          renderContent={false}
-        />
-      </div>
       <div className="flex-1 min-h-0">
         {tab === "list" ? (
           <ErrorBoundary tabKey="home:list">

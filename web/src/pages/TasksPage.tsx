@@ -9,7 +9,6 @@ import { useEffect, useState } from "react";
 import type { AuthUser } from "../lib/auth";
 import { AppShell } from "../components/ui/AppShell";
 import { Brand } from "../components/ui/Brand";
-import { Tabs } from "../components/ui/Tabs";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
 import { HeaderRight } from "../components/ui/HeaderRight";
 import { useWebSocketContext } from "../hooks/useWebSocket";
@@ -50,7 +49,16 @@ export function TasksPage({ token, user, signOut, onNavigate }: Props) {
     writeTabParam(t);
   };
 
-  const nav = buildTopNav(activeTopRoute());
+  const nav = buildTopNav(activeTopRoute(), {
+    route: "tasks",
+    subTabs: [
+      { key: "upcoming", label: "Upcoming" },
+      { key: "activity", label: "Activity" },
+      { key: "schedule", label: "Schedule" },
+    ],
+    activeSubTab: tab,
+    onSubTabChange: handleTabChange,
+  });
 
   return (
     <AppShell
@@ -58,18 +66,6 @@ export function TasksPage({ token, user, signOut, onNavigate }: Props) {
       nav={nav}
       headerRight={<HeaderRight token={token} user={user} signOut={signOut} onNavigate={onNavigate} subscribe={subscribe} />}
     >
-      <div className="px-4 md:px-6 pt-3">
-        <Tabs
-          tabs={[
-            { key: "upcoming", label: "Upcoming" },
-            { key: "activity", label: "Activity" },
-            { key: "schedule", label: "Schedule" },
-          ]}
-          activeKey={tab}
-          onChange={handleTabChange}
-          renderContent={false}
-        />
-      </div>
       <div className="px-4 md:px-6 py-6">
         {tab === "upcoming" && (
           <ErrorBoundary tabKey="tasks:upcoming">

@@ -7,7 +7,6 @@ import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
 import { UnreadBadge } from './UnreadBadge'
 import { SessionTooltip } from './SessionTooltip'
 import { PendingLocalRepoPrompt } from './PendingLocalRepoPrompt'
-import { LaunchButton } from './LaunchButton'
 import { CloneHereModal } from './CloneHereModal'
 
 interface Props {
@@ -43,7 +42,10 @@ export function Sidebar({
   collapsed = false, onToggleCollapsed,
   token = null,
   subscribe,
-  launchSession,
+  // launchSession is kept in Props (callers still pass it) but the sidebar no
+  // longer renders offline rows or re-launch buttons — offline sessions are
+  // launched from Settings → Supervisor, not here. The sidebar is active-only.
+  launchSession: _launchSession,
   cloneHere,
 }: Props) {
   const [cloneModal, setCloneModal] = useState<{ sessionId: string; repoLabel: string } | null>(null)
@@ -190,17 +192,8 @@ export function Sidebar({
     ? [rawConnected[orchestratorIdx], ...rawConnected.filter((_, i) => i !== orchestratorIdx)]
     : rawConnected
 
-  // Offline sessions — everything not online/thinking, deduped by repo_key the
-  // same way the connected list is, sorted most-recently-active first. Surfaced
-  // (dimmed) so the user can still open history and remove stale rows; online-
-  // only filtering (#85) had made offline sessions unmanageable from the UI.
-  const offlineList = collapseByRepoKey(
-    sessions.filter(s => s.status !== 'online' && s.status !== 'thinking'),
-  ).sort((a, b) => {
-    const ta = a.last_activity ? Date.parse(a.last_activity) : 0
-    const tb = b.last_activity ? Date.parse(b.last_activity) : 0
-    return tb - ta
-  })
+  // Offline sessions are intentionally NOT rendered in the sidebar — it is
+  // active-only. They are launched/managed from Settings → Supervisor instead.
 
   const hoveredSession =
     hoverInfo ? connectedList.find(s => s.id === hoverInfo.id) : null
@@ -208,37 +201,24 @@ export function Sidebar({
   return (
     <>
       <div className="w-72 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
-        {/* Header — hamburger toggle left of logo */}
-        <div className="relative flex items-center gap-2 px-3 py-2 border-b border-[var(--border-color)]">
+        {/* Session list header — collapse hamburger (desktop) left of the
+            "Sessions" label; refresh + add + mobile-close on the right. The
+            logo header was removed (it's redundant with the AppShell <Brand/>). */}
+        <div className="flex items-center gap-1 px-3 pt-2 pb-1">
           <button
             onClick={onToggleCollapsed}
-            className="hidden md:inline-flex p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors"
+            className="hidden md:inline-flex p-1 -ml-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
             title="Collapse sidebar"
             aria-label="Collapse sidebar"
           >
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
               <line x1="3" y1="5" x2="17" y2="5" />
               <line x1="3" y1="10" x2="17" y2="10" />
               <line x1="3" y1="15" x2="17" y2="15" />
             </svg>
           </button>
-          <img src="/logo.png" alt="Remo Code" className="h-10 w-auto" />
-          <button
-            onClick={onClose}
-            className="md:hidden absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
-            aria-label="Close sidebar"
-          >
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-              <line x1="4" y1="4" x2="14" y2="14" />
-              <line x1="14" y1="4" x2="4" y2="14" />
-            </svg>
-          </button>
-        </div>
-
-        {/* Session list header with refresh + add */}
-        <div className="flex items-center justify-between px-3 pt-2 pb-1">
           <span className="text-[11px] font-medium text-[var(--text-muted)] uppercase tracking-wider">Sessions</span>
-          <div className="flex items-center gap-0.5">
+          <div className="ml-auto flex items-center gap-0.5">
             <button
               onClick={onRefresh}
               className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
@@ -259,6 +239,16 @@ export function Sidebar({
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
                 <line x1="8" y1="3" x2="8" y2="13" />
                 <line x1="3" y1="8" x2="13" y2="8" />
+              </svg>
+            </button>
+            <button
+              onClick={onClose}
+              className="md:hidden p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
+              aria-label="Close sidebar"
+            >
+              <svg width="14" height="14" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                <line x1="4" y1="4" x2="14" y2="14" />
+                <line x1="14" y1="4" x2="4" y2="14" />
               </svg>
             </button>
           </div>
@@ -390,102 +380,10 @@ export function Sidebar({
             )
           })}
 
-          {connectedList.length === 0 && offlineList.length === 0 && (
+          {connectedList.length === 0 && (
             <p className="text-sm text-[var(--text-muted)] text-center py-8">
-              No sessions yet. Connect a Claude Code instance to get started.
+              No active sessions. Connect a Claude Code instance to get started.
             </p>
-          )}
-
-          {/* Offline sessions — shown dimmed so they remain manageable
-              (selectable for read-only history + removable). Online-only
-              filtering (#85) had made these impossible to delete from the UI. */}
-          {offlineList.length > 0 && (
-            <div className="mt-2 pt-2 border-t border-[var(--border-color)]/40">
-              <div className="px-3 pb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">
-                Offline ({offlineList.length})
-              </div>
-              <div className="space-y-0.5">
-                {offlineList.map(s => {
-                  const ownerRepo = githubOwnerRepo(s)
-                  const primaryLabel = ownerRepo ?? sessionLabel(s)
-                  const branch = branchFor(s)
-                  const rowTitle = s.project_dir
-                    ? `${primaryLabel}${branch ? ` · ${branch}` : ''}\n${s.project_dir}`
-                    : primaryLabel
-                  return (
-                    <div key={s.id} className="group relative">
-                      <div
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => onSelectSession(s.id)}
-                        onKeyDown={(e) => handleRowKeyDown(e, s.id)}
-                        title={rowTitle}
-                        aria-label={primaryLabel}
-                        className={`w-full cursor-pointer text-left px-3 py-2.5 rounded-lg text-sm transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500/40 ${
-                          s.id === activeSessionId
-                            ? 'bg-indigo-600/10 text-[var(--text-primary)] ring-1 ring-indigo-500/20'
-                            : 'text-[var(--text-secondary)]/70 hover:bg-[var(--bg-tertiary)]/40'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="w-2 h-2 rounded-full flex-shrink-0 bg-[var(--text-muted)]/50" title="offline" />
-                          <span className="truncate flex-1 min-w-0">
-                            <span className="font-medium">{primaryLabel}</span>
-                            {branch && (
-                              <>
-                                <span className="opacity-60"> · </span>
-                                <span className="text-[var(--text-secondary)]">{branch}</span>
-                              </>
-                            )}
-                          </span>
-                          <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
-                          <span className="flex items-center gap-1 shrink-0">
-                            {confirmingId === s.id ? (
-                              <>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); setConfirmingId(null); onDeleteSession(s.id) }}
-                                  className="px-2 py-1 text-[11px] font-medium text-white bg-red-600 hover:bg-red-500 rounded transition-colors"
-                                  title="Confirm: removes this offline session"
-                                >
-                                  Confirm
-                                </button>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); setConfirmingId(null) }}
-                                  className="px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 rounded transition-colors"
-                                >
-                                  Cancel
-                                </button>
-                              </>
-                            ) : (
-                              <button
-                                onClick={(e) => { e.stopPropagation(); setConfirmingId(s.id) }}
-                                className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-[var(--text-muted)] hover:text-red-300 hover:bg-red-900/30 rounded transition-colors"
-                                title="Remove offline session"
-                                aria-label={`Remove ${sessionLabel(s)}`}
-                              >
-                                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                                  <line x1="4" y1="4" x2="12" y2="12" />
-                                  <line x1="12" y1="4" x2="4" y2="12" />
-                                </svg>
-                              </button>
-                            )}
-                          </span>
-                        </div>
-                      </div>
-                      {/* Re-launch affordance — sibling of the clickable row (NOT
-                          nested inside it) so the LaunchButton's <button> is valid
-                          HTML. Offline sessions the supervisor can still spawn
-                          (has a local working tree). */}
-                      {s.project_dir && launchSession && (
-                        <div className="mt-1 mb-0.5 pl-7 pr-3 flex items-center gap-1.5">
-                          <LaunchButton session={s} launchSession={launchSession} onToast={showToast} />
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
           )}
         </div>
 

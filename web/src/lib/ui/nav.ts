@@ -4,9 +4,20 @@
  * The 3 pages (Home / Tasks / Settings) each render `<AppShell>` with the same
  * nav items. Active-state is derived from `window.location.hash`.
  */
-import type { AppShellNavItem } from "../../components/ui/AppShell";
+import type { AppShellNavItem, AppShellSubTab } from "../../components/ui/AppShell";
 
 export type TopRoute = "home" | "tasks" | "settings";
+
+/**
+ * Optional sub-tab wiring for the active page — attached to the matching nav
+ * item so its tabs render as a dropdown hanging off the header nav.
+ */
+export interface SubTabConfig {
+  route: TopRoute;
+  subTabs: AppShellSubTab[];
+  activeSubTab: string;
+  onSubTabChange: (key: string) => void;
+}
 
 /**
  * Parse the current hash and return which top-level route is active.
@@ -22,13 +33,26 @@ export function activeTopRoute(hash: string = window.location.hash): TopRoute {
 
 /**
  * Build the 3 nav items with `active` flipped based on the current hash.
+ *
+ * When `subTabs` is provided, its sub-tab config is attached to the matching
+ * nav item so AppShell renders them as a dropdown off that item (replacing the
+ * old full-width <Tabs> strip).
  */
-export function buildTopNav(active: TopRoute): AppShellNavItem[] {
-  return [
+export function buildTopNav(active: TopRoute, subTabs?: SubTabConfig): AppShellNavItem[] {
+  const items: AppShellNavItem[] = [
     { key: "home", label: "Home", href: "#/", active: active === "home" },
     { key: "tasks", label: "Tasks", href: "#/tasks", active: active === "tasks" },
     { key: "settings", label: "Settings", href: "#/settings", active: active === "settings" },
   ];
+  if (subTabs) {
+    const target = items.find((i) => i.key === subTabs.route);
+    if (target) {
+      target.subTabs = subTabs.subTabs;
+      target.activeSubTab = subTabs.activeSubTab;
+      target.onSubTabChange = subTabs.onSubTabChange;
+    }
+  }
+  return items;
 }
 
 /**
