@@ -45,7 +45,6 @@ import * as schedDispatcher from './scheduler/dispatcher.ts'
 import * as schedCatchup from './scheduler/catchup.ts'
 import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
 import { getGraceBuffer as getDispatchGraceBuffer } from './dispatch/grace.ts'
-import { startRevanoteGraceSweep } from './revanote/grace.ts'
 import { startRevanoteCallbackWorker } from './revanote/callback.ts'
 import { startTelegramBridge } from './telegram/bridge.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
@@ -586,7 +585,6 @@ runMigrations()
     // GraceBuffer, whose 60s sweep self-starts on first access. Warm it here so
     // the sweep is alive even before the first offline-parked dispatch.
     getDispatchGraceBuffer()
-    startRevanoteGraceSweep()
     startRevanoteCallbackWorker()
     // Phase 12 W3 — outbound Telegram bridge. No-op when TELEGRAM_BOT_TOKEN
     // is unset; otherwise subscribes to assistant_message:final events.
