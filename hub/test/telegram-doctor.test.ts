@@ -94,8 +94,25 @@ mock.module("../src/telegram/client.ts", () => ({
   },
 }));
 
+// Dispatch mock — used by the auto-replay branch in runDoctor.
+const dispatchCalls: any[] = [];
+let dispatchKind: "dispatched" | "cost_capped" | "session_busy" | "agent_offline" | "no_session" | "failed" = "dispatched";
+mock.module("../src/telegram/dispatch.ts", () => ({
+  dispatchToSession: async (input: any) => {
+    dispatchCalls.push(input);
+    switch (dispatchKind) {
+      case "dispatched": return { kind: "dispatched" };
+      case "cost_capped": return { kind: "cost_capped", resumesAtUtc: "2026-05-29T00:00:00.000Z" };
+      case "session_busy": return { kind: "session_busy" };
+      case "agent_offline": return { kind: "agent_offline" };
+      case "no_session": return { kind: "no_session" };
+      case "failed": return { kind: "failed", reason: "test" };
+    }
+  },
+}));
+
 // Imports AFTER mocks.
-const { runDoctor } = await import("../src/telegram/doctor.ts");
+const { runDoctor, bufferReplay, _resetReplayBufferForTests, hasBufferedReplay } = await import("../src/telegram/doctor.ts");
 const { launchSessionForUser } = await import("../src/telegram/launch.ts");
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -129,6 +146,9 @@ beforeEach(() => {
   state.sentToSupervisor.length = 0;
   state.stateUpdates.length = 0;
   state.sendToSupervisorThrows = false;
+  dispatchCalls.length = 0;
+  dispatchKind = "dispatched";
+  _resetReplayBufferForTests();
   state.sessions.set(SESSION_ID, {
     id: SESSION_ID,
     user_id: USER_ID,
@@ -275,5 +295,97 @@ describe("launchSessionForUser", () => {
     const r = await launchSessionForUser({ userId: USER_ID, sessionId: SESSION_ID });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe("no_online_supervisor");
+  });
+});
+
+// ── Auto-replay buffer tests ──────────────────────────────────────────────
+
+describe("auto-replay buffer", () => {
+  test("autoheal opener differs from manual /doctor opener", async () => {
+    state.channels.set(SESSION_ID, fakeChannel());
+    await runDoctor({ user: freshUser(), chatId: CHAT_ID, autoheal: true });
+    expect(state.sends[0]!.text).toContain("Hold on");
+    expect(state.sends[0]!.text).toContain("diagnosing");
+  });
+
+  test("auto-replay fires on successful launch when buffer present", async () => {
+    bufferReplay(CHAT_ID, { text: "hello buffered", originalUpdateId: 777 });
+    expect(hasBufferedReplay(CHAT_ID)).toBe(true);
+
+    let cb: (() => void) | null = null;
+    await runDoctor({
+      user: freshUser(),
+      chatId: CHAT_ID,
+      autoheal: true,
+      scheduleDelayed: (fn) => { cb = fn; },
+      pollWindowMs: 50,
+    });
+    // Channel comes online before the deferred fires.
+    state.channels.set(SESSION_ID, fakeChannel());
+    cb!();
+    // Yield enough turns for the deferred-async chain.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(dispatchCalls.length).toBe(1);
+    expect(dispatchCalls[0].text).toBe("hello buffered");
+    // updateId is negated so audit UNIQUE can't collide.
+    expect(dispatchCalls[0].updateId).toBe(-777);
+    // Buffer cleared after consumption.
+    expect(hasBufferedReplay(CHAT_ID)).toBe(false);
+    expect(state.sends.find((s) => s.text.includes("sent your message"))).toBeDefined();
+  });
+
+  test("auto-replay skipped + buffer dropped on launch timeout", async () => {
+    bufferReplay(CHAT_ID, { text: "stale", originalUpdateId: 1 });
+    let cb: (() => void) | null = null;
+    await runDoctor({
+      user: freshUser(),
+      chatId: CHAT_ID,
+      autoheal: true,
+      scheduleDelayed: (fn) => { cb = fn; },
+      pollWindowMs: 50,
+    });
+    // No channel — timeout path.
+    cb!();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(dispatchCalls.length).toBe(0);
+    expect(hasBufferedReplay(CHAT_ID)).toBe(false);
+    expect(state.sends.find((s) => s.text.includes("taking longer"))).toBeDefined();
+  });
+
+  test("second buffer call overwrites the first (most-recent-wins)", async () => {
+    bufferReplay(CHAT_ID, { text: "first", originalUpdateId: 1 });
+    const r = bufferReplay(CHAT_ID, { text: "second", originalUpdateId: 2 });
+    expect(r.replaced).toBe(true);
+
+    let cb: (() => void) | null = null;
+    await runDoctor({
+      user: freshUser(),
+      chatId: CHAT_ID,
+      autoheal: true,
+      scheduleDelayed: (fn) => { cb = fn; },
+      pollWindowMs: 50,
+    });
+    state.channels.set(SESSION_ID, fakeChannel());
+    cb!();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(dispatchCalls.length).toBe(1);
+    expect(dispatchCalls[0].text).toBe("second");
+  });
+
+  test("cost-cap on auto-replay → reports it, no loop into doctor", async () => {
+    bufferReplay(CHAT_ID, { text: "expensive", originalUpdateId: 9 });
+    dispatchKind = "cost_capped";
+    let cb: (() => void) | null = null;
+    await runDoctor({
+      user: freshUser(),
+      chatId: CHAT_ID,
+      autoheal: true,
+      scheduleDelayed: (fn) => { cb = fn; },
+      pollWindowMs: 50,
+    });
+    state.channels.set(SESSION_ID, fakeChannel());
+    cb!();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(state.sends.find((s) => s.text.toLowerCase().includes("cost cap"))).toBeDefined();
   });
 });

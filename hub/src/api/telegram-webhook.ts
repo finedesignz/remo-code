@@ -57,6 +57,7 @@ import {
   handleListPicker,
   handleSession,
   listUserSessionsForPicker,
+  prewarmAfterLink,
   HELP_TEXT,
 } from "../telegram/commands.ts";
 import {
@@ -66,7 +67,8 @@ import {
   snapOffsetToPage,
 } from "../telegram/session-picker.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
-import { runDoctor } from "../telegram/doctor.ts";
+import { runDoctor, bufferReplay, hasBufferedReplay } from "../telegram/doctor.ts";
+import { runStatus } from "../telegram/status.ts";
 
 export const telegramWebhookRoutes = new Hono();
 
@@ -193,7 +195,7 @@ async function dispatchInbound(
   user: TelegramUserRow,
   msg: MessageT,
   updateId: number,
-): Promise<{ outcome: string; error?: string }> {
+): Promise<{ outcome: string; error?: string; replayText?: string; replayImages?: string[] }> {
   const chatId = msg.chat.id;
 
   if (!user.telegram_default_session_id) {
@@ -272,8 +274,15 @@ async function dispatchInbound(
       await safeSend(chatId, "Session busy — try again in a moment.");
       return { outcome: "session_busy" };
     case "agent_offline":
-      await safeSend(chatId, "Your supervisor is offline. Reconnect it and try again.");
-      return { outcome: "agent_offline" };
+      // NOTE: no reply here — the caller fires autoheal (runDoctor) and the
+      // opener "🩺 Hold on — diagnosing & launching automatically…" replaces
+      // the legacy "Your supervisor is offline" pre-amble. The caller buffers
+      // text + images for auto-replay using the values surfaced below.
+      return {
+        outcome: "agent_offline",
+        replayText: text,
+        replayImages: images.length > 0 ? images : undefined,
+      };
     case "failed":
       await safeSend(chatId, "Something went wrong dispatching that message.");
       return { outcome: "failed", error: result.reason };
@@ -302,7 +311,15 @@ async function safeEditMessageText(
   try {
     await editMessageText(chatId, messageId, text, keyboard ? { inline_keyboard: keyboard } : {});
   } catch (err: any) {
-    console.warn("[telegram-webhook] editMessageText failed:", err?.status ?? "?", err?.message);
+    // Telegram returns 400 "message is not modified" when the new content is
+    // byte-identical to the old. That's a no-op success for our flows
+    // (paginating to the same page, re-rendering after no state change).
+    const status = err?.status ?? 0;
+    const body = String(err?.message ?? "");
+    if (status === 400 && /not modified/i.test(body)) {
+      return;
+    }
+    console.error("[telegram-webhook] editMessageText failed:", status || "?", body);
   }
 }
 
@@ -362,7 +379,7 @@ async function handleCallbackQuery(
         const idx = rows.findIndex((r) => r.id === action.sessionId);
         const offset = idx >= 0 ? Math.floor(idx / 20) * 20 : 0;
         const keyboard = buildSessionKeyboard({ rows, offset, defaultId: action.sessionId });
-        const text = renderPickerText({ total, offset, defaultId: action.sessionId });
+        const text = renderPickerText({ total, offset, defaultId: action.sessionId, rows });
         await safeEditMessageText(chatId, messageId, text, keyboard);
       } catch (err: any) {
         console.warn("[telegram-webhook] picker re-render failed:", err?.message);
@@ -389,6 +406,7 @@ async function handleCallbackQuery(
       total,
       offset,
       defaultId: user.telegram_default_session_id,
+      rows,
     });
     await safeEditMessageText(chatId, messageId, text, keyboard);
   } catch (err: any) {
@@ -484,8 +502,35 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
       const cmd = parseCommand(text);
       if (cmd.kind === "start") {
         const r = await handleStart({ code: cmd.arg, chatId });
-        await safeSend(chatId, r.reply);
-        return c.json({ ok: true, outcome: r.linkedUserId ? "link_ok" : "link_failed" });
+        if (!r.linkedUserId) {
+          await safeSend(chatId, r.reply);
+          return c.json({ ok: true, outcome: "link_failed" });
+        }
+        // Pre-warm: pick most-recent session, set as default, fire session.start.
+        // Best-effort; failure falls back to /doctor on first message.
+        let prewarmed: { label: string } | null = null;
+        try {
+          const pw = await prewarmAfterLink({
+            userId: r.linkedUserId,
+            existingDefault: null,
+          });
+          if (pw.kind === "prewarmed") prewarmed = { label: pw.label };
+        } catch (err: any) {
+          console.warn("[telegram-webhook] prewarm failed:", err?.message);
+        }
+        // Re-derive email from the canned reply (handleStart already looked it up).
+        // The reply is one of: "Linked to <email>. ..." | "Linked. ..." | error path.
+        const linkedToMatch = r.reply.match(/^Linked to ([^\s.]+)\./);
+        const emailPart = linkedToMatch ? linkedToMatch[1] : null;
+        const reply = prewarmed
+          ? emailPart
+            ? `✅ Linked to ${emailPart}. Pre-launching '${prewarmed.label}' so your next message lands instantly…`
+            : `✅ Linked. Pre-launching '${prewarmed.label}' so your next message lands instantly…`
+          : emailPart
+            ? `✅ Linked to ${emailPart}. Send /list to pick a session.`
+            : "✅ Linked. Send /list to pick a session.";
+        await safeSend(chatId, reply);
+        return c.json({ ok: true, outcome: "link_ok", prewarmed: !!prewarmed });
       }
       // Anything else from an unlinked chat → silent drop (no reply).
       return c.json({ ok: true, outcome: "silent_drop_unlinked" });
@@ -528,6 +573,10 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
           const r = await runDoctor({ user, chatId });
           return c.json({ ok: true, outcome: r.outcome });
         }
+        case "status": {
+          const r = await runStatus({ user, chatId });
+          return c.json({ ok: true, outcome: r.outcome });
+        }
         case "start": {
           // Already linked — replies politely, no-op.
           await safeSend(chatId, "This chat is already linked. Use /unlink from Settings → Telegram on remo-code to detach.");
@@ -543,14 +592,45 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
       }
     }
 
+    // Pre-check: if a buffered replay is already pending for this chat and the
+    // user is just sending a second message before launch finishes, swap the
+    // buffer to most-recent and tell them quickly. Skip dispatchInbound to
+    // avoid re-firing autoheal.
+    if (hasBufferedReplay(msg.chat.id) && user.telegram_default_session_id) {
+      // Extract text + images cheaply enough — re-run the same resolution.
+      const text = msg.text ?? msg.caption ?? "";
+      const images: string[] = [];
+      if (msg.photo && msg.photo.length > 0) {
+        const largest = pickLargestPhoto(msg.photo);
+        const dataUri = await fetchPhotoAsDataUri(largest.file_id);
+        if (dataUri) images.push(dataUri);
+      }
+      if (text || images.length > 0) {
+        bufferReplay(msg.chat.id, {
+          text: text || "(photo from telegram)",
+          images: images.length > 0 ? images : undefined,
+          originalUpdateId: update.update_id,
+        });
+        await safeSend(msg.chat.id, "Queued — I'll send this one after the launch completes.");
+        return c.json({ ok: true, outcome: "replay_buffered_queue_swap" });
+      }
+    }
+
     const r = await dispatchInbound(user, msg, update.update_id);
     // Auto-heal: on agent_offline, immediately walk the user through /doctor
-    // and try to auto-launch the runner. The plain "supervisor offline" reply
-    // already fired from dispatchInbound; runDoctor's first line is the
-    // header so the two messages compose naturally.
+    // and try to auto-launch the runner. The legacy "supervisor offline" reply
+    // is suppressed — runDoctor's autoheal opener replaces it. The original
+    // user message is buffered for auto-replay once the launch completes.
     if (r.outcome === "agent_offline") {
+      if (r.replayText !== undefined || (r.replayImages && r.replayImages.length > 0)) {
+        bufferReplay(msg.chat.id, {
+          text: r.replayText ?? "",
+          images: r.replayImages,
+          originalUpdateId: update.update_id,
+        });
+      }
       try {
-        const dr = await runDoctor({ user, chatId: msg.chat.id });
+        const dr = await runDoctor({ user, chatId: msg.chat.id, autoheal: true });
         return c.json({ ok: true, outcome: "agent_offline_autoheal", doctor: dr.outcome });
       } catch (err: any) {
         console.warn("[telegram-webhook] autoheal runDoctor failed:", err?.message);

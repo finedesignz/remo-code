@@ -19,9 +19,11 @@ import {
   setTelegramDefaultSession,
   type TelegramUserRow,
 } from "../db/dal.ts";
+import { launchSessionForUser } from "./launch.ts";
 import {
   buildSessionKeyboard,
   renderPickerText,
+  applySidebarParityFilter,
   PAGE_SIZE,
   type PickerSessionRow,
 } from "./session-picker.ts";
@@ -33,6 +35,7 @@ export type ParsedCommand =
   | { kind: "list" }
   | { kind: "help" }
   | { kind: "doctor" }
+  | { kind: "status" }
   | { kind: "unknown"; raw: string }
   | { kind: "none" };
 
@@ -55,6 +58,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand {
       return { kind: "help" };
     case "doctor":
       return { kind: "doctor" };
+    case "status":
+      return { kind: "status" };
     default:
       return { kind: "unknown", raw: name };
   }
@@ -65,6 +70,7 @@ export const HELP_TEXT = [
   "",
   "/list — tap-to-pick session list (inline buttons)",
   "/session <id> — set default by typed id-prefix (power users; /list is easier)",
+  "/status — link, default session, supervisor, channel, daily cost",
   "/doctor — diagnose and auto-fix supervisor/session offline issues",
   "/help — this message",
   "",
@@ -118,6 +124,63 @@ export async function handleStart(opts: {
   };
 }
 
+/**
+ * Post-link pre-warm. Best-effort: pick the user's most-recently-used session
+ * (online-first, then last_activity DESC — same ordering as the picker), set
+ * it as the Telegram default, and fire `session.start` so it's live by the
+ * time the user sends their first chat message.
+ *
+ * Returns the chosen session label for the welcome reply, or null when the
+ * user has zero sessions OR a default was already set (rare on a fresh link).
+ *
+ * Failures are swallowed — the link itself is committed by the caller and
+ * `/doctor` will repair anything broken on the first real message.
+ *
+ * `launchImpl` is injectable for tests.
+ */
+export async function prewarmAfterLink(opts: {
+  userId: string;
+  existingDefault: string | null;
+  launchImpl?: typeof launchSessionForUser;
+}): Promise<{ kind: "skipped"; reason: "already_set" | "no_sessions" } | { kind: "prewarmed"; sessionId: string; label: string }> {
+  if (opts.existingDefault) {
+    return { kind: "skipped", reason: "already_set" };
+  }
+  const launch = opts.launchImpl ?? launchSessionForUser;
+  let candidate: { id: string; name: string | null; project_dir: string | null } | undefined;
+  try {
+    const rows = await sql<{ id: string; name: string | null; project_dir: string | null }[]>`
+      SELECT id, name, project_dir
+        FROM sessions
+       WHERE user_id = ${opts.userId} AND deleted_at IS NULL
+       ORDER BY (status IN ('online','thinking')) DESC, last_activity DESC NULLS LAST
+       LIMIT 1
+    `;
+    candidate = rows[0];
+  } catch {
+    return { kind: "skipped", reason: "no_sessions" };
+  }
+  if (!candidate || typeof candidate.id !== "string" || !candidate.id) {
+    return { kind: "skipped", reason: "no_sessions" };
+  }
+  try {
+    await setTelegramDefaultSession(opts.userId, candidate.id);
+  } catch {
+    /* swallow — link is still atomic */
+  }
+  // Fire-and-forget: do NOT await the deferred socket round-trip for the
+  // welcome reply, but DO await `launchImpl` itself so any synchronous setup
+  // (reserveSessionSlot, createRun) completes before we return. The webhook
+  // handler doesn't care about the result — `/doctor` is the fallback.
+  try {
+    void launch({ userId: opts.userId, sessionId: candidate.id });
+  } catch {
+    /* swallow */
+  }
+  const label = candidate.name || candidate.project_dir?.split(/[\\/]/).pop() || candidate.id.slice(0, 8);
+  return { kind: "prewarmed", sessionId: candidate.id, label };
+}
+
 /** Internal session-row shape used by /list and /session. */
 export interface TgSessionRow {
   id: string;
@@ -142,14 +205,36 @@ async function listUserSessions(userId: string): Promise<TgSessionRow[]> {
  * single response bounded.
  */
 export async function listUserSessionsForPicker(userId: string): Promise<PickerSessionRow[]> {
-  const rows = await sql<{ id: string; name: string | null; project_dir: string | null; status: string }[]>`
-    SELECT id, name, project_dir, status
+  const rows = await sql<{
+    id: string;
+    name: string | null;
+    project_dir: string | null;
+    status: string;
+    repo_key: string | null;
+    is_orchestrator: boolean | null;
+    github_owner: string | null;
+    github_repo: string | null;
+    last_activity: Date | string | null;
+  }[]>`
+    SELECT id, name, project_dir, status, repo_key, is_orchestrator,
+           github_owner, github_repo, last_activity
       FROM sessions
      WHERE user_id = ${userId} AND deleted_at IS NULL
      ORDER BY (status IN ('online','thinking')) DESC, last_activity DESC NULLS LAST
      LIMIT 200
   `;
-  return rows;
+  const mapped: PickerSessionRow[] = rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    project_dir: r.project_dir,
+    status: r.status,
+    repo_key: r.repo_key,
+    is_orchestrator: !!r.is_orchestrator,
+    github_owner: r.github_owner,
+    github_repo: r.github_repo,
+    last_activity_ms: r.last_activity ? new Date(r.last_activity as any).getTime() : null,
+  }));
+  return applySidebarParityFilter(mapped);
 }
 
 /**
@@ -170,7 +255,7 @@ export async function handleListPicker(opts: {
     };
   }
   const defaultId = opts.user.telegram_default_session_id;
-  const text = renderPickerText({ total: rows.length, offset, defaultId });
+  const text = renderPickerText({ total: rows.length, offset, defaultId, rows });
   const keyboard = buildSessionKeyboard({ rows, offset, defaultId });
   return { text, keyboard };
 }

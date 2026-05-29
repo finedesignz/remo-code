@@ -25,10 +25,75 @@ import {
 } from '../db/supervisor-dal.ts'
 import { isSupervisorOnline } from '../ws/supervisor-registry.ts'
 import { launchSessionForUser } from './launch.ts'
+import { dispatchToSession } from './dispatch.ts'
 import type { TelegramUserRow } from '../db/dal.ts'
 
 const SUPERVISOR_STALE_MS = 60 * 1000
 const LAUNCH_POLL_MS = 20 * 1000
+const REPLAY_BUFFER_TTL_MS = 60 * 1000
+
+// ── Replay buffer ──────────────────────────────────────────────────────────
+// In-memory only. When autoheal runs and the original message is provided,
+// we stash it here and replay through dispatchToSession in the deferred
+// 20s callback after the launch comes online. Most-recent-wins per chat.
+
+interface BufferedReplay {
+  text: string
+  images?: string[]
+  originalUpdateId: number | bigint
+  queuedAt: number
+}
+
+const replayBuffer = new Map<string, BufferedReplay>()
+
+function bufKey(chatId: number | bigint | string): string {
+  return String(chatId)
+}
+
+/** Replace any existing buffered message for this chat. Returns true if one was already pending. */
+export function bufferReplay(
+  chatId: number | bigint | string,
+  payload: { text: string; images?: string[]; originalUpdateId: number | bigint },
+): { replaced: boolean } {
+  const key = bufKey(chatId)
+  const existed = replayBuffer.has(key)
+  // GC expired entries opportunistically.
+  const now = Date.now()
+  for (const [k, v] of replayBuffer) {
+    if (now - v.queuedAt > REPLAY_BUFFER_TTL_MS) replayBuffer.delete(k)
+  }
+  replayBuffer.set(key, {
+    text: payload.text,
+    images: payload.images,
+    originalUpdateId: payload.originalUpdateId,
+    queuedAt: now,
+  })
+  return { replaced: existed }
+}
+
+export function takeBufferedReplay(chatId: number | bigint | string): BufferedReplay | null {
+  const key = bufKey(chatId)
+  const v = replayBuffer.get(key)
+  if (!v) return null
+  replayBuffer.delete(key)
+  if (Date.now() - v.queuedAt > REPLAY_BUFFER_TTL_MS) return null
+  return v
+}
+
+export function hasBufferedReplay(chatId: number | bigint | string): boolean {
+  const v = replayBuffer.get(bufKey(chatId))
+  if (!v) return false
+  if (Date.now() - v.queuedAt > REPLAY_BUFFER_TTL_MS) {
+    replayBuffer.delete(bufKey(chatId))
+    return false
+  }
+  return true
+}
+
+/** TEST-ONLY: reset buffer between tests. */
+export function _resetReplayBufferForTests(): void {
+  replayBuffer.clear()
+}
 
 async function safeSay(chatId: number | bigint | string, text: string): Promise<void> {
   try {
@@ -65,12 +130,19 @@ async function fetchSession(userId: string, sessionId: string): Promise<SessionR
 interface DoctorOpts {
   user: TelegramUserRow
   chatId: number | bigint | string
+  /**
+   * Indicates the caller is the auto-heal path (NOT a user-typed /doctor).
+   * Changes the opening line and enables auto-replay of any buffered message.
+   */
+  autoheal?: boolean
   /** Injectable for tests. Defaults to `getChannel` from `ws/registry`. */
   getChannelImpl?: typeof getChannel
   /** Injectable for tests. Defaults to `setTimeout`. */
   scheduleDelayed?: (cb: () => void, ms: number) => void
   /** Injectable for tests — overrides the 20s poll window. */
   pollWindowMs?: number
+  /** Injectable for tests. Defaults to the real `dispatchToSession`. */
+  dispatchImpl?: typeof dispatchToSession
 }
 
 export type DoctorOutcome =
@@ -90,8 +162,12 @@ export async function runDoctor(opts: DoctorOpts): Promise<{ outcome: DoctorOutc
   const getCh = opts.getChannelImpl ?? getChannel
   const schedule = opts.scheduleDelayed ?? ((cb, ms) => { setTimeout(cb, ms) })
   const pollWindow = opts.pollWindowMs ?? LAUNCH_POLL_MS
+  const dispatch = opts.dispatchImpl ?? dispatchToSession
 
-  await safeSay(chatId, '🩺 Running diagnostics…')
+  const opener = opts.autoheal
+    ? '🩺 Hold on — diagnosing & launching automatically…'
+    : '🩺 Running diagnostics…'
+  await safeSay(chatId, opener)
 
   // Check 1 — account link
   if (!user.telegram_chat_id) {
@@ -211,18 +287,72 @@ export async function runDoctor(opts: DoctorOpts): Promise<{ outcome: DoctorOutc
 
   // Deferred poll — does NOT block the webhook return.
   schedule(() => {
-    let live = false
-    try {
-      live = !!getCh(sessionId)
-    } catch {}
-    if (live) {
-      void safeSay(chatId, "✅ Launch complete — session online. Resend your message and I'll forward it.")
-    } else {
-      void safeSay(
-        chatId,
-        '⚠ Launch is taking longer than expected. Check the web UI for errors, or try /doctor again.',
-      )
-    }
+    void (async () => {
+      let live = false
+      try {
+        live = !!getCh(sessionId)
+      } catch {}
+      if (!live) {
+        // No channel after timeout. Drop any buffered replay (stale) and tell the user.
+        takeBufferedReplay(chatId)
+        await safeSay(
+          chatId,
+          '⚠ Launch is taking longer than expected. Try again in a moment.',
+        )
+        return
+      }
+
+      // Live channel. If we have a buffered replay, fire it now.
+      const buffered = takeBufferedReplay(chatId)
+      if (!buffered) {
+        await safeSay(chatId, "✅ Launch complete — session online. Resend your message and I'll forward it.")
+        return
+      }
+
+      // Synthesize a fresh updateId — negate the original so the
+      // (chat_id, update_id) UNIQUE audit can't collide with the original row.
+      const replayUpdateId =
+        typeof buffered.originalUpdateId === 'bigint'
+          ? -buffered.originalUpdateId
+          : -Number(buffered.originalUpdateId)
+
+      let result
+      try {
+        result = await dispatch({
+          userId: user.id,
+          sessionId,
+          chatId,
+          updateId: replayUpdateId as any,
+          text: buffered.text,
+          images: buffered.images,
+        })
+      } catch (err: any) {
+        await safeSay(chatId, `⚠ Launch complete but replay failed: ${err?.message ?? 'unknown'}`)
+        return
+      }
+
+      const preview = buffered.text.length > 40 ? buffered.text.slice(0, 40) + '…' : buffered.text
+      switch (result.kind) {
+        case 'dispatched':
+          await safeSay(chatId, `✅ Launch complete — sent your message ('${preview}'). Reply coming up.`)
+          return
+        case 'cost_capped':
+          await safeSay(chatId, `✅ Launch complete, but daily cost cap reached. Resumes at ${result.resumesAtUtc}.`)
+          return
+        case 'session_busy':
+          await safeSay(chatId, '✅ Launch complete, but session is busy — try again in a moment.')
+          return
+        case 'agent_offline':
+          await safeSay(chatId, '⚠ Launch reported online but channel dropped. Try sending again.')
+          return
+        case 'no_session':
+          await safeSay(chatId, '✅ Launch complete, but no default session is bound.')
+          return
+        case 'failed':
+          await safeSay(chatId, `✅ Launch complete, but dispatch failed: ${result.reason}`)
+          return
+      }
+    })()
   }, pollWindow)
 
   return { outcome: 'cmd_doctor_launched' }
