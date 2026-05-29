@@ -72,6 +72,18 @@ export function Sidebar({
   const handleRowLeave = (id: string) => {
     setHoverInfo(prev => (prev?.id === id ? null : prev))
   }
+  // Keyboard activation for the div-based clickable rows (Enter/Space select).
+  const handleRowKeyDown = (e: React.KeyboardEvent, id: string) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      onSelectSession(id)
+    }
+  }
+  // Resolve the running branch for a session's cwd, when the supervisor inventory knows it.
+  const branchFor = (s: CodeSession): string | null => {
+    const lp = (s.local_paths ?? []).find((p) => p.local_path === s.project_dir)
+    return lp?.branch ?? null
+  }
 
   if (collapsed) {
     return (
@@ -265,13 +277,23 @@ export function Sidebar({
           {connectedList.map(s => {
             const ownerRepo = githubOwnerRepo(s)
             const primaryLabel = ownerRepo ?? sessionLabel(s)
+            const branch = branchFor(s)
+            // Full folder path lives in the row tooltip only (never as body text).
+            const rowTitle = s.project_dir
+              ? `${primaryLabel}${branch ? ` · ${branch}` : ''}\n${s.project_dir}`
+              : primaryLabel
             return (
             <div key={s.id} className="group relative">
-              <button
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => onSelectSession(s.id)}
+                onKeyDown={(e) => handleRowKeyDown(e, s.id)}
                 onMouseEnter={(e) => handleRowEnter(s.id, e.currentTarget)}
                 onMouseLeave={() => handleRowLeave(s.id)}
-                className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                title={rowTitle}
+                aria-label={primaryLabel}
+                className={`w-full cursor-pointer text-left px-3 py-2.5 rounded-lg text-sm transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500/40 ${
                   s.id === activeSessionId
                     ? 'bg-indigo-600/20 text-[var(--text-primary)] ring-1 ring-indigo-500/30'
                     : s.is_orchestrator
@@ -293,7 +315,15 @@ export function Sidebar({
                       <path d="M1.5 4a1 1 0 0 1 1-1h3l1.5 1.5H13.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" />
                     </svg>
                   )}
-                  <span className="truncate font-medium flex-1" title={primaryLabel}>{primaryLabel}</span>
+                  <span className="truncate flex-1 min-w-0">
+                    <span className="font-medium">{primaryLabel}</span>
+                    {branch && (
+                      <>
+                        <span className="opacity-60"> · </span>
+                        <span className="text-[var(--text-secondary)]">{branch}</span>
+                      </>
+                    )}
+                  </span>
                   {s.is_orchestrator && (
                     <span
                       className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 shrink-0 font-semibold"
@@ -355,36 +385,7 @@ export function Sidebar({
                     )}
                   </span>
                 </div>
-                {s.project_dir && (
-                  <div className="text-[11px] text-[var(--text-muted)] mt-0.5 truncate pl-4" title={s.project_dir}>
-                    {ownerRepo ? (
-                      <>
-                        {(() => {
-                          // Phase 08.6 — when the supervisor inventory knows the
-                          // branch for the running cwd, surface it inline.
-                          const lp = (s.local_paths ?? []).find((p) => p.local_path === s.project_dir)
-                          if (lp?.branch) {
-                            return (
-                              <>
-                                <span className="opacity-70">on </span>
-                                <span className="font-medium text-[var(--text-secondary)]">{lp.branch}</span>
-                                <span className="opacity-70"> · </span>
-                                {s.project_dir}
-                              </>
-                            )
-                          }
-                          return (
-                            <>
-                              <span className="opacity-70">from </span>
-                              {s.project_dir}
-                            </>
-                          )
-                        })()}
-                      </>
-                    ) : s.project_dir}
-                  </div>
-                )}
-              </button>
+              </div>
             </div>
             )
           })}
@@ -407,11 +408,20 @@ export function Sidebar({
                 {offlineList.map(s => {
                   const ownerRepo = githubOwnerRepo(s)
                   const primaryLabel = ownerRepo ?? sessionLabel(s)
+                  const branch = branchFor(s)
+                  const rowTitle = s.project_dir
+                    ? `${primaryLabel}${branch ? ` · ${branch}` : ''}\n${s.project_dir}`
+                    : primaryLabel
                   return (
                     <div key={s.id} className="group relative">
-                      <button
+                      <div
+                        role="button"
+                        tabIndex={0}
                         onClick={() => onSelectSession(s.id)}
-                        className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                        onKeyDown={(e) => handleRowKeyDown(e, s.id)}
+                        title={rowTitle}
+                        aria-label={primaryLabel}
+                        className={`w-full cursor-pointer text-left px-3 py-2.5 rounded-lg text-sm transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500/40 ${
                           s.id === activeSessionId
                             ? 'bg-indigo-600/10 text-[var(--text-primary)] ring-1 ring-indigo-500/20'
                             : 'text-[var(--text-secondary)]/70 hover:bg-[var(--bg-tertiary)]/40'
@@ -419,7 +429,15 @@ export function Sidebar({
                       >
                         <div className="flex items-center gap-2">
                           <span className="w-2 h-2 rounded-full flex-shrink-0 bg-[var(--text-muted)]/50" title="offline" />
-                          <span className="truncate font-medium flex-1" title={primaryLabel}>{primaryLabel}</span>
+                          <span className="truncate flex-1 min-w-0">
+                            <span className="font-medium">{primaryLabel}</span>
+                            {branch && (
+                              <>
+                                <span className="opacity-60"> · </span>
+                                <span className="text-[var(--text-secondary)]">{branch}</span>
+                              </>
+                            )}
+                          </span>
                           <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
                           <span className="flex items-center gap-1 shrink-0">
                             {confirmingId === s.id ? (
@@ -453,19 +471,16 @@ export function Sidebar({
                             )}
                           </span>
                         </div>
-                        {s.project_dir && (
-                          <div className="text-[11px] text-[var(--text-muted)]/80 mt-0.5 truncate pl-4" title={s.project_dir}>
-                            {s.project_dir}
-                          </div>
-                        )}
-                        {/* Re-launch affordance for offline sessions the supervisor
-                            can still spawn (has a local working tree). */}
-                        {s.project_dir && launchSession && (
-                          <div className="mt-1.5 pl-4 flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-                            <LaunchButton session={s} launchSession={launchSession} onToast={showToast} />
-                          </div>
-                        )}
-                      </button>
+                      </div>
+                      {/* Re-launch affordance — sibling of the clickable row (NOT
+                          nested inside it) so the LaunchButton's <button> is valid
+                          HTML. Offline sessions the supervisor can still spawn
+                          (has a local working tree). */}
+                      {s.project_dir && launchSession && (
+                        <div className="mt-1 mb-0.5 pl-7 pr-3 flex items-center gap-1.5">
+                          <LaunchButton session={s} launchSession={launchSession} onToast={showToast} />
+                        </div>
+                      )}
                     </div>
                   )
                 })}
