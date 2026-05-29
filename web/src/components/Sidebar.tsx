@@ -178,6 +178,18 @@ export function Sidebar({
     ? [rawConnected[orchestratorIdx], ...rawConnected.filter((_, i) => i !== orchestratorIdx)]
     : rawConnected
 
+  // Offline sessions — everything not online/thinking, deduped by repo_key the
+  // same way the connected list is, sorted most-recently-active first. Surfaced
+  // (dimmed) so the user can still open history and remove stale rows; online-
+  // only filtering (#85) had made offline sessions unmanageable from the UI.
+  const offlineList = collapseByRepoKey(
+    sessions.filter(s => s.status !== 'online' && s.status !== 'thinking'),
+  ).sort((a, b) => {
+    const ta = a.last_activity ? Date.parse(a.last_activity) : 0
+    const tb = b.last_activity ? Date.parse(b.last_activity) : 0
+    return tb - ta
+  })
+
   const hoveredSession =
     hoverInfo ? connectedList.find(s => s.id === hoverInfo.id) : null
 
@@ -308,8 +320,10 @@ export function Sidebar({
                   )}
                   <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
                   <UnreadBadge count={unreadCounts[s.id] || 0} />
-                  {/* Action buttons — always visible on mobile, hover on desktop */}
-                  <span className="flex md:hidden md:group-hover:flex items-center gap-1 shrink-0">
+                  {/* Action control — always visible (no hover-only affordance, per
+                      design prefs). Inline two-step confirm. For an online session
+                      this stops the supervisor subprocess and removes the row. */}
+                  <span className="flex items-center gap-1 shrink-0">
                     {confirmingId === s.id ? (
                       <>
                         <button
@@ -329,9 +343,9 @@ export function Sidebar({
                     ) : (
                       <button
                         onClick={(e) => { e.stopPropagation(); setConfirmingId(s.id) }}
-                        className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-red-400 hover:text-red-300 bg-[var(--bg-tertiary)]/80 hover:bg-red-900/40 rounded transition-colors"
-                        title="Disconnect & stop supervisor session — closes the Claude Code subprocess and removes the session"
-                        aria-label={`Disconnect ${sessionLabel(s)}`}
+                        className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-[var(--text-muted)] hover:text-red-300 hover:bg-red-900/30 rounded transition-colors"
+                        title="Stop & remove session — closes the Claude Code subprocess and removes the session"
+                        aria-label={`Stop and remove ${sessionLabel(s)}`}
                       >
                         <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                           <line x1="4" y1="4" x2="12" y2="12" />
@@ -375,16 +389,89 @@ export function Sidebar({
             )
           })}
 
-          {connectedList.length === 0 && (
+          {connectedList.length === 0 && offlineList.length === 0 && (
             <p className="text-sm text-[var(--text-muted)] text-center py-8">
-              No active sessions. Connect a Claude Code instance to get started.
+              No sessions yet. Connect a Claude Code instance to get started.
             </p>
           )}
 
-          {/* Phase 08.5 offline-sessions section removed from sidebar 2026-05-27 —
-              launching belongs on Settings → Supervisor (per-repo Launch buttons).
-              Sidebar shows ACTIVE sessions only. OfflineSessions component kept
-              below for reference / potential reuse but not rendered. */}
+          {/* Offline sessions — shown dimmed so they remain manageable
+              (selectable for read-only history + removable). Online-only
+              filtering (#85) had made these impossible to delete from the UI. */}
+          {offlineList.length > 0 && (
+            <div className="mt-2 pt-2 border-t border-[var(--border-color)]/40">
+              <div className="px-3 pb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">
+                Offline ({offlineList.length})
+              </div>
+              <div className="space-y-0.5">
+                {offlineList.map(s => {
+                  const ownerRepo = githubOwnerRepo(s)
+                  const primaryLabel = ownerRepo ?? sessionLabel(s)
+                  return (
+                    <div key={s.id} className="group relative">
+                      <button
+                        onClick={() => onSelectSession(s.id)}
+                        className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                          s.id === activeSessionId
+                            ? 'bg-indigo-600/10 text-[var(--text-primary)] ring-1 ring-indigo-500/20'
+                            : 'text-[var(--text-secondary)]/70 hover:bg-[var(--bg-tertiary)]/40'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full flex-shrink-0 bg-[var(--text-muted)]/50" title="offline" />
+                          <span className="truncate font-medium flex-1" title={primaryLabel}>{primaryLabel}</span>
+                          <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
+                          <span className="flex items-center gap-1 shrink-0">
+                            {confirmingId === s.id ? (
+                              <>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setConfirmingId(null); onDeleteSession(s.id) }}
+                                  className="px-2 py-1 text-[11px] font-medium text-white bg-red-600 hover:bg-red-500 rounded transition-colors"
+                                  title="Confirm: removes this offline session"
+                                >
+                                  Confirm
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setConfirmingId(null) }}
+                                  className="px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 rounded transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setConfirmingId(s.id) }}
+                                className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-[var(--text-muted)] hover:text-red-300 hover:bg-red-900/30 rounded transition-colors"
+                                title="Remove offline session"
+                                aria-label={`Remove ${sessionLabel(s)}`}
+                              >
+                                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                                  <line x1="4" y1="4" x2="12" y2="12" />
+                                  <line x1="12" y1="4" x2="4" y2="12" />
+                                </svg>
+                              </button>
+                            )}
+                          </span>
+                        </div>
+                        {s.project_dir && (
+                          <div className="text-[11px] text-[var(--text-muted)]/80 mt-0.5 truncate pl-4" title={s.project_dir}>
+                            {s.project_dir}
+                          </div>
+                        )}
+                        {/* Re-launch affordance for offline sessions the supervisor
+                            can still spawn (has a local working tree). */}
+                        {s.project_dir && launchSession && (
+                          <div className="mt-1.5 pl-4 flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                            <LaunchButton session={s} launchSession={launchSession} onToast={showToast} />
+                          </div>
+                        )}
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         {toast && (
@@ -416,99 +503,5 @@ export function Sidebar({
         document.body
       )}
     </>
-  )
-}
-
-interface OfflineSessionsProps {
-  sessions: CodeSession[]
-  activeSessionId: string | null
-  onSelectSession: (id: string) => void
-  launchSession?: (id: string, body?: { cli_kind?: 'claude' | 'codex'; local_path?: string }) => Promise<{ ok: boolean; error?: string; detail?: string }>
-  cloneHere?: (id: string, targetRoot: string) => Promise<{ ok: boolean; error?: string; target_path?: string }>
-  onOpenClone: (sessionId: string, repoLabel: string) => void
-  onToast: (msg: string) => void
-}
-
-/**
- * Lists offline GitHub-keyed sessions in the sidebar with two CTAs:
- *  • Launch       — when `project_dir` is known (i.e. the supervisor has the repo)
- *  • Clone here   — when `project_dir` is missing (i.e. repo is not yet on the host)
- *
- * Only renders rows whose `repo_key` is set; legacy local-only offline sessions
- * stay hidden (they don't have an actionable Launch/Clone surface yet).
- */
-function OfflineSessions({
-  sessions, activeSessionId, onSelectSession, launchSession, cloneHere, onOpenClone, onToast,
-}: OfflineSessionsProps) {
-  // Filter to offline GitHub-keyed sessions, then defensive UI-side dedupe by
-  // repo_key (keep most-recently-active row).
-  const offlineRaw = sessions.filter(s =>
-    s.status !== 'online' && s.status !== 'thinking' && !!s.repo_key,
-  )
-  const offlineByKey = new Map<string, CodeSession>()
-  for (const s of offlineRaw) {
-    const k = s.repo_key as string
-    const prev = offlineByKey.get(k)
-    if (!prev) { offlineByKey.set(k, s); continue }
-    const a = prev.last_activity ? Date.parse(prev.last_activity) : 0
-    const b = s.last_activity ? Date.parse(s.last_activity) : 0
-    if (b > a) offlineByKey.set(k, s)
-  }
-  const offline = Array.from(offlineByKey.values())
-  if (offline.length === 0) return null
-
-  return (
-    <div className="mt-2 pt-2 border-t border-[var(--border-color)]/40">
-      <div className="px-3 pb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">
-        Offline ({offline.length})
-      </div>
-      <div className="space-y-0.5">
-        {offline.map(s => {
-          const ownerRepo = githubOwnerRepo(s)
-          const primaryLabel = ownerRepo ?? sessionLabel(s)
-          const hasLocal = !!s.project_dir
-          return (
-            <div key={s.id} className="group relative">
-              <button
-                onClick={() => onSelectSession(s.id)}
-                className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                  s.id === activeSessionId
-                    ? 'bg-indigo-600/10 text-[var(--text-primary)]'
-                    : 'text-[var(--text-secondary)]/80 hover:bg-[var(--bg-tertiary)]/40'
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full flex-shrink-0 bg-[var(--text-muted)]/50" title="offline" />
-                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" className="text-[var(--text-muted)] shrink-0" aria-hidden="true">
-                    <path d="M8 .25a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.42 7.42 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8.25 8 8 0 0 0 8 .25z" />
-                  </svg>
-                  <span className="truncate font-medium flex-1" title={primaryLabel}>{primaryLabel}</span>
-                  <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
-                </div>
-                <div className="mt-1.5 pl-4 flex items-center gap-1.5">
-                  {hasLocal && launchSession && (
-                    <LaunchButton session={s} launchSession={launchSession} onToast={onToast} />
-                  )}
-                  {!hasLocal && cloneHere && ownerRepo && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onOpenClone(s.id, ownerRepo) }}
-                      className="px-2 py-1 text-[11px] font-medium rounded bg-[var(--bg-tertiary)]/80 hover:bg-[var(--bg-tertiary)] text-[var(--text-primary)] transition-colors"
-                      title="Not on this machine — clone the repo to a configured root"
-                    >
-                      Clone here
-                    </button>
-                  )}
-                  {s.project_dir && (
-                    <span className="text-[10px] text-[var(--text-muted)] truncate" title={s.project_dir}>
-                      {s.project_dir}
-                    </span>
-                  )}
-                </div>
-              </button>
-            </div>
-          )
-        })}
-      </div>
-    </div>
   )
 }
