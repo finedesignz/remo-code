@@ -46,13 +46,27 @@ export interface RecordErrorResult {
     | 'deduped'
     | 'rate_limited'
     | 'cap_exceeded'
+    | 'skipped'
   skip_reason?: string
+}
+
+export interface RecordErrorOpts {
+  /**
+   * B2 (obs): when false, the dispatcher is NEVER invoked. All three gates
+   * (dedupe, rate-limit, daily cap) still run and the row still persists.
+   * On accept, the row lands at `dispatch_status='skipped'` with
+   * `skip_reason='no_dispatch'`. Used by hub self-capture to avoid feeding
+   * hub-internal exceptions back into a Claude session.
+   */
+  dispatch?: boolean
 }
 
 export async function recordError(
   project: ErrorProject,
   fields: RecordErrorFields,
+  opts: RecordErrorOpts = {},
 ): Promise<RecordErrorResult> {
+  const dispatchEnabled = opts.dispatch !== false
   // 1. Insert pending. We always have a row to point notifications at, and
   //    the row also participates in dedupe/rate-limit counts.
   const row = await insertError(project.id, {
@@ -139,8 +153,16 @@ export async function recordError(
     return { error_id: row.id, dispatch_status: 'cap_exceeded', skip_reason: reason }
   }
 
-  // 5. Accepted. Row stays 'pending'; W3 dispatcher fires it into the
-  //    configured session. Fire-and-forget — we never block the intake POST.
+  // 5. Accepted.
+  if (!dispatchEnabled) {
+    // B2 (obs): hub self-capture — gates passed but dispatcher is OFF.
+    // Mark row 'skipped' so it doesn't sit at 'pending' forever.
+    const reason = 'no_dispatch'
+    await updateErrorDispatchStatus(row.id, 'skipped', reason)
+    return { error_id: row.id, dispatch_status: 'skipped', skip_reason: reason }
+  }
+  // Row stays 'pending'; W3 dispatcher fires it into the configured session.
+  // Fire-and-forget — we never block the intake POST.
   void dispatchPendingError(row.id).catch((err) => {
     console.error(`[error-capture] dispatch failed error=${row.id}: ${err?.message ?? err}`)
   })
