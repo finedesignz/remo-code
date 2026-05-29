@@ -30,6 +30,7 @@ import { telegram as telegramApi } from './api/telegram'
 import { revanoteMappings } from './api/revanote-mappings'
 import { revanoteAnnotations } from './api/revanote-annotations'
 import { webhooksTitanium } from './api/webhooks-titanium'
+import { introspect as introspectApi } from './api/introspect'
 import { tasks as tasksApi } from './api/tasks'
 import { usage as usageApi } from './api/usage'
 import { wellKnown } from './api/well-known'
@@ -66,6 +67,7 @@ import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { log as obsLog } from './observability/logger'
 import { withRequestId } from './observability/middleware'
+import { withHttpMetrics } from './observability/http-metrics'
 
 const app = new Hono()
 
@@ -73,6 +75,10 @@ const app = new Hono()
 // security-headers middleware and CORS responses inherit the request_id and
 // every downstream log line carries it.
 app.use('*', withRequestId())
+
+// B4 (obs): record HTTP latency histogram. Mounted second so it sees the
+// final status_class after all downstream handlers run.
+app.use('*', withHttpMetrics())
 
 // Global error handler — never leak internals
 app.onError((err, c) => {
@@ -95,6 +101,11 @@ app.use('/api/*', cors({
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }))
+
+// B4 (obs): /healthz/deep + /metrics. Bearer-gated via HUB_INTROSPECT_TOKEN.
+// Mounted at root — bypasses /api/* auth, CSRF, license-gate, rate-limit
+// catch-alls. The bearer check IS the credential.
+app.route('/', introspectApi)
 
 // Phase 12.1: public deep-link association files for iOS Universal Links and
 // Android App Links. No auth, no license gate. Mounted at root before any

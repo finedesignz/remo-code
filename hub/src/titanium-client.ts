@@ -120,6 +120,7 @@ type JwksResolver = (
 
 let _jwksResolver: JwksResolver | null = null
 let _jwksWarmed = false
+let _jwksWarmedAt: number | null = null
 
 function getJwksResolver(): JwksResolver {
   if (_jwksResolver) return _jwksResolver
@@ -150,6 +151,7 @@ export async function warmJwksCache(): Promise<number> {
     // Force resolver init so subsequent verifies hit the warmed in-memory set.
     getJwksResolver()
     _jwksWarmed = true
+    _jwksWarmedAt = Date.now()
     return body.keys.length
   } catch (e) {
     if (e instanceof TitaniumVerifyError) throw e
@@ -373,6 +375,7 @@ export function __resetForTesting(): void {
   _jwksResolver = null
   _blocklistChecker = null
   _jwksWarmed = false
+  _jwksWarmedAt = null
   if (_redis) {
     try { _redis.disconnect() } catch {}
     _redis = null
@@ -381,4 +384,31 @@ export function __resetForTesting(): void {
 
 export function __isJwksWarmed(): boolean {
   return _jwksWarmed
+}
+
+// ── B4 (obs) introspect helpers ────────────────────────────────────────────
+
+/**
+ * Seconds since the JWKS cache was last warmed, or `null` when never warmed.
+ * Read by /healthz/deep — does NOT trigger a warm.
+ */
+export function getJwksCacheAgeSeconds(): number | null {
+  if (_jwksWarmedAt == null) return null
+  return Math.floor((Date.now() - _jwksWarmedAt) / 1000)
+}
+
+/**
+ * Cheap liveness probe against the Titanium Redis (blocklist) instance.
+ * Reuses the lazy singleton client. Returns true on `PONG`, false otherwise.
+ * Never throws.
+ */
+export async function pingRedis(): Promise<boolean> {
+  if (!config.titanium.redisUrl) return false
+  try {
+    const r = getRedis()
+    const res = await r.ping()
+    return res === 'PONG'
+  } catch {
+    return false
+  }
 }

@@ -26,7 +26,15 @@ const state: {
   sentMessages: [],
 }
 
+// Spread the real shared modules so any export not explicitly overridden below
+// stays resolvable for sibling files in the full suite (Bun mock.module is
+// process-global, first-write-wins). Overrides after the spread always win.
+// See memory: bun-mock-pollution.
+const realDalSL = await import(`../src/db/dal.ts?real=${Date.now()}`)
+const realBudgetSL = await import(`../src/sessions/budget.ts?real=${Date.now()}`)
+
 mock.module('../src/db/dal.ts', () => ({
+  ...realDalSL,
   // Surface mocks for everything sessions.ts imports.
   createSession: async () => ({}),
   listSessions: async () => [],
@@ -197,6 +205,12 @@ mock.module('../src/ws/supervisor-registry.ts', () => ({
   },
   setUserInventory: () => {},
   listSupervisorsForUser: async () => [],
+  // Benign stubs so this file's own transitive imports (and any sibling's) can
+  // resolve these exports even when this partial mock is the active one.
+  findSupervisorForSession: () => null,
+  getActiveSessionIdsForUser: () => new Set<string>(),
+  setSupervisorSessionInventory: () => {},
+  listSupervisors: () => [],
 }))
 
 mock.module('../src/lib/github-scope.ts', () => ({
@@ -213,6 +227,7 @@ mock.module('../src/sessions/routing.ts', () => ({
 }))
 
 mock.module('../src/sessions/budget.ts', () => ({
+  ...realBudgetSL,
   releaseSessionSlot: async () => {},
   // Phase 12 W2 — keep full surface so cross-test imports of api/supervisors
   // (which imports reserveSessionSlot + getCapacitySnapshot) don't break when

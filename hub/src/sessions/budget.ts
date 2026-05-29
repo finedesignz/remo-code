@@ -122,3 +122,14 @@ export async function getCapacitySnapshot(
   `
   return { running: Number(countRows[0]?.running ?? 0), cap }
 }
+
+/**
+ * B4 (obs): total open session_runs across all supervisors. Used to update
+ * the `remo_session_runs_in_flight` gauge at /metrics scrape time.
+ */
+export async function getInFlightRunCount(): Promise<number> {
+  const rows = await sql<{ running: string }[]>`
+    SELECT COUNT(*)::text AS running FROM session_runs WHERE ended_at IS NULL
+  `
+  return Number(rows[0]?.running ?? 0)
+}
