@@ -11,6 +11,7 @@
  * Plain React class component — no `react-error-boundary` dep, no new deps.
  */
 import { Component, type ErrorInfo, type ReactNode } from 'react'
+import { reportError } from '../lib/error-reporter'
 
 const HUB_URL = import.meta.env.VITE_HUB_URL || ''
 const IS_DEV = !!(import.meta as any).env?.DEV
@@ -35,6 +36,11 @@ export class AppErrorBoundary extends Component<Props, State> {
     // Greppable prefix for log scraping.
     // eslint-disable-next-line no-console
     console.error('[remo-error-boundary]', error, errorInfo?.componentStack)
+    // B3 observability: ship the boundary catch to the hub.
+    void reportError({
+      message: error.message || String(error),
+      stack: (error.stack ?? '') + (errorInfo?.componentStack ? `\nComponent stack:${errorInfo.componentStack}` : ''),
+    })
     this.setState({ errorInfo })
   }
 
