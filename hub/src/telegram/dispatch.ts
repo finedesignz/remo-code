@@ -12,7 +12,9 @@
  *      `tg:<chatId>:<updateId>` as the queue's runId so Telegram bursts get
  *      serialized identically to scheduled-task bursts.
  *   3. Insert the user-typed message into `messages` so it appears in the
- *      web UI alongside web-typed messages, prefixed with `[telegram]`.
+ *      web UI alongside web-typed messages. The Telegram source is recorded
+ *      in `telegram_inbound_audit` (chat_id, update_id) — NOT as a string
+ *      prefix on the message content.
  *   4. Broadcast to web subscribers, then push `user_message` onto the agent
  *      socket.
  *
@@ -112,7 +114,12 @@ export async function dispatchToSession(input: DispatchInput): Promise<DispatchO
   }
 
   // (4) Build payload + persist + broadcast + send.
-  const storedContent = `[telegram] ${input.text}`;
+  // NOTE: storedContent is the RAW user text (no `[telegram] ` prefix).
+  // The telegram source is recorded separately in the `telegram_inbound_audit`
+  // row written by the webhook (keyed by chat_id + update_id). When/if a
+  // first-class `messages.source` column lands, filtering should switch to
+  // that — never re-introduce a string prefix that the web UI has to grep.
+  const storedContent = input.text;
   let msg: { id: string; created_at: string };
   try {
     msg = (await insertMessage(input.sessionId, "user", storedContent)) as { id: string; created_at: string };
