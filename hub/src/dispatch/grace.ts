@@ -7,13 +7,17 @@
  * keyed by a target key (sessionId or supervisorId). On agent reconnect the
  * pipeline calls `drain(targetKey)` to re-run each parked replay. Entries older
  * than the TTL (default 10 min — the exact window the three legacy copies use:
- * `10 * 60 * 1000` ms) are expired by a 60s sweep and dropped without replay.
+ * `10 * 60 * 1000` ms) are NOT replayed; instead their optional `onExpire`
+ * side-effect fires exactly once (legacy parity: all three copies expire-marked
+ * the run as skipped/failed_offline on TTL lapse — at BOTH drain-time and
+ * sweep-time). The 60s sweep observes lapses between drains.
  *
  * In-memory only — best-effort across hub restarts (documented).
  *
  * Depth: the subsystem-specific behaviour (what "expire" persists, what
  * "replay" re-runs) is entirely captured in the opaque thunks the caller
- * registers; this module owns only the buffer, the TTL, and the sweep.
+ * registers; this module owns only the buffer, the TTL, the sweep, and the
+ * once-only expire dispatch.
  */
 
 /** Default grace window — matches the legacy `TTL_MS = 10 * 60 * 1000`. */
@@ -22,12 +26,29 @@ const SWEEP_INTERVAL_MS = 60_000
 
 interface Pending {
   replay: () => Promise<void>
+  onExpire?: () => Promise<void>
   expiresAt: number
 }
 
+export interface GraceRegisterOpts {
+  /** Grace window in ms; defaults to DEFAULT_TTL_MS (10 min). */
+  ttlMs?: number
+  /**
+   * Side-effect fired EXACTLY ONCE when this entry is dropped due to TTL
+   * expiry — at either drain-time or sweep-time, whichever observes the
+   * lapse first. Reproduces the legacy expire-marking that all three copies
+   * ran on TTL lapse:
+   *   - scheduler:      updateRunStatus(skipped, 'target_offline')
+   *   - error-capture:  updateErrorDispatchStatus(skipped, 'target_offline_expired')
+   *   - revanote:       updateAnnotationStatus('failed_offline', {skip_reason:'target_offline_expired'})
+   * Errors are swallowed/logged — they never break the sweep loop.
+   */
+  onExpire?: () => Promise<void>
+}
+
 export interface GraceBuffer {
-  /** Park a replay thunk for `targetKey`. ttlMs defaults to DEFAULT_TTL_MS. */
-  register(targetKey: string, replay: () => Promise<void>, ttlMs?: number): void
+  /** Park a replay thunk for `targetKey`. */
+  register(targetKey: string, replay: () => Promise<void>, opts?: GraceRegisterOpts): void
   /** Re-run every live parked replay for `targetKey` (called on reconnect). */
   drain(targetKey: string): Promise<void>
 }
@@ -40,9 +61,10 @@ class GraceBufferImpl implements GraceBuffer {
     this.startSweeper()
   }
 
-  register(targetKey: string, replay: () => Promise<void>, ttlMs: number = DEFAULT_TTL_MS): void {
+  register(targetKey: string, replay: () => Promise<void>, opts: GraceRegisterOpts = {}): void {
+    const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS
     const list = this.byTarget.get(targetKey) ?? []
-    list.push({ replay, expiresAt: Date.now() + ttlMs })
+    list.push({ replay, onExpire: opts.onExpire, expiresAt: Date.now() + ttlMs })
     this.byTarget.set(targetKey, list)
   }
 
@@ -52,9 +74,13 @@ class GraceBufferImpl implements GraceBuffer {
     this.byTarget.delete(targetKey)
     const now = Date.now()
     for (const p of list) {
-      // Expired entries are dropped — the replay thunk owns its own
-      // expire-side-effects via the sweep; here we simply skip.
-      if (p.expiresAt < now) continue
+      // TTL-lapsed entries fire their expire side-effect (legacy parity:
+      // scheduler/error-capture/revanote all expire-mark on drain-time lapse)
+      // then are dropped — never replayed.
+      if (p.expiresAt < now) {
+        await this.fireExpire(targetKey, p)
+        continue
+      }
       try {
         await p.replay()
       } catch (err: any) {
@@ -63,12 +89,29 @@ class GraceBufferImpl implements GraceBuffer {
     }
   }
 
+  /** Fire an entry's onExpire side-effect once; swallow + log any error. */
+  private async fireExpire(targetKey: string, p: Pending): Promise<void> {
+    if (!p.onExpire) return
+    try {
+      await p.onExpire()
+    } catch (err: any) {
+      console.error(`[dispatch.grace] onExpire failed target=${targetKey}: ${err?.message ?? err}`)
+    }
+  }
+
   private sweep(): void {
     const now = Date.now()
     for (const [key, list] of this.byTarget) {
       const live: Pending[] = []
       for (const p of list) {
-        if (p.expiresAt >= now) live.push(p)
+        if (p.expiresAt >= now) {
+          live.push(p)
+        } else {
+          // Sweep-time TTL lapse: fire the expire side-effect (legacy parity —
+          // all three copies expire-marked in their 60s sweep). Fire-and-forget
+          // so one slow/failing thunk never stalls the sweep loop.
+          void this.fireExpire(key, p)
+        }
       }
       if (live.length === 0) this.byTarget.delete(key)
       else this.byTarget.set(key, live)

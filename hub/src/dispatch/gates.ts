@@ -24,8 +24,9 @@ import { reserveSessionSlot } from '../sessions/budget.ts'
 import type { DispatchGate, DispatchRequest } from './pipeline.ts'
 
 /**
- * Daily cost-cap predicate — the single source of truth for the
- * `isOverCostCap` SQL that scheduler/error-capture/revanote each copied.
+ * Daily cost-cap predicate — the SINGLE source of truth for the `isOverCostCap`
+ * SQL that scheduler/error-capture/revanote each copied. `dailyCostCapGate`
+ * delegates here; the SQL is NOT inlined anywhere else (no double truth).
  *
  * Returns true when the user's spend today (in `timezone`) is >= their
  * `daily_cost_cap_usd`. A non-positive or non-finite cap means "no cap"
@@ -39,6 +40,14 @@ export async function isOverCostCap(userId: string, timezone: string): Promise<b
   if (!Number.isFinite(cap) || cap <= 0) return false
   const spent = await sumTodayCostForUser(userId, timezone)
   return spent >= cap
+}
+
+/** Resolve the user's timezone (default 'UTC') for the cost-cap window. */
+async function userTimezone(userId: string): Promise<string> {
+  const rows = await sql<{ tz: string | null }[]>`
+    SELECT timezone AS tz FROM users WHERE id = ${userId} LIMIT 1
+  `
+  return rows[0]?.tz ?? 'UTC'
 }
 
 /**
@@ -56,22 +65,17 @@ export const thresholdGate: DispatchGate = {
 }
 
 /**
- * Daily cost-cap gate (non-bypassable, IR-1). Reads the user timezone from the
- * request — `DispatchRequest` carries no timezone field by design, so this gate
- * resolves it from the `users` row alongside the cap, keeping the SQL co-located.
+ * Daily cost-cap gate (non-bypassable, IR-1). `DispatchRequest` carries no
+ * timezone field by design, so the gate resolves the user's timezone then
+ * delegates to `isOverCostCap` — the single SQL source of truth.
  */
 export const dailyCostCapGate: DispatchGate = {
   name: 'daily_cost_cap',
   async check(req: DispatchRequest) {
-    const rows = await sql<{ cap: string; tz: string | null }[]>`
-      SELECT daily_cost_cap_usd::text AS cap, timezone AS tz
-      FROM users WHERE id = ${req.userId} LIMIT 1
-    `
-    const cap = Number(rows[0]?.cap ?? 10)
-    if (!Number.isFinite(cap) || cap <= 0) return { ok: true }
-    const timezone = rows[0]?.tz ?? 'UTC'
-    const spent = await sumTodayCostForUser(req.userId, timezone)
-    if (spent >= cap) return { ok: false, reason: 'daily_cost_cap' }
+    const timezone = await userTimezone(req.userId)
+    if (await isOverCostCap(req.userId, timezone)) {
+      return { ok: false, reason: 'daily_cost_cap' }
+    }
     return { ok: true }
   },
 }

@@ -123,7 +123,7 @@ describe('dispatch/grace', () => {
     let ran = 0
     g.register('k', async () => {
       ran++
-    }, -1) // already expired
+    }, { ttlMs: -1 }) // already expired
     await g.drain('k')
     expect(ran).toBe(0)
   })
@@ -133,7 +133,7 @@ describe('dispatch/grace', () => {
     let ran = 0
     g.register('k', async () => {
       ran++
-    }, -1)
+    }, { ttlMs: -1 })
     expect(g._pendingCount('k')).toBe(1)
     g._sweepNow()
     expect(g._pendingCount('k')).toBe(0)
@@ -143,7 +143,7 @@ describe('dispatch/grace', () => {
 
   test('sweep keeps live entries', () => {
     const g = getGraceBuffer() as any
-    g.register('k', async () => {}, DEFAULT_TTL_MS)
+    g.register('k', async () => {}, { ttlMs: DEFAULT_TTL_MS })
     g._sweepNow()
     expect(g._pendingCount('k')).toBe(1)
   })
@@ -152,10 +152,71 @@ describe('dispatch/grace', () => {
     const g = getGraceBuffer()
     await g.drain('nope')
   })
+
+  // ── onExpire side-effect (legacy expire-mark parity) ──────────────────────
+  test('TTL-expiry fires onExpire on sweep (exactly once)', async () => {
+    const g = getGraceBuffer() as any
+    let expired = 0
+    g.register('k', async () => {}, { ttlMs: -1, onExpire: async () => { expired++ } })
+    g._sweepNow()
+    expect(expired).toBe(1)
+    // entry now gone — a second sweep must not re-fire it
+    g._sweepNow()
+    expect(expired).toBe(1)
+  })
+
+  test('TTL-expiry fires onExpire on drain when sweep has not run', async () => {
+    const g = getGraceBuffer()
+    let expired = 0
+    let replayed = 0
+    g.register('k', async () => { replayed++ }, { ttlMs: -1, onExpire: async () => { expired++ } })
+    await g.drain('k')
+    expect(expired).toBe(1) // expire-marked
+    expect(replayed).toBe(0) // never replayed
+  })
+
+  test('a drained (live) entry does NOT fire onExpire', async () => {
+    const g = getGraceBuffer()
+    let expired = 0
+    let replayed = 0
+    g.register('k', async () => { replayed++ }, { ttlMs: DEFAULT_TTL_MS, onExpire: async () => { expired++ } })
+    await g.drain('k')
+    expect(replayed).toBe(1)
+    expect(expired).toBe(0)
+  })
+
+  test('sweep with no expired entries fires nothing', () => {
+    const g = getGraceBuffer() as any
+    let expired = 0
+    g.register('k', async () => {}, { ttlMs: DEFAULT_TTL_MS, onExpire: async () => { expired++ } })
+    g._sweepNow()
+    expect(expired).toBe(0)
+    expect(g._pendingCount('k')).toBe(1)
+  })
+
+  test('onExpire that throws does not break the sweep loop', () => {
+    const g = getGraceBuffer() as any
+    let other = 0
+    g.register('a', async () => {}, { ttlMs: -1, onExpire: async () => { throw new Error('boom') } })
+    g.register('b', async () => {}, { ttlMs: -1, onExpire: async () => { other++ } })
+    expect(() => g._sweepNow()).not.toThrow()
+    expect(g._pendingCount('a')).toBe(0)
+    expect(g._pendingCount('b')).toBe(0)
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pipeline
+//
+// TODO(migration): the following pipeline cases land with the telegram/error-
+// capture migration PRs (they need a concrete RunStore/null-store subsystem):
+//   - store:null path (telegram) — dispatch with deps.store === null skips the
+//     markSkipped/onFinalize/markDispatched calls without throwing.
+//   - enqueue-after-abandon — abandon(sessionId) frees the slot so the next
+//     dispatch claims 'dispatched' (queue-level case; pipeline has no abandon
+//     surface yet — added when a subsystem needs cancel).
+//   - promotion-failure branch — promoted re-dispatch whose send() throws is
+//     logged and does not wedge the session (re-dispatch failure path).
 // ─────────────────────────────────────────────────────────────────────────────
 
 const baseReq = (over: Partial<DispatchRequest> = {}): DispatchRequest => ({
@@ -304,6 +365,28 @@ describe('dispatch/pipeline — offline park', () => {
     expect(replays).toHaveLength(0) // not under sessionId
     await getGraceBuffer().drain('sup_42')
     expect(replays).toHaveLength(1)
+  })
+
+  test('onParkExpire fires when a parked entry TTL-lapses on sweep', async () => {
+    const g = getGraceBuffer() as any
+    g._reset()
+    let expired = 0
+    let replayed = 0
+    // Force immediate expiry by reaching into the buffer is not exposed; instead
+    // park then expire via a 0/negative-TTL replay is not pipeline-controllable,
+    // so assert the wiring: onParkExpire is threaded to grace.register's onExpire.
+    const { deps: d } = deps({
+      isOnline: () => false,
+      replay: async () => { replayed++ },
+      onParkExpire: async () => { expired++ },
+    })
+    await dispatch(baseReq(), d)
+    // The grace entry is live (10-min TTL) — manually expire it then sweep.
+    // Reach the single pending entry and backdate it.
+    ;(g as any).byTarget?.get('s1')?.forEach?.((p: any) => { p.expiresAt = Date.now() - 1 })
+    g._sweepNow()
+    expect(expired).toBe(1)
+    expect(replayed).toBe(0)
   })
 })
 

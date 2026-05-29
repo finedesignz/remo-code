@@ -90,6 +90,15 @@ export interface PipelineDeps {
    * parks supervisor-targeted runs under the supervisorId.
    */
   graceKey?: (req: DispatchRequest) => string
+  /**
+   * Optional expire side-effect for a parked-offline request whose grace TTL
+   * lapses before the agent reconnects. Reproduces the legacy expire-mark
+   * (scheduler: updateRunStatus(skipped,'target_offline'); error-capture:
+   * updateErrorDispatchStatus(skipped,'target_offline_expired'); revanote:
+   * updateAnnotationStatus('failed_offline',...)). Undefined for telegram (no
+   * run row → nothing to mark). Errors are swallowed by the grace buffer.
+   */
+  onParkExpire?: (req: DispatchRequest) => Promise<void>
 }
 
 // ── module-owned state ────────────────────────────────────────────────────────
@@ -185,7 +194,9 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
   if (!online) {
     queue.markFinished(req.sessionId) // release the slot we just took
     const key = deps.graceKey ? deps.graceKey(req) : req.sessionId
-    getGraceBuffer().register(key, () => deps.replay(req))
+    getGraceBuffer().register(key, () => deps.replay(req), {
+      onExpire: deps.onParkExpire ? () => deps.onParkExpire!(req) : undefined,
+    })
     return { kind: 'parked_offline' }
   }
 
@@ -248,8 +259,22 @@ export async function onSessionReply(sessionId: string, content: string): Promis
   if (!waiter) return
 
   // markFinished already moved the promoted token into the in-flight slot, so
-  // re-running dispatch() would see the slot occupied and queue/drop. Release
-  // it first, then re-dispatch fresh through every gate.
+  // re-running dispatch() would see the slot occupied and queue/drop. We
+  // INTENTIONALLY release the slot here, then re-dispatch the promoted waiter
+  // fresh through every gate (IR-2). Do NOT "fix" this back to keeping the slot
+  // held — the legacy scheduler held it and then re-entered enqueue() on the
+  // already-occupied slot, which returned 'queued' and stranded the waiter
+  // (never sent). The release-then-redispatch is the deliberate correction.
+  //
+  // KNOWN await-gap (best-effort ordering): between this release and the
+  // re-enqueue inside dispatch() there is an await boundary (the gate checks).
+  // A 3rd same-session dispatch arriving from ANOTHER source in that window can
+  // claim the freed slot ahead of the promoted waiter, reordering it. This is
+  // accepted: cross-source same-session ordering is best-effort, the cost-cap
+  // (IR-1) and queue cap (1 in-flight + 1 waiter) invariants still hold, and the
+  // displaced waiter simply re-queues. A strict hand-off would require an
+  // atomic promote-and-redispatch lock that the single-in-flight model doesn't
+  // warrant.
   queue.markFinished(sessionId)
   try {
     await dispatch(waiter.req, waiter.deps)
