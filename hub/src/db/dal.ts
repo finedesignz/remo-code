@@ -370,6 +370,46 @@ export async function findOrCreateAgentSessionV2(
       return { ...updated[0], created: false, repo_keyed: true, migrated: true }
     }
 
+    // Priority 2.5: an active non-rootless row already occupies (user_id, project_dir)
+    // but with a different (or null) repo_key — e.g. the remote was changed, or a
+    // row was previously upserted by the legacy path before repo_key was known.
+    // The partial unique index idx_sessions_user_project_unique(user_id, project_dir)
+    // WHERE deleted_at IS NULL AND is_rootless=false will reject the P3 INSERT in
+    // that case. Adopt the existing row instead: stamp it with the new repo_key
+    // (and github_owner/repo) so subsequent P1 lookups hit it directly.
+    const projectDirRows = await tx`
+      SELECT * FROM sessions
+      WHERE user_id = ${userId}
+        AND project_dir = ${projectDir}
+        AND is_rootless = false
+        AND deleted_at IS NULL
+      FOR UPDATE
+    `
+    if (projectDirRows[0]) {
+      const row = projectDirRows[0]
+      const updated = tokenHash === null
+        ? await tx`
+            UPDATE sessions
+               SET repo_key = ${repoKey},
+                   github_owner = ${owner},
+                   github_repo = ${repo},
+                   last_activity = now()
+             WHERE id = ${row.id}
+             RETURNING *
+          `
+        : await tx`
+            UPDATE sessions
+               SET repo_key = ${repoKey},
+                   github_owner = ${owner},
+                   github_repo = ${repo},
+                   token_hash = ${tokenHash},
+                   last_activity = now()
+             WHERE id = ${row.id}
+             RETURNING *
+          `
+      return { ...updated[0], created: false, repo_keyed: true }
+    }
+
     // Priority 3: brand-new repo-keyed row. ON CONFLICT handles the final-mile
     // race where two transactions both miss P1 but only one wins the INSERT.
     // Plan 08-003 T4: when called from supervisor inventory, tokenHash is null
