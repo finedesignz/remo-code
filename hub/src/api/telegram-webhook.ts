@@ -67,6 +67,7 @@ import {
 } from "../telegram/session-picker.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
 import { runDoctor, bufferReplay, hasBufferedReplay } from "../telegram/doctor.ts";
+import { runStatus } from "../telegram/status.ts";
 
 export const telegramWebhookRoutes = new Hono();
 
@@ -533,6 +534,10 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
         }
         case "doctor": {
           const r = await runDoctor({ user, chatId });
+          return c.json({ ok: true, outcome: r.outcome });
+        }
+        case "status": {
+          const r = await runStatus({ user, chatId });
           return c.json({ ok: true, outcome: r.outcome });
         }
         case "start": {
