@@ -13,7 +13,8 @@ import { useEffect, useRef, useState } from "react";
 import { hubFetch } from "../../lib/api";
 import type { Profile } from "../../hooks/useProfile";
 import { useWebPushPermission } from "../../hooks/useWebPushPermission";
-import { Card, Field, Button, StatusPill, Toggle } from "../../components/ui";
+import { useSessions, githubOwnerRepo } from "../../hooks/useSessions";
+import { Card, Field, Button, StatusPill, Toggle, LoadingState, EmptyState } from "../../components/ui";
 
 interface Props {
   token: string;
@@ -36,6 +37,7 @@ export function ProfileTab({ token, profile, onUpdateProfile }: Props) {
       <IdentityCard token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
       <TimezoneCard token={token} profile={profile} />
       <NotificationsCard profile={profile} onUpdateProfile={onUpdateProfile} />
+      <TelegramCard token={token} />
     </div>
   );
 }
@@ -380,6 +382,172 @@ function NotificationsCard({
           aria-label="Web push (this tab)"
         />
       </div>
+    </Card>
+  );
+}
+
+/* ─────────────────────────── Telegram ─────────────────────────── */
+
+type TelegramStatus = {
+  linked: boolean;
+  chat_id: string | null;
+  default_session_id: string | null;
+  bot_username: string | null;
+  bot_configured: boolean;
+};
+
+function TelegramCard({ token }: { token: string }) {
+  const [status, setStatus] = useState<TelegramStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [linkCode, setLinkCode] = useState<{ code: string; deepLink: string; expiresAt: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmUnlink, setConfirmUnlink] = useState(false);
+
+  // Lightweight read of the user's sessions to populate the default-session
+  // select. No `subscribe` passed — a one-shot GET /api/sessions on mount is
+  // enough here; the list is array-guarded inside the hook.
+  const { sessions } = useSessions(token);
+  const safeSessions = Array.isArray(sessions) ? sessions : [];
+
+  const refresh = async () => {
+    try {
+      const r = await hubFetch<TelegramStatus>(token, "/api/telegram/status");
+      setStatus(r);
+    } catch (e: any) {
+      setError(e?.message || "Failed to load Telegram status");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { void refresh(); }, []);
+
+  const startLink = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await hubFetch<{ code: string; deepLink: string; expiresAt: string }>(
+        token,
+        "/api/telegram/link-code",
+        { method: "POST", json: {} },
+      );
+      setLinkCode(r);
+      if (r.deepLink) window.open(r.deepLink, "_blank");
+    } catch (e: any) {
+      setError(e?.status === 503 ? "Telegram bridge isn't configured on this server." : e?.message || "Failed to start link");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unlink = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await hubFetch(token, "/api/telegram/link", { method: "DELETE" });
+      setLinkCode(null);
+      setConfirmUnlink(false);
+      await refresh();
+    } catch (e: any) {
+      setError(e?.message || "Unlink failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setDefaultSession = async (sessionId: string | null) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await hubFetch(token, "/api/telegram/default-session", {
+        method: "PUT",
+        json: { session_id: sessionId },
+      });
+      setStatus((prev) => (prev ? { ...prev, default_session_id: sessionId } : prev));
+    } catch (e: any) {
+      setError(e?.message || "Failed to set default session");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const sessionLabel = (s: (typeof safeSessions)[number]) =>
+    githubOwnerRepo(s) || s.name || s.project_dir || s.id;
+
+  return (
+    <Card className="space-y-3">
+      <h3 className="text-sm font-semibold text-[var(--text-primary)]">Telegram</h3>
+
+      {loading ? (
+        <LoadingState variant="inline" label="Loading Telegram status…" />
+      ) : !status?.bot_configured ? (
+        <EmptyState
+          title="Telegram not configured"
+          description="The Telegram bridge isn't configured on this server."
+        />
+      ) : !status.linked ? (
+        <div className="space-y-3">
+          <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+            Link your Telegram account to chat with your sessions from Telegram. Tap below to open Telegram
+            and send the code to the bot.
+          </p>
+          <Button variant="primary" size="sm" onClick={startLink} loading={busy}>
+            Link Telegram
+          </Button>
+          {linkCode && (
+            <div className="text-xs text-[var(--text-muted)]">
+              If Telegram didn't open, send this code to{" "}
+              {status.bot_username ? `@${status.bot_username}` : "the bot"}:{" "}
+              <span className="font-mono text-[var(--text-secondary)]">/start {linkCode.code}</span>
+              <span className="ml-1">(expires in 10 min)</span>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2">
+            <StatusPill status="success" size="sm" label="Linked" />
+            {status.chat_id && (
+              <span className="text-xs text-[var(--text-muted)]">chat {status.chat_id}</span>
+            )}
+          </div>
+
+          <Field label="Default session" helper="Inbound Telegram messages route to this session.">
+            <select
+              value={status.default_session_id ?? ""}
+              disabled={busy}
+              onChange={(e) => void setDefaultSession(e.target.value || null)}
+              className="w-full px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+            >
+              <option value="">None</option>
+              {safeSessions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {sessionLabel(s)}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          {confirmUnlink ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-[var(--text-secondary)]">Unlink Telegram?</span>
+              <Button variant="danger" size="sm" onClick={unlink} loading={busy}>
+                Confirm unlink
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmUnlink(false)} disabled={busy}>
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <Button variant="danger" size="sm" onClick={() => setConfirmUnlink(true)} disabled={busy}>
+              Unlink
+            </Button>
+          )}
+        </div>
+      )}
+
+      {error && <p className="text-xs text-red-400">{error}</p>}
     </Card>
   );
 }
