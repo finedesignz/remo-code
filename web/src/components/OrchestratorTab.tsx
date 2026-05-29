@@ -82,7 +82,9 @@ export function OrchestratorTab({ token }: { token: string }) {
             <h3 className="text-sm font-semibold text-[var(--text-primary)]">Orchestrator session</h3>
             <p className="text-xs text-[var(--text-muted)] mt-1 leading-relaxed">
               A pinned Claude session that runs in your repos parent folder and is taught how to read state from
-              and coordinate your other Claude sessions via the hub API.
+              and coordinate your other Claude sessions via the hub API. When enabled it auto-launches as soon as
+              your supervisor connects and stays available (it's the default target for Telegram). Disable it any
+              time below — once disabled it won't auto-launch again until you turn it back on.
             </p>
           </div>
           <span className={`text-[10px] uppercase tracking-wide px-2 py-1 rounded font-semibold shrink-0 ${
