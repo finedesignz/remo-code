@@ -77,16 +77,16 @@ pub struct RootsConfig {
     pub configured: bool,
 }
 
-/// Read the `auto_update` preference. Defaults to `false` when absent so
-/// existing configs (and brand-new installs) never auto-install without
-/// explicit opt-in.
+/// Read the `auto_update` preference. Defaults to `true` when absent —
+/// new installs and existing configs that never wrote the key get
+/// silent background updates by default. Users can opt out in Settings.
 #[tauri::command]
 pub fn get_auto_update() -> Result<bool, String> {
     let map = read_raw()?;
     Ok(map
         .get("auto_update")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false))
+        .unwrap_or(true))
 }
 
 /// Write the `auto_update` preference. Idempotent — preserves all other keys.

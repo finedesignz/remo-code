@@ -1,6 +1,6 @@
 // Background auto-update watcher.
 //
-// Polls Tauri's updater on a 6-hour cadence. Each check re-reads the
+// Polls Tauri's updater on a 15-minute cadence. Each check re-reads the
 // `auto_update` preference so toggling it mid-session takes effect on the
 // next tick. When enabled AND an update is available, downloads + installs
 // silently and relaunches — no dialog, no confirmation.
@@ -12,8 +12,8 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { invoke } from "@tauri-apps/api/core";
 
-const STARTUP_DELAY_MS = 60_000;
-const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
+const STARTUP_DELAY_MS = 15_000;
+const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15min
 
 export interface AutoUpdateStatus {
   lastCheckedAt: number | null;
