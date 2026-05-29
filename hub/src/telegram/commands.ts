@@ -146,6 +146,22 @@ export async function prewarmAfterLink(opts: {
   if (opts.existingDefault) {
     return { kind: "skipped", reason: "already_set" };
   }
+
+  // orchestrator-autolaunch: when the orchestrator is enabled, leave the default
+  // UNSET so inbound dispatch falls back to (and lazy-pins) the orchestrator —
+  // "the first agent you talk to is the root orchestrator". We do NOT pin a
+  // project session here, which would block that fallback. The orchestrator is
+  // launched on supervisor.hello (or inbound autoheal), so no prewarm needed.
+  try {
+    const { getOrchestratorState } = await import("../db/orchestrator-dal.ts");
+    const prefs = await getOrchestratorState(opts.userId);
+    if (prefs.orchestrator_enabled && !prefs.orchestrator_disabled_explicitly) {
+      return { kind: "skipped", reason: "no_sessions" };
+    }
+  } catch {
+    /* fall through to legacy prewarm */
+  }
+
   const launch = opts.launchImpl ?? launchSessionForUser;
   let candidate: { id: string; name: string | null; project_dir: string | null } | undefined;
   try {

@@ -190,6 +190,25 @@ async function fetchPhotoAsDataUri(fileId: string): Promise<string | null> {
   }
 }
 
+/**
+ * orchestrator-autolaunch: resolve the user's open orchestrator session id, but
+ * only when the feature is enabled and not explicitly disabled. Used as the
+ * Telegram default-target FALLBACK when `telegram_default_session_id` is unset.
+ * Returns null when the orchestrator is off or no session row exists yet
+ * (auto-launch on supervisor.hello / inbound autoheal will create it).
+ */
+async function resolveOrchestratorTarget(userId: string): Promise<string | null> {
+  try {
+    const { getOrchestratorState, findOpenOrchestratorSession } = await import("../db/orchestrator-dal.ts");
+    const prefs = await getOrchestratorState(userId);
+    if (!prefs.orchestrator_enabled || prefs.orchestrator_disabled_explicitly) return null;
+    const row = await findOpenOrchestratorSession(userId);
+    return row?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Inbound text / attachment dispatch path (linked chat, non-command). */
 async function dispatchInbound(
   user: TelegramUserRow,
@@ -198,7 +217,38 @@ async function dispatchInbound(
 ): Promise<{ outcome: string; error?: string; replayText?: string; replayImages?: string[] }> {
   const chatId = msg.chat.id;
 
-  if (!user.telegram_default_session_id) {
+  // Resolve the effective target: explicit default, else fall back to the
+  // user's open orchestrator session (orchestrator-autolaunch). Telegram then
+  // always tracks the orchestrator unless the user explicitly picked another
+  // default. On fallback we lazy-pin the orchestrator id into
+  // `telegram_default_session_id` so the OUTBOUND bridge (which matches on the
+  // column) forwards the reply too.
+  let targetSessionId = user.telegram_default_session_id;
+
+  // Self-healing pin: if the explicit default points at a now-deleted session,
+  // drop it so we fall back to the orchestrator below (avoids a dead pin →
+  // permanent agent_offline).
+  if (targetSessionId) {
+    const live = await getSession(targetSessionId, user.id).catch(() => null);
+    if (!live) {
+      targetSessionId = null;
+      user.telegram_default_session_id = null;
+    }
+  }
+
+  if (!targetSessionId) {
+    const orch = await resolveOrchestratorTarget(user.id);
+    if (orch) {
+      targetSessionId = orch;
+      try {
+        await setTelegramDefaultSession(user.id, orch);
+        user.telegram_default_session_id = orch; // keep the in-memory row coherent
+      } catch {
+        /* swallow — dispatch still proceeds against the resolved id */
+      }
+    }
+  }
+  if (!targetSessionId) {
     await safeSend(chatId, "No default session set. Use /list and /session <id> to pick one.");
     return { outcome: "no_session" };
   }
@@ -254,7 +304,7 @@ async function dispatchInbound(
 
   const result = await dispatchToSession({
     userId: user.id,
-    sessionId: user.telegram_default_session_id,
+    sessionId: targetSessionId,
     chatId,
     updateId,
     text,
