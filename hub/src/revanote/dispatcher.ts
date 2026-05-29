@@ -1,10 +1,45 @@
 /**
- * Revanote dispatcher (Phase 08).
+ * Revanote dispatcher (Round-2 migration — now an adapter over the shared
+ * session-dispatch pipeline `hub/src/dispatch/`).
  *
- * Resolves a session for the annotation's mapping, applies cost/threshold/
- * per-source budget gates, claims the per-session queue, and ships the
- * annotation as a `user_message` to Claude — same pipeline as error-capture
- * (`error-capture/dispatcher.ts`).
+ * Previously this module hand-rolled: threshold gate → per-source budget gate →
+ * session resolution → offline grace park → per-session queue claim →
+ * agent-socket send → run-lifecycle finalize hook. All of that machinery now
+ * lives behind `dispatch()` in `hub/src/dispatch/pipeline.ts`. This file is the
+ * thin revanote adapter: it resolves the annotation's mapping → session, builds
+ * the prompt + a `RunStore` that persists/updates `annotation_runs` and the
+ * `annotations` status enum, sets the gate list
+ * (threshold → cost-cap → revanote-budget — IR-1/IR-2), provides the offline
+ * `replay`/`onParkExpire` thunks, and maps the pipeline's `DispatchOutcome`
+ * back to the WS events + annotation status vocabulary revanote already emits.
+ *
+ * Finalize is no longer wired here: the agent ws assistant_message branch calls
+ * `dispatch.onSessionReply(sessionId, content)`, which fires `RunStore.onFinalize`
+ * for the in-flight annotation run and promotes/re-dispatches any queued
+ * annotationId through the full gate list again. `onFinalize` carries the exact
+ * legacy `run-lifecycle.onAgentReply` behaviour: parse the `<<JSON>>…<<END>>`
+ * envelope, mark the annotation resolved/failed, run the merge gate, and ENQUEUE
+ * the outbound callback (always with `annotation_id`).
+ *
+ * The per-source revanote budget gate (`users.revanote_budget_pct`) is layered
+ * ON TOP of the global daily cost cap as a third `DispatchGate` — it is NOT a
+ * substitute for the cost cap (IR-1).
+ *
+ * Behaviour preserved verbatim:
+ *   - threshold gate first, cost-cap second, revanote-budget third (IR-2);
+ *     cost-cap non-bypassable (IR-1). NOTE: the legacy dispatcher had NO global
+ *     daily-cost-cap gate — only the Claude usage threshold + the per-source
+ *     budget. The migration ADDS `dailyCostCapGate` per the IR-1 mandate.
+ *   - threshold / budget block → annotation 'failed' + skip_reason + reject
+ *     callback (errorTag 'budget_threshold').
+ *   - no session/mapping → annotation 'failed' + reject callback ('no_target').
+ *   - offline target → grace park + annotation 'pending'(skip_reason
+ *     'session_offline'); TTL lapse → 'failed_offline'(target_offline_expired)
+ *     (now via onParkExpire).
+ *   - queue dropped → annotation 'failed'(session_busy) + reject callback
+ *     ('session_busy').
+ *   - dispatched → insert annotation_run(in_flight), persist user message,
+ *     broadcast it, send, annotation 'dispatched', broadcast revanote_dispatched.
  *
  * Fire-and-forget tail off the webhook handler. Never blocks intake.
  */
@@ -21,10 +56,16 @@ import {
 } from '../db/revanote-dal.ts'
 import { findSessionByProjectDir, insertMessage } from '../db/dal.ts'
 import { getChannel, broadcastRevanoteEvent, broadcastToSubscribers } from '../ws/registry.ts'
-import * as queue from '../scheduler/session-queue.ts'
-import { checkUserThreshold } from '../usage/threshold.ts'
 import { renderAnnotationPrompt, storagePrefix, previewComment } from './prompt.ts'
-import { registerAnnotationRunForSession } from './run-lifecycle.ts'
+import { finalizeAnnotationReply } from './run-lifecycle.ts'
+import {
+  dispatch,
+  type DispatchRequest,
+  type DispatchGate,
+  type PipelineDeps,
+  type RunStore,
+} from '../dispatch/pipeline.ts'
+import { thresholdGate, dailyCostCapGate } from '../dispatch/gates.ts'
 
 export type DispatchOutcome =
   | { status: 'dispatched'; run_id: string; session_id: string }
@@ -42,22 +83,52 @@ function hostOf(pageUrl: string): string {
 }
 
 /**
- * Per-source budget gate. Treats `users.revanote_budget_pct` (default 60)
- * as a percentage of the daily cap. When today's revanote-attributed cost
- * already meets-or-exceeds that fraction, refuse new dispatches with
- * `revanote_budget_exceeded`.
+ * Best-effort timezone read. Falls back to UTC on lookup failure.
  */
-async function isOverRevanoteBudget(userId: string, timezone: string): Promise<{ over: boolean; cap: number; spent: number }> {
-  const rows = await sql<{ cap: string; pct: number | null }[]>`
-    SELECT daily_cost_cap_usd::text AS cap, revanote_budget_pct AS pct
-      FROM users WHERE id = ${userId} LIMIT 1
-  `
-  const cap = Number(rows[0]?.cap ?? 10)
-  if (!Number.isFinite(cap) || cap <= 0) return { over: false, cap: 0, spent: 0 }
-  const pct = rows[0]?.pct ?? 60
-  const sourceCap = cap * (pct / 100)
-  const spent = await sumTodayAnnotationCostForUser(userId, timezone)
-  return { over: spent >= sourceCap, cap: sourceCap, spent }
+async function getUserTimezone(userId: string): Promise<string> {
+  try {
+    const rows = await sql<{ tz: string | null }[]>`
+      SELECT COALESCE(timezone, 'UTC') AS tz FROM users WHERE id = ${userId} LIMIT 1
+    `
+    return rows[0]?.tz || 'UTC'
+  } catch {
+    return 'UTC'
+  }
+}
+
+/**
+ * Per-source budget gate. Treats `users.revanote_budget_pct` (default 60) as a
+ * percentage of the daily cap. When today's revanote-attributed cost already
+ * meets-or-exceeds that fraction, refuse new dispatches with
+ * `revanote_budget_exceeded:<detail>`. This is a `DispatchGate` so it runs in
+ * the shared pipeline gate chain AFTER threshold + cost-cap — layered ON TOP of
+ * the global cost cap (IR-1), never a substitute.
+ *
+ * Exported so the budget-gate unit test can exercise it directly.
+ */
+export function revanoteBudgetGate(userId: string, timezone: string): DispatchGate {
+  return {
+    name: 'revanote_budget',
+    async check(_req: DispatchRequest) {
+      const rows = await sql<{ cap: string; pct: number | null }[]>`
+        SELECT daily_cost_cap_usd::text AS cap, revanote_budget_pct AS pct
+          FROM users WHERE id = ${userId} LIMIT 1
+      `
+      const cap = Number(rows[0]?.cap ?? 10)
+      // No cap configured → no per-source budget either (fail-open, matches legacy).
+      if (!Number.isFinite(cap) || cap <= 0) return { ok: true }
+      const pct = rows[0]?.pct ?? 60
+      const sourceCap = cap * (pct / 100)
+      const spent = await sumTodayAnnotationCostForUser(userId, timezone)
+      if (spent >= sourceCap) {
+        return {
+          ok: false,
+          reason: `revanote_budget_exceeded:spent=${spent.toFixed(4)}>=cap=${sourceCap.toFixed(4)}`,
+        }
+      }
+      return { ok: true }
+    },
+  }
 }
 
 async function resolveSessionId(
@@ -70,16 +141,28 @@ async function resolveSessionId(
 }
 
 /**
- * Best-effort timezone read. Falls back to UTC on lookup failure.
+ * Helper: queue an immediate callback for a pre-dispatch rejection. Loaded
+ * lazily so test environments without the callback module loaded don't crash.
+ * ALWAYS carries the external `annotation_id` (revanote invariant).
  */
-async function getUserTimezone(userId: string): Promise<string> {
+async function enqueueRejectionCallback(
+  ann: AnnotationRow,
+  errorTag: string,
+  detail: string,
+): Promise<void> {
   try {
-    const rows = await sql<{ tz: string | null }[]>`
-      SELECT COALESCE(timezone, 'UTC') AS tz FROM users WHERE id = ${userId} LIMIT 1
-    `
-    return rows[0]?.tz || 'UTC'
-  } catch {
-    return 'UTC'
+    const { scheduleImmediateCallback } = await import('./callback.ts')
+    await scheduleImmediateCallback(ann, {
+      annotation_id: ann.annotation_id_external,
+      resolved: false,
+      action_taken: errorTag,
+      agent_reply: null,
+      files_changed: [],
+      deployed: false,
+      error: detail,
+    })
+  } catch (err: any) {
+    console.warn(`[revanote.dispatcher] enqueueRejectionCallback failed: ${err?.message ?? err}`)
   }
 }
 
@@ -105,40 +188,18 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
   const userId = ann.user_id
   const tz = await getUserTimezone(userId)
 
-  // Resolve mapping (host → repo_path + deploy strategy).
+  // Resolve mapping (host → repo_path + deploy strategy) + session up front so
+  // the pipeline has a concrete target. A missing session is NOT a pipeline gate
+  // (it is a target-resolution failure with its own reject-callback semantics),
+  // so we short-circuit it here before entering dispatch().
   const host = hostOf(ann.page_url)
   const mapping = await resolveRevanoteMappingForHost(userId, host)
-
-  // 1. Quota threshold gate.
-  const threshold = await checkUserThreshold(userId)
-  if (!threshold.allowed) {
-    const reason = `quota_threshold_reached:${threshold.reason}`
-    await updateAnnotationStatus(ann.id, 'failed', { skip_reason: reason })
-    broadcastRevanoteEvent(userId, {
-      type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason,
-    })
-    void enqueueRejectionCallback(ann, 'budget_threshold', reason)
-    return { status: 'skipped', skip_reason: reason }
-  }
-
-  // 2. Per-source revanote budget gate.
-  const budget = await isOverRevanoteBudget(userId, tz)
-  if (budget.over) {
-    const reason = `revanote_budget_exceeded:spent=${budget.spent.toFixed(4)}>=cap=${budget.cap.toFixed(4)}`
-    await updateAnnotationStatus(ann.id, 'failed', { skip_reason: reason })
-    broadcastRevanoteEvent(userId, {
-      type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason,
-    })
-    void enqueueRejectionCallback(ann, 'budget_threshold', reason)
-    return { status: 'skipped', skip_reason: reason }
-  }
-
-  // 3. Session resolution.
   const sessionId = ann.session_id || (await resolveSessionId(userId, mapping))
   if (!sessionId) {
     const reason = mapping ? 'session_not_found_for_repo' : 'no_mapping_for_host'
     await updateAnnotationStatus(ann.id, 'failed', {
-      skip_reason: reason, mapping_id: mapping?.id ?? null,
+      skip_reason: reason,
+      mapping_id: mapping?.id ?? null,
     })
     broadcastRevanoteEvent(userId, {
       type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason,
@@ -147,117 +208,147 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
     return { status: 'failed', skip_reason: reason }
   }
 
-  // 4. Channel online?
-  const channel = getChannel(sessionId)
-  if (!channel) {
-    const { register: graceRegister } = await import('./grace.ts')
-    graceRegister(sessionId, ann.id)
-    await updateAnnotationStatus(ann.id, 'pending', {
-      skip_reason: 'session_offline',
-      session_id: sessionId,
-      mapping_id: mapping?.id ?? null,
-    })
-    broadcastRevanoteEvent(userId, {
-      type: 'revanote_skipped', annotation_id: ann.id, skip_reason: 'session_offline',
-    })
-    return { status: 'skipped', skip_reason: 'session_offline' }
-  }
-
-  // 5. Per-session queue claim.
-  const claim = queue.enqueue(sessionId, ann.id)
-  if (claim === 'dropped') {
-    await updateAnnotationStatus(ann.id, 'failed', {
-      skip_reason: 'session_busy', session_id: sessionId, mapping_id: mapping?.id ?? null,
-    })
-    broadcastRevanoteEvent(userId, {
-      type: 'revanote_skipped', annotation_id: ann.id, skip_reason: 'session_busy',
-    })
-    void enqueueRejectionCallback(ann, 'session_busy', 'session_busy')
-    return { status: 'skipped', skip_reason: 'session_busy' }
-  }
-  if (claim === 'queued') {
-    // Stays pending — queue promotion will re-enter via the agent assistant_message hook.
-    return { status: 'queued' }
-  }
-
-  // 6. Insert run row + register lifecycle BEFORE sending so a fast reply is not lost.
-  const run = await insertAnnotationRun({
-    annotation_id: ann.id, user_id: userId, session_id: sessionId,
-  })
-  registerAnnotationRunForSession(sessionId, run.id, ann.id, userId, ann.callback_url)
-
-  // 7. Build prompt + persist as user message + forward to agent.
+  // Prompt + stored chat content. Built once; the RunStore's send persists the
+  // user message, broadcasts it, and forwards it on the agent socket.
   const promptBody = renderAnnotationPrompt({ annotation: ann, mapping })
-  const stored = `${storagePrefix(ann.comment)}\n\n${promptBody}`
-  let msg: { id: string; created_at: string } | null = null
-  try {
-    msg = await insertMessage(sessionId, 'user', stored)
-  } catch (err: any) {
-    await updateAnnotationStatus(ann.id, 'failed', {
-      skip_reason: `insert_message_failed: ${err?.message}`,
-    })
-    await updateAnnotationRun(run.id, {
-      status: 'failed', error: `insert_message: ${err?.message}`, finished_at: new Date(),
-    })
-    queue.markFinished(sessionId)
-    return { status: 'failed', skip_reason: 'insert_message_failed' }
+  const storedContent = `${storagePrefix(ann.comment)}\n\n${promptBody}`
+
+  const store: RunStore = {
+    // Insert the annotation_run row (in_flight) and RETURN its id — the pipeline
+    // threads this id into the finalize hook, so onFinalize / markFailed receive
+    // the real run id as their token arg. Fires exactly when the pipeline
+    // actually dispatches (after gates + queue claim + online check), never for
+    // a skipped / dropped / queued / parked annotation — matching the legacy
+    // "insert the run row when we send" rule.
+    async open(_req) {
+      const run = await insertAnnotationRun({
+        annotation_id: ann.id, user_id: userId, session_id: sessionId,
+      })
+      return run.id
+    },
+    // Gate / queue rejections. The pipeline passes the gate reason or
+    // 'session_busy'. We translate to the revanote skip vocabulary + reject
+    // callback (always carries annotation_id).
+    async markSkipped(_token, reason) {
+      // session_busy comes from the queue drop; everything else is a gate block
+      // (quota_threshold_reached / daily_cost_cap / revanote_budget_exceeded).
+      const isBusy = reason === 'session_busy'
+      await updateAnnotationStatus(ann.id, 'failed', {
+        skip_reason: reason,
+        session_id: sessionId,
+        mapping_id: mapping?.id ?? null,
+      })
+      broadcastRevanoteEvent(userId, {
+        type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason,
+      })
+      void enqueueRejectionCallback(ann, isBusy ? 'session_busy' : 'budget_threshold', reason)
+    },
+    // `runId` is the id returned by open(), threaded back by the pipeline. This
+    // is the exact legacy `run-lifecycle.onAgentReply` body: envelope parse →
+    // annotation status → merge gate → outbound callback enqueue.
+    async onFinalize(runId, replyContent) {
+      await finalizeAnnotationReply({
+        sessionId,
+        runId,
+        annotationId: ann.id,
+        userId,
+        startedAt: openStartedAt,
+        content: replyContent,
+      })
+    },
+    async markFailed(runId, errMsg) {
+      await updateAnnotationStatus(ann.id, 'failed', {
+        skip_reason: `agent_send_failed: ${errMsg}`,
+      })
+      await updateAnnotationRun(runId, {
+        status: 'failed', error: `agent_send: ${errMsg}`, finished_at: new Date(),
+      })
+    },
   }
 
-  // Broadcast so any open chat view shows the message immediately.
-  broadcastToSubscribers(sessionId, {
-    type: 'message', session_id: sessionId, message: msg,
-  })
-
-  try {
-    channel.ws.send(JSON.stringify({
-      type: 'user_message', id: msg.id, content: promptBody, ts: msg.created_at,
-    }))
-  } catch (err: any) {
-    await updateAnnotationStatus(ann.id, 'failed', {
-      skip_reason: `agent_send_failed: ${err?.message}`,
-    })
-    await updateAnnotationRun(run.id, {
-      status: 'failed', error: `agent_send: ${err?.message}`, finished_at: new Date(),
-    })
-    queue.markFinished(sessionId)
-    return { status: 'failed', skip_reason: 'agent_send_failed' }
+  // Captured when open() fires so onFinalize can compute duration_ms with legacy
+  // parity (it measured from run insert → reply).
+  let openStartedAt = Date.now()
+  const origOpen = store.open!
+  store.open = async (req) => {
+    openStartedAt = Date.now()
+    return origOpen(req)
   }
 
-  await updateAnnotationStatus(ann.id, 'dispatched', {
-    session_id: sessionId, mapping_id: mapping?.id ?? null, dispatched_at: new Date(),
-  })
-  broadcastRevanoteEvent(userId, {
-    type: 'revanote_dispatched',
-    annotation_id: ann.id,
-    run_id: run.id,
-    session_id: sessionId,
-    dispatched_at: new Date().toISOString(),
-  })
-  return { status: 'dispatched', run_id: run.id, session_id: sessionId }
-}
+  const deps: PipelineDeps = {
+    // IR-1: cost-cap non-bypassable. IR-2: threshold → cost-cap → revanote-budget.
+    gates: [thresholdGate, dailyCostCapGate, revanoteBudgetGate(userId, tz)],
+    store,
+    isOnline: (req) => getChannel(req.sessionId) != null,
+    // Offline replay: re-run the full dispatch for this pending annotation.
+    replay: async () => {
+      await dispatchPendingAnnotation(ann.id)
+    },
+    // Grace TTL lapse → legacy expire-mark (failed_offline/target_offline_expired).
+    onParkExpire: async () => {
+      await updateAnnotationStatus(ann.id, 'failed_offline', {
+        skip_reason: 'target_offline_expired',
+      })
+    },
+    // Ship the user_message: persist chat history, broadcast to subscribers,
+    // then forward on the socket.
+    send: async (req) => {
+      const channel = getChannel(req.sessionId)
+      if (!channel) throw new Error('session_offline')
+      const msg = await insertMessage(req.sessionId, 'user', storedContent)
+      broadcastToSubscribers(req.sessionId, {
+        type: 'message', session_id: req.sessionId, message: msg,
+      })
+      channel.ws.send(
+        JSON.stringify({ type: 'user_message', id: msg.id, content: req.prompt, ts: msg.created_at }),
+      )
+    },
+  }
 
-/**
- * Helper: queue an immediate callback for a pre-dispatch rejection. Loaded
- * lazily so test environments without the callback module loaded don't crash.
- */
-async function enqueueRejectionCallback(
-  ann: AnnotationRow,
-  errorTag: string,
-  detail: string,
-): Promise<void> {
-  try {
-    const { scheduleImmediateCallback } = await import('./callback.ts')
-    await scheduleImmediateCallback(ann, {
-      annotation_id: ann.annotation_id_external,
-      resolved: false,
-      action_taken: errorTag,
-      agent_reply: null,
-      files_changed: [],
-      deployed: false,
-      error: detail,
-    })
-  } catch (err: any) {
-    console.warn(`[revanote.dispatcher] enqueueRejectionCallback failed: ${err?.message ?? err}`)
+  const req: DispatchRequest = { userId, sessionId, token: ann.id, prompt: promptBody }
+  const outcome = await dispatch(req, deps)
+
+  switch (outcome.kind) {
+    case 'dispatched':
+      // Legacy parity: status='dispatched' + broadcast AFTER the send succeeds.
+      // outcome.runId is the id open() returned (the real annotation_run id).
+      await updateAnnotationStatus(ann.id, 'dispatched', {
+        session_id: sessionId, mapping_id: mapping?.id ?? null, dispatched_at: new Date(),
+      })
+      broadcastRevanoteEvent(userId, {
+        type: 'revanote_dispatched',
+        annotation_id: ann.id,
+        run_id: outcome.runId,
+        session_id: sessionId,
+        dispatched_at: new Date().toISOString(),
+      })
+      return { status: 'dispatched', run_id: outcome.runId, session_id: sessionId }
+    case 'queued':
+      // Stays pending; promotion re-dispatches via onSessionReply.
+      return { status: 'queued' }
+    case 'parked_offline':
+      // Legacy parity: an offline target was marked 'pending'(session_offline)
+      // and parked in grace. The pipeline parks for us (TTL lapse fires
+      // onParkExpire → failed_offline); we own the immediate skip-mark +
+      // broadcast here so the row reflects the offline state.
+      await updateAnnotationStatus(ann.id, 'pending', {
+        skip_reason: 'session_offline',
+        session_id: sessionId,
+        mapping_id: mapping?.id ?? null,
+      })
+      broadcastRevanoteEvent(userId, {
+        type: 'revanote_skipped', annotation_id: ann.id, skip_reason: 'session_offline',
+      })
+      return { status: 'skipped', skip_reason: 'session_offline' }
+    case 'dropped_busy':
+      // markSkipped(session_busy) already fired inside the pipeline.
+      return { status: 'skipped', skip_reason: 'session_busy' }
+    case 'skipped':
+      // markSkipped(reason) already fired inside the pipeline (gate block).
+      return { status: 'skipped', skip_reason: outcome.reason }
+    case 'failed':
+      // markFailed already fired inside the pipeline.
+      return { status: 'failed', skip_reason: 'agent_send_failed' }
   }
 }
 
