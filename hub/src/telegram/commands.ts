@@ -180,7 +180,9 @@ export async function prewarmAfterLink(opts: {
     return { kind: "skipped", reason: "no_sessions" };
   }
   try {
-    await setTelegramDefaultSession(opts.userId, candidate.id);
+    // Prewarm auto-pin → NON-explicit, so a later inbound can still prefer the
+    // orchestrator and an explicit /session pick always wins.
+    await setTelegramDefaultSession(opts.userId, candidate.id, false);
   } catch {
     /* swallow — link is still atomic */
   }

@@ -210,6 +210,29 @@ async function resolveOrchestratorTarget(userId: string): Promise<string | null>
   }
 }
 
+/**
+ * Map a `launchOrchestrator` failure reason to a user-facing reply. Keeps the
+ * "no online supervisor" copy ONLY for the supervisor-related reasons — a
+ * cost/concurrency cap (`at_capacity`) must not be mis-reported as a supervisor
+ * problem (H-1).
+ */
+function orchestratorLaunchFailureReply(reason: string | null): string {
+  switch (reason) {
+    case "at_capacity":
+      return "Can't start the orchestrator right now — daily limit reached or too many sessions running. Try again later.";
+    case "no_online_supervisor":
+      return "Could not start the orchestrator — no online supervisor. Open the Remo Code desktop app and try again.";
+    case "supervisor_has_no_roots":
+      return "Could not start the orchestrator — your supervisor has no repo roots configured. Add one in the desktop app settings.";
+    case "disabled":
+      return "The orchestrator is disabled. Enable it in Settings → Connections on remo-code.";
+    case "send_failed":
+      return "Could not reach your supervisor to start the orchestrator. Try again in a moment.";
+    default:
+      return "Could not start the orchestrator. Try again in a moment.";
+  }
+}
+
 /** Inbound text / attachment dispatch path (linked chat, non-command). */
 async function dispatchInbound(
   user: TelegramUserRow,
@@ -459,7 +482,8 @@ async function handleCallbackQuery(
           user.telegram_default_session_id = sid;
           user.telegram_default_explicit = true;
         } else if (chatId !== undefined) {
-          await safeSend(chatId, "Could not start the orchestrator (no online supervisor?). Try again once a supervisor is connected.");
+          // Reason-specific reply — don't blame the supervisor for a cost/concurrency cap.
+          await safeSend(chatId, orchestratorLaunchFailureReply(res.ok ? null : res.reason));
         }
       } catch (err: any) {
         console.warn("[telegram-webhook] orchestrator launch from picker failed:", err?.message);

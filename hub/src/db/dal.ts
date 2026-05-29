@@ -1692,10 +1692,13 @@ export async function getUsersWithTelegramDefaultSession(
 /**
  * Set (or clear) the Telegram default session.
  *
- * `explicit` records WHETHER the user deliberately chose this default:
- *   - `/session <id>` and tapping a `/list` button pass `explicit: true`.
+ * `explicit` records WHETHER the user deliberately chose this default — it is
+ * REQUIRED so every call site must consciously decide (a silent default is what
+ * let the web-UI dropdown path regress):
+ *   - `/session <id>`, a `/list` button tap, and the web Settings dropdown pass
+ *     `explicit: true`.
  *   - The inbound dispatcher's lazy-pin (orchestrator fallback) and the
- *     prewarm-on-link path pass `explicit: false` (the default omits to false).
+ *     prewarm-on-link path pass `explicit: false`.
  *
  * The flag lets orchestrator-as-default resolution prefer the root orchestrator
  * for a no-choice user while never surprise-switching a user away from a repo
@@ -1704,7 +1707,7 @@ export async function getUsersWithTelegramDefaultSession(
 export async function setTelegramDefaultSession(
   userId: string,
   sessionId: string | null,
-  explicit = false,
+  explicit: boolean,
 ): Promise<void> {
   await sql`
     UPDATE users

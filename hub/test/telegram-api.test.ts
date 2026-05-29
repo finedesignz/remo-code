@@ -27,7 +27,7 @@ const state: {
     telegram_default_session_id: string | null;
   };
   linkCodeGenerated: { code: string; expiresAt: Date } | null;
-  defaultSessionSet: { userId: string; sessionId: string | null } | null;
+  defaultSessionSet: { userId: string; sessionId: string | null; explicit?: boolean } | null;
   cleared: boolean;
   linkCodeCleared: boolean;
   botUsername: string;
@@ -53,8 +53,8 @@ mock.module("../src/db/dal.ts", () => ({
     }
     return null;
   },
-  setTelegramDefaultSession: async (userId: string, sid: string | null) => {
-    state.defaultSessionSet = { userId, sessionId: sid };
+  setTelegramDefaultSession: async (userId: string, sid: string | null, explicit: boolean) => {
+    state.defaultSessionSet = { userId, sessionId: sid, explicit };
     if (userId === USER_ID) state.user.telegram_default_session_id = sid;
   },
   clearTelegramChatId: async (userId: string) => {
@@ -264,7 +264,9 @@ describe("PUT /api/telegram/default-session", () => {
     expect(res.status).toBe(200);
     const body: any = await res.json();
     expect(body.session_id).toBe(SESSION_ID_OWNED);
-    expect(state.defaultSessionSet).toEqual({ userId: USER_ID, sessionId: SESSION_ID_OWNED });
+    // C-2: a web-UI default pick is a DELIBERATE choice → explicit=true so it is
+    // never auto-overridden to the orchestrator on the next inbound message.
+    expect(state.defaultSessionSet).toEqual({ userId: USER_ID, sessionId: SESSION_ID_OWNED, explicit: true });
   });
 
   test("404 on foreign session", async () => {
@@ -289,7 +291,8 @@ describe("PUT /api/telegram/default-session", () => {
     expect(res.status).toBe(200);
     const body: any = await res.json();
     expect(body.session_id).toBeNull();
-    expect(state.defaultSessionSet).toEqual({ userId: USER_ID, sessionId: null });
+    // Clearing is NOT a choice → explicit=false (lets a later inbound prefer the orchestrator).
+    expect(state.defaultSessionSet).toEqual({ userId: USER_ID, sessionId: null, explicit: false });
   });
 
   test("400 on invalid body", async () => {

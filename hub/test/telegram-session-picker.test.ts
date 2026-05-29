@@ -735,7 +735,30 @@ describe("orchestrator visibility in /list", () => {
     expect(res.status).toBe(200);
     expect(state.launchCalls).toBe(1);
     expect(state.setDefaults.length).toBe(0); // no pin
-    expect(state.sentMessages.some((m) => /could not start the orchestrator/i.test(m.text))).toBe(true);
+    expect(state.sentMessages.some((m) => /no online supervisor/i.test(m.text))).toBe(true);
+  });
+
+  test("H-1: at_capacity → cost/concurrency reply, NOT a supervisor message, no pin", async () => {
+    state.user = {
+      id: LINKED_USER_ID,
+      email: "linked@example.com",
+      telegram_chat_id: LINKED_CHAT,
+      telegram_default_session_id: null,
+    };
+    state.sessions = [];
+    state.orchEnabled = true;
+    state.launchResult = { ok: false, reason: "at_capacity", running: 5, cap: 5 };
+    const res = await post(
+      `/api/telegram/webhook/${TEST_SECRET}`,
+      mkCallback({ update_id: 26, chatId: LINKED_CHAT, data: "s:__orchestrator__" }),
+    );
+    expect(res.status).toBe(200);
+    expect(state.launchCalls).toBe(1);
+    expect(state.setDefaults.length).toBe(0); // no pin
+    const reply = state.sentMessages.find((m) => /daily limit reached|too many sessions/i.test(m.text));
+    expect(reply).toBeDefined();
+    // Must NOT blame the supervisor for a cap.
+    expect(state.sentMessages.some((m) => /no online supervisor/i.test(m.text))).toBe(false);
   });
 });
 

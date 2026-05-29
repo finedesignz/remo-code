@@ -82,14 +82,30 @@ The root **orchestrator** is the *preferred* Telegram target unless the user has
 `users.telegram_default_explicit`:
 
 - **`telegram_default_explicit = true`** — the user deliberately picked the
-  default, via `/session <id>` **or** by tapping a button in the `/list` inline
-  picker. An explicit choice is **always honored** and is **never** surprise-
-  switched to the orchestrator. (A user who picked their `remo-code` repo a few
-  versions ago stays on `remo-code` — honoring the choice they made.)
+  default, via `/session <id>`, by tapping a button in the `/list` inline
+  picker, **or** via the web Settings → Telegram default-session dropdown
+  (`PUT /api/telegram/default-session` with a non-null `session_id`). An explicit
+  choice is **always honored** and is **never** surprise-switched to the
+  orchestrator. (A user who picked their `remo-code` repo a few versions ago
+  stays on `remo-code` — honoring the choice they made.)
 - **`telegram_default_explicit = false`** — the default is either unset or was
   **auto-pinned** (the lazy-pin below, or the prewarm-on-link path). For these
   no-choice users the orchestrator wins, so a fresh link / repo-less user lands
   in the root orchestrator instead of dead-ending on "No default session."
+
+**Migration backfill (critical):** the `telegram_default_explicit` column is
+added with `DEFAULT false`, so a one-shot `UPDATE users SET
+telegram_default_explicit = true WHERE telegram_default_session_id IS NOT NULL`
+runs in the same migration. Any default that existed BEFORE the column is treated
+as explicit — we cannot distinguish an old prewarm-auto-pin from an old
+`/session` pick post-hoc, and the user's hard constraint ("my prior pick must
+never be auto-overridden") forces erring toward honoring it. Without this
+backfill every pre-existing default would read false and get silently re-pinned
+to the orchestrator on the next inbound message.
+
+`setTelegramDefaultSession(userId, sessionId, explicit)` takes `explicit` as a
+**required** parameter so every call site must consciously decide (a silent
+default is what previously let the web-dropdown path regress).
 
 Mechanics (`hub/src/api/telegram-webhook.ts` `dispatchInbound`):
 

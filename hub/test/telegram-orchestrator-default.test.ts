@@ -229,4 +229,20 @@ describe("Telegram default → orchestrator fallback", () => {
     expect(state.dispatchCalls[0].sessionId).toBe(ORCH_SESSION_ID);
     expect(state.setDefaults).toEqual([{ userId: LINKED_USER_ID, sessionId: ORCH_SESSION_ID, explicit: false }]);
   });
+
+  test("C-1 REGRESSION: pre-existing default (backfilled explicit) is NOT overridden to the orchestrator", async () => {
+    // The user picked `remo-code` via /session BEFORE telegram_default_explicit
+    // existed. The schema backfill (UPDATE ... SET explicit=true WHERE default
+    // IS NOT NULL) marks it explicit, so inbound MUST honor it — the exact
+    // override the user forbade. Without the backfill this row would read
+    // explicit=false and get silently re-pinned to the orchestrator.
+    state.liveSessionIds.add("sess_remocode");
+    state.user.telegram_default_session_id = "sess_remocode";
+    state.user.telegram_default_explicit = true; // post-backfill state
+    const res = await postUpdate("ship the telegram fix");
+    expect(res.status).toBe(200);
+    expect(state.dispatchCalls.length).toBe(1);
+    expect(state.dispatchCalls[0].sessionId).toBe("sess_remocode"); // NOT the orchestrator
+    expect(state.setDefaults.length).toBe(0); // never re-pinned
+  });
 });

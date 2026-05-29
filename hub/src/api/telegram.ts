@@ -122,6 +122,8 @@ telegram.put("/default-session", async (c) => {
       return c.json({ error: "session_not_found" }, 404);
     }
   }
-  await setTelegramDefaultSession(userId, sessionId);
+  // A web-UI default pick is a DELIBERATE choice → explicit. Clearing (null) is
+  // not a choice → not explicit, so a later inbound can prefer the orchestrator.
+  await setTelegramDefaultSession(userId, sessionId, sessionId !== null);
   return c.json({ session_id: sessionId });
 });
