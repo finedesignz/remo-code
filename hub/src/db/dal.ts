@@ -1663,7 +1663,8 @@ export async function clearTelegramChatId(userId: string): Promise<void> {
   await sql`
     UPDATE users
        SET telegram_chat_id = NULL,
-           telegram_default_session_id = NULL
+           telegram_default_session_id = NULL,
+           telegram_default_explicit = false
      WHERE id = ${userId}
   `;
 }

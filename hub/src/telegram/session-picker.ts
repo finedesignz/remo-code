@@ -263,12 +263,17 @@ export function renderPickerText(opts: {
     "Tap a button to set it as your default.",
   ];
   const legend: string[] = [];
-  legend.push("🟢 = launched");
+  // Only show the 🟢 legend entry when the visible page actually contains a
+  // launched (online/thinking) row — otherwise an all-offline page documents a
+  // marker that isn't present (IN-05).
+  const page = rows ? rows.slice(offset, offset + PAGE_SIZE) : null;
+  const isOnline = (s: PickerSessionRow): boolean => s.status === "online" || s.status === "thinking";
+  // When `rows` is omitted (legacy caller), keep the legacy unconditional legend.
+  if (!page || page.some(isOnline)) legend.push("🟢 = launched");
   if (defaultId) legend.push("✓ = current default");
   let anyOrchestrator = false;
   if (rows) {
-    const page = rows.slice(offset, offset + PAGE_SIZE);
-    if (page.some((s) => s.is_orchestrator)) {
+    if (page!.some((s) => s.is_orchestrator)) {
       legend.push("🧭 = orchestrator (root folder)");
       anyOrchestrator = true;
     }

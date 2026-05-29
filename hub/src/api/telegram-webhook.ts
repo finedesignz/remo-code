@@ -156,6 +156,9 @@ async function safeSend(chatId: number | string, text: string): Promise<void> {
  * variants for each photo; largest is the one we want.
  */
 function pickLargestPhoto(photos: z.infer<typeof PhotoSize>[]): z.infer<typeof PhotoSize> {
+  // Contract: callers gate on `msg.photo.length > 0` before calling. Assert it
+  // explicitly instead of hiding the precondition behind a non-null assertion.
+  if (photos.length === 0) throw new Error("pickLargestPhoto: empty photo list");
   let best = photos[0]!;
   let bestArea = best.width * best.height;
   for (const p of photos.slice(1)) {
@@ -276,12 +279,19 @@ async function dispatchInbound(
       targetSessionId = orch;
       // Lazy-pin as NON-explicit so a later explicit `/session` repo choice
       // still wins, and the user is never silently promoted off the orchestrator.
-      try {
-        await setTelegramDefaultSession(user.id, orch, false);
-        user.telegram_default_session_id = orch; // keep the in-memory row coherent
-        user.telegram_default_explicit = false;
-      } catch {
-        /* swallow — dispatch still proceeds against the resolved id */
+      // Skip the write when the pin is ALREADY orchestrator + non-explicit
+      // (IN-07) — otherwise every inbound message from an orchestrator user
+      // re-writes the same row.
+      const alreadyPinned =
+        user.telegram_default_session_id === orch && user.telegram_default_explicit !== true;
+      if (!alreadyPinned) {
+        try {
+          await setTelegramDefaultSession(user.id, orch, false);
+          user.telegram_default_session_id = orch; // keep the in-memory row coherent
+          user.telegram_default_explicit = false;
+        } catch {
+          /* swallow — dispatch still proceeds against the resolved id */
+        }
       }
     }
   }

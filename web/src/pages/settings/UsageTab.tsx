@@ -36,10 +36,6 @@ interface Props {
 }
 
 export function UsageTab({ token, profile, onUpdateProfile }: Props) {
-  useEffect(() => {
-    console.log("[tab:settings:usage] mounted");
-    return () => console.log("[tab:settings:usage] unmounted");
-  }, []);
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
 
