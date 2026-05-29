@@ -7,7 +7,6 @@ import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
 import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows } from '../db/supervisor-dal'
 import { ensureSupervisorProject } from '../db/error-capture-dal'
-import { findOrCreateRootlessSession } from '../db/dal'
 import { getCapacitySnapshot } from '../sessions/budget'
 import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
@@ -568,6 +567,60 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
   if (msg.type === 'pong') return
 }
 
+/**
+ * B6: seed the per-supervisor self-capture error_projects row and build the
+ * `supervisor.hello_ack` payload carrying its sentry creds.
+ *
+ * The rootless session is created via the 5-arg `findOrCreateRootlessSession`
+ * DAL — `(userId, hostname, cliKind, tokenHashIfCreating, nameIfCreating)`. The
+ * token hash is only consumed when the row is first inserted; reusing an
+ * existing rootless row ignores it. The hash is derived from a freshly minted
+ * `remo_` token via the same `hashToken` helper the Phase-05 rootless-advertise
+ * flow uses — never an invented/insecure constant.
+ *
+ * Guard: a NULL/undefined rootless session id would bind into the NOT-NULL
+ * `error_projects.session_id` INSERT and make postgres.js throw
+ * `UNDEFINED_VALUE` (the exact regression a prior 2-arg call introduced). When
+ * the id is missing we log + return `null` rather than poison the insert.
+ *
+ * Returns the hello_ack object on success, or `null` when the project can't be
+ * seeded (caller skips the ack — crash capture is strictly additive).
+ */
+export async function seedSupervisorSelfCaptureProject(
+  args: { userId: string; hostname: string; supervisorId: string },
+  // Deps are injectable so the arity-guard unit test can spy on the exact calls
+  // WITHOUT a process-global `mock.module` (which pollutes sibling test files —
+  // see hub/test mock-pollution hygiene). Defaults are the real DAL imports.
+  deps: {
+    findOrCreateRootlessSession?: typeof findOrCreateRootlessSession
+    ensureSupervisorProject?: typeof ensureSupervisorProject
+  } = {},
+): Promise<{ type: 'supervisor.hello_ack'; supervisor_id: string; sentry_key: string; sentry_project_id: string } | null> {
+  const { userId, hostname, supervisorId } = args
+  const findRootless = deps.findOrCreateRootlessSession ?? findOrCreateRootlessSession
+  const ensureProject = deps.ensureSupervisorProject ?? ensureSupervisorProject
+  const rawTok = generateToken('remo_')
+  const tokenHash = await hashToken(rawTok)
+  const rootless = await findRootless(
+    userId,
+    hostname,
+    'claude',
+    tokenHash,
+    `${hostname} (claude ambient)`,
+  )
+  if (!rootless?.id) {
+    console.warn(`[supervisor] skip ensureSupervisorProject host=${hostname} reason=rootless_session_id_missing`)
+    return null
+  }
+  const proj = await ensureProject(userId, hostname, rootless.id)
+  return {
+    type: 'supervisor.hello_ack',
+    supervisor_id: supervisorId,
+    sentry_key: proj.sentry_key,
+    sentry_project_id: proj.id,
+  }
+}
+
 async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: any) {
   const userId = ws.data.userId!
   const apiKeyId = ws.data.apiKeyId!
@@ -594,16 +647,10 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     // step fails the supervisor just doesn't get crash capture, which is
     // strictly additive and must never tear down the hello flow.
     try {
-      const rootless = await findOrCreateRootlessSession(userId, 'claude')
-      const proj = await ensureSupervisorProject(userId, msg.hostname, rootless.id)
-      try {
-        ws.send(JSON.stringify({
-          type: 'supervisor.hello_ack',
-          supervisor_id: row.id,
-          sentry_key: proj.sentry_key,
-          sentry_project_id: proj.id,
-        }))
-      } catch {}
+      const ack = await seedSupervisorSelfCaptureProject({ userId, hostname: msg.hostname, supervisorId: row.id })
+      if (ack) {
+        try { ws.send(JSON.stringify(ack)) } catch {}
+      }
     } catch (err: any) {
       console.warn(`[supervisor] ensureSupervisorProject failed host=${msg.hostname} err=${err?.message ?? err}`)
     }
