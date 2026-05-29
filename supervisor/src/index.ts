@@ -6,9 +6,7 @@ import { existsSync, mkdirSync, renameSync, statSync, createWriteStream, type Wr
 import { join } from 'path'
 import { homedir, hostname } from 'os'
 import { startStatusServer, type StatusServer } from './status-server'
-
-// Keep in sync with supervisor/tauri/src-tauri/tauri.conf.json version
-const VERSION = '0.5.8'
+import { VERSION } from './version'
 
 function logDir(): string {
   if (process.platform === 'win32') {

@@ -9,9 +9,7 @@ import { scanAllCommands } from './commands-scanner'
 import { getHandler, nativeSupervisorCommands } from './commands/index'
 import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
 import { log as obs } from './observability/logger'
-
-// Keep in sync with supervisor/tauri/src-tauri/tauri.conf.json version
-const VERSION = '0.5.8'
+import { VERSION } from './version'
 
 /** Bug A — push the live runner set to the hub every 10s after auth_ok. */
 const SESSION_INVENTORY_INTERVAL_MS = 10_000
