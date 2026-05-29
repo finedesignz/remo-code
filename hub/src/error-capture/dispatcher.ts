@@ -89,21 +89,19 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
   const content = buildErrorMessage(error, project)
   const storedContent = `[error: ${project.name} — ${error.error_type}]\n\n${content}`
 
-  // Per-dispatch run id, captured by the RunStore closure once open() inserts
-  // the error_run row. markDispatched / onFinalize / markFailed all key off it.
-  let runId: string | null = null
-
   const notifyCtx = { error_type: error.error_type, error_value: error.error_value }
 
   const store: RunStore = {
-    // Insert the run row + register it before send so a fast assistant_message
-    // reply can finalize it. Returns the errorId (the pipeline's finalize key);
-    // the runId is captured in the closure for the status updates below.
+    // Insert the run row (in_flight) and RETURN its id — the pipeline threads
+    // this id into the finalize hook, so onFinalize / markFailed receive the
+    // real run id as their token arg. Fires exactly when the pipeline actually
+    // dispatches (after gates + queue claim + online check), never for a
+    // skipped / dropped / queued / parked message — matching legacy "insert the
+    // run row when we send".
     async open(_req) {
       const run = await insertErrorRun(errorId, project.id, sessionId)
       await updateErrorRunStatus(run.id, { status: 'in_flight', started_at: new Date() })
-      runId = run.id
-      return errorId
+      return run.id
     },
     // Gate / queue rejections. The pipeline passes the gate reason or
     // 'session_busy'. We translate to the error_capture skip vocabulary.
@@ -123,8 +121,8 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
         skip_reason: reason,
       })
     },
-    async onFinalize(_token, replyContent) {
-      if (!runId) return
+    // `runId` is the id returned by open(), threaded back by the pipeline.
+    async onFinalize(runId, replyContent) {
       const snippet =
         replyContent.length > 500 ? replyContent.slice(replyContent.length - 500) : replyContent
       // cost_usd left null — the agent stream protocol carries no per-turn cost.
@@ -147,15 +145,13 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
         finished_at: new Date().toISOString(),
       })
     },
-    async markFailed(_token, errMsg) {
+    async markFailed(runId, errMsg) {
       await updateErrorDispatchStatus(errorId, 'failed', `agent_send: ${errMsg}`)
-      if (runId) {
-        await updateErrorRunStatus(runId, {
-          status: 'failed',
-          error: `agent_send: ${errMsg}`,
-          finished_at: new Date(),
-        })
-      }
+      await updateErrorRunStatus(runId, {
+        status: 'failed',
+        error: `agent_send: ${errMsg}`,
+        finished_at: new Date(),
+      })
       void notifyThrottled('dispatch_failed', `${project.id}:${sessionId}:send`, 900, project, {
         ...notifyCtx,
         detail: errMsg,
@@ -193,15 +189,16 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
   switch (outcome.kind) {
     case 'dispatched':
       // Legacy parity: status='dispatched' + broadcast AFTER the send succeeds.
+      // outcome.runId is the id open() returned (the real error_run id).
       await updateErrorDispatchStatus(errorId, 'dispatched')
       broadcastErrorEvent(userId, {
         type: 'error_dispatched',
         error_id: errorId,
         project_id: project.id,
-        run_id: runId,
+        run_id: outcome.runId,
         dispatched_at: new Date().toISOString(),
       })
-      return { status: 'dispatched', run_id: runId ?? errorId }
+      return { status: 'dispatched', run_id: outcome.runId }
     case 'queued':
       // Stays pending; promotion re-dispatches via onSessionReply.
       return { status: 'queued' }

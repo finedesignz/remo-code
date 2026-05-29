@@ -61,7 +61,7 @@ export interface RunStore {
 }
 
 export type DispatchOutcome =
-  | { kind: 'dispatched' }
+  | { kind: 'dispatched'; runId: string }
   | { kind: 'queued' }
   | { kind: 'dropped_busy' }
   | { kind: 'parked_offline' }
@@ -200,12 +200,23 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
     return { kind: 'parked_offline' }
   }
 
-  // 4. Send the user_message on the agent socket + register the finalize hook
+  // 4. Open the run row. Fires EXACTLY when we're truly dispatching — after
+  //    gates pass, after the queue head-slot claim, and after the offline park
+  //    check — never for a skipped / dropped / queued / parked message. A
+  //    QUEUED waiter opens its row only when promotion re-enters dispatch()
+  //    (onSessionReply → re-dispatch), so the row is inserted for the message we
+  //    actually send, matching the legacy "insert run row when we send" rule.
+  //    The store returns the run id (or null → fall back to req.token); this id
+  //    is the finalize key threaded through activeBySession so onSessionReply
+  //    calls store.onFinalize(<runId>, content) with the real id.
+  const openedId = (await deps.store?.open?.(req)) ?? req.token
+
+  // 5. Send the user_message on the agent socket + register the finalize hook
   //    BEFORE the reply can race back. IR-7: the hook only fires via
   //    onSessionReply (agent assistant_message branch).
-  activeBySession.set(req.sessionId, { token: req.token, req, deps, startedAt: Date.now() })
+  activeBySession.set(req.sessionId, { token: openedId, req, deps, startedAt: Date.now() })
   try {
-    if (deps.store?.markDispatched) await deps.store.markDispatched(req.token)
+    if (deps.store?.markDispatched) await deps.store.markDispatched(openedId)
     await deps.send(req)
   } catch (err: any) {
     activeBySession.delete(req.sessionId)
@@ -213,13 +224,13 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
     const msg = err?.message ?? String(err)
     if (deps.store) {
       try {
-        await deps.store.markFailed(req.token, msg)
+        await deps.store.markFailed(openedId, msg)
       } catch {}
     }
     return { kind: 'failed', reason: msg }
   }
 
-  return { kind: 'dispatched' }
+  return { kind: 'dispatched', runId: openedId }
 }
 
 /**
