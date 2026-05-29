@@ -75,21 +75,67 @@ The user then picks a **default session** from the dropdown. Inbound messages
 route to that session; outbound replies from that session route back to the
 chat.
 
-### Default target falls back to the orchestrator (orchestrator-autolaunch, 2026-05-28)
+### Orchestrator as the default target — explicit vs. auto (orchestrator-as-default, 2026-05-29)
 
-When `telegram_default_session_id` is unset, inbound dispatch falls back to the
-user's open **orchestrator** session (when the orchestrator is enabled and not
-explicitly disabled). So a freshly-linked chat talks to the root orchestrator by
-default instead of dead-ending on "No default session" — the original
-"telegram didn't work" failure. Mechanics (`hub/src/api/telegram-webhook.ts`
-`dispatchInbound`):
+The root **orchestrator** is the *preferred* Telegram target unless the user has
+**explicitly** chosen a different session. This is gated on a new boolean
+`users.telegram_default_explicit`:
 
-- **Resolution:** `targetSessionId = telegram_default_session_id || resolveOrchestratorTarget(userId)`. `resolveOrchestratorTarget` returns null when the orchestrator is off/explicitly-disabled or no session row exists yet.
-- **Lazy-pin:** on fallback the orchestrator id is written into `telegram_default_session_id` so the OUTBOUND bridge (which matches on the column) forwards the reply too. One reconciliation of "fallback for inbound" + "explicit column for outbound."
-- **Stale-pin self-heal:** if the explicit default points at a now-deleted session (verified via `getSession`), it's dropped and re-resolved to the orchestrator + re-pinned — no permanent `agent_offline` dead-end.
-- **Not-running:** if the orchestrator session exists but its runner isn't live, dispatch returns `agent_offline` → the existing `/doctor` autoheal launches it (`launchSessionForUser` is orchestrator-aware: for `is_orchestrator` rows it delegates to `launchOrchestrator`, which mints the key + system prompt — NOT a plain `session.start`) and replays the buffered message.
-- **Prewarm:** `prewarmAfterLink` no longer pins a project session when the orchestrator is enabled — it leaves the default unset so the orchestrator fallback wins ("the first agent you talk to is the root orchestrator").
-- **Disabled:** orchestrator off + no explicit default → the original "No default session" reply.
+- **`telegram_default_explicit = true`** — the user deliberately picked the
+  default, via `/session <id>`, by tapping a button in the `/list` inline
+  picker, **or** via the web Settings → Telegram default-session dropdown
+  (`PUT /api/telegram/default-session` with a non-null `session_id`). An explicit
+  choice is **always honored** and is **never** surprise-switched to the
+  orchestrator. (A user who picked their `remo-code` repo a few versions ago
+  stays on `remo-code` — honoring the choice they made.)
+- **`telegram_default_explicit = false`** — the default is either unset or was
+  **auto-pinned** (the lazy-pin below, or the prewarm-on-link path). For these
+  no-choice users the orchestrator wins, so a fresh link / repo-less user lands
+  in the root orchestrator instead of dead-ending on "No default session."
+
+**Migration backfill (critical, ONE-SHOT — NOT in schema.sql):** the
+`telegram_default_explicit` column is added with `DEFAULT false`. The backfill of
+PRE-EXISTING prod pins (`UPDATE users SET telegram_default_explicit = true WHERE
+telegram_default_session_id IS NOT NULL`) lives in
+`hub/scripts/migrate-telegram-default-explicit.ts` and is run **manually exactly
+once** after the deploy that ships the column. It deliberately does NOT live in
+`schema.sql`, because `schema.sql` is re-applied on every hub boot
+(`hub/src/db/migrate.ts::runMigrations`) — a re-running `SET explicit=true WHERE
+default IS NOT NULL` would clobber legitimate POST-launch auto-pins (lazy-pin /
+prewarm write explicit=false on purpose) on every redeploy, permanently killing
+orchestrator-as-default for those users. Any default that existed BEFORE the
+column is treated as explicit — we cannot distinguish an old prewarm-auto-pin
+from an old `/session` pick post-hoc, and the user's hard constraint ("my prior
+pick must never be auto-overridden") forces erring toward honoring it. A fresh DB
+needs no backfill (no pre-existing pins).
+
+`setTelegramDefaultSession(userId, sessionId, explicit)` takes `explicit` as a
+**required** parameter so every call site must consciously decide (a silent
+default is what previously let the web-dropdown path regress).
+
+Mechanics (`hub/src/api/telegram-webhook.ts` `dispatchInbound`):
+
+- **Resolution:** an explicit, live default is used as-is. Otherwise (no default,
+  or non-explicit) `resolveOrchestratorTarget(userId)` is preferred; it returns
+  null when the orchestrator is off/explicitly-disabled or no session row exists
+  yet, in which case the existing default (if any) is kept.
+- **Lazy-pin:** on a fallback to the orchestrator its id is written into
+  `telegram_default_session_id` with **`explicit = false`**, so the OUTBOUND
+  bridge (which matches on the column) forwards the reply WITHOUT promoting the
+  pin to an explicit choice. A later explicit `/session` repo pick still wins.
+- **Stale-pin self-heal:** if the default points at a now-deleted session
+  (verified via `getSession`), it's dropped (flag cleared) and re-resolved to the
+  orchestrator — no permanent `agent_offline` dead-end.
+- **Not-running:** if the orchestrator session exists but its runner isn't live,
+  dispatch returns `agent_offline` → the existing `/doctor` autoheal launches it
+  (`launchSessionForUser` is orchestrator-aware: `is_orchestrator` rows delegate
+  to `launchOrchestrator`, which mints the key + system prompt) and replays the
+  buffered message. Tapping the **synthetic** orchestrator row in `/list` (when
+  no orchestrator session exists yet) calls `launchOrchestrator` directly.
+- **Prewarm:** `prewarmAfterLink` leaves the default unset when the orchestrator
+  is enabled (so the orchestrator preference wins). When it does pin a project
+  session (orchestrator disabled), it pins **non-explicit**.
+- **Disabled:** orchestrator off + no explicit default → "No default session."
 
 See the "Orchestrator Session" section in `CLAUDE.md` for the auto-launch + key-mint security model.
 
@@ -101,8 +147,8 @@ All commands work after the user has linked. Unlinked chats can ONLY send
 | Command | Behavior |
 |---|---|
 | `/start <code>` | Bind the current Telegram chat to the remo-code user that minted `<code>`. One active code per user, 10-min TTL, single-use. **Pre-warm:** on first link, the hub picks the user's most-recently-used session (online-first, then `last_activity DESC`), sets it as the Telegram default, and fires `session.start` so the runner is live by the first chat message. Reply: `✅ Linked to <email>. Pre-launching '<repo-name>' so your next message lands instantly…` When the user has zero sessions: `✅ Linked to <email>. Send /list to pick a session.` On miss/expired: `Link code invalid or expired. Generate a fresh one from Settings → Telegram.` Failures of the pre-warm are best-effort — the link itself is committed atomically and `/doctor` repairs anything broken on the first real message. |
-| `/session <id-or-name>` | Override the default session for subsequent messages. Matches against session id-prefix or `project_dir` basename. Ambiguous match → reply lists candidates. No arg → reply shows the current default plus a numbered list. |
-| `/list` | Inline-keyboard session picker. Each button = one session (label = repo name from `project_dir`'s last path segment, truncated to 28 chars). Tap a button to set it as your default — Telegram fires a `callback_query` that the hub validates, persists, and confirms with a toast + a leading ✓ on the chosen button. Paginated 20-per-page (2 buttons per row, 10 rows + a `« Prev` / `Next »` nav row). Currently-default session shown with a leading ✓ before any taps. See "Inline-keyboard session picker" below for `callback_data` encoding + authorization rules. |
+| `/session <id-or-name>` | Override the default session for subsequent messages — sets it as an EXPLICIT choice (`telegram_default_explicit=true`) that sticks until switched and is never auto-overridden by the orchestrator. Matches against session id-prefix or `project_dir` basename. Ambiguous match → reply lists candidates. No arg → reply shows the current default plus a numbered list. |
+| `/list` | Inline-keyboard session picker. **The 🧭 Orchestrator (root folder) is pinned as the FIRST button** so the user can always tap-to-coordinate across repos — even when offline / repo-less, and even with zero other sessions (a synthetic row is offered). Each other button = one session (label = repo name from `project_dir`'s last path segment, truncated to 28 chars). Tap a button to set it as your EXPLICIT default — Telegram fires a `callback_query` that the hub validates, persists, and confirms with a toast + a leading ✓ on the chosen button. Paginated 20-per-page (2 buttons per row, 10 rows + a `« Prev` / `Next »` nav row); `Next`/`Prev` edit the message in-place and fall back to a fresh send if the edit fails. Currently-default session shown with a leading ✓ before any taps. See "Inline-keyboard session picker" below. |
 | `/doctor` | Diagnose and auto-fix "supervisor offline" / "session offline" failures. Walks 6 progressive checks (account link → default session → session row → supervisor connected → live runner channel → auto-launch), replying after each step. When the session row is bound but no Claude runner is alive, the doctor calls `launchSessionForUser` to emit `session.start` to the supervisor — going through `reserveSessionSlot` so the cost cap / concurrency gate is NEVER bypassed. A 20s deferred check polls the channel registry. **Autoheal opener:** when a plain user message returns `agent_offline`, the webhook suppresses the legacy "Your supervisor is offline" reply and lets `/doctor` open with `🩺 Hold on — diagnosing & launching automatically…`. **Auto-replay buffer:** the original message (text + images) is stashed in-memory per chat (60s TTL, most-recent-wins). When the deferred check sees the channel come online, the buffered message is replayed through `dispatchToSession` with a negated `update_id` (audit `(chat_id, update_id)` UNIQUE can't collide). Cost cap is still enforced on the replay. Reply: `✅ Launch complete — sent your message ('<first 40 chars>'). Reply coming up.` On timeout the buffer is dropped: `⚠ Launch is taking longer than expected. Try again in a moment.` A second user message while the buffer is pending overwrites it and replies `Queued — I'll send this one after the launch completes.` See `hub/src/telegram/doctor.ts` + `hub/src/telegram/launch.ts`. |
 | `/status` | Compact one-message report: linked email, default session label + short id, supervisor liveness, session channel state, and today's cost vs the user's daily cap. Reuses `sumTodayCostForUser` and `isSupervisorOnline` — no new DB columns, no duplicated cost math. User-scoped throughout. See `hub/src/telegram/status.ts`. |
 | `/help` | Static command reference. |
@@ -121,28 +167,32 @@ Unknown command from a linked chat → `Unknown command. /help for list.`
 
 | Prefix | Payload | Action |
 |---|---|---|
-| `s:<session_id>` | UUID of the session | Set default session for this Telegram user. |
+| `s:<session_id>` | UUID of the session | Set default session for this Telegram user **as an EXPLICIT choice** (`telegram_default_explicit=true`). Sticks until the user switches; never auto-overridden by the orchestrator preference. |
+| `s:__orchestrator__` | Sentinel (not a real id) | The synthetic root-orchestrator row (shown when no orchestrator session exists yet). Calls `launchOrchestrator` directly, then pins the launched session id **explicitly**. On no online supervisor → friendly reply, no pin. |
 | `p:<offset>` | Non-negative integer | Paginate the session list to a new offset. Snapped to the nearest 20-multiple via `snapOffsetToPage` so stale keyboards from a prior page-size are still safe. |
 
-**Authorization on every callback** — `s:<session_id>` is gated on `getSession(sessionId, userId)`. A user can't spoof another user's session by guessing the UUID; the denial path replies `Not allowed` with `show_alert: true`. Unlinked callbacks are silently dropped (matches the unlinked-text-message path).
+**Authorization on every callback** — `s:<session_id>` is gated on `getSession(sessionId, userId)`. A user can't spoof another user's session by guessing the UUID; the denial path replies `Not allowed` with `show_alert: true`. Unlinked callbacks are silently dropped (matches the unlinked-text-message path). The `s:__orchestrator__` sentinel bypasses `getSession` (no real row) and is gated by `launchOrchestrator`'s own `orchestrator_enabled` check.
 
-**Audit + dedupe** — every callback gets a `telegram_inbound_log` row keyed by `(chat_id, update_id)` exactly like inbound messages. Duplicate Telegram retries short-circuit to `{ deduped: true }`. Outcomes: `callback_session_set`, `callback_session_denied`, `callback_paginate`, `callback_unknown`, `callback_silent_drop_unlinked`.
+**Audit + dedupe** — every callback gets a `telegram_inbound_log` row keyed by `(chat_id, update_id)` exactly like inbound messages. Duplicate Telegram retries short-circuit to `{ deduped: true }`. Outcomes: `callback_session_set`, `callback_orchestrator_launched`, `callback_session_denied`, `callback_paginate`, `callback_unknown`, `callback_silent_drop_unlinked`.
 
-**Cost cap is NOT involved.** Picker callbacks are state changes on the `users` row, not session dispatches — the `enforceCostCap` gate only fires when a user actually messages a session.
+**Pagination resilience** — `safeEditMessageText` first tries `editMessageText` (edits the message in-place). Telegram's `"message is not modified"` 400 is a benign no-op. **Any OTHER failure** (parse/encoding edge case, transient 400, message-too-old-to-edit) is logged AND **falls back to a fresh `sendMessage`/`sendMessageWithKeyboard`** so the page still renders — the picker never silently "freezes" on a tapped `Next`/`Prev`. `answerCallbackQuery` always fires so the button never spins.
 
-`/session <id>` still works for power users who want to type an id-prefix. The no-arg form now nudges users toward `/list`.
+**Cost cap is NOT involved** for set-default/paginate callbacks — they're state changes on the `users` row. The `s:__orchestrator__` launch flows through `launchOrchestrator` → `reserveSessionSlot` (the cost-cap / concurrency gate is NOT bypassed).
+
+`/session <id>` still works for power users who want to type an id-prefix; it ALSO sets the default explicitly. The no-arg form now nudges users toward `/list`.
 
 ### Picker parity with web Sidebar
 
 `listUserSessionsForPicker` mirrors the filtering in `web/src/components/Sidebar.tsx` (lines 157–178, 437–446) so the Telegram inline keyboard shows the same rows the user sees in the browser:
 
-1. **Drop offline + null `repo_key`** — legacy local sessions with no actionable surface are hidden.
+1. **Drop offline + null `repo_key`** — legacy local sessions with no actionable surface are hidden. **EXCEPTION: the orchestrator** (`is_orchestrator=true`) is exempt — it is a repo-less, frequently-offline root session and MUST always be visible + selectable (mirrors the web Sidebar's position-0 pin, which never hides it).
 2. **Collapse worktrees by `(github_owner, github_repo)`** — multiple worktree directories of the same GitHub repo (`<repo>`, `<repo>-feat-X`, `<repo>-fix-Y`) collapse to the canonical clone (project_dir basename matches `github_repo` case-/separator-insensitively). Ties or "no canonical present" → most-recently-active wins.
 3. **Dedupe by `repo_key`** — duplicate `repo_key` rows keep the most-recently-active row. Rows with null `repo_key` pass through keyed by id.
-4. **Pin orchestrator** — the row with `is_orchestrator=true` floats to position 0 of the page list. Its button gets a leading `⭐`.
-5. **Orchestrator hint** — when the user has zero `is_orchestrator` rows, the picker text appends `💡 Pin a root orchestrator from Settings → Connections for cross-repo coordination.`
+4. **Pin orchestrator** — the row with `is_orchestrator=true` floats to position 0 of the page list. Its button is labeled `🧭 Orchestrator (root)`, and the legend reads `🧭 = orchestrator (root folder)`.
+5. **Synthetic orchestrator row** — when no orchestrator `sessions` row exists yet but the feature is enabled (`orchestrator_enabled && !disabled_explicitly`), `listUserSessionsForPicker` PREPENDS a synthetic row with id `__orchestrator__` so even a zero-session / repo-less user can tap-to-start their root folder. Tapping it triggers `launchOrchestrator` (see the `s:__orchestrator__` callback above).
+6. **Orchestrator hint** — when the user has zero `is_orchestrator` rows AND the feature is disabled, the picker text appends `💡 Pin a root orchestrator from Settings → Connections for cross-repo coordination.`
 
-The filter is implemented in `applySidebarParityFilter` (pure, unit-testable) and applied by `listUserSessionsForPicker`. The picker never auto-creates an orchestrator from Telegram — that flow lives in the web UI.
+The filter is implemented in `applySidebarParityFilter` (pure, unit-testable); the orchestrator-visibility injection lives in `listUserSessionsForPicker`.
 
 ### Pagination edits
 
@@ -261,7 +311,7 @@ has soaked. Until then, both code paths coexist.
 ### Modified (hub)
 
 - `hub/src/config.ts` — `config.telegram.{botToken,webhookSecret,botUsername}` (all optional).
-- `hub/src/db/schema.sql` — additive: `users.telegram_chat_id` (BIGINT UNIQUE), `telegram_default_session_id`, `telegram_link_code`, `telegram_link_code_expires_at`; new `telegram_inbound_log` table with `(user_id, received_at DESC)` index.
+- `hub/src/db/schema.sql` — additive: `users.telegram_chat_id` (BIGINT UNIQUE), `telegram_default_session_id`, `telegram_default_explicit` (BOOLEAN NOT NULL DEFAULT false — distinguishes an explicit `/session`/tap choice from an auto-pin), `telegram_link_code`, `telegram_link_code_expires_at`; new `telegram_inbound_log` table with `(user_id, received_at DESC)` index.
 - `hub/src/db/dal.ts` — Telegram DAL helpers (folded into the existing dal module, not a separate `telegram-dal.ts` as the plan envisioned — deviation noted in SUMMARY): `getUserByTelegramChatId`, `getUserByLinkCode`, `setLinkCode`, `linkChatId`, `unlinkChatId`, `setDefaultSession`, `getTelegramStatus`, `appendInboundLog`, `trimInboundLog`, `getUsersWithTelegramDefaultSession`.
 - `hub/src/csrf.ts` — Telegram REST routes covered by the existing double-submit middleware (no new exclusions).
 - `hub/src/index.ts` — mount `telegram-webhook.ts` AHEAD of JWT + license + CSRF catch-alls; mount `telegram.ts` inside; start the outbound bridge at boot.

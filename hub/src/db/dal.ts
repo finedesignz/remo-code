@@ -1631,11 +1631,17 @@ export type TelegramUserRow = {
   email: string;
   telegram_chat_id: string | number | null;
   telegram_default_session_id: string | null;
+  // True only when the user explicitly chose the default (/session or a /list
+  // button tap). Auto-pins leave it false. Drives orchestrator-as-default
+  // resolution: a non-explicit (or null) default never blocks the orchestrator
+  // preference, an explicit one is always honored.
+  telegram_default_explicit: boolean;
 };
 
 export async function getUserByTelegramChatId(chatId: number | bigint | string): Promise<TelegramUserRow | null> {
   const rows = await sql<TelegramUserRow[]>`
-    SELECT id, email, telegram_chat_id, telegram_default_session_id
+    SELECT id, email, telegram_chat_id, telegram_default_session_id,
+           COALESCE(telegram_default_explicit, false) AS telegram_default_explicit
       FROM users
      WHERE telegram_chat_id = ${chatId as any}
      LIMIT 1
@@ -1683,10 +1689,30 @@ export async function getUsersWithTelegramDefaultSession(
   return rows;
 }
 
-export async function setTelegramDefaultSession(userId: string, sessionId: string | null): Promise<void> {
+/**
+ * Set (or clear) the Telegram default session.
+ *
+ * `explicit` records WHETHER the user deliberately chose this default — it is
+ * REQUIRED so every call site must consciously decide (a silent default is what
+ * let the web-UI dropdown path regress):
+ *   - `/session <id>`, a `/list` button tap, and the web Settings dropdown pass
+ *     `explicit: true`.
+ *   - The inbound dispatcher's lazy-pin (orchestrator fallback) and the
+ *     prewarm-on-link path pass `explicit: false`.
+ *
+ * The flag lets orchestrator-as-default resolution prefer the root orchestrator
+ * for a no-choice user while never surprise-switching a user away from a repo
+ * they explicitly picked.
+ */
+export async function setTelegramDefaultSession(
+  userId: string,
+  sessionId: string | null,
+  explicit: boolean,
+): Promise<void> {
   await sql`
     UPDATE users
-       SET telegram_default_session_id = ${sessionId}
+       SET telegram_default_session_id = ${sessionId},
+           telegram_default_explicit = ${explicit}
      WHERE id = ${userId}
   `;
 }

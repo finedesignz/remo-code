@@ -843,6 +843,20 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_runs_in_flight
 -- SET NULL on session delete so outbound silently stops rather than orphaning.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_chat_id              BIGINT UNIQUE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_default_session_id   TEXT REFERENCES sessions(id) ON DELETE SET NULL;
+-- True ONLY when the user explicitly picked the default via `/session <id>` or
+-- by tapping a button in the `/list` inline picker. Auto-pins (lazy-pin in the
+-- inbound dispatcher, prewarm-on-link) leave it false so orchestrator-as-default
+-- resolution can still prefer the root orchestrator for a no-choice user, while
+-- an EXPLICIT repo choice is always honored and never surprise-switched.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_default_explicit     BOOLEAN NOT NULL DEFAULT false;
+-- NOTE: there is intentionally NO backfill UPDATE here. schema.sql is re-applied
+-- on EVERY hub boot (hub/src/db/migrate.ts runMigrations), so a
+-- `SET explicit=true WHERE default IS NOT NULL` would re-run on every redeploy and
+-- clobber legitimate post-launch auto-pins (lazy-pin / prewarm write explicit=false
+-- on purpose so the orchestrator can still win for a no-choice user). The one-time
+-- backfill of PRE-EXISTING prod pins lives in
+-- hub/scripts/migrate-telegram-default-explicit.ts and is run manually exactly once.
+-- A fresh DB needs no backfill (no pre-existing pins) — DEFAULT false is correct.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code            TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_link_code_expires_at TIMESTAMPTZ;
 

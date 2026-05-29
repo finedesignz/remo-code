@@ -68,7 +68,7 @@ export function parseCommand(text: string | undefined | null): ParsedCommand {
 export const HELP_TEXT = [
   "Remo Code Telegram bridge — commands:",
   "",
-  "/list — tap-to-pick session list (inline buttons)",
+  "/list — tap-to-pick session list (inline buttons). 🧭 Orchestrator (root folder) is pinned at the top — tap it to coordinate across all repos.",
   "/session <id> — set default by typed id-prefix (power users; /list is easier)",
   "/status — link, default session, supervisor, channel, daily cost",
   "/doctor — diagnose and auto-fix supervisor/session offline issues",
@@ -180,7 +180,9 @@ export async function prewarmAfterLink(opts: {
     return { kind: "skipped", reason: "no_sessions" };
   }
   try {
-    await setTelegramDefaultSession(opts.userId, candidate.id);
+    // Prewarm auto-pin → NON-explicit, so a later inbound can still prefer the
+    // orchestrator and an explicit /session pick always wins.
+    await setTelegramDefaultSession(opts.userId, candidate.id, false);
   } catch {
     /* swallow — link is still atomic */
   }
@@ -216,9 +218,27 @@ async function listUserSessions(userId: string): Promise<TgSessionRow[]> {
 }
 
 /**
+ * Sentinel session id for the synthetic orchestrator row. Used ONLY when the
+ * orchestrator is enabled but no orchestrator `sessions` row exists yet (e.g.
+ * a brand-new user, supervisor never connected). Tapping `s:__orchestrator__`
+ * triggers a launch (which creates the real row) instead of a set-default.
+ */
+export const ORCHESTRATOR_SENTINEL_ID = "__orchestrator__";
+
+/**
  * Full session list for the inline-keyboard picker (no LIMIT 25 trim — the
  * picker paginates client-side via callback_data). Capped at 200 to keep the
  * single response bounded.
+ *
+ * Orchestrator visibility (orchestrator-as-default, 2026-05-29): the root
+ * orchestrator is ALWAYS surfaced at the top so the user can tap-to-select it,
+ * mirroring the web Sidebar position-0 pin:
+ *   - A real (possibly offline / repo-less) orchestrator row is kept by
+ *     `applySidebarParityFilter` (which exempts is_orchestrator from the
+ *     offline+no-repo drop) and pinned to position 0.
+ *   - When the orchestrator is enabled but NO orchestrator row exists yet, a
+ *     synthetic placeholder row (id=ORCHESTRATOR_SENTINEL_ID) is prepended so
+ *     even a repo-less / zero-session user can start in their root folder.
  */
 export async function listUserSessionsForPicker(userId: string): Promise<PickerSessionRow[]> {
   const rows = await sql<{
@@ -250,7 +270,34 @@ export async function listUserSessionsForPicker(userId: string): Promise<PickerS
     github_repo: r.github_repo,
     last_activity_ms: r.last_activity ? new Date(r.last_activity as any).getTime() : null,
   }));
-  return applySidebarParityFilter(mapped);
+  const filtered = applySidebarParityFilter(mapped);
+
+  // If a real orchestrator row already survived the filter, we're done.
+  if (filtered.some((s) => s.is_orchestrator)) return filtered;
+
+  // No orchestrator row present — inject a synthetic placeholder when the
+  // feature is enabled so the user can always reach their root folder.
+  try {
+    const { getOrchestratorState } = await import("../db/orchestrator-dal.ts");
+    const prefs = await getOrchestratorState(userId);
+    if (prefs.orchestrator_enabled && !prefs.orchestrator_disabled_explicitly) {
+      const synthetic: PickerSessionRow = {
+        id: ORCHESTRATOR_SENTINEL_ID,
+        name: prefs.orchestrator_name || "Orchestrator",
+        project_dir: null,
+        status: "offline",
+        repo_key: null,
+        is_orchestrator: true,
+        github_owner: null,
+        github_repo: null,
+        last_activity_ms: null,
+      };
+      return [synthetic, ...filtered];
+    }
+  } catch {
+    /* swallow — fall back to the unmodified list */
+  }
+  return filtered;
 }
 
 /**
@@ -347,6 +394,8 @@ export async function handleSession(opts: {
     return { reply: lines.join("\n") };
   }
   const pick = matches[0]!;
-  await setTelegramDefaultSession(opts.user.id, pick.id);
+  // Explicit user choice — sticks until they switch, and is never overridden by
+  // orchestrator-as-default resolution.
+  await setTelegramDefaultSession(opts.user.id, pick.id, true);
   return { reply: `Default session set to ${pick.id.slice(0, 8)} (${pick.name || pick.project_dir || "unnamed"}).` };
 }
