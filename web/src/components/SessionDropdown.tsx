@@ -26,7 +26,12 @@ export function shortId(s: CodeSession): string {
 
 /** Filter to only connected (online/thinking) sessions */
 export function connectedSessions(sessions: CodeSession[]): CodeSession[] {
-  return sessions.filter(s => s.status === 'online' || s.status === 'thinking')
+  // Belt-and-suspenders: never assume the arg is an array. A non-array reaches
+  // here only if a caller's source state was set from a non-array API body
+  // (see useSessions); guarding here keeps the whole render path crash-proof.
+  return (Array.isArray(sessions) ? sessions : []).filter(
+    s => s.status === 'online' || s.status === 'thinking',
+  )
 }
 
 export function SessionDropdown({ sessions, activeSessionId, onSelectSession, unreadCounts = {} }: Props) {

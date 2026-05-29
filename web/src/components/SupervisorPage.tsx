@@ -197,7 +197,10 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const { sessions } = useSessions(token, subscribe, connectionId)
   const lastActivityByPath = useMemo(() => {
     const m = new Map<string, number>()
-    for (const s of sessions) {
+    // Guard: `sessions` is set from a fetch body in useSessions; a non-array
+    // 200 body would make `for…of` throw `sessions is not iterable` and crash
+    // the settings:connections ErrorBoundary. Coerce defensively.
+    for (const s of (Array.isArray(sessions) ? sessions : [])) {
       if (!s.project_dir || !s.last_activity) continue
       m.set(s.project_dir, Date.parse(s.last_activity))
     }

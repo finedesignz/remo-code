@@ -65,7 +65,12 @@ export function useSessions(
     if (!token) return
     try {
       const data = await hubFetch<CodeSession[]>(token, '/api/sessions')
-      setSessions(data)
+      // Defensive: the hub can return a non-array 200 body under odd
+      // auth/license/bypass states (e.g. a `{sessions:[]}` wrapper or an
+      // error-shaped 200). A non-array here propagates into `sessions.filter`
+      // / `for…of sessions` in consumers (Sidebar, SessionDropdown,
+      // SupervisorPage) and crashes the per-tab ErrorBoundary. Coerce to [].
+      setSessions(Array.isArray(data) ? data : [])
     } catch { /* swallow */ }
     setLoading(false)
   }, [token])
