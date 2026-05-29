@@ -1,0 +1,301 @@
+// hub/src/orchestrator/auto-launch.ts
+//
+// orchestrator-autolaunch (2026-05-28)
+//
+// One shared `launchOrchestrator` primitive, used by THREE call paths:
+//   1. machine-triggered auto-launch on `supervisor.hello` (this file's
+//      `maybeAutoLaunchOrchestrator`),
+//   2. the interactive REST `POST /api/orchestrator/start`,
+//   3. Telegram autoheal when the default target IS the orchestrator session.
+//
+// All three converge here so the cost-cap / concurrency gate (`reserveSessionSlot`)
+// and the `session_runs` ledger (orphan-resume eligibility) apply uniformly.
+// The pre-existing REST `/start` bypassed both — this fixes that gap.
+//
+// Security (PLAN §4.3): the machine path mints the full-power orchestrator key
+// WITHOUT step-up, gated ONLY on the persisted `orchestrator_enabled &&
+// !orchestrator_disabled_explicitly` flag. A valid supervisor `api_keys`
+// connection already spawns arbitrary FS-access Claude processes, so the
+// orchestrator key grants no escalation; the one thing step-up protects —
+// turning the feature ON — stays behind the interactive cookie+step-up `PUT`.
+//
+// Idempotency (PLAN §4.1 / Invariant I1): exactly one open orchestrator session
+// per user, enforced by `idx_sessions_orchestrator_unique`. Concurrent
+// supervisor.hello connects race on the INSERT; the loser catches the 23505
+// unique violation and reuses the winner's row — never a second spawn.
+
+import { sql } from '../db/postgres.ts';
+import { reserveSessionSlot } from '../sessions/budget.ts';
+import { createRun } from '../db/supervisor-dal.ts';
+import { generateToken } from '../utils/token.ts';
+import { hashToken } from '../lib/crypto.ts';
+import {
+  getOrchestratorState,
+  findOpenOrchestratorSession,
+  createOrchestratorSession,
+  mintOrchestratorApiKey,
+} from '../db/orchestrator-dal.ts';
+import { buildOrchestratorPrompt } from './seed-prompt.ts';
+import {
+  getSupervisor,
+  isSupervisorOnline,
+  sendToSupervisor,
+  updateSupervisorState,
+} from '../ws/supervisor-registry.ts';
+import { listSupervisorsForUser } from '../db/supervisor-dal.ts';
+import { markOrchestratorSession } from '../ws/idle-teardown.ts';
+
+function publicHubUrl(): string {
+  return (process.env.REMO_PUBLIC_URL || 'https://app.remo-code.com').replace(/\/+$/, '');
+}
+
+export type LaunchOrchestratorResult =
+  | { ok: true; sessionId: string; runId: string; supervisorId: string; cwd: string; reused: boolean }
+  | { ok: false; reason: 'disabled' }
+  | { ok: false; reason: 'no_online_supervisor' }
+  | { ok: false; reason: 'supervisor_has_no_roots' }
+  | { ok: false; reason: 'already_running'; sessionId: string }
+  | { ok: false; reason: 'at_capacity'; running: number; cap: number }
+  | { ok: false; reason: 'send_failed'; error: string }
+  | { ok: false; reason: 'internal_error'; error: string };
+
+/**
+ * Resolve cwd + supervisor: prefer the explicitly-requested supervisor (when
+ * online), else the user's `preferred_supervisor_id` (when online), else the
+ * first online supervisor. cwd is that supervisor's `roots[0]`.
+ *
+ * Reads roots from the in-memory registry entry first (authoritative, freshest)
+ * and falls back to the DB supervisor row.
+ */
+async function resolveTarget(
+  userId: string,
+  preferSupervisorId?: string,
+): Promise<
+  | { ok: true; supervisorId: string; cwd: string; hostname: string }
+  | { ok: false; reason: 'no_online_supervisor' | 'supervisor_has_no_roots' }
+> {
+  const all = (await listSupervisorsForUser(userId)) as Array<{
+    id: string;
+    hostname: string;
+    roots?: string[];
+  }>;
+  const online = all.filter((s) => isSupervisorOnline(s.id));
+  if (online.length === 0) return { ok: false, reason: 'no_online_supervisor' };
+
+  const preferredRow = await sql<{ preferred_supervisor_id: string | null }[]>`
+    SELECT preferred_supervisor_id FROM users WHERE id = ${userId}
+  `;
+  const preferredId = preferSupervisorId ?? preferredRow[0]?.preferred_supervisor_id ?? null;
+
+  const target =
+    (preferSupervisorId && online.find((s) => s.id === preferSupervisorId)) ||
+    (preferredId && online.find((s) => s.id === preferredId)) ||
+    online[0]!;
+
+  const entry = getSupervisor(target.id);
+  const roots: string[] = (entry?.roots && entry.roots.length > 0)
+    ? entry.roots
+    : (Array.isArray(target.roots) ? target.roots : []);
+  if (roots.length === 0) return { ok: false, reason: 'supervisor_has_no_roots' };
+
+  return { ok: true, supervisorId: target.id, cwd: roots[0]!, hostname: String(target.hostname || '') };
+}
+
+/**
+ * Find-or-create the one open orchestrator session row, race-safe. On unique
+ * violation (a concurrent connect won the INSERT) re-read and reuse.
+ */
+async function findOrCreateOrchestratorSession(args: {
+  userId: string;
+  name: string;
+  cwd: string;
+  hostname: string;
+}): Promise<{ row: any; created: boolean }> {
+  const existing = await findOpenOrchestratorSession(args.userId);
+  if (existing) return { row: existing, created: false };
+
+  const rawSessionToken = generateToken('remo_');
+  const sessionTokenHash = await hashToken(rawSessionToken);
+  try {
+    const row = await createOrchestratorSession({
+      userId: args.userId,
+      name: args.name,
+      projectDir: args.cwd,
+      tokenHash: sessionTokenHash,
+      hostname: args.hostname,
+    });
+    return { row, created: true };
+  } catch (err: any) {
+    if (err?.code === '23505') {
+      // Lost the race — a sibling connect created the row. Reuse it.
+      const winner = await findOpenOrchestratorSession(args.userId);
+      if (winner) return { row: winner, created: false };
+    }
+    throw err;
+  }
+}
+
+/**
+ * The shared launch primitive. Resolves target, reserves a slot, find-or-creates
+ * the session row, creates a `session_runs` row LINKED to the session (so the
+ * orphan-resume path can recognise + respawn it on reconnect), mints the key,
+ * builds the prompt, and dispatches the orchestrator `session.start`.
+ *
+ * `requireEnabled` (default true): the machine path passes true so the gate also
+ * honours the explicit-disable sentinel. The interactive REST `/start` performs
+ * its own `orchestrator_disabled` 409 BEFORE calling, so it may pass true too.
+ *
+ * `skipIfRunning` (default true): when an orchestrator session is already live
+ * (status online/thinking) returns `already_running` rather than re-spawning.
+ */
+export async function launchOrchestrator(args: {
+  userId: string;
+  preferSupervisorId?: string;
+  requireEnabled?: boolean;
+  skipIfRunning?: boolean;
+}): Promise<LaunchOrchestratorResult> {
+  const requireEnabled = args.requireEnabled ?? true;
+  const skipIfRunning = args.skipIfRunning ?? true;
+
+  try {
+    const prefs = await getOrchestratorState(args.userId);
+    if (requireEnabled && (!prefs.orchestrator_enabled || prefs.orchestrator_disabled_explicitly)) {
+      return { ok: false, reason: 'disabled' };
+    }
+
+    const existing = await findOpenOrchestratorSession(args.userId);
+    if (skipIfRunning && existing && (existing.status === 'online' || existing.status === 'thinking')) {
+      return { ok: false, reason: 'already_running', sessionId: existing.id };
+    }
+
+    const target = await resolveTarget(args.userId, args.preferSupervisorId);
+    if (!target.ok) return { ok: false, reason: target.reason };
+
+    // Session row (race-safe). Reuses an existing offline row in place.
+    const { row: sessionRow } = await findOrCreateOrchestratorSession({
+      userId: args.userId,
+      name: prefs.orchestrator_name,
+      cwd: target.cwd,
+      hostname: target.hostname,
+    });
+    const reused = sessionRow.id === existing?.id;
+
+    // Mark for idle-teardown exemption (the orchestrator is not a WS subscriber).
+    markOrchestratorSession(sessionRow.id);
+
+    // Concurrency gate — MUST precede createRun (Invariant I3).
+    const reservation = await reserveSessionSlot(args.userId, target.supervisorId);
+    if (!reservation.ok) {
+      if (reservation.reason === 'at_capacity') {
+        return { ok: false, reason: 'at_capacity', running: reservation.running, cap: reservation.cap };
+      }
+      return { ok: false, reason: 'no_online_supervisor' };
+    }
+
+    // Run row linked to the orchestrator session so orphan-resume can find it.
+    const run = await createRun({
+      userId: args.userId,
+      sessionId: sessionRow.id,
+      supervisorId: target.supervisorId,
+      repoPath: target.cwd,
+      branch: null,
+      pulled: false,
+      initialPrompt: null,
+    });
+    const runId = run.id as string;
+
+    // Mint the full-power hub key (server-side only — raw value goes ONLY into
+    // the session.start.orchestrator.hub_api_key field, never echoed; I2).
+    const rawHubApiKey = generateToken('remokey_');
+    const hubApiKeyHash = await hashToken(rawHubApiKey);
+    await mintOrchestratorApiKey(args.userId, hubApiKeyHash);
+
+    const systemPrompt = buildOrchestratorPrompt({
+      name: prefs.orchestrator_name,
+      hubUrl: publicHubUrl(),
+      customInstructions: prefs.orchestrator_custom_instructions,
+    });
+
+    await updateSupervisorState(target.supervisorId, 'starting', runId);
+
+    try {
+      sendToSupervisor(target.supervisorId, {
+        type: 'session.start',
+        req_id: runId,
+        run_id: runId,
+        repo_path: target.cwd,
+        pull: false,
+        api_key: '__use_local__',
+        hub_url: '__same__',
+        orchestrator: {
+          session_id: sessionRow.id,
+          name: prefs.orchestrator_name,
+          cwd: target.cwd,
+          system_prompt: systemPrompt,
+          hub_api_key: rawHubApiKey,
+          hub_url: publicHubUrl(),
+        },
+      } as any);
+    } catch (err: any) {
+      return { ok: false, reason: 'send_failed', error: err?.message ?? String(err) };
+    }
+
+    return {
+      ok: true,
+      sessionId: sessionRow.id,
+      runId,
+      supervisorId: target.supervisorId,
+      cwd: target.cwd,
+      reused,
+    };
+  } catch (err: any) {
+    return { ok: false, reason: 'internal_error', error: err?.message ?? String(err) };
+  }
+}
+
+/**
+ * Machine-triggered hook, called from the `supervisor.hello` handler AFTER the
+ * orphan-resume sweep (which already respawns an EXISTING orphaned orchestrator
+ * run). This only fills the "no orchestrator session row exists yet" gap, so it
+ * MUST NOT double-spawn:
+ *
+ *   - bail if disabled / explicitly-disabled,
+ *   - bail (no-op) if an open orchestrator session row already exists — the
+ *     orphan-resume that ran moments earlier owns respawn of its run, and the
+ *     sacred `user_stopped` guard there blocks resurrection of a Stopped run.
+ *
+ * Errors are swallowed — this is best-effort and MUST never tear down hello
+ * (Invariant I6).
+ */
+export async function maybeAutoLaunchOrchestrator(args: {
+  userId: string;
+  supervisorId: string;
+}): Promise<{ launched: boolean; reason?: string }> {
+  if (process.env.REMO_ORCHESTRATOR_AUTOLAUNCH === 'false') {
+    return { launched: false, reason: 'feature_flag_off' };
+  }
+  try {
+    const prefs = await getOrchestratorState(args.userId);
+    if (!prefs.orchestrator_enabled || prefs.orchestrator_disabled_explicitly) {
+      return { launched: false, reason: 'disabled' };
+    }
+    // Row already exists → orphan-resume owns the run. No-op (no double-spawn).
+    const existing = await findOpenOrchestratorSession(args.userId);
+    if (existing) return { launched: false, reason: 'already_exists' };
+
+    const res = await launchOrchestrator({
+      userId: args.userId,
+      preferSupervisorId: args.supervisorId,
+      requireEnabled: true,
+      skipIfRunning: true,
+    });
+    if (res.ok) {
+      console.log(`[orchestrator] auto-launched session=${res.sessionId} run=${res.runId} supervisor=${res.supervisorId}`);
+      return { launched: true };
+    }
+    return { launched: false, reason: res.reason };
+  } catch (err: any) {
+    console.error('[orchestrator] auto-launch failed', err?.message ?? err);
+    return { launched: false, reason: 'error' };
+  }
+}

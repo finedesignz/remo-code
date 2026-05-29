@@ -645,6 +645,19 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     } catch (err: any) {
       console.error('[supervisor] auto-resume failed', err.message)
     }
+
+    // orchestrator-autolaunch: AFTER orphan-resume (which respawns an existing
+    // orphaned orchestrator run) auto-launch the orchestrator if the user has
+    // it enabled and NO open orchestrator session row exists yet. Idempotent +
+    // race-safe (one row per user via idx_sessions_orchestrator_unique). Best-
+    // effort — must never tear down the hello flow.
+    try {
+      const { maybeAutoLaunchOrchestrator } = await import('../orchestrator/auto-launch')
+      await maybeAutoLaunchOrchestrator({ userId, supervisorId: row.id })
+    } catch (err: any) {
+      console.error('[supervisor] orchestrator auto-launch failed', err?.message ?? err)
+    }
+
     broadcastToUser(userId, {
       type: 'supervisor_update',
       supervisor_id: row.id,
