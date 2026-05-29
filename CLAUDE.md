@@ -474,6 +474,8 @@ The dump script (`hub/scripts/dump-openapi.ts`) loads the OpenAPIHono sub-app in
 
 ## Phase 12: Mobile Tauri Client
 
+**Paused 2026-05-28.** Windows MSI preview + Android debug APK ship and work; iOS is unbuilt (needs Mac); release signing, store listings, and Windows/Android release CI are deferred. Single canonical pause-state doc with install commands, source layout, hub endpoint line numbers, rebuild steps, and resume checklist lives at [docs/phase-12-pause-state.md](docs/phase-12-pause-state.md) — start there if returning to this work.
+
 Wraps the existing `web/` SPA as a native iOS + Android app via Tauri 2.
 Connection path is unchanged: phone → `https://app.remo-code.com` (hub) →
 user's supervisor over `/ws/agent`. The phone is a pure hub client; no CLI
