@@ -189,7 +189,6 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           onToggleCollapsed={toggleCollapsed}
           token={token}
           subscribe={subscribe}
-          launchSession={sessionsHook.launchSession}
           cloneHere={sessionsHook.cloneHere}
         />
       </div>

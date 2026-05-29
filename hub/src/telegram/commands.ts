@@ -292,7 +292,10 @@ export async function listUserSessionsForPicker(userId: string): Promise<PickerS
         github_repo: null,
         last_activity_ms: null,
       };
-      return [synthetic, ...filtered];
+      // The synthetic row counts AGAINST the 200-row cap (not on top of it):
+      // prepend then slice(0, 200) so a user already at the cap never gets 201
+      // rows and the picker's "(X of N)" count stays consistent with the cap.
+      return [synthetic, ...filtered].slice(0, 200);
     }
   } catch {
     /* swallow — fall back to the unmodified list */

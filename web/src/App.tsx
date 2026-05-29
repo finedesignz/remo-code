@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useAuth } from './hooks/useAuth'
 import { useProfile } from './hooks/useProfile'
 import { Login } from './pages/Login'
@@ -80,8 +80,12 @@ function resolveHashWithRedirects(): string {
   return canonical
 }
 
+// Pure: reads the (already-redirect-resolved) hash and maps it to a Route.
+// Redirect resolution is a side-effect (history.replaceState) and lives in
+// `resolveHashWithRedirects`, called once at module load and on every
+// hashchange — never inside a render-phase state initializer.
 function getRoute(): Route {
-  const hash = resolveHashWithRedirects()
+  const hash = window.location.hash || '#/'
   if (hash.startsWith('#/auth/callback')) return 'auth-callback'
   if (hash.startsWith('#/login')) return 'login'
   if (hash.startsWith('#/tasks')) return 'tasks'
@@ -92,6 +96,12 @@ function getRoute(): Route {
   if (hash.startsWith('#/dev/mobile-accordion')) return 'dev-mobile-accordion'
   // #/, #/home, #/?tab=list, #/?tab=grid all map to home.
   return 'home'
+}
+
+// Resolve legacy-hash redirects ONCE at module load (mirrors the pathname
+// normalize above). After this, `getRoute()` can read the canonical hash purely.
+if (typeof window !== 'undefined') {
+  resolveHashWithRedirects()
 }
 
 function getGridTabId(): string | undefined {
@@ -107,6 +117,12 @@ export default function App() {
   const [route, setRoute] = useState<Route>(getRoute)
   const [gridTabId, setGridTabId] = useState<string | undefined>(getGridTabId)
   const [licenseRequired, setLicenseRequired] = useState(false)
+  // Latch so a burst of concurrent 401s (every in-flight hubFetch fires
+  // authEventHandler) triggers signOut() — and its single POST /api/auth/logout
+  // — exactly once. Reset once token+user have cleared so a later genuine
+  // re-login can sign out again. Does NOT change the self-terminating behavior:
+  // signOut still fires, just not N times per dead-credential burst.
+  const signingOut = useRef(false)
 
   useEffect(() => {
     const hubUrl = import.meta.env.VITE_HUB_URL || ''
@@ -118,7 +134,7 @@ export default function App() {
 
   // Hash-based routing
   useEffect(() => {
-    const onHashChange = () => { setRoute(getRoute()); setGridTabId(getGridTabId()) }
+    const onHashChange = () => { resolveHashWithRedirects(); setRoute(getRoute()); setGridTabId(getGridTabId()) }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
@@ -135,7 +151,8 @@ export default function App() {
         // the redirect is preserved. Guarded by route so we don't loop while
         // already on login/auth-callback. apiLogout() inside signOut uses a
         // bare fetch (NOT hubFetch), so it can't re-fire this handler.
-        if (route !== 'login' && route !== 'auth-callback') {
+        if (!signingOut.current && route !== 'login' && route !== 'auth-callback') {
+          signingOut.current = true
           signOut()
         }
       } else if (kind === 'license_required') {
@@ -155,7 +172,14 @@ export default function App() {
   // shows Login in the meantime.
   useEffect(() => {
     if (!profileLoading && !profile && (token || user)) {
-      signOut()
+      if (!signingOut.current) {
+        signingOut.current = true
+        signOut()
+      }
+    } else if (!token && !user) {
+      // Credential fully cleared (or never present) — release the latch so a
+      // future re-login can sign out again on its own dead-credential event.
+      signingOut.current = false
     }
   }, [profileLoading, profile, token, user, signOut])
 

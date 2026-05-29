@@ -29,8 +29,7 @@ interface Props {
   token?: string | null
   /** Hub WS subscribe — forwarded to PendingLocalRepoPrompt/CreateGithubRepoModal for progress. */
   subscribe?: (handler: (msg: any) => void) => () => void
-  /** Phase 08.5 launch-flow helpers (from useSessions). Optional so existing callers keep compiling. */
-  launchSession?: (id: string, body?: { cli_kind?: 'claude' | 'codex'; local_path?: string }) => Promise<{ ok: boolean; error?: string; detail?: string }>
+  /** Phase 08.5 launch-flow helper (from useSessions). Optional so existing callers keep compiling. */
   cloneHere?: (id: string, targetRoot: string) => Promise<{ ok: boolean; error?: string; target_path?: string }>
 }
 
@@ -42,10 +41,9 @@ export function Sidebar({
   collapsed = false, onToggleCollapsed,
   token = null,
   subscribe,
-  // launchSession is kept in Props (callers still pass it) but the sidebar no
-  // longer renders offline rows or re-launch buttons — offline sessions are
-  // launched from Settings → Supervisor, not here. The sidebar is active-only.
-  launchSession: _launchSession,
+  // The sidebar no longer renders offline rows or re-launch buttons — offline
+  // sessions are launched from Settings → Supervisor, not here. The sidebar is
+  // active-only, so the old `launchSession` prop has been dropped.
   cloneHere,
 }: Props) {
   const [cloneModal, setCloneModal] = useState<{ sessionId: string; repoLabel: string } | null>(null)

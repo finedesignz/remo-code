@@ -28,10 +28,6 @@ interface Props {
 }
 
 export function ProfileTab({ token, profile, onUpdateProfile }: Props) {
-  useEffect(() => {
-    console.log("[tab:settings:profile] mounted");
-    return () => console.log("[tab:settings:profile] unmounted");
-  }, []);
   return (
     <div className="px-4 md:px-6 lg:px-8 py-5 w-full max-w-5xl mx-auto space-y-5">
       <IdentityCard token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
@@ -410,18 +406,27 @@ function TelegramCard({ token }: { token: string }) {
   const { sessions } = useSessions(token);
   const safeSessions = Array.isArray(sessions) ? sessions : [];
 
+  // Tracks mount state so the async initial load can't setState after unmount
+  // (user swaps settings tab before /status resolves).
+  const aliveRef = useRef(true);
+
   const refresh = async () => {
     try {
       const r = await hubFetch<TelegramStatus>(token, "/api/telegram/status");
-      setStatus(r);
+      if (aliveRef.current) setStatus(r);
     } catch (e: any) {
-      setError(e?.message || "Failed to load Telegram status");
+      if (aliveRef.current) setError(e?.message || "Failed to load Telegram status");
     } finally {
-      setLoading(false);
+      if (aliveRef.current) setLoading(false);
     }
   };
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    aliveRef.current = true;
+    void refresh();
+    return () => { aliveRef.current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const startLink = async () => {
     setBusy(true);
@@ -433,7 +438,7 @@ function TelegramCard({ token }: { token: string }) {
         { method: "POST", json: {} },
       );
       setLinkCode(r);
-      if (r.deepLink) window.open(r.deepLink, "_blank");
+      if (r.deepLink) window.open(r.deepLink, "_blank", "noopener,noreferrer");
     } catch (e: any) {
       setError(e?.status === 503 ? "Telegram bridge isn't configured on this server." : e?.message || "Failed to start link");
     } finally {

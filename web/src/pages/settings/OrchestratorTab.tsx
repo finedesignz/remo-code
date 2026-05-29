@@ -6,9 +6,9 @@
  * primitives. Data logic (GET/PUT /api/orchestrator, POST start/stop) is
  * preserved verbatim — only the markup changed.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { hubFetch } from "../../lib/api";
-import { Card, Button, Field, StatusPill, Modal } from "../../components/ui";
+import { Card, Button, Field, StatusPill, Modal, EmptyState } from "../../components/ui";
 
 type OrchestratorSnapshot = {
   enabled: boolean;
@@ -23,35 +23,65 @@ export function OrchestratorTab({ token }: { token: string }) {
   const [name, setName] = useState("Orchestrator");
   const [instructions, setInstructions] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  // Separate from `err`: set ONLY when the initial load fails so we can render a
+  // Retry empty-state instead of an infinite "Loading…" spinner (WR-05).
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [showEnableModal, setShowEnableModal] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
 
-  async function refresh() {
+  // Unmount guards: bail on setState / clear a dangling savedFlash timer if the
+  // user swaps settings tabs mid-request (WR-04).
+  const aliveRef = useRef(true);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // refresh() reloads the snapshot. `initial` distinguishes the mount load
+  // (drives loading/loadError → Retry state) from action-triggered reloads
+  // (whose failures surface as `err` so a successful start/stop isn't masked).
+  async function refresh(initial = false) {
     try {
       const r = await hubFetch<OrchestratorSnapshot>(token, "/api/orchestrator");
+      if (!aliveRef.current) return;
       setSnap(r);
       setName(r.name);
       setInstructions(r.custom_instructions ?? "");
+      setLoadError(null);
     } catch (e: any) {
-      setErr(e?.message ?? "load failed");
+      if (!aliveRef.current) return;
+      const msg = e?.message ?? "load failed";
+      if (initial) setLoadError(msg);
+      else setErr(msg);
+    } finally {
+      if (aliveRef.current && initial) setLoading(false);
     }
   }
 
-  useEffect(() => { void refresh(); }, []);
+  useEffect(() => {
+    aliveRef.current = true;
+    void refresh(true);
+    return () => {
+      aliveRef.current = false;
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function patch(body: Partial<{ enabled: boolean; name: string; custom_instructions: string | null }>) {
     setBusy(true); setErr(null);
     try {
       const r = await hubFetch<OrchestratorSnapshot>(token, "/api/orchestrator", { method: "PUT", json: body });
+      if (!aliveRef.current) return;
       setSnap(r);
       setName(r.name);
       setInstructions(r.custom_instructions ?? "");
-      setSavedFlash(true); setTimeout(() => setSavedFlash(false), 1200);
+      setSavedFlash(true);
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+      flashTimer.current = setTimeout(() => { if (aliveRef.current) setSavedFlash(false); }, 1200);
     } catch (e: any) {
-      setErr(e?.message ?? "save failed");
+      if (aliveRef.current) setErr(e?.message ?? "save failed");
     } finally {
-      setBusy(false);
+      if (aliveRef.current) setBusy(false);
     }
   }
 
@@ -61,9 +91,9 @@ export function OrchestratorTab({ token }: { token: string }) {
       await hubFetch(token, "/api/orchestrator/start", { method: "POST", json: {} });
       await refresh();
     } catch (e: any) {
-      setErr(e?.message ?? "start failed");
+      if (aliveRef.current) setErr(e?.message ?? "start failed");
     } finally {
-      setBusy(false);
+      if (aliveRef.current) setBusy(false);
     }
   }
 
@@ -73,15 +103,23 @@ export function OrchestratorTab({ token }: { token: string }) {
       await hubFetch(token, "/api/orchestrator/stop", { method: "POST", json: {} });
       await refresh();
     } catch (e: any) {
-      setErr(e?.message ?? "stop failed");
+      if (aliveRef.current) setErr(e?.message ?? "stop failed");
     } finally {
-      setBusy(false);
+      if (aliveRef.current) setBusy(false);
     }
   }
 
   return (
     <div className="px-4 md:px-6 lg:px-8 py-5 w-full max-w-5xl mx-auto space-y-5">
-      {!snap ? (
+      {!snap && loadError ? (
+        <Card>
+          <EmptyState
+            title="Couldn't load orchestrator"
+            description={loadError}
+            action={{ label: "Retry", onClick: () => { setLoadError(null); setLoading(true); void refresh(true); } }}
+          />
+        </Card>
+      ) : !snap || loading ? (
         <div className="text-sm text-[var(--text-muted)]">Loading…</div>
       ) : (
         <Card className="space-y-4">

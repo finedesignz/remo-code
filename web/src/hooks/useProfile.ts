@@ -19,7 +19,7 @@ export function useProfile(token: string | null) {
   const [loading, setLoading] = useState(true)
 
   const fetchProfile = useCallback(async () => {
-    if (!token) return
+    if (!token) { setLoading(false); return }
     try {
       const p = await hubFetch<Profile>(token, '/api/profile')
       setProfile(p)
