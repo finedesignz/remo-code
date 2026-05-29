@@ -66,8 +66,46 @@ import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { log as obsLog } from './observability/logger'
 import { withRequestId } from './observability/middleware'
+import { setOfflineStaleAgentSessions, markStreamingMessagesAsInterrupted } from './db/dal.ts'
 
-const app = new Hono()
+// ════════════════════════════════════════════════════════════════════════════
+// MOUNT-ORDER INVARIANT CONTRACT  (load-bearing — enforced by mount-order.test.ts)
+// ════════════════════════════════════════════════════════════════════════════
+// Hono runs `app.use`/`app.route` in registration order; that order IS the
+// security boundary. These relations MUST hold. A reorder that breaks one is
+// silent in prod but caught by hub/test/mount-order.test.ts (IR-8). The terse
+// `// MUST be mounted BEFORE ...` notes at the original lines below point here.
+//
+//  (1) PUBLIC WEBHOOKS mount BEFORE the `/api/*` JWT/auth catch-all.
+//      A webhook router registered AFTER the catch-all never matches first —
+//      the catch-all's authMiddleware 401s it, OR (worse) it falls through to
+//      static/SPA serving and returns 404, silently dropping ingress.
+//        - /api/sentry          → sentryIntakeApi          (mounted ~L165)
+//        - /api/coolify         → coolifyWebhookRoutes      (mounted ~L170)
+//        - /api/revanote        → revanoteWebhookRoutes     (mounted ~L175)
+//        - /api/telegram        → telegramWebhookRoutes     (mounted ~L181)
+//        - /webhooks/titanium   → webhooksTitanium          (mounted ~L185)
+//      The JWT/auth catch-all is `app.use('/api/*', ...)` (~L190) and its skip
+//      list MUST include each webhook subpath (`/api/sentry/`, `/api/coolify/
+//      webhook/`, `/api/revanote/webhook/`, `/api/telegram/webhook/`).
+//      (`/webhooks/titanium` is outside `/api/*` so the catch-all never sees it.)
+//
+//  (2) LICENSE GATE mounts AFTER auth. `requireActiveLicense` reads `userId`
+//      set by authMiddleware, so it MUST run after it (~L207, after ~L190).
+//      Its skip list mirrors auth's so public webhooks never hit the gate.
+//
+//  (3) CSRF GUARD SKIPS the public webhook paths. `csrfGuard()` (~L222) is
+//      registered after auth; its allowlist (hub/src/csrf.ts CSRF_PATH_ALLOWLIST)
+//      MUST contain every webhook subpath so an unsigned-by-CSRF webhook POST
+//      reaches the webhook's own auth instead of being 403'd by CSRF.
+//
+//  (4) /ws/agent IS KEYED BY api_keys, NOT user license. The agent WS upgrade
+//      (in Bun.serve fetch) authenticates via api_keys and is NEVER routed
+//      through requireActiveLicense — an expired-license user still observes
+//      agent traffic read-only. No license check on the agent path.
+// ════════════════════════════════════════════════════════════════════════════
+
+export const app = new Hono()
 
 // Observability: mint request_id + open ALS frame. Mounted FIRST so even the
 // security-headers middleware and CORS responses inherit the request_id and
@@ -158,25 +196,27 @@ app.use('/api/plugin/*', apiKeyMiddleware)
 app.route('/api/plugin', plugin)
 
 // Sentry-style error intake — public, sentry_key in X-Sentry-Auth IS the credential.
-// MUST be mounted before the JWT catch-all, and the catch-all MUST skip this path.
+// MUST be mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
 app.use('/api/sentry/*', rateLimit({ windowMs: 60_000, max: 600, keyFn: (c) => c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || 'anon' }))
 app.route('/api/sentry', sentryIntakeApi)
 
 // Public Coolify deployment webhook (HMAC-signed, per-user secret in URL).
-// MUST be mounted BEFORE the JWT catch-all middleware below.
+// MUST be mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
 app.route('/api/coolify', coolifyWebhookRoutes)
 
 // Phase 08: Public Revanote annotation webhook (URL-token + HMAC, per-user
-// secret embedded in path). MUST be mounted BEFORE the JWT catch-all.
+// secret embedded in path). MUST be mounted BEFORE the JWT catch-all
+// (see MOUNT-ORDER INVARIANT (1) at top).
 app.route('/api/revanote', revanoteWebhookRoutes)
 
 // Phase 12: Public Telegram inbound webhook (URL-path secret). MUST be
-// mounted BEFORE the JWT catch-all. Auth is :secret in the URL, constant-time
-// compared to config.telegram.webhookSecret.
+// mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
+// Auth is :secret in the URL, constant-time compared to config.telegram.webhookSecret.
 app.route('/api/telegram', telegramWebhookRoutes)
 
 // Public Titanium license-changed webhook (HMAC-signed, shared secret).
-// MUST be mounted BEFORE the JWT catch-all. Inert (503) until secret set.
+// MUST be mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
+// Inert (503) until secret set.
 app.route('/webhooks/titanium', webhooksTitanium)
 
 // Protected API routes (JWT auth, then rate limit keyed on userId)
@@ -336,6 +376,17 @@ app.route('/api/revanote/annotations', revanoteAnnotations)
 // session and a matching X-CSRF-Token on mutating methods.
 app.route('/api/telegram', telegramApi)
 
+// ── Server boot ─────────────────────────────────────────────────────────────
+// Everything below only runs when this module is the process entrypoint
+// (`bun src/index.ts`). Importing `index.ts` in a test (mount-order.test.ts)
+// gives the fully-configured `app` above WITHOUT booting Bun.serve, warming
+// JWKS, installing self-capture, running migrations, or registering signal
+// handlers. `import.meta.main` is true for the entrypoint, false on import.
+if (import.meta.main) {
+  await boot()
+}
+
+async function boot() {
 // Resolve web dist directory (works both in Docker and locally)
 const webDistCandidates = ['./web/dist', '../web/dist', resolve(__dirname, '../../web/dist')]
 const webDist = resolve(webDistCandidates.find(p => existsSync(p)) || './web/dist')
@@ -511,7 +562,6 @@ const server = Bun.serve({
 
 // On startup: apply migrations, then mark all sessions as offline,
 // boot the W2 scheduler (registry + catchup) alongside the legacy v0.
-import { setOfflineStaleAgentSessions, markStreamingMessagesAsInterrupted } from './db/dal.ts'
 runMigrations()
   .then(() => setOfflineStaleAgentSessions())
   .then(() => markStreamingMessagesAsInterrupted())
@@ -545,3 +595,4 @@ process.on('SIGINT', () => gracefulShutdown('SIGINT'))
 
 console.log(`Hub server running on http://localhost:${server.port}`)
 console.log(`Serving web UI from: ${webDist}`)
+} // end boot()
