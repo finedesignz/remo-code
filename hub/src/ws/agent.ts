@@ -367,17 +367,13 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       const g = await import('../scheduler/grace.ts')
       void g.drainForTarget(session.id, userId)
     } catch {}
-    // W3/T4 — drain any error-capture errors parked for this session.
-    // Round-2 migration: error-capture now parks in the shared dispatch grace
-    // buffer keyed by sessionId; drain it the same way the pipeline expects.
+    // W3/T4 — drain any errors/annotations parked for this session.
+    // Round-2 migration: error-capture AND revanote now park in the shared
+    // dispatch grace buffer keyed by sessionId; one drain replays both. (The
+    // legacy revanote/grace.ts buffer is retired.)
     try {
       const { getGraceBuffer } = await import('../dispatch/grace.ts')
       void getGraceBuffer().drain(session.id)
-    } catch {}
-    // Phase 08 — drain any revanote annotations parked for this session.
-    try {
-      const rg = await import('../revanote/grace.ts')
-      void rg.drainForSession(session.id)
     } catch {}
     return
   }
@@ -527,24 +523,17 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
         void tri.onTriageAssistantMessage(sessionId, msg.content)
       }
     } catch {}
-    // Round-2 migration: error-capture finalizes via the shared dispatch
-    // pipeline's finalize hook (RunStore.onFinalize) instead of its own
-    // run-lifecycle. onSessionReply no-ops for any session without an active
+    // Round-2 migration: error-capture AND revanote finalize via the shared
+    // dispatch pipeline's finalize hook (RunStore.onFinalize) instead of their
+    // own run-lifecycle. onSessionReply no-ops for any session without an active
     // pipeline hook, so it is safe to call alongside the not-yet-migrated
-    // scheduler/triage/revanote run-lifecycle calls above/below.
+    // scheduler/triage onAssistantMessage calls above.
     // TODO(round2): collapse to onSessionReply once all subsystems migrated —
-    // then the scheduler/triage/revanote onAssistantMessage/onAgentReply calls
-    // all route through this single fan-in point and the dual path goes away.
+    // then the scheduler/triage onAssistantMessage calls also route through this
+    // single fan-in point and the dual path goes away.
     try {
       const { onSessionReply } = await import('../dispatch/pipeline.ts')
       void onSessionReply(sessionId, msg.content)
-    } catch {}
-    // Phase 08 — finalize any in-flight revanote annotation run for this session.
-    try {
-      const rev = await import('../revanote/run-lifecycle.ts')
-      if (rev.annotationRunActiveForSession(sessionId)) {
-        void rev.onAgentReply(sessionId, msg.content)
-      }
     } catch {}
   }
 

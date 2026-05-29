@@ -1,15 +1,21 @@
 /**
- * Annotation-run lifecycle (Phase 08).
+ * Annotation-run finalize (Phase 08; Round-2 migration).
  *
- * Mirrors `error-capture/run-lifecycle.ts`. When the dispatcher ships a
- * prompt to a Claude session it registers `(sessionId → run_id, annotation_id)`
- * here. The agent ws assistant_message handler calls `onAgentReply` to:
+ * Round-2: the per-session run registry + queue promotion that this module used
+ * to own now live in the shared dispatch pipeline (`hub/src/dispatch/`). The
+ * agent ws assistant_message branch calls `dispatch.onSessionReply`, which fires
+ * the revanote adapter's `RunStore.onFinalize` hook — and that hook delegates to
+ * `finalizeAnnotationReply` below. So this file is now JUST the finalize body
+ * (envelope parse → annotation status → merge gate → outbound callback enqueue),
+ * with NO session-keyed Map and NO queue-promotion logic.
+ *
+ * Finalize steps (unchanged from the legacy `onAgentReply`):
  *   1. Finalize the annotation_run row.
  *   2. Parse the agent envelope (`<<JSON>>…<<END>>`).
  *   3. Persist resolved/action_taken/files_changed/agent_reply.
  *   4. Mark the annotation row resolved/failed.
- *   5. Enqueue the outbound revanote callback.
- *   6. Promote any session-queue waiter.
+ *   5. Run the merge gate (additive — legacy single-shot annotations bypass it).
+ *   6. Enqueue the outbound revanote callback (ALWAYS carries annotation_id).
  */
 import {
   updateAnnotationRun,
@@ -17,50 +23,34 @@ import {
   getAnnotationById,
 } from '../db/revanote-dal.ts'
 import { broadcastRevanoteEvent } from '../ws/registry.ts'
-import * as queue from '../scheduler/session-queue.ts'
 import { parseRevanoteOutput } from './result-schema.ts'
 
-interface Active {
+export interface FinalizeArgs {
+  sessionId: string
   runId: string
   annotationId: string
   userId: string
-  callbackUrl: string
+  /** epoch ms when the run was opened (for duration_ms). */
   startedAt: number
+  /** the agent's assistant_message text. */
+  content: string
 }
 
-const bySession = new Map<string, Active>()
+/**
+ * Finalize an in-flight annotation run from the agent's reply. Invoked by the
+ * revanote adapter's `RunStore.onFinalize` hook (wired into the shared
+ * dispatch pipeline). Mirrors the legacy `onAgentReply` body verbatim minus the
+ * session-registry lookup + queue promotion (the pipeline does those now).
+ */
+export async function finalizeAnnotationReply(args: FinalizeArgs): Promise<void> {
+  const { runId, annotationId, userId, startedAt, content } = args
 
-export function registerAnnotationRunForSession(
-  sessionId: string,
-  runId: string,
-  annotationId: string,
-  userId: string,
-  callbackUrl: string,
-): void {
-  bySession.set(sessionId, {
-    runId, annotationId, userId, callbackUrl, startedAt: Date.now(),
-  })
-}
-
-export function annotationRunActiveForSession(sessionId: string): boolean {
-  return bySession.has(sessionId)
-}
-
-export function getActiveAnnotationRun(sessionId: string): Active | undefined {
-  return bySession.get(sessionId)
-}
-
-export async function onAgentReply(sessionId: string, content: string): Promise<void> {
-  const active = bySession.get(sessionId)
-  if (!active) return
-  bySession.delete(sessionId)
-
-  const duration = Date.now() - active.startedAt
+  const duration = Date.now() - startedAt
   const parsed = parseRevanoteOutput(content)
   const result = parsed.value
   const snippet = content.length > 500 ? content.slice(content.length - 500) : content
 
-  await updateAnnotationRun(active.runId, {
+  await updateAnnotationRun(runId, {
     status: 'success',
     finished_at: new Date(),
     resolved: result.resolved,
@@ -74,15 +64,15 @@ export async function onAgentReply(sessionId: string, content: string): Promise<
   })
 
   const annStatus = result.resolved ? 'resolved' : 'failed'
-  await updateAnnotationStatus(active.annotationId, annStatus, {
+  await updateAnnotationStatus(annotationId, annStatus, {
     resolved_at: result.resolved ? new Date() : null,
     skip_reason: result.resolved ? null : (result.action_taken || parsed.reason || 'agent_unresolved'),
   })
 
-  broadcastRevanoteEvent(active.userId, {
+  broadcastRevanoteEvent(userId, {
     type: 'revanote_resolved',
-    annotation_id: active.annotationId,
-    run_id: active.runId,
+    annotation_id: annotationId,
+    run_id: runId,
     resolved: result.resolved,
     action_taken: result.action_taken ?? null,
     files_changed: result.files_changed ?? [],
@@ -90,9 +80,9 @@ export async function onAgentReply(sessionId: string, content: string): Promise<
     finished_at: new Date().toISOString(),
   })
 
-  // Queue the outbound callback.
+  // Queue the outbound callback (ALWAYS carries annotation_id — revanote invariant).
   try {
-    const ann = await getAnnotationById(active.annotationId, active.userId)
+    const ann = await getAnnotationById(annotationId, userId)
     if (ann) {
       const { scheduleImmediateCallback } = await import('./callback.ts')
       let basePayload: import('./callback.ts').RevanoteCallbackPayload = {
@@ -147,63 +137,4 @@ export async function onAgentReply(sessionId: string, content: string): Promise<
   } catch (err: any) {
     console.warn(`[revanote.lifecycle] callback enqueue failed: ${err?.message ?? err}`)
   }
-
-  // Promote any waiter.
-  const promoted = queue.markFinished(sessionId)
-  if (promoted) {
-    void import('./dispatcher.ts').then((m) =>
-      m.dispatchPendingAnnotation(promoted).catch((err) =>
-        console.error(`[revanote.lifecycle] promote dispatch failed run=${promoted}: ${err?.message ?? err}`),
-      ),
-    )
-  }
 }
-
-export async function onAgentError(sessionId: string, errorMsg: string): Promise<void> {
-  const active = bySession.get(sessionId)
-  if (!active) return
-  bySession.delete(sessionId)
-
-  const duration = Date.now() - active.startedAt
-  await updateAnnotationRun(active.runId, {
-    status: 'failed', error: errorMsg, finished_at: new Date(), duration_ms: duration,
-  })
-  await updateAnnotationStatus(active.annotationId, 'failed', { skip_reason: errorMsg })
-
-  broadcastRevanoteEvent(active.userId, {
-    type: 'revanote_resolved',
-    annotation_id: active.annotationId,
-    run_id: active.runId,
-    resolved: false,
-    action_taken: 'agent_error',
-    files_changed: [],
-    deployed: false,
-    finished_at: new Date().toISOString(),
-  })
-
-  try {
-    const ann = await getAnnotationById(active.annotationId, active.userId)
-    if (ann) {
-      const { scheduleImmediateCallback } = await import('./callback.ts')
-      await scheduleImmediateCallback(ann, {
-        annotation_id: ann.annotation_id_external,
-        resolved: false,
-        action_taken: 'agent_error',
-        agent_reply: null,
-        files_changed: [],
-        deployed: false,
-        error: errorMsg,
-      })
-    }
-  } catch {}
-
-  const promoted = queue.markFinished(sessionId)
-  if (promoted) {
-    void import('./dispatcher.ts').then((m) =>
-      m.dispatchPendingAnnotation(promoted).catch(() => {}),
-    )
-  }
-}
-
-// Test helper.
-export function _reset(): void { bySession.clear() }
