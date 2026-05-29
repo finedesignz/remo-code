@@ -14,6 +14,8 @@
 
 ## 2. Install + test
 
+- **Or download from GitHub Releases:** tagged preview builds (Windows MSI + NSIS + Android APK) are published by `.github/workflows/release-mobile.yml` on every `mobile-v*.*.*` tag push. Grab the latest at <https://github.com/finedesignz/remo-code/releases?q=mobile-v> — no local build needed. Artifacts are UNSIGNED (same SmartScreen / "Install unknown apps" caveats as the local copies below).
+
 ### Windows preview (works today)
 
 ```powershell
