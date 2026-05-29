@@ -103,6 +103,17 @@ src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.
 Drag-and-drop the `.apk` onto the BlueStacks window, or use the **Install APK**
 button in Multi-Instance Manager. For Android Studio AVD: `adb -s emulator-5554
 install -r <apk>`.
+## iOS development without owning a Mac
+
+The Windows-only developer path: rent a Mac for ~30 minutes once to run
+`cargo tauri ios init`, then every subsequent build runs in GitHub Actions
+on `macos-14`, and the unsigned `.ipa` ships to a personal iPhone via
+AltStore re-signing with a free Apple ID. Full runbook in
+[`../../docs/ios-sideload.md`](../../docs/ios-sideload.md).
+
+The one-time MacInCloud step IS the Phase 12.4 iOS prep below — once
+`gen/apple/` is committed, the `.github/workflows/mobile-ios-build.yml`
+workflow handles every build after that.
 
 ## Deferred platform generation
 
