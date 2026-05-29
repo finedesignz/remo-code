@@ -66,15 +66,24 @@ mock.module("../src/db/supervisor-dal.ts", () => ({
   },
 }));
 
+// Spread real shared modules so non-overridden exports stay resolvable for
+// sibling files in the full suite (Bun mock.module is process-global).
+const realBudgetTD = await import(`../src/sessions/budget.ts?real=${Date.now()}`);
+const realWsRegTD = await import(`../src/ws/registry.ts?real=${Date.now()}`);
+const realSupRegTD = await import(`../src/ws/supervisor-registry.ts?real=${Date.now()}`);
+
 mock.module("../src/sessions/budget.ts", () => ({
+  ...realBudgetTD,
   reserveSessionSlot: async (_uid: string, _sid: string) => state.reserveOutcome,
 }));
 
 mock.module("../src/ws/registry.ts", () => ({
+  ...realWsRegTD,
   getChannel: (sid: string) => state.channels.get(sid),
 }));
 
 mock.module("../src/ws/supervisor-registry.ts", () => ({
+  ...realSupRegTD,
   isSupervisorOnline: (sid: string) => {
     const s = state.supervisors.find((x) => x.id === sid);
     return !!s?.online;

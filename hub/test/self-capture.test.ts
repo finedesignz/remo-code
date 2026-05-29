@@ -8,7 +8,7 @@
  *
  * DAL + WS registry are mocked so no Postgres / no live WS needed.
  */
-import { describe, test, expect, beforeEach, mock } from 'bun:test'
+import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
 
 const TEST_USER = '233c6d63-5f44-43f4-9eae-efc34a00735a'
 
@@ -51,7 +51,14 @@ const mockState: {
 }
 
 let rowSeq = 0
+// Spread the REAL module so non-overridden exports (e.g. ensureSupervisorProject,
+// consumed by src/ws/agent.ts) stay defined. Bun's mock.module is process-global
+// and first-write-wins; a partial mock here would otherwise make those exports
+// resolve to undefined and abort sibling files that import agent.ts in the full
+// suite (SyntaxError: Export named 'X' not found). See memory: bun-mock-pollution.
+const realErrorCaptureDal = await import(`../src/db/error-capture-dal.ts?real=${Date.now()}`)
 mock.module('../src/db/error-capture-dal.ts', () => ({
+  ...realErrorCaptureDal,
   ensureSelfProject: async (_userId: string) => mockState.selfProject,
   insertError: async (projectId: string, fields: any) => {
     rowSeq += 1
@@ -88,7 +95,9 @@ mock.module('../src/db/error-capture-dal.ts', () => ({
   },
 }))
 
+const realDalSC = await import(`../src/db/dal.ts?real=${Date.now()}`)
 mock.module('../src/db/dal.ts', () => ({
+  ...realDalSC,
   getUserTimezone: async () => 'UTC',
 }))
 
@@ -102,11 +111,19 @@ mock.module('../src/error-capture/dispatcher.ts', () => ({
   },
 }))
 
+const realWsRegSC = await import(`../src/ws/registry.ts?real=${Date.now()}`)
 mock.module('../src/ws/registry.ts', () => ({
+  ...realWsRegSC,
   broadcastErrorEvent: (_userId: string, event: any) => {
     mockState.broadcasts.push(event)
   },
 }))
+
+// Mock hygiene: Bun's mock.module is process-global and persists across test
+// files (first-write-wins). Restore after this file so partial mocks of shared
+// modules (dal.ts, error-capture-dal.ts, ws/registry.ts) don't shadow real
+// exports for sibling files in the full-suite run. See memory: bun-mock-pollution.
+afterAll(() => mock.restore())
 
 // Import AFTER mocks installed.
 const { installSelfCapture, captureSelfError, _resetForTest } = await import(
