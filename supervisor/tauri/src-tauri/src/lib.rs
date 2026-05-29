@@ -66,6 +66,11 @@ pub fn run() {
 
             // Spawn the Bun supervisor as a managed sidecar.
             sidecar::spawn_managed(app.handle().clone());
+
+            // B6: poll the sidecar's loopback /sup/status every 5s and update
+            // the tray tooltip + status menu item. Graceful when sidecar is
+            // unreachable (grey dot, no crash).
+            tray::spawn_status_poller(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -80,6 +85,7 @@ pub fn run() {
             runtime_cmds::open_external_url,
             runtime_cmds::sidecar_control,
             runtime_cmds::set_api_key,
+            runtime_cmds::get_sidecar_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
