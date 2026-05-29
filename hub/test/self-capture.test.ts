@@ -15,6 +15,7 @@ import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
 // import from the same module. Per Bun mock.module pollution pattern.
 const realErrorCaptureDal = await import(`../src/db/error-capture-dal.ts?bust=${Date.now()}`)
 const realDal = await import(`../src/db/dal.ts?bust=${Date.now()}`)
+const realWsReg = await import(`../src/ws/registry.ts?bust=${Date.now()}`)
 
 const TEST_USER = '233c6d63-5f44-43f4-9eae-efc34a00735a'
 
@@ -111,6 +112,7 @@ mock.module('../src/error-capture/dispatcher.ts', () => ({
 }))
 
 mock.module('../src/ws/registry.ts', () => ({
+  ...realWsReg,
   broadcastErrorEvent: (_userId: string, event: any) => {
     mockState.broadcasts.push(event)
   },

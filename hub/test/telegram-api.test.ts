@@ -42,7 +42,11 @@ const state: {
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
+// Spread real dal so unmocked exports stay resolvable for sibling files in the
+// full suite (Bun mock.module is process-global). See memory: bun-mock-pollution.
+const realDalTA = await import(`../src/db/dal.ts?real=${Date.now()}`);
 mock.module("../src/db/dal.ts", () => ({
+  ...realDalTA,
   getSession: async (sessionId: string, userId: string) => {
     if (sessionId === SESSION_ID_OWNED && userId === USER_ID) {
       return { id: SESSION_ID_OWNED, name: "owned", project_dir: null };
