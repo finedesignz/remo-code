@@ -13,7 +13,7 @@ import { useEffect, useRef, useState } from "react";
 import { hubFetch } from "../../lib/api";
 import type { Profile } from "../../hooks/useProfile";
 import { useWebPushPermission } from "../../hooks/useWebPushPermission";
-import { Card, Field, Button, StatusPill } from "../../components/ui";
+import { Card, Field, Button, StatusPill, Toggle } from "../../components/ui";
 
 interface Props {
   token: string;
@@ -366,33 +366,20 @@ function NotificationsCard({
         </Button>
       )}
 
-      <button
-        type="button"
-        onClick={toggleWebPush}
-        aria-pressed={webPush}
-        disabled={toggleDisabled}
-        className="w-full flex items-center justify-between gap-3 disabled:opacity-50 disabled:cursor-not-allowed pt-2"
+      <div
+        className="w-full flex items-center justify-between gap-3 pt-2"
         title="Show browser notifications for scheduled-task events when this tab is backgrounded."
       >
         <span className="text-sm text-[var(--text-primary)]">
           Web push (this tab)
         </span>
-        <span
-          className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-            webPush && permission === "granted"
-              ? "bg-indigo-600"
-              : "bg-[var(--bg-tertiary)]"
-          }`}
-        >
-          <span
-            className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-              webPush && permission === "granted"
-                ? "translate-x-[1.125rem]"
-                : "translate-x-0.5"
-            }`}
-          />
-        </span>
-      </button>
+        <Toggle
+          checked={webPush && permission === "granted"}
+          onChange={() => void toggleWebPush()}
+          disabled={toggleDisabled}
+          aria-label="Web push (this tab)"
+        />
+      </div>
     </Card>
   );
 }
