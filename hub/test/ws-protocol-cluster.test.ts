@@ -31,7 +31,7 @@ mock.module('../src/db/supervisor-dal', () => ({
 // Spread real exports for any symbol this closure doesn't override, so sibling
 // files in the full suite that transitively import e.g. findSupervisorForSession
 // still resolve them (Bun mock.module is process-global). See bun-mock-pollution.
-const realSupRegWPC = await import(`../src/ws/supervisor-registry.ts?real=${Date.now()}`)
+const realSupRegWPC = await import('../src/ws/supervisor-registry.ts')
 mock.module('../src/ws/supervisor-registry.ts', () => {
   interface Entry {
     ws: any

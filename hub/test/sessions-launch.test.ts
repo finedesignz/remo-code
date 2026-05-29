@@ -31,8 +31,8 @@ const state: {
 // process-global, first-write-wins). Overrides after the spread always win.
 // See memory: bun-mock-pollution.
 const realDalSL = await import(`../src/db/dal.ts?real=${Date.now()}`)
-const realWsRegSL = await import(`../src/ws/registry.ts?real=${Date.now()}`)
-const realSupRegSL = await import(`../src/ws/supervisor-registry.ts?real=${Date.now()}`)
+const realWsRegSL = await import('../src/ws/registry.ts')
+const realSupRegSL = await import('../src/ws/supervisor-registry.ts')
 const realBudgetSL = await import(`../src/sessions/budget.ts?real=${Date.now()}`)
 
 mock.module('../src/db/dal.ts', () => ({

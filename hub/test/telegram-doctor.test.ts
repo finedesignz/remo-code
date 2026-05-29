@@ -72,8 +72,8 @@ mock.module("../src/db/supervisor-dal.ts", () => ({
 // sibling files in the full suite (Bun mock.module is process-global, first-
 // write-wins). See memory: bun-mock-pollution.
 const realBudgetTD = await import(`../src/sessions/budget.ts?real=${Date.now()}`);
-const realWsRegTD = await import(`../src/ws/registry.ts?real=${Date.now()}`);
-const realSupRegTD = await import(`../src/ws/supervisor-registry.ts?real=${Date.now()}`);
+const realWsRegTD = await import('../src/ws/registry.ts');
+const realSupRegTD = await import('../src/ws/supervisor-registry.ts');
 const realTgClientTD = await import(`../src/telegram/client.ts?real=${Date.now()}`);
 
 mock.module("../src/sessions/budget.ts", () => ({
