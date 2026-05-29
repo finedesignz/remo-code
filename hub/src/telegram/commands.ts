@@ -19,6 +19,7 @@ import {
   setTelegramDefaultSession,
   type TelegramUserRow,
 } from "../db/dal.ts";
+import { launchSessionForUser } from "./launch.ts";
 import {
   buildSessionKeyboard,
   renderPickerText,
@@ -120,6 +121,63 @@ export async function handleStart(opts: {
       : "Linked. Send /help for commands.",
     linkedUserId: found.id,
   };
+}
+
+/**
+ * Post-link pre-warm. Best-effort: pick the user's most-recently-used session
+ * (online-first, then last_activity DESC — same ordering as the picker), set
+ * it as the Telegram default, and fire `session.start` so it's live by the
+ * time the user sends their first chat message.
+ *
+ * Returns the chosen session label for the welcome reply, or null when the
+ * user has zero sessions OR a default was already set (rare on a fresh link).
+ *
+ * Failures are swallowed — the link itself is committed by the caller and
+ * `/doctor` will repair anything broken on the first real message.
+ *
+ * `launchImpl` is injectable for tests.
+ */
+export async function prewarmAfterLink(opts: {
+  userId: string;
+  existingDefault: string | null;
+  launchImpl?: typeof launchSessionForUser;
+}): Promise<{ kind: "skipped"; reason: "already_set" | "no_sessions" } | { kind: "prewarmed"; sessionId: string; label: string }> {
+  if (opts.existingDefault) {
+    return { kind: "skipped", reason: "already_set" };
+  }
+  const launch = opts.launchImpl ?? launchSessionForUser;
+  let candidate: { id: string; name: string | null; project_dir: string | null } | undefined;
+  try {
+    const rows = await sql<{ id: string; name: string | null; project_dir: string | null }[]>`
+      SELECT id, name, project_dir
+        FROM sessions
+       WHERE user_id = ${opts.userId} AND deleted_at IS NULL
+       ORDER BY (status IN ('online','thinking')) DESC, last_activity DESC NULLS LAST
+       LIMIT 1
+    `;
+    candidate = rows[0];
+  } catch {
+    return { kind: "skipped", reason: "no_sessions" };
+  }
+  if (!candidate || typeof candidate.id !== "string" || !candidate.id) {
+    return { kind: "skipped", reason: "no_sessions" };
+  }
+  try {
+    await setTelegramDefaultSession(opts.userId, candidate.id);
+  } catch {
+    /* swallow — link is still atomic */
+  }
+  // Fire-and-forget: do NOT await the deferred socket round-trip for the
+  // welcome reply, but DO await `launchImpl` itself so any synchronous setup
+  // (reserveSessionSlot, createRun) completes before we return. The webhook
+  // handler doesn't care about the result — `/doctor` is the fallback.
+  try {
+    void launch({ userId: opts.userId, sessionId: candidate.id });
+  } catch {
+    /* swallow */
+  }
+  const label = candidate.name || candidate.project_dir?.split(/[\\/]/).pop() || candidate.id.slice(0, 8);
+  return { kind: "prewarmed", sessionId: candidate.id, label };
 }
 
 /** Internal session-row shape used by /list and /session. */

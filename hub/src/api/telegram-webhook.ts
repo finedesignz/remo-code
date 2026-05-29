@@ -57,6 +57,7 @@ import {
   handleListPicker,
   handleSession,
   listUserSessionsForPicker,
+  prewarmAfterLink,
   HELP_TEXT,
 } from "../telegram/commands.ts";
 import {
@@ -492,8 +493,35 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
       const cmd = parseCommand(text);
       if (cmd.kind === "start") {
         const r = await handleStart({ code: cmd.arg, chatId });
-        await safeSend(chatId, r.reply);
-        return c.json({ ok: true, outcome: r.linkedUserId ? "link_ok" : "link_failed" });
+        if (!r.linkedUserId) {
+          await safeSend(chatId, r.reply);
+          return c.json({ ok: true, outcome: "link_failed" });
+        }
+        // Pre-warm: pick most-recent session, set as default, fire session.start.
+        // Best-effort; failure falls back to /doctor on first message.
+        let prewarmed: { label: string } | null = null;
+        try {
+          const pw = await prewarmAfterLink({
+            userId: r.linkedUserId,
+            existingDefault: null,
+          });
+          if (pw.kind === "prewarmed") prewarmed = { label: pw.label };
+        } catch (err: any) {
+          console.warn("[telegram-webhook] prewarm failed:", err?.message);
+        }
+        // Re-derive email from the canned reply (handleStart already looked it up).
+        // The reply is one of: "Linked to <email>. ..." | "Linked. ..." | error path.
+        const linkedToMatch = r.reply.match(/^Linked to ([^\s.]+)\./);
+        const emailPart = linkedToMatch ? linkedToMatch[1] : null;
+        const reply = prewarmed
+          ? emailPart
+            ? `✅ Linked to ${emailPart}. Pre-launching '${prewarmed.label}' so your next message lands instantly…`
+            : `✅ Linked. Pre-launching '${prewarmed.label}' so your next message lands instantly…`
+          : emailPart
+            ? `✅ Linked to ${emailPart}. Send /list to pick a session.`
+            : "✅ Linked. Send /list to pick a session.";
+        await safeSend(chatId, reply);
+        return c.json({ ok: true, outcome: "link_ok", prewarmed: !!prewarmed });
       }
       // Anything else from an unlinked chat → silent drop (no reply).
       return c.json({ ok: true, outcome: "silent_drop_unlinked" });
