@@ -1,5 +1,7 @@
 # Mobile Tauri client (Phase 12)
 
+> **Status: paused 2026-05-28.** See [phase-12-pause-state.md](./phase-12-pause-state.md) for the canonical "where everything is" doc, install commands, deferred items, and resume checklist.
+
 Native iOS + Android wrappers around the existing `web/` SPA, talking to
 `https://app.remo-code.com` as a normal hub client. The phone never spawns a
 CLI; it joins existing supervisor-hosted sessions over the same `/ws/client`
