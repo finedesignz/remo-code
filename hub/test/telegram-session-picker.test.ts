@@ -169,7 +169,9 @@ const state: {
   editedReplyMarkups: [],
 };
 
+const realDalTSP = await import(`../src/db/dal.ts?real=${Date.now()}`);
 mock.module("../src/db/dal.ts", () => ({
+  ...realDalTSP,
   getUserByTelegramChatId: async (chatId: number) => {
     if (state.user && state.user.telegram_chat_id === Number(chatId)) return state.user;
     return null;

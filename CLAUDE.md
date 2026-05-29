@@ -115,6 +115,19 @@ cargo tauri android init && cargo tauri android build --release       # SDK+NDK 
 - `.github/workflows/mobile-shell-release.yml` for tagged `mobile-v*.*.*` builds.
 - Apple Developer + Google Play signing key setup.
 
+**12.4 iOS path (Windows-only developer):** the maintainer doesn't own a
+Mac, so the 12.4 iOS prep is "rent MacInCloud for ~30 min to run
+`cargo tauri ios init` once, commit `gen/apple/`, then never touch a Mac
+again." Every subsequent iOS build runs in CI via
+`.github/workflows/mobile-ios-build.yml` (`macos-14`, gated by repo var
+`ENABLE_IOS_BUILD=true`), producing an unsigned `.ipa` that AltStore
+re-signs on Windows with a free Apple ID for sideload to a personal
+iPhone. App Store distribution stays out of scope until the paid Apple
+Developer Program signing path is wired. Full runbook:
+`docs/ios-sideload.md`. The 12.4 Android path is independent — it only
+needs Android Studio (SDK 34 + NDK r26+) installed locally on the
+Windows dev box, no rented host required.
+
 Hub-side `POST /api/auth/finalize-mobile` shipped in Phase 12.1 (PR #105)
 — see `hub/src/api/auth.ts`. A Windows desktop preview of the same crate
 is built per `mobile/tauri/README.md` "Desktop preview build" (Phase 12.3.1).
@@ -460,6 +473,8 @@ When migrating a route:
 The dump script (`hub/scripts/dump-openapi.ts`) loads the OpenAPIHono sub-app in-process — no `Bun.serve`, no port, no DB. It needs placeholder `JWT_SECRET` + `DATABASE_URL` env vars to satisfy module-load-time validation; the npm script sets harmless values.
 
 ## Phase 12: Mobile Tauri Client
+
+**Paused 2026-05-28.** Windows MSI preview + Android debug APK ship and work; iOS is unbuilt (needs Mac); release signing, store listings, and Windows/Android release CI are deferred. Single canonical pause-state doc with install commands, source layout, hub endpoint line numbers, rebuild steps, and resume checklist lives at [docs/phase-12-pause-state.md](docs/phase-12-pause-state.md) — start there if returning to this work.
 
 Wraps the existing `web/` SPA as a native iOS + Android app via Tauri 2.
 Connection path is unchanged: phone → `https://app.remo-code.com` (hub) →

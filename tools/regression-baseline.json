@@ -1,11 +1,11 @@
 {
   "_comment": "Snapshot of expected hub test counts. Updated when intentionally adding/removing tests. CI fails if actual drifts beyond tolerance.",
   "captured_at": "2026-05-28",
-  "captured_from": "bun test (hub/) on feat/obs-b5-ci-gates @ origin/main 35fa2c9",
-  "pass": 715,
-  "skip": 121,
+  "captured_from": "per-file-isolated `bun run check-baseline` (each hub/test file in its own process — order-independent, local==CI). Prior 715/836 predated #157 + the B-series obs tests; bumped to true green. fail_max stays 0.",
+  "pass": 771,
+  "skip": 129,
   "fail": 0,
-  "total": 836,
+  "total": 900,
   "tolerance": {
     "_comment": "Allow modest growth without churn; any fail > 0 always fails CI.",
     "pass_min": 700,

@@ -190,7 +190,10 @@ describe("Telegram outbound bridge", () => {
 
     emitAssistantMessageFinal({ sessionId: "sess_F", userId: "u6", text: "first" });
     emitAssistantMessageFinal({ sessionId: "sess_F", userId: "u6", text: "second" });
-    await settle(20); // > 25ms total
+    // The "first" send blocks 25ms; tick-based settle() can total <25ms on a fast
+    // runner and flake. Wait real wall-clock time well past the block, then drain.
+    await new Promise((r) => setTimeout(r, 60));
+    await settle();
 
     expect(order).toEqual(["first", "second"]);
     expect(state.sends.map((s) => s.text)).toEqual(["first", "second"]);
