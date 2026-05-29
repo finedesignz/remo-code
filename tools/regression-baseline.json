@@ -1,0 +1,15 @@
+{
+  "_comment": "Snapshot of expected hub test counts. Updated when intentionally adding/removing tests. CI fails if actual drifts beyond tolerance.",
+  "captured_at": "2026-05-28",
+  "captured_from": "bun test (hub/) on feat/obs-b5-ci-gates @ origin/main 35fa2c9",
+  "pass": 715,
+  "skip": 121,
+  "fail": 0,
+  "total": 836,
+  "tolerance": {
+    "_comment": "Allow modest growth without churn; any fail > 0 always fails CI.",
+    "pass_min": 700,
+    "skip_max": 150,
+    "fail_max": 0
+  }
+}

@@ -6,7 +6,10 @@
     "dev:hub": "cd hub && bun run dev",
     "dev:web": "cd web && bun run dev",
     "build:web": "cd web && bun run build",
-    "docs:sync": "cd hub && bun run docs:openapi && cd .. && npx --yes widdershins@4.0.1 --search false --language_tabs 'shell:Shell' 'javascript:JavaScript' --summary docs/openapi.json -o docs/api.md"
+    "docs:sync": "cd hub && bun run docs:openapi && cd .. && npx --yes widdershins@4.0.1 --search false --language_tabs 'shell:Shell' 'javascript:JavaScript' --summary docs/openapi.json -o docs/api.md",
+    "smoke": "bun run tools/smoke-https.ts",
+    "check-baseline": "bun run tools/check-baseline.ts",
+    "migration-verify": "bun run tools/migration-verify.ts"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.2",
