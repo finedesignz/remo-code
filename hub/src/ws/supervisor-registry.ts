@@ -2,6 +2,7 @@ import type { ServerWebSocket } from 'bun'
 import type { HubToSupervisor } from './supervisor-protocol'
 import { broadcastToUser } from './registry'
 import { setSupervisorState, touchSupervisor, listSupervisorsForUser } from '../db/supervisor-dal'
+import { wsConnections } from '../observability/metrics'
 
 /**
  * Bug A (2026-05-28) — supervisor's live runner set, pushed every ~10s via
@@ -172,8 +173,10 @@ export function registerSupervisor(args: {
     sessionInventoryAt: null,
     pendingReqs: new Map(),
   }
+  const isReplace = supervisors.has(args.supervisorId)
   supervisors.set(args.supervisorId, entry)
   supervisorsByApiKey.set(args.apiKeyId, args.supervisorId)
+  if (!isReplace) wsConnections.inc({ role: 'supervisor' })
   return entry
 }
 
@@ -195,6 +198,7 @@ export function unregisterSupervisor(supervisorId: string, ws?: ServerWebSocket<
   }
   supervisors.delete(supervisorId)
   supervisorsByApiKey.delete(entry.apiKeyId)
+  wsConnections.dec({ role: 'supervisor' })
   setSupervisorState(supervisorId, 'offline').catch(() => {})
   broadcastToUser(entry.userId, { type: 'supervisor_update', supervisor_id: supervisorId, state: 'offline' })
 }
@@ -371,3 +375,18 @@ export function findSupervisorForSession(sessionId: string): { supervisorId: str
 }
 
 export { listSupervisorsForUser }
+
+/**
+ * B4 (obs): snapshot of every supervisor currently in the in-memory registry.
+ * "Online" = the supervisor's WS is currently registered. Presence in this
+ * map IS the liveness signal; `lastSeenAt = now()` for online entries.
+ * Used only by /healthz/deep.
+ */
+export function listSupervisors(): Array<{ id: string; online: boolean; lastSeenAt: number }> {
+  const now = Date.now()
+  const out: Array<{ id: string; online: boolean; lastSeenAt: number }> = []
+  for (const [id] of supervisors) {
+    out.push({ id, online: true, lastSeenAt: now })
+  }
+  return out
+}

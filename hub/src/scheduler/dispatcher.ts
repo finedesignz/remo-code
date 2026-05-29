@@ -39,11 +39,27 @@ interface RunContext {
 }
 const inFlightByRun = new Map<string, RunContext>()
 
+// B4: keep the queue-depth gauge in sync. Dynamic require avoids a top-of-file
+// dep tangle with the metrics module. Try/catch so a registry hiccup never
+// breaks the scheduler hot path.
+function syncQueueDepthGauge(): void {
+  try {
+    const { scheduledQueueDepth } = require('../observability/metrics')
+    scheduledQueueDepth.set(inFlightByRun.size)
+  } catch {}
+}
+
 export function getRunContext(runId: string): RunContext | null {
   return inFlightByRun.get(runId) ?? null
 }
-export function removeRunContext(runId: string): void { inFlightByRun.delete(runId) }
-export function trackRun(ctx: RunContext): void { inFlightByRun.set(ctx.runId, ctx) }
+export function removeRunContext(runId: string): void {
+  inFlightByRun.delete(runId)
+  syncQueueDepthGauge()
+}
+export function trackRun(ctx: RunContext): void {
+  inFlightByRun.set(ctx.runId, ctx)
+  syncQueueDepthGauge()
+}
 
 async function isOverCostCap(userId: string, timezone: string): Promise<boolean> {
   const rows = await sql<{ cap: string }[]>`
@@ -291,7 +307,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
           type: 'scheduled_run_finished',
           run_id: run.id, task_id: task.id, status: 'failed', error: 'target_offline',
         })
-        inFlightByRun.delete(run.id)
+        inFlightByRun.delete(run.id); syncQueueDepthGauge()
         void onRunFinalized(task, run.id, 'failed', 'target_offline')
         continue
       }
@@ -324,7 +340,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
           status: 'skipped',
           error: reason,
         })
-        inFlightByRun.delete(run.id)
+        inFlightByRun.delete(run.id); syncQueueDepthGauge()
         void onRunFinalized(task, run.id, 'skipped', reason)
         continue
       }
@@ -423,7 +439,7 @@ export async function finalizeRun(
     if (ctx.target.kind === 'session' && ctx.target.sessionId) {
       try { queue.markFinished(ctx.target.sessionId) } catch {}
     }
-    inFlightByRun.delete(runId)
+    inFlightByRun.delete(runId); syncQueueDepthGauge()
   }
 
   broadcastScheduledRun(updated?.user_id ?? ctx?.userId ?? '', {
