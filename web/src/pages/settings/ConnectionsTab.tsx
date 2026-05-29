@@ -230,25 +230,23 @@ function RootsEditor({ token }: { token: string }) {
 /* ─────────────────────────── Revanote link ─────────────────────────── */
 
 function RevanoteLink() {
-  // RevanotePage owns its own full-page surface (subscribe + onBack); link
-  // into it from here rather than embedding so we don't double-wire WS.
+  // The standalone RevanotePage was removed in the Phase 12 restructure and the
+  // `#/revanote` hash now redirects back here, so a button would loop. Revanote
+  // is driven entirely by its inbound webhook + app mappings on the hub; this
+  // card documents that rather than linking to a page that no longer exists.
   return (
     <Card>
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start gap-3">
         <div>
           <h3 className="text-sm font-semibold text-[var(--text-primary)]">
             Revanote
           </h3>
           <p className="text-xs text-[var(--text-muted)] mt-1">
-            Annotation projects + webhook routing.
+            Visual annotations route into the Claude session bound to each page's
+            repo via the Revanote webhook. Rotate the webhook secret and manage app
+            mappings from the hub API — no separate page to open.
           </p>
         </div>
-        <a
-          href="#/revanote"
-          className="px-3 py-1.5 rounded-lg bg-[var(--bg-tertiary)] hover:bg-[var(--bg-tertiary)]/70 text-sm text-[var(--text-primary)] font-medium transition-colors"
-        >
-          Open Revanote
-        </a>
       </div>
     </Card>
   );

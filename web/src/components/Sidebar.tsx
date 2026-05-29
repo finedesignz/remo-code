@@ -102,7 +102,7 @@ export function Sidebar({
           </svg>
         </button>
         <button
-          onClick={() => onNavigate('#/grid')}
+          onClick={() => onNavigate('#/?tab=grid')}
           className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
           title="Grid View"
           aria-label="Grid View"
@@ -115,7 +115,7 @@ export function Sidebar({
           </svg>
         </button>
         <button
-          onClick={() => onNavigate('#/schedules')}
+          onClick={() => onNavigate('#/tasks?tab=schedule')}
           className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
           title="Schedules"
           aria-label="Schedules"
@@ -127,7 +127,7 @@ export function Sidebar({
           </svg>
         </button>
         <button
-          onClick={() => onNavigate('#/error-capture')}
+          onClick={() => onNavigate('#/tasks?tab=activity')}
           className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
           title="Error Capture"
           aria-label="Error Capture"
@@ -239,7 +239,7 @@ export function Sidebar({
               </svg>
             </button>
             <button
-              onClick={() => onNavigate('#/settings?tab=supervisor')}
+              onClick={() => onNavigate('#/settings?tab=connections')}
               className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded transition-colors"
               title="Add connection"
               aria-label="Add connection"
