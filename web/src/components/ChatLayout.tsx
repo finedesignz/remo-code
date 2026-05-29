@@ -198,6 +198,22 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Chat-specific session strip (kept — it's session chrome, not app chrome). */}
         <div className="relative z-40 flex items-center gap-3 px-3 py-2 border-b border-[var(--border-color)]/40 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0">
+          {/* Mobile: open the full session list (online + offline + manage). The
+              SessionDropdown only lists online sessions, so without this trigger
+              offline sessions were unreachable on mobile (no way to open the
+              slide-over sidebar). */}
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(true)}
+            className="md:hidden p-1.5 -ml-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors shrink-0"
+            aria-label="Open session list"
+          >
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+              <line x1="3" y1="5" x2="15" y2="5" />
+              <line x1="3" y1="9" x2="15" y2="9" />
+              <line x1="3" y1="13" x2="15" y2="13" />
+            </svg>
+          </button>
           <div className="md:hidden flex-1 min-w-0">
             <SessionDropdown
               sessions={sessionsHook.sessions}
