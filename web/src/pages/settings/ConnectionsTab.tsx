@@ -13,7 +13,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { hubFetch } from "../../lib/api";
-import { Card, Button, Field, StatusPill, LoadingState } from "../../components/ui";
+import { Card, Button, Field, StatusPill, LoadingState, EmptyState } from "../../components/ui";
 import { SupervisorPage } from "../../components/SupervisorPage";
 import { useSupervisors } from "../../hooks/useSupervisors";
 import { useWebSocketContext } from "../../hooks/useWebSocket";
@@ -125,12 +125,10 @@ function RootsEditor({ token }: { token: string }) {
   if (supervisors.length === 0) {
     return (
       <Card>
-        <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-1">
-          Root repo folder paths
-        </h3>
-        <p className="text-xs text-[var(--text-muted)]">
-          Connect a supervisor first to configure repo roots.
-        </p>
+        <EmptyState
+          title="No supervisor connected"
+          description="Connect a supervisor to configure the repo folders it scans."
+        />
       </Card>
     );
   }
@@ -182,23 +180,15 @@ function RootsEditor({ token }: { token: string }) {
           onChange={(e) => setDraft(e.target.value)}
           rows={Math.max(4, Math.min(10, roots.length + 1))}
           placeholder={"C:/Users/me/GitHub\nD:/code"}
-          className="w-full px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-xs text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-y"
+          className="w-full px-3 py-2 bg-[var(--code-bg)] rounded-lg text-xs text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-y"
           spellCheck={false}
         />
       </Field>
 
-      {roots.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mt-3">
-          {roots.map((r, i) => (
-            <span
-              key={`${r}-${i}`}
-              className="px-2 py-0.5 rounded bg-[var(--bg-tertiary)]/60 text-[11px] text-[var(--text-secondary)] font-mono"
-            >
-              {r}
-            </span>
-          ))}
-        </div>
-      )}
+      <p className="text-xs text-[var(--text-muted)] mt-2">
+        {roots.length} of 16 path{roots.length === 1 ? "" : "s"}
+        {dirty ? " · unsaved changes" : ""}
+      </p>
 
       {error && <p className="text-xs text-red-400 mt-2">{error}</p>}
 
