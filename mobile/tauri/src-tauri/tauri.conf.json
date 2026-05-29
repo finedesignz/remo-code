@@ -10,6 +10,16 @@
     "frontendDist": "../ui/dist"
   },
   "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Remo Code",
+        "width": 1024,
+        "height": 768,
+        "resizable": true,
+        "center": true
+      }
+    ],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline' https://app.remo-code.com; script-src 'self' https://app.remo-code.com; img-src 'self' data: blob: https://app.remo-code.com; connect-src 'self' ipc: http://ipc.localhost https://app.remo-code.com wss://app.remo-code.com; frame-src https://app.remo-code.com"
     }
@@ -18,8 +28,15 @@
     "active": true,
     "targets": ["app", "apk"],
     "icon": [
-      "icons/icon.png"
-    ]
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "allowDowngrades": false
+    }
   },
   "plugins": {
     "deep-link": {
