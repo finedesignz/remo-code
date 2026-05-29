@@ -72,6 +72,24 @@ The user then picks a **default session** from the dropdown. Inbound messages
 route to that session; outbound replies from that session route back to the
 chat.
 
+### Default target falls back to the orchestrator (orchestrator-autolaunch, 2026-05-28)
+
+When `telegram_default_session_id` is unset, inbound dispatch falls back to the
+user's open **orchestrator** session (when the orchestrator is enabled and not
+explicitly disabled). So a freshly-linked chat talks to the root orchestrator by
+default instead of dead-ending on "No default session" — the original
+"telegram didn't work" failure. Mechanics (`hub/src/api/telegram-webhook.ts`
+`dispatchInbound`):
+
+- **Resolution:** `targetSessionId = telegram_default_session_id || resolveOrchestratorTarget(userId)`. `resolveOrchestratorTarget` returns null when the orchestrator is off/explicitly-disabled or no session row exists yet.
+- **Lazy-pin:** on fallback the orchestrator id is written into `telegram_default_session_id` so the OUTBOUND bridge (which matches on the column) forwards the reply too. One reconciliation of "fallback for inbound" + "explicit column for outbound."
+- **Stale-pin self-heal:** if the explicit default points at a now-deleted session (verified via `getSession`), it's dropped and re-resolved to the orchestrator + re-pinned — no permanent `agent_offline` dead-end.
+- **Not-running:** if the orchestrator session exists but its runner isn't live, dispatch returns `agent_offline` → the existing `/doctor` autoheal launches it (`launchSessionForUser` is orchestrator-aware: for `is_orchestrator` rows it delegates to `launchOrchestrator`, which mints the key + system prompt — NOT a plain `session.start`) and replays the buffered message.
+- **Prewarm:** `prewarmAfterLink` no longer pins a project session when the orchestrator is enabled — it leaves the default unset so the orchestrator fallback wins ("the first agent you talk to is the root orchestrator").
+- **Disabled:** orchestrator off + no explicit default → the original "No default session" reply.
+
+See the "Orchestrator Session" section in `CLAUDE.md` for the auto-launch + key-mint security model.
+
 ## Command reference
 
 All commands work after the user has linked. Unlinked chats can ONLY send

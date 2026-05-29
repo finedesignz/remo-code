@@ -8,11 +8,16 @@ export type OrchestratorPrefs = {
   orchestrator_enabled: boolean;
   orchestrator_name: string;
   orchestrator_custom_instructions: string | null;
+  // orchestrator-autolaunch sentinel — set true ONLY by the interactive
+  // cookie+step-up `PUT /api/orchestrator` disable path. The machine-triggered
+  // auto-launch checks this so it never re-enables a user who opted out.
+  orchestrator_disabled_explicitly: boolean;
 };
 
 export async function getOrchestratorState(userId: string): Promise<OrchestratorPrefs> {
   const rows = await sql<OrchestratorPrefs[]>`
-    SELECT orchestrator_enabled, orchestrator_name, orchestrator_custom_instructions
+    SELECT orchestrator_enabled, orchestrator_name, orchestrator_custom_instructions,
+           orchestrator_disabled_explicitly
     FROM users WHERE id = ${userId}
   `;
   const row = rows[0];
@@ -20,6 +25,7 @@ export async function getOrchestratorState(userId: string): Promise<Orchestrator
     orchestrator_enabled: !!row?.orchestrator_enabled,
     orchestrator_name: row?.orchestrator_name || 'Orchestrator',
     orchestrator_custom_instructions: row?.orchestrator_custom_instructions ?? null,
+    orchestrator_disabled_explicitly: !!row?.orchestrator_disabled_explicitly,
   };
 }
 
@@ -31,9 +37,17 @@ export async function updateOrchestratorState(
   const enabled = patch.orchestrator_enabled;
   const name = patch.orchestrator_name;
   const instructions = patch.orchestrator_custom_instructions;
+  // Sentinel follows `enabled` when it is supplied: disabling sets it, enabling
+  // clears it. When `enabled` is not part of the patch the sentinel is left as
+  // is. The caller (the interactive PUT) is the only thing that flips enabled,
+  // so the sentinel is only ever written by an interactive request.
   await sql`
     UPDATE users SET
       orchestrator_enabled = COALESCE(${enabled ?? null}::boolean, orchestrator_enabled),
+      orchestrator_disabled_explicitly = CASE
+        WHEN ${enabled === undefined}::boolean THEN orchestrator_disabled_explicitly
+        ELSE ${enabled === false}::boolean
+      END,
       orchestrator_name = COALESCE(${name ?? null}::text, orchestrator_name),
       orchestrator_custom_instructions = CASE
         WHEN ${instructions === undefined}::boolean THEN orchestrator_custom_instructions

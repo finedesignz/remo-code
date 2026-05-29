@@ -65,7 +65,15 @@ mock.module("../src/db/dal.ts", () => ({
   setTelegramDefaultSession: async (userId: string, sid: string | null) => {
     if (state.user && state.user.id === userId) state.user.telegram_default_session_id = sid;
   },
-  getSession: async (_sessionId: string, _userId: string) => null,
+  getSession: async (sessionId: string, _userId: string) => {
+    // orchestrator-autolaunch self-heal: dispatchInbound verifies the pinned
+    // default still exists. Return a row when it matches the user's pin so the
+    // dispatch proceeds against it (instead of falling back to orchestrator).
+    if (state.user?.telegram_default_session_id === sessionId) {
+      return { id: sessionId, name: "test-repo", project_dir: "C:/repos/test-repo", hostname: "devbox", is_orchestrator: false };
+    }
+    return null;
+  },
   logTelegramInbound: async (input: any) => {
     const uid = Number(input.update_id);
     if (state.dedupeOnUpdateId.has(uid)) return { inserted: false };

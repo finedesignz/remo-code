@@ -17,21 +17,11 @@ import {
   getOrchestratorState,
   updateOrchestratorState,
   findOpenOrchestratorSession,
-  createOrchestratorSession,
-  mintOrchestratorApiKey,
 } from '../db/orchestrator-dal';
-import { listSupervisorsForUser } from '../db/supervisor-dal';
-import { isSupervisorOnline, sendToSupervisor, listOnlineSupervisorIdsForUser } from '../ws/supervisor-registry';
-import { sql } from '../db/postgres';
-import { generateToken } from '../utils/token';
-import { hashToken } from '../lib/crypto';
-import { buildOrchestratorPrompt } from '../orchestrator/seed-prompt';
+import { sendToSupervisor, listOnlineSupervisorIdsForUser } from '../ws/supervisor-registry';
+import { launchOrchestrator } from '../orchestrator/auto-launch';
 
 export const orchestrator = new Hono();
-
-function publicHubUrl(): string {
-  return (process.env.REMO_PUBLIC_URL || 'https://app.remo-code.com').replace(/\/+$/, '');
-}
 
 type SessionState = 'disabled' | 'enabled_idle' | 'running';
 
@@ -82,91 +72,40 @@ orchestrator.post('/start', async (c) => {
     return c.json({ error: 'orchestrator_disabled' }, 409);
   }
 
-  // Already running? Surface it instead of re-spawning.
-  const existing = await findOpenOrchestratorSession(userId);
-  if (existing && (existing.status === 'online' || existing.status === 'thinking')) {
-    return c.json({ session_id: existing.id, already_running: true }, 200);
-  }
-
-  // Pick a supervisor: preferred (when online) → first online.
-  const preferredRow = await sql<{ preferred_supervisor_id: string | null }[]>`
-    SELECT preferred_supervisor_id FROM users WHERE id = ${userId}
-  `;
-  const preferredId = preferredRow[0]?.preferred_supervisor_id ?? null;
-
-  const all = await listSupervisorsForUser(userId);
-  const online = all.filter((s: any) => isSupervisorOnline(s.id));
-  if (online.length === 0) {
-    return c.json({ error: 'no_online_supervisor' }, 409);
-  }
-  const target = (preferredId && online.find((s: any) => s.id === preferredId)) || online[0];
-
-  const roots: string[] = Array.isArray((target as any).roots) ? (target as any).roots : [];
-  if (roots.length === 0) {
-    return c.json({ error: 'supervisor_has_no_roots', detail: 'configure at least one root in the supervisor tray app' }, 409);
-  }
-  const cwd = roots[0];
-  const hostnameStr = String((target as any).hostname || '');
-
-  // Either reuse existing offline row or create one. The partial unique index
-  // guarantees at most one open orchestrator session per user.
-  const rawSessionToken = generateToken('remo_');
-  const sessionTokenHash = await hashToken(rawSessionToken);
-  let sessionRow = existing;
-  if (!sessionRow) {
-    sessionRow = await createOrchestratorSession({
-      userId,
-      name: prefs.orchestrator_name,
-      projectDir: cwd,
-      tokenHash: sessionTokenHash,
-      hostname: hostnameStr,
-    });
-  }
-
-  // Mint a fresh full-power hub API key (purpose='orchestrator'). Used by
-  // Claude inside the orchestrator session to reach the hub REST API.
-  const rawHubApiKey = generateToken('remokey_');
-  const hubApiKeyHash = await hashToken(rawHubApiKey);
-  await mintOrchestratorApiKey(userId, hubApiKeyHash);
-
-  // Build the system prompt with the user's custom append.
-  const systemPrompt = buildOrchestratorPrompt({
-    name: prefs.orchestrator_name,
-    hubUrl: publicHubUrl(),
-    customInstructions: prefs.orchestrator_custom_instructions,
+  // Delegate to the shared primitive — this is the SAME path the machine-
+  // triggered auto-launch uses, so both go through `reserveSessionSlot` +
+  // `createRun` (fixing the pre-existing concurrency-gate / ledger bypass).
+  const res = await launchOrchestrator({
+    userId,
+    requireEnabled: true,
+    skipIfRunning: true,
   });
 
-  // Dispatch session.start with the orchestrator extension. The supervisor
-  // recognizes the field and routes env + cwd + system-prompt accordingly.
-  const runId = crypto.randomUUID();
-  try {
-    sendToSupervisor(target.id, {
-      type: 'session.start',
-      req_id: runId,
-      run_id: runId,
-      repo_path: cwd,
-      pull: false,
-      api_key: '__use_local__',
-      hub_url: '__same__',
-      orchestrator: {
-        session_id: sessionRow.id,
-        name: prefs.orchestrator_name,
-        cwd,
-        system_prompt: systemPrompt,
-        hub_api_key: rawHubApiKey,
-        hub_url: publicHubUrl(),
-      },
-    } as any);
-  } catch (err: any) {
-    return c.json({ error: 'dispatch_failed', detail: err?.message ?? 'unknown' }, 503);
+  if (res.ok) {
+    return c.json({
+      session_id: res.sessionId,
+      run_id: res.runId,
+      supervisor_id: res.supervisorId,
+      cwd: res.cwd,
+    }, 202);
   }
 
-  return c.json({
-    session_id: sessionRow.id,
-    run_id: runId,
-    supervisor_id: target.id,
-    cwd,
-  }, 202);
+  switch (res.reason) {
+    case 'disabled':
+      return c.json({ error: 'orchestrator_disabled' }, 409);
+    case 'already_running':
+      return c.json({ session_id: res.sessionId, already_running: true }, 200);
+    case 'no_online_supervisor':
+      return c.json({ error: 'no_online_supervisor' }, 409);
+    case 'supervisor_has_no_roots':
+      return c.json({ error: 'supervisor_has_no_roots', detail: 'configure at least one root in the supervisor tray app' }, 409);
+    case 'at_capacity':
+      return c.json({ error: 'at_capacity', running: res.running, cap: res.cap }, 429);
+    case 'send_failed':
+      return c.json({ error: 'dispatch_failed', detail: res.error }, 503);
+    default:
+      return c.json({ error: 'internal_error', detail: res.error }, 500);
+  }
 });
 
 orchestrator.post('/stop', async (c) => {

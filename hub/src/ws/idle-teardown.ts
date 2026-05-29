@@ -32,6 +32,25 @@ const subscriberCounts = new Map<string, number>()
 const pendingTeardowns = new Map<string, PendingTeardown>()
 
 /**
+ * orchestrator-autolaunch: session ids known to be the user's orchestrator.
+ * The orchestrator is the always-available Telegram brain and is NOT a WS
+ * subscriber — exempting it from idle-no-subscribers teardown prevents an
+ * auto-launch ↔ teardown respawn churn. Populated by `launchOrchestrator`
+ * (and orphan-resume relaunch) when an orchestrator session is launched, and
+ * checked synchronously here so the hot teardown path stays free of DB I/O.
+ */
+const orchestratorSessionIds = new Set<string>()
+export function markOrchestratorSession(sessionId: string) {
+  orchestratorSessionIds.add(sessionId)
+}
+export function unmarkOrchestratorSession(sessionId: string) {
+  orchestratorSessionIds.delete(sessionId)
+}
+export function isOrchestratorSession(sessionId: string): boolean {
+  return orchestratorSessionIds.has(sessionId)
+}
+
+/**
  * Read-only accessors for tests + monitoring.
  */
 export function getSubscriberCount(sessionId: string): number {
@@ -94,6 +113,14 @@ export function noteSubscriberCount(sessionId: string, count: number) {
  * Best-effort: closes/replaced sockets are silently ignored.
  */
 function teardownSession(sessionId: string) {
+  // orchestrator-autolaunch: the orchestrator stays live while the supervisor
+  // is online (always-available Telegram brain, NOT a WS subscriber). Exempt it
+  // from idle-no-subscribers teardown so auto-launch + idle-teardown don't form
+  // a respawn churn loop. Checked synchronously against the in-memory set.
+  if (isOrchestratorSession(sessionId)) {
+    console.log(`[idle-teardown] skip orchestrator session=${sessionId} (exempt)`)
+    return
+  }
   const channel = getChannel(sessionId)
   if (!channel) {
     // No live agent channel for this session; nothing to stop. The next

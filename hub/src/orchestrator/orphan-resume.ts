@@ -67,6 +67,7 @@ interface OrphanRow {
   branch: string | null
   restart_count: number | null
   started_at: Date
+  is_orchestrator: boolean | null
 }
 
 /**
@@ -117,15 +118,20 @@ async function resumeOrphansInner(args: {
   `
   for (const r of staleSweep) result.finalized_stale.push(r.id)
 
-  // 2. Fresh orphans — open rows < 24h old.
+  // 2. Fresh orphans — open rows < 24h old. LEFT JOIN sessions so we can detect
+  //    orchestrator runs (they need the orchestrator-aware relaunch payload —
+  //    key + system prompt — not a plain session.start).
   const orphans: OrphanRow[] = await sql`
-    SELECT id, session_id, supervisor_id, repo_path, branch, restart_count, started_at
-    FROM session_runs
-    WHERE supervisor_id = ${supervisorId}
-      AND user_id = ${userId}
-      AND ended_at IS NULL
-      AND started_at > now() - interval '24 hours'
-    ORDER BY started_at ASC
+    SELECT r.id, r.session_id, r.supervisor_id, r.repo_path, r.branch,
+           r.restart_count, r.started_at,
+           s.is_orchestrator AS is_orchestrator
+    FROM session_runs r
+    LEFT JOIN sessions s ON s.id = r.session_id
+    WHERE r.supervisor_id = ${supervisorId}
+      AND r.user_id = ${userId}
+      AND r.ended_at IS NULL
+      AND r.started_at > now() - interval '24 hours'
+    ORDER BY r.started_at ASC
   `
 
   if (orphans.length === 0) return result
@@ -158,6 +164,34 @@ async function resumeOrphansInner(args: {
     // (c) End the orphan FIRST so it doesn't count against the cap when we
     //     reserve a slot for its replacement.
     await sql`UPDATE session_runs SET ended_at = now(), exit_reason = 'reboot' WHERE id = ${o.id}`
+
+    // (c.1) Orchestrator runs need the orchestrator-aware relaunch (mint key +
+    //       system prompt + the `orchestrator` session.start extension). A plain
+    //       session.start would spawn a non-orchestrator Claude in the parent
+    //       dir with no hub key. Delegate to the shared `launchOrchestrator`
+    //       primitive, which does its own reserveSessionSlot + createRun.
+    if (o.is_orchestrator) {
+      try {
+        const { launchOrchestrator } = await import('./auto-launch')
+        const res = await launchOrchestrator({
+          userId,
+          preferSupervisorId: supervisorId,
+          requireEnabled: true, // honour the explicit-disable sentinel + enabled flag
+          skipIfRunning: false,
+        })
+        if (!res.ok && res.reason === 'disabled') {
+          result.skipped_user_stopped.push(o.session_id ?? o.id)
+          continue
+        }
+        if (res.ok) result.resumed.push(res.runId)
+        else if (res.reason === 'at_capacity') result.skipped_capacity.push(o.id)
+        else result.skipped_no_supervisor.push(o.id)
+      } catch (err: any) {
+        console.error('[orphan-resume] orchestrator relaunch failed run=' + o.id, err?.message)
+        result.skipped_no_supervisor.push(o.id)
+      }
+      continue
+    }
 
     // (d) Reserve a slot.
     const reservation = await reserveSessionSlot(userId, supervisorId)

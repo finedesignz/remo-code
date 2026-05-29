@@ -43,6 +43,7 @@ interface SessionRow {
   id: string
   project_dir: string | null
   hostname: string | null
+  is_orchestrator: boolean | null
 }
 
 /**
@@ -84,7 +85,7 @@ export async function launchSessionForUser(args: {
 }): Promise<LaunchResult> {
   try {
     const rows = await sql<SessionRow[]>`
-      SELECT id, project_dir, hostname
+      SELECT id, project_dir, hostname, is_orchestrator
         FROM sessions
        WHERE id = ${args.sessionId}
          AND user_id = ${args.userId}
@@ -93,6 +94,34 @@ export async function launchSessionForUser(args: {
     `
     const session = rows[0]
     if (!session) return { ok: false, reason: 'session_not_found' }
+
+    // Orchestrator sessions need the orchestrator-aware launch (mint key +
+    // system prompt + the `orchestrator` session.start extension). A plain
+    // session.start would spawn a non-orchestrator Claude with no hub key.
+    if (session.is_orchestrator) {
+      const { launchOrchestrator } = await import('../orchestrator/auto-launch.ts')
+      const res = await launchOrchestrator({ userId: args.userId, requireEnabled: true, skipIfRunning: true })
+      if (res.ok) {
+        return { ok: true, runId: res.runId, supervisorId: res.supervisorId, hostname: '', repoPath: res.cwd }
+      }
+      switch (res.reason) {
+        case 'already_running':
+          // Treat as success — the doctor's deferred check confirms liveness.
+          return { ok: true, runId: '', supervisorId: '', hostname: '', repoPath: '' }
+        case 'at_capacity':
+          return { ok: false, reason: 'at_capacity', running: res.running, cap: res.cap }
+        case 'no_online_supervisor':
+        case 'supervisor_has_no_roots':
+          return { ok: false, reason: 'no_online_supervisor' }
+        case 'send_failed':
+          return { ok: false, reason: 'send_failed', error: res.error }
+        case 'disabled':
+          return { ok: false, reason: 'session_not_found' }
+        default:
+          return { ok: false, reason: 'internal_error', error: res.error }
+      }
+    }
+
     if (!session.project_dir) return { ok: false, reason: 'no_project_dir' }
 
     const pick = await pickSupervisorForSession(args.userId, session)

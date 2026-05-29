@@ -55,16 +55,18 @@ maybe('orchestrator e2e', () => {
     try { await sql.end({ timeout: 1 }) } catch {}
   })
 
-  test('prefs default to disabled + "Orchestrator"', async () => {
+  test('prefs default to enabled + "Orchestrator" (orchestrator-autolaunch on-by-default)', async () => {
     const s = await dal.getOrchestratorState(userId)
-    expect(s.orchestrator_enabled).toBe(false)
+    expect(s.orchestrator_enabled).toBe(true) // default flipped to true
+    expect(s.orchestrator_disabled_explicitly).toBe(false)
     expect(s.orchestrator_name).toBe('Orchestrator')
     expect(s.orchestrator_custom_instructions).toBeNull()
   })
 
-  test('updateOrchestratorState only touches supplied keys', async () => {
+  test('updateOrchestratorState only touches supplied keys + manages the sentinel', async () => {
     const a = await dal.updateOrchestratorState(userId, { orchestrator_enabled: true })
     expect(a.orchestrator_enabled).toBe(true)
+    expect(a.orchestrator_disabled_explicitly).toBe(false)
     expect(a.orchestrator_name).toBe('Orchestrator')
 
     const b = await dal.updateOrchestratorState(userId, { orchestrator_name: 'Captain' })
@@ -73,6 +75,15 @@ maybe('orchestrator e2e', () => {
 
     const c = await dal.updateOrchestratorState(userId, { orchestrator_custom_instructions: 'be terse' })
     expect(c.orchestrator_custom_instructions).toBe('be terse')
+
+    // Disabling sets the explicit-disable sentinel.
+    const d = await dal.updateOrchestratorState(userId, { orchestrator_enabled: false })
+    expect(d.orchestrator_enabled).toBe(false)
+    expect(d.orchestrator_disabled_explicitly).toBe(true)
+
+    // Re-enabling clears it.
+    const e = await dal.updateOrchestratorState(userId, { orchestrator_enabled: true })
+    expect(e.orchestrator_disabled_explicitly).toBe(false)
 
     // Reset to disabled for the next test block.
     await dal.updateOrchestratorState(userId, { orchestrator_enabled: false })
