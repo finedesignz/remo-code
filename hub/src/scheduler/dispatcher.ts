@@ -23,6 +23,7 @@ import * as queue from './session-queue.ts'
 import { broadcastScheduledRun, broadcastToUser } from '../ws/registry.ts'
 import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
+import { log } from '../observability/logger'
 
 const MAX_CHAIN_DEPTH = 5
 
@@ -119,6 +120,10 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
   const threshold = await checkUserThreshold(userId)
   if (!threshold.allowed) {
     const errMsg = `quota_threshold_reached:${threshold.reason}:${threshold.utilization_pct}>=${threshold.threshold_pct}`
+    log.warn('scheduler.dispatcher.skipped_quota', {
+      task_id: task.id, user_id: userId,
+      reason: threshold.reason, utilization_pct: threshold.utilization_pct, threshold_pct: threshold.threshold_pct,
+    })
     const run = await insertRunV2({
       task_id: task.id,
       user_id: userId,
@@ -139,6 +144,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
   }
 
   if (await isOverCostCap(userId, task.timezone)) {
+    log.warn('scheduler.dispatcher.cost_cap_hit', { task_id: task.id, user_id: userId })
     const run = await insertRunV2({
       task_id: task.id,
       user_id: userId,
@@ -194,9 +200,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
     try {
       const { sendTriage } = await import('./senders/triage.ts')
       void sendTriage(task, ctx, (task.payload ?? {}) as any).catch((err: any) => {
-        console.error(
-          `[scheduler.dispatcher] triage sender failed run=${run.id}: ${err?.message}`,
-        )
+        log.error('scheduler.dispatcher.triage_sender_failed', { run_id: run.id, task_id: task.id, error: err?.message })
         void finalizeRun(run.id, 'failed', err?.message || 'triage_threw')
       })
     } catch (err: any) {
@@ -238,7 +242,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       const { register: aggRegister } = await import('./post-run/aggregator.ts')
       aggRegister(parentFireId!, task.id, userId, targets.length)
     } catch (err: any) {
-      console.error(`[scheduler.dispatcher] aggregator register failed: ${err?.message}`)
+      log.error('scheduler.dispatcher.aggregator_register_failed', { task_id: task.id, error: err?.message })
     }
   }
 
@@ -339,9 +343,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
     }
 
     void routeToSender(task, ctx).catch((err) => {
-      console.error(
-        `[scheduler.dispatcher] sender failed task=${task.id} run=${run.id}: ${err?.message ?? err}`,
-      )
+      log.error('scheduler.dispatcher.sender_failed', { task_id: task.id, run_id: run.id, error: err?.message ?? String(err) })
       void finalizeRun(run.id, 'failed', err?.message || 'sender_threw')
     })
   }
@@ -478,9 +480,7 @@ async function onRunFinalized(
       chainDepth: extra.chainDepth,
     })
   } catch (err: any) {
-    console.error(
-      `[scheduler.dispatcher] post-run dispatch failed task=${task.id} run=${runId}: ${err?.message}`,
-    )
+    log.error('scheduler.dispatcher.post_run_failed', { task_id: task.id, run_id: runId, error: err?.message })
   }
 }
 
@@ -512,9 +512,7 @@ export function init(): void {
       return
     }
     void routeToSender(task, ctx).catch((err) =>
-      console.error(
-        `[scheduler.dispatcher] promoted send failed run=${runId} session=${sessionId}: ${err?.message}`,
-      ),
+      log.error('scheduler.dispatcher.promoted_send_failed', { run_id: runId, session_id: sessionId, error: err?.message }),
     )
   })
 }

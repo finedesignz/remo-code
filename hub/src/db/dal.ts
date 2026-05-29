@@ -1,5 +1,6 @@
 import { sql } from "./postgres.ts";
 import { buildRepoKey, type GitOriginGithub } from "../lib/repo-key.ts";
+import { log } from "../observability/logger.ts";
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
@@ -1139,7 +1140,7 @@ export async function recordCoolifyWebhookAttempt(input: CoolifyAttemptInput): P
          )
     `;
   } catch (err: any) {
-    console.warn('[coolify-webhook] attempts trim failed:', err?.message);
+    log.warn('coolify_webhook.attempts_trim_failed', { error: err?.message });
   }
 }
 
@@ -1730,7 +1731,7 @@ export async function logTelegramInbound(input: TelegramInboundLogInput): Promis
     `;
     inserted = rows.length > 0;
   } catch (err: any) {
-    console.warn("[telegram] inbound log insert failed:", err?.message);
+    log.warn("telegram.inbound_log_insert_failed", { error: err?.message });
     return { inserted: false };
   }
   if (!input.user_id) return { inserted };
@@ -1746,7 +1747,7 @@ export async function logTelegramInbound(input: TelegramInboundLogInput): Promis
          )
     `;
   } catch (err: any) {
-    console.warn("[telegram] inbound log trim failed:", err?.message);
+    log.warn("telegram.inbound_log_trim_failed", { error: err?.message });
   }
   return { inserted };
 }

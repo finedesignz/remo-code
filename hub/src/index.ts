@@ -64,12 +64,19 @@ import {
 } from './ws/agent'
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
+import { log as obsLog } from './observability/logger'
+import { withRequestId } from './observability/middleware'
 
 const app = new Hono()
 
+// Observability: mint request_id + open ALS frame. Mounted FIRST so even the
+// security-headers middleware and CORS responses inherit the request_id and
+// every downstream log line carries it.
+app.use('*', withRequestId())
+
 // Global error handler — never leak internals
 app.onError((err, c) => {
-  console.error('[error]', err.message)
+  obsLog.error('hono.onError', { error: err.message, path: c.req.path, method: c.req.method })
   return c.json({ error: 'internal error' }, 500)
 })
 

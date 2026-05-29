@@ -10,6 +10,7 @@
  * In-memory only — best-effort across hub restarts (documented).
  */
 import { updateErrorDispatchStatus } from '../db/error-capture-dal.ts'
+import { log } from '../observability/logger'
 
 interface Pending { errorId: string; expiresAt: number }
 
@@ -35,14 +36,14 @@ export async function drainForSession(sessionId: string): Promise<void> {
       try {
         await updateErrorDispatchStatus(p.errorId, 'skipped', 'target_offline_expired')
       } catch (err: any) {
-        console.error(`[error-capture.grace] expire mark failed error=${p.errorId}: ${err?.message ?? err}`)
+        log.error('error_capture.grace.expire_mark_failed', { error_id: p.errorId, error: err?.message ?? String(err) })
       }
       continue
     }
     try {
       await dispatchPendingError(p.errorId)
     } catch (err: any) {
-      console.error(`[error-capture.grace] replay failed error=${p.errorId}: ${err?.message ?? err}`)
+      log.error('error_capture.grace.replay_failed', { error_id: p.errorId, error: err?.message ?? String(err) })
     }
   }
 }
