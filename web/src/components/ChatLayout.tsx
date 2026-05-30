@@ -114,11 +114,15 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     })
   }, [subscribe, sessionsHook.updateSessionStatus, sessionsHook.setSessions])
 
-  // Auto-select first connected session ONLY on initial load (when nothing is selected).
+  // Auto-select the default session ONLY on initial load (when nothing is selected).
+  // Default resolution (R-PROFILE-02): prefer the user's orchestrator session,
+  // else the first connected session.
   useEffect(() => {
     if (activeSessionId) return
     const onl = connectedSessions(sessionsHook.sessions)
-    if (onl.length > 0) setActiveSessionId(onl[0].id)
+    if (onl.length === 0) return
+    const orchestrator = onl.find(s => s.is_orchestrator)
+    setActiveSessionId((orchestrator ?? onl[0]).id)
   }, [sessionsHook.sessions, activeSessionId])
 
   // Auto-nudge on session click (matches Layout behavior).
