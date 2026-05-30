@@ -20,6 +20,12 @@ export function useProfile(token: string | null) {
 
   const fetchProfile = useCallback(async () => {
     if (!token) { setLoading(false); return }
+    // Reset to loading on every (re)fetch — critically when `token` transitions
+    // null → set on sign-in. Without this the flag stays at the stale `false`
+    // left by the no-token branch, so App's dead-credential effect sees
+    // `!profileLoading && !profile && token` for one render and force-signs-out
+    // the user the instant they log in (auto-logout race).
+    setLoading(true)
     try {
       const p = await hubFetch<Profile>(token, '/api/profile')
       setProfile(p)

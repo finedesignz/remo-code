@@ -135,8 +135,11 @@ app.use('/api/*', cors({
   credentials: true,
 }))
 
-// Health check
+// Health check. Both `/health` and `/healthz` are liveness aliases (the Coolify
+// probe + tooling hit `/healthz`); `/healthz/deep` (introspectApi below) is the
+// bearer-gated readiness endpoint, NOT a substitute for this cheap liveness ping.
 app.get('/health', (c) => c.json({ ok: true }))
+app.get('/healthz', (c) => c.json({ ok: true }))
 
 // B4 (obs): /healthz/deep + /metrics. Bearer-gated via HUB_INTROSPECT_TOKEN.
 // Mounted at root — bypasses /api/* auth, CSRF, license-gate, rate-limit

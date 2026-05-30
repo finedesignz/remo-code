@@ -30,9 +30,17 @@ export function Login({ onLegacyAuth }: Props) {
       await requestMagicLink(email)
       // Always show the success state regardless of API response — enumeration prevention.
       setSent(true)
-    } catch {
-      // Network-level failure — still show success (don't leak signal).
-      setSent(true)
+    } catch (err) {
+      // Magic-link globally disabled (Titanium bypass) — route to password
+      // sign-in instead of faking "check your inbox" for an email that the
+      // hub will never send. This is a config state, not a per-email signal.
+      if (err instanceof Error && err.message === 'magic_link_disabled') {
+        setMode('password')
+        setError('Magic-link sign-in is unavailable right now — please sign in with your password.')
+      } else {
+        // Network-level failure — still show success (don't leak signal).
+        setSent(true)
+      }
     } finally {
       setLoading(false)
     }

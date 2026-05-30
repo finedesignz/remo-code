@@ -27,12 +27,22 @@ export interface AuthUser {
  * regardless of outcome.
  */
 export async function requestMagicLink(email: string): Promise<void> {
-  await fetch(`${HUB_URL}/api/auth/login/request-link`, {
+  const res = await fetch(`${HUB_URL}/api/auth/login/request-link`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email }),
     credentials: 'include',
-  }).catch(() => {})
+  }).catch(() => null)
+  // Magic-link is globally disabled when the hub runs Titanium-bypassed
+  // (503 `{ error: "titanium_disabled" }`). That is a deployment-wide config
+  // state, NOT a per-email signal — surfacing it leaks no enumeration info, and
+  // silently rendering "check your inbox" would strand the user waiting for an
+  // email that will never send. Signal the caller to fall back to password
+  // sign-in. Every other outcome stays silent (enumeration safety).
+  if (res && res.status === 503) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null
+    if (body?.error === 'titanium_disabled') throw new Error('magic_link_disabled')
+  }
 }
 
 /**
