@@ -100,6 +100,28 @@ only; **it re-runs in full every hub boot**, so data backfills MUST be one-shot 
 (opaque cookie sessions), `sessions`, `messages`, `api_keys`. All queries scoped by `user_id`.
 Subsystem tables are documented in their respective `docs/*.md`.
 
+## Settings UI (web)
+
+`web/src/pages/SettingsPage.tsx` mounts exactly four tabs (`web/src/pages/settings/`):
+**Connections · Credentials · Usage · Profile**. The old **Prompts** and **Orchestrator**
+tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect to Connections.
+
+- **Connections** — single responsive repo table; the orchestrator is a pinned special top
+  "folder" row (enable/disable/start/stop in-row), not its own tab. Root-folder paths are no
+  longer edited here — root setup lives in the supervisor first-run wizard (hub URL + API key
+  + ≥1 root).
+- **Usage** — single "Claude Usage and Cost Controls" card (thresholds + daily cost cap merged);
+  token counts under the `$` figures; autosave.
+- **Profile** — display name + timezone (autosave); no Telegram card (the hub `/api/telegram/*`
+  bridge still runs — see telegram-bridge.md). Default session falls back to the orchestrator
+  when none is set.
+- **Accent = blue** (orange is CTA-only; never indigo — enforced by `web/test/no-indigo.test.ts`).
+  Rationale + tokens live in `~/.claude/design-preferences.md`; do not restate here.
+- **Per-session auto-nudge:** nullable `sessions.auto_nudge` overrides the user global
+  (`users.auto_nudge_idle_sessions`); effective = `session.auto_nudge ?? globalDefault`.
+  `PATCH /api/sessions/:id/auto-nudge`; per-row toggle in the sidebar; nudge dispatch is
+  client-side in `ChatLayout`.
+
 ## WebSocket Protocol
 
 `/ws/agent` (supervisor) and `/ws/client` (browser). All messages Zod-validated in
@@ -148,7 +170,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 |---|---|---|
 | Scheduled tasks | [scheduled-tasks.md](docs/scheduled-tasks.md) | Hub cron scheduler (`hub/src/scheduler/`); fan-out, cost-cap, post-run actions, Phase-11 workflows. Contract test: `hub/test/scheduler.test.ts`. |
 | Error capture | [error-capture.md](docs/error-capture.md) | Sentry-style intake (`hub/src/error-capture/`) → dispatch into repo-bound session; SDK auto-install for 4 stacks. |
-| Grid view | [grid-view.md](docs/grid-view.md) | Multichat grid `#/grid` (up to 12 sessions); `ChatSurface` densities, `@tanstack/react-virtual`. |
+| Grid view | [grid-view.md](docs/grid-view.md) | Multichat grid `#/grid` (up to 12 sessions); `ChatSurface` densities, `@tanstack/react-virtual`. Virtual **Default tab** (`__default__`) auto-shows all active sessions; sessions move between user tabs; active tab+cell persist in `user_grid_state` (`GET/PATCH /api/chat-tabs/grid-state`). |
 | Chat UI architecture | [chat-ui-architecture.md](docs/chat-ui-architecture.md) | Reusable `ChatSurface` spec: component tree, hooks, the transport-adapter seam (portable core vs remo-code WS), attachments/mic/streaming/permissions/slash, theming. Canonical chat-UI pattern for all apps. |
 | Codex + rootless | [codex-and-rootless.md](docs/codex-and-rootless.md) | Phase 05 — Codex CLI runner, rootless ambient sessions, instructions sync. |
 | Coolify self-heal | [coolify-webhook-migration.md](docs/coolify-webhook-migration.md) | Phase 06 — Coolify webhook → triage run → optional `github_issue`. |

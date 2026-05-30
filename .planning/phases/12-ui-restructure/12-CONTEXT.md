@@ -1,5 +1,12 @@
 # Phase 12 — UI Restructure + DRY Pass
 
+> **⚠️ SUPERSEDED (2026-05-30, milestone v-settings-overhaul).** The Settings structure
+> below is historical. The **Orchestrator** and **Prompts** tabs have since been **removed**
+> (orchestrator is now a pinned top row in the Connections table; Prompts handled locally).
+> Current Settings tabs = **Connections · Credentials · Usage · Profile**, app accent =
+> **blue** (not indigo). For the authoritative Settings/Connections/Grid structure, see
+> `.planning/phases/settings-connections-overhaul/PLAN.md` + `.planning/codebase/STRUCTURE.md`.
+
 **Branch:** `feat/ui-restructure-and-dry-pass` (worktree: `C:/Users/artic/GitHub/remo-code-ui-restructure`, off `origin/main` @ `5d4c9a9`)
 **Date:** 2026-05-28
 **Inputs:** `.planning/ui-restructure/AUDIT-UX.md`, `AUDIT-FRONTEND.md`, `AUDIT-BACKEND.md`

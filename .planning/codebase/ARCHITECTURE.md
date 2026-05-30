@@ -12,8 +12,9 @@
 │  3 top-level routes (Phase 12):                                          │
 │    #/         Home     → Tabs: List | Grid                               │
 │    #/tasks    Tasks    → Tabs: Upcoming | Activity | Schedule            │
-│    #/settings Settings → Tabs: Connections | Credentials | Prompts |     │
-│                                  Usage | Profile                          │
+│    #/settings Settings → Tabs: Connections | Credentials | Usage | Profile│
+│                                  (Prompts + Orchestrator removed:         │
+│                                   milestone v-settings-overhaul)          │
 │                                                                          │
 │  Mobile:  PWA + Capacitor wrapper (mobile/), MobileAccordion surface     │
 └────────────────────┬──────────────────────────────┬──────────────────────┘
