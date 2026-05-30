@@ -5,7 +5,7 @@
 // the read is purely local-file + an in-process mutex, so a slow cadence keeps
 // the UI tab quiet.
 //
-// Design follows the Roots panel: bg-secondary/60 cards, rounded-xl, indigo
+// Design follows the Roots panel: bg-secondary/60 cards, rounded-xl, blue
 // accent for the primary action, no heavy borders.
 
 import { useCallback, useEffect, useState } from "react";
@@ -140,7 +140,7 @@ export default function GeneralPage() {
             type="button"
             onClick={() => control("restart")}
             disabled={busy || !isRunning}
-            className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40"
+            className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
           >
             Restart
           </button>
@@ -256,7 +256,7 @@ function AutoUpdateSection() {
           className={[
             "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors",
             enabled
-              ? "bg-indigo-600 ring-1 ring-indigo-500/40"
+              ? "bg-blue-600 ring-1 ring-blue-500/40"
               : "bg-[var(--bg-tertiary)] ring-1 ring-[var(--border-color)]/40",
             busy ? "opacity-60" : "",
           ].join(" ")}

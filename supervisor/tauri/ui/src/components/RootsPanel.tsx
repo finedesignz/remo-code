@@ -7,7 +7,7 @@
 // `last_scan_at`.
 //
 // Aesthetic per global rule #15 + frontend conventions: bg-secondary/60 cards,
-// rounded-xl, indigo accents on primary action, no heavy borders.
+// rounded-xl, blue accents on primary action, no heavy borders.
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -151,7 +151,7 @@ export default function RootsPanel() {
             type="button"
             onClick={onAdd}
             disabled={busy}
-            className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40"
+            className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
           >
             Add root
           </button>

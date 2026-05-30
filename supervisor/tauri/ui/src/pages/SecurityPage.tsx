@@ -165,14 +165,14 @@ export default function SecurityPage() {
               value={draftKey}
               onChange={(e) => setDraftKey(e.target.value)}
               placeholder="remo_…"
-              className="w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/60 text-[var(--text-primary)] outline-none ring-1 ring-transparent focus:ring-indigo-500/40"
+              className="w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/60 text-[var(--text-primary)] outline-none ring-1 ring-transparent focus:ring-blue-500/40"
             />
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => { void onSave(); }}
                 disabled={saving || !draftKey.trim()}
-                className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40"
+                className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
               >
                 {saving ? "Saving…" : "Save & restart sidecar"}
               </button>
@@ -191,7 +191,7 @@ export default function SecurityPage() {
             <button
               type="button"
               onClick={() => setEditing(true)}
-              className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white"
+              className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white"
             >
               {status?.api_key_set ? "Update API key" : "Set API key"}
             </button>
