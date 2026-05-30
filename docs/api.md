@@ -69,7 +69,7 @@ fetch('https://app.remo-code.com/api/profile/cost-today',
 
 `GET /api/profile/cost-today`
 
-Returns the authenticated user's scheduled-task spend so far today, their configured daily cap, and percent consumed. Used by the cost-cap UI banner.
+Returns the authenticated user's real accumulated token spend so far today (the same figure the daily cost cap enforces — interactive, Telegram, webhook and scheduled-run turns), their configured daily cap, and percent consumed. Used by the cost-cap UI banner.
 
 > Example responses
 

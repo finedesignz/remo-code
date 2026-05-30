@@ -14,9 +14,8 @@ import {
   insertRunV2,
   updateRunStatus,
   setTaskFireTimestamps,
-  sumTodayCostForUser,
 } from '../db/scheduled-tasks-dal.ts'
-import { sql } from '../db/postgres.ts'
+import { isOverCostCap } from '../dispatch/gates.ts'
 import { resolveTargets, type ResolvedTarget } from './targets.ts'
 import * as registry from './registry.ts'
 import { broadcastScheduledRun, broadcastToUser } from '../ws/registry.ts'
@@ -60,16 +59,6 @@ export function removeRunContext(runId: string): void {
 export function trackRun(ctx: RunContext): void {
   inFlightByRun.set(ctx.runId, ctx)
   syncQueueDepthGauge()
-}
-
-async function isOverCostCap(userId: string, timezone: string): Promise<boolean> {
-  const rows = await sql<{ cap: string }[]>`
-    SELECT daily_cost_cap_usd::text AS cap FROM users WHERE id = ${userId} LIMIT 1
-  `
-  const cap = Number(rows[0]?.cap ?? 10)
-  if (!Number.isFinite(cap) || cap <= 0) return false
-  const spent = await sumTodayCostForUser(userId, timezone)
-  return spent >= cap
 }
 
 export async function fire(taskId: string): Promise<void> {

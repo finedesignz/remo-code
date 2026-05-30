@@ -165,6 +165,10 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 
 - **Cost cap is non-bypassable.** Every inbound user→session dispatch flows through the shared
   `dailyCostCapGate` in `hub/src/dispatch/gates.ts` (single source of truth — `isOverCostCap`).
+  P3a: the cap counts REAL accumulated token cost for today (user tz), summed from `token_usage`
+  via `getTodayTokenCostUsd` (same tz-day boundary as `/api/usage/cost`). **Manual / interactive
+  chat IS now capped** — not just scheduled runs. `token_usage` is the single source (it records
+  every `usage_event`, including scheduled runs), so scheduled-run cost is not double-counted.
 - **Public webhooks: raw body BEFORE JSON parse**, constant-time secret compare, HMAC over
   `${ts}.${rawBody}`, reject >5min skew. Webhooks mount BEFORE the `/api/*` auth catch-all;
   license gate after auth; `/ws/agent` keyed by `api_keys`. `hub/test/mount-order.test.ts` enforces.

@@ -13,7 +13,7 @@ import { sendMessage } from './client.ts'
 import { getChannel } from '../ws/registry.ts'
 import { listSupervisorsForUser } from '../db/supervisor-dal.ts'
 import { isSupervisorOnline } from '../ws/supervisor-registry.ts'
-import { sumTodayCostForUser } from '../db/scheduled-tasks-dal.ts'
+import { getTodayTokenCostUsd } from '../db/token-usage-dal.ts'
 import type { TelegramUserRow } from '../db/dal.ts'
 
 const SUPERVISOR_STALE_MS = 60 * 1000
@@ -132,7 +132,7 @@ export async function runStatus(opts: StatusOpts): Promise<{ outcome: StatusOutc
       `
       const cap = Number(rows[0]?.cap ?? 10)
       const tz = rows[0]?.tz || 'UTC'
-      const spent = await sumTodayCostForUser(user.id, tz)
+      const spent = await getTodayTokenCostUsd(user.id, tz)
       const capStr = Number.isFinite(cap) ? cap.toFixed(2) : '∞'
       const spentStr = spent.toFixed(2)
       lines.push(`💰 Today: $${spentStr} / $${capStr}`)

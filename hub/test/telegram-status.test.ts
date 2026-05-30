@@ -54,8 +54,8 @@ mock.module("../src/ws/registry.ts", () => ({
   getChannel: () => (state.channelPresent ? { ws: {}, userId: USER_ID, sessionId: SESSION_ID } : undefined),
 }));
 
-mock.module("../src/db/scheduled-tasks-dal.ts", () => ({
-  sumTodayCostForUser: async () => state.costSpent,
+mock.module("../src/db/token-usage-dal.ts", () => ({
+  getTodayTokenCostUsd: async () => state.costSpent,
 }));
 
 mock.module("../src/telegram/client.ts", () => ({
