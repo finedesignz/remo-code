@@ -100,7 +100,7 @@ function IdentityCard({
           value={displayName}
           onChange={(e) => setDisplayName(e.target.value)}
           placeholder="Display name"
-          className="w-full px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+          className="w-full px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500/50"
         />
       </Field>
 
@@ -173,7 +173,7 @@ function AvatarUploader({
         Avatar
       </p>
       <div className="flex items-center gap-3">
-        <div className="w-14 h-14 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-lg font-semibold overflow-hidden shrink-0">
+        <div className="w-14 h-14 rounded-full bg-blue-600 flex items-center justify-center text-[var(--text-on-accent)] text-lg font-semibold overflow-hidden shrink-0">
           {profile.avatar_url ? (
             <img
               src={profile.avatar_url}
@@ -275,7 +275,7 @@ function TimezoneCard({ token, profile }: { token: string; profile: Profile }) {
         <select
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          className="w-full px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+          className="w-full px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
         >
           {zones.map((z) => (
             <option key={z} value={z}>
@@ -523,7 +523,7 @@ function TelegramCard({ token }: { token: string }) {
               value={status.default_session_id ?? ""}
               disabled={busy}
               onChange={(e) => void setDefaultSession(e.target.value || null)}
-              className="w-full px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+              className="w-full px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
             >
               <option value="">None</option>
               {safeSessions.map((s) => (

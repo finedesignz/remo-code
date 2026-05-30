@@ -124,7 +124,7 @@ export function CronBuilder({ value, timezone, onChange }: Props) {
             onClick={() => setState(parseCronToState(p.cron))}
             className={`px-2.5 py-1 rounded-lg text-xs transition-colors ${
               composed === p.cron
-                ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300'
+                ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300'
                 : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'
             }`}
           >
@@ -136,7 +136,7 @@ export function CronBuilder({ value, timezone, onChange }: Props) {
       <select
         value={state.mode}
         onChange={(e) => update('mode', e.target.value as CronMode)}
-        className="w-full px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        className="w-full px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
       >
         {MODE_OPTIONS.map((o) => (
           <option key={o.value} value={o.value}>
@@ -208,7 +208,7 @@ export function CronBuilder({ value, timezone, onChange }: Props) {
                   }}
                   className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                     selected
-                      ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300'
+                      ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300'
                       : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/70'
                   }`}
                 >
@@ -231,7 +231,7 @@ export function CronBuilder({ value, timezone, onChange }: Props) {
             <select
               value={state.dom === 'L' ? 'L' : String(state.dom)}
               onChange={(e) => update('dom', e.target.value === 'L' ? 'L' : parseInt(e.target.value, 10))}
-              className="px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               {range(1, 31).map((d) => (
                 <option key={d} value={d}>{d}</option>
@@ -325,7 +325,7 @@ function NumSelect({
     <select
       value={value}
       onChange={(e) => onChange(parseInt(e.target.value, 10))}
-      className="px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+      className="px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
     >
       {options.map((n) => (
         <option key={n} value={n}>{pad ? String(n).padStart(2, '0') : n}</option>
@@ -352,7 +352,7 @@ function CustomField({ label, value, onChange }: { label: string; value: string;
       <input
         value={value}
         onChange={(e) => onChange(e.target.value.trim() || '*')}
-        className="w-full px-2 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500 text-center"
+        className="w-full px-2 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm font-mono text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500 text-center"
       />
     </label>
   )

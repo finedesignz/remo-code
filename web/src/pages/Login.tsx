@@ -88,12 +88,12 @@ export function Login({ onLegacyAuth }: Props) {
                 onChange={e => setEmail(e.target.value)}
                 required
                 autoComplete="email"
-                className="px-3 py-2 rounded-lg bg-[var(--bg-primary)]/60 text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="px-3 py-2 rounded-lg bg-[var(--bg-primary)]/60 text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <button
                 type="submit"
                 disabled={loading || !email}
-                className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
               >
                 {loading ? 'Sending…' : 'Send magic link'}
               </button>
@@ -128,7 +128,7 @@ export function Login({ onLegacyAuth }: Props) {
                 onChange={e => setEmail(e.target.value)}
                 required
                 autoComplete="email"
-                className="px-3 py-2 rounded-lg bg-[var(--bg-primary)]/60 text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="px-3 py-2 rounded-lg bg-[var(--bg-primary)]/60 text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <input
                 type="password"
@@ -137,12 +137,12 @@ export function Login({ onLegacyAuth }: Props) {
                 onChange={e => setPassword(e.target.value)}
                 required
                 autoComplete="current-password"
-                className="px-3 py-2 rounded-lg bg-[var(--bg-primary)]/60 text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="px-3 py-2 rounded-lg bg-[var(--bg-primary)]/60 text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <button
                 type="submit"
                 disabled={loading}
-                className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+                className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
               >
                 {loading ? '…' : 'Sign in'}
               </button>

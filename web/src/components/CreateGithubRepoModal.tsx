@@ -221,7 +221,7 @@ export function CreateGithubRepoModal({
                 type="button"
                 onClick={handleSubmit}
                 disabled={submitting || scopeMissing || !name.trim()}
-                className="rounded-lg bg-indigo-600 px-3 py-2 text-xs text-[var(--text-on-accent)] hover:bg-indigo-500 disabled:opacity-50"
+                className="rounded-lg bg-blue-600 px-3 py-2 text-xs text-[var(--text-on-accent)] hover:bg-blue-500 disabled:opacity-50"
               >
                 {submitting ? 'Creating…' : 'Create'}
               </button>
@@ -238,7 +238,7 @@ export function CreateGithubRepoModal({
             <div className="h-2 rounded bg-[var(--bg-tertiary)] overflow-hidden">
               <div
                 className={`h-full transition-all duration-300 ${
-                  job.stage === 'failed' ? 'bg-red-500' : 'bg-indigo-500'
+                  job.stage === 'failed' ? 'bg-red-500' : 'bg-blue-500'
                 }`}
                 style={{ width: `${pct}%` }}
               />
@@ -253,7 +253,7 @@ export function CreateGithubRepoModal({
                   <button
                     type="button"
                     onClick={retry}
-                    className="rounded-lg px-2 py-1 text-[11px] bg-indigo-600 hover:bg-indigo-500 text-[var(--text-on-accent)]"
+                    className="rounded-lg px-2 py-1 text-[11px] bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)]"
                   >
                     Retry
                   </button>

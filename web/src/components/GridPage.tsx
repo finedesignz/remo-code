@@ -425,7 +425,7 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
           action={
             <button
               onClick={() => setPickerOpen(true)}
-              className="mt-3 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors"
+              className="mt-3 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors"
             >
               + Add sessions
             </button>
@@ -618,9 +618,9 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
             aria-controls="grid-tab-panel"
             tabIndex={isActive ? 0 : -1}
             onKeyDown={(e) => onTabKeyDown(e, i)}
-            className={`group flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs shrink-0 cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 [scroll-snap-align:start] ${
+            className={`group flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs shrink-0 cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 [scroll-snap-align:start] ${
               isActive
-                ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-[var(--text-primary)]'
+                ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-[var(--text-primary)]'
                 : 'bg-[var(--bg-secondary)]/60 text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'
             }`}
             onClick={() => !isRenaming && onSelect(t.id)}
@@ -638,7 +638,7 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
                   if (e.key === 'Escape') { e.preventDefault(); setRenamingId(null) }
                 }}
                 onClick={e => e.stopPropagation()}
-                className="bg-[var(--bg-input)] border border-[var(--border-color)] rounded px-1.5 py-0.5 text-xs w-32 text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                className="bg-[var(--bg-input)] border border-[var(--border-color)] rounded px-1.5 py-0.5 text-xs w-32 text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500"
               />
             ) : (
               <>
@@ -679,7 +679,7 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
             if (e.key === 'Escape') { e.preventDefault(); setCreating(false); setNewName('') }
           }}
           placeholder="New tab name…"
-          className="bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg px-3 py-1.5 text-xs w-40 text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          className="bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg px-3 py-1.5 text-xs w-40 text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500"
         />
       ) : (
         <button
@@ -719,7 +719,7 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
       aria-selected={isActive}
       data-chat-surface-cell-id={sessionRef.session_id}
       className={`flex flex-col min-h-0 rounded-xl bg-[var(--bg-secondary)]/60 overflow-hidden transition-shadow ${
-        isActive ? 'ring-1 ring-indigo-500/30' : ''
+        isActive ? 'ring-1 ring-blue-500/30' : ''
       }`}
       onMouseDown={onActivate}
     >
@@ -734,7 +734,7 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
         </span>
         {unreadCount > 0 && !isActive && (
           <span
-            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full bg-indigo-500/20 ring-1 ring-indigo-400/40 text-[10px] font-semibold text-indigo-300 tabular-nums"
+            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full bg-blue-500/20 ring-1 ring-blue-400/40 text-[10px] font-semibold text-blue-300 tabular-nums"
             aria-label={`${unreadCount} unread ${unreadCount === 1 ? 'message' : 'messages'}`}
             title={`${unreadCount} unread`}
           >
@@ -833,7 +833,7 @@ function LayoutPicker({ value, onChange }: { value: TabLayout; onChange: (next: 
               onClick={() => { setOpen(false); onChange(opt) }}
               className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
                 opt === value
-                  ? 'bg-indigo-600/20 text-[var(--text-primary)] ring-1 ring-indigo-500/30'
+                  ? 'bg-blue-600/20 text-[var(--text-primary)] ring-1 ring-blue-500/30'
                   : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'
               }`}
             >

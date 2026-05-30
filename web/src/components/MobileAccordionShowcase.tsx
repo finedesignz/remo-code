@@ -32,7 +32,7 @@ export function MobileAccordionShowcase({ token }: { token: string }) {
           </div>
           <a
             href="#/"
-            className="text-xs text-indigo-300 hover:text-indigo-200"
+            className="text-xs text-blue-300 hover:text-blue-200"
           >
             ← back
           </a>

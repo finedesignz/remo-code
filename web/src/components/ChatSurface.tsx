@@ -715,7 +715,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
         <button
           type="button"
           onClick={() => scrollToBottom('smooth')}
-          className="absolute bottom-24 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-indigo-600 hover:bg-indigo-500 text-xs text-[var(--text-on-accent)] ring-1 ring-indigo-500/30 z-10"
+          className="absolute bottom-24 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-500 text-xs text-[var(--text-on-accent)] ring-1 ring-blue-500/30 z-10"
         >
           ↓ {newCount} new
         </button>
@@ -808,7 +808,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
                       onMouseEnter={() => setSlashIdx(i)}
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={() => applySlash(it)}
-                      className={`w-full text-left px-3 py-2 text-sm ${i === slashIdx ? 'bg-indigo-600/20 text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
+                      className={`w-full text-left px-3 py-2 text-sm ${i === slashIdx ? 'bg-blue-600/20 text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
                     >
                       <div className="flex items-baseline gap-2">
                         <span className="font-mono">/{it.name}</span>
@@ -843,7 +843,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
                 }}
                 placeholder={density === 'full' ? 'Send a message to Claude... (type / for commands)' : 'Message…'}
                 rows={1}
-                className={`${d.textarea} bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none max-h-32`}
+                className={`${d.textarea} bg-[var(--bg-input)] border border-[var(--border-color)] rounded-lg text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none max-h-32`}
               />
             </div>
             {activity.status !== 'idle' ? (
@@ -863,7 +863,7 @@ export function ChatSurface(props: ChatSurfaceProps) {
               <button
                 type="submit"
                 disabled={!input.trim() && attachedFiles.length === 0}
-                className={`${d.sendBtn} bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 rounded-lg text-[var(--text-on-accent)] font-medium transition-colors shrink-0`}
+                className={`${d.sendBtn} bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600 rounded-lg text-[var(--text-on-accent)] font-medium transition-colors shrink-0`}
               >
                 Send
               </button>

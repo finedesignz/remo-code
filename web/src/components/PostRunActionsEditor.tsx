@@ -165,14 +165,14 @@ export function PostRunActionsEditor({
                       const nextType = e.target.value as PostRunActionType
                       update(idx, { type: nextType, config: defaultActionConfig(nextType) })
                     }}
-                    className="flex-1 px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="flex-1 px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     {ACTION_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                   </select>
                   <select
                     value={action.on}
                     onChange={(e) => update(idx, { on: e.target.value as PostRunActionOn })}
-                    className="px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     {ON_VALUES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
@@ -186,7 +186,7 @@ export function PostRunActionsEditor({
                       update(idx, { delay_seconds: v })
                     }}
                     title="Delay in seconds before firing this action"
-                    className="w-16 px-2 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="w-16 px-2 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                   <button
                     type="button"
@@ -207,7 +207,7 @@ export function PostRunActionsEditor({
                   <select
                     value={action.config?.task_id ?? ''}
                     onChange={(e) => updateConfig(idx, { task_id: e.target.value })}
-                    className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     <option value="">Choose a task...</option>
                     {otherSchedules.map(s => (
@@ -225,20 +225,20 @@ export function PostRunActionsEditor({
                       value={action.config?.to ?? ''}
                       onChange={(e) => updateConfig(idx, { to: e.target.value })}
                       placeholder="Recipient (blank = your account email)"
-                      className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                     <input
                       value={action.config?.subject ?? ''}
                       onChange={(e) => updateConfig(idx, { subject: e.target.value })}
                       placeholder="Subject (supports {{vars}})"
-                      className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                     <textarea
                       value={action.config?.body ?? ''}
                       onChange={(e) => updateConfig(idx, { body: e.target.value })}
                       rows={3}
                       placeholder="Body — supports {{template_vars}}"
-                      className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-y"
+                      className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
                     />
                     <TemplateHints />
                   </div>
@@ -251,7 +251,7 @@ export function PostRunActionsEditor({
                         value={action.config?.title ?? ''}
                         onChange={(e) => updateConfig(idx, { title: e.target.value })}
                         placeholder="Title"
-                        className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500"
                       />
                     )}
                     <textarea
@@ -259,7 +259,7 @@ export function PostRunActionsEditor({
                       onChange={(e) => updateConfig(idx, { body: e.target.value })}
                       rows={2}
                       placeholder="Message — supports {{template_vars}}"
-                      className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-y"
+                      className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
                     />
                     <TemplateHints />
                   </div>
@@ -271,7 +271,7 @@ export function PostRunActionsEditor({
                     value={action.config?.url ?? ''}
                     onChange={(e) => updateConfig(idx, { url: e.target.value })}
                     placeholder="https://example.com/hook"
-                    className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs font-mono text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="w-full px-2.5 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-xs font-mono text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 )}
               </div>
@@ -281,7 +281,7 @@ export function PostRunActionsEditor({
           <button
             type="button"
             onClick={add}
-            className="w-full px-3 py-2 text-xs text-indigo-300 hover:text-indigo-200 bg-indigo-600/10 hover:bg-indigo-600/20 rounded-lg transition-colors font-medium inline-flex items-center justify-center gap-1.5"
+            className="w-full px-3 py-2 text-xs text-blue-300 hover:text-blue-200 bg-blue-600/10 hover:bg-blue-600/20 rounded-lg transition-colors font-medium inline-flex items-center justify-center gap-1.5"
           >
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
               <line x1="6" y1="2.5" x2="6" y2="9.5" />

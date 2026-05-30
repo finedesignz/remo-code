@@ -118,7 +118,7 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession, un
               onClick={(e) => { e.preventDefault(); onSelectSession(s.id); setOpen(false) }}
               className={`w-full text-left px-3 py-2.5 text-sm transition-colors flex items-center gap-2 ${
                 s.id === activeSessionId
-                  ? 'bg-indigo-600/20 text-[var(--text-primary)]'
+                  ? 'bg-blue-600/20 text-[var(--text-primary)]'
                   : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50'
               }`}
             >

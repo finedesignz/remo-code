@@ -70,7 +70,7 @@ export function ApiKeyModal({ token, onClose }: Props) {
               {/* PRIMARY: Tray app download */}
               <div>
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-indigo-300 bg-indigo-600/20 ring-1 ring-indigo-500/30 rounded">Recommended</span>
+                  <span className="px-2 py-0.5 text-[10px] uppercase tracking-wide font-semibold text-blue-300 bg-blue-600/20 ring-1 ring-blue-500/30 rounded">Recommended</span>
                   <p className="text-xs font-semibold text-[var(--text-primary)]">Download the Remo Code tray app</p>
                 </div>
                 <p className="text-xs text-[var(--text-muted)] mb-3">
@@ -80,7 +80,7 @@ export function ApiKeyModal({ token, onClose }: Props) {
                   href={trayAppReleaseUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs text-[var(--text-on-accent)] font-medium transition-colors"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-xs text-[var(--text-on-accent)] font-medium transition-colors"
                 >
                   Download .msi from GitHub Releases &rarr;
                 </a>
@@ -88,7 +88,7 @@ export function ApiKeyModal({ token, onClose }: Props) {
 
               <button
                 onClick={() => { setNewKey(null); onClose() }}
-                className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-[var(--text-on-accent)] font-medium transition-colors"
+                className="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-xl text-[var(--text-on-accent)] font-medium transition-colors"
               >
                 Done
               </button>
@@ -114,7 +114,7 @@ export function ApiKeyModal({ token, onClose }: Props) {
               <div className="flex gap-2">
                 <button
                   onClick={handleGenerate}
-                  className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-sm text-[var(--text-on-accent)] font-medium transition-colors"
+                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 rounded-xl text-sm text-[var(--text-on-accent)] font-medium transition-colors"
                 >
                   Rotate Key
                 </button>
@@ -145,7 +145,7 @@ export function ApiKeyModal({ token, onClose }: Props) {
 
               <button
                 onClick={handleGenerate}
-                className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-[var(--text-on-accent)] font-medium transition-colors"
+                className="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-xl text-[var(--text-on-accent)] font-medium transition-colors"
               >
                 Generate API Key
               </button>

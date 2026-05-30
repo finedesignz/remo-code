@@ -103,7 +103,7 @@ export function SessionPicker({ token, tab, onClose, onAdded }: Props) {
                   already
                     ? 'opacity-50 cursor-not-allowed'
                     : isSelected
-                      ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30'
+                      ? 'bg-blue-600/20 ring-1 ring-blue-500/30'
                       : 'hover:bg-[var(--bg-tertiary)]/40'
                 }`}
               >
@@ -112,7 +112,7 @@ export function SessionPicker({ token, tab, onClose, onAdded }: Props) {
                   checked={already || isSelected}
                   disabled={already || (!isSelected && remainingSlots === 0)}
                   onChange={() => !already && toggle(s.id)}
-                  className="accent-indigo-600"
+                  className="accent-blue-600"
                 />
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                   isOnline ? 'bg-emerald-400' : 'bg-[var(--text-muted)]'
@@ -141,7 +141,7 @@ export function SessionPicker({ token, tab, onClose, onAdded }: Props) {
           <button
             onClick={submit}
             disabled={submitting || selected.size === 0}
-            className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 text-[var(--text-on-accent)] text-xs font-medium transition-colors"
+            className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600 text-[var(--text-on-accent)] text-xs font-medium transition-colors"
           >
             {submitting ? 'Adding…' : `Add ${selected.size || ''}`.trim()}
           </button>

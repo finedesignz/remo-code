@@ -156,7 +156,7 @@ function RootsEditor({ token }: { token: string }) {
           <select
             value={selectedId ?? ""}
             onChange={(e) => setSelectedId(e.target.value)}
-            className="w-full px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+            className="w-full px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
           >
             {supervisors.map((s) => (
               <option key={s.id} value={s.id}>
@@ -176,7 +176,7 @@ function RootsEditor({ token }: { token: string }) {
           onChange={(e) => setDraft(e.target.value)}
           rows={Math.max(4, Math.min(10, roots.length + 1))}
           placeholder={"C:/Users/me/GitHub\nD:/code"}
-          className="w-full px-3 py-2 bg-[var(--code-bg)] rounded-lg text-xs text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-y"
+          className="w-full px-3 py-2 bg-[var(--code-bg)] rounded-lg text-xs text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-blue-500/50 resize-y"
           spellCheck={false}
         />
       </Field>

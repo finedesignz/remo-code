@@ -39,14 +39,14 @@ export function CommandsList({ token }: Props) {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Filter by name, description, or source..."
-          className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
         {error && <p className="text-xs text-red-400 mt-2">{error}</p>}
         {loading && <p className="text-xs text-[var(--text-muted)] mt-2">Loading...</p>}
         {!loading && rows.length === 0 && (
           <p className="text-xs text-[var(--text-muted)] mt-2">
             No commands synced yet. Install the Remo Code tray app
-            (<a href="https://github.com/finedesignz/remo-code/releases/latest" target="_blank" rel="noreferrer" className="text-indigo-300 hover:text-indigo-200 underline">download .msi</a>)
+            (<a href="https://github.com/finedesignz/remo-code/releases/latest" target="_blank" rel="noreferrer" className="text-blue-300 hover:text-blue-200 underline">download .msi</a>)
             on your machine to sync built-ins, user commands, and plugins.
           </p>
         )}
@@ -79,7 +79,7 @@ function CommandRowItem({ cmd, copied, onCopy }: { cmd: CommandRow; copied: bool
     <div className="px-4 py-2 flex items-center gap-3 hover:bg-[var(--bg-tertiary)]/40 transition-colors group">
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2 flex-wrap">
-          <code className="text-sm font-mono text-indigo-300">/{cmd.name}</code>
+          <code className="text-sm font-mono text-blue-300">/{cmd.name}</code>
           {cmd.kind === 'skill' && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/20">skill</span>
           )}

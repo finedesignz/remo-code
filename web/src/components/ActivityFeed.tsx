@@ -65,12 +65,12 @@ export function ActivityFeed({ activity, onPermissionRespond, onQuestionRespond 
         {/* Streaming text */}
         {activity.streamingText && (
           <div className="rounded-xl px-4 py-2.5 text-sm bg-[var(--bg-tertiary)]/70 text-[var(--text-primary)]">
-            <div className="prose prose-sm max-w-none [&_pre]:bg-[var(--code-bg)] [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:overflow-x-auto [&_code]:text-emerald-300 [&_a]:text-indigo-400 break-words prose-headings:text-[var(--text-primary)] prose-p:text-[var(--text-primary)] prose-strong:text-[var(--text-primary)] prose-li:text-[var(--text-primary)] prose-blockquote:text-[var(--text-secondary)] prose-code:text-emerald-300 prose-th:text-[var(--text-primary)] prose-td:text-[var(--text-primary)]">
+            <div className="prose prose-sm max-w-none [&_pre]:bg-[var(--code-bg)] [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:overflow-x-auto [&_code]:text-emerald-300 [&_a]:text-blue-400 break-words prose-headings:text-[var(--text-primary)] prose-p:text-[var(--text-primary)] prose-strong:text-[var(--text-primary)] prose-li:text-[var(--text-primary)] prose-blockquote:text-[var(--text-secondary)] prose-code:text-emerald-300 prose-th:text-[var(--text-primary)] prose-td:text-[var(--text-primary)]">
               <Markdown rehypePlugins={[rehypeSanitize]}>
                 {activity.streamingText}
               </Markdown>
               {activity.status === 'writing' && (
-                <span className="inline-block w-1.5 h-4 bg-indigo-400 ml-0.5 animate-pulse" />
+                <span className="inline-block w-1.5 h-4 bg-blue-400 ml-0.5 animate-pulse" />
               )}
             </div>
           </div>

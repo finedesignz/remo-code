@@ -43,7 +43,7 @@ export function MessageBubble({ message }: Props) {
       <div
         className={`max-w-[80%] rounded-xl px-4 py-2.5 text-sm overflow-hidden ${
           isUser
-            ? 'bg-indigo-600 text-[var(--text-on-accent)]'
+            ? 'bg-blue-600 text-[var(--text-on-accent)]'
             : 'bg-[var(--bg-tertiary)]/70 text-[var(--text-primary)]'
         }`}
       >
@@ -54,7 +54,7 @@ export function MessageBubble({ message }: Props) {
 
         {scheduled && !revanote && (
           <div className="mb-1.5">
-            <span className="bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300 text-[10px] uppercase tracking-wider px-2 py-0.5 rounded inline-flex items-center gap-1">
+            <span className="bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300 text-[10px] uppercase tracking-wider px-2 py-0.5 rounded inline-flex items-center gap-1">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .2.08.39.22.53l3 3a.75.75 0 1 0 1.06-1.06l-2.78-2.78V5Z" clipRule="evenodd" /></svg>
               Scheduled: {scheduled.taskName}
             </span>
@@ -86,7 +86,7 @@ export function MessageBubble({ message }: Props) {
           <div className="max-w-none break-words text-[var(--text-primary)]
             [&_pre]:bg-[var(--code-bg)] [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:overflow-x-auto [&_pre]:my-2
             [&_code]:text-emerald-300
-            [&_a]:text-indigo-400 [&_a]:underline
+            [&_a]:text-blue-400 [&_a]:underline
             [&_p]:my-1.5 [&_p]:leading-relaxed
             [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-2 [&_ul]:space-y-1
             [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2 [&_ol]:space-y-1
@@ -112,7 +112,7 @@ export function MessageBubble({ message }: Props) {
             >{displayText || message.content}</Markdown>
           </div>
         )}
-        <div className={`text-[10px] mt-1 flex items-center gap-2 ${isUser ? 'text-indigo-200' : 'text-[var(--text-muted)]'}`}>
+        <div className={`text-[10px] mt-1 flex items-center gap-2 ${isUser ? 'text-blue-200' : 'text-[var(--text-muted)]'}`}>
           <span>{new Date(message.created_at).toLocaleTimeString()}</span>
           {message.status === 'interrupted' && (
             <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-medium">

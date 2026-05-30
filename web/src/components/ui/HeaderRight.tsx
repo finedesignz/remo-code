@@ -119,7 +119,7 @@ function ProfileMenu({ user, onNavigate, signOut, token }: { user: AuthUser; onN
         aria-expanded={open}
         aria-haspopup="menu"
       >
-        <span className="relative w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-[var(--text-on-accent)] text-xs font-medium shrink-0 overflow-hidden">
+        <span className="relative w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-[var(--text-on-accent)] text-xs font-medium shrink-0 overflow-hidden">
           {avatarUrl ? <img src={avatarUrl} alt="" className="w-full h-full object-cover" /> : initial}
           {license && license.status !== "unknown" && (
             <span

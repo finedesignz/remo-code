@@ -131,7 +131,7 @@ export class AppErrorBoundary extends Component<Props, State> {
             <button
               type="button"
               onClick={this.handleReload}
-              className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors"
+              className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors"
             >
               Reload
             </button>
