@@ -1,35 +1,40 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repo. **Durable rules + a map only.** Deep
+per-subsystem and per-phase detail lives in `docs/` (context-mode indexed, read on
+demand) — see the Docs map below. Full historical rollups: [docs/claude-architecture-notes.md](docs/claude-architecture-notes.md).
+
+## Preferences (global, not duplicated here)
+
+- UI/UX (color, spacing, font, layout, theme) → `~/.claude/design-preferences.md`
+- Stack / components / data-flow / persistence → `~/.claude/architecture-preferences.md`
+- Ports / Coolify / infra → `~/.claude/infrastructure.md`
+
+Read those before any design or architecture decision. Never restate their contents here.
 
 ## Workflow: always use git worktrees for new features
 
-**Mandatory.** When starting work on a new feature, phase, or non-trivial refactor, create a git worktree off `origin/main` and do ALL implementation work inside that worktree. Never build a new feature directly on the primary checkout — multiple Claude sessions and agents commonly run against this repo in parallel, and uncommitted/untracked files on the main checkout get wiped when another session switches branches or runs `git clean`.
+**Mandatory.** New feature/phase/non-trivial refactor → create a worktree off `origin/main`
+and do ALL work there. Never build on the primary checkout — parallel sessions wipe
+uncommitted/untracked files when they switch branches or `git clean`.
 
 ```bash
 cd C:/Users/artic/GitHub/remo-code
 git fetch origin
 git worktree add ../remo-code-feat-<slug> -b feat/<slug> origin/main
-cd ../remo-code-feat-<slug>
-# all subsequent work, commits, planning docs, agent dispatches happen here
+cd ../remo-code-feat-<slug>          # all work, commits, .planning/ docs happen here
 ```
 
-Open the PR from `feat/<slug>` → `main` when ready. After merge, remove the worktree:
-
-```bash
-git worktree remove ../remo-code-feat-<slug>
-git branch -D feat/<slug>
-```
-
-Exceptions: trivial single-file bugfixes, doc edits, README tweaks. Everything else — including planning docs under `.planning/phases/<N>-<slug>/` — lives in the worktree from the start.
+PR `feat/<slug>` → `main`. After merge: `git worktree remove ../remo-code-feat-<slug> && git branch -D feat/<slug>`.
+Exceptions: trivial single-file bugfixes, doc edits.
 
 ## What This Is
 
-Remo Code is a web app that lets you chat with Claude Code sessions remotely from any browser or phone. A local agent spawns Claude Code CLI with `--input-format stream-json --output-format stream-json`, giving the web UI full visibility into Claude's activity: thinking, tool calls, and streaming text responses.
-
-It also ships **scheduled tasks** — a hub-side cron scheduler that fires user-defined prompts/skills/supervisor commands against one session, one supervisor, or all of either, with per-target run history, daily cost cap, offline-grace replay, and post-run actions. See [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
-
-It also ships **error capture** — a Sentry-style intake endpoint at `/api/sentry/:project_id/envelope/` that fingerprints, dedupes, rate-limits, and daily-caps runtime errors from your deployed apps, then dispatches them as structured `user_message` payloads into the Claude session bound to that repo so Claude can investigate, fix, commit, and push in-session. Includes one-click Sentry SDK auto-install for 4 stacks via supervisor git-ops + Coolify env PATCH. See [docs/error-capture.md](docs/error-capture.md).
+Web app to chat with Claude Code / Codex sessions remotely from any browser or phone.
+A local supervisor spawns the CLI with `--input-format stream-json --output-format
+stream-json`, giving the web UI full visibility into thinking, tool calls, and streaming
+text. Also ships scheduled tasks, error capture, grid view, an orchestrator session, a
+Telegram bridge, and Revanote annotation intake (see Docs map).
 
 ## Architecture
 
@@ -44,538 +49,135 @@ Claude Code CLI / Codex CLI (one persistent process per session)
 ```
 
 Three packages in a Bun workspace:
-- **hub/** — Bun + Hono HTTP/WS server. Authenticates users via Titanium Licensing magic-link + opaque cookie sessions, manages sessions, relays messages and activity events between web clients and supervisors.
-- **web/** — React 19 + Vite + Tailwind CSS 4 SPA. Connects to hub via WebSocket for real-time chat with activity feed (thinking blocks, tool call indicators, streaming text).
-- **supervisor/** — Local supervisor. `supervisor/src/` is the Bun TypeScript source; the Tauri build (`supervisor/tauri/`) compiles it via `bun build --compile` into a sidecar binary and bundles a Windows MSI installer. One supervisor per host. Connects to `/ws/agent` with an API key, spawns Claude/Codex CLIs on demand, parses stream-json events, and relays them to the hub.
+- **hub/** — Bun + Hono HTTP/WS server. Titanium magic-link + opaque-cookie auth, session
+  management, relays messages + activity events between web clients and supervisors. Serves
+  the built SPA as static files in prod.
+- **web/** — React 19 + Vite + Tailwind CSS 4 SPA. WebSocket to hub for real-time chat.
+- **supervisor/** — Local tray app. `supervisor/src/` is Bun TS source; `supervisor/tauri/`
+  compiles it via `bun build --compile` into a sidecar binary + Windows MSI. One per host.
+  Connects to `/ws/agent` with an API key, spawns Claude/Codex CLIs on demand, relays
+  stream-json events to the hub.
 
 ## Commands
 
 ```bash
-# Install dependencies (from repo root)
-bun install
-
-# Run hub server (port 3040)
-bun run dev:hub
-
-# Run web dev server (port 5173)
-bun run dev:web
-
-# Build web for production
-bun run build:web
-
-# Build the Tauri Supervisor desktop app (produces a Windows .msi installer)
-cd supervisor/tauri && cargo tauri build
+bun install                                  # deps (repo root)
+bun run dev:hub                              # hub server (3040)
+bun run dev:web                              # web dev server (5173)
+bun run build:web                            # build web for prod
+bun run check-baseline                       # QC gate (per-file test isolation; tools/regression-baseline.json)
+bun run docs:sync                            # regenerate docs/openapi.json + docs/api.md
+cd supervisor/tauri && cargo tauri build     # build supervisor MSI
 ```
 
-The legacy `npx remo-code-agent` / `claude-remote` shell-alias flow is retired as of 2026-05-26. Install the Tauri Supervisor MSI from https://github.com/finedesignz/remo-code/releases/latest instead.
-
-**Phase 09 follow-up (2026-05-27): legacy spawn path is hard-disabled in supervisor.** The supervisor's `process-manager.ts:spawn()` no longer invokes the retired CLI agent at all — it immediately finalizes every `session.start` as `stopped` with `exit_reason='legacy_agent_spawn_disabled'`. The in-process claude-runner that will replace it (direct `claude --input-format stream-json` spawn bridged over the supervisor WS) is a separate follow-up phase. Until that lands, `session.start` rolls cleanly to stopped instead of trapping the supervisor in a respawn loop against a cached buggy v0.4.1 agent.
-
-**Guards added in the same fix:**
-
-- Supervisor `BACKOFF_SCHEDULE` now caps at `MAX_RESTART_COUNT = 10` — after 10 consecutive restart attempts the run finalizes as `max_restarts_exceeded` and stops respawning.
-- Hub auto-resume on `supervisor.hello` (in `hub/src/ws/agent.ts`) now (a) filters orphan `session_runs` to rows newer than 24h, sweeping older rows as `exit_reason='stale'`, and (b) finalizes any orphan with `restart_count >= 10` as `max_restarts_exceeded` and skips the replay.
-- Canary test `supervisor/test/no-legacy-agent-spawn.test.ts` greps `supervisor/src/**` for the retired `remo-code-agent` package name and `--append-system-prompt` flag; the build FAILS if either reappears.
-
-## Mobile Tauri Client (mobile/tauri/)
-
-Thin Tauri 2.x WebView wrapper for iOS and Android. The real UI is the hosted SPA at `https://app.remo-code.com`; this shell exists to ship a binary through the App Store / Play Store and to own the `remo-code://auth/callback?token=<X>` deep link that closes the magic-link sign-in loop on mobile. One codebase, one UI — re-implementing the web SPA natively is explicitly out of scope.
-
-**Architecture:**
-
-1. OS receives `remo-code://auth/callback?token=<X>` (from a magic-link email).
-2. `mobile/tauri/src-tauri/src/lib.rs::handle_deep_link` parses the URL, extracts the `token`, and evals JS in the WebView that POSTs `{ token }` to `https://app.remo-code.com/api/auth/finalize-mobile` with `credentials: 'include'`.
-3. On 200, the WebView `location.replace`s to the SPA root with the opaque session cookie set on its cookie jar. On error, alert + reload.
-
-**File map:**
-
-- `mobile/tauri/src-tauri/Cargo.toml` — Tauri 2.11.2 + `tauri-plugin-deep-link` 2.4.1. Pinned in lockstep with `supervisor/tauri/src-tauri/Cargo.toml`.
-- `mobile/tauri/src-tauri/tauri.conf.json` — identifier `com.finedesignz.remo-code`, scheme `remo-code://`, productName `Remo Code`, version `0.1.0`. CSP `connect-src` allows `https://app.remo-code.com` + `wss://app.remo-code.com`.
-- `mobile/tauri/src-tauri/src/lib.rs` — `#[cfg_attr(mobile, tauri::mobile_entry_point)] pub fn run()` + the deep-link handler. Token is JSON-escaped via `serde_json::to_string` before being embedded in eval'd JS — never string-concatenated raw.
-- `mobile/tauri/src-tauri/src/main.rs` — desktop fallback entry that calls `remo_code_mobile_lib::run()`.
-- `mobile/tauri/src-tauri/capabilities/default.json` — grants `deep-link:default`, `shell:default`, `os:default`, `http:default`, and core window/webview/event/app perms to the `main` window.
-- `mobile/tauri/ui/` — minimal Vite shell whose `src/main.ts` immediately `location.replace`s to `VITE_REMO_URL` (defaults to `https://app.remo-code.com`). Stashes `window.__REMO_APP_VERSION__` in `sessionStorage` so the redirected SPA can render "Mobile vX.Y.Z".
-
-**Build commands:**
-
-```bash
-cd mobile/tauri/ui && bun install
-cd mobile/tauri && cargo check --manifest-path src-tauri/Cargo.toml   # host typecheck
-cargo tauri ios init && cargo tauri ios build --release               # Mac host only
-cargo tauri android init && cargo tauri android build --release       # SDK+NDK host
-```
-
-**Deferred to Phase 12.4 (NOT on this branch):**
-
-- `gen/apple/` (`cargo tauri ios init` on a Mac).
-- `gen/android/` (`cargo tauri android init` on an SDK+NDK host).
-- iOS/Android icon variants (mobile mipmap + AppIcon fan-out). The
-  1024×1024 source PNG and Windows/macOS variants are in place from
-  Phase 12.3.1; only the per-platform mobile trees are deferred.
-- `.github/workflows/mobile-shell-release.yml` for tagged `mobile-v*.*.*` builds.
-- Apple Developer + Google Play signing key setup.
-
-**12.4 iOS path (Windows-only developer):** the maintainer doesn't own a
-Mac, so the 12.4 iOS prep is "rent MacInCloud for ~30 min to run
-`cargo tauri ios init` once, commit `gen/apple/`, then never touch a Mac
-again." Every subsequent iOS build runs in CI via
-`.github/workflows/mobile-ios-build.yml` (`macos-14`, gated by repo var
-`ENABLE_IOS_BUILD=true`), producing an unsigned `.ipa` that AltStore
-re-signs on Windows with a free Apple ID for sideload to a personal
-iPhone. App Store distribution stays out of scope until the paid Apple
-Developer Program signing path is wired. Full runbook:
-`docs/ios-sideload.md`. The 12.4 Android path is independent — it only
-needs Android Studio (SDK 34 + NDK r26+) installed locally on the
-Windows dev box, no rented host required.
-
-Hub-side `POST /api/auth/finalize-mobile` shipped in Phase 12.1 (PR #105)
-— see `hub/src/api/auth.ts`. A Windows desktop preview of the same crate
-is built per `mobile/tauri/README.md` "Desktop preview build" (Phase 12.3.1).
-
-**CI:** `.github/workflows/mobile-shell-typecheck.yml` runs `cargo check` + `cargo test --lib` against `x86_64-unknown-linux-gnu` on `ubuntu-latest` (installs `libwebkit2gtk-4.1-dev` + `libgtk-3-dev` to satisfy `tauri-build`). Catches Rust regressions without Android NDK / Xcode.
-
-**Invariants:**
-
-- NEVER touch `supervisor/tauri/`, `hub/`, or `web/` from a mobile-shell PR. Cross-package work goes through its own phase.
-- Tauri dep versions track `supervisor/tauri/` exactly — when bumping there, bump here in the same PR.
-- The shell is "dumb": all business logic stays in the web SPA. The shell's only jobs are deep-link handoff and WebView hosting.
-- Token strings from deep links are NEVER concatenated into JS — always `serde_json::to_string`-escaped first to prevent XSS via crafted callback URLs.
-
-When adding native capabilities (push notifications, biometric unlock, camera), updating the deep-link contract, or touching the hub-side `finalize-mobile` endpoint: update `docs/mobile-client.md` in the same commit.
+Legacy `npx remo-code-agent` / `claude-remote` is retired (2026-05-26) — install the Tauri
+Supervisor MSI from https://github.com/finedesignz/remo-code/releases/latest. The legacy spawn
+path is hard-disabled in the supervisor (Phase 09): `session.start` finalizes as
+`stopped`/`legacy_agent_spawn_disabled` instead of respawn-looping; backoff caps at
+`MAX_RESTART_COUNT=10`. Canary test `supervisor/test/no-legacy-agent-spawn.test.ts` fails the
+build if the retired package name or `--append-system-prompt` reappears.
 
 ## Local Supervisor (only supported connection)
 
-The supervisor (`supervisor/src/index.ts`, compiled into the Tauri sidecar binary) runs on the dev machine as a tray app. It:
+`supervisor/src/index.ts`, compiled into the Tauri sidecar, runs as a tray app on the dev
+machine. Connects to `/ws/agent` with an API key; hosts one CLI subprocess per active session
+(spawned lazily on first user message), kept alive between messages for full conversation memory.
 
-1. Connects to the hub via WebSocket at `/ws/agent`, authenticates with an API key.
-2. Hosts one CLI subprocess per active session (Claude Code or Codex), spawning `claude --input-format stream-json --output-format stream-json --verbose` (or `codex app-server`) lazily on first user message.
-3. Keeps each CLI process alive between messages (full conversation memory per session).
-4. Receives user messages from the hub, writes them to the CLI's stdin as JSON.
-5. Parses the CLI's stdout stream-json events and relays them to the hub in real-time.
-6. Hub broadcasts activity events (thinking, text_delta, tool_use, tool_result) to subscribed browsers.
-
-**Session resume:** The supervisor reuses existing sessions by matching `project_dir`. Restarting the supervisor reconnects to the same sessions with full message history.
-
-**Session inventory push (supervisor ≥0.5.7):** the supervisor sends `{type:'session_inventory', sessions:[…]}` to the hub every 10s (and once on connect). Each entry is one live runner — `session_id`, `cli_kind`, `project_dir`, `pid`, `started_at`, `last_activity_at`, `status` (`spawning`|`running`|`idle`|`stopping`). The hub stores this in-memory keyed by `supervisor_id` (`hub/src/ws/supervisor-registry.ts`) and folds it into `GET /api/sessions`'s `active` flag so the UI sidebar reflects supervisor-truth even when the per-bridge `sessions.status` lags. On change the hub broadcasts `{type:'session_inventory_changed', supervisor_id, changed_session_ids, scanned_at}` to the user's connected web clients. Pre-0.5.7 supervisors don't send this — the UI falls back to the DB status column.
-
-**Idle teardown (hub-side):** the hub maintains a per-session subscriber count from `/ws/client` `subscribe`/`unsubscribe`/close events (`hub/src/ws/idle-teardown.ts`). When the count drops to 0, a `REMO_SESSION_IDLE_GRACE_SECONDS` timer starts; if no new subscriber arrives, the hub sends `{type:'shutdown', reason:'idle_no_subscribers'}` to the agent channel, which causes the SessionBridge to call `runner.stopGracefully()` (SIGINT → SIGKILL after 3s). A new subscribe inside the window cancels the timer. Default grace 300s — covers refreshes and grid-view tab swaps.
-
-**Config:** stored in `%LOCALAPPDATA%\remo-code-supervisor\config.json` on Windows (managed by the Tauri first-run wizard).
+- **Session resume** by matching `project_dir` — restart reconnects with full history.
+- **Session inventory push** (supervisor ≥0.5.7): `session_inventory` every 10s, hub stores it
+  in `hub/src/ws/supervisor-registry.ts` and folds it into `GET /api/sessions`'s `active` flag.
+- **Idle teardown** (`hub/src/ws/idle-teardown.ts`): subscriber count → 0 starts a
+  `REMO_SESSION_IDLE_GRACE_SECONDS` timer → `shutdown`/`idle_no_subscribers`. Orchestrator
+  session is exempt.
+- **Config:** `%LOCALAPPDATA%\remo-code-supervisor\config.json` (Tauri first-run wizard).
 
 ## Database
 
-Uses **PostgreSQL** (self-hosted). Schema in `hub/src/db/schema.sql` — run once on a fresh database.
-
-Tables: `users` (email + bcrypt password, role), `sessions` (Claude Code sessions), `messages` (chat history), `api_keys` (supervisor authentication). All queries are scoped by `user_id` with explicit WHERE clauses.
+**PostgreSQL** (self-hosted, on Coolify). Schema in `hub/src/db/schema.sql` — idempotent DDL
+only; **it re-runs in full every hub boot**, so data backfills MUST be one-shot scripts in
+`hub/scripts/`, never inline in schema.sql. Core tables: `users` (identity + Titanium
+`license_status` mirror; legacy `password_hash` behind `ALLOW_LEGACY_LOGIN`), `auth_sessions`
+(opaque cookie sessions), `sessions`, `messages`, `api_keys`. All queries scoped by `user_id`.
+Subsystem tables are documented in their respective `docs/*.md`.
 
 ## WebSocket Protocol
 
-**`/ws/agent`** (supervisor connects here):
-- Auth: `{ type: "auth", api_key, project_dir, hostname }` → API key verified via SHA-256 hash, session found-or-created by project_dir
-- Supervisor sends: `thinking`, `text_delta`, `tool_use`, `tool_result`, `status`, `assistant_message`
-- Hub sends: `user_message` (with optional `images`/`attachments`), `cancel`, `ping`
-- 30s heartbeat ping/pong
+`/ws/agent` (supervisor) and `/ws/client` (browser). All messages Zod-validated in
+`hub/src/ws/protocol.ts` + `agent-protocol.ts`.
 
-**`/ws/client`** (browser connects here):
-- Auth: `{ type: "auth", token: "<jwt>" }` → verified via `JWT_SECRET`
-- Client sends `send_message` (with optional `images`/`attachments`) and `subscribe`
-- Hub sends `message`, `session_status`, `session_list`, plus activity events (`thinking`, `text_delta`, `tool_use`, `tool_result`, `status`)
-- Both endpoints have 5s auth timeout, per-IP connection limits (20), per-connection message rate limits
-
-All WS messages validated with Zod schemas in `hub/src/ws/protocol.ts` and `hub/src/ws/agent-protocol.ts`.
+- **`/ws/agent`** — auth `{ api_key, project_dir, hostname }` (SHA-256 hash); supervisor sends
+  `thinking`/`text_delta`/`tool_use`/`tool_result`/`status`/`assistant_message`; hub sends
+  `user_message`/`cancel`/`ping`; 30s heartbeat. Keyed by `api_keys`, **never** user license.
+- **`/ws/client`** — auth `{ token }` (opaque session cookie; legacy JWT only when
+  `ALLOW_LEGACY_LOGIN=true`); client sends `send_message`/`subscribe`; hub sends
+  `message`/`session_status`/`session_list` + activity events.
+- Both: 5s auth timeout, 20 conns/IP, per-conn rate limits. `subscribe` accepts single
+  `session_id` or multi `session_ids` (cap 12, for grid view).
 
 ## Key Design Decisions
 
-- Supervisor spawns Claude CLI with `--input-format stream-json --output-format stream-json` for full activity streaming
-- Persistent CLI process per session (conversation memory preserved across messages)
-- Session resume by project_dir (supervisor reconnects to existing sessions on restart)
-- Activity events (thinking, tool use) are ephemeral — only the final assistant_message is persisted
-- File attachments: text files embedded in message content, images as base64 data URIs
-- Light/dark theme via CSS custom properties (--bg-primary, --text-primary, etc.)
-- Session tokens use `remo_` prefix + 32 random bytes (base64url), stored as SHA-256 hashes
-- The hub serves the built web SPA as static files (no separate web server in production)
-- Subscription quota (5h + 7d Anthropic utilization) is polled by the **supervisor**, not the hub — the OAuth access token lives only in `~/.claude/.credentials.json` on the dev machine and never leaves it. Hub keeps a per-user in-memory snapshot (`hub/src/usage/store.ts`) and rebroadcasts to web clients via WS event `subscription_usage`.
+- Persistent CLI process per session; resume by `project_dir`.
+- Activity events (thinking, tool use) are ephemeral — only the final `assistant_message` persists.
+- File attachments: text inlined into message content; images as base64 data URIs.
+- Theme via CSS custom properties (`--bg-primary`, `--text-primary`, …).
+- Session tokens: `remo_` prefix + 32 random bytes (base64url), stored as SHA-256 hashes.
+- Subscription quota (5h + 7d Anthropic utilization) polled by the **supervisor**, not the hub
+  — OAuth token stays in `~/.claude/.credentials.json` on the dev machine. Hub keeps an
+  in-memory snapshot (`hub/src/usage/store.ts`), rebroadcasts via WS `subscription_usage`.
 
 ## Environment Variables
 
-**hub/.env**: `DATABASE_URL` (PostgreSQL connection string), `JWT_SECRET` (min 32 chars), `PORT` (3040), `HUB_ALLOWED_ORIGINS`
-
-**web/.env**: `VITE_HUB_URL`
-
-**Supervisor config**: managed by the Tauri first-run wizard; stored at `%LOCALAPPDATA%\remo-code-supervisor\config.json` on Windows. Holds hub URL, API key, repo roots.
-
-**Scheduled tasks (optional):**
-- `REMO_PUBLIC_URL` — prefix for `{{run_url}}` template var in post-run actions (default `https://app.remo-code.com`).
-- `COOLIFY_TOKEN` — required only if `log_check` tasks are configured.
-- `E4A_API_KEY`, `E4A_BASE_URL`, `E4A_INBOX_ID` — required only if `notify_email` post-run actions are configured. Email notifications always use emails4agents per the global rule.
-- `REMO_E2E_DB_URL` — disposable Postgres URL for the e2e test in `hub/test/scheduled-tasks.e2e.test.ts` (tests skip if unset).
-
-**Session lifecycle (optional):**
-- `REMO_SESSION_IDLE_GRACE_SECONDS` — seconds the hub waits after the last web client unsubscribes from a session before sending `shutdown` to the owning agent (kills the Claude/Codex runner with `idle_no_subscribers`). Default `300` (5 min). Set to `0` to disable idle teardown entirely. A new `subscribe` inside the grace window cancels the pending teardown.
-
-## Scheduled Tasks
-
-Hub-side cron scheduler that fires user-defined tasks against connected agents/supervisors on a recurring cadence. Full architecture in [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
-
-- **Module:** `hub/src/scheduler/` (V2 dispatcher). The legacy v0 scheduler (`hub/src/scheduler/index.ts`) has been removed.
-- **Key files:** `cron.ts` (croner wrapper + presets), `dispatcher.ts` (cost-cap + fan-out + triage routing + route to sender), `targets.ts` (resolve target_kind), `catchup.ts` (boot replay), `senders/{agent,supervisor,coolify,triage}.ts`, `post-run/{dispatcher,schema,template,aggregator,chain,email,telegram,webpush,webhook}.ts`.
-- **Round-2 dispatch migration (this phase):** the scheduler's SESSION send→queue→grace→finalize path now runs on the shared `hub/src/dispatch/` pipeline (`dispatch()` + `onSessionReply()` + `getGraceBuffer()`), matching error-capture + revanote. `senders/agent.ts` and the LOCAL-AGENT branch of `senders/triage.ts` are thin adapters: `RunStore` over the existing `scheduled_task_runs` row + gates `[thresholdGate, dailyCostCapGate]` (the promotion re-check, IR-1/IR-2) + offline `replay`/`onParkExpire`. Finalize lands via `dispatch.onSessionReply` → `RunStore.onFinalize` → `finalizeRun(success)` (which fires the post-run pipeline; triage's onFinalize parses `TriageResult` first). **What STAYED in the scheduler:** cron, fan-out across targets, `enforceCostCap` audit rows, target resolution, the Summary directive, Phase-11 workflows + `## RUNTIME CONTEXT` block, the SUPERVISOR-spawn triage path (`pending` map + `onTriageAssistantMessage`), and the supervisor/coolify senders. `scheduler/grace.ts` was DELETED (shared buffer keyed by session/supervisor id); `scheduler/session-queue.ts` is kept as a back-compat shim only (`scheduler.test.ts` exercises it standalone) and is removed in the final Round-2 collapse PR. `dispatcher.init()`'s `setOnPromote` seam is now a no-op (promotion is pipeline-owned).
-- **Agent sender directive:** `hub/src/scheduler/senders/agent.ts` appends a `Summary:` directive (and prepends the `## RUNTIME CONTEXT` block) to the content sent to Claude's stdin inside the dispatch adapter's `send` thunk (forces a 1-line summary at the end of every scheduled run). The content **stored** in `messages` is unchanged — `[scheduled: <task name>]\n\n<prompt>` — and the `runtime_context_snapshot` lives on the run row, never in `messages`; only the sent string carries the directive + block.
-- **Web mirror:** `web/src/lib/cron.ts` keeps the "next 3 runs" preview API-compatible with the hub.
-- **Web UI files:** `web/src/components/CronBuilder.tsx` (dropdown cron composer, 8 modes), `web/src/lib/cron-humanize.ts` (`humanizeCron` plain-English renderer shared by builder + list row), `web/src/lib/format.ts` (`formatDuration`, `formatCostUsd`, `formatRelativeAgo`), `web/src/lib/scheduled-message.ts` (`parseScheduledPrefix` → indigo `Scheduled:` pill in `MessageBubble`).
-- **List + drawer:** `web/src/components/SchedulesPage.tsx` (search + status + task-type filters; last-run cost/duration chips; tz-aware `Next:` + `Fired Xm ago`), `web/src/components/ScheduleRunsDrawer.tsx` (status filter chips with live counts + summary stats banner).
-- **API shape:** list + single-task endpoints include `last_run_cost_usd` and `last_run_duration_ms` (LATERAL JOIN on `scheduled_task_runs` keyed by `task_id`, most recent finalized run).
-- **REST:** `hub/src/api/scheduled-tasks.ts`, `hub/src/api/scheduled-task-runs.ts`. WS events extend `hub/src/ws/protocol.ts`.
-- **Tests:** `hub/test/scheduler.test.ts` (41 unit tests, no DB needed), `hub/test/scheduled-tasks.e2e.test.ts` (skipped without `REMO_E2E_DB_URL`).
-
-When adding a new task type, post-run action, or any scheduler change: update `docs/scheduled-tasks.md` and `hub/test/scheduler.test.ts` in the same commit. The unit-test file is the contract — keep it green.
-
-## Error Capture
-
-Sentry-style error intake routed back into the Claude session bound to each repo. Full architecture in [docs/error-capture.md](docs/error-capture.md).
-
-- **Module:** `hub/src/error-capture/` (Phase 06). Public intake endpoint at `hub/src/api/sentry-intake.ts` mounted OUTSIDE the `/api/*` JWT catch-all — `sentry_key` in `X-Sentry-Auth` IS the credential.
-- **Key files:** `auth.ts` (header parser), `envelope.ts` (gunzip + multi-line JSON), `fingerprint.ts` (sha-256 of project + type + value + top-3 frames), `record.ts` (3 INTAKE gates: dedupe → rate-limit → daily-dispatch-cap; UNCHANGED by the dispatch migration), `notify.ts` (silent-skip emails via emails4agents, throttled), `prompt.ts` (dispatch prompt builder), `dispatcher.ts` (**Round-2 migration: now a thin adapter over the shared `hub/src/dispatch/` pipeline** — builds a `RunStore` + `gates:[thresholdGate,dailyCostCapGate]` + `replay`/`onParkExpire`/`send`, calls `dispatch()`, maps the `DispatchOutcome` to error-capture WS events), `setup/{detect,snippet,coolify-env}.ts`. **Deleted in the migration:** `grace.ts` (now `hub/src/dispatch/grace.ts`) and `run-lifecycle.ts` (finalize now via the pipeline's `onSessionReply` hook in `hub/src/ws/agent.ts`, fired on `assistant_message`). The per-session queue + offline grace + finalize-and-promote all live in the shared `hub/src/dispatch/` deep module — error-capture no longer copies `scheduler/session-queue.ts`. **IR-1:** the migrated `gates[]` ADDS the non-bypassable daily-cost-cap (legacy dispatcher gated only on the Claude usage threshold). The `ws/agent.ts` finalize branch calls `onSessionReply` alongside the not-yet-migrated scheduler/triage/revanote hooks (transitional dual-path; `onSessionReply` no-ops without an active pipeline hook — see the `TODO(round2)` comment).
-- **REST:** `hub/src/api/{sentry-intake,error-projects,errors,error-runs,error-setup}.ts`. WS events extend `hub/src/ws/protocol.ts` (`error_received`, `error_dispatched`, `error_run_finished`, `error_skipped`).
-- **DB tables** (`hub/src/db/schema.sql`, idempotent `CREATE TABLE IF NOT EXISTS`): `error_projects(id, user_id, name, sentry_key UNIQUE, session_id, dedupe_window_seconds=60, rate_limit_per_hour=20, daily_dispatch_cap=50, enabled)`, `errors(id, project_id, fingerprint, error_type, error_value, stacktrace_json, release, received_at, dispatch_status, dispatched_at, skip_reason)`, `error_runs(id, error_id, project_id, session_id, status, started_at, finished_at, output_snippet, error)`, `notifications_sent(id, kind, dedupe_key, sent_at)`.
-- **Web UI:** `web/src/components/{ErrorCapturePage,ErrorProjectEditor,ErrorDetailDrawer,ErrorSetupModal}.tsx` — Settings → Error Capture tab. Per-project row launches `ErrorSetupModal` for one-shot SDK install.
-- **Supported auto-install stacks** (`setup/detect.ts`, content-driven, no fs walk): Node+Express, Node+Next.js, Python+FastAPI, Python+Django. Order: nextjs > express > django > fastapi. Anything else → 422 + throttled `stack_not_detected` email with copy-paste snippet + DSN.
-- **Coolify integration:** `setup/coolify-env.ts → setCoolifyEnv(app_uuid, 'SENTRY_DSN', dsn)` + optional `redeployCoolifyApp`. `COOLIFY_TOKEN` + `COOLIFY_URL` env required for the auto-install path.
-- **Silent-skip emails always go through emails4agents** (per global rule #7). Throttle row is written BEFORE the send attempt to prevent retry storms.
-
-When adding a new dispatch gate, supported stack, supervisor companion command, or any error-capture change: update `docs/error-capture.md` in the same commit.
-
-## Grid View
-
-Multichat grid view at `#/grid` and `#/grid/:tabId` — watch up to 12 Claude Code sessions in one browser frame. Full architecture in [docs/grid-view.md](docs/grid-view.md).
-
-- **Components:** `web/src/components/GridPage.tsx` (tab bar + grid container + layout picker), `ChatSurface.tsx` (the chat surface — three densities: `full`, `cell`, `mobile-expanded`), `MobileAccordion.tsx` (mobile branch, single ChatSurface mounted at a time, unmount-on-collapse), `SessionPicker.tsx` (add/remove tab membership).
-- **REST:** `/api/chat-tabs` (list/create), `/api/chat-tabs/:id` (PATCH name/layout/position, DELETE cascade), `/api/chat-tabs/order` (bulk reorder), `/api/chat-tabs/:id/sessions` (POST add, PATCH bulk reorder), `/api/chat-tabs/:id/sessions/:sessionId` (DELETE remove). Batch initial-history: `GET /api/sessions/messages?ids=a,b,c&limit=30` returns `{ [sessionId]: Message[] }` in one round-trip. Hard cap of 12 ids server-side.
-- **WS subscribe overload** (in `hub/src/ws/protocol.ts`) — back-compat: accepts EITHER shape, never both at once:
-  ```ts
-  // legacy single
-  { type: 'subscribe', session_id: 'sess_abc' }
-  // multi (new)
-  { type: 'subscribe', session_ids: ['sess_a', 'sess_b', 'sess_c'] }
-  ```
-  Per-connection cap is 12 active session_ids. Violations get `{ type: 'subscribe_error', error: 'too_many_sessions', max: 12 }`. The hub holds a `Set<sessionId>` on the connection state and routes activity events by set membership.
-- **DB tables** (both user-scoped, cascade FKs): `chat_tabs(id, user_id, name, layout, position, created_at, updated_at)` and `chat_tab_sessions(tab_id, session_id, position, created_at)` with composite PK `(tab_id, session_id)`. Migrations are idempotent `CREATE TABLE IF NOT EXISTS` in `hub/src/db/schema.sql`.
-- **Performance design:** streaming `text_delta` events are RAF-coalesced in the ChatSurface (one React state update per frame; raw deltas accumulate in a ref). Hub-side throttling is FORBIDDEN — would break the scheduled-tasks event-ordering contract. Message lists are virtualized with `@tanstack/react-virtual` for all three densities.
-- **Mobile auto-swap:** CSS-first via Tailwind `md:` breakpoint (768px). Below `md`, GridPage renders `<MobileAccordion>` instead of the grid regardless of route. Use `100dvh`/`100svh` — never `100vh` (iOS Safari keyboard collapses `vh`).
-- **Active cell:** tracked per tab in `sessionStorage` (`grid:lastActiveCell:<tabId>`), NOT URL. Document-level paste/drop is scoped via `data-chat-surface-cell-id` so typing in cell A keeps paste routed to A even when focus drifts.
-
-### Dependencies of note
-
-- **`@tanstack/react-virtual`** (`web/package.json`) — virtualizes the message list in `ChatSurface` across all densities. The only new web dep added in Phase 03.
-
-When adding a new ChatSurface density, layout mode, tab-membership op, or any grid behavior: update `docs/grid-view.md` in the same commit.
-
-## Phase 05: Codex CLI + Rootless Ambient Sessions
-
-Sessions can run either **Claude Code** or **Codex** (`sessions.cli_kind` — `'claude' | 'codex'`, pinned at create time). Each agent can also host **rootless ambient sessions** (one per CLI per host, no `project_dir`) advertised via `auth` payload `rootless_sessions: ['claude','codex']`. Partial unique index `idx_sessions_rootless_unique` enforces one-per-(user,host,cli). Rootless runners spawn lazily on first `user_message` with cwd `~/.remo-code/rootless/<cli>/`.
-
-**Codex transport:** `codex app-server` over child-process stdio JSON-RPC (newline-delimited with LSP `Content-Length:` fallback auto-detected). `CodexRunner` translates Codex notifications into the same `RunnerEvent` union Claude emits, so the web UI renders both identically. **Spike status:** framing + method names per research §1.3 — not yet live-verified.
-
-**Instructions sync (`seed_files` in `auth_ok`):** three `users.*` TEXT columns (`claude_global_md`, `codex_agents_md`, `codex_config_toml`) sync to the agent on connect. Agent writes each file **create-if-absent only** — it NEVER overwrites; on sha-256 drift it emits an `agent_log` warning. Edit blobs at Settings → Instructions. `PUT /api/instructions` strips secret-looking lines (`api_key`, `token`, `secret`, `password`) from `codex_config_toml`.
-
-**File map** (see [docs/codex-and-rootless.md](docs/codex-and-rootless.md) for the full architecture):
-- Agent: `agent/src/cli-runner.ts` (`CliRunner` interface + `RunnerEvent` union), `claude-runner.ts`, `codex-runner.ts`, `codex-jsonrpc.ts`, `seed.ts`, `index.ts` (per-session runner `Map<sessionId, CliRunner>`)
-- Hub: `hub/src/api/instructions.ts`, `hub/src/db/dal.ts` (`findOrCreateRootlessSession`, `getUserInstructions`, `updateUserInstructions`), `hub/src/ws/agent.ts` (auth handler builds `cli_kind` + `rootless_session_ids` + `seed_files`)
-- Web: `web/src/components/SettingsPage.tsx` (Instructions tab), `Sidebar.tsx` (codex/ambient badges), `useSessions.ts` (`CodeSession.cli_kind`, `is_rootless`, `hostname`)
-
-When adding a new CLI runner, modifying the Codex protocol mapping, changing seed semantics, or extending instruction blobs: update `docs/codex-and-rootless.md` in the same commit.
-
-## Phase 06: Coolify Self-Heal Absorb
-
-Absorbs the standalone `coolify-ai-monitor` Express service (port 3032, now retired) into the hub's scheduler + post-run pipeline. Public HMAC-signed Coolify webhook → `triage` run → structured `TriageResult` JSON → optional `github_issue` post-run action. Full architecture in [docs/scheduled-tasks.md](docs/scheduled-tasks.md) (sections "Coolify webhook ingress", "GitHub-issue post-run action", and the `triage` task_kind row) and the end-to-end migration plan in [docs/coolify-webhook-migration.md](docs/coolify-webhook-migration.md).
-
-**File map (shipped on this branch):**
-
-- `hub/src/api/coolify-webhook.ts` — public ingress with TWO routes: primary `POST /api/coolify/webhook/:user_id/:token` (URL-path token, constant-time compare — matches Coolify's URL-only webhook UI) and legacy `POST /api/coolify/webhook/:user_id` (HMAC headers, deprecated 30-day grace, returns `Deprecation: true` + `Sunset:`). Both flow through a shared `handleAuthenticated` pipeline: optional IP allowlist (`users.coolify_webhook_allowed_ips`) → Zod validate (event-name `EVENT_ALIAS` normalizes `deployment_success`/`deployment_failed` underscore forms emitted by Coolify's `SendWebhookJob` to the dotted internal canonical) → persist run → triage on failure → audit row in `coolify_webhook_attempts` (every hit, capped 100/user). CIDR helper at `hub/src/lib/cidr.ts`.
-- `hub/src/api/account.ts` — `POST /api/account/coolify-webhook-secret/rotate` + `GET .../coolify-webhook-secret` (returns full URL with token embedded), `GET .../coolify-webhook-attempts?limit=10` (audit log), `GET`/`PUT .../coolify-webhook-allowed-ips`.
-- `hub/src/lib/cidr.ts` — zero-dep IPv4/IPv6 + CIDR allowlist helper. `parseAllowlist`, `ipAllowed`, `sourceIpFromHeaders` (cf-connecting-ip → x-real-ip → first x-forwarded-for hop).
-- `hub/src/scheduler/triage-schema.ts` — `TriageResult` Zod schema + `parseTriageOutput` (tolerates ```json fences, rejects bare prose).
-- `hub/src/scheduler/triage-prompt.ts` — `renderTriagePrompt` template for `task_kind: 'triage'` runs.
-- `hub/src/scheduler/post-run/schema.ts` — `github_issue` variant added to the discriminated union.
-- `hub/src/scheduler/post-run/github-issue.ts` — `executeGithubIssue`: loads creds from gateway pair, renders body via `template.ts`, sha256 idempotency over `(repo, application_uuid, deployment_uuid)` in `github_issue_idempotency` (24h window). Failures are log-only.
-- `hub/src/db/dal.ts` — `getUserCoolifyWebhookSecret`, `rotateUserCoolifyWebhookSecret`, `ensureInternalDeploymentTask`, `hasOpenIssueForHash`, `recordOpenIssueForHash`.
-- `hub/src/db/schema.sql` — new nullable columns on `scheduled_task_runs` (`deployment_uuid`, `application_uuid`, `git_repository`, `commit_sha`), `users.coolify_webhook_secret`, `github_issue_idempotency` table.
-- Tests: `hub/test/coolify-webhook.test.ts`, `coolify-webhook-secret.test.ts`, `triage-schema.test.ts`, `post-run-github-issue.test.ts`.
-
-**Pending (NOT shipped on this branch — depends on Phase 04 plan 008):**
-
-- `hub/src/scheduler/log-classifier.ts` (Phase 06 plans 002/003) — 16-pattern regex gate over `log_check` output before LLM spend.
-- `hub/src/scheduler/senders/triage.ts` + the real body of `dispatchTriageStub` (Phase 06 plan 008) — routes synthesized triage runs through `pickSessionTarget` (which lives in unmerged Phase 04 plan 008). Until plan 008 lands, the webhook persists rows but does NOT dispatch to a session.
-
-**Key invariants:**
-
-- **Cost cap.** All triage runs flow through `hub/src/scheduler/dispatcher.ts` `enforceCostCap`. No new fan-out path bypasses the daily cap. The classifier (when wired) skips post-run actions when no errors detected — preserves the cap.
-- **GitHub creds via gateway pair, ALWAYS.** Token fetched via `GET {GATEWAY_URL}/api/credentials/service/github`. There is no `GITHUB_TOKEN` env var on the hub. Per global CLAUDE.md MCP server auth architecture.
-- **Webhook HMAC.** `X-Coolify-Signature: sha256=<hex>` over `${X-Coolify-Timestamp}.${rawBody}`, constant-time compared; reject `>5 min` skew. Raw body must be read BEFORE any JSON parse.
-- **Idempotency.** `github_issue` skips when `sha256(repo|application_uuid|deployment_uuid)` exists in `github_issue_idempotency` within 24h — no duplicate issues for the same failed deployment.
-- **GitHub-issue failures never fail the parent run** — log-only; Octokit errors are swallowed.
-
-When adding a new triage payload field, post-run action, or webhook event type: update `docs/scheduled-tasks.md` and `docs/coolify-webhook-migration.md` in the same commit.
-
-## Phase 07: Titanium Licensing Auth Cutover
-
-Replaces bcrypt + JWT user-auth with **Titanium Licensing** (Keygen-backed) magic-link login + opaque cookie sessions, and gates feature endpoints on a synced `license_status` mirror. The legacy path stays alive behind `ALLOW_LEGACY_LOGIN` for one release as the rollback. Full architecture in [docs/auth.md](docs/auth.md).
-
-**File map (hub):**
-
-- `hub/src/config.ts` — typed `config.titanium.*`, `config.magicLinkSecret`, `config.sessionSecret`, `config.allowLegacyLogin` parsed from env at boot. Missing required vars = fatal.
-- `hub/src/titanium-client.ts` — JWKS-cached EdDSA verifier for Keygen tokens + license `validate` calls. Tests live in `hub/test/titanium-client.test.ts` (offline vectors at `hub/test/fixtures/titanium-vectors.json`).
-- `hub/src/session.ts` — opaque cookie sessions (random token, sha-256 in DB, sliding refresh). `createAuthSession`, `verifyAuthSessionCookie`, `revokeAuthSession`. Persists to the `auth_sessions` table.
-- `hub/src/csrf.ts` — double-submit cookie + `X-CSRF-Token` header check on all state-changing routes.
-- `hub/src/license-gate.ts` — middleware factory. Reads `license_status` from `users` via `getUserLicenseFields`, refreshes through `titanium-client` if stale (TTL `TITANIUM_LICENSE_CACHE_TTL_SECONDS`), 402s when not `active`. **Exclusion list** (NEVER license-gated): `/api/auth/*`, `/api/profile/license`, `/api/profile`, `/healthz`, the Sentry intake, the Coolify webhook, the Titanium license-changed webhook, and `/ws/agent` (agent traffic is keyed by `api_keys`, not user license).
-- `hub/src/auth/middleware.ts` — dual-auth. Tries cookie first, falls back to `Authorization: Bearer <jwt>` ONLY when `config.allowLegacyLogin === true`. Sets `c.set('userId')` and `c.set('authMethod')` (`session_cookie` | `legacy_jwt`).
-- `hub/src/auth/reauth.ts` — short-window step-up gate. Required by sensitive ops (api-key creation, email change, account delete).
-- `hub/src/api/auth.ts` — new routes: `POST /request-link`, `GET /callback`, `POST /logout`. Legacy `POST /login` + `POST /register` are still mounted but return 410 when `!config.allowLegacyLogin`.
-- `hub/src/api/profile.ts` — plain Hono. Excluded from license gate.
-- `hub/src/api/_openapi.ts` — `GET /api/profile/cost-today` and `GET /api/profile/license` are OpenAPI-aware (zod schemas). Both are mounted ahead of the plain `profile.ts` twin and excluded from license gating.
-- `hub/src/api/webhooks-titanium.ts` — `POST /webhooks/titanium/license-changed`. HMAC over `${ts}.${rawBody}`, raw body read BEFORE JSON parse. Returns 503 when `TITANIUM_WEBHOOK_SECRET` is unset.
-- `hub/scripts/migrate-users-to-titanium.ts` — one-shot script: looks up each user in the Titanium portal, writes `titanium_subject` + initial `license_status`, marks unmatched rows `titanium_link_status='pending_verify'`.
-- `hub/src/db/schema.sql` — additive only this phase: `users.titanium_subject`, `users.license_status`, `users.license_id`, `users.license_checked_at`, `users.titanium_link_status`, `users.candidate_subject`; new `auth_sessions` table; new `auth_events` audit table. `password_hash` STAYS.
-- `hub/src/db/dal.ts` — `getUserByTitaniumSubject`, `linkTitaniumSubject`, `setPendingVerify`, `promoteCandidateSubject`, `getUserLicenseFields`, `updateLicenseStatus`, `updateUserEmail`, `createAuthSession`, `getAuthSessionByToken`, `touchAuthSession`, `deleteAuthSession`, `purgeExpiredAuthSessions`, `recordAuthEvent`.
-
-**File map (web):**
-
-- `web/src/lib/auth.ts` — cookie-aware fetch helpers; magic-link `requestLink` + `completeCallback`; portal URL helper reading `VITE_TITANIUM_PORTAL_URL`.
-- `web/src/hooks/useLicense.ts` — polls `GET /api/profile/license` every 5 min; returns `'active' | 'expired' | 'suspended' | 'banned' | 'none' | 'unknown'`. 404 is treated silently as `unknown` (back-compat with pre-endpoint deploys); 402 maps to `expired`.
-- `web/src/components/Layout.tsx` — renders the license badge (color + tooltip) from `useLicense`.
-- `web/src/App.tsx` — magic-link request page + callback route; "Manage account" link to the Titanium portal.
-
-**Key invariants:**
-
-- **Legacy path is gated, NOT deleted this phase.** `ALLOW_LEGACY_LOGIN`, `password_hash`, `bcrypt`, `hub/src/auth/password.ts`, and `JWT_SECRET` all stay alive through the soak. Phase 07.5 deletes them.
-- **`SESSION_SECRET` is never rotated as part of a routine cutover** — that would log out every Titanium-cookie user. D14's force-reissue rotates `JWT_SECRET` (kills legacy bearer JWTs) and leaves `SESSION_SECRET` alone.
-- **`/api/profile/license` is auth-gated, NOT license-gated** — it IS the license-status endpoint; gating it on itself is a circular dep. Same exclusion applies to `/api/auth/*`, `/healthz`, and webhooks.
-- **`/ws/agent` traffic is keyed by `api_keys`, never by user license.** A user with `license_status='expired'` can still observe agent traffic in read-only mode; only user-initiated mutations are blocked.
-- **Magic-link jti single-use.** `TITANIUM_REQUIRE_REDIS=true` (default) hard-fails boot when Redis is absent, preventing silent replay-protection degradation. Set `false` only for local dev.
-- **Webhook HMAC and raw-body discipline mirror the Coolify webhook** (Phase 06): raw body MUST be read before JSON parse, signature over `${ts}.${rawBody}`, constant-time compare, reject >5 min skew. Unset secret → 503.
-- **Per-stack rules #16, #17, #18 from global CLAUDE.md apply.** This phase is the implementation of #16 (auth/billing → Titanium) on this app.
-
-When adding a new license-gated endpoint, exclusion-list entry, magic-link claim, webhook event, session-lifecycle hook, or any Phase 07 surface: update `docs/auth.md` in the same commit. Phase 07.5 cleanup items (password/JWT removal) get appended to `docs/auth.md`'s "07.5 follow-up" section so the cutover plan is preserved alongside the doc.
-
-**Titanium bypass active as of 2026-05-26** (commit `5e3674d`, PR #71). `TITANIUM_BYPASS=true` is set on the prod Coolify app: it skips `warmJwksCache()` at boot, short-circuits `requireActiveLicense` to permissive mode, and 503s the magic-link endpoints (`/api/auth/login/request-link`, `/api/auth/login/callback`) with `{ error: "titanium_disabled" }`. Legacy bcrypt `/api/auth/login` (`ALLOW_LEGACY_LOGIN=true`) is the only working auth path under bypass. The flag stays on until titanium-licensing Phase 09 ships a working Keygen JWKS endpoint; then set to `false` and the full magic-link + license-gate flow resumes.
-
-## Phase 08: Revanote Integration
-
-Inbound visual annotations from Revanote → routed as `user_message` into the Claude session bound to the page's repo → agent replies with a `<<JSON>>…<<END>>` envelope → hub posts a callback back to Revanote (with exponential retry). Full architecture in [docs/revanote.md](docs/revanote.md).
-
-- **Module:** `hub/src/revanote/` (parallel to `error-capture/` and `scheduler/`). NOT folded into `scheduler/task_kind` — annotation lifecycle is 1:1 + callback-bound, different from cron fan-out.
-- **Inbound webhook:** `POST /api/revanote/webhook/:user_id/:token` mounted OUTSIDE the JWT + license + CSRF catch-alls (mirrors `coolify-webhook` + `sentry-intake`). URL-token constant-time compare + optional `X-Revuu-Signature: sha256=<hex>` HMAC. Raw body MUST be read before `JSON.parse` (Hono `c.req.text()` pattern). 5-min timestamp skew if `timestamp` present.
-- **Single secret, triple duty:** `users.revanote_webhook_secret` (UUID) IS the URL token AND the HMAC key AND the outbound callback Bearer. `POST /api/account/revanote-webhook-secret/rotate` returns `{ user_id, token, webhook_secret, webhook_url }` in one call.
-- **File map (hub):** `revanote/payload-schema.ts` (inbound zod), `result-schema.ts` (`<<JSON>>…<<END>>` envelope parser + `stripRevanoteEnvelope`, modeled on `triage-schema.parseTriageOutput`), `prompt.ts` (storage prefix `[revanote: <30-grapheme preview via Intl.Segmenter>]\n\n<full prompt>` + per-strategy agent prompt), `dispatcher.ts` (**Round-2: thin adapter on the shared `hub/src/dispatch/` pipeline** — mapping/session resolve → `RunStore` over `annotation_runs` + `gates:[threshold, dailyCostCap, revanoteBudgetGate]` → `dispatch()` → outcome→WS map), `run-lifecycle.ts` (`finalizeAnnotationReply` = the `onFinalize` hook body: envelope parse + status + merge gate + callback enqueue), `callback.ts` (retry curve `1m → 5m → 15m → 1h → 4h → 12h → dead-letter`, jittered ±10%, `FOR UPDATE SKIP LOCKED` claim).
-- **Round-2 migration (shared dispatch pipeline):** revanote rides `hub/src/dispatch/{pipeline,gates,session-queue,grace}.ts` (same deep module as the error-capture pilot). The per-session queue, offline grace, and finalize fan-in are no longer revanote-owned. The per-source budget is a `revanoteBudgetGate` `DispatchGate` (defined + exported in `dispatcher.ts`) layered ON TOP of the global `dailyCostCapGate` (IR-1). **Deleted:** `revanote/grace.ts` (use `getGraceBuffer()`) + the revanote `onAgentReply`/session-registry path (use pipeline `onSessionReply` + `RunStore.onFinalize`).
-- **REST:** `hub/src/api/{revanote-webhook,revanote-mappings,revanote-annotations}.ts`. Account-level helpers in `hub/src/api/account.ts` (`/revanote-webhook-secret*`, `/revanote-webhook-attempts`, `/revanote-budget-pct`).
-- **WS events:** added 5 lifecycle events to `hub/src/ws/protocol.ts` (`revanote_received`, `revanote_dispatched`, `revanote_skipped`, `revanote_resolved`, `revanote_callback_sent`) + `broadcastRevanoteEvent` in `hub/src/ws/registry.ts`. **Round-2:** the agent ws `assistant_message` handler finalizes revanote via the shared `dispatch.onSessionReply(sessionId, content)` (which fires `RunStore.onFinalize`) — there is no longer a revanote-specific `onAgentReply` call. (scheduler + telegram still use their own legacy finalize calls until migrated.)
-- **DB tables (`hub/src/db/schema.sql`, idempotent):** `users.revanote_webhook_secret`, `users.revanote_budget_pct` (1..100, default 60), `revanote_app_mappings(hostname_pattern, repo_path, supervisor_id?, deploy_strategy pr|direct|none, auto_merge, enabled, auto_created)`, `annotations(annotation_id_external, page_url, annotation_url, screenshot_url, comment, replies_json, callback_url, mapping_id, session_id, status pending|dispatched|resolved|failed|failed_offline, payload_raw JSONB)` UNIQUE `(user_id, annotation_id_external)`, `annotation_runs`, `revanote_callback_attempts` (partial index on `next_retry_at IS NOT NULL`), `revanote_webhook_attempts` (audit log capped 100/user).
-- **Web UI:** `web/src/components/RevanotePage.tsx` route at `#/revanote`. `MessageBubble.tsx` renders the violet **Annotation** pill via `parseRevanotePrefix` (modeled on `parseScheduledPrefix`) and strips the agent's `<<JSON>>…<<END>>` envelope from the displayed text via `stripRevanoteEnvelope`. `web/src/lib/revanote-message.ts` houses both helpers.
-
-**Key invariants:**
-
-- **Cost cap is non-negotiable (IR-1).** All annotation dispatches flow through the shared pipeline's gate chain `[thresholdGate, dailyCostCapGate, revanoteBudgetGate]` (`hub/src/dispatch/gates.ts` + the adapter). The per-source `revanote_budget_pct` gate runs ON TOP of the global cost cap, NOT a substitute.
-- **Webhook raw body MUST be read before any JSON parse** (mirrors Coolify webhook + Sentry intake — required for both HMAC verification and audit log preview).
-- **Audit-log every hit** (success + auth_failed + hmac_failed + bad_payload + stale_timestamp). Capped 100/user, oldest-deleted on each insert.
-- **Outbound callback ALWAYS includes `annotation_id`**, even on pre-dispatch rejections (`budget_threshold`, `no_target`, `session_busy`).
-- **`deployed: true` means "pushed", not "Coolify serving traffic"** — documented contract in `docs/revanote.md`.
-- **GitHub-issue / Coolify deploy-status enrichment** is out of scope this phase — deferred to Phase 09+.
-
-When adding a new annotation status, callback retry bucket, deploy strategy, or any revanote-side change: update `docs/revanote.md` in the same commit.
-
-## Phase 11: Structured Task Workflows + Runtime Context Injection
-
-Collapses the scheduled-task type enum from six options to **three** user-pickable roots (`dev`, `security`, `log_check`) plus **nine chained step kinds** plus internal `triage`. Each root expands into a 3-step workflow glued via the existing `chain_task` post-run action — no new sender. Adds a `## RUNTIME CONTEXT` block to every agent-bound scheduled run, persisted to `scheduled_task_runs.runtime_context_snapshot` for audit. Full architecture in [docs/scheduled-tasks.md](docs/scheduled-tasks.md) "Phase 11" section.
-
-**File map (hub):**
-
-- `hub/src/scheduler/workflows.ts` — `WORKFLOWS` ordering table + `nextStepInWorkflow` / `stepsForWorkflow` / `workflowRootForStep` helpers.
-- `hub/src/scheduler/prompts/loader.ts` + `prompts/<workflow>/<step>.md` (9 files: `dev/{plan,execute,ship}`, `security/{scan,triage,fix-or-issue}`, `log_check/{pull,classify,triage}`).
-- `hub/src/scheduler/context/{project-type,deploy-target,version,global-rules-digest,design-preferences,build}.ts` — runtime context builders.
-- `hub/src/scheduler/post-run/chain.ts` — workflow-aware audit log; chain_task remains authoritative.
-- `hub/src/scheduler/senders/agent.ts` — prepends `## RUNTIME CONTEXT` block; storedContent unchanged.
-- `hub/src/db/schema.sql` — `scheduled_task_runs.runtime_context_snapshot JSONB` (nullable); `task_type` CHECK tightened to the new enum.
-- `hub/src/db/scheduled-tasks-dal.ts` — narrowed `TaskType` union (3 roots + 9 steps + `triage`).
-- `hub/scripts/migrate-task-kinds.ts` — one-shot data migration (`prompt|skill|continue_dev` → `dev`). Idempotent.
-
-**File map (web):**
-
-- `web/src/components/ScheduleEditor.tsx` — `<select>` task-type + `<select>` target; `md:grid-cols-{2,3}` compact layout.
-- `web/src/components/SchedulesPage.tsx`, `web/src/hooks/useSchedules.ts`, `web/src/lib/task-name.ts`, `web/src/lib/task-templates.ts` — narrowed enum + label swaps.
-
-**Key invariants:**
-
-- **Templates are repo `.md` files only** (PLAN.md decision #1). No DB override in v1.
-- **Single `{{user_prompt}}` slot** shared across all three step templates per workflow (decision #2).
-- **Auto-create three pre-chained rows** on workflow save; single-row legacy rows stay legal (decision #3).
-- **Cost cap is per-user-per-day** — workflows can be cut mid-chain (decision #4).
-- **No auto-explosion of legacy rows** during migration; they stay single-step `dev` with prompt verbatim (decision #7).
-- **`triage` is hidden from create-task `<select>`** but visible in run history with "(internal)" label (decision #6).
-- **Hub NEVER reads user home dirs.** `design-preferences.md` is read from repo-vendored `docs/design-preferences.md` if present (decision #9).
-- **`runtime_context_snapshot` is NEVER persisted to `messages`.** It is sent to Claude stdin and stored on the run row only.
-
-When adding a new workflow step, root, runtime-context field, or template: update `docs/scheduled-tasks.md` AND `hub/test/scheduler.test.ts` in the same commit.
-
-## Phase 12: UI restructure
-
-Top-level nav collapsed to **Home / Tasks / Settings** (three hash routes: `#/`, `#/tasks`, `#/settings`). Every other legacy hash (`#/schedules`, `#/error-capture`, `#/revanote`, `#/grid`, `#/grid/:tabId`, `#/supervisor`) hash-redirects to the canonical route via `replaceState` in `web/src/App.tsx::resolveHashWithRedirects`. SettingsPage god-component (1242 LOC) was fragmented into 5 tab modules; ~2900 LOC of dead Phase-08 + legacy chrome files were deleted; 10 shared UI primitives were extracted.
-
-**File map (web):**
-
-- `web/src/components/ui/AppShell.tsx`, `AppHeader.tsx`, `HeaderRight.tsx`, `ProfileMenu.tsx` — shared chrome mounted ONCE per page route. Header has Home / Tasks / Settings links + theme toggle + `UsageStrip` + `ProfileMenu` (avatar → license badge → manage account → logout).
-- `web/src/components/ui/{Card,Modal,Tabs,Button,Field,StatusPill,EmptyState,LoadingState,Drawer}.tsx` — 10 design-token-correct primitives. Modal/Drawer use `rounded-xl` + `ring-1 ring-white/5` (NEVER `rounded-2xl` / `shadow-2xl`). Tabs supports URL-hash sync via `syncHash="tab"`.
-- `web/src/pages/HomePage.tsx` — `#/` route. Tabs: List View (Sidebar + ChatPanel via `ChatLayout`) | Grid View (GridPage minus its own header).
-- `web/src/pages/TasksPage.tsx` + `web/src/pages/tasks/{UpcomingTab,ActivityTab,ScheduleTab}.tsx` — `#/tasks` route. Tabs: Upcoming (next 24h fires) | Activity (runs across all tasks) | Schedule (CRUD list grouped by repo).
-- `web/src/pages/SettingsPage.tsx` + `web/src/pages/settings/{ConnectionsTab,CredentialsTab,PromptsTab,UsageTab,ProfileTab}.tsx` — `#/settings` route. 5 tabs.
-- `web/src/lib/license-ui.ts` — `licenseTone`/`licenseLabel` shared between header badge and Settings → Profile.
-
-**Key invariants:**
-
-- **Three root routes forever.** `#/`, `#/tasks`, `#/settings`. Every legacy deep link is `replaceState`-redirected (NOT `assign`) so the browser back button still works. `{{run_url}}` template emails from the scheduler post-run pipeline embed redirect-target URLs — these redirects are permanent contract.
-- **Login / AuthCallback / Privacy / Terms / SetupForm bypass `<AppShell>`.** They render their own chrome.
-- **Design-token discipline (per `~/.claude/design-preferences.md`):** `rounded-xl` for cards/dialogs, `rounded-lg` for inputs/buttons/list items, `rounded` for chips. NEVER `rounded-2xl` or higher. NO `shadow-2xl` / `shadow-lg` / `shadow-md` — use `ring-1 ring-white/5` instead. Indigo button text uses `text-[var(--text-on-accent)]`, never `text-white`. Red destructive buttons may keep `text-white`.
-- **License gate excludes the 3 root routes from forced redirect.** `useLicense` shows a status badge in the header; only mutating API calls return 402, which surfaces the dismissible `<LicenseRequiredBanner>` overlay.
-- **`AppShell` mounts header/footer/license-banner-offset ONCE per render.** Tabs swap content under it. Mobile nav (hamburger / dropdown) lives in `AppHeader` and works identically across all three pages.
-- **`SchedulesPage.tsx` is retained as a module export** (re-exports `describeTarget`, `formatTsInTz`) consumed by `tasks/UpcomingTab.tsx` + `tasks/ScheduleTab.tsx`. Its standalone page rendering is dead; only the shared helpers remain.
-
-When adding a new top-level route, tab, primitive, or design-token-affecting style: extend the shared primitives, register the redirect in `App.tsx::resolveHashWithRedirects` if a legacy URL needs to map to it, and update this section in the same commit.
-
-## Orchestrator Session
-
-Pinned root-folder Claude session that coordinates the user's other Claude sessions via the hub REST API. Exactly one open orchestrator per user, enforced by the `idx_sessions_orchestrator_unique` partial index on `sessions(user_id) WHERE is_orchestrator=true AND deleted_at IS NULL`.
-
-**Auto-launch (2026-05-28):** the orchestrator is **on by default** and **auto-launches when the supervisor connects** — it no longer waits for an interactive `POST /start`. On `supervisor.hello` (in `hub/src/ws/agent.ts`, AFTER the orphan-resume sweep) the hub calls `maybeAutoLaunchOrchestrator`: if the user has `orchestrator_enabled && !orchestrator_disabled_explicitly` and NO open orchestrator session row, it launches one. It's the default Telegram target too — see the Telegram Bridge section. Both auto and manual paths share the `launchOrchestrator(userId)` primitive in `hub/src/orchestrator/auto-launch.ts`, which goes through `reserveSessionSlot` + `createRun` (the cost-cap / concurrency gate + the `session_runs` ledger) — the old REST `/start` bypassed both; that gap is now fixed.
-
-**File map:**
-
-- Hub: `hub/src/api/orchestrator.ts` (REST — `POST /start` now delegates to the shared primitive), `hub/src/orchestrator/auto-launch.ts` (`launchOrchestrator` + `maybeAutoLaunchOrchestrator`), `hub/src/db/orchestrator-dal.ts` (DAL), `hub/src/orchestrator/seed-prompt.ts` (system-prompt builder), `hub/src/ws/agent.ts` (auto-launch hook in `supervisor.hello`), `hub/src/orchestrator/orphan-resume.ts` (orchestrator-aware relaunch — orchestrator orphans go through `launchOrchestrator`, NOT a plain `session.start`), `hub/scripts/migrate-orchestrator-default.ts` (one-shot backfill).
-- Hub schema: `users.orchestrator_{enabled,name,custom_instructions}` (default of `orchestrator_enabled` flipped to `true`), `users.orchestrator_disabled_explicitly` (explicit-disable sentinel), `sessions.is_orchestrator`, `api_keys.purpose` (default `'supervisor'`; orchestrator-issued rows = `'orchestrator'`). The legacy per-user `idx_api_keys_user_active` is replaced by `idx_api_keys_user_purpose_active` so an orchestrator key and a supervisor key can coexist.
-- Supervisor: `supervisor/src/hub-client.ts` recognizes an optional `orchestrator` field on `session.start` and routes through `ProcessManager.start({ orchestrator })`. `supervisor/src/runners/claude-runner.ts` injects `REMO_HUB_API_KEY` + `REMO_HUB_URL` into the spawned env and writes `.remo-orchestrator.md` into cwd as a CLAUDE.md-style anchor. **No supervisor change for auto-launch.**
-- Web: `web/src/components/OrchestratorTab.tsx` (Settings → Orchestrator tab with red-ring confirm modal on enable; copy notes auto-launch-on-connect). Sidebar pins the orchestrator row to position 0 with an indigo ring + `Orchestrator` pill. GridPage enforces orchestrator-in-cell-0 when the orchestrator session is a member of the active tab.
-
-**Key invariants:**
-
-- **One open orchestrator per user under concurrent connects.** Two supervisors / a double-connect race on the `idx_sessions_orchestrator_unique` INSERT; the loser catches the 23505 unique violation and reuses the winner's row — never a second spawn.
-- `GET /api/orchestrator` is license-gate-exempt (read-only via `readOnlyOk:true`). The **interactive** `PUT`/`POST start`/`POST stop` require `requireRecentAuth()` (15-min step-up window) + active license + per-user mutation rate-limit.
-- **Machine-triggered auto-launch mints the key WITHOUT step-up, gated on the persisted `orchestrator_enabled && !orchestrator_disabled_explicitly` flag.** Rationale: a valid supervisor `api_keys` connection already spawns arbitrary FS-access Claude processes, so the orchestrator key grants no escalation; the one thing step-up protects — turning the feature ON — stays behind the interactive cookie+step-up `PUT`. A stolen supervisor key + feature-disabled = nothing launches.
-- **The explicit-disable sentinel (`orchestrator_disabled_explicitly`) is set ONLY by the interactive `PUT /api/orchestrator` disable path** (disabling sets it, enabling clears it). The machine path checks it so a user who turned the orchestrator OFF is NEVER auto-launched, and a future migration's default flip never resurrects them.
-- The hub API key minted for the orchestrator is full-power (capabilities `['agent','supervisor','orchestrator']`) and lives ONLY in the supervisor's spawned Claude process env (the `session.start.orchestrator.hub_api_key` field). The hub never echoes it back over WS; the system prompt teaches Claude to use it without logging it.
-- **Cost-cap + concurrency apply to BOTH the auto and manual start paths** — both go through `reserveSessionSlot` + `createRun` via the shared `launchOrchestrator`.
-- **The orchestrator session is EXEMPT from idle-no-subscribers teardown** (`hub/src/ws/idle-teardown.ts` — an in-memory `orchestratorSessionIds` set, populated by `launchOrchestrator` via `markOrchestratorSession`). It is the always-available Telegram brain and is not a WS subscriber; the exemption prevents an auto-launch ↔ teardown respawn churn.
-- `cwd` resolution is hub-side: the user's preferred supervisor (when online) else first online, then `roots[0]`. No UI cwd picker. `roots.length === 0` → auto-launch skips silently (no throw).
-- `requireGitRepo` gate is bypassed for orchestrator runs (the cwd is a repos parent, not a repo). Sandbox `assertWithinRoots` still applies.
-- **`user_stopped` is sacred:** orphan-resume's guard blocks resurrection of a Stopped orchestrator run; auto-launch only acts when NO open session row exists (Stop ends the run, not the row).
-- **NEVER set `users.orchestrator_enabled = false` without also setting `users.orchestrator_disabled_explicitly = true`** — `schema.sql`'s backfill `UPDATE` runs on every hub boot and re-enables any non-sentinel user with `orchestrator_enabled = false`. Always flip both together (the interactive `PUT` disable path already does; a manual SQL/admin disable must too) or the next deploy resurrects it.
-- **Cross-supervisor launch is serialized** by a per-user `pg_advisory_xact_lock(hashtext('orchestrator:'||userId))` held across the whole find-or-create → open-run re-check → reserve → createRun → mint transaction in `launchOrchestrator` (`hub/src/orchestrator/auto-launch.ts`). `idx_sessions_orchestrator_unique` guards the SESSION row but NOT the RUN; `reserveSessionSlot`'s `FOR UPDATE` is per-supervisor and does NOT serialize across two distinct supervisors. After acquiring the lock, if an OPEN orchestrator run already exists the loser NO-OPS (`already_running`) — no second reserve/run/mint/send, so two supervisors helloing concurrently spawn exactly one orchestrator. Single-host users hit the lock uncontended (no added latency). The backfill `UPDATE` in `schema.sql` carries an `AND orchestrator_enabled = false` convergence guard so it no-ops once the fleet is migrated (no per-boot table rewrite).
-- The `REMO_ORCHESTRATOR_AUTOLAUNCH=false` env disables the machine-triggered hook (rollback); the interactive path is unaffected.
-- Only Claude is supported. Codex orchestrator is out of scope.
-
-When adding orchestrator-specific endpoints, prompt sections, or env vars: update this rollup in the same commit.
-
-## Hub shared dispatch + webhook-intake modules (hub-deepening, 2026-05-28)
-
-Two **deep modules** extracted to replace copied-N-times patterns. **Round-2 collapse COMPLETE (2026-05-29):** all four inbound subsystems (error-capture, revanote, scheduler, telegram) run on `hub/src/dispatch/`; the per-subsystem copies and the back-compat `scheduler/session-queue.ts` shim are deleted. **Do NOT hand-roll the old per-subsystem versions.**
-
-- **`hub/src/dispatch/`** — the session-dispatch pipeline that scheduler / error-capture / revanote / telegram each used to re-implement (gates → queue → grace → finalize). `dispatch(req, deps)` (`pipeline.ts`) runs `deps.gates[]` in order (first block wins → `{kind:'skipped'}`) → claims the per-session queue (`dispatched` / `queued` / `dropped_busy`) → if the agent is offline, releases the slot and parks `deps.replay` in grace (`parked_offline`) → else sends the `user_message` via `deps.send` and registers a finalize hook. `onSessionReply(sessionId, content)` is the single fan-in from the agent `assistant_message` branch: it finalizes the active hook, then promotes the queue waiter and re-dispatches it through the FULL gate list again. Pieces: `SessionQueue` (`hub/src/dispatch/session-queue.ts` — the ONLY queue impl now; instance class, 1 in-flight + 1 waiter, `markFinished` returns the promoted token, no global `setOnPromote` seam; exercised directly by `hub/test/session-queue.test.ts`); `getGraceBuffer()` (`grace.ts` — singleton, `register(key, replay, { ttlMs, onExpire })`, `drain(key)`, 10-min `DEFAULT_TTL_MS` + 60s `unref`'d sweep, `onExpire` fires exactly once at drain- or sweep-time); `gates.ts` (`thresholdGate`, `dailyCostCapGate` — wraps the single-source-of-truth `isOverCostCap` SQL — and `concurrencyGate(supervisorId)`). The old `hub/src/scheduler/session-queue.ts` back-compat shim (functional API + `setOnPromote`/`onSessionIdleAndPromote` seam) is DELETED — its queue-semantics tests were relocated verbatim to `hub/test/session-queue.test.ts` against the class; `hub/test/scheduler.test.ts` keeps only genuine scheduler-behavior tests (cron, catch-up, post-run, auto-name). `scheduler/dispatcher.ts`'s dead `init()` no-op and its `index.ts` call site are also removed (promotion is pipeline-side via `onSessionReply`). **Promotion behaviour change:** legacy silently stranded the 2nd same-session message; the pipeline releases the slot then re-dispatches through every gate (IR-2), so a user who crossed the cost cap while queued is skipped — migrations must heed this. Known accepted gap: cross-source same-session ordering is best-effort across the await between release and re-enqueue.
-- **`hub/src/webhooks/intake.ts`** — the public-webhook auth gate that coolify / sentry / revanote / telegram each repeated. `runIntake(c, cfg)` does raw-body-before-parse (`c.req.text()`) → resolve presented/expected secret via `cfg.resolveSecret` → constant-time compare → optional HMAC over `${ts}.${rawBody}` (or `rawBody` alone when no `hmacTimestampHeader`) → skew → optional per-owner IP allowlist → audit per `cfg.audit` policy, returning `{ ok:true, ownerId, rawBody }` or a uniform non-leaky `401` (`403` for IP rejection, after a valid credential). Per-webhook differences (sentry header-cred / no-HMAC / no-audit-on-fail, coolify URL-token + IP allowlist, revanote HMAC-when-present, telegram global secret + no-audit-on-fail) are CONFIG (`IntakeConfig`), not new code paths. `constantTimeEqual` / `verifyHmacSig` live here once. Migrating a route: parse `result.rawBody` — never re-read `c.req.text()` (preserves the raw-body-before-parse contract).
-- **Mount-order invariant:** `hub/src/index.ts` has a `MOUNT-ORDER INVARIANT CONTRACT` block (4 relations); `hub/test/mount-order.test.ts` enforces it (public webhooks mount before the `/api/*` JWT/auth catch-all; license gate after auth; CSRF allowlist skips webhook subpaths; `/ws/agent` keyed by `api_keys`, never license). Don't reorder mounts blindly.
-- **CI gate:** the QC baseline (`tools/check-baseline.ts`, `bun run check-baseline`) now runs each `hub/test/*.test.ts` file in its OWN `bun test <file>` process and aggregates the junit totals (order-independent) — Bun `mock.module` is process-global + first-write-wins, so spread real exports in partial mocks (`{ ...await import(real), override }`). Baseline `tools/regression-baseline.json`: pass `771` / total `900`, `tolerance.fail_max:0`.
-
-## API docs convention
-
-The hub exposes OpenAPI 3.1 at `/openapi.json` and a Scalar UI at `/docs`. The spec is assembled in `hub/src/api/_openapi.ts` using `@hono/zod-openapi` `createRoute` declarations. Currently covers `/api/profile/cost-today` and `/api/profile/license` — the rest of the hub is plain Hono and gets migrated incrementally.
-
-When migrating a route:
-1. Add a `createRoute` declaration to `hub/src/api/_openapi.ts` (or a sibling `OpenAPIHono` subrouter mounted ahead of the plain twin in `hub/src/index.ts`).
-2. Delete the plain-Hono twin so it doesn't double-mount.
-3. Run `bun run docs:sync` from repo root; commit the updated `docs/openapi.json` and `docs/api.md`.
-4. CI workflow `.github/workflows/docs-drift.yml` fails PRs that change `hub/src/**` without a matching spec update.
-
-The dump script (`hub/scripts/dump-openapi.ts`) loads the OpenAPIHono sub-app in-process — no `Bun.serve`, no port, no DB. It needs placeholder `JWT_SECRET` + `DATABASE_URL` env vars to satisfy module-load-time validation; the npm script sets harmless values.
-
-## Phase 12: Mobile Tauri Client
-
-**Paused 2026-05-28.** Windows MSI preview + Android debug APK ship and work; iOS is unbuilt (needs Mac); release signing, store listings, and Windows/Android release CI are deferred. Single canonical pause-state doc with install commands, source layout, hub endpoint line numbers, rebuild steps, and resume checklist lives at [docs/phase-12-pause-state.md](docs/phase-12-pause-state.md) — start there if returning to this work.
-
-Wraps the existing `web/` SPA as a native iOS + Android app via Tauri 2.
-Connection path is unchanged: phone → `https://app.remo-code.com` (hub) →
-user's supervisor over `/ws/agent`. The phone is a pure hub client; no CLI
-runs on-device. Full architecture in [docs/mobile-client.md](docs/mobile-client.md);
-sub-phase plan in `.planning/phases/12-mobile-tauri-client/PLAN.md`.
-
-### 12.1 — Hub-side enablement (this PR)
-
-Hub-only changes that unblock the Tauri shell. No mobile scaffold yet.
-
-- **`hub/src/api/well-known.ts`** — public `GET /.well-known/apple-app-site-association` + `GET /.well-known/assetlinks.json`. Both return `application/json`, no auth, no license gate. Mounted at root in `hub/src/index.ts` before any `/api/*` middleware. Driven by `MOBILE_APPLE_TEAM_ID`, `MOBILE_ANDROID_SHA256_FINGERPRINT`, `MOBILE_BUNDLE_ID` env (dev defaults `TEAMID` / `SHA256_PLACEHOLDER` / `com.finedesignz.remo-code`).
-- **`hub/src/api/auth.ts`** — `GET /api/auth/login/callback` accepts an optional `?platform=ios|android` query. When set, it mints a one-time `auth_handoff_tokens` row and 302s to `remo-code://auth/callback?token=<opaque>` instead of setting the browser cookie. New endpoint `POST /api/auth/finalize-mobile` consumes the opaque token (atomic single-use UPDATE), creates a normal auth session, and emits the Tauri-variant cookie. Excluded from the license gate via the existing `/api/auth/*` rule.
-- **`hub/src/session.ts`** — `sessionCookieAttrsForOrigin(origin)` centralizes the cookie-attribute decision. Browser default stays `__Host-remo_sid; SameSite=Lax`. Requests originating from `tauri://localhost` (iOS) or `https://tauri.localhost` (Android) get `remo_sid; SameSite=None; Secure; Partitioned` — the `__Host-` prefix forbids `SameSite=None`, so the Tauri variant uses an unprefixed name. `readSessionCookie` + `parseSessionCookieFromHeader` accept both names so WS upgrade + middleware paths are transport-agnostic.
-- **`hub/src/db/schema.sql`** — new idempotent `auth_handoff_tokens` table (uuid pk, fk to `users`, sha-256 `token_hash`, `purpose` default `'mobile_handoff'`, 60s `expires_at`, nullable `consumed_at`, index on `token_hash`).
-- **`hub/src/db/dal.ts`** — `createAuthHandoffToken(userId)` returns the opaque token (prefix `mh_`, base64url-encoded 32 bytes). `consumeAuthHandoffToken(token)` performs an atomic `UPDATE … WHERE consumed_at IS NULL AND expires_at > now() RETURNING …` so a second concurrent caller can never also succeed.
-- **`hub/src/config.ts`** — new env: `MOBILE_TAURI_ORIGINS_ENABLED` (default `true`, adds Tauri origins to `allowedOrigins`), `MOBILE_BUNDLE_ID`, `MOBILE_APPLE_TEAM_ID`, `MOBILE_ANDROID_SHA256_FINGERPRINT`.
-
-### Key invariants
-
-- **Tauri origins are ADDITIONAL.** `HUB_ALLOWED_ORIGINS` parsing semantics are unchanged; Tauri origins are appended in-process based on `MOBILE_TAURI_ORIGINS_ENABLED`. Set the env to `false` to revert to browser-only.
-- **Single-use semantics are atomic.** `consumeAuthHandoffToken` relies on the `UPDATE … RETURNING` form — no read-then-write race. Double-consume returns `null`.
-- **`/api/auth/finalize-mobile` is NOT license-gated.** Same rationale as the rest of `/api/auth/*`: acquiring a session must not depend on license state.
-- **No changes to `/ws/agent` or `/ws/client` this phase.** Tauri WebView traffic is identical to browser traffic at the WS layer.
-
-When adding a new mobile endpoint, deep-link target, `.well-known` route, or any Phase 12 surface: update `docs/mobile-client.md` in the same commit, and `docs/auth.md` "Mobile finalize endpoint" subsection if the auth flow changes.
+- **hub/.env:** `DATABASE_URL`, `JWT_SECRET` (min 32), `PORT` (3040), `HUB_ALLOWED_ORIGINS`.
+  Titanium / Telegram / mobile / scheduler envs are documented in the relevant `docs/*.md`.
+- **web/.env:** `VITE_HUB_URL`.
+- **Supervisor:** Tauri wizard → `%LOCALAPPDATA%\remo-code-supervisor\config.json`.
+- **Optional:** `REMO_SESSION_IDLE_GRACE_SECONDS` (default 300; `0` disables idle teardown),
+  `REMO_ORCHESTRATOR_AUTOLAUNCH` (`false` disables auto-launch), `TITANIUM_BYPASS` (currently
+  `true` in prod — see docs/auth.md), `COOLIFY_TOKEN`, `E4A_*`.
+
+## Docs map — subsystems & phases
+
+Each doc is the source of truth; **update it in the same commit** as a behavior change.
+Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-notes.md](docs/claude-architecture-notes.md).
+
+| Subsystem / phase | Doc | One-liner |
+|---|---|---|
+| Scheduled tasks | [scheduled-tasks.md](docs/scheduled-tasks.md) | Hub cron scheduler (`hub/src/scheduler/`); fan-out, cost-cap, post-run actions, Phase-11 workflows. Contract test: `hub/test/scheduler.test.ts`. |
+| Error capture | [error-capture.md](docs/error-capture.md) | Sentry-style intake (`hub/src/error-capture/`) → dispatch into repo-bound session; SDK auto-install for 4 stacks. |
+| Grid view | [grid-view.md](docs/grid-view.md) | Multichat grid `#/grid` (up to 12 sessions); `ChatSurface` densities, `@tanstack/react-virtual`. |
+| Codex + rootless | [codex-and-rootless.md](docs/codex-and-rootless.md) | Phase 05 — Codex CLI runner, rootless ambient sessions, instructions sync. |
+| Coolify self-heal | [coolify-webhook-migration.md](docs/coolify-webhook-migration.md) | Phase 06 — Coolify webhook → triage run → optional `github_issue`. |
+| Auth (Titanium) | [auth.md](docs/auth.md) | Phase 07 — magic-link + opaque cookie sessions + license gate. `TITANIUM_BYPASS` active in prod. |
+| Revanote | [revanote.md](docs/revanote.md) | Phase 08 — visual-annotation webhook → session → `<<JSON>>` callback (retry curve). |
+| Orchestrator session | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | Auto-launching root-folder coordinator session; exactly one open per user. |
+| Telegram bridge | [telegram-bridge.md](docs/telegram-bridge.md) | Phase 12 — bidirectional Telegram ↔ session; orchestrator is the preferred default. |
+| Mobile Tauri client | [mobile-client.md](docs/mobile-client.md) · [phase-12-pause-state.md](docs/phase-12-pause-state.md) | Phase 12 — iOS/Android WebView shell + deep-link auth. **Paused 2026-05-28.** |
+| Shared dispatch + intake | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | `hub/src/dispatch/` (gates→queue→grace→finalize) + `hub/src/webhooks/intake.ts`. All inbound subsystems ride these. |
+| API docs | [api.md](docs/api.md) · `/openapi.json` · `/docs` | OpenAPI 3.1 assembled in `hub/src/api/_openapi.ts`; run `bun run docs:sync` after route changes (docs-drift CI enforces). |
+
+## Cross-cutting invariants (do not violate)
+
+- **Cost cap is non-bypassable.** Every inbound user→session dispatch flows through the shared
+  `dailyCostCapGate` in `hub/src/dispatch/gates.ts` (single source of truth — `isOverCostCap`).
+- **Public webhooks: raw body BEFORE JSON parse**, constant-time secret compare, HMAC over
+  `${ts}.${rawBody}`, reject >5min skew. Webhooks mount BEFORE the `/api/*` auth catch-all;
+  license gate after auth; `/ws/agent` keyed by `api_keys`. `hub/test/mount-order.test.ts` enforces.
+- **Don't hand-roll per-subsystem dispatch/queue/grace.** Round-2 collapse is complete — use
+  `hub/src/dispatch/` (the old `scheduler/session-queue.ts` shim is deleted).
+- **schema.sql re-runs every boot** — idempotent DDL only; backfills → `hub/scripts/` one-shots.
+- **Orchestrator:** exactly one open per user (`idx_sessions_orchestrator_unique`); never set
+  `orchestrator_enabled=false` without also setting `orchestrator_disabled_explicitly=true`
+  (the boot backfill re-enables otherwise). Detail in the architecture-notes archive.
+
+## Deployment / Releases
+
+- **Hub:** Docker multi-stage (`Dockerfile`) on Coolify at `app.remo-code.com`, port 3040.
+  The supervisor runs locally on the dev machine — **not** deployed.
+- **Supervisor:** push a `supervisor-v*.*.*` tag → `.github/workflows/release-supervisor.yml`
+  builds + signs the MSI + publishes a Release with `latest.json` for the auto-updater. Local:
+  `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. Key setup: `supervisor/tauri/UPDATER-SETUP.md`.
 
 ## PR Hygiene
 
-Periodically check for open PRs with `gh pr list`. Review them for conflicts with current work, stale branches, or changes that have already been applied to main. Flag any that should be closed or merged.
-
-## Deployment
-
-Docker multi-stage build (see `Dockerfile`): installs deps → builds web → copies into production image with non-root user. Runs on Coolify at `app.remo-code.com`, port 3040.
-
-The agent runs locally on the dev machine — it is NOT deployed to the server. The agent may host multiple CLI subprocesses per process (one Claude project session + ambient Claude + ambient Codex).
-
-## Releases
-
-**Supervisor (Tauri tray app):** push a `supervisor-v*.*.*` tag — `.github/workflows/release-supervisor.yml` builds the MSI on `windows-latest`, signs it with the Tauri updater key, and publishes a GitHub Release with `latest.json` for the in-app auto-updater. Local builds: `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. First-time signing-key setup: `supervisor/tauri/UPDATER-SETUP.md`.
-
-## Phase 12: Telegram Bridge
-
-Bidirectional Telegram ↔ Claude Code session bridge. Inbound `POST /api/telegram/webhook/:secret` lands Telegram updates, routes commands (`/start`, `/session`, `/list`, `/help`) or forwards text/photo/document as `user_message` to a linked default session. Outbound subscribes to an internal `assistant_message:final` event bus and pushes the final reply back to the linked `chat_id`. One hub-wide bot serves all users, keyed by `users.telegram_chat_id`. Full architecture in [docs/telegram-bridge.md](docs/telegram-bridge.md).
-
-**File map (hub):**
-
-- `hub/src/api/telegram-webhook.ts` — public ingress at `POST /api/telegram/webhook/:secret`. Mounted AHEAD of JWT + license + CSRF catch-alls (Phase 06 pattern). Raw body read before `JSON.parse`. Constant-time compare on `:secret` vs `config.telegram.webhookSecret`. Mismatch → 401, no DB write. Zod-validated `Update` envelope. Audit row per accepted request in `telegram_inbound_log`; `(chat_id, update_id)` short-circuits re-dispatch on Telegram retries.
-- `hub/src/api/telegram.ts` — authed REST under `/api/telegram/*` (cookie auth + CSRF double-submit, Phase 07 pattern): `GET /status`, `POST /link-code`, `DELETE /link`, `PUT /default-session`. Plain Hono in v1.
-- `hub/src/telegram/client.ts` — `sendMessage` / `getFile` / `getFileContent` wrapper, `escapeMarkdownV2`, `splitForTelegram` (4096-char split preferring `\n\n` / `\n` / ` ` boundaries within last 200 chars), per-chat outbound serial queue. `AbortSignal.timeout(10_000)`. Bot token never logged.
-- `hub/src/telegram/commands.ts` — `parse(text)` + handlers for `/start <code>`, `/session <arg>`, `/list`, `/help`, `/doctor` (W4).
-- `hub/src/telegram/doctor.ts` — (W4) `runDoctor({ user, chatId })` walks 6 progressive checks (account link → default session → session row → supervisor connected → live runner channel → auto-launch via `launchSessionForUser`) replying after each. Scheduled 20s deferred check polls `getChannel` and replies once with success/timeout. Also invoked from the webhook on `agent_offline` dispatch outcome so silent failures get one-tap diagnostics.
-- `hub/src/telegram/launch.ts` — (W4) `launchSessionForUser({ userId, sessionId })` mirrors `POST /api/supervisors/:id/start` verbatim: resolves the session's supervisor (by `sessions.hostname`), calls `reserveSessionSlot` (cost-cap / concurrency gate — NEVER bypassed), `createRun`, `updateSupervisorState('starting', run.id)`, then `sendToSupervisor({ type: 'session.start', api_key: '__use_local__', hub_url: '__same__', ... })`. Returns a discriminated `LaunchResult` the doctor translates to a Telegram reply.
-- `hub/src/telegram/dispatch.ts` — inbound → session dispatch. **Round-2 migration:** now a thin adapter over the shared `hub/src/dispatch/` pipeline — `dispatch({ store: null, gates: [thresholdGate, dailyCostCapGate], token: 'tg:<chat>:<update>' })`. The locally-replicated `isOverCostCap` SQL copy is DELETED; cost-cap is the shared `dailyCostCapGate` (IR-1, single source of truth). `send` adapter persists the user message, broadcasts to web subscribers, then pushes `user_message` (+`images[]`) onto the agent socket. `DispatchOutcome` map: `skipped`→cost-capped reply, `dropped_busy`→"Session busy", `parked_offline`→buffered (grace) + agent_offline. Offline replay re-runs on `/ws/agent` drain (#163 auto-replay). No run row → no finalize hook (output is the outbound bridge/event bus, not `onSessionReply`). Photo (largest-by-area + `getFile` + base64 data URI) and text-document handling live in the webhook (`telegram-webhook.ts::dispatchInbound`), which passes `images[]` into this adapter. Throttled "cap reached" reply via `notifications_sent` dedupe key `telegram_cap_throttle:<user>:<utc_date>`.
-- `hub/src/telegram/bridge.ts` — outbound subscriber on `assistant_message:final`. Gates on `default_session_id === emitting_session_id` (no leakage across sessions). `splitForTelegram` → MarkdownV2 `sendMessage` chunks. Errors swallowed — broken Telegram link MUST NOT break a live session.
-- `hub/src/telegram/link-codes.ts` — 8-char Crockford base32 (~40 bits), 10-min TTL, single-active-per-user, single-use consume, constant-time compare.
-- `hub/src/events/assistant-events.ts` — internal `EventEmitter` carrying `{ userId, sessionId, content, message_id, cost_usd?, duration_ms? }`. Emit point lives in `hub/src/ws/agent.ts` at the existing assistant-message finalize branch. Additive — does NOT change the WS broadcast path.
-- `hub/src/config.ts` — `config.telegram.{botToken,webhookSecret,botUsername}` (all optional). Bridge silently no-ops if any is unset.
-- `hub/src/db/schema.sql` — additive: `users.telegram_chat_id` (BIGINT UNIQUE), `telegram_default_session_id` (REFERENCES sessions ON DELETE SET NULL), `telegram_default_explicit` (BOOLEAN NOT NULL DEFAULT false — explicit `/session`/tap choice vs. auto-pin), `telegram_link_code`, `telegram_link_code_expires_at`; new `telegram_inbound_log(user_id, chat_id, update_id, outcome, error, raw JSONB, received_at)` capped 100/user via DAL housekeeping.
-- `hub/src/db/dal.ts` — Telegram helpers folded into the existing module (deviation from PLAN.md which suggested a separate `telegram-dal.ts`): `getUserByTelegramChatId`, `getUserByLinkCode`, `setLinkCode`, `linkChatId`, `unlinkChatId`, `setDefaultSession`, `getTelegramStatus`, `appendInboundLog`, `trimInboundLog`, `getUsersWithTelegramDefaultSession`.
-- `hub/src/index.ts` — mounts webhook ahead of the auth catch-all, mounts authed REST inside, starts the outbound bridge at boot.
-
-**File map (web):**
-
-- `web/src/components/SettingsPage.tsx` — Telegram subsection inline (decision: NOT a new page). States: `bot_configured=false` (grey card), `linked=false` (Link Telegram → mint code → open `https://t.me/<bot_username>?start=<code>` deep link), `linked=true` (default-session `<select>`, Unlink with confirm).
-
-**Key invariants:**
-
-- **Cost cap is non-bypassable.** Every inbound user→session dispatch flows through the shared `dailyCostCapGate` (`hub/src/dispatch/gates.ts`) inside `dispatch()` — the gate runs before the queue claim and the `send` adapter, so an over-cap user returns `{kind:'skipped'}` and never reaches the agent socket (IR-1). The legacy local `isOverCostCap` copy in `telegram/dispatch.ts` is removed.
-- **Webhook raw-body-before-parse + constant-time URL-secret compare** mirror the Coolify webhook (Phase 06). Auth-fail (401) writes NO audit row — avoids table-fill DoS via a 401 flood.
-- **Outbound forwards ONLY `assistant_message:final`.** `thinking`, `tool_use`, `tool_result`, `text_delta` are NEVER forwarded. Streaming partial replies would burn the cost cap and Telegram's per-chat rate limit instantly.
-- **Orchestrator is the PREFERRED default — explicit vs. auto (orchestrator-as-default, 2026-05-29).** Inbound `dispatchInbound` honors an **explicit** default (set via `/session` or a `/list` button tap → `users.telegram_default_explicit=true`) as-is and NEVER surprise-switches it. For a **non-explicit** default (auto-pinned) OR no default, the user's open orchestrator session is **preferred** when enabled — so a fresh link / repo-less / no-choice user lands in the root orchestrator. On a fallback to the orchestrator the id is **lazy-pinned non-explicit** so the OUTBOUND bridge forwards the reply WITHOUT promoting it to an explicit choice. A **stale pin** (default points at a deleted session) is dropped (flag cleared) + re-resolved. `agent_offline` → autoheal (`runDoctor` → `launchSessionForUser`→`launchOrchestrator`) + replay. `prewarmAfterLink` leaves the default unset when the orchestrator is enabled; any project pin it does set is non-explicit. Orchestrator disabled + no explicit default → "No default session."
-- **Orchestrator pinned at TOP of `/list` + `/session` picker.** `applySidebarParityFilter` exempts `is_orchestrator` rows from the step-1 offline+no-repo drop and pins them to position 0 (label `🧭 Orchestrator (root)`). When no orchestrator session row exists yet but the feature is enabled, `listUserSessionsForPicker` prepends a synthetic `__orchestrator__` row so a zero-session user can still tap-to-start their root folder; tapping it calls `launchOrchestrator` (through `reserveSessionSlot`) and pins the launched id **explicitly**. Pagination `Next`/`Prev` edits in place via `safeEditMessageText`, which **falls back to a fresh send** if the edit fails (parse/too-old/transient 400) so the page never silently freezes; `answerCallbackQuery` always fires.
-- **Default-session match gate on outbound.** Bridge sends only when `users.telegram_default_session_id === emitting_session_id`. Switching default cleanly stops the previous session's stream.
-- **Per-chat serial queue on outbound** (in `client.ts`) — one in-flight `sendMessage` per `chat_id`. Prevents Telegram's per-chat rate-limit from shedding chunks of a split message.
-- **Telegram retry dedupe.** Every accepted-but-skipped path returns 200; `(chat_id, update_id)` audit-row check short-circuits re-dispatch within the day.
-- **`chat_id` UNIQUE constraint** prevents cross-user impersonation. One chat can only ever belong to one user.
-- **Link codes:** 8-char Crockford base32, 10-min TTL, single-active-per-user, single-use, constant-time compare.
-- **Legacy `hub/src/scheduler/post-run/telegram.ts` per-user-bot-token path is preserved for one release** as the rollback envelope. Unset `TELEGRAM_BOT_TOKEN` in Coolify to disable the hub-wide bridge; per-user post-run integrations continue working untouched.
-- **Telegram routes stay plain Hono in v1.** OpenAPI migration of authed `/api/telegram/*` routes is a deferred refactor. The public webhook is intentionally undocumented in `docs/openapi.json` (surfacing the URL-secret shape would be the wrong move).
-
-When adding a new Telegram command, payload type, link-code field, outbound channel filter, or any Phase 12 surface: update `docs/telegram-bridge.md` in the same commit.
+Periodically `gh pr list` — review open PRs for conflicts, stale branches, or already-applied
+changes; flag any to close or merge.
