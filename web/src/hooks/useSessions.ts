@@ -19,6 +19,10 @@ export interface CodeSession {
   name: string
   project_dir: string | null
   status: string
+  // Authoritative "currently hosted by a supervisor" flag from /api/sessions
+  // (supervisor inventory ∪ status online/thinking). Drives List View + the
+  // virtual Grid Default tab membership.
+  active?: boolean
   last_activity: string | null
   created_at: string
   agent_info?: AgentInfo | null

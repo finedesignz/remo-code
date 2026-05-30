@@ -22,15 +22,20 @@ import { useWebSocketContext } from '../hooks/useWebSocket'
 import { ChatSurface } from './ChatSurface'
 import {
   type TabWithSessions,
+  type SessionRef,
   type TabLayout,
   MAX_CELLS_PER_TAB,
+  DEFAULT_TAB_ID,
   listTabs,
   createTab,
   patchTab,
   deleteTab,
   reorderTabs as reorderTabsApi,
+  addSessionToTab,
   removeSessionFromTab,
   batchMessages,
+  getGridState,
+  patchGridState,
 } from '../lib/chat-tabs-api'
 import { SessionPicker } from './SessionPicker'
 import { MobileAccordion } from './MobileAccordion'
@@ -54,6 +59,8 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [activeTabId, setActiveTabId] = useState<string | undefined>(tabIdFromUrl)
   const [pickerOpen, setPickerOpen] = useState(false)
+  // Layout for the VIRTUAL Default tab (can't persist to a chat_tabs row).
+  const [defaultLayout, setDefaultLayout] = useState<TabLayout>('auto-fit')
   const [seedByTab, setSeedByTab] = useState<Record<string, Record<string, ChatMessage[]>>>({})
   const [activeCellId, setActiveCellIdState] = useState<string | null>(null)
   // Per-session unread counter — incremented when a 'message' event arrives
@@ -61,8 +68,15 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   // becomes active. Surfaced as a soft badge on the cell header and counted
   // for a polite aria-live announcer (count only, never message body).
   const [unreadBySession, setUnreadBySession] = useState<Record<string, number>>({})
+  // Persisted grid state from the DB (active tab + focused cell), loaded once.
+  // Used as the source of truth for restoring focus on reload/device switch;
+  // sessionStorage remains a synchronous fallback.
+  const gridStateRef = useRef<{ active_tab_id: string | null; active_session_id: string | null } | null>(null)
+  const [gridStateLoaded, setGridStateLoaded] = useState(false)
 
-  // Persist active cell per tab to sessionStorage (NOT URL).
+  // Persist active cell per tab to sessionStorage (fast local cache) AND to the
+  // DB grid-state (cross-reload/device durability — Phase 13). The DB write is
+  // fire-and-forget; sessionStorage is the synchronous fallback.
   const setActiveCellId = useCallback((id: string | null) => {
     setActiveCellIdState(id)
     if (id) {
@@ -79,7 +93,9 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
       if (id) sessionStorage.setItem(ACTIVE_CELL_KEY(activeTabId), id)
       else sessionStorage.removeItem(ACTIVE_CELL_KEY(activeTabId))
     } catch {}
-  }, [activeTabId])
+    // Persist focused cell to the DB so it survives reload / device switch.
+    patchGridState(token, { active_session_id: id }).catch(() => {})
+  }, [activeTabId, token])
 
   // Initial load
   useEffect(() => {
@@ -96,28 +112,31 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
         setError(e?.message ?? 'Failed to load tabs')
         setLoading(false)
       })
+    // Load persisted grid state in parallel (best-effort). Stored in a ref so
+    // the URL/tab-restore + active-cell-restore effects can consult it once.
+    getGridState(token)
+      .then((gs) => { if (!cancelled) { gridStateRef.current = gs; setGridStateLoaded(true) } })
+      .catch(() => { if (!cancelled) { gridStateRef.current = { active_tab_id: null, active_session_id: null }; setGridStateLoaded(true) } })
     return () => { cancelled = true }
   }, [token])
 
-  // Sync activeTabId ← URL. Replace (not push) to keep history clean.
+  // Sync activeTabId ← URL. Replace (not push) to keep history clean. The
+  // virtual Default tab (DEFAULT_TAB_ID) is always a valid target even with no
+  // user tabs. Restore priority: URL → persisted grid-state → Default.
   useEffect(() => {
-    if (loading) return
-    if (tabIdFromUrl && tabs.some(t => t.id === tabIdFromUrl)) {
+    if (loading || !gridStateLoaded) return
+    const isValid = (id?: string | null) =>
+      !!id && (id === DEFAULT_TAB_ID || tabs.some(t => t.id === id))
+    if (isValid(tabIdFromUrl)) {
       setActiveTabId(tabIdFromUrl)
       return
     }
-    // No tab in URL: pick most-recent (last by updated_at) if any.
-    if (tabs.length > 0) {
-      const sorted = [...tabs].sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''))
-      const newest = sorted[0]
-      if (newest) {
-        setActiveTabId(newest.id)
-        window.location.replace(`#/grid/${newest.id}`)
-      }
-    } else {
-      setActiveTabId(undefined)
-    }
-  }, [tabs, tabIdFromUrl, loading])
+    // No (valid) tab in URL: prefer the persisted active tab, else Default.
+    const persisted = gridStateRef.current?.active_tab_id
+    const target = isValid(persisted) ? persisted! : DEFAULT_TAB_ID
+    setActiveTabId(target)
+    window.location.replace(`#/grid/${target}`)
+  }, [tabs, tabIdFromUrl, loading, gridStateLoaded])
 
   // Active-cell-scoped paste/drop. ChatSurface already handles paste on its
   // textarea + drop on its root. The remaining case: focus is OUTSIDE all
@@ -183,11 +202,23 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
     return unsub
   }, [subscribe])
 
-  // Restore active cell for current tab from sessionStorage.
+  // Restore active cell for the current tab. On the FIRST restore after load,
+  // prefer the DB-persisted focused cell (Phase 13 — survives reload/device).
+  // On subsequent tab switches use the per-tab sessionStorage cache so we don't
+  // wrongly apply tab A's persisted cell to tab B.
+  const cellRestoredRef = useRef(false)
   useEffect(() => {
     if (!activeTabId) {
       setActiveCellIdState(null)
       return
+    }
+    if (!cellRestoredRef.current) {
+      cellRestoredRef.current = true
+      const persisted = gridStateRef.current?.active_session_id ?? null
+      if (persisted) {
+        setActiveCellIdState(persisted)
+        return
+      }
     }
     try {
       const saved = sessionStorage.getItem(ACTIVE_CELL_KEY(activeTabId))
@@ -197,18 +228,56 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
     }
   }, [activeTabId])
 
-  const activeTab = useMemo(
-    () => tabs.find(t => t.id === activeTabId) ?? null,
-    [tabs, activeTabId],
-  )
+  // Persist the active tab to the DB whenever it changes (fire-and-forget).
+  useEffect(() => {
+    if (loading || !activeTabId) return
+    patchGridState(token, { active_tab_id: activeTabId }).catch(() => {})
+  }, [activeTabId, loading, token])
 
-  // Look up the user's sessions so we can identify the orchestrator and pin it
-  // to the first cell when it's a member of the active tab.
-  const { sessions: allSessions } = useSessions(token)
+  // Look up the user's sessions: identifies the orchestrator (pinned to cell 0)
+  // AND drives the VIRTUAL Default tab's membership (all active sessions — same
+  // source List View uses). Live-updates via the shared WS `session_list`.
+  const { sessions: allSessions } = useSessions(token, subscribe, connectionId)
   const orchestratorId = useMemo(
     () => allSessions.find((s) => s.is_orchestrator)?.id ?? null,
     [allSessions],
   )
+
+  // Virtual Default tab (Phase 13). Membership = all currently-active sessions,
+  // computed (never persisted as chat_tab_sessions rows). Always present, first,
+  // and not user-editable (no rename/delete/reorder/picker).
+  const defaultTab = useMemo<TabWithSessions>(() => {
+    const active = allSessions.filter((s) => s.active)
+    const sessions: SessionRef[] = active.map((s, i) => ({
+      session_id: s.id,
+      position: i,
+      name: s.name,
+      project_dir: s.project_dir,
+      status: s.status,
+    }))
+    return {
+      id: DEFAULT_TAB_ID,
+      user_id: '',
+      name: 'Default',
+      layout: 'auto-fit',
+      position: -1,
+      created_at: '',
+      updated_at: '',
+      sessions,
+    }
+  }, [allSessions])
+
+  // Tabs as rendered: virtual Default always first, then user tabs by position.
+  const displayTabs = useMemo<TabWithSessions[]>(() => {
+    const userTabs = [...tabs].sort((a, b) => a.position - b.position)
+    return [defaultTab, ...userTabs]
+  }, [defaultTab, tabs])
+
+  const activeTab = useMemo(
+    () => displayTabs.find(t => t.id === activeTabId) ?? null,
+    [displayTabs, activeTabId],
+  )
+  const isDefaultTab = activeTabId === DEFAULT_TAB_ID
 
   // Visible session ids (capped at 12 per Phase 03 lock). Orchestrator (when
   // present) always pins to cell 0.
@@ -364,8 +433,21 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   }, [token, activeTabId])
 
   const onRemoveFromTab = useCallback(async (sessionId: string) => {
-    if (!activeTabId) return
+    // The virtual Default tab has no DB memberships to remove.
+    if (!activeTabId || activeTabId === DEFAULT_TAB_ID) return
     await removeSessionFromTab(token, activeTabId, sessionId)
+    await onMembershipChange()
+  }, [activeTabId, token, onMembershipChange])
+
+  // Move/assign a session to another (user) tab. From a user tab: remove from
+  // source + add to target (a true move). From the virtual Default tab: only
+  // add to target (Default membership is computed — nothing to remove).
+  const onMoveSession = useCallback(async (sessionId: string, targetTabId: string) => {
+    if (targetTabId === DEFAULT_TAB_ID || targetTabId === activeTabId) return
+    await addSessionToTab(token, targetTabId, sessionId)
+    if (activeTabId && activeTabId !== DEFAULT_TAB_ID) {
+      await removeSessionFromTab(token, activeTabId, sessionId)
+    }
     await onMembershipChange()
   }, [activeTabId, token, onMembershipChange])
 
@@ -401,7 +483,7 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
         {totalUnread > 0 ? `${totalUnread} unread message${totalUnread === 1 ? '' : 's'} across cells` : ''}
       </div>
       <GridTabBar
-        tabs={tabs}
+        tabs={displayTabs}
         activeTabId={activeTabId}
         onSelect={(id) => { window.location.hash = `#/grid/${id}` }}
         onCreate={onCreateTab}
@@ -411,29 +493,29 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
         wsConnected={connected}
       />
 
-      {tabs.length === 0 && (
-        <EmptyState
-          title="Create your first tab"
-          body="Tabs let you watch multiple Claude Code sessions side-by-side. Click + above to create one."
-        />
+      {activeTab && visibleSessions.length === 0 && (
+        isDefaultTab ? (
+          <EmptyState
+            title="No active sessions"
+            body="Launch a session from the supervisor — active sessions appear here automatically."
+          />
+        ) : (
+          <EmptyState
+            title="This tab has no sessions yet"
+            body="Add sessions from the picker below."
+            action={
+              <button
+                onClick={() => setPickerOpen(true)}
+                className="mt-3 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors"
+              >
+                + Add sessions
+              </button>
+            }
+          />
+        )
       )}
 
-      {tabs.length > 0 && activeTab && visibleSessions.length === 0 && (
-        <EmptyState
-          title="This tab has no sessions yet"
-          body="Add sessions from the picker below."
-          action={
-            <button
-              onClick={() => setPickerOpen(true)}
-              className="mt-3 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors"
-            >
-              + Add sessions
-            </button>
-          }
-        />
-      )}
-
-      {tabs.length > 0 && activeTab && visibleSessions.length > 0 && (
+      {activeTab && visibleSessions.length > 0 && (
         <>
           {/* Desktop: tab toolbar + CSS grid */}
           <div
@@ -443,15 +525,18 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
             className="hidden md:flex flex-col flex-1 min-h-0"
           >
             <div className="px-4 pt-3 flex items-center gap-2 shrink-0">
-              <button
-                onClick={() => setPickerOpen(true)}
-                className="px-3 py-1.5 rounded-lg bg-[var(--bg-secondary)]/60 hover:bg-[var(--bg-tertiary)]/50 text-[var(--text-secondary)] text-xs transition-colors"
-              >
-                + Add sessions
-              </button>
+              {!isDefaultTab && (
+                <button
+                  onClick={() => setPickerOpen(true)}
+                  className="px-3 py-1.5 rounded-lg bg-[var(--bg-secondary)]/60 hover:bg-[var(--bg-tertiary)]/50 text-[var(--text-secondary)] text-xs transition-colors"
+                >
+                  + Add sessions
+                </button>
+              )}
               <LayoutPicker
-                value={activeTab.layout}
+                value={isDefaultTab ? defaultLayout : activeTab.layout}
                 onChange={async (next) => {
+                  if (isDefaultTab) { setDefaultLayout(next); return }
                   if (next === activeTab.layout) return
                   const prevTabs = tabs
                   setTabs(prev => prev.map(t => t.id === activeTab.id ? { ...t, layout: next } : t))
@@ -459,6 +544,11 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
                   catch { setTabs(prevTabs) }
                 }}
               />
+              {isDefaultTab && (
+                <span className="text-[11px] text-[var(--text-muted)]" role="note">
+                  Auto: all active sessions
+                </span>
+              )}
               {overflowCount > 0 && (
                 <span className="text-[11px] text-amber-400" role="status">
                   {MAX_CELLS_PER_TAB}-cell cap reached — {overflowCount} more hidden
@@ -470,10 +560,12 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
               aria-label={`Session grid (${visibleSessions.length} of ${activeTab.sessions.length})`}
               className="flex-1 min-h-0 grid gap-3 p-4 auto-rows-fr"
               style={{
-                gridTemplateColumns:
-                  activeTab.layout === '3x3' ? 'repeat(3, 1fr)' :
-                  activeTab.layout === '4x3' ? 'repeat(4, 1fr)' :
-                  'repeat(auto-fit, minmax(320px, 1fr))',
+                gridTemplateColumns: (() => {
+                  const lay = isDefaultTab ? defaultLayout : activeTab.layout
+                  return lay === '3x3' ? 'repeat(3, 1fr)' :
+                    lay === '4x3' ? 'repeat(4, 1fr)' :
+                    'repeat(auto-fit, minmax(320px, 1fr))'
+                })(),
               }}
             >
               {visibleSessions.map(s => (
@@ -483,6 +575,12 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
                   isActive={s.session_id === activeCellId}
                   onActivate={() => setActiveCellId(s.session_id)}
                   onRemove={() => onRemoveFromTab(s.session_id)}
+                  canRemove={!isDefaultTab}
+                  moveTargets={tabs
+                    .filter(t => t.id !== activeTabId)
+                    .sort((a, b) => a.position - b.position)
+                    .map(t => ({ id: t.id, name: t.name }))}
+                  onMove={(targetId) => onMoveSession(s.session_id, targetId)}
                   subscribe={subscribe}
                   send={send}
                   connectionId={connectionId}
@@ -594,7 +692,7 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
     else if (e.key === 'Home') { e.preventDefault(); focusTabAt(0) }
     else if (e.key === 'End') { e.preventDefault(); focusTabAt(sorted.length - 1) }
     else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(sorted[i].id) }
-    else if (e.key === 'F2') { e.preventDefault(); startRename(sorted[i].id, sorted[i].name) }
+    else if (e.key === 'F2' && sorted[i].id !== DEFAULT_TAB_ID) { e.preventDefault(); startRename(sorted[i].id, sorted[i].name) }
   }
 
   return (
@@ -609,6 +707,8 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
       {sorted.map((t, i) => {
         const isActive = t.id === activeTabId
         const isRenaming = renamingId === t.id
+        // Virtual Default tab: not renamable / deletable / reorderable.
+        const isVirtual = t.id === DEFAULT_TAB_ID
         return (
           <div
             key={t.id}
@@ -624,8 +724,8 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
                 : 'bg-[var(--bg-secondary)]/60 text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'
             }`}
             onClick={() => !isRenaming && onSelect(t.id)}
-            onDoubleClick={(e) => { e.stopPropagation(); startRename(t.id, t.name) }}
-            title="Double-click or F2 to rename"
+            onDoubleClick={(e) => { e.stopPropagation(); if (!isVirtual) startRename(t.id, t.name) }}
+            title={isVirtual ? 'Default — auto-populated with all active sessions' : 'Double-click or F2 to rename'}
           >
             {isRenaming ? (
               <input
@@ -644,25 +744,27 @@ function GridTabBar({ tabs, activeTabId, onSelect, onCreate, onRename, onDelete,
               <>
                 <span className="font-medium">{t.name}</span>
                 <span className="text-[10px] text-[var(--text-muted)]">{t.sessions.length}</span>
-                <span className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 ml-1 transition-opacity">
-                  <button
-                    onClick={e => { e.stopPropagation(); onReorder(t.id, -1) }}
-                    disabled={i === 0}
-                    className="px-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-30"
-                    title="Move left"
-                  >‹</button>
-                  <button
-                    onClick={e => { e.stopPropagation(); onReorder(t.id, 1) }}
-                    disabled={i === sorted.length - 1}
-                    className="px-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-30"
-                    title="Move right"
-                  >›</button>
-                  <button
-                    onClick={e => { e.stopPropagation(); onDelete(t.id) }}
-                    className="px-1 text-red-400 hover:text-red-300"
-                    title="Delete tab"
-                  >×</button>
-                </span>
+                {!isVirtual && (
+                  <span className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 ml-1 transition-opacity">
+                    <button
+                      onClick={e => { e.stopPropagation(); onReorder(t.id, -1) }}
+                      disabled={i <= 1}
+                      className="px-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-30"
+                      title="Move left"
+                    >‹</button>
+                    <button
+                      onClick={e => { e.stopPropagation(); onReorder(t.id, 1) }}
+                      disabled={i === sorted.length - 1}
+                      className="px-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-30"
+                      title="Move right"
+                    >›</button>
+                    <button
+                      onClick={e => { e.stopPropagation(); onDelete(t.id) }}
+                      className="px-1 text-red-400 hover:text-red-300"
+                      title="Delete tab"
+                    >×</button>
+                  </span>
+                )}
               </>
             )}
           </div>
@@ -701,6 +803,9 @@ interface GridCellProps {
   isActive: boolean
   onActivate: () => void
   onRemove: () => void
+  canRemove?: boolean
+  moveTargets?: Array<{ id: string; name: string }>
+  onMove?: (targetTabId: string) => void
   subscribe: (handler: (msg: any) => void) => () => void
   send: (msg: object) => void
   connectionId: number
@@ -710,7 +815,7 @@ interface GridCellProps {
   unreadCount?: number
 }
 
-function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send, connectionId, token, wsConnected, seedMessages, unreadCount = 0 }: GridCellProps) {
+function GridCell({ sessionRef, isActive, onActivate, onRemove, canRemove = true, moveTargets = [], onMove, subscribe, send, connectionId, token, wsConnected, seedMessages, unreadCount = 0 }: GridCellProps) {
   const isOnline = sessionRef.status === 'online' || sessionRef.status === 'thinking'
   return (
     <div
@@ -744,13 +849,18 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
         {/* TODO: scheduled-task queue badge — wire up once useSessionQueueState ships (PLAN-004 T7). */}
         {/* TODO: ↗ open-in-single-chat — needs single-chat route to accept a sessionId param
             before re-enabling (was navigating to `#/` and losing context). */}
-        <button
-          type="button"
-          onClick={onRemove}
-          aria-label={`Remove ${sessionRef.name} from tab`}
-          className="text-[10px] text-red-400 hover:text-red-300 px-1"
-          title="Remove from tab"
-        >×</button>
+        {moveTargets.length > 0 && onMove && (
+          <MoveToTabMenu sessionName={sessionRef.name} targets={moveTargets} onMove={onMove} />
+        )}
+        {canRemove && (
+          <button
+            type="button"
+            onClick={onRemove}
+            aria-label={`Remove ${sessionRef.name} from tab`}
+            className="text-[10px] text-red-400 hover:text-red-300 px-1"
+            title="Remove from tab"
+          >×</button>
+        )}
       </div>
       <div className="flex-1 min-h-0">
         <ChatSurface
@@ -765,6 +875,65 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, subscribe, send,
           onActivate={onActivate}
         />
       </div>
+    </div>
+  )
+}
+
+// ── Move-to-tab menu (Phase 13) ──────────────────────────────────────────────
+// Per-cell affordance to move/assign a session into another user tab. From the
+// virtual Default tab this is an "assign" (add only); from a user tab the
+// parent handler also removes it from the source tab (a true move).
+
+function MoveToTabMenu({ sessionName, targets, onMove }: {
+  sessionName: string
+  targets: Array<{ id: string; name: string }>
+  onMove: (targetTabId: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setOpen(v => !v) }}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Move ${sessionName} to another tab`}
+        className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] px-1"
+        title="Move to tab…"
+      >⇄</button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Move to tab"
+          className="absolute right-0 top-full mt-1 z-30 min-w-[140px] max-h-56 overflow-y-auto rounded-lg bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] shadow-xl py-1"
+        >
+          {targets.map(t => (
+            <button
+              key={t.id}
+              type="button"
+              role="menuitem"
+              onClick={(e) => { e.stopPropagation(); setOpen(false); onMove(t.id) }}
+              className="w-full text-left px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 truncate"
+            >
+              {t.name}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
