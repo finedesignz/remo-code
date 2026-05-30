@@ -431,6 +431,21 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       tool_name: msg.tool_name,
       tool_input: msg.tool_input,
     })
+    // Surface the prompt to server-side consumers (Telegram inline-approval
+    // bridge). Dynamic import + try/catch mirrors the assistant-events emit
+    // below; a listener throw can't tear down this WS handler.
+    try {
+      const { emitPermissionPending } = await import('../events/permission-events.ts')
+      emitPermissionPending({
+        sessionId,
+        userId: ws.data.userId!,
+        requestId: msg.request_id,
+        toolName: msg.tool_name,
+        toolInput: msg.tool_input,
+      })
+    } catch (err: any) {
+      console.warn('[agent] emitPermissionPending failed', err?.message)
+    }
   }
 
   if (msg.type === 'user_question') {

@@ -20,11 +20,17 @@ const state: {
   sessionUsers: Map<string, Array<{ id: string; telegram_chat_id: number }>>;
   // Recorded sendMessage calls (chat + text).
   sends: Array<{ chat: number | string; text: string; at: number }>;
+  // Recorded sendMessageWithKeyboard calls (used by inline approval prompts).
+  keyboardSends: Array<{ chat: number | string; text: string; keyboard: any }>;
+  // Recorded setMyCommands calls.
+  setCommandsCalls: Array<Array<{ command: string; description: string }>>;
   // Optional behavior knob for sendMessage.
   sendImpl: ((chat: number | string, text: string) => Promise<void>) | null;
 } = {
   sessionUsers: new Map(),
   sends: [],
+  keyboardSends: [],
+  setCommandsCalls: [],
   sendImpl: null,
 };
 
@@ -56,18 +62,38 @@ mock.module("../src/telegram/client.ts", () => ({
     }
     state.sends.push({ chat: chatId, text, at: Date.now() });
   },
+  // Inline-approval prompts go through sendMessageWithKeyboard; stub it so
+  // tests never touch the network and can assert the keyboard payload.
+  sendMessageWithKeyboard: async (chatId: number | string, text: string, keyboard: any) => {
+    state.keyboardSends.push({ chat: chatId, text, keyboard });
+    return { message_id: 42 };
+  },
+  // setMyCommands is fired-and-forgotten on startup; record + no network.
+  setMyCommands: async (commands: Array<{ command: string; description: string }>) => {
+    state.setCommandsCalls.push(commands);
+  },
 }));
 
 // ── Imports (must come AFTER mock.module) ──────────────────────────────────
 
 let emitAssistantMessageFinal: typeof import("../src/events/assistant-events.ts").emitAssistantMessageFinal;
 let _resetEvents: typeof import("../src/events/assistant-events.ts")._resetAssistantEventsForTests;
+let emitPermissionPending: typeof import("../src/events/permission-events.ts").emitPermissionPending;
+let _resetPermEvents: typeof import("../src/events/permission-events.ts")._resetPermissionEventsForTests;
+let takePendingPrompt: typeof import("../src/telegram/approvals.ts").takePendingPrompt;
+let _resetPending: typeof import("../src/telegram/approvals.ts")._resetPendingPromptsForTests;
 let startTelegramBridge: typeof import("../src/telegram/bridge.ts").startTelegramBridge;
 let _stopBridge: typeof import("../src/telegram/bridge.ts")._stopTelegramBridgeForTests;
 
 beforeAll(async () => {
   ({ emitAssistantMessageFinal, _resetAssistantEventsForTests: _resetEvents } = await import(
     "../src/events/assistant-events.ts"
+  ));
+  ({ emitPermissionPending, _resetPermissionEventsForTests: _resetPermEvents } = await import(
+    "../src/events/permission-events.ts"
+  ));
+  ({ takePendingPrompt, _resetPendingPromptsForTests: _resetPending } = await import(
+    "../src/telegram/approvals.ts"
   ));
   ({ startTelegramBridge, _stopTelegramBridgeForTests: _stopBridge } = await import(
     "../src/telegram/bridge.ts"
@@ -77,14 +103,20 @@ beforeAll(async () => {
 beforeEach(() => {
   state.sessionUsers.clear();
   state.sends.length = 0;
+  state.keyboardSends.length = 0;
+  state.setCommandsCalls.length = 0;
   state.sendImpl = null;
   _stopBridge();
   _resetEvents();
+  _resetPermEvents();
+  _resetPending();
 });
 
 afterEach(() => {
   _stopBridge();
   _resetEvents();
+  _resetPermEvents();
+  _resetPending();
 });
 
 
@@ -209,6 +241,67 @@ describe("Telegram outbound bridge", () => {
     await settle();
 
     expect(state.sends).toHaveLength(1);
+  });
+
+  // ── Fix A — slash menu ────────────────────────────────────────────────────
+  test("registers the slash-command menu on startup", async () => {
+    startTelegramBridge();
+    await settle();
+    expect(state.setCommandsCalls).toHaveLength(1);
+    const cmds = state.setCommandsCalls[0]!.map((c) => c.command);
+    // Must match the real handled commands (no leading slash).
+    expect(cmds).toContain("list");
+    expect(cmds).toContain("session");
+    expect(cmds).toContain("status");
+    expect(cmds).toContain("doctor");
+    expect(cmds).toContain("help");
+    // No invented commands.
+    for (const c of state.setCommandsCalls[0]!) {
+      expect(c.command).toMatch(/^[a-z][a-z0-9_]{0,31}$/);
+    }
+  });
+
+  // ── Fix C — inline approval prompts ───────────────────────────────────────
+  test("permission_request surfaces an inline Approve/Deny keyboard + records the pending prompt", async () => {
+    state.sessionUsers.set("sess_P", [{ id: "uP", telegram_chat_id: 8000 }]);
+    startTelegramBridge();
+
+    emitPermissionPending({
+      sessionId: "sess_P",
+      userId: "uP",
+      requestId: "req-123",
+      toolName: "Bash",
+      toolInput: { command: "rm -rf node_modules" },
+    });
+    await settle();
+
+    expect(state.keyboardSends).toHaveLength(1);
+    const sent = state.keyboardSends[0]!;
+    expect(sent.chat).toBe(8000);
+    expect(sent.text).toContain("Bash");
+    // Two buttons in one row, with our pa:/pd: callback_data.
+    const buttons = sent.keyboard[0];
+    expect(buttons.map((b: any) => b.callback_data)).toEqual(["pa:req-123", "pd:req-123"]);
+
+    // The pending prompt is recorded so the webhook callback can resolve it.
+    const pending = takePendingPrompt("req-123");
+    expect(pending).not.toBeNull();
+    expect(pending!.sessionId).toBe("sess_P");
+    expect(pending!.userId).toBe("uP");
+  });
+
+  test("permission_request for a session no user has as default is a no-op", async () => {
+    startTelegramBridge();
+    emitPermissionPending({
+      sessionId: "sess_NONE",
+      userId: "uX",
+      requestId: "req-none",
+      toolName: "Write",
+      toolInput: {},
+    });
+    await settle();
+    expect(state.keyboardSends).toHaveLength(0);
+    expect(takePendingPrompt("req-none")).toBeNull();
   });
 });
 
