@@ -2,6 +2,7 @@
 
 **Analysis Date:** 2026-05-28
 
+> **Milestone v-settings-overhaul (2026-05-30):** Settings is now **4 tabs** — Connections · Credentials · Usage · Profile. `PromptsTab` and `OrchestratorTab` (plus `CommandsList`/`useCommands`/instruction blobs and the Profile Telegram card) are **deleted**; the orchestrator is a pinned top row in the Connections table and root-folder setup moved to the supervisor first-run wizard. App accent migrated **indigo→blue** (orange = CTA-only). New schema: `sessions.auto_nudge` (per-session override) + `user_grid_state` (active tab+cell). Default session falls back to the orchestrator.
 > **Phase 12 (2026-05-28):** Web UI reorganized into 3 top-level pages (Home / Tasks / Settings) with tabs. New primitives live under `web/src/components/ui/`. Settings tabs live under `web/src/pages/settings/`, Tasks tabs under `web/src/pages/tasks/`.
 > **Phase 09 (2026-05-26):** The legacy `agent/` workspace and `channel/` plugin are retired. The local CLI runner lives in `supervisor/src/` and ships exclusively as a Tauri MSI desktop app. References to `agent/`, `npx remo-code-agent`, `claude-remote`, or `/ws/channel` are historical.
 
@@ -50,14 +51,13 @@ remo-code/
 │   │   ├── pages/            # Top-level pages
 │   │   │   ├── HomePage.tsx           # Tabs: List | Grid
 │   │   │   ├── TasksPage.tsx          # Tabs: Upcoming | Activity | Schedule
-│   │   │   ├── SettingsPage.tsx       # Tabs: Connections|Credentials|Prompts|Usage|Profile
+│   │   │   ├── SettingsPage.tsx       # Tabs: Connections|Credentials|Usage|Profile
 │   │   │   ├── Login.tsx, AuthCallback.tsx, Privacy.tsx, Terms.tsx
-│   │   │   ├── settings/              # 5 tab modules (Phase 12 W4b)
-│   │   │   │   ├── ConnectionsTab.tsx
+│   │   │   ├── settings/              # 4 tab modules (Prompts+Orchestrator removed: v-settings-overhaul)
+│   │   │   │   ├── ConnectionsTab.tsx  # orchestrator = pinned top row; roots moved to supervisor wizard
 │   │   │   │   ├── CredentialsTab.tsx
-│   │   │   │   ├── PromptsTab.tsx
 │   │   │   │   ├── UsageTab.tsx
-│   │   │   │   └── ProfileTab.tsx
+│   │   │   │   └── ProfileTab.tsx       # no Telegram card; default session = orchestrator
 │   │   │   └── tasks/                 # 3 tab modules
 │   │   │       ├── UpcomingTab.tsx
 │   │   │       ├── ActivityTab.tsx

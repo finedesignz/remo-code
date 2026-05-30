@@ -7,7 +7,9 @@ cells below — each cell is a self-contained chat surface streaming live
 activity. Mobile: a vertical accordion of the active tab's sessions with a
 single inline square expand at a time.
 
-> **Status:** shipped in Phase 03 (`feat/multichat-grid-view`).
+> **Status:** shipped in Phase 03 (`feat/multichat-grid-view`); extended in
+> milestone v-settings-overhaul Phase 13 (virtual Default tab, move-between-tabs,
+> DB-persisted active tab+cell).
 > Routes: `#/grid`, `#/grid/:tabId`.
 
 ---
@@ -65,7 +67,7 @@ This is what makes 12 cells × 5 msg/sec feasible.
 | `web/src/components/SessionPicker.tsx`        | Add/remove sessions from the active tab.                              |
 | `web/src/lib/chat-tabs-api.ts`                | Typed `/api/chat-tabs/*` + batch-messages wrappers.                   |
 | `web/src/lib/raf-batch.ts`                    | RAF coalescer used by `ChatSurface` for `text_delta`.                 |
-| `hub/src/api/chat-tabs.ts`                    | REST router — CRUD, membership, bulk reorder.                         |
+| `hub/src/api/chat-tabs.ts`                    | REST router — CRUD, membership, bulk reorder, `GET/PATCH /grid-state` (active tab+cell). |
 | `hub/src/api/sessions.ts`                     | `GET /api/sessions/messages?ids=…&limit=30` (12-id cap).              |
 | `hub/src/db/chat-tabs-dal.ts`                 | All queries scoped by `user_id` via join.                             |
 | `hub/src/ws/protocol.ts`                      | `ClientSubscribe` overload + `subscribe_error` variant.               |
@@ -101,6 +103,43 @@ EXISTS` statements. All queries are user-scoped via a join on `chat_tabs`.
 
 Deleting a user, a tab, or a session cleans up downstream rows
 automatically — there is no app-level cascade code.
+
+### `user_grid_state` (Phase 13)
+
+Persists the user's last-focused grid location across reload and device.
+One row per user; deliberately **not** FK-constrained on the tab/session
+pointers (the virtual Default tab is not a `chat_tabs` row, and a deleted
+tab/session just leaves a stale pointer the client ignores).
+
+| Column              | Type                        | Notes                                            |
+|---------------------|-----------------------------|--------------------------------------------------|
+| `user_id`           | `uuid primary key`          | FK → `users(id) on delete cascade`.              |
+| `active_tab_id`     | `text`                      | Last-active tab (may be `__default__`).          |
+| `active_session_id` | `text`                      | Last-focused cell's session.                     |
+| `updated_at`        | `timestamptz default now()` |                                                  |
+
+Read/write via `GET /api/chat-tabs/grid-state` →
+`{ active_tab_id, active_session_id }` and `PATCH /api/chat-tabs/grid-state`
+(partial; either field). Both routes are declared **before** `/:id` in
+`hub/src/api/chat-tabs.ts` so the literal path wins over the param route.
+
+## Virtual Default tab (Phase 13)
+
+The first tab in the bar is a **virtual** tab with id `__default__`
+(`web/src/lib/chat-tabs-api.ts` `DEFAULT_TAB_ID`). It is not a `chat_tabs`
+row and has no DB membership — its cells are **all currently-active
+sessions**, sourced from the same `useSessions` hook that drives List View,
+capped at 12 with the existing overflow badge. Default ≈ List-View parity:
+the user never has to hand-assign sessions to see live work.
+
+User-created tabs keep explicit `chat_tab_sessions` membership. Sessions
+**move between tabs** via the existing membership CRUD
+(`addSessionToTab`/`removeSessionFromTab`); the Default tab is read-only
+membership (you cannot add/remove from it — it mirrors active sessions).
+
+On load, `GridPage` restores the active tab from `user_grid_state` (falling
+back to `__default__` if the persisted tab no longer exists) and the active
+cell from grid-state (with a `sessionStorage` fast-cache layer).
 
 ## WS subscribe overload
 
@@ -218,7 +257,11 @@ not O(cells).
 
 `GridPage` tracks an `activeCellId` per tab in component state +
 `sessionStorage` (`grid:lastActiveCell:<tabId>`), NOT URL — too noisy.
-The first visible cell becomes active on tab open.
+The first visible cell becomes active on tab open. **Phase 13:** the active
+tab + cell are also written through to `user_grid_state` via
+`PATCH /api/chat-tabs/grid-state` (debounced), so the focused cell survives a
+reload or a switch to another device — `sessionStorage` is now just a fast
+local cache in front of the DB.
 
 Paste/drop attachment handlers are scoped by the active cell:
 
@@ -278,7 +321,7 @@ Each cell header has a slot for a small badge when the cell's session has
 a scheduled task in-flight or waiting in the per-session queue:
 
 - **Amber dot** — task waiting in the queue.
-- **Indigo spinner** — task in-flight.
+- **Accent spinner** — task in-flight (blue; accent migrated indigo→blue).
 - **Tooltip** — task name.
 
 Wired against the per-session queue state in
@@ -299,7 +342,8 @@ Out of scope for Phase 03 — queued as separate phase candidates:
 - Per-cell mute / notification suppression.
 - "Pop out cell to new window" (multi-window orchestration).
 - Drag-and-reorder cells within a tab via DnD (up/down buttons in v1).
-- Drag-and-reorder cells across tabs.
+- Drag-and-reorder cells across tabs via DnD (move-between-tabs ships via the
+  membership menu in Phase 13; DnD is still deferred).
 - Infinite scroll within cells (initial 30 + load-more button in v1).
 - Mobile tab picker (mobile v1 always shows the current tab's
   accordion; switch tabs from desktop until users ask).

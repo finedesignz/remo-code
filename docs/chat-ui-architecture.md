@@ -190,9 +190,12 @@ The **remo-code-specific** WS adapter. Provides the `subscribe`/`send`/`connecti
 
 `subscribe(handler)` registers a handler in a `Set` and returns an unsubscribe (`:81`). **This is the only file an adapting app must replace.**
 
-### `useCommands(token)` — `useCommands.ts`
+### Slash-menu command catalog — inline in `ChatSurface.tsx`
 
-Powers the slash menu. Fetches `GET /api/commands` → `{ commands: CommandRow[] }`. `CommandRow`: `{ id, supervisor_id, kind:'command'|'skill', name, description, source, path, synced_at }`. Helpers: `groupCommands` (Built-in / User / Plugin:<name> / Skills groups), `filterCommands(rows, q)` (name/description/source substring), `sortByName`. The **command catalog endpoint is app-specific**; the menu UI is portable (see §5.6).
+Powers the slash menu. `ChatSurface` fetches `GET /api/commands` once per token
+→ `{ commands: SlashItem[] }` into local `slashItems` state (no dedicated
+`useCommands` hook — that hook was removed when the Settings → Prompts tab was
+deleted in milestone v-settings-overhaul). `SlashItem`: `{ kind:'command'|'skill', name, description, source }`. The menu opens for a bare slash token; `applySlash(item)` rewrites the input. The **command catalog endpoint is app-specific**; the menu UI is portable (see §5.6).
 
 ---
 
@@ -346,9 +349,9 @@ As long as the adapter emits the `ChatEvent` shapes and accepts the `ClientMessa
 
 **Behavior:** typing `/` opens a filtered menu of commands/skills; arrow keys navigate, Tab/Enter applies (inserts `/<name> ` and positions the caret), Escape dismisses.
 
-**Components/hooks:** `ChatSurface.tsx` (`slashItems`/`slashIdx`/`slashOpen`/`slashSuppressedRef`, `applySlash`, key handling in `handleKeyDown`), `useCommands(token)` + `groupCommands`/`filterCommands`.
+**Components/hooks:** `ChatSurface.tsx` (`slashItems`/`slashIdx`/`slashOpen`/`slashSuppressedRef`, `applySlash`, the inline `GET /api/commands` fetch, key handling in `handleKeyDown`). No separate `useCommands` hook (removed with the Prompts tab).
 
-**Data contract:** the menu opens only for a bare slash token (`/^\/[\w.:-]*$/`). `applySlash(item)` rewrites input to `"/<name> <rest>"` and sets the caret to `name.length + 2`. Items come from `GET /api/commands` via `useCommands`. `SlashItem` = `{ kind:'command'|'skill', name, description, source }`.
+**Data contract:** the menu opens only for a bare slash token (`/^\/[\w.:-]*$/`). `applySlash(item)` rewrites input to `"/<name> <rest>"` and sets the caret to `name.length + 2`. Items come from `GET /api/commands` (fetched inline in `ChatSurface`). `SlashItem` = `{ kind:'command'|'skill', name, description, source }`.
 
 **Edge cases:** menu is suppressed (`slashSuppressedRef`) after applying, after Escape, and while recording; Enter without the menu open submits.
 
@@ -431,7 +434,7 @@ Promote the core into the shared GitHub Packages libs already designated in `arc
 - **`cc-stream-core`** (`@scope/...`, zero React) — the `ChatEvent` / `ClientMessage` Zod schemas + `RunnerEvent`/`CliEvent` unions + the stream-json parser. Both ends import this (kills the supervisor↔hub hand-mirrored type drift).
 - **`cc-stream-react`** (depends on `cc-stream-core`) — `ChatSurface` + all sibling blocks + `useChatSurface` + `useActivity` + `raf-batch` + the token CSS layer. Ships **no transport** — the consuming app injects its `{ subscribe, send, connectionId }` adapter. During extraction, promote the hard-coded `indigo/emerald/amber` Tailwind classes in the blocks to `--accent`/`--success`/`--warning` tokens so accent is themeable.
 
-**Stays app-specific** (do NOT package): `ChatLayout`, `ChatPanel` (or ship a trivial generic `ChatPanel`), `useWebSocket` (remo-code transport), `useCommands` + `/api/commands`, `/api/transcribe`, message-envelope parsers (`scheduled-message`, `revanote-message`), session/sidebar/auth chrome.
+**Stays app-specific** (do NOT package): `ChatLayout`, `ChatPanel` (or ship a trivial generic `ChatPanel`), `useWebSocket` (remo-code transport), the slash-command catalog fetch (`/api/commands`), `/api/transcribe`, message-envelope parsers (`scheduled-message`, `revanote-message`), session/sidebar/auth chrome.
 
 ---
 

@@ -85,7 +85,7 @@ CSS custom properties on `:root` (defined in `web/src/index.css`):
 **Aesthetic rules (per global `~/.claude/design-preferences.md` + repo CLAUDE.md):**
 - **Subtle, not bordered.** Cards = `bg-[var(--bg-secondary)]/60` over `bg-[var(--bg-primary)]`. Reserve borders for active state, modals, header separators.
 - **Radius:** `rounded-xl` cards/dialogs, `rounded-lg` inputs/buttons/list items, `rounded` chips. **NEVER** `rounded-2xl` or larger.
-- **Accent:** indigo. Primary buttons `bg-indigo-600 hover:bg-indigo-500`. Active `bg-indigo-600/20 ring-1 ring-indigo-500/30`.
+- **Accent:** **blue** (migrated indigo→blue, milestone v-settings-overhaul; orange = primary-CTA only; **never indigo** — `web/test/no-indigo.test.ts` guards). Primary buttons `bg-blue-600 hover:bg-blue-500`. Active `bg-blue-600/20 ring-1 ring-blue-500/30`. Tokens in `~/.claude/design-preferences.md`.
 - **Status colors:** emerald (good), amber (warn), red (error), gray (offline). Solid icons at 400, soft bg at /20 + ring.
 - **Padding:** card `p-5`, input/button `px-3 py-2`, list item `px-3 py-2`.
 - **Spacing:** `space-y-4`/`5` between sections, `gap-2`/`3` inline.
