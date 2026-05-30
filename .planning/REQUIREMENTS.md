@@ -1,4 +1,4 @@
-<!-- updated: 2026-05-24 -->
+<!-- updated: 2026-05-30 -->
 # Requirements
 
 > **Note (Phase 09, 2026-05-26):** The agent/ workspace and channel/ plugin are retired. The local CLI runner now lives in supervisor/src/ and ships exclusively as a Tauri MSI desktop app. The hub /ws/agent route is unchanged. References below to agent/, npx remo-code-agent, claude-remote, or /ws/channel are historical. See .planning/phases/09-retire-npm-packages/.
@@ -126,3 +126,170 @@ The persistent identity key SHALL be the Titanium subject UUID (`sub` claim), st
 
 ### R-AUTH-09 — WS `/ws/client` accepts Titanium tokens with no protocol shape change
 The `/ws/client` auth message SHALL accept the Titanium EdDSA JWT in the same shape it currently accepts the legacy JWT (`{ type: "auth", token }`). The verify branch SHALL inspect `alg` and route to either the JWKS-backed EdDSA verifier or the legacy HS256 verifier. Verify SHALL stay local (no Titanium round-trip per connection). Existing 30s heartbeat ping/pong, per-IP connection cap, and per-connection rate limits SHALL remain unchanged.
+
+---
+
+# Milestone `v-settings-overhaul` — Settings/Connections Overhaul + Grid View + Accent Migration
+
+**Source of truth (scope, locked):** `.planning/phases/settings-connections-overhaul/PLAN.md` — do not re-litigate scope.
+**Standards:** `~/.claude/design-preferences.md` (updated this session: **app accent = blue; orange = CTA-only; never indigo**) + `~/.claude/architecture-preferences.md`. (User said "architectural-standards.md" — no such file exists; architecture-preferences.md is the standard.)
+
+These requirements use **area-grouped IDs** (R-DS-*, R-CONN-*, R-NUDGE-*, R-USAGE-*, R-PROFILE-*, R-GRID-*, R-DOCS-*) per the milestone brief. Every numbered PLAN item (1–27) maps to exactly one REQ. Phase mapping → Traceability table at end.
+
+## R-DS-* — Design system / accent foundation (Phase 08; PLAN 1–5)
+
+### R-DS-01 — Accent migration indigo→blue
+Migrate all `indigo` accent to **blue** across UI primitives + every call site: `ui/{Button,Toggle,Tabs,StatusPill,Card,Field}.tsx`, `Brand.tsx` focus ring, `Sidebar.tsx`, `SupervisorPage.tsx`, all `focus:ring-indigo-*`/`bg-indigo-*`/`text-indigo-*`. Accent = `blue-600/500`, rings `blue-500/30`. Orange remains CTA-only; never indigo.
+**Acceptance:** Zero `indigo` in `web/src` (CI grep guard test passes). (PLAN 1)
+
+### R-DS-02 — Button 44px touch targets
+`Button` sizing meets ≥44px touch targets: `md` = `px-4 py-2.5`; add a `touch` size; keep compact `sm` for dense desktop rows but ensure ≥44px hit area via mobile padding.
+**Acceptance:** All interactive elements ≥44px touch target. (PLAN 2)
+
+### R-DS-03 — InfoTip primitive
+New `InfoTip` primitive (Lucide `info`, styled tooltip — NOT native `title=`). Repoint `Field.helper` to render a title-row tip icon instead of a `<p>` description.
+**Acceptance:** `InfoTip` exists and is used; no native `title=` left where InfoTip applies. (PLAN 3)
+
+### R-DS-04 — Card border + shadow
+`Card` gains optional hairline border `/40` + `shadow-sm` (modern-subtle default; flat variant for table wrappers). Update stale doc comment.
+**Acceptance:** Card renders border+shadow by default; flat variant available; doc comment current. (PLAN 4)
+
+### R-DS-05 — Logo horizontal padding
+Add `px-3`/`px-4` horizontal padding around `Brand.tsx` `<a>` (and/or AppShell brand wrapper).
+**Acceptance:** Logo has visible horizontal breathing room. (PLAN 5)
+
+## R-CONN-* — Connections tab overhaul (Phase 09; PLAN 6–10)
+
+### R-CONN-01 — Remove roots card
+Remove the "Root repo folder paths" card (`ConnectionsTab.tsx` RootsEditor 37–213). Roots no longer editable in the web UI.
+**Acceptance:** RootsEditor card gone from Connections. (PLAN 6)
+
+### R-CONN-02 — Roots in supervisor first-run wizard
+Move root-folder setup into the supervisor first-run wizard (`supervisor/tauri/ui/`): first run prompts hub URL + API key + **root folder** together. Wizard MUST require ≥1 root before completing.
+**Acceptance:** Fresh wizard run captures ≥1 root; cannot finish with zero roots. (PLAN 7)
+
+### R-CONN-03 — Orchestrator → pinned top folder row; OrchestratorTab deleted
+Remove `OrchestratorTab` from `SettingsPage.tsx` (tab enum + nav + mount). Render a pinned, specially-marked row at the very top of the SupervisorPage table representing the orchestrator (root folder); its enable/disable/start/stop actions move into that row as icon buttons + tooltips. Keep `/api/orchestrator` endpoints. Redirect `#/settings?tab=orchestrator` → `?tab=connections`.
+**Acceptance:** Orchestrator controllable from its Connections row; OrchestratorTab gone; orchestrator-tab URL redirects. (PLAN 8)
+
+### R-CONN-04 — Compact single-renderer table, no mobile row-wrap
+Single responsive renderer (kill the duplicated desktop/mobile `md:` dual-block). Consolidated metadata cell (`repo · branch · status · last-seen`; path → truncated subline + tooltip). Icon-only row actions w/ tooltips. `divide-y /40`. No mobile row-wrap — horizontal scroll or ellipsis, never wrap. Button sizes per R-DS-02.
+**Acceptance:** One renderer; no `md:` dual-block; no row-wrap on mobile widths. (PLAN 9)
+
+### R-CONN-05 — Tooltips replace inline descriptions
+Replace inline description text throughout Connections with `InfoTip` (R-DS-03).
+**Acceptance:** No inline description paragraphs remain in Connections. (PLAN 10)
+
+## R-NUDGE-* — Prompts removal + per-session auto-nudge (Phase 10; PLAN 11–14)
+
+### R-NUDGE-01 — Per-session auto_nudge column
+`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auto_nudge BOOLEAN` (nullable; null = inherit user global). Idempotent DDL in `schema.sql`.
+**Acceptance:** Column present, nullable, idempotent on re-boot. (PLAN 11)
+
+### R-NUDGE-02 — Per-session nudge endpoint + dispatch fallback
+`PATCH /api/sessions/:id` (or `/api/sessions/:id/auto-nudge`) sets per-session `auto_nudge`. Nudge dispatch reads per-session value, falling back to `users.auto_nudge_idle_sessions` when null.
+**Acceptance:** PATCH persists; dispatch honors per-session value with global fallback. (PLAN 12)
+
+### R-NUDGE-03 — Sessions-list row toggle
+Small blue auto-nudge switch per row in `Sidebar.tsx`; instant PATCH; tooltip-labeled.
+**Acceptance:** Per-row toggle persists and reflects effective state. (PLAN 13)
+
+### R-NUDGE-04 — Delete Prompts tab entirely (incl. instruction blobs + commands)
+Remove `PromptsTab.tsx`, the commands card (`CommandsList`/`useCommands`), AND the instruction blobs (claude_global_md / codex_agents_md / codex_config_toml) — instruction files are handled locally, NOT relocated. Drop the tab enum/nav/mount and `/api/instructions` UI wiring (prune hub endpoint if no other callers). Redirect `#/settings?tab=prompts` → `connections`.
+**Acceptance:** Prompts tab + blobs + commands gone; instruction blobs NOT moved elsewhere; prompts-tab URL redirects. (PLAN 14)
+
+## R-USAGE-* — Usage tab cleanup (Phase 11; PLAN 15–17)
+
+### R-USAGE-01 — Merge cap into thresholds; rename card
+Merge Daily Cost Cap into the thresholds card; rename card to exactly **"Claude Usage and Cost Controls"**. Desktop lays out cap + session% + week% compactly (one row/grid).
+**Acceptance:** One merged card with the exact title; cap no longer separate. (PLAN 15)
+
+### R-USAGE-02 — Tokens under dollars
+In each cost card (Today/Week/Month) show token count beneath the `$` amount (consume `/api/usage/cost` token data; extend `/api/usage/summary` if needed).
+**Acceptance:** Each cost card shows tokens under the dollar figure. (PLAN 16)
+
+### R-USAGE-03 — Tooltips + autosave cap/thresholds
+Replace threshold/cap helper sentences with tooltips. Auto-save-on-blur for cap + thresholds (drop Save buttons).
+**Acceptance:** Helper sentences → InfoTip; cap+thresholds autosave on blur; Save buttons removed. (PLAN 17)
+
+## R-PROFILE-* — Profile tab + default-session (Phase 12; PLAN 18–20)
+
+### R-PROFILE-01 — Delete Telegram card
+Delete the Telegram card (`ProfileTab.tsx:395–557`) + its fetches. Keep `/api/telegram/*` endpoints (bot still works); only the Profile UI is removed.
+**Acceptance:** Telegram card gone from Profile; `/api/telegram/*` untouched. (PLAN 18)
+
+### R-PROFILE-02 — Default session = orchestrator
+Centralize a "resolve default session" helper that falls back to the user's orchestrator session at the root folder when no explicit default is set. Wire into List View auto-select (`ChatLayout.tsx:100-102`), Telegram default resolution, any `default_session` logic.
+**Acceptance:** With no default set, orchestrator is selected everywhere a default is resolved. (PLAN 19)
+
+### R-PROFILE-03 — Autosave name/timezone; width
+Auto-save-on-blur for display name + timezone (drop Save buttons); Profile width → `max-w-7xl`.
+**Acceptance:** Name+timezone autosave on blur; Save buttons removed; width = `max-w-7xl`. (PLAN 20)
+
+## R-GRID-* — Grid View = active sessions + persistence (Phase 13; PLAN 21–23)
+
+### R-GRID-01 — Default tab = all active sessions
+Default tab auto-populates all active sessions (same `useSessions` source as List View), virtual membership (not user-editable), cap 12 + existing overflow badge. Grid Default = List View parity.
+**Acceptance:** Default tab mirrors active sessions, capped at 12 with overflow badge. (PLAN 21)
+
+### R-GRID-02 — User tabs: create + move/assign sessions
+User can create more tabs and move/assign sessions between tabs (drag or menu) using the existing `chat_tab_sessions` CRUD; explicit DB membership retained for user tabs.
+**Acceptance:** Sessions reassignable between user tabs; persists. (PLAN 22)
+
+### R-GRID-03 — Persist tabs + memberships + active-cell across restart
+Add active-cell persistence to DB (extend `chat_tabs` or a `user_grid_state` row). Tabs + memberships + focused cell survive hub restart / reload / device switch.
+**Acceptance:** After hub restart + reload, tabs, assignments, and active cell reload correctly. (PLAN 23)
+
+## R-DOCS-* — Cross-cutting polish + docs (Phase 14; PLAN 24–27)
+
+### R-DOCS-01 — Autosave sweep
+Auto-save-on-blur sweep for remaining low-stakes settings forms; remove redundant Save buttons.
+**Acceptance:** Remaining low-stakes forms autosave; redundant Save buttons gone. (PLAN 24)
+
+### R-DOCS-02 — Width uniformity
+`max-w-7xl` across all settings tabs.
+**Acceptance:** Every settings tab uses `max-w-7xl`. (PLAN 25)
+
+### R-DOCS-03 — EmptyState copy
+`EmptyState` copy → single sentence; drop multi-line descriptions.
+**Acceptance:** EmptyState descriptions are one sentence. (PLAN 26)
+
+### R-DOCS-04 — Architecture docs refresh (anti-drift)
+Update in the same milestone: web CLAUDE.md / `docs/` (new tab set Connections/Credentials/Usage/Profile — Prompts & Orchestrator GONE; accent=blue rule; per-session auto-nudge; Grid Default behavior); `.planning/codebase/{ARCHITECTURE,STRUCTURE,CONVENTIONS}.md`; `.planning/phases/12-ui-restructure/12-CONTEXT.md` supersession note (Orchestrator/Prompts tabs removed; this milestone is the new source of truth); `docs/grid-view.md` (Default tab + persistence); hub `docs:sync` (`/openapi.json` + `docs/api.md`) for any new/changed endpoints.
+**Acceptance:** All listed docs reflect the milestone; `docs:sync` in sync; no drift. (PLAN 27)
+
+---
+
+## Traceability — `v-settings-overhaul`
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| R-DS-01 | Phase 08 | Pending |
+| R-DS-02 | Phase 08 | Pending |
+| R-DS-03 | Phase 08 | Pending |
+| R-DS-04 | Phase 08 | Pending |
+| R-DS-05 | Phase 08 | Pending |
+| R-CONN-01 | Phase 09 | Pending |
+| R-CONN-02 | Phase 09 | Pending |
+| R-CONN-03 | Phase 09 | Pending |
+| R-CONN-04 | Phase 09 | Pending |
+| R-CONN-05 | Phase 09 | Pending |
+| R-NUDGE-01 | Phase 10 | Pending |
+| R-NUDGE-02 | Phase 10 | Pending |
+| R-NUDGE-03 | Phase 10 | Pending |
+| R-NUDGE-04 | Phase 10 | Pending |
+| R-USAGE-01 | Phase 11 | Pending |
+| R-USAGE-02 | Phase 11 | Pending |
+| R-USAGE-03 | Phase 11 | Pending |
+| R-PROFILE-01 | Phase 12 | Pending |
+| R-PROFILE-02 | Phase 12 | Pending |
+| R-PROFILE-03 | Phase 12 | Pending |
+| R-GRID-01 | Phase 13 | Pending |
+| R-GRID-02 | Phase 13 | Pending |
+| R-GRID-03 | Phase 13 | Pending |
+| R-DOCS-01 | Phase 14 | Pending |
+| R-DOCS-02 | Phase 14 | Pending |
+| R-DOCS-03 | Phase 14 | Pending |
+| R-DOCS-04 | Phase 14 | Pending |
+
+**Coverage:** 27/27 PLAN items mapped to 27 REQs across Phases 08–14. No orphans.

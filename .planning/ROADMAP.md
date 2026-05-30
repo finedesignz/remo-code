@@ -1,4 +1,4 @@
-<!-- updated: 2026-05-24 -->
+<!-- updated: 2026-05-30 -->
 # Roadmap
 
 > **Note (Phase 09, 2026-05-26):** The agent/ workspace and channel/ plugin are retired. The local CLI runner now lives in supervisor/src/ and ships exclusively as a Tauri MSI desktop app. The hub /ws/agent route is unchanged. References below to agent/, npx remo-code-agent, claude-remote, or /ws/channel are historical. See .planning/phases/09-retire-npm-packages/.
@@ -106,3 +106,73 @@ Source of truth for phase ordering, status, and dependencies. The GSD SDK parses
   - `07-PLAN-004-dual-auth-middleware` — wave 2 — REST + WS auth handlers detect `alg` and branch between EdDSA (Titanium) verify and legacy HS256 (`JWT_SECRET`) verify; on-first-request linking by email for unlinked rows; email-sync-on-verify
   - `07-PLAN-005-web-login-cutover` — wave 3 — web ships Titanium magic-link flow as the default; "use password" fallback link visible during soak; WS auth payload and REST headers attach Titanium token
   - `07-PLAN-006-cutover-and-cleanup` — wave 4 — after ≥14d green soak: disable `/api/auth/login`, remove `JWT_SECRET` user-token verify code path (gated behind `ALLOW_LEGACY_LOGIN` flag for 1 release), update docs/README/CLAUDE.md
+
+---
+
+<!-- Milestone v-settings-overhaul (2026-05-30): Settings/Connections Overhaul + Grid View + Accent Migration.
+     Locked scope: .planning/phases/settings-connections-overhaul/PLAN.md. Requirements: .planning/REQUIREMENTS.md (R-DS/CONN/NUDGE/USAGE/PROFILE/GRID/DOCS).
+     Standards: ~/.claude/design-preferences.md (accent=blue, orange CTA-only, never indigo) + ~/.claude/architecture-preferences.md. -->
+
+## Phase 08: design-system-foundation
+
+- Status: Pending
+- Mode: standard
+- Goal: Blocking design-system foundation everything else consumes. Migrate the app accent from indigo→blue across all primitives + call sites (orange stays CTA-only, never indigo), size `Button` to ≥44px touch targets, add an `InfoTip` tooltip primitive (replacing inline `<p>` descriptions and native `title=`), give `Card` an optional hairline border + `shadow-sm` (flat variant for tables), and add horizontal padding around the logo.
+- Depends on: []
+- Requirements: [R-DS-01, R-DS-02, R-DS-03, R-DS-04, R-DS-05]
+- Phase dir: `.planning/phases/08-design-system-foundation/`
+
+## Phase 09: connections-overhaul
+
+- Status: Pending
+- Mode: standard
+- Goal: Overhaul the Connections tab. Remove the "Root repo folder paths" card (roots move into the supervisor first-run wizard, which now requires ≥1 root). Delete `OrchestratorTab` and render the orchestrator as a pinned, specially-marked top "folder" row in the repo table with its enable/disable/start/stop as icon buttons + tooltips (`/api/orchestrator` endpoints kept; orchestrator-tab URL redirects to connections). Collapse the duplicated desktop/mobile blocks into one responsive renderer with a consolidated metadata cell, icon-only row actions, and no mobile row-wrap; replace inline descriptions with `InfoTip`.
+- Depends on: [Phase 08]
+- Requirements: [R-CONN-01, R-CONN-02, R-CONN-03, R-CONN-04, R-CONN-05]
+- Phase dir: `.planning/phases/09-connections-overhaul/`
+
+## Phase 10: prompts-removal-and-per-session-nudge
+
+- Status: Pending
+- Mode: standard
+- Goal: Delete the Prompts tab in its entirety — `PromptsTab.tsx`, the commands card (`CommandsList`/`useCommands`), and the instruction blobs (claude_global_md / codex_agents_md / codex_config_toml), which are handled locally and NOT relocated — and redirect its URL to connections. Make auto-nudge per-session: add nullable `sessions.auto_nudge` (null = inherit `users.auto_nudge_idle_sessions`), a `PATCH /api/sessions/:id` endpoint, dispatch logic that reads per-session value with global fallback, and a small blue per-row toggle in `Sidebar.tsx`.
+- Depends on: [Phase 08]
+- Requirements: [R-NUDGE-01, R-NUDGE-02, R-NUDGE-03, R-NUDGE-04]
+- Phase dir: `.planning/phases/10-prompts-removal-and-per-session-nudge/`
+
+## Phase 11: usage-tab-cleanup
+
+- Status: Pending
+- Mode: standard
+- Goal: Clean up the Usage tab. Merge the Daily Cost Cap into the thresholds card and rename it to "Claude Usage and Cost Controls" (cap + session% + week% laid out compactly). Show token counts beneath the dollar amount in each Today/Week/Month cost card. Replace threshold/cap helper sentences with tooltips and switch cap + thresholds to auto-save-on-blur (drop Save buttons).
+- Depends on: [Phase 08]
+- Requirements: [R-USAGE-01, R-USAGE-02, R-USAGE-03]
+- Phase dir: `.planning/phases/11-usage-tab-cleanup/`
+
+## Phase 12: profile-and-default-session
+
+- Status: Pending
+- Mode: standard
+- Goal: Clean up the Profile tab and centralize default-session resolution. Delete the Telegram card + its fetches (keep `/api/telegram/*` endpoints — bot still works). Make the default session = the user's orchestrator session at the root folder wherever a default is resolved with none set (List View auto-select, Telegram default, any `default_session` logic), via one shared helper. Auto-save-on-blur for display name + timezone (drop Save buttons); width → `max-w-7xl`.
+- Depends on: [Phase 08]
+- Requirements: [R-PROFILE-01, R-PROFILE-02, R-PROFILE-03]
+- Phase dir: `.planning/phases/12-profile-and-default-session/`
+
+## Phase 13: grid-view-active-sessions
+
+- Status: Pending
+- Mode: standard
+- Goal: Make the Grid Default tab equal List View — auto-populating all active sessions (same `useSessions` source, virtual non-editable membership, cap 12 + existing overflow badge). Let users create more tabs and move/assign sessions between them via existing `chat_tab_sessions` CRUD. Add active-cell persistence to the DB (extend `chat_tabs` or a new `user_grid_state` row) so tabs, memberships, and the focused cell survive hub restart / reload / device switch.
+- Depends on: [Phase 08]
+- Note: Independent of the Connections/Prompts/Usage/Profile work — may run in parallel with Phases 09–12 once Phase 08 lands.
+- Requirements: [R-GRID-01, R-GRID-02, R-GRID-03]
+- Phase dir: `.planning/phases/13-grid-view-active-sessions/`
+
+## Phase 14: settings-docs-and-polish
+
+- Status: Pending
+- Mode: standard
+- Goal: Cross-cutting polish + anti-drift docs refresh. Auto-save-on-blur sweep for remaining low-stakes forms (remove redundant Save buttons); `max-w-7xl` width uniformity across all settings tabs; collapse `EmptyState` copy to a single sentence. Refresh architecture docs in the same milestone so they don't drift: web CLAUDE.md/`docs/` (new tab set Connections/Credentials/Usage/Profile — Prompts & Orchestrator GONE; accent=blue; per-session auto-nudge; Grid Default behavior), `.planning/codebase/{ARCHITECTURE,STRUCTURE,CONVENTIONS}.md`, `.planning/phases/12-ui-restructure/12-CONTEXT.md` supersession note, `docs/grid-view.md`, and hub `docs:sync` for any new/changed endpoints.
+- Depends on: [Phase 08]
+- Requirements: [R-DOCS-01, R-DOCS-02, R-DOCS-03, R-DOCS-04]
+- Phase dir: `.planning/phases/14-settings-docs-and-polish/`
