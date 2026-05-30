@@ -1,0 +1,8 @@
+{
+  "name": "remo-code-supervisor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:sidecar": "bun run scripts/compile-sidecar.mjs"
+  }
+}
