@@ -85,6 +85,7 @@ pub fn run() {
             runtime_cmds::open_external_url,
             runtime_cmds::sidecar_control,
             runtime_cmds::set_api_key,
+            runtime_cmds::set_hub_url,
             runtime_cmds::get_sidecar_status,
         ])
         .build(tauri::generate_context!())

@@ -22,6 +22,7 @@ interface RootsConfig {
 
 export default function OnboardingPage({ onDone }: { onDone: () => void }) {
   const [hubUrl, setHubUrl] = useState<string>("https://app.remo-code.com");
+  const [hubSaving, setHubSaving] = useState(false);
   const [apiKeySet, setApiKeySet] = useState(false);
   const [roots, setRoots] = useState<string[]>([]);
   const [step, setStep] = useState<1 | 2>(1);
@@ -45,9 +46,28 @@ export default function OnboardingPage({ onDone }: { onDone: () => void }) {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
+  // Persist the hub URL (on blur). Validation mirrors the Rust `set_hub_url`.
+  const saveHubUrl = useCallback(async () => {
+    const v = hubUrl.trim();
+    if (!isValidHubUrl(v)) return;
+    setHubSaving(true); setErr(null);
+    try {
+      await invoke("set_hub_url", { hubUrl: v });
+    } catch (e: any) {
+      setErr(String(e));
+    } finally {
+      setHubSaving(false);
+    }
+  }, [hubUrl]);
+
   const saveKey = useCallback(async () => {
     setBusy(true); setErr(null);
     try {
+      // Make sure the entered hub URL is persisted before the key, so the
+      // sidecar restart from set_api_key picks up the right endpoint.
+      if (isValidHubUrl(hubUrl.trim())) {
+        await invoke("set_hub_url", { hubUrl: hubUrl.trim() });
+      }
       await invoke("set_api_key", { apiKey: draftKey.trim() });
       setApiKeySet(true);
       setDraftKey("");
@@ -57,7 +77,7 @@ export default function OnboardingPage({ onDone }: { onDone: () => void }) {
     } finally {
       setBusy(false);
     }
-  }, [draftKey]);
+  }, [draftKey, hubUrl]);
 
   const addRoot = useCallback(async () => {
     setBusy(true); setErr(null);
@@ -73,7 +93,8 @@ export default function OnboardingPage({ onDone }: { onDone: () => void }) {
     }
   }, []);
 
-  const canFinish = apiKeySet && roots.length > 0;
+  const hubUrlValid = isValidHubUrl(hubUrl.trim());
+  const canFinish = hubUrlValid && apiKeySet && roots.length > 0;
 
   return (
     <div className="h-full flex items-center justify-center bg-[var(--bg-primary)] text-[var(--text-primary)] p-6">
@@ -103,9 +124,22 @@ export default function OnboardingPage({ onDone }: { onDone: () => void }) {
             <h2 className="text-sm font-semibold">Connect to the hub</h2>
             <div>
               <label className="block text-xs text-[var(--text-muted)] mb-1">Hub URL</label>
-              <div className="font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/40 text-[var(--text-secondary)]">
-                {hubUrl}
-              </div>
+              <input
+                type="text"
+                spellCheck={false}
+                autoComplete="off"
+                value={hubUrl}
+                onChange={(e) => setHubUrl(e.target.value)}
+                onBlur={() => { void saveHubUrl(); }}
+                placeholder="https://app.remo-code.com"
+                className={[
+                  "w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/60 text-[var(--text-primary)] outline-none ring-1",
+                  hubUrl.trim() && !hubUrlValid ? "ring-red-500/40" : "ring-transparent focus:ring-blue-500/40",
+                ].join(" ")}
+              />
+              {hubUrl.trim() && !hubUrlValid && (
+                <p className="text-[11px] text-red-300 pt-1">Enter a full http:// or https:// URL.</p>
+              )}
             </div>
             <div>
               <label className="block text-xs text-[var(--text-muted)] mb-1">
@@ -128,7 +162,7 @@ export default function OnboardingPage({ onDone }: { onDone: () => void }) {
             <button
               type="button"
               onClick={() => { void saveKey(); }}
-              disabled={busy || !draftKey.trim()}
+              disabled={busy || hubSaving || !draftKey.trim() || !hubUrlValid}
               className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
             >
               {busy ? "Saving…" : "Continue"}
@@ -175,6 +209,19 @@ export default function OnboardingPage({ onDone }: { onDone: () => void }) {
       </div>
     </div>
   );
+}
+
+// Mirror of the Rust `set_hub_url` validation: http(s) scheme + non-empty host.
+function isValidHubUrl(v: string): boolean {
+  const t = v.trim().replace(/\/+$/, "");
+  const rest = t.startsWith("https://")
+    ? t.slice("https://".length)
+    : t.startsWith("http://")
+    ? t.slice("http://".length)
+    : null;
+  if (rest === null) return false;
+  const host = rest.split(/[/?#]/)[0];
+  return host.length > 0 && !host.includes(" ");
 }
 
 function StepDot({ n, active, done, label }: { n: number; active: boolean; done: boolean; label: string }) {

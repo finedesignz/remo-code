@@ -283,6 +283,45 @@ pub fn set_api_key(app: tauri::AppHandle, api_key: String) -> Result<(), String>
     Ok(())
 }
 
+/// Persist the hub URL into supervisor.json. Mirrors `set_api_key`'s
+/// read-modify-write so existing keys (api_key/roots/etc.) survive, and
+/// restarts the sidecar so the new endpoint is used on the next handshake.
+/// Validates a well-formed http(s) URL with a non-empty host.
+#[tauri::command]
+pub fn set_hub_url(app: tauri::AppHandle, hub_url: String) -> Result<(), String> {
+    let trimmed = hub_url.trim().trim_end_matches('/').to_string();
+    if trimmed.is_empty() {
+        return Err("hub url cannot be empty".to_string());
+    }
+    // Lightweight scheme + host validation (no URL crate dependency to keep the
+    // IPC layer slim, consistent with the rest of this module).
+    let rest = if let Some(r) = trimmed.strip_prefix("https://") {
+        r
+    } else if let Some(r) = trimmed.strip_prefix("http://") {
+        r
+    } else {
+        return Err("hub url must start with http:// or https://".to_string());
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() || host.contains(' ') {
+        return Err("hub url must include a valid host".to_string());
+    }
+
+    let path = supervisor_json()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+    }
+    let mut map = read_json_obj(&path).unwrap_or_default();
+    map.insert("hub_url".to_string(), Value::String(trimmed));
+    let txt = serde_json::to_string_pretty(&Value::Object(map))
+        .map_err(|e| format!("serialize failed: {e}"))?;
+    fs::write(&path, txt).map_err(|e| format!("write failed: {e}"))?;
+
+    // Restart sidecar so the new endpoint is used on the next /ws/agent handshake.
+    sidecar::restart(&app);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // B6: loopback poll of the Bun sidecar's /sup/status endpoint. Drives the
 // tray icon color (green/amber/red/grey) and the "last error" line. Plain
