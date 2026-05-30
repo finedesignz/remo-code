@@ -261,6 +261,7 @@ export async function updateTaskV2(
     target_kind: TargetKind
     target_id: string | null
     payload: Record<string, any>
+    prompt: string
     cron_expr: string
     timezone: string
     catchup_policy: CatchupPolicy
@@ -280,6 +281,10 @@ export async function updateTaskV2(
   if (fields.target_kind !== undefined) sets.push(sql`target_kind = ${fields.target_kind}`)
   if (fields.target_id !== undefined) sets.push(sql`target_id = ${fields.target_id}`)
   if (fields.payload !== undefined) sets.push(sql`payload = ${sql.json(fields.payload as any)}`)
+  // The `prompt` column is authoritative; the dispatcher's sender prefers
+  // `payload.prompt || prompt`, so the API mirrors the column into
+  // `payload.prompt` on every write to keep the two in sync (see PATCH handler).
+  if (fields.prompt !== undefined) sets.push(sql`prompt = ${fields.prompt}`)
   if (fields.cron_expr !== undefined) {
     sets.push(sql`cron_expr = ${fields.cron_expr}`)
     sets.push(sql`cron_expression = ${fields.cron_expr}`)

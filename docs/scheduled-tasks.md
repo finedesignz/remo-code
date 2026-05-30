@@ -108,6 +108,7 @@ type ScheduledTask = {
   target_kind: 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
   target_id: string | null            // required for session / supervisor
   payload: { prompt?: string, command?: string, args?: any }
+  prompt: string                      // mirror of payload.prompt (see "Prompt storage" below)
   cron_expr: string                   // 5-field cron, validated via croner
   timezone: string                    // IANA, validated via Intl.DateTimeFormat
   catchup_policy: 'skip' | 'run_once'
@@ -116,6 +117,33 @@ type ScheduledTask = {
   post_run_actions: PostRunAction[]
 }
 ```
+
+### Prompt storage (column ↔ payload sync)
+
+A `dev` task's custom prompt is persisted in **two** places that are kept in
+lockstep on every write:
+
+- the top-level **`prompt` column** — the single source of truth; the
+  dispatcher's agent sender resolves the run text as
+  `payload.prompt || prompt || 'Continue where you left off.'`
+  (`hub/src/scheduler/senders/agent.ts` `buildContent`).
+- **`payload.prompt`** — the canonical field the web editor reads/writes
+  (`web/src/components/ScheduleEditor.tsx`).
+
+Both the CREATE and PATCH handlers (`hub/src/api/scheduled-tasks.ts`) derive a
+single `prompt` value (from `payload.prompt`, falling back to a top-level
+`prompt` mirror in the request body) and write it to **both** the column and
+`payload.prompt`, so they never drift. `updateTaskV2`
+(`hub/src/db/scheduled-tasks-dal.ts`) accepts an explicit `prompt` field for the
+column. The editor's load path falls back to the column
+(`existing?.payload?.prompt ?? existing?.prompt`) so legacy rows that only ever
+had the column populated still display.
+
+Legacy rows (prompt in column but empty `payload.prompt`, or the reverse) are
+reconciled by the idempotent one-shot
+`hub/scripts/sync-task-prompt-payload.ts` (run via
+`bun run hub/scripts/sync-task-prompt-payload.ts`; `--dry-run` reports only).
+This is a one-shot, **not** in `schema.sql` (which re-runs every hub boot).
 
 ### Auto-name (prefix + suffix)
 
