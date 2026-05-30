@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, getPendingPrompts, dismissLocalSession } from '../db/dal'
+import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, getPendingPrompts, dismissLocalSession, setSessionAutoNudge } from '../db/dal'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
@@ -193,6 +193,27 @@ sessions.post('/:id/rotate-token', async (c) => {
   }
 
   return c.json({ token: rawToken })
+})
+
+// ── Phase 10 — PATCH /api/sessions/:id/auto-nudge ────────────────────────────
+// Set this session's per-session auto-nudge override. `auto_nudge: null` clears
+// the override so the session inherits the user's global default
+// (users.auto_nudge_idle_sessions). User-scoped: only the owner can update.
+// CSRF is enforced by the global /api/* csrfGuard (hub/src/index.ts).
+const AutoNudgeBody = z.object({
+  auto_nudge: z.boolean().nullable(),
+})
+
+sessions.patch('/:id/auto-nudge', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const parsed = AutoNudgeBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_input', detail: parsed.error.issues[0]?.message }, 400)
+  }
+  const updated = await setSessionAutoNudge(sessionId, userId, parsed.data.auto_nudge)
+  if (!updated) return c.json({ error: 'not_found' }, 404)
+  return c.json({ id: sessionId, auto_nudge: updated.auto_nudge })
 })
 
 // ── Phase 04 plan 008 — POST /api/sessions/heal ──────────────────────────────
