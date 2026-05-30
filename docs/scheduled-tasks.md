@@ -390,12 +390,13 @@ Offline parking now uses the shared `hub/src/dispatch/grace.ts`
 `getGraceBuffer()` (the standalone `scheduler/grace.ts` was deleted):
 
 - **Session targets** (`session` / `all_agents`): the dispatcher no longer
-  pre-checks `online` — the run falls through to the agent sender, whose
-  `dispatch()` call parks an offline target in the shared buffer keyed by
-  `sessionId`. On agent reconnect, `getGraceBuffer().drain(sessionId)` re-runs
-  the parked `replay` thunk (`runNow(task.id)`). TTL lapse (10 min) fires
-  `onParkExpire` → `skipped(target_offline)`. **Manual ("run now") runs fail
-  fast** with `target_offline` and never park.
+  pre-checks `online` — the run falls through to the agent sender. When the
+  session runner is offline the sender now **auto-launches the session** before
+  parking (see *Offline-session autostart* below). On agent reconnect,
+  `getGraceBuffer().drain(sessionId)` re-runs the parked `replay` thunk
+  (`runNow(task.id)`) so the freshly-launched runner receives the prompt and the
+  user sees the run execute live. TTL lapse (10 min) fires `onParkExpire` →
+  `skipped(target_offline)`.
 - **Supervisor targets** (`supervisor` / `all_supervisors`): the dispatcher
   keeps its offline pre-check + concurrency gate, but registers the offline
   replay in the same shared buffer keyed by `supervisorId` (replay = mark old
@@ -403,6 +404,33 @@ Offline parking now uses the shared `hub/src/dispatch/grace.ts`
 
 The shared buffer's 60-second sweep marks any entry past its 10-minute TTL via
 the registered `onExpire` side-effect (legacy parity).
+
+### Offline-session autostart (Phase 14)
+
+Previously an offline **session** target wasted every scheduled run: it parked in
+grace and, if the runner never reconnected on its own, expired as
+`skipped/target_offline`. A 4-hour task pointed at a session the user wasn't
+actively running would log 0 successes.
+
+Now `senders/agent.ts` proactively **launches** the session when its host
+(supervisor) is online, via the shared, gate-respecting
+`launchSessionForUser({ userId, sessionId })` (`hub/src/telegram/launch.ts`) — the
+SAME path the Telegram `/doctor` autoheal uses. Concurrency (`reserveSessionSlot`)
+and the cost-cap gate stay enforced; no parallel `session.start` path is minted.
+Flow when `getChannel(sessionId) == null`:
+
+| Launch outcome | Run result |
+|---|---|
+| `ok` (session.start fired) | fall through to `dispatch()` → parked in grace; launched runner connects → drain → `runNow` → delivered live. **Not** `target_offline`. |
+| already pending (`launch_pending`) | `skipped/launch_pending` — dedup: one launch + one grace entry per session (a 4h task that keeps finding the session offline does not stack `session.start` calls or double-deliver). |
+| `at_capacity` | `skipped/at_capacity` (informative, not `target_offline`). |
+| `no_online_supervisor` (host truly offline) | unchanged: scheduled runs fall through to grace park → TTL lapse `skipped/target_offline`; **manual** runs fail fast `target_offline`. |
+| `supervisor_ambiguous` / `no_project_dir` / `session_not_found` / `send_failed` / `internal_error` | `skipped/<reason>`. |
+
+**Dedup** keys off the grace buffer: a live pending entry for the `sessionId`
+means a launch is already in flight, so the next fire skips the duplicate
+`session.start`. **Manual ("run now")** also launches; only when the host itself
+is offline does it keep the immediate fail-fast `target_offline` feedback.
 
 ---
 

@@ -40,6 +40,9 @@ import {
   type RunStore,
 } from '../../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate } from '../../dispatch/gates.ts'
+import { getGraceBuffer } from '../../dispatch/grace.ts'
+import { launchSessionForUser } from '../../telegram/launch.ts'
+import { log } from '../../observability/logger'
 
 interface RunCtxLike {
   runId: string
@@ -85,6 +88,73 @@ function buildContent(task: ScheduledTask): string {
 const SUMMARY_DIRECTIVE = `\n\n---\nWhen finished, end your response with a single line starting with "Summary:" describing in 1-2 sentences what you accomplished or any blocker. Keep it brief — this is a scheduled run and the user only needs the headline result.`
 
 /**
+ * Outcome of the offline-session pre-launch attempt (Phase 14 autostart).
+ *
+ *   - 'launched'      → session.start fired; proceed to dispatch(), which parks
+ *                       the run in grace keyed by sessionId. The launched runner
+ *                       connects → ws/agent drains grace → replay → runNow → the
+ *                       prompt is delivered to the now-online session, live.
+ *   - 'launch_pending'→ a launch was ALREADY triggered by an earlier fire (a live
+ *                       grace entry exists). Skip this run with `launch_pending`
+ *                       so we neither fire a duplicate session.start nor stack a
+ *                       second grace entry / double-deliver — the earlier parked
+ *                       run already covers delivery.
+ *   - 'park'          → couldn't launch but the host is offline
+ *                       (no_online_supervisor). Keep today's behaviour: fall
+ *                       through to dispatch() → grace park → TTL lapse marks the
+ *                       run skipped/target_offline.
+ *   - { skip }        → a definitive non-launchable reason (at_capacity /
+ *                       ambiguous / no_project_dir / …). The run is finalized
+ *                       skipped with that reason — not a misleading target_offline.
+ */
+type LaunchAttempt = 'launched' | 'launch_pending' | 'park' | { skip: string }
+
+/**
+ * Proactively launch an OFFLINE session whose host (supervisor) is online, so a
+ * scheduled/manual run actually executes instead of parking-then-skipping with
+ * `target_offline`. Reuses the gate-respecting `launchSessionForUser` (the same
+ * path the Telegram `/doctor` autoheal uses) — concurrency + cost gates stay
+ * enforced; we do NOT mint a parallel session.start path.
+ *
+ * Dedup / no thundering herd: at most one launch per session per grace window.
+ * A pending grace entry for this sessionId means a launch was already triggered
+ * by an earlier fire (the entry is what the reconnect-drain replays), so we skip
+ * a second `session.start` and report 'launched' (the existing pending entry
+ * already covers delivery). A 4h task that keeps finding the session offline
+ * therefore fires session.start at most once per 10-min grace TTL, never stacks.
+ */
+async function maybeLaunchOfflineSession(args: {
+  userId: string
+  sessionId: string
+}): Promise<LaunchAttempt> {
+  // Dedup: a live grace entry => a launch is already in flight for this session.
+  // Don't fire a duplicate session.start (the parked replay already delivers).
+  if (getGraceBuffer()._pendingCount(args.sessionId) > 0) {
+    log.info('scheduler.agent.launch_dedup', { session_id: args.sessionId })
+    return 'launch_pending'
+  }
+
+  const res = await launchSessionForUser({ userId: args.userId, sessionId: args.sessionId })
+  if (res.ok) {
+    log.info('scheduler.agent.session_launched', {
+      session_id: args.sessionId, supervisor_id: res.supervisorId, run_id: res.runId,
+    })
+    return 'launched'
+  }
+  switch (res.reason) {
+    case 'no_online_supervisor':
+      // Host truly offline — can't launch. Keep today's park/skip behaviour.
+      return 'park'
+    case 'at_capacity':
+      return { skip: 'at_capacity' }
+    default:
+      // supervisor_ambiguous / no_project_dir / session_not_found / send_failed /
+      // internal_error — definitive, report the specific reason.
+      return { skip: res.reason }
+  }
+}
+
+/**
  * Session-targeted scheduled send. The dispatcher has already inserted the
  * `scheduled_task_runs` row (status='pending') and tracked the RunContext, so
  * the RunStore here does NOT insert a new row — it threads `ctx.runId` as the
@@ -122,13 +192,36 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
   const sentContent = `${runtimeBlock}\n\n## TASK\n${content}${SUMMARY_DIRECTIVE}`
   const storedContent = `[scheduled: ${task.name}]\n\n${content}`
 
-  // Manual runs fail fast when the target is offline instead of parking in
-  // grace (immediate UI feedback) — legacy parity with the dispatcher's
-  // isManual offline branch. Checked BEFORE dispatch() so no grace entry is
-  // ever registered for a manual run.
-  if (ctx.isManual && getChannel(sessionId) == null) {
-    await finalizeRun(ctx.runId, 'failed', 'target_offline')
-    return
+  // Offline session target (Phase 14 autostart). Instead of parking-then-skipping
+  // with `target_offline` (which wasted every scheduled run while the session was
+  // offline), proactively launch the session when its host (supervisor) is online,
+  // then let dispatch() park the prompt in grace so the freshly-launched runner
+  // receives it on reconnect and the user sees the run execute live.
+  if (getChannel(sessionId) == null) {
+    const attempt = await maybeLaunchOfflineSession({ userId: ctx.userId, sessionId })
+    if (typeof attempt === 'object') {
+      // Definitive non-launchable reason (at_capacity / ambiguous / …). Skip the
+      // run with that specific reason — informative, not a bare target_offline.
+      await finalizeRun(ctx.runId, 'skipped', attempt.skip)
+      return
+    }
+    if (attempt === 'launch_pending') {
+      // A launch for this session is already in flight (one grace entry per
+      // session). Skip this fire to avoid a duplicate session.start and a second
+      // parked replay — the earlier parked run delivers once the session is up.
+      await finalizeRun(ctx.runId, 'skipped', 'launch_pending')
+      return
+    }
+    if (attempt === 'park' && ctx.isManual) {
+      // Host offline + manual run: keep immediate UI feedback (fail fast) rather
+      // than leaving a pending row to expire — legacy parity.
+      await finalizeRun(ctx.runId, 'failed', 'target_offline')
+      return
+    }
+    // attempt === 'launched'  → fall through to dispatch(); it parks the run in
+    //                           grace, drained when the launched session connects.
+    // attempt === 'park' (scheduled, host offline) → fall through; dispatch()
+    //                           parks → TTL lapse marks skipped/target_offline.
   }
 
   const startedAt = Date.now()
