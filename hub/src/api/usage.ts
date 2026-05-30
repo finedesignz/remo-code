@@ -41,14 +41,33 @@ usage.get('/summary', async (c) => {
   if (!user) return c.json({ error: 'not_found' }, 404)
 
   const tz = user.timezone || 'UTC'
-  const windows = await sumUserCostWindows(userId, tz)
+  const [windows, tokenWindows] = await Promise.all([
+    sumUserCostWindows(userId, tz),
+    sumUserTokenWindows(userId, tz),
+  ])
   const snapshot = getUsage(userId)
+
+  // Total tokens across all buckets (input + output + cache create + cache read)
+  // — the single "tokens processed" figure shown under each cost card.
+  const totalTokens = (t: {
+    input_tokens: number
+    output_tokens: number
+    cache_creation_input_tokens: number
+    cache_read_input_tokens: number
+  }) =>
+    t.input_tokens +
+    t.output_tokens +
+    t.cache_creation_input_tokens +
+    t.cache_read_input_tokens
 
   const value = {
     timezone: tz,
     today_usd: windows.today_usd,
     week_usd: windows.week_usd,
     month_usd: windows.month_usd,
+    today_tokens: totalTokens(tokenWindows.today),
+    week_tokens: totalTokens(tokenWindows.seven_day),
+    month_tokens: totalTokens(tokenWindows.month_to_date),
     daily_cap_usd: Number(user.daily_cost_cap_usd ?? 0),
     thresholds: {
       session_pct: user.claude_session_threshold_pct ?? null,
