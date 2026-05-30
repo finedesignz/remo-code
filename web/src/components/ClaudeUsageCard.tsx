@@ -138,7 +138,7 @@ export function ClaudeUsageCard({ token }: Props) {
             <button
               onClick={handleSave}
               disabled={saving}
-              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors disabled:opacity-50"
             >
               {saving ? 'Saving…' : 'Save'}
             </button>
@@ -179,7 +179,7 @@ function ThresholdSlider({ label, help, enabled, onToggle, value, onChange, curr
           onClick={() => onToggle(!enabled)}
           aria-pressed={enabled}
           className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-            enabled ? 'bg-indigo-600' : 'bg-[var(--bg-tertiary)]'
+            enabled ? 'bg-blue-600' : 'bg-[var(--bg-tertiary)]'
           }`}
         >
           <span
@@ -199,7 +199,7 @@ function ThresholdSlider({ label, help, enabled, onToggle, value, onChange, curr
             step={STEP}
             value={clamped}
             onChange={(e) => onChange(parseInt(e.target.value, 10))}
-            className="flex-1 accent-indigo-500"
+            className="flex-1 accent-blue-500"
           />
           <span className={`text-sm font-mono w-12 text-right ${warn ? 'text-red-400' : 'text-[var(--text-primary)]'}`}>
             {clamped}%

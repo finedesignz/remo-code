@@ -126,7 +126,7 @@ export function ActivityTab({ token }: Props) {
               onClick={() => setFilter(f.key)}
               className={
                 active
-                  ? "px-3 py-1 rounded-full text-xs font-medium bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300"
+                  ? "px-3 py-1 rounded-full text-xs font-medium bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300"
                   : "px-3 py-1 rounded-full text-xs font-medium bg-[var(--bg-tertiary)]/40 text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/70"
               }
             >

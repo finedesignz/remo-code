@@ -467,7 +467,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               href="https://github.com/finedesignz/remo-code/releases/latest"
               target="_blank"
               rel="noreferrer"
-              className="block mt-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs text-[var(--text-on-accent)] font-medium text-center transition-colors"
+              className="block mt-2 px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-xs text-[var(--text-on-accent)] font-medium text-center transition-colors"
             >
               Download .msi from GitHub Releases &rarr;
             </a>
@@ -494,7 +494,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
             <select
               value={activeSupervisorId || ''}
               onChange={(e) => setActiveSupervisorId(e.target.value)}
-              className="px-2 py-1 text-sm bg-[var(--bg-tertiary)]/60 rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+              className="px-2 py-1 text-sm bg-[var(--bg-tertiary)]/60 rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500/50"
             >
               {supervisors.map((s) => (
                 <option key={s.id} value={s.id}>{s.hostname} · {s.online ? s.state : 'offline'} · v{s.version || '?'}</option>
@@ -506,7 +506,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 <select
                   value={String(selectedInstallationId)}
                   onChange={(e) => setSelectedInstallationId(e.target.value === 'all' ? 'all' : Number(e.target.value))}
-                  className="px-2 py-1 text-sm bg-[var(--bg-tertiary)]/60 rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                  className="px-2 py-1 text-sm bg-[var(--bg-tertiary)]/60 rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500/50"
                 >
                   <option value="all">All ({installations.length})</option>
                   {installations.map((i: any) => (
@@ -517,7 +517,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               </>
             )}
             {githubConfigured && installations.length === 0 && (
-              <button onClick={connectGitHub} className="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded-lg text-[var(--text-on-accent)]">Connect GitHub</button>
+              <button onClick={connectGitHub} className="px-3 py-1 text-xs bg-blue-600 hover:bg-blue-500 rounded-lg text-[var(--text-on-accent)]">Connect GitHub</button>
             )}
             {!githubConfigured && (
               <span className="text-xs text-amber-400">GitHub App not configured on hub</span>
@@ -541,7 +541,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               <button
                 key={f}
                 onClick={() => setFilter(f)}
-                className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${filter === f ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
+                className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${filter === f ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
               >
                 {f === 'all' ? 'All' : f === 'running' ? 'Running' : 'Idle'}
               </button>
@@ -552,7 +552,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               <button
                 key={t}
                 onClick={() => setTypeFilter(t)}
-                className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${typeFilter === t ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
+                className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${typeFilter === t ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
               >
                 {t === 'all' ? 'All' : t === 'repos' ? 'Repos' : 'Folders'}
               </button>
@@ -562,7 +562,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search repos…"
-            className="flex-1 min-w-[160px] px-3 py-1.5 text-sm bg-[var(--bg-tertiary)]/40 rounded-lg text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:bg-[var(--bg-tertiary)]/60 focus:ring-1 focus:ring-indigo-500/50"
+            className="flex-1 min-w-[160px] px-3 py-1.5 text-sm bg-[var(--bg-tertiary)]/40 rounded-lg text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:bg-[var(--bg-tertiary)]/60 focus:ring-1 focus:ring-blue-500/50"
           />
           <button
             onClick={() => { loadGitHub(); scan() }}
@@ -696,7 +696,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
 function EmptyState({ onClear }: { onClear: () => void }) {
   return (
     <div className="px-3 py-8 text-center text-sm text-[var(--text-muted)]">
-      No repos match. <button onClick={onClear} className="text-indigo-400 hover:text-indigo-300 underline-offset-2 hover:underline">Clear filter</button>
+      No repos match. <button onClick={onClear} className="text-blue-400 hover:text-blue-300 underline-offset-2 hover:underline">Clear filter</button>
     </div>
   )
 }
@@ -704,7 +704,7 @@ function EmptyState({ onClear }: { onClear: () => void }) {
 function IconBtn({ onClick, disabled, title, tone = 'muted', children }: { onClick?: () => void; disabled?: boolean; title: string; tone?: 'muted' | 'accent' | 'danger'; children: React.ReactNode }) {
   const toneCls =
     tone === 'danger' ? 'text-red-400 hover:text-red-300 hover:bg-red-500/10' :
-    tone === 'accent' ? 'text-indigo-300 hover:text-indigo-200 hover:bg-indigo-500/10' :
+    tone === 'accent' ? 'text-blue-300 hover:text-blue-200 hover:bg-blue-500/10' :
     'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60'
   return (
     <button onClick={onClick} disabled={disabled} title={title} aria-label={title} className={`p-2 md:p-1.5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${toneCls}`}>{children}</button>
@@ -863,7 +863,7 @@ function StartDialog(props: StartDialogProps) {
                   if (e.target.value === '__custom__') { setCustomBranch(true); return }
                   setBranch(e.target.value)
                 }}
-                className="w-full px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500/50 text-sm text-[var(--text-primary)]"
+                className="w-full px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500/50 text-sm text-[var(--text-primary)]"
               >
                 {branches.map((b) => <option key={b} value={b}>{b}</option>)}
                 <option value="__custom__">Custom branch name…</option>
@@ -874,7 +874,7 @@ function StartDialog(props: StartDialogProps) {
                   value={branch}
                   onChange={(e) => setBranch(e.target.value)}
                   placeholder="main"
-                  className="flex-1 px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500/50 text-sm text-[var(--text-primary)]"
+                  className="flex-1 px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500/50 text-sm text-[var(--text-primary)]"
                 />
                 {branches.length > 0 && (
                   <button
@@ -899,12 +899,12 @@ function StartDialog(props: StartDialogProps) {
           </label>
           <div>
             <label className="block text-xs text-[var(--text-muted)] mb-1">Initial prompt (optional)</label>
-            <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={4} placeholder="What should Claude work on?" className="w-full px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500/50 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)]" />
+            <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={4} placeholder="What should Claude work on?" className="w-full px-3 py-2 bg-[var(--bg-tertiary)]/40 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500/50 text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)]" />
           </div>
         </div>
         <div className="mt-5 flex justify-end gap-2">
           <button onClick={onClose} disabled={busy} className="px-4 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 rounded-lg">Cancel</button>
-          <button onClick={handleStart} disabled={busy || (!!localRepo?.dirty && !allowDirty)} className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded-lg text-[var(--text-on-accent)]">
+          <button onClick={handleStart} disabled={busy || (!!localRepo?.dirty && !allowDirty)} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-lg text-[var(--text-on-accent)]">
             {busy ? 'Starting…' : 'Start session'}
           </button>
         </div>

@@ -277,7 +277,7 @@ function WebhookCard({
           <input
             readOnly
             value={loading ? "…" : webhookUrl}
-            className="flex-1 px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-xs text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+            className="flex-1 px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-xs text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-blue-500/50"
           />
           <Button
             variant="ghost"

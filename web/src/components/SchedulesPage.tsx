@@ -86,7 +86,7 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
         <h2 className="text-sm font-semibold text-[var(--text-secondary)] flex-1">Schedules</h2>
         <button
           onClick={handleNew}
-          className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors inline-flex items-center gap-1.5"
+          className="px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors inline-flex items-center gap-1.5"
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <line x1="8" y1="3" x2="8" y2="13" />
@@ -103,7 +103,7 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search by name…"
-            className="flex-1 max-w-sm px-3 py-2 text-sm rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+            className="flex-1 max-w-sm px-3 py-2 text-sm rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-blue-500/40"
             aria-label="Search schedules by name"
           />
           <div className="inline-flex items-center gap-1 rounded-lg bg-[var(--bg-tertiary)]/60 p-0.5">
@@ -114,7 +114,7 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
                 onClick={() => setStatusFilter(opt)}
                 className={`px-2.5 py-1 text-xs rounded-md capitalize transition-colors ${
                   statusFilter === opt
-                    ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300'
+                    ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300'
                     : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
                 }`}
                 aria-pressed={statusFilter === opt}
@@ -126,7 +126,7 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
           <select
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value as TypeFilter)}
-            className="px-3 py-2 text-sm rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-indigo-500/40"
+            className="px-3 py-2 text-sm rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500/40"
             aria-label="Filter by task type"
           >
             <option value="all">All types</option>
@@ -160,7 +160,7 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
             <p className="text-sm text-[var(--text-muted)] mb-3">No schedules match your filters.</p>
             <button
               onClick={clearFilters}
-              className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs text-[var(--text-on-accent)] font-medium transition-colors"
+              className="px-3 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-xs text-[var(--text-on-accent)] font-medium transition-colors"
             >
               Clear filters
             </button>
@@ -220,8 +220,8 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
 function EmptyState({ onNew }: { onNew: () => void }) {
   return (
     <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-8 text-center max-w-xl mx-auto">
-      <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-indigo-600/20 ring-1 ring-indigo-500/30 mb-4">
-        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="text-indigo-300">
+      <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-blue-600/20 ring-1 ring-blue-500/30 mb-4">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="text-blue-300">
           <rect x="3" y="4" width="14" height="13" rx="2" />
           <path d="M3 8h14" />
           <path d="M7 2v4M13 2v4" />
@@ -235,7 +235,7 @@ function EmptyState({ onNew }: { onNew: () => void }) {
       </p>
       <button
         onClick={onNew}
-        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors"
+        className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm text-[var(--text-on-accent)] font-medium transition-colors"
       >
         Create your first schedule
       </button>
@@ -320,7 +320,7 @@ function ScheduleRow({
             aria-pressed={schedule.enabled}
             title={schedule.enabled ? 'Disable' : 'Enable'}
             className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
-              schedule.enabled ? 'bg-indigo-600' : 'bg-[var(--bg-tertiary)]'
+              schedule.enabled ? 'bg-blue-600' : 'bg-[var(--bg-tertiary)]'
             }`}
           >
             <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
@@ -409,7 +409,7 @@ function StatusChip({ status }: { status: NonNullable<ScheduledTask['last_run_st
     failure: { label: 'failed', cls: 'bg-red-600/20 text-red-300 ring-red-500/30' },
     skipped: { label: 'skipped', cls: 'bg-amber-600/20 text-amber-300 ring-amber-500/30' },
     pending: { label: 'pending', cls: 'bg-gray-600/20 text-gray-300 ring-gray-500/30' },
-    running: { label: 'running', cls: 'bg-indigo-600/20 text-indigo-300 ring-indigo-500/30' },
+    running: { label: 'running', cls: 'bg-blue-600/20 text-blue-300 ring-blue-500/30' },
   }
   const c = cfg[status] || cfg.pending
   return (

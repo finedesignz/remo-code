@@ -112,7 +112,7 @@ export function ScheduleRunsDrawer({ token, task, subscribe, onClose }: Props) {
                       onClick={() => setFilter(active && key !== 'all' ? 'all' : key)}
                       className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${
                         active
-                          ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300'
+                          ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300'
                           : 'bg-[var(--bg-tertiary)]/40 text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)]/60'
                       }`}
                     >
@@ -175,7 +175,7 @@ export function ScheduleRunsDrawer({ token, task, subscribe, onClose }: Props) {
                 <button
                   onClick={() => void loadMore()}
                   disabled={loading}
-                  className="w-full px-3 py-2 text-xs text-indigo-300 hover:text-indigo-200 bg-indigo-600/10 hover:bg-indigo-600/20 rounded-lg transition-colors font-medium"
+                  className="w-full px-3 py-2 text-xs text-blue-300 hover:text-blue-200 bg-blue-600/10 hover:bg-blue-600/20 rounded-lg transition-colors font-medium"
                 >
                   {loading ? 'Loading...' : 'Load more'}
                 </button>
@@ -297,7 +297,7 @@ function RunStatusIcon({ status }: { status: ScheduleRun['status'] }) {
     case 'failure': return <span className={`${base} bg-red-400`} title="failed" />
     case 'skipped': return <span className={`${base} bg-amber-400`} title="skipped" />
     case 'cancelled': return <span className={`${base} bg-gray-500`} title="cancelled" />
-    case 'running': return <span className={`${base} bg-indigo-400 animate-pulse`} title="running" />
+    case 'running': return <span className={`${base} bg-blue-400 animate-pulse`} title="running" />
     case 'pending': return <span className={`${base} bg-gray-500`} title="pending" />
     default: return <span className={`${base} bg-gray-500`} />
   }

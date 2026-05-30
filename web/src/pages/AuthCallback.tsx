@@ -72,7 +72,7 @@ export function AuthCallback() {
                 This sign-in link was issued for a different browser. Open the link in the same
                 browser where you requested it, or request a new one.
               </p>
-              <a href="/#/login" className="inline-block px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors">
+              <a href="/#/login" className="inline-block px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors">
                 Back to sign in
               </a>
             </>
@@ -84,7 +84,7 @@ export function AuthCallback() {
                 This sign-in link is no longer valid. Request a new one — they expire after 15 minutes
                 or one use.
               </p>
-              <a href="/#/login" className="inline-block px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors">
+              <a href="/#/login" className="inline-block px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors">
                 Request a new link
               </a>
             </>
@@ -95,7 +95,7 @@ export function AuthCallback() {
               <p className="text-xs text-[var(--text-muted)] mb-4">
                 Something went wrong verifying your link. Please try again.
               </p>
-              <a href="/#/login" className="inline-block px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors">
+              <a href="/#/login" className="inline-block px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] text-sm font-medium transition-colors">
                 Back to sign in
               </a>
             </>

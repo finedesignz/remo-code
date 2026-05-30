@@ -10,6 +10,8 @@ export { Button } from "./Button";
 export type { ButtonProps, ButtonVariant, ButtonSize } from "./Button";
 export { Field } from "./Field";
 export type { FieldProps } from "./Field";
+export { InfoTip } from "./InfoTip";
+export type { InfoTipProps } from "./InfoTip";
 export { StatusPill } from "./StatusPill";
 export type { StatusPillProps, StatusKind } from "./StatusPill";
 export { Toggle } from "./Toggle";

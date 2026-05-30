@@ -89,7 +89,7 @@ After all phases → DEPLOYMENT → V1 PUBLISH GATE.
 - [ ] Security (authn/authz, input validation, no leaked secrets, injection protection, rate limiting, gateway-pair secrets)
 - [ ] CRUD completeness
 - [ ] Architecture spec adherence
-- [ ] Design tokens (subtle, indigo accent, no ad-hoc hex)
+- [ ] Design tokens (subtle, blue accent, no ad-hoc hex)
 - [ ] Accessibility (keyboard, focus rings, ARIA, AA contrast)
 - [ ] Error handling + observability
 - [ ] Tests passing

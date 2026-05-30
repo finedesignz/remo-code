@@ -74,7 +74,7 @@ function DesktopNavItem({ item }: { item: AppShellNavItem }) {
   const linkClass = cn(
     "px-3 py-1.5 rounded-lg text-sm transition-colors",
     item.active
-      ? "bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300"
+      ? "bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300"
       : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
   );
 
@@ -132,7 +132,7 @@ function DesktopNavItem({ item }: { item: AppShellNavItem }) {
                 className={cn(
                   "w-full text-left px-3 py-2 text-sm transition-colors",
                   selected
-                    ? "bg-indigo-600/20 text-indigo-300"
+                    ? "bg-blue-600/20 text-blue-300"
                     : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 hover:text-[var(--text-primary)]"
                 )}
               >
@@ -262,7 +262,7 @@ export function AppShell({
                       className={cn(
                         "block px-3 py-2.5 rounded-lg text-sm transition-colors",
                         item.active
-                          ? "bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300"
+                          ? "bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300"
                           : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
                       )}
                     >
@@ -284,7 +284,7 @@ export function AppShell({
                               className={cn(
                                 "block w-full text-left px-3 py-2 rounded-lg text-sm transition-colors",
                                 selected
-                                  ? "bg-indigo-600/20 text-indigo-300"
+                                  ? "bg-blue-600/20 text-blue-300"
                                   : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
                               )}
                             >

@@ -173,7 +173,7 @@ export function OrchestratorTab({ token }: { token: string }) {
                   onBlur={() => { if (name.trim() && name !== snap.name) void patch({ name: name.trim() }); }}
                   placeholder="Orchestrator"
                   maxLength={64}
-                  className="w-full bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                  className="w-full bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
                 />
               </Field>
               <Field label="Custom instructions" helper="Appended to the built-in seed prompt.">
@@ -184,7 +184,7 @@ export function OrchestratorTab({ token }: { token: string }) {
                   rows={10}
                   maxLength={8000}
                   placeholder="e.g. Always summarize the state of all repos before suggesting next actions."
-                  className="w-full bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                  className="w-full bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500/50"
                 />
               </Field>
             </div>

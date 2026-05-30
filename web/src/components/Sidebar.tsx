@@ -93,7 +93,7 @@ export function Sidebar({
         <div className="flex-1" />
         <button
           onClick={onShowConnect}
-          className="p-2 text-indigo-400 hover:text-indigo-300 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+          className="p-2 text-blue-400 hover:text-blue-300 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
           title="Connect a repository"
           aria-label="Connect a repository"
         >
@@ -263,11 +263,11 @@ export function Sidebar({
                 onMouseLeave={() => handleRowLeave(s.id)}
                 title={rowTitle}
                 aria-label={primaryLabel}
-                className={`w-full cursor-pointer text-left px-3 py-2.5 rounded-lg text-sm transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500/40 ${
+                className={`w-full cursor-pointer text-left px-3 py-2.5 rounded-lg text-sm transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-blue-500/40 ${
                   s.id === activeSessionId
-                    ? 'bg-indigo-600/20 text-[var(--text-primary)] ring-1 ring-indigo-500/30'
+                    ? 'bg-blue-600/20 text-[var(--text-primary)] ring-1 ring-blue-500/30'
                     : s.is_orchestrator
-                      ? 'bg-indigo-600/10 text-[var(--text-primary)] ring-1 ring-indigo-500/40 hover:bg-indigo-600/15'
+                      ? 'bg-blue-600/10 text-[var(--text-primary)] ring-1 ring-blue-500/40 hover:bg-blue-600/15'
                       : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 active:bg-[var(--bg-tertiary)]/70'
                 }`}
               >
@@ -296,7 +296,7 @@ export function Sidebar({
                   </span>
                   {s.is_orchestrator && (
                     <span
-                      className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 shrink-0 font-semibold"
+                      className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 shrink-0 font-semibold"
                       title="Orchestrator — coordinates your other sessions"
                     >
                       Orchestrator
@@ -304,7 +304,7 @@ export function Sidebar({
                   )}
                   {s.cli_kind === 'codex' && (
                     <span
-                      className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 shrink-0 font-semibold"
+                      className="text-[9px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 shrink-0 font-semibold"
                       title="Codex CLI session"
                     >
                       codex

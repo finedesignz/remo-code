@@ -89,7 +89,7 @@ export function MobileAccordionRow({
         aria-controls={`mobile-row-panel-${session.id}`}
         className={`w-full text-left px-3 py-2.5 rounded-lg text-sm transition-colors ${
           expanded
-            ? 'bg-indigo-600/20 text-[var(--text-primary)] ring-1 ring-indigo-500/30'
+            ? 'bg-blue-600/20 text-[var(--text-primary)] ring-1 ring-blue-500/30'
             : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50 active:bg-[var(--bg-tertiary)]/70'
         }`}
       >

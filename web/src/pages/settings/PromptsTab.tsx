@@ -305,7 +305,7 @@ function InstructionField({
         onChange={(e) => onChange(e.target.value)}
         rows={12}
         maxLength={100_000}
-        className="w-full px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500/50 font-mono resize-y min-h-[280px]"
+        className="w-full px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500/50 font-mono resize-y min-h-[280px]"
         spellCheck={false}
       />
       <div className="mt-1.5 text-[10px] text-[var(--text-muted)] text-right">

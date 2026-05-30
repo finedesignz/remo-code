@@ -78,7 +78,7 @@ export function ScheduleRulesBuilder({ rules, timezone, onChange }: Props) {
       <button
         type="button"
         onClick={addRule}
-        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-indigo-300 hover:bg-indigo-600/15 transition-colors"
+        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-blue-300 hover:bg-blue-600/15 transition-colors"
       >
         <span aria-hidden="true" className="text-base leading-none">+</span>
         <span>Add another rule</span>
@@ -139,12 +139,12 @@ export function ScheduleRuleRow({ rule, canRemove, onChange, onRemove }: RowProp
           const n = parseInt(e.target.value || '1', 10)
           onChange({ interval: Number.isFinite(n) && n >= 1 ? Math.min(n, 999) : 1 })
         }}
-        className="w-16 px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500 font-mono"
+        className="w-16 px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
       />
       <select
         value={rule.unit}
         onChange={(e) => onChange({ unit: e.target.value as ScheduleUnit })}
-        className="px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        className="px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
       >
         {UNIT_OPTIONS.map((o) => (
           <option key={o.value} value={o.value}>{o.label}</option>
@@ -155,14 +155,14 @@ export function ScheduleRuleRow({ rule, canRemove, onChange, onRemove }: RowProp
         type="date"
         value={dateStr}
         onChange={(e) => setDate(e.target.value)}
-        className="px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        className="px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
       <span className="text-xs text-[var(--text-muted)] sm:mx-1">at</span>
       <input
         type="time"
         value={timeStr}
         onChange={(e) => setTime(e.target.value)}
-        className="px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        className="px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
       />
       {canRemove && (
         <button

@@ -10,7 +10,7 @@ export interface ToggleProps {
 }
 
 /**
- * Toggle — controlled switch primitive. Track ON = indigo, OFF = bg-tertiary;
+ * Toggle — controlled switch primitive. Track ON = blue, OFF = bg-tertiary;
  * knob uses --text-on-accent (NOT bg-white, so it survives light theme).
  * role="switch" + aria-checked; Space/Enter toggle; disabled dims + blocks.
  */
@@ -45,9 +45,9 @@ export function Toggle({
       onKeyDown={onKeyDown}
       className={cn(
         "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
-        "focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-[var(--bg-primary)]",
+        "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-[var(--bg-primary)]",
         "disabled:opacity-50 disabled:cursor-not-allowed",
-        checked ? "bg-indigo-600" : "bg-[var(--bg-tertiary)]"
+        checked ? "bg-blue-600" : "bg-[var(--bg-tertiary)]"
       )}
     >
       <span

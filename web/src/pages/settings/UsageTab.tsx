@@ -308,7 +308,7 @@ function ThresholdsCard({
           step={5}
           value={session}
           onChange={(e) => setSession(parseInt(e.target.value, 10))}
-          className="w-full accent-indigo-500"
+          className="w-full accent-blue-500"
         />
       </Field>
 
@@ -323,7 +323,7 @@ function ThresholdsCard({
           step={5}
           value={week}
           onChange={(e) => setWeek(parseInt(e.target.value, 10))}
-          className="w-full accent-indigo-500"
+          className="w-full accent-blue-500"
         />
       </Field>
 
@@ -395,7 +395,7 @@ function DailyCapCard({
             step={0.5}
             value={cap}
             onChange={(e) => setCap(e.target.value)}
-            className="w-32 px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+            className="w-32 px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-blue-500/50"
           />
           <Button variant="primary" size="sm" onClick={save} loading={saving}>
             Save

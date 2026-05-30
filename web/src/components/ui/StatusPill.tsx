@@ -29,7 +29,7 @@ const STATUS: Record<StatusKind, string> = {
   idle:
     "bg-gray-500/20 ring-1 ring-gray-500/30 text-gray-300",
   info:
-    "bg-indigo-500/20 ring-1 ring-indigo-500/30 text-indigo-300",
+    "bg-blue-500/20 ring-1 ring-blue-500/30 text-blue-300",
 };
 
 const SIZE = {

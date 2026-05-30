@@ -43,7 +43,7 @@ export function Tabs({
       {/* Mobile: select dropdown (already accessible) */}
       <div className="md:hidden">
         <select
-          className="w-full bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="w-full bg-[var(--bg-tertiary)] text-[var(--text-primary)] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           value={activeKey}
           onChange={(e) => onChange(e.target.value)}
         >
@@ -76,7 +76,7 @@ export function Tabs({
                 pad,
                 "text-sm whitespace-nowrap -mb-px border-b-2 transition-colors",
                 isActive
-                  ? "text-indigo-300 border-indigo-500"
+                  ? "text-blue-300 border-blue-500"
                   : "text-[var(--text-secondary)] border-transparent hover:text-[var(--text-primary)]"
               )}
             >
