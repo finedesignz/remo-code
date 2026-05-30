@@ -328,6 +328,15 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
         request_id: msg.request_id,
         approved: msg.approved,
       }))
+      // Audit: a tool-permission grant/deny was applied + delivered to the
+      // supervisor. Traceable per (session, request, decision, source).
+      log.info('permission.grant_applied', {
+        session_id: msg.session_id,
+        request_id: msg.request_id,
+        approved: msg.approved,
+        source: 'web',
+        user_id: data.userId,
+      })
     }
   }
 

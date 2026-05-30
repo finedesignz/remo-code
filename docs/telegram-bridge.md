@@ -243,6 +243,8 @@ offline — couldn't deliver.` (`callback_permission_offline`). Prompts expire a
 
 **No new dispatch path.** Inline approval forwards a control frame on an existing agent socket; it does NOT route a user→session message and therefore does NOT (and must not) touch the cost-cap dispatch pipeline — it's a response to a runner-initiated prompt, not new traffic.
 
+**Grant audit.** When a `permission_response` is forwarded to the supervisor — from EITHER channel — the hub emits a structured audit line `permission.grant_applied` `{ session_id, request_id, tool?, approved, source }` where `source` is `'web'` (`hub/src/ws/client.ts`) or `'telegram'` (`handlePermissionCallback` in `hub/src/api/telegram-webhook.ts`). This is the single traceable record that a tool grant was applied and delivered. The web and Telegram paths share the **same** hub→supervisor hop: hub `getChannel(sessionId).ws.send({type:'permission_response',…})` → supervisor `SessionBridge.handleHubMessage` (`supervisor/src/runners/session-bridge.ts`, no runtime schema gate — `HubToAgent` is a TS type) → `ClaudeRunner.respondToPermission` → CLI stdin `{type:'control_response', request_id, behavior:'allow'|'deny'}`. `question_response` follows the identical chain to `respondToQuestion`. Return-path coverage: `hub/test/ws-client-permission-returnpath.test.ts` (web→hub→channel + audit) and `supervisor/test/bridge-permission-returnpath.test.ts` (hub frame→runner→CLI control_response).
+
 ### Summarized streaming (MarkdownV2 + editable working message)
 
 A Telegram-driven session no longer goes silent until one final blob lands. While
