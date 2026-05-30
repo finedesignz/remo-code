@@ -52,6 +52,16 @@ export function useAuth() {
   const signIn = useCallback((token: string | null, user: AuthUser) => {
     storeAuth(token, user)
     setState({ user, token: token ?? COOKIE_SENTINEL, loading: false })
+    // Navigate off the login route. The legacy password flow (unlike the
+    // magic-link flow, which redirects through /auth/callback → /) never
+    // changes the hash, so without this the route stays 'login' and App's
+    // `route === 'login'` gate re-renders <Login> forever despite valid auth
+    // — the "clicking Sign in does nothing" trap. Only redirect when actually
+    // sitting on the login route so we never clobber a deliberate deep link.
+    try {
+      const h = window.location.hash
+      if (h === '' || h === '#' || h.startsWith('#/login')) window.location.hash = '#/'
+    } catch {}
   }, [])
 
   const signOut = useCallback(() => {
