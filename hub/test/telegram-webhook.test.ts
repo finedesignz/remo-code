@@ -148,6 +148,9 @@ mock.module("../src/telegram/client.ts", () => ({
   editMessageText: async (chatId: number | string, messageId: number, text: string) => {
     state.editTextCalls.push({ chatId, messageId, text });
   },
+  editMessageTextMd: async (chatId: number | string, messageId: number, text: string) => {
+    state.editTextCalls.push({ chatId, messageId, text });
+  },
   editMessageReplyMarkup: async () => {},
   getFile: async (fileId: string) => ({ file_id: fileId, file_path: "photos/file.jpg", file_size: 1024 }),
   downloadFile: async (_fp: string) => new ArrayBuffer(8),
@@ -487,5 +490,76 @@ describe("inline approval callbacks (Fix C)", () => {
     // permission_response forwarded), which is the security-relevant assertion.
     expect(body.outcome).toBe("callback_permission_stale");
     expect(state.channelSends).toHaveLength(0);
+  });
+});
+
+describe("stop — inline 🛑 button + /stop command", () => {
+  test("🛑 tap by owner forwards cancel{session_id} to the agent socket", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_stop" } as any;
+    state.channelSends = [];
+    const { rememberStoppable, _resetStoppableForTests, takeStoppable } = await import("../src/telegram/stop.ts");
+    _resetStoppableForTests();
+    rememberStoppable("sess_stop", LINKED_USER_ID, { chatId: LINKED_CHAT, messageId: 50 });
+
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 800, chatId: LINKED_CHAT, data: "sx:sess_stop" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_stop_ok");
+
+    expect(state.channelSends).toHaveLength(1);
+    const frame = JSON.parse(state.channelSends![0]!.frame);
+    expect(frame).toEqual({ type: "cancel", session_id: "sess_stop" });
+    // Take-once — entry consumed.
+    expect(takeStoppable("sess_stop", LINKED_USER_ID)).toBeNull();
+  });
+
+  test("second 🛑 tap is a benign no-op (already stopped), no extra cancel", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_stop2" } as any;
+    state.channelSends = [];
+    const { rememberStoppable, _resetStoppableForTests } = await import("../src/telegram/stop.ts");
+    _resetStoppableForTests();
+    rememberStoppable("sess_stop2", LINKED_USER_ID, { chatId: LINKED_CHAT, messageId: 50 });
+
+    await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 810, chatId: LINKED_CHAT, data: "sx:sess_stop2" }));
+    const res2 = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 811, chatId: LINKED_CHAT, data: "sx:sess_stop2" }));
+    const body2 = await res2.json();
+    expect(body2.outcome).toBe("callback_stop_stale");
+    expect(state.channelSends).toHaveLength(1); // only the first tap sent a cancel
+  });
+
+  test("fail-closed: 🛑 tap by a non-fanned user cannot stop (no cancel)", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_stop3" } as any;
+    state.channelSends = [];
+    const { rememberStoppable, _resetStoppableForTests } = await import("../src/telegram/stop.ts");
+    _resetStoppableForTests();
+    // The button was fanned to a DIFFERENT user; LINKED_USER_ID is not registered.
+    rememberStoppable("sess_stop3", "SOME-OTHER-USER", { chatId: 12345, messageId: 50 });
+
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 820, chatId: LINKED_CHAT, data: "sx:sess_stop3" }));
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_stop_stale");
+    expect(state.channelSends).toHaveLength(0);
+  });
+
+  test("/stop with no active session replies 'No active session.'", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: null } as any;
+    state.channelSends = [];
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkUpdate({ update_id: 830, chatId: LINKED_CHAT, text: "/stop" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outcome).toBe("cmd_stop_no_session");
+    expect(state.sentMessages.map((m) => m.text).join("\n")).toContain("No active session.");
+    expect(state.channelSends).toHaveLength(0);
+  });
+
+  test("/stop with a live default session forwards cancel", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_live" } as any;
+    state.channelSends = [];
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkUpdate({ update_id: 831, chatId: LINKED_CHAT, text: "/stop" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outcome).toBe("cmd_stop_ok");
+    expect(state.channelSends).toHaveLength(1);
+    expect(JSON.parse(state.channelSends![0]!.frame)).toEqual({ type: "cancel", session_id: "sess_live" });
   });
 });

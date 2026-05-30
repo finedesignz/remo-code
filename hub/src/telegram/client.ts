@@ -80,6 +80,8 @@ export function splitForTelegram(text: string, maxLen: number = MAX_MESSAGE_LEN)
 export interface SendMessageOptions {
   parse_mode?: "MarkdownV2";
   disable_web_page_preview?: boolean;
+  /** Optional inline keyboard to attach (to the LAST chunk when text splits). */
+  inline_keyboard?: InlineKeyboard;
 }
 
 /** Telegram inline keyboard button. callback_data must be ≤64 bytes. */
@@ -137,14 +139,16 @@ export async function sendMessage(
 export async function sendMessageMd(
   chatId: number | string,
   text: string,
+  inlineKeyboard?: InlineKeyboard,
 ): Promise<{ message_id: number } | void> {
   try {
-    return await sendMessageReturningId(chatId, text, { parse_mode: "MarkdownV2" });
+    return await sendMessageReturningId(chatId, text, { parse_mode: "MarkdownV2", inline_keyboard: inlineKeyboard });
   } catch (err) {
     if (err instanceof TelegramClientError && err.status === 400) {
       // Markup rejected — fall back to plain text (strip nothing; Telegram
-      // renders the raw chars). Better an unformatted message than none.
-      return await sendMessageReturningId(chatId, text);
+      // renders the raw chars). Better an unformatted message than none. The
+      // inline keyboard still attaches — only the text markup was rejected.
+      return await sendMessageReturningId(chatId, text, { inline_keyboard: inlineKeyboard });
     }
     throw err;
   }
@@ -164,7 +168,9 @@ async function sendMessageReturningId(
   const url = `${API_BASE}/bot${token}/sendMessage`;
   const chunks = splitForTelegram(text);
   let last: { message_id: number } | undefined;
-  for (const chunk of chunks) {
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i]!;
+    const isLast = i === chunks.length - 1;
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -173,6 +179,8 @@ async function sendMessageReturningId(
         text: chunk,
         ...(opts.parse_mode ? { parse_mode: opts.parse_mode } : {}),
         ...(opts.disable_web_page_preview ? { disable_web_page_preview: true } : {}),
+        // One reply_markup per message — attach the keyboard to the last chunk only.
+        ...(isLast && opts.inline_keyboard ? { reply_markup: { inline_keyboard: opts.inline_keyboard } } : {}),
       }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -380,13 +388,14 @@ export async function editMessageTextMd(
   chatId: number | string,
   messageId: number,
   text: string,
+  inlineKeyboard?: InlineKeyboard,
 ): Promise<void> {
   try {
-    await editMessageText(chatId, messageId, text, { parse_mode: "MarkdownV2" });
+    await editMessageText(chatId, messageId, text, { parse_mode: "MarkdownV2", inline_keyboard: inlineKeyboard });
   } catch (err) {
     if (err instanceof TelegramClientError && err.status === 400) {
       if (err.bodyPreview.includes("message is not modified")) return;
-      await editMessageText(chatId, messageId, text);
+      await editMessageText(chatId, messageId, text, { inline_keyboard: inlineKeyboard });
       return;
     }
     throw err;

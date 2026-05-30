@@ -36,6 +36,7 @@ export type ParsedCommand =
   | { kind: "help" }
   | { kind: "doctor" }
   | { kind: "status" }
+  | { kind: "stop" }
   | { kind: "unknown"; raw: string }
   | { kind: "none" };
 
@@ -60,6 +61,8 @@ export function parseCommand(text: string | undefined | null): ParsedCommand {
       return { kind: "doctor" };
     case "status":
       return { kind: "status" };
+    case "stop":
+      return { kind: "stop" };
     default:
       return { kind: "unknown", raw: name };
   }
@@ -75,6 +78,7 @@ export const BOT_COMMANDS: ReadonlyArray<{ command: string; description: string 
   { command: "list", description: "Pick your default session (tap-to-select buttons)" },
   { command: "session", description: "Set default session by id-prefix" },
   { command: "status", description: "Show link, default session, supervisor & daily cost" },
+  { command: "stop", description: "Halt the running turn for your default session" },
   { command: "doctor", description: "Diagnose & auto-fix an offline supervisor/session" },
   { command: "help", description: "Show the command reference" },
 ];
@@ -85,6 +89,7 @@ export const HELP_TEXT = [
   "/list — tap-to-pick session list (inline buttons). 🧭 Orchestrator (root folder) is pinned at the top — tap it to coordinate across all repos.",
   "/session <id> — set default by typed id-prefix (power users; /list is easier)",
   "/status — link, default session, supervisor, channel, daily cost",
+  "/stop — halt the running turn for your default session",
   "/doctor — diagnose and auto-fix supervisor/session offline issues",
   "/help — this message",
   "",
