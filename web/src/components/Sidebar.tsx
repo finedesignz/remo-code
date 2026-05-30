@@ -7,6 +7,7 @@ import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
 import { UnreadBadge } from './UnreadBadge'
 import { SessionTooltip } from './SessionTooltip'
 import { CloneHereModal } from './CloneHereModal'
+import { Toggle } from './ui/Toggle'
 
 interface Props {
   sessions: CodeSession[]
@@ -30,6 +31,10 @@ interface Props {
   subscribe?: (handler: (msg: any) => void) => () => void
   /** Phase 08.5 launch-flow helper (from useSessions). Optional so existing callers keep compiling. */
   cloneHere?: (id: string, targetRoot: string) => Promise<{ ok: boolean; error?: string; target_path?: string }>
+  /** Phase 10 — user's global auto-nudge default; reflects effective state when a row has no override. */
+  globalNudgeDefault?: boolean
+  /** Phase 10 — set a session's per-session auto-nudge override (true/false force, null inherit). */
+  onSetAutoNudge?: (id: string, value: boolean | null) => Promise<{ ok: boolean; error?: string }>
 }
 
 export function Sidebar({
@@ -45,6 +50,8 @@ export function Sidebar({
   // sessions are launched from Settings → Supervisor, not here. The sidebar is
   // active-only, so the old `launchSession` prop has been dropped.
   cloneHere,
+  globalNudgeDefault = true,
+  onSetAutoNudge,
 }: Props) {
   const [cloneModal, setCloneModal] = useState<{ sessionId: string; repoLabel: string } | null>(null)
   const [toast, setToast] = useState<string | null>(null)
@@ -320,6 +327,22 @@ export function Sidebar({
                   )}
                   <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
                   <UnreadBadge count={unreadCounts[s.id] || 0} />
+                  {/* Phase 10 — per-session auto-nudge override. Effective state =
+                      explicit override, else the user's global default. Flip
+                      sets an explicit boolean and PATCHes instantly. */}
+                  {onSetAutoNudge && (
+                    <span
+                      className="shrink-0 flex items-center"
+                      onClick={(e) => e.stopPropagation()}
+                      title="Auto-nudge when idle — send a brief status-update prompt when you open this idle session"
+                    >
+                      <Toggle
+                        checked={s.auto_nudge ?? globalNudgeDefault}
+                        onChange={(next) => { void onSetAutoNudge(s.id, next) }}
+                        aria-label={`Auto-nudge when idle for ${primaryLabel}`}
+                      />
+                    </span>
+                  )}
                   {/* Action control — always visible (no hover-only affordance, per
                       design prefs). Inline two-step confirm. For an online session
                       this stops the supervisor subprocess and removes the row. */}

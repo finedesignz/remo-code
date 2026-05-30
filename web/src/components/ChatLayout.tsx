@@ -21,6 +21,7 @@ import { ChatPanel } from './ChatPanel'
 import { ApiKeyModal } from './ApiKeyModal'
 import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
+import { hubFetch } from '../lib/api'
 
 const NUDGE_TEXT = "Status update? Briefly: what's the current state, what would you recommend doing next, or what input do you need from me?"
 
@@ -45,6 +46,25 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     })
   }, [])
   const [showApiKey, setShowApiKey] = useState(false)
+
+  // Phase 10 — user's global auto-nudge default. Per-session `auto_nudge`
+  // overrides this; null/undefined on a session inherits this value. Source of
+  // truth is the server (users.auto_nudge_idle_sessions); the legacy
+  // `remo:auto-nudge` localStorage key is kept only as an offline fallback.
+  const [globalNudgeDefault, setGlobalNudgeDefault] = useState<boolean>(() => {
+    try { return localStorage.getItem('remo:auto-nudge') !== 'off' } catch { return true }
+  })
+  useEffect(() => {
+    let cancelled = false
+    hubFetch<{ auto_nudge_idle_sessions?: boolean }>(token, '/api/profile')
+      .then((p) => {
+        if (!cancelled && typeof p.auto_nudge_idle_sessions === 'boolean') {
+          setGlobalNudgeDefault(p.auto_nudge_idle_sessions)
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [token])
 
   // REVIEW BL-01: shared WS from context.
   const { connected, connectionId, send, subscribe, online } = useWebSocketContext()
@@ -109,10 +129,12 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     }
 
     try {
-      const optOut = localStorage.getItem('remo:auto-nudge') === 'off'
-      if (optOut) return
       const target = sessionsHook.sessions.find(s => s.id === id)
       if (!target || target.status !== 'online') return
+      // Phase 10 — effective auto-nudge = per-session override, else the user's
+      // global default. `auto_nudge` null/undefined means "inherit".
+      const effective = target.auto_nudge ?? globalNudgeDefault
+      if (!effective) return
       const lastUserMsg = readLastUserMessage(id)
       if (lastUserMsg) {
         if (lastUserMsg.content === NUDGE_TEXT) return
@@ -128,7 +150,7 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
         recordUserMessage(id, NUDGE_TEXT)
       }, 150)
     } catch {}
-  }, [sessionsHook.sessions, send])
+  }, [sessionsHook.sessions, send, globalNudgeDefault])
 
   // Close sidebar on Escape (mobile)
   useEffect(() => {
@@ -190,6 +212,8 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           token={token}
           subscribe={subscribe}
           cloneHere={sessionsHook.cloneHere}
+          globalNudgeDefault={globalNudgeDefault}
+          onSetAutoNudge={sessionsHook.setSessionAutoNudge}
         />
       </div>
 
