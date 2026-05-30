@@ -21,22 +21,22 @@ import { activeTopRoute, buildTopNav, readTabParam, writeTabParam } from "../lib
 
 import { ConnectionsTab } from "./settings/ConnectionsTab";
 import { CredentialsTab } from "./settings/CredentialsTab";
-import { PromptsTab } from "./settings/PromptsTab";
 import { UsageTab } from "./settings/UsageTab";
 import { ProfileTab } from "./settings/ProfileTab";
 
-type SettingsTab = "connections" | "credentials" | "prompts" | "usage" | "profile";
+type SettingsTab = "connections" | "credentials" | "usage" | "profile";
 
 function readSettingsTab(): SettingsTab {
   const raw = readTabParam();
   if (
-    raw === "connections" || raw === "credentials" || raw === "prompts" ||
+    raw === "connections" || raw === "credentials" ||
     raw === "usage" || raw === "profile"
   ) {
     return raw;
   }
-  // Legacy `?tab=orchestrator` (and any unknown tab) → Connections, where the
-  // orchestrator now lives as the pinned top row (Phase 09).
+  // Legacy `?tab=orchestrator` (Phase 09) and `?tab=prompts` (Phase 10 — Prompts
+  // tab removed; auto-nudge moved to per-session row toggles, instruction files
+  // handled locally) and any unknown tab → Connections.
   return "connections";
 }
 
@@ -68,7 +68,7 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
   }, []);
 
   const handleTabChange = (next: string) => {
-    const t = (["connections", "credentials", "prompts", "usage", "profile"].includes(next)
+    const t = (["connections", "credentials", "usage", "profile"].includes(next)
       ? next
       : "connections") as SettingsTab;
     setTab(t);
@@ -80,7 +80,6 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
     subTabs: [
       { key: "connections", label: "Connections" },
       { key: "credentials", label: "Credentials" },
-      { key: "prompts", label: "Prompts" },
       { key: "usage", label: "Usage" },
       { key: "profile", label: "Profile" },
     ],
@@ -103,11 +102,6 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
         {tab === "credentials" && (
           <ErrorBoundary tabKey="settings:credentials">
             <CredentialsTab token={token} />
-          </ErrorBoundary>
-        )}
-        {tab === "prompts" && (
-          <ErrorBoundary tabKey="settings:prompts">
-            <PromptsTab token={token} />
           </ErrorBoundary>
         )}
         {tab === "usage" && (
