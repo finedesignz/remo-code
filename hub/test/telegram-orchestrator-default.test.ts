@@ -94,6 +94,7 @@ mock.module("../src/telegram/client.ts", () => ({
   },
   answerCallbackQuery: async () => {},
   editMessageText: async () => {},
+  editMessageTextMd: async () => {},
   editMessageReplyMarkup: async () => {},
   getFile: async (fileId: string) => ({ file_id: fileId, file_path: "x", file_size: 1 }),
   downloadFile: async () => new ArrayBuffer(8),

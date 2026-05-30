@@ -155,6 +155,7 @@ All commands work after the user has linked. Unlinked chats can ONLY send
 | `/list` | Inline-keyboard session picker. **The 🧭 Orchestrator (root folder) is pinned as the FIRST button** so the user can always tap-to-coordinate across repos — even when offline / repo-less, and even with zero other sessions (a synthetic row is offered). Each other button = one session (label = repo name from `project_dir`'s last path segment, truncated to 28 chars). Tap a button to set it as your EXPLICIT default — Telegram fires a `callback_query` that the hub validates, persists, and confirms with a toast + a leading ✓ on the chosen button. Paginated 20-per-page (2 buttons per row, 10 rows + a `« Prev` / `Next »` nav row); `Next`/`Prev` edit the message in-place and fall back to a fresh send if the edit fails. Currently-default session shown with a leading ✓ before any taps. See "Inline-keyboard session picker" below. |
 | `/doctor` | Diagnose and auto-fix "supervisor offline" / "session offline" failures. Walks 6 progressive checks (account link → default session → session row → supervisor connected → live runner channel → auto-launch), replying after each step. When the session row is bound but no Claude runner is alive, the doctor calls `launchSessionForUser` to emit `session.start` to the supervisor — going through `reserveSessionSlot` so the cost cap / concurrency gate is NEVER bypassed. A 20s deferred check polls the channel registry. **Autoheal opener:** when a plain user message returns `agent_offline`, the webhook suppresses the legacy "Your supervisor is offline" reply and lets `/doctor` open with `🩺 Hold on — diagnosing & launching automatically…`. **Auto-replay buffer:** the original message (text + images) is stashed in-memory per chat (60s TTL, most-recent-wins). When the deferred check sees the channel come online, the buffered message is replayed through `dispatchToSession` with a negated `update_id` (audit `(chat_id, update_id)` UNIQUE can't collide). Cost cap is still enforced on the replay. Reply: `✅ Launch complete — sent your message ('<first 40 chars>'). Reply coming up.` On timeout the buffer is dropped: `⚠ Launch is taking longer than expected. Try again in a moment.` A second user message while the buffer is pending overwrites it and replies `Queued — I'll send this one after the launch completes.` See `hub/src/telegram/doctor.ts` + `hub/src/telegram/launch.ts`. |
 | `/status` | Compact one-message report: linked email, default session label + short id, supervisor liveness, session channel state, and today's cost vs the user's daily cap. Reuses `sumTodayCostForUser` and `isSupervisorOnline` — no new DB columns, no duplicated cost math. User-scoped throughout. See `hub/src/telegram/status.ts`. |
+| `/stop` | Halt the in-flight turn for the user's effective default session (a live explicit/auto default, else the open orchestrator). Resolves the target server-side, then forwards the SAME `{ type:'cancel', session_id }` frame the web client sends, onto the session's agent socket via `getChannel`. Ownership is re-verified (`getSession(sessionId, userId)`) so a user can never cancel a session they don't own. Reply: `⏹ Stopped <short-id>` on success, `No active session.` when there's no live target (or ownership is lost), `Couldn't deliver the stop. Try again.` on a send failure. Shares one cancel path with the 🛑 button — see `hub/src/telegram/stop.ts`. Does NOT touch the cost-cap gate (cancel only halts; it never dispatches). |
 | `/help` | Static command reference. |
 | *plain text* | Forwarded as `user_message` content (raw text — no `[telegram] ` prefix) to the user's default session. The Telegram origin is tracked separately in the `telegram_inbound_audit` row keyed by `(chat_id, update_id)`. |
 | *photo* | Largest size is downloaded via `getFile` + `getFileContent`, attached as a base64 data-URI in `images[]` on the `user_message`. The Telegram `caption` becomes the text. 10MB hard cap (matches hub WS limit). |
@@ -279,6 +280,40 @@ and keep only their own intentional markup (`*bold*`, ```code```). The inline
 Approve/Deny prompt is also MarkdownV2 with the same fallback; the keyboard is
 unaffected.
 
+### Stop a running turn (🛑 button + `/stop`)
+
+While a turn streams, the **🛑 Stop** inline button rides the editable "working…"
+message; `/stop` does the same from the keyboard. Both halt the in-flight turn via
+**one shared path** — `requestStop` in `hub/src/telegram/stop.ts` — which forwards
+the SAME `{ type:'cancel', session_id }` frame the web client sends, onto the
+session's agent socket via `getChannel`. No new dispatch path; the cost-cap gate is
+untouched (cancel only halts, it never dispatches).
+
+- **Button wiring.** When the bridge creates the working message it attaches a
+  single-button keyboard `[[🛑 Stop]]` with `callback_data: sx:<sessionId>` (≤64
+  bytes: `sx:` + a 36-char UUID = 39). It also records the working message in the
+  **stop registry** (`rememberStoppable(sessionId, userId, {chatId, messageId})`),
+  mirroring the approvals registry: one entry per `sessionId` holding every
+  authorized user the working message was fanned to. The keyboard persists across
+  the throttled edits; the final `assistant_message` edits the message WITHOUT the
+  keyboard (button disappears) and `forgetStoppable` drops the entry.
+- **Callback handling.** A 🛑 tap is a `callback_query`, handled INSIDE the existing
+  post-auth `handleCallbackQuery` (alongside the Approve/Deny branch), keeping the
+  raw-body / constant-time-secret / mount-order discipline intact. `parseStopCallback`
+  decodes `sx:<sessionId>`; the tapping user is resolved server-side via
+  `getUserByTelegramChatId` (**never** trusted from the wire).
+- **Two-layer fail-closed authz.** (1) `takeStoppable(sessionId, userId)` returns a
+  ctx only if THAT user was fanned the working message (take-once — a second tap, or
+  a tap from an unrelated chat, finds nothing → benign "Already stopped"). (2)
+  `requestStop` re-verifies the user OWNS the session (`getSession`) before sending
+  cancel — a foreign/forged `sessionId` on the wire resolves to no row → `not_authorized`.
+- **`/stop` target.** Resolves the user's effective default (a live explicit/auto
+  default, else the open orchestrator), then calls the same `requestStop`. Reply:
+  `⏹ Stopped <short-id>`, or `No active session.` when there's no live/owned target.
+- **MarkdownV2.** On a successful stop the working message is edited to `⏹ Stopped.`
+  via `editMessageTextMd` (MarkdownV2 → plaintext 400 fallback). `answerCallbackQuery`
+  fires on every branch.
+
 ### Pagination edits
 
 `safeEditMessageText` swallows Telegram's `400 message is not modified` error (no-op success when the new payload is byte-identical to the previous). All other errors are surfaced via `console.error` instead of `console.warn`, so paginate-not-firing-silently bugs surface in logs.
@@ -291,7 +326,10 @@ Telegram update
 hub/src/api/telegram-webhook.ts            ← URL-secret check (constant-time),
                                               raw body before parse, zod validate
    ↓
-hub/src/telegram/commands.ts               ← /start /session /list /help parser
+hub/src/telegram/commands.ts               ← /start /session /list /status /stop /doctor /help parser
+hub/src/telegram/stop.ts                   ← shared cancel path + 🛑 button registry
+                                              (sx:<sessionId> codec; used by the
+                                              button callback AND /stop)
    ↓ (non-command, or after a successful link)
 hub/src/telegram/dispatch.ts               ← adapter over hub/src/dispatch/
                                               dispatch({ store:null,

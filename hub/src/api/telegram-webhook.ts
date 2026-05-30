@@ -45,7 +45,9 @@ import {
   sendMessageWithKeyboard,
   answerCallbackQuery,
   editMessageText,
+  editMessageTextMd,
   editMessageReplyMarkup,
+  escapeMarkdownV2,
   getFile,
   downloadFile,
   type InlineKeyboard,
@@ -72,6 +74,7 @@ import {
   parsePermissionCallback,
   takePendingPrompt,
 } from "../telegram/approvals.ts";
+import { parseStopCallback, takeStoppable, requestStop } from "../telegram/stop.ts";
 import { getChannel } from "../ws/registry.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
 import { runDoctor, bufferReplay, hasBufferedReplay } from "../telegram/doctor.ts";
@@ -511,6 +514,97 @@ async function handlePermissionCallback(
 }
 
 /**
+ * Resolve a 🛑 Stop inline-button tap. Two-layer fail-closed authz:
+ *   1. `takeStoppable(sessionId, user.id)` — the tapping user must be one the
+ *      working message was fanned to (server-side registry; take-once). The
+ *      sessionId arrives on the callback wire only to LOCATE the entry.
+ *   2. `requestStop` re-verifies the user OWNS the session before sending cancel.
+ * Edits the working message to "⏹ Stopped." and answers the callback on every
+ * branch. A second tap (already resolved) is a benign no-op.
+ */
+async function handleStopCallback(
+  cb: CallbackQueryT,
+  user: TelegramUserRow,
+  stop: { sessionId: string },
+): Promise<{ outcome: string }> {
+  // Layer 1: registry membership (authz + take-once). Foreign/forged sessionId
+  // or a second tap finds no entry → benign "already stopped".
+  const ctx = takeStoppable(stop.sessionId, user.id);
+  if (!ctx) {
+    await safeAnswerCallback(cb.id, { text: "Already stopped or expired.", show_alert: false });
+    return { outcome: "callback_stop_stale" };
+  }
+
+  // Layer 2: ownership-checked cancel via the shared helper.
+  const result = await requestStop({ sessionId: stop.sessionId, userId: user.id });
+
+  const chatId = cb.message?.chat.id ?? ctx.chatId;
+  const messageId = cb.message?.message_id ?? ctx.messageId;
+
+  if (result === "stopped") {
+    await safeAnswerCallback(cb.id, { text: "⏹ Stopped" });
+    if (chatId !== undefined && messageId) {
+      try {
+        await editMessageTextMd(chatId, messageId as number, escapeMarkdownV2("⏹ Stopped."));
+      } catch (err: any) {
+        console.warn("[telegram-webhook] stop edit failed:", err?.status ?? "?", err?.message);
+      }
+    }
+    return { outcome: "callback_stop_ok" };
+  }
+  if (result === "offline") {
+    await safeAnswerCallback(cb.id, { text: "Session is offline — nothing to stop.", show_alert: true });
+    return { outcome: "callback_stop_offline" };
+  }
+  if (result === "not_authorized") {
+    await safeAnswerCallback(cb.id, { text: "Not allowed", show_alert: true });
+    return { outcome: "callback_stop_denied" };
+  }
+  await safeAnswerCallback(cb.id, { text: "Couldn't deliver the stop. Try again.", show_alert: true });
+  return { outcome: "callback_stop_send_failed" };
+}
+
+/**
+ * `/stop` command — halt the running turn for the user's effective default
+ * session (explicit/auto default if live, else the open orchestrator). Reuses
+ * the SAME ownership-checked `requestStop` helper as the inline button.
+ */
+async function handleStopCommand(
+  user: TelegramUserRow,
+  chatId: number | string,
+): Promise<{ outcome: string }> {
+  // Resolve the target session: a live default, else the orchestrator fallback.
+  let target = user.telegram_default_session_id;
+  if (target) {
+    const live = await getSession(target, user.id).catch(() => null);
+    if (!live) target = null;
+  }
+  if (!target) target = await resolveOrchestratorTarget(user.id);
+  if (!target) {
+    await safeSend(chatId, "No active session.");
+    return { outcome: "cmd_stop_no_session" };
+  }
+
+  const result = await requestStop({ sessionId: target, userId: user.id });
+  const short = target.slice(0, 8);
+  switch (result) {
+    case "stopped":
+      await safeSend(chatId, `⏹ Stopped ${short}`);
+      return { outcome: "cmd_stop_ok" };
+    case "offline":
+      await safeSend(chatId, "No active session.");
+      return { outcome: "cmd_stop_offline" };
+    case "not_authorized":
+      // Ownership lost between resolve + stop (deleted/transferred). Treat as none.
+      await safeSend(chatId, "No active session.");
+      return { outcome: "cmd_stop_denied" };
+    default:
+      await safeSend(chatId, "Couldn't deliver the stop. Try again.");
+      return { outcome: "cmd_stop_send_failed" };
+  }
+}
+
+/**
  * Handle a callback_query payload (inline-keyboard button tap).
  * Returns an audit outcome string. Authorization is enforced on every branch:
  * unlinked chat → silent drop, foreign session_id → denial toast.
@@ -529,6 +623,12 @@ async function handleCallbackQuery(
   const perm = parsePermissionCallback(cb.data);
   if (perm) {
     return await handlePermissionCallback(cb, user, perm);
+  }
+
+  // ── Stop branch (🛑 on a streaming "Working…" message) ────────────────────
+  const stop = parseStopCallback(cb.data);
+  if (stop) {
+    return await handleStopCallback(cb, user, stop);
   }
 
   const action = parseCallbackData(cb.data);
@@ -799,6 +899,10 @@ telegramWebhookRoutes.post("/webhook/:secret", async (c) => {
         }
         case "status": {
           const r = await runStatus({ user, chatId });
+          return c.json({ ok: true, outcome: r.outcome });
+        }
+        case "stop": {
+          const r = await handleStopCommand(user, chatId);
           return c.json({ ok: true, outcome: r.outcome });
         }
         case "start": {

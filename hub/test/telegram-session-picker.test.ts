@@ -417,6 +417,9 @@ mock.module("../src/telegram/client.ts", () => ({
     }
     state.editedMessages.push({ chat: chatId, messageId, text, keyboard: opts?.inline_keyboard });
   },
+  editMessageTextMd: async (chatId: number | string, messageId: number, text: string) => {
+    state.editedMessages.push({ chat: chatId, messageId, text, keyboard: undefined });
+  },
   editMessageReplyMarkup: async (chatId: number | string, messageId: number, keyboard: any) => {
     state.editedReplyMarkups.push({ chat: chatId, messageId, keyboard });
   },

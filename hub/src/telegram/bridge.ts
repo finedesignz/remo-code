@@ -46,6 +46,8 @@ import {
 } from "./client.ts";
 import { BOT_COMMANDS } from "./commands.ts";
 import { rememberPendingPrompt, permissionCallbackData } from "./approvals.ts";
+import { rememberStoppable, forgetStoppable, stopCallbackData } from "./stop.ts";
+import type { InlineKeyboard } from "./client.ts";
 
 let started = false;
 let unsubscribe: (() => void) | null = null;
@@ -86,6 +88,11 @@ function renderWorking(lines: string[]): string {
   if (lines.length === 0) return head;
   const body = lines.map((l) => escapeMarkdownV2(l)).join("\n");
   return head + "\n\n" + body;
+}
+
+/** Inline keyboard with a single 🛑 Stop button bound to `sessionId`. */
+function stopKeyboard(sessionId: string): InlineKeyboard {
+  return [[{ text: "🛑 Stop", callback_data: stopCallbackData(sessionId) }]];
 }
 
 function stopTyping(st: WorkingState): void {
@@ -140,6 +147,7 @@ async function onActivity(e: SessionActivityEvent): Promise<void> {
   if (users.length === 0) return;
 
   const line = toolLine(e.toolName, e.detail);
+  const keyboard = stopKeyboard(e.sessionId);
   for (const u of users) {
     const chatId = u.telegram_chat_id;
     if (chatId === null || chatId === undefined) continue;
@@ -150,9 +158,12 @@ async function onActivity(e: SessionActivityEvent): Promise<void> {
         if (!st) {
           // Refresh typing immediately, then on an interval until finalized.
           await sendChatAction(chatId as number | string, "typing");
-          const sent = await sendMessageMd(chatId as number | string, renderWorking([line]));
+          const sent = await sendMessageMd(chatId as number | string, renderWorking([line]), keyboard);
           const messageId = sent?.message_id ?? 0;
           if (!messageId) return; // couldn't anchor an editable message; skip streaming for this turn
+          // Record (sessionId → this user @ this working message) so a 🛑 tap can
+          // be authorized server-side and edit the right message. Take-once.
+          rememberStoppable(e.sessionId, u.id, { chatId, messageId });
           const typingTimer = setInterval(() => {
             void sendChatAction(chatId as number | string, "typing");
           }, TYPING_REFRESH_MS);
@@ -160,13 +171,13 @@ async function onActivity(e: SessionActivityEvent): Promise<void> {
           workingByKey.set(key, st);
           return;
         }
-        // Append + edit (throttled). Cap the visible list.
+        // Append + edit (throttled). Cap the visible list. Keep the Stop button.
         st.lines.push(line);
         if (st.lines.length > MAX_TOOL_LINES) st.lines = st.lines.slice(-MAX_TOOL_LINES);
         const sinceEdit = Date.now() - st.lastEditAt;
         if (sinceEdit >= EDIT_THROTTLE_MS) {
           st.lastEditAt = Date.now();
-          await editMessageTextMd(chatId as number | string, st.messageId, renderWorking(st.lines));
+          await editMessageTextMd(chatId as number | string, st.messageId, renderWorking(st.lines), keyboard);
         }
       } catch (err: any) {
         console.warn(
@@ -199,8 +210,11 @@ async function onFinal(e: AssistantMessageFinalEvent): Promise<void> {
       try {
         if (st) {
           // Finalize the editable working message with the full assistant text.
+          // The turn is over → drop the Stop entry (and the final edit passes no
+          // keyboard, so the 🛑 button disappears).
           stopTyping(st);
           workingByKey.delete(key);
+          forgetStoppable(e.sessionId);
           if (e.text.length <= 4096) {
             await editMessageTextMd(chatId as number | string, st.messageId, finalMd);
             return;
@@ -216,6 +230,7 @@ async function onFinal(e: AssistantMessageFinalEvent): Promise<void> {
       } catch (err: any) {
         if (st) stopTyping(st);
         workingByKey.delete(key);
+        forgetStoppable(e.sessionId);
         console.warn(
           `[telegram-bridge] final send failed chat=${chatKey(chatId)} session=${e.sessionId}: ${err?.message ?? err}`,
         );
