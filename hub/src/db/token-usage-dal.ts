@@ -92,6 +92,7 @@ function rowToTotals(r: any): UsageTotals {
 export async function sumUserTokenWindows(userId: string, timezone: string): Promise<{
   today: UsageTotals
   seven_day: UsageTotals
+  month_to_date: UsageTotals
   total: UsageTotals
 }> {
   const tz = timezone || 'UTC'
@@ -108,6 +109,12 @@ export async function sumUserTokenWindows(userId: string, timezone: string): Pro
       COALESCE(SUM(cache_creation_input_tokens) FILTER (WHERE created_at >= now() - interval '7 days'), 0) AS week_cc,
       COALESCE(SUM(cache_read_input_tokens) FILTER (WHERE created_at >= now() - interval '7 days'), 0) AS week_cr,
       COALESCE(SUM(cost_usd) FILTER (WHERE created_at >= now() - interval '7 days'), 0) AS week_cost,
+
+      COALESCE(SUM(input_tokens) FILTER (WHERE created_at >= date_trunc('month', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}), 0) AS month_input,
+      COALESCE(SUM(output_tokens) FILTER (WHERE created_at >= date_trunc('month', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}), 0) AS month_output,
+      COALESCE(SUM(cache_creation_input_tokens) FILTER (WHERE created_at >= date_trunc('month', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}), 0) AS month_cc,
+      COALESCE(SUM(cache_read_input_tokens) FILTER (WHERE created_at >= date_trunc('month', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}), 0) AS month_cr,
+      COALESCE(SUM(cost_usd) FILTER (WHERE created_at >= date_trunc('month', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}), 0) AS month_cost,
 
       COALESCE(SUM(input_tokens), 0) AS total_input,
       COALESCE(SUM(output_tokens), 0) AS total_output,
@@ -128,6 +135,11 @@ export async function sumUserTokenWindows(userId: string, timezone: string): Pro
       input_tokens: r.week_input, output_tokens: r.week_output,
       cache_creation_input_tokens: r.week_cc, cache_read_input_tokens: r.week_cr,
       cost_usd: r.week_cost,
+    }),
+    month_to_date: rowToTotals({
+      input_tokens: r.month_input, output_tokens: r.month_output,
+      cache_creation_input_tokens: r.month_cc, cache_read_input_tokens: r.month_cr,
+      cost_usd: r.month_cost,
     }),
     total: rowToTotals({
       input_tokens: r.total_input, output_tokens: r.total_output,

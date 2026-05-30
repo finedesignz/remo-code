@@ -34,6 +34,25 @@ mock.module('../src/db/dal.ts', () => ({
   sumUserCostWindows: stubSumWindows,
 }))
 
+const emptyTotals = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+  cost_usd: 0,
+}
+const stubSumTokenWindows = mock(async () => ({
+  today: { ...emptyTotals, input_tokens: 100, output_tokens: 50 },
+  seven_day: { ...emptyTotals, input_tokens: 1000, output_tokens: 500 },
+  month_to_date: { ...emptyTotals, input_tokens: 4000, output_tokens: 2000 },
+  total: { ...emptyTotals },
+}))
+const realTokenDal = await import('../src/db/token-usage-dal.ts')
+mock.module('../src/db/token-usage-dal.ts', () => ({
+  ...realTokenDal,
+  sumUserTokenWindows: stubSumTokenWindows,
+}))
+
 const realUsageStore = await import('../src/usage/store.ts')
 mock.module('../src/usage/store.ts', () => ({
   ...realUsageStore,
@@ -74,6 +93,9 @@ describe('GET /api/usage/summary', () => {
     expect(body.today_usd).toBe(1.23)
     expect(body.week_usd).toBe(4.56)
     expect(body.month_usd).toBe(7.89)
+    expect(body.today_tokens).toBe(150)
+    expect(body.week_tokens).toBe(1500)
+    expect(body.month_tokens).toBe(6000)
     expect(body.daily_cap_usd).toBe(2.5)
     expect(body.thresholds.session_pct).toBe(80)
     expect(body.thresholds.week_pct).toBe(95)
