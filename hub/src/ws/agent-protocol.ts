@@ -154,6 +154,25 @@ export const AgentUsageReport = z.object({
 })
 export type AgentUsageReportT = z.infer<typeof AgentUsageReport>
 
+// P2 usage ledger — one event per assistant turn from the supervisor bridge.
+// Carries the four token buckets, the model, and the authoritative SDK cost
+// (`cost_source='sdk'`) or a flag for the hub to estimate (`'estimated'`).
+// Additive member of AgentInbound — does NOT disturb the auth handshake.
+export const AgentUsageEvent = z.object({
+  type: z.literal('usage_event'),
+  session_id: z.string(),
+  model: z.string().nullable().optional(),
+  input_tokens: z.number().int().nonnegative().default(0),
+  output_tokens: z.number().int().nonnegative().default(0),
+  cache_creation_input_tokens: z.number().int().nonnegative().default(0),
+  cache_read_input_tokens: z.number().int().nonnegative().default(0),
+  cost_usd: z.number().nonnegative().default(0),
+  cost_source: z.enum(['sdk', 'estimated']).default('sdk'),
+  request_id: z.string().optional(),
+  ts: z.string().optional(),
+})
+export type AgentUsageEventT = z.infer<typeof AgentUsageEvent>
+
 export const AgentInbound = z.discriminatedUnion('type', [
   AgentAuth,
   AgentThinking,
@@ -166,6 +185,7 @@ export const AgentInbound = z.discriminatedUnion('type', [
   AgentUserQuestion,
   AgentLog,
   AgentUsageReport,
+  AgentUsageEvent,
   z.object({ type: z.literal('pong') }),
   SupervisorHello,
   SupervisorState,

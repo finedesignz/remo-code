@@ -15,6 +15,11 @@
 import { Hono } from 'hono'
 import { getUserById, sumUserCostWindows } from '../db/dal'
 import { getUsage } from '../usage/store'
+import {
+  sumUserTokenWindows,
+  usageBySession,
+  usageByRepo,
+} from '../db/token-usage-dal'
 
 export const usage = new Hono()
 
@@ -55,6 +60,41 @@ usage.get('/summary', async (c) => {
 
   cache.set(userId, { expires_at: now + CACHE_TTL_MS, value })
   return c.json(value)
+})
+
+/**
+ * P2 — GET /api/usage/cost
+ *
+ * Per-turn token + cost ledger aggregates: today / 7d / total token buckets and
+ * dollar cost, plus per-session and per-repo breakdowns. cost_usd is the SDK's
+ * authoritative total_cost_usd where available, else a list-price ESTIMATE — a
+ * subscription list-price equivalent, NOT billed dollars (`cost_is_estimate`).
+ *
+ * Auth: global middleware (cookie-or-bearer), user-scoped.
+ */
+usage.get('/cost', async (c) => {
+  const userId = c.get('userId') as string
+  const user: any = await getUserById(userId)
+  if (!user) return c.json({ error: 'not_found' }, 404)
+  const tz = user.timezone || 'UTC'
+
+  const [windows, bySession, byRepo] = await Promise.all([
+    sumUserTokenWindows(userId, tz),
+    usageBySession(userId, 50),
+    usageByRepo(userId, 50),
+  ])
+
+  return c.json({
+    timezone: tz,
+    cost_is_estimate: true,
+    cost_note:
+      'cost_usd uses the SDK total_cost_usd when available, else a list-price estimate. Subscription list-price equivalent, not billed dollars.',
+    today: windows.today,
+    seven_day: windows.seven_day,
+    total: windows.total,
+    by_session: bySession,
+    by_repo: byRepo,
+  })
 })
 
 /** Test-only — wipe cache. */

@@ -592,6 +592,45 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     return
   }
 
+  // P2 usage ledger — persist per-turn token + cost from the supervisor bridge.
+  // RECORD only; the cost cap (P3) is intentionally NOT consulted here.
+  if (msg.type === 'usage_event') {
+    if (!ws.data.userId) return
+    try {
+      const { recordTokenUsage } = await import('../db/token-usage-dal.ts')
+      const { estimateCostUsd } = await import('../usage/pricing.ts')
+      // SDK total_cost_usd is authoritative. Only estimate when the supervisor
+      // flagged the cost as missing (cost_source='estimated').
+      let costUsd = msg.cost_usd
+      let costSource: 'sdk' | 'estimated' = msg.cost_source
+      if (costSource === 'estimated' || !(costUsd > 0)) {
+        if (costSource !== 'sdk') {
+          costUsd = estimateCostUsd(msg.model ?? null, {
+            input_tokens: msg.input_tokens,
+            output_tokens: msg.output_tokens,
+            cache_creation_input_tokens: msg.cache_creation_input_tokens,
+            cache_read_input_tokens: msg.cache_read_input_tokens,
+          })
+          costSource = 'estimated'
+        }
+      }
+      await recordTokenUsage({
+        userId: ws.data.userId,
+        sessionId: ws.data.sessionId ?? null,
+        model: msg.model ?? null,
+        inputTokens: msg.input_tokens,
+        outputTokens: msg.output_tokens,
+        cacheCreationInputTokens: msg.cache_creation_input_tokens,
+        cacheReadInputTokens: msg.cache_read_input_tokens,
+        costUsd,
+        costSource,
+      })
+    } catch (err: any) {
+      console.error('[agent] usage_event handler failed', err?.message)
+    }
+    return
+  }
+
   if (msg.type === 'pong') return
 }
 

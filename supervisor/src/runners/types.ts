@@ -23,7 +23,24 @@ export type RunnerEvent =
       options?: Array<{ label: string; description?: string }>
       is_multi_select?: boolean
     }
-  | { type: 'result'; cost: number; duration_ms: number }
+  | {
+      type: 'result'
+      cost: number
+      duration_ms: number
+      // P2 usage ledger — per-turn token counts + authoritative SDK cost.
+      // `usage` / `model` are best-effort: a `result` with subtype 'error' or
+      // an older CLI may omit them, in which case the bridge skips usage_event.
+      model?: string
+      usage?: {
+        input_tokens?: number
+        output_tokens?: number
+        cache_creation_input_tokens?: number
+        cache_read_input_tokens?: number
+      }
+      // True when `cost` came from the SDK's `total_cost_usd` (authoritative).
+      // False when absent (hub will estimate from its price table).
+      cost_from_sdk?: boolean
+    }
   | { type: 'error'; message: string }
   | { type: 'log'; message: string }
   | { type: 'ready' }
@@ -71,6 +88,15 @@ export interface CliResultEvent {
   result: string
   duration_ms: number
   total_cost_usd: number
+  // Per-turn token usage emitted by the Claude CLI alongside the result.
+  usage?: {
+    input_tokens?: number
+    output_tokens?: number
+    cache_creation_input_tokens?: number
+    cache_read_input_tokens?: number
+  }
+  // Some CLI builds report a per-model usage breakdown keyed by model id.
+  modelUsage?: Record<string, unknown>
 }
 export type CliEvent =
   | CliInitEvent
@@ -123,4 +149,19 @@ export type AgentToHub =
       is_multi_select?: boolean
     }
   | { type: 'agent_log'; session_id: string; message: string }
+  // P2 usage ledger — one per assistant turn. Additive; hub persists to
+  // token_usage + token_usage_daily. `cost_source` is 'sdk' when total_cost_usd
+  // was present, else 'estimated' (hub fills the cost from its price table).
+  | {
+      type: 'usage_event'
+      session_id: string
+      model: string | null
+      input_tokens: number
+      output_tokens: number
+      cache_creation_input_tokens: number
+      cache_read_input_tokens: number
+      cost_usd: number
+      cost_source: 'sdk' | 'estimated'
+      ts: string
+    }
   | { type: 'pong' }

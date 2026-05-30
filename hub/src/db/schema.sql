@@ -913,3 +913,44 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_project_unique
 -- existing rows backfill cleanly on first scan.
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS seq BIGSERIAL;
 
+-- ── P2 Usage cost ledger ─────────────────────────────────────────────────────
+-- Per-turn token + cost ledger captured from the Claude CLI `result` stream
+-- (supervisor emits `usage_event`). cost_usd is the SDK's authoritative
+-- total_cost_usd when cost_source='sdk', else a hub list-price ESTIMATE
+-- (cost_source='estimated'). NOT billed dollars — a subscription list-price
+-- equivalent. P2 only RECORDS; the cost cap (P3) is unaffected.
+--
+-- Idempotent DDL only (this file re-runs in full every hub boot). Any backfill
+-- belongs in hub/scripts/, never here.
+CREATE TABLE IF NOT EXISTS token_usage (
+  id                          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id                     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id                  TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  model                       TEXT,
+  input_tokens                BIGINT NOT NULL DEFAULT 0,
+  output_tokens               BIGINT NOT NULL DEFAULT 0,
+  cache_creation_input_tokens BIGINT NOT NULL DEFAULT 0,
+  cache_read_input_tokens     BIGINT NOT NULL DEFAULT 0,
+  cost_usd                    NUMERIC(12,6) NOT NULL DEFAULT 0,
+  cost_source                 TEXT NOT NULL DEFAULT 'sdk' CHECK (cost_source IN ('sdk','estimated')),
+  created_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_token_usage_user_created ON token_usage(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
+
+-- Daily per-(user, model) rollup, upserted on each usage_event for cheap
+-- today/7d/total aggregates without scanning the full ledger.
+CREATE TABLE IF NOT EXISTS token_usage_daily (
+  user_id                     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  day                         DATE NOT NULL,
+  model                       TEXT NOT NULL DEFAULT '',
+  input_tokens                BIGINT NOT NULL DEFAULT 0,
+  output_tokens               BIGINT NOT NULL DEFAULT 0,
+  cache_creation_input_tokens BIGINT NOT NULL DEFAULT 0,
+  cache_read_input_tokens     BIGINT NOT NULL DEFAULT 0,
+  cost_usd                    NUMERIC(14,6) NOT NULL DEFAULT 0,
+  updated_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, day, model)
+);
+CREATE INDEX IF NOT EXISTS idx_token_usage_daily_user_day ON token_usage_daily(user_id, day DESC);
+
