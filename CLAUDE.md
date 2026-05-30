@@ -121,9 +121,13 @@ Subsystem tables are documented in their respective `docs/*.md`.
 - File attachments: text inlined into message content; images as base64 data URIs.
 - Theme via CSS custom properties (`--bg-primary`, `--text-primary`, …).
 - Session tokens: `remo_` prefix + 32 random bytes (base64url), stored as SHA-256 hashes.
-- Subscription quota (5h + 7d Anthropic utilization) polled by the **supervisor**, not the hub
-  — OAuth token stays in `~/.claude/.credentials.json` on the dev machine. Hub keeps an
-  in-memory snapshot (`hub/src/usage/store.ts`), rebroadcasts via WS `subscription_usage`.
+- Subscription quota (4 windows: `five_hour`, `seven_day`, + Max-only `seven_day_opus` /
+  `seven_day_oauth_apps`) polled by the **supervisor** (`supervisor/src/usage/oauth-poll.ts`,
+  5-min interval), not the hub — OAuth token stays in `~/.claude/.credentials.json` on the dev
+  machine and is **never** serialized to the hub; only the parsed util%/`resets_at` windows are.
+  Hub keeps an in-memory snapshot (`hub/src/usage/store.ts`), rebroadcasts via WS
+  `subscription_usage`; web renders util + Opus pill + reset countdown (`UsageStrip`/`UsageTab`).
+  The poll ships only with the supervisor MSI (≥0.7.0).
 
 ## Environment Variables
 

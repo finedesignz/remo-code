@@ -34,7 +34,7 @@ function Bar({ label, window }: { label: string; window: UsageWindow }) {
   const { bar, text } = colorFor(util)
   return (
     <div className="flex items-center gap-1.5">
-      <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-medium w-5">{label}</span>
+      <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-medium">{label}</span>
       <span className="w-16 h-1.5 rounded-full bg-[var(--bg-tertiary)] overflow-hidden">
         <span className={`block h-full ${bar} transition-all`} style={{ width: `${util}%` }} />
       </span>
@@ -84,6 +84,12 @@ export function UsageStrip({ subscribe }: Props) {
 
   const { five_hour, seven_day, seven_day_opus, seven_day_oauth_apps } = snap.usage
 
+  // Surface the worst-utilization window's reset countdown inline so the most
+  // urgent limit is visible without hovering (ClaudeUsage's resets_at - now).
+  const worst = [five_hour, seven_day, seven_day_opus ?? undefined]
+    .filter((w): w is UsageWindow => !!w)
+    .reduce((a, b) => (b.utilization > a.utilization ? b : a))
+
   return (
     <div
       className="hidden sm:flex relative items-center gap-3 px-2 py-1 rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors cursor-default"
@@ -93,6 +99,10 @@ export function UsageStrip({ subscribe }: Props) {
     >
       <Bar label="5h" window={five_hour} />
       <Bar label="7d" window={seven_day} />
+      {seven_day_opus && <Bar label="Opus" window={seven_day_opus} />}
+      <span className="text-[10px] text-[var(--text-muted)] font-mono whitespace-nowrap">
+        resets {formatResetIn(worst.resets_at)}
+      </span>
       {hover && (
         <div className="absolute right-0 top-full mt-1 w-72 bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] rounded-lg shadow-xl z-50 p-3 text-xs space-y-1.5">
           <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-medium">Anthropic quota</div>
