@@ -1,7 +1,16 @@
-import { useEffect, useMemo, useState, useCallback } from 'react'
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { useSessions } from '../hooks/useSessions'
 import { useSupervisors } from '../hooks/useSupervisors'
 import { useWebSocketContext } from '../hooks/useWebSocket'
+import { Modal, Button } from './ui'
+
+type OrchestratorSnapshot = {
+  enabled: boolean
+  name: string
+  custom_instructions: string | null
+  session_id: string | null
+  status: 'disabled' | 'enabled_idle' | 'running'
+}
 
 interface Props {
   token: string
@@ -146,6 +155,13 @@ const Icon = {
   Folder: (p: any) => (
     <svg {...p} width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3l1.5 1.5H13.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" /></svg>
   ),
+  // Orchestrator marker — a "sparkle/hub" glyph distinct from repo/folder.
+  Orchestrator: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 2l1.6 4.4L16 8l-4.4 1.6L10 14l-1.6-4.4L4 8l4.4-1.6L10 2z" /><circle cx="15.5" cy="14.5" r="1.4" /><circle cx="4.5" cy="14.5" r="1.4" /></svg>
+  ),
+  Power: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 3v6" /><path d="M5.5 5.5a6 6 0 1 0 9 0" /></svg>
+  ),
 }
 
 function StatusDot({ status, online = true }: { status: Row['status']; online?: boolean }) {
@@ -231,6 +247,12 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const [refreshingGh, setRefreshingGh] = useState(false)
 
   const activeSupervisor = supervisors.find((s) => s.id === activeSupervisorId)
+
+  // ── Orchestrator (Phase 09): logic ported from the retired OrchestratorTab.
+  // Its root folder = the active supervisor's roots[0]; controls live in the
+  // pinned top row of the repo table.
+  const orch = useOrchestrator(token)
+  const orchRoot = activeSupervisor?.roots?.[0] || null
 
   useEffect(() => {
     try { localStorage.setItem(FILTER_LS_KEY, filter) } catch {}
@@ -575,86 +597,39 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           </button>
         </div>
 
-        {/* Table — desktop */}
-        <div className="hidden md:block">
-          <div className="grid grid-cols-[28px_minmax(0,2.2fr)_minmax(0,2fr)_minmax(0,1fr)_auto] gap-3 px-3 py-2 text-[11px] uppercase tracking-wider text-[var(--text-muted)] border-b border-[var(--border-color)]/40">
-            <button onClick={() => toggleSort('status')} className="flex items-center gap-1 hover:text-[var(--text-secondary)] text-left">
-              <span aria-hidden>•</span>
-            </button>
-            <button onClick={() => toggleSort('repo')} className="flex items-center gap-1 hover:text-[var(--text-secondary)] text-left">
-              Repo <Icon.ChevronUpDown />
-            </button>
-            <div>Path</div>
-            <button onClick={() => toggleSort('seen')} className="flex items-center gap-1 hover:text-[var(--text-secondary)] text-left">
-              Last seen <Icon.ChevronUpDown />
-            </button>
-            <div className="text-right pr-1">Actions</div>
-          </div>
-          {rows.length === 0 ? (
-            <EmptyState onClear={() => { setSearch(''); setFilter('all') }} />
-          ) : (
-            <div className="divide-y divide-[var(--border-color)]/30">
-              {rows.map((row) => (
-                <div
-                  key={row.key}
-                  onClick={() => handleRowClick(row)}
-                  className={`grid grid-cols-[28px_minmax(0,2.2fr)_minmax(0,2fr)_minmax(0,1fr)_auto] gap-3 items-center px-3 py-2 hover:bg-[var(--bg-tertiary)]/40 ${row.run ? 'cursor-pointer' : ''}`}
-                >
-                  <div><StatusDot status={row.status} online={!!activeSupervisor?.online} /></div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      {row.hasGithub
-                        ? <Icon.Github className="text-[var(--text-muted)] shrink-0" />
-                        : <Icon.Folder className="text-[var(--text-muted)] shrink-0" />}
-                      <div className="text-sm font-medium text-[var(--text-primary)] truncate">{row.name}</div>
-                    </div>
-                    <div className="text-xs text-[var(--text-muted)] truncate">
-                      {row.branch || 'default branch'}
-                      {row.dirty && <span className="text-amber-400"> · dirty</span>}
-                      {row.hasGithub && !row.hasLocal && <span> · not cloned</span>}
-                    </div>
-                  </div>
-                  <div className="min-w-0 text-xs text-[var(--text-muted)] font-mono truncate" title={row.path || ''}>
-                    {row.path ? truncateMiddle(row.path, 60) : <span className="italic">—</span>}
-                  </div>
-                  <div className="text-xs text-[var(--text-muted)]">
-                    {row.lastSeen > 0 ? timeAgo(row.lastSeen) : <span className="opacity-60">—</span>}
-                  </div>
-                  <div className="flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
-                    <RowActions row={row} online={!!activeSupervisor?.online} onStart={() => startRow(row)} onStop={() => row.run && stopRun(row.run.id)} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+        {/* Header (single responsive renderer; sort controls only matter on wider widths) */}
+        <div className="hidden sm:flex items-center gap-3 px-3 py-2 text-[11px] uppercase tracking-wider text-[var(--text-muted)] border-b border-[var(--border-color)]/40">
+          <span className="w-3 shrink-0" aria-hidden>•</span>
+          <button onClick={() => toggleSort('repo')} className="flex items-center gap-1 hover:text-[var(--text-secondary)] text-left flex-1 min-w-0">
+            Repo <Icon.ChevronUpDown />
+          </button>
+          <button onClick={() => toggleSort('seen')} className="hidden md:flex items-center gap-1 hover:text-[var(--text-secondary)] text-left w-24 shrink-0">
+            Last seen <Icon.ChevronUpDown />
+          </button>
+          <span className="w-20 shrink-0 text-right pr-1">Actions</span>
         </div>
 
-        {/* Mobile card list */}
-        <div className="md:hidden">
+        {/* Rows — single renderer for every width. Pinned orchestrator row first. */}
+        <div className="divide-y divide-[var(--border-color)]/40">
+          <OrchestratorRow
+            orch={orch}
+            online={!!activeSupervisor?.online}
+            rootPath={orchRoot}
+            hasSupervisor={supervisors.length > 0}
+          />
           {rows.length === 0 ? (
             <EmptyState onClear={() => { setSearch(''); setFilter('all') }} />
           ) : (
-            <div className="divide-y divide-[var(--border-color)]/30">
-              {rows.map((row) => (
-                <div key={row.key} onClick={() => handleRowClick(row)} className={`px-3 py-2 ${row.run ? 'cursor-pointer' : ''} hover:bg-[var(--bg-tertiary)]/40`}>
-                  <div className="flex items-center gap-2 min-w-0">
-                    <StatusDot status={row.status} online={!!activeSupervisor?.online} />
-                    {row.hasGithub
-                      ? <Icon.Github className="text-[var(--text-muted)] shrink-0" />
-                      : <Icon.Folder className="text-[var(--text-muted)] shrink-0" />}
-                    <div className="text-sm font-medium text-[var(--text-primary)] truncate flex-1">{row.name}</div>
-                    {row.run && <span className="text-xs text-emerald-400 shrink-0">{timeAgo(Date.parse(row.run.started_at))}</span>}
-                  </div>
-                  <div className="mt-1 text-xs text-[var(--text-muted)] truncate">
-                    {row.branch || 'default'}{row.dirty && <span className="text-amber-400"> · dirty</span>}
-                    {row.path && <span className="font-mono"> · {truncateMiddle(row.path, 40)}</span>}
-                  </div>
-                  <div className="mt-2 flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                    <RowActions row={row} online={!!activeSupervisor?.online} onStart={() => startRow(row)} onStop={() => row.run && stopRun(row.run.id)} />
-                  </div>
-                </div>
-              ))}
-            </div>
+            rows.map((row) => (
+              <RepoRow
+                key={row.key}
+                row={row}
+                online={!!activeSupervisor?.online}
+                onRowClick={() => handleRowClick(row)}
+                onStart={() => startRow(row)}
+                onStop={() => row.run && stopRun(row.run.id)}
+              />
+            ))
           )}
         </div>
       </div>
@@ -723,6 +698,163 @@ function RowActions({ row, online, onStart, onStop }: { row: Row; online: boolea
         <IconBtn title={row.hasLocal ? 'Start session' : 'Clone & start'} tone="accent" disabled={!online} onClick={onStart}><Icon.Play /></IconBtn>
       )}
     </>
+  )
+}
+
+/* ─────────────────────────── Repo row (single responsive renderer) ─────────────────────────── */
+
+function RepoRow({ row, online, onRowClick, onStart, onStop }: {
+  row: Row
+  online: boolean
+  onRowClick: () => void
+  onStart: () => void
+  onStop: () => void
+}) {
+  return (
+    <div
+      onClick={onRowClick}
+      className={`flex items-center gap-3 px-3 py-2 hover:bg-[var(--bg-tertiary)]/40 ${row.run ? 'cursor-pointer' : ''}`}
+    >
+      <span className="w-3 shrink-0 flex justify-center"><StatusDot status={row.status} online={online} /></span>
+      {/* Metadata cell: name + icon, with branch · status · last-seen and the path as a truncated subline. */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {row.hasGithub
+            ? <Icon.Github className="text-[var(--text-muted)] shrink-0" />
+            : <Icon.Folder className="text-[var(--text-muted)] shrink-0" />}
+          <span className="text-sm font-medium text-[var(--text-primary)] truncate">{row.name}</span>
+        </div>
+        <div className="text-xs text-[var(--text-muted)] truncate">
+          {row.branch || 'default branch'}
+          {row.dirty && <span className="text-amber-400"> · dirty</span>}
+          {row.hasGithub && !row.hasLocal && <span> · not cloned</span>}
+          {/* Last-seen folds inline below sm where the dedicated column is hidden. */}
+          {row.lastSeen > 0 && <span className="md:hidden"> · {timeAgo(row.lastSeen)}</span>}
+          {row.path && <span className="font-mono"> · <span title={row.path}>{truncateMiddle(row.path, 48)}</span></span>}
+        </div>
+      </div>
+      <span className="hidden md:block w-24 shrink-0 text-xs text-[var(--text-muted)] truncate">
+        {row.lastSeen > 0 ? timeAgo(row.lastSeen) : <span className="opacity-60">—</span>}
+      </span>
+      <span className="w-20 shrink-0 flex items-center justify-end gap-0.5" onClick={(e) => e.stopPropagation()}>
+        <RowActions row={row} online={online} onStart={onStart} onStop={onStop} />
+      </span>
+    </div>
+  )
+}
+
+/* ─────────────────────────── Orchestrator (pinned top row) ─────────────────────────── */
+
+function useOrchestrator(token: string) {
+  const [snap, setSnap] = useState<OrchestratorSnapshot | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const aliveRef = useRef(true)
+
+  const call = useCallback(async (path: string, init?: RequestInit): Promise<OrchestratorSnapshot | null> => {
+    const r = await apiFetch(token, path, init)
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`)
+    return r.json().catch(() => null)
+  }, [token])
+
+  const refresh = useCallback(async () => {
+    try {
+      const r = await call('/api/orchestrator')
+      if (aliveRef.current && r) setSnap(r)
+    } catch (e: any) {
+      if (aliveRef.current) setError(e?.message ?? 'load failed')
+    }
+  }, [call])
+
+  useEffect(() => {
+    aliveRef.current = true
+    void refresh()
+    const t = setInterval(() => { void refresh() }, 10_000)
+    return () => { aliveRef.current = false; clearInterval(t) }
+  }, [refresh])
+
+  const action = useCallback(async (fn: () => Promise<any>) => {
+    setBusy(true); setError(null)
+    try { await fn(); await refresh() }
+    catch (e: any) { if (aliveRef.current) setError(e?.message ?? 'action failed') }
+    finally { if (aliveRef.current) setBusy(false) }
+  }, [refresh])
+
+  return {
+    snap,
+    busy,
+    error,
+    setEnabled: (enabled: boolean) => action(() => call('/api/orchestrator', { method: 'PUT', body: JSON.stringify({ enabled }) })),
+    start: () => action(() => call('/api/orchestrator/start', { method: 'POST', body: JSON.stringify({}) })),
+    stop: () => action(() => call('/api/orchestrator/stop', { method: 'POST', body: JSON.stringify({}) })),
+  }
+}
+
+function OrchestratorRow({ orch, online, rootPath, hasSupervisor }: {
+  orch: ReturnType<typeof useOrchestrator>
+  online: boolean
+  rootPath: string | null
+  hasSupervisor: boolean
+}) {
+  const { snap, busy, error, setEnabled, start, stop } = orch
+  const [showEnable, setShowEnable] = useState(false)
+  const status = snap?.status ?? 'disabled'
+  const dot =
+    status === 'running' ? 'bg-emerald-400' : status === 'enabled_idle' ? 'bg-blue-400' : 'bg-gray-500'
+  const statusLabel =
+    status === 'running' ? 'running' : status === 'enabled_idle' ? 'idle' : 'disabled'
+
+  return (
+    <div className="flex items-center gap-3 px-3 py-2 bg-blue-600/5 hover:bg-blue-600/10">
+      <span className="w-3 shrink-0 flex justify-center">
+        <span title={statusLabel} className={`inline-block w-2.5 h-2.5 rounded-full ${dot}`} />
+      </span>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Icon.Orchestrator className="text-blue-400 shrink-0" />
+          <span className="text-sm font-medium text-[var(--text-primary)] truncate">Orchestrator</span>
+          <span className="shrink-0 rounded-full bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300 px-1.5 py-0.5 text-[10px] uppercase tracking-wide">{statusLabel}</span>
+        </div>
+        <div className="text-xs text-[var(--text-muted)] truncate">
+          {rootPath
+            ? <>Coordinates every session under <span className="font-mono" title={rootPath}>{truncateMiddle(rootPath, 48)}</span></>
+            : 'Root folder — set in the supervisor first-run wizard'}
+          {error && <span className="text-red-400"> · {error}</span>}
+        </div>
+      </div>
+      <span className="hidden md:block w-24 shrink-0" />
+      <span className="w-20 shrink-0 flex items-center justify-end gap-0.5">
+        {!snap ? null : snap.enabled ? (
+          <>
+            {status === 'running'
+              ? <IconBtn title="Stop orchestrator session" tone="danger" disabled={busy} onClick={() => void stop()}><Icon.Stop /></IconBtn>
+              : <IconBtn title="Start orchestrator session" tone="accent" disabled={busy || !online} onClick={() => void start()}><Icon.Play /></IconBtn>}
+            <IconBtn title="Disable orchestrator" tone="muted" disabled={busy} onClick={() => void setEnabled(false)}><Icon.Power /></IconBtn>
+          </>
+        ) : (
+          <IconBtn title="Enable orchestrator" tone="accent" disabled={busy || !hasSupervisor} onClick={() => setShowEnable(true)}><Icon.Power /></IconBtn>
+        )}
+      </span>
+
+      <Modal
+        open={showEnable}
+        onClose={() => setShowEnable(false)}
+        title="Enable orchestrator mode?"
+        className="ring-red-500/40"
+        footer={
+          <>
+            <Button variant="ghost" size="md" onClick={() => setShowEnable(false)}>Cancel</Button>
+            <Button variant="danger" size="md" disabled={busy} onClick={() => { setShowEnable(false); void setEnabled(true) }}>Enable orchestrator</Button>
+          </>
+        }
+      >
+        <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+          Orchestrator mode gives one Claude session full access to <strong>every repo</strong> under your supervisor's root folder,
+          plus a full-power hub API key that can read messages, start sessions, and dispatch tasks for your account.
+          Only enable if you trust the system prompt and your machine is secure.
+        </p>
+      </Modal>
+    </div>
   )
 }
 

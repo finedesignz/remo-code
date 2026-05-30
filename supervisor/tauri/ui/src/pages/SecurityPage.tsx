@@ -31,6 +31,19 @@ interface RuntimeStatus {
 // is equivalent. We add a tiny `get_api_key_full` IPC to keep the contract
 // narrow and reviewable.
 
+// Mirror of the Rust `set_hub_url` validation: http(s) scheme + non-empty host.
+function isValidHubUrl(v: string): boolean {
+  const t = v.trim().replace(/\/+$/, "");
+  const rest = t.startsWith("https://")
+    ? t.slice("https://".length)
+    : t.startsWith("http://")
+    ? t.slice("http://".length)
+    : null;
+  if (rest === null) return false;
+  const host = rest.split(/[/?#]/)[0];
+  return host.length > 0 && !host.includes(" ");
+}
+
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="grid grid-cols-[140px_1fr] gap-3 py-1.5 items-start">
@@ -49,6 +62,10 @@ export default function SecurityPage() {
   const [draftKey, setDraftKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  // Hub URL editing.
+  const [editingHub, setEditingHub] = useState(false);
+  const [draftHub, setDraftHub] = useState("");
+  const [hubSaving, setHubSaving] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -98,6 +115,26 @@ export default function SecurityPage() {
       setErr(String(e));
     }
   }, [status]);
+
+  const onSaveHub = useCallback(async () => {
+    const v = draftHub.trim();
+    if (!isValidHubUrl(v)) { setErr("Hub URL must be a full http:// or https:// URL"); return; }
+    setHubSaving(true);
+    setSaveMsg(null);
+    setErr(null);
+    try {
+      await invoke("set_hub_url", { hubUrl: v });
+      setSaveMsg("Hub URL saved — sidecar restarting");
+      setEditingHub(false);
+      setDraftHub("");
+      window.setTimeout(() => { void refresh(); }, 600);
+      window.setTimeout(() => setSaveMsg(null), 3000);
+    } catch (e: any) {
+      setErr(String(e));
+    } finally {
+      setHubSaving(false);
+    }
+  }, [draftHub, refresh]);
 
   return (
     <div className="max-w-2xl space-y-5">
@@ -165,14 +202,14 @@ export default function SecurityPage() {
               value={draftKey}
               onChange={(e) => setDraftKey(e.target.value)}
               placeholder="remo_…"
-              className="w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/60 text-[var(--text-primary)] outline-none ring-1 ring-transparent focus:ring-indigo-500/40"
+              className="w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/60 text-[var(--text-primary)] outline-none ring-1 ring-transparent focus:ring-blue-500/40"
             />
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => { void onSave(); }}
                 disabled={saving || !draftKey.trim()}
-                className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40"
+                className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
               >
                 {saving ? "Saving…" : "Save & restart sidecar"}
               </button>
@@ -191,7 +228,7 @@ export default function SecurityPage() {
             <button
               type="button"
               onClick={() => setEditing(true)}
-              className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white"
+              className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white"
             >
               {status?.api_key_set ? "Update API key" : "Set API key"}
             </button>
@@ -216,7 +253,49 @@ export default function SecurityPage() {
         <h2 className="text-sm font-semibold mb-2">Gateway</h2>
         <dl>
           <Row label="Hub URL">
-            <span className="font-mono">{status?.hub_url ?? "—"}</span>
+            {editingHub ? (
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  autoFocus
+                  spellCheck={false}
+                  autoComplete="off"
+                  value={draftHub}
+                  onChange={(e) => setDraftHub(e.target.value)}
+                  placeholder="https://app.remo-code.com"
+                  className="w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/60 text-[var(--text-primary)] outline-none ring-1 ring-transparent focus:ring-blue-500/40"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { void onSaveHub(); }}
+                    disabled={hubSaving || !draftHub.trim()}
+                    className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
+                  >
+                    {hubSaving ? "Saving…" : "Save & restart sidecar"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setEditingHub(false); setDraftHub(""); }}
+                    disabled={hubSaving}
+                    className="px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="font-mono">{status?.hub_url ?? "—"}</span>
+                <button
+                  type="button"
+                  onClick={() => { setEditingHub(true); setDraftHub(status?.hub_url ?? "https://app.remo-code.com"); }}
+                  className="text-xs px-2 py-1 rounded text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40"
+                >
+                  Edit
+                </button>
+              </div>
+            )}
           </Row>
           <Row label="Supervisor ID">
             <span className="font-mono text-xs">{status?.supervisor_id ?? "—"}</span>

@@ -95,7 +95,7 @@ export default function UpdateNotifier() {
   }
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-xl bg-[var(--bg-secondary)]/95 backdrop-blur ring-1 ring-indigo-500/30 shadow-lg p-4 text-sm">
+    <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-xl bg-[var(--bg-secondary)]/95 backdrop-blur ring-1 ring-blue-500/30 shadow-lg p-4 text-sm">
       {state.kind === "available" && (
         <>
           <div className="font-semibold text-[var(--text-primary)]">
@@ -113,7 +113,7 @@ export default function UpdateNotifier() {
             </button>
             <button
               onClick={install}
-              className="px-3 py-1.5 rounded-lg text-xs bg-indigo-600 hover:bg-indigo-500 text-white"
+              className="px-3 py-1.5 rounded-lg text-xs bg-blue-600 hover:bg-blue-500 text-white"
             >
               Install
             </button>
@@ -128,7 +128,7 @@ export default function UpdateNotifier() {
           </div>
           <div className="mt-2 h-1.5 w-full rounded bg-[var(--bg-tertiary)] overflow-hidden">
             <div
-              className="h-full bg-indigo-500 transition-[width] duration-150"
+              className="h-full bg-blue-500 transition-[width] duration-150"
               style={{
                 width:
                   state.total && state.total > 0

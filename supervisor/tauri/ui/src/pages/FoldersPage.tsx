@@ -58,7 +58,7 @@ function RepoRow({ r }: { r: InventoryRepo }) {
           {repoName}
         </span>
         {r.git_origin_github && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-600/20 text-indigo-300 ring-1 ring-indigo-500/30">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-600/20 text-blue-300 ring-1 ring-blue-500/30">
             github
           </span>
         )}
@@ -164,7 +164,7 @@ export default function FoldersPage() {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               placeholder="Filter by path, remote, or owner/repo…"
-              className="flex-1 px-3 py-2 rounded-lg text-sm bg-[var(--bg-tertiary)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:ring-1 focus:ring-indigo-500/40"
+              className="flex-1 px-3 py-2 rounded-lg text-sm bg-[var(--bg-tertiary)] text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:ring-1 focus:ring-blue-500/40"
             />
           </div>
           <span className="text-xs text-[var(--text-muted)] shrink-0">
@@ -191,7 +191,7 @@ export default function FoldersPage() {
             type="button"
             onClick={onRefresh}
             disabled={refreshing}
-            className="px-3 py-2 rounded-lg text-sm bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40"
+            className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
           >
             {refreshing ? "Scanning…" : "Refresh"}
           </button>
