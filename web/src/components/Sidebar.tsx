@@ -6,7 +6,6 @@ import { githubOwnerRepo } from '../hooks/useSessions'
 import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
 import { UnreadBadge } from './UnreadBadge'
 import { SessionTooltip } from './SessionTooltip'
-import { PendingLocalRepoPrompt } from './PendingLocalRepoPrompt'
 import { CloneHereModal } from './CloneHereModal'
 
 interface Props {
@@ -40,7 +39,8 @@ export function Sidebar({
   connected, user, signOut, onClose, unreadCounts = {},
   collapsed = false, onToggleCollapsed,
   token = null,
-  subscribe,
+  // `subscribe` remains in Props (callers pass it) but is no longer consumed
+  // here after the pending-folders banner was removed.
   // The sidebar no longer renders offline rows or re-launch buttons — offline
   // sessions are launched from Settings → Supervisor, not here. The sidebar is
   // active-only, so the old `launchSession` prop has been dropped.
@@ -51,16 +51,6 @@ export function Sidebar({
   const showToast = (msg: string) => {
     setToast(msg)
     window.setTimeout(() => setToast(null), 3500)
-  }
-  // Phase 08 — resolve a sessionId from a (hostname, project_dir) pair so the
-  // PendingLocalRepoPrompt can call POST /api/sessions/:id/create-github-repo.
-  // We try to match against the user's current session list first; if no row
-  // matches, the prompt renders the Create button with an inline hint.
-  const resolveSessionId = (hostname: string, project_dir: string): string | null => {
-    const match = sessions.find(s =>
-      s.hostname === hostname && s.project_dir === project_dir,
-    )
-    return match ? match.id : null
   }
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [hoverInfo, setHoverInfo] = useState<{ id: string; top: number; left: number } | null>(null)
@@ -251,14 +241,6 @@ export function Sidebar({
             </button>
           </div>
         </div>
-
-        {/* Phase 08 — "Needs attention" pending local folders banner */}
-        <PendingLocalRepoPrompt
-          token={token}
-          resolveSessionId={resolveSessionId}
-          subscribe={subscribe}
-          onCreated={onRefresh}
-        />
 
         {/* Session list — only connected sessions */}
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
