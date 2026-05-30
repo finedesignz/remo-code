@@ -275,7 +275,24 @@ export class SessionBridge {
       return
     }
     if (e.type === 'result') {
-      // No direct hub message — assistant_message already emitted with full text.
+      // P2: emit a usage_event so the hub can persist the per-turn token +
+      // cost ledger. Only when we actually have token counts (an 'error'
+      // result or an old CLI omits `usage` — skip those rather than record a
+      // zero row). assistant_message was already emitted with the full text.
+      if (this.sessionId && e.usage) {
+        this.sendToHub({
+          type: 'usage_event',
+          session_id: this.sessionId,
+          model: e.model ?? null,
+          input_tokens: e.usage.input_tokens ?? 0,
+          output_tokens: e.usage.output_tokens ?? 0,
+          cache_creation_input_tokens: e.usage.cache_creation_input_tokens ?? 0,
+          cache_read_input_tokens: e.usage.cache_read_input_tokens ?? 0,
+          cost_usd: e.cost ?? 0,
+          cost_source: e.cost_from_sdk ? 'sdk' : 'estimated',
+          ts: new Date().toISOString(),
+        })
+      }
       return
     }
     if (!this.sessionId) return

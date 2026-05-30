@@ -57,6 +57,7 @@ export class ClaudeRunner implements CliRunner {
   private listener: EventCallback | null = null
   private buffer = ''
   private fullText = ''
+  private lastModel: string | null = null
   private ready = false
   private allowDangerousSkip: boolean
   private orchestrator: OrchestratorRunnerOpts | undefined
@@ -309,6 +310,10 @@ export class ClaudeRunner implements CliRunner {
 
     if (event.type === 'assistant' && 'message' in event) {
       const msg = (event as any).message
+      // P2: remember the model that produced this turn — the `result` event
+      // (where we capture usage) doesn't always carry it, but the assistant
+      // message does (`message.model`).
+      if (typeof msg?.model === 'string' && msg.model) this.lastModel = msg.model
       if (!msg?.content) return
       for (const block of msg.content) {
         if (block.type === 'text' && block.text) {
@@ -340,8 +345,64 @@ export class ClaudeRunner implements CliRunner {
         this.listener?.({ type: 'assistant_message', content: this.fullText })
         this.fullText = ''
       }
-      this.listener?.({ type: 'result', cost: r.total_cost_usd || 0, duration_ms: r.duration_ms || 0 })
+      const parsed = parseUsageFromResult(r, this.lastModel)
+      this.listener?.({
+        type: 'result',
+        cost: parsed.cost,
+        duration_ms: r.duration_ms || 0,
+        ...(parsed.model ? { model: parsed.model } : {}),
+        ...(parsed.usage ? { usage: parsed.usage } : {}),
+        cost_from_sdk: parsed.cost_from_sdk,
+      })
       this.listener?.({ type: 'status', state: 'idle' })
     }
   }
+}
+
+/**
+ * Pure extractor for the P2 usage ledger. Pulls per-turn token counts +
+ * authoritative SDK cost out of a Claude CLI `result` stream event.
+ *
+ * The CLI's `result` event carries `total_cost_usd` (the SDK's authoritative
+ * per-turn cost — a subscription list-price equivalent, NOT a billed charge)
+ * and a `usage` object with the four token buckets. `model` is captured from
+ * the preceding assistant message (`fallbackModel`) since the result event
+ * doesn't reliably include it.
+ *
+ * Exported for unit testing — see supervisor/test/usage-capture.test.ts.
+ */
+export function parseUsageFromResult(
+  r: any,
+  fallbackModel: string | null,
+): {
+  cost: number
+  cost_from_sdk: boolean
+  model: string | null
+  usage: {
+    input_tokens: number
+    output_tokens: number
+    cache_creation_input_tokens: number
+    cache_read_input_tokens: number
+  } | null
+} {
+  const hasCost = typeof r?.total_cost_usd === 'number' && Number.isFinite(r.total_cost_usd)
+  const cost = hasCost ? r.total_cost_usd : 0
+  const u = r?.usage
+  const usage = u && typeof u === 'object'
+    ? {
+        input_tokens: Number(u.input_tokens) || 0,
+        output_tokens: Number(u.output_tokens) || 0,
+        cache_creation_input_tokens: Number(u.cache_creation_input_tokens) || 0,
+        cache_read_input_tokens: Number(u.cache_read_input_tokens) || 0,
+      }
+    : null
+  // Prefer an explicit model on the result, else the per-model usage breakdown
+  // key, else the model from the assistant turn.
+  let model: string | null = typeof r?.model === 'string' ? r.model : null
+  if (!model && r?.modelUsage && typeof r.modelUsage === 'object') {
+    const keys = Object.keys(r.modelUsage)
+    if (keys.length > 0) model = keys[0]
+  }
+  if (!model) model = fallbackModel
+  return { cost, cost_from_sdk: hasCost, model, usage }
 }

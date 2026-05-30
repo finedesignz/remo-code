@@ -158,6 +158,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | Telegram bridge | [telegram-bridge.md](docs/telegram-bridge.md) | Phase 12 — bidirectional Telegram ↔ session; orchestrator is the preferred default. |
 | Mobile Tauri client | [mobile-client.md](docs/mobile-client.md) · [phase-12-pause-state.md](docs/phase-12-pause-state.md) | Phase 12 — iOS/Android WebView shell + deep-link auth. **Paused 2026-05-28.** |
 | Shared dispatch + intake | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | `hub/src/dispatch/` (gates→queue→grace→finalize) + `hub/src/webhooks/intake.ts`. All inbound subsystems ride these. |
+| Usage cost ledger | [usage-cost.md](docs/usage-cost.md) | P2 — per-turn token+cost capture (`usage_event`) → `token_usage` + `token_usage_daily` → `GET /api/usage/cost`. SDK `total_cost_usd` authoritative; `hub/src/usage/pricing.ts` is fallback only. Cost is a list-price ESTIMATE. Cap (P3) unaffected. Needs supervisor ≥0.8.0. |
 | API docs | [api.md](docs/api.md) · `/openapi.json` · `/docs` | OpenAPI 3.1 assembled in `hub/src/api/_openapi.ts`; run `bun run docs:sync` after route changes (docs-drift CI enforces). |
 
 ## Cross-cutting invariants (do not violate)
