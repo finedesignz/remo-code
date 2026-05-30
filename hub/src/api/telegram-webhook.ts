@@ -668,9 +668,37 @@ async function handleCallbackQuery(
           await setTelegramDefaultSession(user.id, sid, true);
           user.telegram_default_session_id = sid;
           user.telegram_default_explicit = true;
-        } else if (chatId !== undefined) {
-          // Reason-specific reply — don't blame the supervisor for a cost/concurrency cap.
-          await safeSend(chatId, orchestratorLaunchFailureReply(res.ok ? null : res.reason));
+          if (chatId !== undefined) {
+            await safeSend(chatId, "✓ Default set to 🧭 Orchestrator (root).");
+          }
+        } else {
+          const reason = res.ok ? null : res.reason;
+          // Supervisor-availability failures (offline / couldn't reach) are
+          // NOT a hard "can't select" — the orchestrator is still what the user
+          // wants. Clear any conflicting explicit pin so the NEXT message falls
+          // through to dispatchInbound's orchestrator-preference path, which
+          // fires autoheal and lazily launches it (matching the web client's
+          // lazy-start). Selecting an offline root must never silently fail.
+          const lazyStartable = reason === "no_online_supervisor" || reason === "send_failed";
+          if (lazyStartable) {
+            try {
+              // null + non-explicit → orchestrator-preference wins on next msg.
+              await setTelegramDefaultSession(user.id, null, false);
+              user.telegram_default_session_id = null;
+              user.telegram_default_explicit = false;
+            } catch {
+              /* swallow — next message still resolves the orchestrator */
+            }
+            if (chatId !== undefined) {
+              await safeSend(
+                chatId,
+                "🧭 Orchestrator (root) selected. Your supervisor looks offline — send a message and I'll start it automatically.",
+              );
+            }
+          } else if (chatId !== undefined) {
+            // Genuine blocker (disabled / at_capacity) — reason-specific reply.
+            await safeSend(chatId, orchestratorLaunchFailureReply(reason));
+          }
         }
       } catch (err: any) {
         console.warn("[telegram-webhook] orchestrator launch from picker failed:", err?.message);
@@ -698,10 +726,29 @@ async function handleCallbackQuery(
       return { outcome: "callback_session_denied" };
     }
     // A button tap IS an explicit choice — sticks, never auto-overridden.
+    // SAME write the `/session` command path uses (DAL setTelegramDefaultSession
+    // with explicit=true). The session row may be OFFLINE (no live supervisor /
+    // channel) — that's fine: dispatch lazily starts it on the next message,
+    // matching the web client. We never require a running CLI to select.
     await setTelegramDefaultSession(user.id, action.sessionId, true);
     user.telegram_default_session_id = action.sessionId;
     user.telegram_default_explicit = true;
     await safeAnswerCallback(cb.id, { text: "✓ Default session set" });
+
+    // Explicit, ALWAYS-visible confirmation (mirrors `/session`'s reply). The
+    // keyboard re-render below is best-effort and can no-op (collapsed survivor,
+    // too-old message, transient 400), which previously left the user unsure the
+    // tap registered. A plain confirmation guarantees they see the switch took.
+    if (chatId !== undefined) {
+      const label =
+        (owned as any).name ||
+        (owned as any).project_dir?.split(/[\\/]/).filter(Boolean).pop() ||
+        action.sessionId.slice(0, 8);
+      const offlineHint = !getChannel(action.sessionId)
+        ? " — it'll start on your next message"
+        : "";
+      await safeSend(chatId, `✓ Default session set to ${label} (${action.sessionId.slice(0, 8)})${offlineHint}.`);
+    }
 
     // Re-render the keyboard with the new ✓ mark, if we have a message ref.
     if (chatId !== undefined && messageId !== undefined) {
