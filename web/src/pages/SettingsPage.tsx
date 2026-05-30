@@ -24,18 +24,19 @@ import { CredentialsTab } from "./settings/CredentialsTab";
 import { PromptsTab } from "./settings/PromptsTab";
 import { UsageTab } from "./settings/UsageTab";
 import { ProfileTab } from "./settings/ProfileTab";
-import { OrchestratorTab } from "./settings/OrchestratorTab";
 
-type SettingsTab = "connections" | "credentials" | "prompts" | "orchestrator" | "usage" | "profile";
+type SettingsTab = "connections" | "credentials" | "prompts" | "usage" | "profile";
 
 function readSettingsTab(): SettingsTab {
   const raw = readTabParam();
   if (
     raw === "connections" || raw === "credentials" || raw === "prompts" ||
-    raw === "orchestrator" || raw === "usage" || raw === "profile"
+    raw === "usage" || raw === "profile"
   ) {
     return raw;
   }
+  // Legacy `?tab=orchestrator` (and any unknown tab) → Connections, where the
+  // orchestrator now lives as the pinned top row (Phase 09).
   return "connections";
 }
 
@@ -67,7 +68,7 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
   }, []);
 
   const handleTabChange = (next: string) => {
-    const t = (["connections", "credentials", "prompts", "orchestrator", "usage", "profile"].includes(next)
+    const t = (["connections", "credentials", "prompts", "usage", "profile"].includes(next)
       ? next
       : "connections") as SettingsTab;
     setTab(t);
@@ -80,7 +81,6 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
       { key: "connections", label: "Connections" },
       { key: "credentials", label: "Credentials" },
       { key: "prompts", label: "Prompts" },
-      { key: "orchestrator", label: "Orchestrator" },
       { key: "usage", label: "Usage" },
       { key: "profile", label: "Profile" },
     ],
@@ -108,11 +108,6 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
         {tab === "prompts" && (
           <ErrorBoundary tabKey="settings:prompts">
             <PromptsTab token={token} />
-          </ErrorBoundary>
-        )}
-        {tab === "orchestrator" && (
-          <ErrorBoundary tabKey="settings:orchestrator">
-            <OrchestratorTab token={token} />
           </ErrorBoundary>
         )}
         {tab === "usage" && (
