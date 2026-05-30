@@ -721,7 +721,7 @@ describe("orchestrator visibility in /list", () => {
     expect(state.user!.telegram_default_explicit).toBe(true);
   });
 
-  test("tapping synthetic orchestrator with no online supervisor → friendly reply, no pin", async () => {
+  test("tapping synthetic orchestrator with no online supervisor → selectable + lazy-start (pin cleared, friendly reply)", async () => {
     state.user = {
       id: LINKED_USER_ID,
       email: "linked@example.com",
@@ -737,8 +737,12 @@ describe("orchestrator visibility in /list", () => {
     );
     expect(res.status).toBe(200);
     expect(state.launchCalls).toBe(1);
-    expect(state.setDefaults.length).toBe(0); // no pin
-    expect(state.sentMessages.some((m) => /no online supervisor/i.test(m.text))).toBe(true);
+    // Bug #2 fix: supervisor-offline is NOT a hard "can't select". The pin is
+    // cleared to null/non-explicit so the NEXT message falls through to the
+    // orchestrator-preference path (autoheal lazy-starts it), matching the web
+    // client. The reply tells the user it'll start on their next message.
+    expect(state.setDefaults).toContainEqual({ userId: LINKED_USER_ID, sessionId: null, explicit: false });
+    expect(state.sentMessages.some((m) => /start it automatically|next message/i.test(m.text))).toBe(true);
   });
 
   test("H-1: at_capacity → cost/concurrency reply, NOT a supervisor message, no pin", async () => {

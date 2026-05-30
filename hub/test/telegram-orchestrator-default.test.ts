@@ -149,6 +149,23 @@ async function postUpdate(text: string, updateId = Math.floor(Math.random() * 1e
   });
 }
 
+async function postCallback(data: string, updateId = Math.floor(Math.random() * 1e9)) {
+  const app = makeApp();
+  return app.request(`/api/telegram/webhook/${TEST_SECRET}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      update_id: updateId,
+      callback_query: {
+        id: `cb-${updateId}`,
+        from: { id: LINKED_CHAT },
+        message: { message_id: 50, chat: { id: LINKED_CHAT } },
+        data,
+      },
+    }),
+  });
+}
+
 beforeEach(() => {
   state.user = {
     id: LINKED_USER_ID,
@@ -229,6 +246,52 @@ describe("Telegram default → orchestrator fallback", () => {
     expect(state.dispatchCalls.length).toBe(1);
     expect(state.dispatchCalls[0].sessionId).toBe(ORCH_SESSION_ID);
     expect(state.setDefaults).toEqual([{ userId: LINKED_USER_ID, sessionId: ORCH_SESSION_ID, explicit: false }]);
+  });
+
+  // ── /list tap-to-select (the `s:<id>` callback path) ──────────────────────
+  // Mirrors the working `/session` command path: a button tap MUST persist the
+  // default explicitly and be honored on the next message (no orchestrator
+  // override).
+  test("LIST-TAP: s:<id> for a NEW live session persists explicit default", async () => {
+    state.liveSessionIds.add("sess_picked");
+    // Currently no default (or a different one). Tap a brand-new session.
+    state.user.telegram_default_session_id = null;
+    state.user.telegram_default_explicit = false;
+    const res = await postCallback("s:sess_picked");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_session_set");
+    // Persisted as EXPLICIT (deliberate user choice) — identical to /session.
+    expect(state.setDefaults).toContainEqual({ userId: LINKED_USER_ID, sessionId: "sess_picked", explicit: true });
+    expect(state.user.telegram_default_session_id).toBe("sess_picked");
+    expect(state.user.telegram_default_explicit).toBe(true);
+  });
+
+  test("LIST-TAP: after tapping a NEW session, next message routes there (no orchestrator override)", async () => {
+    state.liveSessionIds.add("sess_picked");
+    state.user.telegram_default_session_id = null;
+    state.user.telegram_default_explicit = false;
+    // 1) tap to select
+    await postCallback("s:sess_picked", 700001);
+    // 2) send a message — must go to the picked session, NOT the orchestrator.
+    const res = await postUpdate("do the thing", 700002);
+    expect(res.status).toBe(200);
+    expect(state.dispatchCalls.length).toBe(1);
+    expect(state.dispatchCalls[0].sessionId).toBe("sess_picked");
+  });
+
+  test("LIST-TAP: selecting an OFFLINE (no live channel) session still sets it as default", async () => {
+    // A session with a sessions-row but no running supervisor/channel is still a
+    // valid pick — it lazily starts on the next message (matching web client).
+    state.liveSessionIds.add("sess_offline"); // has a DB row (getSession returns it)
+    state.user.telegram_default_session_id = null;
+    state.user.telegram_default_explicit = false;
+    const res = await postCallback("s:sess_offline");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_session_set");
+    expect(state.user.telegram_default_session_id).toBe("sess_offline");
+    expect(state.user.telegram_default_explicit).toBe(true);
   });
 
   test("C-1 REGRESSION: pre-existing default (backfilled explicit) is NOT overridden to the orchestrator", async () => {
