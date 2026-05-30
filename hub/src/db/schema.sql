@@ -446,16 +446,24 @@ CREATE INDEX IF NOT EXISTS idx_gh_idem_created ON github_issue_idempotency(creat
 
 -- ── Phase 04 plan 002: supervisor budget + preferred-supervisor routing ──────
 -- Columns the hub remembers for each supervisor's reported resource budget.
--- A supervisor reports its cgroup-derived `concurrency_budget` periodically via
--- the `host_resources` WS message (Plan 001). The hub may also store an
--- admin/user-controlled `concurrency_override` that is hard-clamped server-side
--- to [1, concurrency_budget * 2] (see ARCHITECTURE-REVIEW §3).
+-- A supervisor is SUPPOSED to report its cgroup-derived `concurrency_budget`
+-- periodically via the `host_resources` WS message (Plan 001) — but that report
+-- is not yet implemented supervisor-side (budget_source stays NULL), so the
+-- column DEFAULT is the effective per-supervisor concurrency cap for every host.
+-- It was 1, which permanently starved user sessions because the always-on
+-- orchestrator run consumes the single slot — and every MSI upgrade rotates the
+-- api_key into a FRESH supervisors row that inherits this default. Default is
+-- now 8 (orchestrator + ~7 concurrent work sessions on a dev host). Users can
+-- still tune per-supervisor via `concurrency_override` (clamped to budget*2).
 -- `budget_source` records which cgroup/host path produced the budget.
 -- `budget_updated_at` lets the UI detect stale reports.
 ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS cpu_cores INTEGER;
 ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS total_mem_mb INTEGER;
 ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS free_mem_mb INTEGER;
-ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS concurrency_budget INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS concurrency_budget INTEGER NOT NULL DEFAULT 8;
+-- Existing DBs created the column with DEFAULT 1; raise it idempotently so
+-- post-MSI-upgrade rows (new api_key → new row) come up at 8, not 1.
+ALTER TABLE supervisors ALTER COLUMN concurrency_budget SET DEFAULT 8;
 ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS concurrency_override INTEGER;
 ALTER TABLE supervisors ADD COLUMN IF NOT EXISTS budget_source TEXT
   CHECK (budget_source IS NULL OR budget_source IN ('cgroup_v2','cgroup_v1','host_fallback'));
