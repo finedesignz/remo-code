@@ -24,6 +24,10 @@ const state: {
   keyboardSends: Array<{ chat: number | string; text: string; keyboard: any }>;
   // Recorded setMyCommands calls.
   setCommandsCalls: Array<Array<{ command: string; description: string }>>;
+  // Recorded editMessageTextMd calls (streaming working-message edits).
+  edits: Array<{ chat: number | string; messageId: number; text: string }>;
+  // Recorded sendChatAction (typing) calls.
+  chatActions: Array<number | string>;
   // Optional behavior knob for sendMessage.
   sendImpl: ((chat: number | string, text: string) => Promise<void>) | null;
 } = {
@@ -31,6 +35,8 @@ const state: {
   sends: [],
   keyboardSends: [],
   setCommandsCalls: [],
+  edits: [],
+  chatActions: [],
   sendImpl: null,
 };
 
@@ -62,6 +68,24 @@ mock.module("../src/telegram/client.ts", () => ({
     }
     state.sends.push({ chat: chatId, text, at: Date.now() });
   },
+  // onFinal now finalizes via sendMessageMd (MarkdownV2 + 400 fallback). Route it
+  // into the same recorder so existing assertions hold (text is escaped upstream
+  // but the bridge tests use reserved-char-free strings, so escaping is a no-op).
+  sendMessageMd: async (chatId: number | string, text: string) => {
+    if (state.sendImpl) {
+      await state.sendImpl(chatId, text);
+    }
+    state.sends.push({ chat: chatId, text, at: Date.now() });
+    return { message_id: 99 };
+  },
+  // Streaming "working…" message helpers — recorded so the summarized-streaming
+  // test can assert the working message is created then finalized.
+  editMessageTextMd: async (chatId: number | string, messageId: number, text: string) => {
+    state.edits.push({ chat: chatId, messageId, text });
+  },
+  sendChatAction: async (chatId: number | string) => {
+    state.chatActions.push(chatId);
+  },
   // Inline-approval prompts go through sendMessageWithKeyboard; stub it so
   // tests never touch the network and can assert the keyboard payload.
   sendMessageWithKeyboard: async (chatId: number | string, text: string, keyboard: any) => {
@@ -80,6 +104,8 @@ let emitAssistantMessageFinal: typeof import("../src/events/assistant-events.ts"
 let _resetEvents: typeof import("../src/events/assistant-events.ts")._resetAssistantEventsForTests;
 let emitPermissionPending: typeof import("../src/events/permission-events.ts").emitPermissionPending;
 let _resetPermEvents: typeof import("../src/events/permission-events.ts")._resetPermissionEventsForTests;
+let emitSessionActivity: typeof import("../src/events/session-activity-events.ts").emitSessionActivity;
+let _resetActivity: typeof import("../src/events/session-activity-events.ts")._resetSessionActivityEventsForTests;
 let takePendingPrompt: typeof import("../src/telegram/approvals.ts").takePendingPrompt;
 let _resetPending: typeof import("../src/telegram/approvals.ts")._resetPendingPromptsForTests;
 let startTelegramBridge: typeof import("../src/telegram/bridge.ts").startTelegramBridge;
@@ -91,6 +117,9 @@ beforeAll(async () => {
   ));
   ({ emitPermissionPending, _resetPermissionEventsForTests: _resetPermEvents } = await import(
     "../src/events/permission-events.ts"
+  ));
+  ({ emitSessionActivity, _resetSessionActivityEventsForTests: _resetActivity } = await import(
+    "../src/events/session-activity-events.ts"
   ));
   ({ takePendingPrompt, _resetPendingPromptsForTests: _resetPending } = await import(
     "../src/telegram/approvals.ts"
@@ -105,10 +134,13 @@ beforeEach(() => {
   state.sends.length = 0;
   state.keyboardSends.length = 0;
   state.setCommandsCalls.length = 0;
+  state.edits.length = 0;
+  state.chatActions.length = 0;
   state.sendImpl = null;
   _stopBridge();
   _resetEvents();
   _resetPermEvents();
+  _resetActivity();
   _resetPending();
 });
 
@@ -116,6 +148,7 @@ afterEach(() => {
   _stopBridge();
   _resetEvents();
   _resetPermEvents();
+  _resetActivity();
   _resetPending();
 });
 
@@ -284,10 +317,43 @@ describe("Telegram outbound bridge", () => {
     expect(buttons.map((b: any) => b.callback_data)).toEqual(["pa:req-123", "pd:req-123"]);
 
     // The pending prompt is recorded so the webhook callback can resolve it.
-    const pending = takePendingPrompt("req-123");
+    const pending = takePendingPrompt("req-123", "uP");
     expect(pending).not.toBeNull();
     expect(pending!.sessionId).toBe("sess_P");
     expect(pending!.userId).toBe("uP");
+  });
+
+  // ── Summarized streaming ──────────────────────────────────────────────────
+  test("tool_use creates an editable 'working…' message; final edits it to the answer", async () => {
+    state.sessionUsers.set("sess_S", [{ id: "uS", telegram_chat_id: 9001 }]);
+    startTelegramBridge();
+
+    // A tool runs mid-turn → working message sent (via sendMessageMd) + typing.
+    emitSessionActivity({
+      sessionId: "sess_S",
+      userId: "uS",
+      kind: "tool_use",
+      toolName: "Edit",
+      detail: "hub/src/foo.ts",
+    });
+    await settle();
+
+    // Working message was sent and a typing indicator fired.
+    expect(state.sends).toHaveLength(1);
+    expect(state.sends[0]!.text).toContain("Working");
+    expect(state.sends[0]!.text).toContain("Edit");
+    expect(state.chatActions).toContain(9001);
+
+    // Final assistant message edits the SAME working message (no new send).
+    const sendsBefore = state.sends.length;
+    emitAssistantMessageFinal({ sessionId: "sess_S", userId: "uS", text: "done — all set" });
+    await settle();
+
+    expect(state.sends).toHaveLength(sendsBefore); // finalized via edit, not a new send
+    expect(state.edits.length).toBeGreaterThanOrEqual(1);
+    const lastEdit = state.edits[state.edits.length - 1]!;
+    expect(lastEdit.messageId).toBe(99);
+    expect(lastEdit.text).toContain("done");
   });
 
   test("permission_request for a session no user has as default is a no-op", async () => {
@@ -301,7 +367,7 @@ describe("Telegram outbound bridge", () => {
     });
     await settle();
     expect(state.keyboardSends).toHaveLength(0);
-    expect(takePendingPrompt("req-none")).toBeNull();
+    expect(takePendingPrompt("req-none", "uX")).toBeNull();
   });
 });
 

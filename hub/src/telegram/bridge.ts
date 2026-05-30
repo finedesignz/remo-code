@@ -34,14 +34,66 @@
 import { config } from "../config.ts";
 import { onAssistantMessageFinal, type AssistantMessageFinalEvent } from "../events/assistant-events.ts";
 import { onPermissionPending, type PermissionPendingEvent } from "../events/permission-events.ts";
+import { onSessionActivity, type SessionActivityEvent } from "../events/session-activity-events.ts";
 import { getUsersWithTelegramDefaultSession } from "../db/dal.ts";
-import { sendMessage, sendMessageWithKeyboard, setMyCommands } from "./client.ts";
+import {
+  sendMessageMd,
+  sendMessageWithKeyboard,
+  sendChatAction,
+  editMessageTextMd,
+  escapeMarkdownV2,
+  setMyCommands,
+} from "./client.ts";
 import { BOT_COMMANDS } from "./commands.ts";
 import { rememberPendingPrompt, permissionCallbackData } from "./approvals.ts";
 
 let started = false;
 let unsubscribe: (() => void) | null = null;
 let unsubscribePermission: (() => void) | null = null;
+let unsubscribeActivity: (() => void) | null = null;
+
+// ── Summarized-streaming state ──────────────────────────────────────────────
+// One editable "working…" message per (chat, session). tool_use events append
+// collapsed one-liners; the final assistant_message edits it to the full text.
+const TYPING_REFRESH_MS = 4000; // Telegram typing expires ~5s
+const EDIT_THROTTLE_MS = 900; // avoid hammering editMessageText (Telegram rate-limits edits)
+const MAX_TOOL_LINES = 12; // cap the collapsed list so the working message stays small
+
+interface WorkingState {
+  messageId: number;
+  lines: string[];
+  typingTimer: ReturnType<typeof setInterval> | null;
+  lastEditAt: number;
+  pendingEdit: boolean;
+}
+
+const workingByKey = new Map<string, WorkingState>();
+
+function workKey(chatId: string | number | bigint, sessionId: string): string {
+  return `${String(chatId)}:${sessionId}`;
+}
+
+/** Collapse a tool_use into a one-line summary, e.g. "🔧 Edit hub/src/foo.ts". */
+function toolLine(toolName: string, detail?: string): string {
+  const d = (detail ?? "").trim();
+  const short = d.length > 80 ? d.slice(0, 79) + "…" : d;
+  return `🔧 ${toolName}${short ? " " + short : ""}`;
+}
+
+/** Render the in-progress working message body (escaped MarkdownV2). */
+function renderWorking(lines: string[]): string {
+  const head = "⏳ *Working…*";
+  if (lines.length === 0) return head;
+  const body = lines.map((l) => escapeMarkdownV2(l)).join("\n");
+  return head + "\n\n" + body;
+}
+
+function stopTyping(st: WorkingState): void {
+  if (st.typingTimer) {
+    clearInterval(st.typingTimer);
+    st.typingTimer = null;
+  }
+}
 
 // Per-chat serial queue. Key = chat_id (stringified to dodge bigint vs number
 // equality surprises). Value = the tail Promise; new sends chain onto it.
@@ -70,6 +122,61 @@ function enqueueForChat(chatId: string | number | bigint, task: () => Promise<vo
   return next;
 }
 
+/**
+ * A tool was invoked mid-turn. When summarized streaming is on, lazily create an
+ * editable "working…" message per (chat, session) and append a collapsed
+ * one-liner. Also (re)start the typing indicator. No-op when the flag is off.
+ */
+async function onActivity(e: SessionActivityEvent): Promise<void> {
+  if (!config.telegram.summarizedStreaming) return;
+  if (e.kind !== "tool_use") return;
+  let users: Array<{ id: string; telegram_chat_id: string | number }>;
+  try {
+    users = await getUsersWithTelegramDefaultSession(e.sessionId);
+  } catch (err: any) {
+    console.warn(`[telegram-bridge] activity DAL lookup failed session=${e.sessionId}: ${err?.message ?? err}`);
+    return;
+  }
+  if (users.length === 0) return;
+
+  const line = toolLine(e.toolName, e.detail);
+  for (const u of users) {
+    const chatId = u.telegram_chat_id;
+    if (chatId === null || chatId === undefined) continue;
+    const key = workKey(chatId, e.sessionId);
+    void enqueueForChat(chatId, async () => {
+      let st = workingByKey.get(key);
+      try {
+        if (!st) {
+          // Refresh typing immediately, then on an interval until finalized.
+          await sendChatAction(chatId as number | string, "typing");
+          const sent = await sendMessageMd(chatId as number | string, renderWorking([line]));
+          const messageId = sent?.message_id ?? 0;
+          if (!messageId) return; // couldn't anchor an editable message; skip streaming for this turn
+          const typingTimer = setInterval(() => {
+            void sendChatAction(chatId as number | string, "typing");
+          }, TYPING_REFRESH_MS);
+          st = { messageId, lines: [line], typingTimer, lastEditAt: Date.now(), pendingEdit: false };
+          workingByKey.set(key, st);
+          return;
+        }
+        // Append + edit (throttled). Cap the visible list.
+        st.lines.push(line);
+        if (st.lines.length > MAX_TOOL_LINES) st.lines = st.lines.slice(-MAX_TOOL_LINES);
+        const sinceEdit = Date.now() - st.lastEditAt;
+        if (sinceEdit >= EDIT_THROTTLE_MS) {
+          st.lastEditAt = Date.now();
+          await editMessageTextMd(chatId as number | string, st.messageId, renderWorking(st.lines));
+        }
+      } catch (err: any) {
+        console.warn(
+          `[telegram-bridge] activity edit failed chat=${chatKey(chatId)} session=${e.sessionId}: ${err?.message ?? err}`,
+        );
+      }
+    });
+  }
+}
+
 async function onFinal(e: AssistantMessageFinalEvent): Promise<void> {
   let users: Array<{ id: string; telegram_chat_id: string | number }>;
   try {
@@ -80,17 +187,37 @@ async function onFinal(e: AssistantMessageFinalEvent): Promise<void> {
   }
   if (users.length === 0) return;
 
+  const finalMd = escapeMarkdownV2(e.text);
   for (const u of users) {
     const chatId = u.telegram_chat_id;
     if (chatId === null || chatId === undefined) continue;
+    const key = workKey(chatId, e.sessionId);
     // Fire-and-forget — the queue ensures per-chat serialization. We do NOT
     // await across users; different chats progress in parallel.
     void enqueueForChat(chatId, async () => {
+      const st = workingByKey.get(key);
       try {
-        await sendMessage(chatId as number | string, e.text);
+        if (st) {
+          // Finalize the editable working message with the full assistant text.
+          stopTyping(st);
+          workingByKey.delete(key);
+          if (e.text.length <= 4096) {
+            await editMessageTextMd(chatId as number | string, st.messageId, finalMd);
+            return;
+          }
+          // Too long to fit one edited message — leave the working summary and
+          // send the full text as a follow-up (MarkdownV2 → plaintext fallback).
+          await sendMessageMd(chatId as number | string, finalMd);
+          return;
+        }
+        // No working message (streaming off, or no tool calls this turn) — send
+        // the final text as a fresh MarkdownV2 message.
+        await sendMessageMd(chatId as number | string, finalMd);
       } catch (err: any) {
+        if (st) stopTyping(st);
+        workingByKey.delete(key);
         console.warn(
-          `[telegram-bridge] sendMessage failed chat=${chatKey(chatId)} session=${e.sessionId}: ${err?.message ?? err}`,
+          `[telegram-bridge] final send failed chat=${chatKey(chatId)} session=${e.sessionId}: ${err?.message ?? err}`,
         );
       }
     });
@@ -127,9 +254,10 @@ async function onPermissionPendingEvent(e: PermissionPendingEvent): Promise<void
   if (users.length === 0) return;
 
   const preview = previewToolInput(e.toolInput);
+  // MarkdownV2: escape dynamic content, keep our own *bold* / ```code``` markup.
   const text =
-    `🔐 Approval needed — *${e.toolName}*` +
-    (preview ? `\n\n\`${preview}\`` : "") +
+    `🔐 Approval needed — *${escapeMarkdownV2(e.toolName)}*` +
+    (preview ? "\n\n```\n" + escapeMarkdownV2(preview) + "\n```" : "") +
     `\n\nApprove this action?`;
   const keyboard = [[
     { text: "✅ Approve", callback_data: permissionCallbackData(e.requestId, "approve") },
@@ -141,10 +269,24 @@ async function onPermissionPendingEvent(e: PermissionPendingEvent): Promise<void
     if (chatId === null || chatId === undefined) continue;
     void enqueueForChat(chatId, async () => {
       try {
-        const sent = await sendMessageWithKeyboard(chatId as number | string, text, keyboard);
-        // Record the pending prompt so the callback can resolve it. We bind the
-        // prompt to THIS user so a foreign chat can't resolve it.
-        rememberPendingPrompt(e.requestId, {
+        let sent: { message_id: number } | void;
+        try {
+          sent = await sendMessageWithKeyboard(chatId as number | string, text, keyboard, {
+            parse_mode: "MarkdownV2",
+          });
+        } catch (mdErr: any) {
+          // 400 → markup rejected; resend as plain text so the prompt is never
+          // silently dropped (the inline keyboard still works).
+          if (mdErr?.status === 400) {
+            sent = await sendMessageWithKeyboard(chatId as number | string, text, keyboard);
+          } else {
+            throw mdErr;
+          }
+        }
+        // Record the pending prompt so the callback can resolve it. Keyed by
+        // (sessionId, requestId) with THIS user authorized — a shared default
+        // session no longer overwrites a sibling user's binding.
+        rememberPendingPrompt(e.sessionId, e.requestId, {
           sessionId: e.sessionId,
           userId: u.id,
           chatId,
@@ -174,6 +316,7 @@ export function startTelegramBridge(): void {
   }
   unsubscribe = onAssistantMessageFinal(onFinal);
   unsubscribePermission = onPermissionPending(onPermissionPendingEvent);
+  unsubscribeActivity = onSessionActivity(onActivity);
   started = true;
   // Register the slash-command menu so typing `/` shows a popup. Best-effort,
   // fire-and-forget — a transient failure must not block bridge startup.
@@ -193,6 +336,12 @@ export function _stopTelegramBridgeForTests(): void {
     unsubscribePermission();
     unsubscribePermission = null;
   }
+  if (unsubscribeActivity) {
+    unsubscribeActivity();
+    unsubscribeActivity = null;
+  }
+  for (const st of workingByKey.values()) stopTyping(st);
+  workingByKey.clear();
   started = false;
   chatQueues.clear();
 }
