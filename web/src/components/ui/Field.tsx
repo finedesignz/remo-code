@@ -1,5 +1,6 @@
 import { useId, type ReactNode, type ReactElement, cloneElement, isValidElement } from "react";
 import { cn } from "../../lib/ui/cn";
+import { InfoTip } from "./InfoTip";
 
 export interface FieldProps {
   label: ReactNode;
@@ -28,18 +29,17 @@ export function Field({ label, helper, error, children, className }: FieldProps)
 
   return (
     <div className={cn("w-full", className)}>
-      <label
-        htmlFor={controlId}
-        className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5"
-      >
-        {label}
-      </label>
+      <div className="flex items-center gap-1 mb-1.5">
+        <label
+          htmlFor={controlId}
+          className="block text-xs font-medium text-[var(--text-secondary)]"
+        >
+          {label}
+        </label>
+        {helper ? <InfoTip content={helper} /> : null}
+      </div>
       {control}
-      {error ? (
-        <p className="text-xs text-red-400 mt-1">{error}</p>
-      ) : helper ? (
-        <p className="text-xs text-[var(--text-muted)] mt-1">{helper}</p>
-      ) : null}
+      {error ? <p className="text-xs text-red-400 mt-1">{error}</p> : null}
     </div>
   );
 }

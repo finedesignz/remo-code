@@ -9,7 +9,7 @@ export function Brand() {
   return (
     <a
       href="#/"
-      className="flex items-center gap-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+      className="flex items-center gap-2 px-3 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
       aria-label="Remo Code — home"
     >
       <img src="/logo.png" alt="Remo Code" className="h-8 w-auto" />
