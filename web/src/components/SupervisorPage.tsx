@@ -51,6 +51,7 @@ interface ActiveRun {
 }
 
 type FilterKey = 'all' | 'running' | 'idle'
+type TypeFilter = 'all' | 'repos' | 'folders'
 type SortKey = 'status' | 'repo' | 'seen'
 type SortDir = 'asc' | 'desc'
 
@@ -72,6 +73,7 @@ interface Row {
 
 const hubUrl = import.meta.env.VITE_HUB_URL || ''
 const FILTER_LS_KEY = 'remo:repos-filter'
+const TYPE_FILTER_LS_KEY = 'remo:repos-type-filter'
 const LOCAL_REPOS_LS_KEY = 'remo:local-repos'
 const GITHUB_REPOS_LS_KEY = 'remo:github-repos'
 
@@ -138,6 +140,12 @@ const Icon = {
   Back: (p: any) => (
     <svg {...p} width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 4l-6 6 6 6" /></svg>
   ),
+  Github: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .25a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.42 7.42 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8.25 8 8 0 0 0 8 .25z" /></svg>
+  ),
+  Folder: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3l1.5 1.5H13.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" /></svg>
+  ),
 }
 
 function StatusDot({ status, online = true }: { status: Row['status']; online?: boolean }) {
@@ -191,6 +199,13 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     } catch {}
     return 'all'
   })
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>(() => {
+    try {
+      const v = localStorage.getItem(TYPE_FILTER_LS_KEY)
+      if (v === 'all' || v === 'repos' || v === 'folders') return v
+    } catch {}
+    return 'all'
+  })
   const [search, setSearch] = useState('')
   const [sortKey, setSortKey] = useState<SortKey>('repo')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
@@ -220,6 +235,10 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   useEffect(() => {
     try { localStorage.setItem(FILTER_LS_KEY, filter) } catch {}
   }, [filter])
+
+  useEffect(() => {
+    try { localStorage.setItem(TYPE_FILTER_LS_KEY, typeFilter) } catch {}
+  }, [typeFilter])
 
   useEffect(() => {
     try { localStorage.setItem(LOCAL_REPOS_LS_KEY, JSON.stringify(localRepos)) } catch {}
@@ -394,6 +413,10 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     if (filter === 'running') filtered = filtered.filter((r) => r.status === 'running')
     else if (filter === 'idle') filtered = filtered.filter((r) => r.status !== 'running')
 
+    // Type filter: repos = GitHub-keyed, folders = local-only
+    if (typeFilter === 'repos') filtered = filtered.filter((r) => r.hasGithub)
+    else if (typeFilter === 'folders') filtered = filtered.filter((r) => !r.hasGithub)
+
     // Sort: connected (local) repos always on top, then by chosen key
     const dir = sortDir === 'asc' ? 1 : -1
     filtered = [...filtered].sort((a, b) => {
@@ -410,7 +433,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     })
 
     return filtered
-  }, [localRepos, githubRepos, activeRuns, selectedInstallationId, search, filter, sortKey, sortDir, lastActivityByPath])
+  }, [localRepos, githubRepos, activeRuns, selectedInstallationId, search, filter, typeFilter, sortKey, sortDir, lastActivityByPath])
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
@@ -431,12 +454,12 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   }
 
   const body = (
-    <div className="space-y-4 w-full">
+    <div className="space-y-3 w-full">
       {error && <div className="px-3 py-2 bg-red-900/30 rounded-lg text-sm text-red-200">{error}</div>}
       {info && <div className="px-3 py-2 bg-emerald-900/30 rounded-lg text-sm text-emerald-200">{info}</div>}
 
       {/* Supervisor selector row */}
-      <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-3">
+      <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-2.5">
         {supervisors.length === 0 ? (
           <div className="text-sm text-[var(--text-muted)] p-2">
             No supervisor registered. Install the Remo Code tray app on the Windows machine you want to control:
@@ -512,7 +535,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
       {/* Repos table */}
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl">
         {/* Toolbar */}
-        <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 border-b border-[var(--border-color)]/40">
+        <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[var(--border-color)]/40">
           <div className="flex items-center gap-1">
             {(['all', 'running', 'idle'] as const).map((f) => (
               <button
@@ -521,6 +544,17 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${filter === f ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
               >
                 {f === 'all' ? 'All' : f === 'running' ? 'Running' : 'Idle'}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1">
+            {(['all', 'repos', 'folders'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTypeFilter(t)}
+                className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${typeFilter === t ? 'bg-indigo-600/20 ring-1 ring-indigo-500/30 text-indigo-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
+              >
+                {t === 'all' ? 'All' : t === 'repos' ? 'Repos' : 'Folders'}
               </button>
             ))}
           </div>
@@ -564,16 +598,20 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 <div
                   key={row.key}
                   onClick={() => handleRowClick(row)}
-                  className={`grid grid-cols-[28px_minmax(0,2.2fr)_minmax(0,2fr)_minmax(0,1fr)_auto] gap-3 items-center px-3 py-2.5 hover:bg-[var(--bg-tertiary)]/40 ${row.run ? 'cursor-pointer' : ''}`}
+                  className={`grid grid-cols-[28px_minmax(0,2.2fr)_minmax(0,2fr)_minmax(0,1fr)_auto] gap-3 items-center px-3 py-2 hover:bg-[var(--bg-tertiary)]/40 ${row.run ? 'cursor-pointer' : ''}`}
                 >
                   <div><StatusDot status={row.status} online={!!activeSupervisor?.online} /></div>
                   <div className="min-w-0">
-                    <div className="text-sm font-medium text-[var(--text-primary)] truncate">{row.name}</div>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {row.hasGithub
+                        ? <Icon.Github className="text-[var(--text-muted)] shrink-0" />
+                        : <Icon.Folder className="text-[var(--text-muted)] shrink-0" />}
+                      <div className="text-sm font-medium text-[var(--text-primary)] truncate">{row.name}</div>
+                    </div>
                     <div className="text-xs text-[var(--text-muted)] truncate">
                       {row.branch || 'default branch'}
                       {row.dirty && <span className="text-amber-400"> · dirty</span>}
                       {row.hasGithub && !row.hasLocal && <span> · not cloned</span>}
-                      {!row.hasGithub && row.hasLocal && <span> · local only</span>}
                     </div>
                   </div>
                   <div className="min-w-0 text-xs text-[var(--text-muted)] font-mono truncate" title={row.path || ''}>
@@ -598,9 +636,12 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           ) : (
             <div className="divide-y divide-[var(--border-color)]/30">
               {rows.map((row) => (
-                <div key={row.key} onClick={() => handleRowClick(row)} className={`px-3 py-2.5 ${row.run ? 'cursor-pointer' : ''} hover:bg-[var(--bg-tertiary)]/40`}>
+                <div key={row.key} onClick={() => handleRowClick(row)} className={`px-3 py-2 ${row.run ? 'cursor-pointer' : ''} hover:bg-[var(--bg-tertiary)]/40`}>
                   <div className="flex items-center gap-2 min-w-0">
                     <StatusDot status={row.status} online={!!activeSupervisor?.online} />
+                    {row.hasGithub
+                      ? <Icon.Github className="text-[var(--text-muted)] shrink-0" />
+                      : <Icon.Folder className="text-[var(--text-muted)] shrink-0" />}
                     <div className="text-sm font-medium text-[var(--text-primary)] truncate flex-1">{row.name}</div>
                     {row.run && <span className="text-xs text-emerald-400 shrink-0">{timeAgo(Date.parse(row.run.started_at))}</span>}
                   </div>
@@ -666,7 +707,7 @@ function IconBtn({ onClick, disabled, title, tone = 'muted', children }: { onCli
     tone === 'accent' ? 'text-indigo-300 hover:text-indigo-200 hover:bg-indigo-500/10' :
     'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60'
   return (
-    <button onClick={onClick} disabled={disabled} title={title} aria-label={title} className={`p-1.5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${toneCls}`}>{children}</button>
+    <button onClick={onClick} disabled={disabled} title={title} aria-label={title} className={`p-2 md:p-1.5 rounded-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${toneCls}`}>{children}</button>
   )
 }
 
