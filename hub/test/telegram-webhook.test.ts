@@ -513,31 +513,31 @@ describe("stop — inline 🛑 button + /stop command", () => {
     expect(takeStoppable("sess_stop", LINKED_USER_ID)).toBeNull();
   });
 
-  test("second 🛑 tap is a benign no-op (already stopped), no extra cancel", async () => {
+  test("second 🛑 tap re-sends cancel (idempotent) — no fragile registry gate", async () => {
+    // The button is NOT gated on the in-memory stoppable registry (that registry
+    // is wiped on every hub redeploy / cleared at turn-end, which silently killed
+    // the button). Authz is requestStop's ownership check. So a re-tap by the
+    // owner simply re-issues cancel — harmless/idempotent at the CLI.
     state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_stop2" } as any;
     state.channelSends = [];
-    const { rememberStoppable, _resetStoppableForTests } = await import("../src/telegram/stop.ts");
-    _resetStoppableForTests();
-    rememberStoppable("sess_stop2", LINKED_USER_ID, { chatId: LINKED_CHAT, messageId: 50 });
 
     await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 810, chatId: LINKED_CHAT, data: "sx:sess_stop2" }));
     const res2 = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 811, chatId: LINKED_CHAT, data: "sx:sess_stop2" }));
     const body2 = await res2.json();
-    expect(body2.outcome).toBe("callback_stop_stale");
-    expect(state.channelSends).toHaveLength(1); // only the first tap sent a cancel
+    expect(body2.outcome).toBe("callback_stop_ok");
+    expect(state.channelSends).toHaveLength(2); // owner re-stops; both taps forward cancel
   });
 
-  test("fail-closed: 🛑 tap by a non-fanned user cannot stop (no cancel)", async () => {
-    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_stop3" } as any;
+  test("fail-closed: 🛑 tap on a session the user does NOT own → denied, no cancel", async () => {
+    // Ownership is enforced by requestStop → getSession(sessionId, userId): the
+    // mock returns a row only when sessionId === the user's default. A foreign
+    // sessionId on the wire resolves to null → not_authorized, no cancel sent.
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_mine" } as any;
     state.channelSends = [];
-    const { rememberStoppable, _resetStoppableForTests } = await import("../src/telegram/stop.ts");
-    _resetStoppableForTests();
-    // The button was fanned to a DIFFERENT user; LINKED_USER_ID is not registered.
-    rememberStoppable("sess_stop3", "SOME-OTHER-USER", { chatId: 12345, messageId: 50 });
 
-    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 820, chatId: LINKED_CHAT, data: "sx:sess_stop3" }));
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 820, chatId: LINKED_CHAT, data: "sx:sess_foreign" }));
     const body = await res.json();
-    expect(body.outcome).toBe("callback_stop_stale");
+    expect(body.outcome).toBe("callback_stop_denied");
     expect(state.channelSends).toHaveLength(0);
   });
 

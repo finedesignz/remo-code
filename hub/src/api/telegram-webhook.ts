@@ -74,7 +74,7 @@ import {
   parsePermissionCallback,
   takePendingPrompt,
 } from "../telegram/approvals.ts";
-import { parseStopCallback, takeStoppable, requestStop } from "../telegram/stop.ts";
+import { parseStopCallback, requestStop, forgetStoppable } from "../telegram/stop.ts";
 import { getChannel } from "../ws/registry.ts";
 import { log } from "../observability/logger.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
@@ -524,32 +524,34 @@ async function handlePermissionCallback(
 }
 
 /**
- * Resolve a 🛑 Stop inline-button tap. Two-layer fail-closed authz:
- *   1. `takeStoppable(sessionId, user.id)` — the tapping user must be one the
- *      working message was fanned to (server-side registry; take-once). The
- *      sessionId arrives on the callback wire only to LOCATE the entry.
- *   2. `requestStop` re-verifies the user OWNS the session before sending cancel.
- * Edits the working message to "⏹ Stopped." and answers the callback on every
- * branch. A second tap (already resolved) is a benign no-op.
+ * Resolve a 🛑 Stop inline-button tap.
+ *
+ * Authz is the ownership check inside `requestStop` (`getSession(sessionId,
+ * userId)`) — the tapping `user` is resolved server-side upstream from the
+ * linked chat, never from the wire, and a forged/foreign sessionId fails closed
+ * as `not_authorized`.
+ *
+ * We intentionally do NOT gate on the in-memory `takeStoppable` registry. That
+ * registry is wiped on every hub redeploy and cleared at turn-end, which made
+ * the button dead ("already stopped or expired") even for a live, owned session
+ * while `/stop` kept working — the registry added fragility for no security gain
+ * (ownership is already enforced). `cb.message` carries chat/message id for the
+ * edit, so the registry isn't needed here at all. Answers the callback on every
+ * branch; a double-tap just calls `requestStop` twice (idempotent — the second
+ * lands as "offline"/no-op).
  */
 async function handleStopCallback(
   cb: CallbackQueryT,
   user: TelegramUserRow,
   stop: { sessionId: string },
 ): Promise<{ outcome: string }> {
-  // Layer 1: registry membership (authz + take-once). Foreign/forged sessionId
-  // or a second tap finds no entry → benign "already stopped".
-  const ctx = takeStoppable(stop.sessionId, user.id);
-  if (!ctx) {
-    await safeAnswerCallback(cb.id, { text: "Already stopped or expired.", show_alert: false });
-    return { outcome: "callback_stop_stale" };
-  }
-
-  // Layer 2: ownership-checked cancel via the shared helper.
   const result = await requestStop({ sessionId: stop.sessionId, userId: user.id });
+  // Best-effort: drop any registry entry so the working message's button is inert
+  // on a later tap (the message gets edited to "⏹ Stopped." below).
+  forgetStoppable(stop.sessionId);
 
-  const chatId = cb.message?.chat.id ?? ctx.chatId;
-  const messageId = cb.message?.message_id ?? ctx.messageId;
+  const chatId = cb.message?.chat.id;
+  const messageId = cb.message?.message_id;
 
   if (result === "stopped") {
     await safeAnswerCallback(cb.id, { text: "⏹ Stopped" });

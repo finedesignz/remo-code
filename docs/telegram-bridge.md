@@ -310,11 +310,16 @@ untouched (cancel only halts, it never dispatches).
   raw-body / constant-time-secret / mount-order discipline intact. `parseStopCallback`
   decodes `sx:<sessionId>`; the tapping user is resolved server-side via
   `getUserByTelegramChatId` (**never** trusted from the wire).
-- **Two-layer fail-closed authz.** (1) `takeStoppable(sessionId, userId)` returns a
-  ctx only if THAT user was fanned the working message (take-once — a second tap, or
-  a tap from an unrelated chat, finds nothing → benign "Already stopped"). (2)
-  `requestStop` re-verifies the user OWNS the session (`getSession`) before sending
-  cancel — a foreign/forged `sessionId` on the wire resolves to no row → `not_authorized`.
+- **Fail-closed authz (ownership, not registry).** The 🛑 tap is authorized purely by
+  `requestStop` re-verifying the user OWNS the session (`getSession(sessionId, userId)`)
+  before sending cancel — a foreign/forged `sessionId` on the wire resolves to no row →
+  `not_authorized`. The tapping user is resolved server-side (`getUserByTelegramChatId`),
+  never from the wire. The button does **NOT** gate on the in-memory stop registry:
+  that `Map` is wiped on every hub redeploy and cleared at turn-end, which silently
+  killed the button ("Already stopped or expired" for a live, owned session) while
+  `/stop` kept working. The registry now only tracks `{chatId, messageId}` for the
+  working-message edit lifecycle; `forgetStoppable` is best-effort cleanup. A double-tap
+  simply re-issues cancel (idempotent at the CLI).
 - **`/stop` target.** Resolves the user's effective default (a live explicit/auto
   default, else the open orchestrator), then calls the same `requestStop`. Reply:
   `⏹ Stopped <short-id>`, or `No active session.` when there's no live/owned target.
