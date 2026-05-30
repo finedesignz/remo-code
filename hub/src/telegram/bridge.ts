@@ -33,11 +33,15 @@
 
 import { config } from "../config.ts";
 import { onAssistantMessageFinal, type AssistantMessageFinalEvent } from "../events/assistant-events.ts";
+import { onPermissionPending, type PermissionPendingEvent } from "../events/permission-events.ts";
 import { getUsersWithTelegramDefaultSession } from "../db/dal.ts";
-import { sendMessage } from "./client.ts";
+import { sendMessage, sendMessageWithKeyboard, setMyCommands } from "./client.ts";
+import { BOT_COMMANDS } from "./commands.ts";
+import { rememberPendingPrompt, permissionCallbackData } from "./approvals.ts";
 
 let started = false;
 let unsubscribe: (() => void) | null = null;
+let unsubscribePermission: (() => void) | null = null;
 
 // Per-chat serial queue. Key = chat_id (stringified to dodge bigint vs number
 // equality surprises). Value = the tail Promise; new sends chain onto it.
@@ -93,6 +97,70 @@ async function onFinal(e: AssistantMessageFinalEvent): Promise<void> {
   }
 }
 
+/** Best-effort one-line preview of a tool input for the approval prompt. */
+function previewToolInput(input: unknown): string {
+  if (input == null) return "";
+  try {
+    const obj = input as Record<string, unknown>;
+    const cmd = obj.command ?? obj.file_path ?? obj.path ?? obj.url;
+    if (typeof cmd === "string") return cmd.length > 200 ? cmd.slice(0, 199) + "…" : cmd;
+    const json = JSON.stringify(input);
+    return json.length > 200 ? json.slice(0, 199) + "…" : json;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * A runner raised a permission prompt. Surface it inline (Approve/Deny) to every
+ * user whose Telegram default session is the emitting session, and record the
+ * pending prompt so the webhook callback can resolve it.
+ */
+async function onPermissionPendingEvent(e: PermissionPendingEvent): Promise<void> {
+  let users: Array<{ id: string; telegram_chat_id: string | number }>;
+  try {
+    users = await getUsersWithTelegramDefaultSession(e.sessionId);
+  } catch (err: any) {
+    console.warn(`[telegram-bridge] permission DAL lookup failed session=${e.sessionId}: ${err?.message ?? err}`);
+    return;
+  }
+  if (users.length === 0) return;
+
+  const preview = previewToolInput(e.toolInput);
+  const text =
+    `🔐 Approval needed — *${e.toolName}*` +
+    (preview ? `\n\n\`${preview}\`` : "") +
+    `\n\nApprove this action?`;
+  const keyboard = [[
+    { text: "✅ Approve", callback_data: permissionCallbackData(e.requestId, "approve") },
+    { text: "🚫 Deny", callback_data: permissionCallbackData(e.requestId, "deny") },
+  ]];
+
+  for (const u of users) {
+    const chatId = u.telegram_chat_id;
+    if (chatId === null || chatId === undefined) continue;
+    void enqueueForChat(chatId, async () => {
+      try {
+        const sent = await sendMessageWithKeyboard(chatId as number | string, text, keyboard);
+        // Record the pending prompt so the callback can resolve it. We bind the
+        // prompt to THIS user so a foreign chat can't resolve it.
+        rememberPendingPrompt(e.requestId, {
+          sessionId: e.sessionId,
+          userId: u.id,
+          chatId,
+          messageId: sent?.message_id ?? 0,
+          toolName: e.toolName,
+          createdAtMs: Date.now(),
+        });
+      } catch (err: any) {
+        console.warn(
+          `[telegram-bridge] permission prompt send failed chat=${chatKey(chatId)} session=${e.sessionId}: ${err?.message ?? err}`,
+        );
+      }
+    });
+  }
+}
+
 /**
  * Boot the bridge. Idempotent. No-op when `TELEGRAM_BOT_TOKEN` is unset.
  * Call once from `hub/src/index.ts` after DB init.
@@ -105,7 +173,13 @@ export function startTelegramBridge(): void {
     return;
   }
   unsubscribe = onAssistantMessageFinal(onFinal);
+  unsubscribePermission = onPermissionPending(onPermissionPendingEvent);
   started = true;
+  // Register the slash-command menu so typing `/` shows a popup. Best-effort,
+  // fire-and-forget — a transient failure must not block bridge startup.
+  void setMyCommands(BOT_COMMANDS as Array<{ command: string; description: string }>).catch((err: any) => {
+    console.warn(`[telegram-bridge] setMyCommands failed: ${err?.message ?? err}`);
+  });
   console.log("[telegram-bridge] outbound bridge started");
 }
 
@@ -114,6 +188,10 @@ export function _stopTelegramBridgeForTests(): void {
   if (unsubscribe) {
     unsubscribe();
     unsubscribe = null;
+  }
+  if (unsubscribePermission) {
+    unsubscribePermission();
+    unsubscribePermission = null;
   }
   started = false;
   chatQueues.clear();

@@ -129,11 +129,12 @@ export async function sendMessageWithKeyboard(
   text: string,
   inlineKeyboard: InlineKeyboard,
   opts: SendMessageOptions = {},
-): Promise<void> {
+): Promise<{ message_id: number } | void> {
   const token = tokenOrThrow();
   const url = `${API_BASE}/bot${token}/sendMessage`;
   const chunks = splitForTelegram(text);
   if (chunks.length === 0) chunks.push("");
+  let lastResult: { message_id: number } | undefined;
   for (let i = 0; i < chunks.length; i++) {
     const isLast = i === chunks.length - 1;
     const body: Record<string, unknown> = {
@@ -153,7 +154,20 @@ export async function sendMessageWithKeyboard(
       const respBody = await res.text().catch(() => "");
       throw new TelegramClientError(res.status, respBody);
     }
+    if (isLast) {
+      // Return the sent message_id so callers (the inline-approval prompt) can
+      // edit it after a decision. Best-effort — a parse failure just yields void.
+      try {
+        const json = (await res.json()) as { result?: { message_id?: number } };
+        if (typeof json.result?.message_id === "number") {
+          lastResult = { message_id: json.result.message_id };
+        }
+      } catch {
+        /* swallow — message_id is non-essential for non-approval callers */
+      }
+    }
   }
+  return lastResult;
 }
 
 /**
@@ -239,6 +253,31 @@ export async function editMessageReplyMarkup(
   if (!res.ok) {
     const respBody = await res.text().catch(() => "");
     throw new TelegramClientError(res.status, respBody);
+  }
+}
+
+/**
+ * Register the bot's command list with Telegram so typing `/` shows a popup
+ * menu in the client. Idempotent on Telegram's side — calling repeatedly with
+ * the same list is a no-op. Call ONCE at bridge startup.
+ *
+ * `commands` is `[{ command, description }]`; `command` must be 1–32 chars,
+ * lowercase letters/digits/underscores, NO leading slash (Telegram adds it).
+ */
+export async function setMyCommands(
+  commands: Array<{ command: string; description: string }>,
+): Promise<void> {
+  const token = tokenOrThrow();
+  const url = `${API_BASE}/bot${token}/setMyCommands`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ commands }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new TelegramClientError(res.status, body);
   }
 }
 

@@ -170,10 +170,12 @@ Unknown command from a linked chat → `Unknown command. /help for list.`
 | `s:<session_id>` | UUID of the session | Set default session for this Telegram user **as an EXPLICIT choice** (`telegram_default_explicit=true`). Sticks until the user switches; never auto-overridden by the orchestrator preference. |
 | `s:__orchestrator__` | Sentinel (not a real id) | The synthetic root-orchestrator row (shown when no orchestrator session exists yet). Calls `launchOrchestrator` directly, then pins the launched session id **explicitly**. On no online supervisor → friendly reply, no pin. |
 | `p:<offset>` | Non-negative integer | Paginate the session list to a new offset. Snapped to the nearest 20-multiple via `snapOffsetToPage` so stale keyboards from a prior page-size are still safe. |
+| `pa:<request_id>` | Runner permission request id | **Approve** a pending permission/approval prompt (see "Inline approval prompts" below). Defined in `hub/src/telegram/approvals.ts`. |
+| `pd:<request_id>` | Runner permission request id | **Deny** a pending permission/approval prompt. |
 
 **Authorization on every callback** — `s:<session_id>` is gated on `getSession(sessionId, userId)`. A user can't spoof another user's session by guessing the UUID; the denial path replies `Not allowed` with `show_alert: true`. Unlinked callbacks are silently dropped (matches the unlinked-text-message path). The `s:__orchestrator__` sentinel bypasses `getSession` (no real row) and is gated by `launchOrchestrator`'s own `orchestrator_enabled` check.
 
-**Audit + dedupe** — every callback gets a `telegram_inbound_log` row keyed by `(chat_id, update_id)` exactly like inbound messages. Duplicate Telegram retries short-circuit to `{ deduped: true }`. Outcomes: `callback_session_set`, `callback_orchestrator_launched`, `callback_session_denied`, `callback_paginate`, `callback_unknown`, `callback_silent_drop_unlinked`.
+**Audit + dedupe** — every callback gets a `telegram_inbound_log` row keyed by `(chat_id, update_id)` exactly like inbound messages. Duplicate Telegram retries short-circuit to `{ deduped: true }`. Outcomes: `callback_session_set`, `callback_orchestrator_launched`, `callback_session_denied`, `callback_paginate`, `callback_unknown`, `callback_silent_drop_unlinked`, `callback_permission_approved`, `callback_permission_denied`, `callback_permission_stale`, `callback_permission_denied_auth`, `callback_permission_offline`.
 
 **Pagination resilience** — `safeEditMessageText` first tries `editMessageText` (edits the message in-place). Telegram's `"message is not modified"` 400 is a benign no-op. **Any OTHER failure** (parse/encoding edge case, transient 400, message-too-old-to-edit) is logged AND **falls back to a fresh `sendMessage`/`sendMessageWithKeyboard`** so the page still renders — the picker never silently "freezes" on a tapped `Next`/`Prev`. `answerCallbackQuery` always fires so the button never spins.
 
@@ -193,6 +195,23 @@ Unknown command from a linked chat → `Unknown command. /help for list.`
 6. **Orchestrator hint** — when the user has zero `is_orchestrator` rows AND the feature is disabled, the picker text appends `💡 Pin a root orchestrator from Settings → Connections for cross-repo coordination.`
 
 The filter is implemented in `applySidebarParityFilter` (pure, unit-testable); the orchestrator-visibility injection lives in `listUserSessionsForPicker`.
+
+### Slash-command menu (setMyCommands)
+
+On bridge startup (`startTelegramBridge()` in `hub/src/telegram/bridge.ts`), the hub calls Telegram's [`setMyCommands`](https://core.telegram.org/bots/api#setmycommands) **once** so typing `/` in the chat shows the command popup. The list is the single source of truth `BOT_COMMANDS` in `hub/src/telegram/commands.ts` — the SAME commands the webhook's linked-command switch handles (`/list`, `/session`, `/status`, `/doctor`, `/help`); no invented entries. The call is fire-and-forget and gated on `config.telegram.botToken` (no token → bridge is a no-op, no `setMyCommands`). A transient failure is logged and never blocks startup; Telegram treats a re-registration of the same list as idempotent.
+
+### Inline approval prompts
+
+When a Telegram-driven Claude session hits a tool **permission/approval** prompt (`can_use_tool` → the supervisor's `permission_request`), the bridge surfaces it inline instead of letting the session block silently:
+
+1. `hub/src/ws/agent.ts` already broadcasts `permission_request` to web subscribers. It now ALSO emits a `permission_request:pending` event on the dedicated bus `hub/src/events/permission-events.ts` (same isolation discipline as the `assistant_message:final` bus — a listener throw can't tear down the WS handler).
+2. The bridge subscribes (`onPermissionPendingEvent` in `bridge.ts`). For every user whose `telegram_default_session_id` matches the emitting session (reusing `getUsersWithTelegramDefaultSession`), it sends an inline keyboard `[✅ Approve] [🚫 Deny]` with `callback_data` `pa:<request_id>` / `pd:<request_id>`, plus a one-line preview of the tool input (e.g. the Bash `command`).
+3. It records the pending prompt in `hub/src/telegram/approvals.ts` keyed by `request_id` → `{ sessionId, userId, chatId, messageId, toolName }`. **Why a server-side map and not callback_data:** Telegram caps `callback_data` at 64 bytes — too small for session UUID + request UUID + a user binding. The map keeps `callback_data` tiny AND the entry's `userId` enforces authorization.
+4. On a tap, the webhook's `handlePermissionCallback` looks up + removes the prompt (resolved exactly once), verifies it belongs to the tapping user, then forwards `{ type: "permission_response", session_id, request_id, approved }` onto the session's **agent socket** via `getChannel(sessionId).ws.send(...)` — the exact frame the web client sends. It edits the prompt message to `✅ Approved — <tool>` / `🚫 Denied — <tool>` and drops the buttons. `answerCallbackQuery` fires on every branch.
+
+**Authorization + edge cases (all answer the callback):** foreign user → `Not allowed` (`callback_permission_denied_auth`, nothing sent to the agent); unknown/expired `request_id` → `This prompt already expired or was answered.` (`callback_permission_stale`); session socket gone → `Session is offline — couldn't deliver.` (`callback_permission_offline`). Prompts expire after `PROMPT_TTL_MS` (10 min) and are pruned lazily on each remember.
+
+**No new dispatch path.** Inline approval forwards a control frame on an existing agent socket; it does NOT route a user→session message and therefore does NOT (and must not) touch the cost-cap dispatch pipeline — it's a response to a runner-initiated prompt, not new traffic.
 
 ### Pagination edits
 
@@ -301,8 +320,10 @@ has soaked. Until then, both code paths coexist.
 
 - `hub/src/api/telegram-webhook.ts` — public ingress, URL-path secret, raw-body-before-parse, zod-validated `Update` envelope, audit-row append, command vs dispatch routing.
 - `hub/src/api/telegram.ts` — authed REST: `GET /status`, `POST /link-code`, `DELETE /link`, `PUT /default-session`. Cookie auth + CSRF double-submit (Phase 07 pattern).
-- `hub/src/telegram/client.ts` — `sendMessage` / `getFile` / `getFileContent`, `escapeMarkdownV2`, `splitForTelegram`. 10s `AbortSignal.timeout`. Per-chat outbound serial queue lives here.
-- `hub/src/telegram/commands.ts` — `parse(text)` + handlers for `/start` `/session` `/list` `/help`.
+- `hub/src/telegram/client.ts` — `sendMessage` / `sendMessageWithKeyboard` (returns `message_id`) / `editMessageText` / `answerCallbackQuery` / `setMyCommands` / `getFile`, `escapeMarkdownV2`, `splitForTelegram`. 10s `AbortSignal.timeout`. Per-chat outbound serial queue lives in `bridge.ts`.
+- `hub/src/telegram/commands.ts` — `parse(text)` + handlers for `/start` `/session` `/list` `/status` `/doctor` `/help`; `BOT_COMMANDS` (single source of truth for the slash menu + `/help`).
+- `hub/src/telegram/approvals.ts` — inline-approval registry (`rememberPendingPrompt`/`takePendingPrompt`, TTL-pruned) + `pa:`/`pd:` callback_data codec. **(new — Fix C)**
+- `hub/src/events/permission-events.ts` — internal `EventEmitter` for `permission_request:pending`. Additive — does not change the WS broadcast path. **(new — Fix C)**
 - `hub/src/telegram/dispatch.ts` — inbound → session dispatch; thin adapter over the shared `hub/src/dispatch/` pipeline (`store:null`, gates `[thresholdGate, dailyCostCapGate]`, token `tg:<chat>:<update>`, grace-backed offline replay). Maps `DispatchOutcome` → Telegram replies: `skipped`→cost-capped, `dropped_busy`→session busy, `parked_offline`→buffered/agent_offline.
 - `hub/src/telegram/bridge.ts` — outbound subscriber on `assistant_message:final`. Default-session match gate. Errors swallowed.
 - `hub/src/telegram/link-codes.ts` — 8-char Crockford base32 generator, single-active-per-user, single-use consume, constant-time compare.
@@ -315,7 +336,9 @@ has soaked. Until then, both code paths coexist.
 - `hub/src/db/dal.ts` — Telegram DAL helpers (folded into the existing dal module, not a separate `telegram-dal.ts` as the plan envisioned — deviation noted in SUMMARY): `getUserByTelegramChatId`, `getUserByLinkCode`, `setLinkCode`, `linkChatId`, `unlinkChatId`, `setDefaultSession`, `getTelegramStatus`, `appendInboundLog`, `trimInboundLog`, `getUsersWithTelegramDefaultSession`.
 - `hub/src/csrf.ts` — Telegram REST routes covered by the existing double-submit middleware (no new exclusions).
 - `hub/src/index.ts` — mount `telegram-webhook.ts` AHEAD of JWT + license + CSRF catch-alls; mount `telegram.ts` inside; start the outbound bridge at boot.
-- `hub/src/ws/agent.ts` — emit `assistant_message:final` on the internal event bus when a session run finalizes. Additive only.
+- `hub/src/ws/agent.ts` — emit `assistant_message:final` on the internal event bus when a session run finalizes; **also emit `permission_request:pending` when a runner raises a permission prompt (Fix C)**. Additive only.
+- `hub/src/api/telegram-webhook.ts` — **(Fix C)** `handlePermissionCallback` resolves `pa:`/`pd:` taps → forwards `permission_response` on the agent socket; **(Fix B)** picker re-render uses `PAGE_SIZE` (was a hardcoded `20`).
+- `hub/src/telegram/bridge.ts` — **(Fix A)** `setMyCommands(BOT_COMMANDS)` on startup; **(Fix C)** subscribes to `permission_request:pending` → sends the Approve/Deny keyboard + records the pending prompt.
 
 ### New (web)
 
@@ -328,6 +351,9 @@ has soaked. Until then, both code paths coexist.
 - `hub/test/telegram-webhook.test.ts` — secret mismatch (401), `/start` link success + expired, unlinked silent-drop, command dispatch, `update_id` dedupe, photo, oversized photo, voice/video/sticker rejection.
 - `hub/test/telegram-bridge.test.ts` — `assistant_message:final` triggers send; non-final events ignored; 6000-char → 2 chunks; default-session mismatch → no send; broken `sendMessage` does not throw.
 - `hub/test/telegram-api.test.ts` — REST: link-code rotation, unlink, default-session, CSRF reject, cookie-auth reject.
+- `hub/test/telegram-approvals.test.ts` — **(Fix C)** approvals registry (remember/take once, expiry) + `pa:`/`pd:` codec round-trip + malformed rejection.
+- `hub/test/telegram-bridge.test.ts` (extended) — **(Fix A)** `setMyCommands` fires on startup with the real handled commands; **(Fix C)** `permission_request:pending` → inline Approve/Deny keyboard + recorded prompt; non-default session → no-op.
+- `hub/test/telegram-webhook.test.ts` (extended) — **(Fix B)** `set_session` / paginate / unknown callbacks; **(Fix C)** approve/deny forward the `permission_response` frame, stale/foreign/offline edge cases.
 
 ### New (docs)
 

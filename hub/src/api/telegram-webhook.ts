@@ -66,7 +66,13 @@ import {
   renderPickerText,
   parseCallbackData,
   snapOffsetToPage,
+  PAGE_SIZE,
 } from "../telegram/session-picker.ts";
+import {
+  parsePermissionCallback,
+  takePendingPrompt,
+} from "../telegram/approvals.ts";
+import { getChannel } from "../ws/registry.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
 import { runDoctor, bufferReplay, hasBufferedReplay } from "../telegram/doctor.ts";
 import { runStatus } from "../telegram/status.ts";
@@ -450,6 +456,62 @@ async function safeEditReplyMarkup(
 }
 
 /**
+ * Resolve an inline permission prompt (Approve / Deny tap). Looks up the pending
+ * prompt by request_id, enforces that it belongs to THIS user, forwards a
+ * `permission_response` onto the session's agent socket, and edits the prompt
+ * message to reflect the decision. answerCallbackQuery fires on every branch.
+ */
+async function handlePermissionCallback(
+  cb: CallbackQueryT,
+  user: TelegramUserRow,
+  perm: { requestId: string; approved: boolean },
+): Promise<{ outcome: string }> {
+  const pending = takePendingPrompt(perm.requestId);
+  if (!pending) {
+    // Already resolved, expired, or unknown — tell the user, no state change.
+    await safeAnswerCallback(cb.id, { text: "This prompt already expired or was answered.", show_alert: false });
+    return { outcome: "callback_permission_stale" };
+  }
+  // Authorization: the prompt MUST belong to the tapping user.
+  if (pending.userId !== user.id) {
+    await safeAnswerCallback(cb.id, { text: "Not allowed", show_alert: true });
+    return { outcome: "callback_permission_denied_auth" };
+  }
+
+  // Forward the decision to the agent socket (same frame the web client sends).
+  const channel = getChannel(pending.sessionId);
+  if (!channel) {
+    await safeAnswerCallback(cb.id, { text: "Session is offline — couldn't deliver.", show_alert: true });
+    return { outcome: "callback_permission_offline" };
+  }
+  try {
+    channel.ws.send(
+      JSON.stringify({
+        type: "permission_response",
+        session_id: pending.sessionId,
+        request_id: perm.requestId,
+        approved: perm.approved,
+      }),
+    );
+  } catch (err: any) {
+    console.warn("[telegram-webhook] permission_response send failed:", err?.message);
+    await safeAnswerCallback(cb.id, { text: "Couldn't deliver the decision. Try again.", show_alert: true });
+    return { outcome: "callback_permission_send_failed" };
+  }
+
+  await safeAnswerCallback(cb.id, { text: perm.approved ? "✅ Approved" : "🚫 Denied" });
+
+  // Edit the prompt to reflect the decision + drop the buttons.
+  const chatId = cb.message?.chat.id ?? pending.chatId;
+  const messageId = cb.message?.message_id ?? pending.messageId;
+  if (chatId !== undefined && messageId) {
+    const verdict = perm.approved ? "✅ Approved" : "🚫 Denied";
+    await safeEditMessageText(chatId, messageId, `${verdict} — ${pending.toolName}`, null);
+  }
+  return { outcome: perm.approved ? "callback_permission_approved" : "callback_permission_denied" };
+}
+
+/**
  * Handle a callback_query payload (inline-keyboard button tap).
  * Returns an audit outcome string. Authorization is enforced on every branch:
  * unlinked chat → silent drop, foreign session_id → denial toast.
@@ -462,6 +524,12 @@ async function handleCallbackQuery(
   if (!user) {
     await safeAnswerCallback(cb.id);
     return { outcome: "callback_silent_drop_unlinked" };
+  }
+
+  // ── Inline-approval branch (Approve/Deny on a permission prompt) ──────────
+  const perm = parsePermissionCallback(cb.data);
+  if (perm) {
+    return await handlePermissionCallback(cb, user, perm);
   }
 
   const action = parseCallbackData(cb.data);
@@ -534,7 +602,7 @@ async function handleCallbackQuery(
         // Keep the same page the user was on — find the offset that contains
         // the picked session, fall back to 0.
         const idx = rows.findIndex((r) => r.id === action.sessionId);
-        const offset = idx >= 0 ? Math.floor(idx / 20) * 20 : 0;
+        const offset = idx >= 0 ? Math.floor(idx / PAGE_SIZE) * PAGE_SIZE : 0;
         const keyboard = buildSessionKeyboard({ rows, offset, defaultId: action.sessionId });
         const text = renderPickerText({ total, offset, defaultId: action.sessionId, rows });
         await safeEditMessageText(chatId, messageId, text, keyboard);

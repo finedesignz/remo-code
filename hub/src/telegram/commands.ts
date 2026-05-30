@@ -65,6 +65,20 @@ export function parseCommand(text: string | undefined | null): ParsedCommand {
   }
 }
 
+/**
+ * Canonical bot command list — the SINGLE source of truth for both the `/help`
+ * text and Telegram's `setMyCommands` slash-menu popup. Order is the menu order.
+ * `command` has NO leading slash (Telegram adds it). Keep in lockstep with the
+ * commands `parseCommand` recognizes + the webhook's LINKED command switch.
+ */
+export const BOT_COMMANDS: ReadonlyArray<{ command: string; description: string }> = [
+  { command: "list", description: "Pick your default session (tap-to-select buttons)" },
+  { command: "session", description: "Set default session by id-prefix" },
+  { command: "status", description: "Show link, default session, supervisor & daily cost" },
+  { command: "doctor", description: "Diagnose & auto-fix an offline supervisor/session" },
+  { command: "help", description: "Show the command reference" },
+];
+
 export const HELP_TEXT = [
   "Remo Code Telegram bridge — commands:",
   "",

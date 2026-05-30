@@ -37,6 +37,10 @@ const state: {
   sentMessages: Array<{ chat: number | string; text: string }>;
   dispatchOutcome: DispatchKind;
   dispatchCalls: any[];
+  // When set, the ws/registry mock returns a channel whose send() pushes here.
+  channelSends: Array<{ sessionId: string; frame: string }> | null;
+  // Recorded editMessageText calls (keyboard re-renders / approval verdicts).
+  editTextCalls: Array<{ chatId: number | string; messageId: number; text: string }>;
 } = {
   linkCodeUser: null,
   user: null,
@@ -45,6 +49,8 @@ const state: {
   sentMessages: [],
   dispatchOutcome: "dispatched",
   dispatchCalls: [],
+  channelSends: null,
+  editTextCalls: [],
 };
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
@@ -119,7 +125,8 @@ mock.module("../src/ws/supervisor-registry.ts", () => ({
   updateSupervisorState: async () => {},
 }));
 mock.module("../src/ws/registry.ts", () => ({
-  getChannel: () => undefined,
+  getChannel: (sessionId: string) =>
+    state.channelSends ? { ws: { send: (s: string) => state.channelSends!.push({ sessionId, frame: s }) } } : undefined,
   broadcastToSubscribers: () => {},
 }));
 mock.module("../src/sessions/budget.ts", () => ({
@@ -138,7 +145,9 @@ mock.module("../src/telegram/client.ts", () => ({
     state.sentMessages.push({ chat: chatId, text });
   },
   answerCallbackQuery: async () => {},
-  editMessageText: async () => {},
+  editMessageText: async (chatId: number | string, messageId: number, text: string) => {
+    state.editTextCalls.push({ chatId, messageId, text });
+  },
   editMessageReplyMarkup: async () => {},
   getFile: async (fileId: string) => ({ file_id: fileId, file_path: "photos/file.jpg", file_size: 1024 }),
   downloadFile: async (_fp: string) => new ArrayBuffer(8),
@@ -215,6 +224,8 @@ beforeEach(() => {
   state.sentMessages = [];
   state.dispatchOutcome = "dispatched";
   state.dispatchCalls = [];
+  state.channelSends = null;
+  state.editTextCalls = [];
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -369,5 +380,109 @@ describe("linked plain-text dispatch", () => {
     const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkUpdate({ update_id: 503, chatId: LINKED_CHAT, text: "queue me" }));
     expect(res.status).toBe(200);
     expect(state.sentMessages[0]?.text.toLowerCase()).toContain("busy");
+  });
+});
+
+// ── Callback-query (inline keyboard) flows ──────────────────────────────────
+
+function mkCallback(opts: { update_id: number; chatId: number; data: string; messageId?: number }) {
+  return {
+    update_id: opts.update_id,
+    callback_query: {
+      id: `cb-${opts.update_id}`,
+      from: { id: opts.chatId },
+      message: { message_id: opts.messageId ?? 50, chat: { id: opts.chatId } },
+      data: opts.data,
+    },
+  };
+}
+
+describe("repo navigator — session-picker callbacks (Fix B)", () => {
+  test("set_session callback sets the default + returns callback_session_set", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_abc" } as any;
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 600, chatId: LINKED_CHAT, data: "s:sess_abc" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_session_set");
+    expect(state.user?.telegram_default_session_id).toBe("sess_abc");
+  });
+
+  test("paginate callback returns callback_paginate (re-render best-effort)", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_abc" } as any;
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 601, chatId: LINKED_CHAT, data: "p:20" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_paginate");
+  });
+
+  test("unknown callback_data returns callback_unknown (still answered)", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: null } as any;
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 602, chatId: LINKED_CHAT, data: "zzz:garbage" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_unknown");
+  });
+});
+
+describe("inline approval callbacks (Fix C)", () => {
+  test("approve forwards permission_response{approved:true} to the agent socket", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_perm" } as any;
+    state.channelSends = [];
+    const { rememberPendingPrompt, _resetPendingPromptsForTests } = await import("../src/telegram/approvals.ts");
+    _resetPendingPromptsForTests();
+    rememberPendingPrompt("req-approve", {
+      sessionId: "sess_perm", userId: LINKED_USER_ID, chatId: LINKED_CHAT, messageId: 50, toolName: "Bash", createdAtMs: Date.now(),
+    });
+
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 700, chatId: LINKED_CHAT, data: "pa:req-approve" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_permission_approved");
+
+    expect(state.channelSends).toHaveLength(1);
+    const frame = JSON.parse(state.channelSends![0]!.frame);
+    expect(frame.type).toBe("permission_response");
+    expect(frame.session_id).toBe("sess_perm");
+    expect(frame.request_id).toBe("req-approve");
+    expect(frame.approved).toBe(true);
+    // Prompt is consumed (resolved exactly once).
+    const { takePendingPrompt } = await import("../src/telegram/approvals.ts");
+    expect(takePendingPrompt("req-approve")).toBeNull();
+  });
+
+  test("deny forwards approved:false", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_perm" } as any;
+    state.channelSends = [];
+    const { rememberPendingPrompt } = await import("../src/telegram/approvals.ts");
+    rememberPendingPrompt("req-deny", {
+      sessionId: "sess_perm", userId: LINKED_USER_ID, chatId: LINKED_CHAT, messageId: 50, toolName: "Write", createdAtMs: Date.now(),
+    });
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 701, chatId: LINKED_CHAT, data: "pd:req-deny" }));
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_permission_denied");
+    const frame = JSON.parse(state.channelSends![0]!.frame);
+    expect(frame.approved).toBe(false);
+  });
+
+  test("stale/unknown request_id replies stale, sends nothing to the agent", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_perm" } as any;
+    state.channelSends = [];
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 702, chatId: LINKED_CHAT, data: "pa:does-not-exist" }));
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_permission_stale");
+    expect(state.channelSends).toHaveLength(0);
+  });
+
+  test("foreign user cannot resolve another user's prompt", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_perm" } as any;
+    state.channelSends = [];
+    const { rememberPendingPrompt } = await import("../src/telegram/approvals.ts");
+    rememberPendingPrompt("req-foreign", {
+      sessionId: "sess_perm", userId: "SOME-OTHER-USER", chatId: LINKED_CHAT, messageId: 50, toolName: "Bash", createdAtMs: Date.now(),
+    });
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 703, chatId: LINKED_CHAT, data: "pa:req-foreign" }));
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_permission_denied_auth");
+    expect(state.channelSends).toHaveLength(0);
   });
 });
