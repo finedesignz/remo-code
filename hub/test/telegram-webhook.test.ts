@@ -430,7 +430,7 @@ describe("inline approval callbacks (Fix C)", () => {
     state.channelSends = [];
     const { rememberPendingPrompt, _resetPendingPromptsForTests } = await import("../src/telegram/approvals.ts");
     _resetPendingPromptsForTests();
-    rememberPendingPrompt("req-approve", {
+    rememberPendingPrompt("sess_perm", "req-approve", {
       sessionId: "sess_perm", userId: LINKED_USER_ID, chatId: LINKED_CHAT, messageId: 50, toolName: "Bash", createdAtMs: Date.now(),
     });
 
@@ -454,7 +454,7 @@ describe("inline approval callbacks (Fix C)", () => {
     state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_perm" } as any;
     state.channelSends = [];
     const { rememberPendingPrompt } = await import("../src/telegram/approvals.ts");
-    rememberPendingPrompt("req-deny", {
+    rememberPendingPrompt("sess_perm", "req-deny", {
       sessionId: "sess_perm", userId: LINKED_USER_ID, chatId: LINKED_CHAT, messageId: 50, toolName: "Write", createdAtMs: Date.now(),
     });
     const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 701, chatId: LINKED_CHAT, data: "pd:req-deny" }));
@@ -477,12 +477,15 @@ describe("inline approval callbacks (Fix C)", () => {
     state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_perm" } as any;
     state.channelSends = [];
     const { rememberPendingPrompt } = await import("../src/telegram/approvals.ts");
-    rememberPendingPrompt("req-foreign", {
+    rememberPendingPrompt("sess_perm", "req-foreign", {
       sessionId: "sess_perm", userId: "SOME-OTHER-USER", chatId: LINKED_CHAT, messageId: 50, toolName: "Bash", createdAtMs: Date.now(),
     });
     const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 703, chatId: LINKED_CHAT, data: "pa:req-foreign" }));
     const body = await res.json();
-    expect(body.outcome).toBe("callback_permission_denied_auth");
+    // Authorization now lives inside takePendingPrompt: an unauthorized user
+    // simply finds no entry bound to them → "stale". Still fails closed (no
+    // permission_response forwarded), which is the security-relevant assertion.
+    expect(body.outcome).toBe("callback_permission_stale");
     expect(state.channelSends).toHaveLength(0);
   });
 });

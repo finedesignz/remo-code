@@ -124,6 +124,95 @@ export async function sendMessage(
  * way as sendMessage, but the keyboard ONLY attaches to the LAST chunk
  * (Telegram supports one reply_markup per message).
  */
+/**
+ * Send `text` with MarkdownV2 parse_mode. If Telegram rejects the markup with
+ * a 400 (an unbalanced/unescaped reserved char makes it reject the WHOLE
+ * message), retry ONCE as plain text so a session is never silently dropped.
+ * Non-400 errors propagate (caller's queue swallows + logs).
+ *
+ * Callers are responsible for escaping any text that should render literally
+ * via `escapeMarkdownV2`; intentional markup (```code```, *bold*) is passed
+ * through by the caller assembling the message.
+ */
+export async function sendMessageMd(
+  chatId: number | string,
+  text: string,
+): Promise<{ message_id: number } | void> {
+  try {
+    return await sendMessageReturningId(chatId, text, { parse_mode: "MarkdownV2" });
+  } catch (err) {
+    if (err instanceof TelegramClientError && err.status === 400) {
+      // Markup rejected — fall back to plain text (strip nothing; Telegram
+      // renders the raw chars). Better an unformatted message than none.
+      return await sendMessageReturningId(chatId, text);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Like {@link sendMessage} but returns the message_id of the LAST chunk sent
+ * (parity with sendMessageWithKeyboard's return). Internal — callers use
+ * sendMessage / sendMessageMd.
+ */
+async function sendMessageReturningId(
+  chatId: number | string,
+  text: string,
+  opts: SendMessageOptions = {},
+): Promise<{ message_id: number } | void> {
+  const token = tokenOrThrow();
+  const url = `${API_BASE}/bot${token}/sendMessage`;
+  const chunks = splitForTelegram(text);
+  let last: { message_id: number } | undefined;
+  for (const chunk of chunks) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: chunk,
+        ...(opts.parse_mode ? { parse_mode: opts.parse_mode } : {}),
+        ...(opts.disable_web_page_preview ? { disable_web_page_preview: true } : {}),
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new TelegramClientError(res.status, body);
+    }
+    try {
+      const json = (await res.json()) as { result?: { message_id?: number } };
+      if (typeof json.result?.message_id === "number") last = { message_id: json.result.message_id };
+    } catch {
+      /* swallow — id is best-effort */
+    }
+  }
+  return last;
+}
+
+/**
+ * Send a Telegram chat action (e.g. "typing"). Expires after ~5s on Telegram's
+ * side, so callers refresh on an interval while a turn is active. Best-effort —
+ * errors are swallowed (a failed typing indicator must never affect delivery).
+ */
+export async function sendChatAction(
+  chatId: number | string,
+  action: "typing" = "typing",
+): Promise<void> {
+  const token = config.telegram.botToken;
+  if (!token) return;
+  try {
+    await fetch(`${API_BASE}/bot${token}/sendChatAction`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, action }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    /* swallow — typing indicator is non-essential */
+  }
+}
+
 export async function sendMessageWithKeyboard(
   chatId: number | string,
   text: string,
@@ -278,6 +367,29 @@ export async function setMyCommands(
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new TelegramClientError(res.status, body);
+  }
+}
+
+/**
+ * MarkdownV2 variant of {@link editMessageText} with a 400→plain-text fallback,
+ * mirroring {@link sendMessageMd}. Used by the streaming "working…" message which
+ * is edited repeatedly as a turn progresses. A "message is not modified" 400
+ * (identical text) is treated as success — it's a benign no-op edit.
+ */
+export async function editMessageTextMd(
+  chatId: number | string,
+  messageId: number,
+  text: string,
+): Promise<void> {
+  try {
+    await editMessageText(chatId, messageId, text, { parse_mode: "MarkdownV2" });
+  } catch (err) {
+    if (err instanceof TelegramClientError && err.status === 400) {
+      if (err.bodyPreview.includes("message is not modified")) return;
+      await editMessageText(chatId, messageId, text);
+      return;
+    }
+    throw err;
   }
 }
 

@@ -109,6 +109,10 @@ const telegramWebhookSecret = requireMinLenIfSet(
   16,
 );
 const telegramBotUsername = process.env.TELEGRAM_BOT_USERNAME || "";
+// Summarized streaming: one editable "working…" message per turn that collapses
+// tool-use lines to one-liners and finalizes with the assistant text. Default ON;
+// set TELEGRAM_SUMMARIZED_STREAMING=false to revert to a single final-blob send.
+const telegramSummarizedStreaming = process.env.TELEGRAM_SUMMARIZED_STREAMING !== "false";
 
 // B2 (obs): owner user_id for the hub's self-capture error_project row.
 // When unset, self-capture is inert (no row seeded, no hooks installed).
@@ -182,6 +186,7 @@ export const config = {
     botToken: telegramBotToken,
     webhookSecret: telegramWebhookSecret,
     botUsername: telegramBotUsername,
+    summarizedStreaming: telegramSummarizedStreaming,
   },
 
   // B4: observability bearer token (gates /healthz/deep + /metrics).

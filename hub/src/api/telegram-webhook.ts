@@ -466,16 +466,15 @@ async function handlePermissionCallback(
   user: TelegramUserRow,
   perm: { requestId: string; approved: boolean },
 ): Promise<{ outcome: string }> {
-  const pending = takePendingPrompt(perm.requestId);
+  // Authorization is enforced inside takePendingPrompt: it returns the entry only
+  // if THIS user is an authorized approver for (requestId). A shared default
+  // session that fanned the prompt to several users now resolves for whichever
+  // authorized user taps first (no last-write-wins clobber).
+  const pending = takePendingPrompt(perm.requestId, user.id);
   if (!pending) {
-    // Already resolved, expired, or unknown — tell the user, no state change.
+    // Already resolved, expired, unknown, or the tapping user isn't authorized.
     await safeAnswerCallback(cb.id, { text: "This prompt already expired or was answered.", show_alert: false });
     return { outcome: "callback_permission_stale" };
-  }
-  // Authorization: the prompt MUST belong to the tapping user.
-  if (pending.userId !== user.id) {
-    await safeAnswerCallback(cb.id, { text: "Not allowed", show_alert: true });
-    return { outcome: "callback_permission_denied_auth" };
   }
 
   // Forward the decision to the agent socket (same frame the web client sends).

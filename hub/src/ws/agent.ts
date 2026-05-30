@@ -388,6 +388,31 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
   // --- Agent activity events ---
   if (msg.type === 'thinking' || msg.type === 'tool_use' || msg.type === 'tool_result') {
     broadcastToSubscribers(sessionId, { ...msg })
+    // Fan tool_use out to server-side consumers (Telegram summarized streaming).
+    // tool_use ONLY — thinking/tool_result are intentionally not surfaced. A
+    // listener throw is isolated by the emitter so it can't tear down this WS
+    // handler. Dynamic import mirrors the assistant/permission emits below.
+    if (msg.type === 'tool_use') {
+      try {
+        const { emitSessionActivity } = await import('../events/session-activity-events.ts')
+        const input = (msg as any).input
+        let detail = ''
+        if (input && typeof input === 'object') {
+          const o = input as Record<string, unknown>
+          const v = o.command ?? o.file_path ?? o.path ?? o.url ?? o.pattern
+          if (typeof v === 'string') detail = v
+        }
+        emitSessionActivity({
+          sessionId,
+          userId: ws.data.userId!,
+          kind: 'tool_use',
+          toolName: (msg as any).tool ?? 'tool',
+          detail,
+        })
+      } catch (err: any) {
+        console.warn('[agent] emitSessionActivity failed', err?.message)
+      }
+    }
   }
 
   if (msg.type === 'text_delta') {
