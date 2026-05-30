@@ -35,6 +35,8 @@ const state: {
   insertedMessages: Array<{ sessionId: string; role: string; content: string }>
   online: Set<string>
   capExceeded: boolean
+  launchResult: any
+  launchCalls: Array<{ userId: string; sessionId: string }>
 } = {
   finalized: [],
   removed: [],
@@ -42,6 +44,10 @@ const state: {
   insertedMessages: [],
   online: new Set(['sess-1']),
   capExceeded: false,
+  // Default: host offline → maybeLaunchOfflineSession returns 'park'. Keeps the
+  // legacy manual-offline test (fail fast target_offline) intact.
+  launchResult: { ok: false, reason: 'no_online_supervisor' },
+  launchCalls: [],
 }
 
 // Mock the dispatcher's finalize/remove/getRunContext. finalizeRun is the seam
@@ -82,6 +88,15 @@ mock.module('../src/scheduler/context/runtime-context.ts', () => ({
   renderRuntimeContextBlock: () => '## RUNTIME CONTEXT\nrepo: demo/app',
 }))
 
+// Autostart launch helper — record calls + return the configured result so the
+// offline-session path is driven without DALs / live supervisors.
+mock.module('../src/telegram/launch.ts', () => ({
+  launchSessionForUser: async (args: { userId: string; sessionId: string }) => {
+    state.launchCalls.push(args)
+    return state.launchResult
+  },
+}))
+
 // Pass-through threshold; cost-cap toggled by state.capExceeded (IR-1 teeth).
 mock.module('../src/dispatch/gates.ts', () => ({
   thresholdGate: { name: 'threshold', async check() { return { ok: true } } },
@@ -96,6 +111,7 @@ mock.module('../src/dispatch/gates.ts', () => ({
 // Import AFTER mocks. Pipeline + adapter are REAL.
 const { sendAgentTask, isScheduledRunActive } = await import('../src/scheduler/senders/agent.ts')
 const { onSessionReply, _reset } = await import('../src/dispatch/pipeline.ts')
+const { getGraceBuffer } = await import('../src/dispatch/grace.ts')
 
 const TASK: any = { id: 'task-1', name: 'Nightly Sweep', task_type: 'dev', prompt: 'Continue.', payload: {} }
 const ctx = (over: any = {}) => ({
@@ -113,7 +129,10 @@ beforeEach(() => {
   state.insertedMessages = []
   state.online = new Set(['sess-1'])
   state.capExceeded = false
+  state.launchResult = { ok: false, reason: 'no_online_supervisor' }
+  state.launchCalls = []
   _reset()
+  getGraceBuffer()._reset()
 })
 
 describe('scheduler dispatch adapter — open→send→finalize lifecycle', () => {
@@ -201,13 +220,75 @@ describe('scheduler dispatch adapter — open→send→finalize lifecycle', () =
     expect(r2!.error).toBe('daily_cost_cap')
   })
 
-  test('manual run fails fast (target_offline) when the session is offline — no grace park', async () => {
+  test('manual run fails fast (target_offline) when session AND host are offline — no grace park', async () => {
     state.online = new Set() // sess-1 offline
+    state.launchResult = { ok: false, reason: 'no_online_supervisor' } // host offline too
     await sendAgentTask(TASK, ctx({ isManual: true }))
     expect(state.sentFrames).toHaveLength(0)
     const fin = state.finalized.find((f) => f.runId === 'run-1')
     expect(fin!.status).toBe('failed')
     expect(fin!.error).toBe('target_offline')
+  })
+
+  // ── Phase 14 autostart: offline session + online supervisor ─────────────────
+  test('offline session + online supervisor → launchSessionForUser fired, run parked (NOT target_offline)', async () => {
+    state.online = new Set() // session offline
+    state.launchResult = { ok: true, runId: 'launch-1', supervisorId: 'sup-1', hostname: 'box', repoPath: '/r' }
+
+    await sendAgentTask(TASK, ctx({ runId: 'run-1' }))
+
+    // Launch fired exactly once for this session.
+    expect(state.launchCalls).toEqual([{ userId: 'user-1', sessionId: 'sess-1' }])
+    // Nothing sent yet (session still offline) and the run is NOT finalized as
+    // target_offline — it's parked in grace awaiting the launched runner.
+    expect(state.sentFrames).toHaveLength(0)
+    expect(state.finalized.find((f) => f.runId === 'run-1')).toBeFalsy()
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
+  })
+
+  test('idempotent: a 2nd fire while a launch is pending does NOT double-launch or double-park', async () => {
+    state.online = new Set()
+    state.launchResult = { ok: true, runId: 'launch-1', supervisorId: 'sup-1', hostname: 'box', repoPath: '/r' }
+
+    await sendAgentTask(TASK, ctx({ runId: 'run-1' })) // launches + parks
+    await sendAgentTask(TASK, ctx({ runId: 'run-2' })) // launch already pending
+
+    // Only ONE session.start ever fired.
+    expect(state.launchCalls).toHaveLength(1)
+    // Only ONE grace entry (no double replay on reconnect).
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
+    // The 2nd fire is skipped with the informative launch_pending reason.
+    const r2 = state.finalized.find((f) => f.runId === 'run-2')
+    expect(r2!.status).toBe('skipped')
+    expect(r2!.error).toBe('launch_pending')
+  })
+
+  test('offline session + at_capacity → skipped with at_capacity (not target_offline), no park', async () => {
+    state.online = new Set()
+    state.launchResult = { ok: false, reason: 'at_capacity', running: 3, cap: 3 }
+
+    await sendAgentTask(TASK, ctx({ runId: 'run-1' }))
+
+    expect(state.launchCalls).toHaveLength(1)
+    expect(state.sentFrames).toHaveLength(0)
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(0)
+    const fin = state.finalized.find((f) => f.runId === 'run-1')
+    expect(fin!.status).toBe('skipped')
+    expect(fin!.error).toBe('at_capacity')
+  })
+
+  test('offline session + offline supervisor (scheduled) → still parks in grace (unchanged)', async () => {
+    state.online = new Set()
+    state.launchResult = { ok: false, reason: 'no_online_supervisor' }
+
+    await sendAgentTask(TASK, ctx({ runId: 'run-1' }))
+
+    expect(state.launchCalls).toHaveLength(1) // attempted, host offline
+    expect(state.sentFrames).toHaveLength(0)
+    // Falls through to dispatch() → parked in grace (TTL lapse later marks
+    // skipped/target_offline). Not finalized synchronously.
+    expect(state.finalized.find((f) => f.runId === 'run-1')).toBeFalsy()
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
   })
 
   test('no session id → failed (no_session_id)', async () => {
