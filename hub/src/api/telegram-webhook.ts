@@ -76,6 +76,7 @@ import {
 } from "../telegram/approvals.ts";
 import { parseStopCallback, takeStoppable, requestStop } from "../telegram/stop.ts";
 import { getChannel } from "../ws/registry.ts";
+import { log } from "../observability/logger.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
 import { runDoctor, bufferReplay, hasBufferedReplay } from "../telegram/doctor.ts";
 import { runStatus } from "../telegram/status.ts";
@@ -495,6 +496,15 @@ async function handlePermissionCallback(
         approved: perm.approved,
       }),
     );
+    // Audit: tool-permission grant/deny applied + delivered to the supervisor.
+    log.info("permission.grant_applied", {
+      session_id: pending.sessionId,
+      request_id: perm.requestId,
+      tool: pending.toolName,
+      approved: perm.approved,
+      source: "telegram",
+      user_id: user.id,
+    });
   } catch (err: any) {
     console.warn("[telegram-webhook] permission_response send failed:", err?.message);
     await safeAnswerCallback(cb.id, { text: "Couldn't deliver the decision. Try again.", show_alert: true });
