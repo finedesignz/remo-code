@@ -12,7 +12,7 @@
 import { OpenAPIHono, createRoute, z } from "@hono/zod-openapi";
 import { Scalar } from "@scalar/hono-api-reference";
 import { authMiddleware } from "../auth/middleware.ts";
-import { sumTodayCostForUser } from "../db/scheduled-tasks-dal.ts";
+import { getTodayTokenCostUsd } from "../db/token-usage-dal.ts";
 import { sql } from "../db/postgres.ts";
 import { getUserLicenseFields, getPendingPrompts, dismissLocalSession } from "../db/dal.ts";
 
@@ -29,7 +29,7 @@ const costTodayRoute = createRoute({
   tags: ["profile"],
   summary: "Today's spend + daily cost cap",
   description:
-    "Returns the authenticated user's scheduled-task spend so far today, their configured daily cap, and percent consumed. Used by the cost-cap UI banner.",
+    "Returns the authenticated user's real accumulated token spend so far today (the same figure the daily cost cap enforces — interactive, Telegram, webhook and scheduled-run turns), their configured daily cap, and percent consumed. Used by the cost-cap UI banner.",
   security: [{ bearerAuth: [] }],
   responses: {
     200: {
@@ -64,7 +64,7 @@ openapi.openapi(costTodayRoute, async (c) => {
   `;
   const cap = Number(rows[0]?.cap ?? 10);
   const tz = rows[0]?.timezone || "UTC";
-  const spent = await sumTodayCostForUser(userId, tz);
+  const spent = await getTodayTokenCostUsd(userId, tz);
   const percent = cap > 0 ? Math.min(100, (spent / cap) * 100) : 0;
   return c.json(
     {

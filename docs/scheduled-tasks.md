@@ -302,17 +302,30 @@ of fires.
 ## Daily cost cap
 
 Each user has `users.daily_cost_cap_usd` (default 10.0000). On every fire,
-the dispatcher calls `sumTodayCostForUser(userId, timezone)` and compares
-against the cap.
+the dispatcher delegates to the shared `isOverCostCap(userId, timezone)` in
+`hub/src/dispatch/gates.ts` (single source of truth) and compares against the cap.
 
+- **P3a (2026-05): the cap counts REAL accumulated token cost.** It now sums
+  `token_usage.cost_usd` for TODAY (the user's tz) via `getTodayTokenCostUsd`,
+  the SAME tz-day boundary `GET /api/usage/cost` "today" uses. That ledger
+  captures EVERY turn emitting a `usage_event` over `/ws/agent` — interactive
+  chat, Telegram, webhooks **and** scheduled runs. So **manual / interactive
+  chat IS now capped**, not just scheduled runs (the old behaviour summed only
+  `scheduled_task_runs.cost_usd`). Single source = `token_usage`; the gate does
+  NOT also add `scheduled_task_runs.cost_usd`, so scheduled-run cost is **not
+  double-counted** (it's already in `token_usage`).
+- **Timing:** the cap is checked BEFORE a turn dispatches, but a turn's cost is
+  only known AFTER it completes (`usage_event` is post-turn). The turn that
+  crosses the cap is allowed to start; the NEXT dispatch is blocked once
+  accumulated cost `>= cap`. We do not pre-estimate the pending turn.
 - If `spent >= cap`, the dispatcher inserts ONE run row with
   `status='skipped', error='daily_cost_cap'` and emits
-  `scheduled_run_finished` immediately. No agent message is sent.
+  `scheduled_run_finished` immediately. No agent message is sent. (Interactive /
+  Telegram blocks surface `over_daily_cost_cap:$<spent>>=$<cap>` via the gate.)
 - A boundary value of exactly `cap` is considered over (>=, not >).
-- Cap `<= 0` disables enforcement (documented escape hatch).
-- We use query-time summation rather than a per-user reset job — see
-  `hub/src/scheduler/daily-reset.ts` (alternative left in place for the
-  case where summation becomes too slow at scale).
+- Cap `<= 0` disables enforcement (documented escape hatch). The
+  `daily_cost_cap_usd` column is NOT NULL DEFAULT 10, so a null cap coalesces to
+  the legacy $10 default (still capped).
 
 The UI surfaces today's spend at `GET /api/profile/cost-today` and lets the
 user adjust their cap on the Settings → Account tab.

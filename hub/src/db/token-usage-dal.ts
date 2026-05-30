@@ -137,6 +137,36 @@ export async function sumUserTokenWindows(userId: string, timezone: string): Pro
   }
 }
 
+/**
+ * P3a — today's accumulated token cost (USD) for a user, in the user's IANA tz.
+ *
+ * Backs the daily cost cap (`isOverCostCap` in dispatch/gates.ts). Reads
+ * `token_usage` directly — the SAME tz-day boundary that `sumUserTokenWindows`
+ * (GET /api/usage/cost "today") uses, so the cap and the cost UI agree.
+ *
+ * Why token_usage and NOT the token_usage_daily rollup: the rollup's `day`
+ * column is bucketed in UTC (recordTokenUsage writes `(now() AT TIME ZONE
+ * 'UTC')::date`), so it cannot answer a per-user-tz "today" correctly near a
+ * UTC boundary. token_usage carries the precise `created_at`, so it is the
+ * correct source for a tz-aware window. The index on token_usage(user_id,
+ * created_at) keeps this cheap.
+ *
+ * token_usage is the SINGLE source: every turn that emits a usage_event over
+ * /ws/agent (interactive, telegram, webhook, AND scheduled runs) is recorded
+ * here, so this sum already includes scheduled-run cost. The cap therefore must
+ * NOT also add scheduled_task_runs.cost_usd — that would double-count.
+ */
+export async function getTodayTokenCostUsd(userId: string, timezone: string): Promise<number> {
+  const tz = timezone || 'UTC'
+  const rows = await sql<{ sum: string | null }[]>`
+    SELECT COALESCE(SUM(cost_usd), 0)::text AS sum
+    FROM token_usage
+    WHERE user_id = ${userId}
+      AND created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}
+  `
+  return Number(rows[0]?.sum ?? 0)
+}
+
 export interface SessionUsageRow extends UsageTotals {
   session_id: string | null
   session_name: string | null

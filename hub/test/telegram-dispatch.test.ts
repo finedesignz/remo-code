@@ -35,12 +35,12 @@ mock.module("../src/db/dal.ts", () => ({
   },
 }));
 
-// gates.ts: dailyCostCapGate → isOverCostCap → sql (cap) + sumTodayCostForUser.
+// gates.ts: dailyCostCapGate → getCostCapStatus → sql (cap) + getTodayTokenCostUsd.
 mock.module("../src/db/postgres.ts", () => ({
   sql: async () => [{ cap: "10.00", tz: "UTC" }],
 }));
-mock.module("../src/db/scheduled-tasks-dal.ts", () => ({
-  sumTodayCostForUser: async () => (state.overCap ? 999 : 0),
+mock.module("../src/db/token-usage-dal.ts", () => ({
+  getTodayTokenCostUsd: async () => (state.overCap ? 999 : 0),
 }));
 
 // gates.ts: thresholdGate → checkUserThreshold. Always allow in these tests.

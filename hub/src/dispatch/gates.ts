@@ -18,7 +18,7 @@
  * subsystem when migrating.
  */
 import { sql } from '../db/postgres.ts'
-import { sumTodayCostForUser } from '../db/scheduled-tasks-dal.ts'
+import { getTodayTokenCostUsd } from '../db/token-usage-dal.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
 import { reserveSessionSlot } from '../sessions/budget.ts'
 import type { DispatchGate, DispatchRequest } from './pipeline.ts'
@@ -28,18 +28,41 @@ import type { DispatchGate, DispatchRequest } from './pipeline.ts'
  * SQL that scheduler/error-capture/revanote each copied. `dailyCostCapGate`
  * delegates here; the SQL is NOT inlined anywhere else (no double truth).
  *
- * Returns true when the user's spend today (in `timezone`) is >= their
- * `daily_cost_cap_usd`. A non-positive or non-finite cap means "no cap"
- * (fail-open — matches the legacy behaviour).
+ * P3a: the cap now compares against REAL accumulated token cost for TODAY (the
+ * user's tz), summed from `token_usage` via `getTodayTokenCostUsd`. That ledger
+ * captures EVERY turn that emits a usage_event over /ws/agent — interactive,
+ * telegram, webhook AND scheduled runs — so manual chat is finally capped, not
+ * just scheduled runs. token_usage is the one source, so we do NOT also add
+ * `scheduled_task_runs.cost_usd` (would double-count scheduled-run cost, which
+ * is already in token_usage).
+ *
+ * Timing: the cap is checked BEFORE a turn dispatches, but a turn's cost is only
+ * known AFTER it completes (usage_event is post-turn). So the turn that crosses
+ * the cap is allowed to start; the NEXT dispatch is blocked once accumulated
+ * cost >= cap. We deliberately do NOT pre-estimate the pending turn.
+ *
+ * Returns `{ over, spent, cap }`. `over` is true when today's spend (in
+ * `timezone`) is >= the user's cap. The `users.daily_cost_cap_usd` column is
+ * NOT NULL DEFAULT 10, so a missing/null cap coalesces to the legacy $10 default
+ * (still capped) — unchanged from the pre-P3a gate. Only a non-positive /
+ * non-finite cap disables enforcement (fail-open).
  */
-export async function isOverCostCap(userId: string, timezone: string): Promise<boolean> {
-  const rows = await sql<{ cap: string }[]>`
+export async function getCostCapStatus(
+  userId: string,
+  timezone: string,
+): Promise<{ over: boolean; spent: number; cap: number }> {
+  const rows = await sql<{ cap: string | null }[]>`
     SELECT daily_cost_cap_usd::text AS cap FROM users WHERE id = ${userId} LIMIT 1
   `
   const cap = Number(rows[0]?.cap ?? 10)
-  if (!Number.isFinite(cap) || cap <= 0) return false
-  const spent = await sumTodayCostForUser(userId, timezone)
-  return spent >= cap
+  if (!Number.isFinite(cap) || cap <= 0) return { over: false, spent: 0, cap: 0 }
+  const spent = await getTodayTokenCostUsd(userId, timezone)
+  return { over: spent >= cap, spent, cap }
+}
+
+/** Boolean convenience wrapper around {@link getCostCapStatus}. */
+export async function isOverCostCap(userId: string, timezone: string): Promise<boolean> {
+  return (await getCostCapStatus(userId, timezone)).over
 }
 
 /** Resolve the user's timezone (default 'UTC') for the cost-cap window. */
@@ -73,8 +96,12 @@ export const dailyCostCapGate: DispatchGate = {
   name: 'daily_cost_cap',
   async check(req: DispatchRequest) {
     const timezone = await userTimezone(req.userId)
-    if (await isOverCostCap(req.userId, timezone)) {
-      return { ok: false, reason: 'daily_cost_cap' }
+    const status = await getCostCapStatus(req.userId, timezone)
+    if (status.over) {
+      // Surface accumulated vs cap so dispatch can tell the user the daily cost
+      // cap was reached (e.g. "over_daily_cost_cap:$10.42>=$10.00").
+      const reason = `over_daily_cost_cap:$${status.spent.toFixed(2)}>=$${status.cap.toFixed(2)}`
+      return { ok: false, reason }
     }
     return { ok: true }
   },
