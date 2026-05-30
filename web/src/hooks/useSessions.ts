@@ -25,6 +25,10 @@ export interface CodeSession {
   cli_kind?: 'claude' | 'codex'
   is_rootless?: boolean
   is_orchestrator?: boolean
+  // ── Phase 10 — per-session auto-nudge override ────────────────────────────
+  // null/undefined → inherit the user's global default
+  // (users.auto_nudge_idle_sessions). true/false force on/off for this session.
+  auto_nudge?: boolean | null
   hostname?: string | null
   // ── Phase 08 — GitHub-keyed session fields ────────────────────────────────
   // All nullable: legacy/local-only sessions have repo_key === null.
@@ -184,10 +188,37 @@ export function useSessions(
     }
   }, [token])
 
+  // Phase 10 — set a session's per-session auto-nudge override (true/false to
+  // force, null to inherit the user's global default). Optimistic: flips local
+  // state immediately, rolls back on failure.
+  const setSessionAutoNudge = useCallback(async (
+    id: string,
+    value: boolean | null,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!token) return { ok: false, error: 'unauthorized' }
+    let prevValue: boolean | null | undefined
+    setSessions(prev => prev.map(s => {
+      if (s.id !== id) return s
+      prevValue = s.auto_nudge
+      return { ...s, auto_nudge: value }
+    }))
+    try {
+      await hubFetch(token, `/api/sessions/${id}/auto-nudge`, {
+        method: 'PATCH',
+        json: { auto_nudge: value },
+      })
+      return { ok: true }
+    } catch (err: any) {
+      // Roll back the optimistic flip.
+      setSessions(prev => prev.map(s => s.id === id ? { ...s, auto_nudge: prevValue ?? null } : s))
+      return { ok: false, error: (err?.body?.error as string) ?? 'unknown' }
+    }
+  }, [token])
+
   return {
     sessions, setSessions, loading,
     createSession, deleteSession, rotateToken, updateSessionStatus,
     refetch: fetchSessions,
-    launchSession, cloneHere, createGithubRepo,
+    launchSession, cloneHere, createGithubRepo, setSessionAutoNudge,
   }
 }

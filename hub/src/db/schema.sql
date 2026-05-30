@@ -962,3 +962,11 @@ CREATE TABLE IF NOT EXISTS token_usage_daily (
 );
 CREATE INDEX IF NOT EXISTS idx_token_usage_daily_user_day ON token_usage_daily(user_id, day DESC);
 
+-- ── Phase 10: per-session auto-nudge override ────────────────────────────────
+-- sessions.auto_nudge: per-session override for the auto-nudge-when-idle
+--   behavior. NULLABLE on purpose: NULL means "inherit the user's global
+--   default" (users.auto_nudge_idle_sessions). TRUE/FALSE force on/off for this
+--   session regardless of the global. Effective value resolved client-side as
+--   `session.auto_nudge ?? user.auto_nudge_idle_sessions`.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auto_nudge BOOLEAN;
+

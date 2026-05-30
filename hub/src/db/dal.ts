@@ -8,7 +8,7 @@ export async function listSessions(userId: string) {
   return sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info,
            cli_kind, is_rootless, hostname, is_orchestrator,
-           repo_key, github_owner, github_repo
+           repo_key, github_owner, github_repo, auto_nudge
     FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST
   `;
@@ -22,10 +22,27 @@ export async function getSession(sessionId: string, userId: string) {
   const rows = await sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at,
            cli_kind, is_rootless, hostname, is_orchestrator,
-           repo_key, github_owner, github_repo
+           repo_key, github_owner, github_repo, auto_nudge
     FROM sessions WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
   `;
   return rows[0] ?? null;
+}
+
+// Phase 10 — set a session's per-session auto-nudge override. NULL clears the
+// override (session inherits users.auto_nudge_idle_sessions). User-scoped: a row
+// is only updated when it belongs to the caller. Returns the new value, or
+// undefined when no owned session matched.
+export async function setSessionAutoNudge(
+  sessionId: string,
+  userId: string,
+  autoNudge: boolean | null,
+): Promise<{ auto_nudge: boolean | null } | undefined> {
+  const rows = await sql<{ auto_nudge: boolean | null }[]>`
+    UPDATE sessions SET auto_nudge = ${autoNudge}
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    RETURNING auto_nudge
+  `;
+  return rows[0];
 }
 
 // ── Phase 08 plan 004 — pending local repos + dismiss-local ───────────────────
