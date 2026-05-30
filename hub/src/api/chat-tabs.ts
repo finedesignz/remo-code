@@ -29,6 +29,8 @@ import {
   addSessionToTab,
   removeSessionFromTab,
   setTabSessionPositions,
+  getGridState,
+  setGridState,
 } from '../db/chat-tabs-dal.ts'
 
 export const chatTabs = new Hono()
@@ -60,6 +62,13 @@ const ReorderSessionsBody = z.object({
   ordered_session_ids: z.array(z.string().min(1).max(100)).min(1).max(50),
 })
 
+// Grid UI state (Phase 13). active_tab_id is free text: the virtual Default tab
+// uses the reserved literal '__default__'; user tabs use the chat_tabs UUID.
+const GridStateBody = z.object({
+  active_tab_id: z.string().min(1).max(64).nullable().optional(),
+  active_session_id: z.string().min(1).max(100).nullable().optional(),
+})
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 
 chatTabs.get('/', async (c) => {
@@ -77,6 +86,22 @@ chatTabs.post('/', async (c) => {
   }
   const tab = await createTab(userId, parsed.data)
   return c.json(tab, 201)
+})
+
+// Grid UI state — MUST be declared before `/:id` so the literal path wins.
+chatTabs.get('/grid-state', async (c) => {
+  const userId = c.get('userId') as string
+  return c.json(await getGridState(userId))
+})
+
+chatTabs.patch('/grid-state', async (c) => {
+  const userId = c.get('userId') as string
+  const body = await c.req.json().catch(() => null)
+  const parsed = GridStateBody.safeParse(body)
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400)
+  }
+  return c.json(await setGridState(userId, parsed.data))
 })
 
 // MUST be declared before `/:id` so it doesn't get captured by the param route.

@@ -176,6 +176,37 @@ maybe('chat-tabs e2e', () => {
     expect(stillB?.name).toBe('b-private')
   })
 
+  test('grid state — default empty, upsert, partial update, isolation', async () => {
+    // Fresh user starts with null/null.
+    const empty = await dal.getGridState(userA)
+    expect(empty).toEqual({ active_tab_id: null, active_session_id: null })
+
+    // Set both.
+    const set1 = await dal.setGridState(userA, {
+      active_tab_id: '__default__',
+      active_session_id: sessionsA[0],
+    })
+    expect(set1).toEqual({ active_tab_id: '__default__', active_session_id: sessionsA[0] })
+
+    // Partial update — only active_session_id; active_tab_id is preserved.
+    const set2 = await dal.setGridState(userA, { active_session_id: sessionsA[1] })
+    expect(set2.active_tab_id).toBe('__default__')
+    expect(set2.active_session_id).toBe(sessionsA[1])
+
+    // Explicit null clears a field.
+    const set3 = await dal.setGridState(userA, { active_session_id: null })
+    expect(set3.active_session_id).toBeNull()
+    expect(set3.active_tab_id).toBe('__default__')
+
+    // Read-back matches.
+    const read = await dal.getGridState(userA)
+    expect(read).toEqual({ active_tab_id: '__default__', active_session_id: null })
+
+    // User B is isolated.
+    const bState = await dal.getGridState(userB)
+    expect(bState).toEqual({ active_tab_id: null, active_session_id: null })
+  })
+
   test('getMessagesForSessions — shape, limit, and ownership filter', async () => {
     // Seed 35 messages on sessionsA[0], 5 on sessionsA[1], 3 on sessionsB[0].
     const sA0 = sessionsA[0]

@@ -331,6 +331,19 @@ CREATE TABLE IF NOT EXISTS chat_tab_sessions (
 CREATE INDEX IF NOT EXISTS idx_chat_tab_sessions_tab_position ON chat_tab_sessions(tab_id, position);
 CREATE INDEX IF NOT EXISTS idx_chat_tab_sessions_session ON chat_tab_sessions(session_id);
 
+-- Phase 13 — grid-view UI state persistence (active tab + focused cell).
+-- One row per user. `active_tab_id` is a free TEXT (the virtual Default tab uses
+-- the reserved literal '__default__'; user tabs use the chat_tabs UUID as text).
+-- `active_session_id` is the focused cell. Both nullable; survives reload/device.
+-- Not FK-constrained on purpose: the virtual Default id is not a chat_tabs row,
+-- and a deleted tab/session simply leaves a stale pointer the client ignores.
+CREATE TABLE IF NOT EXISTS user_grid_state (
+  user_id           UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  active_tab_id     TEXT,
+  active_session_id TEXT,
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ── Phase 05: per-session CLI selection + rootless ambient sessions ──────────
 -- cli_kind: which CLI the agent spawns for this session ('claude' | 'codex').
 -- is_rootless: ambient sessions that have no project_dir; at most one per

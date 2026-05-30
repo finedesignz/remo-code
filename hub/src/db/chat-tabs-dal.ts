@@ -232,6 +232,50 @@ export async function setTabSessionPositions(
   return true
 }
 
+// ── Grid UI state (Phase 13) ──────────────────────────────────────────────────
+
+export interface GridState {
+  active_tab_id: string | null
+  active_session_id: string | null
+}
+
+/** Read the user's persisted grid state (active tab + focused cell). */
+export async function getGridState(userId: string): Promise<GridState> {
+  const rows = await sql<GridState[]>`
+    SELECT active_tab_id, active_session_id
+    FROM user_grid_state
+    WHERE user_id = ${userId}
+  `
+  return rows[0] ?? { active_tab_id: null, active_session_id: null }
+}
+
+/**
+ * Upsert the user's grid state. Only the provided fields are written; omitted
+ * fields keep their current value (COALESCE on the existing row).
+ */
+export async function setGridState(
+  userId: string,
+  fields: { active_tab_id?: string | null; active_session_id?: string | null },
+): Promise<GridState> {
+  const hasTab = Object.prototype.hasOwnProperty.call(fields, 'active_tab_id')
+  const hasSession = Object.prototype.hasOwnProperty.call(fields, 'active_session_id')
+  const rows = await sql<GridState[]>`
+    INSERT INTO user_grid_state (user_id, active_tab_id, active_session_id, updated_at)
+    VALUES (
+      ${userId},
+      ${hasTab ? (fields.active_tab_id ?? null) : null},
+      ${hasSession ? (fields.active_session_id ?? null) : null},
+      now()
+    )
+    ON CONFLICT (user_id) DO UPDATE SET
+      active_tab_id     = CASE WHEN ${hasTab}     THEN ${fields.active_tab_id ?? null}     ELSE user_grid_state.active_tab_id END,
+      active_session_id = CASE WHEN ${hasSession} THEN ${fields.active_session_id ?? null} ELSE user_grid_state.active_session_id END,
+      updated_at        = now()
+    RETURNING active_tab_id, active_session_id
+  `
+  return rows[0]!
+}
+
 // ── Batch messages ────────────────────────────────────────────────────────────
 
 export interface BatchMessage {
