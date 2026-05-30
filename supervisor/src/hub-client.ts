@@ -10,6 +10,7 @@ import { getHandler, nativeSupervisorCommands } from './commands/index'
 import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
 import { log as obs } from './observability/logger'
 import { VERSION } from './version'
+import { pollUsage, USAGE_POLL_INTERVAL_MS, type UsagePayload } from './usage/oauth-poll'
 
 /** Bug A — push the live runner set to the hub every 10s after auth_ok. */
 const SESSION_INVENTORY_INTERVAL_MS = 10_000
@@ -29,6 +30,10 @@ type OutboundMsg =
   | { type: 'run_output'; run_id: string; chunk: string }
   | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
   | { type: 'supervisor.set_roots_ack'; req_id: string; ok: boolean; applied_roots?: string[]; error?: string }
+  // P1 usage poll — parsed, non-secret Anthropic OAuth utilization snapshot.
+  // The OAuth token is read locally in usage/oauth-poll.ts and NEVER serialized
+  // here; only the four utilization windows + reset times cross the wire.
+  | { type: 'usage_report'; usage: UsagePayload }
   | { type: 'pong' }
 
 export class SupervisorClient {
@@ -45,6 +50,10 @@ export class SupervisorClient {
 
   /** Bug A — interval handle for session_inventory pushes; null when not auth'd. */
   private sessionInventoryTimer: ReturnType<typeof setInterval> | null = null
+
+  /** P1 — interval handle for the Anthropic OAuth usage poll; null when not
+   *  auth'd. Fires once on auth_ok + every 5 min. */
+  private usagePollTimer: ReturnType<typeof setInterval> | null = null
 
   // ── B6: observability state ──────────────────────────────────────────────
   /** Last `auth_ok` timestamp (ms). Drives `last_reconnect_ms_ago` in
@@ -147,6 +156,7 @@ export class SupervisorClient {
       if (this.ws !== ws) return // a newer socket has taken over
       this.authenticated = false
       this.stopSessionInventoryPush()
+      this.stopUsagePoll()
       const code = (ev as any)?.code as number | undefined
       const reason = (ev as any)?.reason as string | undefined
       this.log('warn', `WebSocket closed code=${code ?? '?'} reason=${reason || '(none)'}`)
@@ -262,6 +272,9 @@ export class SupervisorClient {
       // Bug A — start the session_inventory push interval. Fires once
       // immediately + every 10s; cancels on disconnect.
       this.startSessionInventoryPush()
+      // P1 — start the Anthropic OAuth usage poll. Fires once immediately +
+      // every 5 min; cancels on disconnect. Token stays local.
+      this.startUsagePoll()
       return
     }
     if (msg.type === 'auth_error') {
@@ -429,6 +442,54 @@ export class SupervisorClient {
     if (!this.sessionInventoryTimer) return
     clearInterval(this.sessionInventoryTimer)
     this.sessionInventoryTimer = null
+  }
+
+  /**
+   * P1 — start the Anthropic OAuth usage poll loop. Idempotent (no-op if already
+   * running). Fires once immediately so the hub gets a snapshot on the same
+   * connect, then every 5 min. Stopped on every disconnect.
+   */
+  private startUsagePoll() {
+    if (this.usagePollTimer) return
+    void this.pollAndSendUsage()
+    this.usagePollTimer = setInterval(() => {
+      void this.pollAndSendUsage()
+    }, USAGE_POLL_INTERVAL_MS)
+  }
+
+  private stopUsagePoll() {
+    if (!this.usagePollTimer) return
+    clearInterval(this.usagePollTimer)
+    this.usagePollTimer = null
+  }
+
+  /**
+   * P1 — read the local OAuth token, poll `/api/oauth/usage`, and forward the
+   * parsed (non-secret) utilization windows to the hub via the existing
+   * `usage_report` agent message. Never throws; missing/expired token and
+   * network errors are logged at info/warn and skip the send.
+   *
+   * The OAuth token never leaves `usage/oauth-poll.ts` — only the four parsed
+   * windows (utilization + reset times) are serialized onto the wire.
+   */
+  private async pollAndSendUsage() {
+    if (!this.authenticated) return
+    if (this.ws?.readyState !== WebSocket.OPEN) return
+    let result
+    try {
+      result = await pollUsage()
+    } catch (err: any) {
+      // pollUsage is non-throwing by contract; guard anyway.
+      this.log('warn', `usage poll threw: ${err?.message ?? err}`)
+      return
+    }
+    if (!result.ok) {
+      // Expected steady-state on hosts without a Claude OAuth login or with an
+      // expired token — keep it to a single info line, not an error.
+      this.log('info', `usage poll skipped: ${result.reason}`)
+      return
+    }
+    this.send({ type: 'usage_report', usage: result.usage })
   }
 
   /**

@@ -59,6 +59,7 @@ export function UsageTab({ token, profile, onUpdateProfile }: Props) {
   return (
     <div className="px-4 md:px-6 lg:px-8 py-5 w-full max-w-7xl mx-auto space-y-5">
       <CostCards summary={summary} error={error} />
+      <LimitsCard summary={summary} />
       <ThresholdsCard token={token} initial={summary?.thresholds} />
       <DailyCapCard
         profile={profile}
@@ -133,6 +134,108 @@ function CostCard({
             label={`${pct}% of $${cap!.toFixed(2)} cap`}
           />
         </div>
+      )}
+    </Card>
+  );
+}
+
+/* ───────────────────────── Limit windows ───────────────────────── */
+
+interface LimitWindow {
+  utilization: number;
+  resets_at: string;
+}
+
+/** resets_at - now → "Nh Mm" (or "Nd Nh" / "Nm"). Mirrors UsageStrip. */
+function formatResetIn(resetsAt: string): string {
+  const target = Date.parse(resetsAt);
+  if (Number.isNaN(target)) return "soon";
+  const diff = target - Date.now();
+  if (diff <= 0) return "now";
+  const totalMin = Math.floor(diff / 60_000);
+  if (totalMin < 60) return `${totalMin}m`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h < 24) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh > 0 ? `${d}d ${rh}h` : `${d}d`;
+}
+
+/** Colour band per spec: <50 success / <80 warning / ≥80 error. */
+function bandFor(util: number): "success" | "warning" | "error" {
+  if (util < 50) return "success";
+  if (util < 80) return "warning";
+  return "error";
+}
+
+function LimitRow({ label, window }: { label: string; window: LimitWindow }) {
+  const util = Math.max(0, Math.min(100, window.utilization));
+  const tone = bandFor(util);
+  const barColor =
+    tone === "success"
+      ? "bg-emerald-400"
+      : tone === "warning"
+        ? "bg-amber-400"
+        : "bg-red-400";
+  return (
+    <div className="flex items-center gap-3">
+      <span className="text-sm text-[var(--text-primary)] w-32 shrink-0">{label}</span>
+      <span className="flex-1 h-2 rounded-full bg-[var(--bg-tertiary)] overflow-hidden">
+        <span className={`block h-full ${barColor} transition-all`} style={{ width: `${util}%` }} />
+      </span>
+      <span className="text-sm font-mono text-[var(--text-primary)] w-14 text-right">
+        {util.toFixed(1)}%
+      </span>
+      <span className="text-xs text-[var(--text-muted)] w-28 text-right">
+        resets in {formatResetIn(window.resets_at)}
+      </span>
+    </div>
+  );
+}
+
+function LimitsCard({ summary }: { summary: UsageSummary | null }) {
+  const w = summary?.claude_window as
+    | {
+        five_hour?: LimitWindow;
+        seven_day?: LimitWindow;
+        seven_day_opus?: LimitWindow | null;
+        seven_day_oauth_apps?: LimitWindow | null;
+      }
+    | null
+    | undefined;
+
+  return (
+    <Card className="space-y-3">
+      <div>
+        <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+          Anthropic limit windows
+        </h3>
+        <p className="text-xs text-[var(--text-muted)] mt-1">
+          Live utilization + reset countdown from the local supervisor's poll of{" "}
+          <code className="text-[var(--text-muted)]">/api/oauth/usage</code> (every 5 min).
+          Opus + OAuth-app rows appear only for Claude Max accounts.
+        </p>
+      </div>
+
+      {!w?.five_hour ? (
+        <p className="text-sm text-[var(--text-muted)]">
+          Waiting for the supervisor to report usage…
+        </p>
+      ) : (
+        <div className="space-y-2.5 pt-1">
+          <LimitRow label="5-hour session" window={w.five_hour} />
+          {w.seven_day && <LimitRow label="7-day" window={w.seven_day} />}
+          {w.seven_day_opus && <LimitRow label="7-day Opus" window={w.seven_day_opus} />}
+          {w.seven_day_oauth_apps && (
+            <LimitRow label="7-day OAuth apps" window={w.seven_day_oauth_apps} />
+          )}
+        </div>
+      )}
+      {summary?.claude_window_updated_at && (
+        <p className="text-[10px] text-[var(--text-muted)] pt-1">
+          Updated {new Date(summary.claude_window_updated_at).toLocaleTimeString()}
+        </p>
       )}
     </Card>
   );
