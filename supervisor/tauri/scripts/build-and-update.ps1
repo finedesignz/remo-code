@@ -40,6 +40,7 @@ $ErrorActionPreference = 'Stop'
 # Paths
 # --------------------------------------------------------------------------- #
 $RepoRoot     = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+$SupervisorPkgDir = Join-Path $RepoRoot 'supervisor'        # holds supervisor/package.json + scripts/compile-sidecar.mjs
 $SupervisorDir= Join-Path $RepoRoot 'supervisor\tauri'
 $UiDir        = Join-Path $SupervisorDir 'ui'
 $SrcTauriDir  = Join-Path $SupervisorDir 'src-tauri'
@@ -143,6 +144,12 @@ function Build-Once {
     Write-Section 'ui: bun install && bun run build'
     Invoke-Native 'bun' @('install') $UiDir
     Invoke-Native 'bun' @('run', 'build') $UiDir
+
+    Write-Section 'sidecar: bun build --compile (version-injected)'
+    # Recompile the sidecar binary with the authoritative version baked in, so
+    # `cargo tauri build` bundles a fresh sidecar that reports the manifest
+    # version (not a stale one). Shared with CI via supervisor/package.json.
+    Invoke-Native 'bun' @('run', 'build:sidecar') $SupervisorPkgDir
 
     Write-Section 'tauri: cargo tauri build'
     # `cargo tauri build` is run from src-tauri's parent (the tauri.conf.json
