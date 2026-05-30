@@ -58,7 +58,12 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     !existing || existing?.name_suffix != null,
   )
   const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? 'dev')
-  const [prompt, setPrompt] = useState<string>(existing?.payload?.prompt ?? '')
+  // Prompt lives in `payload.prompt` (canonical) but legacy rows persisted it
+  // only in the top-level `prompt` column — fall back to that so older tasks
+  // still display their custom prompt on reopen.
+  const [prompt, setPrompt] = useState<string>(
+    existing?.payload?.prompt ?? (existing as any)?.prompt ?? '',
+  )
   const [notes, setNotes] = useState<string>(() => {
     const existingNotes = existing?.payload?.notes ?? ''
     if (existingNotes) return existingNotes

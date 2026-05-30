@@ -73,7 +73,7 @@ function clearActive(sessionId: string, runId: string): void {
   if (set.size === 0) activeScheduledSessions.delete(sessionId)
 }
 
-function buildContent(task: ScheduledTask): string {
+export function buildContent(task: ScheduledTask): string {
   // Phase 11: legacy `skill`/`security_scan`(root)/`continue_dev` rewritten to
   // `dev`/`security` by the DB migration; their `prompt` column carries the
   // original text verbatim. The `security_scan` chained step (under the

@@ -67,6 +67,10 @@ const CreateSchema = z.object({
   target_kind: TargetKindEnum,
   target_id: z.string().min(1).nullable().optional(),
   payload: z.record(z.any()).optional(),
+  // Optional top-level prompt mirror. The canonical home is `payload.prompt`,
+  // but clients may also send it here; the server keeps the `prompt` column and
+  // `payload.prompt` in sync on every write.
+  prompt: z.string().optional(),
   // Either `cron_expr` (legacy) or `schedule_rules` (new). Validated below.
   cron_expr: z.string().min(1).max(200).optional(),
   schedule_rules: z.array(z.object({
@@ -309,6 +313,20 @@ scheduledTasks.post('/', async (c) => {
   const sessionId =
     data.target_kind === 'session' && data.target_id ? data.target_id : null
 
+  // Single source of truth: the `prompt` column. Mirror it into
+  // `payload.prompt` (and vice-versa) so create round-trips for the editor,
+  // which reads `payload.prompt` first and falls back to the column.
+  const createPrompt =
+    typeof data.payload?.prompt === 'string'
+      ? data.payload.prompt
+      : typeof data.prompt === 'string'
+        ? data.prompt
+        : ''
+  const createPayload =
+    createPrompt !== ''
+      ? { ...(data.payload ?? {}), prompt: createPrompt }
+      : (data.payload ?? {})
+
   // Build the locked auto-name prefix server-side from current sessions +
   // supervisors. The client also computes a prefix for live preview, but the
   // server's value is authoritative on persist.
@@ -316,7 +334,7 @@ scheduledTasks.post('/', async (c) => {
     task_type: data.task_type,
     target_kind: data.target_kind,
     target_id: data.target_id ?? null,
-    payload: data.payload ?? {},
+    payload: createPayload,
     cron_expr: effectiveCron,
   }, data.name_suffix, data.name)
 
@@ -326,7 +344,7 @@ scheduledTasks.post('/', async (c) => {
     task_type: data.task_type,
     target_kind: data.target_kind,
     target_id: data.target_id ?? null,
-    payload: data.payload ?? {},
+    payload: createPayload,
     cron_expr: effectiveCron,
     timezone: data.timezone,
     catchup_policy: data.catchup_policy ?? 'skip',
@@ -335,7 +353,7 @@ scheduledTasks.post('/', async (c) => {
     post_run_actions: v.actions,
     session_id: sessionId,
     cron_expression: effectiveCron,
-    prompt: typeof data.payload?.prompt === 'string' ? data.payload.prompt : '',
+    prompt: createPrompt,
     name_prefix: built.prefix || null,
     name_suffix: built.suffix || null,
     schedule_rules: data.schedule_rules ?? null,
@@ -428,6 +446,22 @@ scheduledTasks.patch('/:id', async (c) => {
     data.name,
   )
 
+  // Keep the `prompt` column and `payload.prompt` in sync. The prompt may
+  // arrive via `data.payload.prompt` (canonical) or a top-level `data.prompt`
+  // mirror. When either is present, persist BOTH the column and the
+  // payload.prompt so the dispatcher (`payload.prompt || prompt`) and the
+  // editor (reads payload.prompt, falls back to column) stay consistent.
+  const nextPrompt =
+    typeof data.payload?.prompt === 'string'
+      ? data.payload.prompt
+      : typeof data.prompt === 'string'
+        ? data.prompt
+        : undefined
+  let nextPayload = data.payload
+  if (nextPrompt !== undefined) {
+    nextPayload = { ...(data.payload ?? existing.payload ?? {}), prompt: nextPrompt }
+  }
+
   const updated = await updateTaskV2(id, userId, {
     name: built.name,
     name_prefix: built.prefix || null,
@@ -436,7 +470,8 @@ scheduledTasks.patch('/:id', async (c) => {
     task_type: data.task_type,
     target_kind: data.target_kind,
     target_id: data.target_id !== undefined ? data.target_id ?? null : undefined,
-    payload: data.payload,
+    payload: nextPayload,
+    prompt: nextPrompt,
     cron_expr: data.cron_expr ?? derivedFromRules ?? undefined,
     timezone: data.timezone,
     catchup_policy: data.catchup_policy,
