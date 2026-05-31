@@ -392,3 +392,130 @@ Telegram and any text-only channel SHALL remain on the stream-json programmatic 
 README/CLAUDE.md/`docs/` SHALL document the terminal surface, dual-bucket usage, the cutover gate, the rip-and-replace, and the no-API-key invariant; `bun run docs:sync` run if endpoints changed.
 
 **Milestone coverage:** 25 REQs (R-PTY-01..25) mapped across Phases 15–19. No orphans.
+
+---
+
+## Milestone m-interactive-pty-runner — Phase 20 addendum (Telegram on transcript-tail)
+
+> **Why Phase 20 exists.** Phase 17 (rip-and-replace) deletes the stream-json human runner and with
+> it the Telegram bridge's structured event source (`assistant_message:final`/`tool_use` on the hub
+> event bus, and the `permission_request`→`onPermissionPending` path). After Phase 17 the Telegram
+> bridge is non-functional. Phase 20 rebuilds Telegram on a **backend-agnostic transcript-tail**
+> source plus a **fail-closed permission/question keystroke-injection** path, sequenced strictly
+> AFTER Phase 17.
+>
+> **Supersedes R-PTY-11 / R-PTY-24 (Telegram-stays-stream-json).** R-PTY-11 ("a Telegram default
+> session MUST NOT be switched to the PTY runner") and R-PTY-24 ("Telegram stays on the programmatic
+> pool") were written assuming the stream-json human runner survives. It does not. R-PTY-11's
+> blanket guard and R-PTY-24's "stream-json pool by structural necessity" are **superseded by
+> R-TG-01..R-TG-12 below**: Telegram sessions ARE PTY-interactive sessions whose output is sourced
+> from the transcript and whose input is injected as PTY keystrokes. The transcript reader is a
+> read-only observer of the human's own interactive subscription session — it adds NO programmatic
+> Claude call and therefore does NOT move Telegram onto the programmatic credit pool. The ToS line
+> (constraint 3) is preserved: only a genuine human Telegram message injects to the PTY; Telegram is
+> never combined with auto-nudge/scheduled prompts to drive the PTY unattended.
+
+### Phase 20 — telegram-transcript-tail
+
+#### R-TG-01 — Backend-agnostic transcript-source adapter
+A `TranscriptSource` adapter interface SHALL be defined with at least one implementation per backend.
+The adapter is selected by the session's backend (`cliKind: 'claude' | 'codex'`), NOT hardcoded to a
+single path. Each adapter resolves the active session's transcript location, tails newly-appended
+records, and normalizes them to a shared `TranscriptEntry` union (`assistant_text`, `tool_use`,
+`permission_request`, `user_question`, `turn_complete`). Adding a backend SHALL require only a new
+adapter, no change to the bridge. A test SHALL assert the bridge consumes only the normalized union
+and never a backend-specific shape.
+
+#### R-TG-02 — Claude transcript adapter
+The Claude adapter SHALL source records from the Claude Code projects transcript JSONL
+(`~/.claude/projects/<project-slug>/<session-uuid>.jsonl`), mapping `assistant`/`tool_use`/result
+entries to the normalized union. The session→transcript mapping (which file is THIS remo-code
+session) SHALL be resolved explicitly (project-dir slug + session id captured at PTY spawn), never by
+guessing the newest file. A test SHALL assert mapping is deterministic given a known project dir +
+session id, and that a transcript-format drift (unknown record `type`) degrades to "skip + log",
+never a crash and never a misclassification.
+
+#### R-TG-03 — Codex transcript adapter (+ documented fallback)
+The Codex adapter SHALL source records from the Codex CLI rollout JSONL
+(`~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`; each line
+`{timestamp, type: session_meta|response_item|turn_context, payload}`), mapping `response_item`
+message/function_call payloads to the normalized union. Because this path/format is UNDOCUMENTED and
+version-unstable (community-reverse-engineered; see RESEARCH), the adapter SHALL: (a) resolve the
+session's rollout file by the `session_meta` id captured at spawn (not newest-file heuristic), and
+(b) fall back to a **terminal-byte scrape** mode for Codex when the rollout file is absent or its
+schema is unrecognized — surfacing only `assistant_text` and `turn_complete` (NO permission parsing
+from scraped bytes; see R-TG-06 fail-closed). A test SHALL assert the unknown-schema path selects the
+fallback and never emits a `permission_request` from scraped bytes.
+
+#### R-TG-04 — Telegram output sourced from the selected adapter
+The Telegram outbound bridge SHALL forward `assistant_text` (final turn) and collapsed `tool_use`
+one-liners sourced from the session's `TranscriptSource` (selected by backend), replacing the deleted
+`assistant_message:final` hub-event-bus source. Streaming deltas SHALL NOT be forwarded (parity with
+the prior "final only" invariant). A test SHALL assert the bridge no longer imports
+`onAssistantMessageFinal` and instead consumes `TranscriptEntry` events.
+
+#### R-TG-05 — Pending permission / user_question detected from the transcript
+The system SHALL detect a pending permission/approval or `user_question`/option-select per backend
+from the normalized `TranscriptSource` stream (or a structured side-channel if the backend exposes
+one). Detection SHALL key each pending request by **`(sessionId, requestId)`** — never `requestId`
+alone (reusing the existing `hub/src/telegram/approvals.ts` keying that fixed the multi-user clobber).
+A test SHALL assert two concurrent pendings on different sessions with the same synthetic requestId do
+not collide.
+
+#### R-TG-06 — Fail-CLOSED permission parsing (security-critical)
+Permission/question detection SHALL be fail-CLOSED: if the transcript entry (or scraped bytes) is
+ambiguous, partial, or its option set is not parseable into a discrete, enumerated choice, the system
+SHALL do NOTHING — emit no Telegram prompt, inject no keystroke, and NEVER auto-approve. An
+auto-approval or a default "yes" on parse failure is explicitly forbidden. A test SHALL assert that a
+malformed/ambiguous permission entry produces zero injected keystrokes and zero Telegram approval
+messages. The Codex terminal-byte-scrape fallback (R-TG-03) SHALL NOT emit permission prompts at all.
+
+#### R-TG-07 — Surface to Telegram via existing inline approval UX
+A detected pending permission/question SHALL be surfaced using the existing inline tap-to-approve UX
+(`hub/src/telegram/approvals.ts` registry + `sendMessageWithKeyboard`), with one inline button per
+enumerated option (Approve/Deny for boolean permissions; one button per discrete choice for
+`user_question` option-selects). Authorization SHALL reuse the per-user `(sessionId, requestId)`
+binding — a foreign/stale tap finds no entry and is rejected. A test SHALL assert an unauthorized
+user's tap is rejected and injects nothing.
+
+#### R-TG-08 — Human response injected as the correct PTY keystroke(s)
+On an authorized tap, the system SHALL inject the response into the session's PTY as the literal
+keystroke(s) the backend's TUI expects for that pending request (e.g. the option index/arrow+enter or
+the approve/deny key), via the Phase-16 raw-terminal input path — NOT via the deleted
+`permission_response` agent-protocol message. The keystroke mapping SHALL be per-backend (part of the
+adapter). A test SHALL assert the injected bytes match the expected mapping for a known pending shape,
+and that injection targets the correct session's PTY only.
+
+#### R-TG-09 — Disambiguation: a tap answers exactly one pending request
+A Telegram tap SHALL resolve exactly the `(sessionId, requestId)` it was bound to, then remove that
+entry so the decision applies once. If the bound pending no longer exists (already resolved,
+TTL-expired, or the TUI advanced past it — detected because the transcript shows the request resolved
+or a new turn started), the tap SHALL be rejected with a "no longer pending" notice and inject
+nothing. A test SHALL assert a tap on a superseded/expired pending injects nothing.
+
+#### R-TG-10 — PTY write-arbitration: single-writer turn lock per session
+Concurrent writers to one tmux-backed PTY (phone/browser xterm AND the Telegram bridge) SHALL be
+serialized by a **single-writer turn lock per session** held in the hub. A writer acquires the turn,
+injects one human turn (or one permission/question response), and the lock is released only when the
+turn is observed COMPLETE — defined as a `turn_complete`/assistant-entry observed in the
+`TranscriptSource` (or, for the byte-scrape fallback, the TUI's idle/prompt-ready signal). While held,
+other writers' input is QUEUED (FIFO, bounded) and the holder is shown in per-session "who holds the
+turn" state. A test SHALL assert: (a) a second writer's input is queued not interleaved, (b) the lock
+releases on observed completion, (c) a permission/question response from the non-holder is allowed
+(answering a prompt is not a new turn) without breaking the holder's turn.
+
+#### R-TG-11 — Telegram injection obeys the human-only dispatch guard
+Telegram injection SHALL pass through the Phase-16 human-only dispatch guard (constraint 3 / R-PTY-10):
+a real human Telegram message is an allowed human turn, but Telegram MUST NOT be combined with
+auto-nudge or scheduled/automation prompts to drive the PTY unattended. A test SHALL assert an
+automation-sourced dispatch tagged as Telegram-origin is rejected by the guard.
+
+#### R-TG-12 — Phase 17 break is explicit, not silent; Phase 20 docs
+Phase 17's plan/notes SHALL explicitly state "Telegram bridge event source removed here; rebuilt in
+Phase 20 on transcript-tail" so the break is acknowledged, not silent. Phase 20 SHALL update
+`docs/telegram-bridge.md` (and CLAUDE.md Docs map) to describe the transcript-tail source, the
+per-backend adapters, the fail-closed permission-injection flow, and the write-arbitration turn lock.
+`bun run docs:sync` SHALL run if endpoints changed.
+
+**Phase 20 coverage:** 12 REQs (R-TG-01..12). Supersedes the Telegram clauses of R-PTY-11 and
+R-PTY-24. No orphans.
