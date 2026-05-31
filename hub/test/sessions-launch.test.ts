@@ -240,8 +240,10 @@ mock.module('../src/sessions/budget.ts', () => ({
   releaseSessionSlot: async () => {},
   // Phase 12 W2 — keep full surface so cross-test imports of api/supervisors
   // (which imports reserveSessionSlot + getCapacitySnapshot) don't break when
-  // this stub is the active mock.
-  reserveSessionSlot: async () => ({ ok: false as const, reason: 'noop' as const }),
+  // this stub is the active mock. The /launch route now reserves a slot before
+  // dispatching session.start (protocol-drift fix 2026-05-30), so this must
+  // grant a slot for the happy-path launch tests.
+  reserveSessionSlot: async () => ({ ok: true as const, running: 0, cap: 4 }),
   getCapacitySnapshot: async () => null,
 }))
 
@@ -302,7 +304,17 @@ beforeEach(() => {
 
 // ── Tests ────────────────────────────────────────────────────────────────
 describe('POST /api/sessions/:id/launch', () => {
-  test('happy path → 202 + session.launch dispatched with canonical cwd', async () => {
+  // The supervisor's message switch (supervisor/src/hub-client.ts) only handles
+  // these `session.*` types. Asserting the hub never emits anything outside this
+  // set is the regression guard against the protocol drift this fix repairs
+  // (`session.launch` was emitted but unhandled → silently dropped → no runner).
+  const SUPERVISOR_HANDLED_SESSION_TYPES = new Set([
+    'session.start',
+    'session.stop',
+    'session.status',
+  ])
+
+  test('happy path → 202 + session.start dispatched with canonical cwd as repo_path', async () => {
     const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -315,10 +327,27 @@ describe('POST /api/sessions/:id/launch', () => {
     expect(state.sentMessages).toHaveLength(1)
     const sent = state.sentMessages[0]
     expect(sent.supId).toBe(TEST_SUPERVISOR_ID)
-    expect(sent.msg.type).toBe('session.launch')
-    expect(sent.msg.cwd).toBe('C:/Users/artic/GitHub/remo-code')
-    expect(sent.msg.cli_kind).toBe('claude')
-    expect(sent.msg.session_id).toBe(TEST_SESSION_ID)
+    // Emits the HANDLED type — not the dropped `session.launch`.
+    expect(sent.msg.type).toBe('session.start')
+    // Runner↔session binding: repo_path = resolved canonical cwd (project_dir
+    // match drives the supervisor's session_inventory correlation).
+    expect(sent.msg.repo_path).toBe('C:/Users/artic/GitHub/remo-code')
+    // session.start uses the local-key sentinel + same-hub marker.
+    expect(sent.msg.api_key).toBe('__use_local__')
+    expect(sent.msg.hub_url).toBe('__same__')
+    expect(sent.msg.run_id).toBe(body.run_id)
+  })
+
+  test('regression guard: /launch never emits a session.* type the supervisor cannot handle', async () => {
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(res.status).toBe(202)
+    const sent = state.sentMessages[0]
+    expect(String(sent.msg.type).startsWith('session.')).toBe(true)
+    expect(SUPERVISOR_HANDLED_SESSION_TYPES.has(sent.msg.type)).toBe(true)
   })
 
   test('supervisor offline → 409 supervisor_offline', async () => {
@@ -384,7 +413,7 @@ describe('POST /api/sessions/:id/launch', () => {
       body: JSON.stringify({ local_path: 'C:/Users/artic/GitHub/remo-code-feat' }),
     })
     expect(res.status).toBe(202)
-    expect(state.sentMessages[0].msg.cwd).toBe('C:/Users/artic/GitHub/remo-code-feat')
+    expect(state.sentMessages[0].msg.repo_path).toBe('C:/Users/artic/GitHub/remo-code-feat')
   })
 
   test('local_path body param rejected when not in inventory → 400', async () => {
@@ -427,7 +456,7 @@ describe('POST /api/sessions/:id/launch', () => {
       body: '{}',
     })
     expect(res.status).toBe(202)
-    expect(state.sentMessages[0].msg.cwd).toBe('C:/Users/artic/GitHub/remo-code')
+    expect(state.sentMessages[0].msg.repo_path).toBe('C:/Users/artic/GitHub/remo-code')
   })
 
   test('inventory lists only worktrees (no canonical) → refuses stale worktree project_dir, 409 local_path_missing', async () => {
@@ -461,17 +490,20 @@ describe('POST /api/sessions/:id/launch', () => {
       body: '{}',
     })
     expect(res.status).toBe(202)
-    expect(state.sentMessages[0].msg.cwd).toBe('C:/Users/artic/GitHub/remo-code')
+    expect(state.sentMessages[0].msg.repo_path).toBe('C:/Users/artic/GitHub/remo-code')
   })
 
-  test('cli_kind override applied', async () => {
+  test('cli_kind body override accepted (not on wire — resolved supervisor-side)', async () => {
     const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ cli_kind: 'codex' }),
     })
+    // session.start carries no cli_kind; the override is still accepted by the
+    // route (no 400) and the launch dispatches normally.
     expect(res.status).toBe(202)
-    expect(state.sentMessages[0].msg.cli_kind).toBe('codex')
+    expect(state.sentMessages[0].msg.type).toBe('session.start')
+    expect(state.sentMessages[0].msg.cli_kind).toBeUndefined()
   })
 })
 
