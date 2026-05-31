@@ -20,13 +20,16 @@
 
 import type { TaskType } from '../db/scheduled-tasks-dal.ts'
 
-export type WorkflowRoot = 'dev' | 'security' | 'log_check'
+export type WorkflowRoot = 'dev' | 'security' | 'log_check' | 'qc'
 
 /** Canonical ordered step kinds per workflow. */
 export const WORKFLOWS = {
   dev: ['dev_controller', 'dev_plan', 'dev_execute', 'dev_ship'],
   security: ['security_scan', 'security_triage', 'security_fix_or_issue'],
   log_check: ['log_pull', 'log_classify', 'log_triage'],
+  // auto-dev P4: review → fix → verify. verify opens a PR (never merges) and
+  // NEVER chains back to review — the next scheduled tick re-reviews.
+  qc: ['qc_review', 'qc_fix', 'qc_verify'],
 } as const satisfies Record<WorkflowRoot, readonly TaskType[]>
 
 /**
@@ -52,6 +55,7 @@ export function stepsForWorkflow(root: TaskType): readonly TaskType[] | null {
   if (root === 'dev') return WORKFLOWS.dev
   if (root === 'security') return WORKFLOWS.security
   if (root === 'log_check') return WORKFLOWS.log_check
+  if (root === 'qc') return WORKFLOWS.qc
   return null
 }
 

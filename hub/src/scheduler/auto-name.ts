@@ -13,10 +13,11 @@
 // + internal triage. Legacy prompt/skill/continue_dev/security_scan(root)
 // were migrated by the DB rewrite in commit b9edb82.
 export type TaskType =
-  | 'dev' | 'security' | 'log_check'
+  | 'dev' | 'security' | 'log_check' | 'qc'
   | 'dev_controller' | 'dev_plan' | 'dev_execute' | 'dev_ship'
   | 'security_scan' | 'security_triage' | 'security_fix_or_issue'
   | 'log_pull' | 'log_classify' | 'log_triage'
+  | 'qc_review' | 'qc_fix' | 'qc_verify'
   | 'triage'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
 
@@ -48,6 +49,10 @@ const TYPE_LABELS: Record<TaskType, string> = {
   dev: 'Dev',
   security: 'Security',
   log_check: 'Log Check',
+  qc: 'QC',
+  qc_review: 'QC · Review',
+  qc_fix: 'QC · Fix',
+  qc_verify: 'QC · Verify',
   dev_controller: 'Dev · Controller',
   dev_plan: 'Dev · Plan',
   dev_execute: 'Dev · Execute',

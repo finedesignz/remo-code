@@ -15,10 +15,11 @@ export type PostRunAction = any
 // workflow step kinds + internal `triage`. Legacy values were rewritten by
 // the schema.sql migration (commit b9edb82). DB CHECK constraint matches.
 export type TaskType =
-  | 'dev' | 'security' | 'log_check'
+  | 'dev' | 'security' | 'log_check' | 'qc'
   | 'dev_controller' | 'dev_plan' | 'dev_execute' | 'dev_ship'
   | 'security_scan' | 'security_triage' | 'security_fix_or_issue'
   | 'log_pull' | 'log_classify' | 'log_triage'
+  | 'qc_review' | 'qc_fix' | 'qc_verify'
   | 'triage'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
 export type CatchupPolicy = 'skip' | 'run_once'
@@ -453,6 +454,40 @@ export async function getRun(runId: string, userId: string): Promise<ScheduledTa
     SELECT * FROM scheduled_task_runs WHERE id = ${runId} AND user_id = ${userId} LIMIT 1
   `
   return rows[0] ?? null
+}
+
+/**
+ * auto-dev P4: walk up the `triggered_by_run_id` chain from a run to find the
+ * nearest ancestor run whose task is a `qc_review` (or bare `qc`) root, and
+ * return its `output_snippet` (the `<<FINDINGS>>` block) plus the originating
+ * task's `payload.repo`. Used by the qc_verify success hook to record which
+ * findings are now fixed-and-verified (the 24h idempotency guard).
+ *
+ * The chain is short (review → fix → verify, depth ≤ 3) so the bounded walk is
+ * cheap. Returns null when no qc_review ancestor is found.
+ */
+export async function findQcReviewSnippetForRun(
+  runId: string,
+  userId: string,
+): Promise<{ snippet: string | null; repo: string } | null> {
+  let cursor: string | null = runId
+  for (let hop = 0; hop < 5 && cursor; hop++) {
+    const rows = await sql<{ triggered_by_run_id: string | null; output_snippet: string | null; task_type: string; repo: string | null; name: string }[]>`
+      SELECT r.triggered_by_run_id, r.output_snippet, t.task_type,
+             t.payload->>'repo' AS repo, t.name
+      FROM scheduled_task_runs r
+      JOIN scheduled_tasks t ON t.id = r.task_id
+      WHERE r.id = ${cursor} AND r.user_id = ${userId}
+      LIMIT 1
+    `
+    const row = rows[0]
+    if (!row) return null
+    if (row.task_type === 'qc_review' || row.task_type === 'qc') {
+      return { snippet: row.output_snippet, repo: row.repo ?? row.name ?? '' }
+    }
+    cursor = row.triggered_by_run_id
+  }
+  return null
 }
 
 /**
