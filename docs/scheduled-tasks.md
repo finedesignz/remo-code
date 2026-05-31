@@ -65,6 +65,7 @@ to the web UI over WebSocket.
 | `hub/src/scheduler/post-run/schema.ts`    | Zod schema for `post_run_actions` + chain-cycle detector (DFS)         |
 | `hub/src/scheduler/post-run/aggregator.ts`| Fan-out aggregator: collects child results, fires post-run actions once|
 | `hub/src/scheduler/post-run/template.ts`  | `{{var}}` substitution with optional HTML escape (email variant)       |
+| `hub/src/scheduler/post-run/deploy-verify.ts` | **auto-dev P5** `deploy_verify` action: forced Coolify redeploy (`POST /api/v1/deploy?uuid=…&force=true`, `COOLIFY_TOKEN` env) → poll `/health` then probe the REAL routes (`/api/*` + `/openapi.json` + `/docs`; rule 14.4) → per-route pass/fail (401/403→mounted PASS, 404→route-gone FAIL, 502/503/504→runtime-broken FAIL) → report to repo-bound/orchestrator chat. Probe in `hub/src/scheduler/deploy-verify-probe.ts`; client in `hub/src/lib/coolify-client.ts`. Closes the Coolify error→fix→redeploy loop with verification. See `docs/coolify-webhook-migration.md` §2026-05-30. |
 | `web/src/components/CronBuilder.tsx`      | Dropdown-driven cron builder (8 modes + presets) used in editor        |
 | `web/src/lib/cron-humanize.ts`            | `humanizeCron(expr)` plain-English renderer (builder + list row)       |
 | `web/src/lib/format.ts`                   | `formatDuration`, `formatCostUsd`, `formatRelativeAgo` (list chips)    |

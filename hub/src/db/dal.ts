@@ -4,6 +4,25 @@ import { log } from "../observability/logger.ts";
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
+// auto-dev P5: candidate session IDs bound to a given `repo_key` for a user,
+// used by the repo-keyed deploy-failure resolver to land a triage fix in the
+// session actually bound to the failing repo (not a capacity-picked stranger).
+// Most-recently-active first; the caller intersects with online agent channels.
+export async function listSessionIdsForRepoKey(
+  userId: string,
+  repoKey: string,
+): Promise<string[]> {
+  const rows = await sql<{ id: string }[]>`
+    SELECT id FROM sessions
+    WHERE user_id = ${userId}
+      AND repo_key = ${repoKey}
+      AND is_rootless = false
+      AND deleted_at IS NULL
+    ORDER BY last_activity DESC NULLS LAST
+  `;
+  return rows.map((r) => r.id);
+}
+
 export async function listSessions(userId: string) {
   return sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info,
@@ -1423,6 +1442,28 @@ export async function recordVerifiedFinding(
     VALUES (${userId}, ${hash}, ${repo})
     ON CONFLICT (user_id, hash) DO UPDATE SET created_at = now()
   `;
+}
+
+// ── auto-dev P5: Coolify deploy-failure storm dedupe ─────────────────────────
+//
+// Backed by `coolify_deploy_idempotency`. Atomic claim: the FIRST failed deploy
+// for a (user, application_uuid, fingerprint) wins and dispatches a fix; a storm
+// of repeats within the same fingerprint window loses the claim and is dropped.
+// INSERT ... ON CONFLICT DO NOTHING + RETURNING is the race-safe claim — only
+// one concurrent caller gets a returned row.
+
+export async function claimDeployFailure(
+  userId: string,
+  applicationUuid: string,
+  fingerprint: string,
+): Promise<boolean> {
+  const rows = await sql`
+    INSERT INTO coolify_deploy_idempotency (user_id, application_uuid, fingerprint)
+    VALUES (${userId}, ${applicationUuid}, ${fingerprint})
+    ON CONFLICT (user_id, application_uuid, fingerprint) DO NOTHING
+    RETURNING fingerprint
+  `;
+  return rows.length > 0;
 }
 
 // ── Phase 07: Titanium auth (additive) ────────────────────────────────────────

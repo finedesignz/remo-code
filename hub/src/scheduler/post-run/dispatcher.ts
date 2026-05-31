@@ -26,6 +26,7 @@ import { executeTelegram } from './telegram.ts'
 import { executeWebPush } from './webpush.ts'
 import { executeWebhook } from './webhook.ts'
 import { executeGithubIssue } from './github-issue.ts'
+import { executeDeployVerify } from './deploy-verify.ts'
 import { report as aggregatorReport } from './aggregator.ts'
 import { surfaceProposal } from './propose-notify.ts'
 
@@ -370,6 +371,13 @@ async function executeAction(
         return
       case 'github_issue':
         await executeGithubIssue(action, {
+          userId: args.task.user_id,
+          templateVars,
+          runId: args.runId,
+        })
+        return
+      case 'deploy_verify':
+        await executeDeployVerify(action, {
           userId: args.task.user_id,
           templateVars,
           runId: args.runId,

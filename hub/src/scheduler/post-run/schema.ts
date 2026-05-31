@@ -69,6 +69,28 @@ export const GithubIssueAction = z.object({
   }),
 })
 
+// auto-dev P5: deploy-verify post-run action. After a deploy-failure fix commit
+// lands (push → Coolify auto-deploys), this triggers a forced Coolify redeploy
+// then probes the REAL routes (rule 14.4 — not `/health` alone) and reports
+// pass/fail to chat. `application_uuid` drives the redeploy; `base_url` + `routes`
+// drive the probe. Routes SHOULD be the app's top-level `/api/*` namespaces plus
+// `/openapi.json` + `/docs` when present.
+export const DeployVerifyAction = z.object({
+  type: z.literal('deploy_verify'),
+  ...Base,
+  config: z.object({
+    application_uuid: z.string().min(1),
+    base_url: z.string().url(),
+    routes: z.array(z.string().min(1)).min(1).max(40),
+    health_paths: z.array(z.string().min(1)).max(5).optional(),
+    health_timeout_ms: z.number().int().min(1000).max(600_000).optional(),
+    health_interval_ms: z.number().int().min(500).max(60_000).optional(),
+    // Optional session to post the verify report into; defaults to the run's
+    // repo-bound / orchestrator session resolved at execute time.
+    report_session_id: z.string().optional(),
+  }),
+})
+
 export const PostRunAction = z.discriminatedUnion('type', [
   ChainTaskAction,
   NotifyEmailAction,
@@ -76,6 +98,7 @@ export const PostRunAction = z.discriminatedUnion('type', [
   NotifyWebPushAction,
   WebhookAction,
   GithubIssueAction,
+  DeployVerifyAction,
 ])
 export type PostRunAction = z.infer<typeof PostRunAction>
 
