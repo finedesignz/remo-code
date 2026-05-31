@@ -25,6 +25,17 @@ mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
     childTypes[id] ? { id, task_type: childTypes[id] } : null,
 }))
 
+// auto-dev P3: stub the propose-to-chat surfacer so the router's `propose`
+// branch is observable without DB/network. Must be mocked BEFORE the dispatcher
+// import below.
+const proposeCalls: Array<{ taskId: string; action: string }> = []
+mock.module('../src/scheduler/post-run/propose-notify.ts', () => ({
+  surfaceProposal: async (a: any) => {
+    proposeCalls.push({ taskId: a.task.id, action: a.decision.action })
+    return 'msg'
+  },
+}))
+
 const mod = await import('../src/scheduler/post-run/dispatcher.ts?controller-routing')
 const { routeControllerDecision } = mod as {
   routeControllerDecision: (args: any, actions: any[]) => Promise<boolean>
@@ -83,6 +94,23 @@ describe('routeControllerDecision (auto-dev P2)', () => {
     const handled = await routeControllerDecision(args('propose'), edges)
     expect(handled).toBe(true)
     expect(chainCalls).toEqual([])
+  })
+
+  it('propose → surfaces the roadmap to chat (P3), no chain', async () => {
+    chainCalls.length = 0
+    proposeCalls.length = 0
+    const a = args('propose')
+    a.output_snippet =
+      '<<DECISION\naction: propose\nreason: r\nnext_goal: g\nroadmap: Auth | Billing\nDECISION'
+    await routeControllerDecision(a, edges)
+    expect(chainCalls).toEqual([])
+    expect(proposeCalls).toEqual([{ taskId: 'root', action: 'propose' }])
+  })
+
+  it('non-propose action does NOT surface a proposal', async () => {
+    proposeCalls.length = 0
+    await routeControllerDecision(args('continue'), edges)
+    expect(proposeCalls).toEqual([])
   })
 
   it('missing decision block → fallback continue → dev_execute', async () => {

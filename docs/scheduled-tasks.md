@@ -589,6 +589,50 @@ via `scheduler/post-run/aggregator.ts`:
 
 ---
 
+## Auto-dev: propose-to-chat + HITL (P3)
+
+When the dev controller (`dev`/`dev_controller`, see Phase 11 + auto-dev P2)
+emits `action=propose` — there is no plan AND no clear goal — the post-run
+router does NOT chain. Instead it **surfaces the roadmap to chat** and waits for
+a human. `propose` NEVER auto-builds.
+
+Flow (`hub/src/scheduler/post-run/propose-notify.ts`):
+
+1. **Surface** — `surfaceProposal()` parses the decision's `roadmap` (the
+   controller template emits `" | "`-separated features on one line), formats a
+   numbered, actionable message ("Routine X has no plan or goal and proposes: …
+   Reply with the number(s) or text to approve"), and sends it via the existing
+   `notify_email` + `notify_telegram` post-run senders (synthesized in-memory
+   actions — nothing persisted to `post_run_actions`).
+2. **Throttle/dedupe** — reuses `notifications_sent` with
+   `kind='propose_roadmap'`, `dedupe_key = <taskId>:<sha256(roadmap)[:16]>`,
+   TTL `PROPOSE_TTL_SECONDS` (6h). A routine that keeps ticking `propose` with
+   the same roadmap notifies once per window; a changed roadmap re-notifies.
+3. **Pending state** — the proposal (`{roadmap, items, run_id, proposed_at}`) is
+   persisted under the task's `payload.pending_proposal` (JSONB; **no new
+   table**). The #214 `prompt`/`payload.prompt` mirror is left untouched.
+4. **HITL capture** — an inbound chat reply (`captureApprovalReply`, called from
+   the Telegram webhook before `dispatchToSession`) that is an unambiguous
+   numeric selection ("1", "1, 3") writes the chosen item(s) into the routine's
+   `payload.notes` and clears `pending_proposal`. `requireSelection` keeps
+   unrelated chat from being hijacked; free-form replies fall through to a normal
+   session dispatch.
+5. **Loop close** — `buildRuntimeContext` surfaces `payload.notes` as `user_goal`
+   in the `## RUNTIME CONTEXT` block. The NEXT controller tick now sees a stated
+   goal and chooses `plan` (per the controller decision tree) instead of
+   `propose`.
+
+DB: `notifications_sent` CHECK constraint gains `'propose_roadmap'` (idempotent
+ALTER, re-runs every boot). DAL helpers: `setPendingProposal`,
+`findPendingProposalTasksForUser`, `captureProposalNotes` in
+`hub/src/db/scheduled-tasks-dal.ts`.
+
+Tests: `hub/test/propose-notify.test.ts` (parse/format/resolve, throttle/dedupe,
+capture), `hub/test/dev-controller-routing.test.ts` (propose → surface, no chain;
+non-propose → no surface).
+
+---
+
 ## Coolify webhook ingress (Phase 06)
 
 Public webhook endpoint that turns Coolify deployment events into
