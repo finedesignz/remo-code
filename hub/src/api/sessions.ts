@@ -16,7 +16,7 @@ import {
   getKnownLocalPathsForRepoKey,
   getActiveSessionIdsForUser,
 } from '../ws/supervisor-registry.ts'
-import { releaseSessionSlot } from '../sessions/budget.ts'
+import { releaseSessionSlot, reserveSessionSlot } from '../sessions/budget.ts'
 import { probeGithubAppScope } from '../lib/github-scope.ts'
 import { enqueueCreateGithubRepoJob } from '../lib/github-repo-job.ts'
 import { randomUUID } from 'node:crypto'
@@ -409,23 +409,78 @@ sessions.post('/:id/launch', async (c) => {
     }, 409)
   }
 
-  const cli_kind = (parsed.data.cli_kind ?? (session as any).cli_kind ?? 'claude') as 'claude' | 'codex'
-  const run_id = randomUUID()
-  const nonce = mintLaunchNonce(userId, sessionId)
+  // Note: `cli_kind` (body override / session default) is intentionally not on
+  // the wire — `session.start` resolves the CLI kind supervisor-side via its
+  // inventory, the same as every other start sender. The body field is still
+  // accepted (LaunchBody) for forward-compat and to preserve the API contract.
+
+  // Protocol-drift fix (2026-05-30): the supervisor's message switch has NO
+  // `case 'session.launch'` — the Phase-08 §16 `session.launch` directive was
+  // never implemented supervisor-side, so the old emit was silently dropped and
+  // no runner ever spawned (the "can't connect" prod report). Emit the canonical
+  // `session.start` (the only handled spawn type) instead, mirroring every other
+  // start sender (api/supervisors.ts, telegram/launch.ts, scheduler, orchestrator
+  // auto-launch). Runner↔session binding is by `repo_path`/project_dir match in
+  // the supervisor's session_inventory push — identical to those senders — so the
+  // resolved `cwd` (canonical-clone-preferring, worktree-safe) is what binds the
+  // spawned runner to THIS session's working tree. `session.start` carries no
+  // top-level session_id or cli_kind (resolved supervisor-side via inventory),
+  // matching the wire type in ws/supervisor-protocol.ts.
+  //
+  // Mint the launch nonce for parity with the prior contract / future re-auth,
+  // but the wire api_key is the `__use_local__` sentinel the supervisor expects
+  // (it uses its own configured key), same as the other start senders.
+  void mintLaunchNonce(userId, sessionId)
+
+  // Concurrency gate — MUST come before createRun, exactly as the other
+  // session.start senders (api/supervisors.ts, telegram/launch.ts).
+  const reservation = await reserveSessionSlot(userId, supervisorId)
+  if (!reservation.ok) {
+    if (reservation.reason === 'at_capacity') {
+      return c.json({ error: 'at_capacity', running: reservation.running, cap: reservation.cap }, 429)
+    }
+    return c.json({ error: 'supervisor_offline' }, 409)
+  }
+
+  let run: { id: string }
+  try {
+    run = await createRun({
+      userId,
+      sessionId: null,
+      supervisorId,
+      repoPath: cwd,
+      branch: null,
+      pulled: false,
+      initialPrompt: null,
+    }) as { id: string }
+  } catch (err: any) {
+    await releaseSessionSlot(userId, supervisorId)
+    return c.json({ error: 'run_insert_failed', detail: err?.message ?? String(err) }, 500)
+  }
+  const run_id = run.id
 
   try {
     sendToSupervisor(supervisorId, {
-      type: 'session.launch',
+      type: 'session.start',
+      req_id: run_id,
       run_id,
-      session_id: sessionId,
-      cli_kind,
-      cwd,
-      api_key: nonce,
-      system_prompt: (session as any).system_prompt ?? null,
-    })
+      repo_path: cwd,
+      branch: undefined,
+      pull: false,
+      initial_prompt: undefined,
+      api_key: '__use_local__', // sentinel — supervisor uses its configured key
+      hub_url: '__same__',
+    } as any)
   } catch (err: any) {
+    try {
+      const { endRun } = await import('../db/supervisor-dal.ts')
+      await endRun(run_id, null, `dispatch_failed: ${err?.message ?? 'unknown'}`)
+    } catch {}
+    await releaseSessionSlot(userId, supervisorId)
     return c.json({ error: 'dispatch_failed', detail: err?.message ?? 'unknown' }, 503)
   }
+
+  try { await updateSupervisorState(supervisorId, 'starting', run_id) } catch {}
 
   return c.json({ launching: true, run_id }, 202)
 })
