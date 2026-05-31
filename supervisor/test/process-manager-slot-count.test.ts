@@ -37,8 +37,10 @@ const bridges: BridgeCall[] = []
 class FakeBridge {
   startCalls = 0
   stopCalls = 0
+  alive = true
   start() { this.startCalls++ }
   async stop() { this.stopCalls++ }
+  isAlive() { return this.alive }
 }
 
 function bridgeFactorySpy(opts: SessionBridgeOptions, cb: SessionBridgeCallbacks): any {

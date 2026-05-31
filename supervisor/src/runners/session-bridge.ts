@@ -78,6 +78,22 @@ export class SessionBridge {
     this.connect()
   }
 
+  /**
+   * Liveness probe for the supervisor's slot reconciler. True while this bridge
+   * is genuinely occupying a concurrency slot: it has an open hub WS OR a live
+   * runner subprocess. A bridge that is permanently stranded (hub auth bounce /
+   * hub down — stuck in the reconnect-backoff loop with no runner) reports false
+   * between reconnect attempts, letting ProcessManager.reconcileSlots() reclaim
+   * the leaked slot. A healthy session that is briefly mid-reconnect still has a
+   * live runner, so it keeps reporting true and is never reclaimed.
+   */
+  isAlive(): boolean {
+    if (this.stopped) return false
+    if (this.ws?.readyState === WebSocket.OPEN) return true
+    if (this.runner) return true
+    return false
+  }
+
   /** Stop runner + close WS. Idempotent. */
   async stop(): Promise<void> {
     if (this.stopped) return

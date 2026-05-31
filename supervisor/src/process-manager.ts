@@ -46,6 +46,15 @@ const CIRCUIT_THRESHOLD = 5
  *  finalized as `max_restarts_exceeded` and the supervisor stops respawning. */
 const MAX_RESTART_COUNT = 10
 
+/**
+ * Self-heal grace for the slot reconciler. A counted slot ('starting'/'running')
+ * whose bridge reports `isAlive() === false` is only reclaimed once it has been
+ * stranded longer than this. The bound sits comfortably above the bridge's own
+ * reconnect backoff ceiling (RECONNECT_BACKOFF_MS max 15s) so a healthy session
+ * that is momentarily mid-reconnect — which in any case still has a live runner,
+ * so reports alive — is never falsely reclaimed. */
+const SLOT_STALE_GRACE_MS = 30_000
+
 /** Test hook for the new in-process bridge path. When set, `start()` uses
  *  this factory instead of `new SessionBridge(...)`. Lets the unit test
  *  verify "session.start → bridge constructed with correct options" without
@@ -112,11 +121,55 @@ export class ProcessManager {
    * the same-repoPath duplicate check.
    */
   private activeSlotCount(): number {
+    this.reconcileSlots()
     let n = 0
     for (const r of this.runs.values()) {
       if (r.state === 'starting' || r.state === 'running') n++
     }
     return n
+  }
+
+  /**
+   * Self-healing slot reconciler (2026-05-30). Root cause of the prod lockout:
+   * a slot is counted purely from a run's stored state ('starting'/'running'),
+   * but a run can be stranded in such a state with NO live child process and NO
+   * code path that ever evicts it. The bridge surfaces termination only via
+   * `onExit`; when the bridge instead spins forever in its WS reconnect-backoff
+   * loop (hub down / auth bounce → never authenticates → runner never spawns →
+   * never reaches 'running', and non-terminal WS close codes never call
+   * `onExit`), the entry pins a slot indefinitely. After enough churn every slot
+   * is pinned and `start()` rejects everything with `concurrency_cap` while the
+   * hub DB shows zero live runs — exactly the observed outage.
+   *
+   * Rather than chase every missing-decrement path (each a new leak waiting to
+   * happen), we derive occupancy from REALITY on every cap evaluation: a counted
+   * entry whose bridge is gone or not alive, and that has been stranded past
+   * SLOT_STALE_GRACE_MS, is evicted. This can only ever drop a slot whose bridge
+   * has no open WS and no live runner, so a healthy (or briefly reconnecting)
+   * session is never reclaimed. Eviction here is the same terminal cleanup the
+   * normal exit paths perform: clear any restart timer and drop from `runs`.
+   */
+  private reconcileSlots(): void {
+    const now = Date.now()
+    for (const [runId, r] of this.runs) {
+      if (r.state !== 'starting' && r.state !== 'running') continue
+      const alive = typeof r.bridge?.isAlive === 'function' ? r.bridge.isAlive() : r.bridge != null
+      if (alive) continue
+      const lastSeen = Date.parse(
+        (r as any).lastActivityAt ?? (r as any).startedAt ?? '',
+      )
+      const strandedFor = Number.isFinite(lastSeen) ? now - lastSeen : Infinity
+      if (strandedFor < SLOT_STALE_GRACE_MS) continue
+      this.cb.onLog(
+        'warn',
+        `[reconcile] reclaiming stranded ${r.state} slot — bridge not alive for ${Math.round(strandedFor / 1000)}s`,
+        runId,
+      )
+      if (r.restartTimer) { clearTimeout(r.restartTimer); r.restartTimer = null }
+      if (r.bridge) { void r.bridge.stop().catch(() => {}); r.bridge = null }
+      this.setState(r, 'stopped', { runId, lastExit: { code: null, reason: 'reconciled_stranded_slot' } })
+      this.runs.delete(runId)
+    }
   }
 
   /** True if a crashed-pending-restart entry already targets this repoPath.
