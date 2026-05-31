@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import type { CodeSession } from '../hooks/useSessions'
+import { repoSessionList } from '../lib/session-list'
 import { UnreadBadge } from './UnreadBadge'
 import { timeAgo } from './SessionTooltip'
 
@@ -38,7 +39,9 @@ export function SessionDropdown({ sessions, activeSessionId, onSelectSession, un
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
-  const connected = connectedSessions(sessions)
+  // Worktrees collapsed by repo_key + connected-first sort + orchestrator pinned
+  // (shared selector). Filter to online sessions first — this is a live picker.
+  const connected = repoSessionList(connectedSessions(sessions))
   const active = connected.find(s => s.id === activeSessionId)
   const totalUnread = Object.values(unreadCounts).reduce((sum, c) => sum + c, 0)
 

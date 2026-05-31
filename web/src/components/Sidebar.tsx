@@ -3,7 +3,9 @@ import { createPortal } from 'react-dom'
 import type { AuthUser } from '../lib/auth.ts'
 import type { CodeSession } from '../hooks/useSessions'
 import { githubOwnerRepo } from '../hooks/useSessions'
-import { sessionLabel, shortId, connectedSessions } from './SessionDropdown'
+import { sessionLabel, shortId } from './SessionDropdown'
+import { repoSessionList } from '../lib/session-list'
+import { SessionActionButton } from './SessionActionButton'
 import { UnreadBadge } from './UnreadBadge'
 import { SessionTooltip } from './SessionTooltip'
 import { CloneHereModal } from './CloneHereModal'
@@ -162,33 +164,14 @@ export function Sidebar({
     )
   }
 
-  // Phase 08.6 — defensive UI-side collapse: if the session list ever surfaces
-  // two rows sharing the same `repo_key` (shouldn't happen post-Phase 08 dedupe
-  // but legacy data can drift), keep only the most-recently-active one. Local
-  // sessions with NULL repo_key remain as-is, keyed by id.
-  const collapseByRepoKey = (list: CodeSession[]): CodeSession[] => {
-    const byKey = new Map<string, CodeSession>()
-    const out: CodeSession[] = []
-    for (const s of list) {
-      if (!s.repo_key) { out.push(s); continue }
-      const prev = byKey.get(s.repo_key)
-      if (!prev) { byKey.set(s.repo_key, s); continue }
-      const a = prev.last_activity ? Date.parse(prev.last_activity) : 0
-      const b = s.last_activity ? Date.parse(s.last_activity) : 0
-      if (b > a) byKey.set(s.repo_key, s)
-    }
-    for (const s of byKey.values()) out.push(s)
-    return out
-  }
-  const rawConnected = collapseByRepoKey(connectedSessions(sessions))
-  // Pin the orchestrator session (if any) to the very top.
-  const orchestratorIdx = rawConnected.findIndex((s) => s.is_orchestrator)
-  const connectedList = orchestratorIdx >= 0
-    ? [rawConnected[orchestratorIdx], ...rawConnected.filter((_, i) => i !== orchestratorIdx)]
-    : rawConnected
-
-  // Offline sessions are intentionally NOT rendered in the sidebar — it is
-  // active-only. They are launched/managed from Settings → Supervisor instead.
+  // Shared selector (web/src/lib/session-list): worktrees collapsed by
+  // repo_key, connected-first sort, orchestrator pinned to the top. The sidebar
+  // is active-only, so filter to online sessions first; offline sessions are
+  // launched/managed from Settings → Connections instead.
+  const onlineOnly = (Array.isArray(sessions) ? sessions : []).filter(
+    (s) => s.status === 'online' || s.status === 'thinking',
+  )
+  const connectedList = repoSessionList(onlineOnly)
 
   const hoveredSession =
     hoverInfo ? connectedList.find(s => s.id === hoverInfo.id) : null
@@ -364,17 +347,11 @@ export function Sidebar({
                         </button>
                       </>
                     ) : (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setConfirmingId(s.id) }}
-                        className="p-1.5 min-w-[28px] min-h-[28px] flex items-center justify-center text-[var(--text-muted)] hover:text-red-300 hover:bg-red-900/30 rounded transition-colors"
-                        title="Stop & remove session — closes the Claude Code subprocess and removes the session"
-                        aria-label={`Stop and remove ${sessionLabel(s)}`}
-                      >
-                        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                          <line x1="4" y1="4" x2="12" y2="12" />
-                          <line x1="12" y1="4" x2="4" y2="12" />
-                        </svg>
-                      </button>
+                      <SessionActionButton
+                        kind="stop"
+                        onClick={() => setConfirmingId(s.id)}
+                        label={`Stop & remove ${sessionLabel(s)} — closes the Claude Code subprocess and removes the session`}
+                      />
                     )}
                   </span>
                 </div>
