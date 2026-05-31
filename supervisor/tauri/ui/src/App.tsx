@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { NavLink, Route, Routes } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
-import GeneralPage from "./pages/GeneralPage";
-import RootsPanel from "./components/RootsPanel";
-import FoldersPage from "./pages/FoldersPage";
+import ConnectionsPage from "./pages/ConnectionsPage";
 import SecurityPage from "./pages/SecurityPage";
 import OnboardingPage from "./pages/OnboardingPage";
 import UpdateNotifier from "./UpdateNotifier";
@@ -15,6 +13,11 @@ interface RuntimeStatus {
 interface RootsConfig {
   roots: string[];
 }
+
+const TABS = [
+  { to: "/", label: "Connections" },
+  { to: "/security", label: "Security" },
+] as const;
 
 export default function App() {
   // null = still resolving first-run state; true/false once known.
@@ -48,44 +51,66 @@ export default function App() {
   }
 
   return (
-    <div className="h-full flex bg-[var(--bg-primary)] text-[var(--text-primary)]">
+    <div className="h-full flex flex-col bg-[var(--bg-primary)] text-[var(--text-primary)]">
       <UpdateNotifier />
-      <aside className="w-48 shrink-0 p-4 space-y-1 bg-[var(--bg-secondary)]/40">
-        <div className="px-3 pb-3 text-xs uppercase tracking-wide text-[var(--text-muted)]">
-          Supervisor
-        </div>
-        <NavItem to="/" label="General" />
-        <NavItem to="/roots" label="Roots" />
-        <NavItem to="/repos" label="Repos" />
-        <NavItem to="/security" label="Security" />
-      </aside>
-      <main className="flex-1 p-6 overflow-y-auto">
+      <TabBar />
+      <main className="flex-1 overflow-y-auto px-4 md:px-6 py-5">
         <Routes>
-          <Route path="/" element={<GeneralPage />} />
-          <Route path="/roots" element={<RootsPanel />} />
-          <Route path="/repos" element={<FoldersPage />} />
+          <Route path="/" element={<ConnectionsPage />} />
           <Route path="/security" element={<SecurityPage />} />
+          {/* Retired routes redirect to Connections. */}
+          <Route path="/roots" element={<Navigate to="/" replace />} />
+          <Route path="/repos" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
     </div>
   );
 }
 
-function NavItem({ to, label }: { to: string; label: string }) {
+function TabBar() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const active = TABS.find((t) => t.to === location.pathname)?.to ?? "/";
+
   return (
-    <NavLink
-      to={to}
-      end
-      className={({ isActive }) =>
-        [
-          "block px-3 py-2 rounded-lg text-sm transition-colors",
-          isActive
-            ? "bg-blue-600/20 text-blue-300 ring-1 ring-blue-500/30"
-            : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40",
-        ].join(" ")
-      }
-    >
-      {label}
-    </NavLink>
+    <header className="shrink-0 border-b border-[var(--border-color)]/40 px-4 md:px-6">
+      {/* Mobile: dropdown switcher */}
+      <div className="md:hidden py-2">
+        <select
+          value={active}
+          onChange={(e) => navigate(e.target.value)}
+          className="w-full text-sm px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          {TABS.map((t) => (
+            <option key={t.to} value={t.to}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Desktop: horizontal tab bar */}
+      <nav className="hidden md:flex items-center gap-1">
+        {TABS.map((t) => (
+          <NavLink
+            key={t.to}
+            to={t.to}
+            end
+            className={({ isActive }) =>
+              [
+                "px-3 py-2 my-1 rounded-lg text-sm transition-colors motion-reduce:transition-none",
+                "focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500",
+                isActive
+                  ? "bg-blue-600/20 text-blue-300 ring-1 ring-blue-500/30"
+                  : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40",
+              ].join(" ")
+            }
+          >
+            {t.label}
+          </NavLink>
+        ))}
+      </nav>
+    </header>
   );
 }
