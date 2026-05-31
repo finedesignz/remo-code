@@ -1021,7 +1021,10 @@ CREATE INDEX IF NOT EXISTS idx_token_usage_daily_user_day ON token_usage_daily(u
 -- sessions.auto_nudge: per-session override for the auto-nudge-when-idle
 --   behavior. NULLABLE on purpose: NULL means "inherit the user's global
 --   default" (users.auto_nudge_idle_sessions). TRUE/FALSE force on/off for this
---   session regardless of the global. Effective value resolved client-side as
---   `session.auto_nudge ?? user.auto_nudge_idle_sessions`.
+--   session regardless of the global. Effective value is currently resolved
+--   CLIENT-SIDE in web ChatLayout.tsx as `session.auto_nudge ?? user.auto_nudge_idle_sessions`.
+--   CONTRACT: any future server-side nudge dispatcher MUST resolve
+--   `session.auto_nudge ?? user.auto_nudge_idle_sessions` too — do NOT nudge
+--   unconditionally (NULL means inherit the per-user default, not "always on").
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auto_nudge BOOLEAN;
 

@@ -57,6 +57,13 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   const [tabs, setTabs] = useState<TabWithSessions[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Transient inline notice for grid move actions (e.g. target tab full).
+  const [moveNotice, setMoveNotice] = useState<string | null>(null)
+  useEffect(() => {
+    if (!moveNotice) return
+    const t = setTimeout(() => setMoveNotice(null), 3000)
+    return () => clearTimeout(t)
+  }, [moveNotice])
   const [activeTabId, setActiveTabId] = useState<string | undefined>(tabIdFromUrl)
   const [pickerOpen, setPickerOpen] = useState(false)
   // Layout for the VIRTUAL Default tab (can't persist to a chat_tabs row).
@@ -444,12 +451,31 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   // add to target (Default membership is computed — nothing to remove).
   const onMoveSession = useCallback(async (sessionId: string, targetTabId: string) => {
     if (targetTabId === DEFAULT_TAB_ID || targetTabId === activeTabId) return
+    // Capacity guard: refuse the move if the target user-tab is already full.
+    // (A session already in the target counts; if it's somehow there, the add
+    // is a no-op and the source-remove below still completes the move.)
+    const targetTab = tabs.find(t => t.id === targetTabId)
+    const alreadyInTarget = targetTab?.sessions.some(s => s.session_id === sessionId) ?? false
+    if (targetTab && !alreadyInTarget && targetTab.sessions.length >= MAX_CELLS_PER_TAB) {
+      setMoveNotice(`Tab is full (${MAX_CELLS_PER_TAB} max)`)
+      return
+    }
+    const fromUserTab = !!activeTabId && activeTabId !== DEFAULT_TAB_ID
     await addSessionToTab(token, targetTabId, sessionId)
-    if (activeTabId && activeTabId !== DEFAULT_TAB_ID) {
-      await removeSessionFromTab(token, activeTabId, sessionId)
+    if (fromUserTab) {
+      try {
+        await removeSessionFromTab(token, activeTabId!, sessionId)
+      } catch (e: any) {
+        // Source-remove failed: roll back the target add so the session isn't
+        // left in two tabs.
+        try { await removeSessionFromTab(token, targetTabId, sessionId) } catch {}
+        setMoveNotice('Move failed — please retry')
+        await onMembershipChange()
+        return
+      }
     }
     await onMembershipChange()
-  }, [activeTabId, token, onMembershipChange])
+  }, [activeTabId, token, tabs, onMembershipChange])
 
   // ── Empty + loading ────────────────────────────────────────────────────────
 
@@ -552,6 +578,11 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
               {overflowCount > 0 && (
                 <span className="text-[11px] text-amber-400" role="status">
                   {MAX_CELLS_PER_TAB}-cell cap reached — {overflowCount} more hidden
+                </span>
+              )}
+              {moveNotice && (
+                <span className="text-[11px] text-amber-400" role="alert">
+                  {moveNotice}
                 </span>
               )}
             </div>
