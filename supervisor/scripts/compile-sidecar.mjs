@@ -29,6 +29,12 @@ if (!version || typeof version !== 'string') {
   console.error(`[compile-sidecar] no version found in ${tauriConfPath}`)
   process.exit(1)
 }
+// Strict semver-ish guard: a malformed or quote-bearing version would break the
+// `--define process.env.REMO_SUPERVISOR_VERSION="${version}"` string below.
+if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
+  console.error(`[compile-sidecar] invalid version ${JSON.stringify(version)} in ${tauriConfPath} — expected MAJOR.MINOR.PATCH[-prerelease]`)
+  process.exit(1)
+}
 
 console.log(`[compile-sidecar] injecting REMO_SUPERVISOR_VERSION=${version}`)
 
