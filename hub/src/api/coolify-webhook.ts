@@ -41,8 +41,10 @@ import {
   insertDeploymentRun,
   recordCoolifyWebhookAttempt,
   markUserCoolifyWebhookLegacyHit,
+  claimDeployFailure,
 } from '../db/dal.ts'
 import { runNow as dispatcherRunNow } from '../scheduler/dispatcher.ts'
+import { deployFailureFingerprint } from '../scheduler/deploy-fingerprint.ts'
 import { ipAllowed, sourceIpFromHeaders } from '../lib/cidr.ts'
 
 export const coolifyWebhookRoutes = new Hono()
@@ -94,6 +96,28 @@ export async function dispatchTriage(
   deploymentRunId: string,
   payload: CoolifyWebhookPayload,
 ): Promise<void> {
+  // auto-dev P5: storm dedupe. A crash-looping app can emit dozens of
+  // `deployment.failed` events; collapse them to ONE fix per
+  // (user, application_uuid, fingerprint) window. The first failure claims the
+  // fingerprint and dispatches; repeats inside the window lose the claim and are
+  // dropped. Fail-open on a claim error (better a dup fix than a silent miss).
+  try {
+    const fingerprint = deployFailureFingerprint({
+      application_uuid: payload.application_uuid,
+      git_repository: payload.git_repository,
+      commit_sha: payload.commit_sha,
+    })
+    const claimed = await claimDeployFailure(userId, payload.application_uuid, fingerprint)
+    if (!claimed) {
+      console.info(
+        `[coolify-webhook] storm dedupe: dropped duplicate deploy-failure app=${payload.application_uuid} fp=${fingerprint.slice(0, 12)}`,
+      )
+      return
+    }
+  } catch (err: any) {
+    console.warn(`[coolify-webhook] deploy-failure claim errored (fail-open): ${err?.message}`)
+  }
+
   const taskId = await ensureInternalTriageTask(userId)
   await dispatcherRunNow(taskId, userId, {
     triggeredByRunId: deploymentRunId,

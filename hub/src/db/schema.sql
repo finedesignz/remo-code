@@ -476,6 +476,23 @@ CREATE TABLE IF NOT EXISTS qc_finding_idempotency (
 );
 CREATE INDEX IF NOT EXISTS idx_qc_finding_idem_created ON qc_finding_idempotency(created_at);
 
+-- ── auto-dev P5: Coolify deploy-failure storm dedupe ─────────────────────────
+-- The Coolify webhook path has no fingerprint dedupe (error-capture does), so a
+-- crash-looping app emitting 50 `deployment.failed` events in a row would fire
+-- 50 triage fix dispatches. This guard collapses a storm to ONE fix per
+-- (user, application_uuid, fingerprint) within a short window. Fingerprint is a
+-- coarse signal off the webhook payload (application_uuid + git_repository +
+-- commit_sha + a time bucket) — see hub/src/scheduler/deploy-fingerprint.ts.
+-- Same idempotent shape as github_issue_idempotency.
+CREATE TABLE IF NOT EXISTS coolify_deploy_idempotency (
+  user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  application_uuid TEXT NOT NULL,
+  fingerprint      TEXT NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, application_uuid, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_coolify_deploy_idem_created ON coolify_deploy_idempotency(created_at);
+
 -- ── Phase 04 plan 002: supervisor budget + preferred-supervisor routing ──────
 -- Columns the hub remembers for each supervisor's reported resource budget.
 -- A supervisor is SUPPOSED to report its cgroup-derived `concurrency_budget`
