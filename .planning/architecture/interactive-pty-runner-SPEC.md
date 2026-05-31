@@ -107,6 +107,27 @@ computer, run a supervisor on it.
   error-capture) stays on the stream-json/programmatic path behind the cost cap, or moves to a
   non-Claude backend (Codex — already wired — or a future Gemini runner). **NOT an API key.**
 
+## Telegram (and any text-only channel) — impact
+
+**Telegram cannot ride the PTY/interactive path and will remain on the programmatic pool.**
+The Telegram bridge ([`hub/src/telegram/bridge.ts:4-11`](hub/src/telegram/bridge.ts:4)) subscribes
+to structured `assistant_message:final` events and uses `tool_use` activity for summarized
+streaming — all emitted by the **stream-json runner** (`ws/agent.ts`). A PTY runner emits raw
+terminal ANSI, none of those events, and a TUI can't render in a chat app. So:
+
+- **Telegram stays on the stream-json runner** → its turns bill the **programmatic credit pool**
+  post-June-15, even though a human drives them. This is a structural fact of the entrypoint, not a
+  spoofing/ToS issue — Telegram simply can't reach the interactive entrypoint.
+- **Runner type is per-session.** A session is either PTY-interactive (web/xterm.js → interactive
+  pool) or stream-json (Telegram-compatible → programmatic pool); they don't mix. Telegram's default
+  session (often the orchestrator) MUST remain a stream-json session. Switching that session to the
+  PTY runner breaks Telegram bridging for it. The new runner must therefore be opt-in per session and
+  must not be applied to a session that is a Telegram default.
+- **The interactive-pool benefit applies only to the web terminal coding path.** Telegram does not
+  benefit. To take Telegram off the credit pool: route its work to a Codex/Gemini backend, accept the
+  credit cost (text chat is usually modest and likely fits the $20–$200 credit), or limit it.
+  **Not an API key** (constraint 1).
+
 ## If PTY fails
 
 If the post-6/15 check shows interactive PTY sessions bill the **programmatic** bucket, or the
