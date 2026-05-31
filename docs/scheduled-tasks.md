@@ -172,12 +172,50 @@ User-pickable roots (three only — see Phase 11 narrowing):
 - **dev** — general development run (replaces legacy `prompt`/`skill`/`continue_dev`)
 - **security** — security scan workflow (replaces `security_scan`)
 - **log_check** — Coolify log analysis workflow
+- **qc** — periodic QC-and-fix routine (auto-dev P4): 3-lens review → fix → verify
 
 Chained workflow step kinds (auto-created when a root is saved — PLAN.md decision #3):
 
-- `dev_plan` → `dev_execute` → `dev_ship`
+- `dev_controller` → `dev_plan` → `dev_execute` → `dev_ship`
 - `security_scan` → `security_triage` → `security_fix_or_issue`
 - `log_pull` → `log_classify` → `log_triage`
+- `qc_review` → `qc_fix` → `qc_verify`
+
+#### QC routine (auto-dev P4)
+
+The `qc` root runs a periodic quality loop. A bare `qc` root (or an explicit
+`qc_review` step) renders the 3-lens review prompt (`prompts/qc/review.md`:
+correctness, reuse/simplification, security) which emits a `<<FINDINGS>>` block
+parsed by `hub/src/scheduler/qc-schema.ts` (`parseQcFindings`). Each finding
+carries `severity`, `file:line`, `finding_type`, `root_cause`, `suggested_fix`.
+
+**Findings → fix → verify → PR flow** (post-run router
+`routeQcReviewDecision` in `post-run/dispatcher.ts`):
+
+- **≥1 actionable finding** → chain `qc_fix` (smallest-diff fixes, tests in the
+  same commit, on a `qc/...` branch — never pushed here). `qc_fix` chains
+  `qc_verify` (its own generic chain edge).
+- **zero findings** (or all filtered by idempotency) → finalize **clean**, no chain.
+- `qc_verify` runs `bun run check-baseline`; if green it **opens a PR**
+  (`gh pr create`) for human review and **never merges** — only the `dev` ship
+  step may auto-merge. Red after 2 attempts → `Summary: BLOCKED`, no PR.
+
+**Loop-safety guards (all airtight):**
+
+- **No re-review on the same tick.** `qc_verify` is terminal
+  (`nextStepInWorkflow('qc_verify') === null`) — it never chains `qc_review`.
+  The NEXT scheduled tick re-reviews. Bounds the loop to one fix-batch per fire.
+- **Finding-hash idempotency.** On `qc_verify` success the hub walks the
+  `triggered_by_run_id` chain back to the originating `qc_review` snippet
+  (`findQcReviewSnippetForRun`), parses the findings, and records each
+  `sha256(repo|file|finding_type|top_line)` in `qc_finding_idempotency`
+  (`recordVerifiedFinding`). `routeQcReviewDecision` skips any finding whose hash
+  was verified within **24h** (`hasVerifiedFinding`), so the routine can't
+  oscillate on a finding the agent can't actually resolve.
+- **Cost cap non-bypassable.** qc steps route through `sendAgentTask` →
+  `dispatch()` with `gates: [thresholdGate, dailyCostCapGate]` — no bypass.
+- **`max_concurrent=1`** per qc routine (existing concurrency mechanism) so
+  overlapping fires don't race the same tree.
 
 Internal kind (NOT user-pickable; synthesized by Coolify webhook + classifier):
 

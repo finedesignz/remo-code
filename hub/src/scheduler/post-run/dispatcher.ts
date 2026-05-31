@@ -18,6 +18,9 @@ import { validatePostRunActions, type PostRunAction } from './schema.ts'
 import { executeChain } from './chain.ts'
 import { getTaskById } from '../../db/scheduled-tasks-dal.ts'
 import { parseControllerDecision, nextStepForAction } from '../controller-schema.ts'
+import { parseQcFindings, findingHash } from '../qc-schema.ts'
+import { hasVerifiedFinding, recordVerifiedFinding } from '../../db/dal.ts'
+import { findQcReviewSnippetForRun } from '../../db/scheduled-tasks-dal.ts'
 import { executeEmail } from './email.ts'
 import { executeTelegram } from './telegram.ts'
 import { executeWebPush } from './webpush.ts'
@@ -103,10 +106,33 @@ export async function fireWithContext(args: FireCtxArgs): Promise<void> {
     controllerHandled = await routeControllerDecision(args, actions)
   }
 
+  // auto-dev P4: qc_review routing. A bare `qc` root or an explicit `qc_review`
+  // step emits a `<<FINDINGS>>` block; we chain `qc_fix` ONLY when ≥1 actionable
+  // finding survives the 24h verified-finding idempotency filter, and SUPPRESS
+  // the generic `chain_task` fan-out so we never double-fire. Zero findings →
+  // finalize clean (no chain). qc_verify NEVER chains qc_review (loop-safety).
+  const isQcReview =
+    (args.task.task_type === 'qc' || args.task.task_type === 'qc_review') &&
+    args.status === 'success'
+  let qcHandled = false
+  if (isQcReview) {
+    qcHandled = await routeQcReviewDecision(args, actions)
+  }
+
+  // auto-dev P4: when a qc_verify run finalizes success (tests green + PR
+  // opened), record the originating review's findings as fixed-and-verified so
+  // the 24h idempotency guard suppresses them on the next review tick. Walks up
+  // the trigger chain to the qc_review snippet. Best-effort; never blocks.
+  if (args.task.task_type === 'qc_verify' && args.status === 'success') {
+    await recordQcVerifiedFindings(args)
+  }
+
+  const chainSuppressed = controllerHandled || qcHandled
+
   for (const action of actions) {
-    // Suppress generic chain_task for a controller run — its routing already
-    // fired (or intentionally skipped, e.g. `propose`).
-    if (controllerHandled && action.type === 'chain_task') continue
+    // Suppress generic chain_task for a controller / qc_review run — its routing
+    // already fired (or intentionally skipped, e.g. `propose` / zero findings).
+    if (chainSuppressed && action.type === 'chain_task') continue
     if (!conditionMatches(action, args)) continue
     const delay = (action.delay_seconds ?? 0) * 1000
     if (delay > 0) {
@@ -187,6 +213,101 @@ export async function routeControllerDecision(
     parentTaskKind: args.task.task_type,
   })
   return true
+}
+
+const QC_FINDING_WINDOW_HOURS = 24
+
+/**
+ * auto-dev P4 — qc_review findings router.
+ *
+ * Parses the run's `<<FINDINGS>>` block. Filters out findings whose hash was
+ * fixed-and-verified within the last 24h (the `qc_finding_idempotency` guard —
+ * so the routine can't oscillate on a finding the agent can't resolve). If ≥1
+ * actionable finding remains, chains the `qc_fix` step (which itself chains
+ * `qc_verify` via its own generic chain edge). Zero findings (or all filtered)
+ * → no chain; the run finalizes clean and the next tick re-reviews.
+ *
+ * Returns true to signal the caller to SUPPRESS the generic `chain_task` loop
+ * for this run (qc_review owns the chain decision).
+ */
+export async function routeQcReviewDecision(
+  args: FireCtxArgs,
+  actions: PostRunAction[],
+): Promise<boolean> {
+  const findings = parseQcFindings(args.output_snippet ?? '')
+
+  // Idempotency filter: drop findings already fixed-and-verified within 24h.
+  const repo = String((args.task as any).payload?.repo ?? args.task.name ?? '')
+  const actionable: typeof findings = []
+  for (const f of findings) {
+    try {
+      const seen = await hasVerifiedFinding(args.task.user_id, findingHash(repo, f), QC_FINDING_WINDOW_HOURS)
+      if (seen) {
+        console.log(`[post-run.qc] task=${args.task.id} skip recently-verified finding file=${f.file} type=${f.finding_type}`)
+        continue
+      }
+    } catch (err: any) {
+      // Better to risk a re-fix than to drop a real finding — keep it.
+      console.warn(`[post-run.qc] idempotency check failed task=${args.task.id}: ${err?.message}`)
+    }
+    actionable.push(f)
+  }
+
+  if (actionable.length === 0) {
+    console.log(`[post-run.qc] task=${args.task.id} qc clean (0 actionable findings); no chain`)
+    return true
+  }
+
+  // Resolve the qc_fix chain edge.
+  const chainEdges = actions.filter((a) => a.type === 'chain_task' && a.config?.task_id)
+  let matched: PostRunAction | null = null
+  for (const edge of chainEdges) {
+    const child = await getTaskById(edge.config.task_id)
+    if (child && child.task_type === 'qc_fix') {
+      matched = edge
+      break
+    }
+  }
+
+  if (!matched) {
+    console.log(`[post-run.qc] task=${args.task.id} ${actionable.length} findings but no qc_fix edge wired; no chain`)
+    return true
+  }
+
+  console.log(`[post-run.qc] task=${args.task.id} ${actionable.length} findings → chain qc_fix child=${matched.config.task_id}`)
+  await executeChain(matched, {
+    parentRunId: args.runId,
+    userId: args.task.user_id,
+    chainDepth: args.chainDepth,
+    parentTaskKind: args.task.task_type,
+  })
+  return true
+}
+
+/**
+ * auto-dev P4 — record the originating qc_review findings as fixed-and-verified.
+ * Called when a `qc_verify` run finalizes success. Walks the trigger chain to
+ * the qc_review snippet, parses its `<<FINDINGS>>` block, and records each
+ * finding's hash in `qc_finding_idempotency`. Best-effort; log-only on failure.
+ */
+async function recordQcVerifiedFindings(args: FireCtxArgs): Promise<void> {
+  try {
+    const origin = await findQcReviewSnippetForRun(args.runId, args.task.user_id)
+    if (!origin) return
+    const findings = parseQcFindings(origin.snippet ?? '')
+    for (const f of findings) {
+      try {
+        await recordVerifiedFinding(args.task.user_id, findingHash(origin.repo, f), origin.repo)
+      } catch (err: any) {
+        console.warn(`[post-run.qc] record verified finding failed task=${args.task.id}: ${err?.message}`)
+      }
+    }
+    if (findings.length > 0) {
+      console.log(`[post-run.qc] task=${args.task.id} recorded ${findings.length} verified findings (24h idempotency)`)
+    }
+  } catch (err: any) {
+    console.warn(`[post-run.qc] recordQcVerifiedFindings failed task=${args.task.id}: ${err?.message}`)
+  }
 }
 
 function conditionMatches(action: PostRunAction, args: FireCtxArgs): boolean {

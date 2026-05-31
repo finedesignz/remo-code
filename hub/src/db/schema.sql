@@ -193,11 +193,13 @@ ALTER TABLE scheduled_tasks DROP CONSTRAINT IF EXISTS scheduled_tasks_task_type_
 ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
   CHECK (task_type IN (
     -- User-pickable workflow roots
-    'dev', 'security', 'log_check',
+    'dev', 'security', 'log_check', 'qc',
     -- Chained workflow steps (created by the workflow auto-explosion in W2)
     'dev_controller', 'dev_plan', 'dev_execute', 'dev_ship',
     'security_scan', 'security_triage', 'security_fix_or_issue',
     'log_pull', 'log_classify', 'log_triage',
+    -- auto-dev P4: QC review → fix → verify (verify opens a PR, never merges)
+    'qc_review', 'qc_fix', 'qc_verify',
     -- Internal: synthesized by Coolify webhook
     'triage'
   ));
@@ -457,6 +459,22 @@ CREATE TABLE IF NOT EXISTS github_issue_idempotency (
   PRIMARY KEY (user_id, hash)
 );
 CREATE INDEX IF NOT EXISTS idx_gh_idem_created ON github_issue_idempotency(created_at);
+
+-- ── auto-dev P4: QC finding-hash idempotency ─────────────────────────────────
+-- Loop-safety guard for the `qc` routine (review → fix → verify). After a
+-- finding is fixed-and-verified (qc_verify green + PR opened), its hash is
+-- recorded here. The qc_review post-run router SKIPS chaining a fix for any
+-- finding whose hash was verified within the last 24h, so the routine can't
+-- oscillate forever on a finding the agent can't actually resolve. Same shape
+-- as github_issue_idempotency. Hash = sha256(`${repo}|${file}|${finding_type}|${top_line}`).
+CREATE TABLE IF NOT EXISTS qc_finding_idempotency (
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hash        TEXT NOT NULL,
+  repo        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, hash)
+);
+CREATE INDEX IF NOT EXISTS idx_qc_finding_idem_created ON qc_finding_idempotency(created_at);
 
 -- ── Phase 04 plan 002: supervisor budget + preferred-supervisor routing ──────
 -- Columns the hub remembers for each supervisor's reported resource budget.

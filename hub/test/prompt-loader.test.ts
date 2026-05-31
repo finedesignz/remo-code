@@ -26,6 +26,9 @@ describe('loadPromptTemplate', () => {
       ['log_check', 'pull'],
       ['log_check', 'classify'],
       ['log_check', 'triage'],
+      ['qc', 'review'],
+      ['qc', 'fix'],
+      ['qc', 'verify'],
     ];
     for (const [wf, step] of matrix) {
       const txt = await loadPromptTemplate(wf, step);

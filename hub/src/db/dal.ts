@@ -1392,6 +1392,39 @@ export async function deleteOpenIssuePlaceholder(
   `;
 }
 
+// ── auto-dev P4: QC finding-hash idempotency ─────────────────────────────────
+//
+// Backed by `qc_finding_idempotency` (see schema.sql). Loop-safety guard: a
+// finding fixed-and-verified within `windowHours` is skipped by the qc_review
+// router so the routine can't oscillate on an unfixable finding.
+
+export async function hasVerifiedFinding(
+  userId: string,
+  hash: string,
+  windowHours: number,
+): Promise<boolean> {
+  const rows = await sql`
+    SELECT 1 FROM qc_finding_idempotency
+    WHERE user_id = ${userId}
+      AND hash = ${hash}
+      AND created_at > now() - (${String(windowHours)} || ' hours')::interval
+    LIMIT 1
+  `;
+  return rows.length > 0;
+}
+
+export async function recordVerifiedFinding(
+  userId: string,
+  hash: string,
+  repo: string,
+): Promise<void> {
+  await sql`
+    INSERT INTO qc_finding_idempotency (user_id, hash, repo)
+    VALUES (${userId}, ${hash}, ${repo})
+    ON CONFLICT (user_id, hash) DO UPDATE SET created_at = now()
+  `;
+}
+
 // ── Phase 07: Titanium auth (additive) ────────────────────────────────────────
 //
 // Helpers for linking remo-code `users` rows to Titanium Licensing (Keygen)

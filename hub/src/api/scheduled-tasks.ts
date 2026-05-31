@@ -45,11 +45,12 @@ export const scheduledTasks = new Hono()
 // schema.sql migration in commit b9edb82.
 const TaskTypeEnum = z.enum([
   // User-pickable roots
-  'dev', 'security', 'log_check',
+  'dev', 'security', 'log_check', 'qc',
   // Chained workflow step kinds
   'dev_controller', 'dev_plan', 'dev_execute', 'dev_ship',
   'security_scan', 'security_triage', 'security_fix_or_issue',
   'log_pull', 'log_classify', 'log_triage',
+  'qc_review', 'qc_fix', 'qc_verify',
   // Internal (synthesized by Coolify webhook)
   'triage',
 ])

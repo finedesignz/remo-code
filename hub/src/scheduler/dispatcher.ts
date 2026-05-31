@@ -434,6 +434,7 @@ export async function routeToSender(task: ScheduledTask, ctx: RunContext): Promi
     // until the `log_pull` chained step is wired in Wave 2.
     case 'dev':
     case 'security':
+    case 'qc':
     case 'dev_controller':
     case 'dev_plan':
     case 'dev_execute':
@@ -441,6 +442,9 @@ export async function routeToSender(task: ScheduledTask, ctx: RunContext): Promi
     case 'security_scan':
     case 'security_triage':
     case 'security_fix_or_issue':
+    case 'qc_review':
+    case 'qc_fix':
+    case 'qc_verify':
     case 'log_classify':
     case 'log_triage': {
       const { sendAgentTask } = await import('./senders/agent.ts')

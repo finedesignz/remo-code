@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export type Workflow = 'dev' | 'security' | 'log_check';
+export type Workflow = 'dev' | 'security' | 'log_check' | 'qc';
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
@@ -10,6 +10,7 @@ const VALID_STEPS: Record<Workflow, ReadonlySet<string>> = {
   dev: new Set(['controller', 'plan', 'execute', 'ship']),
   security: new Set(['scan', 'triage', 'fix-or-issue']),
   log_check: new Set(['pull', 'classify', 'triage']),
+  qc: new Set(['review', 'fix', 'verify']),
 };
 
 /**
