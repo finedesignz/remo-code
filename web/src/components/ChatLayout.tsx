@@ -17,6 +17,7 @@ import { useSessions } from '../hooks/useSessions'
 import { useChat } from '../hooks/useChat'
 import { useActivity } from '../hooks/useActivity'
 import { Sidebar } from './Sidebar'
+import { useSidebarWidth } from '../hooks/useSidebarWidth'
 import { ChatPanel } from './ChatPanel'
 import { ApiKeyModal } from './ApiKeyModal'
 import { connectedSessions, sessionLabel, shortId } from './SessionDropdown'
@@ -46,6 +47,8 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     })
   }, [])
   const [showApiKey, setShowApiKey] = useState(false)
+  // Border-drag resizable sidebar width (persisted to localStorage).
+  const { width: sidebarWidth, startResize } = useSidebarWidth()
 
   // Phase 10 — user's global auto-nudge default. Per-session `auto_nudge`
   // overrides this; null/undefined on a session inherits this value. Source of
@@ -195,12 +198,25 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
 
       {/* Sidebar */}
       <div
+        style={sidebarCollapsed ? undefined : { ['--sidebar-w' as string]: `${sidebarWidth}px` }}
         className={`
-          sidebar-panel fixed inset-y-0 left-0 z-40 ${sidebarCollapsed ? 'w-14' : 'w-72'}
+          sidebar-panel fixed inset-y-0 left-0 z-40 ${sidebarCollapsed ? 'w-14' : 'w-72 md:w-[var(--sidebar-w)]'}
           md:relative md:z-0 md:translate-x-0 md:pointer-events-auto
           ${sidebarOpen ? 'translate-x-0 pointer-events-auto' : '-translate-x-full pointer-events-none'}
         `}
       >
+        {/* Border-drag resize target (desktop only) — the right border IS the
+            grab handle (no visible chrome); col-resize cursor on hover. */}
+        {!sidebarCollapsed && (
+          <div
+            onMouseDown={startResize}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            title="Drag to resize"
+            className="hidden md:block absolute top-0 right-0 z-50 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-blue-500/30 active:bg-blue-500/40 transition-colors"
+          />
+        )}
         <Sidebar
           sessions={sessionsHook.sessions}
           activeSessionId={activeSessionId}
