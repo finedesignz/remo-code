@@ -24,7 +24,7 @@ export type WorkflowRoot = 'dev' | 'security' | 'log_check'
 
 /** Canonical ordered step kinds per workflow. */
 export const WORKFLOWS = {
-  dev: ['dev_plan', 'dev_execute', 'dev_ship'],
+  dev: ['dev_controller', 'dev_plan', 'dev_execute', 'dev_ship'],
   security: ['security_scan', 'security_triage', 'security_fix_or_issue'],
   log_check: ['log_pull', 'log_classify', 'log_triage'],
 } as const satisfies Record<WorkflowRoot, readonly TaskType[]>

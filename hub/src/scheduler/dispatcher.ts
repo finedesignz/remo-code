@@ -434,6 +434,7 @@ export async function routeToSender(task: ScheduledTask, ctx: RunContext): Promi
     // until the `log_pull` chained step is wired in Wave 2.
     case 'dev':
     case 'security':
+    case 'dev_controller':
     case 'dev_plan':
     case 'dev_execute':
     case 'dev_ship':

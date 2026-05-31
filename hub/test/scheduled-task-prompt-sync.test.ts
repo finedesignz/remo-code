@@ -147,7 +147,9 @@ describe('dispatcher sender resolves the saved prompt', () => {
     expect(buildContent({ task_type: 'dev', payload: { prompt: 'P' }, prompt: 'C' } as any)).toBe('P')
     // Legacy row: prompt only in the column.
     expect(buildContent({ task_type: 'dev', payload: {}, prompt: 'C' } as any)).toBe('C')
-    // Neither → default.
-    expect(buildContent({ task_type: 'dev', payload: {}, prompt: '' } as any)).toBe('Continue where you left off.')
+    // auto-dev P2: a bare `dev` root with no prompt now renders the controller
+    // decision-tree template instead of the old 'Continue where you left off.'
+    // literal. A custom payload.prompt / column prompt (above) still wins.
+    expect(buildContent({ task_type: 'dev', payload: {}, prompt: '' } as any)).toContain('<<DECISION')
   })
 })

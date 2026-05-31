@@ -14,7 +14,7 @@
 // were migrated by the DB rewrite in commit b9edb82.
 export type TaskType =
   | 'dev' | 'security' | 'log_check'
-  | 'dev_plan' | 'dev_execute' | 'dev_ship'
+  | 'dev_controller' | 'dev_plan' | 'dev_execute' | 'dev_ship'
   | 'security_scan' | 'security_triage' | 'security_fix_or_issue'
   | 'log_pull' | 'log_classify' | 'log_triage'
   | 'triage'
@@ -48,6 +48,7 @@ const TYPE_LABELS: Record<TaskType, string> = {
   dev: 'Dev',
   security: 'Security',
   log_check: 'Log Check',
+  dev_controller: 'Dev · Controller',
   dev_plan: 'Dev · Plan',
   dev_execute: 'Dev · Execute',
   dev_ship: 'Dev · Ship',

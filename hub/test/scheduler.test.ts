@@ -572,7 +572,7 @@ describe('scheduler/auto-name', () => {
 describe('scheduler/workflows (Phase 11)', () => {
   test('WORKFLOWS declares 3 steps per root', async () => {
     const { WORKFLOWS } = await import('../src/scheduler/workflows.ts')
-    expect(WORKFLOWS.dev).toEqual(['dev_plan', 'dev_execute', 'dev_ship'])
+    expect(WORKFLOWS.dev).toEqual(['dev_controller', 'dev_plan', 'dev_execute', 'dev_ship'])
     expect(WORKFLOWS.security).toEqual([
       'security_scan',
       'security_triage',

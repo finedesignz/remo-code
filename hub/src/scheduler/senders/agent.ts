@@ -27,6 +27,9 @@
  * routing, the Summary directive, and Phase-11 workflows all stay in
  * `dispatcher.ts` / their own modules.
  */
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
 import { insertMessage } from '../../db/dal.ts'
 import { sql } from '../../db/postgres.ts'
@@ -43,6 +46,7 @@ import { thresholdGate, dailyCostCapGate } from '../../dispatch/gates.ts'
 import { getGraceBuffer } from '../../dispatch/grace.ts'
 import { launchSessionForUser } from '../../telegram/launch.ts'
 import { log } from '../../observability/logger'
+import { extractDecisionBlock } from '../controller-schema.ts'
 
 interface RunCtxLike {
   runId: string
@@ -73,16 +77,34 @@ function clearActive(sessionId: string, runId: string): void {
   if (set.size === 0) activeScheduledSessions.delete(sessionId)
 }
 
+// auto-dev P2: the controller decision-tree prompt. A bare `dev` ROOT with no
+// custom prompt renders this instead of the dumb `'Continue where you left
+// off.'` literal so it reads repo state and emits a `<<DECISION>>` block the
+// post-run router chains on. Read once at module init (sync; the template ships
+// with the hub). `{{var}}` placeholders stay literal — the live values reach the
+// agent via the prepended `## RUNTIME CONTEXT` block (same as the plan/execute/
+// ship templates, which also never substitute their placeholders in prod).
+const CONTROLLER_TEMPLATE = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts', 'dev', 'controller.md'),
+  'utf8',
+)
+
 export function buildContent(task: ScheduledTask): string {
   // Phase 11: legacy `skill`/`security_scan`(root)/`continue_dev` rewritten to
   // `dev`/`security` by the DB migration; their `prompt` column carries the
   // original text verbatim. The `security_scan` chained step (under the
   // `security` workflow) keeps the `/security-review` slash-command shortcut.
   if (task.task_type === 'security_scan') return '/security-review'
+  const custom = (task.payload as any)?.prompt || task.prompt
+  // auto-dev P2: an explicit `dev_controller` step OR a bare `dev` root with no
+  // user-supplied prompt renders the controller template. A custom prompt
+  // (payload.prompt / task.prompt — the #214 fix) always wins. Chained
+  // `dev_plan`/`dev_execute`/`dev_ship` steps fall through to their own prompt.
+  if (task.task_type === 'dev_controller') return custom || CONTROLLER_TEMPLATE
   if (task.task_type === 'dev') {
-    return (task.payload as any)?.prompt || task.prompt || 'Continue where you left off.'
+    return custom || CONTROLLER_TEMPLATE
   }
-  return (task.payload as any)?.prompt || task.prompt || ''
+  return custom || ''
 }
 
 const SUMMARY_DIRECTIVE = `\n\n---\nWhen finished, end your response with a single line starting with "Summary:" describing in 1-2 sentences what you accomplished or any blocker. Keep it brief — this is a scheduled run and the user only needs the headline result.`
@@ -174,7 +196,7 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
   // the snapshot lives on `scheduled_task_runs`, never in `messages`.
   let runtimeCtx: RuntimeContext = {}
   try {
-    runtimeCtx = await buildRuntimeContext({ userId: ctx.userId, sessionId, taskKind: task.task_type })
+    runtimeCtx = await buildRuntimeContext({ userId: ctx.userId, sessionId, taskKind: task.task_type, taskId: task.id })
   } catch {
     // Best-effort. Fall through with an empty ctx; renderer emits just the header.
   }
@@ -242,7 +264,19 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
     // with the reply snippet. `finalizeRun` fires the post-run action pipeline.
     async onFinalize(token, replyContent) {
       const duration = Date.now() - startedAt
-      const snippet = replyContent.length > 500 ? replyContent.slice(0, 500) + '...' : replyContent
+      // auto-dev P2: the controller emits a `<<DECISION ... DECISION>>` block at
+      // the END of its turn. The default head-truncation (first 500 chars) would
+      // drop it, so when a decision block is present, snippet the block itself
+      // (plus a short lead) so the post-run router can parse the chosen action.
+      const decisionBlock = extractDecisionBlock(replyContent)
+      let snippet: string
+      if (decisionBlock) {
+        snippet = decisionBlock.length > 500
+          ? decisionBlock.slice(0, 500) + '...'
+          : decisionBlock
+      } else {
+        snippet = replyContent.length > 500 ? replyContent.slice(0, 500) + '...' : replyContent
+      }
       await finalizeRun(token, 'success', null, { duration_ms: duration, output_snippet: snippet })
       removeRunContext(token)
       clearActive(sessionId, token)

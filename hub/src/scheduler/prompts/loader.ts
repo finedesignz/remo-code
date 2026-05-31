@@ -7,7 +7,7 @@ export type Workflow = 'dev' | 'security' | 'log_check';
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
 const VALID_STEPS: Record<Workflow, ReadonlySet<string>> = {
-  dev: new Set(['plan', 'execute', 'ship']),
+  dev: new Set(['controller', 'plan', 'execute', 'ship']),
   security: new Set(['scan', 'triage', 'fix-or-issue']),
   log_check: new Set(['pull', 'classify', 'triage']),
 };

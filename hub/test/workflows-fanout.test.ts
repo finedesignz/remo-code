@@ -94,8 +94,9 @@ describe('scheduler/workflows — dev workflow fan-out smoke', () => {
       chainDepth: 2,
     })
 
-    // Workflow ordering invariant: dev_plan → dev_execute → dev_ship → null.
-    expect(WORKFLOWS.dev).toEqual(['dev_plan', 'dev_execute', 'dev_ship'])
+    // Workflow ordering invariant: dev_controller → dev_plan → dev_execute → dev_ship → null.
+    expect(WORKFLOWS.dev).toEqual(['dev_controller', 'dev_plan', 'dev_execute', 'dev_ship'])
+    expect(nextStepInWorkflow('dev_controller')).toBe('dev_plan')
     expect(nextStepInWorkflow('dev_plan')).toBe('dev_execute')
     expect(nextStepInWorkflow('dev_execute')).toBe('dev_ship')
     expect(nextStepInWorkflow('dev_ship')).toBe(null)
