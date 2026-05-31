@@ -16,6 +16,8 @@ import type { ScheduledTask, RunStatus } from '../../db/scheduled-tasks-dal.ts'
 import { listActionsForTask } from '../../db/scheduled-tasks-dal.ts'
 import { validatePostRunActions, type PostRunAction } from './schema.ts'
 import { executeChain } from './chain.ts'
+import { getTaskById } from '../../db/scheduled-tasks-dal.ts'
+import { parseControllerDecision, nextStepForAction } from '../controller-schema.ts'
 import { executeEmail } from './email.ts'
 import { executeTelegram } from './telegram.ts'
 import { executeWebPush } from './webpush.ts'
@@ -87,7 +89,23 @@ export async function fireWithContext(args: FireCtxArgs): Promise<void> {
 
   const ctx = buildContext(args)
 
+  // auto-dev P2: controller routing. A bare `dev` root or an explicit
+  // `dev_controller` step emits a `<<DECISION>>` block; we chain ONLY the step
+  // its action selects (`propose` → no chain) and SUPPRESS the generic
+  // `chain_task` fan-out for this run so we never double-fire or fire the wrong
+  // sibling. Non-chain actions (notify/webhook/…) still fire normally below.
+  const isController =
+    (args.task.task_type === 'dev' || args.task.task_type === 'dev_controller') &&
+    args.status === 'success'
+  let controllerHandled = false
+  if (isController) {
+    controllerHandled = await routeControllerDecision(args, actions)
+  }
+
   for (const action of actions) {
+    // Suppress generic chain_task for a controller run — its routing already
+    // fired (or intentionally skipped, e.g. `propose`).
+    if (controllerHandled && action.type === 'chain_task') continue
     if (!conditionMatches(action, args)) continue
     const delay = (action.delay_seconds ?? 0) * 1000
     if (delay > 0) {
@@ -100,6 +118,68 @@ export async function fireWithContext(args: FireCtxArgs): Promise<void> {
       void executeAction(action, args, ctx)
     }
   }
+}
+
+/**
+ * auto-dev P2 — controller decision router.
+ *
+ * Parses the run's `<<DECISION>>` block and chains the single workflow step the
+ * action selects, by matching the decision's target step kind against the
+ * child task_type of the task's existing `chain_task` edges. `propose` chains
+ * nothing (human-in-the-loop; surfaced to chat in P3). A missing/malformed block
+ * falls back to `continue` so a bare dev still resumes.
+ *
+ * Returns true to signal the caller to SUPPRESS the generic `chain_task` loop
+ * for this run (controller owns the chain decision).
+ */
+export async function routeControllerDecision(
+  args: FireCtxArgs,
+  actions: PostRunAction[],
+): Promise<boolean> {
+  const parsed = parseControllerDecision(args.output_snippet ?? '')
+  const decision = parsed.ok ? parsed.value : parsed.fallback
+  const nextStep = nextStepForAction(decision.action)
+
+  if (nextStep === null) {
+    // propose → no chain. The roadmap is already persisted in the assistant
+    // message + Summary line; P3 wires chat/notify surfacing.
+    console.log(
+      `[post-run.controller] task=${args.task.id} action=propose no_chain reason="${decision.reason}"`,
+    )
+    return true
+  }
+
+  // Resolve which chain_task edge points at the selected step kind.
+  const chainEdges = actions.filter((a) => a.type === 'chain_task' && a.config?.task_id)
+  let matched: PostRunAction | null = null
+  for (const edge of chainEdges) {
+    const child = await getTaskById(edge.config.task_id)
+    if (child && child.task_type === nextStep) {
+      matched = edge
+      break
+    }
+  }
+
+  if (!matched) {
+    // No wired step for this action (e.g. a bare `dev` row with no workflow
+    // chain configured). Nothing to chain — safe no-op, do not invent rows.
+    console.log(
+      `[post-run.controller] task=${args.task.id} action=${decision.action} ` +
+        `no_chain_edge_for=${nextStep}`,
+    )
+    return true
+  }
+
+  console.log(
+    `[post-run.controller] task=${args.task.id} action=${decision.action} chain=${nextStep} child=${matched.config.task_id}`,
+  )
+  await executeChain(matched, {
+    parentRunId: args.runId,
+    userId: args.task.user_id,
+    chainDepth: args.chainDepth,
+    parentTaskKind: args.task.task_type,
+  })
+  return true
 }
 
 function conditionMatches(action: PostRunAction, args: FireCtxArgs): boolean {
