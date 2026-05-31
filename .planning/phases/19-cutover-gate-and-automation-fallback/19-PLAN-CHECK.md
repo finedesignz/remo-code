@@ -73,3 +73,24 @@ API-key-fallback risks each negatively tested, the gate correctly scoped as a de
 a build/rip blocker), and the no-API-key invariant guarded across every runner path. Re-run independent
 gsd-plan-checker / gsd-nyquist-validator subagents before execution if available (this verdict was
 authored manually — no Task nesting in the planning-agent context).
+
+### Cycle-2 addendum (2026-05-31) — H8 + H9 closed
+
+**Re-verdict: PASS (strengthened).** Two SYNTHESIS-cycle1 HIGHs remediated:
+
+- **H8 (19-PLAN-002, selector):** the selector now resolves to EXPLICIT PTY runner ids (`'claude-pty'`/
+  `'codex-pty'`) only — the legacy stream-json runner is NOT a human-resolvable backend and a hard reject
+  (throw) blocks any config/flag combo that would yield a legacy/non-PTY id. Added defense-in-depth
+  `ctx.isHuman` assertion AT the selector (independent of the Phase-16 relay guard), and a
+  post-`programmatic`-gate disable/unlist of Claude-PTY so existing sessions can't keep leaking to the
+  wrong bucket after a failed gate. Negative tests cover all four (no-legacy, hard-reject, isHuman:false
+  throw, post-failed-gate disable). New requirements: **R-PTY-22b, R-PTY-22c**.
+- **H9 (19-PLAN-003, env scrub):** replaced the ANTHROPIC-only scrub with a SINGLE shared
+  `env-sanitize.ts` denylist (ANTHROPIC/OPENAI/GEMINI/GOOGLE_API_KEY + GOOGLE_APPLICATION_CREDENTIALS +
+  alias) applied to EVERY runner spawn (Claude/Codex/Gemini-stub), operating on the RESOLVED spawn env so
+  INHERITED process.env keys are deleted too. Added per-backend behavioral negative tests on the real
+  node-pty spawn path, plus an explicit setup-token guard (Task 4): no setup-token credential on the human
+  PTY path + never serialized to the hub. New requirements: **R-PTY-23b, R-PTY-23c**.
+
+The prior "setup-token serialization" + "post-failed-gate session disable" small-folded items from
+SYNTHESIS are absorbed (R-PTY-23c, R-PTY-22c). H5 frontmatter reconciliation left to the H5 sweep agent.

@@ -753,3 +753,71 @@ second spawn); a pty-interactive session persisted as such is NOT resumed via th
 R-PTY-28 (H1), R-PTY-29 (H2), R-PTY-30 (H3), R-PTY-31 (H10) in Phase 16. All elaborate existing parents
 (R-PTY-01/06/07/08/10/11 + the -a addenda); the parents remain authoritative. H5 (frontmatter
 reconciliation) intentionally excluded — owned by the H5 sweep agent.
+
+## Cycle-2 additions (Phase 17/19/20)
+
+These remediate adjudicated SYNTHESIS-cycle1 HIGHs H4 (Phase 17), H8/H9 (Phase 19), and the Phase-20
+slice of H10. All elaborate existing parents (R-PTY-13/22/23, R-TG-01..03); parents remain authoritative.
+H5 frontmatter reconciliation excluded (owned by the H5 sweep agent).
+
+#### R-PTY-13b — Mechanical one-way-door deletion gate (H4)
+The ChatSurface-deletion task (R-PTY-13/13a) SHALL be guarded by a MACHINE-VERIFIABLE gate script
+(`tools/cutover-deletion-gate.mjs`) that reads the Phase-16 ship-verdict artifact and EXITS NON-ZERO —
+aborting the deletion task with zero deletions — unless that artifact records `verdict: PASS` AND the
+explicit manual fields `render_fidelity: PASS` and `mobile_reattach: PASS` (so a CI-green-but-renders-wrong
+surface cannot trigger the rip). A missing file, `FAIL`/`PARTIAL` verdict, or absent manual field SHALL
+abort. The deletion task invokes the gate as a HARD precondition; `web/test/cutover-deletion-gate.test.ts`
+SHALL prove abort on missing/FAIL/manual-field-absent verdicts and pass only on a fully-green fixture. The
+existing `autonomous:false` operator checkpoint remains as a second layer. *(Threat T-17-04 premature-
+deletion CRITICAL, T-17-04b gate-not-invoked CRITICAL; cross-ref 17-PLAN-002.)*
+
+#### R-PTY-22b — Human backend resolves to explicit PTY runner ids only (H8)
+The default-backend selector (R-PTY-22) SHALL resolve a human session ONLY to an explicit PTY runner id
+(`'claude-pty'` | `'codex-pty'`) and SHALL NEVER return the bare `'claude'`/`'codex'` id or the legacy
+stream-json runner; the legacy stream-json runner is NOT a human-selectable backend (it remains for
+unattended automation behind the cost cap). `resolveHumanBackend` SHALL hard-reject (throw) any config/flag
+combination that would yield a non-PTY/legacy id, and SHALL re-assert `ctx.isHuman === true` (throwing
+otherwise) as defense-in-depth independent of the Phase-16 relay-boundary guard. Negative tests SHALL assert
+the legacy id is never returned for any input, that a polluted config throws, and that `isHuman:false`
+throws. *(Threats T-19-02b legacy-runner-for-human CRITICAL, T-19-02c automation-gets-PTY HIGH; cross-ref
+19-PLAN-002.)*
+
+#### R-PTY-22c — Post-failed-gate Claude-PTY disable (H8 folded)
+On a recorded `programmatic` cutover-gate result, the Claude-PTY backend SHALL be disabled/unlisted such
+that `resolveHumanBackend` never returns `'claude-pty'` for NEW OR EXISTING human sessions (an alert fires
+on disable) until an explicit operator override clears it — so in-flight Claude-PTY sessions cannot keep
+billing to the wrong bucket after a failed gate. A negative test SHALL assert the disabled backend is never
+returned even when config requests it. *(Threat T-19-02d in-flight-leak-after-failed-gate HIGH; cross-ref
+19-PLAN-002.)*
+
+#### R-PTY-23b — Shared multi-provider spawn-env sanitizer (H9)
+A SINGLE shared sanitizer (`supervisor/src/runners/env-sanitize.ts`) SHALL denylist-scrub ALL known provider
+key envs — ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS
+(+ the ANTHROPIC_AUTH_TOKEN alias) — from the RESOLVED spawn env of EVERY runner (Claude PTY, Codex PTY,
+Gemini stub), so INHERITED (process.env) keys are deleted, not only explicitly-set ones. The per-runner
+ad-hoc `delete env.ANTHROPIC_API_KEY` is replaced by this shared call. PER-BACKEND behavioral negative tests
+SHALL pre-seed each denylisted var into process.env, instantiate each runner via its real node-pty spawn
+path, and assert the ACTUAL spawned env carries none of them; a static grep canary backs it up. *(Threat
+T-19-03 API-key-fallback CRITICAL, broadened; cross-ref 19-PLAN-003.)*
+
+#### R-PTY-23c — setup-token prohibited on the interactive path (H9 folded)
+No runner spawn SHALL accept/provision a setup-token-derived credential on the human PTY (interactive) path
+until that credential's billing class is verified, and a setup-token SHALL NEVER be serialized/persisted to
+the hub (it stays supervisor-ephemeral, mirroring the OAuth-token posture). Negative tests SHALL assert no
+human PTY spawn env carries a setup-token credential and that no setup-token is serialized to the hub.
+*(Threat T-19-03b setup-token-on-interactive HIGH; cross-ref 19-PLAN-003.)*
+
+#### R-TG-13 — Explicit transcript-identity plumbing per backend (H10, Phase-20 slice)
+The `TranscriptSource.open(ctx)` input SHALL EXPLICITLY carry the backend transcript-identity values used to
+resolve the on-disk transcript — `ctx.sessionId` for the Claude `<session-uuid>.jsonl` filename-stem
+assumption, and `ctx.codexRolloutId` matched against the Codex rollout file's `session_meta` id — both
+sourced from the session record PERSISTED at PTY spawn (Phase-16/17; cross-ref the H10 persistence owned by
+the Phase-16 plan). When the persisted id/field is ABSENT or the expected file is missing, the adapter SHALL
+deterministically DEGRADE to scrape-mode rather than picking a newest-file. A test SHALL assert correct-file
+resolution when the id is present and scrape-mode (no file guess) when it is absent. *(Threats T-20-01
+wrong-session-cross-wire HIGH, T-20-03 scrape-forged-permission HIGH; cross-ref 20-PLAN-001.)*
+
+**Cycle-2 (Phase 17/19/20) coverage:** 6 new IDs — R-PTY-13b (H4) in Phase 17; R-PTY-22b, R-PTY-22c (H8),
+R-PTY-23b, R-PTY-23c (H9) in Phase 19; R-TG-13 (H10 Phase-20 slice) in Phase 20. All elaborate existing
+parents (R-PTY-13/22/23 + R-TG-01..03); the parents remain authoritative. H5 (frontmatter reconciliation)
+intentionally excluded — owned by the H5 sweep agent.

@@ -72,3 +72,15 @@ threat models present with the CRITICAL auto-approval risk defended in depth and
 sequencing-after-17 honored, and the prior-stance supersession made explicit across SPEC + ROADMAP +
 REQUIREMENTS. Re-run independent gsd-plan-checker / gsd-nyquist-validator subagents before execution if
 available (this verdict was authored manually).
+
+### Cycle-2 addendum (2026-05-31) — H10 (Phase-20 portion) closed
+
+**Re-verdict: PASS (clarified).** SYNTHESIS-cycle1 H10's Phase-20 slice (Codex `session_meta` transcript-id
+mapping + the Claude sessionUUID==filename assumption made explicit) is addressed in 20-PLAN-001: `open(ctx)`
+now EXPLICITLY carries the transcript-identity inputs (`ctx.sessionId` for Claude's UUID==filename-stem
+assumption; `ctx.codexRolloutId` matched against the rollout file's `session_meta` id), both sourced from
+the session record PERSISTED at PTY spawn (Phase-16/17, cross-ref H10 persistence which the Phase-16 agent
+owns). The absent-id / missing-file path now deterministically DEGRADES to scrape-mode (no newest-file
+guess), with a test asserting correct-file-on-id vs scrape-on-absent. New requirement: **R-TG-13**. This
+is a light make-explicit edit; the upstream persistence of those ids is a Phase-16 dependency, not changed
+here. H5 frontmatter reconciliation left to the H5 sweep agent.

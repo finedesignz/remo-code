@@ -17,11 +17,13 @@ requirements:
   - R-TG-01
   - R-TG-02
   - R-TG-03
+  - R-TG-13
 must_haves:
   truths:
     - "A TranscriptSource interface + TranscriptEntry union exist; the active adapter is selected by session cliKind ('claude'|'codex'), not a hardcoded path"
-    - "The Claude adapter resolves ~/.claude/projects/<slug>/<session-uuid>.jsonl deterministically from a known (project dir, session id); never newest-file"
-    - "The Codex adapter resolves the rollout JSONL by session_meta id and falls back to a terminal-byte scrape (assistant_text + turn_complete only) when the file is absent/unrecognized"
+    - "Transcript-identity plumbing is EXPLICIT (H10): the live session → backend transcript id mapping is read from the persisted backend transcript path/id captured at PTY spawn (Phase-16 16-PLAN-002 `runner_type`-adjacent persistence) and surfaced to the adapter via the open(ctx) input — NOT re-derived by guessing. Name the exact source field in the adapter (see key_links); if that field is absent for a session, the adapter degrades to scrape-mode rather than picking a wrong file."
+    - "The Claude adapter resolves ~/.claude/projects/<slug>/<session-uuid>.jsonl deterministically: it relies on the Claude assumption that the session UUID EQUALS the JSONL filename stem; the session UUID comes from the persisted session id (not a directory listing). If the expected file is absent, it degrades to scrape-mode (never newest-file)."
+    - "The Codex adapter resolves the rollout JSONL by the persisted `session_meta` id (captured at spawn) and falls back to a terminal-byte scrape (assistant_text + turn_complete only) when the file is absent/unrecognized"
     - "An unknown transcript record type degrades to skip+log, never a crash and never a misclassification"
   artifacts:
     - path: "hub/src/telegram/transcript/types.ts"
@@ -35,6 +37,10 @@ must_haves:
       to: "claude-adapter | codex-adapter"
       via: "session cliKind from runner session metadata"
       pattern: "cliKind === 'codex' ? codexAdapter : claudeAdapter"
+    - from: "open(ctx) — the persisted backend transcript id (Phase-16/17 spawn-time capture)"
+      to: "the resolved on-disk transcript file (Claude projects JSONL | Codex rollout JSONL)"
+      via: "Claude: ctx.sessionId === <session-uuid>.jsonl filename stem; Codex: ctx.codexRolloutId matches the rollout file's session_meta id (both read from the persisted session record, source field named inline in each adapter)"
+      pattern: "resolve-by-persisted-id; if the persisted id/field is absent OR the file is missing ⇒ degrade to scrape-mode (no newest-file guess)"
 ---
 
 <objective>
@@ -86,6 +92,7 @@ seam every later Phase-20 plan consumes — the bridge must never see a backend-
     - types.ts exports a `TranscriptEntry` discriminated union with members: assistant_text, tool_use, permission_request, user_question, turn_complete — each carrying sessionId; permission_request/user_question carry requestId + an enumerated options array
     - types.ts exports a `TranscriptSource` interface: `open(ctx: {sessionId; projectDir; cliKind})`, an async iterator / callback of TranscriptEntry, and `close()`
     - index.ts exports `selectAdapter(cliKind)` returning the matching adapter
+    - `TranscriptSource.open(ctx)` ctx EXPLICITLY carries the transcript-identity inputs the adapters resolve from (H10): `sessionId` (Claude UUID==filename-stem assumption) and the Codex `session_meta` id (e.g. `ctx.codexRolloutId`), both sourced from the persisted session record captured at PTY spawn (Phase-16/17). The ctx type names these fields; a doc-comment cites the persistence origin and states the absent-field ⇒ scrape-mode degrade rule.
     - tsc passes (`bun run check-baseline` typecheck portion green)
   </acceptance_criteria>
   <action>
@@ -132,8 +139,9 @@ seam every later Phase-20 plan consumes — the bridge must never see a backend-
     - .planning/phases/20-telegram-transcript-tail/20-RESEARCH.md (Codex source + fallback section)
   </read_first>
   <acceptance_criteria>
-    - codex-adapter resolves `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` by matching the `session_meta` id captured at spawn (not newest-file); maps `response_item` message/function_call payloads to TranscriptEntry
-    - When the rollout file is absent OR a line's schema is unrecognized, the adapter selects the terminal-byte-scrape fallback, emitting ONLY assistant_text + turn_complete
+    - codex-adapter resolves `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` by matching the persisted `session_meta` id captured at spawn (read from `ctx.codexRolloutId`; NOT newest-file); maps `response_item` message/function_call payloads to TranscriptEntry
+    - When the persisted `session_meta` id is ABSENT for the session, OR the rollout file is absent, OR a line's schema is unrecognized, the adapter selects the terminal-byte-scrape fallback, emitting ONLY assistant_text + turn_complete (never a wrong-file pick)
+    - A test asserts: persisted id present + matching file ⇒ correct file resolved; persisted id absent ⇒ scrape-mode (no file guess)
     - A test asserts the unknown-schema/absent path selects fallback and NEVER emits a permission_request (T-20-03)
     - Windows sessions-dir path resolution is handled (or a clear TODO with the verified path noted in SUMMARY)
   </acceptance_criteria>

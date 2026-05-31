@@ -60,3 +60,16 @@ CRITICAL/HIGH threat models on every plan (one-way-door + automation-preservatio
 boundaries), cost-cap and stream-json-for-automation invariants honored, the Telegram break made explicit
 and recoverable, and a Nyquist-compliant validation strategy. The destructive work is isolated behind the
 proven-surface checkpoint and PRESERVE-on-ambiguity discipline.
+
+### Cycle-2 addendum (2026-05-31) — H4 closed
+
+**Re-verdict: PASS (strengthened).** SYNTHESIS-cycle1 H4 (one-way-door gate was a narrative note, not
+machine-verifiable) is remediated in 17-PLAN-002: Task 1 now specifies a MECHANICAL gate
+`tools/cutover-deletion-gate.mjs` that reads the Phase-16 ship-verdict artifact and exits non-zero unless
+it records `verdict: PASS` PLUS the manual `render_fidelity: PASS` + `mobile_reattach: PASS` fields (so a
+CI-green-but-renders-wrong surface cannot trigger the rip). Task 3 invokes the gate as a HARD precondition
+(non-zero ⇒ zero deletions); `web/test/cutover-deletion-gate.test.ts` proves abort on missing/FAIL/
+manual-field-absent verdicts. The existing `autonomous:false` operator checkpoint remains as Layer 2.
+New requirement: **R-PTY-13b**. No other Phase-17 changes (frontmatter reconciliation = H5 sweep, not
+this agent). Dependency note: Phase-16 verification must EMIT the `render_fidelity`/`mobile_reattach`
+PASS fields the gate parses (cross-ref H5/Phase-16 — pin exact field names at execution).
