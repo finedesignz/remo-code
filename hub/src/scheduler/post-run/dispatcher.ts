@@ -24,6 +24,7 @@ import { executeWebPush } from './webpush.ts'
 import { executeWebhook } from './webhook.ts'
 import { executeGithubIssue } from './github-issue.ts'
 import { report as aggregatorReport } from './aggregator.ts'
+import { surfaceProposal } from './propose-notify.ts'
 
 const MAX_CHAIN_DEPTH = 5
 const RUN_URL_PREFIX = process.env.REMO_PUBLIC_URL || 'https://app.remo-code.com'
@@ -141,11 +142,17 @@ export async function routeControllerDecision(
   const nextStep = nextStepForAction(decision.action)
 
   if (nextStep === null) {
-    // propose → no chain. The roadmap is already persisted in the assistant
-    // message + Summary line; P3 wires chat/notify surfacing.
+    // propose → no chain (human-in-the-loop). P3: surface the roadmap to chat
+    // (email + Telegram) + persist a pending-proposal for HITL reply capture.
+    // NEVER auto-builds — a human reply → payload.notes → next-tick `plan`.
     console.log(
       `[post-run.controller] task=${args.task.id} action=propose no_chain reason="${decision.reason}"`,
     )
+    try {
+      await surfaceProposal({ task: args.task, decision, runId: args.runId })
+    } catch (err: any) {
+      console.error(`[post-run.controller] surfaceProposal failed task=${args.task.id}:`, err?.message)
+    }
     return true
   }
 
