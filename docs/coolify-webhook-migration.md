@@ -4,6 +4,53 @@ This runbook walks through migrating the Coolify deployment webhook from the leg
 
 ---
 
+## 2026-05-30 update: auto-dev P5 — error→fix→redeploy→VERIFY loop
+
+The Coolify failure path is now a **verified-closed** loop, not a hope-closed one. On
+`deployment.failed`:
+
+1. **Storm dedupe** (`hub/src/scheduler/deploy-fingerprint.ts`). Before dispatching a fix,
+   `dispatchTriage` claims a `(user, application_uuid, fingerprint)` row in
+   `coolify_deploy_idempotency`. Fingerprint =
+   `sha256(application_uuid | git_repository | commit_sha | floor(now / 15min))`. A crash-looping
+   app emitting 50 `deployment.failed` events in one 15-minute window produces **one** fix dispatch
+   (the rest lose the atomic claim and are dropped). A new commit, a different app, or the same
+   commit re-failing in a later window all fingerprint differently → a fresh fix is allowed.
+   Fail-open: a claim error never suppresses a real failure.
+
+2. **Repo-keyed routing** (`hub/src/sessions/repo-routing.ts`). The triage fix lands in the session
+   actually bound to the failing repo. The webhook's `git_repository` is normalised to a `repo_key`
+   (`repoKeyFromGitRepository` — accepts SSH/HTTPS/`ssh://` URLs **and** Coolify's bare `owner/repo`
+   slug) and matched against `sessions.repo_key`; the first bound session with a live agent socket
+   wins. **Fallback:** no repo match (absent/non-GitHub `git_repository`, no bound session, or no live
+   socket) → the original `pickSessionTarget` capacity routing, byte-for-byte as before. Coolify gives
+   us only an `application_uuid` when `git_repository` is absent and there is no hub-side uuid→repo
+   map today, so the resolver keys on `git_repository` and documents the uuid-only fallback.
+
+3. **Redeploy + verify** (`deploy_verify` post-run action — `hub/src/scheduler/post-run/deploy-verify.ts`).
+   After the fix commit lands (push → Coolify auto-deploys), a `deploy_verify` post-run action:
+   - triggers a forced Coolify redeploy: `POST {COOLIFY_BASE_URL}/api/v1/deploy?uuid=<application_uuid>&force=true`
+     (token from `COOLIFY_TOKEN` env **only**, never hard-coded — same convention as the `log_check`
+     sender);
+   - polls `/health` (then `/healthz`) until 200 or timeout, **then probes the REAL routes**
+     (CLAUDE.md global rule 14.4 — never `/health` alone): the app's top-level `/api/*` namespaces plus
+     `/openapi.json` + `/docs` when present. Per-route classification of the unauth probe:
+     `200/2xx`/`401`/`403`/other-4xx → **mounted** (PASS), `404` → **route gone** (FAIL),
+     `502/503/504` → **runtime/proxy broken** (FAIL), network error → **unreachable** (FAIL);
+   - reports a per-route pass/fail verdict to chat (posted into the repo-bound session, else the
+     orchestrator session).
+
+   `deploy_verify` is a **post-run action** in the Zod union (`post-run/schema.ts`) — not a new
+   `task_type`. Config: `{ application_uuid, base_url, routes[], health_paths?, health_timeout_ms?,
+   health_interval_ms?, report_session_id? }`. The redeploy is the only prod-mutating call; the fix
+   itself is commit+push.
+
+Tests: `hub/test/repo-routing.test.ts`, `hub/test/deploy-storm-dedupe.test.ts`,
+`hub/test/deploy-verify-probe.test.ts`. The webhook auth/mount-order invariants
+(`hub/test/mount-order.test.ts`, `hub/test/coolify-webhook.test.ts`) are unchanged.
+
+---
+
 ## 2026-05-25 update: URL-path token auth (replaces HMAC headers)
 
 Coolify's Notifications → Webhook UI exposes only a single URL field — no header configuration, no signing secret support. Phase 06's original HMAC-header design (`X-Coolify-Signature` + `X-Coolify-Timestamp`) was therefore unusable against real Coolify deployments.
