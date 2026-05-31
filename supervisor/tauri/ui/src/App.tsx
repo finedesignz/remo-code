@@ -76,7 +76,7 @@ function TabBar() {
   return (
     <header className="shrink-0 border-b border-[var(--border-color)]/40 px-4 md:px-6">
       {/* Mobile: dropdown switcher */}
-      <div className="md:hidden py-2">
+      <div className="sm:hidden py-2">
         <select
           value={active}
           onChange={(e) => navigate(e.target.value)}
@@ -91,7 +91,7 @@ function TabBar() {
       </div>
 
       {/* Desktop: horizontal tab bar */}
-      <nav className="hidden md:flex items-center gap-1">
+      <nav className="hidden sm:flex items-center gap-1">
         {TABS.map((t) => (
           <NavLink
             key={t.to}
