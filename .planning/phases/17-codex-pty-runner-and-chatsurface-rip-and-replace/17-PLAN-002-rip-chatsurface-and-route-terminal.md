@@ -103,28 +103,40 @@ From ~/.claude/design-preferences.md: accent=blue, never indigo.
   <files>tools/cutover-deletion-gate.mjs, web/test/cutover-deletion-gate.test.ts</files>
   <read_first>
     - .planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-VALIDATION.md (manual proofs)
-    - the Phase-16 VERIFICATION ship-verdict artifact (gsd-verify-work output — the canonical filename/path
-      Phase 16 emits, e.g. `16-VERIFICATION.md`; confirm exact name at execution and pin it in the gate)
+    - .planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-PLAN-002 §shared_verdict_artifact_schema
+      (the SINGLE SOURCE OF TRUTH for the field names + FIXED path + gate-pass rule — this gate is the CONSUMER;
+      Phase-16 Task 5 / `tools/emit-phase16-verdict.mjs` is the PRODUCER. Do NOT re-define the shape here; key
+      off that anchor so producer and consumer cannot drift.)
+    - the Phase-16-emitted artifact at the FIXED path `.planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-VERIFICATION.md`
   </read_first>
   <acceptance_criteria>
-    - `tools/cutover-deletion-gate.mjs` reads the Phase-16 ship-verdict artifact at a FIXED, documented path
-      and parses three required signals: (1) `verdict: PASS` (top-level ship verdict), (2) a manual
-      `render_fidelity: PASS` field, (3) a manual `mobile_reattach: PASS` field. (Field names pinned in the
-      script; Phase-16 H5/verification must emit them — cross-ref the Phase-16 VALIDATION manual-proof rows.)
-    - The script EXITS NON-ZERO (aborting the caller) when ANY of: the verdict file is MISSING, verdict is
-      `FAIL`/`PARTIAL`/absent, OR either manual PASS field is missing/not `PASS`. It exits 0 ONLY when all
-      three are present and PASS. It prints the parsed values + the resolved verdict-file path (immutable
-      evidence) on both paths.
-    - `web/test/cutover-deletion-gate.test.ts` drives the script against fixtures: (a) fully-green verdict ⇒ exit 0;
-      (b) missing file ⇒ non-zero; (c) `verdict: FAIL` ⇒ non-zero; (d) `verdict: PASS` but `mobile_reattach` absent ⇒ non-zero;
-      (e) `verdict: PASS` but `render_fidelity: FAIL` ⇒ non-zero. (A CI-green-but-renders-wrong surface is rejected by (e).)
+    - `tools/cutover-deletion-gate.mjs` reads the Phase-16 artifact at the FIXED path defined in
+      §shared_verdict_artifact_schema and applies that schema's GATE-PASS RULE EXACTLY: exit 0 ONLY when
+      `verdict==PASS` AND `render_fidelity==PASS` AND `mobile_reattach==PASS` AND `automated_suite.result==PASS`
+      AND `term_relay_auth.result==PASS` AND each `manual_attestation.<field>` carries a complete
+      `{by, at, device_build}` triplet. Field names are taken from the shared schema, NOT independently invented.
+    - PROVENANCE / ANTI-FORGERY (NH-4): the gate asserts the PASS evidence is test-bound — `automated_suite`
+      and `term_relay_auth` blocks MUST be present with a `result` and a non-empty `summary`/`tests` + `run_at`;
+      a manual PASS field WITHOUT its matching complete attestation triplet is REJECTED (a hand-typed bare
+      `render_fidelity: PASS` cannot pass). A verdict file missing any provenance block ⇒ non-zero.
+    - The script EXITS NON-ZERO (aborting the caller) when ANY of: the verdict file is MISSING, `verdict` is
+      `FAIL`/`PARTIAL`/absent, either manual PASS field is missing/not `PASS`, either automated block is
+      absent/FAIL, OR any manual attestation triplet is incomplete. It prints the parsed values + the resolved
+      verdict-file path (immutable evidence) on both paths.
+    - `web/test/cutover-deletion-gate.test.ts` drives the script against fixtures: (a) fully-green
+      script-emitted verdict ⇒ exit 0; (b) missing file ⇒ non-zero; (c) `verdict: FAIL` ⇒ non-zero;
+      (d) `verdict: PASS` but `mobile_reattach` absent ⇒ non-zero; (e) `verdict: PASS` but `render_fidelity: FAIL` ⇒ non-zero;
+      (f) `verdict: PASS` + both manual fields `PASS` but `automated_suite` block ABSENT ⇒ non-zero (provenance);
+      (g) `render_fidelity: PASS` with NO attestation triplet ⇒ non-zero (forgery rejected). (A CI-green-but-renders-wrong surface is rejected by (e); a hand-forged PASS by (f)/(g).)
     - tsc/test green; the test is registered in tools/regression-baseline.json
   </acceptance_criteria>
   <action>
     Write the gate as a standalone Node ESM script (no deps) so Task 3 can invoke it as a hard precondition.
-    Parse the Phase-16 verdict artifact (YAML frontmatter or a `### Ship verdict` block — match Phase-16's
-    actual emit shape; pin the exact field discriminators). Author the test with the five fixtures above.
-    This is the mechanical Layer-1 gate; the autonomous:false operator checkpoint (below) remains as Layer 2.
+    Parse the Phase-16 verdict artifact's YAML frontmatter per §shared_verdict_artifact_schema (consume the
+    pinned shape — do not re-invent it). Implement the schema's GATE-PASS RULE incl. the provenance + manual-
+    attestation-triplet checks (NH-4 anti-forgery). Author the test with the seven fixtures above (incl. the
+    provenance-absent + forged-PASS cases). This is the mechanical Layer-1 gate; the autonomous:false operator
+    checkpoint (below) remains as Layer 2.
   </action>
   <verify>
     <automated>cd web; bun test test/cutover-deletion-gate.test.ts 2>$null</automated>

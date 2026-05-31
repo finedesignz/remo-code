@@ -94,3 +94,23 @@ authored manually — no Task nesting in the planning-agent context).
 
 The prior "setup-token serialization" + "post-failed-gate session disable" small-folded items from
 SYNTHESIS are absorbed (R-PTY-23c, R-PTY-22c). H5 frontmatter reconciliation left to the H5 sweep agent.
+
+### Cycle-3 addendum (2026-05-31, FINAL) — NH-5 env-sanitizer tightening + selector→argv PARTIAL binding
+
+**Re-verdict: PASS (strengthened).** Two adjudicated cycle-2-remainder items:
+
+- **NH-5 / H9 tightening (19-PLAN-003 Task 3):** the cycle-2 review flagged the pure NAMED denylist could
+  miss future/aliased provider creds. The denylist is KEPT (justified: an interactive CLI inherits a large
+  undocumented OS-/tool-specific env a full allowlist would brittly break across hosts) and HARDENED with an
+  anchored credential-class PATTERN sweep (`/_API_KEY$/`, `/_AUTH_TOKEN$/`, `/_ACCESS_TOKEN$/`, `/_API_TOKEN$/`),
+  giving allowlist-grade coverage of the credential CLASS. A new test asserts a NOVEL non-named var
+  (`FOO_API_KEY`, `MISTRAL_AUTH_TOKEN`) is stripped from the REAL spawned env while an anchored benign control
+  survives (no over-strip); the named ANTHROPIC/OPENAI/GEMINI/GOOGLE coverage is retained. New requirement:
+  **R-PTY-36**.
+- **PARTIAL binding (b) (19-PLAN-002 Task 2):** added an explicit selector→spawn-argv negative test — for each
+  resolvable human backend (`'claude-pty'`/`'codex-pty'`) the resolved id is driven through the runner registry
+  to its REAL spawn path (H6 interception seam) and the spawned argv is asserted to carry no
+  `-p`/`--input-format`/`--output-format`/`stream-json`. Binds the selector's output to the actual argv at the
+  Phase-19 seam rather than leaning solely on the P16/17 canary (R-PTY-22b-adjacent; no new ID).
+
+H5 frontmatter reconciliation remains the H5 sweep agent's; SPEC/ROADMAP untouched.

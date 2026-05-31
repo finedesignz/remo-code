@@ -18,6 +18,7 @@ requirements:
   - R-PTY-23
   - R-PTY-23b
   - R-PTY-23c
+  - R-PTY-36
 must_haves:
   truths:
     - "Codex is the PRIMARY fallback: the existing Codex PTY runner is selectable as a human backend through the SAME terminal surface, using ChatGPT-subscription sign-in (NOT an API key)"
@@ -131,9 +132,16 @@ reaches an API key.
     - the existing `delete env.ANTHROPIC_API_KEY` site (to replace with the shared sanitizer)
   </read_first>
   <acceptance_criteria>
-    - `env-sanitize.ts` exports `sanitizeSpawnEnv(baseEnv)` that returns a copy with a DENYLIST removed:
-      ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS
-      (+ ANTHROPIC_AUTH_TOKEN alias). The denylist is a single exported constant (test imports it).
+    - `env-sanitize.ts` exports `sanitizeSpawnEnv(baseEnv)`. DECISION (NH-5): the sanitizer keeps the
+      EXPLICIT named denylist for the known provider keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY,
+      GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS + ANTHROPIC_AUTH_TOKEN alias — a single exported constant
+      the test imports) AND ADDS a PATTERN sweep that strips any var matching the credential-class patterns
+      `/_API_KEY$/`, `/_AUTH_TOKEN$/`, `/_ACCESS_TOKEN$/`, `/_API_TOKEN$/` (case-insensitive). Rationale for
+      not going to a pure allowlist: an interactive CLI inherits a large, undocumented, OS-/tool-specific env
+      (PATH, HOME, locale, terminal, tmux, node-pty deps) that a fixed allowlist would brittly break across
+      hosts; the pattern-denylist gives allowlist-grade coverage of the credential CLASS (named + future +
+      aliased) without enumerating every benign var. The named list + the patterns are BOTH single exported
+      constants the tests import.
     - EVERY runner spawn path (Claude PTY, Codex PTY, Gemini stub) resolves its spawn env THROUGH the
       sanitizer; the ad-hoc per-runner `delete env.ANTHROPIC_API_KEY` is replaced by the shared call.
     - INHERITED-env coverage: the sanitizer operates on the RESOLVED spawn env (which includes
@@ -142,12 +150,20 @@ reaches an API key.
       denylisted var into `process.env`, instantiate the runner via its real spawn path (intercept
       node-pty.spawn — reuse the H6 spawn-interception seam), and assert the ACTUAL spawned env contains
       NONE of the denylisted vars and constructs no API-platform billing call.
+    - FUTURE/ALIASED-CRED COVERAGE TEST (NH-5): a test pre-seeds a NOVEL, not-named var that matches a
+      pattern — e.g. `FOO_API_KEY` and `MISTRAL_AUTH_TOKEN` — into process.env, spawns via the real path,
+      and asserts the spawned env carries NEITHER (the pattern sweep catches keys never added to the named
+      list). A benign control var (e.g. `MY_API_KEYBOARD_LAYOUT` or `PATH`) is asserted to SURVIVE so the
+      pattern is anchored (`$`) and does not over-strip. ANTHROPIC/OPENAI/GEMINI/GOOGLE named coverage is
+      retained by the per-backend tests above.
     - A static canary (grep) also asserts no runner builds an API-key env literal, mirroring the
       no-legacy-agent-spawn posture (cheap second layer).
   </acceptance_criteria>
   <action>
-    Implement the shared sanitizer + denylist constant; route all runners through it. Author the
-    behavioral per-backend tests on the real spawn path (intercept node-pty.spawn). Keep a grep canary.
+    Implement the shared sanitizer with the named denylist constant + the anchored credential-class pattern
+    constant; route all runners through it. Author the behavioral per-backend tests on the real spawn path
+    (intercept node-pty.spawn), the novel-`FOO_API_KEY`/`*_AUTH_TOKEN` future-cred test, and the benign-var
+    survival control. Keep a grep canary.
   </action>
   <verify>
     <automated>cd supervisor; bun test test/no-apikey-fallback-guard.test.ts 2>$null</automated>
@@ -182,6 +198,7 @@ reaches an API key.
 - Codex selectable on the shared surface, no API key
 - Gemini stub off by default, not-implemented on explicit select
 - shared `sanitizeSpawnEnv` scrubs ANTHROPIC/OPENAI/GEMINI/GOOGLE_API_KEY + GOOGLE_APPLICATION_CREDENTIALS (+ alias) from EVERY runner spawn, including INHERITED process.env vars; per-backend behavioral tests assert the real spawned env (Claude/Codex/Gemini-stub)
+- credential-class PATTERN sweep (`*_API_KEY`/`*_AUTH_TOKEN`/`*_ACCESS_TOKEN`/`*_API_TOKEN`) strips a NOVEL non-named var (e.g. `FOO_API_KEY`, `MISTRAL_AUTH_TOKEN`) while a benign anchored control survives (NH-5/R-PTY-36)
 - no human PTY spawn carries a setup-token credential; setup-token never serialized to the hub
 - `bun run check-baseline` green
 </verification>

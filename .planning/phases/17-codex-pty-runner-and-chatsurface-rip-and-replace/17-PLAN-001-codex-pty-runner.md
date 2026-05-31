@@ -132,6 +132,7 @@ From supervisor/src/index.ts: per-session runner instantiation site (where cli_k
   <acceptance_criteria>
     - The canary now also scans codex-pty-runner.ts for programmatic/headless flags (none) and credential imports (none)
     - codex-pty-runner-env.test.ts asserts the exported env-builder carries no ANTHROPIC_API_KEY and no forwarded Claude OAuth token
+    - LITERAL-LINE PIN (PARTIAL-binding, NH-4-adjacent): the behavioral canary ALSO asserts the literal scrub MECHANISM is present in source — `grep` confirms a `delete env.ANTHROPIC_API_KEY` (or the shared `sanitizeSpawnEnv` call once Phase-19 lands) site exists in EACH pty runner (claude-pty-runner.ts AND codex-pty-runner.ts); the absence of the delete/sanitize line FAILS the build. This pins the mechanism, not only the runtime env-object assertion, so a refactor that drops the scrub is caught statically as well as behaviorally.
     - `bun run check-baseline` green; new files registered in tools/regression-baseline.json
   </acceptance_criteria>
   <action>

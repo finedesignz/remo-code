@@ -21,6 +21,10 @@ files_modified:
   - hub/test/human-only-guard.test.ts
   - hub/test/pty-runner-type.test.ts
   - hub/test/pty-runner-resume-identity.test.ts
+  - tools/emit-phase16-verdict.mjs
+  - .planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-VERIFICATION.md
+  - hub/test/phase16-verdict-artifact.test.ts
+  - tools/regression-baseline.json
 autonomous: true
 requirements:
   - R-PTY-08
@@ -30,6 +34,10 @@ requirements:
   - R-PTY-29
   - R-PTY-30
   - R-PTY-31
+  - R-PTY-32
+  - R-PTY-33
+  - R-PTY-34
+  - R-PTY-35
 must_haves:
   truths:
     - "A raw-terminal WS frame schema (term.data/term.input/term.resize/term.attach/term.reattach) lives OUTSIDE agent-protocol.ts and carries no RunnerEvent coupling"
@@ -175,7 +183,7 @@ Block on: HIGH.
 
 <task type="auto">
   <name>Task 2: Authenticated, per-session-authorized byte-faithful relay /ws/client ↔ /ws/agent (H2 + H3)</name>
-  <files>hub/src/ws/client.ts, hub/src/ws/agent.ts, hub/src/ws/supervisor-registry.ts, hub/src/dispatch/gates.ts, hub/test/term-relay-auth.test.ts, hub/test/term-agent-inventory-auth.test.ts</files>
+  <files>hub/src/ws/client.ts, hub/src/ws/agent.ts, hub/src/ws/supervisor-registry.ts, hub/src/dispatch/gates.ts, hub/test/term-relay-auth.test.ts, hub/test/term-agent-inventory-auth.test.ts, hub/test/term-frame-direction-allowlist.test.ts, hub/test/term-ws-origin-guard.test.ts</files>
   <read_first>
     - hub/src/ws/client.ts (opaque-cookie auth + subscribe-by-session routing; the per-conn subscribedSessions set)
     - hub/src/ws/agent.ts (api_keys-keyed agent channel)
@@ -186,11 +194,17 @@ Block on: HIGH.
   <threat_model>
     - T-16-12 cross-session/cross-user hijack (HIGH, H2): forged session_id reads/injects another user's PTY → server-side subscribedSessions + DB-backed canWriteTerminal authz.
     - T-16-13 cross-host injection (HIGH, H3): supervisor emits term.* for a session it doesn't host → drop if session_id ∉ that supervisor's advertised inventory.
+    - T-16-18 frame-direction confusion (HIGH, NH-2): an inventory-valid /ws/agent socket sends a `term.input` (a WRITE), turning the supervisor channel into an unguarded input path into a human PTY. Mitigation: each socket allowlists frame DIRECTION by role — `term.input` (client→PTY write) is accepted ONLY on /ws/client, NEVER on /ws/agent; supervisor→hub terminal frames are OUTPUT-ONLY (`term.data`); a `term.input` arriving on /ws/agent is rejected before any forward.
+    - T-16-19 CSWSH / forged-Origin cookie ride (HIGH, NH-3): the `cookie ⇒ human` actor inference treats ANY authenticated browser WS as human; a cross-site WebSocket handshake that rides the user's cookie could drive PTY input as "human". Mitigation: the /ws/client handshake enforces an Origin/CSRF-for-WebSocket check (Origin ∈ HUB_ALLOWED_ORIGINS) and rejects a cross-site/disallowed-Origin handshake BEFORE the connection is treated as a human actor.
+    - T-16-20 inventory self-assertion (HIGH, NH-1): the H3 drop-check trusts the supervisor's OWN advertised `session_inventory`; a compromised/buggy supervisor advertises a victim's session_id and passes H3. Mitigation: cross-validate an inventory-claimed session against the DB record of which host legitimately owns it (sessions.hostname / the persisted supervisor identity) before treating that host as authoritative — a host claiming a session it does not own per the DB is dropped even if it appears in the self-asserted inventory.
   </threat_model>
   <acceptance_criteria>
     - A term.input/term.attach/term.reattach frame is accepted only on an authenticated /ws/client AND only when its target session_id is in THAT connection's subscribedSessions set
     - Authorization additionally requires a DB-backed canWriteTerminal(userId, sessionId) ownership check — a client-supplied session_id for a session the user does NOT own is rejected (no PTY hijack via forged session_id)
     - The hub does NOT parse term.data/term.input payload bytes — byte-faithful passthrough
+    - FRAME-DIRECTION ALLOWLIST (NH-2): each socket allowlists message direction by role — `term.input` is accepted ONLY on /ws/client (client→PTY write), NEVER on /ws/agent; /ws/agent terminal frames are OUTPUT-ONLY (`term.data`). A `term.input` frame injected on /ws/agent is REJECTED before any forward. `term-frame-direction-allowlist.test.ts` (NAMED) asserts a `term.input` on /ws/agent is rejected and `term.data` on /ws/client (server→client direction injected by a client) is likewise rejected.
+    - ORIGIN/CSWSH ENFORCEMENT (NH-3): the /ws/client handshake enforces an Origin/CSRF-for-WebSocket check (Origin ∈ HUB_ALLOWED_ORIGINS); a cross-site/disallowed-Origin handshake is REJECTED at handshake time so a forged-origin socket cannot ride the cookie to drive the human PTY. `term-ws-origin-guard.test.ts` (NAMED) asserts a disallowed-Origin handshake is rejected and an allowed-Origin one proceeds.
+    - INVENTORY CROSS-VALIDATION (NH-1): on /ws/agent, before treating a host as authoritative for a session, the hub cross-validates the inventory-claimed session_id against the DB host-ownership record (sessions.hostname / persisted supervisor identity) — a host advertising a session it does not legitimately own per the DB is DROPPED even if the session_id is present in its self-asserted `session_inventory`. `term-agent-inventory-auth.test.ts` is extended (NAMED case) so a SPOOFED inventory entry for a non-owned session is dropped (not just a session absent from the inventory).
     - On /ws/agent, a term.* frame whose session_id is NOT in that supervisor connection's advertised session_inventory (supervisor-registry) is DROPPED (cross-host injection rejected)
     - A term.input on an unauthenticated or unsubscribed connection is rejected
     - term-relay-auth.test.ts includes NAMED cross-session and cross-user hijack cases: user A cannot write/attach to user B's PTY session even with their own valid session
@@ -202,15 +216,21 @@ Block on: HIGH.
     routing. Do not introduce a new socket. Pass payload bytes through untouched. On the /ws/client
     ingress, enforce `session_id ∈ subscribedSessions` AND `canWriteTerminal(userId, sessionId)` (add the
     ownership helper in gates.ts, DB-scoped by user_id like every other query) BEFORE forwarding — reject
-    a forged/foreign session_id. On the /ws/agent ingress, consult `supervisor-registry.ts` and DROP any
-    term.* frame whose session_id is not in that supervisor's advertised inventory. Add the two named
-    negative tests (cross-user hijack; cross-host injection). Smallest-diff: branch before the structured
-    switch; reuse existing registries.
+    a forged/foreign session_id. Add the per-socket DIRECTION allowlist (NH-2): the /ws/client handler
+    accepts only client→server write frames (`term.input`/`term.attach`/`term.reattach`/`term.resize`) and
+    the /ws/agent handler accepts only server→client output (`term.data`) — reject any out-of-direction
+    frame before forwarding. Enforce the Origin/CSWSH check (NH-3) at the /ws/client handshake against
+    HUB_ALLOWED_ORIGINS (reuse the existing origin allowlist). On the /ws/agent ingress, consult
+    `supervisor-registry.ts` AND cross-validate against DB host-ownership (NH-1) and DROP any term.* frame
+    whose session_id is absent from the advertised inventory OR not legitimately owned by that host per the
+    DB. Add the named negative tests (cross-user hijack; cross-host injection incl. the SPOOFED-inventory
+    case; frame-direction; origin guard). Smallest-diff: branch before the structured switch; reuse existing
+    registries + origin allowlist.
   </action>
   <verify>
-    <automated>cd hub; bun test test/term-relay-auth.test.ts test/term-agent-inventory-auth.test.ts 2>$null</automated>
+    <automated>cd hub; bun test test/term-relay-auth.test.ts test/term-agent-inventory-auth.test.ts test/term-frame-direction-allowlist.test.ts test/term-ws-origin-guard.test.ts 2>$null</automated>
   </verify>
-  <done>Authenticated, per-session-authorized, byte-faithful relay; cross-user hijack and cross-host injection both rejected by named tests.</done>
+  <done>Authenticated, per-session-authorized, byte-faithful, DIRECTION-allowlisted relay with CSWSH/Origin enforcement and DB-cross-validated inventory; cross-user hijack, cross-host injection (incl. spoofed inventory), wrong-direction frames, and forged-origin sockets all rejected by named tests.</done>
 </task>
 
 <task type="auto">
@@ -284,13 +304,91 @@ Block on: HIGH.
   <done>Automation can never drive a PTY session via EITHER the dispatch pipeline OR the term.input relay; the actor is server-inferred (spoof-proof); human turns pass; cost cap intact.</done>
 </task>
 
+<shared_verdict_artifact_schema>
+SINGLE SOURCE OF TRUTH for the Phase-16 → Phase-17 producer/consumer contract (H11/NH-4). This task is the
+PRODUCER; `tools/cutover-deletion-gate.mjs` (Phase 17 / 17-PLAN-002 T1) is the CONSUMER. Both reference THIS
+block by its anchor (`16-PLAN-002 §shared_verdict_artifact_schema`). Field names + path are pinned here and
+MUST NOT be redefined elsewhere — neither side hardcodes a divergent shape.
+
+Path (FIXED): `.planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-VERIFICATION.md`
+Format: YAML frontmatter. Required keys:
+
+```yaml
+verdict: PASS            # PASS | PARTIAL | FAIL  (top-level ship verdict)
+render_fidelity: PASS    # PASS | FAIL  (manual, attested)
+mobile_reattach: PASS    # PASS | FAIL  (manual, attested)
+automated_suite:         # TEST-BOUND — written from real exit code, not retypeable
+  result: PASS           # PASS | FAIL
+  command: "bun run check-baseline"
+  summary: "771/900 ..." # captured verbatim from the run
+  run_at: "2026-05-31T18:04:00Z"
+term_relay_auth:         # TEST-BOUND — named relay/auth/guard tests' real exit codes
+  result: PASS           # PASS | FAIL
+  tests: [term-relay-auth, term-relay-human-guard, term-agent-inventory-auth,
+          term-frame-direction-allowlist, term-ws-origin-guard, pty-runner-resume-identity]
+  run_at: "2026-05-31T18:04:10Z"
+manual_attestation:      # structured — NOT a bare PASS token
+  render_fidelity: { by: "MM", at: "2026-05-31T18:10:00Z", device_build: "Pixel8/Chrome125 build 0.9.0" }
+  mobile_reattach: { by: "MM", at: "2026-05-31T18:12:00Z", device_build: "Pixel8/Chrome125 build 0.9.0" }
+```
+
+GATE-PASS RULE (consumed by cutover-deletion-gate.mjs): exit 0 ONLY when
+`verdict==PASS` AND `render_fidelity==PASS` AND `mobile_reattach==PASS` AND
+`automated_suite.result==PASS` AND `term_relay_auth.result==PASS` AND each `manual_attestation.<field>`
+carries a complete `{by, at, device_build}` triplet. Missing file / any FAIL / absent provenance block /
+incomplete attestation triplet ⇒ non-zero (abort, zero deletions). The triplet requirement is what makes a
+hand-typed `PASS` non-forgeable: a bare `render_fidelity: PASS` with no matching attestation triplet FAILS
+the gate's provenance check.
+</shared_verdict_artifact_schema>
+
+<task type="auto">
+  <name>Task 5: EMIT the test-bound Phase-16 ship-verdict artifact `16-VERIFICATION.md` (producer for the Phase-17 cutover gate — H11/NH-4)</name>
+  <files>tools/emit-phase16-verdict.mjs, .planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-VERIFICATION.md, tools/regression-baseline.json, hub/test/phase16-verdict-artifact.test.ts</files>
+  <read_first>
+    - .planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-VALIDATION.md (the Manual-Only Verifications rows for R-PTY-07 reattach + R-PTY-09 mobile — the two manual proofs the gate's `mobile_reattach`/`render_fidelity` fields attest)
+    - THIS plan's §shared_verdict_artifact_schema block (the SINGLE SOURCE OF TRUTH for the field names + path + gate-pass rule; the Phase-17 gate parses the SAME schema by reference, not a re-definition)
+    - tools/cutover-deletion-gate.mjs is the CONSUMER of this artifact (Phase 17 / 17-PLAN-002 T1) — field names + path MUST match byte-for-byte
+    - tools/regression-baseline.json (per-file isolation registration)
+  </read_first>
+  <threat_model>
+    - T-16-16 forged/hand-edited verdict re-opens the manual wave-through H4/H11 killed (HIGH): a human hand-types `verdict: PASS` / `render_fidelity: PASS` so the rip unlocks without a real run. Mitigation: the artifact is EMITTED by a script (`emit-phase16-verdict.mjs`), NEVER hand-authored; the two test-derived signals (`automated_suite`, `term_relay_auth`) are written DIRECTLY from `bun run check-baseline` / the named-test exit codes (not retypeable); the two manual signals (`render_fidelity`, `mobile_reattach`) are captured as a STRUCTURED attestation — operator initials + ISO-8601 timestamp + the device/build string — not a bare `PASS` token, and the emit script REFUSES to write a manual PASS unless the attestation triplet is supplied (so a blank/forged `PASS` is not expressible). A verdict whose `automated_suite`/`term_relay_auth` PASS is not backed by the recorded test-run summary fails the gate's provenance assert.
+    - T-16-17 producer/consumer drift (HIGH): Phase-16 emits one field shape, Phase-17 gate parses another → gate always-aborts (permablock) or gets hand-waved. Mitigation: ONE schema defined in the SPEC, referenced by BOTH this task and 17-PLAN-002 T1; `phase16-verdict-artifact.test.ts` asserts the emitted artifact validates against the SAME schema the gate consumes (round-trips through `cutover-deletion-gate.mjs` → exit 0 on a real-run fixture).
+  </threat_model>
+  <acceptance_criteria>
+    - `tools/emit-phase16-verdict.mjs` is a standalone Node ESM script (no deps) that WRITES `.planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-VERIFICATION.md` conforming to the SHARED VERDICT-ARTIFACT SCHEMA (defined ONCE in interactive-pty-runner-SPEC.md, referenced here and by the Phase-17 gate). The artifact carries YAML frontmatter with EXACTLY these keys: `verdict` (∈ PASS|PARTIAL|FAIL), `render_fidelity` (PASS|FAIL), `mobile_reattach` (PASS|FAIL), plus provenance blocks: `automated_suite: { result: PASS|FAIL, command, summary, run_at }`, `term_relay_auth: { result: PASS|FAIL, tests: [...], run_at }`, and `manual_attestation: { render_fidelity: {by, at, device_build}, mobile_reattach: {by, at, device_build} }`.
+    - TEST-BOUND provenance (not hand-typed): the script DERIVES `automated_suite.result` from the ACTUAL exit code of `bun run check-baseline` and `term_relay_auth.result` from the ACTUAL exit codes of the named relay tests (`term-relay-auth.test.ts`, `term-relay-human-guard.test.ts`, `term-agent-inventory-auth.test.ts`, `pty-runner-resume-identity.test.ts`), capturing their summary lines verbatim — it does NOT accept these as CLI args. If any required suite is red the script writes `verdict: FAIL` (or refuses to write a PASS).
+    - ATTESTED-but-structured manual fields: `render_fidelity`/`mobile_reattach` PASS are written ONLY when the operator supplies the full attestation triplet (initials + ISO-8601 timestamp + device/build string) for that field; a missing/partial triplet ⇒ that field is written `FAIL` (or omitted), which the gate treats as abort. A bare `PASS` with no triplet is NOT expressible through the script.
+    - `verdict: PASS` is emitted ONLY when both automated signals are PASS AND both manual attestations are complete-and-PASS; otherwise `PARTIAL`/`FAIL`.
+    - The EMITTED `16-VERIFICATION.md` validates against the SAME schema `tools/cutover-deletion-gate.mjs` parses: `phase16-verdict-artifact.test.ts` round-trips a script-emitted fully-green fixture through the gate and asserts exit 0, and asserts a hand-edited artifact missing a provenance block is REJECTED by the gate's provenance check (detectable forgery).
+    - The path `.planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-VERIFICATION.md` and the field names are IDENTICAL to those pinned in 17-PLAN-002 T1 (no drift); the test is registered in tools/regression-baseline.json.
+  </acceptance_criteria>
+  <action>
+    Author `emit-phase16-verdict.mjs` to RUN the automated suites itself (or read an immutable run-summary
+    file the check-baseline step writes), derive the two automated PASS/FAIL signals from real exit codes,
+    require the manual-attestation triplet for each manual field, and write `16-VERIFICATION.md` in the
+    SHARED schema. The schema is pinned ONCE in THIS plan's §shared_verdict_artifact_schema (single source);
+    both this producer and the Phase-17 gate reference that anchor so they can't drift. Add `phase16-verdict-artifact.test.ts`
+    proving the emitted artifact passes the real gate and a forged/provenance-stripped one is rejected. This
+    task runs LAST in Phase 16 (after every other task is green) so the artifact reflects the true phase
+    state. Register the new test in the baseline.
+  </action>
+  <verify>
+    <automated>cd hub; bun test test/phase16-verdict-artifact.test.ts 2>$null</automated>
+    The emitted `16-VERIFICATION.md` exists with the pinned keys; piping it through `node tools/cutover-deletion-gate.mjs` exits 0 only on a fully-green emit.
+  </verify>
+  <done>Phase 16 EMITS the exact verdict artifact the Phase-17 gate consumes, with the PASS evidence bound to real test-run output + structured manual attestations — a hand-edited/forged artifact is detectable, closing the producer/consumer gap (H11/NH-4) so the gate neither permablocks nor gets hand-waved.</done>
+</task>
+
 </tasks>
 
 <verification>
 - term-protocol.ts has zero agent-protocol/RunnerEvent coupling (grep + isolation test)
 - Unauthenticated term.input rejected; authenticated relay is byte-faithful
 - Cross-session/cross-user PTY hijack via forged session_id is rejected (term-relay-auth.test.ts named cases — H2/R-PTY-29)
-- Cross-host term-frame injection on /ws/agent is dropped against the supervisor's advertised inventory (term-agent-inventory-auth.test.ts — H3/R-PTY-30)
+- Cross-host term-frame injection on /ws/agent is dropped against the supervisor's advertised inventory AND a spoofed-inventory entry for a non-owned session is dropped via DB host-ownership cross-validation (term-agent-inventory-auth.test.ts — H3/R-PTY-30, NH-1/R-PTY-35)
+- `term.input` is accepted ONLY on /ws/client (write) and rejected on /ws/agent; /ws/agent is output-only `term.data` — per-socket frame-direction allowlist (term-frame-direction-allowlist.test.ts — NH-2/R-PTY-33)
+- A disallowed/cross-site Origin WS handshake on /ws/client is rejected (CSWSH) so a forged-origin socket can't ride the cookie to drive the human PTY (term-ws-origin-guard.test.ts — NH-3/R-PTY-34)
+- Phase 16 EMITS `16-VERIFICATION.md` in the shared verdict-artifact schema with test-bound provenance; a script-emitted fully-green artifact passes the Phase-17 gate and a forged/provenance-stripped one is rejected (phase16-verdict-artifact.test.ts — H11·NH-4/R-PTY-32)
 - Automation/agent term.input is rejected ON THE RELAY path; client-asserted source:"human" cannot bypass the server-inferred actor (term-relay-human-guard.test.ts — H1/R-PTY-28)
 - Every automation source rejected for pty-interactive on the dispatch path; human interactive allowed; cost cap unaffected
 - schema.sql runner_type + nullable backend-identity/transcript-path columns are idempotent `ADD COLUMN IF NOT EXISTS`, no backfill; resume reads persisted mode — no dual-spawn / no mis-route (pty-runner-resume-identity.test.ts — H10/R-PTY-31)

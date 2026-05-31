@@ -34,6 +34,22 @@ gates the raw `term.input` relay with a SERVER-INFERRED actor (H1), and cross-se
 **PASS holds** for Phase 16. (H5 frontmatter/VALIDATION reconciliation + the duplicate-PLAN-CHECK de-dupe
 are OUT of scope here — owned by the H5 sweep agent.)
 
+## Cycle-3 additions (2026-05-31, FINAL — adjudicated cycle-2 remainder: H11/NH-4 + NH-1/NH-2/NH-3)
+
+| Req | Covered by | Acceptance is verifiable? |
+|-----|-----------|---------------------------|
+| R-PTY-32 (Phase-16 EMITS the test-bound verdict artifact the Phase-17 gate consumes — H11/NH-4) | 16-PLAN-002 (**new Task 5** + §shared_verdict_artifact_schema single-source contract; `tools/emit-phase16-verdict.mjs` derives PASS from real test exit codes + structured manual-attestation triplets) | Yes — `phase16-verdict-artifact.test.ts`: a script-emitted fully-green artifact passes the real `cutover-deletion-gate.mjs` (exit 0); a forged/provenance-stripped artifact is rejected |
+| R-PTY-33 (per-socket terminal-frame DIRECTION allowlist — NH-2) | 16-PLAN-002 (**Task 2**: `term.input` only on /ws/client; /ws/agent output-only `term.data`) | Yes — `term-frame-direction-allowlist.test.ts`: `term.input` on /ws/agent rejected |
+| R-PTY-34 (Origin/CSWSH enforcement on /ws/client handshake — NH-3) | 16-PLAN-002 (**Task 2**: handshake Origin ∈ HUB_ALLOWED_ORIGINS) | Yes — `term-ws-origin-guard.test.ts`: disallowed-Origin handshake rejected, allowed proceeds |
+| R-PTY-35 (inventory cross-validated against DB host-ownership — NH-1) | 16-PLAN-002 (**Task 2**: cross-validate inventory-claimed session vs DB host-ownership) | Yes — `term-agent-inventory-auth.test.ts` (extended): spoofed inventory entry for a non-owned session dropped |
+
+**Cycle-3 verdict (Phase 16):** the producer side of the Phase-16→Phase-17 verdict contract (H11/NH-4) is
+now a concrete Phase-16 task emitting the artifact from REAL test output with a single shared schema both
+sides reference; the three WS-seam surfaces the cycle-2 relay guard introduced (NH-1 inventory self-assertion,
+NH-2 frame-direction, NH-3 CSWSH/Origin) are each closed in 16-PLAN-002 Task 2 with named negative tests.
+**PASS holds** for Phase 16. (H5 reconciliation still excluded — owned by the H5 sweep agent; SPEC/ROADMAP
+untouched.)
+
 ## Quality-gate checklist (per workflow step 8 rubric)
 
 - [x] PLAN.md files created in phase dir (3 plans, waves 1-2-3)

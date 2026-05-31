@@ -821,3 +821,78 @@ wrong-session-cross-wire HIGH, T-20-03 scrape-forged-permission HIGH; cross-ref 
 R-PTY-23b, R-PTY-23c (H9) in Phase 19; R-TG-13 (H10 Phase-20 slice) in Phase 20. All elaborate existing
 parents (R-PTY-13/22/23 + R-TG-01..03); the parents remain authoritative. H5 (frontmatter reconciliation)
 intentionally excluded — owned by the H5 sweep agent.
+
+## Cycle-3 additions
+
+> APPEND-ONLY block authored during the Cycle-3 (FINAL) GSD replan, applying the adjudicated cycle-2
+> remainder (the three cross-AI cycle-2 reviews: claude/codex/gemini). Closes H11/NH-4 (producer/consumer
+> verdict-artifact contract), NH-1/NH-2/NH-3 (WS-seam hardening introduced by the cycle-2 relay guard),
+> and NH-5/H9-tightening (env-sanitizer allowlist-grade coverage); plus two cheap PARTIAL test-bindings
+> folded into existing parents. Touches Phase 16, 17, 19 ONLY. New top-level IDs are namespaced
+> `R-PTY-32..36` to avoid renumbering. The two PARTIAL bindings add acceptance lines to existing parents
+> (R-PTY-13b literal-delete canary in Phase 17; R-PTY-22b selector→argv test in Phase 19) — no new ID.
+> H5 frontmatter reconciliation remains excluded (owned by the H5 sweep agent). SPEC/ROADMAP untouched.
+
+#### R-PTY-32 — Phase-16 EMITS the test-bound ship-verdict artifact the Phase-17 gate consumes (H11 / NH-4)
+Phase 16 SHALL EMIT `.planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-VERIFICATION.md`
+conforming to the SHARED VERDICT-ARTIFACT SCHEMA defined ONCE in `16-PLAN-002 §shared_verdict_artifact_schema`
+(the single source of truth referenced by BOTH the Phase-16 producer task and the Phase-17 gate task, so the
+field names + FIXED path + gate-pass rule cannot drift). The artifact SHALL be written by a script
+(`tools/emit-phase16-verdict.mjs`), NEVER hand-authored: the `automated_suite` and `term_relay_auth` PASS
+signals SHALL be DERIVED from the REAL exit codes/summaries of `bun run check-baseline` and the named relay/
+auth/guard tests (test-bound, not retypeable), and the manual `render_fidelity`/`mobile_reattach` PASS fields
+SHALL each require a structured attestation triplet `{by, at, device_build}` — a bare hand-typed `PASS` is not
+expressible. `tools/cutover-deletion-gate.mjs` SHALL exit 0 ONLY when `verdict==PASS` AND both manual fields
+`PASS` (with complete triplets) AND both automated-provenance blocks present-and-PASS; a missing file, any
+FAIL/PARTIAL, an absent provenance block, or an incomplete triplet SHALL abort. A test
+(`phase16-verdict-artifact.test.ts`) SHALL round-trip a script-emitted fully-green artifact through the real
+gate (exit 0) and SHALL assert a forged/provenance-stripped artifact is REJECTED. This closes the gap where
+the gate would either permanently abort (no producer) or be satisfied by a hand-faked file (manual wave-through
+H4 was meant to kill). *(Threats T-16-16 forged-verdict HIGH, T-16-17 producer/consumer-drift HIGH; cross-ref
+16-PLAN-002 Task 5 + 17-PLAN-002 Task 1.)*
+
+#### R-PTY-33 — Per-socket terminal-frame DIRECTION allowlist (NH-2)
+Each WS socket SHALL allowlist terminal-frame DIRECTION by role: `term.input` (a client→PTY write) SHALL be
+accepted ONLY on `/ws/client`, NEVER on `/ws/agent`; `/ws/agent` terminal frames SHALL be OUTPUT-ONLY
+(`term.data`). A `term.input` frame injected on `/ws/agent` SHALL be rejected before any forward (an
+inventory-valid agent socket cannot become an input path into a human PTY). A NAMED negative test
+(`term-frame-direction-allowlist.test.ts`) SHALL assert a `term.input` on `/ws/agent` is rejected.
+*(Threat T-16-18 frame-direction-confusion HIGH; cross-ref 16-PLAN-002 Task 2.)*
+
+#### R-PTY-34 — Origin/CSWSH enforcement on the /ws/client handshake (NH-3)
+The `cookie ⇒ human` actor inference on `/ws/client` SHALL additionally enforce an Origin/CSRF-for-WebSocket
+check at handshake (Origin ∈ HUB_ALLOWED_ORIGINS); a cross-site / disallowed-Origin WS handshake SHALL be
+REJECTED before the connection is treated as a human actor, so a forged-origin socket cannot ride the user's
+cookie to drive the human PTY. A NAMED negative test (`term-ws-origin-guard.test.ts`) SHALL assert a
+disallowed-Origin handshake is rejected and an allowed-Origin one proceeds. *(Threat T-16-19 CSWSH-cookie-ride
+HIGH; cross-ref 16-PLAN-002 Task 2.)*
+
+#### R-PTY-35 — Supervisor inventory cross-validated against DB host-ownership (NH-1)
+Before the relay treats a `/ws/agent` host as authoritative for a session, the hub SHALL cross-validate the
+supervisor's self-asserted `session_inventory`-claimed `session_id` against the DB host-ownership record
+(sessions.hostname / the persisted supervisor identity). A host advertising a session it does NOT legitimately
+own per the DB SHALL be DROPPED even if the `session_id` appears in its self-asserted inventory (a compromised/
+buggy supervisor cannot claim a victim's session). A NAMED negative case in `term-agent-inventory-auth.test.ts`
+SHALL assert a SPOOFED inventory entry for a non-owned session is dropped (distinct from the existing
+absent-from-inventory case). *(Threat T-16-20 inventory-self-assertion HIGH; cross-ref 16-PLAN-002 Task 2.)*
+
+#### R-PTY-36 — Credential-class pattern sweep in the shared spawn-env sanitizer (NH-5 / H9 tightening)
+`supervisor/src/runners/env-sanitize.ts` SHALL retain the explicit named provider-key denylist (R-PTY-23b) AND
+ADD an anchored credential-class PATTERN sweep (`/_API_KEY$/`, `/_AUTH_TOKEN$/`, `/_ACCESS_TOKEN$/`,
+`/_API_TOKEN$/`, case-insensitive) so future/aliased/unlisted provider credentials are stripped from the
+resolved spawn env of EVERY runner, giving allowlist-grade coverage of the credential CLASS without a brittle
+full-env allowlist (justification: an interactive CLI inherits a large undocumented OS-/tool-specific env a
+fixed allowlist would break across hosts). A test SHALL assert a NOVEL non-named var matching a pattern
+(e.g. `FOO_API_KEY`, `MISTRAL_AUTH_TOKEN`) is stripped from the REAL spawned env while an anchored benign
+control survives (no over-strip); the named ANTHROPIC/OPENAI/GEMINI/GOOGLE coverage is retained by the
+per-backend tests. *(Threat T-19-03 API-key-fallback CRITICAL, broadened to future/aliased creds; cross-ref
+19-PLAN-003 Task 3.)*
+
+**Cycle-3 coverage:** 5 new IDs — R-PTY-32 (H11/NH-4) in Phase 16/17 (producer in 16-PLAN-002 Task 5,
+consumer in 17-PLAN-002 Task 1); R-PTY-33 (NH-2), R-PTY-34 (NH-3), R-PTY-35 (NH-1) in Phase 16 (16-PLAN-002
+Task 2); R-PTY-36 (NH-5) in Phase 19 (19-PLAN-003 Task 3). Plus two PARTIAL test-bindings folded into existing
+parents without new IDs: the literal `delete env.ANTHROPIC_API_KEY` source-pin in the Phase-17 behavioral
+canary (R-PTY-13b-adjacent, 17-PLAN-001 Task 3), and the selector→spawn-argv negative test at the Phase-19
+selector seam (R-PTY-22b-adjacent, 19-PLAN-002 Task 2). All elaborate existing parents (R-PTY-08/10/23 + the
+Cycle-2 -b/-c addenda); parents remain authoritative. H5 (frontmatter reconciliation) excluded — owned by the
+H5 sweep agent. SPEC/ROADMAP untouched.

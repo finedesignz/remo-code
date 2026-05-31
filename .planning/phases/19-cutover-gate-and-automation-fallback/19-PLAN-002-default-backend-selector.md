@@ -125,10 +125,13 @@ programmatic-billed path.
     - Test (H8 defense-in-depth, negative): `ctx.isHuman === false` ⇒ resolve THROWS (no PTY backend handed to automation)
     - Test (H8 post-failed-gate, negative): gate result `programmatic` ⇒ `'claude-pty'` is never returned for new OR existing sessions even when config requests it, until an operator-override flag clears the disable
     - Test: the gate flag is not flipped by any automatic code path (it is operator-set) — assert no production code writes it
+    - SELECTOR→SPAWN-ARGV negative test (PARTIAL-binding, H8/NH-adjacent): for EACH backend the selector can return (`'claude-pty'`, `'codex-pty'`), drive the resolved id through the runner registry to its REAL spawn path (reuse the H6 node-pty spawn-interception seam) and assert the spawned argv contains NONE of `-p`/`--print`/`--input-format`/`--output-format`/`stream-json`. This binds the selector's output to the actual argv at the Phase-19 selector seam — not just leaning on the Phase-16/17 canary — so a human-resolved backend can never emit a programmatic flag.
   </acceptance_criteria>
   <action>
     Author the tests; the "no auto-flip" assertion can grep the codebase for writes to the flag and
-    assert they are only in operator/config tooling, not the runtime.
+    assert they are only in operator/config tooling, not the runtime. For the selector→argv test, resolve
+    each backend id, instantiate its runner via the real spawn path (intercept node-pty.spawn), and assert
+    the intercepted argv carries no programmatic flag.
   </action>
   <verify>
     <automated>cd supervisor; bun test test/default-backend-selector.test.ts 2>$null</automated>
@@ -144,6 +147,7 @@ programmatic-billed path.
 - unconfirmed gate ⇒ default = `'codex-pty'`, never `'claude-pty'` (negative)
 - confirmed gate ⇒ configured default honored (PTY-only)
 - post-`programmatic`-gate ⇒ Claude-PTY disabled, never returned for new/existing until operator override (negative)
+- selector→spawn-argv: each resolvable human backend's REAL spawned argv carries no `-p`/`--input-format`/`--output-format`/`stream-json` (intercepted at the Phase-19 selector seam, not only the P16/17 canary)
 - flag is operator-set, not auto-flipped
 - `bun run check-baseline` green
 </verification>

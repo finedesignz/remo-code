@@ -73,3 +73,21 @@ manual-field-absent verdicts. The existing `autonomous:false` operator checkpoin
 New requirement: **R-PTY-13b**. No other Phase-17 changes (frontmatter reconciliation = H5 sweep, not
 this agent). Dependency note: Phase-16 verification must EMIT the `render_fidelity`/`mobile_reattach`
 PASS fields the gate parses (cross-ref H5/Phase-16 — pin exact field names at execution).
+
+### Cycle-3 addendum (2026-05-31, FINAL) — H11/NH-4 producer/consumer contract CLOSED + PARTIAL binding
+
+**Re-verdict: PASS (strengthened).** The cycle-2 dependency note above (the gate parsed fields no Phase-16
+task emitted) was the adjudicated H11/NH-4 must-fix. It is now CLOSED end-to-end:
+- The verdict-artifact field schema is pinned ONCE in `16-PLAN-002 §shared_verdict_artifact_schema` (fixed
+  path + key names + gate-pass rule) and REFERENCED by both the Phase-16 producer (16-PLAN-002 Task 5,
+  `tools/emit-phase16-verdict.mjs`) and this gate (17-PLAN-002 Task 1) — they cannot drift.
+- 17-PLAN-002 Task 1 is updated to consume that shared schema and to enforce PROVENANCE (NH-4 anti-forgery):
+  the gate now also requires the test-bound `automated_suite`/`term_relay_auth` blocks + complete manual
+  attestation triplets, and its test adds fixtures (f) provenance-absent and (g) forged-bare-PASS ⇒ abort.
+  A hand-edited artifact can no longer satisfy the gate. New requirement: **R-PTY-32** (owned jointly by the
+  Phase-16 producer + this consumer).
+- PARTIAL binding (a): 17-PLAN-001 Task 3 canary now PINS the literal `delete env.ANTHROPIC_API_KEY` (or the
+  shared `sanitizeSpawnEnv`) source site in each PTY runner — the scrub MECHANISM is asserted statically, not
+  only the runtime env-object (R-PTY-13b-adjacent; no new ID).
+
+H5 frontmatter reconciliation remains the H5 sweep agent's; SPEC/ROADMAP untouched.
