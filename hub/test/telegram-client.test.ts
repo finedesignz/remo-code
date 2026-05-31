@@ -83,3 +83,40 @@ describe("splitForTelegram", () => {
     expect(chunks.join("")).toBe("a b c d e");
   });
 });
+
+describe("setWebhook", () => {
+  test("REQUIRED_ALLOWED_UPDATES contains callback_query + message", async () => {
+    const { REQUIRED_ALLOWED_UPDATES } = await import("../src/telegram/client");
+    expect(REQUIRED_ALLOWED_UPDATES).toContain("callback_query");
+    expect(REQUIRED_ALLOWED_UPDATES).toContain("message");
+  });
+
+  test("POSTs setWebhook with allowed_updates including callback_query", async () => {
+    // config reads the token at module-init; set it on the live config object so
+    // setWebhook's tokenOrThrow() passes regardless of env load ordering.
+    const { config } = await import("../src/config");
+    const { setWebhook } = await import("../src/telegram/client");
+    const prevToken = config.telegram.botToken;
+    (config.telegram as any).botToken = "fake-bot-token-client";
+
+    const realFetch = globalThis.fetch;
+    let captured: { url: string; body: any } | null = null;
+    // @ts-expect-error — minimal fetch stub for the single setWebhook call.
+    globalThis.fetch = async (url: string, init?: any) => {
+      captured = { url, body: JSON.parse(init.body) };
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+    try {
+      await setWebhook("https://app.remo-code.com/api/telegram/webhook/SECRET");
+    } finally {
+      globalThis.fetch = realFetch;
+      (config.telegram as any).botToken = prevToken;
+    }
+    expect(captured).not.toBeNull();
+    expect(captured!.url).toContain("/setWebhook");
+    expect(captured!.body.url).toBe("https://app.remo-code.com/api/telegram/webhook/SECRET");
+    // The fix: callback_query MUST be in allowed_updates.
+    expect(captured!.body.allowed_updates).toContain("callback_query");
+    expect(captured!.body.allowed_updates).toContain("message");
+  });
+});

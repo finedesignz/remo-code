@@ -402,6 +402,49 @@ export async function editMessageTextMd(
   }
 }
 
+/**
+ * The update types this bot must receive. `callback_query` is REQUIRED for the
+ * `/list` inline session picker (button taps + "Next »" pagination) and for the
+ * inline Approve/Deny + 🛑 Stop buttons. If a webhook is registered WITHOUT
+ * `callback_query` in `allowed_updates`, Telegram silently never delivers any
+ * button tap, so the picker appears completely dead (the prod bug this fixes).
+ *
+ * Telegram treats an omitted `allowed_updates` on `setWebhook` as "keep the
+ * previous value", so a one-off `setWebhook` that omits it can leave a stale
+ * message-only filter in place. We therefore ALWAYS send this explicit list.
+ */
+export const REQUIRED_ALLOWED_UPDATES = ["message", "callback_query"] as const;
+
+/**
+ * Register the inbound webhook with Telegram, pinning `allowed_updates` so
+ * `callback_query` (inline-button taps) is always delivered. Idempotent on
+ * Telegram's side. Call ONCE at bridge startup (mirrors {@link setMyCommands}).
+ *
+ * `url` is the full public webhook URL including the URL-path secret.
+ */
+export async function setWebhook(
+  url: string,
+  allowedUpdates: readonly string[] = REQUIRED_ALLOWED_UPDATES,
+): Promise<void> {
+  const token = tokenOrThrow();
+  const endpoint = `${API_BASE}/bot${token}/setWebhook`;
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url,
+      // Explicit list — omitting this keeps Telegram's previous filter, which
+      // may be a stale message-only registration that drops callback_query.
+      allowed_updates: allowedUpdates,
+    }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new TelegramClientError(res.status, body);
+  }
+}
+
 export async function getFile(fileId: string): Promise<{ file_id: string; file_path: string; file_size?: number }> {
   const token = tokenOrThrow();
   const url = `${API_BASE}/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`;

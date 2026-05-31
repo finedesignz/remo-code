@@ -50,18 +50,36 @@ Redeploy after setting the vars.
 
 ### 3. Register the webhook with Telegram
 
-One-shot curl against Telegram's API — Telegram needs to know where to deliver
-updates:
+The hub self-registers the webhook on bridge startup (`startTelegramBridge` →
+`setWebhook`, mirroring the `setMyCommands` self-registration), pinning
+`allowed_updates: ["message", "callback_query"]`. **`callback_query` is
+mandatory** — without it Telegram silently never delivers inline-button taps, so
+the `/list` session picker (selecting a session, the "Next »" page button) and
+the Approve/Deny/🛑 Stop buttons all appear dead. The hub builds the URL from
+`REMO_PUBLIC_URL` (default `https://app.remo-code.com`) + the webhook secret, so
+no manual step is normally needed.
+
+To register manually (or to verify), curl against Telegram's API — **always pass
+`allowed_updates` including `callback_query`**, because Telegram treats an
+omitted `allowed_updates` as "keep the previous filter", which can leave a stale
+message-only registration that drops every button tap:
 
 ```
 curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
-  -d "url=https://app.remo-code.com/api/telegram/webhook/<TELEGRAM_WEBHOOK_SECRET>"
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://app.remo-code.com/api/telegram/webhook/<TELEGRAM_WEBHOOK_SECRET>","allowed_updates":["message","callback_query"]}'
 ```
 
 Replace `<TELEGRAM_BOT_TOKEN>` and `<TELEGRAM_WEBHOOK_SECRET>` with the actual
 values. Telegram will start POSTing JSON `Update` objects to that URL. The
 URL-path secret IS the only credential — there are no HMAC headers, mirroring
 the Coolify webhook discipline (Phase 06).
+
+Verify with `getWebhookInfo` — `allowed_updates` must list `callback_query`:
+
+```
+curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo"
+```
 
 To rotate the webhook secret: regenerate `TELEGRAM_WEBHOOK_SECRET`, redeploy,
 then re-call `setWebhook` with the new URL.

@@ -24,6 +24,8 @@ const state: {
   keyboardSends: Array<{ chat: number | string; text: string; keyboard: any }>;
   // Recorded setMyCommands calls.
   setCommandsCalls: Array<Array<{ command: string; description: string }>>;
+  // Recorded setWebhook calls (url + allowed_updates) — self-registration on startup.
+  setWebhookCalls: Array<{ url: string; allowedUpdates: readonly string[] }>;
   // Recorded editMessageTextMd calls (streaming working-message edits).
   edits: Array<{ chat: number | string; messageId: number; text: string }>;
   // Recorded sendChatAction (typing) calls.
@@ -35,6 +37,7 @@ const state: {
   sends: [],
   keyboardSends: [],
   setCommandsCalls: [],
+  setWebhookCalls: [],
   edits: [],
   chatActions: [],
   sendImpl: null,
@@ -96,6 +99,12 @@ mock.module("../src/telegram/client.ts", () => ({
   setMyCommands: async (commands: Array<{ command: string; description: string }>) => {
     state.setCommandsCalls.push(commands);
   },
+  // setWebhook is fired-and-forgotten on startup; record url + allowed_updates,
+  // no network. The default `allowedUpdates` arg is supplied by the real impl's
+  // signature default, so the bridge calls it with one arg — record both.
+  setWebhook: async (url: string, allowedUpdates: readonly string[] = ["message", "callback_query"]) => {
+    state.setWebhookCalls.push({ url, allowedUpdates });
+  },
 }));
 
 // ── Imports (must come AFTER mock.module) ──────────────────────────────────
@@ -134,6 +143,7 @@ beforeEach(() => {
   state.sends.length = 0;
   state.keyboardSends.length = 0;
   state.setCommandsCalls.length = 0;
+  state.setWebhookCalls.length = 0;
   state.edits.length = 0;
   state.chatActions.length = 0;
   state.sendImpl = null;
@@ -292,6 +302,25 @@ describe("Telegram outbound bridge", () => {
     for (const c of state.setCommandsCalls[0]!) {
       expect(c.command).toMatch(/^[a-z][a-z0-9_]{0,31}$/);
     }
+  });
+
+  // ── /list picker fix — webhook self-registration includes callback_query ──
+  // ROOT CAUSE of "can't select from /list" + "Next » does nothing": the
+  // documented manual setWebhook omitted allowed_updates, so Telegram could be
+  // left with a stale message-only filter and NEVER delivered callback_query.
+  // The bridge now self-registers the webhook with an explicit allowed_updates
+  // that MUST contain callback_query (and message).
+  test("self-registers the webhook on startup with callback_query in allowed_updates", async () => {
+    startTelegramBridge();
+    await settle();
+    expect(state.setWebhookCalls).toHaveLength(1);
+    const call = state.setWebhookCalls[0]!;
+    // URL is the public hub URL + /api/telegram/webhook/<secret>.
+    expect(call.url).toContain("/api/telegram/webhook/");
+    expect(call.url).toContain("test-secret-must-be-at-least-16-chars");
+    // The fix: callback_query MUST be allowed or every inline button is dead.
+    expect(call.allowedUpdates).toContain("callback_query");
+    expect(call.allowedUpdates).toContain("message");
   });
 
   // ── Fix C — inline approval prompts ───────────────────────────────────────
