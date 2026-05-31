@@ -3,6 +3,7 @@ import { useSessions } from '../hooks/useSessions'
 import { useSupervisors } from '../hooks/useSupervisors'
 import { useWebSocketContext } from '../hooks/useWebSocket'
 import { Modal, Button } from './ui'
+import { SessionActionButton } from './SessionActionButton'
 
 type OrchestratorSnapshot = {
   enabled: boolean
@@ -692,10 +693,10 @@ function RowActions({ row, online, onStart, onStop }: { row: Row; online: boolea
       {row.run ? (
         <>
           <IconBtn title="Open chat" tone="accent" onClick={() => { /* row click handles */ }}><Icon.Open /></IconBtn>
-          <IconBtn title="Stop session" tone="danger" onClick={onStop}><Icon.Stop /></IconBtn>
+          <SessionActionButton kind="stop" onClick={onStop} />
         </>
       ) : (
-        <IconBtn title={row.hasLocal ? 'Start session' : 'Clone & start'} tone="accent" disabled={!online} onClick={onStart}><Icon.Play /></IconBtn>
+        <SessionActionButton kind="play" label={row.hasLocal ? 'Start session' : 'Clone & start'} disabled={!online} onClick={onStart} />
       )}
     </>
   )
@@ -827,8 +828,8 @@ function OrchestratorRow({ orch, online, rootPath, hasSupervisor }: {
         {!snap ? null : snap.enabled ? (
           <>
             {status === 'running'
-              ? <IconBtn title="Stop orchestrator session" tone="danger" disabled={busy} onClick={() => void stop()}><Icon.Stop /></IconBtn>
-              : <IconBtn title="Start orchestrator session" tone="accent" disabled={busy || !online} onClick={() => void start()}><Icon.Play /></IconBtn>}
+              ? <SessionActionButton kind="stop" label="Stop orchestrator session" loading={busy} onClick={() => void stop()} />
+              : <SessionActionButton kind="play" label="Start orchestrator session" disabled={busy || !online} onClick={() => void start()} />}
             <IconBtn title="Disable orchestrator" tone="muted" disabled={busy} onClick={() => void setEnabled(false)}><Icon.Power /></IconBtn>
           </>
         ) : (
