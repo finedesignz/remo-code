@@ -252,6 +252,10 @@ export async function getGridState(userId: string): Promise<GridState> {
 /**
  * Upsert the user's grid state. Only the provided fields are written; omitted
  * fields keep their current value (COALESCE on the existing row).
+ *
+ * The ON CONFLICT (user_id) DO UPDATE is intentionally last-write-wins: grid
+ * state (active tab/session) is per-user, so two concurrent browser tabs just
+ * clobber each other's active-cell — acceptable by design, not a lost update.
  */
 export async function setGridState(
   userId: string,
