@@ -18,12 +18,25 @@ const state: {
   inventory: any
   scope: { hasAdminWrite: boolean; hasContentsWrite: boolean; kind: string }
   sentMessages: any[]
+  // Fault injection + call tracking for the rollback / capacity safety tests.
+  throwOnSend: boolean
+  throwOnCreateRun: boolean
+  reserveResult: any
+  createdRuns: any[]
+  endRunCalls: Array<{ runId: string; reason: any }>
+  releaseSlotCalls: Array<{ userId: string; supervisorId: string }>
 } = {
   session: null,
   supervisorOnline: true,
   inventory: null,
   scope: { hasAdminWrite: true, hasContentsWrite: true, kind: 'app_installation' },
   sentMessages: [],
+  throwOnSend: false,
+  throwOnCreateRun: false,
+  reserveResult: { ok: true, running: 0, cap: 4 },
+  createdRuns: [],
+  endRunCalls: [],
+  releaseSlotCalls: [],
 }
 
 // Spread the real shared modules so any export not explicitly overridden below
@@ -55,8 +68,16 @@ mock.module('../src/db/chat-tabs-dal.ts', () => ({
 }))
 
 mock.module('../src/db/supervisor-dal.ts', () => ({
-  createRun: async () => ({ id: 'run_x' }),
-  endRun: async () => ({}),
+  createRun: async (args: any) => {
+    if (state.throwOnCreateRun) throw new Error('createRun boom')
+    const row = { id: 'run_x', ...args }
+    state.createdRuns.push(row)
+    return row
+  },
+  endRun: async (runId: string, _exit: any, reason: any) => {
+    state.endRunCalls.push({ runId, reason })
+    return {}
+  },
   // Phase 12 W2 — keep full export surface so the api/supervisors import in
   // cross-test load order resolves setSupervisorRoots.
   setSupervisorRoots: async () => null,
@@ -88,6 +109,7 @@ let _mockReqCounter = 0
 
 mock.module('../src/ws/supervisor-registry.ts', () => ({
   sendToSupervisor: (supId: string, msg: any) => {
+    if (state.throwOnSend) throw new Error('ws send boom')
     state.sentMessages.push({ supId, msg })
   },
   updateSupervisorState: async () => {},
@@ -237,13 +259,16 @@ mock.module('../src/sessions/routing.ts', () => ({
 
 mock.module('../src/sessions/budget.ts', () => ({
   ...realBudgetSL,
-  releaseSessionSlot: async () => {},
+  releaseSessionSlot: async (userId: string, supervisorId: string) => {
+    state.releaseSlotCalls.push({ userId, supervisorId })
+  },
   // Phase 12 W2 — keep full surface so cross-test imports of api/supervisors
   // (which imports reserveSessionSlot + getCapacitySnapshot) don't break when
   // this stub is the active mock. The /launch route now reserves a slot before
   // dispatching session.start (protocol-drift fix 2026-05-30), so this must
-  // grant a slot for the happy-path launch tests.
-  reserveSessionSlot: async () => ({ ok: true as const, running: 0, cap: 4 }),
+  // grant a slot for the happy-path launch tests; per-test capacity faults are
+  // driven via state.reserveResult.
+  reserveSessionSlot: async () => state.reserveResult,
   getCapacitySnapshot: async () => null,
 }))
 
@@ -300,6 +325,12 @@ beforeEach(() => {
   }
   state.scope = { hasAdminWrite: true, hasContentsWrite: true, kind: 'app_installation' }
   state.sentMessages = []
+  state.throwOnSend = false
+  state.throwOnCreateRun = false
+  state.reserveResult = { ok: true, running: 0, cap: 4 }
+  state.createdRuns = []
+  state.endRunCalls = []
+  state.releaseSlotCalls = []
 })
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -504,6 +535,65 @@ describe('POST /api/sessions/:id/launch', () => {
     expect(res.status).toBe(202)
     expect(state.sentMessages[0].msg.type).toBe('session.start')
     expect(state.sentMessages[0].msg.cli_kind).toBeUndefined()
+  })
+
+  // ── Safety paths (triple-QC coverage gap) ────────────────────────────────
+
+  test('dispatch failure (ws send throws) → 503, run ended + slot released (no leak)', async () => {
+    state.throwOnSend = true
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(res.status).toBe(503)
+    expect(((await res.json()) as any).error).toBe('dispatch_failed')
+    // A run row WAS created (reserve+createRun precede send)...
+    expect(state.createdRuns).toHaveLength(1)
+    // ...but it was rolled back: endRun called with the created run id + a
+    // failure reason, and the reserved slot released. No leaked slot/run.
+    expect(state.endRunCalls).toHaveLength(1)
+    expect(state.endRunCalls[0].runId).toBe(state.createdRuns[0].id)
+    expect(String(state.endRunCalls[0].reason)).toContain('dispatch_failed')
+    expect(state.releaseSlotCalls).toHaveLength(1)
+    expect(state.releaseSlotCalls[0]).toEqual({ userId: TEST_USER_ID, supervisorId: TEST_SUPERVISOR_ID })
+    // Nothing reached the supervisor.
+    expect(state.sentMessages).toHaveLength(0)
+  })
+
+  test('run_insert_failed (createRun throws) → 500, slot released, no dispatch', async () => {
+    state.throwOnCreateRun = true
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(res.status).toBe(500)
+    expect(((await res.json()) as any).error).toBe('run_insert_failed')
+    // Reserved slot released; no run row, no endRun, no dispatch.
+    expect(state.releaseSlotCalls).toHaveLength(1)
+    expect(state.releaseSlotCalls[0]).toEqual({ userId: TEST_USER_ID, supervisorId: TEST_SUPERVISOR_ID })
+    expect(state.createdRuns).toHaveLength(0)
+    expect(state.endRunCalls).toHaveLength(0)
+    expect(state.sentMessages).toHaveLength(0)
+  })
+
+  test('at capacity → 429 with {running,cap}; gate blocks before createRun (no run, no dispatch)', async () => {
+    state.reserveResult = { ok: false, reason: 'at_capacity', running: 4, cap: 4 }
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(res.status).toBe(429)
+    const body: any = await res.json()
+    expect(body.error).toBe('at_capacity')
+    expect(body.running).toBe(4)
+    expect(body.cap).toBe(4)
+    // Gate is before createRun + dispatch: no run, no session.start, no release.
+    expect(state.createdRuns).toHaveLength(0)
+    expect(state.sentMessages).toHaveLength(0)
+    expect(state.releaseSlotCalls).toHaveLength(0)
   })
 })
 
