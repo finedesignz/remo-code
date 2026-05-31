@@ -2,11 +2,20 @@
 //
 // Polls Tauri's updater on a 15-minute cadence. Each check re-reads the
 // `auto_update` preference so toggling it mid-session takes effect on the
-// next tick. When enabled AND an update is available, downloads + installs
-// silently and relaunches — no dialog, no confirmation.
+// next tick.
 //
-// When the pref is OFF this module is inert; the existing UpdateNotifier
-// component continues to surface the manual prompt.
+// DEFAULT (changed 2026-05-31): silent background install is now OPT-IN. The
+// `auto_update` pref defaults to FALSE (get_auto_update in config_cmds.rs), so
+// out of the box this watcher is inert and the manual `UpdateNotifier` prompt
+// ("Update available [Later] [Install]") is the default path — install only on
+// a user click, so they're present for the Windows UAC/SmartScreen elevation
+// prompt. Rationale: a silent `downloadAndInstall()` that fired while the owner
+// was away hung mid-install on the UAC dialog and corrupted the supervisor.
+//
+// When the pref is explicitly enabled, this module downloads + installs
+// silently and relaunches — no dialog, no confirmation (fully preserved).
+// When the pref is OFF (the default) this module is inert; the existing
+// UpdateNotifier component surfaces the manual prompt.
 
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
