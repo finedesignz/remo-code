@@ -309,6 +309,36 @@ export async function updateTaskV2(
   return rows[0] ? normalize(rows[0]) : null
 }
 
+/**
+ * Count the total run rows recorded for a task. Used by the scheduler's
+ * `max_runs` end-bound (counts ALL fires regardless of status — a fire that
+ * was skipped/quota-capped still consumes a run slot, matching the documented
+ * "total fires" semantics). Cheap: indexed by task_id.
+ */
+export async function countFiresForTask(taskId: string): Promise<number> {
+  const rows = await sql<{ n: string }[]>`
+    SELECT COUNT(*)::text AS n FROM scheduled_task_runs WHERE task_id = ${taskId}
+  `
+  return Number(rows[0]?.n ?? 0)
+}
+
+/**
+ * Auto-disable a task when an end-bound is reached. Sets enabled=false and
+ * records the stop reason in payload.completed_reason so the UI can surface a
+ * "completed" state. Idempotent.
+ */
+export async function disableTaskWithReason(taskId: string, reason: string): Promise<void> {
+  await sql`
+    UPDATE scheduled_tasks
+    SET enabled = false,
+        payload = COALESCE(payload, '{}'::jsonb)
+          || jsonb_build_object('completed_reason', ${reason}::text,
+                                'completed_at', to_jsonb(now())),
+        updated_at = now()
+    WHERE id = ${taskId}
+  `
+}
+
 export async function setTaskFireTimestamps(
   id: string,
   last: Date | null,

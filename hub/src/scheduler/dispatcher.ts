@@ -14,7 +14,10 @@ import {
   insertRunV2,
   updateRunStatus,
   setTaskFireTimestamps,
+  countFiresForTask,
+  disableTaskWithReason,
 } from '../db/scheduled-tasks-dal.ts'
+import { boundReason, type ScheduleRule } from './schedule-rules.ts'
 import { isOverCostCap } from '../dispatch/gates.ts'
 import { resolveTargets, type ResolvedTarget } from './targets.ts'
 import * as registry from './registry.ts'
@@ -64,6 +67,29 @@ export function trackRun(ctx: RunContext): void {
 export async function fire(taskId: string): Promise<void> {
   const task = await getTaskById(taskId)
   if (!task || !task.enabled) return
+  // P1 end-bounds: scheduled (cron) fires honor `until`/`max_runs`. When a
+  // bound is reached we auto-disable the task (so it stops cleanly + surfaces
+  // a "completed" reason) and skip this fire. Manual run-now / chained runs go
+  // through `runNow`, which intentionally bypasses bounds.
+  const rules: ScheduleRule[] = Array.isArray(task.schedule_rules) ? task.schedule_rules : []
+  if (rules.length > 0) {
+    const hasBound = rules.some(r => r.until || typeof r.max_runs === 'number')
+    if (hasBound) {
+      const totalFires = await countFiresForTask(taskId)
+      const reason = boundReason(rules, new Date(), totalFires)
+      if (reason) {
+        log.info('scheduler.dispatcher.bound_reached', { task_id: taskId, reason, total_fires: totalFires })
+        try { await disableTaskWithReason(taskId, reason) } catch (err: any) {
+          log.error('scheduler.dispatcher.auto_disable_failed', { task_id: taskId, error: err?.message })
+        }
+        try {
+          const reg = await import('./registry.ts')
+          reg.unregister(taskId)
+        } catch {}
+        return
+      }
+    }
+  }
   await fireTask(task, { chainDepth: 0 })
 }
 
