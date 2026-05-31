@@ -1482,7 +1482,27 @@ export async function claimDeployFailure(
   userId: string,
   applicationUuid: string,
   fingerprint: string,
+  prevFingerprint?: string,
 ): Promise<boolean> {
+  // Opportunistic reaping: rows are never otherwise deleted, so bound the table
+  // by dropping claims older than 2h (well past the 15-min dedupe window) on
+  // every claim. Cheap, idempotent.
+  await sql`
+    DELETE FROM coolify_deploy_idempotency WHERE created_at < now() - interval '2 hours'
+  `;
+  // Sliding-window guard: a failure straddling a 15-min bucket boundary would
+  // otherwise hash into a fresh bucket and double-dispatch. If a claim already
+  // exists for the PREVIOUS bucket's fingerprint, treat this as a duplicate.
+  if (prevFingerprint) {
+    const prior = await sql`
+      SELECT 1 FROM coolify_deploy_idempotency
+      WHERE user_id = ${userId}
+        AND application_uuid = ${applicationUuid}
+        AND fingerprint = ${prevFingerprint}
+      LIMIT 1
+    `;
+    if (prior.length > 0) return false;
+  }
   const rows = await sql`
     INSERT INTO coolify_deploy_idempotency (user_id, application_uuid, fingerprint)
     VALUES (${userId}, ${applicationUuid}, ${fingerprint})

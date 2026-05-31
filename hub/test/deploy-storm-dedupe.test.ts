@@ -43,8 +43,10 @@ let dispatchCount = 0
 const realDal = await import('../src/db/dal.ts')
 mock.module('../src/db/dal.ts', () => ({
   ...realDal,
-  claimDeployFailure: async (u: string, app: string, fp: string) => {
+  claimDeployFailure: async (u: string, app: string, fp: string, prevFp?: string) => {
     const key = `${u}|${app}|${fp}`
+    // Sliding-window: an existing claim on the previous bucket counts as a dup.
+    if (prevFp && claimed.has(`${u}|${app}|${prevFp}`)) return false
     if (claimed.has(key)) return false
     claimed.add(key)
     return true
@@ -93,5 +95,21 @@ describe('dispatchTriage storm dedupe (auto-dev P5)', () => {
     await dispatchTriage('user-1', 'run-1', payload)
     await dispatchTriage('user-2', 'run-2', payload)
     expect(dispatchCount).toBe(2)
+  })
+
+  it('sliding window: a claim straddling a bucket boundary is deduped via prevFingerprint', async () => {
+    // The DAL claim treats a prev-bucket claim as a duplicate. Simulate a storm
+    // whose first failure lands in bucket N (current) and a follow-up lands in
+    // bucket N+1 — where N is the previous bucket relative to the follow-up.
+    const { claimDeployFailure } = await import('../src/db/dal.ts')
+    claimed.clear()
+    const t = 1_000_000_000_000
+    const fpN = deployFailureFingerprint(payload, t)
+    const fpN1 = deployFailureFingerprint(payload, t + DEPLOY_DEDUPE_WINDOW_MS) // next bucket
+    expect(fpN).not.toBe(fpN1)
+    // First failure claims bucket N (no prev claim yet).
+    expect(await claimDeployFailure('user-1', 'app-X', fpN)).toBe(true)
+    // Follow-up in bucket N+1 with prev=fpN → deduped (no double dispatch).
+    expect(await claimDeployFailure('user-1', 'app-X', fpN1, fpN)).toBe(false)
   })
 })

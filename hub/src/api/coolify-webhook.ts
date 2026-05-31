@@ -44,7 +44,7 @@ import {
   claimDeployFailure,
 } from '../db/dal.ts'
 import { runNow as dispatcherRunNow } from '../scheduler/dispatcher.ts'
-import { deployFailureFingerprint } from '../scheduler/deploy-fingerprint.ts'
+import { deployFailureFingerprint, DEPLOY_DEDUPE_WINDOW_MS } from '../scheduler/deploy-fingerprint.ts'
 import { hasActiveSessionForRepo } from '../sessions/repo-routing.ts'
 import { ipAllowed, sourceIpFromHeaders } from '../lib/cidr.ts'
 
@@ -103,12 +103,22 @@ export async function dispatchTriage(
   // fingerprint and dispatches; repeats inside the window lose the claim and are
   // dropped. Fail-open on a claim error (better a dup fix than a silent miss).
   try {
-    const fingerprint = deployFailureFingerprint({
+    const fpInput = {
       application_uuid: payload.application_uuid,
       git_repository: payload.git_repository,
       commit_sha: payload.commit_sha,
-    })
-    const claimed = await claimDeployFailure(userId, payload.application_uuid, fingerprint)
+    }
+    const now = Date.now()
+    const fingerprint = deployFailureFingerprint(fpInput, now)
+    // Previous-bucket fingerprint: collapses a storm that straddles a 15-min
+    // bucket boundary (otherwise the new bucket would re-dispatch).
+    const prevFingerprint = deployFailureFingerprint(fpInput, now - DEPLOY_DEDUPE_WINDOW_MS)
+    const claimed = await claimDeployFailure(
+      userId,
+      payload.application_uuid,
+      fingerprint,
+      prevFingerprint,
+    )
     if (!claimed) {
       console.info(
         `[coolify-webhook] storm dedupe: dropped duplicate deploy-failure app=${payload.application_uuid} fp=${fingerprint.slice(0, 12)}`,
@@ -246,8 +256,9 @@ async function handleAuthenticated(opts: {
     } else {
       // (4b) Active-session suppression — if a dev already has a LIVE session on
       // this repo, they're working + monitoring; don't interrupt with triage.
-      // Fail-open: hasActiveSessionForRepo swallows DB errors to `false`, so a
-      // lookup failure dispatches anyway (never silently drop triage).
+      // Fail-open: the try/catch below catches any lookup error and leaves
+      // `suppress=false`, so a lookup failure dispatches triage anyway (never
+      // silently drops it).
       let suppress = false
       try {
         suppress = await hasActiveSessionForRepo(userId, payload.git_repository)
