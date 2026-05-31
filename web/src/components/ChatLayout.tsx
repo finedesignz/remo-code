@@ -206,6 +206,7 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           activeSessionId={activeSessionId}
           onSelectSession={handleSelectSession}
           onDeleteSession={sessionsHook.deleteSession}
+          onDisconnectSession={sessionsHook.disconnectSession}
           onShowConnect={handleShowConnect}
           onShowApiKey={() => setShowApiKey(true)}
           onNavigate={onNavigate}
