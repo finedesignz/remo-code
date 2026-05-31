@@ -16,6 +16,10 @@ interface Props {
   activeSessionId: string | null
   onSelectSession: (id: string) => void
   onDeleteSession: (id: string) => Promise<void>
+  /** User Disconnect — takes a running session offline but KEEPS the row so a
+      later Play resumes the SAME session_id with history. Single-click,
+      reversible (no destructive confirm). Optional so existing callers compile. */
+  onDisconnectSession?: (id: string) => Promise<{ ok: boolean; error?: string }>
   onShowConnect: () => void
   onShowApiKey: () => void
   onNavigate: (hash: string) => void
@@ -41,7 +45,7 @@ interface Props {
 
 export function Sidebar({
   sessions, activeSessionId, onSelectSession,
-  onDeleteSession, onShowConnect, onShowApiKey,
+  onDeleteSession, onDisconnectSession, onShowConnect, onShowApiKey,
   onNavigate, onRefresh,
   connected, user, signOut, onClose, unreadCounts = {},
   collapsed = false, onToggleCollapsed,
@@ -330,6 +334,17 @@ export function Sidebar({
                       design prefs). Inline two-step confirm. For an online session
                       this stops the supervisor subprocess and removes the row. */}
                   <span className="flex items-center gap-1 shrink-0">
+                    {/* Disconnect — single-click, reversible: stops the runner
+                        and frees the slot but KEEPS the session so Play resumes
+                        the same session_id with history. Distinct from the
+                        two-step stop/remove below (which soft-deletes). */}
+                    {onDisconnectSession && confirmingId !== s.id && (
+                      <SessionActionButton
+                        kind="disconnect"
+                        onClick={() => { void onDisconnectSession(s.id) }}
+                        label={`Disconnect ${sessionLabel(s)} — stops the runner and frees the slot; reconnect resumes this session with its history`}
+                      />
+                    )}
                     {confirmingId === s.id ? (
                       <>
                         <button

@@ -579,6 +579,23 @@ export async function markSessionDisconnected(sessionId: string, userId: string)
   await sql`UPDATE sessions SET deleted_at = now(), status = 'offline' WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL`;
 }
 
+// User-initiated Disconnect (distinct from delete/markSessionDisconnected).
+// Takes the session OFFLINE — the caller stops the runner by sending a
+// `shutdown` to the channel — but KEEPS the row (deleted_at stays NULL) so the
+// SAME session_id can be relaunched later, resuming its persisted messages.
+// Returns true when an owned, non-deleted row matched (already-offline still
+// returns true — idempotent). NEVER soft-deletes; that is the whole point —
+// a soft-deleted row would force findOrCreateAgentSession to spawn a NEW
+// session on reconnect, losing history.
+export async function markSessionOffline(sessionId: string, userId: string): Promise<boolean> {
+  const rows = await sql`
+    UPDATE sessions SET status = 'offline'
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    RETURNING id
+  `;
+  return rows.length > 0;
+}
+
 export async function setOfflineStaleAgentSessions() {
   await sql`UPDATE sessions SET status = 'offline' WHERE status = 'online'`;
 }

@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, getPendingPrompts, dismissLocalSession, setSessionAutoNudge } from '../db/dal'
+import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge } from '../db/dal'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
@@ -171,6 +171,62 @@ sessions.delete('/:id', async (c) => {
   } catch {
     return c.json({ error: 'not found' }, 404)
   }
+})
+
+// ── POST /api/sessions/:id/disconnect — user-initiated Disconnect ────────────
+// Takes a RUNNING session OFFLINE without removing it. Distinct from DELETE:
+//   - DELETE soft-deletes the row (deleted_at set) → findOrCreateAgentSession
+//     spawns a NEW session on the next connect, losing history.
+//   - disconnect KEEPS the row (deleted_at stays NULL), so a later /launch for
+//     the SAME session_id resumes the same row with its persisted messages —
+//     "I don't want a new session created every time it reconnects."
+// Steps:
+//   1. Ownership-check the session (404 when missing / not owned).
+//   2. Send `{type:'shutdown', reason:'user_disconnect'}` to the session's
+//      channel so the SessionBridge stops the runner (SIGINT→SIGKILL).
+//   3. End any open session_runs for this session so the supervisor / #223
+//      reconcile frees the concurrency slot.
+//   4. Mark the session status `offline` (KEEP the row).
+// Idempotent: when already offline + no channel + no open runs, it's a no-op
+// 200. Reversible — reconnect via /launch resumes; no destructive confirm.
+sessions.post('/:id/disconnect', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+
+  const session = await getSession(sessionId, userId)
+  if (!session) return c.json({ error: 'not_found' }, 404)
+
+  // Tell the runner to shut down (best-effort; offline sessions have no channel).
+  const channel = getChannel(sessionId)
+  if (channel) {
+    try {
+      channel.ws.send(JSON.stringify({ type: 'shutdown', reason: 'user_disconnect' }))
+    } catch {}
+  }
+
+  // End open runs so the slot is freed. Best-effort — never blocks the offline
+  // transition (the supervisor's runner.exit / #223 reconcile is the backstop).
+  try {
+    const { endOpenRunsForSession } = await import('../db/supervisor-dal.ts')
+    await endOpenRunsForSession(sessionId, userId, 'user_disconnect')
+  } catch (err: any) {
+    console.error('[sessions.disconnect] failed to end open runs', err?.message)
+  }
+
+  // KEEP the row — status offline only, never soft-delete.
+  await markSessionOffline(sessionId, userId)
+
+  // Give the runner ~5s to exit gracefully before forcibly closing the socket.
+  if (channel) {
+    setTimeout(() => {
+      const ch = getChannel(sessionId)
+      if (ch) {
+        try { ch.ws.close(4011, 'session disconnected by user') } catch {}
+      }
+    }, 5_000)
+  }
+
+  return c.json({ ok: true, status: 'offline' as const })
 })
 
 // Rotate session token — returns new raw token, invalidates old

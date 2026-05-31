@@ -118,6 +118,30 @@ export function useSessions(
     await fetchSessions()
   }
 
+  // User Disconnect — takes a running session OFFLINE but KEEPS the row, so a
+  // later launchSession(id) resumes the SAME session_id with full history (no
+  // new session created). Distinct from deleteSession (which soft-deletes).
+  // Optimistic: flip local status to 'offline'/active=false immediately; roll
+  // back on failure.
+  const disconnectSession = useCallback(async (
+    id: string,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!token) return { ok: false, error: 'unauthorized' }
+    let prev: { status: string; active?: boolean } | undefined
+    setSessions(p => p.map(s => {
+      if (s.id !== id) return s
+      prev = { status: s.status, active: s.active }
+      return { ...s, status: 'offline', active: false }
+    }))
+    try {
+      await hubFetch(token, `/api/sessions/${id}/disconnect`, { method: 'POST' })
+      return { ok: true }
+    } catch (err: any) {
+      if (prev) setSessions(p => p.map(s => s.id === id ? { ...s, status: prev!.status, active: prev!.active } : s))
+      return { ok: false, error: (err?.body?.error as string) ?? 'unknown' }
+    }
+  }, [token])
+
   const rotateToken = async (id: string) => {
     if (!token) return null
     try {
@@ -221,7 +245,7 @@ export function useSessions(
 
   return {
     sessions, setSessions, loading,
-    createSession, deleteSession, rotateToken, updateSessionStatus,
+    createSession, deleteSession, disconnectSession, rotateToken, updateSessionStatus,
     refetch: fetchSessions,
     launchSession, cloneHere, createGithubRepo, setSessionAutoNudge,
   }
