@@ -519,3 +519,78 @@ per-backend adapters, the fail-closed permission-injection flow, and the write-a
 
 **Phase 20 coverage:** 12 REQs (R-TG-01..12). Supersedes the Telegram clauses of R-PTY-11 and
 R-PTY-24. No orphans.
+
+---
+
+## Milestone m-interactive-pty-runner — Phase 18 & 19 detail addendum (appended 2026-05-31)
+
+> APPEND-ONLY block authored during the Phase-18/19 detail-planning pass. The parent requirements
+> **R-PTY-17..25 already exist above** (Phases 18–19 sections); this addendum does NOT replace them.
+> It records the fine-grained sub-requirements + threat IDs derived during detail planning, for
+> traceability into the phase PLAN/VALIDATION artifacts. Where a sub-ID elaborates a parent, the parent
+> remains authoritative.
+
+### Phase 18 — billing-guardrail-dual-bucket-usage (elaborates R-PTY-17..20)
+
+#### R-PTY-17a — Programmatic bucket is a dollar balance, additive + fail-safe
+The second (Agent-SDK programmatic credit) bucket SHALL be carried as a DOLLAR balance
+(`{used_usd, limit_usd, resets_at, claimed}`), ADDITIVE to the existing four util% windows on
+`UsagePayload` / `usage_report` / `subscription_usage` (optional + nullable — old supervisors/clients
+SHALL still validate). When the credit source is absent/pre-claim/unrecognized, the bucket SHALL
+degrade to an explicit empty state and SHALL NEVER fabricate a dollar value. The OAuth token SHALL NOT
+be serialized to the hub (parity preserved; negatively tested). *(Threats T-18-01 token-leak CRITICAL;
+T-18-02 fabricated-number HIGH; T-18-03 non-additive-schema HIGH.)*
+
+#### R-PTY-18a — Leak alert visible; hard-halt opt-in, default-off, humans exempt
+The programmatic-leak alert SHALL be surfaced (WS `programmatic_leak_alert` + usage-tab notice), never
+suppressed silently. The hard-halt SHALL be OPT-IN, default OFF, and SHALL act ONLY by adding a
+predicate at the single existing `dailyCostCapGate` chokepoint (no parallel chokepoint), denying
+programmatic/automation dispatch with reason `programmatic_credit_halt`. It SHALL NEVER halt a human
+interactive PTY turn, and SHALL NEVER be a surprise (alert precedes the user-configured bound).
+*(Threats T-18-04 silent-drain HIGH; T-18-05 surprise-hard-stop CRITICAL.)*
+
+#### R-PTY-19a — Automation-routing regression guard
+A guard test SHALL assert every unattended dispatch source (scheduler / orchestrator-background /
+auto-dev / error-capture) passes through `dailyCostCapGate` AND is rejected by the Phase-16 human-only
+guard if pointed at the PTY surface, and that NO automation path constructs an `ANTHROPIC_API_KEY` env /
+API-platform call. *(Threats T-18-06 cap-escape HIGH; T-18-07 automation-on-PTY CRITICAL.)*
+
+#### R-PTY-20a — UI honest empty state + no secret exposure
+The usage UI SHALL render the programmatic bucket only from the non-secret WS snapshot (no token
+read/rendered), show an explicit empty state when the bucket is unknown/pre-claim, and present the
+leak notice + the opt-in hard-halt toggle. Blue accent preserved (`web/test/no-indigo.test.ts` green).
+*(Threat T-18-08 secret-exposure HIGH.)*
+
+### Phase 19 — cutover-gate-and-automation-fallback (elaborates R-PTY-21..25)
+
+#### R-PTY-21a — Gate runbook = measurement, not a build blocker
+A `docs/cutover-gate-june15.md` runbook + a checklist artifact SHALL encode the four SPEC checks
+(PTY-interactive bucket; setup-token vs login; subagents/hooks/MCP residual; login-credential headless
+reclassification) as a snapshot→controlled-turn→snapshot→diff measurement using the Phase-18 dual-bucket
+poll. The runbook SHALL state it is NOT a build blocker (Phases 15–18 ship before June 15) and that only
+the default-on flip is gated. The login-credential reclassification item SHALL be an ONGOING watch.
+*(Threat T-19-01 gate-misread MED.)*
+
+#### R-PTY-22a — Fail-safe default backend until gate-confirmed
+The default-human-backend selector SHALL default new human sessions to a NON-Claude-PTY backend (Codex)
+until a recorded `claude_interactive_confirmed` gate flag is set; the flip to Claude-PTY-default SHALL
+be a recorded operator config change, never automatic. *(Threat T-19-02 silent-programmatic-default
+CRITICAL.)*
+
+#### R-PTY-23a — Codex-primary fallback, Gemini stub, no API key
+The Codex PTY runner SHALL be selectable as a human backend through the same terminal surface using
+ChatGPT-subscription sign-in (not an API key). A Gemini runner seam SHALL exist as a stub only
+(feature-flagged off / not-implemented, never default-selected). NO runner/fallback path SHALL set
+`ANTHROPIC_API_KEY` or construct an API-platform billing call (negatively guarded). *(Threats T-19-03
+API-key-creep CRITICAL; T-19-04 gemini-stub-mistaken MED.)*
+
+#### R-PTY-24a / R-PTY-25a — Supersession + docs consistency
+The R-PTY-24 supersession (Telegram = read-only transcript observer, NOT on the programmatic pool;
+Phase 20 / R-TG-01..12) SHALL be stated explicitly and consistency-tested across SPEC + ROADMAP +
+REQUIREMENTS + docs. The final docs sweep (README / CLAUDE.md / `docs/`) SHALL cover the terminal
+surface, dual-bucket usage, the cutover gate, the rip-and-replace, the selector + fallback, and the
+no-API-key invariant. *(Threat T-19-05 silent-contradiction MED.)*
+
+**Phase 18/19 addendum coverage:** 4 sub-IDs for Phase 18 (R-PTY-17a..20a) + 5 for Phase 19
+(R-PTY-21a..25a), all tracing to existing parents R-PTY-17..25. No orphans; no new top-level
+requirement introduced.
