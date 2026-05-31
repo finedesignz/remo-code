@@ -7,8 +7,10 @@ import {
 } from '../src/scheduler/workflows'
 
 describe('WORKFLOWS table', () => {
-  it('declares three steps per workflow', () => {
-    expect(WORKFLOWS.dev.length).toBe(3)
+  it('declares the expected steps per workflow', () => {
+    // auto-dev P2: dev gains a leading `dev_controller` state-gate step.
+    expect(WORKFLOWS.dev.length).toBe(4)
+    expect(WORKFLOWS.dev[0]).toBe('dev_controller')
     expect(WORKFLOWS.security.length).toBe(3)
     expect(WORKFLOWS.log_check.length).toBe(3)
   })
@@ -16,6 +18,7 @@ describe('WORKFLOWS table', () => {
 
 describe('nextStepInWorkflow', () => {
   it('advances within dev', () => {
+    expect(nextStepInWorkflow('dev_controller')).toBe('dev_plan')
     expect(nextStepInWorkflow('dev_plan')).toBe('dev_execute')
     expect(nextStepInWorkflow('dev_execute')).toBe('dev_ship')
   })
@@ -40,6 +43,7 @@ describe('nextStepInWorkflow', () => {
 describe('stepsForWorkflow', () => {
   it('returns ordered step list for roots', () => {
     expect(stepsForWorkflow('dev')).toEqual([
+      'dev_controller',
       'dev_plan',
       'dev_execute',
       'dev_ship',
