@@ -31,6 +31,12 @@ export interface RuntimeContext {
    * concluded. Maps to the `{{prior_step_output}}` template var.
    */
   prior_step_output?: string | null
+  /**
+   * auto-dev P3: the routine's `payload.notes` — the stated user goal, including
+   * a human's roadmap approval captured via HITL. Surfaced to the controller as
+   * `user_goal` so the next tick sees a goal and chooses `plan` over `propose`.
+   */
+  user_goal?: string | null
 }
 
 // Hardcoded placeholders per scope brief — wired sources land in later phases.
@@ -78,6 +84,19 @@ export async function buildRuntimeContext(input: {
     } catch { /* fall back to undefined */ }
   }
 
+  // auto-dev P3: the routine's stated goal (payload.notes), so the controller
+  // sees a goal (incl. a HITL-approved roadmap item) and picks `plan` over
+  // `propose` on the next tick. Best-effort; empty notes leave it undefined.
+  if (input.taskId) {
+    try {
+      const rows = await sql<{ notes: string | null }[]>`
+        SELECT payload->>'notes' AS notes FROM scheduled_tasks WHERE id = ${input.taskId} LIMIT 1
+      `
+      const notes = rows[0]?.notes?.trim()
+      if (notes) ctx.user_goal = notes
+    } catch { /* fall back to undefined */ }
+  }
+
   // auto-dev P2: the latest finished prior run's output for this task, so the
   // controller/continue step knows what the last run concluded. One cheap query;
   // best-effort (an absent prior run just leaves the field undefined).
@@ -116,6 +135,7 @@ export function renderRuntimeContextBlock(ctx: RuntimeContext): string {
     'mode',
     'design_preferences',
     'user_global_rules_digest',
+    'user_goal',
     'prior_step_output',
   ]
   const lines: string[] = ['## RUNTIME CONTEXT']

@@ -434,15 +434,16 @@ ALTER TABLE error_runs ADD COLUMN IF NOT EXISTS duration_ms INTEGER NULL;
 
 CREATE TABLE IF NOT EXISTS notifications_sent (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  kind            TEXT NOT NULL CHECK (kind IN ('dedupe_hit','rate_limit','daily_cap','dispatch_failed','session_offline','stack_not_detected')),
+  kind            TEXT NOT NULL CHECK (kind IN ('dedupe_hit','rate_limit','daily_cap','dispatch_failed','session_offline','stack_not_detected','propose_roadmap')),
   dedupe_key      TEXT NOT NULL,
   sent_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_sent_lookup ON notifications_sent(kind, dedupe_key, sent_at DESC);
--- Idempotent CHECK relax for existing prod DBs to allow the stack_not_detected kind (added in W5).
+-- Idempotent CHECK relax for existing prod DBs to allow new kinds:
+--   stack_not_detected (W5) · propose_roadmap (auto-dev P3 propose-to-chat).
 ALTER TABLE notifications_sent DROP CONSTRAINT IF EXISTS notifications_sent_kind_check;
 ALTER TABLE notifications_sent ADD CONSTRAINT notifications_sent_kind_check
-  CHECK (kind IN ('dedupe_hit','rate_limit','daily_cap','dispatch_failed','session_offline','stack_not_detected'));
+  CHECK (kind IN ('dedupe_hit','rate_limit','daily_cap','dispatch_failed','session_offline','stack_not_detected','propose_roadmap'));
 
 -- ── Phase 06 plan 007: GitHub-issue post-run idempotency ─────────────────────
 -- Skips duplicate issue creation for the same (repo, app_uuid, deploy_uuid)

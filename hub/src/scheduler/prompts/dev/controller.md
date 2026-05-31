@@ -13,8 +13,12 @@ should happen next. You do NOT implement anything in this turn.
 - user_global_rules_digest: {{user_global_rules_digest}}
 
 ## INPUTS
-- user_goal: {{user_prompt}}            <!-- payload.notes / payload.prompt; may be empty -->
-- prior_run_summary: {{prior_step_output}}   <!-- last run's Summary line + snippet -->
+<!-- `user_goal` and `prior_step_output` are injected via the `## RUNTIME CONTEXT`
+     block above (hub does not substitute these placeholders). `user_goal` is the
+     routine's `payload.notes` — present once a human has approved a proposed
+     roadmap item (HITL); ABSENT means no stated goal. -->
+- user_goal: see `user_goal` in RUNTIME CONTEXT (absent ⇒ no stated goal)
+- prior_run_summary: see `prior_step_output` in RUNTIME CONTEXT (last run's Summary + snippet)
 
 ## TASK — read-only scan, then decide
 1. Determine repo emptiness: is there source code, a README, a package manifest?

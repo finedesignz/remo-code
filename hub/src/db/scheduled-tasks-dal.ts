@@ -488,6 +488,85 @@ export async function insertChainedRun(
   })
 }
 
+// ── auto-dev P3: propose-to-chat + HITL ──────────────────────────────────────
+
+/** A roadmap surfaced to chat by a `propose` controller decision, awaiting a
+ *  human reply. Stored under `payload.pending_proposal` (JSONB), no new table. */
+export interface PendingProposal {
+  roadmap: string
+  items: string[]
+  run_id: string
+  proposed_at: string
+}
+
+/**
+ * Record (or replace) the task's pending proposal under `payload.pending_proposal`.
+ * Pure JSONB merge — leaves `payload.prompt` (and the #214 prompt/payload sync)
+ * untouched. Idempotent: re-proposing the same roadmap overwrites the record.
+ */
+export async function setPendingProposal(
+  taskId: string,
+  proposal: PendingProposal,
+): Promise<void> {
+  await sql`
+    UPDATE scheduled_tasks
+    SET payload = COALESCE(payload, '{}'::jsonb)
+      || jsonb_build_object('pending_proposal', ${sql.json(proposal as any)}::jsonb),
+        updated_at = now()
+    WHERE id = ${taskId}
+  `
+}
+
+/**
+ * The user's tasks that currently carry a pending proposal, newest first. Used
+ * by the HITL reply-capture path to match an inbound approval to the routine
+ * that proposed. Cheap: filtered by user_id + JSONB key existence.
+ */
+export async function findPendingProposalTasksForUser(
+  userId: string,
+): Promise<Array<{ id: string; name: string; proposal: PendingProposal }>> {
+  const rows = await sql<{ id: string; name: string; pending: any }[]>`
+    SELECT id, name, payload->'pending_proposal' AS pending
+    FROM scheduled_tasks
+    WHERE user_id = ${userId}
+      AND payload ? 'pending_proposal'
+    ORDER BY (payload->'pending_proposal'->>'proposed_at') DESC NULLS LAST
+  `
+  const out: Array<{ id: string; name: string; proposal: PendingProposal }> = []
+  for (const r of rows) {
+    const p = typeof r.pending === 'string' ? JSON.parse(r.pending) : r.pending
+    if (p && typeof p.roadmap === 'string') {
+      out.push({ id: r.id, name: r.name, proposal: p as PendingProposal })
+    }
+  }
+  return out
+}
+
+/**
+ * Capture a human's roadmap-approval text into the routine's `payload.notes`
+ * and clear the pending proposal (the loop is closed; the NEXT controller tick
+ * reads `payload.notes` as `user_goal` and chooses `plan`).
+ *
+ * #214 invariant: the `prompt` column / `payload.prompt` mirror is the SEPARATE
+ * custom-prompt store and is NOT touched here — we only set `payload.notes` and
+ * remove `payload.pending_proposal`. Ownership-scoped by user_id.
+ */
+export async function captureProposalNotes(
+  taskId: string,
+  userId: string,
+  notes: string,
+): Promise<boolean> {
+  const rows = await sql`
+    UPDATE scheduled_tasks
+    SET payload = (COALESCE(payload, '{}'::jsonb)
+      || jsonb_build_object('notes', ${notes}::text)) - 'pending_proposal',
+        updated_at = now()
+    WHERE id = ${taskId} AND user_id = ${userId}
+    RETURNING id
+  `
+  return rows.length > 0
+}
+
 export async function listActionsForTask(taskId: string): Promise<PostRunAction[]> {
   const rows = await sql<{ post_run_actions: any }[]>`
     SELECT post_run_actions FROM scheduled_tasks WHERE id = ${taskId} LIMIT 1

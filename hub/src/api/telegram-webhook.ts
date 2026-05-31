@@ -78,6 +78,7 @@ import { parseStopCallback, requestStop, forgetStoppable } from "../telegram/sto
 import { getChannel } from "../ws/registry.ts";
 import { log } from "../observability/logger.ts";
 import { dispatchToSession } from "../telegram/dispatch.ts";
+import { captureApprovalReply } from "../scheduler/post-run/propose-notify.ts";
 import { runDoctor, bufferReplay, hasBufferedReplay } from "../telegram/doctor.ts";
 import { runStatus } from "../telegram/status.ts";
 
@@ -357,6 +358,26 @@ async function dispatchInbound(
   if (!text && images.length === 0) {
     await safeSend(chatId, "Empty message. Send text, an image, or a text file.");
     return { outcome: "empty" };
+  }
+
+  // auto-dev P3 HITL: if the user has a pending `propose` roadmap and this text
+  // is an unambiguous numeric selection ("1", "1,3"), capture it into the
+  // routine's payload.notes and short-circuit — the next controller tick reads
+  // the goal and chooses `plan`. requireSelection keeps unrelated chat from
+  // being hijacked; free-form replies fall through to a normal dispatch.
+  if (text && images.length === 0) {
+    try {
+      const captured = await captureApprovalReply(user.id, text, { requireSelection: true });
+      if (captured) {
+        await safeSend(
+          chatId,
+          `✅ Approved for "${captured.taskName}": ${captured.notes}\nI'll plan it on the next run.`,
+        );
+        return { outcome: "proposal_approved" };
+      }
+    } catch (err: any) {
+      console.warn("[telegram-webhook] proposal capture failed:", err?.message);
+    }
   }
 
   const result = await dispatchToSession({
