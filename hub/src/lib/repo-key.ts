@@ -37,3 +37,25 @@ export function parseGitRemote(remote: string | null | undefined): GitOriginGith
 export function buildRepoKey(o: GitOriginGithub): string {
   return `github://${o.owner.toLowerCase()}/${o.repo.toLowerCase()}`
 }
+
+// auto-dev P5: Coolify's webhook `git_repository` field is not always a full
+// remote URL — it can arrive as a bare `owner/repo` slug. Try the URL parsers
+// first (SSH/HTTPS/ssh://), then fall back to a bare `owner/repo` match so the
+// repo-keyed deploy-failure resolver can map a Coolify failure to a session's
+// `repo_key`. Returns null for anything non-GitHub / unparseable.
+const RE_BARE_SLUG = /^([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/
+
+export function repoKeyFromGitRepository(gitRepository: string | null | undefined): string | null {
+  const remote = parseGitRemote(gitRepository)
+  if (remote) return buildRepoKey(remote)
+
+  // Bare `owner/repo` slug fallback (no scheme, no host).
+  const trimmed = (gitRepository ?? '').trim()
+  if (trimmed === '' || trimmed.includes('://') || trimmed.includes('@')) return null
+  const m = trimmed.match(RE_BARE_SLUG)
+  if (!m) return null
+  const owner = m[1]?.trim()
+  const repo = m[2]?.trim()
+  if (!owner || !repo) return null
+  return buildRepoKey({ owner, repo })
+}
