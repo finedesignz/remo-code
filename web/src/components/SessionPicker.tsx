@@ -5,8 +5,9 @@
  * disabled and pre-checked. Submit issues one POST per newly checked id
  * (server API is one-at-a-time per PLAN-001) then calls `onAdded`.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSessions } from '../hooks/useSessions'
+import { repoSessionList } from '../lib/session-list'
 import { addSessionToTab, MAX_CELLS_PER_TAB, type TabWithSessions } from '../lib/chat-tabs-api'
 
 interface Props {
@@ -18,6 +19,9 @@ interface Props {
 
 export function SessionPicker({ token, tab, onClose, onAdded }: Props) {
   const { sessions, loading } = useSessions(token)
+  // Worktrees collapsed by repo_key + connected-first sort (shared selector) so
+  // worktree dirs never show as standalone pickable rows.
+  const listed = useMemo(() => repoSessionList(sessions), [sessions])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -89,10 +93,10 @@ export function SessionPicker({ token, tab, onClose, onAdded }: Props) {
 
         <div className="flex-1 overflow-y-auto p-2 min-h-0">
           {loading && <div className="text-xs text-[var(--text-muted)] p-3">Loading sessions…</div>}
-          {!loading && sessions.length === 0 && (
+          {!loading && listed.length === 0 && (
             <div className="text-xs text-[var(--text-muted)] p-3">No sessions yet. Create one from the sidebar first.</div>
           )}
-          {!loading && sessions.map(s => {
+          {!loading && listed.map(s => {
             const already = inTab.has(s.id)
             const isSelected = selected.has(s.id)
             const isOnline = s.status === 'online' || s.status === 'thinking'

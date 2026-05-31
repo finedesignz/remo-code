@@ -42,6 +42,7 @@ import { MobileAccordion } from './MobileAccordion'
 import type { ChatMessage } from '../hooks/useChat'
 import type { CodeSession } from '../hooks/useSessions'
 import { useSessions } from '../hooks/useSessions'
+import { repoSessionList } from '../lib/session-list'
 
 const ACTIVE_CELL_KEY = (tabId: string) => `grid:lastActiveCell:${tabId}`
 
@@ -254,7 +255,10 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   // computed (never persisted as chat_tab_sessions rows). Always present, first,
   // and not user-editable (no rename/delete/reorder/picker).
   const defaultTab = useMemo<TabWithSessions>(() => {
-    const active = allSessions.filter((s) => s.active)
+    // Collapse worktrees by repo_key + connected-first sort (shared selector) so
+    // a repo's worktree dirs never appear as their own cells. Filter to active
+    // (supervisor-hosted) sessions — Default-tab membership.
+    const active = repoSessionList(allSessions.filter((s) => s.active))
     const sessions: SessionRef[] = active.map((s, i) => ({
       session_id: s.id,
       position: i,
