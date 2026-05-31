@@ -1,8 +1,8 @@
 ---
 phase: 17
 slug: codex-pty-runner-and-chatsurface-rip-and-replace
-status: draft
-nyquist_compliant: false
+status: final
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-05-31
 ---

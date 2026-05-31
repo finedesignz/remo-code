@@ -1,8 +1,9 @@
 ---
 phase: 20
 slug: telegram-transcript-tail
-status: draft
+status: final
 nyquist_compliant: true
+wave_0_complete: false
 created: 2026-05-31
 ---
 
