@@ -47,6 +47,7 @@ import { getGraceBuffer } from '../../dispatch/grace.ts'
 import { launchSessionForUser } from '../../telegram/launch.ts'
 import { log } from '../../observability/logger'
 import { extractDecisionBlock } from '../controller-schema.ts'
+import { extractFindingsBlock } from '../qc-schema.ts'
 
 interface RunCtxLike {
   runId: string
@@ -89,6 +90,16 @@ const CONTROLLER_TEMPLATE = readFileSync(
   'utf8',
 )
 
+// auto-dev P4: the QC review prompt. A bare `qc` ROOT (or an explicit `qc_review`
+// step) renders this 3-lens review template, which emits a `<<FINDINGS>>` block
+// the post-run router parses to decide whether to chain `qc_fix`. Same gating as
+// the controller template: a custom payload.prompt / column prompt always wins,
+// and chained `qc_fix`/`qc_verify` steps fall through to their own templates.
+const QC_REVIEW_TEMPLATE = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts', 'qc', 'review.md'),
+  'utf8',
+)
+
 export function buildContent(task: ScheduledTask): string {
   // Phase 11: legacy `skill`/`security_scan`(root)/`continue_dev` rewritten to
   // `dev`/`security` by the DB migration; their `prompt` column carries the
@@ -103,6 +114,13 @@ export function buildContent(task: ScheduledTask): string {
   if (task.task_type === 'dev_controller') return custom || CONTROLLER_TEMPLATE
   if (task.task_type === 'dev') {
     return custom || CONTROLLER_TEMPLATE
+  }
+  // auto-dev P4: a bare `qc` root OR an explicit `qc_review` step renders the
+  // 3-lens review template. A custom prompt still wins; chained qc_fix/qc_verify
+  // steps fall through to their own templates (loaded by the chain, not here).
+  if (task.task_type === 'qc_review') return custom || QC_REVIEW_TEMPLATE
+  if (task.task_type === 'qc') {
+    return custom || QC_REVIEW_TEMPLATE
   }
   return custom || ''
 }
@@ -264,16 +282,23 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
     // with the reply snippet. `finalizeRun` fires the post-run action pipeline.
     async onFinalize(token, replyContent) {
       const duration = Date.now() - startedAt
-      // auto-dev P2: the controller emits a `<<DECISION ... DECISION>>` block at
-      // the END of its turn. The default head-truncation (first 500 chars) would
-      // drop it, so when a decision block is present, snippet the block itself
-      // (plus a short lead) so the post-run router can parse the chosen action.
+      // auto-dev P2/P4: a controller emits a `<<DECISION ... DECISION>>` block
+      // and a qc_review emits a `<<FINDINGS ... FINDINGS>>` block at the END of
+      // its turn. The default head-truncation (first 500 chars) would drop them,
+      // so when such a block is present, snippet the block itself so the post-run
+      // router can parse it. Findings blocks can exceed 500 chars (multiple
+      // findings) — cap higher so the qc router sees the whole batch.
       const decisionBlock = extractDecisionBlock(replyContent)
+      const findingsBlock = decisionBlock ? null : extractFindingsBlock(replyContent)
       let snippet: string
       if (decisionBlock) {
         snippet = decisionBlock.length > 500
           ? decisionBlock.slice(0, 500) + '...'
           : decisionBlock
+      } else if (findingsBlock) {
+        snippet = findingsBlock.length > 4000
+          ? findingsBlock.slice(0, 4000) + '...'
+          : findingsBlock
       } else {
         snippet = replyContent.length > 500 ? replyContent.slice(0, 500) + '...' : replyContent
       }
