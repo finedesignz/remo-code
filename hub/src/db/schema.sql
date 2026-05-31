@@ -594,6 +594,12 @@ ALTER TABLE scheduled_task_runs ADD COLUMN IF NOT EXISTS commit_sha TEXT;
 -- Optional comma-separated IPv4 / IPv6 / CIDR list. NULL = allow all (back-compat).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS coolify_webhook_allowed_ips TEXT;
 
+-- ── fix/coolify-triage-guard: master on/off switch for failed-deploy auto-triage ──
+-- When false, a `deployment.failed` webhook still persists its metadata row but
+-- skips dispatching a triage session (audit reason `auto_triage_disabled`).
+-- Default true preserves existing behavior.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS coolify_auto_triage_enabled BOOLEAN NOT NULL DEFAULT true;
+
 -- ── fix/coolify-webhook-deprecation-banner ───────────────────────────────────
 -- Set whenever the legacy HMAC route ingests a valid webhook (deprecated
 -- format). The Settings UI reads this to surface a "rotate to migrate" amber

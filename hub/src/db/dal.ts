@@ -1096,12 +1096,16 @@ export async function getUserCoolifyWebhookSecret(userId: string): Promise<strin
  */
 export async function getUserCoolifyWebhookConfig(
   userId: string,
-): Promise<{ secret: string | null; allowedIps: string[] }> {
-  const rows = await sql<{ coolify_webhook_secret: string | null; coolify_webhook_allowed_ips: string | null }[]>`
-    SELECT coolify_webhook_secret, coolify_webhook_allowed_ips
+): Promise<{ secret: string | null; allowedIps: string[]; autoTriageEnabled: boolean }> {
+  const rows = await sql<{
+    coolify_webhook_secret: string | null;
+    coolify_webhook_allowed_ips: string | null;
+    coolify_auto_triage_enabled: boolean | null;
+  }[]>`
+    SELECT coolify_webhook_secret, coolify_webhook_allowed_ips, coolify_auto_triage_enabled
       FROM users WHERE id = ${userId}
   `;
-  if (!rows[0]) return { secret: null, allowedIps: [] };
+  if (!rows[0]) return { secret: null, allowedIps: [], autoTriageEnabled: true };
   const csv = rows[0].coolify_webhook_allowed_ips;
   let allowedIps: string[] = [];
   if (csv && csv.trim()) {
@@ -1113,7 +1117,29 @@ export async function getUserCoolifyWebhookConfig(
       allowedIps = [];
     }
   }
-  return { secret: rows[0].coolify_webhook_secret, allowedIps };
+  // Default true when NULL (column added later; existing rows backfill via DDL default).
+  const autoTriageEnabled = rows[0].coolify_auto_triage_enabled ?? true;
+  return { secret: rows[0].coolify_webhook_secret, allowedIps, autoTriageEnabled };
+}
+
+/** fix/coolify-triage-guard: read the master auto-triage switch (defaults true). */
+export async function getUserCoolifyAutoTriageEnabled(userId: string): Promise<boolean> {
+  const rows = await sql<{ coolify_auto_triage_enabled: boolean | null }[]>`
+    SELECT coolify_auto_triage_enabled FROM users WHERE id = ${userId}
+  `;
+  return rows[0]?.coolify_auto_triage_enabled ?? true;
+}
+
+/** fix/coolify-triage-guard: set the master auto-triage switch. Returns saved value. */
+export async function setUserCoolifyAutoTriageEnabled(
+  userId: string,
+  enabled: boolean,
+): Promise<boolean> {
+  await sql`
+    UPDATE users SET coolify_auto_triage_enabled = ${enabled}, updated_at = now()
+    WHERE id = ${userId}
+  `;
+  return enabled;
 }
 
 export async function getUserCoolifyWebhookAllowedIps(userId: string): Promise<string> {
