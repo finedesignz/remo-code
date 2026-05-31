@@ -224,6 +224,72 @@ API-compatible.
 
 ---
 
+## Schedule rules — active windows, end bounds, units (P1)
+
+Structured `schedule_rules` (`hub/src/scheduler/schedule-rules.ts`, mirrored at
+`web/src/lib/schedule-rules.ts`) are the user-facing schedule shape; each rule
+is converted to a cron expression and registered as its own croner job. P1 adds
+three additive, **backward-compatible** capabilities. A rule with only
+`{interval, unit, start_at}` behaves exactly as before; no schema migration is
+needed — bounds/window live inside the existing `schedule_rules` JSONB.
+
+### Rule shape (after P1)
+
+```ts
+interface ScheduleRule {
+  interval: number               // 1..999
+  unit: 'minutes'|'hours'|'days'|'weeks'|'months'
+  start_at: string               // ISO 8601
+
+  active_window?: { from: "HH:MM"; to: "HH:MM" }   // 24h, task-local
+  until?: string                 // ISO 8601 — stop firing at/after this instant
+  max_runs?: number              // 1..100000 — stop after N TOTAL fires
+  for?: { count: number; unit }  // convenience; normalized → `until` on write
+}
+```
+
+### Units
+
+| unit      | cron emitted                  | notes |
+|-----------|-------------------------------|-------|
+| `minutes` | `* * * * *` / `*/N * * * *`    | interval=1 → every minute; N → every N min from minute 0 |
+| `hours`   | `MM * * * *` / `MM */N * * *`  | anchored on minute-of-hour of `start_at` |
+| `days`    | `MM HH * * *` / `MM HH */N * *`| anchored on hh:mm |
+| `weeks`   | `MM HH * * DOW`                | interval>1 registry-gated (cadence skip) |
+| `months`  | `MM HH DOM * *`                | fires on `start_at` day-of-month every month; **interval>1 (every N months) is registry-gated** — `shouldSkipFire` skips off-months. DOM approximation: a `start_at` on the 29th–31st won't fire in shorter months (cron has no clamping). |
+
+### Active window (`active_window`)
+
+A fire is **skipped** when the current task-local wall-clock time is outside
+`[from, to)` (inclusive start, exclusive end). Enforced per-rule in
+`shouldSkipFire(rule, now, tz)` (the registry passes the task timezone).
+**Overnight wrap** is supported: when `from > to` (e.g. `22:00`→`06:00`) the
+window covers `22:00–23:59` AND `00:00–05:59`. `from === to` is rejected at
+validation.
+
+### End bounds (`until` / `max_runs` / `for`)
+
+Bounds stop a task cleanly and **auto-disable** it:
+
+- `until` — stop at/after an absolute instant.
+- `max_runs` — stop after N **total** fires (any status: a skipped/quota-capped
+  fire still consumes a slot; counted via `countFiresForTask` = `COUNT(*)` of
+  `scheduled_task_runs` for the task).
+- `for: {count, unit}` — convenience, **normalized to `until = start_at +
+  count*unit` at save time** (`normalizeRulesForStorage` in the API create/patch
+  handlers). Storage only ever carries `until`; the editor re-derives the
+  toggle from `until` on load.
+
+Bounds are **task-scoped** and enforced in `dispatcher.fire()` (the cron entry
+point) — NOT in `shouldSkipFire`. When `boundReason(rules, now, totalFires)`
+returns a reason, `fire()` calls `disableTaskWithReason(taskId, reason)`
+(`enabled=false` + `payload.completed_reason`/`completed_at`), unregisters the
+croner jobs, and skips the fire (no run row). Manual `run-now` and chained runs
+go through `runNow`, which **intentionally bypasses bounds**. Reasons:
+`bound_until`, `bound_max_runs`.
+
+---
+
 ## Web UI
 
 ### Cron builder (`web/src/components/CronBuilder.tsx`)

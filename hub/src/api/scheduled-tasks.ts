@@ -23,7 +23,7 @@ import {
   deleteTask,
 } from '../db/scheduled-tasks-dal.ts'
 import { validate as validateCron, nextRuns, isValidTimezone } from '../scheduler/cron.ts'
-import { validateRules, ruleToCron, type ScheduleRule } from '../scheduler/schedule-rules.ts'
+import { validateRules, ruleToCron, normalizeRulesForStorage, type ScheduleRule } from '../scheduler/schedule-rules.ts'
 import * as registry from '../scheduler/registry.ts'
 import * as dispatcher from '../scheduler/dispatcher.ts'
 import {
@@ -75,8 +75,18 @@ const CreateSchema = z.object({
   cron_expr: z.string().min(1).max(200).optional(),
   schedule_rules: z.array(z.object({
     interval: z.number().int().min(1).max(999),
-    unit: z.enum(['hours', 'days', 'weeks']),
+    unit: z.enum(['minutes', 'hours', 'days', 'weeks', 'months']),
     start_at: z.string().min(1),
+    // P1 additive — deep validation (HH:MM format, ISO until, ranges) is done
+    // by `validateRules` below; here we keep the Zod shape permissive so old
+    // and new clients both parse.
+    active_window: z.object({ from: z.string(), to: z.string() }).optional(),
+    until: z.string().optional(),
+    max_runs: z.number().int().min(1).max(100000).optional(),
+    for: z.object({
+      count: z.number().int().min(1).max(999),
+      unit: z.enum(['minutes', 'hours', 'days', 'weeks', 'months']),
+    }).optional(),
   })).min(1).max(20).optional(),
   timezone: z.string().min(1).max(100),
   catchup_policy: CatchupPolicyEnum.optional(),
@@ -286,6 +296,9 @@ scheduledTasks.post('/', async (c) => {
   if (data.schedule_rules) {
     const rv = validateRules(data.schedule_rules)
     if (!rv.ok) return c.json({ error: 'invalid_schedule_rules', detail: rv.error }, 400)
+    // Resolve `for:{count,unit}` → absolute `until` so storage carries a single
+    // bound (see normalizeRuleForStorage). Mutates the local copy only.
+    data.schedule_rules = normalizeRulesForStorage(data.schedule_rules as ScheduleRule[]) as any
   }
   const effectiveCron = resolveCronExpr(
     { cron_expr: data.cron_expr, schedule_rules: data.schedule_rules as ScheduleRule[] | undefined },
@@ -379,6 +392,7 @@ scheduledTasks.patch('/:id', async (c) => {
   if (data.schedule_rules) {
     const rv = validateRules(data.schedule_rules)
     if (!rv.ok) return c.json({ error: 'invalid_schedule_rules', detail: rv.error }, 400)
+    data.schedule_rules = normalizeRulesForStorage(data.schedule_rules as ScheduleRule[]) as any
   }
 
   // Merge effective values for validation. If client sent schedule_rules,

@@ -7,6 +7,9 @@ import {
   validateRules,
   ruleToCron,
   shouldSkipFire,
+  isWithinActiveWindow,
+  boundReason,
+  normalizeRuleForStorage,
   humanizeRule,
   type ScheduleRule,
 } from '../src/scheduler/schedule-rules.ts'
@@ -26,12 +29,41 @@ describe('validateRule', () => {
     expect(validateRule({ interval: 1000, unit: 'hours', start_at: '2030-01-01T00:00:00Z' } as any).ok).toBe(false)
   })
 
-  test('rejects bad unit', () => {
-    expect(validateRule({ interval: 1, unit: 'months', start_at: '2030-01-01T00:00:00Z' } as any).ok).toBe(false)
+  test('accepts minutes and months units (P1)', () => {
+    expect(validateRule({ interval: 5, unit: 'minutes', start_at: '2030-01-01T00:00:00Z' } as any).ok).toBe(true)
+    expect(validateRule({ interval: 2, unit: 'months', start_at: '2030-01-01T00:00:00Z' } as any).ok).toBe(true)
+  })
+
+  test('rejects truly bad unit', () => {
+    expect(validateRule({ interval: 1, unit: 'fortnights', start_at: '2030-01-01T00:00:00Z' } as any).ok).toBe(false)
   })
 
   test('rejects bad start_at', () => {
     expect(validateRule({ interval: 1, unit: 'hours', start_at: 'nope' } as any).ok).toBe(false)
+  })
+
+  // ── P1 active_window + bounds validation ──
+  test('accepts a valid active_window', () => {
+    expect(validateRule({ interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00Z', active_window: { from: '22:00', to: '06:00' } } as any).ok).toBe(true)
+  })
+
+  test('rejects bad HH:MM in active_window', () => {
+    expect(validateRule({ interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00Z', active_window: { from: '25:00', to: '06:00' } } as any).ok).toBe(false)
+    expect(validateRule({ interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00Z', active_window: { from: '9:00', to: '17:00' } } as any).ok).toBe(false)
+  })
+
+  test('rejects equal active_window from/to', () => {
+    expect(validateRule({ interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00Z', active_window: { from: '09:00', to: '09:00' } } as any).ok).toBe(false)
+  })
+
+  test('rejects bad until / max_runs / for', () => {
+    expect(validateRule({ interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00Z', until: 'nope' } as any).ok).toBe(false)
+    expect(validateRule({ interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00Z', max_runs: 0 } as any).ok).toBe(false)
+    expect(validateRule({ interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00Z', for: { count: 0, unit: 'days' } } as any).ok).toBe(false)
+  })
+
+  test('backward-compat: a base {interval,unit,start_at} rule is still valid', () => {
+    expect(validateRule({ interval: 1, unit: 'hours', start_at: '2030-01-01T00:00:00Z' }).ok).toBe(true)
   })
 })
 
@@ -86,6 +118,100 @@ describe('ruleToCron', () => {
     // 2030-01-01 is a Tuesday → DOW=2
     const r: ScheduleRule = { interval: 1, unit: 'weeks', start_at: '2030-01-01T14:05:00.000Z' }
     expect(ruleToCron(r, 'UTC')).toBe('5 14 * * 2')
+  })
+
+  test('minutes interval=1 fires every minute (P1)', () => {
+    const r: ScheduleRule = { interval: 1, unit: 'minutes', start_at: '2030-01-01T09:30:00.000Z' }
+    expect(ruleToCron(r, 'UTC')).toBe('* * * * *')
+  })
+
+  test('minutes interval=N emits stepped minute cron (P1)', () => {
+    const r: ScheduleRule = { interval: 15, unit: 'minutes', start_at: '2030-01-01T09:30:00.000Z' }
+    expect(ruleToCron(r, 'UTC')).toBe('*/15 * * * *')
+  })
+
+  test('months emits day-of-month anchored cron (P1)', () => {
+    // start_at = 14th @ 14:05 UTC → "5 14 14 * *"
+    const r: ScheduleRule = { interval: 1, unit: 'months', start_at: '2030-03-14T14:05:00.000Z' }
+    expect(ruleToCron(r, 'UTC')).toBe('5 14 14 * *')
+  })
+})
+
+describe('isWithinActiveWindow', () => {
+  const base = { interval: 1, unit: 'days' as const, start_at: '2030-01-01T00:00:00Z' }
+
+  test('no window → always active', () => {
+    expect(isWithinActiveWindow(base, new Date('2030-01-01T03:00:00Z'), 'UTC')).toBe(true)
+  })
+
+  test('daytime window includes inside, excludes outside', () => {
+    const r: ScheduleRule = { ...base, active_window: { from: '09:00', to: '17:00' } }
+    expect(isWithinActiveWindow(r, new Date('2030-01-01T12:00:00Z'), 'UTC')).toBe(true)
+    expect(isWithinActiveWindow(r, new Date('2030-01-01T08:59:00Z'), 'UTC')).toBe(false)
+    expect(isWithinActiveWindow(r, new Date('2030-01-01T17:00:00Z'), 'UTC')).toBe(false) // exclusive end
+  })
+
+  test('overnight wrap (22:00→06:00) covers both sides of midnight', () => {
+    const r: ScheduleRule = { ...base, active_window: { from: '22:00', to: '06:00' } }
+    expect(isWithinActiveWindow(r, new Date('2030-01-01T23:30:00Z'), 'UTC')).toBe(true) // 23:30 in-window
+    expect(isWithinActiveWindow(r, new Date('2030-01-01T02:00:00Z'), 'UTC')).toBe(true) // 02:00 in-window
+    expect(isWithinActiveWindow(r, new Date('2030-01-01T12:00:00Z'), 'UTC')).toBe(false) // midday out
+    expect(isWithinActiveWindow(r, new Date('2030-01-01T06:00:00Z'), 'UTC')).toBe(false) // exclusive end
+  })
+
+  test('shouldSkipFire enforces window (overnight)', () => {
+    const r: ScheduleRule = { ...base, active_window: { from: '22:00', to: '06:00' } }
+    expect(shouldSkipFire(r, new Date('2030-01-01T03:00:00Z'), 'UTC')).toBe(false) // in-window
+    expect(shouldSkipFire(r, new Date('2030-01-01T12:00:00Z'), 'UTC')).toBe(true)  // out-of-window
+  })
+})
+
+describe('months interval cadence (shouldSkipFire)', () => {
+  test('every 2 months skips the off-month', () => {
+    const r: ScheduleRule = { interval: 2, unit: 'months', start_at: '2030-01-15T00:00:00Z' }
+    expect(shouldSkipFire(r, new Date('2030-02-15T00:00:00Z'), 'UTC')).toBe(true)  // 1 month → off
+    expect(shouldSkipFire(r, new Date('2030-03-15T00:00:00Z'), 'UTC')).toBe(false) // 2 months → on
+  })
+})
+
+describe('boundReason (end bounds)', () => {
+  test('until reached → bound_until', () => {
+    const r: ScheduleRule = { interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00Z', until: '2030-01-05T00:00:00Z' }
+    expect(boundReason([r], new Date('2030-01-04T00:00:00Z'), 0)).toBeNull()
+    expect(boundReason([r], new Date('2030-01-05T00:00:01Z'), 0)).toBe('bound_until')
+  })
+
+  test('max_runs reached → bound_max_runs', () => {
+    const r: ScheduleRule = { interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00Z', max_runs: 3 }
+    expect(boundReason([r], new Date('2030-01-10T00:00:00Z'), 2)).toBeNull()  // 2 fires so far, 3rd allowed
+    expect(boundReason([r], new Date('2030-01-10T00:00:00Z'), 3)).toBe('bound_max_runs') // cap hit
+  })
+
+  test('no bounds → never stops', () => {
+    const r: ScheduleRule = { interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00Z' }
+    expect(boundReason([r], new Date('2099-01-01T00:00:00Z'), 99999)).toBeNull()
+  })
+})
+
+describe('normalizeRuleForStorage', () => {
+  test('resolves for:{count,unit} → absolute until and drops for', () => {
+    const r: ScheduleRule = { interval: 1, unit: 'days', start_at: '2030-01-01T00:00:00.000Z', for: { count: 3, unit: 'days' } }
+    const out = normalizeRuleForStorage(r)
+    expect(out.for).toBeUndefined()
+    expect(out.until).toBe('2030-01-04T00:00:00.000Z')
+  })
+
+  test('rule without for is unchanged', () => {
+    const r: ScheduleRule = { interval: 1, unit: 'hours', start_at: '2030-01-01T00:00:00Z' }
+    expect(normalizeRuleForStorage(r)).toEqual(r)
+  })
+
+  test('months for-bound uses calendar math', () => {
+    const r: ScheduleRule = { interval: 1, unit: 'months', start_at: '2030-01-31T00:00:00.000Z', for: { count: 1, unit: 'months' } }
+    const out = normalizeRuleForStorage(r)
+    // Jan 31 + 1 month → JS rolls to Mar 3 (Feb has no 31) — documented approximation
+    expect(out.until).toBeDefined()
+    expect(out.for).toBeUndefined()
   })
 })
 

@@ -27,9 +27,11 @@ interface Props {
 }
 
 const UNIT_OPTIONS: Array<{ value: ScheduleUnit; label: string }> = [
+  { value: 'minutes', label: 'minutes' },
   { value: 'hours', label: 'hours' },
   { value: 'days', label: 'days' },
   { value: 'weeks', label: 'weeks' },
+  { value: 'months', label: 'months' },
 ]
 
 export function ScheduleRulesBuilder({ rules, timezone, onChange }: Props) {
@@ -127,8 +129,42 @@ export function ScheduleRuleRow({ rule, canRemove, onChange, onRemove }: RowProp
     onChange({ start_at: combineLocal(dateStr, next) })
   }
 
+  const windowOn = !!rule.active_window
+  const toggleWindow = () => {
+    if (windowOn) {
+      const { active_window: _drop, ...rest } = rule
+      onChange({ active_window: undefined } as any)
+      void _drop; void rest
+    } else {
+      onChange({ active_window: { from: '09:00', to: '17:00' } })
+    }
+  }
+  const setWindow = (patch: Partial<NonNullable<ScheduleRule['active_window']>>) => {
+    onChange({ active_window: { from: '09:00', to: '17:00', ...rule.active_window, ...patch } })
+  }
+
+  // Bound: "Stop after N <unit>" (sent as `for`, normalized to `until`
+  // server-side). A loaded rule persists `until` (not `for`); we treat either
+  // as "on". When the user edits the count/unit we switch back to `for`.
+  const boundOn = !!rule.for || !!rule.until
+  const toggleBound = () => {
+    if (boundOn) {
+      onChange({ for: undefined, until: undefined } as any)
+    } else {
+      onChange({ for: { count: 30, unit: 'days' } })
+    }
+  }
+  const setBound = (patch: Partial<NonNullable<ScheduleRule['for']>>) => {
+    // Editing the controls re-establishes a `for` bound (clears any stored until).
+    onChange({ for: { count: 30, unit: 'days', ...rule.for, ...patch }, until: undefined } as any)
+  }
+
+  const numCls = 'w-16 px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono'
+  const ctlCls = 'px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500'
+
   return (
-    <div className="bg-[var(--bg-primary)]/40 rounded-lg p-2.5 space-y-2 sm:space-y-0 sm:flex sm:items-center sm:gap-2 sm:flex-wrap">
+    <div className="bg-[var(--bg-primary)]/40 rounded-lg p-2.5 space-y-2">
+    <div className="space-y-2 sm:space-y-0 sm:flex sm:items-center sm:gap-2 sm:flex-wrap">
       <span className="text-xs text-[var(--text-muted)] sm:mr-1">Every</span>
       <input
         type="number"
@@ -180,6 +216,67 @@ export function ScheduleRuleRow({ rule, canRemove, onChange, onRemove }: RowProp
       <p className="basis-full text-[11px] text-[var(--text-muted)] px-1">
         {humanizeRule(rule)}
       </p>
+    </div>
+
+    {/* Active window — one simple row, off by default */}
+    <div className="flex items-center gap-2 flex-wrap pl-0.5">
+      <label className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] cursor-pointer select-none">
+        <input type="checkbox" checked={windowOn} onChange={toggleWindow} className="accent-blue-500" />
+        Active between
+      </label>
+      <input
+        type="time"
+        disabled={!windowOn}
+        value={rule.active_window?.from ?? '09:00'}
+        onChange={(e) => setWindow({ from: e.target.value })}
+        className={`${ctlCls} disabled:opacity-40`}
+      />
+      <span className="text-xs text-[var(--text-muted)]">and</span>
+      <input
+        type="time"
+        disabled={!windowOn}
+        value={rule.active_window?.to ?? '17:00'}
+        onChange={(e) => setWindow({ to: e.target.value })}
+        className={`${ctlCls} disabled:opacity-40`}
+      />
+      <span className="text-[11px] text-[var(--text-muted)]">(task timezone; supports overnight)</span>
+    </div>
+
+    {/* End bound — one simple row, off by default ("runs forever" when off) */}
+    <div className="flex items-center gap-2 flex-wrap pl-0.5">
+      <label className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] cursor-pointer select-none">
+        <input type="checkbox" checked={boundOn} onChange={toggleBound} className="accent-blue-500" />
+        Stop after
+      </label>
+      <input
+        type="number"
+        min={1}
+        max={999}
+        disabled={!boundOn}
+        value={rule.for?.count ?? 30}
+        onChange={(e) => {
+          const n = parseInt(e.target.value || '1', 10)
+          setBound({ count: Number.isFinite(n) && n >= 1 ? Math.min(n, 999) : 1 })
+        }}
+        className={`${numCls} disabled:opacity-40`}
+      />
+      <select
+        disabled={!boundOn}
+        value={rule.for?.unit ?? 'days'}
+        onChange={(e) => setBound({ unit: e.target.value as ScheduleUnit })}
+        className={`${ctlCls} disabled:opacity-40`}
+      >
+        {UNIT_OPTIONS.map((o) => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+      {rule.until && !rule.for && (
+        <span className="text-[11px] text-[var(--text-muted)]">
+          until {new Date(rule.until).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}
+        </span>
+      )}
+      <span className="text-[11px] text-[var(--text-muted)]">(then the task auto-disables)</span>
+    </div>
     </div>
   )
 }

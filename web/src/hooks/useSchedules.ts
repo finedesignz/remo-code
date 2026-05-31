@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { hubFetch, HubFetchError } from '../lib/api'
+import type { ScheduleRule } from '../lib/schedule-rules'
 
 // Phase 11: mirrors hub `TaskType` (hub/src/db/scheduled-tasks-dal.ts).
 // User-pickable roots + 9 chained step kinds + internal `triage`.
@@ -39,7 +40,7 @@ export interface ScheduledTask {
   target_id: string | null
   payload: Record<string, any>
   cron_expr: string
-  schedule_rules?: Array<{ interval: number; unit: 'hours'|'days'|'weeks'; start_at: string }> | null
+  schedule_rules?: ScheduleRule[] | null
   timezone: string
   catchup_policy: CatchupPolicy
   max_concurrent: number
@@ -72,7 +73,7 @@ export interface ScheduleCreateInput {
    * is built from `rules[0]` and stored alongside for the croner engine.
    */
   cron_expr?: string
-  schedule_rules?: Array<{ interval: number; unit: 'hours'|'days'|'weeks'; start_at: string }>
+  schedule_rules?: ScheduleRule[]
   timezone: string
   catchup_policy?: CatchupPolicy
   max_concurrent?: number

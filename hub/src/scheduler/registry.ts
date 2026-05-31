@@ -99,8 +99,10 @@ function registerInternal(task: ScheduledTask): void {
         const now = Date.now()
         const last = lastFireAt.get(task.id) ?? 0
         if (now - last < DEDUPE_WINDOW_MS) return
-        // Rule-level skip gate (start_at + weekly interval anchoring).
-        if (rule && shouldSkipFire(rule, new Date(now))) return
+        // Rule-level skip gate (start_at + weekly/monthly interval anchoring +
+        // active-window). Pass the task timezone so window bounds resolve in
+        // task-local wall-clock time.
+        if (rule && shouldSkipFire(rule, new Date(now), tz)) return
         lastFireAt.set(task.id, now)
         try {
           const d = await dispatcher()
