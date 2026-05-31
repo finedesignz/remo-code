@@ -594,3 +594,78 @@ no-API-key invariant. *(Threat T-19-05 silent-contradiction MED.)*
 **Phase 18/19 addendum coverage:** 4 sub-IDs for Phase 18 (R-PTY-17a..20a) + 5 for Phase 19
 (R-PTY-21a..25a), all tracing to existing parents R-PTY-17..25. No orphans; no new top-level
 requirement introduced.
+
+---
+
+## Milestone m-interactive-pty-runner — Phase 16 & 17 detail addendum (appended 2026-05-31)
+
+> APPEND-ONLY block authored during the Phase-16/17 detail-planning pass. The parent requirements
+> **R-PTY-06..16 + R-TG-12 already exist above** (Phase 16/17 sections); this addendum does NOT replace
+> them. It records the fine-grained sub-requirements + threat IDs derived during detail planning, for
+> traceability into the phase PLAN/VALIDATION artifacts. Where a sub-ID elaborates a parent, the parent
+> remains authoritative. (`workflow.plan_review_convergence` was enabled in `.planning/config.json` the
+> same session.)
+
+### Phase 16 — hardened-pty-relay-and-mobile-terminal (elaborates R-PTY-06..11)
+
+#### R-PTY-07a — Supervisor-owned persistence + scrollback ring-buffer (cross-platform)
+The PTY process SHALL be owned by the supervisor (not scoped to a client WS) so a dropped client does
+NOT kill the session, and a bounded output ring-buffer SHALL record recent PTY output for scrollback
+replay on reattach. tmux SHALL be used on POSIX where available (survival across supervisor restarts);
+on Windows (no native tmux) the supervisor-owned persistent-PTY + ring-buffer is the documented
+baseline. A test SHALL assert a simulated disconnect→reattach replays the last-N lines, and an
+idle/exited PTY is reaped (no orphan). *(Threats T-16-04 persistence-leak MED; cross-ref 16-PLAN-001.)*
+
+#### R-PTY-08a — Isolated raw-terminal frame schema + authenticated byte-faithful relay
+A `hub/src/ws/term-protocol.ts` SHALL define the raw-terminal frame schema
+(`term.data`/`term.input`/`term.resize`/`term.attach`/`term.reattach`) OUTSIDE `agent-protocol.ts`,
+importing neither it nor the `RunnerEvent` type; the hub relay SHALL be byte-faithful and accept frames
+only on an authenticated, subscribed connection. Static + auth tests SHALL assert zero RunnerEvent
+coupling and rejection of unauthenticated frames. *(Threats T-16-05 unauth-attach HIGH, T-16-07
+coupling-leak MED; cross-ref 16-PLAN-002.)*
+
+#### R-PTY-10a — Human-only gate composes WITH the non-bypassable cost cap
+The human-only dispatch gate SHALL be composed into the SINGLE existing dispatch pipeline alongside
+`dailyCostCapGate` (no parallel chokepoint, no new uncapped route); it rejects automation sources for
+`pty-interactive` sessions and allows genuine human turns. A test SHALL assert per-automation-source
+rejection AND that the cost cap still applies. *(Threats T-16-06 automation-on-PTY HIGH, T-16-08
+cap-bypass HIGH; cross-ref 16-PLAN-002.)*
+
+#### R-PTY-11a — Per-session runner_type column (idempotent DDL, opt-in)
+`sessions.runner_type TEXT NOT NULL DEFAULT 'stream-json'` (∈ {'stream-json','pty-interactive'}) SHALL
+be added via `ADD COLUMN IF NOT EXISTS` (idempotent; re-runs safely each boot; NO data backfill in
+schema.sql); the API validates the enum, opt-in per session, and a Telegram-default session SHALL NOT
+be settable to 'pty-interactive'. *(Cross-ref 16-PLAN-002.)*
+
+### Phase 17 — codex-pty-runner-and-chatsurface-rip-and-replace (elaborates R-PTY-12..16 + R-TG-12)
+
+#### R-PTY-12a — Backend selection seam (Claude/Codex PTY)
+For `runner_type='pty-interactive'`, the supervisor SHALL instantiate `codex-pty-runner.ts` when
+`cli_kind='codex'` and `claude-pty-runner.ts` when `cli_kind='claude'`; the Codex runner mirrors the
+Claude PTY runner (interactive-only, env-clean, raw bytes, no RunnerEvent). A test SHALL assert the
+selection + the extended canary covers the Codex runner. *(Threats T-17-01 Codex-programmatic-flag
+HIGH, T-17-02 env-hygiene HIGH, T-17-03 automation-on-Codex-PTY HIGH; cross-ref 17-PLAN-001.)*
+
+#### R-PTY-13a — One-way-door deletion gate
+The web/hub deletions (R-PTY-13/14) SHALL NOT begin until the Phase-16 VERIFICATION ship-verdict is
+PASS (terminal surface proven); a precheck artifact records the gate. A test SHALL assert no
+`ChatSurface`/structured-bubble render path remains for human sessions after deletion. *(Threats T-17-04
+premature-deletion CRITICAL, T-17-05 shared-chrome-deletion HIGH; cross-ref 17-PLAN-002.)*
+
+#### R-PTY-14a — Automation-translation preservation regression (PRESERVE-on-ambiguity)
+After the rip, a regression test SHALL assert automation-shared translation survives — a `usage_event`
+still records cost (the non-bypassable cost-cap source) AND a scheduled-style dispatch still finalizes;
+the runner-side stream-json path (`claude-runner.ts`/`session-bridge.ts`) is unchanged. Ambiguous
+translation paths SHALL be PRESERVED, not deleted. *(Threats T-17-07 delete-automation-translation
+CRITICAL, T-17-08 cost-cap-severed CRITICAL; cross-ref 17-PLAN-003.)*
+
+#### R-TG-12a — Explicit Telegram break markers; bridge module retained
+Each removed Telegram structured-event source / permission-path site SHALL carry the comment
+`// Phase 17 rip: Telegram event source removed here; rebuilt in Phase 20 (transcript-tail).`, and
+`hub/src/telegram/bridge.ts` SHALL remain on disk (Phase 20 re-sources it). A grep test SHALL assert the
+markers exist and the module is present. *(Threat T-17-09 silent-Telegram-break HIGH; cross-ref
+17-PLAN-003.)*
+
+**Phase 16/17 addendum coverage:** 4 sub-IDs for Phase 16 (R-PTY-07a, 08a, 10a, 11a) + 5 for Phase 17
+(R-PTY-12a, 13a, 14a, R-TG-12a), all tracing to existing parents R-PTY-06..16 + R-TG-12. No orphans; no
+new top-level requirement introduced.
