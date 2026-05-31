@@ -13,6 +13,11 @@ type State =
   | { kind: "dismissed" };
 
 const STARTUP_DELAY_MS = 4_000;
+// Periodic background re-check. The supervisor is a long-lived tray app whose
+// settings window stays hidden, so the startup + window-focus checks alone never
+// fire for days — a running instance would silently miss new releases. Poll on a
+// fixed interval so the tray app self-updates without a restart or opening Settings.
+const PERIODIC_CHECK_MS = 6 * 60 * 60 * 1_000; // 6h
 const FOCUS_THROTTLE_MS = 60_000;
 
 export default function UpdateNotifier() {
@@ -62,6 +67,13 @@ export default function UpdateNotifier() {
     const onFocus = () => runCheck(false);
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
+  }, [runCheck]);
+
+  // Periodic background re-check (every PERIODIC_CHECK_MS) so a long-running
+  // tray app picks up new releases without a restart or opening Settings.
+  useEffect(() => {
+    const i = setInterval(() => runCheck(false), PERIODIC_CHECK_MS);
+    return () => clearInterval(i);
   }, [runCheck]);
 
   const install = useCallback(async () => {
