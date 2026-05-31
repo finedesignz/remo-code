@@ -195,7 +195,7 @@ ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
     -- User-pickable workflow roots
     'dev', 'security', 'log_check',
     -- Chained workflow steps (created by the workflow auto-explosion in W2)
-    'dev_plan', 'dev_execute', 'dev_ship',
+    'dev_controller', 'dev_plan', 'dev_execute', 'dev_ship',
     'security_scan', 'security_triage', 'security_fix_or_issue',
     'log_pull', 'log_classify', 'log_triage',
     -- Internal: synthesized by Coolify webhook

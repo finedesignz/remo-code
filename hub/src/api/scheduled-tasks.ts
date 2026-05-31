@@ -47,7 +47,7 @@ const TaskTypeEnum = z.enum([
   // User-pickable roots
   'dev', 'security', 'log_check',
   // Chained workflow step kinds
-  'dev_plan', 'dev_execute', 'dev_ship',
+  'dev_controller', 'dev_plan', 'dev_execute', 'dev_ship',
   'security_scan', 'security_triage', 'security_fix_or_issue',
   'log_pull', 'log_classify', 'log_triage',
   // Internal (synthesized by Coolify webhook)

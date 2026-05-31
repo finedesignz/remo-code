@@ -16,7 +16,7 @@ export type PostRunAction = any
 // the schema.sql migration (commit b9edb82). DB CHECK constraint matches.
 export type TaskType =
   | 'dev' | 'security' | 'log_check'
-  | 'dev_plan' | 'dev_execute' | 'dev_ship'
+  | 'dev_controller' | 'dev_plan' | 'dev_execute' | 'dev_ship'
   | 'security_scan' | 'security_triage' | 'security_fix_or_issue'
   | 'log_pull' | 'log_classify' | 'log_triage'
   | 'triage'
