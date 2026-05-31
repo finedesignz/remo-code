@@ -137,6 +137,10 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
       if (!target || target.status !== 'online') return
       // Phase 10 — effective auto-nudge = per-session override, else the user's
       // global default. `auto_nudge` null/undefined means "inherit".
+      // CONTRACT: this `?? globalNudgeDefault` resolution is currently CLIENT-ONLY.
+      // Any server-side nudge dispatcher MUST resolve
+      // `session.auto_nudge ?? user.auto_nudge_idle_sessions` too — never nudge
+      // unconditionally (NULL = inherit the per-user default, not "always on").
       const effective = target.auto_nudge ?? globalNudgeDefault
       if (!effective) return
       const lastUserMsg = readLastUserMessage(id)
