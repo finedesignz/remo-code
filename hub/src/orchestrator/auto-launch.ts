@@ -293,12 +293,25 @@ export async function launchOrchestrator(args: {
   }
 }
 
+// Per-user reconnect-storm debounce. A flapping supervisor (or several
+// supervisors for one user) can fire `supervisor.hello` repeatedly in quick
+// succession; each would otherwise hit the DB find-or-create + advisory-lock
+// path even though `skipIfRunning` makes the spawn itself idempotent. The
+// debounce short-circuits redundant attempts within a short window so a
+// reconnect storm can't hammer the launch path. `skipIfRunning` + the unique
+// index remain the DURABLE correctness guards; this is purely load-shedding.
+const AUTOLAUNCH_DEBOUNCE_MS = 5_000;
+const lastAutoLaunchAttemptAt = new Map<string, number>();
+
 /**
  * Machine-triggered hook, called from the `supervisor.hello` handler AFTER the
  * orphan-resume sweep (which already respawns an EXISTING orphaned orchestrator
  * run). This only fills the "no orchestrator session row exists yet" gap, so it
  * MUST NOT double-spawn:
  *
+ *   - bail if the feature flag is off,
+ *   - bail (debounced) if an attempt for this user fired in the last
+ *     `AUTOLAUNCH_DEBOUNCE_MS` (reconnect-storm shedding),
  *   - bail if disabled / explicitly-disabled,
  *   - bail (no-op) if an open orchestrator session row already exists — the
  *     orphan-resume that ran moments earlier owns respawn of its run, and the
@@ -314,6 +327,12 @@ export async function maybeAutoLaunchOrchestrator(args: {
   if (process.env.REMO_ORCHESTRATOR_AUTOLAUNCH === 'false') {
     return { launched: false, reason: 'feature_flag_off' };
   }
+  const now = Date.now();
+  const prevAt = lastAutoLaunchAttemptAt.get(args.userId);
+  if (prevAt !== undefined && now - prevAt < AUTOLAUNCH_DEBOUNCE_MS) {
+    return { launched: false, reason: 'debounced' };
+  }
+  lastAutoLaunchAttemptAt.set(args.userId, now);
   try {
     const prefs = await getOrchestratorState(args.userId);
     if (!prefs.orchestrator_enabled || prefs.orchestrator_disabled_explicitly) {
@@ -338,4 +357,12 @@ export async function maybeAutoLaunchOrchestrator(args: {
     console.error('[orchestrator] auto-launch failed', err?.message ?? err);
     return { launched: false, reason: 'error' };
   }
+}
+
+/**
+ * Test-only: clear the per-user reconnect-storm debounce map so unit tests do
+ * not leak attempt timestamps across cases. Not used in production paths.
+ */
+export function __resetAutoLaunchDebounceForTests(): void {
+  lastAutoLaunchAttemptAt.clear();
 }
