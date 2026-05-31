@@ -14,6 +14,7 @@ autonomous: false
 requirements:
   - R-PTY-06
   - R-PTY-07
+  - R-PTY-27
 must_haves:
   truths:
     - "claude-pty-runner.ts spawns interactive `claude` in node-pty with NO -p/--print/--input-format/--output-format and deletes ANTHROPIC_API_KEY from the spawned env"
@@ -86,9 +87,13 @@ From supervisor/test/no-legacy-agent-spawn.test.ts: recursive-grep canary patter
 - **T-16-03 — OAuth token reuse (HIGH, design-level).** The runner spawns the official `claude` only;
   never reads/stores/forwards `~/.claude/.credentials.json`, never imports oauth-poll internals.
   Mitigation: static grep test asserts no credentials/oauth-poll import.
-- **T-16-04 — Persistence resource leak (MEDIUM).** A supervisor-owned PTY that outlives every client
-  could leak processes. Mitigation: idle-teardown integration (reuse `hub/src/ws/idle-teardown.ts`
-  semantics) + a bounded ring-buffer; a killed/exited PTY is reaped. Block on: HIGH.
+- **T-16-04 — Persistence resource leak / orphan PTY (MEDIUM, H7 / R-PTY-27).** A supervisor-owned PTY
+  that outlives every client could leak processes; a crashed supervisor could leave a detached PTY
+  orphaned. Mitigation: an EXPLICIT detach-vs-kill policy — client disconnect DETACHES (PTY survives),
+  while session close / idle-reap / supervisor shutdown (SIGINT/SIGTERM/exit) KILL it — backed by
+  idle-teardown integration (reuse `hub/src/ws/idle-teardown.ts` semantics), a bounded ring-buffer, and a
+  parent-PID dead-man's-switch; a killed/exited PTY is reaped. A test asserts no orphan after
+  close/idle/shutdown and survival after a mere disconnect. Block on: HIGH.
 </threat_model>
 
 <tasks>
@@ -136,6 +141,8 @@ From supervisor/test/no-legacy-agent-spawn.test.ts: recursive-grep canary patter
     - On reattach, the module replays the buffered scrollback then resumes live `term.data`
     - On POSIX where tmux is available, the runner is hosted in a detached tmux session (`new-session -d`/`attach-session`) for survival across supervisor restarts; on Windows the persistent-PTY + ring-buffer baseline is used and documented in the SUMMARY
     - An idle/exited PTY is reaped (no orphan); the mechanism is recorded in the SUMMARY
+    - The detach-vs-kill policy is EXPLICIT (H7 / R-PTY-27): a client WS DISCONNECT detaches and keeps the supervisor-owned PTY alive (persistence); session CLOSE, idle-reap, AND supervisor SHUTDOWN (SIGINT/SIGTERM/exit) KILL the PTY. tmux-backed sessions: detach = `detach-client` (session survives), kill = `kill-session`. A parent-PID dead-man's-switch ensures a crashed supervisor does not leave a detached non-tmux PTY orphaned
+    - A test asserts: after a session CLOSE / idle-reap / supervisor SHUTDOWN there is NO surviving PTY/claude child (no orphan); after a mere client DISCONNECT the supervisor-owned PTY SURVIVES (reattachable)
   </acceptance_criteria>
   <action>
     Implement supervisor-owned PTY persistence with a bounded ring-buffer for scrollback replay as the

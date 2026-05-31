@@ -16,6 +16,24 @@
 
 **No orphan requirements. No plan without a requirement.**
 
+## Cycle-2 additions (2026-05-31, SYNTHESIS-cycle1 H1/H2/H3/H7/H10 — the security seam)
+
+| Req | Covered by | Acceptance is verifiable? |
+|-----|-----------|---------------------------|
+| R-PTY-28 (human-only guard on the term.input RELAY path; server-inferred actor — H1) | 16-PLAN-002 (**reworked T4**: shared humanOnlyPtyGate chokepoint applied to BOTH dispatch pipeline AND relay ingress; actor inferred from connection) | Yes — `term-relay-human-guard.test.ts`: automation/agent term.input rejected on relay; client-asserted `source:"human"` cannot bypass server-inferred actor |
+| R-PTY-29 (per-session write authz on term.attach/term.input; no cross-session/cross-user hijack — H2) | 16-PLAN-002 (**reworked T2**: subscribedSessions + DB-backed `canWriteTerminal`) | Yes — `term-relay-auth.test.ts` named cross-session + cross-user hijack cases |
+| R-PTY-30 (/ws/agent-side inventory authz for term.* — H3) | 16-PLAN-002 (**reworked T2**: drop term.* for session_id ∉ supervisor's advertised inventory) | Yes — `term-agent-inventory-auth.test.ts` cross-host injection dropped |
+| R-PTY-31 (persist runner identity + transcript path/id; resume reads persisted mode — H10) | 16-PLAN-002 (**reworked T3**: nullable backend-identity/transcript-path idempotent columns; resume re-binds) | Yes — `pty-runner-resume-identity.test.ts`: resume reads persisted mode, no dual-spawn, no mis-route |
+| R-PTY-27 (orphan PTY teardown; explicit detach-vs-kill policy — H7, Phase-16 portion) | 16-PLAN-001 (T2 acceptance + T-16-04 threat: disconnect DETACHES, close/idle/shutdown KILL; dead-man's-switch) | Yes — no orphan after close/idle/shutdown; survives a mere disconnect |
+
+**Cycle-2 verdict (Phase 16):** the load-bearing security gaps the synthesis flagged are now closed in
+the PLAN as concrete tasks with named negative tests and threat IDs (T-16-10..15). Critically, the
+human-only guard is no longer confined to `dispatch/pipeline.ts` — it is a SHARED chokepoint that also
+gates the raw `term.input` relay with a SERVER-INFERRED actor (H1), and cross-session/cross-user hijack
+(H2) + cross-host injection (H3) + dual-spawn/mis-route on resume (H10) each have a named negative test.
+**PASS holds** for Phase 16. (H5 frontmatter/VALIDATION reconciliation + the duplicate-PLAN-CHECK de-dupe
+are OUT of scope here — owned by the H5 sweep agent.)
+
 ## Quality-gate checklist (per workflow step 8 rubric)
 
 - [x] PLAN.md files created in phase dir (3 plans, waves 1-2-3)

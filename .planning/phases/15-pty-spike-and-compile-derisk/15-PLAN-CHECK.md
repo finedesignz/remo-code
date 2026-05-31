@@ -15,6 +15,18 @@
 
 **No orphan requirements. No plan without a requirement.**
 
+## Cycle-2 additions (2026-05-31, SYNTHESIS-cycle1 H6/H7)
+
+| Req | Covered by | Acceptance is verifiable? |
+|-----|-----------|---------------------------|
+| R-PTY-26 (behavioral spawn-interception harness — H6; supersedes grep-only) | 15-PLAN-001 (T2 ptySpawn factory seam, **new T4 interception harness**) | Yes — intercepts real {file,argv,env}; proven to catch a runtime-constructed flag the grep canary misses; grep retained as secondary |
+| R-PTY-27 (orphaned-PTY teardown on disconnect/closure/shutdown — H7) | 15-PLAN-001 (**new T5** kill-lifecycle wiring + dead-man's-switch + orphan-teardown test) | Yes — asserts no surviving child after simulated disconnect/teardown; Phase-16 detach-vs-kill policy noted forward |
+
+**Cycle-2 verdict (Phase 15):** the two genuine remediations (H6 behavioral-over-grep, H7 orphan leak)
+are now concrete tasks in 15-PLAN-001 with verifiable acceptance + threat IDs (T-15-05, T-15-06). The
+grep canary is correctly demoted to a secondary line behind the behavioral harness. **PASS holds** for
+Phase 15. (H5 frontmatter/VALIDATION reconciliation is OUT of scope here — owned by the H5 sweep agent.)
+
 ## Quality-gate checklist (per workflow step 8 rubric)
 
 - [x] PLAN.md files created in phase dir (3 plans, waves 1-2-3)

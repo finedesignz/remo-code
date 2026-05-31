@@ -669,3 +669,87 @@ markers exist and the module is present. *(Threat T-17-09 silent-Telegram-break 
 **Phase 16/17 addendum coverage:** 4 sub-IDs for Phase 16 (R-PTY-07a, 08a, 10a, 11a) + 5 for Phase 17
 (R-PTY-12a, 13a, 14a, R-TG-12a), all tracing to existing parents R-PTY-06..16 + R-TG-12. No orphans; no
 new top-level requirement introduced.
+
+---
+
+## Cycle-2 additions (Phase 15/16)
+
+> APPEND-ONLY block authored during the Cycle-2 GSD replan (adjudicated remediation set
+> `.planning/reviews/SYNTHESIS-cycle1.md`, items H1/H2/H3/H6/H7/H10). These elaborate existing parents
+> R-PTY-01/06/07/08/10/11 (+ R-PTY-07a/08a/10a/11a) — the parents remain authoritative. Touches Phase 15
+> and Phase 16 ONLY. The cross-phase frontmatter-metadata reconciliation (H5) is owned by a separate
+> sweep agent and is NOT in scope here. New top-level IDs are namespaced `R-PTY-26..31` to avoid
+> renumbering existing requirements.
+
+### Phase 15 — pty-spike-and-compile-derisk (Cycle-2)
+
+#### R-PTY-26 — Behavioral spawn-interception harness (supersedes grep-only for the spawn invariants) — closes H6
+The no-`ANTHROPIC_API_KEY` / no-`-p` / no-`--input-format stream-json` / no-`--output-format stream-json`
+/ official-`claude`-only invariants SHALL be enforced by a BEHAVIORAL spawn-interception test harness that
+intercepts the ACTUAL spawn call (the `node-pty` spawn factory) at runtime and asserts on the real
+`{ file, argv, env }` the runner passes — NOT only by static source grep. The harness SHALL be ESTABLISHED
+in Phase 15 (the spike seeds it as a mockable, non-runtime-exported `ptySpawn` factory) and is REUSED by
+Phases 16/17/19 (Codex runner, fallback). The static grep canary (R-PTY-01) is RETAINED as a cheap
+secondary line of defense, not the primary one. A test SHALL assert: production runner spawns file
+`claude` with empty Claude argv in PTY mode; the intercepted env has `ANTHROPIC_API_KEY` undefined; the
+intercepted argv contains none of the forbidden tokens. *(Threat T-15-05 grep-evasion HIGH — a token
+constructed at runtime, aliased, or read from config evades static grep but not argv interception.)*
+
+#### R-PTY-27 — Orphaned-PTY teardown on disconnect / closure / shutdown — closes H7
+The PTY child process SHALL be killed (no orphan host process) when its session is torn down, when the
+owning client WS disconnects under the spike's connection-scoped lifecycle, AND when the supervisor
+process shuts down. The spike SHALL wire `runner.kill()` to these lifecycle events and add a parent-PID
+dead-man's-switch so a killed/crashed supervisor does not leave a detached `claude` + `pty` host process.
+A test SHALL assert NO surviving child process after a simulated disconnect/teardown. (The
+supervisor-OWNED persistence model — where a dropped client does NOT kill the PTY — is introduced in
+Phase 16/R-PTY-07a; in Phase 16 the kill-on-teardown applies to session-close/idle-reap/supervisor-exit,
+and the tmux-backed path defines an explicit detach-vs-kill policy: client disconnect DETACHES, session
+close / idle-reap / supervisor-exit KILLS.) *(Threat T-15-06 / T-16-09 orphan-process leak MED —
+zombie `claude` + `pty.exe` hold memory, file locks, and a live OAuth session.)*
+
+### Phase 16 — hardened-pty-relay-and-mobile-terminal (Cycle-2)
+
+#### R-PTY-28 — Server-inferred actor + human-only guard ON THE term.input RELAY path — closes H1
+The human-only enforcement (constraint 3 / R-PTY-10) SHALL gate the raw-terminal `term.input`/attach
+relay path itself, NOT only the structured `dispatch/pipeline.ts`. The actor SHALL be SERVER-INFERRED
+from the connection identity (an authenticated `/ws/client` opaque-cookie connection ⇒ `human`; a
+`/ws/agent` api_keys connection ⇒ `agent`), NEVER read from a client-asserted `source`/actor field. Any
+`term.input` whose inferred actor is not a genuine human-interactive write SHALL be rejected BEFORE the
+byte forward. Implementation routes `term.input` through the SAME `humanOnlyPtyGate` chokepoint (or a
+shared guard helper) used by the dispatch pipeline — no second, ungated write route. A NAMED negative
+test SHALL assert an automation/agent-originated `term.input` is rejected on the relay path, and that a
+client-asserted `source: "human"` field cannot bypass the server-inferred decision. *(Threats T-16-10
+relay-bypasses-human-guard HIGH; T-16-11 client-asserted-actor-spoof HIGH.)*
+
+#### R-PTY-29 — Per-session write authorization on term.attach / term.input (no cross-session PTY hijack) — closes H2
+Every inbound `term.input`/`term.attach`/`term.reattach` frame SHALL be authorized SERVER-SIDE against
+the connection's OWN subscribed/owned session set: the target `session_id` MUST be in
+`subscribedSessions` for that connection AND pass a DB-backed `canWriteTerminal(userId, sessionId)`
+ownership check. A client-supplied `session_id` for a session the connection does not own/subscribe SHALL
+be rejected — NO PTY hijack via a forged `session_id`. A NAMED negative test (`term-relay-auth.test.ts`)
+SHALL include cross-session and cross-user hijack cases: user A cannot write to / attach to user B's PTY
+session even with a valid session of their own. *(Threat T-16-12 cross-session/cross-user PTY hijack
+HIGH — the most load-bearing security seam of the milestone.)*
+
+#### R-PTY-30 — /ws/agent-side inventory authorization for term.* frames — closes H3
+On the `/ws/agent` side, the hub SHALL DROP any `term.*` frame for a `session_id` that is NOT in that
+supervisor connection's advertised `session_inventory`. A compromised or buggy supervisor SHALL NOT be
+able to inject `term.data` for a session it does not host (cross-host injection). A NAMED negative test
+SHALL assert a `term.data` from supervisor X for a session hosted by supervisor Y is dropped.
+*(Threat T-16-13 cross-host term-frame injection HIGH.)*
+
+#### R-PTY-31 — Persist per-session runner identity (runner_type + backend transcript path/id) for safe resume — closes H10
+The per-session `runner_type` ('stream-json'|'pty-interactive') AND the backend PTY/tmux session
+identity + backend transcript path/id captured AT PTY SPAWN SHALL be PERSISTED per session (idempotent
+DDL, mirroring the existing pattern; NO backfill in schema.sql). On reconnect/supervisor-restart the
+resume path SHALL READ the persisted runner mode + identity so a session can never be dual-spawned (two
+PTYs for one session) nor mis-routed (stream-json resumed as PTY or vice-versa), and so Phase-20
+`TranscriptSource` + R-PTY-29 ownership can key off real persisted data rather than a newest-file guess.
+A test SHALL assert: a resume reads the persisted runner mode and re-binds the same backend identity (no
+second spawn); a pty-interactive session persisted as such is NOT resumed via the stream-json path.
+*(Threats T-16-14 dual-spawn-on-resume HIGH; T-16-15 runner-mode-misroute-on-restart HIGH.)*
+
+**Cycle-2 (Phase 15/16) coverage:** 6 new IDs — R-PTY-26 (H6), R-PTY-27 (H7) in Phase 15;
+R-PTY-28 (H1), R-PTY-29 (H2), R-PTY-30 (H3), R-PTY-31 (H10) in Phase 16. All elaborate existing parents
+(R-PTY-01/06/07/08/10/11 + the -a addenda); the parents remain authoritative. H5 (frontmatter
+reconciliation) intentionally excluded — owned by the H5 sweep agent.
