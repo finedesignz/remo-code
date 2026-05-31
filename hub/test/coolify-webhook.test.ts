@@ -21,14 +21,20 @@ const TEST_SECRET = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 const mockState: {
   secret: string | null
   allowedIps: string[]
+  autoTriageEnabled: boolean
+  hasActiveSession: boolean
   attempts: any[]
   runs: any[]
+  triageDispatches: any[]
   legacyHitCount: number
 } = {
   secret: TEST_SECRET,
   allowedIps: [],
+  autoTriageEnabled: true,
+  hasActiveSession: false,
   attempts: [],
   runs: [],
+  triageDispatches: [],
   legacyHitCount: 0,
 }
 
@@ -42,7 +48,11 @@ mock.module('../src/db/dal.ts', () => ({
   getUserCoolifyWebhookConfig: async () => ({
     secret: mockState.secret,
     allowedIps: mockState.allowedIps,
+    autoTriageEnabled: mockState.autoTriageEnabled,
   }),
+  // fix/coolify-triage-guard: storm-dedupe claim stubbed to always succeed so
+  // dispatchTriage proceeds without a DB.
+  claimDeployFailure: async () => true,
   ensureInternalDeploymentTask: async () => 'task-internal-deploy',
   ensureInternalTriageTask: async () => 'task-internal-triage',
   insertDeploymentRun: async (input: any) => {
@@ -66,9 +76,18 @@ mock.module('../src/db/dal.ts', () => ({
   getUserLicenseFields: async () => null,
 }))
 
-// Also mock the dispatcher so triage dispatch is a no-op.
+// Also mock the dispatcher so triage dispatch is observable (no-op + recorded).
 mock.module('../src/scheduler/dispatcher.ts', () => ({
-  runNow: async () => ({ skipped: false }),
+  runNow: async (taskId: string, userId: string, opts: any) => {
+    mockState.triageDispatches.push({ taskId, userId, opts })
+    return { skipped: false }
+  },
+}))
+
+// fix/coolify-triage-guard: mock active-session suppression lookup.
+mock.module('../src/sessions/repo-routing.ts', () => ({
+  hasActiveSessionForRepo: async () => mockState.hasActiveSession,
+  resolveRepoKeyedAgentSession: async () => null,
 }))
 
 let app: Hono
@@ -83,8 +102,11 @@ beforeAll(async () => {
 beforeEach(() => {
   mockState.secret = TEST_SECRET
   mockState.allowedIps = []
+  mockState.autoTriageEnabled = true
+  mockState.hasActiveSession = false
   mockState.attempts.length = 0
   mockState.runs.length = 0
+  mockState.triageDispatches.length = 0
   mockState.legacyHitCount = 0
 })
 
@@ -274,6 +296,77 @@ describe('coolify-webhook event name aliasing', () => {
       body,
     })
     expect(res.status).toBe(400)
+  })
+})
+
+// ── Auto-triage guard: master switch + active-session suppression ───────────
+// fix/coolify-triage-guard
+
+describe('coolify-webhook auto-triage guard', () => {
+  test('switch ON + no active session → triage dispatched + metadata persisted', async () => {
+    mockState.autoTriageEnabled = true
+    mockState.hasActiveSession = false
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody('deployment.failed'),
+    })
+    expect(res.status).toBe(202)
+    expect(mockState.runs.length).toBe(1) // metadata row persisted
+    expect(mockState.runs[0].status).toBe('pending')
+    // Let the fire-and-forget dispatch settle.
+    await new Promise((r) => setImmediate(r))
+    expect(mockState.triageDispatches.length).toBe(1)
+    // Audit reason carries run_id, no skip marker.
+    const audit = mockState.attempts.find((a) => a.status === 'success')
+    expect(audit?.reason).toContain('run_id=')
+    expect(audit?.reason).not.toContain('skipped=')
+  })
+
+  test('switch OFF → no dispatch, metadata persisted, audit reason auto_triage_disabled', async () => {
+    mockState.autoTriageEnabled = false
+    mockState.hasActiveSession = false
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody('deployment.failed'),
+    })
+    expect(res.status).toBe(202)
+    expect(mockState.runs.length).toBe(1) // still persisted
+    expect(mockState.runs[0].status).toBe('pending')
+    await new Promise((r) => setImmediate(r))
+    expect(mockState.triageDispatches.length).toBe(0) // NO dispatch
+    const audit = mockState.attempts.find((a) => a.status === 'success')
+    expect(audit?.reason).toContain('skipped=auto_triage_disabled')
+  })
+
+  test('active session on repo → suppressed, metadata persisted, audit reason suppressed_active_dev_session', async () => {
+    mockState.autoTriageEnabled = true
+    mockState.hasActiveSession = true
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody('deployment.failed'),
+    })
+    expect(res.status).toBe(202)
+    expect(mockState.runs.length).toBe(1)
+    await new Promise((r) => setImmediate(r))
+    expect(mockState.triageDispatches.length).toBe(0) // suppressed
+    const audit = mockState.attempts.find((a) => a.status === 'success')
+    expect(audit?.reason).toContain('skipped=suppressed_active_dev_session')
+  })
+
+  test('deployment.succeeded never triggers triage regardless of switch', async () => {
+    mockState.autoTriageEnabled = true
+    mockState.hasActiveSession = false
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody('deployment.succeeded'),
+    })
+    expect(res.status).toBe(202)
+    await new Promise((r) => setImmediate(r))
+    expect(mockState.triageDispatches.length).toBe(0)
   })
 })
 

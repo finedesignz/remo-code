@@ -60,3 +60,28 @@ export async function resolveRepoKeyedAgentSession(
   }
   return null
 }
+
+/**
+ * fix/coolify-triage-guard — active-session suppression check.
+ *
+ * Returns true when the user has a LIVE (online agent socket) session bound to
+ * the repo named by `gitRepository`. This is the same definition of "active on
+ * this repo" used by `resolveRepoKeyedAgentSession` and by GET /api/sessions'
+ * `active` flag (a live `/ws/agent` channel). When true, a `deployment.failed`
+ * webhook should SKIP auto-triage — a dev is already working + monitoring that
+ * repo and an unsolicited triage session would interrupt them.
+ *
+ * Excludes rootless sessions and the orchestrator implicitly: orchestrator runs
+ * against the root folder, not a per-app `repo_key`, and rootless sessions are
+ * filtered out of `listSessionIdsForRepoKey`.
+ *
+ * Fail-OPEN is the caller's responsibility: this throws on a DB error rather
+ * than swallowing it, so the caller can decide to dispatch-anyway-and-log.
+ */
+export async function hasActiveSessionForRepo(
+  userId: string,
+  gitRepository: string | null | undefined,
+): Promise<boolean> {
+  const target = await resolveRepoKeyedAgentSession(userId, gitRepository)
+  return target != null
+}

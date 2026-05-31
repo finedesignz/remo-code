@@ -7,6 +7,8 @@ import {
   getUserCoolifyWebhookSecret,
   getUserCoolifyWebhookAllowedIps,
   setUserCoolifyWebhookAllowedIps,
+  getUserCoolifyAutoTriageEnabled,
+  setUserCoolifyAutoTriageEnabled,
   listCoolifyWebhookAttempts,
   getUserClaudeThresholds,
   setUserClaudeThresholds,
@@ -51,12 +53,14 @@ accountRouter.get('/coolify-webhook-secret', async (c) => {
   try {
     const status = await getUserCoolifyWebhookStatus(userId);
     const secret = status.configured ? await getUserCoolifyWebhookSecret(userId) : null;
+    const autoTriageEnabled = await getUserCoolifyAutoTriageEnabled(userId);
     return c.json({
       configured: status.configured,
       webhook_url: webhookUrlFor(userId, secret),
       auth_mode: 'url_token',
       legacy_in_use: status.legacy_in_use,
       legacy_hit_at: status.legacy_hit_at,
+      auto_triage_enabled: autoTriageEnabled,
     });
   } catch (err: any) {
     console.error('[account] coolify-webhook-secret GET failed:', err?.code, err?.message);
@@ -277,6 +281,29 @@ accountRouter.put('/coolify-webhook-allowed-ips', async (c) => {
       return c.json({ error: 'invalid_cidr', detail: msg.slice('invalid_cidr_entry:'.length).trim() }, 400);
     }
     console.error('[account] coolify-webhook-allowed-ips PUT failed:', err?.code, err?.message);
+    return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
+  }
+});
+
+// PATCH /api/account/coolify-auto-triage  { enabled: boolean }
+// fix/coolify-triage-guard: master on/off switch for failed-deploy auto-triage.
+// CSRF: covered by the global csrfGuard on mutating /api/* (double-submit cookie).
+accountRouter.patch('/coolify-auto-triage', async (c) => {
+  const userId = c.get('userId') as string;
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'bad_json' }, 400);
+  }
+  if (typeof body?.enabled !== 'boolean') {
+    return c.json({ error: 'bad_request', detail: 'enabled must be a boolean' }, 400);
+  }
+  try {
+    const saved = await setUserCoolifyAutoTriageEnabled(userId, body.enabled);
+    return c.json({ auto_triage_enabled: saved });
+  } catch (err: any) {
+    console.error('[account] coolify-auto-triage PATCH failed:', err?.code, err?.message);
     return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
   }
 });

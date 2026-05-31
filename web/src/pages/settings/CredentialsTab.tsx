@@ -20,6 +20,8 @@ import {
   StatusPill,
   LoadingState,
   EmptyState,
+  Toggle,
+  InfoTip,
 } from "../../components/ui";
 
 interface Props {
@@ -164,13 +166,86 @@ function ApiKeyCard({ token }: { token: string }) {
 
 function CoolifyWebhookCard({ token }: { token: string }) {
   return (
-    <WebhookCard
-      token={token}
-      title="Coolify webhook"
-      helper="Paste into Coolify Notifications → Webhook. The URL IS the credential — treat as a secret."
-      getEndpoint="/api/account/coolify-webhook-secret"
-      rotateEndpoint="/api/account/coolify-webhook-secret/rotate"
-    />
+    <div className="space-y-3">
+      <WebhookCard
+        token={token}
+        title="Coolify webhook"
+        helper="Paste into Coolify Notifications → Webhook. The URL IS the credential — treat as a secret."
+        getEndpoint="/api/account/coolify-webhook-secret"
+        rotateEndpoint="/api/account/coolify-webhook-secret/rotate"
+      />
+      <CoolifyAutoTriageToggle token={token} />
+    </div>
+  );
+}
+
+/* ─────────────────── Coolify auto-triage master switch ─────────────────── */
+
+function CoolifyAutoTriageToggle({ token }: { token: string }) {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [enabled, setEnabled] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    hubFetch<{ auto_triage_enabled?: boolean }>(
+      token,
+      "/api/account/coolify-webhook-secret",
+    )
+      .then((d) => {
+        if (!cancelled) setEnabled(d.auto_triage_enabled ?? true);
+      })
+      .catch((e: any) => {
+        if (!cancelled) setError(String(e?.message || e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  const onChange = async (next: boolean) => {
+    setSaving(true);
+    setError(null);
+    const prev = enabled;
+    setEnabled(next); // optimistic
+    try {
+      const data = await hubFetch<{ auto_triage_enabled: boolean }>(
+        token,
+        "/api/account/coolify-auto-triage",
+        { method: "PATCH", json: { enabled: next } },
+      );
+      setEnabled(data.auto_triage_enabled);
+    } catch (e: any) {
+      setEnabled(prev); // revert on failure
+      setError(String(e?.message || e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card className="space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-1.5">
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+            Auto-triage failed deploys
+          </h3>
+          <InfoTip content="When on, a failed Coolify deploy spins up a triage session — unless you already have a live session on that repo (so it won't interrupt active work)." />
+        </div>
+        <Toggle
+          checked={enabled}
+          onChange={onChange}
+          disabled={loading || saving}
+          aria-label="Auto-triage failed deploys"
+        />
+      </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
+    </Card>
   );
 }
 
