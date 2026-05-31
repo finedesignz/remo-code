@@ -43,6 +43,7 @@ import {
   editMessageTextMd,
   escapeMarkdownV2,
   setMyCommands,
+  setWebhook,
 } from "./client.ts";
 import { BOT_COMMANDS } from "./commands.ts";
 import { rememberPendingPrompt, permissionCallbackData } from "./approvals.ts";
@@ -338,6 +339,19 @@ export function startTelegramBridge(): void {
   void setMyCommands(BOT_COMMANDS as Array<{ command: string; description: string }>).catch((err: any) => {
     console.warn(`[telegram-bridge] setMyCommands failed: ${err?.message ?? err}`);
   });
+  // Self-register the inbound webhook so `allowed_updates` ALWAYS includes
+  // `callback_query`. A prior manual `setWebhook` (the documented curl) could
+  // have pinned a message-only filter, which silently drops every inline-button
+  // tap → the `/list` picker (select + "Next »") and Approve/Deny/Stop buttons
+  // appear dead. Best-effort, fire-and-forget — only runs when we know the
+  // public URL + secret. Mirrors the setMyCommands self-registration above.
+  if (config.telegram.webhookSecret) {
+    const base = (process.env.REMO_PUBLIC_URL || "https://app.remo-code.com").replace(/\/+$/, "");
+    const webhookUrl = `${base}/api/telegram/webhook/${config.telegram.webhookSecret}`;
+    void setWebhook(webhookUrl).catch((err: any) => {
+      console.warn(`[telegram-bridge] setWebhook failed: ${err?.message ?? err}`);
+    });
+  }
   console.log("[telegram-bridge] outbound bridge started");
 }
 
