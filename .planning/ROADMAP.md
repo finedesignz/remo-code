@@ -176,3 +176,71 @@ Source of truth for phase ordering, status, and dependencies. The GSD SDK parses
 - Depends on: [Phase 08]
 - Requirements: [R-DOCS-01, R-DOCS-02, R-DOCS-03, R-DOCS-04]
 - Phase dir: `.planning/phases/14-settings-docs-and-polish/`
+
+---
+
+<!-- Milestone m-interactive-pty-runner (2026-05-31): Interactive-PTY Runner + full rip-and-replace.
+     Source spec: .planning/architecture/interactive-pty-runner-SPEC.md (committed 6ef6953).
+     Branch: feat/interactive-pty-runner.
+     CRITICAL OVERRIDE (user decision, supersedes the spec's "additive / Embed-A keep stream-json chat" text):
+       FULL RIP-AND-REPLACE. PTY-ify ALL human sessions (Claude AND Codex). Delete the stream-json
+       ChatSurface web UI (web/src ChatSurface, grid conversation surface, activity-event/tool_use bubble
+       rendering) ENTIRELY. ONE raw-terminal surface (themed xterm.js) for every human session.
+       stream-json survives ONLY as an unattended-automation transport (scheduler / orchestrator-background /
+       auto-dev / error-capture) behind the cost cap — NOT a human chat UI.
+     Non-negotiable constraints (carry into every phase): NO ANTHROPIC_API_KEY ever passed to a spawned client
+       (delete env.ANTHROPIC_API_KEY stays; no API-key fallback — fallback is Codex/Gemini); spawn official
+       `claude` only, never reuse/extract OAuth token; only genuine human turns touch the PTY runner (guard
+       rejects automation dispatch sources); auth via `claude login` (treat setup-token as suspect);
+       interactive `claude` = no -p, no --input-format stream-json; raw-terminal WS isolated from the
+       /ws/agent RunnerEvent→agent-protocol pipeline. June-15 billing-classification checks GATE the cutover,
+       NOT the build. Requirements: .planning/REQUIREMENTS.md (R-PTY-*). -->
+
+## Phase 15: pty-spike-and-compile-derisk
+
+- Status: Planned
+- Mode: standard
+- Goal: Prove the core PTY mechanic end-to-end and derisk the known blocker. Spawn the genuine *interactive* `claude` TUI (no `-p`, no `--input-format stream-json`) inside a PTY (`node-pty`/ConPTY on Windows) on the supervisor box with `ANTHROPIC_API_KEY` deleted from env; stream raw terminal bytes to a minimal themed xterm.js panel in the web shell over a NEW raw-terminal WS channel (kept isolated from the structured `/ws/agent` RunnerEvent pipeline); accept a typed human turn and render the TUI. **Primary derisk:** `node-pty` is a native addon and does NOT bundle into `bun build --compile` (the Tauri sidecar) — Phase 15 must determine and demonstrate how the PTY host ships in the compiled sidecar (bundle the native module, ship a helper exe, or run the PTY host out-of-band) and document the chosen approach for Phase 16. Not throwaway — this is the seed of the runner. Spike findings written to a SPIKE/RESEARCH artifact that Phase 16 consumes.
+- Depends on: []
+- Requirements: [R-PTY-01, R-PTY-02, R-PTY-03, R-PTY-04, R-PTY-05]
+- Phase dir: `.planning/phases/15-pty-spike-and-compile-derisk/`
+- Plans:
+  - `15-PLAN-001-pty-spawn-and-canary` — wave 1 — interactive `claude` in node-pty, env-strip, build-time canary (R-PTY-01)
+  - `15-PLAN-002-raw-terminal-ws-channel` — wave 2 — isolated term.* frame schema + hub relay + supervisor wiring + isolation/round-trip tests (R-PTY-02, R-PTY-03)
+  - `15-PLAN-003-xterm-panel-and-compile-derisk` — wave 3 — themed xterm.js panel + node-pty/bun-compile shipping proof + SPIKE-FINDINGS (R-PTY-04, R-PTY-05)
+
+## Phase 16: hardened-pty-relay-and-mobile-terminal
+
+- Status: Pending
+- Mode: standard
+- Goal: Productionize the spike into a hardened relay. New `supervisor/src/runners/claude-pty-runner.ts` (interactive `claude` in a PTY, `delete env.ANTHROPIC_API_KEY`, NO RunnerEvent translation — raw bytes only) using the Phase-15 sidecar-shipping approach; tmux-backed persistence so a dropped phone/browser connection reattaches with no lost state; authenticated raw-terminal WS channel (data in/out, resize, reattach/scrollback) relayed `/ws/client` ↔ `/ws/agent`, isolated from the structured agent-protocol; themed xterm.js terminal surface in the React shell (app chrome/sidebar/nav/theme tokens `--bg-primary`/`--text-primary`/blue-accent unchanged) with mobile reconnect/resize/scrollback. A dispatch guard rejects non-interactive/automation sources from the PTY runner (constraint 3). Per-session runner type (PTY-interactive vs stream-json); Telegram-default sessions MUST stay stream-json. Reuses existing opaque-cookie auth + WS infra.
+- Depends on: [Phase 15]
+- Requirements: [R-PTY-06, R-PTY-07, R-PTY-08, R-PTY-09, R-PTY-10, R-PTY-11]
+- Phase dir: `.planning/phases/16-hardened-pty-relay-and-mobile-terminal/`
+
+## Phase 17: codex-pty-runner-and-chatsurface-rip-and-replace
+
+- Status: Pending
+- Mode: standard
+- Goal: Execute the rip-and-replace OVERRIDE. (a) Add a Codex interactive/PTY runner (`supervisor/src/runners/codex-pty-runner.ts`) so Codex human sessions also run on the raw-terminal surface, reusing the Phase-16 PTY host + raw-terminal WS + tmux. (b) DELETE the stream-json human chat UI entirely from web/src: `ChatSurface` and its `full`/`cell`/`mobile-expanded` variants, the grid/list conversation rendering of structured activity (thinking/text_delta/tool_use/tool_result bubbles), and any now-dead hub agent-protocol→bubble translation that exists ONLY to feed that UI. Route ALL human sessions (Claude AND Codex) to the single themed xterm.js terminal surface. (c) Preserve stream-json end-to-end ONLY for unattended automation transports (Phase 18 owns the routing) — do not delete the runner-side stream-json path, only its human chat UI. Update grid view to host terminal cells (or remove grid conversation rendering) consistent with one terminal surface. Tests (`web/test/no-indigo.test.ts`, baseline) stay green; new tests assert no `ChatSurface`/structured-bubble rendering path remains for human sessions.
+- Depends on: [Phase 16]
+- Requirements: [R-PTY-12, R-PTY-13, R-PTY-14, R-PTY-15, R-PTY-16]
+- Phase dir: `.planning/phases/17-codex-pty-runner-and-chatsurface-rip-and-replace/`
+
+## Phase 18: billing-guardrail-dual-bucket-usage
+
+- Status: Pending
+- Mode: standard
+- Goal: Billing guardrail. Extend the existing usage poll (`supervisor/src/usage/oauth-poll.ts` → hub store `hub/src/usage/store.ts`) to surface BOTH balances — interactive subscription pool AND the post-June-15 programmatic credit pool — broadcast via the existing `subscription_usage` WS path and rendered in the usage strip/tab. Alert + optional hard-halt when programmatic credit is consumed unexpectedly (no silent drain, no surprise hard-stop). This is where unattended automation (scheduler / orchestrator background / auto-dev / error-capture) is explicitly routed onto the stream-json/programmatic path behind the existing non-bypassable `dailyCostCapGate`, with the PTY-runner human guard (Phase 16) ensuring automation never rides the interactive PTY path. NOT an API key anywhere.
+- Depends on: [Phase 16]
+- Requirements: [R-PTY-17, R-PTY-18, R-PTY-19, R-PTY-20]
+- Phase dir: `.planning/phases/18-billing-guardrail-dual-bucket-usage/`
+
+## Phase 19: cutover-gate-and-automation-fallback
+
+- Status: Pending
+- Mode: standard
+- Goal: June-15 cutover gate + automation fallback wiring. Encode the spec's "Verify after June 15" checks as an explicit, documented cutover GATE (NOT a build blocker): a runbook + a measurement procedure using the Phase-18 dual-bucket poll to confirm (1) a PTY interactive session bills the INTERACTIVE bucket, (2) `setup-token` vs `login` classification, (3) subagents/hooks/MCP bucket attribution, (4) login-credential headless-reclassification risk. Green-light only flips the PTY runner default-on for human sessions after the interactive-bucket result is confirmed. Wire the "If PTY fails" fallback paths (Codex runner — already present; a stubbed/optional future Gemini runner seam) so the human-coding UX can target Codex/Gemini WITHOUT an API key. Telegram and any text-only channel stays on the stream-json programmatic pool by structural necessity (documented). Final docs sweep: README/CLAUDE.md/`docs/` describing the terminal surface, dual-bucket usage, the cutover gate, and the rip-and-replace.
+- Depends on: [Phase 17, Phase 18]
+- Requirements: [R-PTY-21, R-PTY-22, R-PTY-23, R-PTY-24, R-PTY-25]
+- Phase dir: `.planning/phases/19-cutover-gate-and-automation-fallback/`

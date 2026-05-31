@@ -293,3 +293,102 @@ Update in the same milestone: web CLAUDE.md / `docs/` (new tab set Connections/C
 | R-DOCS-04 | Phase 14 | Pending |
 
 **Coverage:** 27/27 PLAN items mapped to 27 REQs across Phases 08–14. No orphans.
+
+---
+
+## Milestone m-interactive-pty-runner (Phases 15–19)
+
+> Source spec: `.planning/architecture/interactive-pty-runner-SPEC.md`. CRITICAL OVERRIDE in effect:
+> FULL RIP-AND-REPLACE — PTY-ify ALL human sessions (Claude AND Codex); delete the stream-json
+> ChatSurface human chat UI; stream-json survives only as an unattended-automation transport.
+> Non-negotiable: never pass `ANTHROPIC_API_KEY` to a spawned client; no API-key fallback (fallback =
+> Codex/Gemini); spawn official `claude` only, never reuse the OAuth token; only human turns touch the
+> PTY runner; auth via `claude login`; interactive `claude` has no `-p`/`--input-format stream-json`;
+> raw-terminal WS isolated from the `/ws/agent` RunnerEvent pipeline; June-15 checks gate the cutover.
+
+### Phase 15 — pty-spike-and-compile-derisk
+
+#### R-PTY-01 — Interactive claude in a PTY (no programmatic flags)
+The supervisor SHALL spawn the genuine interactive `claude` TUI inside a PTY with NO `-p` and NO `--input-format stream-json`/`--output-format stream-json` flags. The spawned process env MUST have `ANTHROPIC_API_KEY` deleted (parity with `claude-runner.ts:94`). A canary test SHALL fail the build if the PTY runner argv contains `-p`, `--print`, or `--input-format`/`--output-format stream-json`, or if `ANTHROPIC_API_KEY` is present in the spawned env.
+
+#### R-PTY-02 — Raw-terminal bytes streamed both directions
+The spike SHALL stream raw PTY output bytes to the web client and write raw input bytes from the web client into the PTY, such that a typed human turn renders in the TUI and TUI output renders in xterm.js.
+
+#### R-PTY-03 — Raw-terminal WS channel isolated from the structured pipeline
+The raw-terminal transport SHALL be a dedicated channel carrying terminal frames (data/resize/reattach) and MUST NOT emit or depend on the structured `RunnerEvent` union or the `/ws/agent` agent-protocol bubble pipeline. A test SHALL assert no `RunnerEvent` coupling on the terminal path.
+
+#### R-PTY-04 — node-pty / bun-compile shipping approach demonstrated
+The spike SHALL determine and demonstrate how the `node-pty` native addon ships when the supervisor sidecar is produced via `bun build --compile` (bundle native module, helper exe, or out-of-band PTY host). The chosen approach SHALL be documented in a SPIKE/RESEARCH artifact consumed by Phase 16, including a working proof the PTY host runs from the compiled sidecar context (or a documented out-of-band launch).
+
+#### R-PTY-05 — Themed xterm.js panel in the existing shell
+The spike SHALL render the TUI in an xterm.js panel inside the existing React shell using the app theme tokens (`--bg-primary`/`--text-primary`, blue accent) without altering app chrome (sidebar/nav). `web/test/no-indigo.test.ts` SHALL remain green.
+
+### Phase 16 — hardened-pty-relay-and-mobile-terminal
+
+#### R-PTY-06 — claude-pty-runner module
+A new `supervisor/src/runners/claude-pty-runner.ts` SHALL implement the interactive PTY runner (raw bytes only, no RunnerEvent translation), deleting `ANTHROPIC_API_KEY` from the spawned env, using the Phase-15 sidecar-shipping approach.
+
+#### R-PTY-07 — tmux-backed persistence and reattach
+The interactive `claude` SHALL run inside tmux so a dropped phone/browser connection can reattach with no lost state. A test/demo SHALL prove tmux reattach survives a dropped connection with scrollback intact.
+
+#### R-PTY-08 — Authenticated raw-terminal relay end-to-end
+The raw-terminal WS channel SHALL be authenticated via the existing opaque-cookie session/WS infra and relay frames `/ws/client` to/from `/ws/agent` (data/resize/reattach/scrollback) without coupling to the structured agent-protocol.
+
+#### R-PTY-09 — Mobile terminal: reconnect / resize / scrollback
+The xterm.js terminal surface SHALL support reconnect, resize (propagating cols/rows to the PTY), and scrollback on mobile and desktop.
+
+#### R-PTY-10 — Human-only dispatch guard
+A guard SHALL reject non-interactive/automation dispatch sources (scheduler, orchestrator background, auto-dev, error-capture) from the PTY runner. A test SHALL assert an automation-sourced dispatch to a PTY session is rejected.
+
+#### R-PTY-11 — Per-session runner type; Telegram stays stream-json
+Runner type SHALL be per-session (PTY-interactive vs stream-json) and opt-in per session. A session that is a Telegram default MUST NOT be switched to the PTY runner; a guard SHALL prevent it.
+
+### Phase 17 — codex-pty-runner-and-chatsurface-rip-and-replace
+
+#### R-PTY-12 — Codex interactive/PTY runner
+A `supervisor/src/runners/codex-pty-runner.ts` SHALL run Codex human sessions on the raw-terminal surface, reusing the Phase-16 PTY host + raw-terminal WS + tmux.
+
+#### R-PTY-13 — Delete the stream-json human chat UI
+The web `ChatSurface` (all `full`/`cell`/`mobile-expanded` variants) and the structured activity-bubble rendering (thinking/text_delta/tool_use/tool_result) for human sessions SHALL be removed from `web/src`. A test SHALL assert no `ChatSurface`/structured-bubble render path remains for human sessions.
+
+#### R-PTY-14 — Remove dead agent-protocol bubble translation
+Any hub-side agent-protocol-to-bubble translation that exists ONLY to feed the deleted human chat UI SHALL be removed. Translation needed by unattended automation (Phase 18) SHALL be preserved.
+
+#### R-PTY-15 — All human sessions route to the terminal surface
+Both Claude and Codex human sessions SHALL render on the single themed xterm.js terminal surface; grid/list views SHALL host terminal cells (or drop conversation rendering) consistent with one surface.
+
+#### R-PTY-16 — stream-json runner path preserved for automation
+The runner-side stream-json path SHALL remain intact for unattended automation transports (only its human chat UI is removed). Baseline + `no-indigo` tests stay green.
+
+### Phase 18 — billing-guardrail-dual-bucket-usage
+
+#### R-PTY-17 — Dual-bucket usage poll
+`supervisor/src/usage/oauth-poll.ts` to `hub/src/usage/store.ts` SHALL surface BOTH balances (interactive subscription pool AND programmatic credit pool), broadcast via the existing `subscription_usage` WS path. The OAuth token MUST NOT be serialized to the hub (parity with existing behavior).
+
+#### R-PTY-18 — Programmatic-leak alert + optional hard-halt
+The system SHALL alert when programmatic credit is consumed unexpectedly and SHALL support an optional hard-halt — no silent drain, no surprise hard-stop.
+
+#### R-PTY-19 — Automation routed to programmatic path behind the cost cap
+Unattended automation (scheduler/orchestrator-background/auto-dev/error-capture) SHALL be explicitly routed onto the stream-json/programmatic path behind the existing non-bypassable `dailyCostCapGate`. No API key anywhere.
+
+#### R-PTY-20 — Dual-bucket rendered in usage UI
+The usage strip/tab SHALL render both buckets (util% + reset where applicable) without exposing the OAuth token.
+
+### Phase 19 — cutover-gate-and-automation-fallback
+
+#### R-PTY-21 — June-15 cutover gate runbook (not a build blocker)
+A documented cutover GATE SHALL encode the spec four "Verify after June 15" checks as a measurement procedure using the Phase-18 dual-bucket poll. Phases 15 to 18 are buildable before June 15; only the default-on cutover is gated.
+
+#### R-PTY-22 — Interactive-bucket confirmation flips default-on
+The PTY runner SHALL become the default for human sessions ONLY after measurement confirms a PTY interactive session bills the INTERACTIVE bucket.
+
+#### R-PTY-23 — If-PTY-fails fallback to Codex/Gemini (no API key)
+The "If PTY fails" fallback SHALL wire the human-coding UX to the existing Codex runner and provide a stubbed/optional future Gemini runner seam. No code path SHALL fall back to `ANTHROPIC_API_KEY`/API-platform billing.
+
+#### R-PTY-24 — Telegram stays on programmatic pool (documented)
+Telegram and any text-only channel SHALL remain on the stream-json programmatic pool by structural necessity; documented, not worked around with an API key.
+
+#### R-PTY-25 — Final docs sweep
+README/CLAUDE.md/`docs/` SHALL document the terminal surface, dual-bucket usage, the cutover gate, the rip-and-replace, and the no-API-key invariant; `bun run docs:sync` run if endpoints changed.
+
+**Milestone coverage:** 25 REQs (R-PTY-01..25) mapped across Phases 15–19. No orphans.
