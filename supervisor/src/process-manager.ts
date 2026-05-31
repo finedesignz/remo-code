@@ -468,13 +468,23 @@ export class ProcessManager {
     if (!run) return
     run.userStop = true
     if (run.restartTimer) { clearTimeout(run.restartTimer); run.restartTimer = null }
-    this.setState(run, 'stopping', { runId })
-    if (run.bridge) {
-      try { await run.bridge.stop() } catch {}
-    }
-    // If onExit didn't fire (already stopped or bridge null), finalize here.
-    if (this.runs.has(runId)) {
-      this.setState(run, 'idle', { runId, lastExit: { code: 0, reason: 'user_stop' } })
+    try {
+      this.setState(run, 'stopping', { runId })
+      if (run.bridge) {
+        try { await run.bridge.stop() } catch {}
+      }
+      // If onExit didn't fire (already stopped or bridge null), set final state.
+      if (this.runs.has(runId)) {
+        this.setState(run, 'idle', { runId, lastExit: { code: 0, reason: 'user_stop' } })
+      }
+    } catch {
+      // A setState→onLog write may throw (e.g. broken stdout pipe). Swallow —
+      // logging must never abort stop(); the slot is freed in `finally`.
+    } finally {
+      // Slot release MUST happen even if a setState→onLog write threw (e.g. a
+      // broken stdout pipe). Otherwise the slot leaks and eventually every
+      // launch is denied `concurrency_cap`. This is the belt to logging's
+      // suspenders (logging is now EPIPE-safe, but never depend on that here).
       this.runs.delete(runId)
     }
   }

@@ -7,6 +7,7 @@ import { join } from 'path'
 import { homedir, hostname } from 'os'
 import { startStatusServer, type StatusServer } from './status-server'
 import { VERSION } from './version'
+import { isBrokenPipe, installStreamErrorGuards, makeSafeTee } from './safe-logging'
 
 function logDir(): string {
   if (process.platform === 'win32') {
@@ -19,7 +20,20 @@ function logDir(): string {
 /** B6: the active log stream so callers (beforeExit) can flush + close. */
 let fileLogStream: WriteStream | null = null
 
+/** Install 'error' listeners on the std streams so a broken pipe to a dead
+ *  parent surfaces as a swallowed event instead of an uncaughtException.
+ *  Installed as early as possible (before any heavy logging). Idempotent. */
+let stdStreamGuardsInstalled = false
+function installStdStreamErrorGuards(): void {
+  if (stdStreamGuardsInstalled) return
+  stdStreamGuardsInstalled = true
+  installStreamErrorGuards([process.stdout, process.stderr])
+}
+
 function setupFileLogging(): WriteStream | null {
+  // Guard the std streams FIRST — a broken pipe from the very first console
+  // write below must not become an uncaughtException.
+  installStdStreamErrorGuards()
   try {
     const dir = logDir()
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
@@ -35,14 +49,11 @@ function setupFileLogging(): WriteStream | null {
       } catch {}
     }
     const stream = createWriteStream(logPath, { flags: 'a' })
+    // Guard the file stream too — a disk/rotation error must not crash either.
+    try { stream.on('error', () => {}) } catch {}
     fileLogStream = stream
-    const tee = (orig: (...a: any[]) => void, level: string) => (...args: any[]) => {
-      orig(...args)
-      try {
-        const line = args.map((a) => typeof a === 'string' ? a : (a instanceof Error ? (a.stack || a.message) : JSON.stringify(a))).join(' ')
-        stream.write(`${new Date().toISOString()} ${level} ${line}\n`)
-      } catch {}
-    }
+    const fileWrite = (line: string) => { stream.write(line) }
+    const tee = (orig: (...a: any[]) => void, level: string) => makeSafeTee(orig, level, fileWrite)
     console.log = tee(console.log.bind(console), 'INFO')
     console.error = tee(console.error.bind(console), 'ERROR')
     console.warn = tee(console.warn.bind(console), 'WARN')
@@ -152,6 +163,12 @@ async function main() {
     // supervisor.hello_ack. Log-only on failure — we're already in a fatal
     // path and must never throw inside a fatal handler.
     process.on('uncaughtException', (err) => {
+      // A broken stdout/stderr pipe (dead parent tray) must degrade logging to
+      // file-only and NEVER crash/exit — and must not spam the crash intake.
+      if (isBrokenPipe(err)) {
+        try { fileLogStream?.write(`${new Date().toISOString()} WARN [pipe] swallowed broken-pipe uncaughtException: ${err.message}\n`) } catch {}
+        return
+      }
       console.error('uncaughtException:', err.stack || err.message)
       try {
         void client.postCrashEnvelope({ name: err.name, message: err.message, stack: err.stack })

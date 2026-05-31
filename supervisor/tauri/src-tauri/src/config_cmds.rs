@@ -77,16 +77,23 @@ pub struct RootsConfig {
     pub configured: bool,
 }
 
-/// Read the `auto_update` preference. Defaults to `true` when absent —
-/// new installs and existing configs that never wrote the key get
-/// silent background updates by default. Users can opt out in Settings.
+/// Read the `auto_update` preference. Defaults to `false` when absent
+/// (changed 2026-05-31 after the owner's machine hung mid-install): silent
+/// background `downloadAndInstall()` trips a Windows UAC/SmartScreen elevation
+/// prompt, which corrupts the supervisor if it fires while the user is away.
+/// New installs and key-less configs therefore get notify-and-approve (the
+/// manual `UpdateNotifier` prompt) by default; silent background install is
+/// opt-in via Settings.
 #[tauri::command]
 pub fn get_auto_update() -> Result<bool, String> {
     let map = read_raw()?;
-    Ok(map
-        .get("auto_update")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true))
+    Ok(auto_update_from_map(&map))
+}
+
+/// Pure defaulting logic for `auto_update`, split out so it's unit-testable
+/// without touching the on-disk config. Absent/non-bool → `false` (notify-only).
+fn auto_update_from_map(map: &Map<String, Value>) -> bool {
+    map.get("auto_update").and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
 /// Write the `auto_update` preference. Idempotent — preserves all other keys.
@@ -339,5 +346,37 @@ fn parse_github_origin(url: &String) -> Option<Value> {
     let repo = parts.next()?.to_string();
     if owner.is_empty() || repo.is_empty() { return None }
     Some(serde_json::json!({ "owner": owner, "repo": repo }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Map, Value};
+
+    fn map_with(v: Value) -> Map<String, Value> {
+        let mut m = Map::new();
+        m.insert("auto_update".to_string(), v);
+        m
+    }
+
+    #[test]
+    fn auto_update_defaults_false_when_absent() {
+        // The 2026-05-31 fix: a key-less config must NOT silently auto-install.
+        assert_eq!(auto_update_from_map(&Map::new()), false);
+    }
+
+    #[test]
+    fn auto_update_defaults_false_when_non_bool() {
+        assert_eq!(auto_update_from_map(&map_with(json!("yes"))), false);
+        assert_eq!(auto_update_from_map(&map_with(json!(1))), false);
+        assert_eq!(auto_update_from_map(&map_with(Value::Null)), false);
+    }
+
+    #[test]
+    fn auto_update_respects_explicit_opt_in() {
+        // Silent install stays fully available when the user explicitly enables it.
+        assert_eq!(auto_update_from_map(&map_with(json!(true))), true);
+        assert_eq!(auto_update_from_map(&map_with(json!(false))), false);
+    }
 }
 
