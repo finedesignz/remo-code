@@ -1,189 +1,157 @@
-# remo-code — Interactive-PTY Runner Design Spec
+# remo-code — Universal PTY Terminal Surface (rip-and-replace) Design Spec
 
-Single approved design. No options to choose from — decisions below are settled. An executor
-implements exactly this.
+Single committed design. Decisions are settled. Executors follow this. This is the design/decision
+doc (the "why" + constraints + risks); GSD phase artifacts in `.planning/phases/` + `.planning/ROADMAP`
+handle execution detail and MUST stay reconciled with this file.
+
+**Design intent (user-confirmed):** rip-and-replace. ONE terminal surface for all human coding
+sessions; the rich chat UI (ChatSurface) and the stream-json rendering path are removed. The terminal
+is backend-agnostic (claude / codex / future).
 
 ## Context — why this exists
 
-Anthropic's **June 15, 2026** change moves *programmatic* Claude usage on subscription plans
-(Agent SDK, `claude -p`/`--print`, headless `stream-json`, third-party apps authenticating via
-the Agent SDK) OFF subscription interactive limits and ONTO a separate per-user monthly credit
-pool ($20 Pro / $100 Max-5x / $200 Max-20x; non-rollover; overage at full API rates or hard-stop).
-**Interactive** Claude Code in a terminal/IDE stays on subscription limits, unaffected.
+Anthropic's **June 15, 2026** change moves *programmatic* Claude usage on subscription plans (Agent
+SDK, `claude -p`, headless `stream-json`) OFF interactive subscription limits and ONTO a separate
+per-user monthly credit pool. **Interactive** Claude Code in a terminal stays on subscription limits.
 
-remo-code today spawns `claude --input-format stream-json --output-format stream-json --verbose`
-([`supervisor/src/runners/claude-runner.ts:79-84`](supervisor/src/runners/claude-runner.ts:79)) on
-the user's **subscription OAuth** login (it does `delete env.ANTHROPIC_API_KEY` at
-[`claude-runner.ts:94`](supervisor/src/runners/claude-runner.ts:94); confirmed by
-[`supervisor/src/usage/oauth-poll.ts`](supervisor/src/usage/oauth-poll.ts) reading
-`~/.claude/.credentials.json` `claudeAiOauth.accessToken`). That `stream-json` path is the
-**programmatic** entrypoint → metered against the credit pool from June 15 (~95% confidence;
-corroborated by the Multica daemon case + Anthropic's "Run Claude Code programmatically" docs).
+remo-code today spawns `claude --input-format stream-json --output-format stream-json` on the
+subscription OAuth login ([`supervisor/src/runners/claude-runner.ts:79-94`](supervisor/src/runners/claude-runner.ts:79);
+[`supervisor/src/usage/oauth-poll.ts`](supervisor/src/usage/oauth-poll.ts)). That `stream-json` path
+is the programmatic entrypoint → metered against the credit pool from June 15 (~95% confidence).
 
 **Goal:** keep human-driven remote coding on the **interactive subscription pool** by running the
-genuine interactive `claude` TUI in a PTY (the same entrypoint as SSH+tmux, which is uncontested),
-relayed to phone/browser — without an API key and without reusing credentials.
+genuine interactive `claude` TUI in a PTY (same entrypoint as SSH+tmux), relayed to phone/browser —
+without an API key and without reusing credentials.
 
 ## Hard constraints (non-negotiable)
 
-1. **API-key billing is NOT APPROVED for this project.** No code path may pass `ANTHROPIC_API_KEY`
-   (or any API-platform key) to a spawned `claude`. The existing `delete env.ANTHROPIC_API_KEY` at
-   `claude-runner.ts:94` STAYS, and the new PTY runner must do the same. There is **no API-key
-   fallback** anywhere. If the PTY/interactive approach fails (see "If PTY fails"), it fails — we do
-   not fall back to API-key billing.
-2. **Spawn the official `claude` client only.** Never extract, store, present, or reuse the OAuth
-   token directly. All auth is delegated to the official client (this is what keeps remo-code out of
-   the banned "third-party app authenticating as the subscription" class — that ban already pushed
-   SDK/token-reuse apps like OpenClaw onto API keys; remo-code is a wrapper around the official CLI,
-   which is why it still works on the subscription).
-3. **Only genuine human turns touch the PTY runner.** Unattended/scheduled/automation dispatch
-   (scheduler, orchestrator background turns, auto-dev, error-capture) MUST NOT be routed through the
-   PTY runner — doing so is "making a programmatic client look interactive," the flagged/ban-risk
-   move. A guard rejects non-interactive dispatch sources from the PTY runner.
-4. **Auth via `claude login` (interactive OAuth), not `setup-token`.** Default to the `login`
-   credential. Treat `setup-token` as suspect (it is the headless/non-interactive auth path and may
-   carry a programmatic classification — see post-6/15 checks). `login` uses a localhost redirect, so
-   it is run locally on each host; `setup-token` (copy/paste) is the only remote-auth path through the
-   relay and is used only when a host can't be touched locally — and only after its billing
-   classification is verified.
+1. **API-key billing is NOT APPROVED.** No code path passes `ANTHROPIC_API_KEY` to a spawned `claude`
+   (keep the `delete env.ANTHROPIC_API_KEY`). No API-key fallback anywhere. If the PTY/interactive
+   approach fails, fallback is a different backend CLI (see "If PTY fails"), never the API.
+2. **Spawn the official `claude` client only.** Never extract / store / present / reuse the OAuth
+   token. All auth delegated to the official client (this keeps remo-code out of the banned
+   third-party-app-as-subscription class).
+3. **Only genuine human turns touch the PTY surface.** Unattended/scheduled/automation (scheduler,
+   orchestrator background, auto-dev, error-capture) must NOT be injected into the interactive PTY —
+   that's "robot pressing enter via the interactive entrypoint," the flagged/ban-risk move. A guard
+   rejects non-interactive dispatch sources.
+4. **Auth via `claude login` (interactive OAuth), not `setup-token`.** `login` runs locally per host
+   (localhost redirect). `setup-token` (copy/paste) is the only remote-auth path through the relay
+   and is suspect (may carry a programmatic classification) — used only when a host can't be touched
+   locally, and only after its billing classification is verified post-June-15.
 
-## The design
+## The design — universal PTY terminal surface (rip-and-replace)
 
-**Retrofit remo-code** with an **additive** interactive runner alongside the existing stream-json
-runner — not a disguise over it. The stream-json path stays as-is for Codex and for any usage that
-accepts the credit pool.
+ONE terminal surface for every human session. The supervisor runs the interactive CLI (`claude`,
+or `codex`) inside a PTY; raw terminal I/O is relayed to a themed xterm.js panel that **replaces**
+ChatSurface as the conversation surface. The structured stream-json runner, the `RunnerEvent`
+pipeline rendering, and ChatSurface/bubble UI are **removed** once the terminal surface is proven.
 
-```
-Phone / browser  (themed xterm.js panel embedded in the existing remo-code React shell)
-   ↕ authenticated WebSocket  (raw terminal frames — NEW channel, not the structured agent-protocol)
-Supervisor (per host, where the repos live):  PTY ── real interactive `claude` TUI  → interactive pool
-   + tmux-backed persistence (survives phone disconnects)
-   + billing guardrail: poll /api/oauth/usage (both buckets), alert/halt on programmatic leak
-```
-
-### Components
-
-- **`supervisor/src/runners/claude-pty-runner.ts` (new).** Spawns the *interactive* `claude` (no
-  `-p`, no `--input-format stream-json`) inside a PTY (Bun/`node-pty`, ConPTY on Windows). Streams
-  raw terminal output out and writes raw input in. Does `delete env.ANTHROPIC_API_KEY` (constraint 1).
-  Implements only the human-interactive subset — it does NOT translate to the structured `RunnerEvent`
-  union (that union is for stream-json; the terminal path is raw bytes).
-- **Raw-terminal transport (new).** A dedicated WS channel for terminal bytes (data in/out, resize,
-  reattach) — separate from the structured `/ws/agent` `RunnerEvent`→agent-protocol pipeline in
-  `session-bridge.ts`. The hub relays these frames `/ws/client` ↔ `/ws/agent` unchanged in spirit.
-- **Web: embedded themed terminal (Embed-A).** xterm.js as a panel INSIDE the existing React shell.
-  App chrome (sidebar, nav, theme tokens `--bg-primary`/`--text-primary`, blue accent, fonts)
-  unchanged; only the **conversation surface** for an interactive Claude session renders the real TUI,
-  themed to match — like VS Code / Warp / Gitpod. Existing rich chat/grid UI stays for stream-json +
-  Codex sessions. (Reconstructing chat bubbles from the on-disk transcript JSONL is explicitly NOT
-  done — fragile undocumented-format dependency for cosmetics.)
-- **tmux persistence.** The interactive `claude` runs inside tmux so a dropped phone connection can
-  reattach with no lost state.
-- **Auth.** Delegated entirely to the official client (constraint 2). No remo-code auth changes for
-  Claude credentials; reuse existing opaque-cookie sessions + WS infra for the remo-code app itself.
+- **Backend-agnostic terminal.** The PTY runs whichever CLI the session selects (claude / codex /
+  future Grok). Billing/availability differs per backend, but the surface and relay are identical.
+- **`supervisor/src/runners/*-pty-runner.ts`.** Spawn the *interactive* CLI (no `-p`, no
+  `--input-format stream-json`) in a PTY (Bun/`node-pty`, ConPTY on Windows). Stream raw bytes out,
+  write raw input in. `delete env.ANTHROPIC_API_KEY` (constraint 1).
+- **Raw-terminal transport.** A WS channel for terminal bytes (data in/out, resize, reattach),
+  relayed by the hub `/ws/client` ↔ `/ws/agent`. The structured agent-protocol rendering path is
+  retired with ChatSurface.
+- **Web.** Themed xterm.js panel inside the existing React shell — app chrome (sidebar, nav, theme
+  tokens, blue accent, fonts) preserved; the conversation surface IS the terminal. tmux-backed for
+  reattach across phone disconnects.
+- **Auth.** Delegated entirely to the official client (constraint 2).
 
 ### Topology — supervisor-per-host (remote access preserved)
 
-"claude runs local to its supervisor" ≠ "you must be at the machine." Run a supervisor on each host
-you want to code on (laptop, VPS, work box); `claude` runs there; you reach any host from
-phone/browser because the hub relays. The hub already supports multiple supervisors on multiple hosts.
-OUT OF SCOPE: one supervisor SSH-ing to spawn `claude` on a *different* machine — to use a remote
-computer, run a supervisor on it.
+Run a supervisor on each host you code on; the CLI runs there; you reach any host from phone/browser
+via the hub relay (hub already supports multiple supervisors/hosts). OUT OF SCOPE: one supervisor
+SSH-ing to spawn the CLI on a *different* machine — to use a remote computer, run a supervisor on it.
 
-## Phased plan
+## Sequencing safeguard (protects the rip-and-replace)
 
-- **Phase 0 — Spike (buildable now; cutover GATED on June 15).** Minimal embedded web TUI, not
-  throwaway — the seed of the feature: interactive `claude` in a PTY (`node-pty`) on the supervisor
-  box, streamed to a themed xterm.js panel, accepts a typed turn, renders the TUI. Derisks the known
-  technical blocker: **`node-pty` is a native addon and does NOT bundle into `bun build --compile`**
-  (the sidecar). Phase 0 proves the PTY mechanic and informs how the runner ships in the compiled
-  sidecar (e.g. bundle the native module, ship a helper, or run the PTY host out-of-band).
-- **Phase 1 — Hardened relay.** PTY host + tmux persistence + authenticated raw-terminal WS + mobile
-  xterm.js (reconnect / resize / scrollback). Reuse remo-code auth + WS infra.
-- **Phase 2 — Billing guardrail.** Extend the existing usage poll
-  (`supervisor/src/usage/oauth-poll.ts` → hub store) to surface BOTH buckets; alert + optional
-  hard-halt when programmatic credit is consumed unexpectedly. No silent drain, no surprise hard-stop.
-- **Phase 3 — Scope-off automation.** Unattended work (scheduler / orchestrator background / auto-dev /
-  error-capture) stays on the stream-json/programmatic path behind the cost cap, or moves to a
-  non-Claude backend (Codex — already wired — or a future Gemini runner). **NOT an API key.**
+The destructive deletion is a one-way door. Order matters:
 
-## Telegram (and any text-only channel) — TWO plans
+1. **Build + mechanically prove** the universal terminal surface FIRST (Phases 15–16): node-pty on
+   Windows, compile-shipping, render fidelity, input injection, tmux reattach. Do NOT delete
+   ChatSurface / stream-json until the terminal surface is functional and proven.
+2. **Then rip** (delete ChatSurface, stream-json runner, bubble translation) — Phase 17.
+3. **June-15 billing verification gates the DEFAULT BACKEND, not the rip.** The terminal surface works
+   regardless of backend; verification only decides whether the default backend is Claude (if it bills
+   interactive) or Codex (if Claude-via-PTY bills programmatic). See "If PTY fails."
 
-The Telegram bridge ([`hub/src/telegram/bridge.ts:4-11`](hub/src/telegram/bridge.ts:4)) consumes
-structured `assistant_message:final` + `tool_use` events (emitted by the stream-json runner in
-`ws/agent.ts`). A PTY runner emits raw terminal ANSI — none of those events — and a TUI can't render
-in a chat app. So a PTY session can't feed Telegram by piping its bytes. Two documented approaches;
-the core PTY-runner design above is unchanged either way. **Default to Plan A; Plan B is the second
-plan, pursued only if the interactive-pool win for Telegram/orchestrator is wanted AND the
-transcript dependency is judged acceptable AND the June-15 billing check passes.**
+## Telegram — Plan A is dead; transcript-tail (Plan B) is the only path
 
-### Telegram Plan A (baseline — simplest, no new fragility)
+Rip-and-replace removes the stream-json runner, so the Telegram bridge's structured-event source
+(`assistant_message:final` + `tool_use`, [`hub/src/telegram/bridge.ts:4-11`](hub/src/telegram/bridge.ts:4))
+no longer exists. Therefore:
 
-Telegram **stays on the stream-json runner** → its turns bill the **programmatic credit pool**
-post-June-15, even though a human drives them (structural fact of the entrypoint, not a ToS issue).
-- Runner type is per-session: a session is either PTY-interactive (web/xterm.js → interactive pool)
-  or stream-json (Telegram-compatible → programmatic pool); they don't mix. The Telegram default
-  session (often the orchestrator) stays stream-json. The PTY runner is opt-in per session and is
-  never applied to a Telegram-default session.
-- Interactive-pool benefit applies only to the web terminal coding path; Telegram does not benefit.
-  To take it off the credit pool without this work: route Telegram to a Codex/Gemini backend, accept
-  the (modest, likely sub-credit) text-chat cost, or limit it. **Not an API key** (constraint 1).
+- **Telegram MUST move to transcript-tail (Plan B) or be dropped.** Drive the interactive PTY session;
+  source Telegram's output from the session's on-disk transcript JSONL
+  (`~/.claude/projects/<proj>/<session>.jsonl`, structured `assistant`/`tool_use` entries) — not the
+  terminal bytes. Inject Telegram messages into the PTY as input.
+- **Costs:** transcript format is undocumented (tracks an unstable contract, can break on CC
+  releases); extra plumbing for session→transcript mapping and surfacing permission/`user_question`/
+  slash flows as Telegram messages with responses injected back into the PTY.
+- **ToS line unchanged:** a genuine human Telegram message is fine; do NOT combine with
+  auto-nudge/scheduled prompts to drive the PTY unattended.
+- If transcript-tail is judged not worth it, Telegram is dropped (or pointed at a backend that still
+  emits structured events outside this surface — out of scope here).
 
-### Telegram Plan B (second plan — transcript-tail on an interactive PTY session)
+## If PTY fails (or Claude-via-PTY bills programmatic)
 
-Put Telegram on the **interactive pool** by driving an interactive PTY session and sourcing
-Telegram's output from the session's **on-disk transcript JSONL**, not the terminal bytes.
+No API-key fallback (constraint 1). In an all-PTY world the fallback is **swap the terminal's backend
+CLI**, since the surface is backend-agnostic:
 
-- **Input:** inject the Telegram message into the PTY (type + Enter), same as the web relay.
-- **Output:** tail the interactive session's transcript (`~/.claude/projects/<proj>/<session>.jsonl`),
-  which Claude Code appends turn-by-turn as structured `assistant` / `tool_use` entries → recover the
-  clean final text + tool summaries the bridge already expects. No ANSI scraping.
-- **Payoff:** ONE interactive PTY session serves both surfaces — raw terminal to xterm.js (web) and
-  transcript-derived messages to Telegram — all on the interactive pool. Resolves the orchestrator
-  tension (orchestrator can be PTY-interactive AND bridge to Telegram).
+- **Codex — primary fallback.** OpenAI's subscription INCLUDES programmatic/Codex usage within plan
+  limits (there's a "Codex Subscription API" via the ChatGPT plan; pricing aligned to API tokens, no
+  separate penalized credit pool). More permissive than Claude post-June-15. Already wired as a runner.
+- **Gemini — NOT a reliable fallback.** Gemini CLI + Code Assist reportedly stop serving individual/
+  Pro/Ultra tiers **June 18, 2026**, migrating to Antigravity CLI with tighter weekly quotas. Don't
+  bet on it without re-verifying.
+- **Grok — too immature.** Grok Build CLI is early beta (May 14, 2026), no free tier, unsettled
+  pricing. Revisit later.
 
-Costs / risks (why it's the second plan, not the default):
-- **Transcript format is undocumented** and can change between Claude Code releases — the bridge
-  tracks an unstable contract. (Same fragility declined for the web Embed-B; accepted here only
-  because a text channel has no terminal-free alternative.)
-- **Extra plumbing:** session→transcript-file mapping (resume / multiple files), and surfacing
-  interactive-only flows (permission prompts, `user_question`, slash commands) as Telegram messages
-  with responses injected back into the PTY.
-- **Billing still gated:** a Telegram-injected turn into an interactive PTY session *plausibly* bills
-  interactive (same posture as the web PTY path) but is unverified — confirm via the June-15
-  two-bucket check before relying on it.
-- **ToS line unchanged:** a genuine human Telegram message is fine (you pressed send). Do NOT combine
-  with auto-nudge / scheduled prompts to drive the PTY unattended — that becomes a robot pressing
-  enter. **Not an API key** (constraint 1).
+(All provider facts secondary-sourced and fast-moving — re-verify before relying.)
 
-## If PTY fails
+## Phased plan (aligns to GSD milestone m-interactive-pty-runner, Phases 15–19)
 
-If the post-6/15 check shows interactive PTY sessions bill the **programmatic** bucket, or the
-approach is flagged: **the approach fails. No API-key fallback.** Fallback paths are:
-- **Codex** runner (already in `supervisor/src/runners/`), and/or
-- a **new Gemini runner** (Gemini CLI) for the work that would have run on Claude.
-The remo-code interactive-coding UX would then target Codex/Gemini instead of subscription Claude.
+- **15 · pty-spike-and-compile-derisk.** Prove interactive `claude` in a PTY renders + takes input;
+  derisk **`node-pty` native addon + `bun build --compile`** (native-beside-exe vs helper-exe vs
+  out-of-band — `autonomous:false` checkpoint, may change MSI packaging). Raw-terminal WS + xterm panel.
+- **16 · hardened-pty-relay-and-mobile-terminal.** `claude-pty-runner.ts`, tmux reattach, auth'd
+  raw-terminal relay, mobile xterm, human-only guard (constraint 3).
+- **17 · codex-pty-runner-and-chatsurface-rip-and-replace.** Codex PTY runner; DELETE ChatSurface +
+  stream-json rendering + dead bubble translation. **Only after 15–16 prove the surface works.**
+- **18 · billing-guardrail-dual-bucket-usage.** Dual-bucket poll (extend
+  `supervisor/src/usage/oauth-poll.ts`), programmatic-leak alert/halt.
+- **19 · cutover-gate-and-automation-fallback.** June-15 runbook; verify Claude-via-PTY bucket; set
+  default backend (Claude if interactive, else Codex); automation stays programmatic or moves to Codex.
+  No API key.
 
-## Verify after June 15 (the open variables — do NOT build cutover before these)
+## Verify after June 15 (gates the default backend, not the rip)
 
-1. **PTY interactive session → interactive bucket?** Core gate. Run one PTY `claude` turn, watch
-   `/api/oauth/usage` to see which balance moves. Green-light the cutover only if interactive.
-2. **`setup-token` classification.** Does a `setup-token`-provisioned credential bill interactive or
-   programmatic? (Hypothesis to test: `setup-token` may become the SDK/programmatic auth.) Auth one
-   host via `login` and one via `setup-token`, run identical turns, compare buckets.
-3. **Subagents / hooks / MCP inside an interactive session** — which bucket? (Plausibly interactive,
-   since the main `claude` process spawns Task subagents in-process under the same session/OAuth — but
-   undocumented.) Run a subagent-heavy turn, measure programmatic-bucket movement; quantify residual.
-4. **login-credential headless reclassification risk.** Watch whether Anthropic moves to
-   credential-based classification and/or starts rejecting headless use of `login` credentials.
+1. **PTY interactive `claude` → which bucket?** Run a turn, watch `/api/oauth/usage`. Interactive →
+   Claude stays default. Programmatic → default backend becomes Codex.
+2. **`setup-token` classification** (interactive vs programmatic) — test login vs setup-token side by
+   side. (Hypothesis: setup-token may become SDK/programmatic auth.)
+3. **Subagents / hooks / MCP inside an interactive session** — which bucket? (Plausibly interactive;
+   main `claude` spawns Task subagents in-process under the same session/OAuth.) Measure residual.
+4. **login-credential headless reclassification risk** — watch for Anthropic moving to credential-
+   based classification or rejecting headless use of `login` credentials.
 
-## Verification (functional, build-time)
+## Functional verification (build-time)
 
-- Re-confirm spawn argv + env in the new runner: must NOT pass `ANTHROPIC_API_KEY`; must launch
-  *interactive* `claude` (no `-p`, no `--input-format stream-json`).
-- Prove tmux reattach survives a dropped phone connection with no lost state.
-- Prove input injection renders as a normal typed turn in the TUI.
-- Confirm the raw-terminal channel is isolated from the structured agent-protocol (no `RunnerEvent`
-  coupling).
-- Per repo rule: all work in a fresh `feat/` worktree off `origin/main`
-  (`feat/interactive-pty-runner` already created, currently empty/parked).
+- New runner: no `ANTHROPIC_API_KEY`; launches *interactive* CLI (no `-p`, no `--input-format
+  stream-json`).
+- Terminal surface renders fidelity + accepts injected input as a normal typed turn; tmux reattach
+  survives a dropped phone connection with no lost state.
+- Human-only guard rejects non-interactive dispatch sources from the PTY surface.
+- Do NOT delete ChatSurface/stream-json until the terminal surface passes the above (sequencing
+  safeguard).
+- All work in the `feat/interactive-pty-runner` worktree off `origin/main`.
+
+## Residual one-way-door note (acknowledged, user-accepted)
+
+Deleting ChatSurface/stream-json is permanent within this branch — if the terminal UX proves worse for
+real mobile coding than the rich UI, there's no in-product revert (only git history). User has accepted
+this trade for a single unified terminal surface. The sequencing safeguard limits the blast radius to
+"terminal works but UX disappoints," not "nothing works."
