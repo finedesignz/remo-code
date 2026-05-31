@@ -107,26 +107,54 @@ computer, run a supervisor on it.
   error-capture) stays on the stream-json/programmatic path behind the cost cap, or moves to a
   non-Claude backend (Codex — already wired — or a future Gemini runner). **NOT an API key.**
 
-## Telegram (and any text-only channel) — impact
+## Telegram (and any text-only channel) — TWO plans
 
-**Telegram cannot ride the PTY/interactive path and will remain on the programmatic pool.**
-The Telegram bridge ([`hub/src/telegram/bridge.ts:4-11`](hub/src/telegram/bridge.ts:4)) subscribes
-to structured `assistant_message:final` events and uses `tool_use` activity for summarized
-streaming — all emitted by the **stream-json runner** (`ws/agent.ts`). A PTY runner emits raw
-terminal ANSI, none of those events, and a TUI can't render in a chat app. So:
+The Telegram bridge ([`hub/src/telegram/bridge.ts:4-11`](hub/src/telegram/bridge.ts:4)) consumes
+structured `assistant_message:final` + `tool_use` events (emitted by the stream-json runner in
+`ws/agent.ts`). A PTY runner emits raw terminal ANSI — none of those events — and a TUI can't render
+in a chat app. So a PTY session can't feed Telegram by piping its bytes. Two documented approaches;
+the core PTY-runner design above is unchanged either way. **Default to Plan A; Plan B is the second
+plan, pursued only if the interactive-pool win for Telegram/orchestrator is wanted AND the
+transcript dependency is judged acceptable AND the June-15 billing check passes.**
 
-- **Telegram stays on the stream-json runner** → its turns bill the **programmatic credit pool**
-  post-June-15, even though a human drives them. This is a structural fact of the entrypoint, not a
-  spoofing/ToS issue — Telegram simply can't reach the interactive entrypoint.
-- **Runner type is per-session.** A session is either PTY-interactive (web/xterm.js → interactive
-  pool) or stream-json (Telegram-compatible → programmatic pool); they don't mix. Telegram's default
-  session (often the orchestrator) MUST remain a stream-json session. Switching that session to the
-  PTY runner breaks Telegram bridging for it. The new runner must therefore be opt-in per session and
-  must not be applied to a session that is a Telegram default.
-- **The interactive-pool benefit applies only to the web terminal coding path.** Telegram does not
-  benefit. To take Telegram off the credit pool: route its work to a Codex/Gemini backend, accept the
-  credit cost (text chat is usually modest and likely fits the $20–$200 credit), or limit it.
-  **Not an API key** (constraint 1).
+### Telegram Plan A (baseline — simplest, no new fragility)
+
+Telegram **stays on the stream-json runner** → its turns bill the **programmatic credit pool**
+post-June-15, even though a human drives them (structural fact of the entrypoint, not a ToS issue).
+- Runner type is per-session: a session is either PTY-interactive (web/xterm.js → interactive pool)
+  or stream-json (Telegram-compatible → programmatic pool); they don't mix. The Telegram default
+  session (often the orchestrator) stays stream-json. The PTY runner is opt-in per session and is
+  never applied to a Telegram-default session.
+- Interactive-pool benefit applies only to the web terminal coding path; Telegram does not benefit.
+  To take it off the credit pool without this work: route Telegram to a Codex/Gemini backend, accept
+  the (modest, likely sub-credit) text-chat cost, or limit it. **Not an API key** (constraint 1).
+
+### Telegram Plan B (second plan — transcript-tail on an interactive PTY session)
+
+Put Telegram on the **interactive pool** by driving an interactive PTY session and sourcing
+Telegram's output from the session's **on-disk transcript JSONL**, not the terminal bytes.
+
+- **Input:** inject the Telegram message into the PTY (type + Enter), same as the web relay.
+- **Output:** tail the interactive session's transcript (`~/.claude/projects/<proj>/<session>.jsonl`),
+  which Claude Code appends turn-by-turn as structured `assistant` / `tool_use` entries → recover the
+  clean final text + tool summaries the bridge already expects. No ANSI scraping.
+- **Payoff:** ONE interactive PTY session serves both surfaces — raw terminal to xterm.js (web) and
+  transcript-derived messages to Telegram — all on the interactive pool. Resolves the orchestrator
+  tension (orchestrator can be PTY-interactive AND bridge to Telegram).
+
+Costs / risks (why it's the second plan, not the default):
+- **Transcript format is undocumented** and can change between Claude Code releases — the bridge
+  tracks an unstable contract. (Same fragility declined for the web Embed-B; accepted here only
+  because a text channel has no terminal-free alternative.)
+- **Extra plumbing:** session→transcript-file mapping (resume / multiple files), and surfacing
+  interactive-only flows (permission prompts, `user_question`, slash commands) as Telegram messages
+  with responses injected back into the PTY.
+- **Billing still gated:** a Telegram-injected turn into an interactive PTY session *plausibly* bills
+  interactive (same posture as the web PTY path) but is unverified — confirm via the June-15
+  two-bucket check before relying on it.
+- **ToS line unchanged:** a genuine human Telegram message is fine (you pressed send). Do NOT combine
+  with auto-nudge / scheduled prompts to drive the PTY unattended — that becomes a robot pressing
+  enter. **Not an API key** (constraint 1).
 
 ## If PTY fails
 
