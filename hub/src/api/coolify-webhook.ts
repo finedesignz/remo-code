@@ -45,6 +45,7 @@ import {
 } from '../db/dal.ts'
 import { runNow as dispatcherRunNow } from '../scheduler/dispatcher.ts'
 import { deployFailureFingerprint } from '../scheduler/deploy-fingerprint.ts'
+import { hasActiveSessionForRepo } from '../sessions/repo-routing.ts'
 import { ipAllowed, sourceIpFromHeaders } from '../lib/cidr.ts'
 
 export const coolifyWebhookRoutes = new Hono()
@@ -180,9 +181,10 @@ async function handleAuthenticated(opts: {
   rawBody: string
   sourceIp: string | null
   allowedIps: string[]
+  autoTriageEnabled: boolean
   legacy: boolean
 }) {
-  const { userId, rawBody, sourceIp, allowedIps, legacy } = opts
+  const { userId, rawBody, sourceIp, allowedIps, autoTriageEnabled, legacy } = opts
   const preview = rawBody.slice(0, 500)
 
   // (1) IP allowlist (only if user has configured one).
@@ -231,20 +233,50 @@ async function handleAuthenticated(opts: {
     commit_sha: payload.commit_sha ?? null,
   })
 
-  // (4) Triage on failed deploys.
+  // (4) Triage on failed deploys — gated by the master switch + active-session
+  // suppression. `triageDisposition` is folded into the audit reason at (5).
+  let triageDisposition = `run_id=${run.id}`
   if (payload.event === 'deployment.failed') {
-    void dispatchTriage(userId, run.id, payload).catch((err: any) => {
-      console.warn('[coolify-webhook] triage dispatch failed:', err?.message)
-    })
+    if (!autoTriageEnabled) {
+      // (4a) Master switch OFF — persist metadata, skip triage entirely.
+      triageDisposition = `run_id=${run.id} skipped=auto_triage_disabled`
+      console.info(
+        `[coolify-webhook] auto-triage disabled for user=${userId} app=${payload.application_uuid} — skipping dispatch`,
+      )
+    } else {
+      // (4b) Active-session suppression — if a dev already has a LIVE session on
+      // this repo, they're working + monitoring; don't interrupt with triage.
+      // Fail-open: hasActiveSessionForRepo swallows DB errors to `false`, so a
+      // lookup failure dispatches anyway (never silently drop triage).
+      let suppress = false
+      try {
+        suppress = await hasActiveSessionForRepo(userId, payload.git_repository)
+      } catch (err: any) {
+        console.warn(
+          `[coolify-webhook] active-session lookup errored (fail-open, dispatching): ${err?.message}`,
+        )
+      }
+      if (suppress) {
+        triageDisposition = `run_id=${run.id} skipped=suppressed_active_dev_session`
+        console.info(
+          `[coolify-webhook] active dev session on repo=${payload.git_repository} — suppressing triage for app=${payload.application_uuid}`,
+        )
+      } else {
+        void dispatchTriage(userId, run.id, payload).catch((err: any) => {
+          console.warn('[coolify-webhook] triage dispatch failed:', err?.message)
+        })
+      }
+    }
   }
 
-  // (5) Audit row — success. Reason carries the run_id for UI cross-ref.
+  // (5) Audit row — success. Reason carries the run_id (+ any triage skip reason)
+  // for UI cross-ref.
   await logAttempt(
     userId,
     sourceIp,
     payload.event,
     legacy ? 'legacy_hmac' : 'success',
-    `run_id=${run.id}`,
+    triageDisposition,
     preview,
   )
 
@@ -265,6 +297,7 @@ coolifyWebhookRoutes.post('/webhook/:user_id/:token', async (c) => {
   const cfg = await getUserCoolifyWebhookConfig(userId).catch(() => ({
     secret: null,
     allowedIps: [] as string[],
+    autoTriageEnabled: true,
   }))
 
   // Constant-time compare. Always run compare against a dummy when missing
@@ -289,6 +322,7 @@ coolifyWebhookRoutes.post('/webhook/:user_id/:token', async (c) => {
     rawBody,
     sourceIp,
     allowedIps: cfg.allowedIps,
+    autoTriageEnabled: cfg.autoTriageEnabled,
     legacy: false,
   })
   return c.json(result.body, result.status)
@@ -343,7 +377,11 @@ coolifyWebhookRoutes.post('/webhook/:user_id', async (c) => {
   }
 
   // Allowlist on legacy too — same defense-in-depth applies.
-  const cfg = await getUserCoolifyWebhookConfig(userId).catch(() => ({ secret, allowedIps: [] as string[] }))
+  const cfg = await getUserCoolifyWebhookConfig(userId).catch(() => ({
+    secret,
+    allowedIps: [] as string[],
+    autoTriageEnabled: true,
+  }))
 
   // Flag user as still on the legacy HMAC format so the Settings UI can show
   // a "rotate to migrate" banner. Best-effort — never block the webhook.
@@ -356,6 +394,7 @@ coolifyWebhookRoutes.post('/webhook/:user_id', async (c) => {
     rawBody,
     sourceIp,
     allowedIps: cfg.allowedIps,
+    autoTriageEnabled: cfg.autoTriageEnabled,
     legacy: true,
   })
   return c.json(result.body, result.status)
