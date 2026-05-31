@@ -19,7 +19,7 @@ import { useActivity } from '../hooks/useActivity'
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
 import { ApiKeyModal } from './ApiKeyModal'
-import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
+import { connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
 import { hubFetch } from '../lib/api'
 
@@ -229,11 +229,11 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Chat-specific session strip (kept — it's session chrome, not app chrome). */}
         <div className="relative z-40 flex items-center gap-3 px-3 py-2 border-b border-[var(--border-color)]/40 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0">
-          {/* Mobile: open the active-session sidebar slide-over. The header
-              SessionDropdown only shows the current session, so this trigger is
-              how mobile users browse/switch between active sessions. Offline /
-              prior sessions are launched from Settings -> Supervisor, never the
-              sidebar (the sidebar is active-only by design). */}
+          {/* Mobile: hamburger opens the active-session sidebar slide-over —
+              the single way to browse/switch sessions on mobile (the old
+              header SessionDropdown was redundant with it and was removed).
+              Offline / prior sessions are launched from Settings -> Supervisor,
+              never the sidebar (the sidebar is active-only by design). */}
           <button
             type="button"
             onClick={() => setSidebarOpen(true)}
@@ -246,15 +246,14 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
               <line x1="3" y1="13" x2="15" y2="13" />
             </svg>
           </button>
-          <div className="md:hidden flex-1 min-w-0">
-            <SessionDropdown
-              sessions={sessionsHook.sessions}
-              activeSessionId={activeSessionId}
-              onSelectSession={handleSelectSession}
-              unreadCounts={unreadCounts}
-            />
-          </div>
-          <div className="hidden md:block flex-1 min-w-0">
+          {/* Current-session title (mobile + desktop). On mobile, tap to open
+              the session list. Switching happens in the sidebar, not here. */}
+          <button
+            type="button"
+            onClick={() => { if (window.innerWidth < 768) setSidebarOpen(true) }}
+            className="flex-1 min-w-0 text-left md:cursor-default md:pointer-events-none"
+            aria-label={activeSession ? sessionLabel(activeSession) : 'Remo Code'}
+          >
             <h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate flex items-center gap-1.5">
               {activeSession ? sessionLabel(activeSession) : 'Remo Code'}
               {activeSession && (
@@ -266,7 +265,7 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
             {activeSession?.project_dir && (
               <p className="text-[11px] text-[var(--text-muted)] truncate">{activeSession.project_dir}</p>
             )}
-          </div>
+          </button>
 
           {activeSession && (activeSession.status === 'online' || activeSession.status === 'thinking') ? (
             <span className="flex items-center gap-1.5 text-xs text-emerald-400 shrink-0">
