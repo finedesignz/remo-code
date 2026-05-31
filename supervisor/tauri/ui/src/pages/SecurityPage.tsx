@@ -1,71 +1,37 @@
-// Phase 08 — Security page: shows the API key (masked + reveal toggle), the
-// hub URL, and a "Rotate API Key" button that deep-links into the hub's
-// settings → API keys page in the system browser.
+// Security tab — API key (masked + reveal + copy + update), host, supervisor ID.
 //
-// The reveal toggle re-fetches via IPC each time it is enabled — we never
-// retain the unmasked key in React state across renders, only between
-// `await invoke(...)` and the next render. This keeps a screenshot of a
-// running supervisor (with the toggle off) from leaking the key.
+// Backend calls reuse existing Tauri commands (get_runtime_status, set_api_key).
+// The reveal only surfaces the already-masked value the runtime status exposes;
+// the raw key never leaves supervisor.json.
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Eye, EyeOff } from "lucide-react";
+import {
+  Button,
+  Card,
+  CopyButton,
+  ErrorBanner,
+  IconButton,
+  ReadOnlyRow,
+  SectionTitle,
+} from "../components/ui";
 
 interface RuntimeStatus {
-  hub_url: string;
   api_key_set: boolean;
   api_key_masked: string;
   hostname: string;
   supervisor_id: string;
-  config_path: string;
-  config_exists: boolean;
-  sidecar_status: string;
-  version: string;
-}
-
-// Reads the raw api_key out of supervisor.json on demand by parsing the
-// runtime status' config_path. We do not expose an "unmasked" IPC because the
-// masked form is what we want everywhere except the explicit reveal action;
-// instead, we re-read supervisor.json once and surface just the api_key field.
-// In practice the user installing this app is also the one writing the file,
-// so reading it client-side via fs (not available here) vs. a dedicated IPC
-// is equivalent. We add a tiny `get_api_key_full` IPC to keep the contract
-// narrow and reviewable.
-
-// Mirror of the Rust `set_hub_url` validation: http(s) scheme + non-empty host.
-function isValidHubUrl(v: string): boolean {
-  const t = v.trim().replace(/\/+$/, "");
-  const rest = t.startsWith("https://")
-    ? t.slice("https://".length)
-    : t.startsWith("http://")
-    ? t.slice("http://".length)
-    : null;
-  if (rest === null) return false;
-  const host = rest.split(/[/?#]/)[0];
-  return host.length > 0 && !host.includes(" ");
-}
-
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="grid grid-cols-[140px_1fr] gap-3 py-1.5 items-start">
-      <dt className="text-xs uppercase tracking-wide text-[var(--text-muted)] pt-0.5">{label}</dt>
-      <dd className="text-sm text-[var(--text-secondary)] break-all">{children}</dd>
-    </div>
-  );
 }
 
 export default function SecurityPage() {
   const [status, setStatus] = useState<RuntimeStatus | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
-  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
   const [editing, setEditing] = useState(false);
   const [draftKey, setDraftKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
-  // Hub URL editing.
-  const [editingHub, setEditingHub] = useState(false);
-  const [draftHub, setDraftHub] = useState("");
-  const [hubSaving, setHubSaving] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -77,27 +43,20 @@ export default function SecurityPage() {
     }
   }, []);
 
-  useEffect(() => { void refresh(); }, [refresh]);
-
-  const onCopy = useCallback(async () => {
-    if (!status?.api_key_masked) return;
-    try {
-      await navigator.clipboard.writeText(status.api_key_masked);
-      setCopyState("copied");
-      window.setTimeout(() => setCopyState("idle"), 1500);
-    } catch {}
-  }, [status]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
   const onSave = useCallback(async () => {
     setSaving(true);
     setSaveMsg(null);
     setErr(null);
     try {
-      await invoke("set_api_key", { apiKey: draftKey });
+      await invoke("set_api_key", { apiKey: draftKey.trim() });
       setSaveMsg("Saved — sidecar restarting");
       setDraftKey("");
       setEditing(false);
-      window.setTimeout(() => { void refresh(); }, 600);
+      window.setTimeout(() => void refresh(), 600);
       window.setTimeout(() => setSaveMsg(null), 3000);
     } catch (e: any) {
       setErr(String(e));
@@ -106,94 +65,42 @@ export default function SecurityPage() {
     }
   }, [draftKey, refresh]);
 
-  const onRotate = useCallback(async () => {
-    const base = status?.hub_url ?? "https://app.remo-code.com";
-    const url = `${base.replace(/\/$/, "")}/#/settings/api-keys`;
-    try {
-      await invoke("open_external_url", { url });
-    } catch (e: any) {
-      setErr(String(e));
-    }
-  }, [status]);
-
-  const onSaveHub = useCallback(async () => {
-    const v = draftHub.trim();
-    if (!isValidHubUrl(v)) { setErr("Hub URL must be a full http:// or https:// URL"); return; }
-    setHubSaving(true);
-    setSaveMsg(null);
-    setErr(null);
-    try {
-      await invoke("set_hub_url", { hubUrl: v });
-      setSaveMsg("Hub URL saved — sidecar restarting");
-      setEditingHub(false);
-      setDraftHub("");
-      window.setTimeout(() => { void refresh(); }, 600);
-      window.setTimeout(() => setSaveMsg(null), 3000);
-    } catch (e: any) {
-      setErr(String(e));
-    } finally {
-      setHubSaving(false);
-    }
-  }, [draftHub, refresh]);
+  const masked = status?.api_key_masked ?? "";
+  const display = status?.api_key_set
+    ? revealed
+      ? masked
+      : masked.replace(/./g, "•").slice(0, 24)
+    : "—";
 
   return (
-    <div className="max-w-2xl space-y-5">
-      <header>
-        <h1 className="text-lg font-semibold">Security</h1>
-        <p className="text-sm text-[var(--text-muted)]">
-          Credentials and gateway endpoints used by the sidecar.
-        </p>
-      </header>
+    <div className="space-y-5">
+      <ErrorBanner message={err} />
 
-      {err && (
-        <div className="bg-red-500/10 ring-1 ring-red-500/30 rounded-lg px-3 py-2 text-sm text-red-300">
-          {err}
-        </div>
-      )}
+      <Card className="space-y-3">
+        <SectionTitle
+          title="API key"
+          info="Only the first 6 and last 4 characters are ever surfaced; the raw key never leaves supervisor.json. Rotate on the hub, then paste the new key here."
+        />
 
-      <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5 space-y-3">
-        <h2 className="text-sm font-semibold">API key</h2>
-        <dl>
-          <Row label="State">
-            {status?.api_key_set
-              ? <span className="text-emerald-300">Configured</span>
-              : <span className="text-amber-300">Not set — rotate to generate one</span>}
-          </Row>
-          <Row label="Value">
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-xs text-[var(--text-secondary)]">
-                {status?.api_key_set
-                  ? (revealed ? status.api_key_masked : status.api_key_masked.replace(/./g, "•").slice(0, 24))
-                  : "—"}
-              </span>
-              <button
-                type="button"
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-xs text-[var(--text-secondary)] break-all">
+            {display}
+          </span>
+          {status?.api_key_set && (
+            <>
+              <IconButton
+                icon={revealed ? EyeOff : Eye}
+                label={revealed ? "Hide" : "Show"}
                 onClick={() => setRevealed((v) => !v)}
-                disabled={!status?.api_key_set}
-                className="text-xs px-2 py-1 rounded text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-40"
-              >
-                {revealed ? "Hide" : "Show"}
-              </button>
-              <button
-                type="button"
-                onClick={onCopy}
-                disabled={!status?.api_key_set || !revealed}
-                className="text-xs px-2 py-1 rounded text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-40"
-              >
-                {copyState === "copied" ? "Copied" : "Copy"}
-              </button>
-            </div>
-            <p className="text-[11px] text-[var(--text-muted)] pt-1">
-              Only the first 6 and last 4 characters are ever surfaced; the
-              raw key never leaves <span className="font-mono">supervisor.json</span>.
-            </p>
-          </Row>
-        </dl>
+                size={15}
+              />
+              <CopyButton value={masked} label="Copy key" />
+            </>
+          )}
+        </div>
+
         {editing ? (
           <div className="space-y-2 pt-1">
-            <label className="block text-xs text-[var(--text-muted)]">
-              Paste the new API key (starts with <span className="font-mono">remo_</span>)
-            </label>
             <input
               type="text"
               autoFocus
@@ -201,118 +108,63 @@ export default function SecurityPage() {
               autoComplete="off"
               value={draftKey}
               onChange={(e) => setDraftKey(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && draftKey.trim()) void onSave();
+                else if (e.key === "Escape") {
+                  setEditing(false);
+                  setDraftKey("");
+                }
+              }}
               placeholder="remo_…"
-              className="w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/60 text-[var(--text-primary)] outline-none ring-1 ring-transparent focus:ring-blue-500/40"
+              className="w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-primary)] outline-none ring-1 ring-transparent focus:ring-2 focus:ring-blue-500"
             />
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => { void onSave(); }}
+              <Button
+                variant="primary"
+                onClick={() => void onSave()}
                 disabled={saving || !draftKey.trim()}
-                className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
               >
-                {saving ? "Saving…" : "Save & restart sidecar"}
-              </button>
-              <button
-                type="button"
-                onClick={() => { setEditing(false); setDraftKey(""); }}
+                {saving ? "Saving…" : "Save & restart"}
+              </Button>
+              <Button
+                onClick={() => {
+                  setEditing(false);
+                  setDraftKey("");
+                }}
                 disabled={saving}
-                className="px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-40"
               >
                 Cancel
-              </button>
+              </Button>
             </div>
           </div>
         ) : (
-          <div className="flex items-center gap-2 pt-1 flex-wrap">
-            <button
-              type="button"
-              onClick={() => setEditing(true)}
-              className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white"
-            >
+          <div className="pt-1">
+            <Button variant="primary" onClick={() => setEditing(true)}>
               {status?.api_key_set ? "Update API key" : "Set API key"}
-            </button>
-            <button
-              type="button"
-              onClick={onRotate}
-              className="px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40"
-            >
-              Rotate on hub
-            </button>
-            <span className="text-xs text-[var(--text-muted)]">
-              Rotate in the browser, then paste the new key here.
-            </span>
+            </Button>
           </div>
         )}
-        {saveMsg && (
-          <div className="text-xs text-emerald-300 pt-1">{saveMsg}</div>
-        )}
-      </section>
 
-      <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
-        <h2 className="text-sm font-semibold mb-2">Gateway</h2>
+        {saveMsg && <div className="text-xs text-emerald-300 pt-1">{saveMsg}</div>}
+      </Card>
+
+      <Card>
         <dl>
-          <Row label="Hub URL">
-            {editingHub ? (
-              <div className="space-y-2">
-                <input
-                  type="text"
-                  autoFocus
-                  spellCheck={false}
-                  autoComplete="off"
-                  value={draftHub}
-                  onChange={(e) => setDraftHub(e.target.value)}
-                  placeholder="https://app.remo-code.com"
-                  className="w-full font-mono text-xs px-3 py-2 rounded-lg bg-[var(--bg-tertiary)]/60 text-[var(--text-primary)] outline-none ring-1 ring-transparent focus:ring-blue-500/40"
-                />
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => { void onSaveHub(); }}
-                    disabled={hubSaving || !draftHub.trim()}
-                    className="px-3 py-2 rounded-lg text-sm bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-40"
-                  >
-                    {hubSaving ? "Saving…" : "Save & restart sidecar"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setEditingHub(false); setDraftHub(""); }}
-                    disabled={hubSaving}
-                    className="px-3 py-2 rounded-lg text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-40"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <span className="font-mono">{status?.hub_url ?? "—"}</span>
-                <button
-                  type="button"
-                  onClick={() => { setEditingHub(true); setDraftHub(status?.hub_url ?? "https://app.remo-code.com"); }}
-                  className="text-xs px-2 py-1 rounded text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40"
-                >
-                  Edit
-                </button>
-              </div>
-            )}
-          </Row>
-          <Row label="Supervisor ID">
-            <span className="font-mono text-xs">{status?.supervisor_id ?? "—"}</span>
-          </Row>
-          <Row label="Host">
+          <ReadOnlyRow label="Host">
             <span className="font-mono">{status?.hostname ?? "—"}</span>
-          </Row>
+          </ReadOnlyRow>
+          <ReadOnlyRow label="Supervisor ID">
+            <span className="inline-flex items-center gap-1.5 min-w-0">
+              <span className="font-mono text-xs truncate">
+                {status?.supervisor_id ?? "—"}
+              </span>
+              {status?.supervisor_id && (
+                <CopyButton value={status.supervisor_id} label="Copy ID" />
+              )}
+            </span>
+          </ReadOnlyRow>
         </dl>
-      </section>
-
-      <section className="bg-[var(--bg-secondary)]/60 rounded-xl p-5">
-        <h2 className="text-sm font-semibold mb-2">Hardening</h2>
-        <p className="text-sm text-[var(--text-muted)]">
-          The dangerous-skip-permissions cap, restrict-to-git, audit log
-          toggle, and max-concurrent slider land in a later wave.
-        </p>
-      </section>
+      </Card>
     </div>
   );
 }
