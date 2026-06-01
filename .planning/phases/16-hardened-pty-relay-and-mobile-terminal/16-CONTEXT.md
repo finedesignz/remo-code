@@ -4,6 +4,8 @@
 **Status:** Ready for planning
 **Source:** Approved design spec `.planning/architecture/interactive-pty-runner-SPEC.md` (committed 6ef6953) + user RIP-AND-REPLACE override. Consumes Phase 15 SPIKE-FINDINGS (node-pty compile-shipping approach).
 
+> **OPERATOR DECISION (2026-05-31) — supersedes the "tmux for persistence" / node-pty-shipping assumptions below where they imply a bundled-Node host.** Option C (Rust ConPTY — PTY hosting in the Tauri Rust process, Bun relays bytes over a local channel) is the TARGET end-state, **GATED** on a Task-0 derisk spike in 16-PLAN-001 (spawn the genuine interactive `claude` TUI from Rust via wezterm `portable-pty`/`conpty`, capture the real trust prompt, confirm byte round-trip, `ANTHROPIC_API_KEY` removed, no programmatic flags). PASS → Option C (Node `pty-host.mjs` detour dropped on Windows; the Phase-15 node-pty compile-shipping approach + tmux/ring-buffer notes apply to the FALLBACK only). FAIL → Option A (bundled portable node.exe + node-pty + pty-host.mjs — Phase-15-proven). The locked constraints 1-5 (no API key, official client only, human-only, `claude login`, interactive-only no programmatic flags) hold UNCHANGED on either branch.
+
 <domain>
 ## Phase Boundary
 
@@ -66,6 +68,12 @@ Gemini fallback (Phase 19); Telegram transcript-tail + permission injection + wr
   agent-protocol pipeline (`session-bridge.ts`). The PTY runner ships raw bytes; it does NOT translate
   to the `RunnerEvent` union and does NOT import `agent-protocol`/`session-bridge`.
 
+### PTY hosting strategy — Option C (Rust ConPTY) target, spike-gated, Option A fallback (OPERATOR, 2026-05-31)
+- See the operator-decision callout at the top of this file. 16-PLAN-001 OPENS with a Task-0 Rust-ConPTY
+  derisk spike that decides the branch. The "tmux for persistence" and node-pty-shipping items below describe
+  the FALLBACK (Option A) host; on Option C the PTY lives in the Tauri Rust process and the ring-buffer/tmux
+  persistence is owned by that Rust host.
+
 ### tmux for persistence (R-PTY-07)
 - The interactive `claude` runs INSIDE a tmux session keyed per remo session, so the PTY host can
   `new-session`/`attach-session` and a dropped client reattaches the same tmux with scrollback intact.
@@ -98,7 +106,7 @@ Gemini fallback (Phase 19); Telegram transcript-tail + permission injection + wr
 
 ### Source spec + Phase-15 outputs (authoritative)
 - `.planning/architecture/interactive-pty-runner-SPEC.md` — full design, hard constraints, phased plan, June-15 gates.
-- `.planning/phases/15-pty-spike-and-compile-derisk/15-RESEARCH.md` + the Phase-15 SPIKE-FINDINGS artifact — the chosen node-pty compile-shipping approach (a/b/c) this phase MUST consume, not re-derive.
+- `.planning/phases/15-pty-spike-and-compile-derisk/15-RESEARCH.md` + the Phase-15 SPIKE-FINDINGS artifact — the chosen node-pty compile-shipping approach (a/b/c) this phase consumes on the Option-A FALLBACK branch (not re-derived).
 - `.planning/phases/15-*/15-PLAN-001..003` — the spike seed (`claude-pty-runner.ts` start, raw-terminal channel, xterm panel) this phase hardens.
 
 ### Existing runner / usage code (patterns to mirror, env-delete to replicate)
@@ -119,7 +127,7 @@ Gemini fallback (Phase 19); Telegram transcript-tail + permission injection + wr
 - `~/.claude/design-preferences.md` — accent=blue, orange CTA-only, never indigo (read before any UI work).
 
 ### Build / sidecar
-- `supervisor/tauri/` + `bun build --compile` sidecar build + `supervisor/tauri/scripts/build-and-update.ps1` — the compile target where node-pty must ship per the Phase-15 approach.
+- `supervisor/tauri/` + `bun build --compile` sidecar build + `supervisor/tauri/scripts/build-and-update.ps1` — the compile target. On the Option-A FALLBACK branch node-pty must ship here per the Phase-15 approach; on the Option C primary branch the PTY is hosted in the Tauri Rust crate (`src-tauri/`) and NO JS runtime is bundled for the PTY path.
 
 ### Cross-cutting invariants
 - `.planning/STATE.md` "do not violate" + repo `CLAUDE.md` cross-cutting invariants (cost-cap non-bypassable via `dailyCostCapGate`, schema.sql idempotent DDL only, mount-order, dispatch pipeline single source).
@@ -154,3 +162,5 @@ Gemini fallback (Phase 19); Telegram transcript-tail + permission injection + wr
 
 *Phase: 16-hardened-pty-relay-and-mobile-terminal*
 *Context gathered: 2026-05-31 from approved spec + RIP-AND-REPLACE override + Phase-15 outputs*
+*Realigned 2026-05-31: operator decision — Option C (Rust ConPTY) target, spike-gated, Option A fallback.*
+</content>
