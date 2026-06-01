@@ -1,7 +1,7 @@
 # Phase 15 — SPIKE-FINDINGS (node-pty under Bun on Windows + compile-shipping contract)
 
 **Measured:** 2026-05-31 · Host: Windows 11 Pro 10.0.26200, x64 · Bun 1.3.14 · Node v22.16.0 · claude 2.1.159
-**Status:** PTY derisk COMPLETE. Compile-shipping decision = **OPERATOR CHECKPOINT (Plan 03 T3, autonomous:false)** — options + recommendation below.
+**Status:** PTY derisk COMPLETE. Compile-shipping decision = **OPERATOR CHECKPOINT (Plan 03 T3, autonomous:false)** — RESOLVED 2026-05-31 (see §6).
 
 This doc is the authoritative Phase-16 shipping contract. Read it before productionizing the PTY runner.
 
@@ -105,6 +105,10 @@ node-pty` + `pty-host.mjs` next to `binaries/remo-code-supervisor-*.exe`, and `c
 resolve the bundled `node.exe` instead of PATH `node`. **NOT committed** pending operator approval (this
 materially changes MSI packaging — `autonomous:false`).
 
+> **NOTE (2026-05-31): the operator overrode this recommendation — see §6.** Option C (Rust ConPTY) is the
+> adopted TARGET, with Option A demoted to the proven fallback. The §3 recommendation is retained as the
+> as-written spike output for the audit trail.
+
 ---
 
 ## 4. What Phase 16 inherits / depends on
@@ -125,3 +129,15 @@ materially changes MSI packaging — `autonomous:false`).
 - A PTY turn exercised THROUGH a fully-built MSI sidecar (blocked on the packaging decision — the
   end-to-end Bun-parent→Node-host→ConPTY→claude path IS proven from `bun run`/compiled-context source).
 - Linux/forkpty-under-Bun verification.
+
+---
+
+## 6. Operator checkpoint RESOLVED (2026-05-31)
+
+> **Operator decision (2026-05-31): Option C — Rust ConPTY — adopted as the TARGET end-state**, BUT gated. The spike proved *Node* ConPTY (not Rust), so Phase 16 MUST OPEN with a short Rust-ConPTY derisk spike that mirrors the Node proof: spawn the genuine interactive `claude` TUI from the Tauri Rust side (e.g. wezterm `portable-pty` or a `conpty` crate), capture the real trust prompt, confirm byte relay round-trips, with ANTHROPIC_API_KEY deleted and NO -p/stream-json flags. **Fallback = Option A** (bundle pinned portable node.exe + prebuilt node-pty + pty-host.mjs as Tauri resources — already fully proven) if the Rust spike cannot render the real interactive TUI. Rationale: smallest footprint / no JS-runtime bundle is the better end-state and matches operator preference, but the milestone must not bet on an unproven runtime — derisk-first, proven-fallback.
+
+**Packaging intentionally NOT changed in Phase 15:** `supervisor/tauri/scripts/build-and-update.ps1`,
+`tauri.conf.json` (`bundle.resources`), and the sidecar's `node`-path resolution in
+`claude-pty-runner.ts` were deliberately left untouched in Phase 15 — the Rust ConPTY path (Option C) may
+make Option-A Node bundling unnecessary entirely; the Phase 16 opening spike decides which packaging delta
+(if any) lands.
