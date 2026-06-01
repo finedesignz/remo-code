@@ -41,10 +41,115 @@ export async function getSession(sessionId: string, userId: string) {
   const rows = await sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at,
            cli_kind, is_rootless, hostname, is_orchestrator,
-           repo_key, github_owner, github_repo, auto_nudge
+           repo_key, github_owner, github_repo, auto_nudge,
+           runner_type, pty_backend_id, transcript_path
     FROM sessions WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
   `;
   return rows[0] ?? null;
+}
+
+// ── Phase 16 — per-session runner type + persisted PTY backend identity (H10) ─
+
+export type RunnerType = 'stream-json' | 'pty-interactive'
+
+/**
+ * Set a session's runner_type. User-scoped. GUARD (R-PTY-11): a Telegram-default
+ * session MUST NOT be switched to 'pty-interactive' this phase (Telegram stays
+ * stream-json until Phase 20 re-sources it onto the PTY surface). Returns:
+ *   - { runner_type } on success
+ *   - { error: 'telegram_default_pty_forbidden' } when blocked by the guard
+ *   - undefined when no owned session matched
+ */
+export async function setSessionRunnerType(
+  sessionId: string,
+  userId: string,
+  runnerType: RunnerType,
+): Promise<{ runner_type: RunnerType } | { error: string } | undefined> {
+  // Telegram-default guard — refuse pty-interactive for the user's tg-default session.
+  if (runnerType === 'pty-interactive') {
+    const tg = await sql<{ telegram_default_session_id: string | null }[]>`
+      SELECT telegram_default_session_id FROM users WHERE id = ${userId} LIMIT 1
+    `
+    if (tg[0]?.telegram_default_session_id === sessionId) {
+      return { error: 'telegram_default_pty_forbidden' }
+    }
+  }
+  const rows = await sql<{ runner_type: RunnerType }[]>`
+    UPDATE sessions SET runner_type = ${runnerType}
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    RETURNING runner_type
+  `
+  return rows[0]
+}
+
+/** Read the persisted runner_type (authoritative on resume — H10). Defaults to
+ *  'stream-json' for any row predating the column / missing it. */
+export async function getSessionRunnerType(
+  sessionId: string,
+  userId: string,
+): Promise<RunnerType> {
+  const rows = await sql<{ runner_type: RunnerType | null }[]>`
+    SELECT runner_type FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `
+  return (rows[0]?.runner_type as RunnerType) ?? 'stream-json'
+}
+
+/** Persist the backend PTY/tmux identity + transcript path captured at spawn so
+ *  a reconnect/restart re-binds the SAME backend (no dual-spawn — H10). */
+export async function setSessionPtyIdentity(
+  sessionId: string,
+  userId: string,
+  ptyBackendId: string | null,
+  transcriptPath: string | null,
+): Promise<void> {
+  await sql`
+    UPDATE sessions SET pty_backend_id = ${ptyBackendId}, transcript_path = ${transcriptPath}
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `
+}
+
+/** Read the persisted PTY backend identity (resume re-binds it — H10). */
+export async function getSessionPtyIdentity(
+  sessionId: string,
+  userId: string,
+): Promise<{ runner_type: RunnerType; pty_backend_id: string | null; transcript_path: string | null } | null> {
+  const rows = await sql<{ runner_type: RunnerType | null; pty_backend_id: string | null; transcript_path: string | null }[]>`
+    SELECT runner_type, pty_backend_id, transcript_path FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `
+  if (!rows[0]) return null
+  return {
+    runner_type: (rows[0].runner_type as RunnerType) ?? 'stream-json',
+    pty_backend_id: rows[0].pty_backend_id ?? null,
+    transcript_path: rows[0].transcript_path ?? null,
+  }
+}
+
+/**
+ * Server-side write-authorization for a terminal session (H2 / R-PTY-29). A
+ * `term.input`/`term.attach`/`term.reattach` is only allowed when the connection's
+ * user OWNS the target session. This is the DB-backed ownership check the relay
+ * composes with the per-connection subscribedSessions set — no cross-user/
+ * cross-session PTY hijack via a forged session_id.
+ */
+export async function canWriteTerminal(userId: string, sessionId: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    SELECT id FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    LIMIT 1
+  `
+  return rows.length > 0
+}
+
+/** Read the session's owning hostname (DB ground-truth for the H3/NH-1
+ *  cross-host validation — a supervisor may only relay term.* for sessions whose
+ *  DB hostname matches its own). Null when the row has no recorded hostname. */
+export async function getSessionHostname(sessionId: string): Promise<string | null> {
+  const rows = await sql<{ hostname: string | null }[]>`
+    SELECT hostname FROM sessions WHERE id = ${sessionId} AND deleted_at IS NULL LIMIT 1
+  `
+  return rows[0]?.hostname ?? null
 }
 
 // Phase 10 — set a session's per-session auto-nudge override. NULL clears the

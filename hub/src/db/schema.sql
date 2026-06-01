@@ -358,6 +358,20 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_rootless BOOLEAN NOT NULL DEFAU
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS hostname TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_rootless_unique ON sessions(user_id, hostname, cli_kind) WHERE is_rootless = true AND deleted_at IS NULL;
 
+-- ── Phase 16: per-session runner type + persisted PTY backend identity (H10) ─
+-- runner_type: 'stream-json' (existing structured ChatSurface runner) or
+--   'pty-interactive' (the Phase-16 raw-terminal PTY surface). Opt-in per
+--   session; default 'stream-json' so every existing row is unchanged. Idempotent
+--   ADD COLUMN — re-runs safely every boot. NO data backfill here (CLAUDE.md
+--   invariant: schema.sql is idempotent DDL only; backfills go in hub/scripts/).
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS runner_type TEXT NOT NULL DEFAULT 'stream-json';
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WHERE constraint_name='sessions_runner_type_check') THEN ALTER TABLE sessions ADD CONSTRAINT sessions_runner_type_check CHECK (runner_type IN ('stream-json','pty-interactive')); END IF; END $$;
+-- Backend PTY/tmux identity + transcript path/id captured at PTY spawn so a
+-- reconnect/restart RE-BINDS the same backend (no dual-spawn / no mis-route —
+-- H10). Nullable so non-PTY rows are unaffected; NO backfill.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pty_backend_id  TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS transcript_path TEXT;
+
 -- ── Phase 05: per-user instruction blobs synced to agents via auth_ok.seed_files
 -- create_if_absent semantics; agents never overwrite existing local files.
 -- NEVER include API keys or auth tokens — codex_config_toml is secret-stripped on PUT.

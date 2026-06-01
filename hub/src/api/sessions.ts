@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge } from '../db/dal'
+import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity } from '../db/dal'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
@@ -270,6 +270,42 @@ sessions.patch('/:id/auto-nudge', async (c) => {
   const updated = await setSessionAutoNudge(sessionId, userId, parsed.data.auto_nudge)
   if (!updated) return c.json({ error: 'not_found' }, 404)
   return c.json({ id: sessionId, auto_nudge: updated.auto_nudge })
+})
+
+// ── Phase 16 — per-session runner type (opt-in; default stream-json) ──────────
+const RunnerTypeBody = z.object({
+  runner_type: z.enum(['stream-json', 'pty-interactive']),
+})
+
+// PATCH the session's runner_type. Opt-in per session. A Telegram-default
+// session cannot be switched to 'pty-interactive' (R-PTY-11 — the DAL guard
+// rejects it; Phase 20 supersedes by re-sourcing Telegram onto the PTY surface).
+sessions.patch('/:id/runner-type', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const parsed = RunnerTypeBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_input', detail: parsed.error.issues[0]?.message }, 400)
+  }
+  const result = await setSessionRunnerType(sessionId, userId, parsed.data.runner_type)
+  if (!result) return c.json({ error: 'not_found' }, 404)
+  if ('error' in result) {
+    // Telegram-default guard tripped — 409 Conflict (the session is reserved for
+    // the stream-json Telegram bridge this phase).
+    return c.json({ error: result.error }, 409)
+  }
+  return c.json({ id: sessionId, runner_type: result.runner_type })
+})
+
+// GET the persisted runner identity (runner_type + backend id + transcript
+// path). The resume path READS this so a session is re-bound to the SAME
+// backend on reconnect/restart — never dual-spawned or mis-routed (H10).
+sessions.get('/:id/runner-identity', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const identity = await getSessionPtyIdentity(sessionId, userId)
+  if (!identity) return c.json({ error: 'not_found' }, 404)
+  return c.json({ id: sessionId, ...identity })
 })
 
 // ── Phase 04 plan 008 — POST /api/sessions/heal ──────────────────────────────
