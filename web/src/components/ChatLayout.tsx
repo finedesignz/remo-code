@@ -18,6 +18,7 @@ import { useChat } from '../hooks/useChat'
 import { useActivity } from '../hooks/useActivity'
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './ChatPanel'
+import { TerminalSurface } from './TerminalSurface'
 import { ApiKeyModal } from './ApiKeyModal'
 import { connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
@@ -179,6 +180,13 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     ? sessionsHook.sessions.find(s => s.id === activeSessionId)
     : null
 
+  // Phase-15 spike toggle: render the raw-terminal panel for the active session.
+  // Dev/opt-in only (localStorage `remo:pty-interactive` = '1'); full per-session
+  // runner-type selection lands in Phase 16.
+  const ptyInteractive = (() => {
+    try { return localStorage.getItem('remo:pty-interactive') === '1' } catch { return false }
+  })()
+
   return (
     <div className="flex h-full bg-[var(--bg-primary)] relative overflow-hidden">
       {showApiKey && (
@@ -281,20 +289,28 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           ) : null}
         </div>
 
-        <ChatPanel
-          messages={messages}
-          loading={chatLoading}
-          onSend={sendMessage}
-          activeSessionId={activeSessionId}
-          sessionStatus={activeSession?.status}
-          activity={activity}
-          onPermissionRespond={handlePermissionRespond}
-          onQuestionRespond={handleQuestionRespond}
-          token={token}
-          wsConnected={connected}
-          online={online}
-          onCancel={handleCancel}
-        />
+        {ptyInteractive && activeSessionId ? (
+          // Phase-15 spike: PTY-interactive sessions render the raw-terminal
+          // panel instead of the chat bubbles. Gated by a dev toggle
+          // (localStorage `remo:pty-interactive`); full per-session selection
+          // is Phase 16. Non-PTY sessions keep ChatPanel (Phase 17 deletes it).
+          <TerminalSurface sessionId={activeSessionId} subscribe={subscribe} send={send} className="flex-1 min-h-0 p-2" />
+        ) : (
+          <ChatPanel
+            messages={messages}
+            loading={chatLoading}
+            onSend={sendMessage}
+            activeSessionId={activeSessionId}
+            sessionStatus={activeSession?.status}
+            activity={activity}
+            onPermissionRespond={handlePermissionRespond}
+            onQuestionRespond={handleQuestionRespond}
+            token={token}
+            wsConnected={connected}
+            online={online}
+            onCancel={handleCancel}
+          />
+        )}
       </div>
     </div>
   )
