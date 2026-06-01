@@ -6,13 +6,19 @@
 //! thin `claude-pty-bridge.ts` relay; the Phase-15 Node `pty-host.mjs` detour is
 //! DROPPED on Windows.
 //!
+//! BACKEND-AGNOSTIC (Phase-17, R-PTY-12): the spawn frame carries a `cli` field
+//! (`"claude"` | `"codex"`, default `"claude"`). The host spawns the matching
+//! INTERACTIVE binary with EMPTY argv and scrubs EVERY provider API key. This is
+//! how Codex human sessions ride the same raw-terminal surface as Claude.
+//!
 //! HARD CONSTRAINTS (interactive-pty-runner-SPEC.md — enforced + canary-checked):
-//!   1. ANTHROPIC_API_KEY is REMOVED from the spawned `claude` env. No API-key
+//!   1. EVERY provider API key is REMOVED from the spawned env, for BOTH clients:
+//!      ANTHROPIC_API_KEY (claude) and OPENAI_API_KEY (codex). No API-key
 //!      fallback. (CommandBuilder::env_remove)
-//!   2. Official `claude` binary only. This host never reads/stores/forwards the
-//!      OAuth token in ~/.claude/.credentials.json.
-//!   5. Interactive `claude` ONLY: argv is EMPTY. NO -p / --print /
-//!      --input-format / --output-format / stream-json. Raw bytes only — this
+//!   2. Official `claude` / `codex` binary only. This host never reads/stores/
+//!      forwards the OAuth token / credentials of either client.
+//!   5. Interactive ONLY: argv is EMPTY. NO -p / --print / --input-format /
+//!      --output-format / stream-json / app-server / exec. Raw bytes only — this
 //!      module does NOT translate to RunnerEvent / agent-protocol / session-bridge.
 //!
 //! TRANSPORT (Bun <-> Rust local channel): a loopback TCP server on
@@ -20,7 +26,7 @@
 //! Bun bridge reads (REMO_PTY_HOST_PORT_FILE / default in LOCALAPPDATA). The wire
 //! protocol mirrors the Phase-15 `pty-host.mjs` framing for continuity:
 //!   4-byte big-endian length prefix + UTF-8 JSON frame.
-//!     bridge -> host : {t:'spawn',cwd,cols,rows} | {t:'input',d} |
+//!     bridge -> host : {t:'spawn',cli,cwd,cols,rows} | {t:'input',d} |
 //!                       {t:'resize',cols,rows} | {t:'kill'} | {t:'reattach'}
 //!     host -> bridge : {t:'spawned',pid} | {t:'data',d} | {t:'scrollback',d} |
 //!                       {t:'exit',code} | {t:'error',message}
@@ -87,19 +93,31 @@ fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
-/// Build the env handed to the spawned `claude`. CONSTRAINT 1 — strip the API
-/// key. Pure + small so the canary/test can reason about it.
+/// Build the env handed to the spawned interactive client. CONSTRAINT 1 — strip
+/// EVERY provider API key (both clients), regardless of which `cli` is spawned.
+/// Pure + small so the canary/test can reason about it.
 fn build_pty_env(cmd: &mut CommandBuilder) {
-    // Inherit the supervisor env, then REMOVE the API key. Defense in depth: the
-    // bridge never forwards it either.
+    // Inherit the supervisor env, then REMOVE every provider API key. Defense in
+    // depth: the bridge never forwards them either.
     cmd.env_remove("ANTHROPIC_API_KEY");
+    cmd.env_remove("OPENAI_API_KEY");
 }
 
-/// Spawn (or, if already present, leave alone) the interactive `claude` PTY for
+/// Resolve the interactive binary name for a `cli` selector. CONSTRAINT 2/5 —
+/// official interactive binary only; an unknown selector falls back to `claude`.
+fn resolve_cli_binary(cli: &str) -> &'static str {
+    match cli {
+        "codex" => "codex",
+        _ => "claude",
+    }
+}
+
+/// Spawn (or, if already present, leave alone) the interactive PTY for
 /// `session_id`. Returns the captured scrollback handle so the connection loop
-/// can stream + replay. CONSTRAINT 5 — file `claude`, EMPTY argv.
+/// can stream + replay. CONSTRAINT 5 — selected interactive binary, EMPTY argv.
 fn spawn_session(
     session_id: &str,
+    cli: &str,
     cwd: Option<String>,
     cols: u16,
     rows: u16,
@@ -115,8 +133,9 @@ fn spawn_session(
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-    // CONSTRAINT 5 — file `claude`, EMPTY argv. No programmatic flags.
-    let mut cmd = CommandBuilder::new("claude");
+    // CONSTRAINT 5 — selected interactive binary (`claude`/`codex`), EMPTY argv.
+    // No programmatic/headless flags. Ever.
+    let mut cmd = CommandBuilder::new(resolve_cli_binary(cli));
     build_pty_env(&mut cmd); // CONSTRAINT 1
     if let Some(dir) = cwd {
         cmd.cwd(dir);
@@ -303,12 +322,17 @@ fn handle_frame(
                 .and_then(|x| x.as_str())
                 .unwrap_or("default")
                 .to_string();
+            let cli = v
+                .get("cli")
+                .and_then(|x| x.as_str())
+                .unwrap_or("claude")
+                .to_string();
             let cwd = v.get("cwd").and_then(|x| x.as_str()).map(|s| s.to_string());
             let cols = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
             let rows = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
             *session_id = Some(sid.clone());
 
-            match spawn_session(&sid, cwd, cols, rows) {
+            match spawn_session(&sid, &cli, cwd, cols, rows) {
                 Ok((ring, pid)) => {
                     send_frame(writer, &serde_json::json!({ "t": "spawned", "pid": pid }));
                     // Replay scrollback (reattach) BEFORE wiring live output, so

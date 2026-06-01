@@ -8,6 +8,25 @@ import { homedir, hostname } from 'os'
 import { startStatusServer, type StatusServer } from './status-server'
 import { VERSION } from './version'
 import { isBrokenPipe, installStreamErrorGuards, makeSafeTee } from './safe-logging'
+import { ClaudePtyRunner } from './runners/claude-pty-runner'
+import { CodexPtyRunner } from './runners/codex-pty-runner'
+
+/**
+ * Backend selector for the interactive raw-terminal surface (Phase-17,
+ * R-PTY-12). For runner_type='pty-interactive': cli_kind='codex' instantiates
+ * the CodexPtyRunner, cli_kind='claude' the ClaudePtyRunner. Both are raw-bytes-
+ * only and ride the Phase-16 human-only dispatch guard — automation never
+ * reaches either. The runner_type='stream-json' automation path is untouched
+ * (it uses ClaudeRunner + session-bridge, NOT these PTY runners).
+ *
+ * On Windows the live byte path is the Rust-ConPTY host (Option C); its mirror
+ * selector is `selectPtyBridge` in runners/claude-pty-bridge.ts. This Option-A
+ * selector is the portable mirror + the seam the spawn-interception harness
+ * drives.
+ */
+export function selectPtyRunner(cliKind: 'claude' | 'codex'): ClaudePtyRunner | CodexPtyRunner {
+  return cliKind === 'codex' ? new CodexPtyRunner() : new ClaudePtyRunner()
+}
 
 function logDir(): string {
   if (process.platform === 'win32') {

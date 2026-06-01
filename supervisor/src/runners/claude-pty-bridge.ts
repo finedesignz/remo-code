@@ -57,6 +57,10 @@ export function readPtyHostPort(portFile = resolvePtyHostPortFile()): number {
 export interface PtyBridgeOpts {
   /** Stable per-remo-session id — keys the PTY in the Rust host registry. */
   sessionId: string
+  /** Which interactive client the Rust host should spawn. Backend-agnostic
+   *  selector (Phase-17, R-PTY-12); default 'claude'. The host scrubs EVERY
+   *  provider API key regardless of this value. */
+  cli?: 'claude' | 'codex'
   cwd: string
   cols?: number
   rows?: number
@@ -99,6 +103,7 @@ export class ClaudePtyBridge {
     this.sendFrame({
       t: 'spawn',
       session_id: opts.sessionId,
+      cli: opts.cli ?? 'claude',
       cwd: opts.cwd,
       cols: opts.cols ?? 80,
       rows: opts.rows ?? 24,
@@ -154,4 +159,24 @@ export class ClaudePtyBridge {
       }
     }
   }
+}
+
+/**
+ * Codex backend bridge — Phase-17 backend selector (R-PTY-12). Identical relay
+ * to ClaudePtyBridge, but pins `cli: 'codex'` so the Rust host spawns the
+ * interactive `codex` TUI. Raw bytes only; the host scrubs every provider key.
+ */
+export class CodexPtyBridge extends ClaudePtyBridge {
+  start(opts: PtyBridgeOpts): void {
+    super.start({ ...opts, cli: 'codex' })
+  }
+}
+
+/**
+ * Backend selector for the raw-terminal surface. (runner_type='pty-interactive',
+ * cli_kind='codex') → CodexPtyBridge; cli_kind='claude' → ClaudePtyBridge. The
+ * single seam Phase-17 routing keys off (mirrors the Option-A runner selector).
+ */
+export function selectPtyBridge(cliKind: 'claude' | 'codex'): ClaudePtyBridge {
+  return cliKind === 'codex' ? new CodexPtyBridge() : new ClaudePtyBridge()
 }

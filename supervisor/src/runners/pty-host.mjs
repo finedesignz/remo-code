@@ -14,7 +14,10 @@
  *   sidecar.) See 15-SPIKE-FINDINGS.md for the full empirical record.
  *
  * HARD CONSTRAINTS enforced here (interactive-pty-runner-SPEC.md):
- *   - Constraint 1: ANTHROPIC_API_KEY is deleted from the spawned env. ALWAYS.
+ *   - Constraint 1: provider API keys are deleted from the spawned env. ALWAYS
+ *     — both ANTHROPIC_API_KEY (claude) and OPENAI_API_KEY (codex), regardless
+ *     of which `file` the parent asked for, so no provider key can ever leak
+ *     onto either interactive client's spawn path.
  *   - Constraint 5: argv is passed through verbatim from the parent, which is
  *     contractually empty for `claude` (interactive TUI; NO -p / --print /
  *     --input-format / --output-format). The behavioral spawn-interception
@@ -104,9 +107,11 @@ function shutdown() {
 
 function handle(f) {
   if (f.t === 'spawn') {
-    // CONSTRAINT 1 — strip the API key no matter what the parent sent.
+    // CONSTRAINT 1 — strip every provider API key no matter what the parent
+    // sent or which interactive client (`claude`/`codex`) is being spawned.
     const env = { ...process.env }
     delete env.ANTHROPIC_API_KEY
+    delete env.OPENAI_API_KEY
     try {
       term = pty.spawn(f.file, Array.isArray(f.args) ? f.args : [], {
         name: 'xterm-256color',
