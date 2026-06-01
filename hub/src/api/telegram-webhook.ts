@@ -414,6 +414,13 @@ async function dispatchInbound(
         replayText: text,
         replayImages: images.length > 0 ? images : undefined,
       };
+    case "automation_blocked":
+      // R-TG-11: an automation source tried to drive a pty-interactive session
+      // via Telegram. Only a genuine human turn may. (This branch is effectively
+      // unreachable for real inbound — the webhook tags human — but the message
+      // closes the ToS loop if a future automation path ever routes through here.)
+      await safeSend(chatId, "Only a person can drive this interactive session — automation isn't allowed here.");
+      return { outcome: "automation_blocked", error: result.reason };
     case "failed":
       await safeSend(chatId, "Something went wrong dispatching that message.");
       return { outcome: "failed", error: result.reason };

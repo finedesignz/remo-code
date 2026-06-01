@@ -38,6 +38,9 @@ mock.module("../src/db/dal.ts", () => ({
   // ensureSessionSubscribed no-ops, but the imports must still resolve.
   getTranscriptOpenContext: async () => null,
   getUsersWithTelegramDefaultSession: async () => [],
+  // Phase 20: dispatch composes the human-only PTY guard (reads runner_type).
+  // These tests target stream-json sessions ⇒ the guard never blocks.
+  getSessionRunnerType: async () => "stream-json",
 }));
 
 // gates.ts: dailyCostCapGate → getCostCapStatus → sql (cap) + getTodayTokenCostUsd.
