@@ -76,3 +76,62 @@ windows + scheduled-task cost.
 
 - No cost-cap enforcement on `usage_event` (P3 owns the cap flip).
 - No cost UI (P3) — the API is ready for the dashboard.
+
+## Phase 18 — dual-bucket billing guardrail (June-15-2026 split)
+
+From June 15 2026 Anthropic splits subscription billing into TWO independent
+pools, and Phase 18 makes both visible + controllable WITHOUT introducing any
+API-platform key:
+
+- **Interactive subscription pool (unchanged).** Genuine human turns in the
+  interactive PTY draw from the normal subscription limits — the four utilization
+  windows (`five_hour` / `seven_day` / Max-only `seven_day_opus` /
+  `seven_day_oauth_apps`) already polled by the supervisor.
+- **Programmatic credit pool (new).** Agent-SDK / headless `stream-json` /
+  `claude -p` usage bills against a monthly DOLLAR credit (Pro $20 / Max-5x $100 /
+  Max-20x $200, full API list rates, no rollover, claimed once). The supervisor
+  poll (`oauth-poll.ts`) surfaces it ADDITIVELY as
+  `programmatic_credit { used_usd, limit_usd, resets_at, claimed }` — a dollar
+  bucket, not a util% window. Pre-claim / unknown ⇒ explicit empty state, NEVER a
+  fabricated number. It travels the existing `usage_report` → `setUsage`
+  (`hub/src/usage/store.ts`) → `subscription_usage` WS path additively (old
+  supervisors/clients keep working).
+
+### Routing invariant (R-PTY-19)
+
+Every unattended dispatch source — **scheduler / orchestrator-background /
+auto-dev / error-capture** (the `AUTOMATION_ACTORS` set in
+`hub/src/dispatch/gates.ts`) — rides the stream-json/programmatic transport and
+flows through the SINGLE non-bypassable `dailyCostCapGate`. None can reach the
+interactive PTY: the Phase-16 human-only guard (`humanOnlyRejectsActor`) rejects
+every non-human actor on a `pty-interactive` session. No automation path
+constructs an `ANTHROPIC_API_KEY` — the runner spawn paths delete it; the
+programmatic transport is subscription OAuth via stream-json, capped. Guarded by
+`hub/test/automation-routing-guard.test.ts`.
+
+### Leak alert + opt-in hard-halt (R-PTY-18)
+
+- **Leak alert (always on).** `detectProgrammaticLeak`
+  (`hub/src/usage/programmatic-leak.ts`) fires a `programmatic_leak_alert` WS
+  event when programmatic `used_usd` rises while NO automation is in flight, or
+  above a configured per-interval drain rate. Visible, non-blocking — never a
+  silent drain.
+- **Hard-halt (opt-in, OFF by default).** `users.programmatic_halt_usd` (NULL =
+  off) is an ADDITIONAL predicate at the same `dailyCostCapGate` chokepoint
+  (`isOverProgrammaticHalt`): when the claimed credit crosses the bound,
+  programmatic/automation dispatch is denied with reason
+  `programmatic_credit_halt:$<used>>=$<bound>`. There is no parallel chokepoint;
+  the cost cap remains the single dispatch gate. Human interactive PTY turns
+  never hit this gate for this reason, so the halt only ever stops automation.
+
+### Tests (Phase 18)
+
+- `supervisor/test/oauth-poll-dual-bucket.test.ts` / `oauth-poll-credit-absent.test.ts`
+  — second-bucket parse, empty state, token-never-leaves-host.
+- `hub/test/usage-dual-bucket-additive.test.ts` — additive schema + store.
+- `hub/test/programmatic-leak-alert.test.ts` — leak heuristic (no false positives).
+- `hub/test/programmatic-hard-halt.test.ts` — default-off + halt at the single gate.
+- `hub/test/automation-routing-guard.test.ts` — routing + PTY exclusion + no-API-key.
+
+No REST endpoint changed (the hard-halt config is internal), so `docs:sync` is a
+no-op for this phase.
