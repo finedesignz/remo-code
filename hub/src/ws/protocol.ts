@@ -349,5 +349,10 @@ export type HubToClient =
         seven_day: { utilization: number; resets_at: string }
         seven_day_opus?: { utilization: number; resets_at: string } | null
         seven_day_oauth_apps?: { utilization: number; resets_at: string } | null
+        // Phase 18 (R-PTY-17): additive programmatic credit dollar bucket. Old
+        // clients ignore the unknown field; pre-claim accounts omit it.
+        programmatic_credit?: {
+          used_usd: number; limit_usd: number; resets_at: string; claimed: boolean
+        } | null
       }; updated_at: string }
   | { type: 'ping' }
