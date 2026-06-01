@@ -110,6 +110,23 @@ Supervisor desktop app (Tauri MSI — one per host)
 Claude Code CLI / Codex CLI (one process per session)
 ```
 
+> **Terminal-surface cutover (Phases 15–19, in flight).** The human-coding path is
+> moving to a **universal raw-terminal (PTY) surface**: the supervisor spawns the
+> GENUINE interactive `claude` / `codex` TUI inside a PTY and relays raw terminal
+> bytes — **no `-p`, no `--input-format`/`--output-format`, no `stream-json`** on
+> the human path, and **no provider API key, ever** (the fallback is a backend-CLI
+> swap — Codex via ChatGPT sign-in, a stubbed Gemini seam — never the API). The
+> `stream-json` path described below is **preserved for unattended automation only**
+> (scheduler / orchestrator-background / auto-dev / error-capture), behind the
+> non-bypassable cost cap. From June 15 2026 subscription billing splits into an
+> **interactive** pool (human PTY turns) and a **programmatic** credit pool
+> (automation). Which pool an interactive PTY turn bills is verified by the
+> [June-15 cutover gate](docs/cutover-gate-june15.md); a fail-safe
+> default-backend selector keeps users off a programmatic-billed path until the
+> gate confirms. The ChatSurface (stream-json human UI) deletion + the default-on
+> flip are **gated** on that runbook + on-device attestations and have **not** yet
+> happened. See [docs/usage-cost.md](docs/usage-cost.md) §Phase 19.
+
 Three packages in a Bun workspace:
 
 - **hub/** — Bun + Hono server handling auth (Titanium Licensing magic-link + opaque cookie sessions — see [docs/auth.md](docs/auth.md)), message relay, and session management. Broadcasts Claude's activity events (thinking, tool use, text) to subscribed browsers.

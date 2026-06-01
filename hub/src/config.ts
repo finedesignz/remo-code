@@ -114,6 +114,14 @@ const telegramBotUsername = process.env.TELEGRAM_BOT_USERNAME || "";
 // set TELEGRAM_SUMMARIZED_STREAMING=false to revert to a single final-blob send.
 const telegramSummarizedStreaming = process.env.TELEGRAM_SUMMARIZED_STREAMING !== "false";
 
+// PTY cutover flag (mirrors the supervisor's `REMO_PTY_INTERACTIVE === '1'`).
+// OFF (prod default): the Telegram OUTBOUND bridge sources assistant replies +
+// permission prompts from the stream-json `assistant_message:final` / permission
+// event bus (host-agnostic, works in the Coolify hub where no CLI transcript
+// files exist). ON (post-cutover): the bridge tails on-disk CLI transcripts via
+// the per-session TranscriptSource manager. See hub/src/telegram/bridge.ts.
+const ptyInteractive = process.env.REMO_PTY_INTERACTIVE === "1";
+
 // B2 (obs): owner user_id for the hub's self-capture error_project row.
 // When unset, self-capture is inert (no row seeded, no hooks installed).
 // Must be a UUID of an existing users.id when set.
@@ -188,6 +196,9 @@ export const config = {
     botUsername: telegramBotUsername,
     summarizedStreaming: telegramSummarizedStreaming,
   },
+
+  // PTY cutover flag. Off in prod → stream-json outbound path; on → transcript tail.
+  ptyInteractive,
 
   // B4: observability bearer token (gates /healthz/deep + /metrics).
   hubIntrospectToken,

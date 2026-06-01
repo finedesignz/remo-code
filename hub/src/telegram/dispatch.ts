@@ -42,7 +42,8 @@ import {
   type DispatchRequest,
   type PipelineDeps,
 } from "../dispatch/pipeline.ts";
-import { thresholdGate, dailyCostCapGate } from "../dispatch/gates.ts";
+import { thresholdGate, dailyCostCapGate, humanOnlyPtyGate } from "../dispatch/gates.ts";
+import { getSessionRunnerType } from "../db/dal.ts";
 
 export type DispatchOutcome =
   | { kind: "dispatched" }
@@ -50,7 +51,18 @@ export type DispatchOutcome =
   | { kind: "cost_capped"; resumesAtUtc: string }
   | { kind: "session_busy" }
   | { kind: "agent_offline" }
+  | { kind: "automation_blocked"; reason: string }
   | { kind: "failed"; reason: string };
+
+/**
+ * Phase 20 (R-TG-11): the dispatch SOURCE actor. A genuine human Telegram
+ * message is `'human'` (the only source that may drive a pty-interactive
+ * session). Automation that tries to ride the Telegram inbound path
+ * (auto-nudge / scheduled) names itself and is REJECTED by the Phase-16
+ * human-only guard before any PTY injection — "robot pressing enter via the
+ * interactive entrypoint" is the ToS-risk move (constraint 3).
+ */
+export type TelegramDispatchSource = "human" | "scheduler" | "orchestrator-background" | "auto-dev" | "error-capture";
 
 export interface DispatchInput {
   userId: string;
@@ -60,6 +72,9 @@ export interface DispatchInput {
   text: string;
   /** base64 data URIs, matches web-client `send_message` shape. */
   images?: string[];
+  /** Source actor (default 'human'). Automation sources are guard-rejected on a
+   *  pty-interactive session. */
+  source?: TelegramDispatchSource;
 }
 
 /** Next UTC midnight as an ISO string — used for the throttle reply text. */
@@ -91,6 +106,19 @@ function toPipelineImages(images?: string[]): DispatchRequest["images"] {
  */
 export async function dispatchToSession(input: DispatchInput): Promise<DispatchOutcome> {
   if (!input.sessionId) return { kind: "no_session" };
+
+  // Phase 20: the moment a Telegram user dispatches to a session it is
+  // telegram-relevant + about to be live — open its transcript source so the
+  // outbound bridge + permission surfacing tail it. Idempotent, best-effort
+  // (never blocks the dispatch). No-op when the bridge isn't started. Imported
+  // LAZILY so dispatch.ts's module-load graph doesn't pull the bridge's
+  // commands→launch→supervisor-registry chain (keeps the dispatch unit test's
+  // partial ws/registry mock valid).
+  void import("./bridge.ts")
+    .then((m) => m.ensureSessionSubscribed(input.sessionId))
+    .catch((err: any) => {
+      console.warn(`[telegram-dispatch] ensureSessionSubscribed failed session=${input.sessionId}: ${err?.message ?? err}`);
+    });
 
   const token = `tg:${input.chatId}:${input.updateId}`;
   const rawImages = input.images && input.images.length > 0 ? input.images : undefined;
@@ -128,9 +156,22 @@ export async function dispatchToSession(input: DispatchInput): Promise<DispatchO
     );
   };
 
+  const source: TelegramDispatchSource = input.source ?? "human";
+
+  // R-TG-11: the Phase-16 human-only guard. A pty-interactive session may be
+  // driven ONLY by a genuine human turn; an automation-sourced Telegram-origin
+  // dispatch is rejected before any PTY injection. The guard reads the SOURCE
+  // actor (here, off the dispatch input — Telegram inbound is server-tagged) +
+  // the target session's runner_type. Stream-json sessions are unaffected.
+  const guard = humanOnlyPtyGate(async () => ({
+    actor: source,
+    runnerType: await getSessionRunnerType(input.sessionId, input.userId),
+  }));
+
   const deps: PipelineDeps = {
     // IR-1: cost-cap non-bypassable. IR-2: threshold first, then cost-cap.
-    gates: [thresholdGate, dailyCostCapGate],
+    // R-TG-11: human-only PTY guard composed WITH (never replacing) the cost cap.
+    gates: [thresholdGate, dailyCostCapGate, guard],
     // Telegram is user traffic — no run row.
     store: null,
     isOnline: (req) => getChannel(req.sessionId) != null,
@@ -168,10 +209,19 @@ export async function dispatchToSession(input: DispatchInput): Promise<DispatchO
     case "queued":
       return { kind: "dispatched" };
     case "skipped":
-      // The only gate that produces a user-facing reply is the daily cost cap.
-      // The threshold gate also lands here; both map to "cost_capped" copy
-      // (the user can't send until quota/cap frees). resumesAtUtc is the next
-      // UTC midnight (the cost-cap reset boundary).
+      // R-TG-11: the human-only PTY guard rejection is its own outcome — an
+      // automation source tried to drive a pty-interactive session and was
+      // blocked (logged; nothing injected). Distinct from the cost/threshold
+      // cap so the caller can surface the ToS-safe message + audit it.
+      if (outcome.reason.startsWith("automation_blocked_on_pty")) {
+        console.warn(
+          `[telegram-dispatch] human-only guard rejected source=${source} session=${input.sessionId}: ${outcome.reason}`,
+        );
+        return { kind: "automation_blocked", reason: outcome.reason };
+      }
+      // The threshold + daily-cost-cap gates land here; both map to "cost_capped"
+      // copy (the user can't send until quota/cap frees). resumesAtUtc is the
+      // next UTC midnight (the cost-cap reset boundary).
       return { kind: "cost_capped", resumesAtUtc: nextUtcResetIso() };
     case "dropped_busy":
       return { kind: "session_busy" };

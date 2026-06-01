@@ -1,6 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
-import { verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo } from '../db/dal'
+import { TermFrame, isTermFrameType, isAgentToHubTermType } from './term-protocol'
+import { verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo, getSessionHostname } from '../db/dal'
 import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
@@ -148,6 +149,73 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch (e: any) {
     console.error('[agent] JSON parse error:', e.message)
+    return
+  }
+
+  // --- Raw-terminal channel (Phase 15 R-PTY-02/03; Phase 16 hardening) ---
+  // term.* frames from the agent/supervisor are relayed byte-faithfully to the
+  // subscribed clients and MUST NOT enter the structured agent-protocol path
+  // (no RunnerEvent translation, no `messages` persistence). Short-circuit
+  // BEFORE AgentInbound.safeParse. Phase-16 guards (composed here):
+  //   - DIRECTION ALLOWLIST (NH-2): /ws/agent is OUTPUT-ONLY — only term.data is
+  //     accepted. A term.input injected on /ws/agent is rejected before any
+  //     forward (an inventory-valid supervisor socket cannot become an unguarded
+  //     input path into a human PTY).
+  //   - INVENTORY + DB CROSS-VALIDATION (H3/NH-1): the frame's session_id must be
+  //     advertised by THIS connection (its own bound session, or — for a
+  //     multiplexed supervisor — present in its session_inventory) AND, per the
+  //     DB, legitimately owned by this host (sessions.hostname). A host claiming
+  //     a session it does not own per the DB is DROPPED even if it self-asserts
+  //     it in its inventory.
+  if (isTermFrameType(parsed)) {
+    if (!ws.data.authenticated) return
+    const tf = TermFrame.safeParse(parsed)
+    if (!tf.success) return
+    const frame = tf.data
+    // DIRECTION ALLOWLIST (NH-2/R-PTY-33): /ws/agent relays OUTPUT only.
+    if (!isAgentToHubTermType(frame.type)) return
+
+    // INVENTORY authz (H3/R-PTY-30): the session must be advertised by THIS
+    // connection. Plain agent socket → its own bound sessionId. Supervisor
+    // socket → its advertised session_inventory.
+    let advertised = false
+    let advertisedHostname: string | null = null
+    if (ws.data.role === 'supervisor' && ws.data.supervisorId) {
+      const entry = getSupervisor(ws.data.supervisorId)
+      advertised = !!entry?.sessionInventory.some((s) => s.session_id === frame.session_id)
+      advertisedHostname = entry?.hostname ?? null
+    } else if (ws.data.sessionId) {
+      advertised = frame.session_id === ws.data.sessionId
+    }
+    if (!advertised) return // cross-host injection rejected
+
+    // DB HOST-OWNERSHIP CROSS-VALIDATION (NH-1/R-PTY-35): defeat a spoofed
+    // inventory entry. For a supervisor socket, the DB-recorded session hostname
+    // must match this supervisor's hostname. (Plain agent sockets are bound to a
+    // single session at auth time, so the inventory check already pins them; the
+    // cross-validation is the supervisor-multiplex hardening.)
+    if (ws.data.role === 'supervisor') {
+      try {
+        const dbHost = await getSessionHostname(frame.session_id)
+        // Only enforce when BOTH sides record a hostname; a null on either side
+        // means the session predates host-keying — fall back to the inventory
+        // check already passed (don't hard-drop a legitimate legacy session).
+        if (dbHost && advertisedHostname && dbHost !== advertisedHostname) {
+          log.warn('term.agent_host_mismatch', {
+            session_id: frame.session_id,
+            db_host: dbHost,
+            claimed_host: advertisedHostname,
+            supervisor_id: ws.data.supervisorId,
+          })
+          return // host claiming a session it does not own per the DB → dropped
+        }
+      } catch {
+        // DB error — fail closed for the cross-validation path: drop.
+        return
+      }
+    }
+
+    broadcastToSubscribers(frame.session_id, frame)
     return
   }
 

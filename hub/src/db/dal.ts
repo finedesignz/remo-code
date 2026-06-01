@@ -41,10 +41,156 @@ export async function getSession(sessionId: string, userId: string) {
   const rows = await sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at,
            cli_kind, is_rootless, hostname, is_orchestrator,
-           repo_key, github_owner, github_repo, auto_nudge
+           repo_key, github_owner, github_repo, auto_nudge,
+           runner_type, pty_backend_id, transcript_path
     FROM sessions WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
   `;
   return rows[0] ?? null;
+}
+
+// ── Phase 16 — per-session runner type + persisted PTY backend identity (H10) ─
+
+export type RunnerType = 'stream-json' | 'pty-interactive'
+
+/**
+ * Set a session's runner_type. User-scoped. GUARD (R-PTY-11): a Telegram-default
+ * session MUST NOT be switched to 'pty-interactive' this phase (Telegram stays
+ * stream-json until Phase 20 re-sources it onto the PTY surface). Returns:
+ *   - { runner_type } on success
+ *   - { error: 'telegram_default_pty_forbidden' } when blocked by the guard
+ *   - undefined when no owned session matched
+ */
+export async function setSessionRunnerType(
+  sessionId: string,
+  userId: string,
+  runnerType: RunnerType,
+): Promise<{ runner_type: RunnerType } | { error: string } | undefined> {
+  // Telegram-default guard — refuse pty-interactive for the user's tg-default session.
+  if (runnerType === 'pty-interactive') {
+    const tg = await sql<{ telegram_default_session_id: string | null }[]>`
+      SELECT telegram_default_session_id FROM users WHERE id = ${userId} LIMIT 1
+    `
+    if (tg[0]?.telegram_default_session_id === sessionId) {
+      return { error: 'telegram_default_pty_forbidden' }
+    }
+  }
+  const rows = await sql<{ runner_type: RunnerType }[]>`
+    UPDATE sessions SET runner_type = ${runnerType}
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    RETURNING runner_type
+  `
+  return rows[0]
+}
+
+/** Read the persisted runner_type (authoritative on resume — H10). Defaults to
+ *  'stream-json' for any row predating the column / missing it. */
+export async function getSessionRunnerType(
+  sessionId: string,
+  userId: string,
+): Promise<RunnerType> {
+  const rows = await sql<{ runner_type: RunnerType | null }[]>`
+    SELECT runner_type FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `
+  return (rows[0]?.runner_type as RunnerType) ?? 'stream-json'
+}
+
+/** Persist the backend PTY/tmux identity + transcript path captured at spawn so
+ *  a reconnect/restart re-binds the SAME backend (no dual-spawn — H10). */
+export async function setSessionPtyIdentity(
+  sessionId: string,
+  userId: string,
+  ptyBackendId: string | null,
+  transcriptPath: string | null,
+): Promise<void> {
+  await sql`
+    UPDATE sessions SET pty_backend_id = ${ptyBackendId}, transcript_path = ${transcriptPath}
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `
+}
+
+/**
+ * Phase 20 — resolve everything a `TranscriptSource.open(ctx)` needs for a
+ * session, by sessionId alone (server-side; the bridge operates per-session, not
+ * per-user). Returns the cli_kind, project_dir, and the PERSISTED transcript
+ * identity captured at PTY spawn (transcript_path + codex rollout id). The
+ * adapter degrades to scrape-mode when these are absent (never a newest-file
+ * guess). Null when no live (non-deleted) session row matches.
+ *
+ * `codex_rollout_id` is read from `pty_backend_id` for codex sessions: the
+ * Phase-16 spawn-time capture stores the backend identity there, and for codex
+ * the rollout `session_meta` id IS that backend identity. (When a future Phase-16
+ * revision adds a dedicated column this helper is the single place to update.)
+ */
+export async function getTranscriptOpenContext(
+  sessionId: string,
+): Promise<{
+  sessionId: string
+  projectDir: string
+  cliKind: 'claude' | 'codex'
+  transcriptPath: string | null
+  codexRolloutId: string | null
+} | null> {
+  const rows = await sql<
+    { project_dir: string | null; cli_kind: string | null; transcript_path: string | null; pty_backend_id: string | null }[]
+  >`
+    SELECT project_dir, cli_kind, transcript_path, pty_backend_id
+      FROM sessions
+     WHERE id = ${sessionId} AND deleted_at IS NULL
+     LIMIT 1
+  `
+  if (!rows[0]) return null
+  const cliKind = (rows[0].cli_kind as 'claude' | 'codex') ?? 'claude'
+  return {
+    sessionId,
+    projectDir: rows[0].project_dir ?? '',
+    cliKind,
+    transcriptPath: rows[0].transcript_path ?? null,
+    codexRolloutId: cliKind === 'codex' ? (rows[0].pty_backend_id ?? null) : null,
+  }
+}
+
+/** Read the persisted PTY backend identity (resume re-binds it — H10). */
+export async function getSessionPtyIdentity(
+  sessionId: string,
+  userId: string,
+): Promise<{ runner_type: RunnerType; pty_backend_id: string | null; transcript_path: string | null } | null> {
+  const rows = await sql<{ runner_type: RunnerType | null; pty_backend_id: string | null; transcript_path: string | null }[]>`
+    SELECT runner_type, pty_backend_id, transcript_path FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `
+  if (!rows[0]) return null
+  return {
+    runner_type: (rows[0].runner_type as RunnerType) ?? 'stream-json',
+    pty_backend_id: rows[0].pty_backend_id ?? null,
+    transcript_path: rows[0].transcript_path ?? null,
+  }
+}
+
+/**
+ * Server-side write-authorization for a terminal session (H2 / R-PTY-29). A
+ * `term.input`/`term.attach`/`term.reattach` is only allowed when the connection's
+ * user OWNS the target session. This is the DB-backed ownership check the relay
+ * composes with the per-connection subscribedSessions set — no cross-user/
+ * cross-session PTY hijack via a forged session_id.
+ */
+export async function canWriteTerminal(userId: string, sessionId: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    SELECT id FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    LIMIT 1
+  `
+  return rows.length > 0
+}
+
+/** Read the session's owning hostname (DB ground-truth for the H3/NH-1
+ *  cross-host validation — a supervisor may only relay term.* for sessions whose
+ *  DB hostname matches its own). Null when the row has no recorded hostname. */
+export async function getSessionHostname(sessionId: string): Promise<string | null> {
+  const rows = await sql<{ hostname: string | null }[]>`
+    SELECT hostname FROM sessions WHERE id = ${sessionId} AND deleted_at IS NULL LIMIT 1
+  `
+  return rows[0]?.hostname ?? null
 }
 
 // Phase 10 — set a session's per-session auto-nudge override. NULL clears the
@@ -705,7 +851,7 @@ export async function revokeAllUserCredentials(userId: string): Promise<{ revoke
 // ── Users / Profiles ──────────────────────────────────────────────────────────
 
 export async function getUserById(id: string) {
-  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, auto_nudge_idle_sessions, notifications, created_at, updated_at FROM users WHERE id = ${id}`;
+  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, programmatic_halt_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, auto_nudge_idle_sessions, notifications, created_at, updated_at FROM users WHERE id = ${id}`;
   return rows[0] ?? null;
 }
 
@@ -1360,13 +1506,16 @@ export async function createUser(email: string, passwordHash: string, role: stri
   return rows[0];
 }
 
-export async function updateProfile(userId: string, fields: { display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string }) {
+export async function updateProfile(userId: string, fields: { display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string; programmatic_halt_usd?: number | null }) {
   // Build a partial update — only touch the columns provided.
   const sets: any[] = [];
   if (fields.display_name !== undefined) sets.push(sql`display_name = ${fields.display_name}`);
   if (fields.avatar_url !== undefined) sets.push(sql`avatar_url = ${fields.avatar_url}`);
   if (fields.system_prompt !== undefined) sets.push(sql`system_prompt = ${fields.system_prompt}`);
   if (fields.timezone !== undefined) sets.push(sql`timezone = ${fields.timezone}`);
+  // Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt bound. null clears
+  // it (OFF — the default).
+  if (fields.programmatic_halt_usd !== undefined) sets.push(sql`programmatic_halt_usd = ${fields.programmatic_halt_usd}`);
   if (sets.length === 0) return getUserById(userId);
   sets.push(sql`updated_at = now()`);
   let q = sql`UPDATE users SET `;

@@ -26,8 +26,8 @@ const MAX_AVATAR_BYTES = 1_400_000; // ~1MB after base64 overhead (1MB * 1.37)
 
 profileRouter.patch("/", async (c) => {
   const userId = c.get("userId") as string;
-  const body = await c.req.json<{ display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string }>();
-  const fields: { display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string } = {};
+  const body = await c.req.json<{ display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string; programmatic_halt_usd?: number | null }>();
+  const fields: { display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string; programmatic_halt_usd?: number | null } = {};
   if (body.display_name !== undefined) fields.display_name = body.display_name;
   if (body.avatar_url !== undefined) {
     const v = body.avatar_url;
@@ -52,6 +52,18 @@ profileRouter.patch("/", async (c) => {
       return c.json({ error: 'invalid_timezone' }, 400);
     }
     fields.timezone = body.timezone;
+  }
+  // Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt bound. null/0 ⇒
+  // OFF (the default); a positive number arms the halt at dailyCostCapGate.
+  if (body.programmatic_halt_usd !== undefined) {
+    const v = body.programmatic_halt_usd;
+    if (v === null) {
+      fields.programmatic_halt_usd = null;
+    } else if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      return c.json({ error: 'invalid_programmatic_halt_usd' }, 400);
+    } else {
+      fields.programmatic_halt_usd = v === 0 ? null : v; // 0 means OFF
+    }
   }
   const updated = await updateProfile(userId, fields);
   return c.json(updated);

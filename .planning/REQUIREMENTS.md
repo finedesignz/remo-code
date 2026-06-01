@@ -293,3 +293,606 @@ Update in the same milestone: web CLAUDE.md / `docs/` (new tab set Connections/C
 | R-DOCS-04 | Phase 14 | Pending |
 
 **Coverage:** 27/27 PLAN items mapped to 27 REQs across Phases 08–14. No orphans.
+
+---
+
+## Milestone m-interactive-pty-runner (Phases 15–19)
+
+> Source spec: `.planning/architecture/interactive-pty-runner-SPEC.md`. CRITICAL OVERRIDE in effect:
+> FULL RIP-AND-REPLACE — PTY-ify ALL human sessions (Claude AND Codex); delete the stream-json
+> ChatSurface human chat UI; stream-json survives only as an unattended-automation transport.
+> Non-negotiable: never pass `ANTHROPIC_API_KEY` to a spawned client; no API-key fallback (fallback =
+> Codex/Gemini); spawn official `claude` only, never reuse the OAuth token; only human turns touch the
+> PTY runner; auth via `claude login`; interactive `claude` has no `-p`/`--input-format stream-json`;
+> raw-terminal WS isolated from the `/ws/agent` RunnerEvent pipeline; June-15 checks gate the cutover.
+
+### Phase 15 — pty-spike-and-compile-derisk
+
+#### R-PTY-01 — Interactive claude in a PTY (no programmatic flags)
+The supervisor SHALL spawn the genuine interactive `claude` TUI inside a PTY with NO `-p` and NO `--input-format stream-json`/`--output-format stream-json` flags. The spawned process env MUST have `ANTHROPIC_API_KEY` deleted (parity with `claude-runner.ts:94`). A canary test SHALL fail the build if the PTY runner argv contains `-p`, `--print`, or `--input-format`/`--output-format stream-json`, or if `ANTHROPIC_API_KEY` is present in the spawned env.
+
+#### R-PTY-02 — Raw-terminal bytes streamed both directions
+The spike SHALL stream raw PTY output bytes to the web client and write raw input bytes from the web client into the PTY, such that a typed human turn renders in the TUI and TUI output renders in xterm.js.
+
+#### R-PTY-03 — Raw-terminal WS channel isolated from the structured pipeline
+The raw-terminal transport SHALL be a dedicated channel carrying terminal frames (data/resize/reattach) and MUST NOT emit or depend on the structured `RunnerEvent` union or the `/ws/agent` agent-protocol bubble pipeline. A test SHALL assert no `RunnerEvent` coupling on the terminal path.
+
+#### R-PTY-04 — node-pty / bun-compile shipping approach demonstrated
+The spike SHALL determine and demonstrate how the `node-pty` native addon ships when the supervisor sidecar is produced via `bun build --compile` (bundle native module, helper exe, or out-of-band PTY host). The chosen approach SHALL be documented in a SPIKE/RESEARCH artifact consumed by Phase 16, including a working proof the PTY host runs from the compiled sidecar context (or a documented out-of-band launch).
+
+#### R-PTY-05 — Themed xterm.js panel in the existing shell
+The spike SHALL render the TUI in an xterm.js panel inside the existing React shell using the app theme tokens (`--bg-primary`/`--text-primary`, blue accent) without altering app chrome (sidebar/nav). `web/test/no-indigo.test.ts` SHALL remain green.
+
+### Phase 16 — hardened-pty-relay-and-mobile-terminal
+
+#### R-PTY-06 — claude-pty-runner module
+A new `supervisor/src/runners/claude-pty-runner.ts` SHALL implement the interactive PTY runner (raw bytes only, no RunnerEvent translation), deleting `ANTHROPIC_API_KEY` from the spawned env, using the Phase-15 sidecar-shipping approach.
+
+#### R-PTY-07 — tmux-backed persistence and reattach
+The interactive `claude` SHALL run inside tmux so a dropped phone/browser connection can reattach with no lost state. A test/demo SHALL prove tmux reattach survives a dropped connection with scrollback intact.
+
+#### R-PTY-08 — Authenticated raw-terminal relay end-to-end
+The raw-terminal WS channel SHALL be authenticated via the existing opaque-cookie session/WS infra and relay frames `/ws/client` to/from `/ws/agent` (data/resize/reattach/scrollback) without coupling to the structured agent-protocol.
+
+#### R-PTY-09 — Mobile terminal: reconnect / resize / scrollback
+The xterm.js terminal surface SHALL support reconnect, resize (propagating cols/rows to the PTY), and scrollback on mobile and desktop.
+
+#### R-PTY-10 — Human-only dispatch guard
+A guard SHALL reject non-interactive/automation dispatch sources (scheduler, orchestrator background, auto-dev, error-capture) from the PTY runner. A test SHALL assert an automation-sourced dispatch to a PTY session is rejected.
+
+#### R-PTY-11 — Per-session runner type; Telegram stays stream-json
+Runner type SHALL be per-session (PTY-interactive vs stream-json) and opt-in per session. A session that is a Telegram default MUST NOT be switched to the PTY runner; a guard SHALL prevent it.
+
+### Phase 17 — codex-pty-runner-and-chatsurface-rip-and-replace
+
+#### R-PTY-12 — Codex interactive/PTY runner
+A `supervisor/src/runners/codex-pty-runner.ts` SHALL run Codex human sessions on the raw-terminal surface, reusing the Phase-16 PTY host + raw-terminal WS + tmux.
+
+#### R-PTY-13 — Delete the stream-json human chat UI
+The web `ChatSurface` (all `full`/`cell`/`mobile-expanded` variants) and the structured activity-bubble rendering (thinking/text_delta/tool_use/tool_result) for human sessions SHALL be removed from `web/src`. A test SHALL assert no `ChatSurface`/structured-bubble render path remains for human sessions.
+
+#### R-PTY-14 — Remove dead agent-protocol bubble translation
+Any hub-side agent-protocol-to-bubble translation that exists ONLY to feed the deleted human chat UI SHALL be removed. Translation needed by unattended automation (Phase 18) SHALL be preserved.
+
+#### R-PTY-15 — All human sessions route to the terminal surface
+Both Claude and Codex human sessions SHALL render on the single themed xterm.js terminal surface; grid/list views SHALL host terminal cells (or drop conversation rendering) consistent with one surface.
+
+#### R-PTY-16 — stream-json runner path preserved for automation
+The runner-side stream-json path SHALL remain intact for unattended automation transports (only its human chat UI is removed). Baseline + `no-indigo` tests stay green.
+
+### Phase 18 — billing-guardrail-dual-bucket-usage
+
+#### R-PTY-17 — Dual-bucket usage poll
+`supervisor/src/usage/oauth-poll.ts` to `hub/src/usage/store.ts` SHALL surface BOTH balances (interactive subscription pool AND programmatic credit pool), broadcast via the existing `subscription_usage` WS path. The OAuth token MUST NOT be serialized to the hub (parity with existing behavior).
+
+#### R-PTY-18 — Programmatic-leak alert + optional hard-halt
+The system SHALL alert when programmatic credit is consumed unexpectedly and SHALL support an optional hard-halt — no silent drain, no surprise hard-stop.
+
+#### R-PTY-19 — Automation routed to programmatic path behind the cost cap
+Unattended automation (scheduler/orchestrator-background/auto-dev/error-capture) SHALL be explicitly routed onto the stream-json/programmatic path behind the existing non-bypassable `dailyCostCapGate`. No API key anywhere.
+
+#### R-PTY-20 — Dual-bucket rendered in usage UI
+The usage strip/tab SHALL render both buckets (util% + reset where applicable) without exposing the OAuth token.
+
+### Phase 19 — cutover-gate-and-automation-fallback
+
+#### R-PTY-21 — June-15 cutover gate runbook (not a build blocker)
+A documented cutover GATE SHALL encode the spec four "Verify after June 15" checks as a measurement procedure using the Phase-18 dual-bucket poll. Phases 15 to 18 are buildable before June 15; only the default-on cutover is gated.
+
+#### R-PTY-22 — Interactive-bucket confirmation flips default-on
+The PTY runner SHALL become the default for human sessions ONLY after measurement confirms a PTY interactive session bills the INTERACTIVE bucket.
+
+#### R-PTY-23 — If-PTY-fails fallback to Codex/Gemini (no API key)
+The "If PTY fails" fallback SHALL wire the human-coding UX to the existing Codex runner and provide a stubbed/optional future Gemini runner seam. No code path SHALL fall back to `ANTHROPIC_API_KEY`/API-platform billing.
+
+#### R-PTY-24 — Telegram stays on programmatic pool (documented)
+Telegram and any text-only channel SHALL remain on the stream-json programmatic pool by structural necessity; documented, not worked around with an API key.
+
+#### R-PTY-25 — Final docs sweep
+README/CLAUDE.md/`docs/` SHALL document the terminal surface, dual-bucket usage, the cutover gate, the rip-and-replace, and the no-API-key invariant; `bun run docs:sync` run if endpoints changed.
+
+**Milestone coverage:** 25 REQs (R-PTY-01..25) mapped across Phases 15–19. No orphans.
+
+---
+
+## Milestone m-interactive-pty-runner — Phase 20 addendum (Telegram on transcript-tail)
+
+> **Why Phase 20 exists.** Phase 17 (rip-and-replace) deletes the stream-json human runner and with
+> it the Telegram bridge's structured event source (`assistant_message:final`/`tool_use` on the hub
+> event bus, and the `permission_request`→`onPermissionPending` path). After Phase 17 the Telegram
+> bridge is non-functional. Phase 20 rebuilds Telegram on a **backend-agnostic transcript-tail**
+> source plus a **fail-closed permission/question keystroke-injection** path, sequenced strictly
+> AFTER Phase 17.
+>
+> **Supersedes R-PTY-11 / R-PTY-24 (Telegram-stays-stream-json).** R-PTY-11 ("a Telegram default
+> session MUST NOT be switched to the PTY runner") and R-PTY-24 ("Telegram stays on the programmatic
+> pool") were written assuming the stream-json human runner survives. It does not. R-PTY-11's
+> blanket guard and R-PTY-24's "stream-json pool by structural necessity" are **superseded by
+> R-TG-01..R-TG-12 below**: Telegram sessions ARE PTY-interactive sessions whose output is sourced
+> from the transcript and whose input is injected as PTY keystrokes. The transcript reader is a
+> read-only observer of the human's own interactive subscription session — it adds NO programmatic
+> Claude call and therefore does NOT move Telegram onto the programmatic credit pool. The ToS line
+> (constraint 3) is preserved: only a genuine human Telegram message injects to the PTY; Telegram is
+> never combined with auto-nudge/scheduled prompts to drive the PTY unattended.
+
+### Phase 20 — telegram-transcript-tail
+
+#### R-TG-01 — Backend-agnostic transcript-source adapter
+A `TranscriptSource` adapter interface SHALL be defined with at least one implementation per backend.
+The adapter is selected by the session's backend (`cliKind: 'claude' | 'codex'`), NOT hardcoded to a
+single path. Each adapter resolves the active session's transcript location, tails newly-appended
+records, and normalizes them to a shared `TranscriptEntry` union (`assistant_text`, `tool_use`,
+`permission_request`, `user_question`, `turn_complete`). Adding a backend SHALL require only a new
+adapter, no change to the bridge. A test SHALL assert the bridge consumes only the normalized union
+and never a backend-specific shape.
+
+#### R-TG-02 — Claude transcript adapter
+The Claude adapter SHALL source records from the Claude Code projects transcript JSONL
+(`~/.claude/projects/<project-slug>/<session-uuid>.jsonl`), mapping `assistant`/`tool_use`/result
+entries to the normalized union. The session→transcript mapping (which file is THIS remo-code
+session) SHALL be resolved explicitly (project-dir slug + session id captured at PTY spawn), never by
+guessing the newest file. A test SHALL assert mapping is deterministic given a known project dir +
+session id, and that a transcript-format drift (unknown record `type`) degrades to "skip + log",
+never a crash and never a misclassification.
+
+#### R-TG-03 — Codex transcript adapter (+ documented fallback)
+The Codex adapter SHALL source records from the Codex CLI rollout JSONL
+(`~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<uuid>.jsonl`; each line
+`{timestamp, type: session_meta|response_item|turn_context, payload}`), mapping `response_item`
+message/function_call payloads to the normalized union. Because this path/format is UNDOCUMENTED and
+version-unstable (community-reverse-engineered; see RESEARCH), the adapter SHALL: (a) resolve the
+session's rollout file by the `session_meta` id captured at spawn (not newest-file heuristic), and
+(b) fall back to a **terminal-byte scrape** mode for Codex when the rollout file is absent or its
+schema is unrecognized — surfacing only `assistant_text` and `turn_complete` (NO permission parsing
+from scraped bytes; see R-TG-06 fail-closed). A test SHALL assert the unknown-schema path selects the
+fallback and never emits a `permission_request` from scraped bytes.
+
+#### R-TG-04 — Telegram output sourced from the selected adapter
+The Telegram outbound bridge SHALL forward `assistant_text` (final turn) and collapsed `tool_use`
+one-liners sourced from the session's `TranscriptSource` (selected by backend), replacing the deleted
+`assistant_message:final` hub-event-bus source. Streaming deltas SHALL NOT be forwarded (parity with
+the prior "final only" invariant). A test SHALL assert the bridge no longer imports
+`onAssistantMessageFinal` and instead consumes `TranscriptEntry` events.
+
+#### R-TG-05 — Pending permission / user_question detected from the transcript
+The system SHALL detect a pending permission/approval or `user_question`/option-select per backend
+from the normalized `TranscriptSource` stream (or a structured side-channel if the backend exposes
+one). Detection SHALL key each pending request by **`(sessionId, requestId)`** — never `requestId`
+alone (reusing the existing `hub/src/telegram/approvals.ts` keying that fixed the multi-user clobber).
+A test SHALL assert two concurrent pendings on different sessions with the same synthetic requestId do
+not collide.
+
+#### R-TG-06 — Fail-CLOSED permission parsing (security-critical)
+Permission/question detection SHALL be fail-CLOSED: if the transcript entry (or scraped bytes) is
+ambiguous, partial, or its option set is not parseable into a discrete, enumerated choice, the system
+SHALL do NOTHING — emit no Telegram prompt, inject no keystroke, and NEVER auto-approve. An
+auto-approval or a default "yes" on parse failure is explicitly forbidden. A test SHALL assert that a
+malformed/ambiguous permission entry produces zero injected keystrokes and zero Telegram approval
+messages. The Codex terminal-byte-scrape fallback (R-TG-03) SHALL NOT emit permission prompts at all.
+
+#### R-TG-07 — Surface to Telegram via existing inline approval UX
+A detected pending permission/question SHALL be surfaced using the existing inline tap-to-approve UX
+(`hub/src/telegram/approvals.ts` registry + `sendMessageWithKeyboard`), with one inline button per
+enumerated option (Approve/Deny for boolean permissions; one button per discrete choice for
+`user_question` option-selects). Authorization SHALL reuse the per-user `(sessionId, requestId)`
+binding — a foreign/stale tap finds no entry and is rejected. A test SHALL assert an unauthorized
+user's tap is rejected and injects nothing.
+
+#### R-TG-08 — Human response injected as the correct PTY keystroke(s)
+On an authorized tap, the system SHALL inject the response into the session's PTY as the literal
+keystroke(s) the backend's TUI expects for that pending request (e.g. the option index/arrow+enter or
+the approve/deny key), via the Phase-16 raw-terminal input path — NOT via the deleted
+`permission_response` agent-protocol message. The keystroke mapping SHALL be per-backend (part of the
+adapter). A test SHALL assert the injected bytes match the expected mapping for a known pending shape,
+and that injection targets the correct session's PTY only.
+
+#### R-TG-09 — Disambiguation: a tap answers exactly one pending request
+A Telegram tap SHALL resolve exactly the `(sessionId, requestId)` it was bound to, then remove that
+entry so the decision applies once. If the bound pending no longer exists (already resolved,
+TTL-expired, or the TUI advanced past it — detected because the transcript shows the request resolved
+or a new turn started), the tap SHALL be rejected with a "no longer pending" notice and inject
+nothing. A test SHALL assert a tap on a superseded/expired pending injects nothing.
+
+#### R-TG-10 — PTY write-arbitration: single-writer turn lock per session
+Concurrent writers to one tmux-backed PTY (phone/browser xterm AND the Telegram bridge) SHALL be
+serialized by a **single-writer turn lock per session** held in the hub. A writer acquires the turn,
+injects one human turn (or one permission/question response), and the lock is released only when the
+turn is observed COMPLETE — defined as a `turn_complete`/assistant-entry observed in the
+`TranscriptSource` (or, for the byte-scrape fallback, the TUI's idle/prompt-ready signal). While held,
+other writers' input is QUEUED (FIFO, bounded) and the holder is shown in per-session "who holds the
+turn" state. A test SHALL assert: (a) a second writer's input is queued not interleaved, (b) the lock
+releases on observed completion, (c) a permission/question response from the non-holder is allowed
+(answering a prompt is not a new turn) without breaking the holder's turn.
+
+#### R-TG-11 — Telegram injection obeys the human-only dispatch guard
+Telegram injection SHALL pass through the Phase-16 human-only dispatch guard (constraint 3 / R-PTY-10):
+a real human Telegram message is an allowed human turn, but Telegram MUST NOT be combined with
+auto-nudge or scheduled/automation prompts to drive the PTY unattended. A test SHALL assert an
+automation-sourced dispatch tagged as Telegram-origin is rejected by the guard.
+
+#### R-TG-12 — Phase 17 break is explicit, not silent; Phase 20 docs
+Phase 17's plan/notes SHALL explicitly state "Telegram bridge event source removed here; rebuilt in
+Phase 20 on transcript-tail" so the break is acknowledged, not silent. Phase 20 SHALL update
+`docs/telegram-bridge.md` (and CLAUDE.md Docs map) to describe the transcript-tail source, the
+per-backend adapters, the fail-closed permission-injection flow, and the write-arbitration turn lock.
+`bun run docs:sync` SHALL run if endpoints changed.
+
+**Phase 20 coverage:** 12 REQs (R-TG-01..12). Supersedes the Telegram clauses of R-PTY-11 and
+R-PTY-24. No orphans.
+
+---
+
+## Milestone m-interactive-pty-runner — Phase 18 & 19 detail addendum (appended 2026-05-31)
+
+> APPEND-ONLY block authored during the Phase-18/19 detail-planning pass. The parent requirements
+> **R-PTY-17..25 already exist above** (Phases 18–19 sections); this addendum does NOT replace them.
+> It records the fine-grained sub-requirements + threat IDs derived during detail planning, for
+> traceability into the phase PLAN/VALIDATION artifacts. Where a sub-ID elaborates a parent, the parent
+> remains authoritative.
+
+### Phase 18 — billing-guardrail-dual-bucket-usage (elaborates R-PTY-17..20)
+
+#### R-PTY-17a — Programmatic bucket is a dollar balance, additive + fail-safe
+The second (Agent-SDK programmatic credit) bucket SHALL be carried as a DOLLAR balance
+(`{used_usd, limit_usd, resets_at, claimed}`), ADDITIVE to the existing four util% windows on
+`UsagePayload` / `usage_report` / `subscription_usage` (optional + nullable — old supervisors/clients
+SHALL still validate). When the credit source is absent/pre-claim/unrecognized, the bucket SHALL
+degrade to an explicit empty state and SHALL NEVER fabricate a dollar value. The OAuth token SHALL NOT
+be serialized to the hub (parity preserved; negatively tested). *(Threats T-18-01 token-leak CRITICAL;
+T-18-02 fabricated-number HIGH; T-18-03 non-additive-schema HIGH.)*
+
+#### R-PTY-18a — Leak alert visible; hard-halt opt-in, default-off, humans exempt
+The programmatic-leak alert SHALL be surfaced (WS `programmatic_leak_alert` + usage-tab notice), never
+suppressed silently. The hard-halt SHALL be OPT-IN, default OFF, and SHALL act ONLY by adding a
+predicate at the single existing `dailyCostCapGate` chokepoint (no parallel chokepoint), denying
+programmatic/automation dispatch with reason `programmatic_credit_halt`. It SHALL NEVER halt a human
+interactive PTY turn, and SHALL NEVER be a surprise (alert precedes the user-configured bound).
+*(Threats T-18-04 silent-drain HIGH; T-18-05 surprise-hard-stop CRITICAL.)*
+
+#### R-PTY-19a — Automation-routing regression guard
+A guard test SHALL assert every unattended dispatch source (scheduler / orchestrator-background /
+auto-dev / error-capture) passes through `dailyCostCapGate` AND is rejected by the Phase-16 human-only
+guard if pointed at the PTY surface, and that NO automation path constructs an `ANTHROPIC_API_KEY` env /
+API-platform call. *(Threats T-18-06 cap-escape HIGH; T-18-07 automation-on-PTY CRITICAL.)*
+
+#### R-PTY-20a — UI honest empty state + no secret exposure
+The usage UI SHALL render the programmatic bucket only from the non-secret WS snapshot (no token
+read/rendered), show an explicit empty state when the bucket is unknown/pre-claim, and present the
+leak notice + the opt-in hard-halt toggle. Blue accent preserved (`web/test/no-indigo.test.ts` green).
+*(Threat T-18-08 secret-exposure HIGH.)*
+
+### Phase 19 — cutover-gate-and-automation-fallback (elaborates R-PTY-21..25)
+
+#### R-PTY-21a — Gate runbook = measurement, not a build blocker
+A `docs/cutover-gate-june15.md` runbook + a checklist artifact SHALL encode the four SPEC checks
+(PTY-interactive bucket; setup-token vs login; subagents/hooks/MCP residual; login-credential headless
+reclassification) as a snapshot→controlled-turn→snapshot→diff measurement using the Phase-18 dual-bucket
+poll. The runbook SHALL state it is NOT a build blocker (Phases 15–18 ship before June 15) and that only
+the default-on flip is gated. The login-credential reclassification item SHALL be an ONGOING watch.
+*(Threat T-19-01 gate-misread MED.)*
+
+#### R-PTY-22a — Fail-safe default backend until gate-confirmed
+The default-human-backend selector SHALL default new human sessions to a NON-Claude-PTY backend (Codex)
+until a recorded `claude_interactive_confirmed` gate flag is set; the flip to Claude-PTY-default SHALL
+be a recorded operator config change, never automatic. *(Threat T-19-02 silent-programmatic-default
+CRITICAL.)*
+
+#### R-PTY-23a — Codex-primary fallback, Gemini stub, no API key
+The Codex PTY runner SHALL be selectable as a human backend through the same terminal surface using
+ChatGPT-subscription sign-in (not an API key). A Gemini runner seam SHALL exist as a stub only
+(feature-flagged off / not-implemented, never default-selected). NO runner/fallback path SHALL set
+`ANTHROPIC_API_KEY` or construct an API-platform billing call (negatively guarded). *(Threats T-19-03
+API-key-creep CRITICAL; T-19-04 gemini-stub-mistaken MED.)*
+
+#### R-PTY-24a / R-PTY-25a — Supersession + docs consistency
+The R-PTY-24 supersession (Telegram = read-only transcript observer, NOT on the programmatic pool;
+Phase 20 / R-TG-01..12) SHALL be stated explicitly and consistency-tested across SPEC + ROADMAP +
+REQUIREMENTS + docs. The final docs sweep (README / CLAUDE.md / `docs/`) SHALL cover the terminal
+surface, dual-bucket usage, the cutover gate, the rip-and-replace, the selector + fallback, and the
+no-API-key invariant. *(Threat T-19-05 silent-contradiction MED.)*
+
+**Phase 18/19 addendum coverage:** 4 sub-IDs for Phase 18 (R-PTY-17a..20a) + 5 for Phase 19
+(R-PTY-21a..25a), all tracing to existing parents R-PTY-17..25. No orphans; no new top-level
+requirement introduced.
+
+---
+
+## Milestone m-interactive-pty-runner — Phase 16 & 17 detail addendum (appended 2026-05-31)
+
+> APPEND-ONLY block authored during the Phase-16/17 detail-planning pass. The parent requirements
+> **R-PTY-06..16 + R-TG-12 already exist above** (Phase 16/17 sections); this addendum does NOT replace
+> them. It records the fine-grained sub-requirements + threat IDs derived during detail planning, for
+> traceability into the phase PLAN/VALIDATION artifacts. Where a sub-ID elaborates a parent, the parent
+> remains authoritative. (`workflow.plan_review_convergence` was enabled in `.planning/config.json` the
+> same session.)
+
+### Phase 16 — hardened-pty-relay-and-mobile-terminal (elaborates R-PTY-06..11)
+
+#### R-PTY-07a — Supervisor-owned persistence + scrollback ring-buffer (cross-platform)
+The PTY process SHALL be owned by the supervisor (not scoped to a client WS) so a dropped client does
+NOT kill the session, and a bounded output ring-buffer SHALL record recent PTY output for scrollback
+replay on reattach. tmux SHALL be used on POSIX where available (survival across supervisor restarts);
+on Windows (no native tmux) the supervisor-owned persistent-PTY + ring-buffer is the documented
+baseline. A test SHALL assert a simulated disconnect→reattach replays the last-N lines, and an
+idle/exited PTY is reaped (no orphan). *(Threats T-16-04 persistence-leak MED; cross-ref 16-PLAN-001.)*
+
+#### R-PTY-08a — Isolated raw-terminal frame schema + authenticated byte-faithful relay
+A `hub/src/ws/term-protocol.ts` SHALL define the raw-terminal frame schema
+(`term.data`/`term.input`/`term.resize`/`term.attach`/`term.reattach`) OUTSIDE `agent-protocol.ts`,
+importing neither it nor the `RunnerEvent` type; the hub relay SHALL be byte-faithful and accept frames
+only on an authenticated, subscribed connection. Static + auth tests SHALL assert zero RunnerEvent
+coupling and rejection of unauthenticated frames. *(Threats T-16-05 unauth-attach HIGH, T-16-07
+coupling-leak MED; cross-ref 16-PLAN-002.)*
+
+#### R-PTY-10a — Human-only gate composes WITH the non-bypassable cost cap
+The human-only dispatch gate SHALL be composed into the SINGLE existing dispatch pipeline alongside
+`dailyCostCapGate` (no parallel chokepoint, no new uncapped route); it rejects automation sources for
+`pty-interactive` sessions and allows genuine human turns. A test SHALL assert per-automation-source
+rejection AND that the cost cap still applies. *(Threats T-16-06 automation-on-PTY HIGH, T-16-08
+cap-bypass HIGH; cross-ref 16-PLAN-002.)*
+
+#### R-PTY-11a — Per-session runner_type column (idempotent DDL, opt-in)
+`sessions.runner_type TEXT NOT NULL DEFAULT 'stream-json'` (∈ {'stream-json','pty-interactive'}) SHALL
+be added via `ADD COLUMN IF NOT EXISTS` (idempotent; re-runs safely each boot; NO data backfill in
+schema.sql); the API validates the enum, opt-in per session, and a Telegram-default session SHALL NOT
+be settable to 'pty-interactive'. *(Cross-ref 16-PLAN-002.)*
+
+### Phase 17 — codex-pty-runner-and-chatsurface-rip-and-replace (elaborates R-PTY-12..16 + R-TG-12)
+
+#### R-PTY-12a — Backend selection seam (Claude/Codex PTY)
+For `runner_type='pty-interactive'`, the supervisor SHALL instantiate `codex-pty-runner.ts` when
+`cli_kind='codex'` and `claude-pty-runner.ts` when `cli_kind='claude'`; the Codex runner mirrors the
+Claude PTY runner (interactive-only, env-clean, raw bytes, no RunnerEvent). A test SHALL assert the
+selection + the extended canary covers the Codex runner. *(Threats T-17-01 Codex-programmatic-flag
+HIGH, T-17-02 env-hygiene HIGH, T-17-03 automation-on-Codex-PTY HIGH; cross-ref 17-PLAN-001.)*
+
+#### R-PTY-13a — One-way-door deletion gate
+The web/hub deletions (R-PTY-13/14) SHALL NOT begin until the Phase-16 VERIFICATION ship-verdict is
+PASS (terminal surface proven); a precheck artifact records the gate. A test SHALL assert no
+`ChatSurface`/structured-bubble render path remains for human sessions after deletion. *(Threats T-17-04
+premature-deletion CRITICAL, T-17-05 shared-chrome-deletion HIGH; cross-ref 17-PLAN-002.)*
+
+#### R-PTY-14a — Automation-translation preservation regression (PRESERVE-on-ambiguity)
+After the rip, a regression test SHALL assert automation-shared translation survives — a `usage_event`
+still records cost (the non-bypassable cost-cap source) AND a scheduled-style dispatch still finalizes;
+the runner-side stream-json path (`claude-runner.ts`/`session-bridge.ts`) is unchanged. Ambiguous
+translation paths SHALL be PRESERVED, not deleted. *(Threats T-17-07 delete-automation-translation
+CRITICAL, T-17-08 cost-cap-severed CRITICAL; cross-ref 17-PLAN-003.)*
+
+#### R-TG-12a — Explicit Telegram break markers; bridge module retained
+Each removed Telegram structured-event source / permission-path site SHALL carry the comment
+`// Phase 17 rip: Telegram event source removed here; rebuilt in Phase 20 (transcript-tail).`, and
+`hub/src/telegram/bridge.ts` SHALL remain on disk (Phase 20 re-sources it). A grep test SHALL assert the
+markers exist and the module is present. *(Threat T-17-09 silent-Telegram-break HIGH; cross-ref
+17-PLAN-003.)*
+
+**Phase 16/17 addendum coverage:** 4 sub-IDs for Phase 16 (R-PTY-07a, 08a, 10a, 11a) + 5 for Phase 17
+(R-PTY-12a, 13a, 14a, R-TG-12a), all tracing to existing parents R-PTY-06..16 + R-TG-12. No orphans; no
+new top-level requirement introduced.
+
+---
+
+## Cycle-2 additions (Phase 15/16)
+
+> APPEND-ONLY block authored during the Cycle-2 GSD replan (adjudicated remediation set
+> `.planning/reviews/SYNTHESIS-cycle1.md`, items H1/H2/H3/H6/H7/H10). These elaborate existing parents
+> R-PTY-01/06/07/08/10/11 (+ R-PTY-07a/08a/10a/11a) — the parents remain authoritative. Touches Phase 15
+> and Phase 16 ONLY. The cross-phase frontmatter-metadata reconciliation (H5) is owned by a separate
+> sweep agent and is NOT in scope here. New top-level IDs are namespaced `R-PTY-26..31` to avoid
+> renumbering existing requirements.
+
+### Phase 15 — pty-spike-and-compile-derisk (Cycle-2)
+
+#### R-PTY-26 — Behavioral spawn-interception harness (supersedes grep-only for the spawn invariants) — closes H6
+The no-`ANTHROPIC_API_KEY` / no-`-p` / no-`--input-format stream-json` / no-`--output-format stream-json`
+/ official-`claude`-only invariants SHALL be enforced by a BEHAVIORAL spawn-interception test harness that
+intercepts the ACTUAL spawn call (the `node-pty` spawn factory) at runtime and asserts on the real
+`{ file, argv, env }` the runner passes — NOT only by static source grep. The harness SHALL be ESTABLISHED
+in Phase 15 (the spike seeds it as a mockable, non-runtime-exported `ptySpawn` factory) and is REUSED by
+Phases 16/17/19 (Codex runner, fallback). The static grep canary (R-PTY-01) is RETAINED as a cheap
+secondary line of defense, not the primary one. A test SHALL assert: production runner spawns file
+`claude` with empty Claude argv in PTY mode; the intercepted env has `ANTHROPIC_API_KEY` undefined; the
+intercepted argv contains none of the forbidden tokens. *(Threat T-15-05 grep-evasion HIGH — a token
+constructed at runtime, aliased, or read from config evades static grep but not argv interception.)*
+
+#### R-PTY-27 — Orphaned-PTY teardown on disconnect / closure / shutdown — closes H7
+The PTY child process SHALL be killed (no orphan host process) when its session is torn down, when the
+owning client WS disconnects under the spike's connection-scoped lifecycle, AND when the supervisor
+process shuts down. The spike SHALL wire `runner.kill()` to these lifecycle events and add a parent-PID
+dead-man's-switch so a killed/crashed supervisor does not leave a detached `claude` + `pty` host process.
+A test SHALL assert NO surviving child process after a simulated disconnect/teardown. (The
+supervisor-OWNED persistence model — where a dropped client does NOT kill the PTY — is introduced in
+Phase 16/R-PTY-07a; in Phase 16 the kill-on-teardown applies to session-close/idle-reap/supervisor-exit,
+and the tmux-backed path defines an explicit detach-vs-kill policy: client disconnect DETACHES, session
+close / idle-reap / supervisor-exit KILLS.) *(Threat T-15-06 / T-16-09 orphan-process leak MED —
+zombie `claude` + `pty.exe` hold memory, file locks, and a live OAuth session.)*
+
+### Phase 16 — hardened-pty-relay-and-mobile-terminal (Cycle-2)
+
+#### R-PTY-28 — Server-inferred actor + human-only guard ON THE term.input RELAY path — closes H1
+The human-only enforcement (constraint 3 / R-PTY-10) SHALL gate the raw-terminal `term.input`/attach
+relay path itself, NOT only the structured `dispatch/pipeline.ts`. The actor SHALL be SERVER-INFERRED
+from the connection identity (an authenticated `/ws/client` opaque-cookie connection ⇒ `human`; a
+`/ws/agent` api_keys connection ⇒ `agent`), NEVER read from a client-asserted `source`/actor field. Any
+`term.input` whose inferred actor is not a genuine human-interactive write SHALL be rejected BEFORE the
+byte forward. Implementation routes `term.input` through the SAME `humanOnlyPtyGate` chokepoint (or a
+shared guard helper) used by the dispatch pipeline — no second, ungated write route. A NAMED negative
+test SHALL assert an automation/agent-originated `term.input` is rejected on the relay path, and that a
+client-asserted `source: "human"` field cannot bypass the server-inferred decision. *(Threats T-16-10
+relay-bypasses-human-guard HIGH; T-16-11 client-asserted-actor-spoof HIGH.)*
+
+#### R-PTY-29 — Per-session write authorization on term.attach / term.input (no cross-session PTY hijack) — closes H2
+Every inbound `term.input`/`term.attach`/`term.reattach` frame SHALL be authorized SERVER-SIDE against
+the connection's OWN subscribed/owned session set: the target `session_id` MUST be in
+`subscribedSessions` for that connection AND pass a DB-backed `canWriteTerminal(userId, sessionId)`
+ownership check. A client-supplied `session_id` for a session the connection does not own/subscribe SHALL
+be rejected — NO PTY hijack via a forged `session_id`. A NAMED negative test (`term-relay-auth.test.ts`)
+SHALL include cross-session and cross-user hijack cases: user A cannot write to / attach to user B's PTY
+session even with a valid session of their own. *(Threat T-16-12 cross-session/cross-user PTY hijack
+HIGH — the most load-bearing security seam of the milestone.)*
+
+#### R-PTY-30 — /ws/agent-side inventory authorization for term.* frames — closes H3
+On the `/ws/agent` side, the hub SHALL DROP any `term.*` frame for a `session_id` that is NOT in that
+supervisor connection's advertised `session_inventory`. A compromised or buggy supervisor SHALL NOT be
+able to inject `term.data` for a session it does not host (cross-host injection). A NAMED negative test
+SHALL assert a `term.data` from supervisor X for a session hosted by supervisor Y is dropped.
+*(Threat T-16-13 cross-host term-frame injection HIGH.)*
+
+#### R-PTY-31 — Persist per-session runner identity (runner_type + backend transcript path/id) for safe resume — closes H10
+The per-session `runner_type` ('stream-json'|'pty-interactive') AND the backend PTY/tmux session
+identity + backend transcript path/id captured AT PTY SPAWN SHALL be PERSISTED per session (idempotent
+DDL, mirroring the existing pattern; NO backfill in schema.sql). On reconnect/supervisor-restart the
+resume path SHALL READ the persisted runner mode + identity so a session can never be dual-spawned (two
+PTYs for one session) nor mis-routed (stream-json resumed as PTY or vice-versa), and so Phase-20
+`TranscriptSource` + R-PTY-29 ownership can key off real persisted data rather than a newest-file guess.
+A test SHALL assert: a resume reads the persisted runner mode and re-binds the same backend identity (no
+second spawn); a pty-interactive session persisted as such is NOT resumed via the stream-json path.
+*(Threats T-16-14 dual-spawn-on-resume HIGH; T-16-15 runner-mode-misroute-on-restart HIGH.)*
+
+**Cycle-2 (Phase 15/16) coverage:** 6 new IDs — R-PTY-26 (H6), R-PTY-27 (H7) in Phase 15;
+R-PTY-28 (H1), R-PTY-29 (H2), R-PTY-30 (H3), R-PTY-31 (H10) in Phase 16. All elaborate existing parents
+(R-PTY-01/06/07/08/10/11 + the -a addenda); the parents remain authoritative. H5 (frontmatter
+reconciliation) intentionally excluded — owned by the H5 sweep agent.
+
+## Cycle-2 additions (Phase 17/19/20)
+
+These remediate adjudicated SYNTHESIS-cycle1 HIGHs H4 (Phase 17), H8/H9 (Phase 19), and the Phase-20
+slice of H10. All elaborate existing parents (R-PTY-13/22/23, R-TG-01..03); parents remain authoritative.
+H5 frontmatter reconciliation excluded (owned by the H5 sweep agent).
+
+#### R-PTY-13b — Mechanical one-way-door deletion gate (H4)
+The ChatSurface-deletion task (R-PTY-13/13a) SHALL be guarded by a MACHINE-VERIFIABLE gate script
+(`tools/cutover-deletion-gate.mjs`) that reads the Phase-16 ship-verdict artifact and EXITS NON-ZERO —
+aborting the deletion task with zero deletions — unless that artifact records `verdict: PASS` AND the
+explicit manual fields `render_fidelity: PASS` and `mobile_reattach: PASS` (so a CI-green-but-renders-wrong
+surface cannot trigger the rip). A missing file, `FAIL`/`PARTIAL` verdict, or absent manual field SHALL
+abort. The deletion task invokes the gate as a HARD precondition; `web/test/cutover-deletion-gate.test.ts`
+SHALL prove abort on missing/FAIL/manual-field-absent verdicts and pass only on a fully-green fixture. The
+existing `autonomous:false` operator checkpoint remains as a second layer. *(Threat T-17-04 premature-
+deletion CRITICAL, T-17-04b gate-not-invoked CRITICAL; cross-ref 17-PLAN-002.)*
+
+#### R-PTY-22b — Human backend resolves to explicit PTY runner ids only (H8)
+The default-backend selector (R-PTY-22) SHALL resolve a human session ONLY to an explicit PTY runner id
+(`'claude-pty'` | `'codex-pty'`) and SHALL NEVER return the bare `'claude'`/`'codex'` id or the legacy
+stream-json runner; the legacy stream-json runner is NOT a human-selectable backend (it remains for
+unattended automation behind the cost cap). `resolveHumanBackend` SHALL hard-reject (throw) any config/flag
+combination that would yield a non-PTY/legacy id, and SHALL re-assert `ctx.isHuman === true` (throwing
+otherwise) as defense-in-depth independent of the Phase-16 relay-boundary guard. Negative tests SHALL assert
+the legacy id is never returned for any input, that a polluted config throws, and that `isHuman:false`
+throws. *(Threats T-19-02b legacy-runner-for-human CRITICAL, T-19-02c automation-gets-PTY HIGH; cross-ref
+19-PLAN-002.)*
+
+#### R-PTY-22c — Post-failed-gate Claude-PTY disable (H8 folded)
+On a recorded `programmatic` cutover-gate result, the Claude-PTY backend SHALL be disabled/unlisted such
+that `resolveHumanBackend` never returns `'claude-pty'` for NEW OR EXISTING human sessions (an alert fires
+on disable) until an explicit operator override clears it — so in-flight Claude-PTY sessions cannot keep
+billing to the wrong bucket after a failed gate. A negative test SHALL assert the disabled backend is never
+returned even when config requests it. *(Threat T-19-02d in-flight-leak-after-failed-gate HIGH; cross-ref
+19-PLAN-002.)*
+
+#### R-PTY-23b — Shared multi-provider spawn-env sanitizer (H9)
+A SINGLE shared sanitizer (`supervisor/src/runners/env-sanitize.ts`) SHALL denylist-scrub ALL known provider
+key envs — ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY, GOOGLE_APPLICATION_CREDENTIALS
+(+ the ANTHROPIC_AUTH_TOKEN alias) — from the RESOLVED spawn env of EVERY runner (Claude PTY, Codex PTY,
+Gemini stub), so INHERITED (process.env) keys are deleted, not only explicitly-set ones. The per-runner
+ad-hoc `delete env.ANTHROPIC_API_KEY` is replaced by this shared call. PER-BACKEND behavioral negative tests
+SHALL pre-seed each denylisted var into process.env, instantiate each runner via its real node-pty spawn
+path, and assert the ACTUAL spawned env carries none of them; a static grep canary backs it up. *(Threat
+T-19-03 API-key-fallback CRITICAL, broadened; cross-ref 19-PLAN-003.)*
+
+#### R-PTY-23c — setup-token prohibited on the interactive path (H9 folded)
+No runner spawn SHALL accept/provision a setup-token-derived credential on the human PTY (interactive) path
+until that credential's billing class is verified, and a setup-token SHALL NEVER be serialized/persisted to
+the hub (it stays supervisor-ephemeral, mirroring the OAuth-token posture). Negative tests SHALL assert no
+human PTY spawn env carries a setup-token credential and that no setup-token is serialized to the hub.
+*(Threat T-19-03b setup-token-on-interactive HIGH; cross-ref 19-PLAN-003.)*
+
+#### R-TG-13 — Explicit transcript-identity plumbing per backend (H10, Phase-20 slice)
+The `TranscriptSource.open(ctx)` input SHALL EXPLICITLY carry the backend transcript-identity values used to
+resolve the on-disk transcript — `ctx.sessionId` for the Claude `<session-uuid>.jsonl` filename-stem
+assumption, and `ctx.codexRolloutId` matched against the Codex rollout file's `session_meta` id — both
+sourced from the session record PERSISTED at PTY spawn (Phase-16/17; cross-ref the H10 persistence owned by
+the Phase-16 plan). When the persisted id/field is ABSENT or the expected file is missing, the adapter SHALL
+deterministically DEGRADE to scrape-mode rather than picking a newest-file. A test SHALL assert correct-file
+resolution when the id is present and scrape-mode (no file guess) when it is absent. *(Threats T-20-01
+wrong-session-cross-wire HIGH, T-20-03 scrape-forged-permission HIGH; cross-ref 20-PLAN-001.)*
+
+**Cycle-2 (Phase 17/19/20) coverage:** 6 new IDs — R-PTY-13b (H4) in Phase 17; R-PTY-22b, R-PTY-22c (H8),
+R-PTY-23b, R-PTY-23c (H9) in Phase 19; R-TG-13 (H10 Phase-20 slice) in Phase 20. All elaborate existing
+parents (R-PTY-13/22/23 + R-TG-01..03); the parents remain authoritative. H5 (frontmatter reconciliation)
+intentionally excluded — owned by the H5 sweep agent.
+
+## Cycle-3 additions
+
+> APPEND-ONLY block authored during the Cycle-3 (FINAL) GSD replan, applying the adjudicated cycle-2
+> remainder (the three cross-AI cycle-2 reviews: claude/codex/gemini). Closes H11/NH-4 (producer/consumer
+> verdict-artifact contract), NH-1/NH-2/NH-3 (WS-seam hardening introduced by the cycle-2 relay guard),
+> and NH-5/H9-tightening (env-sanitizer allowlist-grade coverage); plus two cheap PARTIAL test-bindings
+> folded into existing parents. Touches Phase 16, 17, 19 ONLY. New top-level IDs are namespaced
+> `R-PTY-32..36` to avoid renumbering. The two PARTIAL bindings add acceptance lines to existing parents
+> (R-PTY-13b literal-delete canary in Phase 17; R-PTY-22b selector→argv test in Phase 19) — no new ID.
+> H5 frontmatter reconciliation remains excluded (owned by the H5 sweep agent). SPEC/ROADMAP untouched.
+
+#### R-PTY-32 — Phase-16 EMITS the test-bound ship-verdict artifact the Phase-17 gate consumes (H11 / NH-4)
+Phase 16 SHALL EMIT `.planning/phases/16-hardened-pty-relay-and-mobile-terminal/16-VERIFICATION.md`
+conforming to the SHARED VERDICT-ARTIFACT SCHEMA defined ONCE in `16-PLAN-002 §shared_verdict_artifact_schema`
+(the single source of truth referenced by BOTH the Phase-16 producer task and the Phase-17 gate task, so the
+field names + FIXED path + gate-pass rule cannot drift). The artifact SHALL be written by a script
+(`tools/emit-phase16-verdict.mjs`), NEVER hand-authored: the `automated_suite` and `term_relay_auth` PASS
+signals SHALL be DERIVED from the REAL exit codes/summaries of `bun run check-baseline` and the named relay/
+auth/guard tests (test-bound, not retypeable), and the manual `render_fidelity`/`mobile_reattach` PASS fields
+SHALL each require a structured attestation triplet `{by, at, device_build}` — a bare hand-typed `PASS` is not
+expressible. `tools/cutover-deletion-gate.mjs` SHALL exit 0 ONLY when `verdict==PASS` AND both manual fields
+`PASS` (with complete triplets) AND both automated-provenance blocks present-and-PASS; a missing file, any
+FAIL/PARTIAL, an absent provenance block, or an incomplete triplet SHALL abort. A test
+(`phase16-verdict-artifact.test.ts`) SHALL round-trip a script-emitted fully-green artifact through the real
+gate (exit 0) and SHALL assert a forged/provenance-stripped artifact is REJECTED. This closes the gap where
+the gate would either permanently abort (no producer) or be satisfied by a hand-faked file (manual wave-through
+H4 was meant to kill). *(Threats T-16-16 forged-verdict HIGH, T-16-17 producer/consumer-drift HIGH; cross-ref
+16-PLAN-002 Task 5 + 17-PLAN-002 Task 1.)*
+
+#### R-PTY-33 — Per-socket terminal-frame DIRECTION allowlist (NH-2)
+Each WS socket SHALL allowlist terminal-frame DIRECTION by role: `term.input` (a client→PTY write) SHALL be
+accepted ONLY on `/ws/client`, NEVER on `/ws/agent`; `/ws/agent` terminal frames SHALL be OUTPUT-ONLY
+(`term.data`). A `term.input` frame injected on `/ws/agent` SHALL be rejected before any forward (an
+inventory-valid agent socket cannot become an input path into a human PTY). A NAMED negative test
+(`term-frame-direction-allowlist.test.ts`) SHALL assert a `term.input` on `/ws/agent` is rejected.
+*(Threat T-16-18 frame-direction-confusion HIGH; cross-ref 16-PLAN-002 Task 2.)*
+
+#### R-PTY-34 — Origin/CSWSH enforcement on the /ws/client handshake (NH-3)
+The `cookie ⇒ human` actor inference on `/ws/client` SHALL additionally enforce an Origin/CSRF-for-WebSocket
+check at handshake (Origin ∈ HUB_ALLOWED_ORIGINS); a cross-site / disallowed-Origin WS handshake SHALL be
+REJECTED before the connection is treated as a human actor, so a forged-origin socket cannot ride the user's
+cookie to drive the human PTY. A NAMED negative test (`term-ws-origin-guard.test.ts`) SHALL assert a
+disallowed-Origin handshake is rejected and an allowed-Origin one proceeds. *(Threat T-16-19 CSWSH-cookie-ride
+HIGH; cross-ref 16-PLAN-002 Task 2.)*
+
+#### R-PTY-35 — Supervisor inventory cross-validated against DB host-ownership (NH-1)
+Before the relay treats a `/ws/agent` host as authoritative for a session, the hub SHALL cross-validate the
+supervisor's self-asserted `session_inventory`-claimed `session_id` against the DB host-ownership record
+(sessions.hostname / the persisted supervisor identity). A host advertising a session it does NOT legitimately
+own per the DB SHALL be DROPPED even if the `session_id` appears in its self-asserted inventory (a compromised/
+buggy supervisor cannot claim a victim's session). A NAMED negative case in `term-agent-inventory-auth.test.ts`
+SHALL assert a SPOOFED inventory entry for a non-owned session is dropped (distinct from the existing
+absent-from-inventory case). *(Threat T-16-20 inventory-self-assertion HIGH; cross-ref 16-PLAN-002 Task 2.)*
+
+#### R-PTY-36 — Credential-class pattern sweep in the shared spawn-env sanitizer (NH-5 / H9 tightening)
+`supervisor/src/runners/env-sanitize.ts` SHALL retain the explicit named provider-key denylist (R-PTY-23b) AND
+ADD an anchored credential-class PATTERN sweep (`/_API_KEY$/`, `/_AUTH_TOKEN$/`, `/_ACCESS_TOKEN$/`,
+`/_API_TOKEN$/`, case-insensitive) so future/aliased/unlisted provider credentials are stripped from the
+resolved spawn env of EVERY runner, giving allowlist-grade coverage of the credential CLASS without a brittle
+full-env allowlist (justification: an interactive CLI inherits a large undocumented OS-/tool-specific env a
+fixed allowlist would break across hosts). A test SHALL assert a NOVEL non-named var matching a pattern
+(e.g. `FOO_API_KEY`, `MISTRAL_AUTH_TOKEN`) is stripped from the REAL spawned env while an anchored benign
+control survives (no over-strip); the named ANTHROPIC/OPENAI/GEMINI/GOOGLE coverage is retained by the
+per-backend tests. *(Threat T-19-03 API-key-fallback CRITICAL, broadened to future/aliased creds; cross-ref
+19-PLAN-003 Task 3.)*
+
+**Cycle-3 coverage:** 5 new IDs — R-PTY-32 (H11/NH-4) in Phase 16/17 (producer in 16-PLAN-002 Task 5,
+consumer in 17-PLAN-002 Task 1); R-PTY-33 (NH-2), R-PTY-34 (NH-3), R-PTY-35 (NH-1) in Phase 16 (16-PLAN-002
+Task 2); R-PTY-36 (NH-5) in Phase 19 (19-PLAN-003 Task 3). Plus two PARTIAL test-bindings folded into existing
+parents without new IDs: the literal `delete env.ANTHROPIC_API_KEY` source-pin in the Phase-17 behavioral
+canary (R-PTY-13b-adjacent, 17-PLAN-001 Task 3), and the selector→spawn-argv negative test at the Phase-19
+selector seam (R-PTY-22b-adjacent, 19-PLAN-002 Task 2). All elaborate existing parents (R-PTY-08/10/23 + the
+Cycle-2 -b/-c addenda); parents remain authoritative. H5 (frontmatter reconciliation) excluded — owned by the
+H5 sweep agent. SPEC/ROADMAP untouched.

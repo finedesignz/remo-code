@@ -286,6 +286,13 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_runs_chained
 ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_cost_cap_usd NUMERIC(10,4) NOT NULL DEFAULT 10.0000;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS web_push_enabled BOOLEAN NOT NULL DEFAULT true;
 
+-- Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt bound. NULL = OFF
+-- (the default — no surprise hard-stop). When set, dispatch on the programmatic/
+-- automation path is denied at dailyCostCapGate once the polled programmatic
+-- credit used_usd >= this bound. Human interactive PTY turns never hit this gate
+-- for this reason. Idempotent DDL; no backfill (schema.sql re-runs every boot).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS programmatic_halt_usd NUMERIC(10,4) NULL;
+
 -- ── Paused repos (per-(user, supervisor, repo_path)) ──────────────────────────
 -- Set when the user explicitly clicks "Disconnect" on a session whose
 -- project_dir matches a supervisor-managed repo. The supervisor MUST NOT
@@ -357,6 +364,20 @@ DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WH
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_rootless BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS hostname TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_rootless_unique ON sessions(user_id, hostname, cli_kind) WHERE is_rootless = true AND deleted_at IS NULL;
+
+-- ── Phase 16: per-session runner type + persisted PTY backend identity (H10) ─
+-- runner_type: 'stream-json' (existing structured ChatSurface runner) or
+--   'pty-interactive' (the Phase-16 raw-terminal PTY surface). Opt-in per
+--   session; default 'stream-json' so every existing row is unchanged. Idempotent
+--   ADD COLUMN — re-runs safely every boot. NO data backfill here (CLAUDE.md
+--   invariant: schema.sql is idempotent DDL only; backfills go in hub/scripts/).
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS runner_type TEXT NOT NULL DEFAULT 'stream-json';
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WHERE constraint_name='sessions_runner_type_check') THEN ALTER TABLE sessions ADD CONSTRAINT sessions_runner_type_check CHECK (runner_type IN ('stream-json','pty-interactive')); END IF; END $$;
+-- Backend PTY/tmux identity + transcript path/id captured at PTY spawn so a
+-- reconnect/restart RE-BINDS the same backend (no dual-spawn / no mis-route —
+-- H10). Nullable so non-PTY rows are unaffected; NO backfill.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pty_backend_id  TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS transcript_path TEXT;
 
 -- ── Phase 05: per-user instruction blobs synced to agents via auth_ok.seed_files
 -- create_if_absent semantics; agents never overwrite existing local files.

@@ -349,5 +349,15 @@ export type HubToClient =
         seven_day: { utilization: number; resets_at: string }
         seven_day_opus?: { utilization: number; resets_at: string } | null
         seven_day_oauth_apps?: { utilization: number; resets_at: string } | null
+        // Phase 18 (R-PTY-17): additive programmatic credit dollar bucket. Old
+        // clients ignore the unknown field; pre-claim accounts omit it.
+        programmatic_credit?: {
+          used_usd: number; limit_usd: number; resets_at: string; claimed: boolean
+        } | null
       }; updated_at: string }
+  // Phase 18 (R-PTY-18): programmatic-credit leak alert. Broadcast to the user's
+  // clients when credit drains without automation in flight, or above a
+  // configured rate. Visible, non-blocking — never a silent drain.
+  | { type: 'programmatic_leak_alert'; reason: 'drain_without_automation' | 'drain_rate_exceeded';
+      delta_usd: number; used_usd: number; limit_usd: number; detected_at: string }
   | { type: 'ping' }

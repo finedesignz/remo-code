@@ -7,12 +7,24 @@ mod first_run;
 mod legacy_cleanup;
 mod mutex_probe;
 mod nssm;
+mod pty_host;
 mod runtime_cmds;
 mod sidecar;
 mod tray;
 
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
+
+/// Resolve the loopback-port token file the Bun `claude-pty-bridge.ts` reads to
+/// discover the Rust PTY host's ephemeral port. Honors REMO_PTY_HOST_PORT_FILE;
+/// defaults to the supervisor's LOCALAPPDATA config dir (same dir as config.json).
+fn pty_host_port_file() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("REMO_PTY_HOST_PORT_FILE") {
+        return std::path::PathBuf::from(p);
+    }
+    let base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
+    base.join("remo-code-supervisor").join("pty-host.port")
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -64,6 +76,19 @@ pub fn run() {
                 });
             }
 
+            // Phase-16 Option C: start the Rust-hosted interactive `claude`
+            // ConPTY server on a loopback port BEFORE the Bun sidecar, writing
+            // the chosen port to a token file the Bun `claude-pty-bridge.ts`
+            // discovers (REMO_PTY_HOST_PORT_FILE / LOCALAPPDATA default). The PTY
+            // lifetime is tied to THIS process (dead-man's-switch).
+            {
+                let port_file = pty_host_port_file();
+                match pty_host::spawn_host(Some(port_file.clone())) {
+                    Ok(port) => log::info!("[pty_host] listening on 127.0.0.1:{port} (port file {port_file:?})"),
+                    Err(e) => log::error!("[pty_host] failed to start: {e:#}"),
+                }
+            }
+
             // Spawn the Bun supervisor as a managed sidecar.
             sidecar::spawn_managed(app.handle().clone());
 
@@ -109,6 +134,10 @@ pub fn run() {
                 // exit from within an `ExitRequested` handler that also blocks
                 // it is fragile. Spawn an OS thread that waits + then re-emits
                 // exit.
+                // Phase-16 Option C: KILL every hosted PTY on shutdown so no
+                // orphan `claude` survives the supervisor (R-PTY-27 — shutdown
+                // KILLS; only a bridge disconnect detaches).
+                pty_host::kill_all();
                 std::thread::spawn(move || {
                     let _ = sidecar::shutdown_blocking(
                         &app_for_thread,

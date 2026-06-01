@@ -1,20 +1,97 @@
-# Telegram Bridge (Phase 12)
+# Telegram Bridge (Phase 12 → re-sourced on transcript-tail in Phase 20)
 
 Bidirectional chat bridge between a user's Telegram account and their Claude Code
-orchestrator session on remo-code. Talk to your hub-resident Claude session from
-any phone running Telegram — DM the bot, get a final reply back. Inbound
-messages route through the **shared session-dispatch pipeline** (`hub/src/dispatch/`)
-— the same gate ordering (threshold → daily-cost-cap), per-session queue, and
-offline-grace buffer scheduled tasks and the other subsystems use — with
-`store: null` (Telegram writes no run row). Outbound forwards the final
-`assistant_message` plus a **summarized live stream** — an editable "working…"
-message that collapses each `tool_use` to a one-liner while the turn runs, then
-finalizes to the full assistant text. `thinking` and raw `text_delta` chatter are
-never forwarded. All user-facing messages use Telegram **MarkdownV2** with a
-400→plain-text fallback. Delivery rides the event buses, NOT a pipeline finalize
-hook.
+(or Codex) session on remo-code. Talk to your hub-resident session from any phone
+running Telegram — DM the bot, get a final reply back, tap to approve a permission
+prompt.
 
-A single hub-wide bot serves every user, keyed by `users.telegram_chat_id`.
+## Source-of-truth: the transcript-tail (Phase 20, supersedes the Phase-12 event bus)
+
+**Phase 17 removed the stream-json human runner** — and with it the
+`assistant_message:final` / `permission_request` hub event bus the original
+(Phase-12) bridge consumed. **Phase 20 re-grounds the bridge on a TRANSCRIPT-TAIL:**
+each backend writes its own on-disk transcript while its interactive PTY runs, and
+the hub READS those files (read-only). This is backend-agnostic and adds **no
+programmatic API call** — the transcript reader never moves Telegram onto the
+programmatic pool, never reuses the OAuth token, never needs `ANTHROPIC_API_KEY`.
+
+- **Backend-agnostic `TranscriptSource`** (`hub/src/telegram/transcript/`):
+  `selectAdapter(cliKind)` picks the adapter by the session's `cli_kind`.
+  - **Claude adapter** — Claude Code projects JSONL
+    `~/.claude/projects/<slug>/<session-uuid>.jsonl`, resolved DETERMINISTICALLY
+    from the persisted session id (UUID === filename stem) / the persisted
+    `transcript_path` captured at PTY spawn. **Never newest-file.**
+  - **Codex adapter** — Codex rollout JSONL
+    `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`, resolved by matching
+    the persisted `session_meta` id. **Both path/format are undocumented +
+    version-unstable** — re-verify against the installed CLI version.
+  - **Scrape fallback** — when the deterministic file is absent / the id is
+    missing / the schema is unrecognized, the adapter degrades to a terminal-byte
+    scrape that emits **only** assistant text + turn-complete, and **never a
+    permission** (you cannot fail-closed-parse a discrete approve/deny out of raw
+    bytes). The human handles those on the xterm surface.
+  - Every adapter normalizes to a shared `TranscriptEntry` union
+    (`assistant_text` / `tool_use` / `permission_request` / `user_question` /
+    `turn_complete`). The bridge consumes ONLY this union — never a backend shape.
+- **One tail, many consumers** (`transcript/manager.ts`): the outbound bridge
+  (final assistant text + collapsed `tool_use` one-liners), the permission
+  surfacer, and the PTY turn lock all attach to a single per-session source.
+
+Outbound forwards the final assistant turn plus a **summarized live stream** — an
+editable "working…" message that collapses each `tool_use` to a one-liner, then
+finalizes to the full assistant text. `thinking` / raw streaming deltas do not
+exist in the transcript stream and are never forwarded. All user-facing messages
+use Telegram **MarkdownV2** with a 400→plain-text fallback, per-chat serialized.
+
+## Fail-closed permission/question keystroke-injection (Phase 20)
+
+A permission/`user_question` exists post-rip only as a transcript entry. The
+detector (`transcript/permission-detector.ts`) is **fail-closed**: it surfaces a
+Telegram tap-to-approve ONLY for a clean, fully-enumerated, keystroke-mappable
+choice; anything ambiguous/partial/unparseable surfaces **nothing** (no prompt, no
+keystroke, **no default "yes", no approve-on-timeout**). Pendings are keyed by
+**`(sessionId, requestId)`** (reusing the multi-user-clobber fix in
+`approvals.ts`) with per-user authorization.
+
+An authorized tap is injected as the backend-specific **PTY keystroke(s)**
+(`transcript/keystroke-map.ts`) via the Phase-16 raw-terminal `term.input` path
+(`transcript/pty-inject.ts`) into **only that session's PTY** — NOT the deleted
+`permission_response` agent message. A `takePendingPrompt` removes the entry so a
+superseded / already-resolved / replayed tap injects nothing.
+
+> ⚠️ The literal accept/deny/option BYTE sequences in `keystroke-map.ts` are
+> PROVISIONAL (y/n + numbered-list conventions) and pending a live per-backend
+> byte capture (the Phase-20 manual gate). The wiring, fail-closed gating, and
+> disambiguation are complete + tested; only the final byte values await capture
+> from a real Claude / Codex TUI prompt.
+
+## PTY write-arbitration (Phase 20)
+
+Two writers feed one PTY stdin: the web xterm panel and the Telegram injector. A
+per-session **single-writer turn lock** (`turn-lock.ts`) arbitrates them: a new
+human turn ACQUIRES the lock before its bytes reach stdin; the other writer is
+QUEUED (bounded FIFO); the lock releases only on the observed `turn_complete`
+(the same transcript signal the bridge tails) or a safety TTL. A permission
+RESPONSE is exempt — it completes the in-flight turn rather than starting a new
+one, so it never deadlocks.
+
+## Human-only guard (Phase 20, ToS)
+
+Telegram inbound dispatch carries a `source` tag and passes the Phase-16
+**human-only PTY guard** (`humanOnlyPtyGate`): a genuine human Telegram message
+may drive a `pty-interactive` session; an automation-tagged Telegram-origin
+dispatch (auto-nudge / scheduled / orchestrator-background / error-capture) is
+**rejected** before any PTY injection — "a robot pressing enter via the
+interactive entrypoint" is the ban-risk move. The guard composes WITH (never
+replaces) the non-bypassable daily-cost-cap gate.
+
+---
+
+Inbound messages route through the **shared session-dispatch pipeline**
+(`hub/src/dispatch/`) — the same gate ordering (threshold → daily-cost-cap →
+human-only-PTY), per-session queue, and offline-grace buffer the other subsystems
+use — with `store: null` (Telegram writes no run row). A single hub-wide bot
+serves every user, keyed by `users.telegram_chat_id`.
 One BotFather bot, one Telegram webhook secret, one redeploy.
 
 ## Setup

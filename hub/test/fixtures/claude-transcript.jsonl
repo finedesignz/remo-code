@@ -1,0 +1,6 @@
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello, I will help you."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"hub/src/foo.ts"}}]}}
+{"type":"permission_request","request_id":"req-claude-1","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}
+{"type":"user_question","request_id":"q-claude-1","question":"Which approach?","options":[{"label":"Option A","description":"fast"},{"label":"Option B"}]}
+{"type":"weird_future_record","foo":"bar"}
+{"type":"result","subtype":"success"}

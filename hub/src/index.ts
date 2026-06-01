@@ -58,6 +58,7 @@ import { parseSessionCookieFromHeader } from './session'
 import {
   createClientWsData, handleClientOpen, handleClientMessage, handleClientClose,
 } from './ws/client'
+import { isAllowedClientWsOrigin } from './ws/origin-guard'
 import {
   createAgentWsData, handleAgentOpen, handleAgentMessage, handleAgentClose,
 } from './ws/agent'
@@ -469,10 +470,17 @@ const server = Bun.serve({
 
     // WebSocket upgrades — with origin validation (C2 fix) and connection limits
     if (url.pathname === '/ws/client' || url.pathname === '/ws/agent') {
-      // Origin check for browser clients
+      // Origin / CSWSH check for browser clients (Phase 16 NH-3 / R-PTY-34).
+      // The /ws/client cookie ⇒ human actor inference treats ANY authenticated
+      // browser WS as human; a cross-site WebSocket handshake riding the user's
+      // cookie could then drive PTY input as "human". Enforce Origin ∈
+      // HUB_ALLOWED_ORIGINS at the handshake. HARDENED for CSWSH: a /ws/client
+      // handshake with a DISALLOWED **or MISSING** Origin is rejected — browsers
+      // always send Origin on a WS handshake, so an absent one is not a
+      // legitimate browser client and must not be treated as a human actor.
       if (url.pathname === '/ws/client') {
         const origin = req.headers.get('origin')
-        if (origin && !config.allowedOrigins.includes(origin)) {
+        if (!isAllowedClientWsOrigin(origin, config.allowedOrigins)) {
           return new Response('forbidden', { status: 403 })
         }
       }
