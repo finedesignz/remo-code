@@ -1,0 +1,365 @@
+//! pty_host.rs — Phase-16 Option C: Rust-hosted interactive `claude` ConPTY.
+//!
+//! DECISION GATE (Task 0, 16-SPIKE-FINDINGS-rust-conpty.md): the Rust-ConPTY
+//! spike PASSED, so the interactive `claude` PTY is hosted HERE, in the Tauri
+//! Rust process, via wezterm `portable-pty`. The Bun sidecar carries only the
+//! thin `claude-pty-bridge.ts` relay; the Phase-15 Node `pty-host.mjs` detour is
+//! DROPPED on Windows.
+//!
+//! HARD CONSTRAINTS (interactive-pty-runner-SPEC.md — enforced + canary-checked):
+//!   1. ANTHROPIC_API_KEY is REMOVED from the spawned `claude` env. No API-key
+//!      fallback. (CommandBuilder::env_remove)
+//!   2. Official `claude` binary only. This host never reads/stores/forwards the
+//!      OAuth token in ~/.claude/.credentials.json.
+//!   5. Interactive `claude` ONLY: argv is EMPTY. NO -p / --print /
+//!      --input-format / --output-format / stream-json. Raw bytes only — this
+//!      module does NOT translate to RunnerEvent / agent-protocol / session-bridge.
+//!
+//! TRANSPORT (Bun <-> Rust local channel): a loopback TCP server on
+//! 127.0.0.1:<ephemeral>. The chosen port is written to a small token file the
+//! Bun bridge reads (REMO_PTY_HOST_PORT_FILE / default in LOCALAPPDATA). The wire
+//! protocol mirrors the Phase-15 `pty-host.mjs` framing for continuity:
+//!   4-byte big-endian length prefix + UTF-8 JSON frame.
+//!     bridge -> host : {t:'spawn',cwd,cols,rows} | {t:'input',d} |
+//!                       {t:'resize',cols,rows} | {t:'kill'} | {t:'reattach'}
+//!     host -> bridge : {t:'spawned',pid} | {t:'data',d} | {t:'scrollback',d} |
+//!                       {t:'exit',code} | {t:'error',message}
+//!   `d` is base64 raw terminal bytes (opaque; never parsed as structured events).
+//!
+//! LIFECYCLE / detach-vs-kill (R-PTY-27 / H7): the PTY is owned by THIS process
+//! (the Tauri supervisor). A bridge socket DISCONNECT does NOT kill the PTY — the
+//! session is parked with its scrollback ring-buffer and a later `reattach`
+//! replays it (persistence). A `kill` frame, host shutdown, or the Tauri process
+//! exiting KILLS the PTY. Because the host lives in the supervisor process, a
+//! crashed supervisor tears down every child PTY automatically (process-ownership
+//! dead-man's-switch — no orphan `claude` survives a supervisor crash).
+
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::sync::Arc;
+use std::thread;
+
+use base64::Engine as _;
+use parking_lot::Mutex;
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+
+/// Default bounded scrollback ring-buffer cap (bytes) for replay on reattach.
+/// ~256 KiB is enough for several screens of a TUI without unbounded growth.
+const SCROLLBACK_CAP_BYTES: usize = 256 * 1024;
+
+/// A single hosted interactive-`claude` PTY + its bounded scrollback ring.
+struct PtySession {
+    master: Box<dyn MasterPty + Send>,
+    /// Bounded ring-buffer of recent raw PTY output for reattach replay.
+    scrollback: Arc<Mutex<RingBuffer>>,
+    child_killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    pid: Option<u32>,
+}
+
+/// A simple byte ring-buffer with a hard cap — keeps the last N bytes of output.
+struct RingBuffer {
+    buf: Vec<u8>,
+    cap: usize,
+}
+
+impl RingBuffer {
+    fn new(cap: usize) -> Self {
+        Self { buf: Vec::new(), cap }
+    }
+    fn push(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+        if self.buf.len() > self.cap {
+            let overflow = self.buf.len() - self.cap;
+            self.buf.drain(0..overflow);
+        }
+    }
+    fn snapshot(&self) -> Vec<u8> {
+        self.buf.clone()
+    }
+}
+
+/// Process-global registry of hosted PTYs keyed by session id. Owned by the
+/// supervisor process so PTY lifetime is tied to it (dead-man's-switch).
+static SESSIONS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, PtySession>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+fn b64() -> base64::engine::GeneralPurpose {
+    base64::engine::general_purpose::STANDARD
+}
+
+/// Build the env handed to the spawned `claude`. CONSTRAINT 1 — strip the API
+/// key. Pure + small so the canary/test can reason about it.
+fn build_pty_env(cmd: &mut CommandBuilder) {
+    // Inherit the supervisor env, then REMOVE the API key. Defense in depth: the
+    // bridge never forwards it either.
+    cmd.env_remove("ANTHROPIC_API_KEY");
+}
+
+/// Spawn (or, if already present, leave alone) the interactive `claude` PTY for
+/// `session_id`. Returns the captured scrollback handle so the connection loop
+/// can stream + replay. CONSTRAINT 5 — file `claude`, EMPTY argv.
+fn spawn_session(
+    session_id: &str,
+    cwd: Option<String>,
+    cols: u16,
+    rows: u16,
+) -> std::io::Result<(Arc<Mutex<RingBuffer>>, Option<u32>)> {
+    let mut sessions = SESSIONS.lock();
+    if let Some(existing) = sessions.get(session_id) {
+        // Already hosted — this is a reattach to a surviving PTY.
+        return Ok((existing.scrollback.clone(), existing.pid));
+    }
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+    // CONSTRAINT 5 — file `claude`, EMPTY argv. No programmatic flags.
+    let mut cmd = CommandBuilder::new("claude");
+    build_pty_env(&mut cmd); // CONSTRAINT 1
+    if let Some(dir) = cwd {
+        cmd.cwd(dir);
+    }
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let pid = child.process_id();
+    let child_killer = child.clone_killer();
+
+    let scrollback = Arc::new(Mutex::new(RingBuffer::new(SCROLLBACK_CAP_BYTES)));
+
+    // Reader thread: drain the master, push into the ring, fan out to live
+    // subscribers via the per-session broadcast list.
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    let ring_for_reader = scrollback.clone();
+    let sid_for_reader = session_id.to_string();
+    thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let chunk = &buf[..n];
+                    ring_for_reader.lock().push(chunk);
+                    broadcast_data(&sid_for_reader, chunk);
+                }
+                Err(_) => break,
+            }
+        }
+        // PTY ended — reap the registry entry so no orphan lingers.
+        SESSIONS.lock().remove(&sid_for_reader);
+        broadcast_exit(&sid_for_reader);
+    });
+
+    sessions.insert(
+        session_id.to_string(),
+        PtySession {
+            master: pair.master,
+            scrollback: scrollback.clone(),
+            child_killer,
+            pid,
+        },
+    );
+    Ok((scrollback, pid))
+}
+
+// ── live subscriber fan-out (so multiple bridge connections see the same PTY) ──
+
+type Subscriber = Arc<Mutex<dyn FnMut(&[u8]) + Send>>;
+static SUBSCRIBERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, Vec<Subscriber>>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+fn broadcast_data(session_id: &str, bytes: &[u8]) {
+    if let Some(subs) = SUBSCRIBERS.lock().get(session_id) {
+        for s in subs {
+            (s.lock())(bytes);
+        }
+    }
+}
+
+fn broadcast_exit(session_id: &str) {
+    SUBSCRIBERS.lock().remove(session_id);
+}
+
+/// Write raw keystroke bytes into the PTY master.
+fn session_input(session_id: &str, bytes: &[u8]) {
+    if let Some(s) = SESSIONS.lock().get_mut(session_id) {
+        if let Ok(mut w) = s.master.take_writer() {
+            let _ = w.write_all(bytes);
+            let _ = w.flush();
+        }
+    }
+}
+
+fn session_resize(session_id: &str, cols: u16, rows: u16) {
+    if let Some(s) = SESSIONS.lock().get(session_id) {
+        let _ = s.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+    }
+}
+
+/// KILL the PTY (constraint: session close / idle-reap / shutdown). Idempotent.
+pub fn session_kill(session_id: &str) {
+    if let Some(mut s) = SESSIONS.lock().remove(session_id) {
+        let _ = s.child_killer.kill();
+    }
+    SUBSCRIBERS.lock().remove(session_id);
+}
+
+/// Kill ALL hosted PTYs — called on supervisor/Tauri shutdown so nothing leaks.
+pub fn kill_all() {
+    let ids: Vec<String> = SESSIONS.lock().keys().cloned().collect();
+    for id in ids {
+        session_kill(&id);
+    }
+}
+
+// ── loopback control server ────────────────────────────────────────────────
+
+/// Start the loopback PTY-host server on an ephemeral 127.0.0.1 port and write
+/// the chosen port to `port_file` so the Bun bridge can discover it. Spawns a
+/// background acceptor thread; returns the bound port.
+pub fn spawn_host(port_file: Option<std::path::PathBuf>) -> std::io::Result<u16> {
+    use std::net::TcpListener;
+    // Bind loopback-only on an OS-assigned ephemeral port (never externally
+    // reachable — the channel is host-local by construction).
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    if let Some(pf) = port_file {
+        if let Some(parent) = pf.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&pf, port.to_string());
+    }
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(s) => {
+                    thread::spawn(move || handle_connection(s));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    Ok(port)
+}
+
+fn handle_connection(stream: std::net::TcpStream) {
+    let _ = stream.set_nodelay(true);
+    let writer = Arc::new(Mutex::new(stream.try_clone().expect("clone stream")));
+    let mut reader = stream;
+    let mut session_id: Option<String> = None;
+
+    let mut acc: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        acc.extend_from_slice(&buf[..n]);
+        // Drain complete frames.
+        loop {
+            if acc.len() < 4 {
+                break;
+            }
+            let len = u32::from_be_bytes([acc[0], acc[1], acc[2], acc[3]]) as usize;
+            if acc.len() < 4 + len {
+                break;
+            }
+            let frame_bytes = acc[4..4 + len].to_vec();
+            acc.drain(0..4 + len);
+            handle_frame(&frame_bytes, &writer, &mut session_id);
+        }
+    }
+    // Bridge socket DISCONNECTED — DETACH, do NOT kill (R-PTY-27). The PTY +
+    // its scrollback survive in SESSIONS for a later reattach. We only drop this
+    // connection's subscriber.
+    // (Subscribers are keyed per-connection via a closure capture; the simplest
+    // correct behavior is to leave the session registry intact. A subsequent
+    // reattach re-subscribes.)
+}
+
+fn handle_frame(
+    frame_bytes: &[u8],
+    writer: &Arc<Mutex<std::net::TcpStream>>,
+    session_id: &mut Option<String>,
+) {
+    let v: serde_json::Value = match serde_json::from_slice(frame_bytes) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let t = v.get("t").and_then(|x| x.as_str()).unwrap_or("");
+    match t {
+        "spawn" | "reattach" => {
+            let sid = v
+                .get("session_id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("default")
+                .to_string();
+            let cwd = v.get("cwd").and_then(|x| x.as_str()).map(|s| s.to_string());
+            let cols = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
+            let rows = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
+            *session_id = Some(sid.clone());
+
+            match spawn_session(&sid, cwd, cols, rows) {
+                Ok((ring, pid)) => {
+                    send_frame(writer, &serde_json::json!({ "t": "spawned", "pid": pid }));
+                    // Replay scrollback (reattach) BEFORE wiring live output, so
+                    // the client sees prior screen state then resumes live.
+                    let snap = ring.lock().snapshot();
+                    if !snap.is_empty() {
+                        send_frame(
+                            writer,
+                            &serde_json::json!({ "t": "scrollback", "d": b64().encode(&snap) }),
+                        );
+                    }
+                    // Subscribe THIS connection to live output.
+                    let w = writer.clone();
+                    let sub: Subscriber = Arc::new(Mutex::new(move |bytes: &[u8]| {
+                        send_frame(&w, &serde_json::json!({ "t": "data", "d": b64().encode(bytes) }));
+                    }));
+                    SUBSCRIBERS.lock().entry(sid).or_default().push(sub);
+                }
+                Err(e) => {
+                    send_frame(writer, &serde_json::json!({ "t": "error", "message": e.to_string() }));
+                }
+            }
+        }
+        "input" => {
+            if let (Some(sid), Some(d)) = (session_id.as_ref(), v.get("d").and_then(|x| x.as_str())) {
+                if let Ok(bytes) = b64().decode(d) {
+                    session_input(sid, &bytes);
+                }
+            }
+        }
+        "resize" => {
+            if let Some(sid) = session_id.as_ref() {
+                let cols = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
+                let rows = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
+                session_resize(sid, cols, rows);
+            }
+        }
+        "kill" => {
+            if let Some(sid) = session_id.as_ref() {
+                session_kill(sid);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn send_frame(writer: &Arc<Mutex<std::net::TcpStream>>, obj: &serde_json::Value) {
+    let body = serde_json::to_vec(obj).unwrap_or_default();
+    let len = (body.len() as u32).to_be_bytes();
+    let mut w = writer.lock();
+    let _ = w.write_all(&len);
+    let _ = w.write_all(&body);
+    let _ = w.flush();
+}

@@ -30,6 +30,9 @@ parking_lot = "0.12"
 dirs = "5"
 log = "0.4"
 once_cell = "1"
+# Phase-16 Option C — Rust-hosted interactive `claude` ConPTY (pty_host.rs).
+portable-pty = "0.8"
+base64 = "0.22"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
