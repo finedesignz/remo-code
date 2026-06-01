@@ -73,7 +73,10 @@ import {
 import {
   parsePermissionCallback,
   takePendingPrompt,
+  type PermissionCallback,
 } from "../telegram/approvals.ts";
+import { keystrokeFor } from "../telegram/transcript/keystroke-map.ts";
+import { injectPtyKeystroke } from "../telegram/transcript/pty-inject.ts";
 import { parseStopCallback, requestStop, forgetStoppable } from "../telegram/stop.ts";
 import { getChannel } from "../ws/registry.ts";
 import { log } from "../observability/logger.ts";
@@ -489,24 +492,75 @@ async function safeEditReplyMarkup(
 async function handlePermissionCallback(
   cb: CallbackQueryT,
   user: TelegramUserRow,
-  perm: { requestId: string; approved: boolean },
+  perm: PermissionCallback,
 ): Promise<{ outcome: string }> {
   // Authorization is enforced inside takePendingPrompt: it returns the entry only
-  // if THIS user is an authorized approver for (requestId). A shared default
-  // session that fanned the prompt to several users now resolves for whichever
-  // authorized user taps first (no last-write-wins clobber).
+  // if THIS user is an authorized approver for (requestId). takePendingPrompt
+  // REMOVES the entry, so a superseded / already-resolved / TTL-expired pending
+  // returns null — a stale or replayed tap injects NOTHING (T-20-08).
   const pending = takePendingPrompt(perm.requestId, user.id);
   if (!pending) {
-    // Already resolved, expired, unknown, or the tapping user isn't authorized.
-    await safeAnswerCallback(cb.id, { text: "This prompt already expired or was answered.", show_alert: false });
+    await safeAnswerCallback(cb.id, { text: "This prompt is no longer pending.", show_alert: false });
     return { outcome: "callback_permission_stale" };
   }
 
-  // Forward the decision to the agent socket (same frame the web client sends).
   const channel = getChannel(pending.sessionId);
   if (!channel) {
     await safeAnswerCallback(cb.id, { text: "Session is offline — couldn't deliver.", show_alert: true });
     return { outcome: "callback_permission_offline" };
+  }
+
+  // ── Phase 20: transcript-tail pending ⇒ inject a PTY keystroke ───────────
+  // The pending carries keystroke-injection context. We translate the chosen
+  // option to literal TUI bytes (keystroke-map, fail-closed) and write them to
+  // ONLY this session's PTY via term.input — NOT the deleted permission_response.
+  if (pending.injection) {
+    const optionId =
+      perm.optionId !== undefined ? perm.optionId : perm.approved ? "approve" : "deny";
+    const bytes = keystrokeFor(pending.injection.cliKind, {
+      sessionId: pending.sessionId,
+      requestId: perm.requestId,
+      toolName: pending.toolName,
+      options: pending.injection.options.map((o) => ({ id: o.id, label: o.label })),
+      shape: pending.injection.shape,
+    }, optionId);
+    if (bytes === null) {
+      // Unmappable option ⇒ fail-closed: inject nothing.
+      await safeAnswerCallback(cb.id, { text: "Couldn't map that choice — nothing sent.", show_alert: true });
+      return { outcome: "callback_permission_unmappable" };
+    }
+    const res = injectPtyKeystroke(pending.sessionId, bytes);
+    if (!res.ok) {
+      await safeAnswerCallback(cb.id, { text: "Session is offline — couldn't deliver.", show_alert: true });
+      return { outcome: `callback_permission_${res.reason ?? "send_failed"}` };
+    }
+    const label =
+      perm.optionId !== undefined
+        ? pending.injection.options[Number(perm.optionId)]?.label ?? "Selected"
+        : perm.approved ? "✅ Approved" : "🚫 Denied";
+    log.info("permission.keystroke_injected", {
+      session_id: pending.sessionId,
+      request_id: perm.requestId,
+      tool: pending.toolName,
+      cli_kind: pending.injection.cliKind,
+      shape: pending.injection.shape,
+      source: "telegram",
+      user_id: user.id,
+    });
+    await safeAnswerCallback(cb.id, { text: label });
+    const chatIdI = cb.message?.chat.id ?? pending.chatId;
+    const messageIdI = cb.message?.message_id ?? pending.messageId;
+    if (chatIdI !== undefined && messageIdI) {
+      await safeEditMessageText(chatIdI, messageIdI, `${label} — ${pending.toolName}`, null);
+    }
+    return { outcome: "callback_permission_injected" };
+  }
+
+  // ── Legacy stream-json pending ⇒ permission_response agent message ────────
+  if (perm.optionId !== undefined) {
+    // Option-select has no legacy permission_response equivalent — fail-closed.
+    await safeAnswerCallback(cb.id, { text: "This prompt can't be answered here.", show_alert: true });
+    return { outcome: "callback_permission_unsupported" };
   }
   try {
     channel.ws.send(
@@ -517,7 +571,6 @@ async function handlePermissionCallback(
         approved: perm.approved,
       }),
     );
-    // Audit: tool-permission grant/deny applied + delivered to the supervisor.
     log.info("permission.grant_applied", {
       session_id: pending.sessionId,
       request_id: perm.requestId,
@@ -533,8 +586,6 @@ async function handlePermissionCallback(
   }
 
   await safeAnswerCallback(cb.id, { text: perm.approved ? "✅ Approved" : "🚫 Denied" });
-
-  // Edit the prompt to reflect the decision + drop the buttons.
   const chatId = cb.message?.chat.id ?? pending.chatId;
   const messageId = cb.message?.message_id ?? pending.messageId;
   if (chatId !== undefined && messageId) {
