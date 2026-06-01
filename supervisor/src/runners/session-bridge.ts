@@ -1,6 +1,19 @@
 import { hostname, platform, release, arch, cpus, totalmem } from 'os'
 import { ClaudeRunner } from './claude-runner'
+import { ClaudePtyRunner } from './claude-pty-runner'
 import type { AgentToHub, CliRunner, HubToAgent, RunnerEvent } from './types'
+
+/**
+ * Phase-15 spike flag. When `REMO_PTY_INTERACTIVE=1`, a session hosts the
+ * raw-terminal interactive `claude` PTY runner instead of the stream-json
+ * ClaudeRunner, bridging onData → `term.data` frames and routing inbound
+ * `term.input`/`term.resize` to the PTY. ADDITIVE + flag-gated — the stream-json
+ * path is untouched when the flag is off. Full per-session runner-type selection
+ * is Phase 16 (this is the spike seam, not the production switch).
+ */
+function ptyInteractiveEnabled(): boolean {
+  return process.env.REMO_PTY_INTERACTIVE === '1'
+}
 
 /**
  * Per-session WebSocket bridge to the hub's `/ws/agent` endpoint. Restored
@@ -61,6 +74,10 @@ const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000]
 export class SessionBridge {
   private ws: WebSocket | null = null
   private runner: CliRunner | null = null
+  /** Phase-15 spike: raw-terminal PTY runner (mutually exclusive with `runner`,
+   *  active only under REMO_PTY_INTERACTIVE=1). Raw bytes only — never emits
+   *  RunnerEvent. */
+  private ptyRunner: ClaudePtyRunner | null = null
   private sessionId: string | null = null
   private opts: SessionBridgeOptions
   private cb: SessionBridgeCallbacks
@@ -91,6 +108,7 @@ export class SessionBridge {
     if (this.stopped) return false
     if (this.ws?.readyState === WebSocket.OPEN) return true
     if (this.runner) return true
+    if (this.ptyRunner) return true
     return false
   }
 
@@ -102,6 +120,11 @@ export class SessionBridge {
     if (this.runner) {
       try { await this.runner.stopGracefully() } catch {}
       this.runner = null
+    }
+    // Phase-15: reap the PTY runner + its Node host (R-PTY-27).
+    if (this.ptyRunner) {
+      try { this.ptyRunner.kill() } catch {}
+      this.ptyRunner = null
     }
     if (this.ws) {
       try { this.ws.close() } catch {}
@@ -172,6 +195,7 @@ export class SessionBridge {
       if (code === 4001 || code === 4002) {
         this.cb.onLog('error', `agent-bridge: terminal close code=${code}; bridge exiting`)
         if (this.runner) { try { this.runner.stop() } catch {} this.runner = null }
+        if (this.ptyRunner) { try { this.ptyRunner.kill() } catch {} this.ptyRunner = null }
         this.cb.onExit({ code: null, reason: `ws_close_${code}` })
         return
       }
@@ -204,7 +228,8 @@ export class SessionBridge {
       this.sessionId = msg.session_id
       this.cb.onLog('info', `agent-bridge: authenticated session=${this.sessionId.slice(0, 8)}`)
       try { this.cb.onSessionId?.(this.sessionId) } catch {}
-      this.ensureRunner()
+      if (ptyInteractiveEnabled()) this.ensurePtyRunner()
+      else this.ensureRunner()
       return
     }
     if (msg.type === 'auth_error') {
@@ -213,6 +238,26 @@ export class SessionBridge {
       return
     }
     if (!this.sessionId) return
+
+    // --- Raw-terminal channel (Phase 15) — additive, flag-gated. term.* frames
+    // are raw bytes routed straight to the PTY runner; they NEVER touch the
+    // stream-json runner or RunnerEvent translation. ---
+    if (ptyInteractiveEnabled()) {
+      const anyMsg = msg as any
+      if (anyMsg.type === 'term.input') {
+        const pty = this.ensurePtyRunner()
+        try { pty?.write(Buffer.from(String(anyMsg.bytes ?? ''), 'base64').toString('binary')) } catch {}
+        return
+      }
+      if (anyMsg.type === 'term.resize') {
+        this.ptyRunner?.resize(Number(anyMsg.cols) || 80, Number(anyMsg.rows) || 24)
+        return
+      }
+      if (anyMsg.type === 'term.attach') {
+        this.ensurePtyRunner()
+        return
+      }
+    }
 
     if (msg.type === 'user_message') {
       const runner = this.ensureRunner()
@@ -262,6 +307,35 @@ export class SessionBridge {
     this.runner = runner
     runner.start((e) => this.handleRunnerEvent(e))
     return runner
+  }
+
+  /** Phase-15 spike: lazily start the interactive PTY runner and bridge its
+   *  raw output bytes to the hub as `term.data` frames. base64 over the
+   *  existing /ws/agent JSON socket (see hub/src/ws/term-protocol.ts). */
+  private ensurePtyRunner(): ClaudePtyRunner | null {
+    if (this.ptyRunner) return this.ptyRunner
+    const pty = new ClaudePtyRunner()
+    this.ptyRunner = pty
+    pty.start({
+      cwd: this.opts.repoPath,
+      cols: 100,
+      rows: 30,
+      onData: (bytes) => {
+        if (!this.sessionId) return
+        this.sendToHub({
+          type: 'term.data',
+          session_id: this.sessionId,
+          bytes: Buffer.from(bytes, 'binary').toString('base64'),
+        })
+      },
+      onExit: (code) => {
+        this.cb.onLog('warn', `agent-bridge: pty runner exited code=${code}`)
+        this.ptyRunner = null
+        this.cb.onExit({ code, reason: 'pty_runner_exit' })
+      },
+    })
+    if (!this.spawnReported) { this.spawnReported = true; this.cb.onSpawned({ pid: pty.pid ?? 0 }) }
+    return pty
   }
 
   private handleRunnerEvent(e: RunnerEvent) {

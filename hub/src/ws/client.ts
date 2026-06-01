@@ -1,5 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { ClientInbound, SUBSCRIBE_MAX } from './protocol'
+import { TermFrame, isTermFrameType } from './term-protocol'
 import { verifyJwt } from '../auth/jwt.ts'
 import { verifyAuthSessionToken } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
@@ -120,6 +121,31 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch (e: any) {
     log.error('client.json_parse_error', { error: e.message })
+    return
+  }
+
+  // --- Raw-terminal channel (Phase 15, R-PTY-02/03) ---
+  // term.input/resize/attach from an authorized client are forwarded
+  // byte-faithfully to the session's agent channel and MUST NOT enter the
+  // structured client-protocol path. Short-circuit BEFORE ClientInbound
+  // .safeParse. Ownership is verified (getSession scoped by userId); term.input
+  // is a mutation, gated like send_message. No `messages` row is created.
+  if (isTermFrameType(parsed)) {
+    if (!data.authenticated || !data.userId) return
+    const tf = TermFrame.safeParse(parsed)
+    if (!tf.success) return
+    const frame = tf.data
+    const session = await getSession(frame.session_id, data.userId)
+    if (!session) return // not owned by this user → never relay across the boundary
+    // License gate: term.input drives a live session (a mutation).
+    if (frame.type === 'term.input' && !(await isLicenseActive(data))) {
+      try { ws.send(JSON.stringify({ type: 'send_refused', reason: 'license_inactive' })) } catch {}
+      return
+    }
+    const channel = getChannel(frame.session_id)
+    if (channel) {
+      try { channel.ws.send(JSON.stringify(frame)) } catch {}
+    }
     return
   }
 

@@ -1,5 +1,6 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
+import { TermFrame, isTermFrameType } from './term-protocol'
 import { verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo } from '../db/dal'
 import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
@@ -148,6 +149,25 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch (e: any) {
     console.error('[agent] JSON parse error:', e.message)
+    return
+  }
+
+  // --- Raw-terminal channel (Phase 15, R-PTY-02/03) ---
+  // term.* frames from the supervisor are relayed byte-faithfully to the
+  // subscribed clients and MUST NOT enter the structured agent-protocol path
+  // (no RunnerEvent translation, no `messages` persistence). Short-circuit
+  // BEFORE AgentInbound.safeParse. Only an authenticated agent connection may
+  // relay, and only for the session it is bound to.
+  if (isTermFrameType(parsed)) {
+    if (!ws.data.authenticated) return
+    const tf = TermFrame.safeParse(parsed)
+    if (!tf.success) return
+    const frame = tf.data
+    // The agent connection only relays for its own bound session.
+    if (ws.data.sessionId && frame.session_id !== ws.data.sessionId) return
+    if (frame.type === 'term.data') {
+      broadcastToSubscribers(frame.session_id, frame)
+    }
     return
   }
 
