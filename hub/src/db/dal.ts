@@ -810,7 +810,7 @@ export async function revokeAllUserCredentials(userId: string): Promise<{ revoke
 // ── Users / Profiles ──────────────────────────────────────────────────────────
 
 export async function getUserById(id: string) {
-  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, auto_nudge_idle_sessions, notifications, created_at, updated_at FROM users WHERE id = ${id}`;
+  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, programmatic_halt_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, auto_nudge_idle_sessions, notifications, created_at, updated_at FROM users WHERE id = ${id}`;
   return rows[0] ?? null;
 }
 
@@ -1465,13 +1465,16 @@ export async function createUser(email: string, passwordHash: string, role: stri
   return rows[0];
 }
 
-export async function updateProfile(userId: string, fields: { display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string }) {
+export async function updateProfile(userId: string, fields: { display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string; programmatic_halt_usd?: number | null }) {
   // Build a partial update — only touch the columns provided.
   const sets: any[] = [];
   if (fields.display_name !== undefined) sets.push(sql`display_name = ${fields.display_name}`);
   if (fields.avatar_url !== undefined) sets.push(sql`avatar_url = ${fields.avatar_url}`);
   if (fields.system_prompt !== undefined) sets.push(sql`system_prompt = ${fields.system_prompt}`);
   if (fields.timezone !== undefined) sets.push(sql`timezone = ${fields.timezone}`);
+  // Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt bound. null clears
+  // it (OFF — the default).
+  if (fields.programmatic_halt_usd !== undefined) sets.push(sql`programmatic_halt_usd = ${fields.programmatic_halt_usd}`);
   if (sets.length === 0) return getUserById(userId);
   sets.push(sql`updated_at = now()`);
   let q = sql`UPDATE users SET `;

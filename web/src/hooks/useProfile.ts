@@ -10,6 +10,8 @@ export interface Profile {
   session_count: number
   system_prompt?: string | null
   daily_cost_cap_usd?: number
+  // Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt bound. null/absent = OFF.
+  programmatic_halt_usd?: number | null
   web_push_enabled?: boolean
   timezone?: string
 }
@@ -55,6 +57,7 @@ export function useProfile(token: string | null) {
     avatar_url?: string | null
     system_prompt?: string | null
     daily_cost_cap_usd?: number
+    programmatic_halt_usd?: number | null
     web_push_enabled?: boolean
     timezone?: string
   }) => {

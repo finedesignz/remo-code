@@ -15,6 +15,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { hubFetch } from "../../lib/api";
 import type { Profile } from "../../hooks/useProfile";
+import {
+  useProgrammaticLeakAlert,
+  type ProgrammaticCredit,
+} from "../../hooks/useSubscriptionUsage";
 import { Card, Field, InfoTip, StatusPill, LoadingState } from "../../components/ui";
 
 interface UsageSummary {
@@ -34,15 +38,19 @@ interface UsageSummary {
   claude_window_updated_at: string | null;
 }
 
+type Subscribe = (handler: (msg: any) => void) => () => void;
+
 interface Props {
   token: string;
   profile: Profile;
-  onUpdateProfile: (data: { daily_cost_cap_usd?: number }) => Promise<any>;
+  onUpdateProfile: (data: { daily_cost_cap_usd?: number; programmatic_halt_usd?: number | null }) => Promise<any>;
+  subscribe: Subscribe;
 }
 
-export function UsageTab({ token, profile, onUpdateProfile }: Props) {
+export function UsageTab({ token, profile, onUpdateProfile, subscribe }: Props) {
   const [summary, setSummary] = useState<UsageSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { alert, dismiss } = useProgrammaticLeakAlert(subscribe);
 
   const load = useCallback(async () => {
     try {
@@ -63,14 +71,108 @@ export function UsageTab({ token, profile, onUpdateProfile }: Props) {
 
   return (
     <div className="px-4 md:px-6 lg:px-8 py-5 w-full max-w-7xl mx-auto space-y-5">
+      {alert && <LeakAlertBanner alert={alert} onDismiss={dismiss} />}
       <CostCards summary={summary} error={error} />
       <LimitsCard summary={summary} />
+      <ProgrammaticCreditCard summary={summary} />
       <ControlsCard
         token={token}
         profile={profile}
         summary={summary}
         onUpdateProfile={onUpdateProfile}
       />
+    </div>
+  );
+}
+
+/* ───────────── Programmatic credit (Phase 18 dual-bucket) ───────────── */
+
+function ProgrammaticCreditCard({ summary }: { summary: UsageSummary | null }) {
+  const credit = (summary?.claude_window?.programmatic_credit ?? null) as
+    | ProgrammaticCredit
+    | null;
+
+  return (
+    <Card className="space-y-3">
+      <div className="flex items-center gap-1">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+          Programmatic credit
+        </h3>
+        <InfoTip
+          content={
+            <>
+              The Agent-SDK / headless credit pool (separate from the interactive
+              subscription limits as of June 15 2026). Automation bills against
+              this dollar credit; your interactive sessions do not. Shows an empty
+              state until the credit is claimed.
+            </>
+          }
+        />
+      </div>
+
+      {!credit || !credit.claimed ? (
+        <p className="text-sm text-[var(--text-muted)]">
+          Programmatic credit not claimed or unavailable yet.
+        </p>
+      ) : (
+        <ProgrammaticCreditBar credit={credit} />
+      )}
+    </Card>
+  );
+}
+
+function ProgrammaticCreditBar({ credit }: { credit: ProgrammaticCredit }) {
+  const limit = credit.limit_usd > 0 ? credit.limit_usd : 0;
+  const pct = limit > 0 ? Math.max(0, Math.min(100, (credit.used_usd / limit) * 100)) : 0;
+  const tone = bandFor(pct);
+  const barColor =
+    tone === "success" ? "bg-emerald-400" : tone === "warning" ? "bg-amber-400" : "bg-red-400";
+  const remaining = Math.max(0, limit - credit.used_usd);
+  return (
+    <div className="space-y-2 pt-1">
+      <div className="flex items-center gap-3">
+        <span className="text-sm text-[var(--text-primary)] w-32 shrink-0">Credit used</span>
+        <span className="flex-1 h-2 rounded-full bg-[var(--bg-tertiary)] overflow-hidden">
+          <span className={`block h-full ${barColor} transition-all`} style={{ width: `${pct}%` }} />
+        </span>
+        <span className="text-sm font-mono text-[var(--text-primary)] w-28 text-right">
+          ${credit.used_usd.toFixed(2)} / ${limit.toFixed(2)}
+        </span>
+      </div>
+      <p className="text-xs text-[var(--text-muted)] font-mono">
+        ${remaining.toFixed(2)} remaining · resets in {formatResetIn(credit.resets_at)}
+      </p>
+    </div>
+  );
+}
+
+/* ───────────── Leak alert banner (Phase 18) ───────────── */
+
+function LeakAlertBanner({
+  alert,
+  onDismiss,
+}: {
+  alert: { reason: string; delta_usd: number; used_usd: number; limit_usd: number };
+  onDismiss: () => void;
+}) {
+  const why =
+    alert.reason === "drain_without_automation"
+      ? "programmatic credit drained with no automation running"
+      : "programmatic credit drained faster than your configured rate";
+  return (
+    <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 flex items-start justify-between gap-3">
+      <div className="text-sm text-[var(--text-primary)]">
+        <span className="font-semibold text-amber-400">Programmatic credit alert — </span>
+        {why}: +${alert.delta_usd.toFixed(2)} (now ${alert.used_usd.toFixed(2)} of $
+        {alert.limit_usd.toFixed(2)}).
+      </div>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] shrink-0"
+      >
+        Dismiss
+      </button>
     </div>
   );
 }
@@ -290,7 +392,7 @@ function ControlsCard({
   token: string;
   profile: Profile;
   summary: UsageSummary | null;
-  onUpdateProfile: (data: { daily_cost_cap_usd?: number }) => Promise<any>;
+  onUpdateProfile: (data: { daily_cost_cap_usd?: number; programmatic_halt_usd?: number | null }) => Promise<any>;
 }) {
   // Daily cap
   const initialCap = profile.daily_cost_cap_usd ?? summary?.daily_cap_usd ?? 10;
@@ -302,6 +404,17 @@ function ControlsCard({
   const [week, setWeek] = useState<number>(80);
   const lastThresholds = useRef<{ session: number; week: number }>({ session: 80, week: 80 });
   const [bootstrapped, setBootstrapped] = useState(false);
+
+  // Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt. OFF by default
+  // (null/0 bound). Toggling on without a bound is a no-op until a bound is set.
+  const initialHalt = profile.programmatic_halt_usd ?? null;
+  const [haltEnabled, setHaltEnabled] = useState<boolean>(
+    initialHalt != null && initialHalt > 0,
+  );
+  const [haltBound, setHaltBound] = useState<string>(
+    initialHalt != null && initialHalt > 0 ? String(initialHalt) : "",
+  );
+  const lastHalt = useRef<number | null>(initialHalt && initialHalt > 0 ? initialHalt : null);
 
   const [error, setError] = useState<string | null>(null);
   const [saved, flashSaved] = useSavedFlash();
@@ -350,6 +463,28 @@ function ControlsCard({
         json: { session_pct: session, week_pct: week },
       });
       lastThresholds.current = { session, week };
+      flashSaved();
+    } catch (e: any) {
+      setError(e?.message || "Save failed");
+    }
+  };
+
+  // Persist the hard-halt bound. Disabled toggle OR empty/0 bound => null (OFF).
+  const saveHalt = async () => {
+    let next: number | null = null;
+    if (haltEnabled) {
+      const n = parseFloat(haltBound);
+      if (haltBound.trim() !== "" && (!Number.isFinite(n) || n < 0)) {
+        setError("Hard-halt bound must be a non-negative number");
+        return;
+      }
+      next = Number.isFinite(n) && n > 0 ? n : null;
+    }
+    if (next === lastHalt.current) return; // no change
+    setError(null);
+    try {
+      await onUpdateProfile({ programmatic_halt_usd: next });
+      lastHalt.current = next;
       flashSaved();
     } catch (e: any) {
       setError(e?.message || "Save failed");
@@ -420,6 +555,47 @@ function ControlsCard({
             className="w-full accent-blue-500"
           />
         </Field>
+      </div>
+
+      {/* Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt. */}
+      <div className="border-t border-[var(--bg-tertiary)] pt-4 space-y-3">
+        <div className="flex items-center gap-1">
+          <h4 className="text-sm font-semibold text-[var(--text-primary)]">
+            Programmatic credit hard-halt
+          </h4>
+          <InfoTip content="Optional. When the programmatic (Agent-SDK) credit reaches this dollar bound, automation dispatch is halted. This never affects your own interactive work. Off by default." />
+        </div>
+        <label className="flex items-center gap-2 text-sm text-[var(--text-primary)]">
+          <input
+            type="checkbox"
+            checked={haltEnabled}
+            onChange={(e) => {
+              setHaltEnabled(e.target.checked);
+              if (!e.target.checked) void onUpdateProfile({ programmatic_halt_usd: null }).then(() => { lastHalt.current = null; flashSaved(); });
+            }}
+            className="accent-blue-500"
+          />
+          Halt automation when programmatic credit crosses a bound
+        </label>
+        {haltEnabled && (
+          <Field
+            label="Hard-halt bound (USD)"
+            helper="Halts automation only — your interactive sessions keep running. An alert fires before this bound is reached, so it is never a surprise."
+          >
+            <div className="flex items-center gap-2 max-w-xs">
+              <span className="text-[var(--text-muted)] text-sm">$</span>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={haltBound}
+                onChange={(e) => setHaltBound(e.target.value)}
+                onBlur={() => void saveHalt()}
+                className="w-full px-3 py-2 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] font-mono focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+              />
+            </div>
+          </Field>
+        )}
       </div>
 
       {error && <p className="text-xs text-red-400">{error}</p>}
