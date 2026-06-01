@@ -160,6 +160,10 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
 - **Optional:** `REMO_SESSION_IDLE_GRACE_SECONDS` (default 300; `0` disables idle teardown),
   `REMO_ORCHESTRATOR_AUTOLAUNCH` (`false` disables auto-launch), `TITANIUM_BYPASS` (currently
   `true` in prod — see docs/auth.md), `COOLIFY_TOKEN`, `E4A_*`.
+- **`REMO_PTY_INTERACTIVE`** (default OFF): interactive PTY runner infra landed dark behind this
+  flag. With it OFF the hub is prod-equivalent to `origin/main`. The cutover (default flip +
+  ChatSurface deletion + supervisor MSI) is gated on device attestation — see
+  [docs/cutover-gate-june15.md](docs/cutover-gate-june15.md). Do not flip on without that gate.
 
 ## Docs map — subsystems & phases
 
