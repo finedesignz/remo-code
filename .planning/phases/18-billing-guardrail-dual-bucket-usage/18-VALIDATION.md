@@ -3,7 +3,7 @@ phase: 18
 slug: billing-guardrail-dual-bucket-usage
 status: final
 nyquist_compliant: true
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-05-31
 ---
 
@@ -45,13 +45,13 @@ the credit endpoint is unknown.
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|--------|
-| 18-01-01 | 01 | 1 | R-PTY-17 | T-18-01 | second bucket parsed; OAuth token NEVER in payload | unit | `bun test supervisor/test/oauth-poll-dual-bucket.test.ts` | ⬜ pending |
-| 18-01-02 | 01 | 1 | R-PTY-17 | T-18-02 | endpoint absent/pre-claim ⇒ explicit empty state, no fabricated $ | unit (neg) | `bun test supervisor/test/oauth-poll-credit-absent.test.ts` | ⬜ pending |
-| 18-02-01 | 02 | 1 | R-PTY-17 | T-18-03 | WS/store carry 2nd bucket additively; old-shape still validates | unit | `bun test hub/test/usage-dual-bucket-additive.test.ts` | ⬜ pending |
-| 18-03-01 | 03 | 2 | R-PTY-18 | T-18-04 | leak alert fires on drain w/ no in-flight automation; no false alert otherwise | unit | `bun test hub/test/programmatic-leak-alert.test.ts` | ⬜ pending |
-| 18-03-02 | 03 | 2 | R-PTY-18 | T-18-05 | hard-halt default OFF; when ON+bound crossed ⇒ dailyCostCapGate denies programmatic; human PTY unaffected | unit (neg) | `bun test hub/test/programmatic-hard-halt.test.ts` | ⬜ pending |
-| 18-04-01 | 04 | 2 | R-PTY-19 | T-18-06/07 | each unattended source passes dailyCostCapGate + is rejected on the PTY surface (human-only guard) | unit (neg) | `bun test hub/test/automation-routing-guard.test.ts` | ⬜ pending |
-| 18-05-01 | 05 | 3 | R-PTY-20 | T-18-08 | usage UI renders both buckets + alert + halt toggle; no token exposed; no-indigo green | unit | `bun test web/test/usage-dual-bucket.test.tsx; bun test web/test/no-indigo.test.ts` | ⬜ pending |
+| 18-01-01 | 01 | 1 | R-PTY-17 | T-18-01 | second bucket parsed; OAuth token NEVER in payload | unit | `bun test supervisor/test/oauth-poll-dual-bucket.test.ts` | ✅ green |
+| 18-01-02 | 01 | 1 | R-PTY-17 | T-18-02 | endpoint absent/pre-claim ⇒ explicit empty state, no fabricated $ | unit (neg) | `bun test supervisor/test/oauth-poll-credit-absent.test.ts` | ✅ green |
+| 18-02-01 | 02 | 1 | R-PTY-17 | T-18-03 | WS/store carry 2nd bucket additively; old-shape still validates | unit | `bun test hub/test/usage-dual-bucket-additive.test.ts` | ✅ green |
+| 18-03-01 | 03 | 2 | R-PTY-18 | T-18-04 | leak alert fires on drain w/ no in-flight automation; no false alert otherwise | unit | `bun test hub/test/programmatic-leak-alert.test.ts` | ✅ green |
+| 18-03-02 | 03 | 2 | R-PTY-18 | T-18-05 | hard-halt default OFF; when ON+bound crossed ⇒ dailyCostCapGate denies programmatic; human PTY unaffected | unit (neg) | `bun test hub/test/programmatic-hard-halt.test.ts` | ✅ green |
+| 18-04-01 | 04 | 2 | R-PTY-19 | T-18-06/07 | each unattended source passes dailyCostCapGate + is rejected on the PTY surface (human-only guard) | unit (neg) | `bun test hub/test/automation-routing-guard.test.ts` | ✅ green |
+| 18-05-01 | 05 | 3 | R-PTY-20 | T-18-08 | usage UI renders both buckets + alert + halt toggle; no token exposed; no-indigo green | unit | `bun test web/test/usage-dual-bucket.test.tsx; bun test web/test/no-indigo.test.ts` | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
