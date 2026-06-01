@@ -92,6 +92,19 @@ function toPipelineImages(images?: string[]): DispatchRequest["images"] {
 export async function dispatchToSession(input: DispatchInput): Promise<DispatchOutcome> {
   if (!input.sessionId) return { kind: "no_session" };
 
+  // Phase 20: the moment a Telegram user dispatches to a session it is
+  // telegram-relevant + about to be live — open its transcript source so the
+  // outbound bridge + permission surfacing tail it. Idempotent, best-effort
+  // (never blocks the dispatch). No-op when the bridge isn't started. Imported
+  // LAZILY so dispatch.ts's module-load graph doesn't pull the bridge's
+  // commands→launch→supervisor-registry chain (keeps the dispatch unit test's
+  // partial ws/registry mock valid).
+  void import("./bridge.ts")
+    .then((m) => m.ensureSessionSubscribed(input.sessionId))
+    .catch((err: any) => {
+      console.warn(`[telegram-dispatch] ensureSessionSubscribed failed session=${input.sessionId}: ${err?.message ?? err}`);
+    });
+
   const token = `tg:${input.chatId}:${input.updateId}`;
   const rawImages = input.images && input.images.length > 0 ? input.images : undefined;
 

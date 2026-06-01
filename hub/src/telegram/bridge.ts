@@ -1,44 +1,41 @@
 /**
- * Phase 12 Wave 3 — Telegram outbound bridge.
+ * Phase 20 — Telegram outbound bridge, re-sourced on the transcript-tail.
  *
- * Subscribes to `assistant_message:final` events from the hub's internal
- * event bus and forwards the final assistant text to Telegram for every user
- * whose `telegram_default_session_id` matches the event's session.
+ * After the Phase-17 rip the stream-json assistant-final / permission event bus
+ * the old bridge consumed is gone. The bridge now
+ * sources every session's output from its on-disk transcript via the per-session
+ * `TranscriptSource` manager (`transcript/manager.ts`) — backend-agnostic
+ * (Claude projects JSONL / Codex rollout JSONL + scrape fallback), selected by
+ * the session's `cli_kind`. The bridge consumes ONLY the normalized
+ * `TranscriptEntry` union; it never sees a backend-specific shape and no longer
+ * subscribes to the deleted assistant-final event bus.
  *
- * Strict invariants:
- *   - FINAL `assistant_message` only. Streaming `text_delta` / `thinking` /
- *     `tool_use` / `tool_result` never reach the bus and are therefore never
- *     forwarded. (Enforced at the emit site in ws/agent.ts.)
- *   - Feature-gated on `config.telegram.botToken`. With no token,
- *     `startTelegramBridge()` is a no-op — no listener is registered, no
- *     `sendMessage` is ever called.
- *   - Listener errors are swallowed. The emitter helper isolates throws,
- *     and we additionally try/catch every iteration so a Telegram 4xx/5xx
- *     can't break subsequent sends.
- *   - Per-chat serialization. Telegram rate-limits per chat at ~1 msg/sec.
- *     We hold a `Map<chatId, Promise<void>>` and chain each send onto the
- *     previous in-flight send for the same chat. Prevents 429s and out-of-
- *     order delivery without blocking other chats.
- *   - Idempotent boot. `startTelegramBridge()` may be called multiple times
- *     (hot-reload, test setup) — a module-scoped `started` flag guards
- *     against double-subscription.
+ * Strict invariants (unchanged from the event-bus era):
+ *   - FINAL assistant text + collapsed tool one-liners only. Streaming deltas
+ *     never exist in the transcript stream (the adapter emits assistant_text as a
+ *     completed turn), so partials are never forwarded.
+ *   - Feature-gated on `config.telegram.botToken`. No token ⇒ `startTelegramBridge`
+ *     is a no-op.
+ *   - Per-chat serialization via `Map<chatId, Promise>` to dodge Telegram's
+ *     ~1 msg/sec per-chat rate limit and keep ordering.
+ *   - Idempotent boot.
  *
- * NOT in scope for MVP:
- *   - Global rate limit (30 msg/sec across all chats). Per-chat throttle is
- *     enough for the expected MVP traffic.
- *   - Markdown / formatting. We send plain text — `client.sendMessage`
- *     handles 4096-char split internally. Markdown escaping would require
- *     deciding what to preserve; punt to a future wave.
+ * Subscription lifecycle: the bridge opens a transcript source for a session
+ * LAZILY when a Telegram-default user dispatches to it (`ensureSessionSubscribed`,
+ * called from the inbound dispatch path). The source stays open while the bridge
+ * holds it; `_stopTelegramBridgeForTests` releases all. Permission detection +
+ * surfacing (plan 03) and turn-lock release (plan 04) attach their OWN consumers
+ * to the same manager source — one tail, many consumers.
  */
 
 import { config } from "../config.ts";
-import { onAssistantMessageFinal, type AssistantMessageFinalEvent } from "../events/assistant-events.ts";
-import { onPermissionPending, type PermissionPendingEvent } from "../events/permission-events.ts";
-import { onSessionActivity, type SessionActivityEvent } from "../events/session-activity-events.ts";
 import { getUsersWithTelegramDefaultSession } from "../db/dal.ts";
 import {
+  subscribeToSessionTranscript,
+} from "./transcript/manager.ts";
+import type { TranscriptEntry } from "./transcript/types.ts";
+import {
   sendMessageMd,
-  sendMessageWithKeyboard,
   sendChatAction,
   editMessageTextMd,
   escapeMarkdownV2,
@@ -46,28 +43,25 @@ import {
   setWebhook,
 } from "./client.ts";
 import { BOT_COMMANDS } from "./commands.ts";
-import { rememberPendingPrompt, permissionCallbackData } from "./approvals.ts";
 import { rememberStoppable, forgetStoppable, stopCallbackData } from "./stop.ts";
+import { startPermissionSurfacing, stopPermissionSurfacing } from "./permission-surfacing.ts";
 import type { InlineKeyboard } from "./client.ts";
 
 let started = false;
-let unsubscribe: (() => void) | null = null;
-let unsubscribePermission: (() => void) | null = null;
-let unsubscribeActivity: (() => void) | null = null;
+
+// Per-session transcript subscription unsubscribe fns (bridge-owned consumer).
+const sessionUnsubs = new Map<string, () => void>();
 
 // ── Summarized-streaming state ──────────────────────────────────────────────
-// One editable "working…" message per (chat, session). tool_use events append
-// collapsed one-liners; the final assistant_message edits it to the full text.
-const TYPING_REFRESH_MS = 4000; // Telegram typing expires ~5s
-const EDIT_THROTTLE_MS = 900; // avoid hammering editMessageText (Telegram rate-limits edits)
-const MAX_TOOL_LINES = 12; // cap the collapsed list so the working message stays small
+const TYPING_REFRESH_MS = 4000;
+const EDIT_THROTTLE_MS = 900;
+const MAX_TOOL_LINES = 12;
 
 interface WorkingState {
   messageId: number;
   lines: string[];
   typingTimer: ReturnType<typeof setInterval> | null;
   lastEditAt: number;
-  pendingEdit: boolean;
 }
 
 const workingByKey = new Map<string, WorkingState>();
@@ -76,14 +70,12 @@ function workKey(chatId: string | number | bigint, sessionId: string): string {
   return `${String(chatId)}:${sessionId}`;
 }
 
-/** Collapse a tool_use into a one-line summary, e.g. "🔧 Edit hub/src/foo.ts". */
 function toolLine(toolName: string, detail?: string): string {
   const d = (detail ?? "").trim();
   const short = d.length > 80 ? d.slice(0, 79) + "…" : d;
   return `🔧 ${toolName}${short ? " " + short : ""}`;
 }
 
-/** Render the in-progress working message body (escaped MarkdownV2). */
 function renderWorking(lines: string[]): string {
   const head = "⏳ *Working…*";
   if (lines.length === 0) return head;
@@ -91,7 +83,6 @@ function renderWorking(lines: string[]): string {
   return head + "\n\n" + body;
 }
 
-/** Inline keyboard with a single 🛑 Stop button bound to `sessionId`. */
 function stopKeyboard(sessionId: string): InlineKeyboard {
   return [[{ text: "🛑 Stop", callback_data: stopCallbackData(sessionId) }]];
 }
@@ -103,76 +94,59 @@ function stopTyping(st: WorkingState): void {
   }
 }
 
-// Per-chat serial queue. Key = chat_id (stringified to dodge bigint vs number
-// equality surprises). Value = the tail Promise; new sends chain onto it.
+// Per-chat serial queue.
 const chatQueues = new Map<string, Promise<void>>();
 
 function chatKey(chatId: string | number | bigint): string {
   return String(chatId);
 }
 
-/**
- * Append `task` onto the serial queue for `chatId`. Returns a promise that
- * resolves when `task` itself settles. The tail in the map always settles
- * (errors are swallowed) so a failed send never poisons the queue.
- */
 function enqueueForChat(chatId: string | number | bigint, task: () => Promise<void>): Promise<void> {
   const key = chatKey(chatId);
   const prev = chatQueues.get(key) ?? Promise.resolve();
-  const next = prev.then(task, task); // run regardless of prior outcome
-  // Track a tail that always resolves so the map never holds a rejected promise.
+  const next = prev.then(task, task);
   const tail = next.catch(() => undefined);
   chatQueues.set(key, tail);
-  // Clean up when this is the last queued entry — avoid an unbounded map.
   tail.then(() => {
     if (chatQueues.get(key) === tail) chatQueues.delete(key);
   });
   return next;
 }
 
-/**
- * A tool was invoked mid-turn. When summarized streaming is on, lazily create an
- * editable "working…" message per (chat, session) and append a collapsed
- * one-liner. Also (re)start the typing indicator. No-op when the flag is off.
- */
-async function onActivity(e: SessionActivityEvent): Promise<void> {
+/** A tool_use transcript entry → append a collapsed line to the working msg. */
+async function onToolUse(sessionId: string, toolName: string, detail?: string): Promise<void> {
   if (!config.telegram.summarizedStreaming) return;
-  if (e.kind !== "tool_use") return;
   let users: Array<{ id: string; telegram_chat_id: string | number }>;
   try {
-    users = await getUsersWithTelegramDefaultSession(e.sessionId);
+    users = await getUsersWithTelegramDefaultSession(sessionId);
   } catch (err: any) {
-    console.warn(`[telegram-bridge] activity DAL lookup failed session=${e.sessionId}: ${err?.message ?? err}`);
+    console.warn(`[telegram-bridge] tool_use DAL lookup failed session=${sessionId}: ${err?.message ?? err}`);
     return;
   }
   if (users.length === 0) return;
 
-  const line = toolLine(e.toolName, e.detail);
-  const keyboard = stopKeyboard(e.sessionId);
+  const line = toolLine(toolName, detail);
+  const keyboard = stopKeyboard(sessionId);
   for (const u of users) {
     const chatId = u.telegram_chat_id;
     if (chatId === null || chatId === undefined) continue;
-    const key = workKey(chatId, e.sessionId);
+    const key = workKey(chatId, sessionId);
     void enqueueForChat(chatId, async () => {
       let st = workingByKey.get(key);
       try {
         if (!st) {
-          // Refresh typing immediately, then on an interval until finalized.
           await sendChatAction(chatId as number | string, "typing");
           const sent = await sendMessageMd(chatId as number | string, renderWorking([line]), keyboard);
           const messageId = sent?.message_id ?? 0;
-          if (!messageId) return; // couldn't anchor an editable message; skip streaming for this turn
-          // Record (sessionId → this user @ this working message) so a 🛑 tap can
-          // be authorized server-side and edit the right message. Take-once.
-          rememberStoppable(e.sessionId, u.id, { chatId, messageId });
+          if (!messageId) return;
+          rememberStoppable(sessionId, u.id, { chatId, messageId });
           const typingTimer = setInterval(() => {
             void sendChatAction(chatId as number | string, "typing");
           }, TYPING_REFRESH_MS);
-          st = { messageId, lines: [line], typingTimer, lastEditAt: Date.now(), pendingEdit: false };
+          st = { messageId, lines: [line], typingTimer, lastEditAt: Date.now() };
           workingByKey.set(key, st);
           return;
         }
-        // Append + edit (throttled). Cap the visible list. Keep the Stop button.
         st.lines.push(line);
         if (st.lines.length > MAX_TOOL_LINES) st.lines = st.lines.slice(-MAX_TOOL_LINES);
         const sinceEdit = Date.now() - st.lastEditAt;
@@ -182,169 +156,118 @@ async function onActivity(e: SessionActivityEvent): Promise<void> {
         }
       } catch (err: any) {
         console.warn(
-          `[telegram-bridge] activity edit failed chat=${chatKey(chatId)} session=${e.sessionId}: ${err?.message ?? err}`,
+          `[telegram-bridge] tool_use edit failed chat=${chatKey(chatId)} session=${sessionId}: ${err?.message ?? err}`,
         );
       }
     });
   }
 }
 
-async function onFinal(e: AssistantMessageFinalEvent): Promise<void> {
+/** An assistant_text (final) transcript entry → forward / finalize working msg. */
+async function onAssistantText(sessionId: string, text: string): Promise<void> {
   let users: Array<{ id: string; telegram_chat_id: string | number }>;
   try {
-    users = await getUsersWithTelegramDefaultSession(e.sessionId);
+    users = await getUsersWithTelegramDefaultSession(sessionId);
   } catch (err: any) {
-    console.warn(`[telegram-bridge] DAL lookup failed session=${e.sessionId}: ${err?.message ?? err}`);
+    console.warn(`[telegram-bridge] DAL lookup failed session=${sessionId}: ${err?.message ?? err}`);
     return;
   }
   if (users.length === 0) return;
 
-  const finalMd = escapeMarkdownV2(e.text);
+  const finalMd = escapeMarkdownV2(text);
   for (const u of users) {
     const chatId = u.telegram_chat_id;
     if (chatId === null || chatId === undefined) continue;
-    const key = workKey(chatId, e.sessionId);
-    // Fire-and-forget — the queue ensures per-chat serialization. We do NOT
-    // await across users; different chats progress in parallel.
+    const key = workKey(chatId, sessionId);
     void enqueueForChat(chatId, async () => {
       const st = workingByKey.get(key);
       try {
         if (st) {
-          // Finalize the editable working message with the full assistant text.
-          // The turn is over → drop the Stop entry (and the final edit passes no
-          // keyboard, so the 🛑 button disappears).
           stopTyping(st);
           workingByKey.delete(key);
-          forgetStoppable(e.sessionId);
-          if (e.text.length <= 4096) {
+          forgetStoppable(sessionId);
+          if (text.length <= 4096) {
             await editMessageTextMd(chatId as number | string, st.messageId, finalMd);
             return;
           }
-          // Too long to fit one edited message — leave the working summary and
-          // send the full text as a follow-up (MarkdownV2 → plaintext fallback).
           await sendMessageMd(chatId as number | string, finalMd);
           return;
         }
-        // No working message (streaming off, or no tool calls this turn) — send
-        // the final text as a fresh MarkdownV2 message.
         await sendMessageMd(chatId as number | string, finalMd);
       } catch (err: any) {
         if (st) stopTyping(st);
         workingByKey.delete(key);
-        forgetStoppable(e.sessionId);
+        forgetStoppable(sessionId);
         console.warn(
-          `[telegram-bridge] final send failed chat=${chatKey(chatId)} session=${e.sessionId}: ${err?.message ?? err}`,
+          `[telegram-bridge] final send failed chat=${chatKey(chatId)} session=${sessionId}: ${err?.message ?? err}`,
         );
       }
     });
   }
 }
 
-/** Best-effort one-line preview of a tool input for the approval prompt. */
-function previewToolInput(input: unknown): string {
-  if (input == null) return "";
-  try {
-    const obj = input as Record<string, unknown>;
-    const cmd = obj.command ?? obj.file_path ?? obj.path ?? obj.url;
-    if (typeof cmd === "string") return cmd.length > 200 ? cmd.slice(0, 199) + "…" : cmd;
-    const json = JSON.stringify(input);
-    return json.length > 200 ? json.slice(0, 199) + "…" : json;
-  } catch {
-    return "";
+/** The bridge's own transcript consumer — handles output entries only.
+ *  Permission detection (plan 03) and turn-lock release (plan 04) attach their
+ *  OWN consumers to the same source via the manager. */
+function bridgeConsumer(entry: TranscriptEntry): void {
+  switch (entry.kind) {
+    case "assistant_text":
+      void onAssistantText(entry.sessionId, entry.text);
+      break;
+    case "tool_use":
+      void onToolUse(entry.sessionId, entry.toolName, entry.detail);
+      break;
+    // permission_request / user_question — handled by the permission surfacing
+    // consumer (plan 03), NOT here.
+    // turn_complete — consumed by the turn lock (plan 04).
+    default:
+      break;
   }
 }
 
 /**
- * A runner raised a permission prompt. Surface it inline (Approve/Deny) to every
- * user whose Telegram default session is the emitting session, and record the
- * pending prompt so the webhook callback can resolve it.
+ * Ensure a transcript source is open for `sessionId` with the bridge's output
+ * consumer (and the permission-surfacing consumer) attached. Idempotent per
+ * session. Called from the inbound dispatch path when a Telegram user sends to a
+ * session (the moment we know the session is telegram-relevant + likely live).
+ * No-op when the bridge isn't started (no token).
  */
-async function onPermissionPendingEvent(e: PermissionPendingEvent): Promise<void> {
-  let users: Array<{ id: string; telegram_chat_id: string | number }>;
-  try {
-    users = await getUsersWithTelegramDefaultSession(e.sessionId);
-  } catch (err: any) {
-    console.warn(`[telegram-bridge] permission DAL lookup failed session=${e.sessionId}: ${err?.message ?? err}`);
+export async function ensureSessionSubscribed(sessionId: string): Promise<void> {
+  if (!started) return;
+  if (sessionUnsubs.has(sessionId)) return;
+  const unsub = await subscribeToSessionTranscript(sessionId, bridgeConsumer);
+  if (!unsub) return; // no session row / unresolvable
+  // Guard against a racing concurrent call having installed one already.
+  if (sessionUnsubs.has(sessionId)) {
+    unsub();
     return;
   }
-  if (users.length === 0) return;
+  sessionUnsubs.set(sessionId, unsub);
+  // Plan 03: attach the fail-closed permission surfacing consumer to the SAME
+  // source (one tail, many consumers). It manages its own unsubscribe lifetime.
+  await startPermissionSurfacing(sessionId);
+}
 
-  const preview = previewToolInput(e.toolInput);
-  // MarkdownV2: escape dynamic content, keep our own *bold* / ```code``` markup.
-  const text =
-    `🔐 Approval needed — *${escapeMarkdownV2(e.toolName)}*` +
-    (preview ? "\n\n```\n" + escapeMarkdownV2(preview) + "\n```" : "") +
-    `\n\nApprove this action?`;
-  const keyboard = [[
-    { text: "✅ Approve", callback_data: permissionCallbackData(e.requestId, "approve") },
-    { text: "🚫 Deny", callback_data: permissionCallbackData(e.requestId, "deny") },
-  ]];
-
-  for (const u of users) {
-    const chatId = u.telegram_chat_id;
-    if (chatId === null || chatId === undefined) continue;
-    void enqueueForChat(chatId, async () => {
-      try {
-        let sent: { message_id: number } | void;
-        try {
-          sent = await sendMessageWithKeyboard(chatId as number | string, text, keyboard, {
-            parse_mode: "MarkdownV2",
-          });
-        } catch (mdErr: any) {
-          // 400 → markup rejected; resend as plain text so the prompt is never
-          // silently dropped (the inline keyboard still works).
-          if (mdErr?.status === 400) {
-            sent = await sendMessageWithKeyboard(chatId as number | string, text, keyboard);
-          } else {
-            throw mdErr;
-          }
-        }
-        // Record the pending prompt so the callback can resolve it. Keyed by
-        // (sessionId, requestId) with THIS user authorized — a shared default
-        // session no longer overwrites a sibling user's binding.
-        rememberPendingPrompt(e.sessionId, e.requestId, {
-          sessionId: e.sessionId,
-          userId: u.id,
-          chatId,
-          messageId: sent?.message_id ?? 0,
-          toolName: e.toolName,
-          createdAtMs: Date.now(),
-        });
-      } catch (err: any) {
-        console.warn(
-          `[telegram-bridge] permission prompt send failed chat=${chatKey(chatId)} session=${e.sessionId}: ${err?.message ?? err}`,
-        );
-      }
-    });
+/** Release a session's transcript subscription (e.g. on idle teardown). */
+export function releaseSessionSubscription(sessionId: string): void {
+  const unsub = sessionUnsubs.get(sessionId);
+  if (unsub) {
+    unsub();
+    sessionUnsubs.delete(sessionId);
   }
+  stopPermissionSurfacing(sessionId);
 }
 
 /**
  * Boot the bridge. Idempotent. No-op when `TELEGRAM_BOT_TOKEN` is unset.
- * Call once from `hub/src/index.ts` after DB init.
  */
 export function startTelegramBridge(): void {
   if (started) return;
-  if (!config.telegram.botToken) {
-    // Disabled — do not subscribe. No noise in logs (boot already warned if
-    // exactly one of botToken/webhookSecret was set).
-    return;
-  }
-  unsubscribe = onAssistantMessageFinal(onFinal);
-  unsubscribePermission = onPermissionPending(onPermissionPendingEvent);
-  unsubscribeActivity = onSessionActivity(onActivity);
+  if (!config.telegram.botToken) return;
   started = true;
-  // Register the slash-command menu so typing `/` shows a popup. Best-effort,
-  // fire-and-forget — a transient failure must not block bridge startup.
   void setMyCommands(BOT_COMMANDS as Array<{ command: string; description: string }>).catch((err: any) => {
     console.warn(`[telegram-bridge] setMyCommands failed: ${err?.message ?? err}`);
   });
-  // Self-register the inbound webhook so `allowed_updates` ALWAYS includes
-  // `callback_query`. A prior manual `setWebhook` (the documented curl) could
-  // have pinned a message-only filter, which silently drops every inline-button
-  // tap → the `/list` picker (select + "Next »") and Approve/Deny/Stop buttons
-  // appear dead. Best-effort, fire-and-forget — only runs when we know the
-  // public URL + secret. Mirrors the setMyCommands self-registration above.
   if (config.telegram.webhookSecret) {
     const base = (process.env.REMO_PUBLIC_URL || "https://app.remo-code.com").replace(/\/+$/, "");
     const webhookUrl = `${base}/api/telegram/webhook/${config.telegram.webhookSecret}`;
@@ -352,25 +275,29 @@ export function startTelegramBridge(): void {
       console.warn(`[telegram-bridge] setWebhook failed: ${err?.message ?? err}`);
     });
   }
-  console.log("[telegram-bridge] outbound bridge started");
+  console.log("[telegram-bridge] transcript-tail outbound bridge started");
 }
 
-/** Test-only — stop the bridge and clear queues. */
+/** Test-only — stop the bridge and clear queues + subscriptions. */
 export function _stopTelegramBridgeForTests(): void {
-  if (unsubscribe) {
-    unsubscribe();
-    unsubscribe = null;
+  for (const unsub of sessionUnsubs.values()) {
+    try {
+      unsub();
+    } catch {
+      /* ignore */
+    }
   }
-  if (unsubscribePermission) {
-    unsubscribePermission();
-    unsubscribePermission = null;
-  }
-  if (unsubscribeActivity) {
-    unsubscribeActivity();
-    unsubscribeActivity = null;
-  }
+  sessionUnsubs.clear();
   for (const st of workingByKey.values()) stopTyping(st);
   workingByKey.clear();
   started = false;
   chatQueues.clear();
 }
+
+/** Test-only — force the started flag (so ensureSessionSubscribed runs). */
+export function _setStartedForTests(v: boolean): void {
+  started = v;
+}
+
+/** Test-only — the bridge's transcript consumer (for direct unit feeding). */
+export const _bridgeConsumerForTests = bridgeConsumer;

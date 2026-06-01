@@ -109,6 +109,47 @@ export async function setSessionPtyIdentity(
   `
 }
 
+/**
+ * Phase 20 — resolve everything a `TranscriptSource.open(ctx)` needs for a
+ * session, by sessionId alone (server-side; the bridge operates per-session, not
+ * per-user). Returns the cli_kind, project_dir, and the PERSISTED transcript
+ * identity captured at PTY spawn (transcript_path + codex rollout id). The
+ * adapter degrades to scrape-mode when these are absent (never a newest-file
+ * guess). Null when no live (non-deleted) session row matches.
+ *
+ * `codex_rollout_id` is read from `pty_backend_id` for codex sessions: the
+ * Phase-16 spawn-time capture stores the backend identity there, and for codex
+ * the rollout `session_meta` id IS that backend identity. (When a future Phase-16
+ * revision adds a dedicated column this helper is the single place to update.)
+ */
+export async function getTranscriptOpenContext(
+  sessionId: string,
+): Promise<{
+  sessionId: string
+  projectDir: string
+  cliKind: 'claude' | 'codex'
+  transcriptPath: string | null
+  codexRolloutId: string | null
+} | null> {
+  const rows = await sql<
+    { project_dir: string | null; cli_kind: string | null; transcript_path: string | null; pty_backend_id: string | null }[]
+  >`
+    SELECT project_dir, cli_kind, transcript_path, pty_backend_id
+      FROM sessions
+     WHERE id = ${sessionId} AND deleted_at IS NULL
+     LIMIT 1
+  `
+  if (!rows[0]) return null
+  const cliKind = (rows[0].cli_kind as 'claude' | 'codex') ?? 'claude'
+  return {
+    sessionId,
+    projectDir: rows[0].project_dir ?? '',
+    cliKind,
+    transcriptPath: rows[0].transcript_path ?? null,
+    codexRolloutId: cliKind === 'codex' ? (rows[0].pty_backend_id ?? null) : null,
+  }
+}
+
 /** Read the persisted PTY backend identity (resume re-binds it — H10). */
 export async function getSessionPtyIdentity(
   sessionId: string,

@@ -33,6 +33,11 @@ mock.module("../src/db/dal.ts", () => ({
     inserted.push({ sessionId, role, content });
     return { id: "m-1", created_at: "2026-05-28T00:00:00Z" };
   },
+  // Phase 20: dispatch.ts → bridge.ts → transcript/manager.ts statically import
+  // these. The bridge is feature-gated off (no token set in this test) so
+  // ensureSessionSubscribed no-ops, but the imports must still resolve.
+  getTranscriptOpenContext: async () => null,
+  getUsersWithTelegramDefaultSession: async () => [],
 }));
 
 // gates.ts: dailyCostCapGate → getCostCapStatus → sql (cap) + getTodayTokenCostUsd.
