@@ -45,8 +45,48 @@ export const TermAttach = z.object({
   session_id: z.string(),
 })
 
-export const TermFrame = z.discriminatedUnion('type', [TermData, TermInput, TermResize, TermAttach])
+// Phase 16 (R-PTY-08): reattach after a reconnect — the host replays the
+// session's buffered scrollback, then resumes live `term.data`. `scrollback` is
+// an optional opaque base64 blob the HOST may carry on the reply; clients send
+// it bare (no payload) to REQUEST replay.
+export const TermReattach = z.object({
+  type: z.literal('term.reattach'),
+  session_id: z.string(),
+  scrollback: z.string().optional(), // base64; host→client replay only
+})
+
+export const TermFrame = z.discriminatedUnion('type', [
+  TermData,
+  TermInput,
+  TermResize,
+  TermAttach,
+  TermReattach,
+])
 export type TermFrameT = z.infer<typeof TermFrame>
+
+/**
+ * Per-socket frame-DIRECTION allowlist (Phase 16, NH-2 / R-PTY-33).
+ *
+ * `term.input` is a client→PTY WRITE — accepted ONLY on /ws/client, NEVER on
+ * /ws/agent. /ws/agent terminal frames are OUTPUT-ONLY (`term.data`). This is the
+ * mechanism that stops an inventory-valid supervisor socket from injecting input
+ * into a human PTY (NH-2). The relay consults these sets BEFORE forwarding.
+ */
+export const CLIENT_TO_HUB_TERM_TYPES = new Set<TermFrameT['type']>([
+  'term.input',
+  'term.resize',
+  'term.attach',
+  'term.reattach',
+])
+export const AGENT_TO_HUB_TERM_TYPES = new Set<TermFrameT['type']>([
+  'term.data',
+])
+export function isClientToHubTermType(t: string): boolean {
+  return CLIENT_TO_HUB_TERM_TYPES.has(t as TermFrameT['type'])
+}
+export function isAgentToHubTermType(t: string): boolean {
+  return AGENT_TO_HUB_TERM_TYPES.has(t as TermFrameT['type'])
+}
 
 /** Cheap discriminator: does a parsed JSON object look like a term.* frame?
  *  Used by the WS handlers to short-circuit BEFORE the structured-protocol
