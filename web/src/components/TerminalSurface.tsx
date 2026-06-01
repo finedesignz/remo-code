@@ -1,12 +1,21 @@
 /**
- * TerminalSurface — Phase-15 themed xterm.js panel for a raw-terminal (PTY)
- * session. Seed of the single human surface that replaces ChatSurface in
- * Phase 17 (RIP-AND-REPLACE). Spike scope: render PTY output, send keystrokes
- * + resize over the raw-terminal WS channel (term.* frames).
+ * TerminalSurface — themed xterm.js panel for a raw-terminal (PTY) session.
+ * Seed of the single human surface that replaces ChatSurface in Phase 17
+ * (RIP-AND-REPLACE).
+ *
+ * Phase 16 (R-PTY-09) hardening — mobile-ready:
+ *   - RECONNECT replays scrollback: on (re)attach the host sends term.reattach
+ *     {scrollback}; we clear the buffer then write it before live term.data.
+ *   - RESIZE: FitAddon-computed cols/rows propagate to the PTY on container
+ *     resize (ResizeObserver), orientation change, AND mobile keyboard-viewport
+ *     change (visualViewport).
+ *   - SCROLLBACK works on touch (mobile) and desktop (xterm scrollback default).
+ *   - SESSION SWITCH clears the prior buffer BEFORE replay so no cross-session
+ *     bleed (T-16-10).
  *
  * Channel isolation: this component speaks ONLY term.data/term.input/
- * term.resize/term.attach over the shared /ws/client connection — it never
- * touches the structured chat message path.
+ * term.resize/term.attach/term.reattach over the shared /ws/client connection —
+ * it never touches the structured chat message path.
  *
  * Theme: background/foreground derived from the app's CSS custom properties
  * (--bg-primary / --text-primary). Accent = BLUE (the forbidden purple-blue
@@ -73,38 +82,64 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     termRef.current = term
     fitRef.current = fit
 
+    // SESSION SWITCH / mount: start from a clean buffer so a prior session's
+    // bytes never bleed into this one (T-16-10). Scrollback replay (below)
+    // re-clears before writing the replayed buffer.
+    term.clear()
+
     // Keystrokes → term.input (base64 raw bytes).
     const dataDisp = term.onData((d) => {
       send({ type: 'term.input', session_id: sessionId, bytes: toB64(d) })
     })
 
-    // Request (re)attach so the supervisor starts/streams the PTY.
+    // Request (re)attach + ask for scrollback replay so a reconnect restores the
+    // prior screen state before live output resumes.
     send({ type: 'term.attach', session_id: sessionId })
+    send({ type: 'term.reattach', session_id: sessionId })
 
-    // Inbound term.data → write to the terminal.
+    // Inbound term.data (live) + term.reattach{scrollback} (replay).
     const unsub = subscribe((msg) => {
       if (!msg || msg.session_id !== sessionId) return
-      if (msg.type === 'term.data' && typeof msg.bytes === 'string') {
+      if (msg.type === 'term.reattach' && typeof msg.scrollback === 'string') {
+        // RECONNECT replay: clear then write the buffered scrollback, then live
+        // term.data resumes appending.
+        term.clear()
+        term.write(fromB64(msg.scrollback))
+      } else if (msg.type === 'term.data' && typeof msg.bytes === 'string') {
         term.write(fromB64(msg.bytes))
       }
     })
 
-    // Resize → fit + term.resize.
+    // Resize → fit + term.resize. Debounced via rAF so a burst of viewport
+    // events (mobile keyboard open) collapses to one resize.
+    let rafId = 0
     const sendResize = () => {
-      try { fit.fit() } catch {}
-      send({ type: 'term.resize', session_id: sessionId, cols: term.cols, rows: term.rows })
+      if (rafId) cancelAnimationFrame(rafId)
+      rafId = requestAnimationFrame(() => {
+        rafId = 0
+        try { fit.fit() } catch {}
+        send({ type: 'term.resize', session_id: sessionId, cols: term.cols, rows: term.rows })
+      })
     }
     const ro = new ResizeObserver(() => sendResize())
     if (hostRef.current) ro.observe(hostRef.current)
     window.addEventListener('resize', sendResize)
+    window.addEventListener('orientationchange', sendResize)
+    // Mobile keyboard-viewport changes (on-screen keyboard open/close) only
+    // surface via visualViewport, not window.resize.
+    const vv = (window as any).visualViewport as VisualViewport | undefined
+    vv?.addEventListener('resize', sendResize)
     // Initial resize so the PTY matches the rendered grid.
     sendResize()
 
     return () => {
+      if (rafId) cancelAnimationFrame(rafId)
       try { dataDisp.dispose() } catch {}
       try { unsub() } catch {}
       try { ro.disconnect() } catch {}
       window.removeEventListener('resize', sendResize)
+      window.removeEventListener('orientationchange', sendResize)
+      vv?.removeEventListener('resize', sendResize)
       try { term.dispose() } catch {}
       termRef.current = null
       fitRef.current = null
