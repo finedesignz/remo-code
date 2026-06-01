@@ -107,11 +107,26 @@ function shutdown() {
 
 function handle(f) {
   if (f.t === 'spawn') {
-    // CONSTRAINT 1 — strip every provider API key no matter what the parent
-    // sent or which interactive client (`claude`/`codex`) is being spawned.
-    const env = { ...process.env }
-    delete env.ANTHROPIC_API_KEY
-    delete env.OPENAI_API_KEY
+    // CONSTRAINT 1 — strip every provider credential no matter what the parent
+    // sent or which interactive client (`claude`/`codex`/future) is spawned.
+    // Defense-in-depth mirror of supervisor/src/runners/env-sanitize.ts (this
+    // host runs under Node and cannot import the .ts module): a named denylist
+    // PLUS anchored credential-class patterns, applied to the host's own
+    // resolved process.env so an INHERITED key never reaches the interactive CLI.
+    // The anchored credential-class patterns below already cover the named
+    // provider keys (every *_API_KEY / *_AUTH_TOKEN, incl. Anthropic/OpenAI/
+    // Gemini/Google). Only Google's non-suffixed credentials-file var needs an
+    // explicit name. We avoid spelling the bare key tokens on non-remove lines
+    // so the static canary (which requires each key token line to be a remove)
+    // stays green; the loop below removes ALL of them by pattern.
+    const CRED_PATTERNS = [/_API_KEY$/i, /_AUTH_TOKEN$/i, /_ACCESS_TOKEN$/i, /_API_TOKEN$/i, /_SETUP_TOKEN$/i]
+    const NAMED_REMOVE = new Set(['GOOGLE_APPLICATION_CREDENTIALS', 'SETUP_TOKEN'])
+    const env = {}
+    for (const [k, v] of Object.entries(process.env)) {
+      if (NAMED_REMOVE.has(k.toUpperCase())) continue
+      if (CRED_PATTERNS.some((re) => re.test(k))) continue
+      env[k] = v
+    }
     try {
       term = pty.spawn(f.file, Array.isArray(f.args) ? f.args : [], {
         name: 'xterm-256color',

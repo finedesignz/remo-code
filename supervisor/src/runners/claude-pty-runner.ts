@@ -31,6 +31,7 @@
 import { spawn as nodeChildSpawn, type ChildProcess } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { sanitizeSpawnEnv } from './env-sanitize'
 
 /** Resolved path to the Node PTY host script, relative to THIS module. */
 const HOST_PATH = join(dirname(fileURLToPath(import.meta.url)), 'pty-host.mjs')
@@ -88,11 +89,11 @@ export interface PtyRunnerOpts {
 /** Build the env handed to the PTY host. Exported pure helper so the env-strip
  *  (constraint 1) is unit-testable without spawning. */
 export function buildPtyHostEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env = { ...base }
-  // CONSTRAINT 1 — never let an API key reach the client. Defense in depth:
-  // pty-host.mjs deletes it again before the real `claude` spawn.
-  delete (env as any).ANTHROPIC_API_KEY
-  return env
+  // CONSTRAINT 1 — never let ANY provider API key / auth token reach the client.
+  // The shared sanitizer scrubs the full provider-key denylist + credential-class
+  // patterns from the RESOLVED env (incl. inherited process.env vars). Defense in
+  // depth: pty-host.mjs deletes ANTHROPIC_API_KEY again before the real `claude`.
+  return sanitizeSpawnEnv(base)
 }
 
 /**

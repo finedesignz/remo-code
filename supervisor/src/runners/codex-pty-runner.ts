@@ -36,6 +36,7 @@
 import { spawn as nodeChildSpawn, type ChildProcess } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { sanitizeSpawnEnv } from './env-sanitize'
 
 /** Resolved path to the Node PTY host script, relative to THIS module. */
 const HOST_PATH = join(dirname(fileURLToPath(import.meta.url)), 'pty-host.mjs')
@@ -96,10 +97,11 @@ export interface PtyRunnerOpts {
  *  OPENAI_API_KEY (Codex's key) and ANTHROPIC_API_KEY (defense in depth so a
  *  mixed env can never leak a key onto the Codex spawn path). */
 export function buildCodexPtyHostEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env = { ...base }
-  delete (env as any).OPENAI_API_KEY
-  delete (env as any).ANTHROPIC_API_KEY
-  return env
+  // The shared sanitizer scrubs the full provider-key denylist (incl.
+  // OPENAI_API_KEY + ANTHROPIC_API_KEY) + credential-class patterns from the
+  // RESOLVED env (incl. inherited process.env vars). Codex auth = `codex login`
+  // (ChatGPT subscription sign-in), never an API key.
+  return sanitizeSpawnEnv(base)
 }
 
 /**
