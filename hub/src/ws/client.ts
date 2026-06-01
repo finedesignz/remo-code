@@ -7,6 +7,7 @@ import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
 import { insertMessage, listSessions, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
+import { acquire } from '../telegram/turn-lock.ts'
 import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
@@ -47,6 +48,9 @@ interface ClientWsData {
   // config.titanium.licenseCacheTtlSeconds).
   licenseStatus?: string | null
   licenseCheckedAt?: number | null
+  // Phase 20: stable per-connection writer id for the PTY turn lock. A web
+  // xterm panel is one writer; Telegram injection is the other ('telegram').
+  writerId?: string
 }
 
 export function createClientWsData(): ClientWsData {
@@ -62,6 +66,7 @@ export function createClientWsData(): ClientWsData {
     authMethod: null,
     licenseStatus: null,
     licenseCheckedAt: null,
+    writerId: `client:${crypto.randomUUID()}`,
   }
 }
 
@@ -175,9 +180,24 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       }
     }
     const channel = getChannel(frame.session_id)
-    if (channel) {
-      try { channel.ws.send(JSON.stringify(frame)) } catch {}
+    if (!channel) return
+    // PTY WRITE-ARBITRATION (Phase 20 / R-TG-10). A term.input from the xterm
+    // panel is a HUMAN TURN — it must hold the per-session turn lock before its
+    // bytes reach PTY stdin so it never interleaves with a Telegram-injected
+    // turn. The writerId is this connection (idempotent re-acquire while the same
+    // writer streams keystrokes within its turn). resize/attach/reattach are
+    // control frames, not turns — they bypass the lock. The lock releases on the
+    // observed transcript turn_complete (telegram/bridge → onTurnComplete).
+    if (frame.type === 'term.input') {
+      const writerId = data.writerId ?? 'client:unknown'
+      const granted = await acquire(frame.session_id, writerId)
+      if (!granted) {
+        // Queued waiter was dropped (overflow/reset) — drop the frame rather than
+        // inject out-of-turn bytes.
+        return
+      }
     }
+    try { channel.ws.send(JSON.stringify(frame)) } catch {}
     return
   }
 

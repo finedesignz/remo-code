@@ -45,6 +45,7 @@ import {
 import { BOT_COMMANDS } from "./commands.ts";
 import { rememberStoppable, forgetStoppable, stopCallbackData } from "./stop.ts";
 import { startPermissionSurfacing, stopPermissionSurfacing } from "./permission-surfacing.ts";
+import { onTurnComplete } from "./turn-lock.ts";
 import type { InlineKeyboard } from "./client.ts";
 
 let started = false;
@@ -217,9 +218,13 @@ function bridgeConsumer(entry: TranscriptEntry): void {
     case "tool_use":
       void onToolUse(entry.sessionId, entry.toolName, entry.detail);
       break;
+    case "turn_complete":
+      // Plan 04: the same transcript signal releases the PTY turn lock + dequeues
+      // the next writer (one observation, two consumers).
+      onTurnComplete(entry.sessionId);
+      break;
     // permission_request / user_question — handled by the permission surfacing
     // consumer (plan 03), NOT here.
-    // turn_complete — consumed by the turn lock (plan 04).
     default:
       break;
   }
