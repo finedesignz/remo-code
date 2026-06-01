@@ -1,11 +1,11 @@
 {
   "_comment": "Snapshot of expected hub test counts. Updated when intentionally adding/removing tests. CI fails if actual drifts beyond tolerance.",
-  "captured_at": "2026-05-30",
-  "captured_from": "per-file-isolated `bun run check-baseline` (each hub/test file in its own process — order-independent). P2 (usage-cost-ledger) adds 3 hub test files (usage-pricing, usage-event-handler, usage-cost-api, +14 tests). pass/total here are informational; the enforced gate is pass_min/skip_max/fail_max. fail_max stays 0.",
-  "pass": 785,
-  "skip": 129,
+  "captured_at": "2026-06-01",
+  "captured_from": "per-file-isolated `bun run check-baseline` (each hub/test file in its own process — order-independent). Phase 20 (telegram-transcript-tail) adds 7 hub test files: transcript-backend-agnostic, transcript-adapter-claude, transcript-adapter-codex, telegram-output-from-transcript, telegram-permission-failclosed, telegram-permission-disambiguation, telegram-keystroke-inject, pty-turn-lock, telegram-human-only-guard (replacing the obsolete event-bus telegram-bridge.test.ts). pass/total here are informational; the enforced gate is pass_min/skip_max/fail_max. fail_max stays 0.",
+  "pass": 1263,
+  "skip": 130,
   "fail": 0,
-  "total": 914,
+  "total": 1393,
   "tolerance": {
     "_comment": "Allow modest growth without churn; any fail > 0 always fails CI.",
     "pass_min": 700,
