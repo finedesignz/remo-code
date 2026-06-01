@@ -3,7 +3,7 @@ phase: 16
 slug: hardened-pty-relay-and-mobile-terminal
 status: final
 nyquist_compliant: true
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-05-31
 hosting_decision_gate: 16-01-00  # Task-0 Rust-ConPTY spike: PASS → Option C, FAIL → Option A fallback
 ---
@@ -48,16 +48,17 @@ hosting_decision_gate: 16-01-00  # Task-0 Rust-ConPTY spike: PASS → Option C, 
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 16-01-00 | 01 | 1 | R-PTY-06 | T-16-00 | Rust spike renders genuine interactive `claude` TUI; trust prompt captured; byte round-trip; API key removed; no programmatic flags → PASS Option C / FAIL Option A | spike (manual-attended) | `cargo run --bin pty_spike` (Tauri crate) + verdict in 16-SPIKE-FINDINGS-rust-conpty.md | ❌ W0 | ⬜ pending (gate) |
-| 16-01-01 | 01 | 1 | R-PTY-06 | T-16-01 | chosen-branch host argv has no `-p`/`--print`/stream-json (globs node-pty-runner A + pty_host.rs/bridge C) | canary | `bun test supervisor/test/no-api-key-no-streamjson-pty.test.ts` | ✅ (Ph15) | ⬜ pending |
-| 16-01-02 | 01 | 1 | R-PTY-06 | T-16-02/03 | `ANTHROPIC_API_KEY` stripped (delete on A / remove on C); no credentials/oauth import | unit/static | `bun test supervisor/test/pty-runner-env.test.ts` | ✅ (Ph15) | ⬜ pending |
-| 16-01-03 | 01 | 1 | R-PTY-07 | T-16-04 | drop+reattach replays scrollback; PTY survives; no leak | integration | `bun test supervisor/test/pty-reattach-persistence.test.ts` | ❌ W0 | ⬜ pending |
-| 16-02-01 | 02 | 2 | R-PTY-08 | T-16-07 | term path has zero RunnerEvent/agent-protocol coupling | static | `bun test hub/test/term-channel-isolation.test.ts` | ❌ W0 | ⬜ pending |
-| 16-02-02 | 02 | 2 | R-PTY-08 | T-16-05 | term frames require auth+subscription; byte-faithful relay | integration | `bun test hub/test/term-relay-auth.test.ts` | ❌ W0 | ⬜ pending |
-| 16-02-03 | 02 | 2 | R-PTY-11 | — | runner_type idempotent DDL; Telegram-default can't switch to PTY | unit | `bun test hub/test/pty-runner-type.test.ts` | ❌ W0 | ⬜ pending |
-| 16-02-04 | 02 | 2 | R-PTY-10 | T-16-06/08 | automation source rejected for PTY session; cost cap intact | unit | `bun test hub/test/human-only-guard.test.ts` | ❌ W0 | ⬜ pending |
-| 16-03-01 | 03 | 3 | R-PTY-09 | T-16-10 | reattach replays; session switch clears buffer | unit | `bun test web/test/terminal-surface.test.tsx` | ❌ W0 | ⬜ pending |
-| 16-03-02 | 03 | 3 | R-PTY-09 | T-16-09 | themed xterm panel, no indigo | unit | `bun test web/test/no-indigo.test.ts` | ✅ | ⬜ pending |
+| 16-01-00 | 01 | 1 | R-PTY-06 | T-16-00 | Rust spike renders genuine interactive `claude` TUI; trust prompt captured; byte round-trip; API key removed; no programmatic flags → PASS Option C / FAIL Option A | spike (manual-attended) | `cargo run --bin pty_spike` (Tauri crate) + verdict in 16-SPIKE-FINDINGS-rust-conpty.md | ✅ | ✅ green — **PASS → Option C** (1333B TUI, round-trip OK) |
+| 16-01-01 | 01 | 1 | R-PTY-06 | T-16-01 | chosen-branch host argv has no `-p`/`--print`/stream-json (globs node-pty-runner A + pty_host.rs/bridge C) | canary | `bun test supervisor/test/no-api-key-no-streamjson-pty.test.ts` | ✅ | ✅ green (branch-agnostic; fails on flag injection) |
+| 16-01-02 | 01 | 1 | R-PTY-06 | T-16-02/03 | `ANTHROPIC_API_KEY` stripped (delete on A / remove on C); no credentials/oauth import | unit/static | `bun test supervisor/test/pty-runner-env.test.ts` | ✅ | ✅ green (A buildPtyHostEnv + C env_remove static) |
+| 16-01-03 | 01 | 1 | R-PTY-07 | T-16-04 | drop+reattach replays scrollback; PTY survives; no leak | integration | `bun test supervisor/test/pty-reattach-persistence.test.ts` | ✅ | ✅ green (detach-vs-kill, idle-reap, ring replay) |
+| 16-02-01 | 02 | 2 | R-PTY-08 | T-16-07 | term path has zero RunnerEvent/agent-protocol coupling | static | `bun test hub/test/term-channel-isolation.test.ts` | ✅ | ✅ green |
+| 16-02-02 | 02 | 2 | R-PTY-08 | T-16-05/H2/H3/NH-1/2/3 | term frames require auth+subscription+ownership; byte-faithful; direction allowlist; CSWSH; inventory+DB cross-val | integration | `bun test hub/test/term-relay-auth.test.ts term-agent-inventory-auth.test.ts term-frame-direction-allowlist.test.ts term-ws-origin-guard.test.ts` | ✅ | ✅ green (named cross-user/cross-host/spoof/direction/origin) |
+| 16-02-03 | 02 | 2 | R-PTY-11/31 | T-16-14/15 | runner_type idempotent DDL; Telegram-default can't switch to PTY; resume reads persisted mode (no dual-spawn/mis-route) | unit | `bun test hub/test/pty-runner-type.test.ts pty-runner-resume-identity.test.ts` | ✅ | ✅ green |
+| 16-02-04 | 02 | 2 | R-PTY-10/28 | T-16-06/08/10/11 | automation rejected for PTY on dispatch AND relay; server-inferred actor; cost cap intact | unit | `bun test hub/test/human-only-guard.test.ts term-relay-human-guard.test.ts` | ✅ | ✅ green |
+| 16-02-05 | 02 | 2 | R-PTY-32 | T-16-16/17 | test-bound verdict artifact passes the real cutover gate; forged/provenance-stripped rejected | unit | `bun test hub/test/phase16-verdict-artifact.test.ts` | ✅ | ✅ green |
+| 16-03-01 | 03 | 3 | R-PTY-09 | T-16-10 | reattach replays; session switch clears buffer; input/resize framing | unit | `bun test web/test/terminal-surface.test.tsx` | ✅ | ✅ green (via openTermWs + fake WS) |
+| 16-03-02 | 03 | 3 | R-PTY-09 | T-16-09 | themed xterm panel, no indigo | unit | `bun test web/test/no-indigo.test.ts` | ✅ | ✅ green |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -69,13 +70,13 @@ hosting_decision_gate: 16-01-00  # Task-0 Rust-ConPTY spike: PASS → Option C, 
 
 ## Wave 0 Requirements
 
-- [ ] `supervisor/tauri/src-tauri/src/pty_spike.rs` + `16-SPIKE-FINDINGS-rust-conpty.md` — Rust-ConPTY decision-gate spike (genuine interactive TUI + trust-prompt capture + byte round-trip → PASS/FAIL verdict)
-- [ ] `supervisor/test/pty-reattach-persistence.test.ts` — disconnect→reattach scrollback stub
-- [ ] `hub/test/term-channel-isolation.test.ts` — RunnerEvent-coupling static check stub
-- [ ] `hub/test/term-relay-auth.test.ts` — auth/subscription gate + byte-faithful relay stub
-- [ ] `hub/test/pty-runner-type.test.ts` — runner_type enum + Telegram-default guard stub
-- [ ] `hub/test/human-only-guard.test.ts` — automation-source rejection + cost-cap-intact stub
-- [ ] `web/test/terminal-surface.test.tsx` — reattach/session-switch buffer-clear stub
+- [x] `supervisor/tauri/src-tauri/src/pty_spike.rs` + `16-SPIKE-FINDINGS-rust-conpty.md` — Rust-ConPTY decision-gate spike (genuine interactive TUI + byte round-trip → **PASS → Option C**)
+- [x] `supervisor/test/pty-reattach-persistence.test.ts` — disconnect→reattach scrollback + detach-vs-kill (7 pass)
+- [x] `hub/test/term-channel-isolation.test.ts` — RunnerEvent-coupling static check (4 pass)
+- [x] `hub/test/term-relay-auth.test.ts` — auth/subscription/ownership + byte-faithful relay + direction (named H2 cases)
+- [x] `hub/test/pty-runner-type.test.ts` — runner_type enum + Telegram-default guard (7 pass)
+- [x] `hub/test/human-only-guard.test.ts` — automation-source rejection + cost-cap-intact (8 pass)
+- [x] `web/test/terminal-surface.test.tsx` — reattach/session-switch + input/resize framing (7 pass)
 
 ---
 
