@@ -10,6 +10,8 @@ import { VERSION } from './version'
 import { isBrokenPipe, installStreamErrorGuards, makeSafeTee } from './safe-logging'
 import { ClaudePtyRunner } from './runners/claude-pty-runner'
 import { CodexPtyRunner } from './runners/codex-pty-runner'
+// Phase-19 gated human-backend selection lives in runner-factory (no side-effects).
+export { runnerForHumanBackend, selectHumanPtyRunner } from './runners/runner-factory'
 
 /**
  * Backend selector for the interactive raw-terminal surface (Phase-17,
