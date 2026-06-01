@@ -1,0 +1,20 @@
+# Phase-16 Task-0 Rust-ConPTY derisk spike — STANDALONE throwaway crate.
+#
+# Deliberately separate from the parent Tauri crate so `cargo run` does NOT
+# invoke tauri-build (which requires a staged sidecar binary). The spike only
+# needs a ConPTY + a child process; it has zero Tauri coupling. The source lives
+# one level up at ../src/pty_spike.rs (the planned path) and is referenced here.
+[package]
+name = "pty_spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "pty_spike"
+path = "../src/pty_spike.rs"
+
+[dependencies]
+portable-pty = "0.8"
+
+[workspace]
