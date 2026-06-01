@@ -1,11 +1,12 @@
 import type { ServerWebSocket } from 'bun'
 import { ClientInbound, SUBSCRIBE_MAX } from './protocol'
-import { TermFrame, isTermFrameType } from './term-protocol'
+import { TermFrame, isTermFrameType, isClientToHubTermType } from './term-protocol'
 import { verifyJwt } from '../auth/jwt.ts'
 import { verifyAuthSessionToken } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
-import { insertMessage, listSessions, getSession, getUserLicenseFields } from '../db/dal'
+import { insertMessage, listSessions, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
+import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
 import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
@@ -124,23 +125,54 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     return
   }
 
-  // --- Raw-terminal channel (Phase 15, R-PTY-02/03) ---
-  // term.input/resize/attach from an authorized client are forwarded
+  // --- Raw-terminal channel (Phase 15 R-PTY-02/03; Phase 16 hardening) ---
+  // term.input/resize/attach/reattach from an authorized client are forwarded
   // byte-faithfully to the session's agent channel and MUST NOT enter the
-  // structured client-protocol path. Short-circuit BEFORE ClientInbound
-  // .safeParse. Ownership is verified (getSession scoped by userId); term.input
-  // is a mutation, gated like send_message. No `messages` row is created.
+  // structured client-protocol path. Short-circuit BEFORE ClientInbound.safeParse.
+  // No `messages` row is created. Phase-16 guards (composed here):
+  //   - DIRECTION ALLOWLIST (NH-2): /ws/client accepts ONLY client→PTY write
+  //     frames; a server→client output frame (term.data) injected by a client is
+  //     rejected.
+  //   - OWNERSHIP (H2): server-side subscription set + DB-backed canWriteTerminal
+  //     — a forged/foreign session_id is rejected (no cross-user/cross-session
+  //     hijack).
+  //   - HUMAN-ONLY (H1): the actor is SERVER-INFERRED as `human` from this
+  //     authenticated cookie connection (NEVER a payload field); the shared
+  //     humanOnlyPtyGate decision is applied to term.input on a pty-interactive
+  //     session. (A human connection always passes; this is the spoof-proof seam
+  //     that also covers the relay path, not just dispatch/pipeline.ts.)
   if (isTermFrameType(parsed)) {
     if (!data.authenticated || !data.userId) return
     const tf = TermFrame.safeParse(parsed)
     if (!tf.success) return
     const frame = tf.data
+    // DIRECTION ALLOWLIST (NH-2/R-PTY-33): only client→hub write frames here.
+    if (!isClientToHubTermType(frame.type)) return
+    // OWNERSHIP (H2/R-PTY-29): the session must be in THIS connection's
+    // subscribed set AND owned by this user per the DB. Both checks — the
+    // subscription set is the live routing scope; canWriteTerminal is the DB
+    // ground-truth that defeats a forged session_id even if mis-subscribed.
+    const subscribed = data.clientEntry?.subscriptions?.has(frame.session_id) ?? false
+    if (!subscribed) return
+    if (!(await canWriteTerminal(data.userId, frame.session_id))) return
     const session = await getSession(frame.session_id, data.userId)
-    if (!session) return // not owned by this user → never relay across the boundary
+    if (!session) return // belt-and-suspenders ownership check
     // License gate: term.input drives a live session (a mutation).
     if (frame.type === 'term.input' && !(await isLicenseActive(data))) {
       try { ws.send(JSON.stringify({ type: 'send_refused', reason: 'license_inactive' })) } catch {}
       return
+    }
+    // HUMAN-ONLY guard on the relay (H1/R-PTY-28). Actor is SERVER-INFERRED as
+    // 'human' from this authenticated /ws/client cookie connection — never read
+    // from the frame. Applied to term.input (the write that drives the
+    // interactive entrypoint) on a pty-interactive session.
+    if (frame.type === 'term.input') {
+      const runnerType = await getSessionRunnerType(frame.session_id, data.userId)
+      if (humanOnlyRejectsActor('human', runnerType)) {
+        // Unreachable for a human actor by construction — but keep the SAME
+        // chokepoint so there is no second, ungated write route into a PTY.
+        return
+      }
     }
     const channel = getChannel(frame.session_id)
     if (channel) {
