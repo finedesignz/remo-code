@@ -355,4 +355,9 @@ export type HubToClient =
           used_usd: number; limit_usd: number; resets_at: string; claimed: boolean
         } | null
       }; updated_at: string }
+  // Phase 18 (R-PTY-18): programmatic-credit leak alert. Broadcast to the user's
+  // clients when credit drains without automation in flight, or above a
+  // configured rate. Visible, non-blocking — never a silent drain.
+  | { type: 'programmatic_leak_alert'; reason: 'drain_without_automation' | 'drain_rate_exceeded';
+      delta_usd: number; used_usd: number; limit_usd: number; detected_at: string }
   | { type: 'ping' }

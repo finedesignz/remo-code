@@ -21,6 +21,8 @@ import { sql } from '../db/postgres.ts'
 import { getTodayTokenCostUsd } from '../db/token-usage-dal.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
 import { reserveSessionSlot } from '../sessions/budget.ts'
+import { getUsage } from '../usage/store.ts'
+import { isOverProgrammaticHalt } from '../usage/programmatic-leak.ts'
 import type { DispatchGate, DispatchRequest } from './pipeline.ts'
 
 /**
@@ -74,6 +76,30 @@ async function userTimezone(userId: string): Promise<string> {
 }
 
 /**
+ * Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt status.
+ *
+ * Reads the user's `programmatic_halt_usd` bound (NULL = OFF, the default) and
+ * the latest polled programmatic-credit snapshot from the in-memory usage store,
+ * delegating the comparison to the single `isOverProgrammaticHalt` predicate.
+ *
+ * Returns `{ halt, bound, used_usd }`. `halt` is true ONLY when the bound is set
+ * (>0) AND the claimed credit used_usd has crossed it. Absent config, absent /
+ * unclaimed credit, or a store miss => `halt:false` (fail-open — never a surprise
+ * stop). This is the hard-halt's TWIN to `getCostCapStatus`.
+ */
+export async function getProgrammaticHaltStatus(
+  userId: string,
+): Promise<{ halt: boolean; bound: number | null; used_usd: number | null }> {
+  const rows = await sql<{ bound: string | null }[]>`
+    SELECT programmatic_halt_usd::text AS bound FROM users WHERE id = ${userId} LIMIT 1
+  `
+  const bound = rows[0]?.bound == null ? null : Number(rows[0].bound)
+  const credit = getUsage(userId)?.usage.programmatic_credit ?? null
+  const halt = isOverProgrammaticHalt(bound, credit)
+  return { halt, bound: Number.isFinite(bound as number) ? (bound as number) : null, used_usd: credit?.used_usd ?? null }
+}
+
+/**
  * Claude usage threshold gate. Blocks with `quota_threshold_reached:<reason>`
  * when the user crossed their configured 5h / 7d utilization threshold.
  */
@@ -101,6 +127,17 @@ export const dailyCostCapGate: DispatchGate = {
       // Surface accumulated vs cap so dispatch can tell the user the daily cost
       // cap was reached (e.g. "over_daily_cost_cap:$10.42>=$10.00").
       const reason = `over_daily_cost_cap:$${status.spent.toFixed(2)}>=$${status.cap.toFixed(2)}`
+      return { ok: false, reason }
+    }
+    // Phase 18 (R-PTY-18): the opt-in programmatic-credit hard-halt rides the
+    // SAME chokepoint as an additional predicate (no parallel gate). Default OFF
+    // (null bound) => never fires. When the user-configured bound is crossed,
+    // programmatic/automation dispatch is denied with a typed reason. Human
+    // interactive PTY turns never reach this gate for this reason (the
+    // human-only guard + interactive pool keep them off the programmatic path).
+    const halt = await getProgrammaticHaltStatus(req.userId)
+    if (halt.halt) {
+      const reason = `programmatic_credit_halt:$${(halt.used_usd ?? 0).toFixed(2)}>=$${(halt.bound ?? 0).toFixed(2)}`
       return { ok: false, reason }
     }
     return { ok: true }

@@ -286,6 +286,13 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_runs_chained
 ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_cost_cap_usd NUMERIC(10,4) NOT NULL DEFAULT 10.0000;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS web_push_enabled BOOLEAN NOT NULL DEFAULT true;
 
+-- Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt bound. NULL = OFF
+-- (the default — no surprise hard-stop). When set, dispatch on the programmatic/
+-- automation path is denied at dailyCostCapGate once the polled programmatic
+-- credit used_usd >= this bound. Human interactive PTY turns never hit this gate
+-- for this reason. Idempotent DDL; no backfill (schema.sql re-runs every boot).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS programmatic_halt_usd NUMERIC(10,4) NULL;
+
 -- ── Paused repos (per-(user, supervisor, repo_path)) ──────────────────────────
 -- Set when the user explicitly clicks "Disconnect" on a session whose
 -- project_dir matches a supervisor-managed repo. The supervisor MUST NOT
