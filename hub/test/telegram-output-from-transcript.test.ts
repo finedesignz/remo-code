@@ -13,6 +13,9 @@ import { describe, test, expect, beforeAll, beforeEach, afterEach, mock } from "
 
 process.env.TELEGRAM_BOT_TOKEN = "fake-bot-token-transcript";
 process.env.TELEGRAM_WEBHOOK_SECRET = "test-secret-must-be-at-least-16-chars";
+// Flag-ON: this suite exercises the transcript-tail outbound source. The
+// flag-OFF (stream-json) source is covered by telegram-outbound-source-gate.test.ts.
+process.env.REMO_PTY_INTERACTIVE = "1";
 
 const state: {
   sessionUsers: Map<string, Array<{ id: string; telegram_chat_id: number }>>;
@@ -111,11 +114,17 @@ describe("bridge output sourced from TranscriptEntry (R-TG-04)", () => {
   });
 });
 
-describe("the bridge no longer imports the event bus", () => {
-  test("bridge.ts source does not reference onAssistantMessageFinal", async () => {
+describe("the bridge supports BOTH outbound sources (flag-gated)", () => {
+  // Phase 20 originally asserted the bridge no longer imports the event bus.
+  // That regressed prod (the Coolify hub has no local CLI transcript files, so
+  // the transcript tail emits nothing). The deploy-safe design keeps the
+  // stream-json event-bus source as the flag-OFF prod default and uses the
+  // transcript tail only under REMO_PTY_INTERACTIVE=1.
+  test("bridge.ts references BOTH the event bus and the transcript manager", async () => {
     const src = await Bun.file(new URL("../src/telegram/bridge.ts", import.meta.url)).text();
-    expect(src).not.toContain("onAssistantMessageFinal");
-    expect(src).not.toMatch(/events\/assistant-events/);
+    expect(src).toContain("onAssistantMessageFinal");
+    expect(src).toMatch(/events\/assistant-events/);
+    expect(src).toMatch(/transcript\/manager/);
   });
 });
 

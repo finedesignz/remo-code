@@ -17,6 +17,16 @@ backend-agnostic transcript adapters (stream-json event bus already removed in
 Phase 17), with fail-closed permission surfacing, PTY write-arbitration, and a
 human-only guard — WITHOUT breaking the still-live stream-json/ChatSurface path.
 
+> **Deploy-safety amendment (2026-06-01):** the Phase-20 OUTBOUND re-sourcing was
+> originally unconditional, which would have silently killed Telegram outbound replies
+> on the prod Coolify hub (no local CLI transcript files there → transcript tail emits
+> nothing). The bridge is now **flag-gated on `REMO_PTY_INTERACTIVE`**: flag OFF (prod
+> default) restores the stream-json `assistant_message:final` / `session_activity` /
+> `permission_pending` event-bus consumer (host-agnostic); flag ON uses the
+> transcript-tail source documented below. Permission injection, turn-lock, and the
+> human-only guard are unchanged regardless of the flag. See `.planning/DEPLOY-SAFETY.md`
+> (verdict now SHIP-HUB-OK) and `telegram-outbound-source-gate.test.ts`.
+
 ## Critical Regression Check (#2) — CLEAN
 
 The phase did NOT break the live stream-json path or any shared subsystem.

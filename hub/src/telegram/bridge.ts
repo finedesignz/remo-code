@@ -1,34 +1,54 @@
 /**
- * Phase 20 — Telegram outbound bridge, re-sourced on the transcript-tail.
+ * Telegram OUTBOUND bridge — DUAL-SOURCE, flag-gated on `REMO_PTY_INTERACTIVE`.
  *
- * After the Phase-17 rip the stream-json assistant-final / permission event bus
- * the old bridge consumed is gone. The bridge now
- * sources every session's output from its on-disk transcript via the per-session
- * `TranscriptSource` manager (`transcript/manager.ts`) — backend-agnostic
- * (Claude projects JSONL / Codex rollout JSONL + scrape fallback), selected by
- * the session's `cli_kind`. The bridge consumes ONLY the normalized
- * `TranscriptEntry` union; it never sees a backend-specific shape and no longer
- * subscribes to the deleted assistant-final event bus.
+ * There are two distinct sources for the assistant replies / tool one-liners /
+ * permission prompts that get forwarded to Telegram. Which one is active is
+ * decided ONCE at boot by `config.ptyInteractive` (env `REMO_PTY_INTERACTIVE`):
  *
- * Strict invariants (unchanged from the event-bus era):
- *   - FINAL assistant text + collapsed tool one-liners only. Streaming deltas
- *     never exist in the transcript stream (the adapter emits assistant_text as a
- *     completed turn), so partials are never forwarded.
- *   - Feature-gated on `config.telegram.botToken`. No token ⇒ `startTelegramBridge`
- *     is a no-op.
- *   - Per-chat serialization via `Map<chatId, Promise>` to dodge Telegram's
- *     ~1 msg/sec per-chat rate limit and keep ordering.
+ *   ── flag OFF (PROD DEFAULT) — stream-json event-bus source ────────────────
+ *   The bridge subscribes to the hub's internal event bus:
+ *     - `onAssistantMessageFinal` → final assistant text  (assistant_message:final)
+ *     - `onSessionActivity`       → tool_use one-liners    (summarized streaming)
+ *     - `onPermissionPending`     → inline Approve/Deny prompts
+ *   These events are emitted from the stream-json runner finalize path in
+ *   `ws/agent.ts` and live ENTIRELY in hub memory — they do NOT touch the local
+ *   filesystem. This is the ONLY host-agnostic source and is what works in the
+ *   prod Coolify hub (where the CLI + its transcript files live on a DIFFERENT
+ *   host — the supervisor — so there are no `~/.claude/projects/...` files to
+ *   tail). This path is byte-for-byte the origin/main behavior the live user
+ *   has today.
+ *
+ *   ── flag ON (POST-CUTOVER) — transcript-tail source ───────────────────────
+ *   The bridge sources every session's output from its on-disk transcript via
+ *   the per-session `TranscriptSource` manager (`transcript/manager.ts`) —
+ *   backend-agnostic (Claude projects JSONL / Codex rollout JSONL + scrape
+ *   fallback), selected by the session's `cli_kind`. Permission surfacing
+ *   (plan 03) and turn-lock release (plan 04) attach their OWN consumers to the
+ *   same source. This is the source for the interactive-PTY world AFTER the
+ *   cutover, when the CLI runs co-located with a transcript the consumer can
+ *   read. It is NOT safe in the current split hub/supervisor prod topology,
+ *   hence the gate.
+ *
+ * Strict invariants (identical for both sources):
+ *   - FINAL assistant text + collapsed tool one-liners only. No streaming deltas.
+ *   - Feature-gated on `config.telegram.botToken`. No token ⇒ no-op boot.
+ *   - Per-chat serialization via `Map<chatId, Promise>` (Telegram ~1 msg/sec/chat).
  *   - Idempotent boot.
- *
- * Subscription lifecycle: the bridge opens a transcript source for a session
- * LAZILY when a Telegram-default user dispatches to it (`ensureSessionSubscribed`,
- * called from the inbound dispatch path). The source stays open while the bridge
- * holds it; `_stopTelegramBridgeForTests` releases all. Permission detection +
- * surfacing (plan 03) and turn-lock release (plan 04) attach their OWN consumers
- * to the same manager source — one tail, many consumers.
  */
 
 import { config } from "../config.ts";
+import {
+  onAssistantMessageFinal,
+  type AssistantMessageFinalEvent,
+} from "../events/assistant-events.ts";
+import {
+  onPermissionPending,
+  type PermissionPendingEvent,
+} from "../events/permission-events.ts";
+import {
+  onSessionActivity,
+  type SessionActivityEvent,
+} from "../events/session-activity-events.ts";
 import { getUsersWithTelegramDefaultSession } from "../db/dal.ts";
 import {
   subscribeToSessionTranscript,
@@ -36,6 +56,7 @@ import {
 import type { TranscriptEntry } from "./transcript/types.ts";
 import {
   sendMessageMd,
+  sendMessageWithKeyboard,
   sendChatAction,
   editMessageTextMd,
   escapeMarkdownV2,
@@ -43,6 +64,7 @@ import {
   setWebhook,
 } from "./client.ts";
 import { BOT_COMMANDS } from "./commands.ts";
+import { rememberPendingPrompt, permissionCallbackData } from "./approvals.ts";
 import { rememberStoppable, forgetStoppable, stopCallbackData } from "./stop.ts";
 import { startPermissionSurfacing, stopPermissionSurfacing } from "./permission-surfacing.ts";
 import { onTurnComplete } from "./turn-lock.ts";
@@ -50,7 +72,12 @@ import type { InlineKeyboard } from "./client.ts";
 
 let started = false;
 
-// Per-session transcript subscription unsubscribe fns (bridge-owned consumer).
+// Event-bus unsubscribe fns (flag-OFF / stream-json source).
+let unsubscribeFinal: (() => void) | null = null;
+let unsubscribePermission: (() => void) | null = null;
+let unsubscribeActivity: (() => void) | null = null;
+
+// Per-session transcript subscription unsubscribe fns (flag-ON / transcript source).
 const sessionUnsubs = new Map<string, () => void>();
 
 // ── Summarized-streaming state ──────────────────────────────────────────────
@@ -114,7 +141,9 @@ function enqueueForChat(chatId: string | number | bigint, task: () => Promise<vo
   return next;
 }
 
-/** A tool_use transcript entry → append a collapsed line to the working msg. */
+// ── Shared rendering primitives (source-agnostic) ───────────────────────────
+
+/** Append a collapsed tool one-liner to the per-(chat,session) working msg. */
 async function onToolUse(sessionId: string, toolName: string, detail?: string): Promise<void> {
   if (!config.telegram.summarizedStreaming) return;
   let users: Array<{ id: string; telegram_chat_id: string | number }>;
@@ -164,7 +193,7 @@ async function onToolUse(sessionId: string, toolName: string, detail?: string): 
   }
 }
 
-/** An assistant_text (final) transcript entry → forward / finalize working msg. */
+/** Forward / finalize the working msg with the final assistant text. */
 async function onAssistantText(sessionId: string, text: string): Promise<void> {
   let users: Array<{ id: string; telegram_chat_id: string | number }>;
   try {
@@ -207,9 +236,100 @@ async function onAssistantText(sessionId: string, text: string): Promise<void> {
   }
 }
 
-/** The bridge's own transcript consumer — handles output entries only.
- *  Permission detection (plan 03) and turn-lock release (plan 04) attach their
- *  OWN consumers to the same source via the manager. */
+/** Best-effort one-line preview of a tool input for the approval prompt. */
+function previewToolInput(input: unknown): string {
+  if (input == null) return "";
+  try {
+    const obj = input as Record<string, unknown>;
+    const cmd = obj.command ?? obj.file_path ?? obj.path ?? obj.url;
+    if (typeof cmd === "string") return cmd.length > 200 ? cmd.slice(0, 199) + "…" : cmd;
+    const json = JSON.stringify(input);
+    return json.length > 200 ? json.slice(0, 199) + "…" : json;
+  } catch {
+    return "";
+  }
+}
+
+/** Surface a permission prompt inline (Approve/Deny) to the session's TG users. */
+async function onPermissionPrompt(
+  sessionId: string,
+  requestId: string,
+  toolName: string,
+  toolInput: unknown,
+): Promise<void> {
+  let users: Array<{ id: string; telegram_chat_id: string | number }>;
+  try {
+    users = await getUsersWithTelegramDefaultSession(sessionId);
+  } catch (err: any) {
+    console.warn(`[telegram-bridge] permission DAL lookup failed session=${sessionId}: ${err?.message ?? err}`);
+    return;
+  }
+  if (users.length === 0) return;
+
+  const preview = previewToolInput(toolInput);
+  const text =
+    `🔐 Approval needed — *${escapeMarkdownV2(toolName)}*` +
+    (preview ? "\n\n```\n" + escapeMarkdownV2(preview) + "\n```" : "") +
+    `\n\nApprove this action?`;
+  const keyboard = [[
+    { text: "✅ Approve", callback_data: permissionCallbackData(requestId, "approve") },
+    { text: "🚫 Deny", callback_data: permissionCallbackData(requestId, "deny") },
+  ]];
+
+  for (const u of users) {
+    const chatId = u.telegram_chat_id;
+    if (chatId === null || chatId === undefined) continue;
+    void enqueueForChat(chatId, async () => {
+      try {
+        let sent: { message_id: number } | void;
+        try {
+          sent = await sendMessageWithKeyboard(chatId as number | string, text, keyboard, {
+            parse_mode: "MarkdownV2",
+          });
+        } catch (mdErr: any) {
+          if (mdErr?.status === 400) {
+            sent = await sendMessageWithKeyboard(chatId as number | string, text, keyboard);
+          } else {
+            throw mdErr;
+          }
+        }
+        rememberPendingPrompt(sessionId, requestId, {
+          sessionId,
+          userId: u.id,
+          chatId,
+          messageId: sent?.message_id ?? 0,
+          toolName,
+          createdAtMs: Date.now(),
+        });
+      } catch (err: any) {
+        console.warn(
+          `[telegram-bridge] permission prompt send failed chat=${chatKey(chatId)} session=${sessionId}: ${err?.message ?? err}`,
+        );
+      }
+    });
+  }
+}
+
+// ── flag-OFF (PROD) source: stream-json event bus ───────────────────────────
+
+function onFinal(e: AssistantMessageFinalEvent): void {
+  void onAssistantText(e.sessionId, e.text);
+}
+
+function onActivity(e: SessionActivityEvent): void {
+  if (e.kind !== "tool_use") return;
+  void onToolUse(e.sessionId, e.toolName, e.detail);
+}
+
+function onPermissionPendingEvent(e: PermissionPendingEvent): void {
+  void onPermissionPrompt(e.sessionId, e.requestId, e.toolName, e.toolInput);
+}
+
+// ── flag-ON (POST-CUTOVER) source: per-session transcript tail ──────────────
+
+/** The bridge's own transcript consumer — output entries only. Permission
+ *  detection (plan 03) + turn-lock release (plan 04) attach their own consumers
+ *  to the same source via the manager. */
 function bridgeConsumer(entry: TranscriptEntry): void {
   switch (entry.kind) {
     case "assistant_text":
@@ -219,8 +339,6 @@ function bridgeConsumer(entry: TranscriptEntry): void {
       void onToolUse(entry.sessionId, entry.toolName, entry.detail);
       break;
     case "turn_complete":
-      // Plan 04: the same transcript signal releases the PTY turn lock + dequeues
-      // the next writer (one observation, two consumers).
       onTurnComplete(entry.sessionId);
       break;
     // permission_request / user_question — handled by the permission surfacing
@@ -231,29 +349,28 @@ function bridgeConsumer(entry: TranscriptEntry): void {
 }
 
 /**
- * Ensure a transcript source is open for `sessionId` with the bridge's output
- * consumer (and the permission-surfacing consumer) attached. Idempotent per
- * session. Called from the inbound dispatch path when a Telegram user sends to a
- * session (the moment we know the session is telegram-relevant + likely live).
- * No-op when the bridge isn't started (no token).
+ * Ensure a transcript source is open for `sessionId` (flag-ON path only).
+ * Idempotent per session. Called from the inbound dispatch path when a Telegram
+ * user sends to a session. No-op when the bridge isn't started OR when running
+ * the flag-OFF event-bus source (the bus is global, not per-session).
  */
 export async function ensureSessionSubscribed(sessionId: string): Promise<void> {
   if (!started) return;
+  // flag OFF: outbound comes from the global event bus — nothing to open here.
+  if (!config.ptyInteractive) return;
   if (sessionUnsubs.has(sessionId)) return;
   const unsub = await subscribeToSessionTranscript(sessionId, bridgeConsumer);
   if (!unsub) return; // no session row / unresolvable
-  // Guard against a racing concurrent call having installed one already.
   if (sessionUnsubs.has(sessionId)) {
     unsub();
     return;
   }
   sessionUnsubs.set(sessionId, unsub);
-  // Plan 03: attach the fail-closed permission surfacing consumer to the SAME
-  // source (one tail, many consumers). It manages its own unsubscribe lifetime.
+  // Plan 03: fail-closed permission surfacing on the SAME source.
   await startPermissionSurfacing(sessionId);
 }
 
-/** Release a session's transcript subscription (e.g. on idle teardown). */
+/** Release a session's transcript subscription (flag-ON path; e.g. idle teardown). */
 export function releaseSessionSubscription(sessionId: string): void {
   const unsub = sessionUnsubs.get(sessionId);
   if (unsub) {
@@ -265,11 +382,28 @@ export function releaseSessionSubscription(sessionId: string): void {
 
 /**
  * Boot the bridge. Idempotent. No-op when `TELEGRAM_BOT_TOKEN` is unset.
+ * Chooses the outbound source by `config.ptyInteractive` (see file header).
  */
 export function startTelegramBridge(): void {
   if (started) return;
   if (!config.telegram.botToken) return;
   started = true;
+
+  if (config.ptyInteractive) {
+    // POST-CUTOVER: transcript-tail source. Per-session subscriptions are opened
+    // lazily by ensureSessionSubscribed() on inbound dispatch — nothing global
+    // to wire here.
+    console.log("[telegram-bridge] transcript-tail outbound bridge started (REMO_PTY_INTERACTIVE=1)");
+  } else {
+    // PROD DEFAULT: stream-json event-bus source (host-agnostic). Restores the
+    // origin/main outbound behavior — works in the split hub/supervisor topology
+    // where the hub has no local CLI transcript files.
+    unsubscribeFinal = onAssistantMessageFinal(onFinal);
+    unsubscribePermission = onPermissionPending(onPermissionPendingEvent);
+    unsubscribeActivity = onSessionActivity(onActivity);
+    console.log("[telegram-bridge] stream-json (assistant_message:final) outbound bridge started");
+  }
+
   void setMyCommands(BOT_COMMANDS as Array<{ command: string; description: string }>).catch((err: any) => {
     console.warn(`[telegram-bridge] setMyCommands failed: ${err?.message ?? err}`);
   });
@@ -280,11 +414,22 @@ export function startTelegramBridge(): void {
       console.warn(`[telegram-bridge] setWebhook failed: ${err?.message ?? err}`);
     });
   }
-  console.log("[telegram-bridge] transcript-tail outbound bridge started");
 }
 
 /** Test-only — stop the bridge and clear queues + subscriptions. */
 export function _stopTelegramBridgeForTests(): void {
+  if (unsubscribeFinal) {
+    unsubscribeFinal();
+    unsubscribeFinal = null;
+  }
+  if (unsubscribePermission) {
+    unsubscribePermission();
+    unsubscribePermission = null;
+  }
+  if (unsubscribeActivity) {
+    unsubscribeActivity();
+    unsubscribeActivity = null;
+  }
   for (const unsub of sessionUnsubs.values()) {
     try {
       unsub();

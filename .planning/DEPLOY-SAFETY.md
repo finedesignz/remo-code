@@ -2,7 +2,22 @@
 
 **Date:** 2026-06-01 · **Verifier:** Claude (independent) · **Branch:** feat/interactive-pty-runner
 
-## VERDICT: ⚠️ DON'T-SHIP-HUB AS-IS (one behavior regression, NOT a crash)
+## VERDICT (UPDATED 2026-06-01): ✅ SHIP-HUB-OK
+
+The one outbound regression below is now **flag-gated behind `REMO_PTY_INTERACTIVE`**
+(prod default OFF). With the flag OFF the Telegram OUTBOUND bridge is restored to the
+origin/main behavior: it subscribes to the stream-json `assistant_message:final` /
+`session_activity` / `permission_pending` event bus (host-agnostic, no local CLI
+transcript files needed), so the live user keeps receiving Telegram replies after a
+hub redeploy. The transcript-tail source is used ONLY when `REMO_PTY_INTERACTIVE=1`
+(post-cutover). Inbound dispatch, permission injection, turn-lock and human-only guard
+are unchanged regardless of the flag. Proven by `telegram-outbound-source-gate.test.ts`
+(flag OFF → event-bus) + `telegram-output-from-transcript.test.ts` (flag ON → tail);
+`bun run check-baseline` fail=0.
+
+---
+
+## ORIGINAL VERDICT (superseded): ⚠️ DON'T-SHIP-HUB AS-IS (one behavior regression, NOT a crash)
 
 The hub will **boot and run without crashing** in the Coolify container. The PTY runner +
 backend-selector are supervisor-local and flag-gated (`REMO_PTY_INTERACTIVE`), so they do
