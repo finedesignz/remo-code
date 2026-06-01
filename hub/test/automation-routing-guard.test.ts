@@ -63,10 +63,16 @@ describe('no ANTHROPIC_API_KEY on the automation runner spawn paths', () => {
     expect(files.length).toBeGreaterThan(0)
     for (const f of files) {
       const src = readFileSync(join(runnersDir, f), 'utf-8')
-      // A spawn path must never SET an API key; if it touches env it must delete it.
+      // A spawn path must never SET an API key; if it touches env it must scrub it.
       expect(src).not.toMatch(/env(\.|\[['"])ANTHROPIC_API_KEY['"\]]?\s*=/)
       if (/spawn|Bun\.spawn|child_process|pty/i.test(src)) {
-        expect(src).toMatch(/delete\s+\(?env[^\n]*ANTHROPIC_API_KEY/)
+        // Phase-19: the scrub is centralized in the shared `sanitizeSpawnEnv`
+        // (env-sanitize.ts) — accept it OR the legacy literal delete. The
+        // shared sanitizer scrubs the full provider-key denylist + credential
+        // patterns (incl. inherited vars), a strict superset of the old delete.
+        const scrubs =
+          /\bsanitizeSpawnEnv\b/.test(src) || /delete\s+\(?env[^\n]*ANTHROPIC_API_KEY/.test(src)
+        expect(scrubs).toBe(true)
       }
     }
   })

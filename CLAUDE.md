@@ -181,6 +181,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | Mobile Tauri client | [mobile-client.md](docs/mobile-client.md) · [phase-12-pause-state.md](docs/phase-12-pause-state.md) | Phase 12 — iOS/Android WebView shell + deep-link auth. **Paused 2026-05-28.** |
 | Shared dispatch + intake | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | `hub/src/dispatch/` (gates→queue→grace→finalize) + `hub/src/webhooks/intake.ts`. All inbound subsystems ride these. |
 | Usage cost ledger | [usage-cost.md](docs/usage-cost.md) | P2 — per-turn token+cost capture (`usage_event`) → `token_usage` + `token_usage_daily` → `GET /api/usage/cost`. SDK `total_cost_usd` authoritative; `hub/src/usage/pricing.ts` is fallback only. Cost is a list-price ESTIMATE. Cap (P3) unaffected. Needs supervisor ≥0.8.0. |
+| PTY terminal surface + cutover gate | [usage-cost.md](docs/usage-cost.md) · [cutover-gate-june15.md](docs/cutover-gate-june15.md) | Phases 15–19 — universal raw-terminal (PTY) human path (interactive `claude`/`codex` TUI, raw bytes, NO stream-json, NO API key). Phase-18 dual-bucket usage (interactive vs programmatic). Phase-19 fail-safe default-backend selector (`supervisor/src/runners/backend-selector.ts`), Codex/Gemini-stub fallback + shared `env-sanitize.ts`, and the June-15 cutover gate (`tools/cutover-deletion-gate.mjs`). Cutover flip + ChatSurface deletion are GATED (pending runbook + on-device attestations). |
 | API docs | [api.md](docs/api.md) · `/openapi.json` · `/docs` | OpenAPI 3.1 assembled in `hub/src/api/_openapi.ts`; run `bun run docs:sync` after route changes (docs-drift CI enforces). |
 
 ## Cross-cutting invariants (do not violate)
@@ -196,6 +197,16 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   license gate after auth; `/ws/agent` keyed by `api_keys`. `hub/test/mount-order.test.ts` enforces.
 - **Don't hand-roll per-subsystem dispatch/queue/grace.** Round-2 collapse is complete — use
   `hub/src/dispatch/` (the old `scheduler/session-queue.ts` shim is deleted).
+- **No provider API key on the human PTY path — EVER.** The interactive terminal surface spawns the
+  GENUINE `claude`/`codex` TUI with EMPTY argv (no `-p`/`--input-format`/`--output-format`/`stream-json`)
+  and routes every spawn env through the shared `supervisor/src/runners/env-sanitize.ts` (named denylist +
+  anchored credential-class patterns; scrubs inherited vars + setup-token). Fallback is a backend-CLI swap
+  (Codex via ChatGPT sign-in, stubbed Gemini), never the API. The fail-safe default-backend selector
+  (`backend-selector.ts`) resolves human sessions to `claude-pty`/`codex-pty` only — never the legacy
+  stream-json runner — and defaults to `codex-pty` until the June-15 cutover gate confirms interactive
+  billing. The stream-json path is PRESERVED for unattended automation only, behind the cost cap.
+  Cutover flip + ChatSurface deletion are GATED on `tools/cutover-deletion-gate.mjs` (Phase-16 on-device
+  attestations). Enforced by `supervisor/test/{no-api-key-no-streamjson-pty,no-apikey-fallback-guard,default-backend-selector}.test.ts`.
 - **schema.sql re-runs every boot** — idempotent DDL only; backfills → `hub/scripts/` one-shots.
 - **Orchestrator:** exactly one open per user (`idx_sessions_orchestrator_unique`); never set
   `orchestrator_enabled=false` without also setting `orchestrator_disabled_explicitly=true`

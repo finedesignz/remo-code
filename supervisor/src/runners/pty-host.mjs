@@ -109,8 +109,9 @@ function handle(f) {
   if (f.t === 'spawn') {
     // CONSTRAINT 1 — strip every provider credential no matter what the parent
     // sent or which interactive client (`claude`/`codex`/future) is spawned.
-    // Defense-in-depth mirror of supervisor/src/runners/env-sanitize.ts (this
-    // host runs under Node and cannot import the .ts module): a named denylist
+    // Defense-in-depth mirror of `sanitizeSpawnEnv` in
+    // supervisor/src/runners/env-sanitize.ts (this host runs under Node and
+    // cannot import the .ts module): a named denylist
     // PLUS anchored credential-class patterns, applied to the host's own
     // resolved process.env so an INHERITED key never reaches the interactive CLI.
     // The anchored credential-class patterns below already cover the named
