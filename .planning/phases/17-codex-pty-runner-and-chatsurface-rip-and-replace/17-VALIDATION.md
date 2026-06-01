@@ -39,13 +39,34 @@ created: 2026-05-31
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 17-01-01 | 01 | 1 | R-PTY-12 | T-17-01/02 | Codex PTY runner interactive-only, env-clean, no RunnerEvent | canary/static | `bun test supervisor/test/no-api-key-no-streamjson-pty.test.ts` | ✅ (Ph15/16) | ⬜ pending |
-| 17-01-02 | 01 | 1 | R-PTY-12 | T-17-02 | Codex env carries no API key / no forwarded OAuth | unit | `bun test supervisor/test/codex-pty-runner-env.test.ts` | ❌ W0 | ⬜ pending |
-| 17-02-01 | 02 | 2 | R-PTY-13/15 | T-17-04 | deletion gated on Phase-16 verdict PASS | manual gate | (operator precheck) `17-02-PRECHECK.md` | ❌ W0 | ⬜ pending |
-| 17-02-02 | 02 | 2 | R-PTY-13 | T-17-05/06 | no ChatSurface/bubble path for human sessions; chrome intact | static/render | `bun test web/test/no-human-chatsurface.test.tsx` | ❌ W0 | ⬜ pending |
-| 17-02-03 | 02 | 2 | R-PTY-13 | T-17-06 | no indigo; web builds | unit/build | `bun test web/test/no-indigo.test.ts; cd web; bun run build` | ✅ | ⬜ pending |
-| 17-03-01 | 03 | 3 | R-PTY-14/16 | T-17-07/08 | usage/cost-cap + automation finalize PRESERVED after rip | regression | `bun test hub/test/automation-translation-preserved.test.ts` | ❌ W0 | ⬜ pending |
-| 17-03-02 | 03 | 3 | R-TG-12 | T-17-09 | Telegram break marked for Phase 20; bridge module on disk | static/grep | `bun test hub/test/telegram-break-marked.test.ts` | ❌ W0 | ⬜ pending |
+| 17-01-01 | 01 | 1 | R-PTY-12 | T-17-01/02 | Codex PTY runner interactive-only, env-clean, no RunnerEvent | canary/static | `bun test supervisor/test/no-api-key-no-streamjson-pty.test.ts` | ✅ | ✅ green |
+| 17-01-02 | 01 | 1 | R-PTY-12 | T-17-02 | Codex env carries no API key / no forwarded OAuth | unit | `bun test supervisor/test/codex-pty-runner-env.test.ts` | ✅ | ✅ green |
+| 17-02-01 | 02 | 2 | R-PTY-13b | T-17-04 | MECHANICAL deletion gate aborts unless Phase-16 verdict PASS + provenance | gate/unit | `bun test web/test/cutover-deletion-gate.test.ts` | ✅ | ✅ green (gate ENFORCED; real artifact ABORTS) |
+| 17-02-02 | 02 | 2 | R-PTY-13 | T-17-05/06 | no ChatSurface/bubble path for human sessions; chrome intact | static/render | `bun test web/test/no-human-chatsurface.test.tsx` | ❌ | 🚫 blocked-on-manual-gate (ChatSurface NOT deleted; deletion deferred to device attestation) |
+| 17-02-03 | 02 | 2 | R-PTY-13 | T-17-06 | no indigo; web builds | unit/build | `bun test web/test/no-indigo.test.ts; cd web; bun run build` | ✅ | ✅ green |
+| 17-03-01 | 03 | 3 | R-PTY-14/16 | T-17-07/08 | usage/cost-cap + automation finalize PRESERVED after rip | regression | `bun test hub/test/automation-translation-preserved.test.ts` | ❌ | 🚫 blocked-on-manual-gate (no dead translation while ChatSurface live; nothing removed) |
+| 17-03-02 | 03 | 3 | R-TG-12 | T-17-09 | Telegram break marked for Phase 20; bridge module on disk | static/grep | `bun test hub/test/telegram-break-marked.test.ts` | ❌ | 🚫 blocked-on-manual-gate (Telegram source still live + working; not removed) |
+
+### Deferred (blocked-on-manual-gate)
+
+The destructive half of Phase 17 is BLOCKED by the one-way-door gate. `tools/cutover-deletion-gate.mjs`
+exits non-zero against the real `16-VERIFICATION.md` (`verdict: PARTIAL`, `render_fidelity: FAIL`,
+`mobile_reattach: FAIL`, empty `manual_attestation` triplets). Per that gate, the following remain deferred:
+
+- **17-02 T3** — delete ChatSurface / bubble components / feeding hooks. DEFERRED. ChatSurface is intact;
+  the terminal surface is already routed behind the existing `localStorage remo:pty-interactive` flag
+  (Phase 16), so the routing seam exists without the deletion.
+- **17-03 T1** — remove dead human-UI-only translation. DEFERRED. While ChatSurface remains live, the
+  agent-protocol→bubble translation in `hub/src/ws/agent.ts` still has live consumers (ChatSurface web
+  render + Telegram fan-out + usage/cost-cap). NOTHING is provably dead; PRESERVE-on-ambiguity ⇒ no removal.
+- **17-03 T2** — remove + mark the Telegram structured-event source. DEFERRED. The Telegram bridge is a
+  live, working consumer of the same translation. Removing it now would break a working feature for no
+  benefit, and the break is contractually a consequence of the (gated) human-UI deletion. No markers were
+  added (adding "removed here" markers without removal would be misleading).
+
+To unlock: an operator records the two on-device attestation triplets (R-PTY-07 phone reattach, R-PTY-09
+mobile resize/scrollback) into `16-VERIFICATION.md` via `tools/emit-phase16-verdict.mjs`, flipping the
+verdict to PASS. Then 17-02 T3 / 17-03 T1+T2 may execute.
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
