@@ -112,6 +112,21 @@ export class SessionBridge {
     return false
   }
 
+  /**
+   * True once a runner subprocess has actually been spawned (onSpawned fired).
+   * The slot reconciler uses THIS — not the run's stored pid — to decide whether
+   * a counted slot is genuinely occupying a process. The stream-json runner
+   * reports spawn with a best-effort `pid: 0` (it never surfaces a real OS pid
+   * through its `ready` event), which ProcessManager stores as `null`; basing
+   * aliveness on `pid != null` therefore reaps every healthy idle session
+   * (#237 regression). `spawnReported` is the truthful signal: a bridge that
+   * authenticated (WS open) but never spawned a runner returns false and stays
+   * reclaimable; a bridge that has spawned and is alive returns true forever.
+   */
+  hasSpawnedRunner(): boolean {
+    return this.spawnReported
+  }
+
   /** Stop runner + close WS. Idempotent. */
   async stop(): Promise<void> {
     if (this.stopped) return

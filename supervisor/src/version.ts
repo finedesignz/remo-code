@@ -30,7 +30,7 @@
  * Hard-coded fallback — must equal the `version` in tauri.conf.json. Enforced
  * by supervisor/test/version-drift.test.ts. Bump in lockstep on every release.
  */
-export const FALLBACK_VERSION = '0.8.5'
+export const FALLBACK_VERSION = '0.8.6'
 
 /**
  * The version reported at runtime. Prefers the build-time-injected

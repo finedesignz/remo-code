@@ -154,15 +154,26 @@ export class ProcessManager {
     for (const [runId, r] of this.runs) {
       if (r.state !== 'starting' && r.state !== 'running') continue
       const bridgeAlive = typeof r.bridge?.isAlive === 'function' ? r.bridge.isAlive() : r.bridge != null
-      // Leak fix B (2026-06-01): the real SessionBridge.isAlive() returns true
-      // whenever its hub WS is OPEN — even if the `claude` child NEVER spawned
-      // (pid stays null). A bridge that authenticated but never spawned a runner
-      // pins its slot forever; isAlive() alone never frees it (live evidence:
-      // 8 runners state:"running"/"starting" with pid:null). A run that has not
-      // reported a pid is NOT genuinely occupying a process slot — let it be
-      // reclaimed once past the grace window even when the bridge WS is open.
-      const hasLiveChild = r.pid != null
-      const alive = bridgeAlive && hasLiveChild
+      // Leak fix B (2026-06-01, corrected 2026-06-02): the real
+      // SessionBridge.isAlive() returns true whenever its hub WS is OPEN — even
+      // if the `claude` child NEVER spawned. A bridge that authenticated but
+      // never spawned a runner pins its slot forever; isAlive() alone never frees
+      // it. The ORIGINAL fix keyed this on `r.pid != null`, but the stream-json
+      // runner reports spawn with a best-effort `pid: 0` (it never surfaces a
+      // real OS pid), which onSpawned stores as `null` via `info.pid || null`.
+      // So `r.pid != null` is false for EVERY healthy runner, and aliveness
+      // collapsed to "had activity in the last grace window" — reaping idle but
+      // healthy sessions (the auto-launched orchestrator: green→gray, #237
+      // regression; live evidence: a `running` runner with pid:null).
+      // The truthful signal is whether the bridge actually SPAWNED a runner, not
+      // the lie-valued pid: `hasSpawnedRunner()` is true once onSpawned fired and
+      // false for a never-spawned bridge — so genuinely-alive sessions (incl.
+      // idle orchestrator) are never reclaimed, while authenticated-but-never-
+      // spawned stranded bridges still are.
+      const hasSpawnedRunner = typeof r.bridge?.hasSpawnedRunner === 'function'
+        ? r.bridge.hasSpawnedRunner()
+        : r.pid != null
+      const alive = bridgeAlive && hasSpawnedRunner
       if (alive) continue
       const lastSeen = Date.parse(
         (r as any).lastActivityAt ?? (r as any).startedAt ?? '',
