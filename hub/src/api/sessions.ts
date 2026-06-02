@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity } from '../db/dal'
+import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity, setSessionSkipPermissions, getSessionSkipPermissions } from '../db/dal'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
@@ -270,6 +270,29 @@ sessions.patch('/:id/auto-nudge', async (c) => {
   const updated = await setSessionAutoNudge(sessionId, userId, parsed.data.auto_nudge)
   if (!updated) return c.json({ error: 'not_found' }, 404)
   return c.json({ id: sessionId, auto_nudge: updated.auto_nudge })
+})
+
+// ── PATCH /api/sessions/:id/skip-permissions ─────────────────────────────────
+// Per-session "bypass permissions" override (default OFF). When ON, the hub
+// REQUESTS --dangerously-skip-permissions on session.start; the supervisor's
+// config `allow_dangerous_skip_permissions` is the HARD CEILING (applied =
+// requested && allowed), so a per-session opt-in can never exceed the host
+// config. User-scoped: only the owner can update. CSRF via the global /api/*
+// csrfGuard (hub/src/index.ts). Mirrors the auto-nudge PATCH shape.
+const SkipPermsBody = z.object({
+  enabled: z.boolean(),
+})
+
+sessions.patch('/:id/skip-permissions', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const parsed = SkipPermsBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_input', detail: parsed.error.issues[0]?.message }, 400)
+  }
+  const updated = await setSessionSkipPermissions(sessionId, userId, parsed.data.enabled)
+  if (!updated) return c.json({ error: 'not_found' }, 404)
+  return c.json({ id: sessionId, dangerously_skip_permissions: updated.dangerously_skip_permissions })
 })
 
 // ── Phase 16 — per-session runner type (opt-in; default stream-json) ──────────
@@ -562,6 +585,10 @@ sessions.post('/:id/launch', async (c) => {
       initial_prompt: undefined,
       api_key: '__use_local__', // sentinel — supervisor uses its configured key
       hub_url: '__same__',
+      // Per-session bypass-permissions REQUEST (default OFF). The supervisor's
+      // config `allow_dangerous_skip_permissions` is the hard ceiling
+      // (applied = requested && allowed).
+      dangerously_skip_permissions: (session as any).dangerously_skip_permissions === true,
     } as any)
   } catch (err: any) {
     try {

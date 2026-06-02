@@ -247,6 +247,7 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           cloneHere={sessionsHook.cloneHere}
           globalNudgeDefault={globalNudgeDefault}
           onSetAutoNudge={sessionsHook.setSessionAutoNudge}
+          onSetSkipPermissions={sessionsHook.setSessionSkipPermissions}
         />
       </div>
 

@@ -42,6 +42,8 @@ interface Props {
   globalNudgeDefault?: boolean
   /** Phase 10 — set a session's per-session auto-nudge override (true/false force, null inherit). */
   onSetAutoNudge?: (id: string, value: boolean | null) => Promise<{ ok: boolean; error?: string }>
+  /** Per-session "bypass permissions" override (default OFF). */
+  onSetSkipPermissions?: (id: string, enabled: boolean) => Promise<{ ok: boolean; error?: string }>
 }
 
 export function Sidebar({
@@ -59,6 +61,7 @@ export function Sidebar({
   cloneHere,
   globalNudgeDefault = true,
   onSetAutoNudge,
+  onSetSkipPermissions,
 }: Props) {
   const [cloneModal, setCloneModal] = useState<{ sessionId: string; repoLabel: string } | null>(null)
   const [toast, setToast] = useState<string | null>(null)
@@ -484,6 +487,18 @@ export function Sidebar({
                   checked={s.auto_nudge ?? globalNudgeDefault}
                   onChange={(next) => { void onSetAutoNudge(s.id, next) }}
                   aria-label={`Auto-nudge when idle for ${label}`}
+                />
+              </label>
+            )}
+            {onSetSkipPermissions && (
+              <label className="flex items-center justify-between gap-3 text-[12px] text-[var(--text-secondary)]">
+                <span title="Bypass tool-approval prompts for this session (auto-allows every tool). Still capped by the supervisor host config.">
+                  Skip approval prompts
+                </span>
+                <Toggle
+                  checked={s.dangerously_skip_permissions === true}
+                  onChange={(next) => { void onSetSkipPermissions(s.id, next) }}
+                  aria-label={`Skip approval prompts for ${label}`}
                 />
               </label>
             )}

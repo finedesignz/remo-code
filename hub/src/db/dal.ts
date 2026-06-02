@@ -27,7 +27,8 @@ export async function listSessions(userId: string) {
   return sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info,
            cli_kind, is_rootless, hostname, is_orchestrator,
-           repo_key, github_owner, github_repo, auto_nudge
+           repo_key, github_owner, github_repo, auto_nudge,
+           dangerously_skip_permissions
     FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST
   `;
@@ -42,6 +43,7 @@ export async function getSession(sessionId: string, userId: string) {
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at,
            cli_kind, is_rootless, hostname, is_orchestrator,
            repo_key, github_owner, github_repo, auto_nudge,
+           dangerously_skip_permissions,
            runner_type, pty_backend_id, transcript_path
     FROM sessions WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
   `;
@@ -208,6 +210,37 @@ export async function setSessionAutoNudge(
     RETURNING auto_nudge
   `;
   return rows[0];
+}
+
+// Per-session "bypass permissions" override. User-scoped. The hub passes the
+// REQUESTED value on session.start; the supervisor's config
+// `allow_dangerous_skip_permissions` is the hard ceiling (applied = requested
+// && allowed). Default OFF: a row that was never set reads as NULL (== OFF).
+export async function setSessionSkipPermissions(
+  sessionId: string,
+  userId: string,
+  enabled: boolean,
+): Promise<{ dangerously_skip_permissions: boolean } | undefined> {
+  const rows = await sql<{ dangerously_skip_permissions: boolean | null }[]>`
+    UPDATE sessions SET dangerously_skip_permissions = ${enabled}
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    RETURNING dangerously_skip_permissions
+  `;
+  if (!rows[0]) return undefined;
+  return { dangerously_skip_permissions: rows[0].dangerously_skip_permissions === true };
+}
+
+/** Effective per-session skip-permissions (default OFF when null/missing). The
+ *  supervisor still ANDs this with its host config ceiling. */
+export async function getSessionSkipPermissions(
+  sessionId: string,
+  userId: string,
+): Promise<boolean> {
+  const rows = await sql<{ dangerously_skip_permissions: boolean | null }[]>`
+    SELECT dangerously_skip_permissions FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `;
+  return rows[0]?.dangerously_skip_permissions === true;
 }
 
 // ── Phase 08 plan 004 — pending local repos + dismiss-local ───────────────────
