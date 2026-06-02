@@ -21,7 +21,7 @@ import { useSidebarWidth } from '../hooks/useSidebarWidth'
 import { ChatPanel } from './ChatPanel'
 import { TerminalSurface } from './TerminalSurface'
 import { ApiKeyModal } from './ApiKeyModal'
-import { connectedSessions, sessionLabel, shortId } from './SessionDropdown'
+import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
 import { hubFetch } from '../lib/api'
 
@@ -253,32 +253,42 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
       {/* Main chat area — NO app header here; AppShell owns it. */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Chat-specific session strip (kept — it's session chrome, not app chrome). */}
-        <div className="relative z-40 flex items-center gap-3 px-3 py-2 border-b border-[var(--border-color)]/40 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0">
-          {/* Mobile: hamburger opens the active-session sidebar slide-over —
-              the single way to browse/switch sessions on mobile (the old
-              header SessionDropdown was redundant with it and was removed).
-              Offline / prior sessions are launched from Settings -> Supervisor,
-              never the sidebar (the sidebar is active-only by design). */}
+        <div className="relative z-40 flex items-center gap-2 sm:gap-3 px-3 py-2 safe-x border-b border-[var(--border-color)]/40 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0">
+          {/* Mobile (< md): the desktop left sidebar is hidden, so the session
+              switcher lives HERE as a top-bar dropdown — the single way to
+              browse/switch active sessions on a phone. Reconciles PR #228:
+              #228 removed the OLD header dropdown because it duplicated the
+              hamburger slide-over; the owner now wants the dropdown to BE the
+              switcher, so it returns as primary and the redundant slide-over
+              trigger is gone. Per-session management (delete / disconnect /
+              auto-nudge) stays reachable via the "manage" affordance, which
+              opens the full sidebar slide-over. */}
+          <div className="md:hidden flex-1 min-w-0">
+            <SessionDropdown
+              sessions={sessionsHook.sessions}
+              activeSessionId={activeSessionId}
+              onSelectSession={handleSelectSession}
+              unreadCounts={unreadCounts}
+            />
+          </div>
+          {/* Mobile: open the full sidebar slide-over for per-session controls
+              the dropdown doesn't expose (delete / disconnect / auto-nudge). */}
           <button
             type="button"
             onClick={() => setSidebarOpen(true)}
-            className="md:hidden p-1.5 -ml-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors shrink-0"
-            aria-label="Open session list"
+            className="md:hidden p-1.5 -mr-0.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors shrink-0"
+            aria-label="Manage sessions"
+            title="Manage sessions"
           >
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
-              <line x1="3" y1="5" x2="15" y2="5" />
-              <line x1="3" y1="9" x2="15" y2="9" />
-              <line x1="3" y1="13" x2="15" y2="13" />
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="9" cy="3.5" r="1.3" />
+              <circle cx="9" cy="9" r="1.3" />
+              <circle cx="9" cy="14.5" r="1.3" />
             </svg>
           </button>
-          {/* Current-session title (mobile + desktop). On mobile, tap to open
-              the session list. Switching happens in the sidebar, not here. */}
-          <button
-            type="button"
-            onClick={() => { if (window.innerWidth < 768) setSidebarOpen(true) }}
-            className="flex-1 min-w-0 text-left md:cursor-default md:pointer-events-none"
-            aria-label={activeSession ? sessionLabel(activeSession) : 'Remo Code'}
-          >
+          {/* Desktop (md+): static current-session title — switching happens in
+              the always-visible left sidebar, not here. */}
+          <div className="hidden md:block flex-1 min-w-0">
             <h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate flex items-center gap-1.5">
               {activeSession ? sessionLabel(activeSession) : 'Remo Code'}
               {activeSession && (
@@ -290,7 +300,7 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
             {activeSession?.project_dir && (
               <p className="text-[11px] text-[var(--text-muted)] truncate">{activeSession.project_dir}</p>
             )}
-          </button>
+          </div>
 
           {activeSession && (activeSession.status === 'online' || activeSession.status === 'thinking') ? (
             <span className="flex items-center gap-1.5 text-xs text-emerald-400 shrink-0">
