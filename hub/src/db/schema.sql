@@ -1049,3 +1049,12 @@ CREATE INDEX IF NOT EXISTS idx_token_usage_daily_user_day ON token_usage_daily(u
 --   unconditionally (NULL means inherit the per-user default, not "always on").
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auto_nudge BOOLEAN;
 
+-- sessions.dangerously_skip_permissions: per-session opt-in to bypass the CLI's
+--   tool-permission prompts (--dangerously-skip-permissions). NULLABLE on
+--   purpose: NULL or FALSE means OFF (the default — prompts are surfaced). Only
+--   TRUE requests skip. The hub passes the REQUESTED value on session.start;
+--   the supervisor's config `allow_dangerous_skip_permissions` is the HARD
+--   CEILING (applied = requested && allowed) — a per-session opt-in can never
+--   exceed the host config. Additive, no backfill (NULL == OFF).
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS dangerously_skip_permissions BOOLEAN;
+

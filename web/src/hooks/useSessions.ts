@@ -33,6 +33,10 @@ export interface CodeSession {
   // null/undefined → inherit the user's global default
   // (users.auto_nudge_idle_sessions). true/false force on/off for this session.
   auto_nudge?: boolean | null
+  // Per-session "bypass permissions" override. null/undefined/false → OFF
+  // (default — approval prompts surface). true → requests
+  // --dangerously-skip-permissions (still ANDed with the supervisor host cap).
+  dangerously_skip_permissions?: boolean | null
   hostname?: string | null
   // ── Phase 08 — GitHub-keyed session fields ────────────────────────────────
   // All nullable: legacy/local-only sessions have repo_key === null.
@@ -243,10 +247,35 @@ export function useSessions(
     }
   }, [token])
 
+  // Per-session "bypass permissions" override. Optimistic: flips local state
+  // immediately, rolls back on failure. Default OFF.
+  const setSessionSkipPermissions = useCallback(async (
+    id: string,
+    enabled: boolean,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    if (!token) return { ok: false, error: 'unauthorized' }
+    let prevValue: boolean | null | undefined
+    setSessions(prev => prev.map(s => {
+      if (s.id !== id) return s
+      prevValue = s.dangerously_skip_permissions
+      return { ...s, dangerously_skip_permissions: enabled }
+    }))
+    try {
+      await hubFetch(token, `/api/sessions/${id}/skip-permissions`, {
+        method: 'PATCH',
+        json: { enabled },
+      })
+      return { ok: true }
+    } catch (err: any) {
+      setSessions(prev => prev.map(s => s.id === id ? { ...s, dangerously_skip_permissions: prevValue ?? null } : s))
+      return { ok: false, error: (err?.body?.error as string) ?? 'unknown' }
+    }
+  }, [token])
+
   return {
     sessions, setSessions, loading,
     createSession, deleteSession, disconnectSession, rotateToken, updateSessionStatus,
     refetch: fetchSessions,
-    launchSession, cloneHere, createGithubRepo, setSessionAutoNudge,
+    launchSession, cloneHere, createGithubRepo, setSessionAutoNudge, setSessionSkipPermissions,
   }
 }
