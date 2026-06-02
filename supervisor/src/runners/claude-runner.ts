@@ -65,6 +65,8 @@ export class ClaudeRunner implements CliRunner {
   spawnImpl: SpawnFn | null = null
   /** When stopped intentionally, suppress auto-restart. */
   private intentionalStop = false
+  /** Monotonic counter for unique interrupt control_request ids. */
+  private interruptCounter = 0
 
   constructor(projectDir: string, allowDangerousSkip = false, orchestrator?: OrchestratorRunnerOpts) {
     this.projectDir = projectDir
@@ -202,8 +204,26 @@ export class ClaudeRunner implements CliRunner {
   }
 
   cancel() {
-    if (this.proc) {
-      try { this.proc.kill('SIGINT') } catch {}
+    // ESC-style turn interrupt — cancel the in-progress turn WITHOUT killing
+    // the process/session (so conversation memory survives). Mirrors pressing
+    // ESC in the CLI. SIGINT on Windows is unreliable and tends to kill the
+    // session, so we use the stream-json interrupt control_request instead.
+    // Verified wire format (from @anthropic-ai/claude-agent-sdk):
+    //   {"type":"control_request","request_id":"<id>","request":{"subtype":"interrupt"}}
+    // The CLI acks with a control_response{subtype:'success'}; we don't block
+    // on it — the next user message can be sent immediately.
+    if (!this.proc) return
+    const requestId = `interrupt_${Date.now()}_${this.interruptCounter++}`
+    const line = JSON.stringify({
+      type: 'control_request',
+      request_id: requestId,
+      request: { subtype: 'interrupt' },
+    })
+    try {
+      this.proc.stdin.write(line + '\n')
+      ;(this.proc.stdin as any).flush?.()
+    } catch (err: any) {
+      this.listener?.({ type: 'error', message: `interrupt write failed: ${err?.message ?? err}` })
     }
   }
 
@@ -277,6 +297,11 @@ export class ClaudeRunner implements CliRunner {
       this.listener?.({ type: 'ready' })
       return
     }
+
+    // CLI ack for our outbound control_response/interrupt control_request.
+    // Nothing to do — interrupt is fire-and-forget. Swallow so it doesn't fall
+    // through as noise.
+    if (event.type === 'control_response') return
 
     if (event.type === 'control_request' && (event as any).subtype === 'can_use_tool') {
       const req = event as any
