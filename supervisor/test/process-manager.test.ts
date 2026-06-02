@@ -9,6 +9,7 @@ import type { SessionBridgeCallbacks, SessionBridgeOptions } from '../src/runner
 let TMP: string
 let ROOT: string
 let REPO_GIT: string
+let REPO_GIT_2: string
 let REPO_NOGIT: string
 let AUDIT_PATH: string
 
@@ -81,11 +82,14 @@ beforeAll(() => {
   TMP = mkdtempSync(join(tmpdir(), 'remo-pm-'))
   ROOT = join(TMP, 'gh')
   REPO_GIT = join(ROOT, 'repo-with-git')
+  REPO_GIT_2 = join(ROOT, 'repo-with-git-2')
   REPO_NOGIT = join(ROOT, 'repo-no-git')
   AUDIT_PATH = join(TMP, 'audit.jsonl')
   mkdirSync(REPO_GIT, { recursive: true })
+  mkdirSync(REPO_GIT_2, { recursive: true })
   mkdirSync(REPO_NOGIT, { recursive: true })
   mkdirSync(join(REPO_GIT, '.git'), { recursive: true })
+  mkdirSync(join(REPO_GIT_2, '.git'), { recursive: true })
 })
 
 afterAll(() => {
@@ -149,11 +153,12 @@ describe('ProcessManager security gates', () => {
 
   test('concurrency_cap: second start refused while first is active', async () => {
     const { pm } = makePM(makeCfg({ maxConcurrent: 1 }))
-    const r1 = await pm.start(spec({ runId: 'a' }))
+    const r1 = await pm.start(spec({ runId: 'a', repoPath: REPO_GIT }))
     expect(r1).toBeNull()
     expect(bridges.length).toBe(1)
     // First run is in 'starting' state (no onSpawned yet) — still occupies a slot.
-    const r2 = await pm.start(spec({ runId: 'b' }))
+    // Second start is for a DIFFERENT repo so it is not deduped — it must hit the cap.
+    const r2 = await pm.start(spec({ runId: 'b', repoPath: REPO_GIT_2 }))
     expect(r2?.reason).toBe('concurrency_cap')
     expect(bridges.length).toBe(1) // no second bridge constructed
   })
@@ -176,7 +181,7 @@ describe('ProcessManager security gates', () => {
   test('audit log appends one JSONL entry per decision (allow + reject)', async () => {
     const { pm } = makePM(makeCfg({ maxConcurrent: 1 }))
     await pm.start(spec({ runId: 'a', repoPath: REPO_GIT }))      // allowed
-    await pm.start(spec({ runId: 'b', repoPath: REPO_GIT }))      // concurrency_cap
+    await pm.start(spec({ runId: 'b', repoPath: REPO_GIT_2 }))    // concurrency_cap (distinct repo, at budget)
     await pm.start(spec({ runId: 'c', repoPath: TMP }))           // sandbox escape
     const lines = readFileSync(AUDIT_PATH, 'utf-8').trim().split('\n')
     expect(lines.length).toBe(3)

@@ -178,7 +178,10 @@ describe('ProcessManager.activeSlotCount — crashed excluded', () => {
     expect(r2).toBeNull()
     bridges[0].cb.onSpawned!({ pid: 1 })
     bridges[1].cb.onSpawned!({ pid: 2 })
-    const r3 = await pm.start(spec({ runId: 'r3', repoPath: REPO_GIT }))
+    // Third start is a DISTINCT repo (not a dedup) so it tests the cap at budget.
+    const REPO_C = join(ROOT, 'repo-c')
+    if (!existsSync(REPO_C)) mkdirSync(join(REPO_C, '.git'), { recursive: true })
+    const r3 = await pm.start(spec({ runId: 'r3', repoPath: REPO_C }))
     expect(r3?.reason).toBe('concurrency_cap')
   })
 

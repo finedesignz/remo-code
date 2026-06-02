@@ -153,7 +153,16 @@ export class ProcessManager {
     const now = Date.now()
     for (const [runId, r] of this.runs) {
       if (r.state !== 'starting' && r.state !== 'running') continue
-      const alive = typeof r.bridge?.isAlive === 'function' ? r.bridge.isAlive() : r.bridge != null
+      const bridgeAlive = typeof r.bridge?.isAlive === 'function' ? r.bridge.isAlive() : r.bridge != null
+      // Leak fix B (2026-06-01): the real SessionBridge.isAlive() returns true
+      // whenever its hub WS is OPEN — even if the `claude` child NEVER spawned
+      // (pid stays null). A bridge that authenticated but never spawned a runner
+      // pins its slot forever; isAlive() alone never frees it (live evidence:
+      // 8 runners state:"running"/"starting" with pid:null). A run that has not
+      // reported a pid is NOT genuinely occupying a process slot — let it be
+      // reclaimed once past the grace window even when the bridge WS is open.
+      const hasLiveChild = r.pid != null
+      const alive = bridgeAlive && hasLiveChild
       if (alive) continue
       const lastSeen = Date.parse(
         (r as any).lastActivityAt ?? (r as any).startedAt ?? '',
@@ -180,6 +189,22 @@ export class ProcessManager {
       if (r.state === 'crashed' && r.spec.repoPath === repoPath) return true
     }
     return false
+  }
+
+  /** True if an ACTIVE ('starting'/'running') entry already targets this
+   *  repoPath. Primary leak fix (2026-06-01): the scheduler/continue-dev
+   *  rotation re-fires `session.start` for an already-active project every
+   *  ~15-30 min with a FRESH run_id. Keyed only on run_id, each repeat minted a
+   *  SECOND counted runner for the same project_dir (live evidence: kh-hub x2,
+   *  ottolax x2 ...), pinning the cap. A repeated start for an already-active
+   *  project is a duplicate — reuse the live runner, don't mint another. */
+  private activeRunIdForRepo(repoPath: string): string | null {
+    for (const r of this.runs.values()) {
+      if ((r.state === 'starting' || r.state === 'running') && r.spec.repoPath === repoPath) {
+        return r.spec.runId
+      }
+    }
+    return null
   }
 
   private writeAudit(spec: RunSpec, allowed: boolean, reason?: string): void {
@@ -335,7 +360,21 @@ export class ProcessManager {
       return { reason: 'duplicate_run', detail: { repo_path: spec.repoPath, pending_restart: true } }
     }
 
+    // Reconcile stranded slots BEFORE the duplicate-by-repo check so a leaked
+    // entry (bridge gone / never spawned) is evicted and does not falsely
+    // dedupe a legitimate fresh start for that repo.
     const slots = this.activeSlotCount()
+
+    // Primary leak fix: a repeated start for an already-active project (fresh
+    // run_id, same project_dir) is a duplicate — reject instead of minting a
+    // second counted runner. The live runner already serves that project.
+    const activeForRepo = this.activeRunIdForRepo(spec.repoPath)
+    if (activeForRepo && activeForRepo !== spec.runId) {
+      this.cb.onLog('warn', `Refusing duplicate start for already-active repo: ${spec.repoPath} (active run ${activeForRepo})`, spec.runId)
+      this.writeAudit(spec, false, 'duplicate_run')
+      return { reason: 'duplicate_run', detail: { repo_path: spec.repoPath, active_run_id: activeForRepo } }
+    }
+
     if (slots >= this.cfg.maxConcurrent) {
       this.cb.onLog('warn', `[security] concurrency_cap: ${slots}/${this.cfg.maxConcurrent} slots in use`, spec.runId)
       this.cb.onStateChange('stopped', {
