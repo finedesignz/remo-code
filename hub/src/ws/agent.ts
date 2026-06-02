@@ -1126,6 +1126,28 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     return
   }
 
+  // Phase 08 §6 — create-local-repo-and-push progress/failure from supervisor.
+  // Map supervisor stages onto the hub job model + broadcast to web clients.
+  if (msg.type === 'repo_create_progress') {
+    try {
+      const { applySupervisorProgress } = await import('../lib/github-repo-job')
+      applySupervisorProgress(msg.job_id, msg.stage)
+    } catch (err: any) {
+      console.error('[supervisor] repo_create_progress handler failed', err?.message)
+    }
+    return
+  }
+  if (msg.type === 'repo_create_failed') {
+    try {
+      const { getJob, failJob } = await import('../lib/github-repo-job')
+      const job = getJob(msg.job_id)
+      if (job) failJob(msg.job_id, job.stage, msg.error || `failed at ${msg.stage}`)
+    } catch (err: any) {
+      console.error('[supervisor] repo_create_failed handler failed', err?.message)
+    }
+    return
+  }
+
   // W2/T10 — scheduled-run lifecycle from supervisor.
   if (msg.type === 'run_started' || msg.type === 'run_output' || msg.type === 'run_finished') {
     try {

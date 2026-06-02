@@ -5,6 +5,7 @@ import {
   SupervisorCommandsSync, HostResourcesMessage,
   SupervisorRepoInventory, SetRootsAck,
   SupervisorSessionInventory,
+  RepoCreateProgress, RepoCreateFailed,
 } from './supervisor-protocol'
 
 // -- Agent -> Hub (inbound messages from the local streaming agent) --
@@ -208,6 +209,8 @@ export const AgentInbound = z.discriminatedUnion('type', [
   SupervisorRepoInventory,
   SetRootsAck,
   SupervisorSessionInventory,
+  RepoCreateProgress,
+  RepoCreateFailed,
 ])
 
 export type AgentInboundType = z.infer<typeof AgentInbound>
