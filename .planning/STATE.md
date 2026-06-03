@@ -1,5 +1,11 @@
-<!-- updated: 2026-05-29 -->
+<!-- updated: 2026-06-02 -->
 # Project State — remo-code
+
+> **v1.0 reconciled + archived 2026-06-02.** All 14 v1.0 phases shipped to prod via the
+> direct-PR workflow (not the GSD lifecycle); GSD state reconciled (per-phase SUMMARY/PLAN
+> stubs + ROADMAP statuses → Complete) and the milestone archived to
+> `.planning/milestones/v1.0-{MILESTONE,ROADMAP,REQUIREMENTS}.md`.
+> `gsd-sdk query init.milestone-op` → `completed_phases: 14/14`, `all_phases_complete: true`.
 
 > **Reconstructed 2026-05-29.** The prior STATE.md was stale at Phase 03 (2026-05-24).
 > Repo is ~10 phases ahead. Source of truth for live detail is `docs/*.md` + git log.
