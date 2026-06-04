@@ -34,11 +34,16 @@
 - **Auth:** `COOLIFY_TOKEN` + `COOLIFY_BASE_URL`
 - **App UUID:** Per-project (stored on `error_projects.coolify_app_uuid`)
 
-### Anthropic (revanote LLM escalator only)
+### Anthropic — none (subscription-only, NO API key)
 
-- **Direct API calls:** `hub/src/revanote/llm-escalator.ts` — `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL`
-- **Cache TTL:** `LLM_ESCALATOR_CACHE_TTL_MS`
-- **Note:** Claude Code CLI subprocess (the main "AI" path) does NOT use this — supervisor spawns `claude` locally and that CLI handles its own OAuth via `~/.claude/.credentials.json` on the dev machine. No Anthropic key on hub for chat.
+- **No direct Anthropic API calls anywhere.** The revanote LLM risk-escalator (the only
+  code that ever held an `ANTHROPIC_API_KEY`) was removed 2026-06-03; Revanote risk
+  classification is now heuristic-only. The app never holds an Anthropic API key.
+- Claude Code CLI subprocess (the main "AI" path): supervisor spawns `claude` locally and
+  that CLI handles its own OAuth via `~/.claude/.credentials.json` on the dev machine —
+  subscription billing, no key on the hub. Spawn paths actively scrub `ANTHROPIC_API_KEY`
+  (`env-sanitize.ts` denylist, `claude-runner.ts`, `pty_host.rs` `env_remove`), enforced by
+  canary tests.
 
 ### Codex CLI (OpenAI)
 
