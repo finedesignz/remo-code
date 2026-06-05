@@ -75,6 +75,20 @@ QUEUED (bounded FIFO); the lock releases only on the observed `turn_complete`
 RESPONSE is exempt — it completes the in-flight turn rather than starting a new
 one, so it never deadlocks.
 
+**Lock lifecycle / self-heal (fixes wedged typing).** In prod the transcript
+`turn_complete` signal is OFF (`REMO_TELEGRAM_TRANSCRIPT_TAIL=0`, #247) and PTY
+sessions emit raw bytes (no stream-json `turn_complete`), so the TTL is the only
+turn-end signal. To keep interactive typing from wedging:
+- **Disconnect release** — when a `/ws/client` connection closes, the hub calls
+  `releaseByWriter(writerId)` (`hub/src/ws/client.ts` close handler). Each
+  connection has a unique `writerId`, so a closed/dead connection that held the
+  lock (or was queued) can never wedge a different connection's `term.input`:
+  its hold is released (promoting the next queued writer) and its queued waiters
+  resolve `false` (their `acquire` awaits unblock).
+- **Interactive TTL** — the safety backstop is **60s** (was 10min). An idempotent
+  re-acquire by the current holder (each streamed keystroke) RE-ARMS the TTL, so
+  active typing never trips it; an abandoned/stale holder frees within 60s.
+
 ## Human-only guard (Phase 20, ToS)
 
 Telegram inbound dispatch carries a `source` tag and passes the Phase-16

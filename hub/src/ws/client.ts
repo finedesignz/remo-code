@@ -7,7 +7,7 @@ import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
 import { insertMessage, listSessions, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
-import { acquire } from '../telegram/turn-lock.ts'
+import { acquire, releaseByWriter } from '../telegram/turn-lock.ts'
 import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
@@ -604,6 +604,10 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
 export function handleClientClose(ws: ServerWebSocket<ClientWsData>) {
   log.info('client.closed', { user_id: ws.data.userId })
   if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
+  // PTY write-arbitration: release any turn lock this connection held (and drop its
+  // queued waiters) so a closed connection can never wedge another connection's
+  // term.input. writerId is unique per connection (createClientWsData).
+  if (ws.data.writerId) releaseByWriter(ws.data.writerId)
   if (ws.data.clientEntry) {
     // Bug B — capture the sessions this connection was subscribed to BEFORE
     // unregistering, then recompute counts for each so idle-teardown timers

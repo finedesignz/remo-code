@@ -29,7 +29,13 @@
  */
 
 const DEFAULT_QUEUE_BOUND = 16
-const DEFAULT_TTL_MS = 10 * 60 * 1000 // 10 min safety backstop
+// Interactive backstop. With re-arm-on-keystroke (see acquire's idempotent-holder
+// path), an actively-typing holder keeps the lock indefinitely; an IDLE/abandoned
+// holder (e.g. a closed connection that somehow missed releaseByWriter, or a stale
+// Telegram turn) frees within this window so a different writer's input can never be
+// wedged for long. 60s is comfortably longer than any keystroke gap during active
+// typing yet short enough for interactive self-heal (was 10min — far too long).
+const DEFAULT_TTL_MS = 60 * 1000 // 60s interactive safety backstop
 
 export type WriterId = string // a client connection id, or 'telegram'
 
@@ -92,7 +98,15 @@ export function acquire(sessionId: string, writerId: WriterId): Promise<boolean>
     armTtl(sessionId, fresh)
     return Promise.resolve(true)
   }
-  if (st.holder === writerId) return Promise.resolve(true)
+  if (st.holder === writerId) {
+    // Idempotent re-acquire by the current holder (same writer streaming more
+    // keystrokes within its turn) — re-arm the TTL so the backstop measures IDLE
+    // time, not time-since-first-keystroke. An actively-typing holder thus never
+    // hits the TTL; an abandoned holder frees after `ttlMs` of silence.
+    st.acquiredAtMs = Date.now()
+    armTtl(sessionId, st)
+    return Promise.resolve(true)
+  }
   // Held by another writer → queue (bounded).
   return new Promise<boolean>((resolve) => {
     const waiter: Waiter = { writerId, resolve, enqueuedAtMs: Date.now() }
@@ -124,6 +138,36 @@ export function release(sessionId: string): void {
     next.resolve(true)
   } else {
     locks.delete(sessionId)
+  }
+}
+
+/**
+ * Release any turn ownership held by `writerId` across ALL sessions. Called when a
+ * writer goes away (e.g. a `/ws/client` connection closes) so a dead writer can
+ * never wedge another connection's input (the critical fix for "terminal renders
+ * but I can't type"). For each session:
+ *   - if `writerId` is the HOLDER → `release(sessionId)` (promotes the next queued
+ *     waiter, exactly as a normal release would);
+ *   - remove any QUEUED waiters owned by `writerId`, resolving them `false` so their
+ *     awaiting `acquire(...)` calls don't hang forever.
+ * Idempotent + safe when the writer holds/queues nothing.
+ */
+export function releaseByWriter(writerId: WriterId): void {
+  // Snapshot session ids — release() mutates `locks` (may delete entries).
+  for (const sessionId of Array.from(locks.keys())) {
+    const st = locks.get(sessionId)
+    if (!st) continue
+    // Drop this writer's queued waiters first (resolve false so awaiters unblock).
+    if (st.queue.length > 0) {
+      const remaining: Waiter[] = []
+      for (const w of st.queue) {
+        if (w.writerId === writerId) w.resolve(false)
+        else remaining.push(w)
+      }
+      st.queue = remaining
+    }
+    // If this writer holds the turn, release it (promotes next queued waiter).
+    if (st.holder === writerId) release(sessionId)
   }
 }
 
