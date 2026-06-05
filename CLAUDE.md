@@ -160,10 +160,19 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
 - **Optional:** `REMO_SESSION_IDLE_GRACE_SECONDS` (default 300; `0` disables idle teardown),
   `REMO_ORCHESTRATOR_AUTOLAUNCH` (`false` disables auto-launch), `TITANIUM_BYPASS` (currently
   `true` in prod — see docs/auth.md), `COOLIFY_TOKEN`, `E4A_*`.
-- **`REMO_PTY_INTERACTIVE`** (default OFF): interactive PTY runner infra landed dark behind this
-  flag. With it OFF the hub is prod-equivalent to `origin/main`. The cutover (default flip +
-  ChatSurface deletion + supervisor MSI) is gated on device attestation — see
-  [docs/cutover-gate-june15.md](docs/cutover-gate-june15.md). Do not flip on without that gate.
+- **`REMO_PTY_INTERACTIVE`** (prod: **ON** since the 2026-06-04 cutover): drives the **web**
+  default human surface — `GET /api/client-config` returns `pty_interactive`, and the SPA renders
+  `TerminalSurface` (interactive `claude`/`codex` TUI over the Rust ConPTY) instead of the
+  stream-json `ChatSurface`. The supervisor reads its OWN `REMO_PTY_INTERACTIVE` (process env) to
+  route human turns through `selectHumanPtyRunner` → `ClaudePtyBridge` (Rust `pty_host.rs`).
+  Requires supervisor ≥ v0.9.0 (the Rust-ConPTY wiring; older MSIs break on this flag). Backend
+  selection gated by `claude_interactive_confirmed` (supervisor config.json / `REMO_CLAUDE_INTERACTIVE_CONFIRMED=1`)
+  — operator-overridden to Claude-PTY now; **re-verify June-15 billing** (`docs/cutover-gate-june15.md`).
+- **`REMO_TELEGRAM_TRANSCRIPT_TAIL`** (default OFF — **keep OFF in Coolify**): independently gates
+  the Telegram outbound transcript-tail source. DECOUPLED from `REMO_PTY_INTERACTIVE` (#247) because
+  transcript-tail reads on-disk CLI transcripts that don't exist in the hub container; with it OFF,
+  Telegram outbound uses the host-agnostic stream-json event-bus. ChatSurface is **kept** as fallback
+  (deletion still gated on the device attestation in [docs/cutover-gate-june15.md](docs/cutover-gate-june15.md)).
 
 ## Docs map — subsystems & phases
 
