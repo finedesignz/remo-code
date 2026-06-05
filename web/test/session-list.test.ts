@@ -10,6 +10,7 @@ import {
   sortConnectedFirst,
   repoSessionList,
   isSessionOnline,
+  isWorktreeOrNonCanonicalRepo,
 } from '../src/lib/session-list'
 import type { CodeSession } from '../src/hooks/useSessions'
 
@@ -84,5 +85,32 @@ describe('repoSessionList', () => {
     expect(out.map((s) => s.id)).not.toContain('r1wt') // worktree collapsed away
     expect(out[1].id).toBe('r1')                       // online before offline
     expect(out[out.length - 1].id).toBe('r2')          // offline last
+  })
+})
+
+// Connections repo-list worktree filter (settings repo table). The hub enriches
+// the legacy scan shape with is_worktree / is_canonical from repo_inventory; the
+// web hides worktrees + non-canonical sibling clones, keeps the canonical clone.
+describe('isWorktreeOrNonCanonicalRepo (Connections filter)', () => {
+  test('hides a git worktree entry', () => {
+    expect(isWorktreeOrNonCanonicalRepo({ is_worktree: true, is_canonical: false })).toBe(true)
+  })
+  test('hides a non-canonical branch-checkout sibling clone', () => {
+    expect(isWorktreeOrNonCanonicalRepo({ is_worktree: false, is_canonical: false })).toBe(true)
+  })
+  test('keeps the canonical clone', () => {
+    expect(isWorktreeOrNonCanonicalRepo({ is_worktree: false, is_canonical: true })).toBe(false)
+  })
+  test('keeps legacy/unenriched entries (flags absent → shown)', () => {
+    expect(isWorktreeOrNonCanonicalRepo({})).toBe(false)
+  })
+  test('filters a mixed list down to the canonical only', () => {
+    const repos = [
+      { path: 'C:/gh/app', is_worktree: false, is_canonical: true },        // canonical → keep
+      { path: 'C:/gh/app-feat-x', is_worktree: true, is_canonical: false }, // worktree → hide
+      { path: 'C:/gh/app-fix-y', is_worktree: false, is_canonical: false }, // sibling clone → hide
+    ]
+    const visible = repos.filter((r) => !isWorktreeOrNonCanonicalRepo(r))
+    expect(visible.map((r) => r.path)).toEqual(['C:/gh/app'])
   })
 })

@@ -4,6 +4,7 @@ import { useSupervisors } from '../hooks/useSupervisors'
 import { useWebSocketContext } from '../hooks/useWebSocket'
 import { Modal, Button } from './ui'
 import { SessionActionButton } from './SessionActionButton'
+import { isWorktreeOrNonCanonicalRepo } from '../lib/session-list'
 
 type OrchestratorSnapshot = {
   enabled: boolean
@@ -389,7 +390,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
       // Feature 1 — hide git worktrees / branch-checkout siblings; only the
       // canonical repo appears in the list. Fields are optional on the legacy
       // scan shape, so absent → treat as a canonical repo (show it).
-      if (l.is_worktree === true || l.is_canonical === false) continue
+      if (isWorktreeOrNonCanonicalRepo(l)) continue
       const matchedGh = ghDeduped.find((g) => l.remote?.includes(g.full_name))
       // installation filter: if user picked one and local has matched gh from another install, hide
       if (selectedInstallationId !== 'all' && matchedGh && matchedGh.installation_id !== selectedInstallationId) continue
