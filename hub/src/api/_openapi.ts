@@ -15,6 +15,7 @@ import { authMiddleware } from "../auth/middleware.ts";
 import { getTodayTokenCostUsd } from "../db/token-usage-dal.ts";
 import { sql } from "../db/postgres.ts";
 import { getUserLicenseFields, getPendingPrompts, dismissLocalSession } from "../db/dal.ts";
+import { TASK_TEMPLATES } from "../scheduler/task-templates.ts";
 
 export const openapi = new OpenAPIHono();
 
@@ -408,6 +409,63 @@ openapi.openapi(dismissLocalRoute, async (c) => {
     },
   });
 }
+// ── Scheduled tasks: GSD template catalog (read-only) ───────────────────────
+// Documented twin of the plain-Hono `GET /api/tasks/templates` in `./tasks.ts`.
+// The plain route serves traffic; this declaration only contributes to the
+// spec. The static catalog lives in `hub/src/scheduler/task-templates.ts`.
+
+const TaskTemplateSchema = z.object({
+  id: z.enum(["gsd_run", "gsd_audit", "gsd_review", "gsd_plan"]),
+  label: z.string(),
+  description: z.string(),
+  promptTemplate: z.string(),
+  taskType: z.literal("dev"),
+  defaultCron: z.string(),
+  cadenceLabel: z.string(),
+  requiredInputs: z.array(z.enum(["target_session", "cadence"])),
+  guardrails: z.object({
+    planFirst: z.boolean(),
+    autoMerge: z.boolean(),
+    inheritCostCap: z.literal(true),
+  }),
+  defaultPostRunActions: z.array(
+    z.object({
+      type: z.enum(["notify_telegram", "github_issue"]),
+      on: z.enum(["success", "failure", "always"]),
+      config: z.record(z.any()),
+    }),
+  ),
+  category: z.literal("gsd"),
+});
+
+const taskTemplatesRoute = createRoute({
+  method: "get",
+  path: "/api/tasks/templates",
+  tags: ["Tasks"],
+  summary: "Predefined GSD scheduled-task templates",
+  description:
+    "Returns the static, read-only catalog of GSD task templates (Run dev, Audit, Review PRs, Plan). A template pre-fills a normal scheduled-task CREATE — it is sugar over the existing payload (no new table). Each carries an injected GSD slash prompt, default cadence, guardrails (non-bypassable cost cap, plan-first), and default post-run actions.",
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: {
+      description: "GSD template catalog",
+      content: {
+        "application/json": {
+          schema: z.object({ templates: z.array(TaskTemplateSchema) }),
+        },
+      },
+    },
+    401: {
+      description: "Missing or invalid session",
+      content: { "application/json": { schema: z.object({ error: z.string() }) } },
+    },
+  },
+});
+
+openapi.use("/api/tasks/*", authMiddleware);
+openapi.openapi(taskTemplatesRoute, (c) => {
+  return c.json({ templates: TASK_TEMPLATES }, 200);
+});
 
 // OpenAPI security scheme registration.
 openapi.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {

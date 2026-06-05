@@ -6,6 +6,7 @@ import { AuthCallback } from './pages/AuthCallback'
 import { SetupForm } from './components/SetupForm'
 import { HomePage } from './pages/HomePage'
 import { TasksPage } from './pages/TasksPage'
+import { ActivityPage } from './pages/ActivityPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { ChatSurfaceShowcase } from './components/ChatSurfaceShowcase'
 import { MobileAccordionShowcase } from './components/MobileAccordionShowcase'
@@ -19,6 +20,7 @@ import { onAuthEvent } from './lib/api'
 type Route =
   | 'home'
   | 'tasks'
+  | 'activity'
   | 'settings'
   | 'privacy'
   | 'terms'
@@ -51,14 +53,17 @@ if (typeof window !== 'undefined' && window.location.pathname !== '/') {
  *
  * Returns the canonical hash AFTER redirect resolution.
  */
-function resolveHashWithRedirects(): string {
-  const hash = window.location.hash
+// Pure hash→canonical-hash mapping (no DOM). Exported for unit tests.
+export function canonicalizeHash(hash: string): string {
   let canonical = hash || '#/'
 
-  // #/schedules → #/tasks?tab=schedule
-  if (hash.startsWith('#/schedules')) canonical = '#/tasks?tab=schedule'
-  // #/error-capture → #/tasks?tab=activity
-  else if (hash.startsWith('#/error-capture')) canonical = '#/tasks?tab=activity'
+  // Tasks collapsed to a single page; Activity is parked at #/activity.
+  // #/tasks?tab=activity → #/activity (back-compat for old deep links/bookmarks)
+  if (/^#\/tasks(\?|&).*\btab=activity\b/.test(hash)) canonical = '#/activity'
+  // #/schedules → #/tasks (sub-tabs gone)
+  else if (hash.startsWith('#/schedules')) canonical = '#/tasks'
+  // #/error-capture → #/activity (the run-feed surface)
+  else if (hash.startsWith('#/error-capture')) canonical = '#/activity'
   // #/revanote → #/settings?tab=connections
   else if (hash.startsWith('#/revanote')) canonical = '#/settings?tab=connections'
   // Legacy #/supervisor → #/settings?tab=connections (was supervisor tab)
@@ -73,6 +78,12 @@ function resolveHashWithRedirects(): string {
       canonical = q ? `#/?tab=grid&${q}` : '#/?tab=grid'
     }
   }
+  return canonical
+}
+
+function resolveHashWithRedirects(): string {
+  const hash = window.location.hash
+  const canonical = canonicalizeHash(hash)
 
   if (canonical !== hash) {
     window.history.replaceState(null, '', window.location.pathname + window.location.search + canonical)
@@ -89,6 +100,7 @@ function getRoute(): Route {
   if (hash.startsWith('#/auth/callback')) return 'auth-callback'
   if (hash.startsWith('#/login')) return 'login'
   if (hash.startsWith('#/tasks')) return 'tasks'
+  if (hash.startsWith('#/activity')) return 'activity'
   if (hash.startsWith('#/settings')) return 'settings'
   if (hash.startsWith('#/privacy')) return 'privacy'
   if (hash.startsWith('#/terms')) return 'terms'
@@ -236,6 +248,9 @@ export default function App() {
       )}
       {route === 'tasks' && (
         <TasksPage token={token} user={user} signOut={signOut} onNavigate={navigate} />
+      )}
+      {route === 'activity' && (
+        <ActivityPage token={token} user={user} signOut={signOut} onNavigate={navigate} />
       )}
       {route === 'settings' && (
         <SettingsPage

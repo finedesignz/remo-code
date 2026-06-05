@@ -1357,5 +1357,144 @@ To perform this operation, you must be authenticated by means of one of the foll
 bearerAuth
 </aside>
 
+<h1 id="remo-code-hub-tasks">Tasks</h1>
+
+## Predefined GSD scheduled-task templates
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/tasks/templates \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/tasks/templates',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/tasks/templates`
+
+Returns the static, read-only catalog of GSD task templates (Run dev, Audit, Review PRs, Plan). A template pre-fills a normal scheduled-task CREATE — it is sugar over the existing payload (no new table). Each carries an injected GSD slash prompt, default cadence, guardrails (non-bypassable cost cap, plan-first), and default post-run actions.
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "templates": [
+    {
+      "id": "gsd_run",
+      "label": "string",
+      "description": "string",
+      "promptTemplate": "string",
+      "taskType": "dev",
+      "defaultCron": "string",
+      "cadenceLabel": "string",
+      "requiredInputs": [
+        "target_session"
+      ],
+      "guardrails": {
+        "planFirst": true,
+        "autoMerge": true,
+        "inheritCostCap": true
+      },
+      "defaultPostRunActions": [
+        {
+          "type": "notify_telegram",
+          "on": "success",
+          "config": {
+            "property1": null,
+            "property2": null
+          }
+        }
+      ],
+      "category": "gsd"
+    }
+  ]
+}
+```
+
+<h3 id="predefined-gsd-scheduled-task-templates-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|GSD template catalog|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid session|Inline|
+
+<h3 id="predefined-gsd-scheduled-task-templates-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» templates|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» label|string|true|none|none|
+|»» description|string|true|none|none|
+|»» promptTemplate|string|true|none|none|
+|»» taskType|string|true|none|none|
+|»» defaultCron|string|true|none|none|
+|»» cadenceLabel|string|true|none|none|
+|»» requiredInputs|[string]|true|none|none|
+|»» guardrails|object|true|none|none|
+|»»» planFirst|boolean|true|none|none|
+|»»» autoMerge|boolean|true|none|none|
+|»»» inheritCostCap|boolean|true|none|none|
+|»» defaultPostRunActions|[object]|true|none|none|
+|»»» type|string|true|none|none|
+|»»» on|string|true|none|none|
+|»»» config|object|true|none|none|
+|»»»» **additionalProperties**|any|false|none|none|
+|»» category|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|id|gsd_run|
+|id|gsd_audit|
+|id|gsd_review|
+|id|gsd_plan|
+|taskType|dev|
+|inheritCostCap|true|
+|type|notify_telegram|
+|type|github_issue|
+|on|success|
+|on|failure|
+|on|always|
+|category|gsd|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
 # Schemas
 

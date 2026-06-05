@@ -8,11 +8,19 @@ import { ScheduleRulesBuilder } from './ScheduleRulesBuilder'
 import { type ScheduleRule, ruleToCron, defaultRule, validateRule } from '../lib/schedule-rules'
 import { computeTaskAutoName } from '../lib/task-name'
 import { TASK_TEMPLATES, isReplaceableNotes } from '../lib/task-templates'
+import { type GsdTemplate, templateScheduleRules } from '../lib/gsd-templates'
 
 interface Props {
   token: string
   existing: ScheduledTask | null
   allSchedules: ScheduledTask[]
+  /**
+   * Optional GSD template to pre-fill a NEW task from (sugar over the normal
+   * create). Ignored when `existing` is set (editing). Sets the prompt,
+   * task_type, cadence, and default post-run actions; round-trips
+   * `payload.template_id` + `payload.args.gsd` on save.
+   */
+  template?: GsdTemplate | null
   onClose: () => void
   onSave: (data: ScheduleCreateInput) => Promise<void>
 }
@@ -49,7 +57,9 @@ const COMMON_TZS = [
   'Australia/Sydney',
 ]
 
-export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave }: Props) {
+export function ScheduleEditor({ token, existing, allSchedules, template, onClose, onSave }: Props) {
+  // A template prefill only applies to NEW tasks (never override an edit).
+  const tpl = existing ? null : template ?? null
   // Basic fields
   const [nameSuffix, setNameSuffix] = useState<string>(
     existing?.name_suffix ?? existing?.name ?? '',
@@ -57,12 +67,12 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
   const [suffixHydrated, setSuffixHydrated] = useState<boolean>(
     !existing || existing?.name_suffix != null,
   )
-  const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? 'dev')
+  const [taskType, setTaskType] = useState<TaskType>(existing?.task_type ?? tpl?.taskType ?? 'dev')
   // Prompt lives in `payload.prompt` (canonical) but legacy rows persisted it
   // only in the top-level `prompt` column — fall back to that so older tasks
   // still display their custom prompt on reopen.
   const [prompt, setPrompt] = useState<string>(
-    existing?.payload?.prompt ?? (existing as any)?.prompt ?? '',
+    existing?.payload?.prompt ?? (existing as any)?.prompt ?? tpl?.promptTemplate ?? '',
   )
   const [notes, setNotes] = useState<string>(() => {
     const existingNotes = existing?.payload?.notes ?? ''
@@ -79,6 +89,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
   const [scheduleRules, setScheduleRules] = useState<ScheduleRule[]>(() => {
     const r = existing?.schedule_rules
     if (Array.isArray(r) && r.length > 0) return r as ScheduleRule[]
+    if (tpl) return templateScheduleRules(tpl)
     return [defaultRule()]
   })
 
@@ -95,7 +106,9 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
   const [maxConcurrent, setMaxConcurrent] = useState(existing?.max_concurrent ?? 1)
   const [enabled, setEnabled] = useState(existing?.enabled ?? true)
 
-  const [postRunActions, setPostRunActions] = useState<PostRunAction[]>(existing?.post_run_actions ?? [])
+  const [postRunActions, setPostRunActions] = useState<PostRunAction[]>(
+    existing?.post_run_actions ?? (tpl?.defaultPostRunActions as PostRunAction[] | undefined) ?? [],
+  )
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -144,6 +157,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     if (taskType === 'security' || taskType === 'log_check') {
       if (notes) payload.notes = notes
     }
+    if (tpl) payload.template_id = tpl.id
     return computeTaskAutoName(
       {
         task_type: taskType,
@@ -154,7 +168,7 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
       },
       { sessions, supervisors },
     )
-  }, [taskType, targetKind, targetId, prompt, notes, cronExpr, sessions, supervisors])
+  }, [taskType, targetKind, targetId, prompt, notes, cronExpr, sessions, supervisors, tpl])
 
   useEffect(() => {
     if (suffixHydrated) return
@@ -204,6 +218,16 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     if (taskType === 'security' || taskType === 'log_check') {
       if (notes.trim()) payload.notes = notes.trim()
     }
+    // GSD template provenance — additive, fully back-compat (the hub payload is
+    // loose JSONB). `args.gsd` carries operator intent the dev controller reads
+    // without re-parsing the prompt. The cost cap is NOT touched here.
+    if (tpl) {
+      payload.template_id = tpl.id
+      payload.args = {
+        ...(payload.args ?? {}),
+        gsd: { planFirst: tpl.guardrails.planFirst, autoMerge: tpl.guardrails.autoMerge },
+      }
+    }
 
     const input: ScheduleCreateInput = {
       name_suffix: nameSuffix.trim(),
@@ -246,8 +270,13 @@ export function ScheduleEditor({ token, existing, allSchedules, onClose, onSave 
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
       <div className="bg-[var(--bg-secondary)] rounded-xl ring-1 ring-white/5 max-w-3xl w-full max-h-[92vh] overflow-y-auto">
         <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-3.5 bg-[var(--bg-secondary)]/95 backdrop-blur-sm">
-          <h2 className="text-base font-semibold text-[var(--text-primary)]">
+          <h2 className="text-base font-semibold text-[var(--text-primary)] flex items-center gap-2">
             {existing ? 'Edit schedule' : 'New schedule'}
+            {tpl && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-600/20 text-blue-300 ring-1 ring-blue-500/30">
+                GSD: {tpl.label}
+              </span>
+            )}
           </h2>
           <button onClick={onClose} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-2xl leading-none">&times;</button>
         </div>
