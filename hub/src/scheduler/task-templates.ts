@@ -141,4 +141,38 @@ export function getTaskTemplate(id: string): TaskTemplate | undefined {
   return BY_ID.get(id as TaskTemplateId)
 }
 
+/**
+ * Compose the effective prompt a template instantiates into `payload.prompt`.
+ *
+ * WHY: a `task_type: 'dev'` task WITH a custom `payload.prompt` is sent to the
+ * agent runner VERBATIM and BYPASSES the dev controller (see
+ * `hub/src/scheduler/senders/agent.ts::buildContent`), so the controller's
+ * dev_ship / auto-merge gating never runs for these template tasks. That's the
+ * correct (no-auto-merge) behavior — but it means the template `guardrails` are
+ * otherwise nominal. The ONLY channel that reaches the in-session GSD run is the
+ * prompt text itself, so we ride the guardrail intent on it.
+ *
+ * The literal slash command stays the FIRST token (so the in-session GSD skill
+ * still triggers); guardrail directives follow on their own lines, terse.
+ */
+export function buildTemplatePrompt(template: TaskTemplate): string {
+  const lines: string[] = [template.promptTemplate]
+  const g = template.guardrails
+  if (template.id === 'gsd_plan') {
+    lines.push('Write the plan into .planning/ only — do NOT execute code.')
+  } else if (template.id === 'gsd_review') {
+    lines.push('Review and comment only — read-only, no code changes, no merge.')
+  } else {
+    if (g.planFirst) {
+      lines.push("Plan first — do not execute scope you haven't planned.")
+    }
+    if (!g.autoMerge) {
+      lines.push(
+        'When work is ready, open a PR for review and STOP — do NOT merge, tag, or deploy.',
+      )
+    }
+  }
+  return lines.join('\n')
+}
+
 export const TASK_TEMPLATE_IDS: TaskTemplateId[] = TASK_TEMPLATES.map((t) => t.id)

@@ -19,6 +19,7 @@ import {
   TASK_TEMPLATES,
   TASK_TEMPLATE_IDS,
   getTaskTemplate,
+  buildTemplatePrompt,
   type TaskTemplate,
 } from '../src/scheduler/task-templates.ts'
 import { validate as validateCron } from '../src/scheduler/cron.ts'
@@ -49,6 +50,37 @@ describe('task-templates/catalog', () => {
     for (const t of TASK_TEMPLATES) {
       expect(validateCron(t.defaultCron)).toEqual({ ok: true })
     }
+  })
+
+  test('buildTemplatePrompt: slash command FIRST, guardrail directives ride the prompt', () => {
+    for (const t of TASK_TEMPLATES) {
+      const p = buildTemplatePrompt(t)
+      // The literal slash command must be the first token so the in-session
+      // GSD skill still triggers.
+      expect(p.split('\n')[0]).toBe(t.promptTemplate)
+      expect(p.startsWith(t.promptTemplate)).toBe(true)
+      // A directive must follow on its own line(s).
+      expect(p.split('\n').length).toBeGreaterThan(1)
+    }
+  })
+
+  test('buildTemplatePrompt: per-template guardrail directives', () => {
+    const run = buildTemplatePrompt(getTaskTemplate('gsd_run') as TaskTemplate)
+    expect(run).toContain('Plan first')
+    // autoMerge:false → explicit no-merge directive
+    expect(run.toLowerCase()).toContain('do not merge')
+    expect(run).toContain('open a PR')
+
+    const audit = buildTemplatePrompt(getTaskTemplate('gsd_audit') as TaskTemplate)
+    expect(audit.toLowerCase()).toContain('do not merge')
+
+    const review = buildTemplatePrompt(getTaskTemplate('gsd_review') as TaskTemplate)
+    expect(review.toLowerCase()).toContain('read-only')
+    expect(review.toLowerCase()).toContain('no code changes')
+
+    const plan = buildTemplatePrompt(getTaskTemplate('gsd_plan') as TaskTemplate)
+    expect(plan).toContain('.planning/')
+    expect(plan.toLowerCase()).toContain('do not execute code')
   })
 
   test('GSD slash prompts use a DASH, never a colon', () => {
