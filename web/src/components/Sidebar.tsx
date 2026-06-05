@@ -4,7 +4,10 @@ import type { AuthUser } from '../lib/auth.ts'
 import type { CodeSession } from '../hooks/useSessions'
 import { githubOwnerRepo } from '../hooks/useSessions'
 import { sessionLabel, shortId } from './SessionDropdown'
-import { repoSessionList } from '../lib/session-list'
+import { repoSessionList, sessionRepoIdent } from '../lib/session-list'
+import { useRepoGroups } from '../hooks/useRepoGroups'
+import { partitionIntoGroups } from '../lib/group-partition'
+import { GroupSection } from './groups/GroupSection'
 import { SessionActionButton } from './SessionActionButton'
 import { SessionAvatar } from './SessionAvatar'
 import { UnreadBadge } from './UnreadBadge'
@@ -125,6 +128,16 @@ export function Sidebar({
     (s) => s.status === 'online' || s.status === 'thinking',
   )
   const connectedList = repoSessionList(onlineOnly)
+
+  // Repo grouping (Phase 3) — shares groups + collapse state with Connections.
+  const groupsApi = useRepoGroups(token ?? null)
+  // Orchestrator pinned ABOVE all groups (unchanged); the rest partition.
+  const orchSession = connectedList.find((s) => s.is_orchestrator) ?? null
+  const groupableSessions = connectedList.filter((s) => !s.is_orchestrator)
+  const sessionSections =
+    groupsApi.groupView && groupsApi.groups.length > 0
+      ? partitionIntoGroups(groupableSessions, groupsApi.groups, sessionRepoIdent)
+      : null
 
   if (collapsed) {
     return (
@@ -295,7 +308,8 @@ export function Sidebar({
 
         {/* Session list — only connected sessions */}
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-          {connectedList.map(s => {
+          {(() => {
+          const renderSessionRow = (s: CodeSession) => {
             const ownerRepo = githubOwnerRepo(s)
             const primaryLabel = ownerRepo ?? sessionLabel(s)
             const branch = branchFor(s)
@@ -433,13 +447,48 @@ export function Sidebar({
               </div>
             </div>
             )
-          })}
+          }
 
-          {connectedList.length === 0 && (
-            <p className="text-sm text-[var(--text-muted)] text-center py-8">
-              No active sessions. Connect a Claude Code instance to get started.
-            </p>
-          )}
+          if (sessionSections) {
+            return (
+              <>
+                {orchSession && renderSessionRow(orchSession)}
+                {sessionSections.map((section) => (
+                  <GroupSection
+                    key={section.id}
+                    id={section.id}
+                    name={section.name}
+                    count={section.count}
+                    collapsed={groupsApi.isCollapsed(section.id)}
+                    onToggle={groupsApi.toggleCollapsed}
+                    isUngrouped={section.isUngrouped}
+                    dense
+                  >
+                    <div className="space-y-0.5">
+                      {section.items.map((s) => renderSessionRow(s))}
+                    </div>
+                  </GroupSection>
+                ))}
+                {connectedList.length === 0 && (
+                  <p className="text-sm text-[var(--text-muted)] text-center py-8">
+                    No active sessions. Connect a Claude Code instance to get started.
+                  </p>
+                )}
+              </>
+            )
+          }
+
+          return (
+            <>
+              {connectedList.map((s) => renderSessionRow(s))}
+              {connectedList.length === 0 && (
+                <p className="text-sm text-[var(--text-muted)] text-center py-8">
+                  No active sessions. Connect a Claude Code instance to get started.
+                </p>
+              )}
+            </>
+          )
+          })()}
         </div>
 
         {toast && (

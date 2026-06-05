@@ -93,6 +93,20 @@ export function sessionDisplayLabel(s: CodeSession): string {
   return s.name
 }
 
+/**
+ * Repo ident for a session, for grouping. GitHub-keyed → `repo_key` (already
+ * "github://owner/repo"); else the canonical local path → `path://<path>`; else
+ * null (ungroupable → Ungrouped section). Mirrors web/src/lib/repo-ident.
+ */
+export function sessionRepoIdent(s: CodeSession): string | null {
+  if (s.repo_key) return s.repo_key
+  // Prefer the canonical (non-worktree) local path; fall back to project_dir.
+  const canonical = (s.local_paths ?? []).find((p) => p.canonical && !p.is_worktree)
+  const path = canonical?.local_path ?? s.project_dir
+  if (path) return `path://${path}`
+  return null
+}
+
 /** Online (connected) sessions first, then offline; stable secondary sort by label. */
 export function sortConnectedFirst(sessions: CodeSession[]): CodeSession[] {
   return [...(Array.isArray(sessions) ? sessions : [])].sort((a, b) => {
