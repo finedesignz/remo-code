@@ -16,8 +16,15 @@ import {
   listUserActivityRuns,
   listTasksGroupedByRepo,
 } from '../db/dal'
+import { TASK_TEMPLATES } from '../scheduler/task-templates.ts'
 
 export const tasks = new Hono()
+
+// Static, read-only GSD template catalog. User-scoped only for auth (the
+// catalog itself is a fixed, code-defined list — see task-templates.ts).
+tasks.get('/templates', (c) => {
+  return c.json({ templates: TASK_TEMPLATES })
+})
 
 const UpcomingQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),
