@@ -337,6 +337,178 @@
           }
         }
       }
+    },
+    "/api/tasks/templates": {
+      "get": {
+        "tags": [
+          "Tasks"
+        ],
+        "summary": "Predefined GSD scheduled-task templates",
+        "description": "Returns the static, read-only catalog of GSD task templates (Run dev, Audit, Review PRs, Plan). A template pre-fills a normal scheduled-task CREATE — it is sugar over the existing payload (no new table). Each carries an injected GSD slash prompt, default cadence, guardrails (non-bypassable cost cap, plan-first), and default post-run actions.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "GSD template catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "templates": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "enum": [
+                              "gsd_run",
+                              "gsd_audit",
+                              "gsd_review",
+                              "gsd_plan"
+                            ]
+                          },
+                          "label": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "promptTemplate": {
+                            "type": "string"
+                          },
+                          "taskType": {
+                            "type": "string",
+                            "enum": [
+                              "dev"
+                            ]
+                          },
+                          "defaultCron": {
+                            "type": "string"
+                          },
+                          "cadenceLabel": {
+                            "type": "string"
+                          },
+                          "requiredInputs": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "target_session",
+                                "cadence"
+                              ]
+                            }
+                          },
+                          "guardrails": {
+                            "type": "object",
+                            "properties": {
+                              "planFirst": {
+                                "type": "boolean"
+                              },
+                              "autoMerge": {
+                                "type": "boolean"
+                              },
+                              "inheritCostCap": {
+                                "type": "boolean",
+                                "enum": [
+                                  true
+                                ]
+                              }
+                            },
+                            "required": [
+                              "planFirst",
+                              "autoMerge",
+                              "inheritCostCap"
+                            ]
+                          },
+                          "defaultPostRunActions": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "enum": [
+                                    "notify_telegram",
+                                    "github_issue"
+                                  ]
+                                },
+                                "on": {
+                                  "type": "string",
+                                  "enum": [
+                                    "success",
+                                    "failure",
+                                    "always"
+                                  ]
+                                },
+                                "config": {
+                                  "type": "object",
+                                  "additionalProperties": {
+                                    "nullable": true
+                                  }
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "on",
+                                "config"
+                              ]
+                            }
+                          },
+                          "category": {
+                            "type": "string",
+                            "enum": [
+                              "gsd"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "label",
+                          "description",
+                          "promptTemplate",
+                          "taskType",
+                          "defaultCron",
+                          "cadenceLabel",
+                          "requiredInputs",
+                          "guardrails",
+                          "defaultPostRunActions",
+                          "category"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "templates"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }
