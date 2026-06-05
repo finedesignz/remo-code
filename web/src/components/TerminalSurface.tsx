@@ -46,14 +46,23 @@ function cssVar(name: string, fallback: string): string {
 }
 
 // base64 helpers for the raw byte payloads carried over the JSON WS.
-function toB64(s: string): string {
-  // s is a binary string (one char per byte).
-  let out = ''
-  try { out = btoa(s) } catch { out = btoa(unescape(encodeURIComponent(s))) }
-  return out
+// CRITICAL: bytes stay bytes. Keystrokes are UTF-8-encoded to bytes before
+// base64; inbound PTY bytes are handed to xterm as a Uint8Array so xterm runs
+// the single authoritative UTF-8 decode. Decoding to a JS string anywhere in the
+// relay corrupts multibyte sequences (box-drawing, etc.) and desyncs the parser.
+const _enc = new TextEncoder()
+export function inputToB64(s: string): string {
+  const bytes = _enc.encode(s)
+  let bin = ''
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+  return btoa(bin)
 }
-function fromB64(b64: string): string {
-  try { return atob(b64) } catch { return '' }
+export function b64ToBytes(b64: string): Uint8Array {
+  let bin = ''
+  try { bin = atob(b64) } catch { return new Uint8Array(0) }
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
 }
 
 export function TerminalSurface({ sessionId, subscribe, send, className }: Props) {
@@ -82,6 +91,29 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     termRef.current = term
     fitRef.current = fit
 
+    // MOBILE INPUT HARDENING (iOS Safari / Android Chrome).
+    // xterm renders a hidden helper <textarea> that receives keystrokes. On
+    // mobile the OS keyboard applies autocapitalize/autocorrect/predictive-text
+    // to it, which starts an IME composition on the first character and then
+    // mangles subsequent input (observed: only the first keystroke lands, then a
+    // stray newline). Disable every "smart" text feature and hint a raw input
+    // mode so each key maps 1:1 to a byte sent to the PTY. (term.element is the
+    // wrapper; .xterm-helper-textarea is the live capture target.)
+    const ta = term.textarea
+    if (ta) {
+      ta.setAttribute('autocapitalize', 'none')
+      ta.setAttribute('autocorrect', 'off')
+      ta.setAttribute('autocomplete', 'off')
+      ta.setAttribute('spellcheck', 'false')
+      // enterkeyhint omitted: the TUI handles Enter; "go"/"send" labels imply submit
+      ta.setAttribute('inputmode', 'text')
+    }
+    // Mobile taps on the host div don't reliably focus xterm's hidden textarea,
+    // so the keyboard opens but keystrokes go nowhere. Focus the terminal on tap.
+    const focusTerm = () => { try { term.focus() } catch {} }
+    hostRef.current.addEventListener('touchstart', focusTerm, { passive: true })
+    hostRef.current.addEventListener('mousedown', focusTerm)
+
     // SESSION SWITCH / mount: start from a clean buffer so a prior session's
     // bytes never bleed into this one (T-16-10). Scrollback replay (below)
     // re-clears before writing the replayed buffer.
@@ -89,7 +121,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
 
     // Keystrokes → term.input (base64 raw bytes).
     const dataDisp = term.onData((d) => {
-      send({ type: 'term.input', session_id: sessionId, bytes: toB64(d) })
+      send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(d) })
     })
 
     // Request (re)attach + ask for scrollback replay so a reconnect restores the
@@ -104,9 +136,9 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
         // RECONNECT replay: clear then write the buffered scrollback, then live
         // term.data resumes appending.
         term.clear()
-        term.write(fromB64(msg.scrollback))
+        term.write(b64ToBytes(msg.scrollback))
       } else if (msg.type === 'term.data' && typeof msg.bytes === 'string') {
-        term.write(fromB64(msg.bytes))
+        term.write(b64ToBytes(msg.bytes))
       }
     })
 

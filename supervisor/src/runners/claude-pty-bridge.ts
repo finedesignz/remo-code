@@ -110,9 +110,12 @@ export class ClaudePtyBridge {
     })
   }
 
-  /** Raw keystrokes from the human terminal → the PTY. */
+  /** Raw keystrokes from the human terminal → the PTY. `data` is a raw-byte
+   *  (latin1) string — the same contract the Node PTY runner uses — so multibyte
+   *  UTF-8 input survives the hop intact. Decoding bytes↔text is xterm's job,
+   *  never the relay's. */
   write(data: string): void {
-    this.sendFrame({ t: 'input', d: Buffer.from(data, 'utf8').toString('base64') })
+    this.sendFrame({ t: 'input', d: Buffer.from(data, 'binary').toString('base64') })
   }
 
   resize(cols: number, rows: number): void {
@@ -149,9 +152,12 @@ export class ClaudePtyBridge {
       }
       this.acc = this.acc.subarray(4 + len)
       if (frame.t === 'data') {
-        this.opts?.onData(Buffer.from(frame.d ?? '', 'base64').toString('utf8'))
+        // Raw bytes as a latin1 string — NOT utf8-decoded. utf8-decoding here
+        // and re-encoding downstream corrupts every multibyte char (box-drawing,
+        // etc.); the browser's xterm runs the one true UTF-8 decode.
+        this.opts?.onData(Buffer.from(frame.d ?? '', 'base64').toString('binary'))
       } else if (frame.t === 'scrollback') {
-        const sb = Buffer.from(frame.d ?? '', 'base64').toString('utf8')
+        const sb = Buffer.from(frame.d ?? '', 'base64').toString('binary')
         if (this.opts?.onScrollback) this.opts.onScrollback(sb)
         else this.opts?.onData(sb)
       } else if (frame.t === 'exit') {
