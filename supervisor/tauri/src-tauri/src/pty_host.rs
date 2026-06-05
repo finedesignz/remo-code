@@ -56,6 +56,12 @@ const SCROLLBACK_CAP_BYTES: usize = 256 * 1024;
 /// A single hosted interactive-`claude` PTY + its bounded scrollback ring.
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
+    /// The PTY master writer, taken ONCE at spawn and held for the session's
+    /// lifetime. `MasterPty::take_writer()` may only be called once — calling it
+    /// per-keystroke (the prior bug) succeeded on the first input then returned
+    /// Err forever, so only the first character ever reached the child. Hold the
+    /// writer here and reuse it for every `session_input`.
+    writer: Box<dyn Write + Send>,
     /// Bounded ring-buffer of recent raw PTY output for reattach replay.
     scrollback: Arc<Mutex<RingBuffer>>,
     child_killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
@@ -156,6 +162,12 @@ fn spawn_session(
         .master
         .try_clone_reader()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    // Take the writer ONCE here (it can only be taken once) and hold it on the
+    // session so every keystroke reuses the SAME writer. See PtySession.writer.
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
     let ring_for_reader = scrollback.clone();
     let sid_for_reader = session_id.to_string();
     thread::spawn(move || {
@@ -180,6 +192,7 @@ fn spawn_session(
         session_id.to_string(),
         PtySession {
             master: pair.master,
+            writer,
             scrollback: scrollback.clone(),
             child_killer,
             pid,
@@ -209,10 +222,9 @@ fn broadcast_exit(session_id: &str) {
 /// Write raw keystroke bytes into the PTY master.
 fn session_input(session_id: &str, bytes: &[u8]) {
     if let Some(s) = SESSIONS.lock().get_mut(session_id) {
-        if let Ok(mut w) = s.master.take_writer() {
-            let _ = w.write_all(bytes);
-            let _ = w.flush();
-        }
+        // Reuse the writer taken once at spawn — NOT take_writer() per call.
+        let _ = s.writer.write_all(bytes);
+        let _ = s.writer.flush();
     }
 }
 
