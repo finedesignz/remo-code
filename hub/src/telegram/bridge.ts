@@ -1,9 +1,13 @@
 /**
- * Telegram OUTBOUND bridge — DUAL-SOURCE, flag-gated on `REMO_PTY_INTERACTIVE`.
+ * Telegram OUTBOUND bridge — DUAL-SOURCE, flag-gated on `REMO_TELEGRAM_TRANSCRIPT_TAIL`.
  *
  * There are two distinct sources for the assistant replies / tool one-liners /
  * permission prompts that get forwarded to Telegram. Which one is active is
- * decided ONCE at boot by `config.ptyInteractive` (env `REMO_PTY_INTERACTIVE`):
+ * decided ONCE at boot by `config.telegramTranscriptTail` (env
+ * `REMO_TELEGRAM_TRANSCRIPT_TAIL`). NOTE: this is DECOUPLED from the web PTY flag
+ * `REMO_PTY_INTERACTIVE` — flipping the web terminal on does NOT switch Telegram to
+ * the transcript-tail, because that path needs CLI transcripts co-located with the
+ * hub (false in the Coolify split topology). Keep this OFF in the Coolify hub:
  *
  *   ── flag OFF (PROD DEFAULT) — stream-json event-bus source ────────────────
  *   The bridge subscribes to the hub's internal event bus:
@@ -357,7 +361,7 @@ function bridgeConsumer(entry: TranscriptEntry): void {
 export async function ensureSessionSubscribed(sessionId: string): Promise<void> {
   if (!started) return;
   // flag OFF: outbound comes from the global event bus — nothing to open here.
-  if (!config.ptyInteractive) return;
+  if (!config.telegramTranscriptTail) return;
   if (sessionUnsubs.has(sessionId)) return;
   const unsub = await subscribeToSessionTranscript(sessionId, bridgeConsumer);
   if (!unsub) return; // no session row / unresolvable
@@ -382,14 +386,14 @@ export function releaseSessionSubscription(sessionId: string): void {
 
 /**
  * Boot the bridge. Idempotent. No-op when `TELEGRAM_BOT_TOKEN` is unset.
- * Chooses the outbound source by `config.ptyInteractive` (see file header).
+ * Chooses the outbound source by `config.telegramTranscriptTail` (see file header).
  */
 export function startTelegramBridge(): void {
   if (started) return;
   if (!config.telegram.botToken) return;
   started = true;
 
-  if (config.ptyInteractive) {
+  if (config.telegramTranscriptTail) {
     // POST-CUTOVER: transcript-tail source. Per-session subscriptions are opened
     // lazily by ensureSessionSubscribed() on inbound dispatch — nothing global
     // to wire here.

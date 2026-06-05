@@ -13,9 +13,10 @@ import { describe, test, expect, beforeAll, beforeEach, afterEach, mock } from "
 
 process.env.TELEGRAM_BOT_TOKEN = "fake-bot-token-transcript";
 process.env.TELEGRAM_WEBHOOK_SECRET = "test-secret-must-be-at-least-16-chars";
-// Flag-ON: this suite exercises the transcript-tail outbound source. The
-// flag-OFF (stream-json) source is covered by telegram-outbound-source-gate.test.ts.
-process.env.REMO_PTY_INTERACTIVE = "1";
+// Flag-ON: this suite exercises the transcript-tail outbound source, now gated on
+// the DECOUPLED REMO_TELEGRAM_TRANSCRIPT_TAIL flag (independent of the web PTY flag).
+// The flag-OFF (stream-json) source is covered by telegram-outbound-source-gate.test.ts.
+process.env.REMO_TELEGRAM_TRANSCRIPT_TAIL = "1";
 
 const state: {
   sessionUsers: Map<string, Array<{ id: string; telegram_chat_id: number }>>;

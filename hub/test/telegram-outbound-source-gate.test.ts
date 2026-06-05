@@ -18,8 +18,12 @@ import { describe, test, expect, beforeAll, beforeEach, afterEach, mock } from "
 
 process.env.TELEGRAM_BOT_TOKEN = "fake-bot-token-gate";
 process.env.TELEGRAM_WEBHOOK_SECRET = "test-secret-must-be-at-least-16-chars";
-// PROD DEFAULT: stream-json event-bus outbound source.
-process.env.REMO_PTY_INTERACTIVE = "0";
+// DECOUPLING GUARANTEE: even with the WEB PTY flag ON, Telegram outbound MUST stay
+// on the stream-json event-bus source (the transcript-tail flag is independent and
+// OFF here). Proves flipping REMO_PTY_INTERACTIVE in the Coolify hub does not
+// silently break Telegram by routing it to transcript files that don't exist there.
+process.env.REMO_PTY_INTERACTIVE = "1";
+process.env.REMO_TELEGRAM_TRANSCRIPT_TAIL = "0";
 
 const state: {
   sessionUsers: Map<string, Array<{ id: string; telegram_chat_id: number }>>;
@@ -95,8 +99,12 @@ async function settle(ticks = 10): Promise<void> {
 }
 
 describe("flag OFF (prod default) → stream-json event-bus outbound", () => {
-  test("config.ptyInteractive is false in prod default", () => {
-    expect(config.ptyInteractive).toBe(false);
+  test("telegram outbound stays event-bus even when the WEB PTY flag is ON", () => {
+    // Decoupling guarantee: ptyInteractive (web terminal) can be ON, but the
+    // Telegram outbound source is gated independently by telegramTranscriptTail,
+    // which is OFF here → event-bus source (Coolify-safe).
+    expect(config.ptyInteractive).toBe(true);
+    expect(config.telegramTranscriptTail).toBe(false);
   });
 
   test("assistant_message:final on the event bus forwards to the TG user", async () => {
