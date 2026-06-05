@@ -3,7 +3,7 @@
  * Threats T-19-02 / 02b / 02c / 02d (R-PTY-22 / 22b / 22c).
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   resolveHumanBackend,
@@ -194,7 +194,21 @@ function makeCapture(): { file: string; argv: string[]; frames: any[]; fake: any
 
 describe('19-02 selector->spawn-argv carries no programmatic flag (H8)', () => {
   let restores: Array<() => void> = []
-  afterEach(() => { restores.forEach((r) => r()); restores = [] })
+  // PTY-cutover Phase A: the H8 negative tests drive the NODE PtyRunner spawn
+  // path (intercepted via __setHostSpawnForTest). The factory only returns the
+  // Node runner when the Rust ConPTY host port file is ABSENT, so pin
+  // REMO_PTY_HOST_PORT_FILE at a guaranteed-missing path for this block —
+  // independent of whether the dev/CI machine has a live Tauri host.
+  let prevPortFile: string | undefined
+  beforeEach(() => {
+    prevPortFile = process.env.REMO_PTY_HOST_PORT_FILE
+    process.env.REMO_PTY_HOST_PORT_FILE = join(import.meta.dir, '__no_such_pty_host_port__')
+  })
+  afterEach(() => {
+    restores.forEach((r) => r()); restores = []
+    if (prevPortFile === undefined) delete process.env.REMO_PTY_HOST_PORT_FILE
+    else process.env.REMO_PTY_HOST_PORT_FILE = prevPortFile
+  })
 
   test('claude-pty resolved runner spawns no programmatic flag', () => {
     const cap = makeCapture()
@@ -245,8 +259,37 @@ describe('19-02 selector->spawn-argv carries no programmatic flag (H8)', () => {
     expect(cap.argv).not.toContain('-p')
   })
 
-  test('runnerForHumanBackend maps ids to the right runner class', () => {
+  test('runnerForHumanBackend maps ids to the Node fallback when no Rust host', () => {
+    // port file pinned absent by this describe's beforeEach.
     expect(runnerForHumanBackend('claude-pty').constructor.name).toBe('ClaudePtyRunner')
     expect(runnerForHumanBackend('codex-pty').constructor.name).toBe('CodexPtyRunner')
+  })
+})
+
+// ---- PTY-cutover Phase A: Rust ConPTY bridge is the PRODUCTION runner ----
+// When the Rust host has published its loopback-port token file
+// (REMO_PTY_HOST_PORT_FILE points at an existing file), runnerForHumanBackend
+// MUST return the Rust ClaudePtyBridge/CodexPtyBridge — NOT the Node helpers.
+describe('PTY-cutover Phase A: runnerForHumanBackend returns Rust bridge when host present', () => {
+  let prevPortFile: string | undefined
+  let portFilePath = ''
+  beforeEach(() => {
+    prevPortFile = process.env.REMO_PTY_HOST_PORT_FILE
+    portFilePath = join(import.meta.dir, `pty-host-port-${process.pid}.tmp`)
+    writeFileSync(portFilePath, '54321', 'utf8')
+    process.env.REMO_PTY_HOST_PORT_FILE = portFilePath
+  })
+  afterEach(() => {
+    if (prevPortFile === undefined) delete process.env.REMO_PTY_HOST_PORT_FILE
+    else process.env.REMO_PTY_HOST_PORT_FILE = prevPortFile
+    try { rmSync(portFilePath) } catch {}
+  })
+
+  test('claude-pty => ClaudePtyBridge (Rust), not the Node ClaudePtyRunner', () => {
+    expect(runnerForHumanBackend('claude-pty').constructor.name).toBe('ClaudePtyBridge')
+  })
+
+  test('codex-pty => CodexPtyBridge (Rust), not the Node CodexPtyRunner', () => {
+    expect(runnerForHumanBackend('codex-pty').constructor.name).toBe('CodexPtyBridge')
   })
 })
