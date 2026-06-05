@@ -15,6 +15,7 @@ import {
   templateScheduleRules,
 } from '../src/lib/gsd-templates'
 import { validateRule } from '../src/lib/schedule-rules'
+import { isInternalTask } from '../src/components/SchedulesPage'
 
 describe('canonicalizeHash — Activity parked + sub-tab collapse', () => {
   test('#/tasks?tab=activity redirects to the parked #/activity route', () => {
@@ -80,5 +81,24 @@ describe('GSD template catalog (web mirror)', () => {
       expect(rules).toHaveLength(1)
       expect(validateRule(rules[0])).toBeNull()
     }
+  })
+})
+
+describe('user-facing Tasks list excludes __internal_ system tasks', () => {
+  // Mirrors the SchedulesPage `filteredSchedules` exclusion guard.
+  const visible = (names: string[]) =>
+    names.filter((name) => !isInternalTask({ name }))
+
+  test('isInternalTask flags only the __internal_ prefix', () => {
+    expect(isInternalTask({ name: '__internal_triage' })).toBe(true)
+    expect(isInternalTask({ name: '__internal_coolify_deployment' })).toBe(true)
+    expect(isInternalTask({ name: 'Continue Dev on finedesignz/kh-hub' })).toBe(false)
+    expect(isInternalTask({ name: 'internal report' })).toBe(false)
+  })
+
+  test('filteredSchedules drops internal tasks, keeps user tasks', () => {
+    expect(
+      visible(['__internal_triage', 'My nightly scan', '__internal_coolify_deployment']),
+    ).toEqual(['My nightly scan'])
   })
 })
