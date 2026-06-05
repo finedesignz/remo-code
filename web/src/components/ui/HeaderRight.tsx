@@ -48,6 +48,17 @@ export function HeaderRight({ token, user, signOut, onNavigate, subscribe }: Hea
   return (
     <>
       <button
+        onClick={() => window.location.reload()}
+        className="p-1.5 text-[var(--text-muted)] hover:text-blue-400 rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors"
+        title="Reload"
+        aria-label="Reload"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M1 4v-3h3" /><path d="M3.51 11a7 7 0 0 0 12.13-3.5" />
+          <path d="M15 12v3h-3" /><path d="M12.49 5a7 7 0 0 0-12.13 3.5" />
+        </svg>
+      </button>
+      <button
         onClick={toggleTheme}
         className="p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors"
         title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
