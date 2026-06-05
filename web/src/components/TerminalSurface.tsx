@@ -22,7 +22,7 @@
  * accent must never appear — the web accent-guard test enforces this). App
  * chrome is untouched.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -64,11 +64,65 @@ export function b64ToBytes(b64: string): Uint8Array {
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
   return out
 }
+// Raw file bytes → base64 (for term.attach_file uploads).
+export function bytesToB64(bytes: Uint8Array): string {
+  let bin = ''
+  const CHUNK = 0x8000 // avoid arg-count limits on String.fromCharCode
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  }
+  return btoa(bin)
+}
+
+/**
+ * On-screen key sequences for the toolbar. The user's Apple keyboard has no
+ * arrow keys, so ↑/↓ (menu navigation) are the critical entries; Esc/Tab/Ctrl-C
+ * round out TUI control. Each value is the exact raw byte string sent verbatim
+ * as a term.input keystroke. Exported for the byte-sequence test.
+ */
+export const KEY_SEQUENCES = {
+  esc: '\x1b',
+  up: '\x1b[A',
+  down: '\x1b[B',
+  left: '\x1b[D',
+  right: '\x1b[C',
+  tab: '\x09',
+  enter: '\r',
+  ctrlC: '\x03',
+} as const
 
 export function TerminalSurface({ sessionId, subscribe, send, className }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  // Send a raw key sequence as a term.input keystroke, then refocus the terminal
+  // so the on-screen button press doesn't steal the cursor.
+  const sendKey = useCallback((seq: string) => {
+    send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(seq) })
+    try { termRef.current?.focus() } catch {}
+  }, [send, sessionId])
+
+  // Upload a file to the host (term.attach_file): the supervisor writes it to a
+  // temp file and types its absolute path into the TUI.
+  const uploadFile = useCallback((file: File) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const bytes = new Uint8Array(reader.result as ArrayBuffer)
+        send({ type: 'term.attach_file', session_id: sessionId, filename: file.name, data_b64: bytesToB64(bytes) })
+        setNotice(`Uploaded ${file.name} → path inserted`)
+        setTimeout(() => setNotice(null), 4000)
+        try { termRef.current?.focus() } catch {}
+      } catch {
+        setNotice('Attachment upload failed')
+        setTimeout(() => setNotice(null), 4000)
+      }
+    }
+    reader.readAsArrayBuffer(file)
+  }, [send, sessionId])
 
   useEffect(() => {
     if (!hostRef.current) return
@@ -178,11 +232,65 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     }
   }, [sessionId, subscribe, send])
 
+  // Image paste (Ctrl-V / mobile paste): xterm's text paste can't carry image
+  // bytes, so intercept paste events that contain image files and route them
+  // through the same upload path. Separate effect so the heavy terminal effect
+  // above doesn't re-run when the upload callback identity changes.
+  useEffect(() => {
+    const host = hostRef.current
+    if (!host) return
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items
+      if (!items) return
+      for (const it of items) {
+        if (it.kind === 'file' && it.type.startsWith('image/')) {
+          const f = it.getAsFile()
+          if (f) { e.preventDefault(); uploadFile(f); return }
+        }
+      }
+    }
+    host.addEventListener('paste', onPaste)
+    return () => host.removeEventListener('paste', onPaste)
+  }, [uploadFile])
+
+  const btn = 'px-2 py-1 rounded text-xs font-medium leading-none select-none ' +
+    'bg-[var(--bg-secondary)] text-[var(--text-primary)] border border-[var(--border)] ' +
+    'hover:bg-[var(--bg-tertiary)] active:opacity-80 min-h-[32px] min-w-[32px]'
+
   return (
-    <div
-      ref={hostRef}
-      className={className}
-      style={{ width: '100%', height: '100%', background: 'var(--bg-primary)' }}
-    />
+    <div className={className} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%' }}>
+      {/* On-screen key bar — supplies keys a phone/Apple keyboard can't (arrows,
+          Esc, Tab, Ctrl-C) plus file attach. onMouseDown/preventDefault keeps
+          terminal focus so typing stays live. */}
+      <div
+        className="flex flex-wrap items-center gap-1 px-1 pb-1 shrink-0"
+        onMouseDown={(e) => e.preventDefault()}
+      >
+        <button type="button" className={btn} title="Escape" onClick={() => sendKey(KEY_SEQUENCES.esc)}>Esc</button>
+        <button type="button" className={btn} title="Up" onClick={() => sendKey(KEY_SEQUENCES.up)}>↑</button>
+        <button type="button" className={btn} title="Down" onClick={() => sendKey(KEY_SEQUENCES.down)}>↓</button>
+        <button type="button" className={btn} title="Left" onClick={() => sendKey(KEY_SEQUENCES.left)}>←</button>
+        <button type="button" className={btn} title="Right" onClick={() => sendKey(KEY_SEQUENCES.right)}>→</button>
+        <button type="button" className={btn} title="Tab" onClick={() => sendKey(KEY_SEQUENCES.tab)}>Tab</button>
+        <button type="button" className={btn} title="Enter" onClick={() => sendKey(KEY_SEQUENCES.enter)}>⏎</button>
+        <button type="button" className={btn} title="Ctrl-C (interrupt)" onClick={() => sendKey(KEY_SEQUENCES.ctrlC)}>^C</button>
+        <button type="button" className={btn} title="Attach file" onClick={() => fileInputRef.current?.click()}>📎</button>
+        {notice && <span className="text-xs text-[var(--text-muted)] ml-1">{notice}</span>}
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) uploadFile(f)
+            e.target.value = '' // allow re-selecting the same file
+          }}
+        />
+      </div>
+      <div
+        ref={hostRef}
+        style={{ flex: 1, minHeight: 0, width: '100%', background: 'var(--bg-primary)' }}
+      />
+    </div>
   )
 }
