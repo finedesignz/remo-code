@@ -46,6 +46,38 @@ export type RunnerEvent =
   | { type: 'ready' }
   | { type: 'exited'; code: number | null }
 
+/**
+ * Minimal lifecycle surface `session-bridge` needs from an interactive PTY
+ * runner, regardless of whether it is the Rust ConPTY bridge
+ * (`ClaudePtyBridge`, prod) or the Node helper fallback (`ClaudePtyRunner`).
+ *
+ * The two start-opts shapes are a superset here: the Rust bridge keys its PTY
+ * by `sessionId` and can replay scrollback (`onScrollback`); the Node runner
+ * ignores both. `pid` is OPTIONAL — the Rust bridge has none (the PTY lives in
+ * the Tauri process), so session-bridge must tolerate `undefined` (it already
+ * does `pty.pid ?? 0`).
+ */
+export interface PtyLikeStartOpts {
+  /** Rust bridge only — keys the PTY in the host registry; ignored by the Node runner. */
+  sessionId?: string
+  cwd: string
+  cols?: number
+  rows?: number
+  onData: (bytes: string) => void
+  /** Rust bridge only — scrollback replay on (re)attach, before live onData. */
+  onScrollback?: (bytes: string) => void
+  onExit?: (code: number | null) => void
+}
+
+export interface PtyLike {
+  start(opts: PtyLikeStartOpts): void
+  write(data: string): void
+  resize(cols: number, rows: number): void
+  kill(): void
+  /** Node runner exposes the host pid; the Rust bridge has none. */
+  readonly pid?: number
+}
+
 export interface CliRunner {
   readonly cliKind: 'claude' | 'codex'
   readonly isReady: boolean

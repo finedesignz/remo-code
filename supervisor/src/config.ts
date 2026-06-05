@@ -39,6 +39,20 @@ export interface SupervisorConfig {
   scan: ScanSettings
   /** Phase 08 §15 — ISO timestamp of the most recent scan; null when never scanned. */
   lastScanAt: string | null
+  /**
+   * PTY-cutover Phase A — preferred interactive human backend. 'claude' is only
+   * honored once the cutover gate confirms (see `claudeInteractiveConfirmed`);
+   * until then the selector fails safe to 'codex-pty'. Env override:
+   * `REMO_DEFAULT_HUMAN_BACKEND`.
+   */
+  defaultHumanBackend: 'claude' | 'codex'
+  /**
+   * PTY-cutover Phase A — operator-recorded cutover-gate flag. FALSE by default
+   * (fail-safe): Claude-PTY is never the default until the operator confirms
+   * interactive billing per docs/cutover-gate-june15.md. Prod flips this on via
+   * `REMO_CLAUDE_INTERACTIVE_CONFIRMED=1`. No production code path writes it.
+   */
+  claudeInteractiveConfirmed: boolean
 }
 
 function defaultConfigDir(): string {
@@ -77,6 +91,27 @@ function readScanFromRaw(raw: any): ScanSettings {
   }
 }
 
+/**
+ * PTY-cutover Phase A — resolve the preferred interactive human backend.
+ * Precedence: env `REMO_DEFAULT_HUMAN_BACKEND` > config `default_human_backend`
+ * > 'claude' (default). Only 'claude' | 'codex' accepted; anything else → default.
+ */
+function readDefaultHumanBackend(raw: any): 'claude' | 'codex' {
+  const env = process.env.REMO_DEFAULT_HUMAN_BACKEND
+  const val = env || raw?.default_human_backend
+  return val === 'codex' ? 'codex' : 'claude'
+}
+
+/**
+ * PTY-cutover Phase A — resolve the cutover-gate confirm flag (fail-safe FALSE).
+ * Precedence: env `REMO_CLAUDE_INTERACTIVE_CONFIRMED=1` > config
+ * `claude_interactive_confirmed === true` > false.
+ */
+function readClaudeInteractiveConfirmed(raw: any): boolean {
+  if (process.env.REMO_CLAUDE_INTERACTIVE_CONFIRMED === '1') return true
+  return raw?.claude_interactive_confirmed === true
+}
+
 export function loadConfig(): SupervisorConfig {
   if (!existsSync(CONFIG_PATH)) {
     throw new Error(`Supervisor not configured. Open the Remo Code tray app and complete the first-run setup (or write ${CONFIG_PATH} manually).`)
@@ -96,6 +131,8 @@ export function loadConfig(): SupervisorConfig {
     autostart: raw.autostart !== false, // default TRUE
     scan: readScanFromRaw(raw),
     lastScanAt: typeof raw.last_scan_at === 'string' ? raw.last_scan_at : null,
+    defaultHumanBackend: readDefaultHumanBackend(raw),
+    claudeInteractiveConfirmed: readClaudeInteractiveConfirmed(raw),
   }
 }
 
@@ -119,6 +156,8 @@ export function defaultConfig(): SupervisorConfig {
     autostart: true,
     scan: { ...DEFAULT_SCAN_SETTINGS },
     lastScanAt: null,
+    defaultHumanBackend: readDefaultHumanBackend({}),
+    claudeInteractiveConfirmed: readClaudeInteractiveConfirmed({}),
   }
 }
 
@@ -147,8 +186,36 @@ export function saveConfig(cfg: Partial<SupervisorConfig> & { apiKey: string }) 
         }
       : existing.scan ?? { ...DEFAULT_SCAN_SETTINGS },
     last_scan_at: cfg.lastScanAt ?? existing.last_scan_at ?? null,
+    // PTY-cutover Phase A
+    default_human_backend:
+      cfg.defaultHumanBackend ?? existing.default_human_backend ?? 'claude',
+    claude_interactive_confirmed:
+      cfg.claudeInteractiveConfirmed ?? existing.claude_interactive_confirmed ?? false,
   }
   writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2), 'utf-8')
+}
+
+/**
+ * PTY-cutover Phase A — build the `BackendSelectorConfig` the human-session
+ * runner factory consumes, from the resolved supervisor config (env-overridable
+ * via REMO_DEFAULT_HUMAN_BACKEND / REMO_CLAUDE_INTERACTIVE_CONFIRMED=1).
+ *
+ * Fail-safe: `claude_interactive_confirmed` defaults to FALSE, so until prod
+ * sets `REMO_CLAUDE_INTERACTIVE_CONFIRMED=1` the gate result is 'unknown' and
+ * the selector resolves a Claude preference to 'codex-pty'. The code default is
+ * deliberately NOT hardcoded to confirmed — the env/config flip is how prod
+ * enables Claude-PTY (see docs/cutover-gate-june15.md).
+ */
+export function getBackendSelectorConfig(cfg?: SupervisorConfig): import('./runners/backend-selector').BackendSelectorConfig {
+  const c = cfg ?? defaultConfig()
+  const confirmed = c.claudeInteractiveConfirmed
+  return {
+    defaultHumanBackend: c.defaultHumanBackend,
+    gate: {
+      result: confirmed ? 'interactive' : 'unknown',
+      claudeInteractiveConfirmed: confirmed,
+    },
+  }
 }
 
 export function parseRoots(input: string | undefined): string[] {

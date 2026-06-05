@@ -1,7 +1,17 @@
 import { hostname, platform, release, arch, cpus, totalmem } from 'os'
 import { ClaudeRunner } from './claude-runner'
-import { ClaudePtyRunner } from './claude-pty-runner'
-import type { AgentToHub, CliRunner, HubToAgent, RunnerEvent } from './types'
+import { selectHumanPtyRunner } from './runner-factory'
+import { PtyPersistence } from './pty-persistence'
+import { getBackendSelectorConfig } from '../config'
+import type { AgentToHub, CliRunner, HubToAgent, PtyLike, RunnerEvent } from './types'
+
+/**
+ * Module-level supervisor-owned PTY persistence coordinator (R-PTY-07/27).
+ * Tracks the interactive PTY per remo-session so a dropped browser/phone WS
+ * detaches (not kills) and a reattach replays scrollback. Shared across all
+ * SessionBridge instances in this process.
+ */
+const ptyPersistence = new PtyPersistence()
 
 /**
  * Phase-15 spike flag. When `REMO_PTY_INTERACTIVE=1`, a session hosts the
@@ -74,10 +84,12 @@ const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000]
 export class SessionBridge {
   private ws: WebSocket | null = null
   private runner: CliRunner | null = null
-  /** Phase-15 spike: raw-terminal PTY runner (mutually exclusive with `runner`,
-   *  active only under REMO_PTY_INTERACTIVE=1). Raw bytes only — never emits
-   *  RunnerEvent. */
-  private ptyRunner: ClaudePtyRunner | null = null
+  /** Interactive PTY runner (mutually exclusive with `runner`, active only under
+   *  REMO_PTY_INTERACTIVE=1). Raw bytes only — never emits RunnerEvent.
+   *  PTY-cutover Phase A: this is the Rust ConPTY `ClaudePtyBridge` in prod
+   *  (Option C), or the Node `ClaudePtyRunner` fallback when no Rust host —
+   *  both satisfy `PtyLike`, chosen by the gated runner-factory. */
+  private ptyRunner: PtyLike | null = null
   private sessionId: string | null = null
   private opts: SessionBridgeOptions
   private cb: SessionBridgeCallbacks
@@ -136,8 +148,11 @@ export class SessionBridge {
       try { await this.runner.stopGracefully() } catch {}
       this.runner = null
     }
-    // Phase-15: reap the PTY runner + its Node host (R-PTY-27).
+    // Session close = KILL the PTY (R-PTY-27). Route through the persistence
+    // coordinator so it drops its registry entry + scrollback; fall back to a
+    // direct kill if the session was never registered.
     if (this.ptyRunner) {
+      if (this.sessionId) { try { ptyPersistence.kill(this.sessionId, 'session_close') } catch {} }
       try { this.ptyRunner.kill() } catch {}
       this.ptyRunner = null
     }
@@ -327,22 +342,37 @@ export class SessionBridge {
   /** Phase-15 spike: lazily start the interactive PTY runner and bridge its
    *  raw output bytes to the hub as `term.data` frames. base64 over the
    *  existing /ws/agent JSON socket (see hub/src/ws/term-protocol.ts). */
-  private ensurePtyRunner(): ClaudePtyRunner | null {
+  private ensurePtyRunner(): PtyLike | null {
     if (this.ptyRunner) return this.ptyRunner
-    const pty = new ClaudePtyRunner()
+    // PTY-cutover Phase A: gated factory → Rust ConPTY bridge in prod (Option C),
+    // Node helper fallback when no Rust host. Default backend + cutover-gate
+    // flag come from the supervisor config (env-overridable). Human-only.
+    const pty = selectHumanPtyRunner({ isHuman: true }, getBackendSelectorConfig())
     this.ptyRunner = pty
+    const sessionId = this.sessionId ?? undefined
+    // Register with the supervisor-owned persistence coordinator so a dropped
+    // client WS detaches (not kills) and reattach replays scrollback (R-PTY-27).
+    if (sessionId) ptyPersistence.register(sessionId, pty)
+    const emitTerm = (bytes: string) => {
+      if (!this.sessionId) return
+      this.sendToHub({
+        type: 'term.data',
+        session_id: this.sessionId,
+        bytes: Buffer.from(bytes, 'binary').toString('base64'),
+      })
+    }
     pty.start({
+      sessionId,
       cwd: this.opts.repoPath,
       cols: 100,
       rows: 30,
       onData: (bytes) => {
-        if (!this.sessionId) return
-        this.sendToHub({
-          type: 'term.data',
-          session_id: this.sessionId,
-          bytes: Buffer.from(bytes, 'binary').toString('base64'),
-        })
+        if (sessionId) { try { ptyPersistence.recordOutput(sessionId, bytes) } catch {} }
+        emitTerm(bytes)
       },
+      // Scrollback replay on (re)attach — Rust bridge only; sent as the same
+      // base64 term.data shape so the browser replays it before live output.
+      onScrollback: (bytes) => emitTerm(bytes),
       onExit: (code) => {
         this.cb.onLog('warn', `agent-bridge: pty runner exited code=${code}`)
         this.ptyRunner = null

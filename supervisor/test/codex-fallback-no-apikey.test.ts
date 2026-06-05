@@ -4,6 +4,7 @@
  * spawn env carries no provider key (incl. inherited OPENAI_API_KEY).
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
+import { join } from 'node:path'
 import {
   CodexPtyRunner,
   __setCodexHostSpawnForTest,
@@ -46,9 +47,19 @@ function capturingFake(cap: { file: string; argv: string[]; env: NodeJS.ProcessE
 }
 
 describe('19-03 Codex fallback (R-PTY-23 / T-19-03)', () => {
-  test('selector resolves codex-pty to a CodexPtyRunner', () => {
-    const runner = selectHumanPtyRunner(human, codexCfg)
-    expect(runner.constructor.name).toBe('CodexPtyRunner')
+  test('selector resolves codex-pty to a CodexPtyRunner (Node fallback, no Rust host)', () => {
+    // PTY-cutover Phase A: factory returns the Node runner only when the Rust
+    // ConPTY host port file is absent — pin it absent for this assertion so it
+    // is independent of a live Tauri host on the dev/CI machine.
+    const prev = process.env.REMO_PTY_HOST_PORT_FILE
+    process.env.REMO_PTY_HOST_PORT_FILE = join(import.meta.dir, '__no_such_pty_host_port__')
+    try {
+      const runner = selectHumanPtyRunner(human, codexCfg)
+      expect(runner.constructor.name).toBe('CodexPtyRunner')
+    } finally {
+      if (prev === undefined) delete process.env.REMO_PTY_HOST_PORT_FILE
+      else process.env.REMO_PTY_HOST_PORT_FILE = prev
+    }
   })
 
   let cap: any
