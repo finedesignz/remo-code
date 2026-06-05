@@ -22,6 +22,7 @@ import { ChatPanel } from './ChatPanel'
 import { TerminalSurface } from './TerminalSurface'
 import { ApiKeyModal } from './ApiKeyModal'
 import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
+import { MobileSessionControls } from './MobileSessionControls'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
 import { hubFetch } from '../lib/api'
 import { useClientConfig } from '../hooks/useClientConfig'
@@ -38,7 +39,6 @@ interface Props {
 export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
   const clientConfig = useClientConfig()
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem('remo:sidebar-collapsed') === '1' } catch { return false }
   })
@@ -134,9 +134,6 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
   // Auto-nudge on session click (matches Layout behavior).
   const handleSelectSession = useCallback((id: string) => {
     setActiveSessionId(id)
-    if (window.innerWidth < 768) {
-      setSidebarOpen(false)
-    }
 
     try {
       const target = sessionsHook.sessions.find(s => s.id === id)
@@ -166,17 +163,6 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     } catch {}
   }, [sessionsHook.sessions, send, globalNudgeDefault])
 
-  // Close sidebar on Escape (mobile)
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && sidebarOpen && window.innerWidth < 768) {
-        setSidebarOpen(false)
-      }
-    }
-    window.addEventListener('keydown', handleKey)
-    return () => window.removeEventListener('keydown', handleKey)
-  }, [sidebarOpen])
-
   const handleShowConnect = useCallback(() => {
     onNavigate('#/settings?tab=connections')
   }, [onNavigate])
@@ -202,21 +188,12 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
         <ApiKeyModal token={token} onClose={() => setShowApiKey(false)} />
       )}
 
-      {/* Mobile overlay backdrop */}
-      {sidebarOpen && (
-        <div
-          className="sidebar-overlay fixed inset-0 bg-black/50 z-30 md:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      {/* Sidebar */}
+      {/* Sidebar — DESKTOP ONLY (md+). On mobile there is NO sidebar; per-session
+          controls live inline in the session strip (MobileSessionControls). */}
       <div
         style={sidebarCollapsed ? undefined : { ['--sidebar-w' as string]: `${sidebarWidth}px` }}
         className={`
-          sidebar-panel fixed inset-y-0 left-0 z-40 ${sidebarCollapsed ? 'w-14' : 'w-72 md:w-[var(--sidebar-w)]'}
-          md:relative md:z-0 md:translate-x-0 md:pointer-events-auto
-          ${sidebarOpen ? 'translate-x-0 pointer-events-auto' : '-translate-x-full pointer-events-none'}
+          sidebar-panel hidden md:flex relative z-0 ${sidebarCollapsed ? 'w-14' : 'w-[var(--sidebar-w)]'}
         `}
       >
         {/* Border-drag resize target (desktop only) — the right border IS the
@@ -244,7 +221,6 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           connected={connected}
           user={user}
           signOut={signOut}
-          onClose={() => setSidebarOpen(false)}
           unreadCounts={unreadCounts}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={toggleCollapsed}
@@ -260,16 +236,10 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
       {/* Main chat area — NO app header here; AppShell owns it. */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Chat-specific session strip (kept — it's session chrome, not app chrome). */}
-        <div className="relative z-40 flex items-center gap-2 sm:gap-3 px-3 py-2 safe-x border-b border-[var(--border-color)]/40 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0">
+        <div className="relative z-40 flex items-center gap-2 sm:gap-3 px-3 md:px-6 py-2 safe-x border-b border-[var(--border-color)]/40 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0">
           {/* Mobile (< md): the desktop left sidebar is hidden, so the session
               switcher lives HERE as a top-bar dropdown — the single way to
-              browse/switch active sessions on a phone. Reconciles PR #228:
-              #228 removed the OLD header dropdown because it duplicated the
-              hamburger slide-over; the owner now wants the dropdown to BE the
-              switcher, so it returns as primary and the redundant slide-over
-              trigger is gone. Per-session management (delete / disconnect /
-              auto-nudge) stays reachable via the "manage" affordance, which
-              opens the full sidebar slide-over. */}
+              browse/switch active sessions on a phone. */}
           <div className="md:hidden flex-1 min-w-0">
             <SessionDropdown
               sessions={sessionsHook.sessions}
@@ -278,21 +248,20 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
               unreadCounts={unreadCounts}
             />
           </div>
-          {/* Mobile: open the full sidebar slide-over for per-session controls
-              the dropdown doesn't expose (delete / disconnect / auto-nudge). */}
-          <button
-            type="button"
-            onClick={() => setSidebarOpen(true)}
-            className="md:hidden p-1.5 -mr-0.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors shrink-0"
-            aria-label="Manage sessions"
-            title="Manage sessions"
-          >
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <circle cx="9" cy="3.5" r="1.3" />
-              <circle cx="9" cy="9" r="1.3" />
-              <circle cx="9" cy="14.5" r="1.3" />
-            </svg>
-          </button>
+          {/* Mobile: per-session controls inline (NO sidebar) — Stop/interrupt
+              + a kebab popover for disconnect / delete / auto-nudge / skip-perms,
+              mirroring the desktop sidebar's session-row actions. */}
+          {activeSession && (
+            <MobileSessionControls
+              session={activeSession}
+              onCancel={handleCancel}
+              onDeleteSession={sessionsHook.deleteSession}
+              onDisconnectSession={sessionsHook.disconnectSession}
+              globalNudgeDefault={globalNudgeDefault}
+              onSetAutoNudge={sessionsHook.setSessionAutoNudge}
+              onSetSkipPermissions={sessionsHook.setSessionSkipPermissions}
+            />
+          )}
           {/* Desktop (md+): static current-session title — switching happens in
               the always-visible left sidebar, not here. */}
           <div className="hidden md:block flex-1 min-w-0">
