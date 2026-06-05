@@ -48,6 +48,10 @@ export const RepoScanResult = z.object({
     branch: z.string().nullable(),
     dirty: z.boolean(),
     last_commit: z.string().nullable().optional(),
+    // Worktree introspection — optional; the legacy scan shape omits them.
+    // Threaded through so the web can hide worktrees / non-canonical entries.
+    is_worktree: z.boolean().optional(),
+    is_canonical: z.boolean().optional(),
   })).max(500),
 })
 
