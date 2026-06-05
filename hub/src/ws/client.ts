@@ -151,6 +151,11 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     const tf = TermFrame.safeParse(parsed)
     if (!tf.success) return
     const frame = tf.data
+    // A PTY WRITE TURN injects bytes into stdin: term.input (keystrokes) and
+    // term.attach_file (writes a host temp file then types its path). Both get
+    // the license + human-only + turn-lock gates below; control frames
+    // (resize/attach/reattach) bypass them.
+    const isWriteTurn = frame.type === 'term.input' || frame.type === 'term.attach_file'
     const _diag = frame.type === 'term.input'
     if (_diag) log.info('term.input.diag.rx', { session_id: frame.session_id, user_id: data.userId })
     // DIRECTION ALLOWLIST (NH-2/R-PTY-33): only client→hub write frames here.
@@ -164,9 +169,9 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     if (!(await canWriteTerminal(data.userId, frame.session_id))) { if (_diag) log.warn('term.input.diag.drop', { gate: 'cannot_write', session_id: frame.session_id }); return }
     const session = await getSession(frame.session_id, data.userId)
     if (!session) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_session', session_id: frame.session_id }); return }
-    // License gate: term.input drives a live session (a mutation).
-    if (frame.type === 'term.input' && !(await isLicenseActive(data))) {
-      log.warn('term.input.diag.drop', { gate: 'license_inactive', session_id: frame.session_id })
+    // License gate: a write turn drives a live session (a mutation).
+    if (isWriteTurn && !(await isLicenseActive(data))) {
+      log.warn('term.input.diag.drop', { gate: 'license_inactive', session_id: frame.session_id, frame: frame.type })
       try { ws.send(JSON.stringify({ type: 'send_refused', reason: 'license_inactive' })) } catch {}
       return
     }
@@ -174,7 +179,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // 'human' from this authenticated /ws/client cookie connection — never read
     // from the frame. Applied to term.input (the write that drives the
     // interactive entrypoint) on a pty-interactive session.
-    if (frame.type === 'term.input') {
+    if (isWriteTurn) {
       const runnerType = await getSessionRunnerType(frame.session_id, data.userId)
       if (humanOnlyRejectsActor('human', runnerType)) {
         log.warn('term.input.diag.drop', { gate: 'human_only', session_id: frame.session_id, runner_type: runnerType })
@@ -192,7 +197,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // writer streams keystrokes within its turn). resize/attach/reattach are
     // control frames, not turns — they bypass the lock. The lock releases on the
     // observed transcript turn_complete (telegram/bridge → onTurnComplete).
-    if (frame.type === 'term.input') {
+    if (isWriteTurn) {
       const writerId = data.writerId ?? 'client:unknown'
       const granted = await acquire(frame.session_id, writerId)
       if (!granted) {

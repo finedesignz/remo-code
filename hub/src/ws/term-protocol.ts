@@ -45,6 +45,19 @@ export const TermAttach = z.object({
   session_id: z.string(),
 })
 
+// Attachment upload (client → hub → agent). The browser uploads file bytes;
+// the supervisor writes them to a per-session temp file on the HOST and types
+// the absolute path into the TUI (Claude/Codex read files by path). This is a
+// human WRITE turn — gated identically to term.input on the relay. `data_b64`
+// is the raw file bytes base64-encoded; cap matches the structured-message WS
+// payload limit (~10MB).
+export const TermAttachFile = z.object({
+  type: z.literal('term.attach_file'),
+  session_id: z.string(),
+  filename: z.string().min(1).max(255),
+  data_b64: z.string().max(14_000_000), // ~10MB raw after base64 (4/3 overhead)
+})
+
 // Phase 16 (R-PTY-08): reattach after a reconnect — the host replays the
 // session's buffered scrollback, then resumes live `term.data`. `scrollback` is
 // an optional opaque base64 blob the HOST may carry on the reply; clients send
@@ -61,6 +74,7 @@ export const TermFrame = z.discriminatedUnion('type', [
   TermResize,
   TermAttach,
   TermReattach,
+  TermAttachFile,
 ])
 export type TermFrameT = z.infer<typeof TermFrame>
 
@@ -77,6 +91,7 @@ export const CLIENT_TO_HUB_TERM_TYPES = new Set<TermFrameT['type']>([
   'term.resize',
   'term.attach',
   'term.reattach',
+  'term.attach_file',
 ])
 export const AGENT_TO_HUB_TERM_TYPES = new Set<TermFrameT['type']>([
   'term.data',

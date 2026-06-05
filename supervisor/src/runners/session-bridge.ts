@@ -1,4 +1,6 @@
-import { hostname, platform, release, arch, cpus, totalmem } from 'os'
+import { hostname, platform, release, arch, cpus, totalmem, tmpdir } from 'os'
+import { mkdirSync, writeFileSync } from 'fs'
+import { join, basename, extname } from 'path'
 import { ClaudeRunner } from './claude-runner'
 import { selectHumanPtyRunner } from './runner-factory'
 import { PtyPersistence } from './pty-persistence'
@@ -23,6 +25,23 @@ const ptyPersistence = new PtyPersistence()
  */
 function ptyInteractiveEnabled(): boolean {
   return process.env.REMO_PTY_INTERACTIVE === '1'
+}
+
+/**
+ * Make an upload filename safe to write into a temp dir: strip any path
+ * components and traversal, drop control chars, and keep a sane extension.
+ * Never returns an empty string. Exported for unit testing.
+ */
+export function sanitizeAttachmentName(raw: string): string {
+  // basename() defeats path separators on both platforms; then strip anything
+  // that isn't a conservative filename char, collapse dots so `..` can't survive.
+  let name = basename(String(raw || ''))
+  const ext = extname(name).slice(0, 16) // bound the extension length
+  const stem = name.slice(0, name.length - ext.length)
+  const cleanStem = stem.replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.+/g, '.').replace(/^\.+/, '')
+  const cleanExt = ext.replace(/[^A-Za-z0-9.]/g, '')
+  name = (cleanStem || 'attachment') + cleanExt
+  return name.slice(0, 200)
 }
 
 /**
@@ -285,6 +304,26 @@ export class SessionBridge {
       }
       if (anyMsg.type === 'term.attach') {
         this.ensurePtyRunner()
+        return
+      }
+      if (anyMsg.type === 'term.attach_file') {
+        // Write the uploaded bytes to a per-session temp file on THIS host, then
+        // type the absolute path into the TUI so Claude/Codex can read it. The
+        // browser has no filesystem on the host; this is the path-injection seam.
+        try {
+          const pty = this.ensurePtyRunner()
+          const safe = sanitizeAttachmentName(String(anyMsg.filename ?? 'attachment'))
+          const dir = join(tmpdir(), 'remo-attachments', this.sessionId)
+          mkdirSync(dir, { recursive: true })
+          const abs = join(dir, safe)
+          const bytes = Buffer.from(String(anyMsg.data_b64 ?? ''), 'base64')
+          writeFileSync(abs, bytes)
+          // Trailing space so the path is a complete token at the TUI cursor.
+          pty?.write(abs + ' ')
+          this.cb.onLog('info', `term.attach_file: wrote ${bytes.length}B → ${abs}`)
+        } catch (err) {
+          this.cb.onLog('error', `term.attach_file failed: ${(err as Error)?.message ?? err}`)
+        }
         return
       }
     }
