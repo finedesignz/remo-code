@@ -34,6 +34,7 @@ import { introspect as introspectApi } from './api/introspect'
 import { tasks as tasksApi } from './api/tasks'
 import { usage as usageApi } from './api/usage'
 import { wellKnown } from './api/well-known'
+import { clientConfig } from './api/client-config'
 import { orchestrator as orchestratorApi } from './api/orchestrator'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
@@ -203,6 +204,12 @@ app.route('/api/auth', authRouter)
 // Setup routes (no auth required — guarded internally by user count check)
 app.route('/api/setup', setup)
 
+// Public client bootstrap config (single feature-gate boolean, no secrets).
+// Exposes the hub's REMO_PTY_INTERACTIVE flag so the SPA's default human surface
+// (TerminalSurface vs ChatSurface) stays in lockstep with the env flip.
+// MUST be mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
+app.route('/api/client-config', clientConfig)
+
 // Plugin routes (API key auth — MUST be before JWT catch-all)
 app.use('/api/plugin/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.req.header('authorization')?.slice(0, 20) || 'anon' }))
 app.use('/api/plugin/*', apiKeyMiddleware)
@@ -247,6 +254,8 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/auth/')) return next()
   // Public setup bootstrap (guarded by user-count check inside).
   if (c.req.path.startsWith('/api/setup')) return next()
+  // Public client bootstrap config (single feature-gate boolean, no secrets).
+  if (c.req.path.startsWith('/api/client-config')) return next()
   return authMiddleware(c, next)
 })
 app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('userId') || 'anon' }))
@@ -265,6 +274,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
   if (c.req.path.startsWith('/api/setup')) return next()
+  if (c.req.path.startsWith('/api/client-config')) return next()
   return requireActiveLicense({ readOnlyOk: true })(c, next)
 })
 

@@ -24,6 +24,7 @@ import { ApiKeyModal } from './ApiKeyModal'
 import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
 import { hubFetch } from '../lib/api'
+import { useClientConfig } from '../hooks/useClientConfig'
 
 const NUDGE_TEXT = "Status update? Briefly: what's the current state, what would you recommend doing next, or what input do you need from me?"
 
@@ -35,6 +36,7 @@ interface Props {
 }
 
 export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
+  const clientConfig = useClientConfig()
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
@@ -183,12 +185,16 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     ? sessionsHook.sessions.find(s => s.id === activeSessionId)
     : null
 
-  // Phase-15 spike toggle: render the raw-terminal panel for the active session.
-  // Dev/opt-in only (localStorage `remo:pty-interactive` = '1'); full per-session
-  // runner-type selection lands in Phase 16.
-  const ptyInteractive = (() => {
+  // PTY cutover: the raw-terminal surface (TerminalSurface) is the default human
+  // chat surface once the hub's REMO_PTY_INTERACTIVE flag is on — fetched at boot
+  // via useClientConfig so web + hub stay in lockstep with the env flip. The
+  // localStorage `remo:pty-interactive` = '1' override stays as a dev/opt-in
+  // escape hatch (forces terminal on even when the hub flag is off). With the hub
+  // flag off and no override, behavior is unchanged (ChatSurface/ChatPanel).
+  const localPtyOverride = (() => {
     try { return localStorage.getItem('remo:pty-interactive') === '1' } catch { return false }
   })()
+  const ptyInteractive = clientConfig.pty_interactive || localPtyOverride
 
   return (
     <div className="flex h-full bg-[var(--bg-primary)] relative overflow-hidden">
