@@ -265,7 +265,7 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           {/* Desktop (md+): static current-session title — switching happens in
               the always-visible left sidebar, not here. */}
           <div className="hidden md:block flex-1 min-w-0">
-            <h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate flex items-center gap-1.5">
+            <h2 className="text-sm font-semibold text-[var(--text-secondary)] leading-tight truncate flex items-center gap-1.5">
               {activeSession ? sessionLabel(activeSession) : 'Remo Code'}
               {activeSession && (
                 <span className="text-[10px] text-[var(--text-muted)] font-mono font-normal">
@@ -274,17 +274,17 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
               )}
             </h2>
             {activeSession?.project_dir && (
-              <p className="text-[11px] text-[var(--text-muted)] truncate">{activeSession.project_dir}</p>
+              <p className="text-[11px] text-[var(--text-muted)] leading-tight truncate mt-0.5">{activeSession.project_dir}</p>
             )}
           </div>
 
           {activeSession && (activeSession.status === 'online' || activeSession.status === 'thinking') ? (
-            <span className="flex items-center gap-1.5 text-xs text-emerald-400 shrink-0">
+            <span className="flex items-center gap-1.5 text-xs text-emerald-400 shrink-0 pl-2">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               <span className="hidden sm:inline">Connected</span>
             </span>
           ) : activeSession ? (
-            <span className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] shrink-0">
+            <span className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] shrink-0 pl-2">
               <span className="w-1.5 h-1.5 rounded-full bg-[var(--text-muted)]" />
               <span className="hidden sm:inline">Offline</span>
             </span>
