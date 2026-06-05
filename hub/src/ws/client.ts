@@ -151,6 +151,8 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     const tf = TermFrame.safeParse(parsed)
     if (!tf.success) return
     const frame = tf.data
+    const _diag = frame.type === 'term.input'
+    if (_diag) log.info('term.input.diag.rx', { session_id: frame.session_id, user_id: data.userId })
     // DIRECTION ALLOWLIST (NH-2/R-PTY-33): only client→hub write frames here.
     if (!isClientToHubTermType(frame.type)) return
     // OWNERSHIP (H2/R-PTY-29): the session must be in THIS connection's
@@ -158,12 +160,13 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // subscription set is the live routing scope; canWriteTerminal is the DB
     // ground-truth that defeats a forged session_id even if mis-subscribed.
     const subscribed = data.clientEntry?.subscriptions?.has(frame.session_id) ?? false
-    if (!subscribed) return
-    if (!(await canWriteTerminal(data.userId, frame.session_id))) return
+    if (!subscribed) { if (_diag) log.warn('term.input.diag.drop', { gate: 'not_subscribed', session_id: frame.session_id }); return }
+    if (!(await canWriteTerminal(data.userId, frame.session_id))) { if (_diag) log.warn('term.input.diag.drop', { gate: 'cannot_write', session_id: frame.session_id }); return }
     const session = await getSession(frame.session_id, data.userId)
-    if (!session) return // belt-and-suspenders ownership check
+    if (!session) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_session', session_id: frame.session_id }); return }
     // License gate: term.input drives a live session (a mutation).
     if (frame.type === 'term.input' && !(await isLicenseActive(data))) {
+      log.warn('term.input.diag.drop', { gate: 'license_inactive', session_id: frame.session_id })
       try { ws.send(JSON.stringify({ type: 'send_refused', reason: 'license_inactive' })) } catch {}
       return
     }
@@ -174,13 +177,14 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     if (frame.type === 'term.input') {
       const runnerType = await getSessionRunnerType(frame.session_id, data.userId)
       if (humanOnlyRejectsActor('human', runnerType)) {
+        log.warn('term.input.diag.drop', { gate: 'human_only', session_id: frame.session_id, runner_type: runnerType })
         // Unreachable for a human actor by construction — but keep the SAME
         // chokepoint so there is no second, ungated write route into a PTY.
         return
       }
     }
     const channel = getChannel(frame.session_id)
-    if (!channel) return
+    if (!channel) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_channel', session_id: frame.session_id }); return }
     // PTY WRITE-ARBITRATION (Phase 20 / R-TG-10). A term.input from the xterm
     // panel is a HUMAN TURN — it must hold the per-session turn lock before its
     // bytes reach PTY stdin so it never interleaves with a Telegram-injected
@@ -192,12 +196,14 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       const writerId = data.writerId ?? 'client:unknown'
       const granted = await acquire(frame.session_id, writerId)
       if (!granted) {
+        log.warn('term.input.diag.drop', { gate: 'lock_not_granted', session_id: frame.session_id, writer_id: writerId })
         // Queued waiter was dropped (overflow/reset) — drop the frame rather than
         // inject out-of-turn bytes.
         return
       }
     }
-    try { channel.ws.send(JSON.stringify(frame)) } catch {}
+    if (_diag) log.info('term.input.diag.fwd', { session_id: frame.session_id })
+    try { channel.ws.send(JSON.stringify(frame)) } catch { if (_diag) log.warn('term.input.diag.drop', { gate: 'channel_send_threw', session_id: frame.session_id }) }
     return
   }
 
