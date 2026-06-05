@@ -85,6 +85,39 @@ to the web UI over WebSocket.
 | GET    | `/api/scheduled-task-runs/:run_id`     | One run + in-flight events if subscribed                        |
 | POST   | `/api/scheduled-task-runs/:run_id/cancel` | Best-effort cancel — sends to socket and marks `cancelled`   |
 | GET    | `/api/profile/cost-today`              | User's running daily spend in USD                               |
+| GET    | `/api/tasks/upcoming`                  | Next-N enabled tasks by `next_fire_at` (folded into the single-page "Next run" sort / Upcoming filter; endpoint preserved) |
+| GET    | `/api/tasks/activity`                  | User-wide run feed (parked surface — see Activity below)        |
+| GET    | `/api/tasks/templates`                 | Static, read-only GSD template catalog (see GSD templates below) |
+
+### GSD task templates
+
+`hub/src/scheduler/task-templates.ts` is a **static, code-defined catalog** of
+GSD presets, served read-only at `GET /api/tasks/templates` (web mirror:
+`web/src/lib/gsd-templates.ts`). A template is **pure sugar over the existing
+payload** — picking one pre-fills `ScheduleEditor`, then the NORMAL create POSTs
+with two **additive, back-compat** payload fields (no new table, no migration):
+
+- `payload.template_id` — provenance tag (`gsd_run | gsd_audit | gsd_review | gsd_plan`).
+- `payload.args.gsd` — `{ planFirst, autoMerge }` operator intent the dev
+  controller reads without re-parsing the prompt.
+
+| id | Prompt | task_type | Default cron | Auto-merge |
+|----|--------|-----------|--------------|------------|
+| `gsd_run` | `/gsd-run` | `dev` | `0 */4 * * *` | **OFF** (QC → PR) |
+| `gsd_audit` | `/gsd-audit-fix` | `dev` | `0 3 * * *` | OFF |
+| `gsd_review` | `/gsd-code-review` | `dev` | `0 9 * * 1` | OFF |
+| `gsd_plan` | `/gsd-plan-phase` | `dev` | `0 8 * * 1` | OFF |
+
+All templates use `task_type: 'dev'` — the **live dev-chain root** (the legacy
+`continue_dev`/`prompt` enum values were rewritten by the schema.sql migration in
+b9edb82). `dev` routes to the agent sender, which runs `payload.prompt` verbatim;
+`gsd_run`/`gsd_audit` ride the dev chain + dev controller via their post-run
+actions, while `gsd_review`/`gsd_plan` are read/plan-only single turns. v1
+**degrades gracefully** to a plain scheduled prompt when the dev controller isn't
+active. GSD slash syntax uses a **dash, never a colon**. The cost cap is
+**non-bypassable** — templates set nothing special; every run flows through the
+shared `dailyCostCapGate`. `auto-name.ts` is template-aware ("Run dev on
+`<repo>` every 4h"). Contract test: `hub/test/task-templates.test.ts`.
 
 ### WebSocket events (outbound to subscribed clients)
 
@@ -330,6 +363,33 @@ go through `runNow`, which **intentionally bypasses bounds**. Reasons:
 ---
 
 ## Web UI
+
+### Tasks page — single page, no sub-tabs
+
+`web/src/pages/TasksPage.tsx` is a **single page** (the old `Upcoming | Activity
+| Schedule` sub-tabs are gone). Its body is the grouped task CRUD list
+(`web/src/pages/tasks/ScheduleTab.tsx`):
+
+- **Upcoming** folded into a **"Next run" sort** + an **Upcoming filter** on the
+  toolbar. The `GET /api/tasks/upcoming` endpoint is preserved.
+- **`+ New Task ▾`** split button → "Blank task" + the GSD template cards.
+  Picking a template pre-fills `ScheduleEditor` (prompt/task_type/cadence/
+  post-run defaults + a "GSD: …" provenance badge).
+- `buildTopNav` is called **without** `subTabs`, so the Tasks nav item is a
+  single target and the PR #252 mobile top-bar dropdown collapses.
+- Legacy `?tab=` deep links: `#/tasks?tab=activity` → `#/activity`;
+  `#/schedules` and other `?tab=` params → canonical `#/tasks`
+  (`canonicalizeHash` in `web/src/App.tsx`). Guard: `web/test/tasks-redesign.test.ts`.
+
+### Activity — PARKED at `#/activity` (do NOT delete)
+
+Activity was removed from the Tasks sub-tabs but is **not deleted**. The
+`ActivityTab` component (`web/src/pages/tasks/ActivityTab.tsx`) + the
+`GET /api/tasks/activity` endpoint are unchanged, now rendered standalone at the
+parked route `#/activity` (`web/src/pages/ActivityPage.tsx`, no nav item yet).
+This is the **seed for a future global activity log** (all activity, not just
+scheduled-task runs); the data source will widen later. A "moving soon" note on
+the Tasks page links to it. **Do not delete** — it is intentionally parked.
 
 ### Cron builder (`web/src/components/CronBuilder.tsx`)
 

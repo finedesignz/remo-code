@@ -23,6 +23,13 @@ import {
 import { ScheduleEditor } from "../../components/ScheduleEditor";
 import { ScheduleRunsDrawer } from "../../components/ScheduleRunsDrawer";
 import { useSchedules, type ScheduledTask } from "../../hooks/useSchedules";
+import { GSD_TEMPLATES, type GsdTemplate } from "../../lib/gsd-templates";
+
+type SortMode = "default" | "next_run";
+type StatusFilter = "all" | "enabled" | "disabled" | "upcoming";
+
+// Tasks fired/firing within this window count as "Upcoming" for the filter.
+const UPCOMING_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 interface Props {
   token: string;
@@ -51,9 +58,16 @@ export function ScheduleTab({ token, subscribe }: Props) {
   const [groupsErr, setGroupsErr] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<ScheduledTask | null>(null);
+  const [editTemplate, setEditTemplate] = useState<GsdTemplate | null>(null);
   const [drawerTaskId, setDrawerTaskId] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  // Single-page toolbar state (Upcoming folded into a sort + filter).
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [sortMode, setSortMode] = useState<SortMode>("default");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
 
   // Fetch grouping shape from the backend whenever schedules change.
   // Server returns tasks keyed by repo, but full task fields (including
@@ -84,25 +98,61 @@ export function ScheduleTab({ token, subscribe }: Props) {
   const renderedGroups = useMemo<ScheduleGroup[]>(() => {
     if (!groups) return [];
     const byId = new Map(schedules.map((s) => [s.id, s]));
+    const q = search.trim().toLowerCase();
+    const now = Date.now();
+    const matches = (t: ScheduledTask): boolean => {
+      if (q && !(t.name ?? "").toLowerCase().includes(q)) return false;
+      if (statusFilter === "enabled" && !t.enabled) return false;
+      if (statusFilter === "disabled" && t.enabled) return false;
+      if (statusFilter === "upcoming") {
+        if (!t.enabled || !t.next_fire_at) return false;
+        const ms = new Date(t.next_fire_at).getTime();
+        if (!(ms >= now && ms - now <= UPCOMING_WINDOW_MS)) return false;
+      }
+      return true;
+    };
+    const sortTasks = (arr: ScheduledTask[]): ScheduledTask[] => {
+      if (sortMode !== "next_run") return arr;
+      // "Next run" sort: soonest next_fire_at first; tasks without a next run
+      // (disabled / no schedule) sink to the bottom.
+      return [...arr].sort((a, b) => {
+        const av = a.next_fire_at ? new Date(a.next_fire_at).getTime() : Infinity;
+        const bv = b.next_fire_at ? new Date(b.next_fire_at).getTime() : Infinity;
+        return av - bv;
+      });
+    };
     return groups.map((g) => ({
       ...g,
-      tasks: g.tasks
-        .map((t) => byId.get((t as any).id) ?? (t as ScheduledTask))
-        .filter(Boolean),
+      tasks: sortTasks(
+        g.tasks
+          .map((t) => byId.get((t as any).id) ?? (t as ScheduledTask))
+          .filter(Boolean)
+          .filter(matches),
+      ),
     }));
-  }, [groups, schedules]);
+  }, [groups, schedules, search, statusFilter, sortMode]);
 
   const handleNew = () => {
     setEditing(null);
+    setEditTemplate(null);
+    setNewMenuOpen(false);
+    setEditorOpen(true);
+  };
+  const handleNewFromTemplate = (tpl: GsdTemplate) => {
+    setEditing(null);
+    setEditTemplate(tpl);
+    setNewMenuOpen(false);
     setEditorOpen(true);
   };
   const handleEdit = (s: ScheduledTask) => {
     setEditing(s);
+    setEditTemplate(null);
     setEditorOpen(true);
   };
   const handleClose = () => {
     setEditorOpen(false);
     setEditing(null);
+    setEditTemplate(null);
   };
   const handleDelete = async (id: string) => {
     try {
@@ -141,15 +191,59 @@ export function ScheduleTab({ token, subscribe }: Props) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="text-xs text-[var(--text-muted)]">
-          {schedules.length} scheduled task{schedules.length === 1 ? "" : "s"}{" "}
-          across {renderedGroups.length} group
-          {renderedGroups.length === 1 ? "" : "s"}
+      {/* Page header + New Task split button */}
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-lg font-semibold text-[var(--text-primary)]">Tasks</h1>
+          <p className="text-xs text-[var(--text-muted)] mt-0.5">
+            {schedules.length} task{schedules.length === 1 ? "" : "s"} across{" "}
+            {renderedGroups.length} group{renderedGroups.length === 1 ? "" : "s"}.{" "}
+            <span>
+              Activity moved —{" "}
+              <a href="#/activity" className="text-blue-400 hover:text-blue-300 underline">
+                view it here
+              </a>
+              .
+            </span>
+          </p>
         </div>
-        <Button variant="primary" size="sm" onClick={handleNew}>
-          New schedule
-        </Button>
+        <NewTaskMenu
+          open={newMenuOpen}
+          onToggle={() => setNewMenuOpen((v) => !v)}
+          onClose={() => setNewMenuOpen(false)}
+          onBlank={handleNew}
+          onTemplate={handleNewFromTemplate}
+        />
+      </div>
+
+      {/* Toolbar: search · status filter · sort */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search by name…"
+          className="px-3 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-blue-500 w-48"
+        />
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+          className="px-3 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
+          aria-label="Filter tasks"
+        >
+          <option value="all">All</option>
+          <option value="enabled">Enabled</option>
+          <option value="disabled">Disabled</option>
+          <option value="upcoming">Upcoming (24h)</option>
+        </select>
+        <select
+          value={sortMode}
+          onChange={(e) => setSortMode(e.target.value as SortMode)}
+          className="px-3 py-1.5 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
+          aria-label="Sort tasks"
+        >
+          <option value="default">Group order</option>
+          <option value="next_run">Next run</option>
+        </select>
       </div>
 
       {isEmpty ? (
@@ -210,6 +304,7 @@ export function ScheduleTab({ token, subscribe }: Props) {
         <ScheduleEditor
           token={token}
           existing={editing}
+          template={editTemplate}
           allSchedules={schedules}
           onClose={handleClose}
           onSave={async (data) => {
@@ -230,6 +325,62 @@ export function ScheduleTab({ token, subscribe }: Props) {
           subscribe={subscribe}
           onClose={() => setDrawerTaskId(null)}
         />
+      )}
+    </div>
+  );
+}
+
+function NewTaskMenu({
+  open,
+  onToggle,
+  onClose,
+  onBlank,
+  onTemplate,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  onBlank: () => void;
+  onTemplate: (tpl: GsdTemplate) => void;
+}) {
+  return (
+    <div className="relative">
+      <Button variant="primary" size="sm" onClick={onToggle}>
+        + New Task ▾
+      </Button>
+      {open && (
+        <>
+          {/* click-away */}
+          <div className="fixed inset-0 z-40" onClick={onClose} aria-hidden />
+          <div className="absolute right-0 mt-1 z-50 w-72 rounded-xl bg-[var(--bg-secondary)] ring-1 ring-white/10 shadow-xl p-1.5">
+            <button
+              type="button"
+              onClick={onBlank}
+              className="w-full text-left px-3 py-2 rounded-lg text-sm text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/50"
+            >
+              Blank task
+            </button>
+            <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
+              GSD templates
+            </div>
+            {GSD_TEMPLATES.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => onTemplate(t)}
+                className="w-full text-left px-3 py-2 rounded-lg hover:bg-[var(--bg-tertiary)]/50"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-[var(--text-primary)]">{t.label}</span>
+                  <span className="text-[10px] text-blue-300">{t.cadenceLabel}</span>
+                </div>
+                <div className="text-xs text-[var(--text-muted)] mt-0.5 line-clamp-2">
+                  {t.description}
+                </div>
+              </button>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

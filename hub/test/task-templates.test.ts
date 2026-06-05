@@ -23,6 +23,7 @@ import {
 } from '../src/scheduler/task-templates.ts'
 import { validate as validateCron } from '../src/scheduler/cron.ts'
 import { validatePostRunActions } from '../src/scheduler/post-run/schema.ts'
+import { computeTaskAutoName } from '../src/scheduler/auto-name.ts'
 
 describe('task-templates/catalog', () => {
   test('ships exactly the 4 GSD presets', () => {
@@ -123,6 +124,26 @@ describe('task-templates/create-from-template', () => {
     expect(Object.keys(body.payload)).not.toContain('bypass_cost_cap')
     expect(Object.keys(body.payload)).not.toContain('skip_cost_cap')
     expect(validatePostRunActions(body.post_run_actions).ok).toBe(true)
+  })
+
+  test('auto-name prefix is template-aware (Run dev on <repo> …)', () => {
+    const ctx = {
+      sessions: [{ id: 'sess-123', name: 'remo', project_dir: 'C:/Users/x/GitHub/finedesignz/remo-code' }],
+      supervisors: [],
+    }
+    const run = getTaskTemplate('gsd_run') as TaskTemplate
+    const name = computeTaskAutoName(
+      {
+        task_type: 'dev',
+        target_kind: 'session',
+        target_id: 'sess-123',
+        payload: { prompt: run.promptTemplate, template_id: run.id },
+        cron_expr: run.defaultCron,
+      },
+      ctx,
+    )
+    expect(name.startsWith('Run dev on')).toBe(true)
+    expect(name).toContain('finedesignz/remo-code')
   })
 
   test('builds a valid body for all 4 templates', () => {
