@@ -107,12 +107,22 @@ function cronCadence(cron: string): string {
   return cron
 }
 
+// GSD template id → leading label (mirrors hub/src/scheduler/auto-name.ts).
+const TEMPLATE_LEADS: Record<string, string> = {
+  gsd_run: 'Run dev',
+  gsd_audit: 'Audit',
+  gsd_review: 'Review PRs',
+  gsd_plan: 'Plan phase',
+}
+
 export function computeTaskAutoName(task: TaskNameInput, ctx: TaskNameContext): string {
   const typeLbl = TYPE_LABELS[task.task_type] || task.task_type
   const target = targetLabel(task.target_kind, task.target_id ?? null, ctx)
   const cadence = cronCadence(task.cron_expr)
 
-  const leading = typeLbl
+  const templateId = (task.payload as any)?.template_id
+  const leading =
+    (typeof templateId === 'string' && TEMPLATE_LEADS[templateId]) || typeLbl
 
   if (!target) return ''
   if (!cadence) return leading + ' on ' + target
