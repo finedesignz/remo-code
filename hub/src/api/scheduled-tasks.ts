@@ -411,19 +411,27 @@ scheduledTasks.patch('/:id', async (c) => {
     post_run_actions:
       data.post_run_actions !== undefined ? data.post_run_actions : existing.post_run_actions,
   }
+  // Only re-validate targeting when the patch actually changes it. A pure
+  // non-targeting PATCH (e.g. `{ enabled }`) must NOT 400 on a pre-existing
+  // task that legitimately has a null target_id (e.g. internal system tasks
+  // with target_kind='session' / target_id=null routed at dispatch time).
+  const touchesTargeting =
+    data.target_kind !== undefined || data.target_id !== undefined
+
   const v = validateInputs({
     // Validate the (possibly derived) effective cron when rules changed too.
     cron_expr: data.cron_expr ?? derivedFromRules ?? undefined,
     timezone: data.timezone,
-    target_kind: data.target_kind,
-    // target_id pairing depends on the effective kind, so always check it:
+    // Only enforce target_kind/target_id pairing when targeting is touched.
+    target_kind: touchesTargeting ? effective.target_kind : undefined,
     target_id: effective.target_id ?? null,
     post_run_actions: data.post_run_actions,
   })
   if (!v.ok) return c.json(v.body, v.status)
 
-  // For the target-pairing check we want it gated on the effective kind:
-  if (targetIdRequired(effective.target_kind) && !effective.target_id) {
+  // For the target-pairing check we want it gated on the effective kind —
+  // but only when the patch actually changes targeting.
+  if (touchesTargeting && targetIdRequired(effective.target_kind) && !effective.target_id) {
     return c.json(
       { error: 'target_id_required', detail: `target_id required for kind=${effective.target_kind}` },
       400,
