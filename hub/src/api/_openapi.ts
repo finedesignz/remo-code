@@ -255,6 +255,160 @@ openapi.openapi(dismissLocalRoute, async (c) => {
   return c.json({ dismissed: true as const }, 200);
 });
 
+// ── Repo grouping (per-user, many-to-many) ──────────────────────────────────
+// Spec-only registration. The plain-Hono router in `./repo-groups.ts` serves
+// traffic (it owns param-route ordering); these `registerPath` calls only
+// contribute to the OpenAPI spec, so there is NO double-mount.
+{
+  const Err = z.object({ error: z.string() });
+  const RepoIdent = z
+    .string()
+    .openapi({ example: "github://acme/app", description: "github://owner/repo or path://<abs>" });
+  const GroupMember = z.object({ repo_ident: RepoIdent, created_at: z.string() });
+  const Group = z.object({
+    id: z.string().uuid(),
+    name: z.string(),
+    sort_order: z.number().int(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  });
+  const GroupWithMembers = Group.extend({ members: z.array(GroupMember) });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const base = { tags: ["repo-groups"], security: [{ bearerAuth: [] }] } as const;
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/repo-groups",
+    summary: "List the user's repo groups with members",
+    ...base,
+    responses: {
+      200: { description: "Groups", ...json(z.object({ groups: z.array(GroupWithMembers) })) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/repo-groups",
+    summary: "Create a repo group",
+    ...base,
+    request: { body: json(z.object({ name: z.string().min(1).max(64) })) },
+    responses: {
+      201: { description: "Created", ...json(Group) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      409: { description: "Group name already exists", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "put",
+    path: "/api/repo-groups/reorder",
+    summary: "Bulk-reorder groups by id",
+    ...base,
+    request: { body: json(z.object({ ordered_ids: z.array(z.string().uuid()) })) },
+    responses: {
+      204: { description: "Reordered" },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "patch",
+    path: "/api/repo-groups/{id}",
+    summary: "Rename and/or reorder a group",
+    ...base,
+    request: {
+      params: z.object({ id: z.string().uuid() }),
+      body: json(z.object({ name: z.string().min(1).max(64).optional(), sort_order: z.number().int().optional() })),
+    },
+    responses: {
+      200: { description: "Updated", ...json(Group) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Not found", ...json(Err) },
+      409: { description: "Group name already exists", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "delete",
+    path: "/api/repo-groups/{id}",
+    summary: "Delete a group (members cascade)",
+    ...base,
+    request: { params: z.object({ id: z.string().uuid() }) },
+    responses: {
+      204: { description: "Deleted" },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/repo-groups/{id}/members",
+    summary: "Add a repo to a group (idempotent)",
+    ...base,
+    request: {
+      params: z.object({ id: z.string().uuid() }),
+      body: json(z.object({ repo_ident: RepoIdent })),
+    },
+    responses: {
+      204: { description: "Added" },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "put",
+    path: "/api/repo-groups/{id}/members",
+    summary: "Replace a group's full member set",
+    ...base,
+    request: {
+      params: z.object({ id: z.string().uuid() }),
+      body: json(z.object({ repo_idents: z.array(RepoIdent) })),
+    },
+    responses: {
+      204: { description: "Replaced" },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "delete",
+    path: "/api/repo-groups/{id}/members/{repo_ident}",
+    summary: "Remove a repo from a group (repo_ident URL-encoded)",
+    ...base,
+    request: { params: z.object({ id: z.string().uuid(), repo_ident: z.string() }) },
+    responses: {
+      204: { description: "Removed" },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "get",
+    path: "/api/repo-groups/collapse-state",
+    summary: "Get per-user collapsed group-section ids",
+    ...base,
+    responses: {
+      200: { description: "Collapse state", ...json(z.object({ collapsed_group_ids: z.array(z.string()) })) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "patch",
+    path: "/api/repo-groups/collapse-state",
+    summary: "Replace per-user collapsed group-section ids",
+    ...base,
+    request: { body: json(z.object({ collapsed_group_ids: z.array(z.string()) })) },
+    responses: {
+      200: { description: "Collapse state", ...json(z.object({ collapsed_group_ids: z.array(z.string()) })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+    },
+  });
+}
+
 // OpenAPI security scheme registration.
 openapi.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
   type: "http",

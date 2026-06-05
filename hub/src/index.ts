@@ -21,6 +21,7 @@ import { errorProjectsRouter } from './api/error-projects'
 import { errorsRouter } from './api/errors'
 import { errorRunsRouter } from './api/error-runs'
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
+import { repoGroups as repoGroupsApi } from './api/repo-groups'
 import { instructions as instructionsApi } from './api/instructions'
 import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
@@ -383,6 +384,7 @@ app.route('/api/error-projects', errorProjectsRouter)
 app.route('/api/errors', errorsRouter)
 app.route('/api/error-runs', errorRunsRouter)
 app.route('/api/chat-tabs', chatTabsApi)
+app.route('/api/repo-groups', repoGroupsApi)
 app.route('/api/instructions', instructionsApi)
 app.route('/api/error-setup', errorSetupApi)
 // Phase 08: JWT-authed revanote sub-routes (mappings + annotations).

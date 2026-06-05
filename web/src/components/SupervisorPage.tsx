@@ -5,6 +5,12 @@ import { useWebSocketContext } from '../hooks/useWebSocket'
 import { Modal, Button } from './ui'
 import { SessionActionButton } from './SessionActionButton'
 import { isWorktreeOrNonCanonicalRepo } from '../lib/session-list'
+import { repoIdent as computeRepoIdent } from '../lib/repo-ident'
+import { useRepoGroups } from '../hooks/useRepoGroups'
+import { partitionIntoGroups } from '../lib/group-partition'
+import { GroupSection } from './groups/GroupSection'
+import { RepoGroupChips } from './groups/RepoGroupChips'
+import { GroupsManager } from './groups/GroupsManager'
 
 type OrchestratorSnapshot = {
   enabled: boolean
@@ -85,6 +91,7 @@ interface Row {
   run?: ActiveRun
   status: 'running' | 'idle' | 'starting' | 'error'
   lastSeen: number     // ms since epoch (run started_at or local last_commit) — for sort
+  repoIdent: string | null  // github://owner/repo or path://<abs>; null = ungroupable
 }
 
 const hubUrl = import.meta.env.VITE_HUB_URL || ''
@@ -264,6 +271,10 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const orch = useOrchestrator(token)
   const orchRoot = activeSupervisor?.roots?.[0] || null
 
+  // ── Repo grouping (Phase 2) ──────────────────────────────────────────────
+  const groupsApi = useRepoGroups(token)
+  const [showGroupsManager, setShowGroupsManager] = useState(false)
+
   useEffect(() => {
     try { localStorage.setItem(FILTER_LS_KEY, filter) } catch {}
   }, [filter])
@@ -418,6 +429,9 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
         run,
         status,
         lastSeen,
+        repoIdent: matchedGh
+          ? computeRepoIdent({ owner: matchedGh.owner, repo: matchedGh.name })
+          : computeRepoIdent({ path: l.path }),
       })
     }
 
@@ -438,6 +452,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
         github: g,
         status: 'idle',
         lastSeen: 0,
+        repoIdent: computeRepoIdent({ owner: g.owner, repo: g.name }),
       })
     }
 
@@ -470,6 +485,24 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
 
     return filtered
   }, [localRepos, githubRepos, activeRuns, selectedInstallationId, search, filter, typeFilter, sortKey, sortDir, lastActivityByPath])
+
+  // Partition the ALREADY-filtered rows into group sections (filter → partition,
+  // so worktree-hidden rows never resurface as members). A repo in N groups
+  // renders under each. Only used when groupView is on.
+  const groupSections = useMemo(
+    () => partitionIntoGroups(rows, groupsApi.groups, (r) => r.repoIdent),
+    [rows, groupsApi.groups],
+  )
+
+  // Groupable repos in the current view — feeds the manager's bulk-membership
+  // checklist (dedupe by ident; label = display name).
+  const repoChoices = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const r of rows) {
+      if (r.repoIdent && !seen.has(r.repoIdent)) seen.set(r.repoIdent, r.name)
+    }
+    return Array.from(seen, ([ident, label]) => ({ ident, label }))
+  }, [rows])
 
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
@@ -684,6 +717,23 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           >
             {launchingAll ? 'Launching…' : `Launch selected${selected.size > 0 ? ` (${selected.size})` : ''}`}
           </button>
+          {/* Repo grouping controls */}
+          <button
+            onClick={() => setShowGroupsManager(true)}
+            title="Manage repo groups"
+            className="px-2.5 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)] inline-flex items-center gap-1"
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><rect x="2" y="2.5" width="5" height="5" rx="1" /><rect x="9" y="2.5" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>
+            Groups
+          </button>
+          <button
+            onClick={() => groupsApi.setGroupView(!groupsApi.groupView)}
+            title={groupsApi.groupView ? 'Switch to flat list' : 'Group repos by your groups'}
+            aria-pressed={groupsApi.groupView}
+            className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${groupsApi.groupView ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
+          >
+            Group by
+          </button>
         </div>
 
         {/* Header (single responsive renderer; sort controls only matter on wider widths) */}
@@ -718,6 +768,37 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           />
           {rows.length === 0 ? (
             <EmptyState onClear={() => { setSearch(''); setFilter('all') }} />
+          ) : groupsApi.groupView && groupsApi.groups.length > 0 ? (
+            groupSections.map((section) => (
+              <GroupSection
+                key={section.id}
+                id={section.id}
+                name={section.name}
+                count={section.count}
+                collapsed={groupsApi.isCollapsed(section.id)}
+                onToggle={groupsApi.toggleCollapsed}
+                isUngrouped={section.isUngrouped}
+              >
+                <div className="divide-y divide-[var(--border-color)]/40">
+                  {section.items.map((row) => (
+                    <RepoRow
+                      key={`${section.id}:${row.key}`}
+                      row={row}
+                      online={!!activeSupervisor?.online}
+                      selectable={launchableKeys.has(row.key)}
+                      selected={selected.has(row.key)}
+                      onToggleSelect={() => toggleSelect(row.key)}
+                      onRowClick={() => handleRowClick(row)}
+                      onStart={() => startRow(row)}
+                      onStop={() => row.run && stopRun(row.run.id)}
+                      groups={groupsApi.groups}
+                      memberGroupIds={row.repoIdent ? (groupsApi.identToGroupIds.get(row.repoIdent) ?? []) : []}
+                      onToggleMembership={groupsApi.toggleMembership}
+                    />
+                  ))}
+                </div>
+              </GroupSection>
+            ))
           ) : (
             rows.map((row) => (
               <RepoRow
@@ -730,11 +811,21 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 onRowClick={() => handleRowClick(row)}
                 onStart={() => startRow(row)}
                 onStop={() => row.run && stopRun(row.run.id)}
+                groups={groupsApi.groups}
+                memberGroupIds={row.repoIdent ? (groupsApi.identToGroupIds.get(row.repoIdent) ?? []) : []}
+                onToggleMembership={groupsApi.toggleMembership}
               />
             ))
           )}
         </div>
       </div>
+
+      <GroupsManager
+        open={showGroupsManager}
+        onClose={() => setShowGroupsManager(false)}
+        groupsApi={groupsApi}
+        repoChoices={repoChoices}
+      />
 
       {startTarget && activeSupervisor && (
         <StartDialog
@@ -805,7 +896,7 @@ function RowActions({ row, online, onStart, onStop }: { row: Row; online: boolea
 
 /* ─────────────────────────── Repo row (single responsive renderer) ─────────────────────────── */
 
-function RepoRow({ row, online, selectable, selected, onToggleSelect, onRowClick, onStart, onStop }: {
+function RepoRow({ row, online, selectable, selected, onToggleSelect, onRowClick, onStart, onStop, groups, memberGroupIds, onToggleMembership }: {
   row: Row
   online: boolean
   selectable: boolean
@@ -814,6 +905,9 @@ function RepoRow({ row, online, selectable, selected, onToggleSelect, onRowClick
   onRowClick: () => void
   onStart: () => void
   onStop: () => void
+  groups: import('../lib/repo-groups').RepoGroup[]
+  memberGroupIds: string[]
+  onToggleMembership: (groupId: string, repoIdent: string, member: boolean) => void | Promise<void>
 }) {
   return (
     <div
@@ -851,6 +945,14 @@ function RepoRow({ row, online, selectable, selected, onToggleSelect, onRowClick
           {row.path && <span className="font-mono"> · <span title={row.path}>{truncateMiddle(row.path, 48)}</span></span>}
         </div>
       </div>
+      <span className="hidden sm:flex shrink-0 items-center max-w-[180px]" onClick={(e) => e.stopPropagation()}>
+        <RepoGroupChips
+          repoIdent={row.repoIdent}
+          groups={groups}
+          memberGroupIds={memberGroupIds}
+          onToggleMembership={onToggleMembership}
+        />
+      </span>
       <span className="hidden md:block w-24 shrink-0 text-xs text-[var(--text-muted)] truncate">
         {row.lastSeen > 0 ? timeAgo(row.lastSeen) : <span className="opacity-60">—</span>}
       </span>

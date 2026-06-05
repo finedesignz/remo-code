@@ -353,6 +353,53 @@ CREATE TABLE IF NOT EXISTS user_grid_state (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ── Repo grouping (per-user, many-to-many) ───────────────────────────────────
+-- User-defined groups for organizing repos in the Connections tab + sidebar.
+-- A repo (identified by repo_ident below) may belong to 0..N groups, and a repo
+-- in N groups renders under EACH of those groups. Cascade chain:
+-- users → repo_groups → repo_group_members. Additive only — no backfill, safe
+-- to re-run every boot.
+--
+-- repo_ident is "github://<owner>/<repo>" for GitHub-backed repos (host-agnostic,
+-- matches hub/src/lib/repo-key.ts buildRepoKey) or "path://<abs-path>" for
+-- local-only folders. NOT foreign-keyed: repos live transiently in scan output /
+-- sessions / pending_local_repos, so a membership may reference a repo not
+-- currently scanned; the client tolerates stale idents (cf. user_grid_state).
+CREATE TABLE IF NOT EXISTS repo_groups (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (user_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_repo_groups_user_order
+  ON repo_groups(user_id, sort_order, name);
+
+CREATE TABLE IF NOT EXISTS repo_group_members (
+  group_id    UUID NOT NULL REFERENCES repo_groups(id) ON DELETE CASCADE,
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- denormalized for cheap user-scoped reads
+  repo_ident  TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (group_id, repo_ident)
+);
+CREATE INDEX IF NOT EXISTS idx_repo_group_members_user_ident
+  ON repo_group_members(user_id, repo_ident);   -- "which groups is this repo in?" per user
+CREATE INDEX IF NOT EXISTS idx_repo_group_members_group
+  ON repo_group_members(group_id);
+
+-- Per-user collapse state for group sections (cross-device, like user_grid_state).
+-- One row per user; collapsed_group_ids is a JSON array of group-id strings that
+-- are currently collapsed. The reserved literal '__ungrouped__' represents the
+-- implicit Ungrouped section. Absent group ids default to EXPANDED. Not
+-- FK-constrained: a deleted group leaves a stale id the client ignores.
+CREATE TABLE IF NOT EXISTS user_repo_group_state (
+  user_id             UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  collapsed_group_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ── Phase 05: per-session CLI selection + rootless ambient sessions ──────────
 -- cli_kind: which CLI the agent spawns for this session ('claude' | 'codex').
 -- is_rootless: ambient sessions that have no project_dir; at most one per
