@@ -109,6 +109,35 @@ export function getGsdTemplate(id: string | null | undefined): GsdTemplate | und
   return GSD_TEMPLATES.find((t) => t.id === id)
 }
 
+/**
+ * Compose the effective prompt a template instantiates into `payload.prompt`.
+ * Web mirror of hub `buildTemplatePrompt` (task-templates.ts) — keep in sync.
+ *
+ * WHY: a dev task WITH a custom `payload.prompt` is sent to the agent VERBATIM
+ * and bypasses the dev controller, so its `guardrails` never reach the run via
+ * the controller. The prompt text is the only channel that does — so the
+ * guardrail intent rides on it. Slash command stays the FIRST token (so the
+ * in-session GSD skill triggers); directives follow on their own lines.
+ */
+export function buildGsdTemplatePrompt(t: GsdTemplate): string {
+  const lines: string[] = [t.promptTemplate]
+  if (t.id === 'gsd_plan') {
+    lines.push('Write the plan into .planning/ only — do NOT execute code.')
+  } else if (t.id === 'gsd_review') {
+    lines.push('Review and comment only — read-only, no code changes, no merge.')
+  } else {
+    if (t.guardrails.planFirst) {
+      lines.push("Plan first — do not execute scope you haven't planned.")
+    }
+    if (!t.guardrails.autoMerge) {
+      lines.push(
+        'When work is ready, open a PR for review and STOP — do NOT merge, tag, or deploy.',
+      )
+    }
+  }
+  return lines.join('\n')
+}
+
 /** Build a concrete ScheduleRule (with start_at) for a template prefill. */
 export function templateScheduleRules(t: GsdTemplate): ScheduleRule[] {
   const d = new Date()

@@ -8,7 +8,7 @@ import { ScheduleRulesBuilder } from './ScheduleRulesBuilder'
 import { type ScheduleRule, ruleToCron, defaultRule, validateRule } from '../lib/schedule-rules'
 import { computeTaskAutoName } from '../lib/task-name'
 import { TASK_TEMPLATES, isReplaceableNotes } from '../lib/task-templates'
-import { type GsdTemplate, templateScheduleRules } from '../lib/gsd-templates'
+import { type GsdTemplate, templateScheduleRules, buildGsdTemplatePrompt } from '../lib/gsd-templates'
 
 interface Props {
   token: string
@@ -72,7 +72,7 @@ export function ScheduleEditor({ token, existing, allSchedules, template, onClos
   // only in the top-level `prompt` column — fall back to that so older tasks
   // still display their custom prompt on reopen.
   const [prompt, setPrompt] = useState<string>(
-    existing?.payload?.prompt ?? (existing as any)?.prompt ?? tpl?.promptTemplate ?? '',
+    existing?.payload?.prompt ?? (existing as any)?.prompt ?? (tpl ? buildGsdTemplatePrompt(tpl) : '') ?? '',
   )
   const [notes, setNotes] = useState<string>(() => {
     const existingNotes = existing?.payload?.notes ?? ''
