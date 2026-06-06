@@ -28,7 +28,7 @@ import { computeDueRowsForTask, type DueRow } from './due-rows.ts';
 import { appendRunLog, recentRunLog, type RoutineRunLogEntry } from './run-log.ts';
 import { setCycleRunner, type CycleRunner } from './queue.ts';
 import { planWaves } from './waves.ts';
-import { runWavePlan, STUB_SEAMS, type WaveRunContext, type WaveRunSummary, type WaveSeams } from './wave-runner.ts';
+import { runWavePlan, STUB_SEAMS, makeLiveSeams, type WaveRunContext, type WaveRunSummary, type WaveSeams } from './wave-runner.ts';
 import type { LifecycleStage } from '../db/orchestrator-rows-dal.ts';
 
 // ── Live-path gate (carried Phase-22 gate; decision D10) ─────────────────────
@@ -389,18 +389,25 @@ export async function runWaves(
  * the registration seam works and logs that execution is deferred.
  */
 export function makeCycleRunner(): CycleRunner {
+  // Phase 25: the LIVE call site uses the REAL seams (prompt injection through the
+  // shared dispatch pipeline + cost cap). `runWaves`/`runWavePlan` still DEFAULT to
+  // STUB_SEAMS so tests + any non-live caller stay inert; only this flag-gated
+  // cycle-runner opts into makeLiveSeams().
+  const liveSeams = makeLiveSeams();
   return async (entry) => {
-    // The queue entry alone carries only session_id; resolving session→task→user
-    // (to build the real controller context + render/inject the prompt) is the
-    // Phase-25 wiring concern. Here we exercise the wave dispatch path with an
-    // empty command set + inert STUB_SEAMS, proving the seam is wired without any
-    // side effects. A real tick (Phase 25) will pass the parsed controller reply.
+    // The queue entry alone carries only session_id. Resolving session→task→user
+    // (to build the real controller context, render + inject the controller prompt,
+    // and pass the parsed reply's per-command RUNLOG blocks as the wave command set)
+    // is the remaining controller-wiring concern (the wave runner already needs
+    // ctx.userId to ride the dispatch pipeline). Until that wiring lands, this runs
+    // the wave dispatch path with an empty command set, so the live seams are wired
+    // at the live call site WITHOUT injecting anything (no commands ⇒ no inject).
     console.log(
-      `[orchestrator] cycle claimed session=${entry.session_id} — wave dispatch wired ` +
-        `(commands + seams land in Phase 25)`,
+      `[orchestrator] cycle claimed session=${entry.session_id} — live wave seams wired ` +
+        `(command set + session→user resolution land with controller injection)`,
     );
-    const ctx: WaveRunContext = { sessionId: entry.session_id, repoKey: null };
-    await runWaves({ decision: SAFE_FALLBACK, runLogBlocks: [] }, ctx);
+    const ctx: WaveRunContext = { sessionId: entry.session_id, repoKey: null, userId: null };
+    await runWaves({ decision: SAFE_FALLBACK, runLogBlocks: [] }, ctx, liveSeams);
   };
 }
 

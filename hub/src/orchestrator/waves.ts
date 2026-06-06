@@ -74,6 +74,14 @@ export interface WaveUnit {
   propose: boolean;
   /** Intra-wave ordering priority (higher first). */
   priority: number;
+  /**
+   * Phase-25 (additive): free-text for a custom MICRO-PROMPT row, carried through
+   * to the execution seam so it can wrap the user's text in the finish→PR→reviewer
+   * envelope. `null` for ordinary gsd-command rows. The PURE planner always emits
+   * `null` (it only sees command strings); a richer caller that has the row may set
+   * it before passing the plan to the runner.
+   */
+  microPrompt?: string | null;
 }
 
 export interface WavePlan {
@@ -150,6 +158,7 @@ export function planWaves(commands: string[]): WavePlan {
       command: cmd,
       propose: PROPOSE_COMMANDS.has(cmd),
       priority: commandPriority(cmd),
+      microPrompt: null,
     };
     const bucket = buckets.get(idx) ?? [];
     bucket.push(unit);

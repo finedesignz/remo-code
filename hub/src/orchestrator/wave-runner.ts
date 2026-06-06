@@ -25,11 +25,15 @@
 
 import { appendRunLog } from './run-log.ts';
 import type { WavePlan, WaveUnit } from './waves.ts';
+import { composeCommandPrompt } from './command-prompts.ts';
+import { injectOrchestratorPrompt, type InjectDeps } from './inject.ts';
 
 // ── Execution context (minimal; what a run needs to log + later inject) ──────
 export interface WaveRunContext {
   sessionId: string;
   repoKey: string | null;
+  /** Owning user (needed by the Phase-25 inject seam → dispatch pipeline). */
+  userId?: string | null;
   /** Decision rationale to stamp on each run-log row (D4). */
   decisionRationale?: string | null;
 }
@@ -79,6 +83,79 @@ export const STUB_SEAMS: WaveSeams = {
     console.log(`[orchestrator] proposeToChat STUB (Phase 28) command=${unit.command}`);
   },
 };
+
+/**
+ * Phase-25 LIVE SEAMS — the REAL execution seam (locked decision D6).
+ *
+ * `executeCommand` composes the templated prompt for the unit's command
+ * (command-prompts.ts) and INJECTS it into the bound session via the EXISTING
+ * dispatch pipeline (inject.ts → hub/src/dispatch/). It flows through
+ * `dailyCostCapGate` (non-bypassable). It returns as soon as the prompt is
+ * DISPATCHED or REFUSED — the gsd work + PR + reviewer happen ASYNC inside the
+ * agent's turn.
+ *
+ * BECAUSE the agent owns the PR + reviewer (per the embedded prompt), the
+ * `createPrForUnit` and `dispatchReviewer` hub-side seams are NO-OPS that return
+ * null: the hub cannot and must not open a PR or run a reviewer — it only injects
+ * text. pr_url / reviewer_verdict are reconciled on a later tick when the
+ * controller re-reads the agent's reported `<<UNIT>>` / run-log block. The
+ * run-log row written at dispatch time therefore carries pr_url=null /
+ * verdict=null and an outcome reflecting the DISPATCH result.
+ *
+ * proposeToChat stays a stub here (Phase 28 wires surfaceProposal); propose-tier
+ * units (ship/complete-milestone/tag) never reach executeCommand anyway.
+ *
+ * `injectDeps` is injectable for tests (spy the dispatch pipeline).
+ */
+export function makeLiveSeams(injectDeps?: InjectDeps): WaveSeams {
+  return {
+    async executeCommand(unit, ctx): Promise<ExecuteResult> {
+      const composed = composeCommandPrompt({ command: unit.command, microPrompt: unit.microPrompt });
+      if (!composed) {
+        // Propose-only or unknown/no-op command — should not reach here (the
+        // planner routes propose units to proposeToChat), but stay defensive.
+        return { outcome: 'skipped_not_executable' };
+      }
+      if (!ctx.userId) {
+        // Cannot ride the dispatch pipeline without the owning user.
+        return { outcome: 'skipped_no_user' };
+      }
+      const token = `orch:${ctx.sessionId}:${composed.command}:${Date.now()}`;
+      const res = await injectOrchestratorPrompt(
+        { userId: ctx.userId, sessionId: ctx.sessionId, token, prompt: composed.prompt },
+        injectDeps,
+      );
+      switch (res.kind) {
+        case 'dispatched':
+        case 'queued':
+          // Prompt is on its way to the agent. The gsd skill + PR + reviewer run
+          // async inside the agent turn; pr_url/verdict reconciled later.
+          return { outcome: 'dispatched' };
+        case 'refused_cost_cap':
+          return { outcome: 'refused_cost_cap' };
+        case 'no_session':
+          return { outcome: 'no_session' };
+        case 'refused':
+          return { outcome: `refused:${res.reason}` };
+        case 'failed':
+          return { outcome: `failed:${res.reason}` };
+      }
+    },
+    // The agent opens the PR + dispatches the reviewer inside its turn (D6). The
+    // hub does NOT — these are intentional no-ops. The run-log carries null and is
+    // reconciled when the agent's reported block surfaces on a later tick.
+    async createPrForUnit() {
+      return null;
+    },
+    async dispatchReviewer() {
+      return null;
+    },
+    // Phase 28 wires surfaceProposal; until then propose-tier units log 'proposed'.
+    async proposeToChat(unit) {
+      console.log(`[orchestrator] proposeToChat STUB (Phase 28) command=${unit.command}`);
+    },
+  };
+}
 
 // ── Per-unit lifecycle outcome (returned for the wave summary) ───────────────
 export interface UnitRunResult {
