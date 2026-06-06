@@ -27,6 +27,8 @@ import { humanizeRule } from '../scheduler/schedule-rules.ts';
 import { computeDueRowsForTask, type DueRow } from './due-rows.ts';
 import { appendRunLog, recentRunLog, type RoutineRunLogEntry } from './run-log.ts';
 import { setCycleRunner, type CycleRunner } from './queue.ts';
+import { planWaves } from './waves.ts';
+import { runWavePlan, STUB_SEAMS, type WaveRunContext, type WaveRunSummary, type WaveSeams } from './wave-runner.ts';
 import type { LifecycleStage } from '../db/orchestrator-rows-dal.ts';
 
 // ── Live-path gate (carried Phase-22 gate; decision D10) ─────────────────────
@@ -345,17 +347,33 @@ export async function writeRunLogFromBlocks(
   return written;
 }
 
-// ── Phase-24 SEAM (NOT IMPLEMENTED HERE) ─────────────────────────────────────
+// ── Phase-24 wave dispatch (planner + runner wired) ──────────────────────────
 /**
- * Dispatch the dependency-aware command waves for a parsed decision.
+ * Dispatch the dependency-aware command waves for a parsed controller reply.
  *
- * **Phase-24 SEAM — intentionally a no-op in Phase 23.** Phase 23 is the
- * decision core only: it computes the decision, renders the prompt, and writes
- * the run log. Actual wave fan-out / per-command gsd-skill injection land in
- * Phases 24 (waves) and 25 (command seam).
+ * Phase 24: the command set is taken from the controller's per-command RUNLOG
+ * blocks (the agent emits one block per command it intends to run this tick).
+ * Those commands are grouped into dependency waves (`planWaves`) and run with
+ * the per-unit finish→PR→reviewer→run-log protocol (`runWavePlan`).
+ *
+ * The execute / PR / reviewer / propose mechanics are SEAMS:
+ *   - executeCommand / createPrForUnit → Phase 25 (templated prompt injection).
+ *   - dispatchReviewer                 → reviewer dispatch.
+ *   - proposeToChat (ship/milestone/tag) → Phase 28 (surfaceProposal).
+ * They default to `STUB_SEAMS` (inert: no gh / network / merge), so even on a
+ * live (flag-ON) tick this only writes placeholder run-log rows until Phases
+ * 25/28 fill the seams. merge-to-main is EXCLUDED (off-hours Phase 29).
+ *
+ * `seams` is injectable for tests; defaults to the inert stubs in prod.
  */
-export async function runWaves(_decision: ParsedController): Promise<void> {
-  console.log('[orchestrator] runWaves: deferred to Phase 24 (no-op in Phase 23)');
+export async function runWaves(
+  parsed: ParsedController,
+  ctx: WaveRunContext,
+  seams: WaveSeams = STUB_SEAMS,
+): Promise<WaveRunSummary> {
+  const commands = parsed.runLogBlocks.map((b) => b.command);
+  const plan = planWaves(commands);
+  return runWavePlan(plan, ctx, seams);
 }
 
 // ── Cycle-runner factory + flag-gated registration (D10) ─────────────────────
@@ -372,11 +390,17 @@ export async function runWaves(_decision: ParsedController): Promise<void> {
  */
 export function makeCycleRunner(): CycleRunner {
   return async (entry) => {
+    // The queue entry alone carries only session_id; resolving session→task→user
+    // (to build the real controller context + render/inject the prompt) is the
+    // Phase-25 wiring concern. Here we exercise the wave dispatch path with an
+    // empty command set + inert STUB_SEAMS, proving the seam is wired without any
+    // side effects. A real tick (Phase 25) will pass the parsed controller reply.
     console.log(
-      `[orchestrator] cycle claimed session=${entry.session_id} — decision-core only ` +
-        `(wave dispatch deferred to Phase 24)`,
+      `[orchestrator] cycle claimed session=${entry.session_id} — wave dispatch wired ` +
+        `(commands + seams land in Phase 25)`,
     );
-    await runWaves({ decision: SAFE_FALLBACK, runLogBlocks: [] });
+    const ctx: WaveRunContext = { sessionId: entry.session_id, repoKey: null };
+    await runWaves({ decision: SAFE_FALLBACK, runLogBlocks: [] }, ctx);
   };
 }
 
