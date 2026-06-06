@@ -200,6 +200,11 @@ ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
     'log_pull', 'log_classify', 'log_triage',
     -- auto-dev P4: QC review → fix → verify (verify opens a PR, never merges)
     'qc_review', 'qc_fix', 'qc_verify',
+    -- Phase 21 (auto-dev-orchestrator): the session-level orchestrator task.
+    -- One per session (enforced by idx_scheduled_tasks_orchestrator_unique below).
+    -- Locked decision 3: REPLACES the many-tasks-per-session model — the
+    -- orchestrator task owns per-command rows in orchestrator_rows.
+    'orchestrator',
     -- Internal: synthesized by Coolify webhook
     'triage'
   ));
@@ -239,6 +244,96 @@ ALTER TABLE scheduled_tasks ALTER COLUMN session_id DROP NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next_fire
   ON scheduled_tasks(next_fire_at) WHERE enabled;
+
+-- ── Phase 21: auto-dev-orchestrator data model (additive, idempotent) ────────
+-- Foundational DDL ONLY — no behavior is wired here. Locked decisions 3, 4, 10
+-- (see .planning/architecture/auto-dev-orchestrator-SPEC.md §2). schema.sql
+-- re-runs in full every boot, so every statement below is idempotent. Any data
+-- backfill belongs in a one-shot hub/scripts/ script, NEVER inline here.
+
+-- D3: at most ONE orchestrator task per session. Partial unique index — only
+-- constrains rows where task_type='orchestrator'; all other task types are
+-- unaffected. A second insert for a session that already has an orchestrator
+-- task fails at the DB layer (duplicate key).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_tasks_orchestrator_unique
+  ON scheduled_tasks(session_id)
+  WHERE task_type = 'orchestrator';
+
+-- D10: manual lifecycle stage with per-stage frequency presets. Default
+-- 'development'. Constrained to the three stages. Named CHECK added guardedly
+-- so re-runs are no-ops (Postgres has no ADD CONSTRAINT IF NOT EXISTS).
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS lifecycle_stage TEXT NOT NULL DEFAULT 'development';
+DO $$ BEGIN
+  ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_lifecycle_stage_check
+    CHECK (lifecycle_stage IN ('development','beta','production-maintenance'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- D1/D3: per-command rows owned by an orchestrator task. Each row is one
+-- routine command with its own schedule_rule (reusing the ScheduleRule JSONB
+-- shape: cron-equivalent interval/unit/start_at + active_window + bounds).
+-- frequency_label='Never' ⇒ disabled; 'Once' ⇒ max_runs=1 (enforced by the
+-- controller, not here). micro_prompt is optional free text appended to the
+-- command's prompt. No behavior wired in Phase 21.
+CREATE TABLE IF NOT EXISTS orchestrator_rows (
+  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  task_id         TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+  command         TEXT NOT NULL,
+  enabled         BOOLEAN NOT NULL DEFAULT true,
+  schedule_rule   JSONB,
+  frequency_label TEXT,
+  micro_prompt    TEXT,
+  sort_order      INTEGER NOT NULL DEFAULT 0,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_rows_task
+  ON orchestrator_rows(task_id, sort_order);
+
+-- D1/D4: append-only audit of every routine command the controller runs. The
+-- controller reads the last N entries each tick to feed runtime context.
+-- decision_rationale / outcome / gap_dimension capture the controller's
+-- structured decision; pr_url / reviewer_verdict / deploy_verify_result capture
+-- the downstream PR + QC + deploy-verify results.
+CREATE TABLE IF NOT EXISTS routine_run_log (
+  id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  session_id           TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  repo_key             TEXT,
+  command              TEXT NOT NULL,
+  decision_rationale   TEXT,
+  outcome              TEXT,
+  gap_dimension        TEXT,
+  pr_url               TEXT,
+  reviewer_verdict     TEXT,
+  deploy_verify_result TEXT,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_routine_run_log_session_created
+  ON routine_run_log(session_id, created_at DESC);
+
+-- D10: hub-wide routine queue + per-session single-cycle lock. The global
+-- concurrency cap (Phase 22) reads pending/running rows; the partial unique
+-- index guarantees at most one running cycle per session (a second due-tick is
+-- coalesced, not stacked). status constrained to the queue lifecycle.
+CREATE TABLE IF NOT EXISTS routine_queue (
+  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  priority    INTEGER NOT NULL DEFAULT 0,
+  status      TEXT NOT NULL DEFAULT 'pending',
+  enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at  TIMESTAMPTZ
+);
+DO $$ BEGIN
+  ALTER TABLE routine_queue ADD CONSTRAINT routine_queue_status_check
+    CHECK (status IN ('pending','running','done','failed','cancelled'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Per-session lock: at most one running cycle per session.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_routine_queue_session_running
+  ON routine_queue(session_id)
+  WHERE status = 'running';
+-- FIFO + priority drain order for the global queue (Phase 22).
+CREATE INDEX IF NOT EXISTS idx_routine_queue_pending
+  ON routine_queue(priority DESC, enqueued_at)
+  WHERE status = 'pending';
 
 CREATE TABLE IF NOT EXISTS scheduled_task_runs (
   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
