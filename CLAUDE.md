@@ -160,6 +160,13 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
 - **Optional:** `REMO_SESSION_IDLE_GRACE_SECONDS` (default 300; `0` disables idle teardown),
   `REMO_ORCHESTRATOR_AUTOLAUNCH` (`false` disables auto-launch), `TITANIUM_BYPASS` (currently
   `true` in prod — see docs/auth.md), `COOLIFY_TOKEN`, `E4A_*`.
+- **`REMO_ORCHESTRATOR_ENABLED`** (default **OFF** / `'0'`; accepts `1|true|yes|on`): gates the
+  **auto-dev orchestrator** live cycle path (Phases 21–32). When OFF,
+  `registerCycleRunnerIfEnabled()` (the ONLY caller of the Phase-22 queue `setCycleRunner`) is a
+  no-op, so the routine-queue drain worker (`hub/src/orchestrator/queue.ts`) claims nothing and
+  prod stays fully dormant on the e2e-unproven queue. Companion knobs (Phase 22):
+  `REMO_ORCHESTRATOR_GLOBAL_CONCURRENCY` (default 2), `REMO_ORCHESTRATOR_DRAIN_INTERVAL_MS`
+  (default 1000). Phase-23 decision core: `hub/src/orchestrator/{due-rows,run-log,controller}.ts`.
 - **`REMO_PTY_INTERACTIVE`** (prod: **ON** since the 2026-06-04 cutover): drives the **web**
   default human surface — `GET /api/client-config` returns `pty_interactive`, and the SPA renders
   `TerminalSurface` (interactive `claude`/`codex` TUI over the Rust ConPTY) instead of the
