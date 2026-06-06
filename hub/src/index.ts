@@ -48,6 +48,7 @@ import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/d
 import { getGraceBuffer as getDispatchGraceBuffer } from './dispatch/grace.ts'
 import { startRevanoteCallbackWorker } from './revanote/callback.ts'
 import { startTelegramBridge } from './telegram/bridge.ts'
+import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/queue.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -612,6 +613,10 @@ runMigrations()
     // Phase 12 W3 — outbound Telegram bridge. No-op when TELEGRAM_BOT_TOKEN
     // is unset; otherwise subscribes to assistant_message:final events.
     startTelegramBridge()
+    // Phase 22 — auto-dev-orchestrator global routine-cycle queue drain worker.
+    // Dormant until Phase 23 registers a cycle-runner via setCycleRunner(); it
+    // claims nothing without one, so starting it here is safe.
+    startRoutineQueueWorker()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -623,6 +628,7 @@ function gracefulShutdown(signal: string) {
   console.log(`[shutdown] received ${signal}, pausing schedulers`)
   try { schedRegistry.pauseAll() } catch {}
   try { clearPostRunTimers() } catch {}
+  try { stopRoutineQueueWorker() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

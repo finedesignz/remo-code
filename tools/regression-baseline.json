@@ -1,15 +1,15 @@
 {
   "_comment": "Snapshot of expected hub test counts. Updated when intentionally adding/removing tests. CI fails if actual drifts beyond tolerance.",
-  "captured_at": "2026-06-01",
+  "captured_at": "2026-06-06",
   "captured_from": "per-file-isolated `bun run check-baseline` (each hub/test file in its own process — order-independent). Phase 20 (telegram-transcript-tail) adds 7 hub test files: transcript-backend-agnostic, transcript-adapter-claude, transcript-adapter-codex, telegram-output-from-transcript, telegram-permission-failclosed, telegram-permission-disambiguation, telegram-keystroke-inject, pty-turn-lock, telegram-human-only-guard (replacing the obsolete event-bus telegram-bridge.test.ts). pass/total here are informational; the enforced gate is pass_min/skip_max/fail_max. fail_max stays 0.",
-  "pass": 1263,
-  "skip": 130,
+  "pass": 1320,
+  "skip": 154,
   "fail": 0,
-  "total": 1393,
+  "total": 1474,
   "tolerance": {
-    "_comment": "Allow modest growth without churn; any fail > 0 always fails CI.",
+    "_comment": "Allow modest growth without churn; any fail > 0 always fails CI. skip_max raised to 175 for Phase 22 (orchestrator-queue) env-gated (REMO_E2E_DB_URL) e2e skips, matching the Phase 21 data-model e2e gating.",
     "pass_min": 700,
-    "skip_max": 150,
+    "skip_max": 175,
     "fail_max": 0
   }
 }
