@@ -316,3 +316,91 @@ describe('helpers + flag-off dormancy', () => {
     else process.env.REMO_ORCHESTRATOR_ENABLED = prev;
   });
 });
+
+// ── Env-gated e2e: real Postgres — orchestrator_approvals DAL ─────────────────
+// The unit tests above pass FAKE approval deps, so the real orchestrator_approvals
+// table (the merge command's anti-double-merge backstop) is never exercised. This
+// block drives the actual DAL against a disposable Postgres and asserts:
+//   1. insertApproval is idempotent — the UNIQUE (session_id, command, content_sha)
+//      index makes a duplicate human approval ON CONFLICT return the SAME row id
+//      (NOT a 2nd row) — so a re-fired approval cannot stack a second marker.
+//   2. listUnconsumedApprovals returns only consumed_at IS NULL rows.
+//   3. markApprovalConsumed is idempotent — flips an unconsumed row once, returns
+//      null on a 2nd call (already consumed) — so a re-fired merge window cannot
+//      re-consume / double-merge the same approval (R-ADO-25).
+// Mirrors the gating in orchestrator-data-model.test.ts.
+import { beforeAll as beforeAllE2E, afterAll as afterAllE2E } from 'bun:test';
+
+const HAS_TEST_DB = !!process.env.REMO_E2E_DB_URL;
+const maybe = HAS_TEST_DB ? describe : describe.skip;
+
+if (!HAS_TEST_DB) {
+  console.log(
+    '[e2e] REMO_E2E_DB_URL not set — orchestrator_approvals e2e SKIPPED. ' +
+      'Set REMO_E2E_DB_URL to a disposable Postgres URL to run them.',
+  );
+}
+
+maybe('orchestrator_approvals — e2e DAL (REMO_E2E_DB_URL)', () => {
+  let sql: any;
+  let dal: typeof import('../src/db/orchestrator-rows-dal.ts');
+  let userId: string;
+  let sessionId: string;
+
+  beforeAllE2E(async () => {
+    process.env.DATABASE_URL = process.env.REMO_E2E_DB_URL!;
+    process.env.JWT_SECRET = process.env.JWT_SECRET || 'x'.repeat(32);
+    const pg = await import('../src/db/postgres.ts');
+    sql = pg.sql;
+    const SCHEMA = await Bun.file(new URL('../src/db/schema.sql', import.meta.url)).text();
+    await sql.unsafe(SCHEMA);
+    dal = await import('../src/db/orchestrator-rows-dal.ts');
+
+    const u = await sql`
+      INSERT INTO users (email, password_hash)
+      VALUES (${`adoappr-${Date.now()}@e2e.local`}, 'x') RETURNING id
+    `;
+    userId = u[0].id;
+    const s = await sql`
+      INSERT INTO sessions (user_id, name, project_dir, token_hash)
+      VALUES (${userId}, 'appr', '/tmp/appr', ${`h-appr-${Date.now()}`}) RETURNING id
+    `;
+    sessionId = s[0].id;
+  });
+
+  afterAllE2E(async () => {
+    if (sql && userId) await sql`DELETE FROM users WHERE id = ${userId}`;
+  });
+
+  test('insertApproval is idempotent on the (session_id, command, content_sha) tuple', async () => {
+    const a1 = await dal.insertApproval({ session_id: sessionId, command: 'ship', content_sha: 'sha-A' });
+    const a2 = await dal.insertApproval({ session_id: sessionId, command: 'ship', content_sha: 'sha-A' });
+    expect(a1.id).toBe(a2.id); // ON CONFLICT returned the SAME row — no duplicate marker
+    const cnt = await sql`
+      SELECT count(*)::int AS n FROM orchestrator_approvals
+      WHERE session_id = ${sessionId} AND command = 'ship' AND content_sha = 'sha-A'
+    `;
+    expect(cnt[0].n).toBe(1);
+  });
+
+  test('listUnconsumedApprovals returns only unconsumed rows', async () => {
+    // Distinct content_sha so it is a separate tuple from the test above.
+    await dal.insertApproval({ session_id: sessionId, command: 'gsd-ship', content_sha: 'sha-B' });
+    const list = await dal.listUnconsumedApprovals(sessionId);
+    expect(list.length).toBeGreaterThanOrEqual(1);
+    expect(list.every((r) => r.consumed_at == null)).toBe(true);
+  });
+
+  test('markApprovalConsumed is idempotent — flips once, returns null on re-consume', async () => {
+    const a = await dal.insertApproval({ session_id: sessionId, command: 'tag', content_sha: 'sha-C' });
+    const first = await dal.markApprovalConsumed(a.id);
+    expect(first?.id).toBe(a.id);
+    expect(first?.consumed_at).not.toBeNull();
+    // 2nd consume is a no-op (row no longer unconsumed) — re-fired window can't double-merge.
+    const second = await dal.markApprovalConsumed(a.id);
+    expect(second).toBeNull();
+    // And it drops out of the unconsumed read.
+    const stillUnconsumed = await dal.listUnconsumedApprovals(sessionId);
+    expect(stillUnconsumed.find((r) => r.id === a.id)).toBeUndefined();
+  });
+});
