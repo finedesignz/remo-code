@@ -36,6 +36,7 @@ import {
 } from '../scheduler/deploy-verify-probe.ts'
 import { injectOrchestratorPrompt, type InjectOutcome } from './inject.ts'
 import { appendRunLog } from './run-log.ts'
+import { notifyChatSurface } from './propose.ts'
 
 // ── Hard bound (R-ADO-21) — non-negotiable; never raise without re-reading D9 ──
 export const MAX_FIX_ITERATIONS = 3
@@ -97,26 +98,19 @@ export function scanLogForErrors(log: string | null | undefined): LogScanResult 
   return { clean: matches.length === 0, matches, scanned: lines.length }
 }
 
-// ── Surface seam (Phase 28 propose-to-chat NOT built yet) ─────────────────────
+// ── Surface seam (Phase 28 propose-to-chat — LIVE) ────────────────────────────
 /**
  * Thin notify seam — surfaces an exhausted/failed verify tail to chat. Phase 28
- * (tiered-autonomy-propose-to-chat) will replace this with the real
- * `surfaceProposal` path. Until then it logs (best-effort, never throws) so the
- * bounded loop's terminal "surface" step is observable.
- *
- * NOTE: PHASE-28 STUB — replace with surfaceProposal when that lands.
+ * wires the LIVE path (`notifyChatSurface`, propose.ts) which reuses the SHIPPED
+ * P3 notify senders + `notifications_sent` throttle. Notify-only — verify-tail
+ * writes its own `verify_failed` run-log row. Tests inject their own notify spy
+ * via `depsOverride`; both real-deps builders bind the live notify.
  */
 export type NotifySeam = (input: {
   sessionId: string
   userId: string | null
   summary: string
 }) => Promise<void>
-
-const defaultNotify: NotifySeam = async ({ sessionId, summary }) => {
-  console.warn(
-    `[orchestrator] verify-tail SURFACE (Phase-28 stub) session=${sessionId}: ${summary}`,
-  )
-}
 
 // ── Injectable deps (tests swap network + dispatch; prod uses the real ones) ──
 export interface VerifyTailDeps {
@@ -187,7 +181,7 @@ function buildRealDeps(target: VerifyTarget): VerifyTailDeps {
     runDeployVerify: () =>
       runDeployVerify({ baseUrl: target.baseUrl, routes: target.routes }),
     inject: (input) => injectOrchestratorPrompt(input),
-    notify: defaultNotify,
+    notify: notifyChatSurface,
     appendRunLog,
   }
 }
@@ -271,7 +265,7 @@ export async function runVerifyTail(
           pass: false,
         }),
         inject: (input) => injectOrchestratorPrompt(input),
-        notify: defaultNotify,
+        notify: notifyChatSurface,
         appendRunLog,
       }
   const deps: VerifyTailDeps = { ...baseDeps, ...depsOverride }

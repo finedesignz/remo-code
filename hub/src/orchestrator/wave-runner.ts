@@ -28,6 +28,7 @@ import type { WavePlan, WaveUnit } from './waves.ts';
 import { composeCommandPrompt, isGapScanCommand } from './command-prompts.ts';
 import { nextGapDimensions } from './gap-rotation.ts';
 import { injectOrchestratorPrompt, type InjectDeps } from './inject.ts';
+import { proposeToChat as proposeToChatLive } from './propose.ts';
 
 // ── Execution context (minimal; what a run needs to log + later inject) ──────
 export interface WaveRunContext {
@@ -103,8 +104,9 @@ export const STUB_SEAMS: WaveSeams = {
  * run-log row written at dispatch time therefore carries pr_url=null /
  * verdict=null and an outcome reflecting the DISPATCH result.
  *
- * proposeToChat stays a stub here (Phase 28 wires surfaceProposal); propose-tier
- * units (ship/complete-milestone/tag) never reach executeCommand anyway.
+ * proposeToChat is the Phase-28 LIVE seam (propose.ts) — propose-tier units
+ * (ship/complete-milestone/tag) surface a one-tap approval to chat and are NEVER
+ * executed/PR'd/merged here. They never reach executeCommand anyway.
  *
  * `injectDeps` is injectable for tests (spy the dispatch pipeline).
  */
@@ -171,9 +173,11 @@ export function makeLiveSeams(injectDeps?: InjectDeps): WaveSeams {
     async dispatchReviewer() {
       return null;
     },
-    // Phase 28 wires surfaceProposal; until then propose-tier units log 'proposed'.
-    async proposeToChat(unit) {
-      console.log(`[orchestrator] proposeToChat STUB (Phase 28) command=${unit.command}`);
+    // Phase-28 LIVE: surface a one-tap propose-to-chat (propose.ts reuses the P3
+    // notify senders + notifications_sent throttle). NOTIFY-ONLY — the 'proposed'
+    // run-log row is written by runUnit, never here. Best-effort (never throws).
+    async proposeToChat(unit, ctx) {
+      await proposeToChatLive(unit, ctx);
     },
   };
 }
