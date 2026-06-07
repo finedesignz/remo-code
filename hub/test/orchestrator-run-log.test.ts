@@ -30,19 +30,40 @@ if (!HAS_TEST_DB) {
 
 maybe('run-log — e2e round-trip (REMO_E2E_DB_URL)', () => {
   let sql: any
-  const sessionId = `sess-runlog-${Date.now()}`
+  // routine_run_log.session_id FKs to sessions(id); real PG enforces it (mocks
+  // didn't). Seed a user + two real sessions and use their UUIDs as parents.
+  let userId: string
+  let sessionId: string
+  let otherSessionId: string
 
   beforeAll(async () => {
+    process.env.DATABASE_URL = process.env.REMO_E2E_DB_URL!
+    process.env.JWT_SECRET = process.env.JWT_SECRET || 'x'.repeat(32)
     const mod = await import('../src/db/postgres.ts')
     sql = mod.sql
     const schema = await Bun.file(new URL('../src/db/schema.sql', import.meta.url)).text()
     await sql.unsafe(schema)
+
+    const u = await sql`
+      INSERT INTO users (email, password_hash)
+      VALUES (${`adorl-${Date.now()}@e2e.local`}, 'x') RETURNING id
+    `
+    userId = u[0].id
+    const s = await sql`
+      INSERT INTO sessions (user_id, name, project_dir, token_hash)
+      VALUES (${userId}, 'rl', '/tmp/rl', ${`h-rl-${Date.now()}`}) RETURNING id
+    `
+    sessionId = s[0].id
+    const o = await sql`
+      INSERT INTO sessions (user_id, name, project_dir, token_hash)
+      VALUES (${userId}, 'rl-other', '/tmp/rl-other', ${`h-rlo-${Date.now()}`}) RETURNING id
+    `
+    otherSessionId = o[0].id
   })
 
   afterAll(async () => {
-    try {
-      await sql`DELETE FROM routine_run_log WHERE session_id = ${sessionId}`
-    } catch { /* ignore */ }
+    // Cascades sessions + their routine_run_log rows.
+    if (sql && userId) await sql`DELETE FROM users WHERE id = ${userId}`
   })
 
   test('append then recent returns newest-first, scoped to the session', async () => {
@@ -65,14 +86,12 @@ maybe('run-log — e2e round-trip (REMO_E2E_DB_URL)', () => {
     })
 
     // A different session's row must NOT leak in.
-    await appendRunLog({ session_id: `other-${sessionId}`, command: 'noise', outcome: 'success' })
+    await appendRunLog({ session_id: otherSessionId, command: 'noise', outcome: 'success' })
 
     const recent = await recentRunLog(sessionId, 10)
     expect(recent.length).toBe(2)
     // newest first
     expect(recent[0].command).toBe('gsd-code-review')
     expect(recent[1].command).toBe('gsd-execute-phase')
-
-    await sql`DELETE FROM routine_run_log WHERE session_id = ${`other-${sessionId}`}`
   })
 })
