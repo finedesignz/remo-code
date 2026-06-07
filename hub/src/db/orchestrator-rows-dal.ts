@@ -61,6 +61,41 @@ export async function listOrchestratorRows(taskId: string): Promise<Orchestrator
   `;
 }
 
+// Patch a subset of an existing row's mutable fields (Phase 30 — applyStagePreset
+// overwrite path). Only the provided fields are written; `updated_at` is bumped.
+// Returns the updated row, or null when the id does not exist.
+export interface OrchestratorRowPatch {
+  enabled?: boolean;
+  schedule_rule?: ScheduleRule | null;
+  frequency_label?: string | null;
+  micro_prompt?: string | null;
+  sort_order?: number;
+}
+
+export async function updateOrchestratorRowFields(
+  id: string,
+  patch: OrchestratorRowPatch,
+): Promise<OrchestratorRow | null> {
+  const rows = await sql<OrchestratorRow[]>`
+    UPDATE orchestrator_rows SET
+      enabled         = COALESCE(${patch.enabled ?? null}, enabled),
+      schedule_rule   = ${
+        patch.schedule_rule === undefined
+          ? sql`schedule_rule`
+          : patch.schedule_rule === null
+            ? null
+            : sql.json(patch.schedule_rule as any)
+      },
+      frequency_label = ${patch.frequency_label === undefined ? sql`frequency_label` : patch.frequency_label},
+      micro_prompt    = ${patch.micro_prompt === undefined ? sql`micro_prompt` : patch.micro_prompt},
+      sort_order      = COALESCE(${patch.sort_order ?? null}, sort_order),
+      updated_at      = now()
+    WHERE id = ${id}
+    RETURNING *
+  `;
+  return rows[0] ?? null;
+}
+
 // ── routine_run_log ──────────────────────────────────────────────────────────
 
 export interface RoutineRunLogEntry {
