@@ -9,13 +9,20 @@
 //                  `schedule_rule.active_window` (reuse `isWithinActiveWindow`
 //                  from scheduler/schedule-rules.ts — NO new window logic).
 //                  Outside the window ⇒ a skipped run-log row, nothing injected.
-//   SELECTION    — PRs whose dispatched reviewer marked PASS (verdict read from
-//                  routine_run_log) AND that carry an UNCONSUMED approval marker
-//                  (P28 HITL contract — orchestrator_approvals, keyed by
-//                  content_sha = sha256(pr_url)). FAIL / UNCERTAIN / unapproved
-//                  PRs are HELD and surfaced to chat (notifyChatSurface).
-//   IDEMPOTENCY  — each selected approval is marked CONSUMED at selection time, so
-//                  a re-fired window cannot re-select the same PR (R-ADO-25).
+//   SELECTION    — (decision D8 / D5) PRs whose dispatched reviewer marked PASS
+//                  (verdict read from routine_run_log). For an ORDINARY dev-command
+//                  PR (command NOT in PROPOSE_ONLY_COMMANDS) a reviewer PASS is
+//                  SUFFICIENT ⇒ auto-merge in-window, NO approval marker required.
+//                  For a POWERFUL-command PR (command ∈ PROPOSE_ONLY_COMMANDS —
+//                  ship / complete-milestone / tag + aliases) PASS is NOT enough:
+//                  it also needs an UNCONSUMED approval marker (P28 HITL contract —
+//                  orchestrator_approvals, keyed by content_sha = sha256(pr_url)).
+//                  FAIL / UNCERTAIN (any command), or a powerful-command PR without
+//                  an approval, are HELD and surfaced to chat (notifyChatSurface).
+//   IDEMPOTENCY  — a consumed powerful-command approval is marked CONSUMED at
+//                  selection time, so a re-fired window cannot re-select it
+//                  (R-ADO-25). Dev-PR auto-merges consume no marker; the merged PR
+//                  closes, so a re-fired window finds no open PASS row for it.
 //   HUB STAYS TEXT-ONLY — the hub NEVER shells gh/git/merge. It injects a templated
 //                  prompt (cost-cap-gated via injectOrchestratorPrompt) instructing
 //                  the bound session AGENT to `gh pr merge --squash` ONLY the
@@ -34,6 +41,7 @@ import {
 } from '../db/orchestrator-rows-dal.ts';
 import { injectOrchestratorPrompt } from './inject.ts';
 import { notifyChatSurface } from './propose.ts';
+import { PROPOSE_ONLY_COMMANDS } from './command-prompts.ts';
 
 /** The canonical command name. EXCLUDED from the wave planner; routed here. */
 export const MERGE_COMMAND = 'merge-to-main';
@@ -139,7 +147,10 @@ export async function runMergeToMain(
     }
   }
 
-  // ── SELECT: PASS ∩ unconsumed approval (P28 HITL contract, R-ADO-25) ──────
+  // ── SELECT (decision D8 / D5) ─────────────────────────────────────────────
+  // Dev-command PRs: reviewer PASS ⇒ auto-merge (NO approval marker needed).
+  // Powerful-command PRs (∈ PROPOSE_ONLY_COMMANDS): PASS AND an unconsumed
+  // approval marker; otherwise HELD. FAIL / UNCERTAIN (any command) ⇒ HELD.
   const approvals = await deps.listUnconsumedApprovals(ctx.sessionId);
   // index unconsumed approvals by content_sha for O(1) match per PR.
   const approvalBySha = new Map<string, { id: string }>();
@@ -149,16 +160,23 @@ export async function runMergeToMain(
   const held: string[] = [];
 
   for (const c of candidates.values()) {
-    const passed = c.verdict === 'PASS';
+    if (c.verdict !== 'PASS') {
+      held.push(c.prUrl); // FAIL / UNCERTAIN ⇒ HOLD (any command).
+      continue;
+    }
+    const needsApproval = PROPOSE_ONLY_COMMANDS.has(c.command);
+    if (!needsApproval) {
+      merged.push(c.prUrl); // ordinary dev PR + PASS ⇒ auto-merge.
+      continue;
+    }
     const approval = approvalBySha.get(prContentSha(c.prUrl));
-    if (passed && approval) {
-      // Mark consumed BEFORE inject so a re-fired window cannot re-select it,
-      // even if the agent's merge turn is still in flight (idempotency guard).
+    if (approval) {
+      // Powerful command: mark consumed BEFORE inject so a re-fired window cannot
+      // re-select it, even if the agent's merge turn is still in flight.
       await deps.markApprovalConsumed(approval.id);
       merged.push(c.prUrl);
     } else {
-      // FAIL / UNCERTAIN, or PASS-without-approval → HOLD.
-      held.push(c.prUrl);
+      held.push(c.prUrl); // powerful-command PR awaiting approval ⇒ HOLD.
     }
   }
 
@@ -169,7 +187,7 @@ export async function runMergeToMain(
         sessionId: ctx.sessionId,
         userId: ctx.userId,
         summary:
-          `Off-hours merge held ${held.length} PR(s) (FAIL / uncertain / unapproved) — ` +
+          `Off-hours merge held ${held.length} PR(s) (FAIL / uncertain, or ship/milestone/tag awaiting approval) — ` +
           `not auto-merged:\n${held.map((u) => `- ${u}`).join('\n')}`,
       })
       .catch(() => {});
@@ -183,7 +201,7 @@ export async function runMergeToMain(
       outcome: held.length > 0 ? 'held_only' : 'no_candidates',
       decision_rationale:
         held.length > 0
-          ? `No PASS+approved PRs; held ${held.length}: ${held.join(', ')}`
+          ? `No mergeable PRs; held ${held.length}: ${held.join(', ')}`
           : 'No PRs awaiting merge.',
     });
     return held.length > 0 ? { kind: 'held_only', held } : { kind: 'no_candidates' };
@@ -221,7 +239,7 @@ export async function runMergeToMain(
     command: MERGE_COMMAND,
     outcome: dispatched ? 'merge_dispatched' : `refused_${inj.kind}`,
     decision_rationale:
-      `Merging ${merged.length} PASS+approved PR(s): ${merged.join(', ')}.` +
+      `Merging ${merged.length} PR(s) (dev PASS auto-merge; ship/milestone/tag approved): ${merged.join(', ')}.` +
       (held.length > 0 ? ` Held ${held.length}: ${held.join(', ')}.` : '') +
       ` Inject=${inj.kind}.`,
   });

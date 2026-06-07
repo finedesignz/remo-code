@@ -8,10 +8,12 @@
  * Covers:
  *   1. WINDOW GATE — out-of-window ⇒ skipped run-log row, nothing injected/merged.
  *   2. WINDOW GATE — in-window ⇒ proceeds (selection runs).
- *   3. SELECTION   — only PASS+approved PRs are merged; FAIL / uncertain /
- *                    PASS-without-approval are HELD + surfaced (notifyChatSurface).
- *   4. IDEMPOTENCY — a selected approval is marked CONSUMED; a re-fire (no
- *                    unconsumed marker) re-merges nothing.
+ *   3. SELECTION   — (decision D8/D5) dev-command PRs auto-merge on reviewer PASS
+ *                    (NO approval needed); ship/complete-milestone/tag PRs need
+ *                    PASS + an unconsumed approval; FAIL / uncertain are HELD +
+ *                    surfaced (notifyChatSurface).
+ *   4. IDEMPOTENCY — a consumed powerful-command approval is marked CONSUMED; a
+ *                    re-fire (no unconsumed marker) re-merges nothing.
  *   5. RUN LOG     — exactly one merge-to-main run-log row per call, with merged +
  *                    held PRs in the rationale.
  *   6. FLAG-OFF    — registerCycleRunnerIfEnabled() returns false with the flag OFF
@@ -127,41 +129,86 @@ describe('runMergeToMain — window gate', () => {
   });
 });
 
-describe('runMergeToMain — selection (PASS+approved only)', () => {
-  test('merges only PASS+approved; holds FAIL / uncertain / unapproved + notifies', async () => {
-    const passApproved = 'https://gh/pr/pass-approved';
-    const passNoApproval = 'https://gh/pr/pass-noapproval';
-    const failApproved = 'https://gh/pr/fail';
+describe('runMergeToMain — selection (decision D8/D5)', () => {
+  test('dev PASS PR auto-merges with NO approval marker', async () => {
+    const devPass = 'https://gh/pr/dev-pass';
+    const { deps, calls } = makeDeps({
+      now: new Date('2026-06-06T02:00:00Z'),
+      log: [logRow(devPass, 'PASS', 'execute')], // dev command, no approval row
+      approvals: [],
+    });
+    const out = await runMergeToMain({ ...baseCtx, scheduleRule: rule() }, deps);
+    expect(out.kind).toBe('dispatched');
+    if (out.kind === 'dispatched') {
+      expect(out.merged).toEqual([devPass]);
+      expect(out.held).toEqual([]);
+    }
+    expect(calls.consumed.length).toBe(0); // dev auto-merge consumes no marker
+    expect(calls.injected.length).toBe(1);
+    expect(calls.injected[0].prompt).toContain(devPass);
+    expect(calls.notified.length).toBe(0); // nothing held
+  });
+
+  test('ship PASS PR WITHOUT approval ⇒ HELD; ship PASS WITH approval ⇒ merged + consumed', async () => {
+    const shipNoApproval = 'https://gh/pr/ship-noapproval';
+    const shipApproved = 'https://gh/pr/ship-approved';
+    const { deps, calls } = makeDeps({
+      now: new Date('2026-06-06T02:00:00Z'),
+      log: [
+        logRow(shipApproved, 'PASS', 'ship'),
+        logRow(shipNoApproval, 'PASS', 'ship'),
+      ],
+      approvals: [{ id: 'a1', content_sha: prContentSha(shipApproved) }],
+    });
+    const out = await runMergeToMain({ ...baseCtx, scheduleRule: rule() }, deps);
+    expect(out.kind).toBe('dispatched');
+    if (out.kind === 'dispatched') {
+      expect(out.merged).toEqual([shipApproved]);
+      expect(out.held).toEqual([shipNoApproval]);
+    }
+    expect(calls.consumed).toEqual(['a1']); // only the approved powerful-cmd marker
+    expect(calls.injected[0].prompt).toContain(shipApproved);
+    expect(calls.injected[0].prompt).not.toContain(shipNoApproval);
+    expect(calls.notified.length).toBe(1);
+    expect(calls.notified[0].summary).toContain(shipNoApproval);
+  });
+
+  test('merges PASS dev + PASS approved ship; holds FAIL / uncertain / unapproved ship', async () => {
+    const devPass = 'https://gh/pr/dev-pass';
+    const shipApproved = 'https://gh/pr/ship-approved';
+    const milestoneNoApproval = 'https://gh/pr/milestone-noapproval';
+    const failDev = 'https://gh/pr/fail';
     const uncertain = 'https://gh/pr/uncertain';
     const { deps, calls } = makeDeps({
       now: new Date('2026-06-06T02:00:00Z'),
       log: [
-        logRow(passApproved, 'PASS'),
-        logRow(passNoApproval, 'PASS'),
-        logRow(failApproved, 'FAIL'),
-        logRow(uncertain, 'UNCERTAIN'),
+        logRow(devPass, 'PASS', 'execute'),
+        logRow(shipApproved, 'PASS', 'ship'),
+        logRow(milestoneNoApproval, 'PASS', 'complete-milestone'),
+        logRow(failDev, 'FAIL', 'execute'),
+        logRow(uncertain, 'UNCERTAIN', 'execute'),
       ],
       approvals: [
-        { id: 'a1', content_sha: prContentSha(passApproved) },
-        { id: 'a3', content_sha: prContentSha(failApproved) }, // approved but FAIL ⇒ still held
+        { id: 'a1', content_sha: prContentSha(shipApproved) },
+        { id: 'a3', content_sha: prContentSha(failDev) }, // approved but FAIL ⇒ still held
       ],
     });
     const out = await runMergeToMain({ ...baseCtx, scheduleRule: rule() }, deps);
     expect(out.kind).toBe('dispatched');
     if (out.kind === 'dispatched') {
-      expect(out.merged).toEqual([passApproved]);
-      expect(out.held.sort()).toEqual([failApproved, passNoApproval, uncertain].sort());
+      expect(out.merged.sort()).toEqual([devPass, shipApproved].sort());
+      expect(out.held.sort()).toEqual([failDev, milestoneNoApproval, uncertain].sort());
     }
-    // only the PASS+approved marker consumed
+    // only the PASS+approved powerful-cmd marker consumed
     expect(calls.consumed).toEqual(['a1']);
-    // exactly the selected PR in the injected merge prompt; held PRs absent
     expect(calls.injected.length).toBe(1);
-    expect(calls.injected[0].prompt).toContain(passApproved);
-    expect(calls.injected[0].prompt).not.toContain(passNoApproval);
-    expect(calls.injected[0].prompt).not.toContain(failApproved);
+    expect(calls.injected[0].prompt).toContain(devPass);
+    expect(calls.injected[0].prompt).toContain(shipApproved);
+    expect(calls.injected[0].prompt).not.toContain(milestoneNoApproval);
+    expect(calls.injected[0].prompt).not.toContain(failDev);
     // held surfaced once
     expect(calls.notified.length).toBe(1);
-    expect(calls.notified[0].summary).toContain(passNoApproval);
+    expect(calls.notified[0].summary).toContain(milestoneNoApproval);
   });
 
   test('no PASS+approved candidates, only holds ⇒ held_only, no inject', async () => {
@@ -192,11 +239,11 @@ describe('runMergeToMain — selection (PASS+approved only)', () => {
 });
 
 describe('runMergeToMain — idempotency (consumed marker prevents re-merge)', () => {
-  test('re-fired window with the marker already consumed merges nothing', async () => {
+  test('re-fired window with the marker already consumed merges nothing (powerful cmd)', async () => {
     const pr = 'https://gh/pr/1';
     const shared = makeDeps({
       now: new Date('2026-06-06T02:00:00Z'),
-      log: [logRow(pr, 'PASS')],
+      log: [logRow(pr, 'PASS', 'ship')], // powerful cmd ⇒ approval-gated, idempotent
       approvals: [{ id: 'a1', content_sha: prContentSha(pr) }],
     });
     // first window: merges + consumes a1
