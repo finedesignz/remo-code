@@ -30,6 +30,7 @@ import { setCycleRunner, type CycleRunner } from './queue.ts';
 import { planWaves } from './waves.ts';
 import { runWavePlan, STUB_SEAMS, makeLiveSeams, type WaveRunContext, type WaveRunSummary, type WaveSeams } from './wave-runner.ts';
 import { runVerifyTail } from './verify-tail.ts';
+import { MERGE_COMMAND, isMergeCommand, runMergeToMain, type MergeOutcome } from './merge-command.ts';
 import type { LifecycleStage } from '../db/orchestrator-rows-dal.ts';
 
 // ── Live-path gate (carried Phase-22 gate; decision D10) ─────────────────────
@@ -377,6 +378,33 @@ export async function runWaves(
   return runWavePlan(plan, ctx, seams);
 }
 
+// ── Phase-29 off-hours merge-to-main (SPECIAL PATH — NOT the wave planner) ────
+/**
+ * Route a due `merge-to-main` row to the dedicated off-hours merge command.
+ *
+ * `merge-to-main` is EXCLUDED from `planWaves` (waves.ts EXCLUDED_COMMANDS) and is
+ * the ONLY auto-merge-to-main path (R-ADO-24). This is the controller's seam that
+ * carries the row's `schedule_rule` (off-hours active_window) into
+ * `runMergeToMain`, which window-gates + selects PASS+approved PRs and injects the
+ * agent merge turn (hub stays text-only). If no merge row is due, this is a no-op.
+ *
+ * Returns the merge outcome (tests assert on it) or null when no merge row is due.
+ */
+export async function dispatchMergeIfDue(
+  dueRows: DueRow[],
+  ctx: { sessionId: string; userId: string | null; repoKey: string | null; tz?: string },
+): Promise<MergeOutcome | null> {
+  const mergeDue = dueRows.find((d) => isMergeCommand(d.row.command));
+  if (!mergeDue) return null;
+  return runMergeToMain({
+    sessionId: ctx.sessionId,
+    userId: ctx.userId,
+    repoKey: ctx.repoKey,
+    scheduleRule: mergeDue.row.schedule_rule,
+    tz: ctx.tz,
+  });
+}
+
 // ── Cycle-runner factory + flag-gated registration (D10) ─────────────────────
 /**
  * Build the CycleRunner injected into the Phase-22 queue. Per claimed cycle it
@@ -409,6 +437,18 @@ export function makeCycleRunner(): CycleRunner {
     );
     const ctx: WaveRunContext = { sessionId: entry.session_id, repoKey: null, userId: null };
     await runWaves({ decision: SAFE_FALLBACK, runLogBlocks: [] }, ctx, liveSeams);
+
+    // Phase 29: the off-hours `merge-to-main` row (EXCLUDED from the wave planner)
+    // routes through the dedicated special path `dispatchMergeIfDue`. It activates
+    // once the due-row + session→user resolution lands here (same wiring gap as the
+    // wave command set above); the function + its window-gate/PASS+approved
+    // selection are wired and unit-tested. No due rows resolved yet ⇒ no-op.
+    try {
+      await dispatchMergeIfDue([], { sessionId: entry.session_id, userId: null, repoKey: null });
+    } catch (err: any) {
+      console.warn(`[orchestrator] merge-to-main path threw (ignored): ${err?.message ?? err}`);
+    }
+    void MERGE_COMMAND; // referenced for the special-path constant (see dispatchMergeIfDue).
 
     // Phase 27 (D9): the MANDATORY terminal verify tail — runs after the waves on
     // EVERY tick regardless of which commands were due. Best-effort: a throw here
