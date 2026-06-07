@@ -1271,6 +1271,1486 @@
         }
       }
     },
+    "/api/orchestrator-tasks/{sessionId}": {
+      "get": {
+        "summary": "Get a session's orchestrator task + its rows (task null if none)",
+        "tags": [
+          "orchestrator-tasks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "sessionId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task + rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "user_id": {
+                          "type": "string"
+                        },
+                        "session_id": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "lifecycle_stage": {
+                          "type": "string",
+                          "enum": [
+                            "development",
+                            "beta",
+                            "production-maintenance"
+                          ]
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "created_at": {
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "user_id",
+                        "session_id",
+                        "name",
+                        "lifecycle_stage",
+                        "enabled",
+                        "created_at",
+                        "updated_at"
+                      ]
+                    },
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "task_id": {
+                            "type": "string"
+                          },
+                          "command": {
+                            "type": "string"
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "schedule_rule": {
+                            "type": "object",
+                            "nullable": true,
+                            "properties": {
+                              "interval": {
+                                "type": "integer"
+                              },
+                              "unit": {
+                                "type": "string",
+                                "enum": [
+                                  "minutes",
+                                  "hours",
+                                  "days",
+                                  "weeks",
+                                  "months"
+                                ]
+                              },
+                              "start_at": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "interval",
+                              "unit",
+                              "start_at"
+                            ]
+                          },
+                          "frequency_label": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "micro_prompt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "sort_order": {
+                            "type": "integer"
+                          },
+                          "created_at": {
+                            "type": "string"
+                          },
+                          "updated_at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "task_id",
+                          "command",
+                          "enabled",
+                          "schedule_rule",
+                          "frequency_label",
+                          "micro_prompt",
+                          "sort_order",
+                          "created_at",
+                          "updated_at"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "task",
+                    "rows"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create the one orchestrator task for a session",
+        "tags": [
+          "orchestrator-tasks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "sessionId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "lifecycle_stage": {
+                    "type": "string",
+                    "enum": [
+                      "development",
+                      "beta",
+                      "production-maintenance"
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "user_id": {
+                          "type": "string"
+                        },
+                        "session_id": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "lifecycle_stage": {
+                          "type": "string",
+                          "enum": [
+                            "development",
+                            "beta",
+                            "production-maintenance"
+                          ]
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "created_at": {
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "user_id",
+                        "session_id",
+                        "name",
+                        "lifecycle_stage",
+                        "enabled",
+                        "created_at",
+                        "updated_at"
+                      ]
+                    },
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "task_id": {
+                            "type": "string"
+                          },
+                          "command": {
+                            "type": "string"
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "schedule_rule": {
+                            "type": "object",
+                            "nullable": true,
+                            "properties": {
+                              "interval": {
+                                "type": "integer"
+                              },
+                              "unit": {
+                                "type": "string",
+                                "enum": [
+                                  "minutes",
+                                  "hours",
+                                  "days",
+                                  "weeks",
+                                  "months"
+                                ]
+                              },
+                              "start_at": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "interval",
+                              "unit",
+                              "start_at"
+                            ]
+                          },
+                          "frequency_label": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "micro_prompt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "sort_order": {
+                            "type": "integer"
+                          },
+                          "created_at": {
+                            "type": "string"
+                          },
+                          "updated_at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "task_id",
+                          "command",
+                          "enabled",
+                          "schedule_rule",
+                          "frequency_label",
+                          "micro_prompt",
+                          "sort_order",
+                          "created_at",
+                          "updated_at"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "task",
+                    "rows"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Session already has an orchestrator task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orchestrator-tasks/{taskId}": {
+      "patch": {
+        "summary": "Update the task's lifecycle stage",
+        "tags": [
+          "orchestrator-tasks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "taskId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "lifecycle_stage": {
+                    "type": "string",
+                    "enum": [
+                      "development",
+                      "beta",
+                      "production-maintenance"
+                    ]
+                  }
+                },
+                "required": [
+                  "lifecycle_stage"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "user_id": {
+                          "type": "string"
+                        },
+                        "session_id": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "lifecycle_stage": {
+                          "type": "string",
+                          "enum": [
+                            "development",
+                            "beta",
+                            "production-maintenance"
+                          ]
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "created_at": {
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "user_id",
+                        "session_id",
+                        "name",
+                        "lifecycle_stage",
+                        "enabled",
+                        "created_at",
+                        "updated_at"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "task"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orchestrator-tasks/{taskId}/apply-preset": {
+      "post": {
+        "summary": "Apply a lifecycle-stage frequency preset to the rows",
+        "tags": [
+          "orchestrator-tasks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "taskId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "development",
+                      "beta",
+                      "production-maintenance"
+                    ]
+                  },
+                  "overwrite": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Preset applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "result": {
+                      "nullable": true
+                    },
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "task_id": {
+                            "type": "string"
+                          },
+                          "command": {
+                            "type": "string"
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "schedule_rule": {
+                            "type": "object",
+                            "nullable": true,
+                            "properties": {
+                              "interval": {
+                                "type": "integer"
+                              },
+                              "unit": {
+                                "type": "string",
+                                "enum": [
+                                  "minutes",
+                                  "hours",
+                                  "days",
+                                  "weeks",
+                                  "months"
+                                ]
+                              },
+                              "start_at": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "interval",
+                              "unit",
+                              "start_at"
+                            ]
+                          },
+                          "frequency_label": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "micro_prompt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "sort_order": {
+                            "type": "integer"
+                          },
+                          "created_at": {
+                            "type": "string"
+                          },
+                          "updated_at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "task_id",
+                          "command",
+                          "enabled",
+                          "schedule_rule",
+                          "frequency_label",
+                          "micro_prompt",
+                          "sort_order",
+                          "created_at",
+                          "updated_at"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "rows"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orchestrator-tasks/{taskId}/rows": {
+      "post": {
+        "summary": "Add a command row or a micro-prompt row",
+        "tags": [
+          "orchestrator-tasks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "taskId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "type": "string"
+                  },
+                  "micro_prompt": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "frequency_label": {
+                    "type": "string"
+                  },
+                  "schedule_rule": {
+                    "type": "object",
+                    "nullable": true,
+                    "properties": {
+                      "interval": {
+                        "type": "integer"
+                      },
+                      "unit": {
+                        "type": "string",
+                        "enum": [
+                          "minutes",
+                          "hours",
+                          "days",
+                          "weeks",
+                          "months"
+                        ]
+                      },
+                      "start_at": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "interval",
+                      "unit",
+                      "start_at"
+                    ]
+                  },
+                  "sort_order": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "row": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "task_id": {
+                          "type": "string"
+                        },
+                        "command": {
+                          "type": "string"
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "schedule_rule": {
+                          "type": "object",
+                          "nullable": true,
+                          "properties": {
+                            "interval": {
+                              "type": "integer"
+                            },
+                            "unit": {
+                              "type": "string",
+                              "enum": [
+                                "minutes",
+                                "hours",
+                                "days",
+                                "weeks",
+                                "months"
+                              ]
+                            },
+                            "start_at": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "interval",
+                            "unit",
+                            "start_at"
+                          ]
+                        },
+                        "frequency_label": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "micro_prompt": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "sort_order": {
+                          "type": "integer"
+                        },
+                        "created_at": {
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "task_id",
+                        "command",
+                        "enabled",
+                        "schedule_rule",
+                        "frequency_label",
+                        "micro_prompt",
+                        "sort_order",
+                        "created_at",
+                        "updated_at"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "row"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orchestrator-tasks/rows/{rowId}": {
+      "patch": {
+        "summary": "Update a row (enabled / frequency / schedule_rule / micro_prompt / sort_order)",
+        "tags": [
+          "orchestrator-tasks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "rowId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "frequency_label": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "micro_prompt": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "schedule_rule": {
+                    "type": "object",
+                    "nullable": true,
+                    "properties": {
+                      "interval": {
+                        "type": "integer"
+                      },
+                      "unit": {
+                        "type": "string",
+                        "enum": [
+                          "minutes",
+                          "hours",
+                          "days",
+                          "weeks",
+                          "months"
+                        ]
+                      },
+                      "start_at": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "interval",
+                      "unit",
+                      "start_at"
+                    ]
+                  },
+                  "sort_order": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "row": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "task_id": {
+                          "type": "string"
+                        },
+                        "command": {
+                          "type": "string"
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "schedule_rule": {
+                          "type": "object",
+                          "nullable": true,
+                          "properties": {
+                            "interval": {
+                              "type": "integer"
+                            },
+                            "unit": {
+                              "type": "string",
+                              "enum": [
+                                "minutes",
+                                "hours",
+                                "days",
+                                "weeks",
+                                "months"
+                              ]
+                            },
+                            "start_at": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "interval",
+                            "unit",
+                            "start_at"
+                          ]
+                        },
+                        "frequency_label": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "micro_prompt": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "sort_order": {
+                          "type": "integer"
+                        },
+                        "created_at": {
+                          "type": "string"
+                        },
+                        "updated_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "task_id",
+                        "command",
+                        "enabled",
+                        "schedule_rule",
+                        "frequency_label",
+                        "micro_prompt",
+                        "sort_order",
+                        "created_at",
+                        "updated_at"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "row"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Row not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete a row",
+        "tags": [
+          "orchestrator-tasks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "rowId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Row not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/orchestrator-tasks/{taskId}/rows/reorder": {
+      "post": {
+        "summary": "Bulk-reorder a task's rows by id",
+        "tags": [
+          "orchestrator-tasks"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "taskId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "ordered_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "ordered_ids"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reordered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "task_id": {
+                            "type": "string"
+                          },
+                          "command": {
+                            "type": "string"
+                          },
+                          "enabled": {
+                            "type": "boolean"
+                          },
+                          "schedule_rule": {
+                            "type": "object",
+                            "nullable": true,
+                            "properties": {
+                              "interval": {
+                                "type": "integer"
+                              },
+                              "unit": {
+                                "type": "string",
+                                "enum": [
+                                  "minutes",
+                                  "hours",
+                                  "days",
+                                  "weeks",
+                                  "months"
+                                ]
+                              },
+                              "start_at": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "interval",
+                              "unit",
+                              "start_at"
+                            ]
+                          },
+                          "frequency_label": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "micro_prompt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "sort_order": {
+                            "type": "integer"
+                          },
+                          "created_at": {
+                            "type": "string"
+                          },
+                          "updated_at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "task_id",
+                          "command",
+                          "enabled",
+                          "schedule_rule",
+                          "frequency_label",
+                          "micro_prompt",
+                          "sort_order",
+                          "created_at",
+                          "updated_at"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "rows"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Task not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/tasks/templates": {
       "get": {
         "tags": [

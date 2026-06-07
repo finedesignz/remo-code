@@ -96,6 +96,135 @@ export async function updateOrchestratorRowFields(
   return rows[0] ?? null;
 }
 
+// Delete a single row. Returns true when a row was removed. (Phase 31 — UI CRUD.)
+export async function deleteOrchestratorRow(id: string): Promise<boolean> {
+  const rows = await sql`DELETE FROM orchestrator_rows WHERE id = ${id} RETURNING id`;
+  return rows.length > 0;
+}
+
+// Fetch a single row joined to its owning task's user_id, so the API can verify
+// ownership without a second query. Returns null when the row id does not exist.
+export async function getOrchestratorRowWithOwner(
+  id: string,
+): Promise<(OrchestratorRow & { user_id: string }) | null> {
+  const rows = await sql<(OrchestratorRow & { user_id: string })[]>`
+    SELECT r.*, t.user_id
+    FROM orchestrator_rows r
+    JOIN scheduled_tasks t ON t.id = r.task_id
+    WHERE r.id = ${id}
+  `;
+  return rows[0] ?? null;
+}
+
+// Bulk-apply a new ordering. `orderedIds` lists row ids in the desired order;
+// each row's sort_order is set to its index. Scoped to one task. (Phase 31.)
+export async function reorderOrchestratorRows(
+  taskId: string,
+  orderedIds: string[],
+): Promise<void> {
+  for (let i = 0; i < orderedIds.length; i++) {
+    await sql`
+      UPDATE orchestrator_rows SET sort_order = ${i}, updated_at = now()
+      WHERE id = ${orderedIds[i]} AND task_id = ${taskId}
+    `;
+  }
+}
+
+// ── orchestrator TASK (the one-per-session scheduled_tasks row) ───────────────
+// Phase 31 — the web editor configures exactly one `task_type='orchestrator'`
+// scheduled_tasks row per session. These helpers keep that surface grep-friendly
+// and scoped by user_id. The DB partial unique index
+// (idx_scheduled_tasks_orchestrator_unique) is the authoritative one-per-session
+// backstop; the API maps its unique-violation to a 409.
+
+export interface OrchestratorTask {
+  id: string;
+  user_id: string;
+  session_id: string | null;
+  name: string;
+  lifecycle_stage: LifecycleStage;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// Static column list, inlined per query. NOT a top-level `sql` fragment — the
+// postgres tag must not be invoked at module-load time (some tests mock `sql`
+// with a fake that throws on unrecognized queries; a top-level call would fire
+// during their import of any module that transitively loads this file).
+
+// The user's orchestrator task for a session (or null). Scoped by user_id.
+export async function getOrchestratorTaskForSession(
+  userId: string,
+  sessionId: string,
+): Promise<OrchestratorTask | null> {
+  const rows = await sql<OrchestratorTask[]>`
+    SELECT id, user_id, session_id, name, lifecycle_stage, enabled, created_at, updated_at FROM scheduled_tasks
+    WHERE user_id = ${userId} AND session_id = ${sessionId}
+      AND task_type = 'orchestrator'
+    LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+// Fetch by task id, scoped to the owner. Used by row/stage mutations to verify
+// ownership before touching child rows.
+export async function getOrchestratorTaskById(
+  userId: string,
+  taskId: string,
+): Promise<OrchestratorTask | null> {
+  const rows = await sql<OrchestratorTask[]>`
+    SELECT id, user_id, session_id, name, lifecycle_stage, enabled, created_at, updated_at FROM scheduled_tasks
+    WHERE id = ${taskId} AND user_id = ${userId} AND task_type = 'orchestrator'
+    LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+// Create the one orchestrator task for a session. Relies on the partial unique
+// index to enforce one-per-session: a duplicate insert throws a unique-violation
+// (Postgres code 23505), which the API maps to 409. `cron_expression` is a
+// NOT NULL legacy column on scheduled_tasks; the orchestrator task is fired by
+// its own queue (not the cron engine), so we store an inert sentinel.
+export async function createOrchestratorTaskForSession(
+  userId: string,
+  sessionId: string,
+  opts: { stage?: LifecycleStage; name?: string } = {},
+): Promise<OrchestratorTask> {
+  const stage = opts.stage ?? 'development';
+  const name = opts.name ?? 'Orchestrator';
+  const rows = await sql<OrchestratorTask[]>`
+    INSERT INTO scheduled_tasks (
+      user_id, session_id, name, cron_expression, prompt,
+      task_type, target_kind, target_id, lifecycle_stage, enabled
+    ) VALUES (
+      ${userId}, ${sessionId}, ${name}, '@orchestrator', '',
+      'orchestrator', 'session', ${sessionId}, ${stage}, false
+    )
+    RETURNING id, user_id, session_id, name, lifecycle_stage, enabled, created_at, updated_at
+  `;
+  return rows[0];
+}
+
+export async function updateOrchestratorTaskStage(
+  userId: string,
+  taskId: string,
+  stage: LifecycleStage,
+): Promise<OrchestratorTask | null> {
+  const rows = await sql<OrchestratorTask[]>`
+    UPDATE scheduled_tasks SET lifecycle_stage = ${stage}, updated_at = now()
+    WHERE id = ${taskId} AND user_id = ${userId} AND task_type = 'orchestrator'
+    RETURNING id, user_id, session_id, name, lifecycle_stage, enabled, created_at, updated_at
+  `;
+  return rows[0] ?? null;
+}
+
+// True when an error is a Postgres unique-constraint violation (23505). Used by
+// the create path to convert the one-per-session index collision into a 409.
+export function isUniqueViolation(err: unknown): boolean {
+  return !!err && typeof err === 'object' && (err as any).code === '23505';
+}
+
 // ── routine_run_log ──────────────────────────────────────────────────────────
 
 export interface RoutineRunLogEntry {

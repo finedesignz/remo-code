@@ -1357,6 +1357,1209 @@ To perform this operation, you must be authenticated by means of one of the foll
 bearerAuth
 </aside>
 
+<h1 id="remo-code-hub-orchestrator-tasks">orchestrator-tasks</h1>
+
+## Get a session's orchestrator task + its rows (task null if none)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/orchestrator-tasks/{sessionId} \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/orchestrator-tasks/{sessionId}',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/orchestrator-tasks/{sessionId}`
+
+<h3 id="get-a-session's-orchestrator-task-+-its-rows-(task-null-if-none)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|sessionId|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "task": {
+    "id": "string",
+    "user_id": "string",
+    "session_id": "string",
+    "name": "string",
+    "lifecycle_stage": "development",
+    "enabled": true,
+    "created_at": "string",
+    "updated_at": "string"
+  },
+  "rows": [
+    {
+      "id": "string",
+      "task_id": "string",
+      "command": "string",
+      "enabled": true,
+      "schedule_rule": {
+        "interval": 0,
+        "unit": "minutes",
+        "start_at": "string"
+      },
+      "frequency_label": "string",
+      "micro_prompt": "string",
+      "sort_order": 0,
+      "created_at": "string",
+      "updated_at": "string"
+    }
+  ]
+}
+```
+
+<h3 id="get-a-session's-orchestrator-task-+-its-rows-(task-null-if-none)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Task + rows|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Session not found|Inline|
+
+<h3 id="get-a-session's-orchestrator-task-+-its-rows-(task-null-if-none)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» task|object¦null|true|none|none|
+|»» id|string|true|none|none|
+|»» user_id|string|true|none|none|
+|»» session_id|string¦null|true|none|none|
+|»» name|string|true|none|none|
+|»» lifecycle_stage|string|true|none|none|
+|»» enabled|boolean|true|none|none|
+|»» created_at|string|true|none|none|
+|»» updated_at|string|true|none|none|
+|» rows|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» task_id|string|true|none|none|
+|»» command|string|true|none|none|
+|»» enabled|boolean|true|none|none|
+|»» schedule_rule|object¦null|true|none|none|
+|»»» interval|integer|true|none|none|
+|»»» unit|string|true|none|none|
+|»»» start_at|string|true|none|none|
+|»» frequency_label|string¦null|true|none|none|
+|»» micro_prompt|string¦null|true|none|none|
+|»» sort_order|integer|true|none|none|
+|»» created_at|string|true|none|none|
+|»» updated_at|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|lifecycle_stage|development|
+|lifecycle_stage|beta|
+|lifecycle_stage|production-maintenance|
+|unit|minutes|
+|unit|hours|
+|unit|days|
+|unit|weeks|
+|unit|months|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Create the one orchestrator task for a session
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/orchestrator-tasks/{sessionId} \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "lifecycle_stage": "development",
+  "name": "string"
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/orchestrator-tasks/{sessionId}',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/orchestrator-tasks/{sessionId}`
+
+> Body parameter
+
+```json
+{
+  "lifecycle_stage": "development",
+  "name": "string"
+}
+```
+
+<h3 id="create-the-one-orchestrator-task-for-a-session-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|sessionId|path|string|true|none|
+|body|body|object|false|none|
+|» lifecycle_stage|body|string|false|none|
+|» name|body|string|false|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|» lifecycle_stage|development|
+|» lifecycle_stage|beta|
+|» lifecycle_stage|production-maintenance|
+
+> Example responses
+
+> 201 Response
+
+```json
+{
+  "task": {
+    "id": "string",
+    "user_id": "string",
+    "session_id": "string",
+    "name": "string",
+    "lifecycle_stage": "development",
+    "enabled": true,
+    "created_at": "string",
+    "updated_at": "string"
+  },
+  "rows": [
+    {
+      "id": "string",
+      "task_id": "string",
+      "command": "string",
+      "enabled": true,
+      "schedule_rule": {
+        "interval": 0,
+        "unit": "minutes",
+        "start_at": "string"
+      },
+      "frequency_label": "string",
+      "micro_prompt": "string",
+      "sort_order": 0,
+      "created_at": "string",
+      "updated_at": "string"
+    }
+  ]
+}
+```
+
+<h3 id="create-the-one-orchestrator-task-for-a-session-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|201|[Created](https://tools.ietf.org/html/rfc7231#section-6.3.2)|Created|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Session not found|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|Session already has an orchestrator task|Inline|
+
+<h3 id="create-the-one-orchestrator-task-for-a-session-responseschema">Response Schema</h3>
+
+Status Code **201**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» task|object¦null|true|none|none|
+|»» id|string|true|none|none|
+|»» user_id|string|true|none|none|
+|»» session_id|string¦null|true|none|none|
+|»» name|string|true|none|none|
+|»» lifecycle_stage|string|true|none|none|
+|»» enabled|boolean|true|none|none|
+|»» created_at|string|true|none|none|
+|»» updated_at|string|true|none|none|
+|» rows|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» task_id|string|true|none|none|
+|»» command|string|true|none|none|
+|»» enabled|boolean|true|none|none|
+|»» schedule_rule|object¦null|true|none|none|
+|»»» interval|integer|true|none|none|
+|»»» unit|string|true|none|none|
+|»»» start_at|string|true|none|none|
+|»» frequency_label|string¦null|true|none|none|
+|»» micro_prompt|string¦null|true|none|none|
+|»» sort_order|integer|true|none|none|
+|»» created_at|string|true|none|none|
+|»» updated_at|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|lifecycle_stage|development|
+|lifecycle_stage|beta|
+|lifecycle_stage|production-maintenance|
+|unit|minutes|
+|unit|hours|
+|unit|days|
+|unit|weeks|
+|unit|months|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Update the task's lifecycle stage
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X PATCH https://app.remo-code.com/api/orchestrator-tasks/{taskId} \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "lifecycle_stage": "development"
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/orchestrator-tasks/{taskId}',
+{
+  method: 'PATCH',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`PATCH /api/orchestrator-tasks/{taskId}`
+
+> Body parameter
+
+```json
+{
+  "lifecycle_stage": "development"
+}
+```
+
+<h3 id="update-the-task's-lifecycle-stage-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|taskId|path|string|true|none|
+|body|body|object|false|none|
+|» lifecycle_stage|body|string|true|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|» lifecycle_stage|development|
+|» lifecycle_stage|beta|
+|» lifecycle_stage|production-maintenance|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "task": {
+    "id": "string",
+    "user_id": "string",
+    "session_id": "string",
+    "name": "string",
+    "lifecycle_stage": "development",
+    "enabled": true,
+    "created_at": "string",
+    "updated_at": "string"
+  }
+}
+```
+
+<h3 id="update-the-task's-lifecycle-stage-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Updated|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Task not found|Inline|
+
+<h3 id="update-the-task's-lifecycle-stage-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» task|object|true|none|none|
+|»» id|string|true|none|none|
+|»» user_id|string|true|none|none|
+|»» session_id|string¦null|true|none|none|
+|»» name|string|true|none|none|
+|»» lifecycle_stage|string|true|none|none|
+|»» enabled|boolean|true|none|none|
+|»» created_at|string|true|none|none|
+|»» updated_at|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|lifecycle_stage|development|
+|lifecycle_stage|beta|
+|lifecycle_stage|production-maintenance|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Apply a lifecycle-stage frequency preset to the rows
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/orchestrator-tasks/{taskId}/apply-preset \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "stage": "development",
+  "overwrite": true
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/orchestrator-tasks/{taskId}/apply-preset',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/orchestrator-tasks/{taskId}/apply-preset`
+
+> Body parameter
+
+```json
+{
+  "stage": "development",
+  "overwrite": true
+}
+```
+
+<h3 id="apply-a-lifecycle-stage-frequency-preset-to-the-rows-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|taskId|path|string|true|none|
+|body|body|object|false|none|
+|» stage|body|string|false|none|
+|» overwrite|body|boolean|false|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|» stage|development|
+|» stage|beta|
+|» stage|production-maintenance|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "result": null,
+  "rows": [
+    {
+      "id": "string",
+      "task_id": "string",
+      "command": "string",
+      "enabled": true,
+      "schedule_rule": {
+        "interval": 0,
+        "unit": "minutes",
+        "start_at": "string"
+      },
+      "frequency_label": "string",
+      "micro_prompt": "string",
+      "sort_order": 0,
+      "created_at": "string",
+      "updated_at": "string"
+    }
+  ]
+}
+```
+
+<h3 id="apply-a-lifecycle-stage-frequency-preset-to-the-rows-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Preset applied|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Task not found|Inline|
+
+<h3 id="apply-a-lifecycle-stage-frequency-preset-to-the-rows-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» result|any|false|none|none|
+|» rows|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» task_id|string|true|none|none|
+|»» command|string|true|none|none|
+|»» enabled|boolean|true|none|none|
+|»» schedule_rule|object¦null|true|none|none|
+|»»» interval|integer|true|none|none|
+|»»» unit|string|true|none|none|
+|»»» start_at|string|true|none|none|
+|»» frequency_label|string¦null|true|none|none|
+|»» micro_prompt|string¦null|true|none|none|
+|»» sort_order|integer|true|none|none|
+|»» created_at|string|true|none|none|
+|»» updated_at|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|unit|minutes|
+|unit|hours|
+|unit|days|
+|unit|weeks|
+|unit|months|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Add a command row or a micro-prompt row
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/orchestrator-tasks/{taskId}/rows \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "command": "string",
+  "micro_prompt": "string",
+  "enabled": true,
+  "frequency_label": "string",
+  "schedule_rule": {
+    "interval": 0,
+    "unit": "minutes",
+    "start_at": "string"
+  },
+  "sort_order": 0
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/orchestrator-tasks/{taskId}/rows',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/orchestrator-tasks/{taskId}/rows`
+
+> Body parameter
+
+```json
+{
+  "command": "string",
+  "micro_prompt": "string",
+  "enabled": true,
+  "frequency_label": "string",
+  "schedule_rule": {
+    "interval": 0,
+    "unit": "minutes",
+    "start_at": "string"
+  },
+  "sort_order": 0
+}
+```
+
+<h3 id="add-a-command-row-or-a-micro-prompt-row-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|taskId|path|string|true|none|
+|body|body|object|false|none|
+|» command|body|string|false|none|
+|» micro_prompt|body|string|false|none|
+|» enabled|body|boolean|false|none|
+|» frequency_label|body|string|false|none|
+|» schedule_rule|body|object¦null|false|none|
+|»» interval|body|integer|true|none|
+|»» unit|body|string|true|none|
+|»» start_at|body|string|true|none|
+|» sort_order|body|integer|false|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|»» unit|minutes|
+|»» unit|hours|
+|»» unit|days|
+|»» unit|weeks|
+|»» unit|months|
+
+> Example responses
+
+> 201 Response
+
+```json
+{
+  "row": {
+    "id": "string",
+    "task_id": "string",
+    "command": "string",
+    "enabled": true,
+    "schedule_rule": {
+      "interval": 0,
+      "unit": "minutes",
+      "start_at": "string"
+    },
+    "frequency_label": "string",
+    "micro_prompt": "string",
+    "sort_order": 0,
+    "created_at": "string",
+    "updated_at": "string"
+  }
+}
+```
+
+<h3 id="add-a-command-row-or-a-micro-prompt-row-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|201|[Created](https://tools.ietf.org/html/rfc7231#section-6.3.2)|Created|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Task not found|Inline|
+
+<h3 id="add-a-command-row-or-a-micro-prompt-row-responseschema">Response Schema</h3>
+
+Status Code **201**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» row|object|true|none|none|
+|»» id|string|true|none|none|
+|»» task_id|string|true|none|none|
+|»» command|string|true|none|none|
+|»» enabled|boolean|true|none|none|
+|»» schedule_rule|object¦null|true|none|none|
+|»»» interval|integer|true|none|none|
+|»»» unit|string|true|none|none|
+|»»» start_at|string|true|none|none|
+|»» frequency_label|string¦null|true|none|none|
+|»» micro_prompt|string¦null|true|none|none|
+|»» sort_order|integer|true|none|none|
+|»» created_at|string|true|none|none|
+|»» updated_at|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|unit|minutes|
+|unit|hours|
+|unit|days|
+|unit|weeks|
+|unit|months|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Update a row (enabled / frequency / schedule_rule / micro_prompt / sort_order)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X PATCH https://app.remo-code.com/api/orchestrator-tasks/rows/{rowId} \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "enabled": true,
+  "frequency_label": "string",
+  "micro_prompt": "string",
+  "schedule_rule": {
+    "interval": 0,
+    "unit": "minutes",
+    "start_at": "string"
+  },
+  "sort_order": 0
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/orchestrator-tasks/rows/{rowId}',
+{
+  method: 'PATCH',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`PATCH /api/orchestrator-tasks/rows/{rowId}`
+
+> Body parameter
+
+```json
+{
+  "enabled": true,
+  "frequency_label": "string",
+  "micro_prompt": "string",
+  "schedule_rule": {
+    "interval": 0,
+    "unit": "minutes",
+    "start_at": "string"
+  },
+  "sort_order": 0
+}
+```
+
+<h3 id="update-a-row-(enabled-/-frequency-/-schedule_rule-/-micro_prompt-/-sort_order)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|rowId|path|string|true|none|
+|body|body|object|false|none|
+|» enabled|body|boolean|false|none|
+|» frequency_label|body|string¦null|false|none|
+|» micro_prompt|body|string¦null|false|none|
+|» schedule_rule|body|object¦null|false|none|
+|»» interval|body|integer|true|none|
+|»» unit|body|string|true|none|
+|»» start_at|body|string|true|none|
+|» sort_order|body|integer|false|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|»» unit|minutes|
+|»» unit|hours|
+|»» unit|days|
+|»» unit|weeks|
+|»» unit|months|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "row": {
+    "id": "string",
+    "task_id": "string",
+    "command": "string",
+    "enabled": true,
+    "schedule_rule": {
+      "interval": 0,
+      "unit": "minutes",
+      "start_at": "string"
+    },
+    "frequency_label": "string",
+    "micro_prompt": "string",
+    "sort_order": 0,
+    "created_at": "string",
+    "updated_at": "string"
+  }
+}
+```
+
+<h3 id="update-a-row-(enabled-/-frequency-/-schedule_rule-/-micro_prompt-/-sort_order)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Updated|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Row not found|Inline|
+
+<h3 id="update-a-row-(enabled-/-frequency-/-schedule_rule-/-micro_prompt-/-sort_order)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» row|object|true|none|none|
+|»» id|string|true|none|none|
+|»» task_id|string|true|none|none|
+|»» command|string|true|none|none|
+|»» enabled|boolean|true|none|none|
+|»» schedule_rule|object¦null|true|none|none|
+|»»» interval|integer|true|none|none|
+|»»» unit|string|true|none|none|
+|»»» start_at|string|true|none|none|
+|»» frequency_label|string¦null|true|none|none|
+|»» micro_prompt|string¦null|true|none|none|
+|»» sort_order|integer|true|none|none|
+|»» created_at|string|true|none|none|
+|»» updated_at|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|unit|minutes|
+|unit|hours|
+|unit|days|
+|unit|weeks|
+|unit|months|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Delete a row
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X DELETE https://app.remo-code.com/api/orchestrator-tasks/rows/{rowId} \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/orchestrator-tasks/rows/{rowId}',
+{
+  method: 'DELETE',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`DELETE /api/orchestrator-tasks/rows/{rowId}`
+
+<h3 id="delete-a-row-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|rowId|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "ok": true
+}
+```
+
+<h3 id="delete-a-row-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Deleted|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Row not found|Inline|
+
+<h3 id="delete-a-row-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ok|boolean|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Bulk-reorder a task's rows by id
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/orchestrator-tasks/{taskId}/rows/reorder \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "ordered_ids": [
+    "string"
+  ]
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/orchestrator-tasks/{taskId}/rows/reorder',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/orchestrator-tasks/{taskId}/rows/reorder`
+
+> Body parameter
+
+```json
+{
+  "ordered_ids": [
+    "string"
+  ]
+}
+```
+
+<h3 id="bulk-reorder-a-task's-rows-by-id-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|taskId|path|string|true|none|
+|body|body|object|false|none|
+|» ordered_ids|body|[string]|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "rows": [
+    {
+      "id": "string",
+      "task_id": "string",
+      "command": "string",
+      "enabled": true,
+      "schedule_rule": {
+        "interval": 0,
+        "unit": "minutes",
+        "start_at": "string"
+      },
+      "frequency_label": "string",
+      "micro_prompt": "string",
+      "sort_order": 0,
+      "created_at": "string",
+      "updated_at": "string"
+    }
+  ]
+}
+```
+
+<h3 id="bulk-reorder-a-task's-rows-by-id-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Reordered|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Task not found|Inline|
+
+<h3 id="bulk-reorder-a-task's-rows-by-id-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» rows|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» task_id|string|true|none|none|
+|»» command|string|true|none|none|
+|»» enabled|boolean|true|none|none|
+|»» schedule_rule|object¦null|true|none|none|
+|»»» interval|integer|true|none|none|
+|»»» unit|string|true|none|none|
+|»»» start_at|string|true|none|none|
+|»» frequency_label|string¦null|true|none|none|
+|»» micro_prompt|string¦null|true|none|none|
+|»» sort_order|integer|true|none|none|
+|»» created_at|string|true|none|none|
+|»» updated_at|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|unit|minutes|
+|unit|hours|
+|unit|days|
+|unit|weeks|
+|unit|months|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
 <h1 id="remo-code-hub-tasks">Tasks</h1>
 
 ## Predefined GSD scheduled-task templates

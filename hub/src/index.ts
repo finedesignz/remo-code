@@ -37,6 +37,7 @@ import { usage as usageApi } from './api/usage'
 import { wellKnown } from './api/well-known'
 import { clientConfig } from './api/client-config'
 import { orchestrator as orchestratorApi } from './api/orchestrator'
+import { orchestratorTasks as orchestratorTasksApi } from './api/orchestrator-tasks'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
 import { runMigrations } from './db/migrate'
@@ -391,6 +392,10 @@ app.route('/api/error-setup', errorSetupApi)
 // Phase 08: JWT-authed revanote sub-routes (mappings + annotations).
 // The public webhook route lives at /api/revanote/webhook/* (mounted above).
 app.route('/api/orchestrator', orchestratorApi)
+// Phase 31 (auto-dev-orchestrator): authed config REST for the one-per-session
+// orchestrator task + its rows. Data-only (controller path is flag-OFF). Mounted
+// alongside the other authed user routes (post-auth catch-all).
+app.route('/api/orchestrator-tasks', orchestratorTasksApi)
 app.route('/api/revanote/mappings', revanoteMappings)
 app.route('/api/revanote/annotations', revanoteAnnotations)
 // Phase 12 Wave 4: authed Telegram REST. Mounted INSIDE the /api/* auth +
