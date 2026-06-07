@@ -19,6 +19,16 @@
 // are deliberately ABSENT from the executable registry — those route through
 // `proposeToChat` (Phase 28), never executeCommand, so they need no template here.
 
+import { agentForDimension, isGapDimension, type GapDimension } from './gap-rotation.ts'
+
+/** The command key(s) that drive the Phase-26 gap-scan rotation. */
+const GAP_SCAN_COMMANDS: ReadonlySet<string> = new Set(['gap-scan', 'gsd-gap-scan'])
+
+/** True iff `command` is a gap-scan rotation command. */
+export function isGapScanCommand(command: string): boolean {
+  return GAP_SCAN_COMMANDS.has((command ?? '').trim())
+}
+
 // ── Command → gsd skill name ─────────────────────────────────────────────────
 /**
  * The DUE-row `command` strings map to the gsd skill the agent should run.
@@ -96,6 +106,11 @@ export interface ComposeInput {
   command: string
   /** Free-text for a custom MICRO-PROMPT row (nullable). */
   microPrompt?: string | null
+  /**
+   * Phase-26 gap-scan rotation: the dimension this gap-scan tick should analyse
+   * (chosen by `nextGapDimensions` from the run log). Ignored for non-gap commands.
+   */
+  gapDimension?: GapDimension | string | null
 }
 
 export interface ComposedPrompt {
@@ -105,6 +120,11 @@ export interface ComposedPrompt {
   prompt: string
   /** The gsd skill the prompt instructs the agent to run (null for micro-prompt). */
   skill: string | null
+  /**
+   * Phase-26: the gap dimension embedded in this prompt (gap-scan only), echoed so the
+   * seam can persist it to `routine_run_log.gap_dimension`. Null for non-gap commands.
+   */
+  gapDimension: GapDimension | string | null
 }
 
 /**
@@ -137,20 +157,39 @@ export function composeCommandPrompt(input: ComposeInput): ComposedPrompt | null
       micro,
       envelope(command === MICRO_PROMPT_COMMAND ? 'micro-prompt' : command),
     ].join('\n')
-    return { command, prompt, skill: null }
+    return { command, prompt, skill: null, gapDimension: null }
   }
 
   if (skill == null) return null // unknown command, no micro-prompt → nothing to run
 
+  // Phase-26 gap-scan rotation: when a dimension is supplied, focus this gap-scan on it
+  // and route the analysis through the mapped specialist subagent (R-ADO-17/18).
+  let gapLine = ''
+  let gapDimension: GapDimension | string | null = null
+  if (isGapScanCommand(command)) {
+    const dim = (input.gapDimension ?? '').toString().trim()
+    if (isGapDimension(dim)) {
+      gapDimension = dim
+      const agent = agentForDimension(dim)
+      gapLine = [
+        `\nThis is a ROTATING gap-scan. Run a **${dim}** gap analysis for this repo`,
+        `using the **${agent}** specialist subagent. Focus only on the ${dim} dimension.`,
+        `Record the dimension you scanned as \`gap_dimension: ${dim}\` in the report block below`,
+        'so the next gap-scan tick rotates to a different dimension.',
+      ].join(' ')
+    }
+  }
+
   const prompt = [
     `Run the \`${skill}\` gsd skill for this repo as the orchestrator's scheduled "${command}" command.`,
     'Plan the work, then execute it. If the work is parallelizable, spawn your own Task subagents.',
+    gapLine,
     micro.length > 0 ? `\nAdditional instruction for this run: ${micro}` : '',
     envelope(command),
   ]
     .filter(Boolean)
     .join('\n')
-  return { command, prompt, skill }
+  return { command, prompt, skill, gapDimension }
 }
 
 /** True when a command would be EXECUTED (not proposed, not a no-op) given input. */

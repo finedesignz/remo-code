@@ -23,9 +23,10 @@
 // throws is caught, logged as outcome='failed', and does NOT wedge its wave or
 // abort later waves.
 
-import { appendRunLog } from './run-log.ts';
+import { appendRunLog, recentRunLog } from './run-log.ts';
 import type { WavePlan, WaveUnit } from './waves.ts';
-import { composeCommandPrompt } from './command-prompts.ts';
+import { composeCommandPrompt, isGapScanCommand } from './command-prompts.ts';
+import { nextGapDimensions } from './gap-rotation.ts';
 import { injectOrchestratorPrompt, type InjectDeps } from './inject.ts';
 
 // ── Execution context (minimal; what a run needs to log + later inject) ──────
@@ -110,7 +111,26 @@ export const STUB_SEAMS: WaveSeams = {
 export function makeLiveSeams(injectDeps?: InjectDeps): WaveSeams {
   return {
     async executeCommand(unit, ctx): Promise<ExecuteResult> {
-      const composed = composeCommandPrompt({ command: unit.command, microPrompt: unit.microPrompt });
+      // Phase-26 gap-scan rotation: pick the least-recently-used dimension from this
+      // session's run log so each gap-scan tick advances the wheel (R-ADO-17/18). The
+      // chosen dimension is embedded in the prompt AND echoed back so runUnit persists
+      // it to routine_run_log.gap_dimension. Best-effort: a run-log read failure just
+      // falls back to the wheel head.
+      let gapDimension: string | null = null;
+      if (isGapScanCommand(unit.command)) {
+        let recent: Awaited<ReturnType<typeof recentRunLog>> = [];
+        try {
+          recent = await recentRunLog(ctx.sessionId);
+        } catch (err: any) {
+          console.warn(`[orchestrator] gap-scan run-log read failed: ${err?.message ?? err}`);
+        }
+        gapDimension = nextGapDimensions(recent, 1)[0] ?? null;
+      }
+      const composed = composeCommandPrompt({
+        command: unit.command,
+        microPrompt: unit.microPrompt,
+        gapDimension,
+      });
       if (!composed) {
         // Propose-only or unknown/no-op command — should not reach here (the
         // planner routes propose units to proposeToChat), but stay defensive.
@@ -129,8 +149,9 @@ export function makeLiveSeams(injectDeps?: InjectDeps): WaveSeams {
         case 'dispatched':
         case 'queued':
           // Prompt is on its way to the agent. The gsd skill + PR + reviewer run
-          // async inside the agent turn; pr_url/verdict reconciled later.
-          return { outcome: 'dispatched' };
+          // async inside the agent turn; pr_url/verdict reconciled later. For a
+          // gap-scan, persist the rotated dimension so the next tick advances (D7).
+          return { outcome: 'dispatched', gapDimension: composed.gapDimension };
         case 'refused_cost_cap':
           return { outcome: 'refused_cost_cap' };
         case 'no_session':

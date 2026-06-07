@@ -18,9 +18,11 @@ import { describe, test, expect, afterAll, mock } from 'bun:test'
 import {
   composeCommandPrompt,
   isExecutableCommand,
+  isGapScanCommand,
   PROPOSE_ONLY_COMMANDS,
   MICRO_PROMPT_COMMAND,
 } from '../src/orchestrator/command-prompts.ts'
+import { DIMENSION_AGENTS } from '../src/orchestrator/gap-rotation.ts'
 import { thresholdGate, dailyCostCapGate } from '../src/dispatch/gates.ts'
 import type { InjectDeps } from '../src/orchestrator/inject.ts'
 
@@ -99,6 +101,58 @@ describe('composeCommandPrompt — propose-only + micro-prompt', () => {
 
   test('micro-prompt sentinel with empty text is a no-op (null)', () => {
     expect(composeCommandPrompt({ command: MICRO_PROMPT_COMMAND, microPrompt: '   ' })).toBeNull()
+  })
+})
+
+// ── 1b. gap-scan rotation prompt (Phase 26) ───────────────────────────────────
+
+describe('composeCommandPrompt — gap-scan rotation (R-ADO-17/18)', () => {
+  test('isGapScanCommand recognises the rotation command', () => {
+    expect(isGapScanCommand('gap-scan')).toBe(true)
+    expect(isGapScanCommand('gsd-gap-scan')).toBe(true)
+    expect(isGapScanCommand('gsd-code-review')).toBe(false)
+  })
+
+  test('gap-scan WITH a dimension embeds the dimension + mapped specialist + records it', () => {
+    const c = composeCommandPrompt({ command: 'gap-scan', gapDimension: 'security' })
+    expect(c).not.toBeNull()
+    expect(c!.skill).toBe('gsd-review')
+    expect(c!.gapDimension).toBe('security')
+    // dimension + specialist agent named in the prompt
+    expect(c!.prompt).toContain('security')
+    expect(c!.prompt).toContain(DIMENSION_AGENTS['security']) // 'Security Engineer'
+    // instructs the agent to record the dimension so the wheel advances
+    expect(c!.prompt).toContain('gap_dimension: security')
+    // envelope preserved
+    expect(c!.prompt).toContain('gh pr create')
+    expect(c!.prompt).toContain('<<UNIT')
+  })
+
+  test('each dimension maps to its specialist in the prompt', () => {
+    for (const [dim, agent] of Object.entries(DIMENSION_AGENTS)) {
+      const c = composeCommandPrompt({ command: 'gap-scan', gapDimension: dim })
+      expect(c!.gapDimension).toBe(dim)
+      expect(c!.prompt).toContain(agent)
+      expect(c!.prompt).toContain(`gap_dimension: ${dim}`)
+    }
+  })
+
+  test('gap-scan WITHOUT a dimension still composes (gapDimension null, no rotation line)', () => {
+    const c = composeCommandPrompt({ command: 'gap-scan' })
+    expect(c).not.toBeNull()
+    expect(c!.gapDimension).toBeNull()
+    expect(c!.prompt).not.toContain('ROTATING gap-scan')
+  })
+
+  test('an invalid dimension is ignored (gapDimension null)', () => {
+    const c = composeCommandPrompt({ command: 'gap-scan', gapDimension: 'bogus' })
+    expect(c!.gapDimension).toBeNull()
+  })
+
+  test('non-gap commands ignore gapDimension', () => {
+    const c = composeCommandPrompt({ command: 'gsd-plan-phase', gapDimension: 'security' })
+    expect(c!.gapDimension).toBeNull()
+    expect(c!.prompt).not.toContain('ROTATING gap-scan')
   })
 })
 
@@ -181,6 +235,22 @@ describe('makeLiveSeams.executeCommand — rides the dispatch pipeline', () => {
     const seams = makeLiveSeams(deps)
     expect(await seams.createPrForUnit({ command: 'gsd-plan-phase', propose: false, priority: 0 }, { sessionId: 's', repoKey: null })).toBeNull()
     expect(await seams.dispatchReviewer(null, { command: 'gsd-plan-phase', propose: false, priority: 0 }, { sessionId: 's', repoKey: null })).toBeNull()
+  })
+
+  test('gap-scan unit rotates a dimension (empty log → wheel head) + returns it', async () => {
+    const { deps, calls } = spyInject('dispatched')
+    const seams = makeLiveSeams(deps)
+    const res = await seams.executeCommand(
+      { command: 'gap-scan', propose: false, priority: 0, microPrompt: null },
+      { sessionId: 'sess-gap', repoKey: 'acme/site', userId: 'user-1' },
+    )
+    // mocked recentRunLog → [] ⇒ LRU picks the wheel head 'security'
+    expect(res.outcome).toBe('dispatched')
+    expect(res.gapDimension).toBe('security')
+    // dimension + specialist embedded in the injected prompt
+    expect(calls[0].req.prompt).toContain('security')
+    expect(calls[0].req.prompt).toContain('Security Engineer')
+    expect(calls[0].req.prompt).toContain('gap_dimension: security')
   })
 
   test('micro-prompt unit injects the wrapped free text', async () => {
