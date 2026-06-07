@@ -1,0 +1,200 @@
+# Auto-Dev Orchestrator
+
+Source of truth for the session-level auto-dev orchestrator (milestone
+`m-auto-dev-orchestrator`, Phases 21–32). Scope: **hub + web only** — no supervisor
+changes. The orchestrator runs gsd commands INSIDE the bound session agent (Claude
+Code, which holds the gsd skills): the hub injects a templated prompt and the agent
+itself spawns parallel Task subagents (locked decision D6). The hub does NOT
+re-implement orchestration and never shells `gh`/git/merge — it ships TEXT ONLY.
+
+> **Default OFF.** With `REMO_ORCHESTRATOR_ENABLED` unset, nothing registers,
+> enqueues, or injects. The live path is e2e-unproven against real Postgres; flip
+> the flag only deliberately (see [Enablement gate](#enablement-gate)).
+
+## Model — one orchestrator task per session
+
+The orchestrator REPLACES the legacy many-tasks-per-session model (locked decision
+D3). Each session has at most **one** `task_type='orchestrator'` scheduled task
+(enforced by the partial unique index `idx_scheduled_tasks_orchestrator_unique`).
+That task owns a set of **command rows** in `orchestrator_rows`.
+
+### The row model (`orchestrator_rows`)
+
+| column | meaning |
+|---|---|
+| `command` | a gsd command (`gsd-plan-phase`, `gsd-execute-phase`, `gsd-audit-fix`, `gap-scan`, `gsd-code-review`, `gsd-verify-work`, `gsd-complete-milestone`, `gsd-ship`, `merge-to-main`) or a free-text **micro-prompt** row |
+| `enabled` | row on/off |
+| `schedule_rule` | JSONB, reuses the scheduler `ScheduleRule` (cron interval + `active_window` + bounds) — this makes the row *eligible/due* |
+| `frequency_label` | `Never` (⇒ disabled), `Once` (⇒ max_runs=1, auto-disables after one run), or a cadence label |
+| `micro_prompt` | free text for a custom row, wrapped in the finish→PR→reviewer envelope |
+| `sort_order` | row ordering in the UI |
+
+The schedule is **eligibility**, not the trigger: when the routine fires, a
+controller computes EVERY due row this tick and runs them all (decision D1).
+
+Two always-on **implicit** rows are NOT in the table: `status-check/decide` (first,
+context gathering) and `deploy+log-verify` (terminal, every tick — see
+[Verify tail](#verify-tail)).
+
+### Lifecycle stages
+
+`scheduled_tasks.lifecycle_stage` ∈ `{development, beta, production-maintenance}`
+(default `development`). Stage **presets** (`hub/src/orchestrator/stage-presets.ts`)
+seed default row frequencies — development biases to building (frequent
+plan/execute + gap-scan), beta to QC (heavy audit-fix/review/verify),
+production-maintenance to maintenance (security-weighted gap-scan, plan/execute
+parked). The user overrides any row afterward; overrides persist.
+
+## The queue (`routine_queue`) + per-session lock
+
+`hub/src/orchestrator/queue.ts` — a hub-wide FIFO+priority queue caps concurrent
+cycles across ALL sessions at `REMO_ORCHESTRATOR_GLOBAL_CONCURRENCY` (default 2). A
+drain worker (`startRoutineQueueWorker`, interval `REMO_ORCHESTRATOR_DRAIN_INTERVAL_MS`,
+default 1000ms) claims pending entries up to the cap. A **per-session lock** (the
+partial unique index on `(session_id) WHERE status='running'`) guarantees at most
+one running cycle per session; a second due-tick for a running session is coalesced,
+not stacked. Priority: a `deploy-fix`/`merge-to-main` row outranks `build` work.
+
+## The tick / async model (controller → waves, end-to-end)
+
+This is the Phase-32 wiring that closes the Phase-25 deferral. The hub DRIVES the
+waves from the **due rows** directly (it does not wait for the agent to emit RUNLOG
+blocks — those are a reconciliation read, see below).
+
+1. **Enqueue tick** (`scanAndEnqueueDueCycles`, interval
+   `REMO_ORCHESTRATOR_TICK_INTERVAL_MS`, default 60000ms) scans every enabled
+   orchestrator task; for each whose session has ≥1 due row it `enqueueCycle(...)`.
+   Started ONLY when the flag is ON.
+2. The **drain worker** claims an entry (per-session lock + global cap). The entry
+   carries only `session_id`.
+3. `makeCycleRunner()`'s runner calls `resolveCycleContext(session_id)`:
+   `getSessionById` → `{ user_id, repo_key }`; `getOrchestratorTaskForSession` → the
+   one orchestrator task (`id`, `lifecycle_stage`, `timezone`). A stale/foreign entry
+   (no session or no task) is a clean no-op.
+4. `buildControllerContext(...)` assembles project state + the last N
+   `routine_run_log` entries + the **DUE rows** (`computeDueRowsForTask`).
+5. `renderControllerPrompt(ctx)` is stamped as the run-log `decision_rationale`
+   (context). The DUE ROWS are the authoritative command set:
+   `runWavesFromDueRows(dueRows, ctx, makeLiveSeams())`.
+   - `planWaves` groups the due commands into dependency-aware waves (independent
+     commands parallel; `plan→execute→ship` sequenced). `merge-to-main` is EXCLUDED.
+   - Each row's `micro_prompt` is carried onto its `WaveUnit`.
+   - The `executeCommand` live seam composes the templated prompt
+     (`command-prompts.ts`) and INJECTS it into the bound session via the shared
+     dispatch pipeline (`inject.ts` → `hub/src/dispatch/`), through the
+     **non-bypassable `dailyCostCapGate`**.
+6. `dispatchMergeIfDue(dueRows, ...)` routes a due `merge-to-main` row to the
+   off-hours special path.
+7. `runVerifyTail(...)` runs the mandatory terminal verify (always, every tick).
+
+**Async boundary:** `executeCommand` returns as soon as the prompt is DISPATCHED (or
+refused). The gsd work + PR + reviewer happen ASYNC inside the agent's turn. The
+agent reports a `<<UNIT>>` block; the hub reconciles `pr_url`/`reviewer_verdict` into
+`routine_run_log` on a LATER tick when `buildControllerContext` re-reads the log. The
+run-log row written at dispatch time carries the dispatch outcome with null pr/verdict.
+
+The controller prompt's `<<RUNLOG>>`/`<<DECISION>>` parser
+(`parseControllerDecisions` + `writeRunLogFromBlocks`) is the reconciliation path for
+agent-reported blocks — it is not the driver.
+
+## Run log (`routine_run_log`)
+
+Per session/repo (decision D4): timestamp, command, decision rationale, outcome,
+gap-dimension/agent, PR url, reviewer verdict, deploy-verify result. Fed into the
+controller context each tick. **Survives repo resets/worktrees** (it is in the hub
+DB, not the working tree).
+
+## Per-unit contract: finish → PR → reviewer
+
+Every non-propose unit MUST, inside the agent turn: finish the work, open a PR on a
+per-command branch (NEVER merge to main), dispatch a reviewer subagent to verify that
+PR, and report the verdict. Units never merge to main — that is the off-hours command.
+
+## Tiered autonomy — propose-to-chat
+
+Plan, execute, audit-fix, gap-scan, code-review, verify run autonomously.
+`gsd-ship` / `gsd-complete-milestone` / `tag` are **propose-tier** (decision D5): the
+wave runner routes them to `proposeToChat` (`propose.ts`, reusing the P3
+`surfaceProposal` notify senders + `notifications_sent` throttle) for one-tap chat
+approval — they are NEVER executed/PR'd/merged by a cycle.
+
+## Off-hours merge to main
+
+`merge-command.ts` — the ONLY auto-merge-to-main path (decision D8). EXCLUDED from
+the wave planner. Runs only inside the merge row's `schedule_rule.active_window`
+(reusing `isWithinActiveWindow`); outside the window ⇒ a skipped run-log row.
+In-window it auto-merges PRs the dispatched reviewer marked PASS (FAIL/uncertain held
++ surfaced to chat). Powerful commands consume an `orchestrator_approvals` marker
+before injecting so a re-fired window cannot double-merge.
+
+## Gap-scan rotation
+
+`gap-rotation.ts` — a dimension wheel (security, performance, accessibility, test
+coverage, dead-code/dependency hygiene, error-handling, docs-drift, type-safety).
+Each `gap-scan` tick picks the least-recently-run dimension from the run log and maps
+it to the right specialist subagent. The chosen dimension is embedded in the prompt
+and persisted to `routine_run_log.gap_dimension` so the next tick rotates.
+
+## Verify tail
+
+`verify-tail.ts` (decision D9) — the mandatory terminal step every cycle: forced
+redeploy → `/health` → probe real routes (reuses the P5 `deploy-verify-probe`) AND a
+Coolify runtime-log error scan, bounded to N=3 fix iterations then surface. No-ops
+gracefully (writes a `skipped` run-log row) when `COOLIFY_TOKEN` + `REMO_VERIFY_*`
+are unset. Routes default to `/api/sessions,/openapi.json,/docs`.
+
+## Web UI
+
+`web/src/pages/settings/` — the orchestrator is the pinned top "folder" row in
+Settings → Connections. One orchestrator task per session: a row table (command,
+frequency, micro-prompt), a lifecycle-stage selector, and the controller prompt.
+Data-only config; the live controller path is flag-gated.
+
+## Enablement gate
+
+`REMO_ORCHESTRATOR_ENABLED` (default **OFF**) is the single live-path gate.
+`registerCycleRunnerIfEnabled()` (called once at boot, `hub/src/index.ts`) is the ONLY
+caller of the queue's `setCycleRunner` + the only starter of the enqueue tick. With
+the flag OFF: no runner is registered (the drain worker claims nothing), and the
+enqueue tick never starts — so NOTHING is registered, enqueued, or injected.
+
+**Remaining before live enablement:** a real-Postgres end-to-end soak (the wiring is
+unit-tested with injected DB/seams; it has not run against a live DB), and confirming
+the verify-tail target envs in prod.
+
+## Legacy task migration
+
+`hub/scripts/migrate-legacy-tasks-to-orchestrator.ts` — a ONE-SHOT (NOT in
+schema.sql) that folds legacy `dev`/`qc`/`security`/`log_check` scheduled tasks into
+the orchestrator model: one orchestrator task per session + seeded `orchestrator_rows`
+(`dev` → plan + execute; `qc` → audit-fix + code-review + verify-work; security/log →
+gap-scan). Seeded rows are parked (`frequency_label='Never'`, disabled) so migration
+never silently starts firing work. The migrated legacy tasks are DISABLED (not
+deleted — reversible). Idempotent + re-runnable; supports `--dry-run`.
+
+```bash
+# Report only (writes nothing) — review BEFORE applying:
+bun run hub/scripts/migrate-legacy-tasks-to-orchestrator.ts --dry-run
+# Apply:
+bun run hub/scripts/migrate-legacy-tasks-to-orchestrator.ts
+```
+
+Do NOT auto-run against prod — run by hand after reviewing the dry-run output.
+
+## Cross-cutting invariants
+
+- Cost cap non-bypassable (`dailyCostCapGate` always in the inject gate list).
+- `schema.sql` is idempotent-only; data backfills are one-shots in `hub/scripts/`.
+- Single dispatch pipeline (`hub/src/dispatch/`) — no per-subsystem queue/grace.
+- Hub injects TEXT ONLY; the agent owns gh/git/PR/reviewer inside its turn.
+- Off-hours merge is the ONLY auto-merge-to-main path.
+
+## Key files
+
+`hub/src/orchestrator/`: `controller.ts` (cycle runner + resolution + enqueue tick),
+`queue.ts`, `due-rows.ts`, `waves.ts` (planner), `wave-runner.ts` (seams + per-unit
+lifecycle), `inject.ts` (dispatch adapter), `command-prompts.ts`, `command-set.ts`,
+`run-log.ts`, `verify-tail.ts`, `merge-command.ts`, `propose.ts`, `gap-rotation.ts`,
+`stage-presets.ts`. DAL: `hub/src/db/orchestrator-rows-dal.ts`. Schema:
+`hub/src/db/schema.sql` (Phase-21 block). Migration:
+`hub/scripts/migrate-legacy-tasks-to-orchestrator.ts`.

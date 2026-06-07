@@ -270,3 +270,129 @@ Source of truth for phase ordering, status, and dependencies. The GSD SDK parses
   - `20-PLAN-003-permission-injection-failclosed` — wave 2 — detect pending permission/`user_question` from the transcript keyed by `(sessionId,requestId)`; surface via existing inline UX; inject backend-specific PTY keystrokes; FAIL-CLOSED parse + explicit-confirmation + disambiguation/expiry; threat model (R-TG-05, R-TG-06, R-TG-07, R-TG-08, R-TG-09)
   - `20-PLAN-004-pty-write-arbitration` — wave 3 — single-writer per-session turn lock in the hub; FIFO queue; release on observed `turn_complete`; non-holder response allowed; "who holds the turn" state (R-TG-10)
   - `20-PLAN-005-human-guard-and-docs` — wave 4 — Telegram injection through the Phase-16 human-only guard; `docs/telegram-bridge.md` + CLAUDE.md Docs map; `docs:sync` if endpoints changed (R-TG-11, R-TG-12)
+
+---
+
+<!-- Milestone m-auto-dev-orchestrator (2026-06-06): Session-level Auto-Dev Orchestrator.
+     Source spec: .planning/architecture/auto-dev-orchestrator-SPEC.md (10 locked decisions).
+     Branch: feat/auto-dev-orchestrator.
+     Scope: hub + web ONLY. No supervisor changes. gsd commands execute INSIDE the bound session agent
+       (Claude Code), which holds the gsd skills — the hub injects a templated prompt and the agent itself
+       spawns parallel Task subagents (locked decision 6). The hub does NOT re-implement orchestration.
+     Supersedes the row-level pieces of auto-dev-system-SPEC.md (P1–P5, shipped) by adding a session-level
+       orchestration layer on top of the existing dispatch / cost-cap / deploy-verify machinery.
+     Non-negotiable invariants (carry into every phase): cost cap non-bypassable (dailyCostCapGate);
+       schema.sql idempotent-only (backfills → hub/scripts/ one-shots); single dispatch pipeline
+       (hub/src/dispatch/) — no per-subsystem queue/grace; reuse P3 surfaceProposal for propose-to-chat;
+       reuse P5 deploy-verify-probe; off-hours merge is the ONLY auto-merge-to-main path.
+     Task model is a REPLACE (locked decision 3): one `orchestrator` task per session is THE scheduled-task
+       model; legacy many-tasks-per-session + standalone dev/qc tasks migrate into orchestrator rows (Phase 32).
+     Requirements: .planning/REQUIREMENTS.md (R-ADO-*). -->
+
+## Phase 21: orchestrator-data-model
+
+- Status: Complete
+- Mode: standard
+- Goal: Additive, idempotent DDL for the orchestrator task model (locked decisions 3, 4, 10). Extend `scheduled_tasks.task_type` CHECK to include `orchestrator`; add a partial unique index enforcing at most one `orchestrator` row per session (`(session_id) WHERE task_type = 'orchestrator'`); add `scheduled_tasks.lifecycle_stage` (default `development`). Create `orchestrator_rows` (per-command rows: `id, task_id, command, enabled, schedule_rule JSONB reusing ScheduleRule, frequency_label, micro_prompt, sort_order`), `routine_run_log` (timestamp, command, decision rationale, outcome, gap-dimension/agent, PR url, reviewer verdict, deploy-verify result; indexed by `(session_id, created_at)`), and `routine_queue` (`id, session_id, priority, enqueued_at, started_at, status`; per-session advisory lock via partial unique index on `(session_id) WHERE status='running'`). DDL goes in `hub/src/db/schema.sql` (re-runs every boot — idempotent only); any data backfill is a one-shot in `hub/scripts/`. Reuse existing idempotency tables. DAL + Zod types; no behavior wired yet.
+- Depends on: []
+- Requirements: [R-ADO-01, R-ADO-02, R-ADO-03, R-ADO-04]
+- Phase dir: `.planning/phases/21-orchestrator-data-model/`
+
+## Phase 22: global-queue-and-per-session-lock
+
+- Status: Complete
+- Mode: standard
+- Goal: Hub-wide concurrency control for routine cycles (locked decision 10). A global FIFO queue (`routine_queue`) caps concurrent orchestrator cycles across ALL sessions (configurable, default 2–3) with priority ordering (deploy-fix > build). A drain worker pulls eligible cycles up to the cap; overlapping due-cycles enqueue FIFO+priority. A per-session advisory lock (the `status='running'` partial unique index from Phase 21) guarantees exactly one cycle per session at a time; a second due-tick for a locked session is coalesced, not stacked. No cycle work executes yet — this phase owns enqueue/dequeue/lock/release mechanics + tests only.
+- Depends on: [Phase 21]
+- Requirements: [R-ADO-05, R-ADO-06, R-ADO-07]
+- Phase dir: `.planning/phases/22-global-queue-and-per-session-lock/`
+
+## Phase 23: controller-and-run-log
+
+- Status: Complete
+- Mode: standard
+- Goal: The per-tick controller core (locked decisions 1, 4). When an orchestrator routine fires (passing the Phase-22 queue+lock), the controller (a) gathers project state — open roadmap phases, last commits, open PRs, deploy status — and reads the last N `routine_run_log` entries; (b) computes the set of DUE command rows for this tick from each row's `schedule_rule` eligibility; (c) assembles the standard controller prompt (SPEC §4 skeleton) with run-log + project-state + due-rows context injected; and (d) parses the agent's structured decision/outcome back into `routine_run_log` writes (mirror the existing `parseControllerDecision`). Always-on implicit rows: `status-check/decide` first, `deploy+log-verify` terminal. Run all DUE rows this tick (not just highest-priority). Run-log survives repo resets/worktrees. Wave fan-out and per-command skill execution land in Phases 24–25.
+- Depends on: [Phase 22]
+- Requirements: [R-ADO-08, R-ADO-09, R-ADO-10]
+- Phase dir: `.planning/phases/23-controller-and-run-log/`
+
+## Phase 24: dependency-aware-wave-execution
+
+- Status: Complete
+- Mode: standard
+- Goal: Group the DUE commands into dependency-aware waves (locked decision 2): independent commands (audit-fix, gap-scan, code-review on different areas) run as parallel Task subagents inside the agent turn; dependent commands (execute after plan, ship after execute) sequence across waves within the same tick. Parallelism lives INSIDE the agent turn via the templated prompt (locked decision 6) — the hub does not fan out subagents itself. Each unit of work MUST finish → create a PR → dispatch a reviewer subagent to verify that PR, with the reviewer verdict captured to the run log. Do NOT merge to main here (off-hours command, Phase 29 owns that). Encode wave grouping + the finish→PR→reviewer contract into the controller prompt template and the decision parser.
+- Depends on: [Phase 23]
+- Requirements: [R-ADO-11, R-ADO-12, R-ADO-13]
+- Phase dir: `.planning/phases/24-dependency-aware-wave-execution/`
+
+## Phase 25: gsd-command-execution-seam
+
+- Status: Complete
+- Mode: standard
+- Goal: The execution seam mapping each orchestrator row → a gsd skill invocation inside the bound session agent (locked decision 6). For each due command (`gsd-plan-phase`, `gsd-execute-phase`, `gsd-audit-fix`, `gsd-code-review`, `gsd-verify-work`, plus micro-prompt free-text rows), inject the templated per-command instruction into the bound session's agent turn so the agent runs the corresponding gsd skill. Reuse the entire existing `hub/src/dispatch/` pipeline (gates → queue → grace → finalize) — the cost cap (`dailyCostCapGate`) and `MAX_CHAIN_DEPTH` are non-bypassable and apply to every injected turn. No new dispatch/queue/grace machinery. Micro-prompt rows carry their free text as the turn body with the same frequency semantics.
+- Depends on: [Phase 24]
+- Requirements: [R-ADO-14, R-ADO-15, R-ADO-16]
+- Phase dir: `.planning/phases/25-gsd-command-execution-seam/`
+
+## Phase 26: gap-scan-rotation
+
+- Status: Complete
+- Mode: standard
+- Goal: The rotating gap-scan command (locked decision 7). A fixed dimension wheel — security · performance · accessibility · test-coverage · dead-code/dependency-hygiene · error-handling · docs-drift · type-safety — where each `gap-scan` tick picks the least-recently-run dimension(s) from `routine_run_log` and maps it to the right specialist agent (Security Engineer, Performance Benchmarker, Accessibility Auditor, Test Results Analyzer, etc.). The chosen dimension + agent are recorded to the run log so the next tick advances the wheel. Rides the Phase-24 wave model (gap-scan is an independent/parallel unit) and the Phase-25 execution seam (it produces a finish→PR→reviewer unit).
+- Depends on: [Phase 25]
+- Requirements: [R-ADO-17, R-ADO-18]
+- Phase dir: `.planning/phases/26-gap-scan-rotation/`
+
+## Phase 27: verify-loop-tail
+
+- Status: Complete
+- Mode: standard
+- Goal: The terminal deploy/log-verify tail every cycle ends with (locked decision 9). Reuse P5 deploy-verify: forced redeploy → `/health` → probe real routes (`deploy-verify-probe`), AND add a Coolify runtime-log fetch grepped for error/exception/stack patterns. On failure → dispatch a fix agent → re-verify, bounded at N=3 iterations (no cost runaway / infinite loop), then surface to chat. Always appended as the last wave of every tick regardless of which commands were due. Outcome (verify result + iterations + final state) written to the run log.
+- Depends on: [Phase 24]
+- Requirements: [R-ADO-19, R-ADO-20, R-ADO-21]
+- Phase dir: `.planning/phases/27-verify-loop-tail/`
+
+## Phase 28: tiered-autonomy-propose-to-chat
+
+- Status: Complete
+- Mode: standard
+- Goal: Tiered autonomy gating (locked decision 5). Plan, execute, audit-fix, gap-find, code-review, and deploy-verify run autonomously. `gsd-ship`, `gsd-complete-milestone`, version-tag, and production-merge instead surface a propose-to-chat (Telegram/email) via the existing P3 `surfaceProposal` for one-tap approval — and the controller STOPS that branch rather than completing the ship. Reuse `notifications_sent` for propose throttle. The dedicated off-hours merge command (Phase 29) is the explicit exception to the "propose, don't auto" rule for merge-to-main. Encode the autonomy tier per command into the controller prompt + decision parser so a high-tier command emits a proposal, not an action.
+- Depends on: [Phase 25]
+- Requirements: [R-ADO-22, R-ADO-23]
+- Phase dir: `.planning/phases/28-tiered-autonomy-propose-to-chat/`
+
+## Phase 29: off-hours-merge-to-main
+
+- Status: Complete
+- Mode: standard
+- Goal: The dedicated off-hours merge-to-main command (locked decision 8) — the ONLY auto-merge-to-main path. Runs only inside a configurable off-hours window (e.g. 01:00–05:00 local, via the row's `schedule_rule` active_window). It auto-merges PRs whose dispatched reviewer marked PASS (reading reviewer verdicts from `routine_run_log`); FAIL/uncertain PRs are held and surfaced to chat (P3 surfaceProposal). Keeps production undisturbed during the day. Idempotent on `github_issue_idempotency`-style guards so a re-fired window doesn't double-merge. Outcome written to the run log.
+- Depends on: [Phase 28]
+- Requirements: [R-ADO-24, R-ADO-25]
+- Phase dir: `.planning/phases/29-off-hours-merge-to-main/`
+
+## Phase 30: lifecycle-stage-presets
+
+- Status: Complete
+- Mode: standard
+- Goal: Per-session lifecycle stage with per-stage row-frequency presets (locked decision 10). The `lifecycle_stage ∈ {development, beta, production-maintenance}` field (default `development`, from Phase 21) drives an "apply preset" action that fills default row frequencies, each overridable per row afterward: development — frequent decide/plan/execute/gap, lighter review; beta — heavy QC/audit/code-review/verify, lighter build, ship rare (propose); production-maintenance — mostly deploy+log-verify + security gap-scan, ship/merge rare, build on demand. Presets are data (a stage→row-frequency map) applied to `orchestrator_rows`, not hardcoded controller behavior; user overrides persist.
+- Depends on: [Phase 23]
+- Requirements: [R-ADO-26, R-ADO-27]
+- Phase dir: `.planning/phases/30-lifecycle-stage-presets/`
+
+## Phase 31: web-orchestrator-editor
+
+- Status: Complete
+- Mode: standard
+- Goal: The web UI for the one-orchestrator-task-per-session model (SPEC §5). Settings exposes exactly one orchestrator task per session with: a lifecycle-stage selector (dev/beta/prod-maint) + "apply preset" that fills default row frequencies (overridable); a read-only/expandable view of the drafted standard controller prompt; and a table with one command per row — command name · frequency control reusing `ScheduleRulesBuilder` (cron + day/time + active_window + bounds) with **Never** (⇒ disabled) and **Once** (⇒ max_runs=1 auto-disable) options · enabled toggle · drag sort. "+ Add command" and "+ Add micro-prompt" rows use the same frequency UI. Accent = BLUE (no indigo — CI-guarded by `web/test/no-indigo.test.ts`).
+- Depends on: [Phase 23, Phase 30]
+- Requirements: [R-ADO-28, R-ADO-29, R-ADO-30]
+- Phase dir: `.planning/phases/31-web-orchestrator-editor/`
+
+## Phase 32: legacy-task-migration-and-docs
+
+- Status: Complete
+- Mode: standard
+- Goal: Fold the legacy task model into the orchestrator model (locked decision 3 — REPLACE) and close docs. A one-shot idempotent backfill in `hub/scripts/` migrates existing many-tasks-per-session scheduled tasks + standalone dev/qc routines into one `orchestrator` row-set per session (with `--dry-run`), deprecating the old `WORKFLOWS.dev/qc` chains as the engine while preserving the ported substrate (shared dispatch, cost cap, deploy-verify, idempotency, notify channels). Docs sweep: new `docs/auto-dev-orchestrator.md`, CLAUDE.md Docs map + cross-cutting invariants, README; `bun run docs:sync` for any new/changed `/api` routes (docs-drift CI enforces). Final QC gate: `bun run check-baseline` green.
+- Depends on: [Phase 29, Phase 31]
+- Requirements: [R-ADO-31, R-ADO-32, R-ADO-33]
+- Phase dir: `.planning/phases/32-legacy-task-migration-and-docs/`

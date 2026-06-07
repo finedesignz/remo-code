@@ -37,6 +37,7 @@ import { usage as usageApi } from './api/usage'
 import { wellKnown } from './api/well-known'
 import { clientConfig } from './api/client-config'
 import { orchestrator as orchestratorApi } from './api/orchestrator'
+import { orchestratorTasks as orchestratorTasksApi } from './api/orchestrator-tasks'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
 import { runMigrations } from './db/migrate'
@@ -48,6 +49,8 @@ import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/d
 import { getGraceBuffer as getDispatchGraceBuffer } from './dispatch/grace.ts'
 import { startRevanoteCallbackWorker } from './revanote/callback.ts'
 import { startTelegramBridge } from './telegram/bridge.ts'
+import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/queue.ts'
+import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchestrator/controller.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -390,6 +393,10 @@ app.route('/api/error-setup', errorSetupApi)
 // Phase 08: JWT-authed revanote sub-routes (mappings + annotations).
 // The public webhook route lives at /api/revanote/webhook/* (mounted above).
 app.route('/api/orchestrator', orchestratorApi)
+// Phase 31 (auto-dev-orchestrator): authed config REST for the one-per-session
+// orchestrator task + its rows. Data-only (controller path is flag-OFF). Mounted
+// alongside the other authed user routes (post-auth catch-all).
+app.route('/api/orchestrator-tasks', orchestratorTasksApi)
 app.route('/api/revanote/mappings', revanoteMappings)
 app.route('/api/revanote/annotations', revanoteAnnotations)
 // Phase 12 Wave 4: authed Telegram REST. Mounted INSIDE the /api/* auth +
@@ -612,6 +619,15 @@ runMigrations()
     // Phase 12 W3 — outbound Telegram bridge. No-op when TELEGRAM_BOT_TOKEN
     // is unset; otherwise subscribes to assistant_message:final events.
     startTelegramBridge()
+    // Phase 22 — auto-dev-orchestrator global routine-cycle queue drain worker.
+    // Dormant until Phase 23 registers a cycle-runner via setCycleRunner(); it
+    // claims nothing without one, so starting it here is safe.
+    startRoutineQueueWorker()
+    // Phase 32 — auto-dev-orchestrator live path. Registers the cycle-runner and
+    // starts the due-scan enqueue tick ONLY when REMO_ORCHESTRATOR_ENABLED is ON.
+    // With the flag OFF (default) this is a no-op: no runner is registered (queue
+    // stays dormant) and the due-scan tick never starts (nothing is enqueued).
+    registerCycleRunnerIfEnabled()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -623,6 +639,8 @@ function gracefulShutdown(signal: string) {
   console.log(`[shutdown] received ${signal}, pausing schedulers`)
   try { schedRegistry.pauseAll() } catch {}
   try { clearPostRunTimers() } catch {}
+  try { stopRoutineQueueWorker() } catch {}
+  try { stopDueOrchestratorTick() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

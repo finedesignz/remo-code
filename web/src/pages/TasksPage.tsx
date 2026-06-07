@@ -13,7 +13,7 @@
  * `subTabs` config, so the PR #252 mobile top-bar dropdown collapses to a
  * single nav target.
  */
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { AuthUser } from "../lib/auth";
 import { AppShell } from "../components/ui/AppShell";
 import { Brand } from "../components/ui/Brand";
@@ -22,6 +22,7 @@ import { HeaderRight } from "../components/ui/HeaderRight";
 import { useWebSocketContext } from "../hooks/useWebSocket";
 import { activeTopRoute, buildTopNav, readTabParam } from "../lib/ui/nav";
 import { ScheduleTab } from "./tasks/ScheduleTab";
+import { OrchestratorTab } from "./tasks/OrchestratorTab";
 
 interface Props {
   token: string;
@@ -60,16 +61,51 @@ export function TasksPage({ token, user, signOut, onNavigate }: Props) {
 
   const nav = buildTopNav(activeTopRoute());
 
+  // In-page view switch (keeps the single top-nav target — no sub-tabs). The
+  // orchestrator editor (Phase 31) is a per-session config surface that lives
+  // alongside the scheduled-task list.
+  const [view, setView] = useState<"schedules" | "orchestrator">("schedules");
+
   return (
     <AppShell
       brand={<Brand />}
       nav={nav}
       headerRight={<HeaderRight token={token} user={user} signOut={signOut} onNavigate={onNavigate} subscribe={subscribe} />}
     >
-      <div className="px-4 md:px-6 py-6">
-        <ErrorBoundary tabKey="tasks:list">
-          <ScheduleTab token={token} subscribe={subscribe} />
-        </ErrorBoundary>
+      <div className="px-4 md:px-6 py-6 space-y-4">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setView("schedules")}
+            className={
+              view === "schedules"
+                ? "px-3 py-1.5 rounded-lg text-sm bg-blue-600/20 text-blue-300"
+                : "px-3 py-1.5 rounded-lg text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+            }
+          >
+            Scheduled tasks
+          </button>
+          <button
+            type="button"
+            onClick={() => setView("orchestrator")}
+            className={
+              view === "orchestrator"
+                ? "px-3 py-1.5 rounded-lg text-sm bg-blue-600/20 text-blue-300"
+                : "px-3 py-1.5 rounded-lg text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+            }
+          >
+            Orchestrator
+          </button>
+        </div>
+        {view === "schedules" ? (
+          <ErrorBoundary tabKey="tasks:list">
+            <ScheduleTab token={token} subscribe={subscribe} />
+          </ErrorBoundary>
+        ) : (
+          <ErrorBoundary tabKey="tasks:orchestrator">
+            <OrchestratorTab token={token} />
+          </ErrorBoundary>
+        )}
       </div>
     </AppShell>
   );

@@ -896,3 +896,169 @@ canary (R-PTY-13b-adjacent, 17-PLAN-001 Task 3), and the selector→spawn-argv n
 selector seam (R-PTY-22b-adjacent, 19-PLAN-002 Task 2). All elaborate existing parents (R-PTY-08/10/23 + the
 Cycle-2 -b/-c addenda); parents remain authoritative. H5 (frontmatter reconciliation) excluded — owned by the
 H5 sweep agent. SPEC/ROADMAP untouched.
+
+---
+
+## Milestone m-auto-dev-orchestrator — Auto-Dev Orchestrator (Phases 21–32)
+
+> Source spec: `.planning/architecture/auto-dev-orchestrator-SPEC.md` (10 locked decisions). Scope: hub + web
+> only; no supervisor changes. gsd commands run inside the bound session agent via hub-injected prompts. Each
+> requirement traces to a locked decision (D1–D10).
+
+### R-ADO-01 — `orchestrator` task type + one-per-session
+`scheduled_tasks.task_type` CHECK SHALL be extended (idempotently) to include `orchestrator`, and a partial
+unique index SHALL enforce at most one `orchestrator` row per session: `(session_id) WHERE task_type =
+'orchestrator'`. A second insert for a session that already has an orchestrator task SHALL fail at the DB
+layer. *(D3)*
+
+### R-ADO-02 — `lifecycle_stage` column
+`scheduled_tasks` SHALL gain a `lifecycle_stage` column constrained to `{development, beta,
+production-maintenance}`, default `development`. DDL is idempotent (re-runs every boot). *(D10)*
+
+### R-ADO-03 — `orchestrator_rows` table
+A `orchestrator_rows` table SHALL store per-command rows: `id, task_id (FK), command (text/enum), enabled,
+schedule_rule (JSONB, reusing the existing ScheduleRule shape: cron + active_window + bounds), frequency_label
+(Never|Once|cron), micro_prompt (nullable free text), sort_order`. `frequency_label='Never'` ⇒ disabled;
+`'Once'` ⇒ max_runs=1 auto-disable after one run. *(D1, D3)*
+
+### R-ADO-04 — `routine_run_log` + `routine_queue` tables
+A `routine_run_log` table SHALL persist per-run rows: timestamp, command, decision rationale, outcome,
+gap-dimension/agent used, PR url, reviewer verdict, deploy-verify result; indexed by `(session_id,
+created_at)`; surviving repo resets/worktrees. A `routine_queue` table SHALL persist `id, session_id,
+priority, enqueued_at, started_at, status`, with a per-session advisory lock via a partial unique index on
+`(session_id) WHERE status='running'`. All DDL idempotent; any backfill is a one-shot in `hub/scripts/`. *(D4, D10)*
+
+### R-ADO-05 — Global host concurrency cap
+A hub-wide queue SHALL cap concurrent orchestrator cycles across ALL sessions at a configurable limit
+(default 2–3). A drain worker SHALL start queued cycles only up to the cap. *(D10)*
+
+### R-ADO-06 — FIFO + priority ordering
+Overlapping due-cycles SHALL enqueue FIFO with priority such that a `deploy-fix` cycle outranks a `build`
+cycle when the cap is contended. *(D10)*
+
+### R-ADO-07 — Per-session single-cycle lock
+A per-session lock (the `status='running'` partial unique index) SHALL guarantee at most one running cycle
+per session. A second due-tick for a session whose cycle is running SHALL be coalesced, not stacked. *(D10)*
+
+### R-ADO-08 — Status-check/decide + run-log read each tick
+On firing, the controller SHALL first run an implicit `status-check/decide` step that gathers project state
+(open roadmap phases, last commits, open PRs, deploy status) and reads the last N `routine_run_log` entries,
+feeding both into the tick's runtime context. *(D1, D4)*
+
+### R-ADO-09 — Compute and run ALL due rows
+The controller SHALL compute the set of DUE command rows from each row's `schedule_rule` eligibility and run
+EVERY due row this tick (not only the highest-priority one). *(D1)*
+
+### R-ADO-10 — Controller prompt + decision parser + run-log write
+The controller SHALL assemble the standard controller prompt (SPEC §4 skeleton) with run-log, project-state,
+and due-rows context injected, and SHALL parse the agent's structured decision/outcome back into
+`routine_run_log` writes (one entry per command: outcome + PR + reviewer verdict + gap dimension), mirroring
+the existing `parseControllerDecision`. *(D1, D4)*
+
+### R-ADO-11 — Dependency-aware wave grouping
+DUE commands SHALL be grouped into dependency waves: independent commands run as parallel units; dependent
+commands (plan→execute→ship) sequence across waves within the same tick. *(D2)*
+
+### R-ADO-12 — Parallelism inside the agent turn
+Parallel fan-out SHALL occur INSIDE the bound session's agent turn (the agent spawns Task subagents per the
+injected prompt); the hub SHALL NOT itself fan out subagents or re-implement orchestration. *(D2, D6)*
+
+### R-ADO-13 — finish → PR → reviewer per unit
+Each unit of work SHALL finish, create a PR, and dispatch a reviewer subagent to verify that PR; the reviewer
+verdict SHALL be captured to `routine_run_log`. Units SHALL NOT merge to main (off-hours command only). *(D2)*
+
+### R-ADO-14 — Row → gsd skill mapping via injected prompt
+Each orchestrator row SHALL map to a gsd skill invocation (`gsd-plan-phase`, `gsd-execute-phase`,
+`gsd-audit-fix`, `gsd-code-review`, `gsd-verify-work`, etc.) executed by injecting a templated per-command
+instruction into the bound session's agent turn. *(D6)*
+
+### R-ADO-15 — Reuse the single dispatch pipeline + non-bypassable cost cap
+Every injected turn SHALL flow through the existing `hub/src/dispatch/` pipeline; the daily cost cap
+(`dailyCostCapGate`) and `MAX_CHAIN_DEPTH` SHALL apply and SHALL NOT be bypassed. No new per-subsystem
+dispatch/queue/grace machinery SHALL be introduced. *(D3, D6)*
+
+### R-ADO-16 — Micro-prompt rows
+A micro-prompt row SHALL carry its free-text body as the injected turn with the same frequency/Never/Once
+semantics as command rows. *(D6)*
+
+### R-ADO-17 — Gap-scan dimension wheel + LRU rotation
+`gap-scan` SHALL rotate over a fixed dimension set — security, performance, accessibility, test-coverage,
+dead-code/dependency-hygiene, error-handling, docs-drift, type-safety — selecting the least-recently-run
+dimension(s) per the run log, and SHALL record the chosen dimension to `routine_run_log` so the next tick
+advances the wheel. *(D7)*
+
+### R-ADO-18 — Dimension → specialist agent mapping
+Each gap-scan dimension SHALL map to the appropriate specialist agent (e.g. Security Engineer, Performance
+Benchmarker, Accessibility Auditor, Test Results Analyzer); the agent used SHALL be recorded to the run log. *(D7)*
+
+### R-ADO-19 — Always-appended verify tail
+Every cycle SHALL end with a deploy+log-verify tail regardless of which commands were due: forced redeploy →
+`/health` → probe real routes (reuse P5 `deploy-verify-probe`). *(D9)*
+
+### R-ADO-20 — Coolify log error-scan
+The verify tail SHALL fetch the Coolify runtime log and grep for error/exception/stack patterns in addition
+to the route probe. *(D9)*
+
+### R-ADO-21 — Bounded fix loop
+On verify failure the controller SHALL dispatch a fix agent and re-verify, capped at N=3 iterations, then
+surface to chat — never looping unbounded. Verify outcome + iteration count SHALL be written to the run log. *(D9)*
+
+### R-ADO-22 — Autonomous tier
+Plan, execute, audit-fix, gap-find, code-review, and deploy-verify SHALL run autonomously without per-run
+chat approval. *(D5)*
+
+### R-ADO-23 — Propose-to-chat tier
+`gsd-ship`, `gsd-complete-milestone`, version-tag, and production-merge SHALL NOT execute autonomously;
+instead they SHALL surface a propose-to-chat (Telegram/email) via the existing P3 `surfaceProposal` for
+one-tap approval, and the controller SHALL stop that branch. Propose throttling reuses `notifications_sent`.
+The off-hours merge command (R-ADO-24) is the explicit exception. *(D5)*
+
+### R-ADO-24 — Off-hours merge window + auto-merge on PASS
+A dedicated `merge-to-main` command SHALL run only inside a configurable off-hours window (via the row's
+`schedule_rule` active_window) and SHALL be the ONLY auto-merge-to-main path. It SHALL auto-merge PRs whose
+dispatched reviewer marked PASS (verdict read from `routine_run_log`). *(D8)*
+
+### R-ADO-25 — Hold + surface on FAIL/uncertain; idempotent
+PRs the reviewer marked FAIL or uncertain SHALL be held and surfaced to chat, never auto-merged. The merge
+command SHALL be idempotent (guarded like `github_issue_idempotency`) so a re-fired window does not
+double-merge. *(D8)*
+
+### R-ADO-26 — Per-stage frequency presets
+Each `lifecycle_stage` SHALL ship a default row-frequency preset: development (frequent
+decide/plan/execute/gap, lighter review), beta (heavy QC/audit/code-review/verify, lighter build, ship rare),
+production-maintenance (mostly deploy+log-verify + security gap-scan, ship/merge rare, build on demand).
+Presets SHALL be data (a stage→row-frequency map) applied to `orchestrator_rows`, not hardcoded controller
+behavior. *(D10)*
+
+### R-ADO-27 — Apply preset, overridable
+Applying a stage preset SHALL fill default row frequencies, and the user SHALL be able to override any row
+afterward; overrides persist across subsequent ticks. *(D10)*
+
+### R-ADO-28 — One orchestrator editor per session
+The web Settings UI SHALL expose exactly one orchestrator task per session, with a lifecycle-stage selector
+(dev/beta/prod-maint) and an "apply preset" action that fills default row frequencies (overridable). *(D5, D10, §5)*
+
+### R-ADO-29 — Drafted standard prompt + row table
+The editor SHALL show the drafted standard controller prompt (read-only/expandable) and a table with one
+command per row: command name · frequency control reusing `ScheduleRulesBuilder` (cron + day/time +
+active_window + bounds) with **Never** and **Once** options · enabled toggle · drag sort. "+ Add command" and
+"+ Add micro-prompt" use the same frequency UI. *(§5)*
+
+### R-ADO-30 — Blue accent (no indigo)
+The orchestrator editor SHALL use the blue accent and SHALL NOT introduce indigo; `web/test/no-indigo.test.ts`
+SHALL stay green. *(§5)*
+
+### R-ADO-31 — Legacy task migration (one-shot, dry-run)
+An idempotent one-shot script in `hub/scripts/` SHALL migrate existing many-tasks-per-session scheduled tasks
+and standalone dev/qc routines into one `orchestrator` row-set per session, supporting `--dry-run`,
+deprecating the legacy `WORKFLOWS.dev/qc` chains as the engine while preserving the ported substrate (shared
+dispatch, cost cap, deploy-verify, idempotency, notify channels). *(D3)*
+
+### R-ADO-32 — Docs sweep
+A `docs/auto-dev-orchestrator.md` SHALL be added and the CLAUDE.md Docs map + cross-cutting invariants and
+README updated; `bun run docs:sync` SHALL regenerate `docs/openapi.json`/`docs/api.md` for any new/changed
+`/api` routes (docs-drift CI enforces). *(§6)*
+
+### R-ADO-33 — Final QC gate green
+`bun run check-baseline` SHALL pass at milestone close (no regression below the recorded baseline,
+`fail_max:0`). *(§6)*
