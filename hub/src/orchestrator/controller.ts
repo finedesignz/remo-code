@@ -29,6 +29,7 @@ import { appendRunLog, recentRunLog, type RoutineRunLogEntry } from './run-log.t
 import { setCycleRunner, type CycleRunner } from './queue.ts';
 import { planWaves } from './waves.ts';
 import { runWavePlan, STUB_SEAMS, makeLiveSeams, type WaveRunContext, type WaveRunSummary, type WaveSeams } from './wave-runner.ts';
+import { runVerifyTail } from './verify-tail.ts';
 import type { LifecycleStage } from '../db/orchestrator-rows-dal.ts';
 
 // ── Live-path gate (carried Phase-22 gate; decision D10) ─────────────────────
@@ -408,6 +409,22 @@ export function makeCycleRunner(): CycleRunner {
     );
     const ctx: WaveRunContext = { sessionId: entry.session_id, repoKey: null, userId: null };
     await runWaves({ decision: SAFE_FALLBACK, runLogBlocks: [] }, ctx, liveSeams);
+
+    // Phase 27 (D9): the MANDATORY terminal verify tail — runs after the waves on
+    // EVERY tick regardless of which commands were due. Best-effort: a throw here
+    // must never wedge the tick (the queue owns claim/release). No-ops gracefully
+    // when Coolify/target env is unset, so a flag-ON tick without COOLIFY_TOKEN +
+    // REMO_VERIFY_* simply writes a `skipped` run-log row.
+    try {
+      await runVerifyTail({
+        sessionId: entry.session_id,
+        repoKey: null,
+        userId: null,
+        decisionRationale: SAFE_FALLBACK.reason,
+      });
+    } catch (err: any) {
+      console.warn(`[orchestrator] verify-tail threw (ignored): ${err?.message ?? err}`);
+    }
   };
 }
 
