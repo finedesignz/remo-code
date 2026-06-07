@@ -158,3 +158,60 @@ export async function pendingRoutineQueue(): Promise<RoutineQueueEntry[]> {
     ORDER BY priority DESC, enqueued_at ASC
   `;
 }
+
+// ── orchestrator_approvals (Phase 29 — HITL merge approval markers) ──────────
+// P28 proposes high-tier commands to chat; a human approval writes one marker row
+// here keyed by the proposal tuple (session_id, command, content_sha). The
+// off-hours merge command reads UNCONSUMED markers, merges matching PASS PRs, and
+// flips consumed_at so a re-fired window cannot double-merge (R-ADO-25).
+
+export interface OrchestratorApproval {
+  id: string;
+  session_id: string;
+  command: string;
+  content_sha: string;
+  approved_at: string;
+  consumed_at: string | null;
+  created_at: string;
+}
+
+export interface NewOrchestratorApproval {
+  session_id: string;
+  command: string;
+  content_sha: string;
+}
+
+// Insert (or no-op return existing) an approval marker for a proposal tuple. The
+// UNIQUE (session_id, command, content_sha) index makes a duplicate human approval
+// idempotent; ON CONFLICT returns the existing row.
+export async function insertApproval(a: NewOrchestratorApproval): Promise<OrchestratorApproval> {
+  const rows = await sql<OrchestratorApproval[]>`
+    INSERT INTO orchestrator_approvals (session_id, command, content_sha)
+    VALUES (${a.session_id}, ${a.command}, ${a.content_sha})
+    ON CONFLICT (session_id, command, content_sha) DO UPDATE
+      SET session_id = EXCLUDED.session_id
+    RETURNING *
+  `;
+  return rows[0];
+}
+
+// Unconsumed approval markers for a session (the merge command's hot read).
+export async function listUnconsumedApprovals(sessionId: string): Promise<OrchestratorApproval[]> {
+  return sql<OrchestratorApproval[]>`
+    SELECT * FROM orchestrator_approvals
+    WHERE session_id = ${sessionId} AND consumed_at IS NULL
+    ORDER BY approved_at ASC
+  `;
+}
+
+// Mark one approval consumed (idempotency guard: only flips an unconsumed row).
+// Returns the updated row, or null if it was already consumed / not found.
+export async function markApprovalConsumed(id: string): Promise<OrchestratorApproval | null> {
+  const rows = await sql<OrchestratorApproval[]>`
+    UPDATE orchestrator_approvals
+    SET consumed_at = now()
+    WHERE id = ${id} AND consumed_at IS NULL
+    RETURNING *
+  `;
+  return rows[0] ?? null;
+}

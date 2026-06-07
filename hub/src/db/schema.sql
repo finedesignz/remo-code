@@ -335,6 +335,31 @@ CREATE INDEX IF NOT EXISTS idx_routine_queue_pending
   ON routine_queue(priority DESC, enqueued_at)
   WHERE status = 'pending';
 
+-- D5/D8 (Phase 29): HITL approval markers consumed by the off-hours merge-to-main
+-- command. P28 proposes high-tier commands (ship / complete-milestone / tag /
+-- production-merge) to chat; a human approval writes one row here keyed by the
+-- proposal tuple (session_id, command, content_sha). The off-hours merge command
+-- reads UNCONSUMED markers, merges the matching PASS PRs, and marks them consumed
+-- so a re-fired window cannot double-merge (R-ADO-25 idempotency). content_sha is
+-- the proposal content hash (Phase 29 keys it on sha256(pr_url)). Append-only +
+-- consumed_at flip; no data backfill (schema.sql re-runs every boot).
+CREATE TABLE IF NOT EXISTS orchestrator_approvals (
+  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  command     TEXT NOT NULL,
+  content_sha TEXT NOT NULL,
+  approved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  consumed_at TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- One approval per proposal tuple (P28 HITL contract).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_approvals_tuple
+  ON orchestrator_approvals(session_id, command, content_sha);
+-- Fast unconsumed lookup per session (the merge command's hot read).
+CREATE INDEX IF NOT EXISTS idx_orchestrator_approvals_unconsumed
+  ON orchestrator_approvals(session_id)
+  WHERE consumed_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS scheduled_task_runs (
   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   task_id      TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
