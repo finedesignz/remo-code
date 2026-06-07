@@ -74,7 +74,9 @@ interface LegacyTask {
   task_type: string;
 }
 
-async function main(): Promise<number> {
+// Exported so the env-gated e2e (migrate-legacy-tasks.test.ts) can drive the real
+// DB path against a disposable Postgres and assert apply + idempotent re-run.
+export async function main(): Promise<number> {
   const { sql } = await import('../src/db/postgres.ts');
   const {
     getOrchestratorTaskForSession,
