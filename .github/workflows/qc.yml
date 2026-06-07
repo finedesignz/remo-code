@@ -71,6 +71,25 @@ jobs:
       - name: Migration verify
         run: bun run migration-verify
 
+      # Auto-Dev Orchestrator real-Postgres e2e — the enablement gate before
+      # REMO_ORCHESTRATOR_ENABLED=1 in prod. These files SKIP unless REMO_E2E_DB_URL
+      # is set; here we point it at the CI postgres service so the env-gated blocks
+      # actually run. Required/blocking (no continue-on-error): asserts schema boots
+      # clean + idempotent, the routine_queue global cap + per-session running-lock
+      # (unique-violation path), orchestrator_approvals insert/consume idempotency,
+      # routine_run_log round-trip, and the legacy-task migration apply + re-run.
+      - name: Orchestrator Postgres e2e
+        env:
+          REMO_E2E_DB_URL: postgres://remo:remo@localhost:5432/remo_ci
+        run: |
+          bun test \
+            hub/test/orchestrator-data-model.test.ts \
+            hub/test/orchestrator-queue.test.ts \
+            hub/test/orchestrator-run-log.test.ts \
+            hub/test/orchestrator-stage-presets.test.ts \
+            hub/test/orchestrator-merge-command.test.ts \
+            hub/test/migrate-legacy-tasks.test.ts
+
   post-deploy-smoke:
     name: Post-deploy smoke (prod HTTPS)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
