@@ -26,12 +26,13 @@ import {
 import { humanizeRule } from '../scheduler/schedule-rules.ts';
 import { computeDueRowsForTask, type DueRow } from './due-rows.ts';
 import { appendRunLog, recentRunLog, type RoutineRunLogEntry } from './run-log.ts';
-import { setCycleRunner, type CycleRunner } from './queue.ts';
+import { setCycleRunner, enqueueCycle, CyclePriority, type CycleRunner } from './queue.ts';
 import { planWaves } from './waves.ts';
 import { runWavePlan, STUB_SEAMS, makeLiveSeams, type WaveRunContext, type WaveRunSummary, type WaveSeams } from './wave-runner.ts';
 import { runVerifyTail } from './verify-tail.ts';
 import { MERGE_COMMAND, isMergeCommand, runMergeToMain, type MergeOutcome } from './merge-command.ts';
-import type { LifecycleStage } from '../db/orchestrator-rows-dal.ts';
+import { getSessionById } from '../db/dal.ts';
+import { getOrchestratorTaskForSession, type LifecycleStage } from '../db/orchestrator-rows-dal.ts';
 
 // ── Live-path gate (carried Phase-22 gate; decision D10) ─────────────────────
 /**
@@ -378,6 +379,44 @@ export async function runWaves(
   return runWavePlan(plan, ctx, seams);
 }
 
+/**
+ * Phase 32 — the LIVE driver: plan + run waves directly from the tick's DUE ROWS.
+ *
+ * This closes the Phase-25 controller→wave deferral. Instead of waiting for the
+ * agent to emit RUNLOG blocks (parsed next tick), the hub takes the DUE command
+ * rows as the authoritative command set for THIS tick: `planWaves` groups them
+ * into dependency waves, and each unit's `micro_prompt` (free-text custom rows)
+ * is carried onto the matching `WaveUnit.microPrompt` so the execution seam wraps
+ * it in the finish→PR→reviewer envelope. `runWavePlan` then injects each unit's
+ * templated prompt through the cost-capped dispatch pipeline (makeLiveSeams).
+ *
+ * merge-to-main is EXCLUDED by `planWaves` (off-hours special path — see
+ * `dispatchMergeIfDue`). Returns the wave summary (empty when no rows are due).
+ */
+export async function runWavesFromDueRows(
+  dueRows: DueRow[],
+  ctx: WaveRunContext,
+  seams: WaveSeams = STUB_SEAMS,
+): Promise<WaveRunSummary> {
+  const commands = dueRows.map((d) => d.row.command);
+  const plan = planWaves(commands);
+  // Carry each due row's micro_prompt onto its planned unit (first match by
+  // command — rows are de-duped by planWaves, so one micro_prompt per command).
+  const microByCommand = new Map<string, string | null>();
+  for (const d of dueRows) {
+    if (!microByCommand.has(d.row.command)) {
+      microByCommand.set(d.row.command, d.row.micro_prompt ?? null);
+    }
+  }
+  for (const wave of plan.waves) {
+    for (const unit of wave) {
+      const micro = microByCommand.get(unit.command);
+      if (micro != null) unit.microPrompt = micro;
+    }
+  }
+  return runWavePlan(plan, ctx, seams);
+}
+
 // ── Phase-29 off-hours merge-to-main (SPECIAL PATH — NOT the wave planner) ────
 /**
  * Route a due `merge-to-main` row to the dedicated off-hours merge command.
@@ -405,67 +444,234 @@ export async function dispatchMergeIfDue(
   });
 }
 
+// ── Session→task→user resolution (Phase 32 — closes the Phase-25 deferral) ────
+/**
+ * The resolved identity + context a claimed cycle needs to drive the waves. The
+ * queue entry alone carries only `session_id`; this fans it out to the owning
+ * user, the one orchestrator task, the lifecycle stage, the repo key, and the
+ * tick's DUE rows + run-log + project-state context.
+ */
+export interface ResolvedCycleContext {
+  sessionId: string;
+  userId: string;
+  taskId: string;
+  repoKey: string | null;
+  tz: string;
+  controllerContext: ControllerContext;
+}
+
+/**
+ * Resolve a queue entry's `session_id` → owning user + orchestrator task + stage,
+ * then build the controller context (project state + run-log + DUE rows). Returns
+ * `null` when the session is gone or has no orchestrator task (a stale/foreign
+ * queue entry) — the caller treats that as a clean no-op (release 'done').
+ *
+ * `deps` is injectable for tests (mock the two DB reads + the context builder).
+ */
+export interface ResolveDeps {
+  getSessionById: typeof getSessionById;
+  getOrchestratorTaskForSession: typeof getOrchestratorTaskForSession;
+  buildControllerContext: typeof buildControllerContext;
+}
+const REAL_RESOLVE_DEPS: ResolveDeps = {
+  getSessionById,
+  getOrchestratorTaskForSession,
+  buildControllerContext,
+};
+
+export async function resolveCycleContext(
+  sessionId: string,
+  deps: ResolveDeps = REAL_RESOLVE_DEPS,
+): Promise<ResolvedCycleContext | null> {
+  const session = await deps.getSessionById(sessionId);
+  if (!session) return null;
+  const userId: string | null = (session as any).user_id ?? null;
+  if (!userId) return null;
+
+  const task = await deps.getOrchestratorTaskForSession(userId, sessionId);
+  if (!task) return null;
+
+  const repoKey: string | null = (session as any).repo_key ?? null;
+  const tz: string = (task as any).timezone ?? 'UTC';
+  const stage: LifecycleStage = task.lifecycle_stage ?? 'development';
+
+  const controllerContext = await deps.buildControllerContext({
+    userId,
+    sessionId,
+    taskId: task.id,
+    stage,
+    repo: repoKey ?? undefined,
+    tz,
+  });
+
+  return { sessionId, userId, taskId: task.id, repoKey, tz, controllerContext };
+}
+
 // ── Cycle-runner factory + flag-gated registration (D10) ─────────────────────
 /**
- * Build the CycleRunner injected into the Phase-22 queue. Per claimed cycle it
- * would: build context → render prompt → (Phase 24/25) inject the turn → parse
- * the reply → write run-log. In Phase 23 the dispatch step is the no-op seam, so
- * this runner only exercises the decision-core path. The queue owns claim/release.
+ * Build the CycleRunner injected into the Phase-22 queue. Per claimed cycle:
+ *   1. resolve session→user→task→stage + build the controller context (DUE rows,
+ *      run-log, project state) via `resolveCycleContext`;
+ *   2. render the controller prompt → use it as the run-log decision_rationale
+ *      (the prompt is context; the DUE ROWS are the authoritative command set);
+ *   3. drive the dependency-aware waves directly from the DUE rows
+ *      (`runWavesFromDueRows`) — each unit injects its templated prompt through
+ *      the cost-capped dispatch pipeline (makeLiveSeams). The gsd work + PR +
+ *      reviewer run ASYNC inside the agent turn; pr_url/verdict reconcile on a
+ *      later tick when buildControllerContext re-reads routine_run_log;
+ *   4. route a due off-hours `merge-to-main` row through `dispatchMergeIfDue`;
+ *   5. always run the mandatory terminal verify tail (Phase 27).
  *
- * NOTE: a full runner needs the firing session's identity (userId/taskId/stage),
- * which the queue entry alone does not carry. Resolving session→task→user is a
- * Phase-24 wiring concern; here the runner is a minimal placeholder that proves
- * the registration seam works and logs that execution is deferred.
+ * The queue owns claim/release; every step is best-effort (a throw is logged, not
+ * propagated, so one bad step never wedges the tick). `runWaves`/`runWavePlan`
+ * still DEFAULT to STUB_SEAMS, so only this flag-gated runner opts into the live
+ * seams — non-live callers + tests stay inert.
+ *
+ * `resolveDeps` is injectable for tests; `seams` defaults to the live seams.
  */
-export function makeCycleRunner(): CycleRunner {
-  // Phase 25: the LIVE call site uses the REAL seams (prompt injection through the
-  // shared dispatch pipeline + cost cap). `runWaves`/`runWavePlan` still DEFAULT to
-  // STUB_SEAMS so tests + any non-live caller stay inert; only this flag-gated
-  // cycle-runner opts into makeLiveSeams().
-  const liveSeams = makeLiveSeams();
+export function makeCycleRunner(
+  resolveDeps: ResolveDeps = REAL_RESOLVE_DEPS,
+  seams: WaveSeams = makeLiveSeams(),
+): CycleRunner {
   return async (entry) => {
-    // The queue entry alone carries only session_id. Resolving session→task→user
-    // (to build the real controller context, render + inject the controller prompt,
-    // and pass the parsed reply's per-command RUNLOG blocks as the wave command set)
-    // is the remaining controller-wiring concern (the wave runner already needs
-    // ctx.userId to ride the dispatch pipeline). Until that wiring lands, this runs
-    // the wave dispatch path with an empty command set, so the live seams are wired
-    // at the live call site WITHOUT injecting anything (no commands ⇒ no inject).
-    console.log(
-      `[orchestrator] cycle claimed session=${entry.session_id} — live wave seams wired ` +
-        `(command set + session→user resolution land with controller injection)`,
-    );
-    const ctx: WaveRunContext = { sessionId: entry.session_id, repoKey: null, userId: null };
-    await runWaves({ decision: SAFE_FALLBACK, runLogBlocks: [] }, ctx, liveSeams);
+    const resolved = await resolveCycleContext(entry.session_id, resolveDeps);
+    if (!resolved) {
+      console.log(
+        `[orchestrator] cycle claimed session=${entry.session_id} — no orchestrator task ` +
+          `(stale/foreign queue entry); no-op.`,
+      );
+      return;
+    }
 
-    // Phase 29: the off-hours `merge-to-main` row (EXCLUDED from the wave planner)
-    // routes through the dedicated special path `dispatchMergeIfDue`. It activates
-    // once the due-row + session→user resolution lands here (same wiring gap as the
-    // wave command set above); the function + its window-gate/PASS+approved
-    // selection are wired and unit-tested. No due rows resolved yet ⇒ no-op.
+    const { sessionId, userId, repoKey, tz, controllerContext } = resolved;
+    const dueRows = controllerContext.dueRows;
+    // The controller prompt is the tick's decision context; it is stamped as the
+    // run-log decision_rationale (truncated). The DUE ROWS are the command set.
+    const prompt = renderControllerPrompt(controllerContext);
+    const decisionRationale = prompt.slice(0, 500);
+
+    const ctx: WaveRunContext = { sessionId, repoKey, userId, decisionRationale };
+
+    console.log(
+      `[orchestrator] cycle session=${sessionId} due=${dueRows.length} ` +
+        `commands=[${dueRows.map((d) => d.row.command).join(',')}]`,
+    );
+
+    // (a) drive the dependency-aware waves from the DUE rows (live inject).
     try {
-      await dispatchMergeIfDue([], { sessionId: entry.session_id, userId: null, repoKey: null });
+      await runWavesFromDueRows(dueRows, ctx, seams);
+    } catch (err: any) {
+      console.warn(`[orchestrator] wave dispatch threw (ignored): ${err?.message ?? err}`);
+    }
+
+    // (b) off-hours merge-to-main (EXCLUDED from the wave planner) — window-gated.
+    try {
+      await dispatchMergeIfDue(dueRows, { sessionId, userId, repoKey, tz });
     } catch (err: any) {
       console.warn(`[orchestrator] merge-to-main path threw (ignored): ${err?.message ?? err}`);
     }
     void MERGE_COMMAND; // referenced for the special-path constant (see dispatchMergeIfDue).
 
-    // Phase 27 (D9): the MANDATORY terminal verify tail — runs after the waves on
-    // EVERY tick regardless of which commands were due. Best-effort: a throw here
-    // must never wedge the tick (the queue owns claim/release). No-ops gracefully
-    // when Coolify/target env is unset, so a flag-ON tick without COOLIFY_TOKEN +
-    // REMO_VERIFY_* simply writes a `skipped` run-log row.
+    // (c) MANDATORY terminal verify tail (Phase 27 / D9). No-ops gracefully when
+    // COOLIFY_TOKEN + REMO_VERIFY_* are unset (writes a `skipped` run-log row).
     try {
       await runVerifyTail({
-        sessionId: entry.session_id,
-        repoKey: null,
-        userId: null,
-        decisionRationale: SAFE_FALLBACK.reason,
+        sessionId,
+        repoKey,
+        userId,
+        decisionRationale,
       });
     } catch (err: any) {
       console.warn(`[orchestrator] verify-tail threw (ignored): ${err?.message ?? err}`);
     }
   };
+}
+
+// ── Due-scan enqueue tick (Phase 32 — feeds the queue; gated) ────────────────
+/**
+ * Periodic enqueue tick: scan every enabled orchestrator task, and for each whose
+ * session has ≥1 DUE row this scan, `enqueueCycle(session_id, priority)`. The
+ * queue's per-session running-lock coalesces a second enqueue for a session whose
+ * cycle is still running (the drain claim filters running sessions), so a fast
+ * tick interval cannot stack cycles.
+ *
+ * Priority: DEPLOY_FIX when a deploy-fix or merge-to-main row is due, else BUILD.
+ *
+ * Started ONLY by `registerCycleRunnerIfEnabled()` when REMO_ORCHESTRATOR_ENABLED
+ * is ON. Flag OFF ⇒ never started ⇒ NOTHING is ever enqueued.
+ */
+let dueTickTimer: ReturnType<typeof setInterval> | null = null;
+
+function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+/** Due-scan interval (ms). Default 60000. */
+export const DUE_TICK_INTERVAL_MS = parsePositiveIntEnv(
+  process.env.REMO_ORCHESTRATOR_TICK_INTERVAL_MS,
+  60_000,
+);
+
+/**
+ * One due-scan pass: enqueue a cycle for every enabled orchestrator task whose
+ * session has a DUE row. Exported for tests. Best-effort per task. Returns the
+ * session ids enqueued this pass.
+ */
+export async function scanAndEnqueueDueCycles(now: Date = new Date()): Promise<string[]> {
+  const enqueued: string[] = [];
+  let tasks: { id: string; session_id: string | null; timezone: string | null }[] = [];
+  try {
+    const { sql } = await import('../db/postgres.ts');
+    tasks = await sql<{ id: string; session_id: string | null; timezone: string | null }[]>`
+      SELECT id, session_id, timezone FROM scheduled_tasks
+      WHERE task_type = 'orchestrator' AND enabled = true AND session_id IS NOT NULL
+    `;
+  } catch (err: any) {
+    console.warn(`[orchestrator] due-scan task load failed: ${err?.message ?? err}`);
+    return enqueued;
+  }
+
+  for (const task of tasks) {
+    if (!task.session_id) continue;
+    try {
+      const dueRows = await computeDueRowsForTask(task.id, {
+        sessionId: task.session_id,
+        now,
+        tz: task.timezone ?? 'UTC',
+      });
+      if (dueRows.length === 0) continue;
+      const hot = dueRows.some(
+        (d) => d.row.command === 'deploy-fix' || isMergeCommand(d.row.command),
+      );
+      await enqueueCycle(task.session_id, hot ? CyclePriority.DEPLOY_FIX : CyclePriority.BUILD);
+      enqueued.push(task.session_id);
+    } catch (err: any) {
+      console.warn(
+        `[orchestrator] due-scan enqueue failed task=${task.id}: ${err?.message ?? err}`,
+      );
+    }
+  }
+  return enqueued;
+}
+
+export function startDueOrchestratorTick(): void {
+  if (dueTickTimer) return;
+  dueTickTimer = setInterval(() => {
+    scanAndEnqueueDueCycles().catch((err) =>
+      console.warn(`[orchestrator] due-scan tick error: ${err?.message ?? err}`),
+    );
+  }, DUE_TICK_INTERVAL_MS);
+  (dueTickTimer as any).unref?.();
+  console.log(`[orchestrator] due-scan tick started (interval=${DUE_TICK_INTERVAL_MS}ms).`);
+}
+
+export function stopDueOrchestratorTick(): void {
+  if (dueTickTimer) {
+    clearInterval(dueTickTimer);
+    dueTickTimer = null;
+  }
 }
 
 /**
@@ -483,6 +689,9 @@ export function registerCycleRunnerIfEnabled(): boolean {
     return false;
   }
   setCycleRunner(makeCycleRunner());
-  console.log('[orchestrator] cycle-runner registered (REMO_ORCHESTRATOR_ENABLED=ON).');
+  startDueOrchestratorTick();
+  console.log(
+    '[orchestrator] cycle-runner registered + due-scan tick started (REMO_ORCHESTRATOR_ENABLED=ON).',
+  );
   return true;
 }

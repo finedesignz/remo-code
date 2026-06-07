@@ -36,6 +36,15 @@ export const COMMAND_DEPS: Readonly<Record<string, readonly string[]>> = Object.
   'code-review': [],
   'complete-milestone': ['execute'],
   tag: ['execute'],
+  // full gsd-* slugs (SPEC §3 default-row vocabulary) — same chain shape so a
+  // tick mixing slugs sequences faithfully (execute → ship/complete-milestone).
+  'gsd-plan-phase': [],
+  'gsd-execute-phase': ['gsd-plan-phase'],
+  'gsd-audit-fix': [],
+  'gsd-code-review': [],
+  'gsd-verify-work': ['gsd-execute-phase'],
+  'gsd-ship': ['gsd-execute-phase'],
+  'gsd-complete-milestone': ['gsd-execute-phase'],
 });
 
 /** Commands that the off-hours Phase-29 path owns — EXCLUDED from this planner. */
@@ -47,9 +56,15 @@ export const EXCLUDED_COMMANDS: ReadonlySet<string> = new Set(['merge-to-main'])
  * so ordering is faithful, but the runner routes them to `proposeToChat`.
  */
 export const PROPOSE_COMMANDS: ReadonlySet<string> = new Set([
+  // short topology keys
   'ship',
   'complete-milestone',
   'tag',
+  // full gsd-* slugs (the SPEC §3 default-row command vocabulary) — must match
+  // command-prompts.ts PROPOSE_ONLY_COMMANDS so a due `gsd-ship` row is routed to
+  // proposeToChat (never executed/PR'd/merged) by the wave runner (D5 / Phase 28).
+  'gsd-ship',
+  'gsd-complete-milestone',
 ]);
 
 // ── Caps (sane bounds; mirror queue's parsePositiveInt discipline) ───────────
