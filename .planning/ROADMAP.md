@@ -420,7 +420,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase TMAC-02: task-macros-registry
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: `hub/src/orchestrator/task-macros.ts` — pure `task_type → macro prompt` registry taking `{repo_path, repo_ident, lifecycle_stage}`. DEV prompt = the canonical SPEC §4 text verbatim with `{repo_path}`/`{repo_ident}`/`{lifecycle_stage}` substituted and stage-conditional clauses keyed off lifecycle_stage. maintenance/security/brainstorming = documented stubs that resolve but flag not-yet-complete.
 - Depends on: []
