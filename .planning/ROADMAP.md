@@ -456,7 +456,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase TMAC-06: retire-micro-row-and-docs
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: For the new task types, retire the `command-prompts.ts` micro-registry + `waves.ts`/`wave-runner.ts`/`due-rows.ts`/`gap-rotation.ts` usage from the live path (KEEP the code until migration verified — remove only dead wiring, leave modules importable). Add a canary/guard test so the macro path can't silently regress to the micro-row path. Docs sweep: CLAUDE.md Docs map + auto-dev doc note, `bun run docs:sync`, `bun run check-baseline` green.
 - Depends on: [Phase TMAC-05]

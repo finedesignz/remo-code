@@ -170,7 +170,14 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   concurrent-cycle cap), `REMO_ORCHESTRATOR_DRAIN_INTERVAL_MS` (default 1000, drain interval),
   `REMO_ORCHESTRATOR_TICK_INTERVAL_MS` (default 60000, Phase-32 due-scan enqueue interval). The
   Phase-32 controller→wave wiring drives dependency-aware waves directly from each tick's DUE rows
-  (`hub/src/orchestrator/controller.ts` `makeCycleRunner`→`runWavesFromDueRows`). Verify-tail target
+  (`hub/src/orchestrator/controller.ts` `makeCycleRunner`→`runWavesFromDueRows`). **Milestone TMAC
+  (2026-06-08): the cycle-runner now defaults to the resume-heartbeat MACRO path** — `useMacroPath()`
+  routes each tick through `runMacroCycle` (resolve `scheduled_tasks.macro_task_type` → one autonomous
+  macro prompt via `task-macros.ts`, reconcile the prior reply's `<<STATE>>`/`<<NOTIFY>>`/`<<GATE>>`
+  sentinels via `sentinels.ts` into `routine_run_log` + stage-gated `notify.ts` fan-out, halt on an open
+  mandatory gate per `lifecycle_stage`, else re-inject — cost-capped). The legacy per-micro-command-row
+  wave path is preserved behind **`REMO_ORCHESTRATOR_LEGACY_WAVES=1`** (rollback only) and guarded by
+  `hub/test/orchestrator-macro-path-guard.test.ts`. Verify-tail target
   envs (no-op when unset): `REMO_VERIFY_APP_UUID`, `REMO_VERIFY_BASE_URL`, `REMO_VERIFY_ROUTES`
   (default `/api/sessions,/openapi.json,/docs`), plus `COOLIFY_TOKEN`. Off-hours merge-to-main runs
   ONLY inside the merge row's `schedule_rule.active_window` (no separate env). Full architecture:
@@ -211,7 +218,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | Shared dispatch + intake | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | `hub/src/dispatch/` (gates→queue→grace→finalize) + `hub/src/webhooks/intake.ts`. All inbound subsystems ride these. |
 | Usage cost ledger | [usage-cost.md](docs/usage-cost.md) | P2 — per-turn token+cost capture (`usage_event`) → `token_usage` + `token_usage_daily` → `GET /api/usage/cost`. SDK `total_cost_usd` authoritative; `hub/src/usage/pricing.ts` is fallback only. Cost is a list-price ESTIMATE. Cap (P3) unaffected. Needs supervisor ≥0.8.0. |
 | PTY terminal surface + cutover gate | [usage-cost.md](docs/usage-cost.md) · [cutover-gate-june15.md](docs/cutover-gate-june15.md) | Phases 15–19 — universal raw-terminal (PTY) human path (interactive `claude`/`codex` TUI, raw bytes, NO stream-json, NO API key). Phase-18 dual-bucket usage (interactive vs programmatic). Phase-19 fail-safe default-backend selector (`supervisor/src/runners/backend-selector.ts`), Codex/Gemini-stub fallback + shared `env-sanitize.ts`, and the June-15 cutover gate (`tools/cutover-deletion-gate.mjs`). Cutover flip + ChatSurface deletion are GATED (pending runbook + on-device attestations). |
-| Auto-dev orchestrator | [auto-dev-orchestrator.md](docs/auto-dev-orchestrator.md) | Phases 21–32 — session-level auto-dev: one `orchestrator` task per session + `orchestrator_rows`; global `routine_queue` + per-session lock; controller drives dependency-aware waves from DUE rows (`hub/src/orchestrator/`), injecting templated gsd prompts (agent owns PR+reviewer); off-hours merge; propose-to-chat; gap-scan rotation; verify-tail. **Flag-gated OFF** (`REMO_ORCHESTRATOR_ENABLED`). Legacy migration: `hub/scripts/migrate-legacy-tasks-to-orchestrator.ts`. |
+| Auto-dev orchestrator | [auto-dev-orchestrator.md](docs/auto-dev-orchestrator.md) · [.planning/architecture/auto-dev-task-prompts-SPEC.md](.planning/architecture/auto-dev-task-prompts-SPEC.md) | Phases 21–32 — session-level auto-dev: one `orchestrator` task per session + `orchestrator_rows`; global `routine_queue` + per-session lock; verify-tail. **Flag-gated OFF** (`REMO_ORCHESTRATOR_ENABLED`). **Milestone TMAC (2026-06-08): macro path is the default** — a task carries one `macro_task_type` (dev complete; maintenance/security/brainstorming stubs) resolved to ONE autonomous macro prompt (`task-macros.ts`); resume-heartbeat controller (`runMacroCycle`) reconciles `<<STATE>>`/`<<NOTIFY>>`/`<<GATE>>` sentinels (`sentinels.ts`) → `routine_run_log` + stage-gated `notify.ts` fan-out, halt on mandatory gate. Legacy micro-row wave path KEPT behind `REMO_ORCHESTRATOR_LEGACY_WAVES=1` (rollback) + guard test. Migrations: `hub/scripts/migrate-legacy-tasks-to-orchestrator.ts`, `migrate-orchestrator-macro-task-type.ts`. |
 | API docs | [api.md](docs/api.md) · `/openapi.json` · `/docs` | OpenAPI 3.1 assembled in `hub/src/api/_openapi.ts`; run `bun run docs:sync` after route changes (docs-drift CI enforces). |
 
 ## Cross-cutting invariants (do not violate)
