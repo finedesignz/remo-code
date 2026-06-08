@@ -55,6 +55,14 @@ describe('sentinels — NOTIFY', () => {
     expect(r.notifies[0].detail).toBe('shipped v1.2.0, live')
   })
 
+  test('a `>` inside a quoted attr value does not truncate the block (M3)', () => {
+    const raw = '<<NOTIFY level=info detail="latency > 500ms, p99 > 1s">>'
+    const r = parseSentinels(raw)
+    expect(r.notifies).toHaveLength(1)
+    expect(r.notifies[0].level).toBe('info')
+    expect(r.notifies[0].detail).toBe('latency > 500ms, p99 > 1s')
+  })
+
   test('level defaults to info when unspecified/unknown', () => {
     expect(parseSentinels('<<NOTIFY detail="hi">>').notifies[0].level).toBe('info')
     expect(parseSentinels('<<NOTIFY level=bogus>>').notifies[0].level).toBe('info')

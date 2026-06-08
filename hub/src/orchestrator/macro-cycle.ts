@@ -45,10 +45,13 @@ export interface MacroCycleDeps {
   appendRunLog: typeof appendRunLog;
   inject: typeof injectOrchestratorPrompt;
   fanOut: typeof fanOutNotify;
+  /** true when a run is already in flight for this session (per-session lock held). */
+  isRunLive: (sessionId: string) => boolean;
 }
 
 async function realDeps(): Promise<MacroCycleDeps> {
   const dal = await import('../db/dal.ts');
+  const { getQueue } = await import('../dispatch/pipeline.ts');
   return {
     getLatestAssistantReply: async (sessionId, userId) => {
       try {
@@ -67,6 +70,7 @@ async function realDeps(): Promise<MacroCycleDeps> {
     appendRunLog,
     inject: injectOrchestratorPrompt,
     fanOut: fanOutNotify,
+    isRunLive: (sessionId) => getQueue().currentInFlight(sessionId) != null,
   };
 }
 
@@ -74,6 +78,8 @@ export interface MacroCycleResult {
   reconciled: boolean;
   halted: boolean;
   injected: boolean;
+  /** true when the tick skipped resume because a run is already live (SPEC §2.3). */
+  skipped: boolean;
   /** the parsed sentinels from the prior reply (for tests/observability). */
   sentinels: ParsedSentinels | null;
 }
@@ -87,7 +93,7 @@ export async function runMacroCycle(
   input: MacroCycleInput,
   deps?: MacroCycleDeps,
 ): Promise<MacroCycleResult> {
-  const result: MacroCycleResult = { reconciled: false, halted: false, injected: false, sentinels: null };
+  const result: MacroCycleResult = { reconciled: false, halted: false, injected: false, skipped: false, sentinels: null };
   let d: MacroCycleDeps;
   try {
     d = deps ?? (await realDeps());
@@ -119,6 +125,25 @@ export async function runMacroCycle(
       `[orchestrator.macro] session=${sessionId} HALTED on gate: ${sentinels.gate.reason ?? 'unspecified'} ` +
         `(stage=${stage}); awaiting human reply.`,
     );
+    return result;
+  }
+
+  // 2b. SKIP if a run is already live (SPEC §2.3): the per-session lock is held,
+  //     so the macro is still working — do NOT queue a duplicate resume. The next
+  //     heartbeat reconciles once the run finishes.
+  if (d.isRunLive(sessionId)) {
+    result.skipped = true;
+    try {
+      await d.appendRunLog({
+        session_id: sessionId,
+        repo_key: repoKey,
+        command: `macro:${macroTaskType}`,
+        decision_rationale: `resume-heartbeat skipped (run live, stage=${stage})`,
+        outcome: 'skipped',
+      });
+    } catch {
+      /* best-effort */
+    }
     return result;
   }
 
@@ -205,7 +230,14 @@ export async function reconcileSentinels(
   }
 
   // NOTIFY blocks — fan out per the stage matrix (info/ship requests).
+  //
+  // Dedup (SPEC §4 STEP 5): a paused-on-gate turn emits BOTH a `<<GATE>>` AND a
+  // `<<NOTIFY level=blocking>>`. Both map to event:'gate', so fanning out both
+  // would page the user twice for one gate. When a GATE block is present, let it
+  // own the gate fan-out (below) and skip the blocking NOTIFYs here — exactly one
+  // gate fan-out per turn.
   for (const n of sentinels.notifies) {
+    if (n.level === 'blocking' && sentinels.gate) continue;
     const event: NotifyEvent = n.level === 'blocking' ? 'gate' : 'info';
     const decision = shouldNotify(event, stage, { level: n.level, channel: n.channel });
     if (!decision.fire) continue;

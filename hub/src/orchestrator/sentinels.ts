@@ -30,8 +30,10 @@
 // ── Block regexes (mirror controller.ts RUNLOG_RE / DECISION_RE) ─────────────
 // `<<TAG ...inline... >>` self-closing OR `<<TAG ...\n body \n TAG>>` paired.
 const STATE_RE = /<<STATE\b([\s\S]*?)(?:^|\n)\s*STATE(?:>>)?(?:\s|$)/i;
-const NOTIFY_RE = /<<NOTIFY\b([^>]*?)>>/gi;
-const GATE_RE = /<<GATE\b([^>]*?)>>/gi;
+// Match up to the literal `>>` terminator (not the first `>`), so a `>` inside an
+// attribute value — e.g. detail="latency > 500ms" — does not truncate the block.
+const NOTIFY_RE = /<<NOTIFY\b([\s\S]*?)>>/gi;
+const GATE_RE = /<<GATE\b([\s\S]*?)>>/gi;
 
 export interface StateSentinel {
   lifecycle: string | null;

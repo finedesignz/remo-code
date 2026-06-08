@@ -42,6 +42,7 @@ function spyDeps(over: Partial<MacroCycleDeps> = {}): {
       log.notifies.push(input)
       return { delivered: [] }
     }) as any,
+    isRunLive: () => false,
     ...over,
   }
   return { deps, log }
@@ -124,6 +125,32 @@ describe('runMacroCycle — NOTIFY reconcile', () => {
     await runMacroCycle(baseInput({ stage: 'development' }), dev.deps)
     const info = dev.log.notifies.find((n) => n.event === 'info')
     expect(info.channels).toEqual(['inapp'])
+  })
+})
+
+describe('runMacroCycle — GATE+NOTIFY pair fans out once (M1)', () => {
+  // SPEC §4 STEP 5: a paused-on-gate turn emits BOTH blocks. They must page once.
+  const pairReply =
+    '<<GATE reason="destructive migration" detail="needs approval">>\n' +
+    '<<NOTIFY level=blocking detail="paused on mandatory gate">>'
+
+  test('beta: exactly one gate fan-out for the GATE+blocking-NOTIFY pair', async () => {
+    const { deps, log } = spyDeps({ getLatestAssistantReply: async () => pairReply })
+    const r = await runMacroCycle(baseInput({ stage: 'beta' }), deps)
+    expect(r.halted).toBe(true)
+    const gateNotifies = log.notifies.filter((n) => n.event === 'gate')
+    expect(gateNotifies).toHaveLength(1)
+  })
+})
+
+describe('runMacroCycle — skip when a run is live (M2)', () => {
+  test('isRunLive=true → skips resume, no inject, logs skipped', async () => {
+    const { deps, log } = spyDeps({ isRunLive: () => true })
+    const r = await runMacroCycle(baseInput(), deps)
+    expect(r.skipped).toBe(true)
+    expect(r.injected).toBe(false)
+    expect(log.injects).toHaveLength(0)
+    expect(log.runLogs.some((e) => e.command === 'macro:dev' && e.outcome === 'skipped')).toBe(true)
   })
 })
 
