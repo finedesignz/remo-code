@@ -447,7 +447,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase TMAC-05: data-and-web-editor
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: A task is ONE row (`task_type` + schedule), not N command rows. Idempotent DDL only in `schema.sql`; any backfill of existing micro-row tasks → single task_type rows in a one-shot `hub/scripts/*.ts` (`--dry-run`). Web task editor (`web/src/pages/settings/` orchestrator surface) becomes a `task_type` picker + schedule + lifecycle-stage selector, not a command-row grid. Accent = blue only (no indigo). Sync `/openapi.json` if routes change (`bun run docs:sync`).
 - Depends on: [Phase TMAC-04]

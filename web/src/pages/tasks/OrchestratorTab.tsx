@@ -24,11 +24,21 @@ import {
 import {
   useOrchestrator,
   type LifecycleStage,
+  type MacroTaskType,
   type OrchestratorRow,
 } from "../../hooks/useOrchestrator";
 import { useSessions } from "../../hooks/useSessions";
 
 const STAGES: LifecycleStage[] = ["development", "beta", "production-maintenance"];
+
+// Milestone TMAC: the macro task_type picker. dev is the fully-specified routine;
+// the others are documented stubs (labeled "(stub)") until brainstormed (SPEC §6).
+const TASK_TYPES: { value: MacroTaskType; label: string }[] = [
+  { value: "dev", label: "Dev" },
+  { value: "maintenance", label: "Maintenance (stub)" },
+  { value: "security", label: "Security (stub)" },
+  { value: "brainstorming", label: "Brainstorming (stub)" },
+];
 
 // SPEC §3 user-configurable command set (mirrors hub/src/orchestrator/command-set.ts).
 const KNOWN_COMMANDS = [
@@ -135,6 +145,18 @@ export function OrchestratorTab({ token }: Props) {
           </div>
         ) : (
           <div className="flex flex-wrap items-center gap-3">
+            <label className="text-xs text-[var(--text-muted)]">Task type</label>
+            <select
+              value={orch.task.macro_task_type ?? "dev"}
+              onChange={(e) => void orch.setMacroType(e.target.value as MacroTaskType)}
+              className="px-2 py-1.5 bg-[var(--bg-tertiary)] rounded-lg text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {TASK_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
             <label className="text-xs text-[var(--text-muted)]">Lifecycle stage</label>
             <select
               value={orch.task.lifecycle_stage}
