@@ -429,7 +429,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase TMAC-03: notify-fanout
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: `hub/src/orchestrator/notify.ts` best-effort fan-out (telegram bridge / in-app message + sidebar badge / email via `hub/src/lib/email.ts` emails4agents / push no-op). NEVER throws (log-only on failure, error-capture/notify.ts style). Honors the SPEC §3 stage matrix: which channels fire for ship vs blocking-gate per lifecycle_stage.
 - Depends on: []
