@@ -462,3 +462,10 @@ and a best-effort fan-out notify helper.
 - Depends on: [Phase TMAC-05]
 - Requirements: [R-TMAC-06]
 - Phase dir: `.planning/phases/TMAC-06-retire-micro-row-and-docs/`
+
+<!-- Milestone TMAC CLOSED 2026-06-08: all 6 phases (TMAC-01..06) built + verified.
+     check-baseline pass=1529 fail=0; web build clean; no-indigo + macro-path guard green.
+     Shipped on branch feat/orchestrator-task-macros — PR to main pending human review
+     (production gate: NOT merged/deployed by the build driver). REMO_ORCHESTRATOR_ENABLED
+     stays operator-controlled; macro path is the default cycle-runner behavior, legacy wave
+     path preserved behind REMO_ORCHESTRATOR_LEGACY_WAVES=1. -->
