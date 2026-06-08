@@ -411,7 +411,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase TMAC-01: sentinels
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: Pure parser `hub/src/orchestrator/sentinels.ts` for `<<STATE …>>`, `<<NOTIFY level=… …>>`, `<<GATE …>>` blocks in a session reply. No DB/network/clock. Malformed/missing → safe empty result (never throws), mirroring the existing `parseControllerDecision` fallback style. Typed result shape (lifecycle/milestone/phase/last_action/next_action/decisions/deployed_live for STATE; level/channel/detail for NOTIFY; reason/detail for GATE).
 - Depends on: []
