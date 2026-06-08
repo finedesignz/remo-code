@@ -51,6 +51,9 @@ const TaskTypeEnum = z.enum([
   'security_scan', 'security_triage', 'security_fix_or_issue',
   'log_pull', 'log_classify', 'log_triage',
   'qc_review', 'qc_fix', 'qc_verify',
+  // Phase 21 (auto-dev-orchestrator): the session-level orchestrator task.
+  // Allowed by the DB CHECK constraint in schema.sql; must be accepted here too.
+  'orchestrator',
   // Internal (synthesized by Coolify webhook)
   'triage',
 ])
