@@ -32,7 +32,23 @@ import { runWavePlan, STUB_SEAMS, makeLiveSeams, type WaveRunContext, type WaveR
 import { runVerifyTail } from './verify-tail.ts';
 import { MERGE_COMMAND, isMergeCommand, runMergeToMain, type MergeOutcome } from './merge-command.ts';
 import { getSessionById } from '../db/dal.ts';
-import { getOrchestratorTaskForSession, type LifecycleStage } from '../db/orchestrator-rows-dal.ts';
+import {
+  getOrchestratorTaskForSession,
+  type LifecycleStage,
+  type MacroTaskType,
+} from '../db/orchestrator-rows-dal.ts';
+import { runMacroCycle } from './macro-cycle.ts';
+
+// Milestone TMAC: route an orchestrator cycle through the resume-heartbeat MACRO
+// path (task_type → one autonomous macro prompt) instead of the legacy per-micro-
+// command-row wave engine. Default ON (every task carries a macro_task_type,
+// defaulting to 'dev'). The env escape hatch re-enables the legacy wave path for
+// a controlled migration rollback only.
+export function useMacroPath(): boolean {
+  const raw = (process.env.REMO_ORCHESTRATOR_LEGACY_WAVES ?? '0').trim().toLowerCase();
+  const legacy = raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+  return !legacy;
+}
 
 // ── Live-path gate (carried Phase-22 gate; decision D10) ─────────────────────
 /**
@@ -458,6 +474,11 @@ export interface ResolvedCycleContext {
   repoKey: string | null;
   tz: string;
   controllerContext: ControllerContext;
+  // Milestone TMAC: the macro task_type + repo path/ident drive the resume-
+  // heartbeat macro path (REPLACES the wave path for these tasks).
+  macroTaskType: MacroTaskType;
+  repoPath: string;
+  repoIdent: string;
 }
 
 /**
@@ -492,8 +513,12 @@ export async function resolveCycleContext(
   if (!task) return null;
 
   const repoKey: string | null = (session as any).repo_key ?? null;
+  const projectDir: string | null = (session as any).project_dir ?? null;
   const tz: string = (task as any).timezone ?? 'UTC';
   const stage: LifecycleStage = task.lifecycle_stage ?? 'development';
+  const macroTaskType: MacroTaskType = task.macro_task_type ?? 'dev';
+  const repoPath = projectDir ?? repoKey ?? 'this repo';
+  const repoIdent = repoKey ?? projectDir ?? 'this repo';
 
   const controllerContext = await deps.buildControllerContext({
     userId,
@@ -504,7 +529,17 @@ export async function resolveCycleContext(
     tz,
   });
 
-  return { sessionId, userId, taskId: task.id, repoKey, tz, controllerContext };
+  return {
+    sessionId,
+    userId,
+    taskId: task.id,
+    repoKey,
+    tz,
+    controllerContext,
+    macroTaskType,
+    repoPath,
+    repoIdent,
+  };
 }
 
 // ── Cycle-runner factory + flag-gated registration (D10) ─────────────────────
@@ -545,6 +580,31 @@ export function makeCycleRunner(
 
     const { sessionId, userId, repoKey, tz, controllerContext } = resolved;
     const dueRows = controllerContext.dueRows;
+
+    // ── Milestone TMAC: resume-heartbeat MACRO path (REPLACES the wave path) ──
+    // Resolve macro_task_type → one autonomous macro prompt, reconcile the prior
+    // turn's sentinels, halt on an open mandatory gate, else (re)inject to resume.
+    // The macro prompt itself owns release + deploy-verify (SPEC §4 STEP 4), so we
+    // do NOT run the legacy merge/verify-tail seams on this path.
+    if (useMacroPath()) {
+      try {
+        await runMacroCycle({
+          userId,
+          sessionId,
+          taskId: resolved.taskId,
+          macroTaskType: resolved.macroTaskType,
+          stage: controllerContext.stage,
+          repoPath: resolved.repoPath,
+          repoIdent: resolved.repoIdent,
+          repoKey,
+        });
+      } catch (err: any) {
+        console.warn(`[orchestrator] macro cycle threw (ignored): ${err?.message ?? err}`);
+      }
+      return;
+    }
+
+    // ── Legacy wave path (rollback only, REMO_ORCHESTRATOR_LEGACY_WAVES=1) ────
     // The controller prompt is the tick's decision context; it is stamped as the
     // run-log decision_rationale (truncated). The DUE ROWS are the command set.
     const prompt = renderControllerPrompt(controllerContext);

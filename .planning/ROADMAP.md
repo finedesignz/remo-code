@@ -438,7 +438,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase TMAC-04: controller-resume-heartbeat
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: Wire the resume-heartbeat path into `hub/src/orchestrator/controller.ts`. Each tick: resolve `task_type` → macro (task-macros.ts); skip if per-session cycle lock held; inject the macro via existing cost-capped `injectOrchestratorPrompt` when idle + milestone incomplete; on the agent reply parse sentinels (sentinels.ts) → reconcile into `routine_run_log` (STATE→decision_rationale/outcome) + trigger notify (notify.ts) / halt on GATE per stage. New macro cycle-runner path is selected by `task_type` so the legacy micro-row wave path is bypassed for these types. Gated/dormant by default (REMO_ORCHESTRATOR_ENABLED).
 - Depends on: [Phase TMAC-01, Phase TMAC-02, Phase TMAC-03]
