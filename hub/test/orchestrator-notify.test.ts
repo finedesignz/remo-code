@@ -6,6 +6,7 @@ import { describe, test, expect } from 'bun:test'
 import {
   shouldNotify,
   fanOutNotify,
+  applyChannelPrefs,
   type NotifyDeps,
 } from '../src/orchestrator/notify.ts'
 
@@ -56,6 +57,48 @@ function spyDeps(over: Partial<NotifyDeps> = {}): { deps: NotifyDeps; calls: any
   }
   return { deps, calls }
 }
+
+describe('applyChannelPrefs — §7.1 per-channel opt-in (PURE)', () => {
+  const all: any[] = ['telegram', 'inapp', 'email', 'push']
+  test('null/undefined prefs ⇒ all channels (default all-on, prior behavior)', () => {
+    expect(applyChannelPrefs(all, null)).toEqual(all)
+    expect(applyChannelPrefs(all, undefined)).toEqual(all)
+  })
+  test('missing key reads as opted-IN', () => {
+    expect(applyChannelPrefs(all, { telegram: true })).toEqual(all)
+    expect(applyChannelPrefs(all, {})).toEqual(all)
+  })
+  test('explicit false mutes only that channel', () => {
+    expect(applyChannelPrefs(all, { email: false })).toEqual(['telegram', 'inapp', 'push'])
+    expect(applyChannelPrefs(all, { telegram: false, push: false })).toEqual(['inapp', 'email'])
+  })
+})
+
+describe('fanOutNotify — honors per-channel prefs', () => {
+  test('a muted channel is skipped even when requested', async () => {
+    const { deps, calls } = spyDeps({
+      getUserById: async () => ({ email: 'u@x.com', telegram_chat_id: 123, notify_channels: { telegram: false } }),
+    })
+    const r = await fanOutNotify(
+      { userId: 'u1', sessionId: 's1', event: 'gate', level: 'blocking', detail: 'halt', channels: ['telegram', 'inapp', 'email'] },
+      deps,
+    )
+    expect(calls.tg).toBe(0)
+    expect(r.delivered).not.toContain('telegram')
+    expect(r.delivered.sort()).toEqual(['email', 'inapp'])
+  })
+  test('no prefs ⇒ unchanged fan-out (back-compat)', async () => {
+    const { deps, calls } = spyDeps({
+      getUserById: async () => ({ email: 'u@x.com', telegram_chat_id: 123 }),
+    })
+    const r = await fanOutNotify(
+      { userId: 'u1', sessionId: 's1', event: 'ship', level: 'info', detail: 'v1', channels: ['telegram', 'inapp', 'email'] },
+      deps,
+    )
+    expect(calls.tg).toBe(1)
+    expect(r.delivered.sort()).toEqual(['email', 'inapp', 'telegram'])
+  })
+})
 
 describe('fanOutNotify — channel fan-out', () => {
   test('all channels deliver when user linked', async () => {

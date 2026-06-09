@@ -143,6 +143,12 @@ export interface OrchestratorTask {
   session_id: string | null;
   name: string;
   lifecycle_stage: LifecycleStage;
+  /**
+   * Milestone TMAC §7.2: true when the user SET lifecycle_stage explicitly. When
+   * false, the stored stage is a default and the controller may override it with
+   * an auto-detected stage (stage-detect.ts); an explicit stage always wins.
+   */
+  lifecycle_stage_explicit: boolean;
   /** Milestone TMAC: dev|maintenance|security|brainstorming (macro prompt key). */
   macro_task_type: MacroTaskType;
   enabled: boolean;
@@ -163,7 +169,7 @@ export async function getOrchestratorTaskForSession(
   sessionId: string,
 ): Promise<OrchestratorTask | null> {
   const rows = await sql<OrchestratorTask[]>`
-    SELECT id, user_id, session_id, name, lifecycle_stage, macro_task_type, enabled, created_at, updated_at FROM scheduled_tasks
+    SELECT id, user_id, session_id, name, lifecycle_stage, lifecycle_stage_explicit, macro_task_type, enabled, created_at, updated_at FROM scheduled_tasks
     WHERE user_id = ${userId} AND session_id = ${sessionId}
       AND task_type = 'orchestrator'
     LIMIT 1
@@ -178,7 +184,7 @@ export async function getOrchestratorTaskById(
   taskId: string,
 ): Promise<OrchestratorTask | null> {
   const rows = await sql<OrchestratorTask[]>`
-    SELECT id, user_id, session_id, name, lifecycle_stage, macro_task_type, enabled, created_at, updated_at FROM scheduled_tasks
+    SELECT id, user_id, session_id, name, lifecycle_stage, lifecycle_stage_explicit, macro_task_type, enabled, created_at, updated_at FROM scheduled_tasks
     WHERE id = ${taskId} AND user_id = ${userId} AND task_type = 'orchestrator'
     LIMIT 1
   `;
@@ -206,7 +212,7 @@ export async function createOrchestratorTaskForSession(
       ${userId}, ${sessionId}, ${name}, '@orchestrator', '',
       'orchestrator', 'session', ${sessionId}, ${stage}, ${macroTaskType}, false
     )
-    RETURNING id, user_id, session_id, name, lifecycle_stage, macro_task_type, enabled, created_at, updated_at
+    RETURNING id, user_id, session_id, name, lifecycle_stage, lifecycle_stage_explicit, macro_task_type, enabled, created_at, updated_at
   `;
   return rows[0];
 }
@@ -217,9 +223,9 @@ export async function updateOrchestratorTaskStage(
   stage: LifecycleStage,
 ): Promise<OrchestratorTask | null> {
   const rows = await sql<OrchestratorTask[]>`
-    UPDATE scheduled_tasks SET lifecycle_stage = ${stage}, updated_at = now()
+    UPDATE scheduled_tasks SET lifecycle_stage = ${stage}, lifecycle_stage_explicit = true, updated_at = now()
     WHERE id = ${taskId} AND user_id = ${userId} AND task_type = 'orchestrator'
-    RETURNING id, user_id, session_id, name, lifecycle_stage, macro_task_type, enabled, created_at, updated_at
+    RETURNING id, user_id, session_id, name, lifecycle_stage, lifecycle_stage_explicit, macro_task_type, enabled, created_at, updated_at
   `;
   return rows[0] ?? null;
 }
@@ -233,7 +239,7 @@ export async function updateOrchestratorTaskMacroType(
   const rows = await sql<OrchestratorTask[]>`
     UPDATE scheduled_tasks SET macro_task_type = ${macroTaskType}, updated_at = now()
     WHERE id = ${taskId} AND user_id = ${userId} AND task_type = 'orchestrator'
-    RETURNING id, user_id, session_id, name, lifecycle_stage, macro_task_type, enabled, created_at, updated_at
+    RETURNING id, user_id, session_id, name, lifecycle_stage, lifecycle_stage_explicit, macro_task_type, enabled, created_at, updated_at
   `;
   return rows[0] ?? null;
 }
