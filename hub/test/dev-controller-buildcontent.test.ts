@@ -71,3 +71,27 @@ describe('buildContent — dev controller (auto-dev P2)', () => {
     expect(buildContent(task({ task_type: 'security_scan' }))).toBe('/security-review')
   })
 })
+
+describe('buildContent — template_id is server-side authoritative (F-01/F-02)', () => {
+  it('F-01/F-02: dev task with empty prompt + payload.template_id=gsd_run bakes guardrails, never CONTROLLER', () => {
+    const out = buildContent(
+      task({ task_type: 'dev', prompt: '', payload: { template_id: 'gsd_run' } }),
+    )
+    expect(out.startsWith('/gsd-run')).toBe(true)
+    expect(out).toContain('Plan first')
+    expect(out).not.toContain('<<DECISION')
+  })
+
+  it('F-01: gsd_review template bakes its read-only guardrail', () => {
+    const out = buildContent(
+      task({ task_type: 'dev', prompt: '', payload: { template_id: 'gsd_review' } }),
+    )
+    expect(out.startsWith('/gsd-code-review')).toBe(true)
+    expect(out).toContain('read-only')
+  })
+
+  it('regression: dev task with custom prompt + no template_id is unchanged', () => {
+    const out = buildContent(task({ task_type: 'dev', prompt: 'do X', payload: {} }))
+    expect(out).toBe('do X')
+  })
+})
