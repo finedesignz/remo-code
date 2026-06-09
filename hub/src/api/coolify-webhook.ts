@@ -72,23 +72,47 @@ const EVENT_ALIAS: Record<string, DottedEvent> = {
   deployment_in_progress: 'deployment.in_progress',
 }
 
-const CoolifyWebhookPayload = z.object({
-  event: z
-    .string()
-    .min(1)
-    .transform((s, ctx) => {
-      const mapped = EVENT_ALIAS[s]
-      if (!mapped) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `unsupported_event: ${s}` })
-        return z.NEVER
-      }
-      return mapped
-    }),
-  deployment_uuid: z.string().min(1),
-  application_uuid: z.string().min(1),
-  git_repository: z.string().optional(),
-  commit_sha: z.string().optional(),
-})
+/**
+ * Coolify emits NON-deployment events too — notably `task_failed` / `task_success`
+ * for its per-application scheduled-task (cron command) feature. These ride the
+ * SAME webhook channel as deployments but carry a different body shape (no
+ * `deployment_uuid` / `application_uuid` in the deployment sense) and are NOT a
+ * deploy-failure signal, so they must never trigger deploy triage.
+ *
+ * We RECOGNIZE them explicitly so a well-formed event is recorded as `ignored`
+ * (with its event type) instead of dropped as `bad_payload` just because we
+ * don't model its type. Both underscore and dotted forms are accepted.
+ */
+const RECOGNIZED_NON_DEPLOY_EVENTS = new Set<string>([
+  'task_failed',
+  'task.failed',
+  'task_success',
+  'task.success',
+  'task_succeeded',
+  'task.succeeded',
+])
+
+const CoolifyWebhookPayload = z
+  .object({
+    event: z
+      .string()
+      .min(1)
+      .transform((s, ctx) => {
+        const mapped = EVENT_ALIAS[s]
+        if (!mapped) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `unsupported_event: ${s}` })
+          return z.NEVER
+        }
+        return mapped
+      }),
+    deployment_uuid: z.string().min(1),
+    application_uuid: z.string().min(1),
+    git_repository: z.string().optional(),
+    commit_sha: z.string().optional(),
+  })
+  // Tolerate unknown/extra fields Coolify may add — a deploy event with a
+  // slightly richer shape must not hard-fail on strictness.
+  .passthrough()
 
 export type CoolifyWebhookPayload = z.infer<typeof CoolifyWebhookPayload>
 
@@ -218,6 +242,18 @@ async function handleAuthenticated(opts: {
   if (typeof parsedBody === 'object' && parsedBody !== null && (parsedBody as any).event === 'test') {
     await logAttempt(userId, sourceIp, 'test', 'success', 'test_ok', preview)
     return { status: 200 as const, body: { ok: true, message: 'test received' } }
+  }
+
+  // (2b) Recognized non-deployment event (e.g. `task_failed` — a Coolify
+  // scheduled-command failure, NOT a deploy failure). Accept + audit as
+  // `ignored` with its event type; insert no run and dispatch no triage. This
+  // keeps a well-formed Coolify event from landing as `bad_payload` just
+  // because we don't model its type.
+  const rawEvent =
+    typeof (parsedBody as any)?.event === 'string' ? (parsedBody as any).event : null
+  if (rawEvent && RECOGNIZED_NON_DEPLOY_EVENTS.has(rawEvent)) {
+    await logAttempt(userId, sourceIp, rawEvent, 'ignored', 'non_deploy_event', preview)
+    return { status: 200 as const, body: { ok: true, ignored: true, event: rawEvent } }
   }
 
   const result = CoolifyWebhookPayload.safeParse(parsedBody)

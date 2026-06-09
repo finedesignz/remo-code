@@ -818,7 +818,7 @@ CREATE TABLE IF NOT EXISTS coolify_webhook_attempts (
   received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   source_ip TEXT,
   event_type TEXT,
-  status TEXT NOT NULL,        -- 'success' | 'auth_failed' | 'ip_rejected' | 'bad_payload' | 'rate_limited' | 'legacy_hmac'
+  status TEXT NOT NULL,        -- 'success' | 'auth_failed' | 'ip_rejected' | 'bad_payload' | 'rate_limited' | 'legacy_hmac' | 'ignored'
   reason TEXT,
   raw_body_preview TEXT        -- first 500 chars; never the token/secret
 );
