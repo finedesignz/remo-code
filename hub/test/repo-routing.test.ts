@@ -50,6 +50,12 @@ mock.module('../src/ws/registry.ts', () => ({
   getChannel: (sid: string) => (onlineSessions.has(sid) ? ({} as any) : undefined),
 }))
 
+// feat/coolify-uuid-repo-map: uuid→repo_key resolver stub. Keyed by appUuid.
+const repoKeyForUuid: Record<string, string | null> = {}
+mock.module('../src/sessions/coolify-app-repo.ts', () => ({
+  resolveRepoKeyFromAppUuid: async (uuid: string) => repoKeyForUuid[uuid] ?? null,
+}))
+
 const { resolveRepoKeyedAgentSession } = await import(
   '../src/sessions/repo-routing.ts?repo-routing'
 )
@@ -88,6 +94,34 @@ describe('resolveRepoKeyedAgentSession (auto-dev P5)', () => {
 
   it('unparseable git_repository → null (no DB call needed)', async () => {
     const r = await resolveRepoKeyedAgentSession('u1', 'not-a-repo')
+    expect(r).toBeNull()
+  })
+
+  it('no git_repository but application_uuid resolves repo_key → matches bound session', async () => {
+    for (const k of Object.keys(sessionsForKey)) delete sessionsForKey[k]
+    for (const k of Object.keys(repoKeyForUuid)) delete repoKeyForUuid[k]
+    onlineSessions.clear()
+    repoKeyForUuid['app-xyz'] = 'github://o/r'
+    sessionsForKey['github://o/r'] = ['sess-U']
+    onlineSessions.add('sess-U')
+    const r = await resolveRepoKeyedAgentSession('u1', null, 'app-xyz')
+    expect(r).toEqual({ kind: 'repo_keyed_agent', agent_session_id: 'sess-U', repo_key: 'github://o/r' })
+  })
+
+  it('git_repository present takes precedence over application_uuid resolver', async () => {
+    for (const k of Object.keys(sessionsForKey)) delete sessionsForKey[k]
+    for (const k of Object.keys(repoKeyForUuid)) delete repoKeyForUuid[k]
+    onlineSessions.clear()
+    repoKeyForUuid['app-xyz'] = 'github://wrong/key' // must NOT be used
+    sessionsForKey['github://finedesignz/remo-code'] = ['sess-G']
+    onlineSessions.add('sess-G')
+    const r = await resolveRepoKeyedAgentSession('u1', 'finedesignz/remo-code', 'app-xyz')
+    expect(r?.repo_key).toBe('github://finedesignz/remo-code')
+  })
+
+  it('no git_repository + uuid resolves null → null (caller falls back)', async () => {
+    for (const k of Object.keys(repoKeyForUuid)) delete repoKeyForUuid[k]
+    const r = await resolveRepoKeyedAgentSession('u1', null, 'unknown-app')
     expect(r).toBeNull()
   })
 

@@ -704,6 +704,23 @@ CREATE TABLE IF NOT EXISTS coolify_deploy_idempotency (
 );
 CREATE INDEX IF NOT EXISTS idx_coolify_deploy_idem_created ON coolify_deploy_idempotency(created_at);
 
+-- ── feat/coolify-uuid-repo-map: application_uuid → repo_key cache ─────────────
+-- Coolify's `deployment.failed` webhook carries only `application_uuid` (no
+-- `git_repository`), so the repo-keyed deploy-failure router can't derive a
+-- `repo_key` from the payload. This table caches the uuid→repo_key mapping
+-- resolved lazily from the Coolify API (GET /api/v1/applications/{uuid}) so the
+-- triage fix can land in the session bound to the failing repo. user-scoped.
+-- Lazy-populated at runtime (NO inline backfill — idempotent DDL only); a stale
+-- row (>24h) is re-resolved by the resolver. `git_full_url` is kept for audit.
+CREATE TABLE IF NOT EXISTS coolify_app_repo (
+  application_uuid TEXT PRIMARY KEY,
+  user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  repo_key         TEXT,
+  git_full_url     TEXT,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_coolify_app_repo_user ON coolify_app_repo(user_id);
+
 -- ── Phase 04 plan 002: supervisor budget + preferred-supervisor routing ──────
 -- Columns the hub remembers for each supervisor's reported resource budget.
 -- A supervisor is SUPPOSED to report its cgroup-derived `concurrency_budget`

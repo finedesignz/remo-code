@@ -27,6 +27,9 @@ const mockState: {
   runs: any[]
   triageDispatches: any[]
   legacyHitCount: number
+  repoKeyed: any
+  hasLiveAgent: boolean
+  finalizeCalls: any[]
 } = {
   secret: TEST_SECRET,
   allowedIps: [],
@@ -36,6 +39,9 @@ const mockState: {
   runs: [],
   triageDispatches: [],
   legacyHitCount: 0,
+  repoKeyed: null,
+  hasLiveAgent: true,
+  finalizeCalls: [],
 }
 
 // Spread the real dal so unmocked exports stay defined — Bun's mock.module is
@@ -82,12 +88,33 @@ mock.module('../src/scheduler/dispatcher.ts', () => ({
     mockState.triageDispatches.push({ taskId, userId, opts })
     return { skipped: false }
   },
+  // feat/coolify-uuid-repo-map: orphan-run finalize records here so we can
+  // assert the un-routable deploy-failure path closes the metadata run.
+  finalizeRun: async (runId: string, status: string, reason?: string | null) => {
+    mockState.finalizeCalls.push({ runId, status, reason })
+  },
 }))
 
 // fix/coolify-triage-guard: mock active-session suppression lookup.
 mock.module('../src/sessions/repo-routing.ts', () => ({
   hasActiveSessionForRepo: async () => mockState.hasActiveSession,
-  resolveRepoKeyedAgentSession: async () => null,
+  // Repo-keyed routing miss by default (Coolify payload has no git_repository);
+  // tests flip mockState.repoKeyed to simulate a bound-session match.
+  resolveRepoKeyedAgentSession: async () => mockState.repoKeyed,
+}))
+
+// feat/coolify-uuid-repo-map: online-target probes used by the orphan-run guard.
+// Spread the real modules so unrelated exports (getChannel, isSupervisorOnline)
+// stay defined under Bun's process-global mock.module (mock-pollution hygiene).
+const realRegCW = await import(`../src/ws/registry.ts?real=${Date.now()}`)
+mock.module('../src/ws/registry.ts', () => ({
+  ...realRegCW,
+  listOnlineAgentSessionsForUser: () => (mockState.hasLiveAgent ? ['sess-live'] : []),
+}))
+const realSupRegCW = await import(`../src/ws/supervisor-registry.ts?real=${Date.now()}`)
+mock.module('../src/ws/supervisor-registry.ts', () => ({
+  ...realSupRegCW,
+  listOnlineSupervisorIdsForUser: () => [],
 }))
 
 let app: Hono
@@ -108,6 +135,9 @@ beforeEach(() => {
   mockState.runs.length = 0
   mockState.triageDispatches.length = 0
   mockState.legacyHitCount = 0
+  mockState.repoKeyed = null
+  mockState.hasLiveAgent = true
+  mockState.finalizeCalls.length = 0
 })
 
 function urlTokenPath(userId: string, token: string): string {
@@ -354,6 +384,44 @@ describe('coolify-webhook auto-triage guard', () => {
     expect(mockState.triageDispatches.length).toBe(0) // suppressed
     const audit = mockState.attempts.find((a) => a.status === 'success')
     expect(audit?.reason).toContain('skipped=suppressed_active_dev_session')
+  })
+
+  // feat/coolify-uuid-repo-map: un-routable deploy failure (no repo-keyed
+  // session AND no live agent/supervisor) finalizes the metadata run cleanly
+  // instead of leaving it pending (the at_capacity orphan-run leak).
+  test('un-routable deploy failure → metadata run finalized skipped/no_routable_session, NO dispatch', async () => {
+    mockState.autoTriageEnabled = true
+    mockState.hasActiveSession = false
+    mockState.repoKeyed = null // no session bound to the failing repo
+    mockState.hasLiveAgent = false // no online agent (+ supervisor mock returns [])
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody('deployment.failed'),
+    })
+    expect(res.status).toBe(202) // webhook still fast
+    expect(mockState.runs.length).toBe(1)
+    await new Promise((r) => setImmediate(r))
+    expect(mockState.triageDispatches.length).toBe(0) // doomed dispatch skipped
+    const fin = mockState.finalizeCalls.find((f) => f.status === 'skipped')
+    expect(fin?.reason).toBe('no_routable_session')
+    expect(fin?.runId).toBe(mockState.runs[0].id) // closed the metadata run
+  })
+
+  test('repo-keyed session match → dispatch proceeds (no orphan finalize)', async () => {
+    mockState.autoTriageEnabled = true
+    mockState.hasActiveSession = false
+    mockState.repoKeyed = { kind: 'repo_keyed_agent', agent_session_id: 's1', repo_key: 'github://o/r' }
+    mockState.hasLiveAgent = false
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: validBody('deployment.failed'),
+    })
+    expect(res.status).toBe(202)
+    await new Promise((r) => setImmediate(r))
+    expect(mockState.triageDispatches.length).toBe(1)
+    expect(mockState.finalizeCalls.length).toBe(0)
   })
 
   test('deployment.succeeded never triggers triage regardless of switch', async () => {

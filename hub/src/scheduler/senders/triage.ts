@@ -81,7 +81,11 @@ export async function sendTriage(
   // a live agent socket, land the fix THERE rather than in a capacity-picked
   // stranger. Only when there's no repo match do we fall back to
   // `pickSessionTarget` (capacity-based), preserving prior behavior.
-  const repoKeyed = await resolveRepoKeyedAgentSession(ctx.userId, payload.git_repository)
+  const repoKeyed = await resolveRepoKeyedAgentSession(
+    ctx.userId,
+    payload.git_repository,
+    payload.application_uuid,
+  )
   const pick: Awaited<ReturnType<typeof pickSessionTarget>> = repoKeyed
     ? { kind: 'local_agent', agent_session_id: repoKeyed.agent_session_id }
     : await pickSessionTarget(ctx.userId)
