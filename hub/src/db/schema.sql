@@ -268,6 +268,19 @@ DO $$ BEGIN
     CHECK (lifecycle_stage IN ('development','beta','production-maintenance'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- Milestone TMAC (autonomous task-type macro prompts): an orchestrator task now
+-- carries ONE macro task_type (dev|maintenance|security|brainstorming) that the
+-- controller resolves to a single autonomous macro prompt (task-macros.ts),
+-- REPLACING the per-orchestrator_rows micro-command model for that task. Default
+-- 'dev' (the fully-specified routine). Distinct from scheduled_tasks.task_type
+-- (which stays 'orchestrator' for the row). Idempotent: ADD COLUMN IF NOT EXISTS
+-- + guarded named CHECK.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS macro_task_type TEXT NOT NULL DEFAULT 'dev';
+DO $$ BEGIN
+  ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_macro_task_type_check
+    CHECK (macro_task_type IN ('dev','maintenance','security','brainstorming'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- D1/D3: per-command rows owned by an orchestrator task. Each row is one
 -- routine command with its own schedule_rule (reusing the ScheduleRule JSONB
 -- shape: cron-equivalent interval/unit/start_at + active_window + bounds).

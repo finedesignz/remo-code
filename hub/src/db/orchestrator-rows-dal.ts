@@ -143,10 +143,14 @@ export interface OrchestratorTask {
   session_id: string | null;
   name: string;
   lifecycle_stage: LifecycleStage;
+  /** Milestone TMAC: dev|maintenance|security|brainstorming (macro prompt key). */
+  macro_task_type: MacroTaskType;
   enabled: boolean;
   created_at: string;
   updated_at: string;
 }
+
+export type MacroTaskType = 'dev' | 'maintenance' | 'security' | 'brainstorming';
 
 // Static column list, inlined per query. NOT a top-level `sql` fragment — the
 // postgres tag must not be invoked at module-load time (some tests mock `sql`
@@ -159,7 +163,7 @@ export async function getOrchestratorTaskForSession(
   sessionId: string,
 ): Promise<OrchestratorTask | null> {
   const rows = await sql<OrchestratorTask[]>`
-    SELECT id, user_id, session_id, name, lifecycle_stage, enabled, created_at, updated_at FROM scheduled_tasks
+    SELECT id, user_id, session_id, name, lifecycle_stage, macro_task_type, enabled, created_at, updated_at FROM scheduled_tasks
     WHERE user_id = ${userId} AND session_id = ${sessionId}
       AND task_type = 'orchestrator'
     LIMIT 1
@@ -174,7 +178,7 @@ export async function getOrchestratorTaskById(
   taskId: string,
 ): Promise<OrchestratorTask | null> {
   const rows = await sql<OrchestratorTask[]>`
-    SELECT id, user_id, session_id, name, lifecycle_stage, enabled, created_at, updated_at FROM scheduled_tasks
+    SELECT id, user_id, session_id, name, lifecycle_stage, macro_task_type, enabled, created_at, updated_at FROM scheduled_tasks
     WHERE id = ${taskId} AND user_id = ${userId} AND task_type = 'orchestrator'
     LIMIT 1
   `;
@@ -189,19 +193,20 @@ export async function getOrchestratorTaskById(
 export async function createOrchestratorTaskForSession(
   userId: string,
   sessionId: string,
-  opts: { stage?: LifecycleStage; name?: string } = {},
+  opts: { stage?: LifecycleStage; name?: string; macroTaskType?: MacroTaskType } = {},
 ): Promise<OrchestratorTask> {
   const stage = opts.stage ?? 'development';
   const name = opts.name ?? 'Orchestrator';
+  const macroTaskType = opts.macroTaskType ?? 'dev';
   const rows = await sql<OrchestratorTask[]>`
     INSERT INTO scheduled_tasks (
       user_id, session_id, name, cron_expression, prompt,
-      task_type, target_kind, target_id, lifecycle_stage, enabled
+      task_type, target_kind, target_id, lifecycle_stage, macro_task_type, enabled
     ) VALUES (
       ${userId}, ${sessionId}, ${name}, '@orchestrator', '',
-      'orchestrator', 'session', ${sessionId}, ${stage}, false
+      'orchestrator', 'session', ${sessionId}, ${stage}, ${macroTaskType}, false
     )
-    RETURNING id, user_id, session_id, name, lifecycle_stage, enabled, created_at, updated_at
+    RETURNING id, user_id, session_id, name, lifecycle_stage, macro_task_type, enabled, created_at, updated_at
   `;
   return rows[0];
 }
@@ -214,7 +219,21 @@ export async function updateOrchestratorTaskStage(
   const rows = await sql<OrchestratorTask[]>`
     UPDATE scheduled_tasks SET lifecycle_stage = ${stage}, updated_at = now()
     WHERE id = ${taskId} AND user_id = ${userId} AND task_type = 'orchestrator'
-    RETURNING id, user_id, session_id, name, lifecycle_stage, enabled, created_at, updated_at
+    RETURNING id, user_id, session_id, name, lifecycle_stage, macro_task_type, enabled, created_at, updated_at
+  `;
+  return rows[0] ?? null;
+}
+
+// Milestone TMAC: set the macro task_type (dev|maintenance|security|brainstorming).
+export async function updateOrchestratorTaskMacroType(
+  userId: string,
+  taskId: string,
+  macroTaskType: MacroTaskType,
+): Promise<OrchestratorTask | null> {
+  const rows = await sql<OrchestratorTask[]>`
+    UPDATE scheduled_tasks SET macro_task_type = ${macroTaskType}, updated_at = now()
+    WHERE id = ${taskId} AND user_id = ${userId} AND task_type = 'orchestrator'
+    RETURNING id, user_id, session_id, name, lifecycle_stage, macro_task_type, enabled, created_at, updated_at
   `;
   return rows[0] ?? null;
 }

@@ -1412,6 +1412,7 @@ fetch('https://app.remo-code.com/api/orchestrator-tasks/{sessionId}',
     "session_id": "string",
     "name": "string",
     "lifecycle_stage": "development",
+    "macro_task_type": "dev",
     "enabled": true,
     "created_at": "string",
     "updated_at": "string"
@@ -1457,6 +1458,7 @@ Status Code **200**
 |»» session_id|string¦null|true|none|none|
 |»» name|string|true|none|none|
 |»» lifecycle_stage|string|true|none|none|
+|»» macro_task_type|string|true|none|none|
 |»» enabled|boolean|true|none|none|
 |»» created_at|string|true|none|none|
 |»» updated_at|string|true|none|none|
@@ -1482,6 +1484,10 @@ Status Code **200**
 |lifecycle_stage|development|
 |lifecycle_stage|beta|
 |lifecycle_stage|production-maintenance|
+|macro_task_type|dev|
+|macro_task_type|maintenance|
+|macro_task_type|security|
+|macro_task_type|brainstorming|
 |unit|minutes|
 |unit|hours|
 |unit|days|
@@ -1521,7 +1527,8 @@ curl -X POST https://app.remo-code.com/api/orchestrator-tasks/{sessionId} \
 ```javascript
 const inputBody = '{
   "lifecycle_stage": "development",
-  "name": "string"
+  "name": "string",
+  "macro_task_type": "dev"
 }';
 const headers = {
   'Content-Type':'application/json',
@@ -1550,7 +1557,8 @@ fetch('https://app.remo-code.com/api/orchestrator-tasks/{sessionId}',
 ```json
 {
   "lifecycle_stage": "development",
-  "name": "string"
+  "name": "string",
+  "macro_task_type": "dev"
 }
 ```
 
@@ -1562,6 +1570,7 @@ fetch('https://app.remo-code.com/api/orchestrator-tasks/{sessionId}',
 |body|body|object|false|none|
 |» lifecycle_stage|body|string|false|none|
 |» name|body|string|false|none|
+|» macro_task_type|body|string|false|none|
 
 #### Enumerated Values
 
@@ -1570,6 +1579,10 @@ fetch('https://app.remo-code.com/api/orchestrator-tasks/{sessionId}',
 |» lifecycle_stage|development|
 |» lifecycle_stage|beta|
 |» lifecycle_stage|production-maintenance|
+|» macro_task_type|dev|
+|» macro_task_type|maintenance|
+|» macro_task_type|security|
+|» macro_task_type|brainstorming|
 
 > Example responses
 
@@ -1583,6 +1596,7 @@ fetch('https://app.remo-code.com/api/orchestrator-tasks/{sessionId}',
     "session_id": "string",
     "name": "string",
     "lifecycle_stage": "development",
+    "macro_task_type": "dev",
     "enabled": true,
     "created_at": "string",
     "updated_at": "string"
@@ -1629,6 +1643,7 @@ Status Code **201**
 |»» session_id|string¦null|true|none|none|
 |»» name|string|true|none|none|
 |»» lifecycle_stage|string|true|none|none|
+|»» macro_task_type|string|true|none|none|
 |»» enabled|boolean|true|none|none|
 |»» created_at|string|true|none|none|
 |»» updated_at|string|true|none|none|
@@ -1654,6 +1669,10 @@ Status Code **201**
 |lifecycle_stage|development|
 |lifecycle_stage|beta|
 |lifecycle_stage|production-maintenance|
+|macro_task_type|dev|
+|macro_task_type|maintenance|
+|macro_task_type|security|
+|macro_task_type|brainstorming|
 |unit|minutes|
 |unit|hours|
 |unit|days|
@@ -1683,7 +1702,7 @@ To perform this operation, you must be authenticated by means of one of the foll
 bearerAuth
 </aside>
 
-## Update the task's lifecycle stage
+## Update the task's lifecycle stage and/or macro task type
 
 > Code samples
 
@@ -1698,7 +1717,8 @@ curl -X PATCH https://app.remo-code.com/api/orchestrator-tasks/{taskId} \
 
 ```javascript
 const inputBody = '{
-  "lifecycle_stage": "development"
+  "lifecycle_stage": "development",
+  "macro_task_type": "dev"
 }';
 const headers = {
   'Content-Type':'application/json',
@@ -1726,17 +1746,19 @@ fetch('https://app.remo-code.com/api/orchestrator-tasks/{taskId}',
 
 ```json
 {
-  "lifecycle_stage": "development"
+  "lifecycle_stage": "development",
+  "macro_task_type": "dev"
 }
 ```
 
-<h3 id="update-the-task's-lifecycle-stage-parameters">Parameters</h3>
+<h3 id="update-the-task's-lifecycle-stage-and/or-macro-task-type-parameters">Parameters</h3>
 
 |Name|In|Type|Required|Description|
 |---|---|---|---|---|
 |taskId|path|string|true|none|
 |body|body|object|false|none|
-|» lifecycle_stage|body|string|true|none|
+|» lifecycle_stage|body|string|false|none|
+|» macro_task_type|body|string|false|none|
 
 #### Enumerated Values
 
@@ -1745,6 +1767,10 @@ fetch('https://app.remo-code.com/api/orchestrator-tasks/{taskId}',
 |» lifecycle_stage|development|
 |» lifecycle_stage|beta|
 |» lifecycle_stage|production-maintenance|
+|» macro_task_type|dev|
+|» macro_task_type|maintenance|
+|» macro_task_type|security|
+|» macro_task_type|brainstorming|
 
 > Example responses
 
@@ -1758,6 +1784,7 @@ fetch('https://app.remo-code.com/api/orchestrator-tasks/{taskId}',
     "session_id": "string",
     "name": "string",
     "lifecycle_stage": "development",
+    "macro_task_type": "dev",
     "enabled": true,
     "created_at": "string",
     "updated_at": "string"
@@ -1765,7 +1792,7 @@ fetch('https://app.remo-code.com/api/orchestrator-tasks/{taskId}',
 }
 ```
 
-<h3 id="update-the-task's-lifecycle-stage-responses">Responses</h3>
+<h3 id="update-the-task's-lifecycle-stage-and/or-macro-task-type-responses">Responses</h3>
 
 |Status|Meaning|Description|Schema|
 |---|---|---|---|
@@ -1774,7 +1801,7 @@ fetch('https://app.remo-code.com/api/orchestrator-tasks/{taskId}',
 |401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
 |404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Task not found|Inline|
 
-<h3 id="update-the-task's-lifecycle-stage-responseschema">Response Schema</h3>
+<h3 id="update-the-task's-lifecycle-stage-and/or-macro-task-type-responseschema">Response Schema</h3>
 
 Status Code **200**
 
@@ -1786,6 +1813,7 @@ Status Code **200**
 |»» session_id|string¦null|true|none|none|
 |»» name|string|true|none|none|
 |»» lifecycle_stage|string|true|none|none|
+|»» macro_task_type|string|true|none|none|
 |»» enabled|boolean|true|none|none|
 |»» created_at|string|true|none|none|
 |»» updated_at|string|true|none|none|
@@ -1797,6 +1825,10 @@ Status Code **200**
 |lifecycle_stage|development|
 |lifecycle_stage|beta|
 |lifecycle_stage|production-maintenance|
+|macro_task_type|dev|
+|macro_task_type|maintenance|
+|macro_task_type|security|
+|macro_task_type|brainstorming|
 
 Status Code **400**
 

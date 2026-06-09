@@ -396,3 +396,76 @@ Source of truth for phase ordering, status, and dependencies. The GSD SDK parses
 - Depends on: [Phase 29, Phase 31]
 - Requirements: [R-ADO-31, R-ADO-32, R-ADO-33]
 - Phase dir: `.planning/phases/32-legacy-task-migration-and-docs/`
+
+---
+
+# Milestone TMAC — Autonomous Task-Type Macro Prompts
+
+<!-- added 2026-06-08. Source of truth: .planning/architecture/auto-dev-task-prompts-SPEC.md (locked). Collision-safe CODE prefix TMAC per global rule; phase dirs .planning/phases/TMAC-NN-slug/. Does NOT renumber or disturb v1.0 / auto-dev-orchestrator phases above. -->
+
+Requirements: `.planning/milestones/TMAC-REQUIREMENTS.md`.
+Goal: replace the orchestrator per-micro-command-row model with ONE autonomous macro prompt
+per `task_type` (DEV complete; maintenance/security/brainstorming stubs); add resume-heartbeat
+controller, specialist-decides gate ladder, stage-aware notify matrix, three sentinel blocks,
+and a best-effort fan-out notify helper.
+
+## Phase TMAC-01: sentinels
+
+- Status: Complete
+- Mode: standard
+- Goal: Pure parser `hub/src/orchestrator/sentinels.ts` for `<<STATE …>>`, `<<NOTIFY level=… …>>`, `<<GATE …>>` blocks in a session reply. No DB/network/clock. Malformed/missing → safe empty result (never throws), mirroring the existing `parseControllerDecision` fallback style. Typed result shape (lifecycle/milestone/phase/last_action/next_action/decisions/deployed_live for STATE; level/channel/detail for NOTIFY; reason/detail for GATE).
+- Depends on: []
+- Requirements: [R-TMAC-01]
+- Phase dir: `.planning/phases/TMAC-01-sentinels/`
+
+## Phase TMAC-02: task-macros-registry
+
+- Status: Complete
+- Mode: standard
+- Goal: `hub/src/orchestrator/task-macros.ts` — pure `task_type → macro prompt` registry taking `{repo_path, repo_ident, lifecycle_stage}`. DEV prompt = the canonical SPEC §4 text verbatim with `{repo_path}`/`{repo_ident}`/`{lifecycle_stage}` substituted and stage-conditional clauses keyed off lifecycle_stage. maintenance/security/brainstorming = documented stubs that resolve but flag not-yet-complete.
+- Depends on: []
+- Requirements: [R-TMAC-02]
+- Phase dir: `.planning/phases/TMAC-02-task-macros-registry/`
+
+## Phase TMAC-03: notify-fanout
+
+- Status: Complete
+- Mode: standard
+- Goal: `hub/src/orchestrator/notify.ts` best-effort fan-out (telegram bridge / in-app message + sidebar badge / email via `hub/src/lib/email.ts` emails4agents / push no-op). NEVER throws (log-only on failure, error-capture/notify.ts style). Honors the SPEC §3 stage matrix: which channels fire for ship vs blocking-gate per lifecycle_stage.
+- Depends on: []
+- Requirements: [R-TMAC-03]
+- Phase dir: `.planning/phases/TMAC-03-notify-fanout/`
+
+## Phase TMAC-04: controller-resume-heartbeat
+
+- Status: Complete
+- Mode: standard
+- Goal: Wire the resume-heartbeat path into `hub/src/orchestrator/controller.ts`. Each tick: resolve `task_type` → macro (task-macros.ts); skip if per-session cycle lock held; inject the macro via existing cost-capped `injectOrchestratorPrompt` when idle + milestone incomplete; on the agent reply parse sentinels (sentinels.ts) → reconcile into `routine_run_log` (STATE→decision_rationale/outcome) + trigger notify (notify.ts) / halt on GATE per stage. New macro cycle-runner path is selected by `task_type` so the legacy micro-row wave path is bypassed for these types. Gated/dormant by default (REMO_ORCHESTRATOR_ENABLED).
+- Depends on: [Phase TMAC-01, Phase TMAC-02, Phase TMAC-03]
+- Requirements: [R-TMAC-04]
+- Phase dir: `.planning/phases/TMAC-04-controller-resume-heartbeat/`
+
+## Phase TMAC-05: data-and-web-editor
+
+- Status: Complete
+- Mode: standard
+- Goal: A task is ONE row (`task_type` + schedule), not N command rows. Idempotent DDL only in `schema.sql`; any backfill of existing micro-row tasks → single task_type rows in a one-shot `hub/scripts/*.ts` (`--dry-run`). Web task editor (`web/src/pages/settings/` orchestrator surface) becomes a `task_type` picker + schedule + lifecycle-stage selector, not a command-row grid. Accent = blue only (no indigo). Sync `/openapi.json` if routes change (`bun run docs:sync`).
+- Depends on: [Phase TMAC-04]
+- Requirements: [R-TMAC-05]
+- Phase dir: `.planning/phases/TMAC-05-data-and-web-editor/`
+
+## Phase TMAC-06: retire-micro-row-and-docs
+
+- Status: Complete
+- Mode: standard
+- Goal: For the new task types, retire the `command-prompts.ts` micro-registry + `waves.ts`/`wave-runner.ts`/`due-rows.ts`/`gap-rotation.ts` usage from the live path (KEEP the code until migration verified — remove only dead wiring, leave modules importable). Add a canary/guard test so the macro path can't silently regress to the micro-row path. Docs sweep: CLAUDE.md Docs map + auto-dev doc note, `bun run docs:sync`, `bun run check-baseline` green.
+- Depends on: [Phase TMAC-05]
+- Requirements: [R-TMAC-06]
+- Phase dir: `.planning/phases/TMAC-06-retire-micro-row-and-docs/`
+
+<!-- Milestone TMAC CLOSED 2026-06-08: all 6 phases (TMAC-01..06) built + verified.
+     check-baseline pass=1529 fail=0; web build clean; no-indigo + macro-path guard green.
+     Shipped on branch feat/orchestrator-task-macros — PR to main pending human review
+     (production gate: NOT merged/deployed by the build driver). REMO_ORCHESTRATOR_ENABLED
+     stays operator-controlled; macro path is the default cycle-runner behavior, legacy wave
+     path preserved behind REMO_ORCHESTRATOR_LEGACY_WAVES=1. -->

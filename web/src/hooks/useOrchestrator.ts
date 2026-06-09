@@ -12,12 +12,16 @@ import type { ScheduleRule } from "../lib/schedule-rules";
 
 export type LifecycleStage = "development" | "beta" | "production-maintenance";
 
+// Milestone TMAC: the macro task_type — one autonomous macro prompt per type.
+export type MacroTaskType = "dev" | "maintenance" | "security" | "brainstorming";
+
 export interface OrchestratorTask {
   id: string;
   user_id: string;
   session_id: string | null;
   name: string;
   lifecycle_stage: LifecycleStage;
+  macro_task_type: MacroTaskType;
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -61,6 +65,7 @@ export interface UseOrchestrator {
   refetch: () => Promise<void>;
   create: () => Promise<void>;
   setStage: (stage: LifecycleStage) => Promise<void>;
+  setMacroType: (macroTaskType: MacroTaskType) => Promise<void>;
   applyPreset: (stage: LifecycleStage, overwrite: boolean) => Promise<void>;
   addRow: (input: AddRowInput) => Promise<void>;
   updateRow: (rowId: string, patch: RowPatch) => Promise<void>;
@@ -121,6 +126,19 @@ export function useOrchestrator(
         token,
         `/api/orchestrator-tasks/${task.id}`,
         { method: "PATCH", json: { lifecycle_stage: stage } },
+      );
+      setTask(data.task);
+    },
+    [token, task],
+  );
+
+  const setMacroType = useCallback(
+    async (macroTaskType: MacroTaskType) => {
+      if (!token || !task) return;
+      const data = await hubFetch<{ task: OrchestratorTask }>(
+        token,
+        `/api/orchestrator-tasks/${task.id}`,
+        { method: "PATCH", json: { macro_task_type: macroTaskType } },
       );
       setTask(data.task);
     },
@@ -198,6 +216,7 @@ export function useOrchestrator(
     refetch,
     create,
     setStage,
+    setMacroType,
     applyPreset,
     addRow,
     updateRow,

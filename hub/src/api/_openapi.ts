@@ -418,6 +418,8 @@ openapi.openapi(dismissLocalRoute, async (c) => {
   const reg = openapi.openAPIRegistry;
   const base = { tags: ["orchestrator-tasks"], security: [{ bearerAuth: [] }] } as const;
   const Stage = z.enum(["development", "beta", "production-maintenance"]);
+  // Milestone TMAC: the macro task_type driving the autonomous routine prompt.
+  const MacroType = z.enum(["dev", "maintenance", "security", "brainstorming"]);
   const ScheduleRule = z
     .object({
       interval: z.number().int(),
@@ -432,6 +434,7 @@ openapi.openapi(dismissLocalRoute, async (c) => {
     session_id: z.string().nullable(),
     name: z.string(),
     lifecycle_stage: Stage,
+    macro_task_type: MacroType,
     enabled: z.boolean(),
     created_at: z.string(),
     updated_at: z.string(),
@@ -472,7 +475,13 @@ openapi.openapi(dismissLocalRoute, async (c) => {
     ...base,
     request: {
       params: z.object({ sessionId: z.string() }),
-      body: json(z.object({ lifecycle_stage: Stage.optional(), name: z.string().optional() })),
+      body: json(
+        z.object({
+          lifecycle_stage: Stage.optional(),
+          name: z.string().optional(),
+          macro_task_type: MacroType.optional(),
+        }),
+      ),
     },
     responses: {
       201: { description: "Created", ...json(TaskWithRows) },
@@ -484,11 +493,17 @@ openapi.openapi(dismissLocalRoute, async (c) => {
   reg.registerPath({
     method: "patch",
     path: "/api/orchestrator-tasks/{taskId}",
-    summary: "Update the task's lifecycle stage",
+    summary: "Update the task's lifecycle stage and/or macro task type",
     ...base,
     request: {
       params: z.object({ taskId: z.string() }),
-      body: json(z.object({ lifecycle_stage: Stage })),
+      // EITHER field (or both); at least one required (route enforces via .refine).
+      body: json(
+        z.object({
+          lifecycle_stage: Stage.optional(),
+          macro_task_type: MacroType.optional(),
+        }),
+      ),
     },
     responses: {
       200: { description: "Updated", ...json(z.object({ task: OrchestratorTask })) },

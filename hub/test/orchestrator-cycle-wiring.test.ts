@@ -10,7 +10,7 @@
  *
  * Reqs: closes R-ADO-11..14 wiring; preserves D10 (flag-OFF dormant).
  */
-import { describe, test, expect, afterEach } from 'bun:test'
+import { describe, test, expect, afterEach, beforeAll, afterAll } from 'bun:test'
 import {
   resolveCycleContext,
   makeCycleRunner,
@@ -111,6 +111,19 @@ describe('resolveCycleContext', () => {
 // ── makeCycleRunner — drives waves from the REAL due-row command set ──────────
 
 describe('makeCycleRunner — due rows drive the wave command set', () => {
+  // Milestone TMAC: the resume-heartbeat macro path is now the cycle-runner
+  // default. This block exercises the LEGACY wave path (preserved behind the
+  // rollback flag), so pin REMO_ORCHESTRATOR_LEGACY_WAVES=1 for its lifetime.
+  let prevLegacy: string | undefined
+  beforeAll(() => {
+    prevLegacy = process.env.REMO_ORCHESTRATOR_LEGACY_WAVES
+    process.env.REMO_ORCHESTRATOR_LEGACY_WAVES = '1'
+  })
+  afterAll(() => {
+    if (prevLegacy === undefined) delete process.env.REMO_ORCHESTRATOR_LEGACY_WAVES
+    else process.env.REMO_ORCHESTRATOR_LEGACY_WAVES = prevLegacy
+  })
+
   test('executeCommand seam is called with the real due commands', async () => {
     const dueRows = due('gsd-plan-phase', 'gsd-execute-phase')
     const { seams, executed } = spySeams()

@@ -20,6 +20,7 @@ import {
   getOrchestratorTaskById,
   createOrchestratorTaskForSession,
   updateOrchestratorTaskStage,
+  updateOrchestratorTaskMacroType,
   listOrchestratorRows,
   insertOrchestratorRow,
   updateOrchestratorRowFields,
@@ -62,14 +63,24 @@ const ScheduleRuleSchema = z
   .strict()
   .nullable();
 
+// Milestone TMAC: the macro task_type (dev|maintenance|security|brainstorming).
+const MacroTaskTypeEnum = z.enum(['dev', 'maintenance', 'security', 'brainstorming']);
+
 const CreateTaskSchema = z.object({
   lifecycle_stage: StageEnum.optional(),
   name: z.string().min(1).max(200).optional(),
+  macro_task_type: MacroTaskTypeEnum.optional(),
 });
 
-const PatchTaskSchema = z.object({
-  lifecycle_stage: StageEnum,
-});
+// PATCH accepts EITHER lifecycle_stage OR macro_task_type (or both); at least one.
+const PatchTaskSchema = z
+  .object({
+    lifecycle_stage: StageEnum.optional(),
+    macro_task_type: MacroTaskTypeEnum.optional(),
+  })
+  .refine((b) => b.lifecycle_stage != null || b.macro_task_type != null, {
+    message: 'patch must set lifecycle_stage and/or macro_task_type',
+  });
 
 const ApplyPresetSchema = z.object({
   stage: StageEnum.optional(),
@@ -135,6 +146,7 @@ orchestratorTasks.post('/:sessionId', async (c) => {
     const task = await createOrchestratorTaskForSession(userId, sessionId, {
       stage: parsed.data.lifecycle_stage,
       name: parsed.data.name,
+      macroTaskType: parsed.data.macro_task_type,
     });
     return c.json({ task, rows: [] }, 201);
   } catch (err) {
@@ -145,15 +157,22 @@ orchestratorTasks.post('/:sessionId', async (c) => {
   }
 });
 
-// PATCH lifecycle_stage.
+// PATCH lifecycle_stage and/or macro_task_type.
 orchestratorTasks.patch('/:taskId', async (c) => {
   const userId = c.get('userId') as string;
   const taskId = c.req.param('taskId');
   const parsed = PatchTaskSchema.safeParse(await c.req.json().catch(() => ({})));
   if (!parsed.success) return c.json({ error: 'invalid_body', detail: parsed.error.issues }, 400);
 
-  const task = await updateOrchestratorTaskStage(userId, taskId, parsed.data.lifecycle_stage);
-  if (!task) return c.json({ error: 'task_not_found' }, 404);
+  let task = null as Awaited<ReturnType<typeof updateOrchestratorTaskStage>>;
+  if (parsed.data.lifecycle_stage != null) {
+    task = await updateOrchestratorTaskStage(userId, taskId, parsed.data.lifecycle_stage);
+    if (!task) return c.json({ error: 'task_not_found' }, 404);
+  }
+  if (parsed.data.macro_task_type != null) {
+    task = await updateOrchestratorTaskMacroType(userId, taskId, parsed.data.macro_task_type);
+    if (!task) return c.json({ error: 'task_not_found' }, 404);
+  }
   return c.json({ task });
 });
 
