@@ -515,3 +515,59 @@ describe('coolify-webhook legacy HMAC route', () => {
     expect(res.status).toBe(401)
   })
 })
+
+// ── Non-deployment events (task_failed etc.) ────────────────────────────────
+
+describe('coolify-webhook non-deploy events', () => {
+  // Regression: prod 2026-06-08 recorded a `task_failed` event as bad_payload
+  // (schema_validation_failed). task_failed is a Coolify scheduled-command
+  // failure, NOT a deploy failure — must be accepted + classified `ignored`,
+  // never bad_payload, and must NOT dispatch triage.
+  test('task_failed → 200 ignored, NOT bad_payload, no run, no triage', async () => {
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // Real task_failed bodies lack deployment_uuid/application_uuid.
+      body: JSON.stringify({ event: 'task_failed', message: 'cron command exited 1' }),
+    })
+    expect(res.status).toBe(200)
+    const json: any = await res.json()
+    expect(json.ok).toBe(true)
+    expect(json.ignored).toBe(true)
+
+    // Audit row is `ignored`, NOT bad_payload / schema_validation_failed.
+    const bad = mockState.attempts.find((a) => a.status === 'bad_payload')
+    expect(bad).toBeUndefined()
+    const ignored = mockState.attempts.find((a) => a.status === 'ignored')
+    expect(ignored).toBeTruthy()
+    expect(ignored.event_type).toBe('task_failed')
+    expect(ignored.reason).toBe('non_deploy_event')
+
+    // No deploy run inserted, no triage dispatched.
+    expect(mockState.runs.length).toBe(0)
+    expect(mockState.triageDispatches.length).toBe(0)
+  })
+
+  test('task_success (dotted) → 200 ignored, no triage', async () => {
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'task.success' }),
+    })
+    expect(res.status).toBe(200)
+    const ignored = mockState.attempts.find((a) => a.status === 'ignored')
+    expect(ignored?.event_type).toBe('task.success')
+    expect(mockState.triageDispatches.length).toBe(0)
+  })
+
+  test('truly unknown event still → 400 bad_payload (unchanged)', async () => {
+    const res = await app.request(urlTokenPath(TEST_USER_ID, TEST_SECRET), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'totally_made_up', deployment_uuid: 'd', application_uuid: 'a' }),
+    })
+    expect(res.status).toBe(400)
+    const bad = mockState.attempts.find((a) => a.status === 'bad_payload')
+    expect(bad?.reason).toBe('schema_validation_failed')
+  })
+})

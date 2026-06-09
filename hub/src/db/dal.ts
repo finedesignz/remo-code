@@ -1369,7 +1369,11 @@ export type CoolifyAttemptStatus =
   | 'ip_rejected'
   | 'bad_payload'
   | 'rate_limited'
-  | 'legacy_hmac';
+  | 'legacy_hmac'
+  // Well-formed Coolify event we recognize but intentionally do not act on
+  // (e.g. `task_failed` — a scheduled-command failure, NOT a deploy failure).
+  // Recorded so it never lands as `bad_payload`; no run/triage.
+  | 'ignored';
 
 export interface CoolifyAttemptInput {
   user_id: string;
