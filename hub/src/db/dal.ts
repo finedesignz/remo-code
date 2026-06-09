@@ -904,21 +904,25 @@ export async function getUserNotifyChannels(userId: string): Promise<NotifyChann
 }
 
 // Merge a partial opt-in patch over the stored map (only provided keys change).
-// Returns the merged map. Unknown keys are ignored.
+// Returns the merged map. ATOMIC: a single JSONB `||` concat merges the sanitized
+// patch in-DB (no read-modify-write race; `||` overrides only the provided keys
+// and preserves the all-on default for unset keys). Unknown keys are dropped here.
 export async function updateUserNotifyChannels(
   userId: string,
   patch: NotifyChannelPrefs,
 ): Promise<NotifyChannelPrefs> {
-  const current = await getUserNotifyChannels(userId);
-  const next: NotifyChannelPrefs = { ...current };
+  const sanitized: NotifyChannelPrefs = {};
   for (const k of NOTIFY_CHANNEL_KEYS) {
-    if (typeof patch[k] === 'boolean') next[k] = patch[k];
+    if (typeof patch[k] === 'boolean') sanitized[k] = patch[k];
   }
-  await sql`
-    UPDATE users SET notify_channels = ${sql.json(next as any)}, updated_at = now()
+  const rows = await sql<{ notify_channels: NotifyChannelPrefs | null }[]>`
+    UPDATE users
+    SET notify_channels = COALESCE(notify_channels, '{}'::jsonb) || ${sql.json(sanitized)}::jsonb,
+        updated_at = now()
     WHERE id = ${userId}
+    RETURNING notify_channels
   `;
-  return next;
+  return rows[0]?.notify_channels ?? sanitized;
 }
 
 // Phase 12 W2 — preferences / prompts / profile (extended)

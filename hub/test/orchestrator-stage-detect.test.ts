@@ -15,11 +15,12 @@ describe('deriveStageFromSignal — PURE §7.2 mapping', () => {
     expect(deriveStageFromSignal({ hasCoolifyApp: false, hasRecordedDeploy: false })).toBe('development')
     expect(DEFAULT_STAGE).toBe('development')
   })
-  test('a mapped Coolify app ⇒ production-maintenance', () => {
-    expect(deriveStageFromSignal({ hasCoolifyApp: true, hasRecordedDeploy: false })).toBe('production-maintenance')
+  test('a mapped-but-never-deployed Coolify app ⇒ development (not enough alone)', () => {
+    expect(deriveStageFromSignal({ hasCoolifyApp: true, hasRecordedDeploy: false })).toBe('development')
   })
   test('a recorded deploy ⇒ production-maintenance', () => {
     expect(deriveStageFromSignal({ hasCoolifyApp: false, hasRecordedDeploy: true })).toBe('production-maintenance')
+    expect(deriveStageFromSignal({ hasCoolifyApp: true, hasRecordedDeploy: true })).toBe('production-maintenance')
   })
   test('never returns beta (not derivable)', () => {
     for (const a of [true, false]) for (const d of [true, false]) {
@@ -46,9 +47,9 @@ describe('detectLifecycleStage — best-effort probe', () => {
     expect(await detectLifecycleStage({ userId: 'u1', coolifyAppUuid: 'app-123' }, d)).toBe('production-maintenance')
   })
 
-  test('mapped app but zero deploys ⇒ still production-maintenance (app IS the signal)', async () => {
+  test('mapped app but zero deploys ⇒ development (a bare mapped app is NOT a deploy)', async () => {
     const d = deps({ countRecordedDeploys: async () => 0 })
-    expect(await detectLifecycleStage({ userId: 'u1', coolifyAppUuid: 'app-123' }, d)).toBe('production-maintenance')
+    expect(await detectLifecycleStage({ userId: 'u1', coolifyAppUuid: 'app-123' }, d)).toBe('development')
   })
 
   test('a DB probe error degrades to development (never throws)', async () => {

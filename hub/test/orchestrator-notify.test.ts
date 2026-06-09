@@ -37,6 +37,14 @@ describe('shouldNotify — SPEC §3 stage matrix', () => {
   test('info: development restricts to in-app only', () => {
     expect(shouldNotify('info', 'development').channels).toEqual(['inapp'])
   })
+  test('channel=in-app alias resolves to inapp ONLY (no external fan-out)', () => {
+    // A `channel=in-app` (hyphenated) request must map to the in-app sink, never
+    // fall through to the all-channels default that would page externally.
+    for (const stage of ['development', 'beta', 'production-maintenance'] as const) {
+      const d = shouldNotify('info', stage, { level: 'info', channel: 'in-app' })
+      expect(d.channels).toEqual(['inapp'])
+    }
+  })
 })
 
 function spyDeps(over: Partial<NotifyDeps> = {}): { deps: NotifyDeps; calls: any } {

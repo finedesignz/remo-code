@@ -158,9 +158,16 @@ describe('task-macros — BRAINSTORMING always gates for approval', () => {
     // explicitly at every stage including development (overrides silent-dev)
     expect(flat).toContain('every stage, including development')
     expect(flat).toContain('OVERRIDES the silent-development default')
-    // emits the blocking notify + approval gate
-    expect(p).toContain('<<NOTIFY level=blocking channel=all')
+    // the approval gate is always emitted; beta/prod page is blocking+all-channel
     expect(p).toContain('<<GATE reason="approval"')
+    expect(p).toContain('<<NOTIFY level=blocking channel=all')
+  })
+  test('NOTIFY loudness is stage-conditional — dev is in-app-only, beta/prod pages', () => {
+    const flat = p.replace(/\s+/g, ' ')
+    // development → quiet in-app-only info notice (no external page)
+    expect(p).toContain('<<NOTIFY level=info channel=in-app')
+    expect(flat).toContain('development stage')
+    expect(flat).toContain('beta OR production-maintenance stage')
   })
 })
 

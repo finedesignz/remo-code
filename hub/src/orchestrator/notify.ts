@@ -54,13 +54,26 @@ export function applyChannelPrefs(
   return channels.filter((c) => prefs[c] !== false);
 }
 
+// Accept a few human-friendly aliases for the in-app channel so a prompt that
+// emits `channel=in-app` (or `in_app`/`app`) routes ONLY to the in-app sink and
+// never falls through to the all-channels default (which would page externally).
+const CHANNEL_ALIASES: Record<string, NotifyChannel> = {
+  inapp: 'inapp',
+  'in-app': 'inapp',
+  in_app: 'inapp',
+  app: 'inapp',
+  telegram: 'telegram',
+  email: 'email',
+  push: 'push',
+};
+
 function channelsFor(spec: string | null): NotifyChannel[] {
   const s = (spec ?? '').trim().toLowerCase();
   if (s === '' || s === 'all') return ALL_CHANNELS;
   const picked = s
     .split(/[,\s]+/)
-    .map((c) => c.trim())
-    .filter((c): c is NotifyChannel => (ALL_CHANNELS as string[]).includes(c));
+    .map((c) => CHANNEL_ALIASES[c.trim()])
+    .filter((c): c is NotifyChannel => c != null);
   return picked.length > 0 ? picked : ALL_CHANNELS;
 }
 

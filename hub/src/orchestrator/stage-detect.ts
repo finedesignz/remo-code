@@ -8,10 +8,13 @@
 // already-explicit stage.
 //
 // Conservative-by-design: we only return 'production-maintenance' when there is a
-// CONCRETE positive signal that the repo has a live prod deploy (a Coolify app
-// mapped to it, or a recorded successful deploy for it). With no signal we return
-// 'development' — the safe default that runs silently and fully autonomously
-// (SPEC §3). We never guess 'beta' (no derivable signal exists for it).
+// CONCRETE positive signal that the repo has a live prod deploy — a RECORDED
+// successful deploy for it. A bare mapped Coolify app (uuid present, never
+// deployed) is NOT sufficient: many dev sessions point at a deploy target that
+// hasn't shipped yet, and auto-flipping them to a notifying stage over-pages the
+// user. With no recorded deploy we return 'development' — the safe default that
+// runs silently and fully autonomously (SPEC §3). We never guess 'beta' (no
+// derivable signal exists for it).
 //
 // SCOPE: PURE decision (`deriveStageFromSignal`) + a thin best-effort DB probe
 // (`detectLifecycleStage`) behind an injectable dep. The probe NEVER throws — a
@@ -31,12 +34,12 @@ export interface DeploySignal {
 }
 
 /**
- * PURE: map a derived deploy signal → the DEFAULT lifecycle stage. A live prod
- * deploy (mapped Coolify app OR a recorded deploy) ⇒ 'production-maintenance';
- * otherwise 'development'. Never returns 'beta' (not derivable) and never throws.
+ * PURE: map a derived deploy signal → the DEFAULT lifecycle stage. Only a RECORDED
+ * prod deploy ⇒ 'production-maintenance'; a bare mapped Coolify app with no recorded
+ * deploy stays 'development'. Never returns 'beta' (not derivable) and never throws.
  */
 export function deriveStageFromSignal(signal: DeploySignal): LifecycleStage {
-  if (signal.hasCoolifyApp || signal.hasRecordedDeploy) {
+  if (signal.hasRecordedDeploy) {
     return 'production-maintenance';
   }
   return DEFAULT_STAGE;

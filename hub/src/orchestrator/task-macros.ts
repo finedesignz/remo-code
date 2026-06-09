@@ -294,11 +294,17 @@ right specialist subagent (Backend Architect = feasibility/stack, UI Designer = 
 briefing it with ~/.claude/architecture-preferences.md + ~/.claude/design-preferences.md;
 take its input, record it, and CONTINUE the ideation. BUT promoting ANY proposed idea
 into a dev milestone is a MANDATORY HUMAN-APPROVAL gate at EVERY stage — INCLUDING
-development. This OVERRIDES the silent-development default: even though a dev-stage repo
-normally runs without paging, brainstorming ALWAYS emits <<NOTIFY level=blocking
-channel=all>> + <<GATE reason="approval" detail="...">> and STOPS to wait for the human
-to sign off before anything is built. Never start unapproved scope. Never DROP/reset a
-database without explicit human approval at ANY stage.
+development. This OVERRIDES the silent-development default: brainstorming ALWAYS emits
+<<GATE reason="approval" detail="...">> and STOPS to wait for human sign-off before
+anything is built, never starting unapproved scope. The GATE never changes; only the
+NOTIFY LOUDNESS is stage-conditional (mirrors the DEV stage clauses) — use the
+{lifecycle_stage} value above:
+  • development stage → emit a QUIET in-app-only notice
+    <<NOTIFY level=info channel=in-app detail="proposed feature awaiting approval: ...">>
+    (NO telegram/email/push page) — the GATE still blocks and waits.
+  • beta OR production-maintenance stage → emit a real page
+    <<NOTIFY level=blocking channel=all detail="...">>.
+Never DROP/reset a database without explicit human approval at ANY stage.
 
 STEP 4 — (no autonomous release) — you do not ship. When a human approves, hand the
 written spec to DEV; record the handoff. There is no version bump on this path.
@@ -314,8 +320,10 @@ decisions: <specialist input this run, or none>
 deployed_live: n/a
 STATE>>
 When a proposed spec is ready for sign-off (the normal end of a brainstorming run), ALSO
-emit <<GATE reason="approval" detail="...">> and <<NOTIFY level=blocking channel=all
-detail="proposed feature awaiting approval: ...">> and STOP — even in development.
+emit <<GATE reason="approval" detail="...">> and STOP — even in development — paired with
+a STAGE-CONDITIONAL NOTIFY (per STEP 3): development → <<NOTIFY level=info channel=in-app
+detail="proposed feature awaiting approval: ...">> (quiet, in-app only, no external page);
+beta / production-maintenance → <<NOTIFY level=blocking channel=all detail="...">>.
 
 Hard rules: REQUIRE human approval before ANY idea becomes a dev milestone (at every
 stage, including development); never build unapproved scope; daily cost cap is
