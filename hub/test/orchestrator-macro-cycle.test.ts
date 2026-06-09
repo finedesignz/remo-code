@@ -190,6 +190,49 @@ describe('runMacroCycle — skip when a run is live (M2)', () => {
   })
 })
 
+describe('runMacroCycle — F-12 stub macro guard', () => {
+  // The complete=false stub path is exercised in its own file
+  // (orchestrator-macro-stub.test.ts) because forcing a stub requires a
+  // process-global mock.module of task-macros (feedback_bun_mock_pollution) that
+  // would leak into the sibling tests here. This sibling just asserts the
+  // happy path: a real complete macro injects and never trips the guard.
+  test('complete macro (dev) does NOT set stubNotReady; injects normally', async () => {
+    const { deps } = spyDeps()
+    const r = await runMacroCycle(baseInput({ macroTaskType: 'dev' }), deps)
+    expect(r.stubNotReady).toBe(false)
+    expect(r.injected).toBe(true)
+  })
+})
+
+describe('runMacroCycle — F-10 failure notify', () => {
+  test('cost-cap refusal fires a failure notify (even in dev)', async () => {
+    const { deps, log } = spyDeps({
+      inject: (async () => ({ kind: 'refused_cost_cap' as const, reason: 'over_daily_cost_cap' })) as any,
+    })
+    const r = await runMacroCycle(baseInput({ stage: 'development' }), deps)
+    expect(r.injected).toBe(false)
+    expect(log.notifies.some((n) => n.event === 'failure')).toBe(true)
+  })
+
+  test('inject throw fires a failure notify', async () => {
+    const { deps, log } = spyDeps({
+      inject: (async () => {
+        throw new Error('boom')
+      }) as any,
+    })
+    await runMacroCycle(baseInput({ stage: 'development' }), deps)
+    expect(log.notifies.some((n) => n.event === 'failure' && /boom/.test(n.detail))).toBe(true)
+  })
+
+  test('no_session does NOT fire a failure notify (benign offline)', async () => {
+    const { deps, log } = spyDeps({
+      inject: (async () => ({ kind: 'no_session' as const })) as any,
+    })
+    await runMacroCycle(baseInput({ stage: 'development' }), deps)
+    expect(log.notifies.some((n) => n.event === 'failure')).toBe(false)
+  })
+})
+
 describe('runMacroCycle — robustness', () => {
   test('a throwing inject is swallowed (cycle never wedges)', async () => {
     const { deps } = spyDeps({

@@ -22,7 +22,7 @@
 import type { LifecycleStage } from '../db/orchestrator-rows-dal.ts';
 import type { NotifyLevel } from './sentinels.ts';
 
-export type NotifyEvent = 'ship' | 'gate' | 'info';
+export type NotifyEvent = 'ship' | 'gate' | 'info' | 'failure';
 
 export interface NotifyDecision {
   /** Fire the fan-out at all? */
@@ -107,6 +107,12 @@ export function shouldNotify(
     }
     // production-maintenance
     return { fire: true, channels: ALL_CHANNELS, halt: true };
+  }
+  if (event === 'failure') {
+    // A failed/refused/errored UNATTENDED run must surface even in development —
+    // stage silence is for routine PROGRESS, never for failures. All channels;
+    // never a forced halt (the cycle already stopped on its own).
+    return { fire: true, channels: channelsFor(opts.channel ?? 'all'), halt: false };
   }
   // info — honor the agent's request; dev still suppresses page-y channels.
   const channels = channelsFor(opts.channel ?? 'all');

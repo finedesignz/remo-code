@@ -45,6 +45,19 @@ describe('shouldNotify — SPEC §3 stage matrix', () => {
       expect(d.channels).toEqual(['inapp'])
     }
   })
+
+  // F-10: a failed/refused unattended run must surface even in dev — failures
+  // bypass stage silence (which is only for routine progress).
+  test('failure: fires in development (failures bypass stage silence)', () => {
+    const d = shouldNotify('failure', 'development')
+    expect(d.fire).toBe(true)
+    expect(d.halt).toBe(false)
+    expect(d.channels.length).toBeGreaterThan(0)
+  })
+  test('failure: fires in beta + production-maintenance', () => {
+    expect(shouldNotify('failure', 'beta').fire).toBe(true)
+    expect(shouldNotify('failure', 'production-maintenance').fire).toBe(true)
+  })
 })
 
 function spyDeps(over: Partial<NotifyDeps> = {}): { deps: NotifyDeps; calls: any } {
