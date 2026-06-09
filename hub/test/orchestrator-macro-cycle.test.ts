@@ -191,17 +191,11 @@ describe('runMacroCycle — skip when a run is live (M2)', () => {
 })
 
 describe('runMacroCycle — F-12 stub macro guard', () => {
-  // `maintenance` is a registered STUB (complete:false) on this branch, so we can
-  // exercise the guard with a real macro type — no renderMacro mock needed.
-  test('stub macro (complete=false) → no inject, stub_not_ready run-log', async () => {
-    const { deps, log } = spyDeps()
-    const r = await runMacroCycle(baseInput({ macroTaskType: 'maintenance' as any }), deps)
-    expect(r.stubNotReady).toBe(true)
-    expect(r.injected).toBe(false)
-    expect(log.injects).toHaveLength(0)
-    expect(log.runLogs.some((e) => e.outcome === 'stub_not_ready')).toBe(true)
-  })
-
+  // The complete=false stub path is exercised in its own file
+  // (orchestrator-macro-stub.test.ts) because forcing a stub requires a
+  // process-global mock.module of task-macros (feedback_bun_mock_pollution) that
+  // would leak into the sibling tests here. This sibling just asserts the
+  // happy path: a real complete macro injects and never trips the guard.
   test('complete macro (dev) does NOT set stubNotReady; injects normally', async () => {
     const { deps } = spyDeps()
     const r = await runMacroCycle(baseInput({ macroTaskType: 'dev' }), deps)
