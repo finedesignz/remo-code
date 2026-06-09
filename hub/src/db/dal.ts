@@ -884,8 +884,45 @@ export async function revokeAllUserCredentials(userId: string): Promise<{ revoke
 // ── Users / Profiles ──────────────────────────────────────────────────────────
 
 export async function getUserById(id: string) {
-  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, programmatic_halt_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, auto_nudge_idle_sessions, notifications, created_at, updated_at FROM users WHERE id = ${id}`;
+  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, programmatic_halt_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, auto_nudge_idle_sessions, notifications, notify_channels, created_at, updated_at FROM users WHERE id = ${id}`;
   return rows[0] ?? null;
+}
+
+// ── Milestone TMAC §7.1: per-channel orchestrator-notify opt-in ──────────────
+// users.notify_channels is a JSONB map {telegram,inapp,email,push}->bool.
+// Default all-on (set by the schema column default); a MISSING key reads as
+// opted-IN, so the notifier only mutes a channel on an explicit `false`.
+export type NotifyChannelKey = 'telegram' | 'inapp' | 'email' | 'push';
+export type NotifyChannelPrefs = Partial<Record<NotifyChannelKey, boolean>>;
+const NOTIFY_CHANNEL_KEYS: NotifyChannelKey[] = ['telegram', 'inapp', 'email', 'push'];
+
+export async function getUserNotifyChannels(userId: string): Promise<NotifyChannelPrefs> {
+  const rows = await sql<{ notify_channels: NotifyChannelPrefs | null }[]>`
+    SELECT notify_channels FROM users WHERE id = ${userId} LIMIT 1
+  `;
+  return rows[0]?.notify_channels ?? {};
+}
+
+// Merge a partial opt-in patch over the stored map (only provided keys change).
+// Returns the merged map. ATOMIC: a single JSONB `||` concat merges the sanitized
+// patch in-DB (no read-modify-write race; `||` overrides only the provided keys
+// and preserves the all-on default for unset keys). Unknown keys are dropped here.
+export async function updateUserNotifyChannels(
+  userId: string,
+  patch: NotifyChannelPrefs,
+): Promise<NotifyChannelPrefs> {
+  const sanitized: NotifyChannelPrefs = {};
+  for (const k of NOTIFY_CHANNEL_KEYS) {
+    if (typeof patch[k] === 'boolean') sanitized[k] = patch[k];
+  }
+  const rows = await sql<{ notify_channels: NotifyChannelPrefs | null }[]>`
+    UPDATE users
+    SET notify_channels = COALESCE(notify_channels, '{}'::jsonb) || ${sql.json(sanitized)}::jsonb,
+        updated_at = now()
+    WHERE id = ${userId}
+    RETURNING notify_channels
+  `;
+  return rows[0]?.notify_channels ?? sanitized;
 }
 
 // Phase 12 W2 — preferences / prompts / profile (extended)
