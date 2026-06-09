@@ -118,8 +118,10 @@ export async function runMacroCycle(
     console.warn('[orchestrator.macro] reconcile threw (ignored):', err?.message ?? err);
   }
 
-  // 2. HALT check — an open GATE at a halting stage stops the resume.
-  if (sentinels?.gate && stageHalts(stage)) {
+  // 2. HALT check — an open GATE stops the resume at a halting stage. Brainstorming
+  //    is HUMAN-IN-THE-LOOP: its approval gate ALWAYS halts (even in development),
+  //    so it never auto-resumes past an awaiting-approval proposal (SPEC §6).
+  if (sentinels?.gate && (stageHalts(stage) || macroTaskType === 'brainstorming')) {
     result.halted = true;
     console.log(
       `[orchestrator.macro] session=${sessionId} HALTED on gate: ${sentinels.gate.reason ?? 'unspecified'} ` +

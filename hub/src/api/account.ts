@@ -12,6 +12,8 @@ import {
   listCoolifyWebhookAttempts,
   getUserClaudeThresholds,
   setUserClaudeThresholds,
+  getUserNotifyChannels,
+  updateUserNotifyChannels,
 } from '../db/dal.ts';
 import {
   getUserRevanoteWebhookSecret,
@@ -304,6 +306,53 @@ accountRouter.patch('/coolify-auto-triage', async (c) => {
     return c.json({ auto_triage_enabled: saved });
   } catch (err: any) {
     console.error('[account] coolify-auto-triage PATCH failed:', err?.code, err?.message);
+    return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
+  }
+});
+
+// ── Milestone TMAC §7.1: per-channel orchestrator-notify opt-in ──────────────
+// GET  /api/account/notify-channels → { notify_channels: {telegram,inapp,email,push} }
+// PATCH same path, body = partial {telegram?,inapp?,email?,push?} booleans.
+// Default all-on (schema default); a missing key reads as opted-IN — only an
+// explicit `false` mutes a channel in hub/src/orchestrator/notify.ts.
+const NotifyChannelsPatch = z
+  .object({
+    telegram: z.boolean().optional(),
+    inapp: z.boolean().optional(),
+    email: z.boolean().optional(),
+    push: z.boolean().optional(),
+  })
+  .strict()
+  .refine((b) => Object.keys(b).length > 0, { message: 'at least one channel must be set' });
+
+accountRouter.get('/notify-channels', async (c) => {
+  const userId = c.get('userId') as string;
+  try {
+    const prefs = await getUserNotifyChannels(userId);
+    return c.json({ notify_channels: prefs });
+  } catch (err: any) {
+    console.error('[account] notify-channels GET failed:', err?.code, err?.message);
+    return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
+  }
+});
+
+accountRouter.patch('/notify-channels', async (c) => {
+  const userId = c.get('userId') as string;
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'bad_json' }, 400);
+  }
+  const parsed = NotifyChannelsPatch.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: 'bad_request', detail: parsed.error.issues[0]?.message ?? 'invalid' }, 400);
+  }
+  try {
+    const saved = await updateUserNotifyChannels(userId, parsed.data);
+    return c.json({ notify_channels: saved });
+  } catch (err: any) {
+    console.error('[account] notify-channels PATCH failed:', err?.code, err?.message);
     return c.json({ error: 'internal_error', code: err?.code ?? null }, 500);
   }
 });

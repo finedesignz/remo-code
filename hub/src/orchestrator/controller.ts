@@ -38,6 +38,7 @@ import {
   type MacroTaskType,
 } from '../db/orchestrator-rows-dal.ts';
 import { runMacroCycle } from './macro-cycle.ts';
+import { detectLifecycleStage } from './stage-detect.ts';
 
 // Milestone TMAC: route an orchestrator cycle through the resume-heartbeat MACRO
 // path (task_type → one autonomous macro prompt) instead of the legacy per-micro-
@@ -493,11 +494,15 @@ export interface ResolveDeps {
   getSessionById: typeof getSessionById;
   getOrchestratorTaskForSession: typeof getOrchestratorTaskForSession;
   buildControllerContext: typeof buildControllerContext;
+  // Milestone TMAC §7.2: auto-detect the DEFAULT stage from prod-deploy state.
+  // Used ONLY when the task's stage is not explicitly set; an explicit stage wins.
+  detectLifecycleStage: typeof detectLifecycleStage;
 }
 const REAL_RESOLVE_DEPS: ResolveDeps = {
   getSessionById,
   getOrchestratorTaskForSession,
   buildControllerContext,
+  detectLifecycleStage,
 };
 
 export async function resolveCycleContext(
@@ -515,7 +520,23 @@ export async function resolveCycleContext(
   const repoKey: string | null = (session as any).repo_key ?? null;
   const projectDir: string | null = (session as any).project_dir ?? null;
   const tz: string = (task as any).timezone ?? 'UTC';
-  const stage: LifecycleStage = task.lifecycle_stage ?? 'development';
+
+  // Milestone TMAC §7.2: an EXPLICIT user-set stage always wins. Only when the
+  // stage was left at its default (lifecycle_stage_explicit=false) do we override
+  // with an auto-detected stage derived from prod-deploy state. Best-effort: the
+  // detector never throws and degrades to 'development', so a probe failure leaves
+  // the stored default in place.
+  let stage: LifecycleStage = task.lifecycle_stage ?? 'development';
+  if (!(task as any).lifecycle_stage_explicit) {
+    try {
+      stage = await deps.detectLifecycleStage({
+        userId,
+        coolifyAppUuid: (session as any).coolify_app_uuid ?? null,
+      });
+    } catch {
+      /* keep the stored default */
+    }
+  }
   const macroTaskType: MacroTaskType = task.macro_task_type ?? 'dev';
   const repoPath = projectDir ?? repoKey ?? 'this repo';
   const repoIdent = repoKey ?? projectDir ?? 'this repo';

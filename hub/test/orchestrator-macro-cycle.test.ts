@@ -143,6 +143,42 @@ describe('runMacroCycle — GATE+NOTIFY pair fans out once (M1)', () => {
   })
 })
 
+describe('runMacroCycle — brainstorming approval gate is stage-quiet (PR #273)', () => {
+  // Brainstorming ALWAYS gates for human approval, but the NOTIFY loudness is
+  // stage-conditional: development → in-app-only info (NO external page);
+  // beta/prod → blocking all-channel page. The GATE itself is always present.
+  const devReply =
+    '<<GATE reason="approval" detail="proposed feature awaiting sign-off">>\n' +
+    '<<NOTIFY level=info channel=in-app detail="proposed feature awaiting approval: X">>'
+  const prodReply =
+    '<<GATE reason="approval" detail="proposed feature awaiting sign-off">>\n' +
+    '<<NOTIFY level=blocking channel=all detail="proposed feature awaiting approval: X">>'
+
+  const EXTERNAL = ['telegram', 'email', 'push']
+  const hasExternal = (notifies: any[]) =>
+    notifies.some((n) => (n.channels ?? []).some((c: string) => EXTERNAL.includes(c)))
+
+  test('development: GATE present AND fan-out is in-app only (no external page)', async () => {
+    const { deps, log } = spyDeps({ getLatestAssistantReply: async () => devReply })
+    const r = await runMacroCycle(baseInput({ macroTaskType: 'brainstorming', stage: 'development' }), deps)
+    expect(r.sentinels!.gate).toBeTruthy() // the approval gate is always emitted
+    // exactly the quiet in-app info notify; no external-channel fan-out.
+    const fans = log.notifies
+    expect(fans.length).toBeGreaterThan(0)
+    expect(hasExternal(fans)).toBe(false)
+    expect(fans.every((n) => (n.channels ?? []).every((c: string) => c === 'inapp'))).toBe(true)
+  })
+
+  test('beta / production-maintenance: GATE present AND external fan-out occurs', async () => {
+    for (const stage of ['beta', 'production-maintenance'] as const) {
+      const { deps, log } = spyDeps({ getLatestAssistantReply: async () => prodReply })
+      const r = await runMacroCycle(baseInput({ macroTaskType: 'brainstorming', stage }), deps)
+      expect(r.sentinels!.gate).toBeTruthy()
+      expect(hasExternal(log.notifies)).toBe(true)
+    }
+  })
+})
+
 describe('runMacroCycle — skip when a run is live (M2)', () => {
   test('isRunLive=true → skips resume, no inject, logs skipped', async () => {
     const { deps, log } = spyDeps({ isRunLive: () => true })

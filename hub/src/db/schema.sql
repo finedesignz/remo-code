@@ -281,6 +281,16 @@ DO $$ BEGIN
     CHECK (macro_task_type IN ('dev','maintenance','security','brainstorming'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- Milestone TMAC §7.2: tracks whether lifecycle_stage was set EXPLICITLY by the
+-- user (vs. left at the default). When false, the controller treats the stored
+-- stage as a default and may override it with an AUTO-DETECTED stage derived from
+-- prod-deploy state (stage-detect.ts). When true, the user's choice ALWAYS wins —
+-- auto-detect never flips an explicit stage. Additive, no backfill: existing rows
+-- default to false (= "not explicitly set", eligible for auto-detect), which is
+-- the conservative choice since the prior stage column also defaulted to
+-- 'development'. Set true by the PATCH /api/orchestrator-tasks lifecycle_stage path.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS lifecycle_stage_explicit BOOLEAN NOT NULL DEFAULT false;
+
 -- D1/D3: per-command rows owned by an orchestrator task. Each row is one
 -- routine command with its own schedule_rule (reusing the ScheduleRule JSONB
 -- shape: cron-equivalent interval/unit/start_at + active_window + bounds).
@@ -1237,4 +1247,13 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auto_nudge BOOLEAN;
 --   CEILING (applied = requested && allowed) — a per-session opt-in can never
 --   exceed the host config. Additive, no backfill (NULL == OFF).
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS dangerously_skip_permissions BOOLEAN;
+
+-- ── Milestone TMAC §7.1: per-channel orchestrator-notify opt-in ──────────────
+-- users.notify_channels: per-user opt-in/out for each orchestrator notify
+--   channel. JSONB map {telegram,inapp,email,push}->bool. Consulted by
+--   hub/src/orchestrator/notify.ts BEFORE fanning a channel out. Additive, no
+--   backfill: DEFAULT is all-on so existing behavior is preserved, and a MISSING
+--   key is treated as opted-IN (only an explicit `false` mutes a channel).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_channels JSONB NOT NULL
+  DEFAULT '{"telegram":true,"inapp":true,"email":true,"push":true}'::jsonb;
 

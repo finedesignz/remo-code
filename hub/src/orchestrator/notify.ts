@@ -36,13 +36,44 @@ export interface NotifyDecision {
 export type NotifyChannel = 'telegram' | 'inapp' | 'email' | 'push';
 const ALL_CHANNELS: NotifyChannel[] = ['telegram', 'inapp', 'email', 'push'];
 
+/** Per-channel opt-in map (users.notify_channels). Missing key ⇒ opted-IN. */
+export type NotifyChannelPrefs = Partial<Record<NotifyChannel, boolean>>;
+
+/**
+ * Filter the requested channels by the user's per-channel opt-in prefs
+ * (Milestone TMAC §7.1). PURE. Default is all-on: a null/undefined prefs map, or
+ * a channel with no explicit entry, is treated as opted-IN — only an explicit
+ * `false` mutes a channel. Preserves the pre-§7.1 fan-out behavior exactly when
+ * no prefs are set.
+ */
+export function applyChannelPrefs(
+  channels: NotifyChannel[],
+  prefs: NotifyChannelPrefs | null | undefined,
+): NotifyChannel[] {
+  if (!prefs) return channels;
+  return channels.filter((c) => prefs[c] !== false);
+}
+
+// Accept a few human-friendly aliases for the in-app channel so a prompt that
+// emits `channel=in-app` (or `in_app`/`app`) routes ONLY to the in-app sink and
+// never falls through to the all-channels default (which would page externally).
+const CHANNEL_ALIASES: Record<string, NotifyChannel> = {
+  inapp: 'inapp',
+  'in-app': 'inapp',
+  in_app: 'inapp',
+  app: 'inapp',
+  telegram: 'telegram',
+  email: 'email',
+  push: 'push',
+};
+
 function channelsFor(spec: string | null): NotifyChannel[] {
   const s = (spec ?? '').trim().toLowerCase();
   if (s === '' || s === 'all') return ALL_CHANNELS;
   const picked = s
     .split(/[,\s]+/)
-    .map((c) => c.trim())
-    .filter((c): c is NotifyChannel => (ALL_CHANNELS as string[]).includes(c));
+    .map((c) => CHANNEL_ALIASES[c.trim()])
+    .filter((c): c is NotifyChannel => c != null);
   return picked.length > 0 ? picked : ALL_CHANNELS;
 }
 
@@ -94,7 +125,7 @@ export interface NotifyInput {
 
 // Injectable seam (tests swap these for spies; defaults are the real adapters).
 export interface NotifyDeps {
-  getUserById: (id: string) => Promise<{ email?: string | null; telegram_chat_id?: string | number | null } | null>;
+  getUserById: (id: string) => Promise<{ email?: string | null; telegram_chat_id?: string | number | null; notify_channels?: NotifyChannelPrefs | null } | null>;
   sendTelegram: (chatId: number | string, text: string) => Promise<unknown>;
   broadcastToUser: (userId: string, message: object) => void;
   sendEmail: (input: { to: string; subject: string; html: string; text: string }) => Promise<boolean>;
@@ -133,16 +164,23 @@ export async function fanOutNotify(
     return { delivered };
   }
 
-  const { userId, sessionId, event, level, detail, channels } = input;
+  const { userId, sessionId, event, level, detail } = input;
   const text = `${SUBJECT_PREFIX} ${event.toUpperCase()}${level === 'blocking' ? ' (BLOCKING)' : ''}: ${detail}`;
 
-  // Resolve user once (telegram chat id + email). Best-effort.
-  let user: { email?: string | null; telegram_chat_id?: string | number | null } | null = null;
+  // Resolve user once (telegram chat id + email + per-channel opt-in). Best-effort.
+  let user:
+    | { email?: string | null; telegram_chat_id?: string | number | null; notify_channels?: NotifyChannelPrefs | null }
+    | null = null;
   try {
     user = await d.getUserById(userId);
   } catch (err: any) {
     console.warn('[orchestrator.notify] getUserById failed:', err?.message ?? err);
   }
+
+  // §7.1: honor the user's per-channel opt-in. Default all-on (a null prefs map,
+  // or an unset key, stays opted-IN). If getUserById failed we have no prefs →
+  // fall through to the requested channels (preserves prior best-effort behavior).
+  const channels = applyChannelPrefs(input.channels, user?.notify_channels ?? null);
 
   // in-app — always cheap; broadcast a structured event (badge + message).
   if (channels.includes('inapp')) {

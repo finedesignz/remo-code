@@ -43,10 +43,10 @@ function due(...commands: string[]): DueRow[] {
   return commands.map((c) => ({ row: row(c), autoDisableAfter: false }))
 }
 
-function ctxWithDue(dueRows: DueRow[]): ControllerContext {
+function ctxWithDue(dueRows: DueRow[], stage: any = 'development'): ControllerContext {
   return {
     repo: 'finedesignz/demo',
-    stage: 'development',
+    stage: stage ?? 'development',
     runtimeContext: { repo: 'finedesignz/demo' },
     runLog: [],
     dueRows,
@@ -57,13 +57,19 @@ function ctxWithDue(dueRows: DueRow[]): ControllerContext {
 const DEFAULT_SESSION = { user_id: 'user-1', repo_key: 'finedesignz/demo' }
 const DEFAULT_TASK = { id: 'task-1', lifecycle_stage: 'development', timezone: 'UTC' }
 
-function resolveDeps(dueRows: DueRow[], opts: { session?: any; task?: any } = {}): ResolveDeps {
+function resolveDeps(
+  dueRows: DueRow[],
+  opts: { session?: any; task?: any; detectStage?: any } = {},
+): ResolveDeps {
   const session = 'session' in opts ? opts.session : DEFAULT_SESSION
   const task = 'task' in opts ? opts.task : DEFAULT_TASK
   return {
     getSessionById: (async (_id: string) => session) as any,
     getOrchestratorTaskForSession: (async (_u: string, _s: string) => task) as any,
-    buildControllerContext: (async () => ctxWithDue(dueRows)) as any,
+    buildControllerContext: (async (i: any) => ctxWithDue(dueRows, i?.stage)) as any,
+    // Milestone TMAC §7.2 default: a detector that would auto-pick prod-maint, so
+    // tests can assert it is ONLY consulted when the stage is not explicit.
+    detectLifecycleStage: (opts.detectStage ?? (async () => 'production-maintenance')) as any,
   }
 }
 
@@ -105,6 +111,30 @@ describe('resolveCycleContext', () => {
   test('null when session has no orchestrator task (stale/foreign entry)', async () => {
     const deps = resolveDeps([], { task: null })
     expect(await resolveCycleContext('sess-x', deps)).toBeNull()
+  })
+
+  // ── Milestone TMAC §7.2: auto-detected stage default vs explicit override ──
+  test('stage NOT explicit ⇒ auto-detected stage overrides the stored default', async () => {
+    const task = { id: 'task-1', lifecycle_stage: 'development', lifecycle_stage_explicit: false, timezone: 'UTC' }
+    const r = await resolveCycleContext('sess-1', resolveDeps(due('gsd-plan-phase'), { task }))
+    // detector returns production-maintenance → it wins over the stored default
+    expect(r!.controllerContext.stage).toBe('production-maintenance')
+  })
+
+  test('explicit stage ALWAYS wins — detector is never consulted', async () => {
+    let detectorCalled = false
+    const task = { id: 'task-1', lifecycle_stage: 'beta', lifecycle_stage_explicit: true, timezone: 'UTC' }
+    const detectStage = async () => { detectorCalled = true; return 'production-maintenance' }
+    const r = await resolveCycleContext('sess-1', resolveDeps(due('gsd-plan-phase'), { task, detectStage }))
+    expect(r!.controllerContext.stage).toBe('beta')
+    expect(detectorCalled).toBe(false)
+  })
+
+  test('a detector throw degrades to the stored default (best-effort)', async () => {
+    const task = { id: 'task-1', lifecycle_stage: 'development', lifecycle_stage_explicit: false, timezone: 'UTC' }
+    const detectStage = async () => { throw new Error('probe down') }
+    const r = await resolveCycleContext('sess-1', resolveDeps(due('gsd-plan-phase'), { task, detectStage }))
+    expect(r!.controllerContext.stage).toBe('development')
   })
 })
 
