@@ -154,6 +154,55 @@ describe('runMacroCycle — skip when a run is live (M2)', () => {
   })
 })
 
+describe('runMacroCycle — F-12 stub macro guard', () => {
+  // `maintenance` is a registered STUB (complete:false) on this branch, so we can
+  // exercise the guard with a real macro type — no renderMacro mock needed.
+  test('stub macro (complete=false) → no inject, stub_not_ready run-log', async () => {
+    const { deps, log } = spyDeps()
+    const r = await runMacroCycle(baseInput({ macroTaskType: 'maintenance' as any }), deps)
+    expect(r.stubNotReady).toBe(true)
+    expect(r.injected).toBe(false)
+    expect(log.injects).toHaveLength(0)
+    expect(log.runLogs.some((e) => e.outcome === 'stub_not_ready')).toBe(true)
+  })
+
+  test('complete macro (dev) does NOT set stubNotReady; injects normally', async () => {
+    const { deps } = spyDeps()
+    const r = await runMacroCycle(baseInput({ macroTaskType: 'dev' }), deps)
+    expect(r.stubNotReady).toBe(false)
+    expect(r.injected).toBe(true)
+  })
+})
+
+describe('runMacroCycle — F-10 failure notify', () => {
+  test('cost-cap refusal fires a failure notify (even in dev)', async () => {
+    const { deps, log } = spyDeps({
+      inject: (async () => ({ kind: 'refused_cost_cap' as const, reason: 'over_daily_cost_cap' })) as any,
+    })
+    const r = await runMacroCycle(baseInput({ stage: 'development' }), deps)
+    expect(r.injected).toBe(false)
+    expect(log.notifies.some((n) => n.event === 'failure')).toBe(true)
+  })
+
+  test('inject throw fires a failure notify', async () => {
+    const { deps, log } = spyDeps({
+      inject: (async () => {
+        throw new Error('boom')
+      }) as any,
+    })
+    await runMacroCycle(baseInput({ stage: 'development' }), deps)
+    expect(log.notifies.some((n) => n.event === 'failure' && /boom/.test(n.detail))).toBe(true)
+  })
+
+  test('no_session does NOT fire a failure notify (benign offline)', async () => {
+    const { deps, log } = spyDeps({
+      inject: (async () => ({ kind: 'no_session' as const })) as any,
+    })
+    await runMacroCycle(baseInput({ stage: 'development' }), deps)
+    expect(log.notifies.some((n) => n.event === 'failure')).toBe(false)
+  })
+})
+
 describe('runMacroCycle — robustness', () => {
   test('a throwing inject is swallowed (cycle never wedges)', async () => {
     const { deps } = spyDeps({

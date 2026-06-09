@@ -80,6 +80,8 @@ export interface MacroCycleResult {
   injected: boolean;
   /** true when the tick skipped resume because a run is already live (SPEC §2.3). */
   skipped: boolean;
+  /** true when resume was suppressed because the macro for this task_type is a stub (complete=false). */
+  stubNotReady: boolean;
   /** the parsed sentinels from the prior reply (for tests/observability). */
   sentinels: ParsedSentinels | null;
 }
@@ -93,7 +95,7 @@ export async function runMacroCycle(
   input: MacroCycleInput,
   deps?: MacroCycleDeps,
 ): Promise<MacroCycleResult> {
-  const result: MacroCycleResult = { reconciled: false, halted: false, injected: false, skipped: false, sentinels: null };
+  const result: MacroCycleResult = { reconciled: false, halted: false, injected: false, skipped: false, stubNotReady: false, sentinels: null };
   let d: MacroCycleDeps;
   try {
     d = deps ?? (await realDeps());
@@ -155,6 +157,30 @@ export async function runMacroCycle(
       lifecycle_stage: stage,
     };
     const macro = renderMacro(macroTaskType, ctx);
+
+    // F-12: never inject a half-authored stub prompt on an unattended run. A
+    // stub (complete=false) finalizes the tick cleanly with a recognizable
+    // run-log row instead of a silent dead run.
+    if (!macro.complete) {
+      result.stubNotReady = true;
+      console.log(
+        `[orchestrator.macro] session=${sessionId} macro_task_type=${macroTaskType} is a STUB ` +
+          `(complete=false) — skipping inject (stub_not_ready).`,
+      );
+      try {
+        await d.appendRunLog({
+          session_id: sessionId,
+          repo_key: repoKey,
+          command: `macro:${macroTaskType}`,
+          decision_rationale: `stub_not_ready (macro for ${macroTaskType} not authored; stage=${stage})`,
+          outcome: 'stub_not_ready',
+        });
+      } catch {
+        /* best-effort */
+      }
+      return result;
+    }
+
     const token = `orch:${sessionId}:macro:${macroTaskType}:${Date.now()}`;
     const outcome = await d.inject({ userId, sessionId, token, prompt: macro.prompt });
     result.injected = outcome.kind === 'dispatched' || outcome.kind === 'queued';
@@ -173,16 +199,46 @@ export async function runMacroCycle(
     }
 
     if (!result.injected) {
+      const reason = ('reason' in outcome && (outcome as any).reason) ? (outcome as any).reason : outcome.kind;
       console.log(
-        `[orchestrator.macro] session=${sessionId} inject not dispatched: ${outcome.kind}` +
-          (('reason' in outcome && (outcome as any).reason) ? ` (${(outcome as any).reason})` : ''),
+        `[orchestrator.macro] session=${sessionId} inject not dispatched: ${outcome.kind} (${reason})`,
       );
+      // F-10: a refused/failed unattended resume must surface to the user (even
+      // in dev). `no_session` is benign (offline session reconciles next tick) —
+      // do NOT page on it; everything else is a real failure/refusal.
+      if (outcome.kind !== 'no_session') {
+        await emitFailure(d, input, `resume inject ${outcome.kind}: ${reason}`);
+      }
     }
   } catch (err: any) {
     console.warn('[orchestrator.macro] inject threw (ignored):', err?.message ?? err);
+    // F-10: a thrown resume is a failure — surface it.
+    await emitFailure(d, input, `resume inject threw: ${err?.message ?? String(err)}`);
   }
 
   return result;
+}
+
+/**
+ * F-10: fan out a `failure` notify for a failed/refused unattended resume. Fires
+ * regardless of stage (shouldNotify('failure', ...) is always fire=true). Never
+ * throws — fanOut is best-effort and we wrap defensively.
+ */
+async function emitFailure(deps: MacroCycleDeps, input: MacroCycleInput, detail: string): Promise<void> {
+  try {
+    const decision = shouldNotify('failure', input.stage, { level: 'blocking', channel: 'all' });
+    if (!decision.fire) return;
+    await deps.fanOut({
+      userId: input.userId,
+      sessionId: input.sessionId,
+      event: 'failure',
+      level: 'blocking',
+      detail,
+      channels: decision.channels,
+    });
+  } catch {
+    /* fanOut already never-throws; defensive */
+  }
 }
 
 /** Stages whose blocking gate forces a HALT (SPEC §3): beta + production-maint. */
