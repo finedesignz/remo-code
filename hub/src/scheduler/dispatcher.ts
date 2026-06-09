@@ -363,6 +363,15 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
                 await updateRunStatus(runId, {
                   status: 'skipped', error: 'target_offline', finished_at: new Date(),
                 })
+                // F-05: parity with the other terminal branches — an unattended run whose
+                // target never reconnects must still fire post-run actions (telegram/github_issue)
+                // and tell the UI it finished, instead of vanishing silently.
+                broadcastScheduledRun(userId, {
+                  type: 'scheduled_run_finished',
+                  run_id: runId, task_id: taskId, status: 'skipped', error: 'target_offline',
+                })
+                inFlightByRun.delete(runId); syncQueueDepthGauge()
+                void onRunFinalized(task, runId, 'skipped', 'target_offline')
               },
             },
           )
