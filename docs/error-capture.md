@@ -266,18 +266,22 @@ Failure codes:
 
 ## SDK auto-install
 
+> **Why no official Sentry SDK (fleet-crash fix, pilot 2026-06-10):** error-project ids are **UUIDs**, but the official `sentry_sdk` / `@sentry/*` SDK requires an **integer** project id in the DSN and raises `BadDsn: Invalid project in DSN` at init — which **crash-loops every app** the snippet is installed into. So the snippet injects a tiny **dependency-free reporter** instead (proven in `finedesignz/mcp-factory` PRs #73 + #74). No `@sentry/*` / `sentry-sdk` dependency is added.
+
+The reporter (per stack): reads the DSN from the `SENTRY_DSN` env var, parses `https://<key>@<host>/<uuid>` by hand, and POSTs a proper Sentry **envelope** (`{event_id}\n{"type":"event"}\n{event}\n`, the exact wire shape `error-capture/envelope.ts` accepts) to `https://<host>/api/sentry/<uuid>/envelope/?sentry_key=<key>`. It captures unhandled exceptions via the platform's process/excepthook hook plus a fail-open framework middleware, and is **fail-open** — any reporting error is swallowed so it can never take the host app down. **Node** uses the built-in `node:https`; **Python** uses the stdlib `urllib.request`.
+
 `detectStack` is content-driven (no filesystem walk — the supervisor reads candidate files on behalf of the hub via `error_setup_probe`). Order: nextjs > express > django > fastapi; first match wins.
 
 | Stack            | Detection signal                                                                 | Entry-file injection                                                                                                  | Manifest patch                                |
 |------------------|----------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|-----------------------------------------------|
-| `node-nextjs`    | `next.config.{js,ts,mjs}` present (+ `package.json`)                              | Prepend `@sentry/nextjs` init to `next.config.*` (snippet + manifest mode `package.json`)                              | `addSentryDep` → `@sentry/nextjs` in `dependencies` |
-| `node-express`   | `package.json#dependencies.express` present (and not Next.js)                      | Prepend `import * as Sentry from '@sentry/node'; Sentry.init({ dsn: process.env.SENTRY_DSN, ... })` to entry            | `addSentryDep` → `@sentry/node` in `dependencies` |
-| `python-django`  | `manage.py` present OR `wsgi.py` contains `django.core.wsgi`                       | Prepend `import sentry_sdk; sentry_sdk.init(...)` to entry                                                              | `addPythonSentryRequirement` → `sentry-sdk[django]` in `requirements.txt` |
-| `python-fastapi` | Any `*.py` in probe set contains `from fastapi import FastAPI` or `FastAPI(`       | Prepend `import sentry_sdk; sentry_sdk.init(...)` to the file declaring `FastAPI()`                                     | `addPythonSentryRequirement` → `sentry-sdk[fastapi]` in `requirements.txt` |
+| `node-nextjs`    | `next.config.{js,ts,mjs}` present (+ `package.json`)                              | Prepend dependency-free `node:https` reporter (`uncaughtException`/`unhandledRejection` → envelope POST) to `next.config.*` | none (no dependency — `addSentryDep` is a no-op) |
+| `node-express`   | `package.json#dependencies.express` present (and not Next.js)                      | Prepend dependency-free `node:https` reporter (`uncaughtException`/`unhandledRejection` → envelope POST) to entry          | none (no dependency — `addSentryDep` is a no-op) |
+| `python-django`  | `manage.py` present OR `wsgi.py` contains `django.core.wsgi`                       | Prepend stdlib `urllib.request` reporter (`sys.excepthook` + `got_request_exception` signal → envelope POST) to entry      | none (no dependency — `addPythonSentryRequirement` is a no-op) |
+| `python-fastapi` | Any `*.py` in probe set contains `from fastapi import FastAPI` or `FastAPI(`       | Prepend stdlib `urllib.request` reporter (`sys.excepthook` + fail-open `BaseHTTPMiddleware` → envelope POST) to the file declaring `FastAPI()` | none (no dependency — `addPythonSentryRequirement` is a no-op) |
 
-`injectSnippet` is **idempotent** — it checks for `@sentry/node` / `@sentry/nextjs` / `sentry_sdk` markers and returns `alreadyConfigured` without re-prepending.
+`injectSnippet` is **idempotent** — it checks for the `Remo error capture` reporter marker (and legacy `@sentry/node` / `@sentry/nextjs` / `sentry_sdk` markers) and returns `alreadyConfigured` without re-prepending. `addSentryDep` / `addPythonSentryRequirement` are now no-ops (return `alreadyConfigured: true`) because the reporter needs no third-party package.
 
-The apply step (`error_setup_apply` supervisor command) writes entry + manifest, runs `git add -A`, commits as `feat: install Sentry SDK for error capture`, and pushes to the default branch. **No PR is opened** — the user (or Coolify auto-deploy-on-push) takes it from there.
+The apply step (`error_setup_apply` supervisor command) writes the entry file, runs `git add -A`, commits as `feat: install Sentry SDK for error capture`, and pushes to the default branch. **No PR is opened** — the user (or Coolify auto-deploy-on-push) takes it from there.
 
 If `coolify_app_uuid` is supplied AND the commit was pushed, `setCoolifyEnv(app_uuid, 'SENTRY_DSN', dsn)` PATCHes the Coolify env. If `redeploy: true`, `redeployCoolifyApp(app_uuid)` triggers a deploy (defaults OFF — operator drives the redeploy).
 
