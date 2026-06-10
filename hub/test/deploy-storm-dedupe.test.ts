@@ -54,10 +54,27 @@ mock.module('../src/db/dal.ts', () => ({
   ensureInternalTriageTask: async () => 'triage-task-id',
 }))
 
+let finalizeCount = 0
 mock.module('../src/scheduler/dispatcher.ts', () => ({
   runNow: async () => {
     dispatchCount++
   },
+  // feat/coolify-uuid-repo-map: dispatchTriage now imports finalizeRun for the
+  // orphan-run guard. The guard's routability probe fails-open here (no DB), so
+  // dispatch still fires and storm-dedupe assertions are unaffected.
+  finalizeRun: async () => {
+    finalizeCount++
+  },
+}))
+
+// feat/coolify-uuid-repo-map: dispatchTriage's orphan-run guard probes for a
+// live target; provide one so the storm-dedupe path reaches the dispatch (the
+// guard only short-circuits when there is NO routable session AND no live
+// agent/supervisor — out of scope for these dedupe assertions).
+const realRegStorm = await import('../src/ws/registry.ts')
+mock.module('../src/ws/registry.ts', () => ({
+  ...realRegStorm,
+  listOnlineAgentSessionsForUser: () => ['sess-storm'],
 }))
 
 const { dispatchTriage } = await import('../src/api/coolify-webhook.ts?storm')

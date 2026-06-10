@@ -1752,6 +1752,47 @@ export async function claimDeployFailure(
   return rows.length > 0;
 }
 
+// ── feat/coolify-uuid-repo-map: application_uuid → repo_key cache ─────────────
+// Lazy-populated mapping resolved from the Coolify API (see
+// hub/src/sessions/coolify-app-repo.ts). user-scoped.
+
+export interface CoolifyAppRepoRow {
+  application_uuid: string;
+  user_id: string;
+  repo_key: string | null;
+  git_full_url: string | null;
+  updated_at: string;
+}
+
+export async function getCoolifyAppRepo(
+  applicationUuid: string,
+  userId: string,
+): Promise<CoolifyAppRepoRow | null> {
+  const rows = await sql<CoolifyAppRepoRow[]>`
+    SELECT application_uuid, user_id, repo_key, git_full_url, updated_at
+    FROM coolify_app_repo
+    WHERE application_uuid = ${applicationUuid} AND user_id = ${userId}
+    LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+export async function upsertCoolifyAppRepo(input: {
+  application_uuid: string;
+  user_id: string;
+  repo_key: string | null;
+  git_full_url: string | null;
+}): Promise<void> {
+  await sql`
+    INSERT INTO coolify_app_repo (application_uuid, user_id, repo_key, git_full_url, updated_at)
+    VALUES (${input.application_uuid}, ${input.user_id}, ${input.repo_key}, ${input.git_full_url}, now())
+    ON CONFLICT (application_uuid, user_id) DO UPDATE SET
+      repo_key = EXCLUDED.repo_key,
+      git_full_url = EXCLUDED.git_full_url,
+      updated_at = now()
+  `;
+}
+
 // ── Phase 07: Titanium auth (additive) ────────────────────────────────────────
 //
 // Helpers for linking remo-code `users` rows to Titanium Licensing (Keygen)

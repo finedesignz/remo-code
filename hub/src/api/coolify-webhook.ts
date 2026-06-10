@@ -43,9 +43,11 @@ import {
   markUserCoolifyWebhookLegacyHit,
   claimDeployFailure,
 } from '../db/dal.ts'
-import { runNow as dispatcherRunNow } from '../scheduler/dispatcher.ts'
+import { runNow as dispatcherRunNow, finalizeRun } from '../scheduler/dispatcher.ts'
 import { deployFailureFingerprint, DEPLOY_DEDUPE_WINDOW_MS } from '../scheduler/deploy-fingerprint.ts'
-import { hasActiveSessionForRepo } from '../sessions/repo-routing.ts'
+import { hasActiveSessionForRepo, resolveRepoKeyedAgentSession } from '../sessions/repo-routing.ts'
+import { listOnlineAgentSessionsForUser } from '../ws/registry.ts'
+import { listOnlineSupervisorIdsForUser } from '../ws/supervisor-registry.ts'
 import { ipAllowed, sourceIpFromHeaders } from '../lib/cidr.ts'
 
 export const coolifyWebhookRoutes = new Hono()
@@ -151,6 +153,44 @@ export async function dispatchTriage(
     }
   } catch (err: any) {
     console.warn(`[coolify-webhook] deploy-failure claim errored (fail-open): ${err?.message}`)
+  }
+
+  // Orphan-run finalize. The deployment metadata run (`deploymentRunId`) was
+  // inserted as `pending` (NULL session_id) and is NEVER finalized by the triage
+  // path. When the deploy failure is UN-ROUTABLE — no session bound to the repo
+  // (resolved via git_repository OR the application_uuid→repo_key cache) with a
+  // live socket, AND no online agent / supervisor to capacity-route to — a
+  // dispatched triage would just self-finalize `no_target_available` while this
+  // metadata row sits `pending` forever (the at_capacity orphan-run leak). So we
+  // close it cleanly here and skip the doomed dispatch.
+  //
+  // Semantics: `skipped` / `no_routable_session` (not `failed`) — an un-routable
+  // deploy failure is a no-op, not a triage failure; this matches the existing
+  // metadata-skip semantics (log_check `no_errors_detected`) and won't fire
+  // `on:'success'` post-run chains. Best-effort + fail-open: any error in the
+  // routability probe falls through to dispatch-anyway (never silently drops).
+  try {
+    const repoKeyed = await resolveRepoKeyedAgentSession(
+      userId,
+      payload.git_repository,
+      payload.application_uuid,
+    )
+    if (!repoKeyed) {
+      const hasLiveTarget =
+        listOnlineAgentSessionsForUser(userId).length > 0 ||
+        listOnlineSupervisorIdsForUser(userId).length > 0
+      if (!hasLiveTarget) {
+        await finalizeRun(deploymentRunId, 'skipped', 'no_routable_session')
+        console.info(
+          `[coolify-webhook] un-routable deploy failure app=${payload.application_uuid} — finalized metadata run=${deploymentRunId} as skipped/no_routable_session`,
+        )
+        return
+      }
+    }
+  } catch (err: any) {
+    console.warn(
+      `[coolify-webhook] orphan-run routability probe errored (fail-open, dispatching): ${err?.message}`,
+    )
   }
 
   const taskId = await ensureInternalTriageTask(userId)
