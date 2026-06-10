@@ -57,6 +57,12 @@ export async function resolveRepoKeyFromAppUuid(
   if (!appUuid || typeof appUuid !== 'string' || appUuid.trim() === '') return null
   const uuid = appUuid.trim()
 
+  // A stale-but-present cached key. If the API re-resolve below fails (down /
+  // unconfigured / error), serving this old key still routes to the right
+  // session — strictly better than dropping to capacity routing. Only when we
+  // have NO cached key at all do we return null.
+  let staleKey: string | null = null
+
   // (1) Cache lookup.
   try {
     const cached = await getCoolifyAppRepo(uuid, userId)
@@ -65,6 +71,7 @@ export async function resolveRepoKeyFromAppUuid(
       if (cached.repo_key && Number.isFinite(ageMs) && ageMs < CACHE_TTL_MS) {
         return cached.repo_key
       }
+      if (cached.repo_key) staleKey = cached.repo_key
     }
   } catch (err: any) {
     console.warn(`[coolify-app-repo] cache lookup failed uuid=${uuid}: ${err?.message}`)
@@ -74,8 +81,9 @@ export async function resolveRepoKeyFromAppUuid(
   // (2) Coolify API resolve.
   const token = process.env.COOLIFY_TOKEN
   if (!token) {
-    // Unconfigured — can't resolve. Caller falls back. (Don't cache a miss.)
-    return null
+    // Unconfigured — can't resolve. Serve a stale cached key if we have one,
+    // else caller falls back. (Don't cache a miss.)
+    return staleKey
   }
   const baseUrl = (process.env.COOLIFY_BASE_URL || DEFAULT_BASE).replace(/\/+$/, '')
   const url = `${baseUrl}/api/v1/applications/${encodeURIComponent(uuid)}`
@@ -88,17 +96,17 @@ export async function resolveRepoKeyFromAppUuid(
     })
     if (!res.ok) {
       console.warn(`[coolify-app-repo] coolify http ${res.status} uuid=${uuid}`)
-      return null
+      return staleKey
     }
     const app = await res.json()
     gitUrl = extractGitUrl(app)
   } catch (err: any) {
     console.warn(`[coolify-app-repo] coolify fetch failed uuid=${uuid}: ${err?.message}`)
-    return null
+    return staleKey
   }
 
   const repoKey = repoKeyFromGitRepository(gitUrl)
-  if (!repoKey) return null
+  if (!repoKey) return staleKey
 
   // (3) Upsert cache. Best-effort — a cache-write failure must not lose the
   // freshly-resolved answer.

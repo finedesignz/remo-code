@@ -142,6 +142,58 @@ describe('resolveRepoKeyFromAppUuid', () => {
     expect(upserts.length).toBe(0)
   })
 
+  it('stale cache + API failure → serves stale repo_key (LOW-1)', async () => {
+    cache['u1:app-stale'] = {
+      application_uuid: 'app-stale',
+      user_id: 'u1',
+      repo_key: 'github://stale/key',
+      git_full_url: null,
+      updated_at: new Date(Date.now() - 48 * 3600 * 1000).toISOString(),
+    }
+    // HTTP error
+    fetchImpl = async () => jsonRes({}, false, 500)
+    expect(await resolveRepoKeyFromAppUuid('app-stale', 'u1')).toBe('github://stale/key')
+    // network reject
+    fetchImpl = async () => {
+      throw new Error('ECONNREFUSED')
+    }
+    expect(await resolveRepoKeyFromAppUuid('app-stale', 'u1')).toBe('github://stale/key')
+    // unconfigured token
+    delete process.env.COOLIFY_TOKEN
+    expect(await resolveRepoKeyFromAppUuid('app-stale', 'u1')).toBe('github://stale/key')
+  })
+
+  it('cross-user isolation: same uuid, each user resolves own repo_key, no clobber (MED-1)', async () => {
+    const uuid = 'shared-app-uuid'
+    cache[`u1:${uuid}`] = {
+      application_uuid: uuid,
+      user_id: 'u1',
+      repo_key: 'github://o/repo-one',
+      git_full_url: null,
+      updated_at: new Date().toISOString(),
+    }
+    cache[`u2:${uuid}`] = {
+      application_uuid: uuid,
+      user_id: 'u2',
+      repo_key: 'github://o/repo-two',
+      git_full_url: null,
+      updated_at: new Date().toISOString(),
+    }
+    let fetched = false
+    fetchImpl = async () => {
+      fetched = true
+      return jsonRes({})
+    }
+    expect(await resolveRepoKeyFromAppUuid(uuid, 'u1')).toBe('github://o/repo-one')
+    expect(await resolveRepoKeyFromAppUuid(uuid, 'u2')).toBe('github://o/repo-two')
+    expect(fetched).toBe(false)
+    // u2's upsert (on its own miss) must not overwrite u1's row.
+    delete cache[`u2:${uuid}`]
+    fetchImpl = async () => jsonRes({ git_repository: 'o/repo-two' })
+    expect(await resolveRepoKeyFromAppUuid(uuid, 'u2')).toBe('github://o/repo-two')
+    expect(cache[`u1:${uuid}`].repo_key).toBe('github://o/repo-one')
+  })
+
   it('empty / null appUuid → null (no fetch)', async () => {
     let fetched = false
     fetchImpl = async () => {

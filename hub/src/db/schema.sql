@@ -713,11 +713,12 @@ CREATE INDEX IF NOT EXISTS idx_coolify_deploy_idem_created ON coolify_deploy_ide
 -- Lazy-populated at runtime (NO inline backfill — idempotent DDL only); a stale
 -- row (>24h) is re-resolved by the resolver. `git_full_url` is kept for audit.
 CREATE TABLE IF NOT EXISTS coolify_app_repo (
-  application_uuid TEXT PRIMARY KEY,
+  application_uuid TEXT NOT NULL,
   user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   repo_key         TEXT,
   git_full_url     TEXT,
-  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (application_uuid, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_coolify_app_repo_user ON coolify_app_repo(user_id);
 

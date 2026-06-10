@@ -1786,8 +1786,7 @@ export async function upsertCoolifyAppRepo(input: {
   await sql`
     INSERT INTO coolify_app_repo (application_uuid, user_id, repo_key, git_full_url, updated_at)
     VALUES (${input.application_uuid}, ${input.user_id}, ${input.repo_key}, ${input.git_full_url}, now())
-    ON CONFLICT (application_uuid) DO UPDATE SET
-      user_id = EXCLUDED.user_id,
+    ON CONFLICT (application_uuid, user_id) DO UPDATE SET
       repo_key = EXCLUDED.repo_key,
       git_full_url = EXCLUDED.git_full_url,
       updated_at = now()
