@@ -25,7 +25,10 @@ jobs:
   pr-gate:
     name: PR gate (typecheck + baseline + migration)
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    # Self-hosted Hetzner edge runner (free CI minutes). Requires the runner host
+    # to provide Docker (for the postgres:16 service below) + passwordless sudo
+    # (apt-get postgresql-client). Verified green on the cost PR before merge.
+    runs-on: [self-hosted, hetzner-edge]
     timeout-minutes: 15
 
     services:

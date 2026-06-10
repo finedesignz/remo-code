@@ -18,7 +18,9 @@ permissions:
 
 jobs:
   drift:
-    runs-on: ubuntu-latest
+    # Self-hosted Hetzner edge runner (free CI minutes). No service container /
+    # sudo needed here — just setup-bun + git diff — the lowest-risk leg.
+    runs-on: [self-hosted, hetzner-edge]
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
