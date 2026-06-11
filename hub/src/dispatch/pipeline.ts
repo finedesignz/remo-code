@@ -79,6 +79,16 @@ export interface PipelineDeps {
    */
   isOnline: (req: DispatchRequest) => boolean | Promise<boolean>
   /**
+   * Spawn-on-error hook (optional, opt-in). When `isOnline` reports false,
+   * dispatch calls this — if present — to LAZY-START the offline-but-existing
+   * session before parking. Runs AFTER every gate (so cost-cap / threshold /
+   * dedupe / rate-limit remain non-bypassable). Returns true iff the session
+   * came online in time, in which case dispatch proceeds to send instead of
+   * parking; false → existing park/skip behaviour (no leak — see
+   * `dispatch/spawn-on-error.ts`). Omit to preserve today's behaviour exactly.
+   */
+  ensureOnline?: (req: DispatchRequest) => Promise<boolean>
+  /**
    * Ship the `user_message` to the agent socket. Resolves the socket, builds
    * the wire frame, persists chat history as the subsystem requires. Called
    * exactly once on a successful claim (after all gates pass + queue admits).
@@ -188,9 +198,24 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
 
   // claim === 'dispatched' → we own the in-flight slot. Proceed to send.
 
-  // 3. Offline park. If the agent isn't online, release the slot and park the
-  //    replay thunk in grace; drained on reconnect.
-  const online = await deps.isOnline(req)
+  // 3. Offline park. If the agent isn't online, OPTIONALLY try to lazy-start
+  //    the session (spawn-on-error, opt-in via ensureOnline), then re-check;
+  //    if still offline, release the slot and park the replay thunk in grace.
+  let online = await deps.isOnline(req)
+  if (!online && deps.ensureOnline) {
+    // Spawn-on-error runs strictly AFTER the gate list above (IR-1: cost-cap /
+    // dedupe / rate-limit already passed — we never spawn for a gated repair).
+    // It owns its own leak-safe reserve→create→send→release sequence and a
+    // per-session in-flight lock; a false return means "couldn't bring it
+    // online" → fall through to the normal park.
+    try {
+      if (await deps.ensureOnline(req)) {
+        online = await deps.isOnline(req)
+      }
+    } catch (err: any) {
+      console.error(`[dispatch] ensureOnline failed session=${req.sessionId}: ${err?.message ?? err}`)
+    }
+  }
   if (!online) {
     queue.markFinished(req.sessionId) // release the slot we just took
     const key = deps.graceKey ? deps.graceKey(req) : req.sessionId
