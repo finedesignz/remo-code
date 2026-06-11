@@ -41,8 +41,11 @@ async function loadDispatcher() {
 
 function makeTask(over: Record<string, unknown>) {
   return {
+    // macro_task_type defaults to 'dev' on EVERY scheduled_tasks row
+    // (schema.sql: NOT NULL DEFAULT 'dev') — mirror prod reality so the guard
+    // is exercised against realistic rows, not the never-occurring null case.
     id: 't1', user_id: 'u1', task_type: 'dev', cron_expression: '0 * * * *',
-    target_kind: 'session', target_id: 's1', macro_task_type: null,
+    target_kind: 'session', target_id: 's1', macro_task_type: 'dev',
     ...over,
   } as any
 }
@@ -79,25 +82,40 @@ describe('F-11 routeToSender guard — macro/orchestrator never mis-dispatched',
     expect(args[1].error).toBe('orchestrator_disabled')
   })
 
-  test('macro_task_type:dev → skipped (due-tick owned when enabled), no sender invoked', async () => {
+  test('genuine task_type:orchestrator → skipped (due-tick owned) when orchestrator enabled', async () => {
     process.env.REMO_ORCHESTRATOR_ENABLED = '1'
     const { routeToSender } = await loadDispatcher()
-    await routeToSender(makeTask({ task_type: 'dev', macro_task_type: 'dev' }), makeCtx())
+    await routeToSender(makeTask({ task_type: 'orchestrator', macro_task_type: 'dev' }), makeCtx())
 
     expect(sendAgentTask).not.toHaveBeenCalled()
+    expect(sendLogCheck).not.toHaveBeenCalled()
     expect(updateRunStatus).toHaveBeenCalled()
     const args = updateRunStatus.mock.calls[0] as any[]
     expect(args[1].status).toBe('skipped')
     expect(args[1].error).toBe('orchestrator_due_tick_owned')
   })
 
-  test('regression: normal task_type:dev still routes to the agent sender', async () => {
+  test('overskip regression: dev task with macro_task_type:dev routes to agent sender (NOT skipped) when orchestrator enabled', async () => {
+    // The bug: gating on `|| macroType` skipped EVERY scheduled task, since
+    // macro_task_type is NOT NULL DEFAULT 'dev'. A normal dev task must dispatch.
+    process.env.REMO_ORCHESTRATOR_ENABLED = '1'
     const { routeToSender } = await loadDispatcher()
-    await routeToSender(makeTask({ task_type: 'dev', macro_task_type: null }), makeCtx())
+    await routeToSender(makeTask({ task_type: 'dev', macro_task_type: 'dev' }), makeCtx())
 
     expect(sendAgentTask).toHaveBeenCalledTimes(1)
-    expect(sendSupervisorTask).not.toHaveBeenCalled()
-    // guard did not finalize-skip this one
+    expect(sendLogCheck).not.toHaveBeenCalled()
+    const skipped = updateRunStatus.mock.calls.some((c: any[]) => c[1]?.status === 'skipped')
+    expect(skipped).toBe(false)
+  })
+
+  test('overskip regression: log_check task with macro_task_type:dev routes to coolify log-pull (NOT skipped) when orchestrator enabled', async () => {
+    // This is the exact prod row shape (all 31 enabled tasks: log_check + macro 'dev').
+    process.env.REMO_ORCHESTRATOR_ENABLED = '1'
+    const { routeToSender } = await loadDispatcher()
+    await routeToSender(makeTask({ task_type: 'log_check', macro_task_type: 'dev' }), makeCtx())
+
+    expect(sendLogCheck).toHaveBeenCalledTimes(1)
+    expect(sendAgentTask).not.toHaveBeenCalled()
     const skipped = updateRunStatus.mock.calls.some((c: any[]) => c[1]?.status === 'skipped')
     expect(skipped).toBe(false)
   })

@@ -437,15 +437,20 @@ function updateFireTimestamps(taskId: string, fired: Date): void {
 }
 
 export async function routeToSender(task: ScheduledTask, ctx: RunContext): Promise<void> {
-  // F-11: macro/orchestrator tasks are owned by the controller due-tick
+  // F-11: orchestrator tasks are owned by the controller due-tick
   // (scanAndEnqueueDueCycles, gated by isOrchestratorEnabled) — NOT the cron
   // sender. If such a task ever reaches the cron path (e.g. a future misconfig
   // gives it a real cron rule), refuse to dispatch it as a bare prompt: that
   // would run an un-guarded prompt the macro engine is meant to own. Finalize
   // with a clear status and return. We do NOT drive the macro cycle from here
   // (that would double-fire against the due-tick).
-  const macroType = (task as any).macro_task_type as string | null | undefined
-  if (task.task_type === 'orchestrator' || macroType) {
+  //
+  // The discriminator is `task_type === 'orchestrator'` ONLY (see
+  // controller.ts scanAndEnqueueDueCycles, which selects exactly those rows).
+  // `macro_task_type` is an orthogonal flavor label (`dev`/`maintenance`/...)
+  // that is `NOT NULL DEFAULT 'dev'` on EVERY scheduled_tasks row, so gating on
+  // it here skipped every normal log_check/dev task — never do that.
+  if (task.task_type === 'orchestrator') {
     const { isOrchestratorEnabled } = await import('../orchestrator/controller.ts')
     const reason = isOrchestratorEnabled() ? 'orchestrator_due_tick_owned' : 'orchestrator_disabled'
     await finalizeRun(ctx.runId, 'skipped', reason)
