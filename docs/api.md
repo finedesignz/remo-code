@@ -2731,5 +2731,136 @@ To perform this operation, you must be authenticated by means of one of the foll
 bearerAuth
 </aside>
 
+<h1 id="remo-code-hub-feedback">feedback</h1>
+
+## Submit end-user feedback (screenshot + description) into the bound session
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/feedback/{token} \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json'
+
+```
+
+```javascript
+const inputBody = '{
+  "comment": "string",
+  "screenshot": "string",
+  "page_url": "string",
+  "console_errors": "string"
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json'
+};
+
+fetch('https://app.remo-code.com/api/feedback/{token}',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/feedback/{token}`
+
+Public, unauthenticated-by-design. The opaque `fb_` token in the URL IS the credential (SHA-256-hashed lookup against feedback_keys). Accepts a bug description, optional screenshot (base64 data-URI), page URL, and captured console errors, and dispatches them into the app's bound remo-code session via the shared cost-capped dispatch pipeline. Bounded by per-token + per-IP rate limits and the non-bypassable daily cost cap.
+
+> Body parameter
+
+```json
+{
+  "comment": "string",
+  "screenshot": "string",
+  "page_url": "string",
+  "console_errors": "string"
+}
+```
+
+<h3 id="submit-end-user-feedback-(screenshot-+-description)-into-the-bound-session-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|token|path|string|true|none|
+|body|body|object|false|none|
+|» comment|body|string|true|Required bug/feedback description.|
+|» screenshot|body|string|false|Optional base64 data-URI image (image/png|jpeg|gif|webp), ≤~10MB.|
+|» page_url|body|string|false|none|
+|» console_errors|body|string|false|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "ok": true,
+  "status": "string"
+}
+```
+
+<h3 id="submit-end-user-feedback-(screenshot-+-description)-into-the-bound-session-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Accepted + dispatched (fire-and-forget)|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Missing/invalid comment or screenshot|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Feedback key disabled|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Unknown token|Inline|
+|413|[Payload Too Large](https://tools.ietf.org/html/rfc7231#section-6.5.11)|Payload too large (comment/screenshot/console_errors cap)|Inline|
+|429|[Too Many Requests](https://tools.ietf.org/html/rfc6585#section-4)|Rate limited (per-token or per-IP)|Inline|
+
+<h3 id="submit-end-user-feedback-(screenshot-+-description)-into-the-bound-session-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ok|boolean|true|none|none|
+|» status|string|true|none|none|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **413**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **429**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="success">
+This operation does not require authentication
+</aside>
+
 # Schemas
 

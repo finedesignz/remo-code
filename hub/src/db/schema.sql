@@ -1275,3 +1275,24 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS dangerously_skip_permissions BOOLE
 ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_channels JSONB NOT NULL
   DEFAULT '{"telegram":true,"inapp":true,"email":true,"push":true}'::jsonb;
 
+-- ── Feedback intake (Option A) — per-app end-user feedback → bound session ────
+-- feedback_keys: the per-app SUBMIT credential for the public feedback widget.
+--   ONE key per app. token_hash is the SHA-256 of an opaque `fb_`-prefixed
+--   token (32 random bytes, base64url) — the plaintext is shown ONCE at mint
+--   time and never stored (same pattern as auth_sessions / api_keys). The
+--   widget embeds the plaintext token and POSTs to /api/feedback/<token>; the
+--   hub hashes it, looks up this row, and (when enabled) dispatches the
+--   screenshot + comment into session_id via the shared dispatch pipeline.
+--   Disable a leaked key by setting enabled=false (revoke without delete).
+--   Idempotent DDL only — NO backfill (this re-runs every boot).
+CREATE TABLE IF NOT EXISTS feedback_keys (
+  token_hash  TEXT PRIMARY KEY,
+  session_id  TEXT NOT NULL,
+  user_id     TEXT NOT NULL,
+  label       TEXT,
+  enabled     BOOLEAN NOT NULL DEFAULT true,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_keys_user ON feedback_keys(user_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_keys_session ON feedback_keys(session_id);
+
