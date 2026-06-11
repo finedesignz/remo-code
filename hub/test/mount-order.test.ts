@@ -52,6 +52,19 @@ mock.module('../src/db/revanote-dal.ts', () => ({
   ...realRevanoteDal,
   getUserRevanoteWebhookSecret: async () => null, // → revanote 401 unauthorized
 }));
+// Feedback intake: a real key lookup resolves a DISABLED key so the handler
+// returns 403 (route mounted + key resolved + handler ran). Without this mock
+// the unknown-token path returns 404 from the handler — indistinguishable from
+// the catch-all-swallow 404 this test guards against, so we force a deterministic
+// "auth ran" signal instead.
+const realFeedbackDal = await import('../src/db/feedback-dal.ts');
+mock.module('../src/db/feedback-dal.ts', () => ({
+  ...realFeedbackDal,
+  resolveFeedbackKey: async () => ({
+    token_hash: 'x', session_id: 's', user_id: 'u',
+    label: null, enabled: false, created_at: new Date(),
+  }),
+}));
 
 // dal.ts is huge and exports ~101 helpers consumed across the whole app (auth,
 // session, csrf, ...). DO NOT replace it wholesale — re-export the REAL module
@@ -88,6 +101,7 @@ const WEBHOOK_PATHS: Array<{ path: string; note: string }> = [
   { path: '/api/coolify/webhook/user_test/wrong-token', note: 'coolify URL-token' },
   { path: '/api/coolify/webhook/user_test', note: 'coolify legacy HMAC' },
   { path: '/api/revanote/webhook/user_test/wrong-token', note: 'revanote URL-token + HMAC' },
+  { path: '/api/feedback/fb_disabled_token', note: 'feedback intake URL-token (disabled key → 403)' },
   { path: '/api/telegram/webhook/wrong-secret', note: 'telegram URL-secret' },
   { path: '/webhooks/titanium/license-changed', note: 'titanium license-changed HMAC' },
 ];

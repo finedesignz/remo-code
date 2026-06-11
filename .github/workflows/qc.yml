@@ -88,7 +88,8 @@ jobs:
             hub/test/orchestrator-run-log.test.ts \
             hub/test/orchestrator-stage-presets.test.ts \
             hub/test/orchestrator-merge-command.test.ts \
-            hub/test/migrate-legacy-tasks.test.ts
+            hub/test/migrate-legacy-tasks.test.ts \
+            hub/test/feedback-key-ownership.test.ts
 
   post-deploy-smoke:
     name: Post-deploy smoke (prod HTTPS)

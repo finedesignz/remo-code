@@ -26,6 +26,9 @@ import { instructions as instructionsApi } from './api/instructions'
 import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { revanoteWebhookRoutes } from './api/revanote-webhook'
+import { feedbackWebhookRoutes } from './api/feedback-webhook'
+import { feedbackKeys as feedbackKeysApi } from './api/feedback-keys'
+import { sourceIpFromHeaders } from './lib/cidr'
 import { telegramWebhookRoutes } from './api/telegram-webhook'
 import { telegram as telegramApi } from './api/telegram'
 import { revanoteMappings } from './api/revanote-mappings'
@@ -89,11 +92,12 @@ import { withHttpMetrics } from './observability/http-metrics'
 //        - /api/sentry          → sentryIntakeApi          (mounted ~L165)
 //        - /api/coolify         → coolifyWebhookRoutes      (mounted ~L170)
 //        - /api/revanote        → revanoteWebhookRoutes     (mounted ~L175)
+//        - /api/feedback        → feedbackWebhookRoutes      (mounted ~L178)
 //        - /api/telegram        → telegramWebhookRoutes     (mounted ~L181)
 //        - /webhooks/titanium   → webhooksTitanium          (mounted ~L185)
 //      The JWT/auth catch-all is `app.use('/api/*', ...)` (~L190) and its skip
 //      list MUST include each webhook subpath (`/api/sentry/`, `/api/coolify/
-//      webhook/`, `/api/revanote/webhook/`, `/api/telegram/webhook/`).
+//      webhook/`, `/api/revanote/webhook/`, `/api/feedback/`, `/api/telegram/webhook/`).
 //      (`/webhooks/titanium` is outside `/api/*` so the catch-all never sees it.)
 //
 //  (2) LICENSE GATE mounts AFTER auth. `requireActiveLicense` reads `userId`
@@ -146,6 +150,26 @@ app.use('/api/*', cors({
 // bearer-gated readiness endpoint, NOT a substitute for this cheap liveness ping.
 app.get('/health', (c) => c.json({ ok: true }))
 app.get('/healthz', (c) => c.json({ ok: true }))
+
+// Public embeddable feedback widget (Option A). Served at root (no auth) so any
+// app can <script src=".../feedback-widget.js" data-feedback-token="fb_...">.
+// Static, framework-agnostic vanilla JS; the token is supplied by the host page.
+app.get('/feedback-widget.js', async (c) => {
+  const candidates = [
+    resolve(import.meta.dir, '../public/feedback-widget.js'),
+    resolve('./hub/public/feedback-widget.js'),
+    resolve('./public/feedback-widget.js'),
+  ]
+  const path = candidates.find((p) => existsSync(p))
+  if (!path) return c.text('// feedback widget not found', 404)
+  const body = await Bun.file(path).text()
+  return new Response(body, {
+    headers: {
+      'content-type': 'application/javascript; charset=utf-8',
+      'cache-control': 'public, max-age=3600',
+    },
+  })
+})
 
 // B4 (obs): /healthz/deep + /metrics. Bearer-gated via HUB_INTROSPECT_TOKEN.
 // Mounted at root — bypasses /api/* auth, CSRF, license-gate, rate-limit
@@ -233,6 +257,21 @@ app.route('/api/coolify', coolifyWebhookRoutes)
 // (see MOUNT-ORDER INVARIANT (1) at top).
 app.route('/api/revanote', revanoteWebhookRoutes)
 
+// Public end-user feedback intake (Option A). The :token in the URL IS the
+// credential (opaque fb_ token, SHA-256-hashed lookup). MUST be mounted BEFORE
+// the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top). Abuse is bounded by
+// (a) per-token + per-IP rate limits here, (b) the non-bypassable daily cost cap
+// inside dispatch. See hub/src/api/feedback-webhook.ts threat model.
+app.use('/api/feedback/*', rateLimitMulti({
+  buckets: [
+    // Per submit-token: 20/min — bounds a leaked-token flood.
+    { windowMs: 60_000, max: 20, keyFn: (c) => `fbtok:${c.req.path}` },
+    // Per source IP: 10/min — bounds a single-origin flood across tokens.
+    { windowMs: 60_000, max: 10, keyFn: (c) => `fbip:${sourceIpFromHeaders(c.req.raw.headers) || 'anon'}` },
+  ],
+}))
+app.route('/api/feedback', feedbackWebhookRoutes)
+
 // Phase 12: Public Telegram inbound webhook (URL-path secret). MUST be
 // mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
 // Auth is :secret in the URL, constant-time compared to config.telegram.webhookSecret.
@@ -252,6 +291,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
+  if (c.req.path.startsWith('/api/feedback/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   // Phase 07: public auth endpoints (login request-link, callback, logout, me).
   // The authRouter handles its own auth state internally where needed.
@@ -275,6 +315,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
+  if (c.req.path.startsWith('/api/feedback/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
   if (c.req.path.startsWith('/api/setup')) return next()
@@ -388,6 +429,9 @@ app.route('/api/errors', errorsRouter)
 app.route('/api/error-runs', errorRunsRouter)
 app.route('/api/chat-tabs', chatTabsApi)
 app.route('/api/repo-groups', repoGroupsApi)
+// Feedback intake (Option A): authed key management (mint/list/disable). The
+// PUBLIC submit endpoint is /api/feedback/:token (mounted above, pre-auth).
+app.route('/api/feedback-keys', feedbackKeysApi)
 app.route('/api/instructions', instructionsApi)
 app.route('/api/error-setup', errorSetupApi)
 // Phase 08: JWT-authed revanote sub-routes (mappings + annotations).

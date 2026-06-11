@@ -663,6 +663,43 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   return c.json({ templates: TASK_TEMPLATES }, 200);
 });
 
+// ── Feedback intake (Option A) — public end-user feedback webhook ───────────
+// Spec-only registration. The plain-Hono router in `./feedback-webhook.ts`
+// serves traffic (mounted public, BEFORE the JWT catch-all); this only
+// contributes to the OpenAPI spec. No security scheme — the URL :token IS the
+// credential.
+{
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  reg.registerPath({
+    method: "post",
+    path: "/api/feedback/{token}",
+    tags: ["feedback"],
+    summary: "Submit end-user feedback (screenshot + description) into the bound session",
+    description:
+      "Public, unauthenticated-by-design. The opaque `fb_` token in the URL IS the credential (SHA-256-hashed lookup against feedback_keys). Accepts a bug description, optional screenshot (base64 data-URI), page URL, and captured console errors, and dispatches them into the app's bound remo-code session via the shared cost-capped dispatch pipeline. Bounded by per-token + per-IP rate limits and the non-bypassable daily cost cap.",
+    request: {
+      params: z.object({ token: z.string().openapi({ example: "fb_AbC123..." }) }),
+      body: json(
+        z.object({
+          comment: z.string().min(1).max(5000).openapi({ description: "Required bug/feedback description." }),
+          screenshot: z.string().optional().openapi({ description: "Optional base64 data-URI image (image/png|jpeg|gif|webp), ≤~10MB." }),
+          page_url: z.string().optional(),
+          console_errors: z.string().max(20000).optional(),
+        }),
+      ),
+    },
+    responses: {
+      202: { description: "Accepted + dispatched (fire-and-forget)", ...json(z.object({ ok: z.boolean(), status: z.string() })) },
+      400: { description: "Missing/invalid comment or screenshot", ...json(z.object({ error: z.string() })) },
+      403: { description: "Feedback key disabled", ...json(z.object({ error: z.string() })) },
+      404: { description: "Unknown token", ...json(z.object({ error: z.string() })) },
+      413: { description: "Payload too large (comment/screenshot/console_errors cap)", ...json(z.object({ error: z.string() })) },
+      429: { description: "Rate limited (per-token or per-IP)", ...json(z.object({ error: z.string() })) },
+    },
+  });
+}
+
 // OpenAPI security scheme registration.
 openapi.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
   type: "http",
