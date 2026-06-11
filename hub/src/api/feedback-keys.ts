@@ -14,6 +14,7 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import {
   createFeedbackKey,
+  FeedbackSessionNotOwned,
   listFeedbackKeys,
   setFeedbackKeyEnabled,
 } from '../db/feedback-dal.ts'
@@ -40,8 +41,15 @@ feedbackKeys.post('/', async (c) => {
   const parsed = CreateBody.safeParse(body)
   if (!parsed.success) return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400)
   const { session_id, label } = parsed.data
-  const { token, token_hash } = await createFeedbackKey(session_id, userId, label ?? null)
-  return c.json({ token, token_hash }, 201)
+  let minted: { token: string; token_hash: string }
+  try {
+    minted = await createFeedbackKey(session_id, userId, label ?? null)
+  } catch (err) {
+    // BLOCKER-1: foreign / unknown session — never bind a key to another user's session.
+    if (err instanceof FeedbackSessionNotOwned) return c.json({ error: 'session_not_found' }, 404)
+    throw err
+  }
+  return c.json({ token: minted.token, token_hash: minted.token_hash }, 201)
 })
 
 // PATCH /:token_hash → { enabled } toggle. 404 if not the user's key.

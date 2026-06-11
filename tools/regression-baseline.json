@@ -7,9 +7,9 @@
   "fail": 0,
   "total": 1474,
   "tolerance": {
-    "_comment": "Allow modest growth without churn; any fail > 0 always fails CI. skip_max raised to 175 for Phase 22 (orchestrator-queue) env-gated (REMO_E2E_DB_URL) e2e skips, matching the Phase 21 data-model e2e gating.",
+    "_comment": "Allow modest growth without churn; any fail > 0 always fails CI. skip_max raised to 175 for Phase 22 (orchestrator-queue) env-gated (REMO_E2E_DB_URL) e2e skips, matching the Phase 21 data-model e2e gating. Raised to 178 for the feedback-intake key-ownership e2e (REMO_E2E_DB_URL-gated, BLOCKER-1 regression).",
     "pass_min": 700,
-    "skip_max": 175,
+    "skip_max": 178,
     "fail_max": 0
   }
 }

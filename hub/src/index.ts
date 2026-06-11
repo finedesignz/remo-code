@@ -28,6 +28,7 @@ import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { revanoteWebhookRoutes } from './api/revanote-webhook'
 import { feedbackWebhookRoutes } from './api/feedback-webhook'
 import { feedbackKeys as feedbackKeysApi } from './api/feedback-keys'
+import { sourceIpFromHeaders } from './lib/cidr'
 import { telegramWebhookRoutes } from './api/telegram-webhook'
 import { telegram as telegramApi } from './api/telegram'
 import { revanoteMappings } from './api/revanote-mappings'
@@ -266,7 +267,7 @@ app.use('/api/feedback/*', rateLimitMulti({
     // Per submit-token: 20/min — bounds a leaked-token flood.
     { windowMs: 60_000, max: 20, keyFn: (c) => `fbtok:${c.req.path}` },
     // Per source IP: 10/min — bounds a single-origin flood across tokens.
-    { windowMs: 60_000, max: 10, keyFn: (c) => `fbip:${c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || 'anon'}` },
+    { windowMs: 60_000, max: 10, keyFn: (c) => `fbip:${sourceIpFromHeaders(c.req.raw.headers) || 'anon'}` },
   ],
 }))
 app.route('/api/feedback', feedbackWebhookRoutes)

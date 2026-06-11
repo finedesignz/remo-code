@@ -60,6 +60,9 @@ const PAGE_URL_MAX = 2_048
 // base64 string is ~4/3 the raw size, so cap the encoded length accordingly.
 const SCREENSHOT_RAW_MAX = 10 * 1024 * 1024
 const SCREENSHOT_B64_MAX = Math.ceil(SCREENSHOT_RAW_MAX * 4 / 3) + 16
+// Whole-request ceiling (screenshot b64 + comment + console_errors + JSON
+// overhead) — checked against Content-Length before buffering the body.
+const BODY_MAX = SCREENSHOT_B64_MAX + COMMENT_MAX + CONSOLE_MAX + PAGE_URL_MAX + 4_096
 
 // data:<media_type>;base64,<data>
 const DATA_URI_RE = /^data:([a-z]+\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i
@@ -75,8 +78,16 @@ feedbackWebhookRoutes.post('/:token', async (c) => {
   if (!key) return c.json({ error: 'not_found' }, 404)
   if (!key.enabled) return c.json({ error: 'key_disabled' }, 403)
 
-  // 2. Parse + validate the body. Standard JSON parse is fine: auth is the URL
-  //    token, NOT an HMAC over the raw body, so there is no raw-body invariant.
+  // 2. Size gate BEFORE buffering (LOW-1): reject oversized payloads on the
+  //    declared Content-Length so we never read + hold 2-3× a >10MB body. The
+  //    per-field caps below still re-check the actual decoded sizes.
+  const declaredLen = Number(c.req.header('content-length') ?? '0')
+  if (Number.isFinite(declaredLen) && declaredLen > BODY_MAX) {
+    return c.json({ error: 'payload_too_large', max_bytes: BODY_MAX }, 413)
+  }
+
+  // Parse + validate the body. Standard JSON parse is fine: auth is the URL
+  // token, NOT an HMAC over the raw body, so there is no raw-body invariant.
   let body: any
   try {
     body = await c.req.json()

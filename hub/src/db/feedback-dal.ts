@@ -29,15 +29,39 @@ export interface FeedbackKeyRow {
 }
 
 /**
+ * Thrown when the supplied `sessionId` is not owned by `userId` (or does not
+ * exist). The route maps this to 404 — never bind a feedback key to another
+ * user's session (cross-user escalation: a leaked token would inject into the
+ * other user's live agent). See SECURITY.md BLOCKER-1.
+ */
+export class FeedbackSessionNotOwned extends Error {
+  constructor() {
+    super('session_not_owned')
+    this.name = 'FeedbackSessionNotOwned'
+  }
+}
+
+/**
  * Mint a feedback key for `sessionId` owned by `userId`. Returns the plaintext
  * token ONCE — the caller must surface it immediately; it is unrecoverable
  * afterwards. Only the hash is persisted.
+ *
+ * SECURITY (BLOCKER-1): asserts the session belongs to `userId` BEFORE insert.
+ * A foreign / unknown `sessionId` throws `FeedbackSessionNotOwned` (→ 404) so a
+ * key can never be bound to another user's session.
  */
 export async function createFeedbackKey(
   sessionId: string,
   userId: string,
   label: string | null = null,
 ): Promise<{ token: string; token_hash: string }> {
+  const owned = await sql<{ id: string }[]>`
+    SELECT id FROM sessions
+     WHERE id = ${sessionId} AND user_id = ${userId}
+     LIMIT 1
+  `
+  if (owned.length === 0) throw new FeedbackSessionNotOwned()
+
   const token = 'fb_' + randomBytes(32).toString('base64url')
   const tokenHash = hashFeedbackToken(token)
   await sql`
