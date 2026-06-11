@@ -191,6 +191,12 @@ As of the Round-2 hub-deepening refactor, `dispatcher.ts` is a **thin adapter ov
    - `skipped` (gate block, e.g. cost-cap / threshold) → status `skipped(<reason>)`.
    - `failed` (send threw) → status `failed` + run `failed` + throttled `dispatch_failed` email.
 
+### Spawn-on-error (opt-in lazy session start)
+
+By default an inbound error whose bound session is **offline** finalizes `skipped(session_offline)` (above). With `REMO_SPAWN_ON_ERROR=1` (default **OFF** — ships dormant), the dispatcher passes an `ensureOnline` hook to the pipeline: when a gated, accepted repair targets an offline-but-existing session, `hub/src/dispatch/spawn-on-error.ts` **lazy-starts** that session via the supervisor's real `session.start` directive (NOT the dead `session.launch` drift), waits up to `REMO_SPAWN_ON_ERROR_TIMEOUT_MS` (default 25s) for the agent socket to appear, then dispatches — so idle apps auto-repair.
+
+It runs **strictly after** the gate list (cost-cap / threshold / dedupe / rate-limit stay non-bypassable — a gated repair never spawns). Leak-safety: it uses the same hub-authoritative `reserveSessionSlot` → `createRun` → `session.start` sequence as the web/start endpoints, with `endRun` + `releaseSessionSlot` on send failure and a per-session in-flight lock; at capacity / no supervisor / timeout it returns false and the pipeline falls back to the existing park/skip (no orphan run). Flag OFF reproduces today's behaviour exactly.
+
 Finalize happens via the **pipeline finalize hook**, not a per-subsystem run-lifecycle: the `/ws/agent` `assistant_message` branch calls `dispatch.onSessionReply(sessionId, content)`, which fires the in-flight error run's `RunStore.onFinalize` (→ `success`, `output_snippet`, `error_run_finished`) and then promotes/re-dispatches any queued errorId.
 
 > **Transitional dual-path (Round-2 pilot):** error-capture is the FIRST subsystem migrated onto the shared pipeline. The `assistant_message` branch in `hub/src/ws/agent.ts` calls `onSessionReply` AND still calls the not-yet-migrated scheduler/triage/revanote `onAssistantMessage`/`onAgentReply` hooks. `onSessionReply` no-ops for any session without an active pipeline hook, so the calls coexist safely. The `// TODO(round2): collapse to onSessionReply once all subsystems migrated` comment marks where the legacy calls are removed once revanote/scheduler/telegram land on the pipeline.

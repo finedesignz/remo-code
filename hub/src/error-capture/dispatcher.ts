@@ -50,6 +50,7 @@ import {
   type RunStore,
 } from '../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate } from '../dispatch/gates.ts'
+import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
 
 export type DispatchOutcome =
   | { status: 'dispatched'; run_id: string }
@@ -164,6 +165,11 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
     gates: [thresholdGate, dailyCostCapGate],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
+    // Spawn-on-error (opt-in via REMO_SPAWN_ON_ERROR): when the bound session
+    // is offline, lazy-START it via the supervisor before parking, so an idle
+    // app actually auto-repairs. Runs only after the gate list passes (cost-cap
+    // etc. stay non-bypassable); leak-safe + dormant by default.
+    ensureOnline: (req) => ensureSessionOnline(req.userId, req.sessionId),
     // Offline replay: re-run the full dispatch for this pending error.
     replay: async () => {
       await dispatchPendingError(errorId)
