@@ -20,20 +20,32 @@
  *      so the run row never sits open (the at-capacity orphan-run leak class).
  *   5. Poll for the agent socket to appear up to a bounded timeout
  *      (`REMO_SPAWN_ON_ERROR_TIMEOUT_MS`, default 25s). Online in time → return
- *      true (pipeline proceeds to send). Timeout → return false; the run we
- *      created is a REAL spawning run (the supervisor owns its lifecycle and
- *      will close it on exit), and the pipeline falls back to park/skip — the
- *      drained grace replay (or the spawned runner's own first turn) handles the
- *      repair. We do NOT force-close a run that may still be coming up.
- *
- * Runaway guard: at most ONE in-flight spawn per session (an in-memory lock).
- * A second repair for a session already spawning skips the start and just waits
- * on / falls through with the existing attempt.
+ *      true (pipeline proceeds to send). Timeout → proactively `endRun` +
+ *      `releaseSessionSlot` to free the slot NOW (HIGH-1 leak fix) and return
+ *      false; the pipeline falls back to park/skip — the drained grace replay
+ *      (or, if the supervisor was merely slow and brings the runner up later,
+ *      its own first turn) handles the repair.
  *
  * Leak-safety summary: the only place a run row is created is step 4, guarded by
  * the same reserve→create→send→(release-on-failure) sequence the web/start and
- * supervisors/start endpoints use. A reservation that wins but whose send throws
- * is released; a reservation at capacity creates nothing.
+ * supervisors/start endpoints use. EVERY outcome closes/frees the slot on a
+ * bounded, connection-independent timescale: a reservation at capacity creates
+ * nothing; createRun-throw releases; send-throw endRun+releases; success →
+ * supervisor `runner.exit` closes it; TIMEOUT → we proactively endRun+release
+ * (the spawn-on-error run has `session_id=null`, so the in-band
+ * close-by-session path can never reap it — the proactive close is what bounds
+ * it to MINUTES, not the 24h reconnect sweep). NO path leaves a NULL-session
+ * run open past the timeout.
+ *
+ * Single-replica assumption (MED-1): the in-process `spawningSessions` lock
+ * (below) is the double-spawn guard. It is correct WITHIN one process (the
+ * has()/add() is synchronous — no await between them). The hub Dockerfile runs
+ * a single `bun hub/src/index.ts` process and prod is deployed single-replica
+ * on Coolify, so a cross-process lock is unnecessary. The cap reservation
+ * (`reserveSessionSlot`) IS cross-process (`FOR UPDATE`), and the supervisor's
+ * own `duplicate_run` guard is a final backstop. FOLLOW-UP: if the hub is ever
+ * scaled to >1 replica, replace this Set with a DB advisory lock /
+ * `INSERT ... ON CONFLICT` sentinel keyed by session_id.
  */
 import { getChannel } from '../ws/registry.ts'
 import { log } from '../observability/logger.ts'
@@ -139,7 +151,7 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
 
     const { reserveSessionSlot, releaseSessionSlot } = await import('../sessions/budget.ts')
     const { createRun, endRun } = await import('../db/supervisor-dal.ts')
-    const { sendToSupervisor, updateSupervisorState } = await import('../ws/supervisor-registry.ts')
+    const { sendToSupervisor } = await import('../ws/supervisor-registry.ts')
 
     // Concurrency gate — SAME hub-authoritative reservation every start sender
     // uses. At capacity → no run row, no leak, fall back to park/skip.
@@ -205,9 +217,13 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
       return false
     }
 
-    try {
-      await updateSupervisorState(supervisorId, 'starting', runId)
-    } catch {}
+    // HIGH-2: do NOT pre-emptively set the supervisor row to
+    // state='starting', current_run_id=<our runId>. If the supervisor's cap
+    // is >1 it may already have a live run, and forcing the row here clobbers
+    // that run's current_run_id, desyncing the UI from the actually-active
+    // run. The supervisor's own `status` announcements (handled in
+    // ws/agent.ts) carry the real run_id and are authoritative — let them own
+    // lifecycle state. Spawn-on-error must not author supervisor state.
 
     log.info('spawn_on_error.started', {
       user_id: userId,
@@ -217,15 +233,50 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
     })
 
     const online = await waitForOnline(sessionId, Date.now() + spawnTimeoutMs())
-    log.info(online ? 'spawn_on_error.online' : 'spawn_on_error.timeout', {
+    if (online) {
+      log.info('spawn_on_error.online', {
+        user_id: userId,
+        session_id: sessionId,
+        run_id: runId,
+      })
+      return online
+    }
+
+    // HIGH-1 (the leak fix): on TIMEOUT, proactively finalize the run instead
+    // of leaving it open for the supervisor. The created row has
+    // session_id=null, so the in-band close-by-session path
+    // (endOpenRunsForSession) can NEVER reach it — if the supervisor silently
+    // dropped `session.start` (its own concurrency gate, not_git_repo, parse
+    // mismatch, or any path that never echoes run_id back), this row would sit
+    // `ended_at IS NULL`, counting against the concurrency cap, until WS-close
+    // or the 24h reconnect stale-sweep. Repeated errors against an idle/
+    // declining supervisor would accumulate NULL-session open rows → cap
+    // exhaustion → blocks ALL launches incl. orchestrator (the known
+    // at_capacity orphan-run leak class).
+    //
+    // So we write ended_at NOW (frees the slot, connection-independent,
+    // minutes-scale bound = the timeout itself) and fall back to park/skip,
+    // which the pipeline already does on `false`. If the supervisor genuinely
+    // did spawn a runner for this run_id and is merely slow, closing the row
+    // is harmless: there is no in-flight hub turn expected on this run (the
+    // pipeline parked), and the supervisor's `duplicate_run` guard /
+    // `runner.exit` reconciliation tolerate the already-closed row.
+    try {
+      await endRun(runId, null, 'spawn_on_error_timeout')
+    } catch (err: any) {
+      log.error('spawn_on_error.timeout_endrun_failed', {
+        user_id: userId,
+        session_id: sessionId,
+        run_id: runId,
+        error: err?.message ?? String(err),
+      })
+    }
+    await releaseSessionSlot(userId, supervisorId)
+    log.info('spawn_on_error.timeout', {
       user_id: userId,
       session_id: sessionId,
       run_id: runId,
     })
-    // On timeout we deliberately leave the run row alone: it is a genuine
-    // spawning run whose lifecycle the supervisor owns (it will close it on
-    // exit). The pipeline falls back to park/skip; the grace drain (or the
-    // runner's own first turn after it finishes coming up) handles the repair.
     return online
   } finally {
     spawningSessions.delete(sessionId)

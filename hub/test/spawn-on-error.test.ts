@@ -9,9 +9,9 @@
  *   - flag OFF (default)              → no spawn, ensureSessionOnline=false.
  *   - flag ON + offline + supervisor connected + headroom
  *                                     → session.start sent, returns true once online.
- *   - spawn timeout                   → returns false, NO orphan run left open
- *                                       (createRun called once, endRun NOT called,
- *                                       the run is a real spawning run).
+ *   - spawn timeout                   → returns false, run proactively finalized
+ *                                       (createRun once, endRun('spawn_on_error_timeout')
+ *                                       + releaseSessionSlot — slot freed, no leak).
  *   - no supervisor connected         → no spawn, false.
  *   - concurrency cap reached         → no spawn (no createRun), false.
  *   - already online                  → true immediately, no spawn.
@@ -181,16 +181,20 @@ describe('spawn-on-error: ensureSessionOnline', () => {
     expect(state.endRunCalls.length).toBe(0)
   })
 
-  test('spawn timeout → false, run NOT force-closed (no orphan-close), no release', async () => {
+  test('spawn timeout → false, run proactively finalized + slot freed (HIGH-1/LOW-2 leak closed)', async () => {
     state.online = false // never comes online
     const ok = await ensureSessionOnline('u1', 's1')
     expect(ok).toBe(false)
     expect(state.createRunCalls).toBe(1)
     expect(state.sentMessages.length).toBe(1)
-    // The run is a genuine spawning run the supervisor owns — we do NOT endRun
-    // it on timeout, and we do NOT release (slot stays reserved for the run).
-    expect(state.endRunCalls.length).toBe(0)
-    expect(state.releaseCalls).toBe(0)
+    // HIGH-1: on timeout we proactively finalize the NULL-session run (write
+    // ended_at) and release the slot, so a silently-dropped session.start can
+    // never strand an open run against the cap. The bound is the timeout
+    // itself (minutes-scale), connection-independent — NOT the 24h sweep.
+    expect(state.endRunCalls.length).toBe(1)
+    expect(state.endRunCalls[0][0]).toBe('run-1')
+    expect(state.endRunCalls[0][2]).toBe('spawn_on_error_timeout')
+    expect(state.releaseCalls).toBe(1)
   })
 
   test('send failure → endRun + releaseSessionSlot (no leak), false', async () => {
