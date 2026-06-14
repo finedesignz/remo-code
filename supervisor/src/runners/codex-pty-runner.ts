@@ -18,8 +18,10 @@
  *   3. Human-only: this runner only ever sees genuine human keystrokes; it rides
  *      the Phase-16 human-only dispatch guard (runner_type='pty-interactive').
  *      Automation never touches the PTY.
- *   5. Interactive `codex` ONLY: argv is EMPTY. NO programmatic/headless flags
- *      (no `app-server`, `exec`, `-p`, `--print`, `--input-format`,
+ *   5. Interactive `codex` ONLY: argv is an ALLOWLIST OF ONE — empty, except for
+ *      the optional operator-blessed `--dangerously-skip-permissions` permission
+ *      flag (gated by config `allowDangerousSkipPermissions`). NO programmatic/
+ *      headless flags (no `app-server`, `exec`, `-p`, `--print`, `--input-format`,
  *      `--output-format`, `stream-json` — those belong to the PRESERVED
  *      automation path, never the PTY). This module emits RAW BYTES and MUST NOT
  *      translate to the structured RunnerEvent union, import agent-protocol, or
@@ -89,6 +91,9 @@ export interface PtyRunnerOpts {
   rows?: number
   onData: (bytes: string) => void
   onExit?: (code: number | null) => void
+  /** Operator-gated bypass (config `allowDangerousSkipPermissions`). When true,
+   *  appends the SOLE permitted argv token `--dangerously-skip-permissions`. */
+  dangerouslySkipPermissions?: boolean
 }
 
 /** Build the env handed to the PTY host for a Codex session. Exported pure
@@ -121,8 +126,10 @@ export class CodexPtyRunner {
     this.host = hostSpawn('node', [HOST_PATH], { env })
     this.host.stdout?.on('data', (chunk) => this.onHostData(chunk))
     this.host.on('exit', (code) => { this.opts?.onExit?.(code); this.host = null })
-    // CONSTRAINT 5 — file 'codex', argv EMPTY. No programmatic/headless flags. EVER.
-    this.sendFrame({ t: 'spawn', file: 'codex', args: [], cwd: opts.cwd, cols: opts.cols ?? 80, rows: opts.rows ?? 24 })
+    // CONSTRAINT 5 — file 'codex'. argv is an allowlist-of-one: empty, plus the
+    // optional operator-blessed --dangerously-skip-permissions. No programmatic/headless flags. EVER.
+    const args = opts.dangerouslySkipPermissions ? ['--dangerously-skip-permissions'] : []
+    this.sendFrame({ t: 'spawn', file: 'codex', args, cwd: opts.cwd, cols: opts.cols ?? 80, rows: opts.rows ?? 24 })
   }
 
   /** Raw keystrokes from the human terminal → the PTY. */

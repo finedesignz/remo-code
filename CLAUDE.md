@@ -236,8 +236,12 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 - **Don't hand-roll per-subsystem dispatch/queue/grace.** Round-2 collapse is complete — use
   `hub/src/dispatch/` (the old `scheduler/session-queue.ts` shim is deleted).
 - **No provider API key on the human PTY path — EVER.** The interactive terminal surface spawns the
-  GENUINE `claude`/`codex` TUI with EMPTY argv (no `-p`/`--input-format`/`--output-format`/`stream-json`)
-  and routes every spawn env through the shared `supervisor/src/runners/env-sanitize.ts` (named denylist +
+  GENUINE `claude`/`codex` TUI with an ALLOWLIST-OF-ONE argv — empty except for the optional
+  operator-blessed `--dangerously-skip-permissions` (a PERMISSION flag, gated by config
+  `allowDangerousSkipPermissions`; same ceiling as the stream-json runner). The forbidden programmatic
+  tokens stay forbidden: no `-p`/`--print`/`--input-format`/`--output-format`/`stream-json`, no API key.
+  The bridge threads it as the spawn-frame `dangerously_skip_permissions` field; `pty_host.rs` turns it
+  into the sole argv token. It routes every spawn env through the shared `supervisor/src/runners/env-sanitize.ts` (named denylist +
   anchored credential-class patterns; scrubs inherited vars + setup-token). Fallback is a backend-CLI swap
   (Codex via ChatGPT sign-in, stubbed Gemini), never the API. The fail-safe default-backend selector
   (`backend-selector.ts`) resolves human sessions to `claude-pty`/`codex-pty` only — never the legacy

@@ -17,9 +17,13 @@
 //!      fallback. (CommandBuilder::env_remove)
 //!   2. Official `claude` / `codex` binary only. This host never reads/stores/
 //!      forwards the OAuth token / credentials of either client.
-//!   5. Interactive ONLY: argv is EMPTY. NO -p / --print / --input-format /
-//!      --output-format / stream-json / app-server / exec. Raw bytes only — this
-//!      module does NOT translate to RunnerEvent / agent-protocol / session-bridge.
+//!   5. Interactive ONLY: argv is an ALLOWLIST OF ONE — empty, except for the
+//!      optional operator-blessed --dangerously-skip-permissions permission flag
+//!      (set when the spawn frame's `dangerously_skip_permissions` is true; gated
+//!      upstream by config `allowDangerousSkipPermissions`). NO -p / --print /
+//!      --input-format / --output-format / stream-json / app-server / exec — those
+//!      programmatic flags stay forbidden. Raw bytes only — this module does NOT
+//!      translate to RunnerEvent / agent-protocol / session-bridge.
 //!
 //! TRANSPORT (Bun <-> Rust local channel): a loopback TCP server on
 //! 127.0.0.1:<ephemeral>. The chosen port is written to a small token file the
@@ -127,6 +131,7 @@ fn spawn_session(
     cwd: Option<String>,
     cols: u16,
     rows: u16,
+    dangerously_skip_permissions: bool,
 ) -> std::io::Result<(Arc<Mutex<RingBuffer>>, Option<u32>)> {
     let mut sessions = SESSIONS.lock();
     if let Some(existing) = sessions.get(session_id) {
@@ -139,9 +144,13 @@ fn spawn_session(
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-    // CONSTRAINT 5 — selected interactive binary (`claude`/`codex`), EMPTY argv.
-    // No programmatic/headless flags. Ever.
+    // CONSTRAINT 5 — selected interactive binary (`claude`/`codex`). argv is an
+    // allowlist-of-one: empty, plus the optional operator-blessed
+    // --dangerously-skip-permissions. No programmatic/headless flags. Ever.
     let mut cmd = CommandBuilder::new(resolve_cli_binary(cli));
+    if dangerously_skip_permissions {
+        cmd.arg("--dangerously-skip-permissions");
+    }
     build_pty_env(&mut cmd); // CONSTRAINT 1
     if let Some(dir) = cwd {
         cmd.cwd(dir);
@@ -342,9 +351,15 @@ fn handle_frame(
             let cwd = v.get("cwd").and_then(|x| x.as_str()).map(|s| s.to_string());
             let cols = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
             let rows = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
+            // Operator-gated bypass (config allowDangerousSkipPermissions upstream).
+            // Honored only on a fresh spawn; spawn_session is idempotent on reattach.
+            let skip_perms = v
+                .get("dangerously_skip_permissions")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
             *session_id = Some(sid.clone());
 
-            match spawn_session(&sid, &cli, cwd, cols, rows) {
+            match spawn_session(&sid, &cli, cwd, cols, rows, skip_perms) {
                 Ok((ring, pid)) => {
                     send_frame(writer, &serde_json::json!({ "t": "spawned", "pid": pid }));
                     // Replay scrollback (reattach) BEFORE wiring live output, so

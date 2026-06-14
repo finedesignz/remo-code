@@ -405,6 +405,9 @@ export class SessionBridge {
       cwd: this.opts.repoPath,
       cols: 100,
       rows: 30,
+      // Operator-gated bypass — same ceiling as the stream-json runner. The PTY
+      // appends `--dangerously-skip-permissions` (its SOLE permitted argv token).
+      dangerouslySkipPermissions: this.opts.allowDangerousSkipPermissions,
       onData: (bytes) => {
         if (sessionId) { try { ptyPersistence.recordOutput(sessionId, bytes) } catch {} }
         emitTerm(bytes)
