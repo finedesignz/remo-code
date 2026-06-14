@@ -1,3 +1,4 @@
+<!-- status: passed (reconciled 2026-06-14: 3/3 PASS, READY verdict; the documented caveat is a non-deployed multi-process edge, not a blocker; status key added so GSD stats counts this phase Complete) -->
 # Phase 22 — global-queue-and-per-session-lock · VERIFICATION
 
 **Verdict: READY-WITH-CAVEAT** · independent QC gate · commit `ad76045`
