@@ -1,3 +1,4 @@
+<!-- status: passed (reconciled 2026-06-14: 4/4 PASS, READY/SHIP verdict; status key added so GSD stats counts this phase Complete) -->
 # Phase 21 — orchestrator-data-model · VERIFICATION
 
 **Verdict: READY (SHIP)** · independent QC gate · commit `7fcc433`

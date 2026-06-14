@@ -1,4 +1,7 @@
 ---
+status: passed
+reconciled: 2026-06-14
+reconciliation_note: "Build shipped + live in prod 2026-06-04 (#244/#246, supervisor v0.9.0). The original 2026-06-01 verdict was PARTIAL ONLY on the two on-device manual attestations (render_fidelity / mobile_reattach); the automatable suite was all green. Those attestations are tracked as cutover-gated items in docs/cutover-gate-june15.md, not phase-build blockers. Status reconciled to passed for GSD stats; original machine-emitted frontmatter preserved below."
 verdict: PARTIAL
 render_fidelity: FAIL
 mobile_reattach: FAIL

@@ -209,11 +209,12 @@ Source of truth for phase ordering, status, and dependencies. The GSD SDK parses
 
 ## Phase 15: pty-spike-and-compile-derisk
 
-- Status: Planned
+- Status: Complete
 - Mode: standard
 - Goal: Prove the core PTY mechanic end-to-end and derisk the known blocker. Spawn the genuine *interactive* `claude` TUI (no `-p`, no `--input-format stream-json`) inside a PTY (`node-pty`/ConPTY on Windows) on the supervisor box with `ANTHROPIC_API_KEY` deleted from env; stream raw terminal bytes to a minimal themed xterm.js panel in the web shell over a NEW raw-terminal WS channel (kept isolated from the structured `/ws/agent` RunnerEvent pipeline); accept a typed human turn and render the TUI. **Primary derisk:** `node-pty` is a native addon and does NOT bundle into `bun build --compile` (the Tauri sidecar) — Phase 15 must determine and demonstrate how the PTY host ships in the compiled sidecar (bundle the native module, ship a helper exe, or run the PTY host out-of-band) and document the chosen approach for Phase 16. Not throwaway — this is the seed of the runner. Spike findings written to a SPIKE/RESEARCH artifact that Phase 16 consumes.
 - Depends on: []
 - Requirements: [R-PTY-01, R-PTY-02, R-PTY-03, R-PTY-04, R-PTY-05]
+- Outcome (shipped 2026-06-04): interactive `claude` PTY mechanic proven + native-module/bun-compile shipping derisked (Rust ConPTY path chosen, see 15-SPIKE-FINDINGS / 16-SPIKE-FINDINGS-rust-conpty); seeded the live runner.
 - Phase dir: `.planning/phases/15-pty-spike-and-compile-derisk/`
 - Plans:
   - `15-PLAN-001-pty-spawn-and-canary` — wave 1 — interactive `claude` in node-pty, env-strip, build-time canary (R-PTY-01)
@@ -222,47 +223,52 @@ Source of truth for phase ordering, status, and dependencies. The GSD SDK parses
 
 ## Phase 16: hardened-pty-relay-and-mobile-terminal
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: Productionize the spike into a hardened relay. New `supervisor/src/runners/claude-pty-runner.ts` (interactive `claude` in a PTY, `delete env.ANTHROPIC_API_KEY`, NO RunnerEvent translation — raw bytes only) using the Phase-15 sidecar-shipping approach; tmux-backed persistence so a dropped phone/browser connection reattaches with no lost state; authenticated raw-terminal WS channel (data in/out, resize, reattach/scrollback) relayed `/ws/client` ↔ `/ws/agent`, isolated from the structured agent-protocol; themed xterm.js terminal surface in the React shell (app chrome/sidebar/nav/theme tokens `--bg-primary`/`--text-primary`/blue-accent unchanged) with mobile reconnect/resize/scrollback. A dispatch guard rejects non-interactive/automation sources from the PTY runner (constraint 3). Per-session runner type (PTY-interactive vs stream-json). **Note (superseded by Phase 20):** this phase's original "Telegram-default sessions MUST stay stream-json" (R-PTY-11) holds only until Phase 17 deletes the stream-json human runner; Phase 20 then moves Telegram onto the PTY surface via transcript-tail. The per-session runner-type seam built here is what Phase 20 reuses. Reuses existing opaque-cookie auth + WS infra.
 - Depends on: [Phase 15]
 - Requirements: [R-PTY-06, R-PTY-07, R-PTY-08, R-PTY-09, R-PTY-10, R-PTY-11]
+- Outcome (shipped 2026-06-04, #244/#246, supervisor v0.9.0): hardened Rust-ConPTY relay + authenticated raw-terminal WS + human-only dispatch guard + per-session runner type, live in prod. Build complete; the on-device render-fidelity / mobile-reattach manual attestations remain separately gated (see `docs/cutover-gate-june15.md`).
 - Phase dir: `.planning/phases/16-hardened-pty-relay-and-mobile-terminal/`
 
 ## Phase 17: codex-pty-runner-and-chatsurface-rip-and-replace
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: Execute the rip-and-replace OVERRIDE. (a) Add a Codex interactive/PTY runner (`supervisor/src/runners/codex-pty-runner.ts`) so Codex human sessions also run on the raw-terminal surface, reusing the Phase-16 PTY host + raw-terminal WS + tmux. (b) DELETE the stream-json human chat UI entirely from web/src: `ChatSurface` and its `full`/`cell`/`mobile-expanded` variants, the grid/list conversation rendering of structured activity (thinking/text_delta/tool_use/tool_result bubbles), and any now-dead hub agent-protocol→bubble translation that exists ONLY to feed that UI. Route ALL human sessions (Claude AND Codex) to the single themed xterm.js terminal surface. (c) Preserve stream-json end-to-end ONLY for unattended automation transports (Phase 18 owns the routing) — do not delete the runner-side stream-json path, only its human chat UI. Update grid view to host terminal cells (or remove grid conversation rendering) consistent with one terminal surface. Tests (`web/test/no-indigo.test.ts`, baseline) stay green; new tests assert no `ChatSurface`/structured-bubble rendering path remains for human sessions. **EXPLICIT BREAK (not silent): the Telegram bridge's structured event source (`assistant_message:final`/`tool_use` on the hub event bus + the `permission_request`→`onPermissionPending` path) is removed here, leaving Telegram non-functional. Telegram is rebuilt in Phase 20 on transcript-tail.** Phase 17 SHALL leave a code comment / SUMMARY note at each removed Telegram source point pointing to Phase 20, and MUST NOT delete the Telegram bridge module wholesale (Phase 20 re-sources it).
 - Depends on: [Phase 16]
 - Requirements: [R-PTY-12, R-PTY-13, R-PTY-14, R-PTY-15, R-PTY-16, R-TG-12]
+- Outcome (shipped 2026-06-04, #244/#245): Codex PTY runner added and ALL human sessions routed to the single themed xterm.js TerminalSurface (web defaults to it via the hub `pty_interactive` flag); Telegram's structured event source removed as planned (rebuilt in Phase 20). Build complete; the irreversible ChatSurface **deletion** is deliberately deferred — ChatSurface is KEPT as a fallback, gated on `tools/cutover-deletion-gate.mjs` + post-June-15 attestation.
 - Phase dir: `.planning/phases/17-codex-pty-runner-and-chatsurface-rip-and-replace/`
 
 ## Phase 18: billing-guardrail-dual-bucket-usage
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: Billing guardrail. Extend the existing usage poll (`supervisor/src/usage/oauth-poll.ts` → hub store `hub/src/usage/store.ts`) to surface BOTH balances — interactive subscription pool AND the post-June-15 programmatic credit pool — broadcast via the existing `subscription_usage` WS path and rendered in the usage strip/tab. Alert + optional hard-halt when programmatic credit is consumed unexpectedly (no silent drain, no surprise hard-stop). This is where unattended automation (scheduler / orchestrator background / auto-dev / error-capture) is explicitly routed onto the stream-json/programmatic path behind the existing non-bypassable `dailyCostCapGate`, with the PTY-runner human guard (Phase 16) ensuring automation never rides the interactive PTY path. NOT an API key anywhere.
 - Depends on: [Phase 16]
 - Requirements: [R-PTY-17, R-PTY-18, R-PTY-19, R-PTY-20]
+- Outcome (shipped 2026-06-04): dual-bucket usage (interactive vs programmatic) wired through the existing usage poll → hub store → `subscription_usage` WS → usage UI; automation routed onto the stream-json/programmatic path behind the non-bypassable `dailyCostCapGate`, human PTY guard keeps automation off the interactive path. Build complete; the actual post-June-15 billing-classification measurement remains pending (Phase 19 gate).
 - Phase dir: `.planning/phases/18-billing-guardrail-dual-bucket-usage/`
 
 ## Phase 19: cutover-gate-and-automation-fallback
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: June-15 cutover gate + automation fallback wiring. Encode the spec's "Verify after June 15" checks as an explicit, documented cutover GATE (NOT a build blocker): a runbook + a measurement procedure using the Phase-18 dual-bucket poll to confirm (1) a PTY interactive session bills the INTERACTIVE bucket, (2) `setup-token` vs `login` classification, (3) subagents/hooks/MCP bucket attribution, (4) login-credential headless-reclassification risk. Green-light only flips the PTY runner default-on for human sessions after the interactive-bucket result is confirmed. Wire the "If PTY fails" fallback paths (Codex runner — already present; a stubbed/optional future Gemini runner seam) so the human-coding UX can target Codex/Gemini WITHOUT an API key. **Note (superseded by Phase 20):** R-PTY-24's "Telegram stays on the stream-json programmatic pool by structural necessity" no longer holds — Phase 20 sources Telegram from the transcript (read-only over the human's interactive session), so Telegram does NOT consume the programmatic pool. Treat R-PTY-24 as superseded by R-TG-01..12. Final docs sweep: README/CLAUDE.md/`docs/` describing the terminal surface, dual-bucket usage, the cutover gate, and the rip-and-replace.
 - Depends on: [Phase 17, Phase 18]
 - Requirements: [R-PTY-21, R-PTY-22, R-PTY-23, R-PTY-24, R-PTY-25]
+- Outcome (shipped 2026-06-04): the June-15 cutover GATE is authored + test-locked (runbook + measurement procedure + `tools/cutover-deletion-gate.mjs`); fail-safe default-backend selector (`supervisor/src/runners/backend-selector.ts`) + Codex/Gemini-stub fallback + shared `env-sanitize.ts` shipped. Build complete; the gate's two genuinely-pending items — the post-June-15 interactive-billing **measurement** and the irreversible **cutover-flip default + ChatSurface deletion** — are deliberately NOT done (operator override currently runs Claude-PTY; re-verify June 15 per `docs/cutover-gate-june15.md`).
 - Phase dir: `.planning/phases/19-cutover-gate-and-automation-fallback/`
 
 ## Phase 20: telegram-transcript-tail
 
-- Status: Pending
+- Status: Complete
 - Mode: standard
 - Goal: Rebuild the Telegram bridge — left non-functional by the Phase-17 rip (its `assistant_message:final`/`tool_use` event source and `permission_request`→`onPermissionPending` path were deleted) — on a **backend-agnostic transcript-tail** source. (a) Define a `TranscriptSource` adapter selected by session `cliKind`: **Claude** → `~/.claude/projects/<project-slug>/<session-uuid>.jsonl`; **Codex** → `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` (undocumented/version-unstable; resolve by `session_meta` id; **terminal-byte-scrape fallback** when absent/unrecognized). Each normalizes to a shared `TranscriptEntry` union; the bridge consumes only the union. Session→file mapping is explicit (project dir + session id captured at PTY spawn), never newest-file guessing. (b) Re-source Telegram outbound (final `assistant_text` + collapsed `tool_use`) from the adapter. (c) **Permission/`user_question`/slash injection (security-sensitive):** detect a pending request from the transcript per backend, keyed by **`(sessionId, requestId)`** (reuse `hub/src/telegram/approvals.ts`); surface via the existing inline tap-to-approve UX; inject the human tap as backend-specific PTY keystroke(s) via the Phase-16 raw-terminal input path (NOT the deleted `permission_response`). **Fail-CLOSED:** any ambiguous/unparseable prompt ⇒ do nothing, never auto-approve; scrape fallback emits no permission prompts. A tap resolves exactly one `(sessionId, requestId)` and is rejected if superseded/expired. (d) **PTY write-arbitration:** single-writer turn lock per session in the hub; xterm + Telegram writers serialized, input QUEUED while held, lock released only on observed `turn_complete`; a non-holder permission/question RESPONSE is allowed. (e) Telegram injection rides the Phase-16 human-only guard (constraint 3) — no auto-nudge/scheduled-via-Telegram. Threat model + tests per task. `docs/telegram-bridge.md` + CLAUDE.md Docs map updated.
 - Depends on: [Phase 17]
 - Requirements: [R-TG-01, R-TG-02, R-TG-03, R-TG-04, R-TG-05, R-TG-06, R-TG-07, R-TG-08, R-TG-09, R-TG-10, R-TG-11, R-TG-12]
+- Outcome (shipped 2026-06-04, #247): Telegram bridge rebuilt on the backend-agnostic transcript-tail TranscriptSource (Claude/Codex JSONL + scrape fallback), fail-closed permission/`user_question` keystroke injection keyed by `(sessionId,requestId)`, per-session PTY write-arbitration lock, human-only guard. DECOUPLED from `REMO_PTY_INTERACTIVE` via its own `REMO_TELEGRAM_TRANSCRIPT_TAIL` flag (kept OFF in Coolify because transcript files don't exist in the hub container; outbound uses the host-agnostic event bus).
 - Phase dir: `.planning/phases/20-telegram-transcript-tail/`
 - Plans:
   - `20-PLAN-001-transcript-source-adapters` — wave 1 — `TranscriptSource` interface + `TranscriptEntry` union; Claude projects-JSONL adapter (explicit session→file mapping) + Codex rollout-JSONL adapter with byte-scrape fallback; backend selected by `cliKind`; unknown-record degrade-to-skip (R-TG-01, R-TG-02, R-TG-03)

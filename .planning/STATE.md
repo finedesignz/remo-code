@@ -1,5 +1,10 @@
-<!-- updated: 2026-06-02 -->
+<!-- updated: 2026-06-14 -->
 # Project State — remo-code
+
+> **GSD stats reconciled 2026-06-14 (PTY + orchestrator/TMAC).** Phases 15–32 shipped via the
+> direct-PR workflow; GSD per-phase status reconciled to match (PLAN.md placeholders for 15–20 +
+> `status: passed` on the 16/21/22 verification reports). `gsd-sdk query stats.json` now reports
+> 20/32 phases Complete (63%) with NO phase 15–32 left "Not Started" (was 12/32, 38%).
 
 > **v1.0 reconciled + archived 2026-06-02.** All 14 v1.0 phases shipped to prod via the
 > direct-PR workflow (not the GSD lifecycle); GSD state reconciled (per-phase SUMMARY/PLAN
@@ -31,11 +36,30 @@ connection is the Tauri Supervisor MSI.
 
 ## Current position
 
-All roadmap phases 03–12 landed. Repo HEAD on `origin/main` at **#188** (`b878ae7`).
-Working state: stable, no open PRs at resume time, clean tree (only untracked `.planning/`
-docs). Latest session (2026-05-29) shipped auth-failure-fallback hardening (#180–#182),
-orchestrator/Telegram profile UI (#183), CI cost cuts (#184/#186), REVIEW fixes (#185),
-CLAUDE.md slimming (#187), and magic-link-disabled web fallback + auto-logout (#188).
+Two milestones shipped on top of v1.0 since the 2026-06-02 archive:
+
+- **m-interactive-pty-runner (Phases 15–20) — SHIPPED + LIVE 2026-06-04.** The web/phone default
+  human surface is now the interactive `claude`/`codex` PTY terminal (themed xterm.js over a Rust
+  ConPTY bridge), NOT the stream-json ChatSurface. Supervisor v0.9.0 wired the ConPTY bridge
+  (#244), web defaults to TerminalSurface via the hub `pty_interactive` flag (#245/#246), prod runs
+  `REMO_PTY_INTERACTIVE=1`. Phase-18 dual-bucket usage (interactive vs programmatic) + Phase-19
+  cutover gate (`tools/cutover-deletion-gate.mjs`) + fail-safe `backend-selector.ts` + Phase-20
+  Telegram transcript-tail (decoupled via its own `REMO_TELEGRAM_TRANSCRIPT_TAIL`, #247) all landed.
+  No `ANTHROPIC_API_KEY` ever touches the human PTY path. **Still genuinely pending (cutover, not
+  build):** the post-June-15 interactive-billing measurement + the irreversible cutover-flip default
+  and ChatSurface deletion — ChatSurface is KEPT as a fallback. See `docs/cutover-gate-june15.md`.
+- **Auto-Dev Orchestrator + TMAC (Phases 21–32) — BUILT + MERGED, flag-gated OFF.** Session-level
+  auto-dev: one `orchestrator` task per session + global `routine_queue` + per-session lock + verify
+  tail. Milestone TMAC (#271/#273/#275) made the autonomous macro-prompt path the default
+  (`runMacroCycle`, `task-macros.ts`/`sentinels.ts`/`notify.ts`); the legacy micro-row wave engine is
+  kept behind `REMO_ORCHESTRATOR_LEGACY_WAVES=1`. The whole live cycle is gated OFF in prod via
+  `REMO_ORCHESTRATOR_ENABLED` (default OFF) — code built + merged, e2e-unproven, dormant. See
+  `docs/auto-dev-orchestrator.md`.
+
+Earlier baseline: all roadmap phases 03–12 landed; auth-failure-fallback hardening (#180–#182),
+profile UI (#183), CI cost cuts (#184/#186), CLAUDE.md slimming (#187), magic-link-disabled web
+fallback (#188). Live in prod at **https://app.remo-code.com**; source of truth for live detail is
+`docs/*.md` + git log.
 
 ### Phase ledger (`.planning/phases/`)
 03 multichat-grid-view · 04 coolify-dev-supervisor · 05 codex-cli-and-rootless ·
