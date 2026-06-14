@@ -67,6 +67,10 @@ export interface PtyLikeStartOpts {
   /** Rust bridge only — scrollback replay on (re)attach, before live onData. */
   onScrollback?: (bytes: string) => void
   onExit?: (code: number | null) => void
+  /** Operator-gated (`allowDangerousSkipPermissions`). When true the PTY spawns
+   *  the interactive TUI with `--dangerously-skip-permissions` as its SOLE argv
+   *  token (still a permission flag, never a programmatic/stream-json flag). */
+  dangerouslySkipPermissions?: boolean
 }
 
 export interface PtyLike {

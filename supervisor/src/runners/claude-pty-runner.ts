@@ -11,10 +11,13 @@
  *      here (defense in depth) and in pty-host.mjs. No API-key fallback exists.
  *   2. Official `claude` binary only. We never read, store, or forward the
  *      OAuth token in ~/.claude/.credentials.json — auth is the client's job.
- *   5. Interactive `claude` ONLY: argv is EMPTY. NO -p / --print /
- *      --input-format / --output-format / stream-json. This module emits RAW
- *      BYTES and MUST NOT translate to the structured RunnerEvent union, import
- *      agent-protocol, or import session-bridge.
+ *   5. Interactive `claude` ONLY: argv is an ALLOWLIST OF ONE — empty, except for
+ *      the optional operator-blessed `--dangerously-skip-permissions` permission
+ *      flag (gated by config `allowDangerousSkipPermissions`). NO -p / --print /
+ *      --input-format / --output-format / stream-json — those are programmatic
+ *      flags and remain forbidden. This module emits RAW BYTES and MUST NOT
+ *      translate to the structured RunnerEvent union, import agent-protocol, or
+ *      import session-bridge.
  *
  * ARCHITECTURE (Phase-15 derisk verdict — see 15-SPIKE-FINDINGS.md):
  *   node-pty cannot be driven from Bun on Windows (its node:net named-pipe
@@ -84,6 +87,9 @@ export interface PtyRunnerOpts {
   rows?: number
   onData: (bytes: string) => void
   onExit?: (code: number | null) => void
+  /** Operator-gated bypass (config `allowDangerousSkipPermissions`). When true,
+   *  appends the SOLE permitted argv token `--dangerously-skip-permissions`. */
+  dangerouslySkipPermissions?: boolean
 }
 
 /** Build the env handed to the PTY host. Exported pure helper so the env-strip
@@ -114,8 +120,10 @@ export class ClaudePtyRunner {
     this.host = hostSpawn('node', [HOST_PATH], { env })
     this.host.stdout?.on('data', (chunk) => this.onHostData(chunk))
     this.host.on('exit', (code) => { this.opts?.onExit?.(code); this.host = null })
-    // CONSTRAINT 5 — file 'claude', argv EMPTY. No programmatic flags. EVER.
-    this.sendFrame({ t: 'spawn', file: 'claude', args: [], cwd: opts.cwd, cols: opts.cols ?? 80, rows: opts.rows ?? 24 })
+    // CONSTRAINT 5 — file 'claude'. argv is an allowlist-of-one: empty, plus the
+    // optional operator-blessed --dangerously-skip-permissions. No programmatic flags. EVER.
+    const args = opts.dangerouslySkipPermissions ? ['--dangerously-skip-permissions'] : []
+    this.sendFrame({ t: 'spawn', file: 'claude', args, cwd: opts.cwd, cols: opts.cols ?? 80, rows: opts.rows ?? 24 })
   }
 
   /** Raw keystrokes from the human terminal → the PTY. */

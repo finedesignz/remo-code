@@ -21,6 +21,7 @@ import {
   type HostHandle,
 } from '../src/runners/claude-pty-runner'
 import { __setCodexHostSpawnForTest } from '../src/runners/codex-pty-runner'
+import { ClaudePtyBridge, CodexPtyBridge } from '../src/runners/claude-pty-bridge'
 
 const human: HumanSessionContext = { isHuman: true }
 
@@ -263,6 +264,108 @@ describe('19-02 selector->spawn-argv carries no programmatic flag (H8)', () => {
     // port file pinned absent by this describe's beforeEach.
     expect(runnerForHumanBackend('claude-pty').constructor.name).toBe('ClaudePtyRunner')
     expect(runnerForHumanBackend('codex-pty').constructor.name).toBe('CodexPtyRunner')
+  })
+})
+
+// ---- Operator-gated --dangerously-skip-permissions on the PTY path ----
+// The bypass is the SOLE permitted argv token; gated by the start-opt
+// `dangerouslySkipPermissions` (threaded from config allowDangerousSkipPermissions).
+describe('PTY bypass: dangerouslySkipPermissions threads --dangerously-skip-permissions', () => {
+  let restores: Array<() => void> = []
+  let prevPortFile: string | undefined
+  beforeEach(() => {
+    prevPortFile = process.env.REMO_PTY_HOST_PORT_FILE
+    // Pin Rust host ABSENT so the Node runner (with captured spawn frame) is used.
+    process.env.REMO_PTY_HOST_PORT_FILE = join(import.meta.dir, '__no_such_pty_host_port__')
+  })
+  afterEach(() => {
+    restores.forEach((r) => r()); restores = []
+    if (prevPortFile === undefined) delete process.env.REMO_PTY_HOST_PORT_FILE
+    else process.env.REMO_PTY_HOST_PORT_FILE = prevPortFile
+  })
+
+  const FLAG = '--dangerously-skip-permissions'
+
+  function spawnFrameFor(
+    setSpawn: (fn: any) => () => void,
+    runner: any,
+    startOpts: Record<string, unknown>,
+  ): any {
+    const cap = makeCapture()
+    restores.push(setSpawn(cap.fake))
+    runner.start({ cwd: '/tmp', onData() {}, ...startOpts })
+    return cap.frames.find((f) => f.t === 'spawn')
+  }
+
+  test('claude Node runner: bypass true => args include the flag', () => {
+    const r = runnerForHumanBackend('claude-pty')
+    const f = spawnFrameFor(__setHostSpawnForTest, r, { dangerouslySkipPermissions: true })
+    expect(f.file).toBe('claude')
+    expect(f.args).toEqual([FLAG])
+  })
+
+  test('claude Node runner: bypass false/absent => empty args', () => {
+    const r1 = runnerForHumanBackend('claude-pty')
+    const f1 = spawnFrameFor(__setHostSpawnForTest, r1, { dangerouslySkipPermissions: false })
+    expect(f1.args).toEqual([])
+    const r2 = runnerForHumanBackend('claude-pty')
+    const f2 = spawnFrameFor(__setHostSpawnForTest, r2, {})
+    expect(f2.args).toEqual([])
+  })
+
+  test('codex Node runner: bypass true => args include the flag; false => empty', () => {
+    const rOn = runnerForHumanBackend('codex-pty')
+    const fOn = spawnFrameFor(__setCodexHostSpawnForTest, rOn, { dangerouslySkipPermissions: true })
+    expect(fOn.file).toBe('codex')
+    expect(fOn.args).toEqual([FLAG])
+    const rOff = runnerForHumanBackend('codex-pty')
+    const fOff = spawnFrameFor(__setCodexHostSpawnForTest, rOff, { dangerouslySkipPermissions: false })
+    expect(fOff.args).toEqual([])
+  })
+})
+
+// ---- Rust bridge spawn frame carries the dangerously_skip_permissions field ----
+describe('PTY bypass: Rust bridge spawn frame carries dangerously_skip_permissions', () => {
+  function bridgeSpawnFrame(BridgeCtor: any, startOpts: Record<string, unknown>): any {
+    const frames: any[] = []
+    let acc = Buffer.alloc(0)
+    const fakeSock: any = {
+      on() { return fakeSock },
+      end() {},
+      write(chunk: Buffer) {
+        acc = Buffer.concat([acc, chunk])
+        while (acc.length >= 4) {
+          const len = acc.readUInt32BE(0)
+          if (acc.length < 4 + len) break
+          try { frames.push(JSON.parse(acc.subarray(4, 4 + len).toString('utf8'))) } catch {}
+          acc = acc.subarray(4 + len)
+        }
+      },
+    }
+    const bridge = new BridgeCtor()
+    bridge.start({
+      sessionId: 's1', cwd: '/tmp', onData() {},
+      connectFactory: () => fakeSock,
+      ...startOpts,
+    })
+    return frames.find((f) => f.t === 'spawn')
+  }
+
+  test('ClaudePtyBridge: bypass true => field true', () => {
+    const f = bridgeSpawnFrame(ClaudePtyBridge, { dangerouslySkipPermissions: true })
+    expect(f.cli).toBe('claude')
+    expect(f.dangerously_skip_permissions).toBe(true)
+  })
+
+  test('ClaudePtyBridge: bypass false/absent => field false', () => {
+    expect(bridgeSpawnFrame(ClaudePtyBridge, { dangerouslySkipPermissions: false }).dangerously_skip_permissions).toBe(false)
+    expect(bridgeSpawnFrame(ClaudePtyBridge, {}).dangerously_skip_permissions).toBe(false)
+  })
+
+  test('CodexPtyBridge: bypass true => field true, cli codex', () => {
+    const f = bridgeSpawnFrame(CodexPtyBridge, { dangerouslySkipPermissions: true })
+    expect(f.cli).toBe('codex')
+    expect(f.dangerously_skip_permissions).toBe(true)
   })
 })
 

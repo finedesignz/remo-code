@@ -9,13 +9,16 @@
  * Windows.
  *
  * HARD CONSTRAINTS (interactive-pty-runner-SPEC.md — the actual spawn lives in
- * pty_host.rs which removes ANTHROPIC_API_KEY and uses EMPTY argv; this bridge
- * NEVER adds programmatic flags, NEVER forwards an API key, and NEVER reads
- * ~/.claude/.credentials.json):
+ * pty_host.rs which removes ANTHROPIC_API_KEY and uses an allowlist-of-one argv
+ * (empty, plus the optional operator-blessed --dangerously-skip-permissions);
+ * this bridge NEVER adds programmatic flags, NEVER forwards an API key, and NEVER
+ * reads ~/.claude/.credentials.json):
  *   1. No ANTHROPIC_API_KEY ever crosses this bridge (it carries opaque bytes).
  *   2. Official `claude` only — spawned by the Rust host; this bridge never spawns.
  *   5. Interactive only — no -p / --print / --input-format / --output-format /
- *      stream-json. Raw bytes only; this module does NOT import RunnerEvent,
+ *      stream-json. The bridge may set `dangerously_skip_permissions` on the spawn
+ *      frame (operator-gated); the Rust host turns it into the SOLE permitted argv
+ *      token. Raw bytes only; this module does NOT import RunnerEvent,
  *      agent-protocol, or session-bridge.
  *
  * TRANSPORT: a loopback TCP socket to the Rust host. The host writes its
@@ -69,6 +72,10 @@ export interface PtyBridgeOpts {
   /** Scrollback replay on (re)attach — emitted BEFORE live `onData` resumes. */
   onScrollback?: (bytes: string) => void
   onExit?: (code: number | null) => void
+  /** Operator-gated (config `allowDangerousSkipPermissions`). When true the spawn
+   *  frame carries `dangerously_skip_permissions`, which the Rust host turns into
+   *  the SOLE permitted argv token `--dangerously-skip-permissions`. */
+  dangerouslySkipPermissions?: boolean
   /** Override the connect factory (test seam). */
   connectFactory?: (port: number) => Socket
 }
@@ -107,6 +114,7 @@ export class ClaudePtyBridge {
       cwd: opts.cwd,
       cols: opts.cols ?? 80,
       rows: opts.rows ?? 24,
+      dangerously_skip_permissions: opts.dangerouslySkipPermissions ?? false,
     })
   }
 
