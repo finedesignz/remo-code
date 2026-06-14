@@ -117,6 +117,11 @@ let emitSessionActivity: typeof import("../src/events/session-activity-events.ts
 let _resetActivity: typeof import("../src/events/session-activity-events.ts")._resetSessionActivityEventsForTests;
 let takePendingPrompt: typeof import("../src/telegram/approvals.ts").takePendingPrompt;
 let _resetPending: typeof import("../src/telegram/approvals.ts")._resetPendingPromptsForTests;
+let emitQuestionPending: typeof import("../src/events/question-events.ts").emitQuestionPending;
+let _resetQuestionEvents: typeof import("../src/events/question-events.ts")._resetQuestionEventsForTests;
+let parseQuestionCallback: typeof import("../src/telegram/question-approvals.ts").parseQuestionCallback;
+let takeQuestionOption: typeof import("../src/telegram/question-approvals.ts").takeQuestionOption;
+let _resetQuestionPrompts: typeof import("../src/telegram/question-approvals.ts")._resetQuestionPromptsForTests;
 let startTelegramBridge: typeof import("../src/telegram/bridge.ts").startTelegramBridge;
 let _stopBridge: typeof import("../src/telegram/bridge.ts")._stopTelegramBridgeForTests;
 
@@ -132,6 +137,12 @@ beforeAll(async () => {
   ));
   ({ takePendingPrompt, _resetPendingPromptsForTests: _resetPending } = await import(
     "../src/telegram/approvals.ts"
+  ));
+  ({ emitQuestionPending, _resetQuestionEventsForTests: _resetQuestionEvents } = await import(
+    "../src/events/question-events.ts"
+  ));
+  ({ parseQuestionCallback, takeQuestionOption, _resetQuestionPromptsForTests: _resetQuestionPrompts } = await import(
+    "../src/telegram/question-approvals.ts"
   ));
   ({ startTelegramBridge, _stopTelegramBridgeForTests: _stopBridge } = await import(
     "../src/telegram/bridge.ts"
@@ -152,6 +163,8 @@ beforeEach(() => {
   _resetPermEvents();
   _resetActivity();
   _resetPending();
+  _resetQuestionEvents();
+  _resetQuestionPrompts();
 });
 
 afterEach(() => {
@@ -446,5 +459,52 @@ describe("Telegram outbound bridge — disabled when token unset", () => {
 
     expect(state.sends).toHaveLength(0);
     _restoreConfig();
+  });
+});
+
+describe("Telegram outbound bridge — multiple-choice questions", () => {
+  test("emitQuestionPending → one inline button per option with qa: callback data", async () => {
+    state.sessionUsers.set("sess_Q", [{ id: "uq1", telegram_chat_id: 7000 }]);
+    startTelegramBridge();
+
+    emitQuestionPending({
+      sessionId: "sess_Q",
+      userId: "uq1",
+      requestId: "req-q-1",
+      question: "Which database?",
+      options: [{ label: "Postgres" }, { label: "SQLite" }],
+      isMultiSelect: false,
+    });
+    await settle();
+
+    expect(state.keyboardSends).toHaveLength(1);
+    const ks = state.keyboardSends[0];
+    expect(ks.chat).toBe(7000);
+    // One row per option, one button per row.
+    expect(ks.keyboard).toHaveLength(2);
+    expect(ks.keyboard[0][0].text).toBe("Postgres");
+    expect(ks.keyboard[1][0].text).toBe("SQLite");
+    // Callback data is the qa: token codec and resolves to the chosen label.
+    const cb0 = parseQuestionCallback(ks.keyboard[0][0].callback_data);
+    expect(cb0).not.toBeNull();
+    const chosen = takeQuestionOption(cb0!.token, "uq1");
+    expect(chosen?.label).toBe("Postgres");
+    expect(chosen?.sessionId).toBe("sess_Q");
+    expect(chosen?.requestId).toBe("req-q-1");
+  });
+
+  test("no matching default-session → no question prompt sent", async () => {
+    state.sessionUsers.set("sess_other", [{ id: "u2", telegram_chat_id: 2000 }]);
+    startTelegramBridge();
+    emitQuestionPending({
+      sessionId: "sess_none",
+      userId: "u2",
+      requestId: "req-q-2",
+      question: "q?",
+      options: [{ label: "A" }],
+      isMultiSelect: false,
+    });
+    await settle();
+    expect(state.keyboardSends).toHaveLength(0);
   });
 });

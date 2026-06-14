@@ -19,6 +19,7 @@
  */
 import { getChannel } from './registry.ts'
 import { config } from '../config.ts'
+import { hasPendingPrompt } from './pending-prompts.ts'
 
 interface PendingTeardown {
   sessionId: string
@@ -119,6 +120,14 @@ function teardownSession(sessionId: string) {
   // a respawn churn loop. Checked synchronously against the in-memory set.
   if (isOrchestratorSession(sessionId)) {
     console.log(`[idle-teardown] skip orchestrator session=${sessionId} (exempt)`)
+    return
+  }
+  // Second exemption: a session BLOCKED on a pending interactive prompt
+  // (permission_request / user_question) is waiting on the user — killing it
+  // would drop the prompt + the in-flight turn. Telegram-driven sessions have
+  // no persistent WS subscriber, so without this they'd be torn down mid-prompt.
+  if (hasPendingPrompt(sessionId)) {
+    console.log(`[idle-teardown] skip session=${sessionId} (pending prompt)`)
     return
   }
   const channel = getChannel(sessionId)

@@ -74,6 +74,10 @@ import {
   parsePermissionCallback,
   takePendingPrompt,
 } from "../telegram/approvals.ts";
+import {
+  parseQuestionCallback,
+  takeQuestionOption,
+} from "../telegram/question-approvals.ts";
 import { parseStopCallback, requestStop, forgetStoppable } from "../telegram/stop.ts";
 import { getChannel } from "../ws/registry.ts";
 import { log } from "../observability/logger.ts";
@@ -398,9 +402,22 @@ async function dispatchInbound(
     case "cost_capped":
       await safeSend(chatId, `Daily cost cap reached. Resumes at ${result.resumesAtUtc}.`);
       return { outcome: "cost_capped" };
-    case "session_busy":
-      await safeSend(chatId, "Session busy — try again in a moment.");
-      return { outcome: "session_busy" };
+    case "session_busy": {
+      // If the session is blocked on a pending prompt, the user is "busy"
+      // because they haven't answered yet — say so instead of a bare "busy".
+      let pending = false;
+      try {
+        const { hasPendingPrompt } = await import("../ws/pending-prompts.ts");
+        pending = hasPendingPrompt(targetSessionId);
+      } catch {}
+      await safeSend(
+        chatId,
+        pending
+          ? "This session is waiting on a question above — tap an option (or answer it) to continue."
+          : "Session busy — try again in a moment.",
+      );
+      return { outcome: pending ? "session_busy_pending_prompt" : "session_busy" };
+    }
     case "agent_offline":
       // NOTE: no reply here — the caller fires autoheal (runDoctor) and the
       // opener "🩺 Hold on — diagnosing & launching automatically…" replaces
@@ -545,6 +562,70 @@ async function handlePermissionCallback(
 }
 
 /**
+ * Resolve an inline multiple-choice answer (an option button tap on a
+ * `user_question` prompt). Looks up the option token, enforces that it belongs to
+ * THIS user, forwards a `question_response` (answer = the chosen option LABEL)
+ * onto the session's agent socket, and edits the prompt message to show the
+ * choice + remove the buttons. answerCallbackQuery fires on every branch.
+ */
+async function handleQuestionCallback(
+  cb: CallbackQueryT,
+  user: TelegramUserRow,
+  q: { token: string },
+): Promise<{ outcome: string }> {
+  // Authorization is enforced inside takeQuestionOption: it returns the entry
+  // only if THIS user owns the token. Resolving invalidates every option token
+  // for the (sessionId, requestId) so the prompt is answered exactly once.
+  const chosen = takeQuestionOption(q.token, user.id);
+  if (!chosen) {
+    await safeAnswerCallback(cb.id, { text: "This question already expired or was answered.", show_alert: false });
+    return { outcome: "callback_question_stale" };
+  }
+
+  const channel = getChannel(chosen.sessionId);
+  if (!channel) {
+    await safeAnswerCallback(cb.id, { text: "Session is offline — couldn't deliver.", show_alert: true });
+    return { outcome: "callback_question_offline" };
+  }
+  try {
+    channel.ws.send(
+      JSON.stringify({
+        type: "question_response",
+        session_id: chosen.sessionId,
+        request_id: chosen.requestId,
+        answer: chosen.label,
+      }),
+    );
+    // Clear the pending-prompt mark so idle-teardown is no longer suppressed.
+    try {
+      const { clearPromptPending } = await import("../ws/pending-prompts.ts");
+      clearPromptPending(chosen.sessionId, chosen.requestId);
+    } catch {}
+    log.info("question.answer_applied", {
+      session_id: chosen.sessionId,
+      request_id: chosen.requestId,
+      source: "telegram",
+      user_id: user.id,
+    });
+  } catch (err: any) {
+    console.warn("[telegram-webhook] question_response send failed:", err?.message);
+    await safeAnswerCallback(cb.id, { text: "Couldn't deliver the answer. Try again.", show_alert: true });
+    return { outcome: "callback_question_send_failed" };
+  }
+
+  await safeAnswerCallback(cb.id, { text: `✅ ${chosen.label}` });
+
+  // Edit the prompt to reflect the choice + drop the buttons.
+  const chatId = cb.message?.chat.id ?? chosen.chatId;
+  const messageId = cb.message?.message_id ?? chosen.messageId;
+  if (chatId !== undefined && messageId) {
+    const qShort = chosen.question.length > 200 ? chosen.question.slice(0, 199) + "…" : chosen.question;
+    await safeEditMessageText(chatId, messageId, `❓ ${qShort}\n\n✅ ${chosen.label}`, null);
+  }
+  return { outcome: "callback_question_answered" };
+}
+
+/**
  * Resolve a 🛑 Stop inline-button tap.
  *
  * Authz is the ownership check inside `requestStop` (`getSession(sessionId,
@@ -656,6 +737,12 @@ async function handleCallbackQuery(
   const perm = parsePermissionCallback(cb.data);
   if (perm) {
     return await handlePermissionCallback(cb, user, perm);
+  }
+
+  // ── Inline-question branch (option tap on a user_question prompt) ─────────
+  const question = parseQuestionCallback(cb.data);
+  if (question) {
+    return await handleQuestionCallback(cb, user, question);
   }
 
   // ── Stop branch (🛑 on a streaming "Working…" message) ────────────────────

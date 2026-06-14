@@ -456,6 +456,12 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       tool_name: msg.tool_name,
       tool_input: msg.tool_input,
     })
+    // Mark the session blocked on a pending prompt so idle-teardown won't kill
+    // it while it waits for a user decision (TG isn't a persistent subscriber).
+    try {
+      const { markPromptPending } = await import('./pending-prompts.ts')
+      markPromptPending(sessionId, msg.request_id)
+    } catch {}
     // Surface the prompt to server-side consumers (Telegram inline-approval
     // bridge). Dynamic import + try/catch mirrors the assistant-events emit
     // below; a listener throw can't tear down this WS handler.
@@ -483,6 +489,27 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       ...(msg.options ? { options: msg.options } : {}),
       ...(msg.is_multi_select ? { is_multi_select: msg.is_multi_select } : {}),
     })
+    // Mark the session blocked on a pending prompt (idle-teardown exemption).
+    try {
+      const { markPromptPending } = await import('./pending-prompts.ts')
+      markPromptPending(sessionId, msg.request_id)
+    } catch {}
+    // Bridge the question to Telegram (one inline button per option). Dynamic
+    // import + try/catch mirrors the permission bridge above; a listener throw
+    // can't tear down this WS handler.
+    try {
+      const { emitQuestionPending } = await import('../events/question-events.ts')
+      emitQuestionPending({
+        sessionId,
+        userId: ws.data.userId!,
+        requestId: msg.request_id,
+        question: msg.question,
+        options: msg.options ?? [],
+        isMultiSelect: msg.is_multi_select === true,
+      })
+    } catch (err: any) {
+      console.warn('[agent] emitQuestionPending failed', err?.message)
+    }
   }
 
   if (msg.type === 'status') {
@@ -573,6 +600,13 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     try {
       const { onSessionReply } = await import('../dispatch/pipeline.ts')
       void onSessionReply(sessionId, msg.content)
+    } catch {}
+    // Turn finished — clear any pending-prompt marks so idle-teardown is no
+    // longer suppressed for this session (a prompt answered mid-turn already
+    // cleared its own requestId; this is a belt-and-suspenders sweep).
+    try {
+      const { clearAllPromptsPending } = await import('./pending-prompts.ts')
+      clearAllPromptsPending(sessionId)
     } catch {}
   }
 
