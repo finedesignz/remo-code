@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity, setSessionSkipPermissions, getSessionSkipPermissions } from '../db/dal'
+import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity, setSessionSkipPermissions, getSessionSkipPermissions, getSessionSkipPermissionsByRepo } from '../db/dal'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
@@ -394,6 +394,7 @@ sessions.post('/heal', async (c) => {
         return c.json({ error: 'run_insert_failed', detail: err?.message ?? String(err) }, 500)
       }
 
+      const skipPerms = await getSessionSkipPermissionsByRepo(userId, repo)
       try {
         sendToSupervisor(pick.supervisor_id, {
           type: 'session.start',
@@ -405,6 +406,7 @@ sessions.post('/heal', async (c) => {
           initial_prompt: prompt,
           api_key: '__use_local__',
           hub_url: '__same__',
+          dangerously_skip_permissions: skipPerms,
           ...(model ? { model } : {}),
         } as any)
       } catch (err: any) {

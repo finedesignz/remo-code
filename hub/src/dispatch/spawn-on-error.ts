@@ -49,6 +49,7 @@
  */
 import { getChannel } from '../ws/registry.ts'
 import { log } from '../observability/logger.ts'
+import { getSessionSkipPermissions } from '../db/dal.ts'
 
 // Heavy deps (supervisor-registry, budget, DAL) are imported LAZILY inside the
 // function below — not statically — so that merely importing this module (e.g.
@@ -190,6 +191,7 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
       return false
     }
 
+    const skipPerms = await getSessionSkipPermissions(sessionId, userId)
     try {
       sendToSupervisor(supervisorId, {
         type: 'session.start',
@@ -201,6 +203,7 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
         initial_prompt: undefined,
         api_key: '__use_local__',
         hub_url: '__same__',
+        dangerously_skip_permissions: skipPerms,
       } as any)
     } catch (err: any) {
       // Send failed → the run never began. End it + release the slot so the

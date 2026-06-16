@@ -32,7 +32,7 @@ import { createRun } from '../../db/supervisor-dal.ts'
 import { sendToSupervisor, updateSupervisorState } from '../../ws/supervisor-registry.ts'
 import { releaseSessionSlot } from '../../sessions/budget.ts'
 import { getChannel, broadcastToSubscribers } from '../../ws/registry.ts'
-import { insertMessage } from '../../db/dal.ts'
+import { insertMessage, getSessionSkipPermissionsByRepo } from '../../db/dal.ts'
 import { renderTriagePrompt } from '../triage-prompt.ts'
 import { parseTriageOutput } from '../triage-schema.ts'
 import { finalizeRun, removeRunContext } from '../dispatcher.ts'
@@ -129,6 +129,7 @@ export async function sendTriage(
       return
     }
 
+    const skipPerms = await getSessionSkipPermissionsByRepo(ctx.userId, repo)
     try {
       sendToSupervisor(pick.supervisor_id, {
         type: 'session.start',
@@ -140,6 +141,7 @@ export async function sendTriage(
         initial_prompt: prompt,
         api_key: '__use_local__',
         hub_url: '__same__',
+        dangerously_skip_permissions: skipPerms,
       } as any)
     } catch (err: any) {
       try {

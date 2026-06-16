@@ -27,6 +27,7 @@
 
 import { reserveSessionSlot } from '../sessions/budget'
 import { listOnlineSupervisorIdsForUser, getSupervisor } from '../ws/supervisor-registry'
+import { getSessionSkipPermissionsByRepo } from '../db/dal'
 
 const MAX_RESTART_COUNT = 10
 
@@ -217,6 +218,7 @@ async function resumeOrphansInner(args: {
       continue
     }
 
+    const skipPerms = await getSessionSkipPermissionsByRepo(userId, o.repo_path)
     try {
       entry.ws.send(JSON.stringify({
         type: 'session.start',
@@ -227,6 +229,7 @@ async function resumeOrphansInner(args: {
         pull: false,
         api_key: '__use_local__',
         hub_url: '__same__',
+        dangerously_skip_permissions: skipPerms,
       }))
       result.resumed.push(newRunId)
     } catch (err: any) {

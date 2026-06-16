@@ -5,6 +5,7 @@ import {
   setSupervisorOverride, setPreferredSupervisor, setSupervisorRoots,
 } from '../db/supervisor-dal'
 import { validateRoots } from '../lib/roots-validate'
+import { getSessionSkipPermissionsByRepo } from '../db/dal'
 import {
   getSupervisor as getSupervisorRegistryEntry, isSupervisorOnline,
   sendRequest, sendToSupervisor, updateSupervisorState,
@@ -175,6 +176,7 @@ supervisors.post('/:id/start', async (c) => {
   })
   await updateSupervisorState(a.supervisorId, 'starting', run.id)
 
+  const skipPerms = await getSessionSkipPermissionsByRepo(a.userId, body.data.repo_path)
   try {
     sendToSupervisor(a.supervisorId, {
       type: 'session.start',
@@ -186,6 +188,7 @@ supervisors.post('/:id/start', async (c) => {
       initial_prompt: body.data.initial_prompt,
       api_key: '__use_local__', // sentinel — supervisor uses its configured key
       hub_url: '__same__',
+      dangerously_skip_permissions: skipPerms,
     } as any)
   } catch (err: any) {
     return c.json({ error: err.message }, 500)

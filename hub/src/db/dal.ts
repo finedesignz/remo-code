@@ -243,6 +243,26 @@ export async function getSessionSkipPermissions(
   return rows[0]?.dangerously_skip_permissions === true;
 }
 
+/** Effective per-session skip-permissions resolved by repo working tree, for the
+ *  spawn paths that only have (userId, projectDir) and no sessionId. Picks the
+ *  most-recently-active matching session. Returns TRUE when no session row
+ *  matches (the column now defaults TRUE; absent-row mirrors that default-ON
+ *  intent). The supervisor still ANDs this with its host config ceiling, so a
+ *  spurious TRUE can never exceed host policy. */
+export async function getSessionSkipPermissionsByRepo(
+  userId: string,
+  projectDir: string,
+): Promise<boolean> {
+  const rows = await sql<{ dangerously_skip_permissions: boolean | null }[]>`
+    SELECT dangerously_skip_permissions FROM sessions
+    WHERE user_id = ${userId} AND project_dir = ${projectDir} AND deleted_at IS NULL
+    ORDER BY last_activity DESC NULLS LAST
+    LIMIT 1
+  `;
+  if (rows.length === 0) return true;
+  return rows[0].dangerously_skip_permissions === true;
+}
+
 // ── Phase 08 plan 004 — pending local repos + dismiss-local ───────────────────
 
 export type PendingPrompt = {
