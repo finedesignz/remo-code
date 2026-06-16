@@ -1,6 +1,13 @@
 # June-15 Cutover Gate — Runbook + Measurement Procedure
 
-**Status: authored; measurement PENDING a live post-June-15 account.**
+**Status (2026-06-15): billing measurement DEFERRED — Anthropic postponed the programmatic-billing
+cutover this gate guards** (*"Agent SDK, claude -p, and third-party app usage continues to work with
+your subscription exactly as it did before today … subscription limits are unchanged."*). With no
+programmatic credit pool in effect, the live Claude-PTY default is billing-safe; the controlled
+measurement is recorded `deferred` and re-triggered by check 4 when Anthropic reschedules. See
+`.planning/phases/19-cutover-gate-and-automation-fallback/cutover-gate-checklist.md` (REGIME UPDATE)
+and `docs/runbooks/june15-pty-billing-measurement.md`. **The ChatSurface-deletion gate is separate and
+remains BLOCKED** (on-device attestations still pending).
 
 This runbook encodes the SPEC's *"Verify after June 15"* checks as an explicit, operator-run
 **measurement procedure** driven by the Phase-18 dual-bucket usage poll. It is the single source

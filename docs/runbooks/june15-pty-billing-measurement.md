@@ -1,6 +1,17 @@
 # Operator Runbook — June-15 PTY Billing Classification Measurement
 
-**Run this on or after 2026-06-15, at the live prod UI, signed in as the operator.**
+> ## ⏸️ DEFERRED 2026-06-15 — Anthropic postponed the billing cutover this measurement targets
+>
+> On 2026-06-15 Anthropic announced the Agent SDK / `claude -p` / third-party-app billing split
+> (subscription → dedicated credit pool) is **not** taking effect: *"Nothing changes for now …
+> continues to work with your subscription exactly as it did before today … subscription limits are
+> unchanged."* There is therefore no programmatic credit pool for an interactive `claude` PTY turn to
+> mis-bill into, so this controlled measurement is **deferred, not run** — the live Claude-PTY default
+> is billing-safe under the unchanged regime. **Re-run this runbook only once Anthropic reschedules the
+> split** (the trigger is check 4 / ONGOING WATCH in `cutover-gate-checklist.md`). The procedure below
+> stays valid verbatim for that future run.
+
+**When you do run it (post-reschedule): on the live prod UI, signed in as the operator.**
 
 This is the hands-on companion to [`docs/cutover-gate-june15.md`](../cutover-gate-june15.md) and the
 [`cutover-gate-checklist.md`](../../.planning/phases/19-cutover-gate-and-automation-fallback/cutover-gate-checklist.md).
