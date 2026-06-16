@@ -71,7 +71,7 @@ const titaniumBypass = parseBool(process.env.TITANIUM_BYPASS, false);
 // + grid-view tab swaps. 0 disables idle teardown entirely.
 const sessionIdleGraceSeconds = (() => {
   const v = process.env.REMO_SESSION_IDLE_GRACE_SECONDS;
-  if (v === undefined || v === "") return 300;
+  if (v === undefined || v === "") return 14400; // 4h (was 300s/5m) — long-running dev sessions shouldn't be killed minutes after the UI walks away
   const n = Number(v);
   if (!Number.isInteger(n) || n < 0) {
     throw new Error(`REMO_SESSION_IDLE_GRACE_SECONDS must be a non-negative integer; got ${JSON.stringify(v)}`);
