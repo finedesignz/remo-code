@@ -23,6 +23,7 @@ import {
   createRun,
 } from '../db/supervisor-dal.ts'
 import { reserveSessionSlot } from '../sessions/budget.ts'
+import { getSessionSkipPermissions } from '../db/dal.ts'
 import {
   isSupervisorOnline,
   sendToSupervisor,
@@ -157,6 +158,7 @@ export async function launchSessionForUser(args: {
     })
     await updateSupervisorState(pick.supervisorId, 'starting', run.id)
 
+    const skipPerms = await getSessionSkipPermissions(session.id, args.userId)
     try {
       sendToSupervisor(pick.supervisorId, {
         type: 'session.start',
@@ -168,6 +170,7 @@ export async function launchSessionForUser(args: {
         initial_prompt: undefined,
         api_key: '__use_local__',
         hub_url: '__same__',
+        dangerously_skip_permissions: skipPerms,
       } as any)
     } catch (err: any) {
       return { ok: false, reason: 'send_failed', error: err?.message ?? String(err) }
