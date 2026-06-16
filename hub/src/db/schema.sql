@@ -1257,14 +1257,17 @@ CREATE INDEX IF NOT EXISTS idx_token_usage_daily_user_day ON token_usage_daily(u
 --   unconditionally (NULL means inherit the per-user default, not "always on").
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auto_nudge BOOLEAN;
 
--- sessions.dangerously_skip_permissions: per-session opt-in to bypass the CLI's
---   tool-permission prompts (--dangerously-skip-permissions). NULLABLE on
---   purpose: NULL or FALSE means OFF (the default — prompts are surfaced). Only
---   TRUE requests skip. The hub passes the REQUESTED value on session.start;
---   the supervisor's config `allow_dangerous_skip_permissions` is the HARD
---   CEILING (applied = requested && allowed) — a per-session opt-in can never
---   exceed the host config. Additive, no backfill (NULL == OFF).
+-- sessions.dangerously_skip_permissions: per-session toggle to bypass the CLI's
+--   tool-permission prompts (--dangerously-skip-permissions). NULL or FALSE means
+--   OFF; only TRUE requests skip. NEW sessions now DEFAULT ON (SET DEFAULT TRUE
+--   below) — the hub passes the REQUESTED value on session.start, but the
+--   supervisor's config `allow_dangerous_skip_permissions` is the HARD CEILING
+--   (applied = requested && allowed), so the default only REQUESTS the bypass and
+--   can never exceed the host config. Users can still turn an individual session
+--   OFF via the web toggle. The default flip is backfilled to existing rows by the
+--   one-shot `hub/scripts/backfill-skip-permissions-default-on.ts`.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS dangerously_skip_permissions BOOLEAN;
+ALTER TABLE sessions ALTER COLUMN dangerously_skip_permissions SET DEFAULT TRUE;
 
 -- ── Milestone TMAC §7.1: per-channel orchestrator-notify opt-in ──────────────
 -- users.notify_channels: per-user opt-in/out for each orchestrator notify
