@@ -151,12 +151,29 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
     const { supervisorId, cwd } = target
 
     const { reserveSessionSlot, releaseSessionSlot } = await import('../sessions/budget.ts')
-    const { createRun, endRun } = await import('../db/supervisor-dal.ts')
+    const { endRun } = await import('../db/supervisor-dal.ts')
     const { sendToSupervisor } = await import('../ws/supervisor-registry.ts')
 
     // Concurrency gate — SAME hub-authoritative reservation every start sender
-    // uses. At capacity → no run row, no leak, fall back to park/skip.
-    const reservation = await reserveSessionSlot(userId, supervisorId)
+    // uses, with the run row consumed INSIDE the reservation tx (closes the
+    // over-admission race). At capacity → no run row, no leak, park/skip.
+    let reservation
+    try {
+      reservation = await reserveSessionSlot(userId, supervisorId, {
+        sessionId: null,
+        repoPath: cwd,
+        branch: null,
+        pulled: false,
+        initialPrompt: null,
+      })
+    } catch (err: any) {
+      log.error('spawn_on_error.create_run_failed', {
+        user_id: userId,
+        session_id: sessionId,
+        error: err?.message ?? String(err),
+      })
+      return false
+    }
     if (!reservation.ok) {
       log.info('spawn_on_error.reserve_denied', {
         user_id: userId,
@@ -165,31 +182,15 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
       })
       return false
     }
-
-    // Create the run row INSIDE the reservation window, exactly like the web
-    // start path. On any failure below, release the slot + end the run so we
-    // never leave a wedged open run.
-    let runId: string
-    try {
-      const run = (await createRun({
-        userId,
-        sessionId: null,
-        supervisorId,
-        repoPath: cwd,
-        branch: null,
-        pulled: false,
-        initialPrompt: null,
-      })) as { id: string }
-      runId = run.id
-    } catch (err: any) {
-      await releaseSessionSlot(userId, supervisorId)
+    if (!reservation.run) {
       log.error('spawn_on_error.create_run_failed', {
         user_id: userId,
         session_id: sessionId,
-        error: err?.message ?? String(err),
+        error: 'no run row returned',
       })
       return false
     }
+    const runId = reservation.run.id
 
     const skipPerms = await getSessionSkipPermissions(sessionId, userId)
     try {

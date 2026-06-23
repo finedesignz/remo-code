@@ -82,10 +82,20 @@ mock.module('../src/ws/supervisor-registry.ts', () => ({
 }))
 
 mock.module('../src/sessions/budget.ts', () => ({
-  reserveSessionSlot: async () =>
-    state.reserveOk
-      ? { ok: true, running: 0, cap: 4 }
-      : { ok: false, reason: state.reserveReason, running: 4, cap: 4 },
+  // The run row is consumed INSIDE the reservation tx now (atomic gate), so a
+  // granted reservation carries the created run and honours createRunThrows
+  // (the INSERT throwing rolls the whole tx back).
+  reserveSessionSlot: async (_uid: string, _sid: string, runFields?: any) => {
+    if (!state.reserveOk) {
+      return { ok: false, reason: state.reserveReason, running: 4, cap: 4 }
+    }
+    if (runFields) {
+      state.createRunCalls++
+      if (state.createRunThrows) throw new Error('run_insert_failed')
+      return { ok: true, running: 0, cap: 4, run: { id: 'run-1' } }
+    }
+    return { ok: true, running: 0, cap: 4, run: null }
+  },
   releaseSessionSlot: async () => {
     state.releaseCalls++
   },
@@ -210,11 +220,13 @@ describe('spawn-on-error: ensureSessionOnline', () => {
     expect(state.releaseCalls).toBe(1)
   })
 
-  test('createRun failure → releaseSessionSlot, no orphan, false', async () => {
+  test('reservation INSERT failure → tx rolls back, no orphan, no release, false', async () => {
     state.createRunThrows = true
     const ok = await ensureSessionOnline('u1', 's1')
     expect(ok).toBe(false)
-    expect(state.releaseCalls).toBe(1)
+    // Run consumed inside the reservation tx: the INSERT throwing rolls the
+    // whole tx back, so the slot is never committed — nothing to release.
+    expect(state.releaseCalls).toBe(0)
     expect(state.sentMessages.length).toBe(0)
   })
 

@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import {
-  listSupervisorsForUser, getSupervisor, createRun, listRunsForSupervisor,
+  listSupervisorsForUser, getSupervisor, listRunsForSupervisor,
   setSupervisorOverride, setPreferredSupervisor, setSupervisorRoots,
 } from '../db/supervisor-dal'
 import { validateRoots } from '../lib/roots-validate'
@@ -148,7 +148,14 @@ supervisors.post('/:id/start', async (c) => {
   // Phase 04 plan 003: hub-authoritative concurrency gate. Reserve atomically
   // before creating the run row so concurrent /start calls at cap can't both
   // win the race.
-  const reservation = await reserveSessionSlot(a.userId, a.supervisorId)
+  // Reserve + consume the run row atomically inside the FOR-UPDATE tx.
+  const reservation = await reserveSessionSlot(a.userId, a.supervisorId, {
+    sessionId: null,
+    repoPath: body.data.repo_path,
+    branch: body.data.branch ?? null,
+    pulled: body.data.pull ?? false,
+    initialPrompt: body.data.initial_prompt ?? null,
+  })
   if (!reservation.ok) {
     if (reservation.reason === 'supervisor_not_found') {
       return c.json({ error: 'not found' }, 404)
@@ -159,21 +166,14 @@ supervisors.post('/:id/start', async (c) => {
       cap: reservation.cap,
     }, 429)
   }
+  if (!reservation.run) {
+    return c.json({ error: 'run_insert_failed' }, 500)
+  }
 
   // Concurrent runs allowed — supervisor manages N children.
-  // We need an api_key to pass to the supervisor so it can spawn claude-remote
-  // talking to this hub. We re-use the supervisor's own api_key (it has agent capability too).
-  // The supervisor sends "hello" with its api_key_id; the actual raw key is stored client-side.
-  // Tell the supervisor to use its configured api_key (the supervisor already has it locally).
-  const run = await createRun({
-    userId: a.userId,
-    sessionId: null,
-    supervisorId: a.supervisorId,
-    repoPath: body.data.repo_path,
-    branch: body.data.branch ?? null,
-    pulled: body.data.pull ?? false,
-    initialPrompt: body.data.initial_prompt ?? null,
-  })
+  // We re-use the supervisor's own api_key (it has agent capability too); the
+  // supervisor uses its locally configured key via the `__use_local__` sentinel.
+  const run = reservation.run
   await updateSupervisorState(a.supervisorId, 'starting', run.id)
 
   const skipPerms = await getSessionSkipPermissionsByRepo(a.userId, body.data.repo_path)

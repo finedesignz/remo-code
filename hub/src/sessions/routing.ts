@@ -21,7 +21,7 @@
  * without re-picking the same broken supervisor.
  */
 import { sql } from '../db/postgres.ts'
-import { reserveSessionSlot } from './budget.ts'
+import { reserveSessionSlot, type ReserveRunFields } from './budget.ts'
 import { isSupervisorOnline } from '../ws/supervisor-registry.ts'
 import { listOnlineAgentSessionsForUser } from '../ws/registry.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
@@ -32,7 +32,7 @@ import { checkUserThreshold } from '../usage/threshold.ts'
 const ONLINE_RECENCY_MS = 90_000
 
 export type PickedTarget =
-  | { kind: 'supervisor'; supervisor_id: string; running: number; cap: number }
+  | { kind: 'supervisor'; supervisor_id: string; running: number; cap: number; run: { id: string } | null }
   | { kind: 'local_agent'; agent_session_id: string }
   | { kind: 'none'; reason: string }
   | {
@@ -57,9 +57,10 @@ function isRecent(lastSeen: string | Date | null): boolean {
 
 export async function pickSessionTarget(
   userId: string,
-  opts: { excludeSupervisorIds?: string[] } = {},
+  opts: { excludeSupervisorIds?: string[]; runFields?: ReserveRunFields } = {},
 ): Promise<PickedTarget> {
   const exclude = new Set(opts.excludeSupervisorIds ?? [])
+  const runFields = opts.runFields
 
   // Step 0: Claude usage threshold gate. Blocks new dispatch when the user
   // is over their configured 5h or 7d cap. In-flight runs are not killed —
@@ -88,9 +89,9 @@ export async function pickSessionTarget(
     `
     const sup = supRows[0]
     if (sup && isSupervisorOnline(sup.id) && isRecent(sup.last_seen_at)) {
-      const r = await reserveSessionSlot(userId, sup.id)
+      const r = await reserveSessionSlot(userId, sup.id, runFields)
       if (r.ok) {
-        return { kind: 'supervisor', supervisor_id: sup.id, running: r.running, cap: r.cap }
+        return { kind: 'supervisor', supervisor_id: sup.id, running: r.running, cap: r.cap, run: r.run }
       }
       // at_capacity or supervisor_not_found → fall through to step 2.
     }
@@ -107,9 +108,9 @@ export async function pickSessionTarget(
     if (sup.id === preferredId) continue // already tried in step 1
     if (!isSupervisorOnline(sup.id)) continue
     if (!isRecent(sup.last_seen_at)) continue
-    const r = await reserveSessionSlot(userId, sup.id)
+    const r = await reserveSessionSlot(userId, sup.id, runFields)
     if (r.ok) {
-      return { kind: 'supervisor', supervisor_id: sup.id, running: r.running, cap: r.cap }
+      return { kind: 'supervisor', supervisor_id: sup.id, running: r.running, cap: r.cap, run: r.run }
     }
   }
 

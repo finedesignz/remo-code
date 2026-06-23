@@ -216,15 +216,20 @@ maybe('pickSessionTarget routing', () => {
     bringSupervisorOnline(SUP_A, TEST_API_KEY_A)
     // SUP_B not online so the only possible target is SUP_A's 1 slot.
 
-    // Two concurrent picks; each successful one creates a session_runs row so
-    // the second-in-the-batch sees the higher count under FOR UPDATE serialisation.
-    const pickAndConsume = async () => {
-      const r = await pickSessionTarget(TEST_USER_ID)
-      if (r.kind === 'supervisor') {
-        await insertRun(r.supervisor_id)
-      }
-      return r
-    }
+    // Two concurrent picks. The slot-consuming INSERT happens INSIDE the
+    // reservation's FOR-UPDATE tx (via runFields), so the second-in-the-batch
+    // sees the committed reservation under FOR UPDATE serialisation — exactly
+    // one wins the single open slot.
+    const pickAndConsume = async () =>
+      pickSessionTarget(TEST_USER_ID, {
+        runFields: {
+          sessionId: null,
+          repoPath: '/tmp/heal-test',
+          branch: null,
+          pulled: false,
+          initialPrompt: null,
+        },
+      })
     const results = await Promise.all([pickAndConsume(), pickAndConsume()])
     const winners = results.filter((r: any) => r.kind === 'supervisor')
     const losers = results.filter((r: any) => r.kind === 'none')
