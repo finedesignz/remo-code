@@ -47,7 +47,14 @@ CREATE TABLE IF NOT EXISTS api_keys (
   capabilities TEXT[] NOT NULL DEFAULT ARRAY['agent','supervisor']
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_active ON api_keys(user_id) WHERE revoked_at IS NULL;
+-- NOTE: the legacy one-active-key-per-user unique index
+-- (idx_api_keys_user_active) used to be created here, but it is unconditionally
+-- DROPped + replaced by the per-(user, purpose) variant idx_api_keys_user_purpose_active
+-- further down in this file. Creating it here was vestigial AND made re-applying
+-- the whole schema (sql.unsafe(schema.sql)) fail once a user legitimately had
+-- multiple active keys with distinct purposes — the CREATE would error on the
+-- now-valid data. Defining only the final purpose-aware index keeps schema
+-- application idempotent and order-independent.
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash) WHERE revoked_at IS NULL;
 
 -- Per-user system prompt injected at the start of every new Claude session

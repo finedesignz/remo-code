@@ -589,6 +589,21 @@ export async function findOrCreateAgentSessionV2(
 
     if (legacyRows.length > 0) {
       const keeper = legacyRows[0]
+      // Supersede the non-keeper siblings FIRST. The keeper UPDATE below adopts
+      // `projectDir`, which may equal a sibling's current project_dir; the partial
+      // unique index idx_sessions_user_project_unique(user_id, project_dir)
+      // WHERE deleted_at IS NULL AND is_rootless=false would reject the keeper
+      // UPDATE while that sibling is still live. Soft-deleting siblings first
+      // removes them from the index so the keeper can take over the path.
+      for (let i = 1; i < legacyRows.length; i++) {
+        const other = legacyRows[i]
+        await tx`
+          UPDATE sessions
+             SET superseded_by = ${keeper.id},
+                 deleted_at = now()
+           WHERE id = ${other.id}
+        `
+      }
       const updated = tokenHash === null
         ? await tx`
             UPDATE sessions
@@ -611,15 +626,6 @@ export async function findOrCreateAgentSessionV2(
              WHERE id = ${keeper.id}
              RETURNING *
           `
-      for (let i = 1; i < legacyRows.length; i++) {
-        const other = legacyRows[i]
-        await tx`
-          UPDATE sessions
-             SET superseded_by = ${keeper.id},
-                 deleted_at = now()
-           WHERE id = ${other.id}
-        `
-      }
       return { ...updated[0], created: false, repo_keyed: true, migrated: true }
     }
 
