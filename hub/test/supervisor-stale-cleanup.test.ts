@@ -30,9 +30,14 @@ maybe('cleanupStaleSupervisorRows', () => {
   let apiKeyIds: string[] = []
 
   async function mkApiKey(userId: string): Promise<string> {
+    // Each supervisor row needs its own api_key. The partial unique index
+    // idx_api_keys_user_purpose_active (user_id, purpose) WHERE revoked_at IS NULL
+    // allows only ONE active key per (user, purpose), so give each a distinct
+    // purpose — purpose is irrelevant to what this suite exercises.
+    const purpose = 'stale-' + Math.random().toString(36).slice(2, 10)
     const rows = await sql`
-      INSERT INTO api_keys (user_id, key_hash, capabilities, name)
-      VALUES (${userId}, ${TAG + '-' + Math.random().toString(36).slice(2, 10)}, ${JSON.stringify(['supervisor'])}::jsonb, 'stale test')
+      INSERT INTO api_keys (user_id, key_hash, capabilities, name, purpose)
+      VALUES (${userId}, ${TAG + '-' + Math.random().toString(36).slice(2, 10)}, ${['supervisor']}::text[], 'stale test', ${purpose})
       RETURNING id
     `
     apiKeyIds.push(rows[0].id as string)

@@ -42,16 +42,20 @@ const FAKE_AGENT_SESSION = 'sess_heal_t008_agent'
 const fakeWs: any = { send: () => {}, close: () => {} }
 
 async function seed(): Promise<void> {
+  // users.preferred_supervisor_id is an FK → supervisors(id), so insert the
+  // user WITHOUT it first, seed the supervisors, then point at SUP_A.
   await sql.unsafe(`
-    INSERT INTO users (id, email, password_hash, role, preferred_supervisor_id)
-    VALUES ('${TEST_USER_ID}', 't008+heal@test.local', 'x', 'user', '${SUP_A}')
-    ON CONFLICT (id) DO UPDATE SET preferred_supervisor_id = '${SUP_A}';
+    INSERT INTO users (id, email, password_hash, role)
+    VALUES ('${TEST_USER_ID}', 't008+heal@test.local', 'x', 'user')
+    ON CONFLICT (id) DO UPDATE SET preferred_supervisor_id = NULL;
   `)
+  // Distinct purpose per key: idx_api_keys_user_purpose_active allows one active
+  // key per (user, purpose). capabilities is text[] in the schema, not jsonb.
   await sql.unsafe(`
-    INSERT INTO api_keys (id, user_id, key_hash, capabilities, name)
+    INSERT INTO api_keys (id, user_id, key_hash, capabilities, name, purpose)
     VALUES
-      ('${TEST_API_KEY_A}', '${TEST_USER_ID}', 'heal-a-hash', '["supervisor"]'::jsonb, 'heal a'),
-      ('${TEST_API_KEY_B}', '${TEST_USER_ID}', 'heal-b-hash', '["supervisor"]'::jsonb, 'heal b')
+      ('${TEST_API_KEY_A}', '${TEST_USER_ID}', 'heal-a-hash', ARRAY['supervisor']::text[], 'heal a', 'heal-a'),
+      ('${TEST_API_KEY_B}', '${TEST_USER_ID}', 'heal-b-hash', ARRAY['supervisor']::text[], 'heal b', 'heal-b')
     ON CONFLICT (id) DO NOTHING;
   `)
   // SUP_A: last_seen now (online); SUP_B: last_seen now (online). Budget 2 each.
@@ -64,6 +68,10 @@ async function seed(): Promise<void> {
       concurrency_budget = 2,
       concurrency_override = NULL,
       last_seen_at = EXCLUDED.last_seen_at;
+  `)
+  // Now SUP_A exists → set the user's preferred supervisor.
+  await sql.unsafe(`
+    UPDATE users SET preferred_supervisor_id = '${SUP_A}' WHERE id = '${TEST_USER_ID}';
   `)
   // Fake "session" row so registerChannel has something to reference.
   await sql.unsafe(`

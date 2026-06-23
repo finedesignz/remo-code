@@ -38,7 +38,7 @@ async function seed(): Promise<void> {
   `)
   await sql.unsafe(`
     INSERT INTO api_keys (id, user_id, key_hash, capabilities, name)
-    VALUES ('${TEST_API_KEY_ID}', '${TEST_USER_ID}', 'budget-test-hash', '["supervisor"]'::jsonb, 'budget test')
+    VALUES ('${TEST_API_KEY_ID}', '${TEST_USER_ID}', 'budget-test-hash', ARRAY['supervisor']::text[], 'budget test')
     ON CONFLICT (id) DO NOTHING;
   `)
   await sql.unsafe(`
@@ -48,7 +48,7 @@ async function seed(): Promise<void> {
   `)
   await sql.unsafe(`
     INSERT INTO api_keys (id, user_id, key_hash, capabilities, name)
-    VALUES ('apikey_budget_t099', '${OTHER_USER_ID}', 'budget-test-other-hash', '["supervisor"]'::jsonb, 'budget other')
+    VALUES ('apikey_budget_t099', '${OTHER_USER_ID}', 'budget-test-other-hash', ARRAY['supervisor']::text[], 'budget other')
     ON CONFLICT (id) DO NOTHING;
   `)
   await sql.unsafe(`

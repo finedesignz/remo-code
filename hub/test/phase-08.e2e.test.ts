@@ -111,8 +111,11 @@ maybe('phase-08 e2e — worktrees of one GitHub repo collapse to one session', (
     expect(rows[0].github_owner).toBe('test')
     expect(rows[0].github_repo).toBe('demo')
 
-    // Bookkeeping: project_dir tracks the most-recently-connecting worktree.
-    expect(rows[0].project_dir).toBe('/tmp/repo-w1')
+    // Bookkeeping: the worktree-overwrite guard (dal.ts P1, 2026-05-28) keeps
+    // the canonical clone path and never downgrades it to a worktree path. The
+    // sibling connect (/tmp/repo-w1, is_worktree, parent=/tmp/repo) therefore
+    // resolves project_dir to the parent clone, not the worktree checkout.
+    expect(rows[0].project_dir).toBe('/tmp/repo')
   })
 })
 

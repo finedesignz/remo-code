@@ -42,7 +42,7 @@ async function seed(): Promise<void> {
   `)
   await sql.unsafe(`
     INSERT INTO api_keys (id, user_id, key_hash, capabilities, name)
-    VALUES ('${TEST_API_KEY_ID}', '${TEST_USER_ID}', 'state-test-hash', '["supervisor"]'::jsonb, 'state test')
+    VALUES ('${TEST_API_KEY_ID}', '${TEST_USER_ID}', 'state-test-hash', ARRAY['supervisor']::text[], 'state test')
     ON CONFLICT (id) DO NOTHING;
   `)
   await sql.unsafe(`
