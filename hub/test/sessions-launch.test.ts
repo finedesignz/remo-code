@@ -300,8 +300,19 @@ mock.module('../src/sessions/budget.ts', () => ({
   // this stub is the active mock. The /launch route now reserves a slot before
   // dispatching session.start (protocol-drift fix 2026-05-30), so this must
   // grant a slot for the happy-path launch tests; per-test capacity faults are
-  // driven via state.reserveResult.
-  reserveSessionSlot: async () => state.reserveResult,
+  // driven via state.reserveResult. The run row is now consumed INSIDE the
+  // reservation tx (atomic gate), so when runFields is supplied a granted
+  // reservation also carries the created run (and honours throwOnCreateRun).
+  reserveSessionSlot: async (_uid: string, _sid: string, runFields?: any) => {
+    const r = state.reserveResult
+    if (r.ok && runFields) {
+      if (state.throwOnCreateRun) throw new Error('createRun boom')
+      const row = { id: 'run_x', ...runFields }
+      state.createdRuns.push(row)
+      return { ...r, run: { id: row.id } }
+    }
+    return r
+  },
   getCapacitySnapshot: async () => null,
 }))
 
@@ -600,7 +611,7 @@ describe('POST /api/sessions/:id/launch', () => {
     expect(state.sentMessages).toHaveLength(0)
   })
 
-  test('run_insert_failed (createRun throws) → 500, slot released, no dispatch', async () => {
+  test('run_insert_failed (reservation INSERT throws) → 500, no leak, no dispatch', async () => {
     state.throwOnCreateRun = true
     const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
       method: 'POST',
@@ -609,9 +620,10 @@ describe('POST /api/sessions/:id/launch', () => {
     })
     expect(res.status).toBe(500)
     expect(((await res.json()) as any).error).toBe('run_insert_failed')
-    // Reserved slot released; no run row, no endRun, no dispatch.
-    expect(state.releaseSlotCalls).toHaveLength(1)
-    expect(state.releaseSlotCalls[0]).toEqual({ userId: TEST_USER_ID, supervisorId: TEST_SUPERVISOR_ID })
+    // The run row is consumed INSIDE the reservation tx now: when the INSERT
+    // throws the whole tx rolls back, so the slot is never committed — there is
+    // nothing to release. No run row, no endRun, no dispatch, no leaked slot.
+    expect(state.releaseSlotCalls).toHaveLength(0)
     expect(state.createdRuns).toHaveLength(0)
     expect(state.endRunCalls).toHaveLength(0)
     expect(state.sentMessages).toHaveLength(0)

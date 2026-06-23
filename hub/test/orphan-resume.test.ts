@@ -29,7 +29,7 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:tes
 const HAS_TEST_DB = !!process.env.REMO_E2E_DB_URL
 const maybe = HAS_TEST_DB ? describe : describe.skip
 
-const TEST_USER_ID = '00000000-0000-0000-0000-0000000or001'
+const TEST_USER_ID = '00000000-0000-0000-0000-000000005001'
 const TEST_API_KEY_ID = 'apikey_or001'
 const TEST_SUPERVISOR_ID = 'sup_or001'
 
@@ -61,7 +61,7 @@ async function seed() {
   `)
   await sql.unsafe(`
     INSERT INTO api_keys (id, user_id, key_hash, capabilities, name)
-    VALUES ('${TEST_API_KEY_ID}', '${TEST_USER_ID}', 'or001-hash', '["supervisor"]'::jsonb, 'or001')
+    VALUES ('${TEST_API_KEY_ID}', '${TEST_USER_ID}', 'or001-hash', ARRAY['supervisor']::text[], 'or001')
     ON CONFLICT (id) DO NOTHING;
   `)
   await sql.unsafe(`

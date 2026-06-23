@@ -109,8 +109,11 @@ maybe('coolify-webhook-secret endpoints', () => {
     // UUID v4 shape: 8-4-4-4-12 hex chars
     expect(body.secret).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
     expect(typeof body.webhook_url).toBe('string')
-    expect(body.header_format).toContain('X-Coolify-Signature')
-    expect(body.timestamp_header).toBe('X-Coolify-Timestamp')
+    expect(body.webhook_url).toContain(`/api/coolify/webhook/${userId}`)
+    // The rotate endpoint moved to the url_token auth model: the webhook_url
+    // itself is the credential. The old HMAC header_format/timestamp_header
+    // fields no longer exist on this response.
+    expect(body.auth_mode).toBe('url_token')
 
     // Stash for next test.
     ;(globalThis as any).__first_secret__ = body.secret

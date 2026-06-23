@@ -60,12 +60,34 @@ maybe('finalizeOpenRunsForSupervisor', () => {
     `
     userId = userRow[0].id
     supervisorId = `sup_finalize_${Date.now()}`
+
+    // session_runs.supervisor_id is an FK → supervisors(id) in the real schema,
+    // so every supervisor_id we reference needs a real parent row.
+    await mkSupervisor(supervisorId)
   })
+
+  // Each supervisor needs its own api_key: supervisors.api_key_id is uniquely
+  // indexed (idx_supervisors_api_key) and the api_keys partial unique index
+  // allows one active key per (user, purpose) — so use a distinct purpose too.
+  async function mkSupervisor(id: string): Promise<void> {
+    const apiKeyId = `apikey_${id}`
+    await sql`
+      INSERT INTO api_keys (id, user_id, key_hash, capabilities, name, purpose)
+      VALUES (${apiKeyId}, ${userId}, ${`hash-${id}`}, ${['supervisor']}::text[], 'finalize test', ${`purpose-${id}`})
+      ON CONFLICT (id) DO NOTHING
+    `
+    await sql`
+      INSERT INTO supervisors (id, user_id, api_key_id, hostname, roots)
+      VALUES (${id}, ${userId}, ${apiKeyId}, ${'finalize-host'}, ARRAY[]::text[])
+      ON CONFLICT (id) DO NOTHING
+    `
+  }
 
   test('updates only open rows for the given supervisor', async () => {
     // Two open + one already-ended row for this supervisor; one open row for
     // another supervisor (control).
     const otherSup = `sup_other_${Date.now()}`
+    await mkSupervisor(otherSup)
     await sql`
       INSERT INTO session_runs (user_id, supervisor_id, repo_path)
       VALUES (${userId}, ${supervisorId}, 'a')

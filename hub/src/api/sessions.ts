@@ -6,7 +6,6 @@ import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
 import { generateToken } from '../utils/token'
 import { pickSessionTarget } from '../sessions/routing.ts'
-import { createRun } from '../db/supervisor-dal.ts'
 import {
   sendToSupervisor,
   updateSupervisorState,
@@ -360,6 +359,15 @@ sessions.post('/heal', async (c) => {
   for (let hop = 0; hop < HEAL_MAX_HOPS; hop++) {
     const pick = await pickSessionTarget(userId, {
       excludeSupervisorIds: Array.from(exclude),
+      // Consume the run row atomically inside the reservation tx (closes the
+      // over-admission race — see budget.ts reserveSessionSlot).
+      runFields: {
+        sessionId: null,
+        repoPath: repo,
+        branch,
+        pulled: false,
+        initialPrompt: prompt,
+      },
     })
 
     if (pick.kind === 'quota_blocked') {
@@ -377,22 +385,11 @@ sessions.post('/heal', async (c) => {
     }
 
     if (pick.kind === 'supervisor') {
-      // Reservation is held — must release on dispatch failure.
-      let run: { id: string }
-      try {
-        run = await createRun({
-          userId,
-          sessionId: null,
-          supervisorId: pick.supervisor_id,
-          repoPath: repo,
-          branch,
-          pulled: false,
-          initialPrompt: prompt,
-        }) as { id: string }
-      } catch (err: any) {
-        await releaseSessionSlot(userId, pick.supervisor_id)
-        return c.json({ error: 'run_insert_failed', detail: err?.message ?? String(err) }, 500)
+      // Run row already consumed atomically inside the reservation tx.
+      if (!pick.run) {
+        return c.json({ error: 'run_insert_failed' }, 500)
       }
+      const run = pick.run
 
       const skipPerms = await getSessionSkipPermissionsByRepo(userId, repo)
       try {
@@ -551,30 +548,29 @@ sessions.post('/:id/launch', async (c) => {
 
   // Concurrency gate — MUST come before createRun, exactly as the other
   // session.start senders (api/supervisors.ts, telegram/launch.ts).
-  const reservation = await reserveSessionSlot(userId, supervisorId)
+  // Reserve + consume the run row atomically inside the FOR-UPDATE tx.
+  let reservation
+  try {
+    reservation = await reserveSessionSlot(userId, supervisorId, {
+      sessionId: null,
+      repoPath: cwd,
+      branch: null,
+      pulled: false,
+      initialPrompt: null,
+    })
+  } catch (err: any) {
+    return c.json({ error: 'run_insert_failed', detail: err?.message ?? String(err) }, 500)
+  }
   if (!reservation.ok) {
     if (reservation.reason === 'at_capacity') {
       return c.json({ error: 'at_capacity', running: reservation.running, cap: reservation.cap }, 429)
     }
     return c.json({ error: 'supervisor_offline' }, 409)
   }
-
-  let run: { id: string }
-  try {
-    run = await createRun({
-      userId,
-      sessionId: null,
-      supervisorId,
-      repoPath: cwd,
-      branch: null,
-      pulled: false,
-      initialPrompt: null,
-    }) as { id: string }
-  } catch (err: any) {
-    await releaseSessionSlot(userId, supervisorId)
-    return c.json({ error: 'run_insert_failed', detail: err?.message ?? String(err) }, 500)
+  if (!reservation.run) {
+    return c.json({ error: 'run_insert_failed' }, 500)
   }
-  const run_id = run.id
+  const run_id = reservation.run.id
 
   try {
     sendToSupervisor(supervisorId, {

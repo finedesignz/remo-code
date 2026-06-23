@@ -8,9 +8,18 @@
  * and rejects with `at_capacity` when the live count of open session_runs
  * (ended_at IS NULL) is already >= cap.
  *
- * The actual `INSERT INTO session_runs` is the caller's responsibility — this
- * function only gates. That keeps the lock window tight and means callers can
- * compose the run row with whatever fields they need (restart_of, etc.).
+ * ATOMICITY: the slot-consuming `INSERT INTO session_runs` runs INSIDE the same
+ * `FOR UPDATE` transaction. Pass the run fields via the `runFields` argument and
+ * use the returned `run` row. This closes the over-admission race: because the
+ * supervisor row stays locked until the tx commits, a concurrent reserver blocks
+ * on `FOR UPDATE` until the prior reservation's INSERT has committed, so its
+ * `COUNT(*)` already reflects the in-flight reservation. Under true `Promise.all`
+ * parallelism at cap, exactly `cap` reservations win.
+ *
+ * Callers MUST pass `runFields` so reserve+consume is one tx boundary. The legacy
+ * gate-only form (no `runFields`) is retained ONLY for callers that have nothing
+ * to insert (pure capacity probes) — it does NOT consume a slot and re-introduces
+ * the race if used as a reserve-then-insert-later gate, so don't.
  *
  * `releaseSessionSlot` is intentionally a no-op for now: the running count is
  * derived from `session_runs.ended_at IS NULL`, which the existing close paths
@@ -22,21 +31,40 @@
  */
 import { sql } from '../db/postgres.ts'
 
+/**
+ * Run fields consumed atomically inside the reservation tx. Mirrors `createRun`
+ * in supervisor-dal.ts so the INSERT can move into the FOR-UPDATE window without
+ * the caller composing a separate insert.
+ */
+export interface ReserveRunFields {
+  sessionId: string | null
+  repoPath: string
+  branch: string | null
+  pulled: boolean
+  initialPrompt: string | null
+  restartOf?: string | null
+  restartCount?: number
+}
+
 export type ReserveResult =
-  | { ok: true; running: number; cap: number }
+  | { ok: true; running: number; cap: number; run: { id: string } | null }
   | { ok: false; reason: 'at_capacity'; running: number; cap: number }
   | { ok: false; reason: 'supervisor_not_found' }
 
 /**
- * Atomically reserve a session slot against the supervisor's effective cap.
+ * Atomically reserve a session slot against the supervisor's effective cap and,
+ * when `runFields` is supplied, consume it by inserting the `session_runs` row
+ * inside the SAME `SELECT ... FOR UPDATE` transaction.
  *
- * Runs in a transaction with `SELECT ... FOR UPDATE` so concurrent reservers
- * targeting the same supervisor are serialised: at cap, exactly one wins and
- * the others see `at_capacity`.
+ * Concurrent reservers targeting the same supervisor are serialised on the
+ * supervisor row lock: at cap, exactly `cap` win and the rest see `at_capacity`.
+ * The consuming INSERT is committed before the lock releases, so the next
+ * reserver's count already includes it — no over-admission under parallelism.
  */
 export async function reserveSessionSlot(
   userId: string,
   supervisorId: string,
+  runFields?: ReserveRunFields,
 ): Promise<ReserveResult> {
   return sql.begin(async (tx) => {
     const supRows = await tx<{
@@ -71,7 +99,25 @@ export async function reserveSessionSlot(
     if (running >= cap) {
       return { ok: false, reason: 'at_capacity', running, cap } as const
     }
-    return { ok: true, running, cap } as const
+
+    // Consume the slot inside the locked window so the reservation is reflected
+    // in the open-run count seen by the next reserver waiting on FOR UPDATE.
+    let run: { id: string } | null = null
+    if (runFields) {
+      const runRows = await tx<{ id: string }[]>`
+        INSERT INTO session_runs
+          (user_id, session_id, supervisor_id, repo_path, branch, pulled, initial_prompt, restart_of, restart_count)
+        VALUES (
+          ${userId}, ${runFields.sessionId}, ${supervisorId}, ${runFields.repoPath},
+          ${runFields.branch}, ${runFields.pulled}, ${runFields.initialPrompt},
+          ${runFields.restartOf ?? null}, ${runFields.restartCount ?? 0}
+        )
+        RETURNING id
+      `
+      run = runRows[0] ?? null
+    }
+
+    return { ok: true, running, cap, run } as const
   }) as Promise<ReserveResult>
 }
 

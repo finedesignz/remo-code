@@ -172,8 +172,13 @@ maybe('phase 07 titanium auth dal', () => {
     `
     expect(rows.length).toBe(1)
     expect(rows[0].user_id).toBe(u.id)
-    expect(rows[0].metadata.candidate_subject).toBe('cand_x')
-    expect(rows[0].metadata.attempted_subject).toBe('try_y')
+    // This codebase's postgres client returns jsonb columns as raw JSON strings
+    // (it does not auto-parse), so parse before asserting on the object.
+    const metadata = typeof rows[0].metadata === 'string'
+      ? JSON.parse(rows[0].metadata)
+      : rows[0].metadata
+    expect(metadata.candidate_subject).toBe('cand_x')
+    expect(metadata.attempted_subject).toBe('try_y')
   })
 })
 

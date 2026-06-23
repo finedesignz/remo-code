@@ -60,8 +60,8 @@ maybe('verifyApiKeyWithCapability disambiguates failure reasons', () => {
   test('ok when key exists, not revoked, has capability', async () => {
     const keyHash = mkHash()
     await sql`
-      INSERT INTO api_keys (user_id, name, key_hash, capabilities)
-      VALUES (${userId}, 'happy', ${keyHash}, ARRAY['agent','supervisor'])
+      INSERT INTO api_keys (user_id, name, key_hash, capabilities, purpose)
+      VALUES (${userId}, 'happy', ${keyHash}, ARRAY['agent','supervisor'], 'disamb-happy')
     `
     const result = await dal.verifyApiKeyWithCapability(keyHash, 'supervisor')
     expect(result.ok).toBe(true)
@@ -84,8 +84,8 @@ maybe('verifyApiKeyWithCapability disambiguates failure reasons', () => {
   test('missing_capability when caps non-empty and need not present', async () => {
     const keyHash = mkHash()
     await sql`
-      INSERT INTO api_keys (user_id, name, key_hash, capabilities)
-      VALUES (${userId}, 'no-cap', ${keyHash}, ARRAY['agent'])
+      INSERT INTO api_keys (user_id, name, key_hash, capabilities, purpose)
+      VALUES (${userId}, 'no-cap', ${keyHash}, ARRAY['agent'], 'disamb-no-cap')
     `
     const result = await dal.verifyApiKeyWithCapability(keyHash, 'supervisor')
     expect(result.ok).toBe(false)
@@ -100,8 +100,8 @@ maybe('verifyApiKeyWithCapability disambiguates failure reasons', () => {
   test('empty caps treated as legacy all-caps (ok)', async () => {
     const keyHash = mkHash()
     await sql`
-      INSERT INTO api_keys (user_id, name, key_hash, capabilities)
-      VALUES (${userId}, 'legacy', ${keyHash}, ARRAY[]::TEXT[])
+      INSERT INTO api_keys (user_id, name, key_hash, capabilities, purpose)
+      VALUES (${userId}, 'legacy', ${keyHash}, ARRAY[]::TEXT[], 'disamb-legacy')
     `
     const result = await dal.verifyApiKeyWithCapability(keyHash, 'supervisor')
     expect(result.ok).toBe(true)

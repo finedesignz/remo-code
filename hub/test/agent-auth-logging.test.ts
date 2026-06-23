@@ -52,25 +52,38 @@ function makeFakeWs() {
 maybe('agent auth surfaces structured log lines on failure', () => {
   let handleAgentMessage: typeof import('../src/ws/agent.ts')['handleAgentMessage']
   let warnings: string[] = []
-  let origWarn: typeof console.warn
+
+  // src/ws/agent.ts logs through the structured `log` helper
+  // (src/observability/logger.ts), which writes one JSON line per call via its
+  // own writer — NOT console.warn. Capture that writer's output and assert on
+  // the structured envelope { level, msg, ...fields } instead of a string.
+  let setWriter: typeof import('../src/observability/logger.ts')['_setWriterForTest']
+  let restoreWriter: (() => void) | null = null
 
   beforeAll(async () => {
     const { runMigrations } = await import('../src/db/migrate.ts')
     await runMigrations()
     handleAgentMessage = (await import('../src/ws/agent.ts')).handleAgentMessage
+    setWriter = (await import('../src/observability/logger.ts'))._setWriterForTest
   })
 
   afterAll(() => {
-    if (origWarn) console.warn = origWarn
+    if (restoreWriter) restoreWriter()
   })
 
   function captureWarn(fn: () => Promise<void>) {
     warnings = []
-    origWarn = console.warn
-    console.warn = (...a: any[]) => { warnings.push(a.map(String).join(' ')) }
+    const prev = setWriter((line: string) => { warnings.push(line) })
+    restoreWriter = () => setWriter(prev)
     return fn().finally(() => {
-      console.warn = origWarn
+      setWriter(prev)
+      restoreWriter = null
     })
+  }
+
+  // Parse a captured JSON log line; tolerate non-JSON lines.
+  function parsed(): Array<Record<string, any>> {
+    return warnings.map((w) => { try { return JSON.parse(w) } catch { return {} } })
   }
 
   test('invalid api_key emits structured warn (reason=invalid_api_key)', async () => {
@@ -83,8 +96,8 @@ maybe('agent auth surfaces structured log lines on failure', () => {
         hostname: 'testhost',
       }))
     })
-    const hit = warnings.find((w) => w.includes('[agent] auth fail') && w.includes('reason=invalid_api_key'))
-    expect(hit, `expected '[agent] auth fail reason=invalid_api_key' in warnings, got:\n${warnings.join('\n')}`).toBeDefined()
+    const hit = parsed().find((l) => l.level === 'warn' && l.msg === 'agent.auth_fail' && l.reason === 'invalid_api_key')
+    expect(hit, `expected warn agent.auth_fail reason=invalid_api_key in logs, got:\n${warnings.join('\n')}`).toBeDefined()
     // Auth_error frame is sent and connection closed with 4001.
     expect(ws._sent.some((s) => s.includes('auth_error'))).toBe(true)
     expect(ws._closes[0]?.code).toBe(4001)
@@ -100,7 +113,7 @@ maybe('agent auth surfaces structured log lines on failure', () => {
         // api_key intentionally missing
       }))
     })
-    const hit = warnings.find((w) => w.includes('[agent] schema reject'))
-    expect(hit, `expected '[agent] schema reject' in warnings, got:\n${warnings.join('\n')}`).toBeDefined()
+    const hit = parsed().find((l) => l.level === 'warn' && l.msg === 'agent.schema_reject')
+    expect(hit, `expected warn agent.schema_reject in logs, got:\n${warnings.join('\n')}`).toBeDefined()
   })
 })
