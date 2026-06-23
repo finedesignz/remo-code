@@ -105,6 +105,9 @@ mock.module('../src/db/supervisor-dal.ts', () => ({
 mock.module('../src/db/dal.ts', () => ({
   getSession: async () =>
     state.sessionProjectDir == null ? { id: 's1' } : { id: 's1', project_dir: state.sessionProjectDir },
+  // #289 added a getSessionSkipPermissions import to spawn-on-error.ts; this
+  // partial mock must expose it or bun fails to load the module under test.
+  getSessionSkipPermissions: async () => true,
 }))
 
 mock.module('../src/observability/logger.ts', () => ({
