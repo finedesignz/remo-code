@@ -389,9 +389,17 @@ app.use('/api/users/me/profile', async (c, next) =>
   isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/supervisors/:id/roots', async (c, next) =>
   isMutating(c) ? userMutationLimit(c, next) : next())
-// Orchestrator: mutating endpoints require fresh login (15-min step-up).
-app.use('/api/orchestrator', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
-app.use('/api/orchestrator/*', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
+// Orchestrator: prefs edits (PUT) require fresh login (15-min step-up) — they
+// carry custom_instructions that drive an autonomous agent. The session
+// lifecycle (POST /start, /stop) does NOT: it mirrors /api/supervisors/:id/start
+// (no step-up), and a long-lived cookie session (created_at can be weeks old)
+// must be able to launch the orchestrator without forcing a re-login round-trip.
+// requireRecentAuth is keyed on auth_sessions.created_at, so gating /start behind
+// it permanently 401s any session older than 15 min.
+const orchestratorStepUp = async (c: any, next: any) =>
+  c.req.method.toUpperCase() === 'PUT' ? requireRecentAuth()(c, next) : next()
+app.use('/api/orchestrator', orchestratorStepUp)
+app.use('/api/orchestrator/*', orchestratorStepUp)
 app.use('/api/orchestrator', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/orchestrator/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/mappings', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
