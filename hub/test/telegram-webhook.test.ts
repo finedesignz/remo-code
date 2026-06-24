@@ -493,6 +493,57 @@ describe("inline approval callbacks (Fix C)", () => {
   });
 });
 
+describe("inline question callbacks (multiple-choice answers)", () => {
+  test("option tap forwards question_response{answer:label} to the agent socket", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_q" } as any;
+    state.channelSends = [];
+    const { rememberQuestionOption, questionCallbackData, _resetQuestionPromptsForTests, takeQuestionOption } =
+      await import("../src/telegram/question-approvals.ts");
+    _resetQuestionPromptsForTests();
+    const token = rememberQuestionOption({
+      sessionId: "sess_q", requestId: "req-q", userId: LINKED_USER_ID, chatId: LINKED_CHAT, messageId: 50,
+      label: "Postgres", question: "Which database?",
+    });
+
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 800, chatId: LINKED_CHAT, data: questionCallbackData(token) }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_question_answered");
+
+    expect(state.channelSends).toHaveLength(1);
+    const frame = JSON.parse(state.channelSends![0]!.frame);
+    expect(frame.type).toBe("question_response");
+    expect(frame.session_id).toBe("sess_q");
+    expect(frame.request_id).toBe("req-q");
+    expect(frame.answer).toBe("Postgres");
+    // Resolved exactly once.
+    expect(takeQuestionOption(token, LINKED_USER_ID)).toBeNull();
+  });
+
+  test("stale/unknown token replies stale, sends nothing to the agent", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_q" } as any;
+    state.channelSends = [];
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 801, chatId: LINKED_CHAT, data: "qa:nope" }));
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_question_stale");
+    expect(state.channelSends).toHaveLength(0);
+  });
+
+  test("foreign user cannot resolve another user's question option", async () => {
+    state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_q" } as any;
+    state.channelSends = [];
+    const { rememberQuestionOption, questionCallbackData } = await import("../src/telegram/question-approvals.ts");
+    const token = rememberQuestionOption({
+      sessionId: "sess_q", requestId: "req-q-foreign", userId: "SOME-OTHER-USER", chatId: LINKED_CHAT, messageId: 50,
+      label: "A", question: "q",
+    });
+    const res = await post(app, `/api/telegram/webhook/${TEST_SECRET}`, mkCallback({ update_id: 802, chatId: LINKED_CHAT, data: questionCallbackData(token) }));
+    const body = await res.json();
+    expect(body.outcome).toBe("callback_question_stale");
+    expect(state.channelSends).toHaveLength(0);
+  });
+});
+
 describe("stop — inline 🛑 button + /stop command", () => {
   test("🛑 tap by owner forwards cancel{session_id} to the agent socket", async () => {
     state.user = { id: LINKED_USER_ID, email: LINKED_EMAIL, telegram_chat_id: LINKED_CHAT, telegram_default_session_id: "sess_stop" } as any;

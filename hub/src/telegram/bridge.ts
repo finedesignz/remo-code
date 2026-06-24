@@ -50,6 +50,10 @@ import {
   type PermissionPendingEvent,
 } from "../events/permission-events.ts";
 import {
+  onQuestionPending,
+  type QuestionPendingEvent,
+} from "../events/question-events.ts";
+import {
   onSessionActivity,
   type SessionActivityEvent,
 } from "../events/session-activity-events.ts";
@@ -69,6 +73,7 @@ import {
 } from "./client.ts";
 import { BOT_COMMANDS } from "./commands.ts";
 import { rememberPendingPrompt, permissionCallbackData } from "./approvals.ts";
+import { rememberQuestionOption, questionCallbackData } from "./question-approvals.ts";
 import { rememberStoppable, forgetStoppable, stopCallbackData } from "./stop.ts";
 import { startPermissionSurfacing, stopPermissionSurfacing } from "./permission-surfacing.ts";
 import { onTurnComplete } from "./turn-lock.ts";
@@ -79,6 +84,7 @@ let started = false;
 // Event-bus unsubscribe fns (flag-OFF / stream-json source).
 let unsubscribeFinal: (() => void) | null = null;
 let unsubscribePermission: (() => void) | null = null;
+let unsubscribeQuestion: (() => void) | null = null;
 let unsubscribeActivity: (() => void) | null = null;
 
 // Per-session transcript subscription unsubscribe fns (flag-ON / transcript source).
@@ -385,6 +391,84 @@ export function releaseSessionSubscription(sessionId: string): void {
 }
 
 /**
+ * A runner raised a multiple-choice question (AskUserQuestion / elicitation).
+ * Surface it inline with ONE BUTTON PER OPTION to every user whose Telegram
+ * default session is the emitting session, and record each option button so the
+ * webhook callback can resolve the chosen label.
+ *
+ * Multi-select (v1): rendered identically; each tap answers with that single
+ * option's label. The web client retains true multi-select.
+ *
+ * Free-form questions (no options): we still surface the question text so the
+ * user isn't left hanging, with a hint to reply in chat. (A plain reply flows
+ * through the normal dispatch path; bridging it to question_response is out of
+ * scope for v1 — noted for follow-up.)
+ */
+async function onQuestionPendingEvent(e: QuestionPendingEvent): Promise<void> {
+  let users: Array<{ id: string; telegram_chat_id: string | number }>;
+  try {
+    users = await getUsersWithTelegramDefaultSession(e.sessionId);
+  } catch (err: any) {
+    console.warn(`[telegram-bridge] question DAL lookup failed session=${e.sessionId}: ${err?.message ?? err}`);
+    return;
+  }
+  if (users.length === 0) return;
+
+  const hint = e.isMultiSelect ? "\n\n_Pick one option \\(tap a button\\):_" : "";
+  const headMd =
+    `❓ *Question* — ` +
+    escapeMarkdownV2(e.question.length > 600 ? e.question.slice(0, 599) + "…" : e.question) +
+    hint;
+
+  for (const u of users) {
+    const chatId = u.telegram_chat_id;
+    if (chatId === null || chatId === undefined) continue;
+    void enqueueForChat(chatId, async () => {
+      try {
+        // Mint one token per (user, option) and build a one-button-per-row keyboard.
+        // The callback's own `cb.message` carries chat/message_id for the edit, so
+        // the token doesn't need a (yet-unknown) prompt message_id — we store 0.
+        const keyboard: InlineKeyboard = [];
+        for (const opt of e.options) {
+          const token = rememberQuestionOption({
+            sessionId: e.sessionId,
+            requestId: e.requestId,
+            userId: u.id,
+            chatId,
+            messageId: 0,
+            label: opt.label,
+            question: e.question,
+          });
+          const btnText = opt.label.length > 60 ? opt.label.slice(0, 59) + "…" : opt.label;
+          keyboard.push([{ text: btnText, callback_data: questionCallbackData(token) }]);
+        }
+
+        if (keyboard.length > 0) {
+          try {
+            await sendMessageWithKeyboard(chatId as number | string, headMd, keyboard, {
+              parse_mode: "MarkdownV2",
+            });
+          } catch (mdErr: any) {
+            if (mdErr?.status === 400) {
+              await sendMessageWithKeyboard(chatId as number | string, headMd, keyboard);
+            } else {
+              throw mdErr;
+            }
+          }
+        } else {
+          // No options — surface as a plain message (no buttons to resolve).
+          await sendMessageMd(chatId as number | string, headMd);
+        }
+      } catch (err: any) {
+        console.warn(
+          `[telegram-bridge] question prompt send failed chat=${chatKey(chatId)} session=${e.sessionId}: ${err?.message ?? err}`,
+        );
+      }
+    });
+  }
+}
+
+/**
  * Boot the bridge. Idempotent. No-op when `TELEGRAM_BOT_TOKEN` is unset.
  * Chooses the outbound source by `config.telegramTranscriptTail` (see file header).
  */
@@ -404,6 +488,11 @@ export function startTelegramBridge(): void {
     // where the hub has no local CLI transcript files.
     unsubscribeFinal = onAssistantMessageFinal(onFinal);
     unsubscribePermission = onPermissionPending(onPermissionPendingEvent);
+    // Multiple-choice questions (AskUserQuestion) ride the same stream-json
+    // event-bus path — `user_question:pending` is emitted by ws/agent.ts only on
+    // this path, so the inline-question surfacing is wired here (not in the
+    // transcript-tail branch, where questions arrive as PTY keystroke prompts).
+    unsubscribeQuestion = onQuestionPending(onQuestionPendingEvent);
     unsubscribeActivity = onSessionActivity(onActivity);
     console.log("[telegram-bridge] stream-json (assistant_message:final) outbound bridge started");
   }
@@ -429,6 +518,10 @@ export function _stopTelegramBridgeForTests(): void {
   if (unsubscribePermission) {
     unsubscribePermission();
     unsubscribePermission = null;
+  }
+  if (unsubscribeQuestion) {
+    unsubscribeQuestion();
+    unsubscribeQuestion = null;
   }
   if (unsubscribeActivity) {
     unsubscribeActivity();

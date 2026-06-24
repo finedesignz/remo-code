@@ -48,6 +48,47 @@ function parseOptionsFromSchema(schema: unknown): Array<{ label: string; descrip
   return []
 }
 
+/**
+ * Extract a question + option labels from the built-in AskUserQuestion tool's
+ * input. When AskUserQuestion is surfaced as a `can_use_tool` control_request,
+ * `tool_input` has the shape:
+ *   { questions: [{ question, header?, options: [{label, description?}], multiSelect? }] }
+ * We surface the FIRST question's text + its option labels.
+ *
+ * ASSUMPTION (flagged for runtime verification): the exact `tool_input` shape is
+ * inferred from Claude Code's AskUserQuestion schema. We parse defensively —
+ * any missing/odd field degrades to a best-effort question with empty options
+ * (which still renders as a plain prompt), never throws.
+ */
+function parseAskUserQuestionInput(toolInput: unknown): {
+  question: string
+  options: Array<{ label: string; description?: string }>
+  isMultiSelect: boolean
+} | null {
+  if (!toolInput || typeof toolInput !== 'object') return null
+  const ti = toolInput as Record<string, any>
+  const questions = Array.isArray(ti.questions) ? ti.questions : null
+  const first = questions && questions.length > 0 ? questions[0] : ti
+  if (!first || typeof first !== 'object') return null
+  const question: string =
+    (typeof first.question === 'string' && first.question) ||
+    (typeof first.header === 'string' && first.header) ||
+    (typeof ti.question === 'string' && ti.question) ||
+    'Claude is asking a question'
+  const rawOpts = Array.isArray(first.options) ? first.options : []
+  const options = rawOpts
+    .map((o: any) => {
+      if (typeof o === 'string') return { label: o }
+      if (o && typeof o === 'object' && typeof o.label === 'string') {
+        return o.description ? { label: o.label, description: String(o.description) } : { label: o.label }
+      }
+      return null
+    })
+    .filter((o: any): o is { label: string; description?: string } => !!o)
+  const isMultiSelect = first.multiSelect === true || first.multi_select === true
+  return { question, options, isMultiSelect }
+}
+
 type SpawnFn = (cmd: string[], opts: any) => Subprocess
 
 export class ClaudeRunner implements CliRunner {
@@ -65,6 +106,15 @@ export class ClaudeRunner implements CliRunner {
   spawnImpl: SpawnFn | null = null
   /** When stopped intentionally, suppress auto-restart. */
   private intentionalStop = false
+  /**
+   * request_ids that arrived as `can_use_tool` for the built-in AskUserQuestion
+   * tool. These were surfaced to the hub as `user_question` (not a bare
+   * permission prompt), so the user's answer must be returned as a tool-ALLOW
+   * control_response carrying the selection — NOT as the elicitation-style
+   * `{ response: { answer } }`. Tracked so respondToQuestion picks the right wire
+   * shape. Entry removed once answered.
+   */
+  private askUserQuestionRequests = new Map<string, { question: string }>()
   /** Monotonic counter for unique interrupt control_request ids. */
   private interruptCounter = 0
 
@@ -192,11 +242,30 @@ export class ClaudeRunner implements CliRunner {
 
   respondToQuestion(requestId: string, answer: string) {
     if (!this.proc) return
-    const line = JSON.stringify({
-      type: 'control_response',
-      request_id: requestId,
-      response: { answer },
-    })
+    const askUserQuestion = this.askUserQuestionRequests.get(requestId)
+    let line: string
+    if (askUserQuestion) {
+      // AskUserQuestion came in as `can_use_tool` → answer is a tool-ALLOW
+      // control_response carrying the user's selection back as the tool input.
+      // ASSUMPTION (flagged for runtime verification): the CLI accepts the
+      // selection via `behavior: 'allow'` + an `updatedInput` echoing the chosen
+      // answer. If the exact field differs at runtime, adjust here — the rest of
+      // the pipeline (hub bridge, TG/web buttons) is unaffected.
+      this.askUserQuestionRequests.delete(requestId)
+      line = JSON.stringify({
+        type: 'control_response',
+        request_id: requestId,
+        behavior: 'allow',
+        updatedInput: { answer },
+      })
+    } else {
+      // Elicitation / side_question — the runner asked directly; answer inline.
+      line = JSON.stringify({
+        type: 'control_response',
+        request_id: requestId,
+        response: { answer },
+      })
+    }
     try {
       this.proc.stdin.write(line + '\n')
       ;(this.proc.stdin as any).flush?.()
@@ -305,6 +374,27 @@ export class ClaudeRunner implements CliRunner {
 
     if (event.type === 'control_request' && (event as any).subtype === 'can_use_tool') {
       const req = event as any
+      // AskUserQuestion is a built-in tool that arrives as a `can_use_tool`
+      // permission request, but it is semantically a multiple-choice QUESTION —
+      // routing it to a bare Approve/Deny hides the choices. Special-case it:
+      // surface a `user_question` with the parsed options, and remember the
+      // request_id so the answer is returned as a tool-allow control_response.
+      if (req.tool_name === 'AskUserQuestion') {
+        const parsed = parseAskUserQuestionInput(req.tool_input)
+        if (parsed) {
+          this.askUserQuestionRequests.set(req.request_id, { question: parsed.question })
+          this.listener?.({
+            type: 'user_question',
+            request_id: req.request_id,
+            question: parsed.question,
+            ...(parsed.options.length > 0 ? { options: parsed.options } : {}),
+            ...(parsed.isMultiSelect ? { is_multi_select: true } : {}),
+          })
+          return
+        }
+        // Couldn't parse — fall through to the permission path so the turn still
+        // makes progress (Approve/Deny) rather than hanging.
+      }
       this.listener?.({
         type: 'permission_request',
         request_id: req.request_id,

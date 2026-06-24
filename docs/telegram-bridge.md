@@ -360,6 +360,26 @@ offline — couldn't deliver.` (`callback_permission_offline`). Prompts expire a
 
 **Grant audit.** When a `permission_response` is forwarded to the supervisor — from EITHER channel — the hub emits a structured audit line `permission.grant_applied` `{ session_id, request_id, tool?, approved, source }` where `source` is `'web'` (`hub/src/ws/client.ts`) or `'telegram'` (`handlePermissionCallback` in `hub/src/api/telegram-webhook.ts`). This is the single traceable record that a tool grant was applied and delivered. The web and Telegram paths share the **same** hub→supervisor hop: hub `getChannel(sessionId).ws.send({type:'permission_response',…})` → supervisor `SessionBridge.handleHubMessage` (`supervisor/src/runners/session-bridge.ts`, no runtime schema gate — `HubToAgent` is a TS type) → `ClaudeRunner.respondToPermission` → CLI stdin `{type:'control_response', request_id, behavior:'allow'|'deny'}`. `question_response` follows the identical chain to `respondToQuestion`. Return-path coverage: `hub/test/ws-client-permission-returnpath.test.ts` (web→hub→channel + audit) and `supervisor/test/bridge-permission-returnpath.test.ts` (hub frame→runner→CLI control_response).
 
+### Inline multiple-choice questions (AskUserQuestion)
+
+When a Telegram-driven session raises a **question** rather than a permission gate — the built-in `AskUserQuestion` tool, or an MCP elicitation / `side_question` — the bridge surfaces it inline with **one button per option** so the user picks an answer from chat. It mirrors the approval flow, with the differences that questions have N choices (not a fixed Approve/Deny pair) and the answer is the chosen **option label**, not a boolean.
+
+1. **Supervisor parse (`supervisor/src/runners/claude-runner.ts`).** `AskUserQuestion` arrives as a `control_request` / `can_use_tool`. `parseAskUserQuestionInput` extracts the first question's text, its option labels (+ descriptions), and `multiSelect` from the `tool_input` shape `{ questions: [{ question, header?, options: [{label, description?}], multiSelect? }] }`. The runner surfaces a `user_question` event `{ request_id, question, options, is_multi_select? }` (NOT a `permission_request`) and records the `request_id` in `askUserQuestionRequests` so the answer is returned on the right wire. Parsing is **defensive** — any missing/odd field degrades to a best-effort question with empty options (rendered as a plain prompt), never throws.
+2. **Hub fan-out (`hub/src/ws/agent.ts`).** On `user_question` the hub broadcasts to web subscribers, `markPromptPending(sessionId, requestId)` (idle-teardown exemption — see below), and emits `user_question:pending` on the dedicated bus `hub/src/events/question-events.ts` (same listener-isolation discipline as the permission bus).
+3. **Bridge render (`onQuestionPendingEvent` in `bridge.ts`).** For every user whose `telegram_default_session_id` matches the emitting session, it sends an inline keyboard with **one row per option**. Each button's `callback_data` is `qa:<token>`, where `<token>` is minted per **(prompt, user, option)** by `rememberQuestionOption` (`hub/src/telegram/question-approvals.ts`). **Why a short token, not `qa:<sessionId>:<requestId>:<optionIndex>`:** Telegram caps `callback_data` at 64 bytes — a session UUID + request UUID + index blows past it. The token resolves server-side to `{ sessionId, requestId, userId, chatId, messageId, label, question }`; the per-option `label` rides the entry so the tap carries the chosen answer with a tiny wire payload. (`approvals.ts` keys by `requestId` because permission has two fixed buttons; questions mint a token per option to carry the label.) Free-form questions (no options) surface as a plain message with no buttons.
+4. **Resolve on tap (`handleQuestionCallback` in `hub/src/api/telegram-webhook.ts`).** `takeQuestionOption(token, tappingUserId)` enforces ownership (returns nothing if the token isn't this user's) and, on success, **invalidates every option token for the same `(sessionId, requestId)`** so the prompt is answered exactly once regardless of which option or which authorized user taps. It then forwards `{ type: "question_response", session_id, request_id, answer: <chosen label> }` onto the session's **agent socket** via `getChannel(sessionId).ws.send(...)` — the exact frame the web client sends — clears the pending mark (`clearPromptPending`), edits the prompt message to show the choice, and emits `question.answer_applied` `{ session_id, request_id, source: 'telegram', user_id }`.
+5. **Supervisor answer (`respondToQuestion` in `claude-runner.ts`).** `SessionBridge.handleHubMessage` routes `question_response` → `respondToQuestion(requestId, answer)`. If the `requestId` was an `AskUserQuestion` (`can_use_tool`), the CLI gets a tool-**allow** control_response `{ type:'control_response', request_id, behavior:'allow', updatedInput:{ answer } }`; an elicitation / direct question gets `{ type:'control_response', request_id, response:{ answer } }`.
+
+**Authorization + edge cases (all answer the callback):** an unauthorized / unknown / expired / already-answered tap → `This question already expired or was answered.` (`callback_question_stale`, nothing sent to the agent); session socket gone → `Session is offline — couldn't deliver.` (`callback_question_offline`). Tokens expire after `QUESTION_PROMPT_TTL_MS` (10 min, matching the permission TTL) and are pruned lazily on each remember.
+
+**Multi-select (v1):** rendered identically — each tap answers with that single option's label and resolves the prompt. A richer "tap several then Done" UX is deferred; the web client retains true multi-select.
+
+**No new dispatch path.** Like inline approvals, a question answer forwards a control frame on an existing agent socket; it does NOT route a user→session message and therefore does NOT touch the cost-cap dispatch pipeline — it's a response to a runner-initiated prompt, not new traffic.
+
+**Idle-teardown exemption (`hub/src/ws/pending-prompts.ts`).** A Telegram-driven session is not a persistent WS subscriber, so once the runner blocks on a question the subscriber count is 0 and the idle-teardown timer would kill the session before the user can answer. `markPromptPending` records the open `requestId`; `hub/src/ws/idle-teardown.ts` checks `hasPendingPrompt(sessionId)` and skips teardown (a second exemption alongside the orchestrator). The mark is cleared on answer (`question_response` from either Telegram or web), and `clearAllPromptsPending` clears on turn finalize. A session counts every open `requestId`, so it stays exempt until ALL pending prompts resolve.
+
+> **Runtime-verification assumptions (flagged in `claude-runner.ts`).** Two contracts are inferred from Claude Code's `AskUserQuestion` schema and cannot be exercised without a live CLI: (a) the inbound `tool_input` shape parsed by `parseAskUserQuestionInput`; (b) the outbound answer contract `behavior:'allow' + updatedInput:{ answer }`. Both are isolated to `claude-runner.ts` and parse/emit defensively; if the live CLI differs, adjust there — the hub bridge and TG/web button plumbing are unaffected.
+
 ### Summarized streaming (MarkdownV2 + editable working message)
 
 A Telegram-driven session no longer goes silent until one final blob lands. While
@@ -558,6 +578,9 @@ has soaked. Until then, both code paths coexist.
 - `hub/src/telegram/commands.ts` — `parse(text)` + handlers for `/start` `/session` `/list` `/status` `/doctor` `/help`; `BOT_COMMANDS` (single source of truth for the slash menu + `/help`).
 - `hub/src/telegram/approvals.ts` — inline-approval registry (`rememberPendingPrompt`/`takePendingPrompt`, TTL-pruned) + `pa:`/`pd:` callback_data codec. **(new — Fix C)**
 - `hub/src/events/permission-events.ts` — internal `EventEmitter` for `permission_request:pending`. Additive — does not change the WS broadcast path. **(new — Fix C)**
+- `hub/src/telegram/question-approvals.ts` — inline multiple-choice registry (`rememberQuestionOption`/`takeQuestionOption`, per-(prompt,user,option) short token, whole-prompt invalidation on first resolve, TTL-pruned) + `qa:<token>` callback_data codec (`questionCallbackData`/`parseQuestionCallback`). **(new — MCQ)**
+- `hub/src/events/question-events.ts` — internal `EventEmitter` for `user_question:pending`. Mirrors the permission bus; additive. **(new — MCQ)**
+- `hub/src/ws/pending-prompts.ts` — tracks sessions BLOCKED on an open interactive prompt (permission or question) keyed by `sessionId → Set<requestId>`; `markPromptPending`/`clearPromptPending`/`clearAllPromptsPending`/`hasPendingPrompt`. Second idle-teardown exemption. **(new — MCQ)**
 - `hub/src/telegram/dispatch.ts` — inbound → session dispatch; thin adapter over the shared `hub/src/dispatch/` pipeline (`store:null`, gates `[thresholdGate, dailyCostCapGate]`, token `tg:<chat>:<update>`, grace-backed offline replay). Maps `DispatchOutcome` → Telegram replies: `skipped`→cost-capped, `dropped_busy`→session busy, `parked_offline`→buffered/agent_offline.
 - `hub/src/telegram/bridge.ts` — outbound subscriber on `assistant_message:final`. Default-session match gate. Errors swallowed.
 - `hub/src/telegram/link-codes.ts` — 8-char Crockford base32 generator, single-active-per-user, single-use consume, constant-time compare.
@@ -570,9 +593,12 @@ has soaked. Until then, both code paths coexist.
 - `hub/src/db/dal.ts` — Telegram DAL helpers (folded into the existing dal module, not a separate `telegram-dal.ts` as the plan envisioned — deviation noted in SUMMARY): `getUserByTelegramChatId`, `getUserByLinkCode`, `setLinkCode`, `linkChatId`, `unlinkChatId`, `setDefaultSession`, `getTelegramStatus`, `appendInboundLog`, `trimInboundLog`, `getUsersWithTelegramDefaultSession`.
 - `hub/src/csrf.ts` — Telegram REST routes covered by the existing double-submit middleware (no new exclusions).
 - `hub/src/index.ts` — mount `telegram-webhook.ts` AHEAD of JWT + license + CSRF catch-alls; mount `telegram.ts` inside; start the outbound bridge at boot.
-- `hub/src/ws/agent.ts` — emit `assistant_message:final` on the internal event bus when a session run finalizes; **also emit `permission_request:pending` when a runner raises a permission prompt (Fix C)**; **also emit `session_activity` (tool_use) for the summarized-streaming working message**. Additive only.
-- `hub/src/api/telegram-webhook.ts` — **(Fix C)** `handlePermissionCallback` resolves `pa:`/`pd:` taps → forwards `permission_response` on the agent socket; **(Fix B)** picker re-render uses `PAGE_SIZE` (was a hardcoded `20`).
-- `hub/src/telegram/bridge.ts` — **(Fix A)** `setMyCommands(BOT_COMMANDS)` on startup; **(Fix C)** subscribes to `permission_request:pending` → sends the Approve/Deny keyboard + records the pending prompt.
+- `hub/src/ws/agent.ts` — emit `assistant_message:final` on the internal event bus when a session run finalizes; **also emit `permission_request:pending` when a runner raises a permission prompt (Fix C)**; **also emit `session_activity` (tool_use) for the summarized-streaming working message**; **also, on `user_question`, `markPromptPending` + emit `user_question:pending` to the bridge (MCQ)**. Additive only.
+- `hub/src/api/telegram-webhook.ts` — **(Fix C)** `handlePermissionCallback` resolves `pa:`/`pd:` taps → forwards `permission_response` on the agent socket; **(Fix B)** picker re-render uses `PAGE_SIZE` (was a hardcoded `20`); **(MCQ)** `handleQuestionCallback` resolves `qa:<token>` taps → forwards `question_response{answer:label}` on the agent socket + `clearPromptPending`.
+- `hub/src/telegram/bridge.ts` — **(Fix A)** `setMyCommands(BOT_COMMANDS)` + `setWebhook` (pins `allowed_updates`) on startup; **(Fix C)** subscribes to `permission_request:pending` → sends the Approve/Deny keyboard + records the pending prompt; **(MCQ)** subscribes to `user_question:pending` → sends one inline button per option + records each option token.
+- `hub/src/ws/client.ts` — **(MCQ)** handles the web `question_response` frame (forward to agent socket + `clearPromptPending`), keeping web + Telegram answer paths identical.
+- `hub/src/ws/idle-teardown.ts` — **(MCQ)** second exemption: skip teardown when `hasPendingPrompt(sessionId)` (a session blocked on an open prompt is not idle).
+- `supervisor/src/runners/claude-runner.ts` — **(MCQ)** `parseAskUserQuestionInput` + surface `AskUserQuestion`/elicitation as `user_question` (with options + `is_multi_select`); `respondToQuestion` returns the chosen label as a tool-allow (`updatedInput`) or inline (`response`) control_response. `session-bridge.ts` routes `question_response` → `respondToQuestion`.
 
 ### New (web)
 
@@ -583,11 +609,14 @@ has soaked. Until then, both code paths coexist.
 - `hub/test/telegram-client.test.ts` — escape + split edge cases (multi-byte, exact-4096, exact-4097, code fences).
 - `hub/test/telegram-link-codes.test.ts` — generation rotation, consume, single-use, expiry, constant-time compare.
 - `hub/test/telegram-webhook.test.ts` — secret mismatch (401), `/start` link success + expired, unlinked silent-drop, command dispatch, `update_id` dedupe, photo, oversized photo, voice/video/sticker rejection.
-- `hub/test/telegram-bridge.test.ts` — `assistant_message:final` triggers send; non-final events ignored; 6000-char → 2 chunks; default-session mismatch → no send; broken `sendMessage` does not throw.
+- `hub/test/telegram-output-from-transcript.test.ts` / `hub/test/telegram-outbound-source-gate.test.ts` — outbound bridge (Phase 20 re-sourced from the transcript; the flag-gated event-bus vs transcript-tail source). These replaced the deleted event-bus `telegram-bridge.test.ts`.
 - `hub/test/telegram-api.test.ts` — REST: link-code rotation, unlink, default-session, CSRF reject, cookie-auth reject.
 - `hub/test/telegram-approvals.test.ts` — **(Fix C)** approvals registry (remember/take once, expiry) + `pa:`/`pd:` codec round-trip + malformed rejection.
-- `hub/test/telegram-bridge.test.ts` (extended) — **(Fix A)** `setMyCommands` fires on startup with the real handled commands; **(Fix C)** `permission_request:pending` → inline Approve/Deny keyboard + recorded prompt; non-default session → no-op.
-- `hub/test/telegram-webhook.test.ts` (extended) — **(Fix B)** `set_session` / paginate / unknown callbacks; **(Fix C)** approve/deny forward the `permission_response` frame, stale/foreign/offline edge cases.
+- `hub/test/telegram-webhook.test.ts` (extended) — **(Fix B)** `set_session` / paginate / unknown callbacks; **(Fix C)** approve/deny forward the `permission_response` frame, stale/foreign/offline edge cases; **(MCQ)** `qa:` option tap forwards `question_response{answer:label}`, stale/foreign-user edge cases.
+- `hub/test/telegram-question-approvals.test.ts` — **(MCQ)** question registry: remember/take once, ownership auth, whole-prompt invalidation on first tap, TTL expiry, `qa:<token>` codec round-trip + malformed rejection.
+- `hub/test/telegram-question-bridge.test.ts` — **(MCQ)** `emitQuestionPending` → one inline button per option with `qa:` callback data resolving to the chosen label (flag-OFF stream-json event-bus path); non-default session → no-op. Re-homed from the deleted event-bus `telegram-bridge.test.ts`.
+- `hub/test/idle-teardown-pending-prompt.test.ts` — **(MCQ)** a session with an open prompt (`markPromptPending`) is exempt from idle teardown until cleared.
+- `supervisor/test/claude-runner-askuserquestion.test.ts` — **(MCQ)** `can_use_tool` `AskUserQuestion` → `user_question` with options + `is_multi_select` (NOT a `permission_request`); `respondToQuestion` emits the tool-allow `updatedInput` answer; elicitation path emits the inline `response` answer.
 
 ### New (docs)
 
@@ -602,7 +631,8 @@ Per-file (recommended — cross-file Bun mock pollution can spuriously fail
 bun test hub/test/telegram-client.test.ts
 bun test hub/test/telegram-link-codes.test.ts
 bun test hub/test/telegram-webhook.test.ts
-bun test hub/test/telegram-bridge.test.ts
+bun test hub/test/telegram-output-from-transcript.test.ts
+bun test hub/test/telegram-question-bridge.test.ts
 bun test hub/test/telegram-api.test.ts
 ```
 

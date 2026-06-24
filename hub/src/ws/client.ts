@@ -427,6 +427,10 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
         user_id: data.userId,
       })
     }
+    try {
+      const { clearPromptPending } = await import('./pending-prompts.ts')
+      clearPromptPending(msg.session_id, msg.request_id)
+    } catch {}
   }
 
   if (msg.type === 'question_response') {
@@ -445,6 +449,10 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
         answer: msg.answer,
       }))
     }
+    try {
+      const { clearPromptPending } = await import('./pending-prompts.ts')
+      clearPromptPending(msg.session_id, msg.request_id)
+    } catch {}
   }
 
   if (msg.type === 'send_message') {
