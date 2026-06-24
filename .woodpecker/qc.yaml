@@ -1,6 +1,8 @@
 # Woodpecker CI — Linux PR-gate ported from .github/workflows/qc.yml (pr-gate job).
-# Bun + real Postgres service. The post-deploy-smoke (prod HTTPS) and the signed
-# Windows release-supervisor (TAURI_SIGNING_* secrets) stay on GitHub Actions.
+# Bun + real Postgres service. The post-deploy-smoke and docs-drift checks are now
+# also on Woodpecker (sibling pipelines in this dir). Only the signed Windows
+# release-supervisor and the Windows/macOS mobile builds stay on GitHub Actions —
+# the Woodpecker runner is linux/amd64 only and signing secrets live in GHA.
 when:
   - event: pull_request
     branch: main

@@ -1,0 +1,31 @@
+# Woodpecker CI — docs-drift PR check, ported from .github/workflows/docs-drift.yml.
+# Fails the PR if docs/openapi.json or docs/api.md are stale vs. `bun run docs:sync`.
+when:
+  - event: pull_request
+    path:
+      include:
+        - 'hub/src/**'
+        - 'docs/openapi.json'
+        - 'docs/api.md'
+        - '.woodpecker/docs-drift.yaml'
+
+labels:
+  platform: linux/amd64
+
+steps:
+  - name: docs-drift
+    image: oven/bun:latest
+    environment:
+      # Required for hub modules to load — never used at runtime here.
+      JWT_SECRET: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      DATABASE_URL: postgres://localhost:5432/placeholder
+    commands:
+      - bun install
+      - bun run docs:sync
+      - |
+        if ! git diff --quiet -- docs/openapi.json docs/api.md; then
+          echo "Docs drift detected. Run \`bun run docs:sync\` and commit docs/openapi.json + docs/api.md."
+          git --no-pager diff -- docs/openapi.json docs/api.md | head -200
+          exit 1
+        fi
+        echo "no drift"

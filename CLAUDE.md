@@ -262,6 +262,22 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   builds + signs the MSI + publishes a Release with `latest.json` for the auto-updater. Local:
   `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. Key setup: `supervisor/tauri/UPDATER-SETUP.md`.
 
+## CI (Woodpecker-first)
+
+CI/PR-checks/smoke run on **Woodpecker** (`.woodpecker/*.yaml`, one pipeline per file) —
+GitHub Actions is reserved for what Woodpecker's `linux/amd64` runner can't do.
+
+- **Woodpecker:** `qc.yaml` (PR-gate: typecheck + `check-baseline` + `migration-verify` +
+  orchestrator Postgres-e2e), `docs-drift.yaml` (PR docs-sync drift), `post-deploy-smoke.yaml`
+  (push-to-main prod HTTPS smoke after the Coolify rollout).
+- **GitHub Actions (platform-locked, keep here):** `release-supervisor.yml` (windows-latest +
+  signed MSI/`latest.json`, TAURI signing secrets), `release-mobile.yml` (Windows MSI/NSIS +
+  Android APK), `mobile-ios-build.yml` (macOS + Apple toolchain), `mobile-shell-typecheck.yml`
+  (paused, manual-only). The mobile workflows are dormant (Phase 12 paused).
+
+When adding a check, default to a new `.woodpecker/*.yaml` pipeline; only reach for GHA if it
+needs Windows/macOS or signing secrets.
+
 ## PR Hygiene
 
 Periodically `gh pr list` — review open PRs for conflicts, stale branches, or already-applied

@@ -1,0 +1,30 @@
+# Woodpecker CI — post-deploy prod smoke, ported from .github/workflows/qc.yml
+# (post-deploy-smoke job). Runs on push to main, waits for the Coolify auto-deploy
+# to roll out, then probes prod HTTPS. The signed Windows release-supervisor and
+# the macOS/Windows mobile builds stay on GitHub Actions (no Windows/macOS runner).
+when:
+  - event: push
+    branch: main
+
+labels:
+  platform: linux/amd64
+
+steps:
+  - name: smoke
+    image: oven/bun:latest
+    environment:
+      # Defaults match the GHA job. To override, set these as Woodpecker repo
+      # env vars (Settings → Environment) — they take precedence over the
+      # in-script fallbacks below.
+      SMOKE_BASE_URL: https://app.remo-code.com
+      COOLIFY_DEPLOY_WAIT_SECONDS: '120'
+    commands:
+      - bun install --frozen-lockfile
+      - |
+        wait_s="${COOLIFY_DEPLOY_WAIT_SECONDS:-120}"
+        echo "sleeping ${wait_s}s for Coolify rollout"
+        sleep "${wait_s}"
+      - |
+        base="${SMOKE_BASE_URL:-https://app.remo-code.com}"
+        echo "smoking ${base}"
+        bun run smoke -- "$base"
