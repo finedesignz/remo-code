@@ -4,6 +4,7 @@ import { join, basename, extname } from 'path'
 import { ClaudeRunner } from './claude-runner'
 import { selectHumanPtyRunner } from './runner-factory'
 import { PtyPersistence } from './pty-persistence'
+import { writeSessionBreadcrumb } from './session-breadcrumb'
 import { getBackendSelectorConfig } from '../config'
 import type { AgentToHub, CliRunner, HubToAgent, PtyLike, RunnerEvent } from './types'
 
@@ -363,7 +364,19 @@ export class SessionBridge {
       return
     }
     if (msg.type === 'shutdown') {
-      this.cb.onLog('info', `agent-bridge: shutdown requested (${msg.reason ?? 'no_reason'})`)
+      const reason = msg.reason ?? 'no_reason'
+      this.cb.onLog('info', `agent-bridge: shutdown requested (${reason})`)
+      // "Write to memory before killing": drop a factual breadcrumb to the
+      // supervisor-owned dir BEFORE we kill the runner. The transcript survives
+      // (resume-by-project_dir), so this only records that/why the live process
+      // was reaped. Best-effort + fail-open — never blocks the shutdown.
+      const crumbPath = writeSessionBreadcrumb({
+        sessionId: this.sessionId,
+        repoPath: this.opts.repoPath,
+        reason,
+        backend: this.ptyRunner ? 'pty' : this.runner ? 'stream-json' : 'unknown',
+      })
+      if (crumbPath) this.cb.onLog('info', `agent-bridge: wrote session breadcrumb ${crumbPath}`)
       void this.stop().then(() => this.cb.onExit({ code: 0, reason: 'hub_shutdown' }))
       return
     }
