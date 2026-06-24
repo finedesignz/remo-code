@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { ChatSurface } from './ChatSurface'
+import { TerminalSurface } from './TerminalSurface'
 import type { CodeSession } from '../hooks/useSessions'
 import { sessionLabel, shortId } from './SessionDropdown'
 
@@ -13,6 +14,8 @@ interface Props {
   connectionId: number
   token: string
   wsConnected: boolean
+  /** When true, render the raw-terminal TerminalSurface instead of ChatSurface. */
+  ptyInteractive?: boolean
 }
 
 /**
@@ -39,6 +42,7 @@ export function MobileAccordionRow({
   connectionId,
   token,
   wsConnected,
+  ptyInteractive = false,
 }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null)
 
@@ -129,15 +133,30 @@ export function MobileAccordionRow({
             paddingBottom: 'env(safe-area-inset-bottom)',
           }}
         >
-          <ChatSurface
-            density="mobile-expanded"
-            sessionId={session.id}
-            subscribe={subscribe}
-            send={send}
-            connectionId={connectionId}
-            token={token}
-            wsConnected={wsConnected}
-          />
+          {ptyInteractive ? (
+            // PTY-interactive: raw-terminal surface. aspect-square gives the
+            // terminal a bounded box so xterm's own scrollback scrolls inside
+            // the cell (toolbar stays sticky on top) rather than scrolling the
+            // whole page.
+            <div className="aspect-square w-full overflow-hidden">
+              <TerminalSurface
+                sessionId={session.id}
+                subscribe={subscribe}
+                send={send}
+                className="h-full p-1"
+              />
+            </div>
+          ) : (
+            <ChatSurface
+              density="mobile-expanded"
+              sessionId={session.id}
+              subscribe={subscribe}
+              send={send}
+              connectionId={connectionId}
+              token={token}
+              wsConnected={wsConnected}
+            />
+          )}
         </div>
       )}
     </div>

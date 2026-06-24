@@ -12,6 +12,8 @@ interface Props {
   wsConnected: boolean
   /** Optional context-only; not used internally yet (reserved for analytics). */
   tabId?: string
+  /** When true, rows render the raw-terminal TerminalSurface instead of ChatSurface. */
+  ptyInteractive?: boolean
 }
 
 /**
@@ -42,6 +44,7 @@ export function MobileAccordion({
   connectionId,
   token,
   wsConnected,
+  ptyInteractive = false,
 }: Props) {
   const [expandedId, setExpandedId] = useState<string | null>(null)
 
@@ -72,6 +75,7 @@ export function MobileAccordion({
           connectionId={connectionId}
           token={token}
           wsConnected={wsConnected}
+          ptyInteractive={ptyInteractive}
         />
       ))}
     </div>

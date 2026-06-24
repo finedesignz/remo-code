@@ -105,6 +105,21 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     try { termRef.current?.focus() } catch {}
   }, [send, sessionId])
 
+  // Ctrl+V / paste: read clipboard text and inject it as a term.input keystroke
+  // (same raw-byte path as on-screen keys). Image paste stays on the dedicated
+  // upload effect below; this covers the text case the on-screen keyboard can't
+  // reach on a phone. Falls back to a notice if the clipboard read is blocked.
+  const pasteClipboard = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      if (text) sendKey(text)
+    } catch {
+      setNotice('Clipboard read blocked — use the device paste gesture')
+      setTimeout(() => setNotice(null), 4000)
+    }
+    try { termRef.current?.focus() } catch {}
+  }, [sendKey])
+
   // Upload a file to the host (term.attach_file): the supervisor writes it to a
   // temp file and types its absolute path into the TUI.
   const uploadFile = useCallback((file: File) => {
@@ -263,7 +278,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
           Esc, Tab, Ctrl-C) plus file attach. onMouseDown/preventDefault keeps
           terminal focus so typing stays live. */}
       <div
-        className="flex flex-wrap items-center gap-1 px-1 pb-1 shrink-0"
+        className="flex flex-wrap items-center gap-1 px-1 pb-1 shrink-0 sticky top-0 z-10 bg-[var(--bg-primary)]"
         onMouseDown={(e) => e.preventDefault()}
       >
         <button type="button" className={btn} title="Escape" onClick={() => sendKey(KEY_SEQUENCES.esc)}>Esc</button>
@@ -274,6 +289,18 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
         <button type="button" className={btn} title="Tab" onClick={() => sendKey(KEY_SEQUENCES.tab)}>Tab</button>
         <button type="button" className={btn} title="Enter" onClick={() => sendKey(KEY_SEQUENCES.enter)}>⏎</button>
         <button type="button" className={btn} title="Ctrl-C (interrupt)" onClick={() => sendKey(KEY_SEQUENCES.ctrlC)}>^C</button>
+        <button
+          type="button"
+          className={btn}
+          title="Paste (Ctrl+V)"
+          aria-label="Ctrl+V"
+          onClick={() => { void pasteClipboard() }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+          </svg>
+        </button>
         <button type="button" className={btn} title="Attach file" onClick={() => fileInputRef.current?.click()}>📎</button>
         {notice && <span className="text-xs text-[var(--text-muted)] ml-1">{notice}</span>}
         <input
