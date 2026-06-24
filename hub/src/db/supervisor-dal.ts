@@ -250,6 +250,25 @@ export async function endRun(runId: string, exitCode: number | null, exitReason:
   `
 }
 
+// User-initiated Disconnect — mark every open run bound to this session ended
+// so the supervisor (and the #223 reconcile path) frees the concurrency slot.
+// Scoped by user_id (defense in depth). Idempotent: zero open runs → no rows
+// touched. Does NOT soft-delete the session (the row is kept so the same
+// session_id can be relaunched, resuming history). Returns the count ended.
+export async function endOpenRunsForSession(
+  sessionId: string,
+  userId: string,
+  exitReason: string,
+): Promise<number> {
+  const rows = await sql`
+    UPDATE session_runs
+    SET ended_at = COALESCE(ended_at, now()), exit_reason = ${exitReason}
+    WHERE session_id = ${sessionId} AND user_id = ${userId} AND ended_at IS NULL
+    RETURNING id
+  `
+  return rows.length
+}
+
 /**
  * Bundle 3 — zombie-run cleanup. When a supervisor's WebSocket closes, any
  * `session_runs` rows it left open (`ended_at IS NULL`) are unreachable: the

@@ -53,6 +53,10 @@ if (!REMO_E2E_DB_URL) {
             send: (raw: string) => { agentSendCalls.push(JSON.parse(raw)) },
           },
         }),
+        // coolify-webhook.ts imports this to gate the local_agent branch
+        // (`listOnlineAgentSessionsForUser(userId).length > 0`). A whole-module
+        // mock must re-export it or bun crashes loading the module under test.
+        listOnlineAgentSessionsForUser: (_userId: string) => ['stub-agent-session'],
         broadcastToSubscribers: () => {},
         broadcastScheduledRun: () => {},
         broadcastToUser: () => {},
@@ -60,6 +64,12 @@ if (!REMO_E2E_DB_URL) {
 
       const dbMod = await import('../src/db/postgres.ts')
       sql = dbMod.sql
+
+      // Apply schema before touching tables. check-baseline runs each test file
+      // in its own process against a shared DB, so this file cannot assume an
+      // earlier file already migrated — migrate idempotently like the DAL suites.
+      const { runMigrations } = await import('../src/db/migrate.ts')
+      await runMigrations()
 
       // Seed a user with webhook secret + low cost cap so we can flip caps.
       await sql`

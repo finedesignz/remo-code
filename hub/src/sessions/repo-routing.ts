@@ -26,6 +26,7 @@
 import { repoKeyFromGitRepository } from '../lib/repo-key.ts'
 import { listSessionIdsForRepoKey } from '../db/dal.ts'
 import { getChannel } from '../ws/registry.ts'
+import { resolveRepoKeyFromAppUuid } from './coolify-app-repo.ts'
 
 export interface RepoKeyedTarget {
   kind: 'repo_keyed_agent'
@@ -41,8 +42,17 @@ export interface RepoKeyedTarget {
 export async function resolveRepoKeyedAgentSession(
   userId: string,
   gitRepository: string | null | undefined,
+  appUuid?: string | null,
 ): Promise<RepoKeyedTarget | null> {
-  const repoKey = repoKeyFromGitRepository(gitRepository)
+  // Prefer the webhook's `git_repository` when present + parseable. Coolify's
+  // `deployment.failed` payload usually OMITS it (only `application_uuid`), so
+  // fall back to the uuid→repo_key resolver (Coolify-API cache) when we can't
+  // derive a key from the repo string. Either way we end with a `repo_key` and
+  // do the SAME bound-session-with-live-socket match.
+  let repoKey = repoKeyFromGitRepository(gitRepository)
+  if (!repoKey && appUuid) {
+    repoKey = await resolveRepoKeyFromAppUuid(appUuid, userId)
+  }
   if (!repoKey) return null
 
   let candidateIds: string[]

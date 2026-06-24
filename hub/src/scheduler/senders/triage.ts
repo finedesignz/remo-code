@@ -28,11 +28,10 @@
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
 import { pickSessionTarget } from '../../sessions/routing.ts'
 import { resolveRepoKeyedAgentSession } from '../../sessions/repo-routing.ts'
-import { createRun } from '../../db/supervisor-dal.ts'
 import { sendToSupervisor, updateSupervisorState } from '../../ws/supervisor-registry.ts'
 import { releaseSessionSlot } from '../../sessions/budget.ts'
 import { getChannel, broadcastToSubscribers } from '../../ws/registry.ts'
-import { insertMessage } from '../../db/dal.ts'
+import { insertMessage, getSessionSkipPermissionsByRepo } from '../../db/dal.ts'
 import { renderTriagePrompt } from '../triage-prompt.ts'
 import { parseTriageOutput } from '../triage-schema.ts'
 import { finalizeRun, removeRunContext } from '../dispatcher.ts'
@@ -81,10 +80,24 @@ export async function sendTriage(
   // a live agent socket, land the fix THERE rather than in a capacity-picked
   // stranger. Only when there's no repo match do we fall back to
   // `pickSessionTarget` (capacity-based), preserving prior behavior.
-  const repoKeyed = await resolveRepoKeyedAgentSession(ctx.userId, payload.git_repository)
+  const repoKeyed = await resolveRepoKeyedAgentSession(
+    ctx.userId,
+    payload.git_repository,
+    payload.application_uuid,
+  )
+  const triagePrompt = renderTriagePrompt(payload)
   const pick: Awaited<ReturnType<typeof pickSessionTarget>> = repoKeyed
     ? { kind: 'local_agent', agent_session_id: repoKeyed.agent_session_id }
-    : await pickSessionTarget(ctx.userId)
+    : await pickSessionTarget(ctx.userId, {
+        // Consume the run row atomically inside the reservation tx.
+        runFields: {
+          sessionId: null,
+          repoPath: payload.git_repository || 'unknown',
+          branch: payload.commit_sha || 'HEAD',
+          pulled: false,
+          initialPrompt: triagePrompt,
+        },
+      })
   if (repoKeyed) {
     console.log(
       `[triage] repo-keyed route task=${ctx.taskId} repo_key=${repoKeyed.repo_key} session=${repoKeyed.agent_session_id}`,
@@ -103,28 +116,19 @@ export async function sendTriage(
     return
   }
 
-  const prompt = renderTriagePrompt(payload)
+  const prompt = triagePrompt
 
   if (pick.kind === 'supervisor') {
     const repo = payload.git_repository || 'unknown'
     const branch = payload.commit_sha || 'HEAD'
-    let run: { id: string }
-    try {
-      run = (await createRun({
-        userId: ctx.userId,
-        sessionId: null,
-        supervisorId: pick.supervisor_id,
-        repoPath: repo,
-        branch,
-        pulled: false,
-        initialPrompt: prompt,
-      })) as { id: string }
-    } catch (err: any) {
-      await releaseSessionSlot(ctx.userId, pick.supervisor_id)
-      await finalizeRun(ctx.runId, 'failed', `run_insert_failed: ${err?.message ?? err}`)
+    // Run row already consumed atomically inside the reservation tx.
+    if (!pick.run) {
+      await finalizeRun(ctx.runId, 'failed', 'run_insert_failed')
       return
     }
+    const run = pick.run
 
+    const skipPerms = await getSessionSkipPermissionsByRepo(ctx.userId, repo)
     try {
       sendToSupervisor(pick.supervisor_id, {
         type: 'session.start',
@@ -136,6 +140,7 @@ export async function sendTriage(
         initial_prompt: prompt,
         api_key: '__use_local__',
         hub_url: '__same__',
+        dangerously_skip_permissions: skipPerms,
       } as any)
     } catch (err: any) {
       try {

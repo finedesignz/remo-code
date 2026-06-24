@@ -1,13 +1,15 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
 import {
-  listSupervisorsForUser, getSupervisor, createRun, listRunsForSupervisor,
+  listSupervisorsForUser, getSupervisor, listRunsForSupervisor,
   setSupervisorOverride, setPreferredSupervisor, setSupervisorRoots,
 } from '../db/supervisor-dal'
 import { validateRoots } from '../lib/roots-validate'
+import { getSessionSkipPermissionsByRepo } from '../db/dal'
 import {
   getSupervisor as getSupervisorRegistryEntry, isSupervisorOnline,
   sendRequest, sendToSupervisor, updateSupervisorState,
+  getUserInventory,
 } from '../ws/supervisor-registry'
 import { isGitHubAppConfigured, mintTokenizedCloneUrl } from '../auth/github-app'
 import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
@@ -39,11 +41,49 @@ supervisors.post('/:id/scan', async (c) => {
   if ('error' in a) return a.error
   try {
     const res: any = await sendRequest(a.supervisorId, { type: 'repo.scan' } as any, 20_000)
+    // The legacy `repo.scan` shape (ScannedRepo) carries no worktree/canonical
+    // introspection, so the web's worktree filter (SupervisorPage) had nothing
+    // to act on and clones-on-a-branch / worktrees still cluttered the list.
+    // Enrich each entry from the supervisor's `repo_inventory` (already stored
+    // in the registry per scan), joining by normalized local_path — no new MSI.
+    if (res && Array.isArray(res.repos)) {
+      res.repos = enrichScanWithInventory(res.repos, getUserInventory(a.userId)?.repos)
+    }
     return c.json(res)
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
   }
 })
+
+/** Normalize a local path for cross-shape joins: forward slashes, no trailing
+ * separator, lower-cased (Windows paths are case-insensitive). */
+function normPath(p: string): string {
+  return String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
+
+/**
+ * Stamp `is_worktree` / `is_canonical` onto legacy `repo.scan_result` entries by
+ * joining (on normalized local_path) to the supervisor's introspection
+ * `repo_inventory`. The scan shape (ScannedRepo) has no worktree metadata, so
+ * without this the web's Connections worktree filter has nothing to act on and
+ * worktrees / branch-checkout sibling clones clutter the list. Entries with no
+ * inventory match are returned unchanged (legacy → treated as canonical/shown).
+ * Exported for unit testing.
+ */
+export function enrichScanWithInventory(
+  repos: Array<{ path: string; [k: string]: any }>,
+  inventory?: Array<{ local_path: string; is_worktree: boolean; canonical?: boolean }>,
+): Array<{ path: string; is_worktree?: boolean; is_canonical?: boolean; [k: string]: any }> {
+  if (!Array.isArray(inventory) || inventory.length === 0) return repos
+  const byPath = new Map<string, { is_worktree: boolean; canonical: boolean }>()
+  for (const e of inventory) {
+    byPath.set(normPath(e.local_path), { is_worktree: e.is_worktree, canonical: !!e.canonical })
+  }
+  return repos.map((r) => {
+    const m = byPath.get(normPath(r.path))
+    return m ? { ...r, is_worktree: m.is_worktree, is_canonical: m.canonical } : r
+  })
+}
 
 supervisors.get('/:id/branches', async (c) => {
   const a = await authorizeSupervisor(c)
@@ -108,7 +148,14 @@ supervisors.post('/:id/start', async (c) => {
   // Phase 04 plan 003: hub-authoritative concurrency gate. Reserve atomically
   // before creating the run row so concurrent /start calls at cap can't both
   // win the race.
-  const reservation = await reserveSessionSlot(a.userId, a.supervisorId)
+  // Reserve + consume the run row atomically inside the FOR-UPDATE tx.
+  const reservation = await reserveSessionSlot(a.userId, a.supervisorId, {
+    sessionId: null,
+    repoPath: body.data.repo_path,
+    branch: body.data.branch ?? null,
+    pulled: body.data.pull ?? false,
+    initialPrompt: body.data.initial_prompt ?? null,
+  })
   if (!reservation.ok) {
     if (reservation.reason === 'supervisor_not_found') {
       return c.json({ error: 'not found' }, 404)
@@ -119,23 +166,17 @@ supervisors.post('/:id/start', async (c) => {
       cap: reservation.cap,
     }, 429)
   }
+  if (!reservation.run) {
+    return c.json({ error: 'run_insert_failed' }, 500)
+  }
 
   // Concurrent runs allowed — supervisor manages N children.
-  // We need an api_key to pass to the supervisor so it can spawn claude-remote
-  // talking to this hub. We re-use the supervisor's own api_key (it has agent capability too).
-  // The supervisor sends "hello" with its api_key_id; the actual raw key is stored client-side.
-  // Tell the supervisor to use its configured api_key (the supervisor already has it locally).
-  const run = await createRun({
-    userId: a.userId,
-    sessionId: null,
-    supervisorId: a.supervisorId,
-    repoPath: body.data.repo_path,
-    branch: body.data.branch ?? null,
-    pulled: body.data.pull ?? false,
-    initialPrompt: body.data.initial_prompt ?? null,
-  })
+  // We re-use the supervisor's own api_key (it has agent capability too); the
+  // supervisor uses its locally configured key via the `__use_local__` sentinel.
+  const run = reservation.run
   await updateSupervisorState(a.supervisorId, 'starting', run.id)
 
+  const skipPerms = await getSessionSkipPermissionsByRepo(a.userId, body.data.repo_path)
   try {
     sendToSupervisor(a.supervisorId, {
       type: 'session.start',
@@ -147,6 +188,7 @@ supervisors.post('/:id/start', async (c) => {
       initial_prompt: body.data.initial_prompt,
       api_key: '__use_local__', // sentinel — supervisor uses its configured key
       hub_url: '__same__',
+      dangerously_skip_permissions: skipPerms,
     } as any)
   } catch (err: any) {
     return c.json({ error: err.message }, 500)

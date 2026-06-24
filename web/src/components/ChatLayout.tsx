@@ -17,11 +17,15 @@ import { useSessions } from '../hooks/useSessions'
 import { useChat } from '../hooks/useChat'
 import { useActivity } from '../hooks/useActivity'
 import { Sidebar } from './Sidebar'
+import { useSidebarWidth } from '../hooks/useSidebarWidth'
 import { ChatPanel } from './ChatPanel'
+import { TerminalSurface } from './TerminalSurface'
 import { ApiKeyModal } from './ApiKeyModal'
-import { connectedSessions, sessionLabel, shortId } from './SessionDropdown'
+import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
+import { MobileSessionControls } from './MobileSessionControls'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
 import { hubFetch } from '../lib/api'
+import { useClientConfig } from '../hooks/useClientConfig'
 
 const NUDGE_TEXT = "Status update? Briefly: what's the current state, what would you recommend doing next, or what input do you need from me?"
 
@@ -33,8 +37,8 @@ interface Props {
 }
 
 export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
+  const clientConfig = useClientConfig()
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
-  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem('remo:sidebar-collapsed') === '1' } catch { return false }
   })
@@ -46,6 +50,8 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     })
   }, [])
   const [showApiKey, setShowApiKey] = useState(false)
+  // Border-drag resizable sidebar width (persisted to localStorage).
+  const { width: sidebarWidth, startResize } = useSidebarWidth()
 
   // Phase 10 — user's global auto-nudge default. Per-session `auto_nudge`
   // overrides this; null/undefined on a session inherits this value. Source of
@@ -128,9 +134,6 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
   // Auto-nudge on session click (matches Layout behavior).
   const handleSelectSession = useCallback((id: string) => {
     setActiveSessionId(id)
-    if (window.innerWidth < 768) {
-      setSidebarOpen(false)
-    }
 
     try {
       const target = sessionsHook.sessions.find(s => s.id === id)
@@ -160,17 +163,6 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     } catch {}
   }, [sessionsHook.sessions, send, globalNudgeDefault])
 
-  // Close sidebar on Escape (mobile)
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && sidebarOpen && window.innerWidth < 768) {
-        setSidebarOpen(false)
-      }
-    }
-    window.addEventListener('keydown', handleKey)
-    return () => window.removeEventListener('keydown', handleKey)
-  }, [sidebarOpen])
-
   const handleShowConnect = useCallback(() => {
     onNavigate('#/settings?tab=connections')
   }, [onNavigate])
@@ -179,33 +171,49 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     ? sessionsHook.sessions.find(s => s.id === activeSessionId)
     : null
 
+  // PTY cutover: the raw-terminal surface (TerminalSurface) is the default human
+  // chat surface once the hub's REMO_PTY_INTERACTIVE flag is on — fetched at boot
+  // via useClientConfig so web + hub stay in lockstep with the env flip. The
+  // localStorage `remo:pty-interactive` = '1' override stays as a dev/opt-in
+  // escape hatch (forces terminal on even when the hub flag is off). With the hub
+  // flag off and no override, behavior is unchanged (ChatSurface/ChatPanel).
+  const localPtyOverride = (() => {
+    try { return localStorage.getItem('remo:pty-interactive') === '1' } catch { return false }
+  })()
+  const ptyInteractive = clientConfig.pty_interactive || localPtyOverride
+
   return (
     <div className="flex h-full bg-[var(--bg-primary)] relative overflow-hidden">
       {showApiKey && (
         <ApiKeyModal token={token} onClose={() => setShowApiKey(false)} />
       )}
 
-      {/* Mobile overlay backdrop */}
-      {sidebarOpen && (
-        <div
-          className="sidebar-overlay fixed inset-0 bg-black/50 z-30 md:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      {/* Sidebar */}
+      {/* Sidebar — DESKTOP ONLY (md+). On mobile there is NO sidebar; per-session
+          controls live inline in the session strip (MobileSessionControls). */}
       <div
+        style={sidebarCollapsed ? undefined : { ['--sidebar-w' as string]: `${sidebarWidth}px` }}
         className={`
-          sidebar-panel fixed inset-y-0 left-0 z-40 ${sidebarCollapsed ? 'w-14' : 'w-72'}
-          md:relative md:z-0 md:translate-x-0 md:pointer-events-auto
-          ${sidebarOpen ? 'translate-x-0 pointer-events-auto' : '-translate-x-full pointer-events-none'}
+          sidebar-panel hidden md:flex relative z-0 ${sidebarCollapsed ? 'w-14' : 'w-[var(--sidebar-w)]'}
         `}
       >
+        {/* Border-drag resize target (desktop only) — the right border IS the
+            grab handle (no visible chrome); col-resize cursor on hover. */}
+        {!sidebarCollapsed && (
+          <div
+            onMouseDown={startResize}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            title="Drag to resize"
+            className="hidden md:block absolute top-0 right-0 z-50 h-full w-1.5 translate-x-1/2 cursor-col-resize hover:bg-blue-500/30 active:bg-blue-500/40 transition-colors"
+          />
+        )}
         <Sidebar
           sessions={sessionsHook.sessions}
           activeSessionId={activeSessionId}
           onSelectSession={handleSelectSession}
           onDeleteSession={sessionsHook.deleteSession}
+          onDisconnectSession={sessionsHook.disconnectSession}
           onShowConnect={handleShowConnect}
           onShowApiKey={() => setShowApiKey(true)}
           onNavigate={onNavigate}
@@ -213,7 +221,6 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           connected={connected}
           user={user}
           signOut={signOut}
-          onClose={() => setSidebarOpen(false)}
           unreadCounts={unreadCounts}
           collapsed={sidebarCollapsed}
           onToggleCollapsed={toggleCollapsed}
@@ -222,39 +229,45 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           cloneHere={sessionsHook.cloneHere}
           globalNudgeDefault={globalNudgeDefault}
           onSetAutoNudge={sessionsHook.setSessionAutoNudge}
+          onSetSkipPermissions={sessionsHook.setSessionSkipPermissions}
         />
       </div>
 
-      {/* Main chat area — NO app header here; AppShell owns it. */}
-      <div className="flex-1 flex flex-col min-w-0">
+      {/* Main chat area — NO app header here; AppShell owns it. `md:pl-3` insets
+          the whole chat column (header strip + content) off the sidebar so the
+          header bar doesn't sit flush against the sidebar border. */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 md:pl-3">
         {/* Chat-specific session strip (kept — it's session chrome, not app chrome). */}
-        <div className="relative z-40 flex items-center gap-3 px-3 py-2 border-b border-[var(--border-color)]/40 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0">
-          {/* Mobile: hamburger opens the active-session sidebar slide-over —
-              the single way to browse/switch sessions on mobile (the old
-              header SessionDropdown was redundant with it and was removed).
-              Offline / prior sessions are launched from Settings -> Supervisor,
-              never the sidebar (the sidebar is active-only by design). */}
-          <button
-            type="button"
-            onClick={() => setSidebarOpen(true)}
-            className="md:hidden p-1.5 -ml-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors shrink-0"
-            aria-label="Open session list"
-          >
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
-              <line x1="3" y1="5" x2="15" y2="5" />
-              <line x1="3" y1="9" x2="15" y2="9" />
-              <line x1="3" y1="13" x2="15" y2="13" />
-            </svg>
-          </button>
-          {/* Current-session title (mobile + desktop). On mobile, tap to open
-              the session list. Switching happens in the sidebar, not here. */}
-          <button
-            type="button"
-            onClick={() => { if (window.innerWidth < 768) setSidebarOpen(true) }}
-            className="flex-1 min-w-0 text-left md:cursor-default md:pointer-events-none"
-            aria-label={activeSession ? sessionLabel(activeSession) : 'Remo Code'}
-          >
-            <h2 className="text-sm font-semibold text-[var(--text-secondary)] truncate flex items-center gap-1.5">
+        <div className="relative z-40 flex items-center gap-2 sm:gap-3 px-3 md:px-6 py-2 safe-x border-b border-[var(--border-color)]/40 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0">
+          {/* Mobile (< md): the desktop left sidebar is hidden, so the session
+              switcher lives HERE as a top-bar dropdown — the single way to
+              browse/switch active sessions on a phone. */}
+          <div className="md:hidden flex-1 min-w-0">
+            <SessionDropdown
+              sessions={sessionsHook.sessions}
+              activeSessionId={activeSessionId}
+              onSelectSession={handleSelectSession}
+              unreadCounts={unreadCounts}
+            />
+          </div>
+          {/* Mobile: per-session controls inline (NO sidebar) — Stop/interrupt
+              + a kebab popover for disconnect / delete / auto-nudge / skip-perms,
+              mirroring the desktop sidebar's session-row actions. */}
+          {activeSession && (
+            <MobileSessionControls
+              session={activeSession}
+              onCancel={handleCancel}
+              onDeleteSession={sessionsHook.deleteSession}
+              onDisconnectSession={sessionsHook.disconnectSession}
+              globalNudgeDefault={globalNudgeDefault}
+              onSetAutoNudge={sessionsHook.setSessionAutoNudge}
+              onSetSkipPermissions={sessionsHook.setSessionSkipPermissions}
+            />
+          )}
+          {/* Desktop (md+): static current-session title — switching happens in
+              the always-visible left sidebar, not here. */}
+          <div className="hidden md:block flex-1 min-w-0">
+            <h2 className="text-sm font-semibold text-[var(--text-secondary)] leading-tight truncate flex items-center gap-1.5">
               {activeSession ? sessionLabel(activeSession) : 'Remo Code'}
               {activeSession && (
                 <span className="text-[10px] text-[var(--text-muted)] font-mono font-normal">
@@ -263,37 +276,45 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
               )}
             </h2>
             {activeSession?.project_dir && (
-              <p className="text-[11px] text-[var(--text-muted)] truncate">{activeSession.project_dir}</p>
+              <p className="text-[11px] text-[var(--text-muted)] leading-tight truncate mt-0.5">{activeSession.project_dir}</p>
             )}
-          </button>
+          </div>
 
           {activeSession && (activeSession.status === 'online' || activeSession.status === 'thinking') ? (
-            <span className="flex items-center gap-1.5 text-xs text-emerald-400 shrink-0">
+            <span className="flex items-center gap-1.5 text-xs text-emerald-400 shrink-0 pl-2">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               <span className="hidden sm:inline">Connected</span>
             </span>
           ) : activeSession ? (
-            <span className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] shrink-0">
+            <span className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] shrink-0 pl-2">
               <span className="w-1.5 h-1.5 rounded-full bg-[var(--text-muted)]" />
               <span className="hidden sm:inline">Offline</span>
             </span>
           ) : null}
         </div>
 
-        <ChatPanel
-          messages={messages}
-          loading={chatLoading}
-          onSend={sendMessage}
-          activeSessionId={activeSessionId}
-          sessionStatus={activeSession?.status}
-          activity={activity}
-          onPermissionRespond={handlePermissionRespond}
-          onQuestionRespond={handleQuestionRespond}
-          token={token}
-          wsConnected={connected}
-          online={online}
-          onCancel={handleCancel}
-        />
+        {ptyInteractive && activeSessionId ? (
+          // Phase-15 spike: PTY-interactive sessions render the raw-terminal
+          // panel instead of the chat bubbles. Gated by a dev toggle
+          // (localStorage `remo:pty-interactive`); full per-session selection
+          // is Phase 16. Non-PTY sessions keep ChatPanel (Phase 17 deletes it).
+          <TerminalSurface sessionId={activeSessionId} subscribe={subscribe} send={send} className="flex-1 min-h-0 p-2" />
+        ) : (
+          <ChatPanel
+            messages={messages}
+            loading={chatLoading}
+            onSend={sendMessage}
+            activeSessionId={activeSessionId}
+            sessionStatus={activeSession?.status}
+            activity={activity}
+            onPermissionRespond={handlePermissionRespond}
+            onQuestionRespond={handleQuestionRespond}
+            token={token}
+            wsConnected={connected}
+            online={online}
+            onCancel={handleCancel}
+          />
+        )}
       </div>
     </div>
   )

@@ -69,6 +69,20 @@ export function collapseWorktrees(sessions: CodeSession[]): CodeSession[] {
   return order.map((k) => byKey.get(k)!)
 }
 
+/**
+ * Connections-list worktree filter (settings repo table). The legacy `repo.scan`
+ * shape carries no introspection, so the hub enriches each scanned repo from the
+ * supervisor's `repo_inventory` with `is_worktree` / `is_canonical`. A repo is
+ * HIDDEN when it is a worktree OR an explicitly-non-canonical sibling clone; the
+ * canonical clone (and any entry missing the flags — legacy/unenriched scan)
+ * stays visible. Single source of truth so SupervisorPage + tests can't drift.
+ */
+export function isWorktreeOrNonCanonicalRepo(
+  l: { is_worktree?: boolean; is_canonical?: boolean },
+): boolean {
+  return l.is_worktree === true || l.is_canonical === false
+}
+
 /** Display label for sort/title — owner/repo when GitHub-keyed, else folder/name. */
 export function sessionDisplayLabel(s: CodeSession): string {
   if (s.github_owner && s.github_repo) return `${s.github_owner}/${s.github_repo}`
@@ -77,6 +91,20 @@ export function sessionDisplayLabel(s: CodeSession): string {
     if (folder) return folder
   }
   return s.name
+}
+
+/**
+ * Repo ident for a session, for grouping. GitHub-keyed → `repo_key` (already
+ * "github://owner/repo"); else the canonical local path → `path://<path>`; else
+ * null (ungroupable → Ungrouped section). Mirrors web/src/lib/repo-ident.
+ */
+export function sessionRepoIdent(s: CodeSession): string | null {
+  if (s.repo_key) return s.repo_key
+  // Prefer the canonical (non-worktree) local path; fall back to project_dir.
+  const canonical = (s.local_paths ?? []).find((p) => p.canonical && !p.is_worktree)
+  const path = canonical?.local_path ?? s.project_dir
+  if (path) return `path://${path}`
+  return null
 }
 
 /** Online (connected) sessions first, then offline; stable secondary sort by label. */

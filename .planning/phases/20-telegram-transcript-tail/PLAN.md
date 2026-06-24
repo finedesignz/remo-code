@@ -1,0 +1,2 @@
+# Phase 20: telegram-transcript-tail — PLAN (reconciliation placeholder)
+Shipped via the direct-PR workflow (not the GSD lifecycle); the detailed numbered `20-PLAN-*` files in this dir are the real historical plans. This bare PLAN.md exists only so the GSD SDK recognizes the phase as planned+complete (the SDK's plan counter matches only `PLAN.md` / `*-PLAN.md`, not the numbered `20-PLAN-001-*.md` form). See the `20-*-SUMMARY.md` files and `20-VERIFICATION.md`.

@@ -34,6 +34,9 @@ type OutboundMsg =
   // The OAuth token is read locally in usage/oauth-poll.ts and NEVER serialized
   // here; only the four utilization windows + reset times cross the wire.
   | { type: 'usage_report'; usage: UsagePayload }
+  // Phase 08 §6 — create-local-repo-and-push progress + failure.
+  | { type: 'repo_create_progress'; job_id: string; stage: 'init' | 'commit' | 'remote_add' | 'pushing_locally' | 'pushed' | 'reindexing' | 'done'; percent?: number; message?: string }
+  | { type: 'repo_create_failed'; job_id: string; stage: string; error: string }
   | { type: 'pong' }
 
 export class SupervisorClient {
@@ -295,6 +298,7 @@ export class SupervisorClient {
       case 'session.stop': await this.onSessionStop(msg); break
       case 'session.status': this.onSessionStatus(msg); break
       case 'run_command': await this.onRunCommand(msg); break
+      case 'create_local_repo_and_push': await this.onCreateLocalRepoAndPush(msg); break
       case 'key_rotated': this.onKeyRotated(msg); break
       case 'supervisor.set_roots': await this.onSetRoots(msg); break
       default:
@@ -693,6 +697,54 @@ export class SupervisorClient {
         error: `handler_exception: ${err?.message || String(err)}`,
       })
     }
+  }
+
+  /**
+   * Phase 08 §6 — hub created the empty GitHub remote and asks us to push the
+   * local folder. Sandbox-gate `local_path` against configured roots BEFORE any
+   * git runs (mirrors rejectIfEscape for the repo.* ops), then drive
+   * init→commit→remote_add→push→done via git-push-driver, forwarding each stage
+   * as repo_create_progress. On escape or git failure emit repo_create_failed.
+   */
+  private async onCreateLocalRepoAndPush(msg: {
+    job_id: string
+    session_id: string
+    owner: string
+    name: string
+    visibility: 'private' | 'public'
+    remote_url: string
+    local_path: string
+  }) {
+    const jobId = msg.job_id
+    // Sandbox enforcement: local_path must resolve inside a configured root.
+    // The folder already exists (it's an unpushed local repo), so use the
+    // existing-path assertion. No git runs if this throws.
+    try {
+      assertWithinRoots(msg.local_path, this.cfg.roots ?? [])
+    } catch (err) {
+      if (err instanceof SandboxEscapeError) {
+        this.log('warn', `create_local_repo_and_push: sandbox_escape: ${msg.local_path}`)
+        this.send({ type: 'repo_create_failed', job_id: jobId, stage: 'validating_scope', error: 'sandbox_escape' })
+        return
+      }
+      this.send({ type: 'repo_create_failed', job_id: jobId, stage: 'validating_scope', error: (err as any)?.message || 'sandbox_check_failed' })
+      return
+    }
+
+    const { pushLocalRepo } = await import('./git-push-driver')
+    const res = await pushLocalRepo({
+      localPath: msg.local_path,
+      remoteUrl: msg.remote_url,
+      onProgress: (stage) => {
+        this.send({ type: 'repo_create_progress', job_id: jobId, stage })
+      },
+    })
+    if (!res.ok) {
+      this.log('warn', `create_local_repo_and_push failed at ${res.failedStage}: ${res.error}`)
+      this.send({ type: 'repo_create_failed', job_id: jobId, stage: res.failedStage ?? 'pushing_locally', error: res.error ?? 'push_failed' })
+      return
+    }
+    this.log('info', `create_local_repo_and_push: pushed ${msg.owner}/${msg.name}`)
   }
 
   private onSessionStatus(msg: { req_id: string }) {

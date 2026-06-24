@@ -38,7 +38,7 @@ async function seed(): Promise<void> {
   `)
   await sql.unsafe(`
     INSERT INTO api_keys (id, user_id, key_hash, capabilities, name)
-    VALUES ('${TEST_API_KEY_ID}', '${TEST_USER_ID}', 'budget-test-hash', '["supervisor"]'::jsonb, 'budget test')
+    VALUES ('${TEST_API_KEY_ID}', '${TEST_USER_ID}', 'budget-test-hash', ARRAY['supervisor']::text[], 'budget test')
     ON CONFLICT (id) DO NOTHING;
   `)
   await sql.unsafe(`
@@ -48,7 +48,7 @@ async function seed(): Promise<void> {
   `)
   await sql.unsafe(`
     INSERT INTO api_keys (id, user_id, key_hash, capabilities, name)
-    VALUES ('apikey_budget_t099', '${OTHER_USER_ID}', 'budget-test-other-hash', '["supervisor"]'::jsonb, 'budget other')
+    VALUES ('apikey_budget_t099', '${OTHER_USER_ID}', 'budget-test-other-hash', ARRAY['supervisor']::text[], 'budget other')
     ON CONFLICT (id) DO NOTHING;
   `)
   await sql.unsafe(`
@@ -159,14 +159,18 @@ maybe('supervisor-budget gate', () => {
 
   test('(e) concurrent race: 5 parallel reserves with cap=3 → exactly 3 succeed', async () => {
     await setBudget(3, null)
-    // Race: 5 parallel reservations; each successful one creates a run row so
-    // subsequent reservations in the batch see the higher count under
-    // FOR UPDATE serialisation.
-    const reserve = async () => {
-      const r = await reserveSessionSlot(TEST_USER_ID, TEST_SUP_ID)
-      if (r.ok) await insertRun()
-      return r
-    }
+    // Race: 5 parallel reservations. The slot-consuming INSERT happens INSIDE
+    // the reservation's FOR-UPDATE tx (via runFields), so a concurrent reserver
+    // blocking on FOR UPDATE sees the committed reservation in its count — no
+    // over-admission. Exactly cap=3 win.
+    const reserve = async () =>
+      reserveSessionSlot(TEST_USER_ID, TEST_SUP_ID, {
+        sessionId: null,
+        repoPath: '/tmp/test',
+        branch: null,
+        pulled: false,
+        initialPrompt: null,
+      })
     const results = await Promise.all([reserve(), reserve(), reserve(), reserve(), reserve()])
     const ok = results.filter((r: any) => r.ok).length
     const denied = results.filter((r: any) => !r.ok && r.reason === 'at_capacity').length

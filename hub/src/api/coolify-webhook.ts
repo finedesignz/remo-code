@@ -43,9 +43,11 @@ import {
   markUserCoolifyWebhookLegacyHit,
   claimDeployFailure,
 } from '../db/dal.ts'
-import { runNow as dispatcherRunNow } from '../scheduler/dispatcher.ts'
+import { runNow as dispatcherRunNow, finalizeRun } from '../scheduler/dispatcher.ts'
 import { deployFailureFingerprint, DEPLOY_DEDUPE_WINDOW_MS } from '../scheduler/deploy-fingerprint.ts'
-import { hasActiveSessionForRepo } from '../sessions/repo-routing.ts'
+import { hasActiveSessionForRepo, resolveRepoKeyedAgentSession } from '../sessions/repo-routing.ts'
+import { listOnlineAgentSessionsForUser } from '../ws/registry.ts'
+import { listOnlineSupervisorIdsForUser } from '../ws/supervisor-registry.ts'
 import { ipAllowed, sourceIpFromHeaders } from '../lib/cidr.ts'
 
 export const coolifyWebhookRoutes = new Hono()
@@ -72,23 +74,47 @@ const EVENT_ALIAS: Record<string, DottedEvent> = {
   deployment_in_progress: 'deployment.in_progress',
 }
 
-const CoolifyWebhookPayload = z.object({
-  event: z
-    .string()
-    .min(1)
-    .transform((s, ctx) => {
-      const mapped = EVENT_ALIAS[s]
-      if (!mapped) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `unsupported_event: ${s}` })
-        return z.NEVER
-      }
-      return mapped
-    }),
-  deployment_uuid: z.string().min(1),
-  application_uuid: z.string().min(1),
-  git_repository: z.string().optional(),
-  commit_sha: z.string().optional(),
-})
+/**
+ * Coolify emits NON-deployment events too — notably `task_failed` / `task_success`
+ * for its per-application scheduled-task (cron command) feature. These ride the
+ * SAME webhook channel as deployments but carry a different body shape (no
+ * `deployment_uuid` / `application_uuid` in the deployment sense) and are NOT a
+ * deploy-failure signal, so they must never trigger deploy triage.
+ *
+ * We RECOGNIZE them explicitly so a well-formed event is recorded as `ignored`
+ * (with its event type) instead of dropped as `bad_payload` just because we
+ * don't model its type. Both underscore and dotted forms are accepted.
+ */
+const RECOGNIZED_NON_DEPLOY_EVENTS = new Set<string>([
+  'task_failed',
+  'task.failed',
+  'task_success',
+  'task.success',
+  'task_succeeded',
+  'task.succeeded',
+])
+
+const CoolifyWebhookPayload = z
+  .object({
+    event: z
+      .string()
+      .min(1)
+      .transform((s, ctx) => {
+        const mapped = EVENT_ALIAS[s]
+        if (!mapped) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: `unsupported_event: ${s}` })
+          return z.NEVER
+        }
+        return mapped
+      }),
+    deployment_uuid: z.string().min(1),
+    application_uuid: z.string().min(1),
+    git_repository: z.string().optional(),
+    commit_sha: z.string().optional(),
+  })
+  // Tolerate unknown/extra fields Coolify may add — a deploy event with a
+  // slightly richer shape must not hard-fail on strictness.
+  .passthrough()
 
 export type CoolifyWebhookPayload = z.infer<typeof CoolifyWebhookPayload>
 
@@ -127,6 +153,44 @@ export async function dispatchTriage(
     }
   } catch (err: any) {
     console.warn(`[coolify-webhook] deploy-failure claim errored (fail-open): ${err?.message}`)
+  }
+
+  // Orphan-run finalize. The deployment metadata run (`deploymentRunId`) was
+  // inserted as `pending` (NULL session_id) and is NEVER finalized by the triage
+  // path. When the deploy failure is UN-ROUTABLE — no session bound to the repo
+  // (resolved via git_repository OR the application_uuid→repo_key cache) with a
+  // live socket, AND no online agent / supervisor to capacity-route to — a
+  // dispatched triage would just self-finalize `no_target_available` while this
+  // metadata row sits `pending` forever (the at_capacity orphan-run leak). So we
+  // close it cleanly here and skip the doomed dispatch.
+  //
+  // Semantics: `skipped` / `no_routable_session` (not `failed`) — an un-routable
+  // deploy failure is a no-op, not a triage failure; this matches the existing
+  // metadata-skip semantics (log_check `no_errors_detected`) and won't fire
+  // `on:'success'` post-run chains. Best-effort + fail-open: any error in the
+  // routability probe falls through to dispatch-anyway (never silently drops).
+  try {
+    const repoKeyed = await resolveRepoKeyedAgentSession(
+      userId,
+      payload.git_repository,
+      payload.application_uuid,
+    )
+    if (!repoKeyed) {
+      const hasLiveTarget =
+        listOnlineAgentSessionsForUser(userId).length > 0 ||
+        listOnlineSupervisorIdsForUser(userId).length > 0
+      if (!hasLiveTarget) {
+        await finalizeRun(deploymentRunId, 'skipped', 'no_routable_session')
+        console.info(
+          `[coolify-webhook] un-routable deploy failure app=${payload.application_uuid} — finalized metadata run=${deploymentRunId} as skipped/no_routable_session`,
+        )
+        return
+      }
+    }
+  } catch (err: any) {
+    console.warn(
+      `[coolify-webhook] orphan-run routability probe errored (fail-open, dispatching): ${err?.message}`,
+    )
   }
 
   const taskId = await ensureInternalTriageTask(userId)
@@ -218,6 +282,18 @@ async function handleAuthenticated(opts: {
   if (typeof parsedBody === 'object' && parsedBody !== null && (parsedBody as any).event === 'test') {
     await logAttempt(userId, sourceIp, 'test', 'success', 'test_ok', preview)
     return { status: 200 as const, body: { ok: true, message: 'test received' } }
+  }
+
+  // (2b) Recognized non-deployment event (e.g. `task_failed` — a Coolify
+  // scheduled-command failure, NOT a deploy failure). Accept + audit as
+  // `ignored` with its event type; insert no run and dispatch no triage. This
+  // keeps a well-formed Coolify event from landing as `bad_payload` just
+  // because we don't model its type.
+  const rawEvent =
+    typeof (parsedBody as any)?.event === 'string' ? (parsedBody as any).event : null
+  if (rawEvent && RECOGNIZED_NON_DEPLOY_EVENTS.has(rawEvent)) {
+    await logAttempt(userId, sourceIp, rawEvent, 'ignored', 'non_deploy_event', preview)
+    return { status: 200 as const, body: { ok: true, ignored: true, event: rawEvent } }
   }
 
   const result = CoolifyWebhookPayload.safeParse(parsedBody)

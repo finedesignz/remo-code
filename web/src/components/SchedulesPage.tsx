@@ -16,6 +16,16 @@ interface Props {
 type StatusFilter = 'all' | 'enabled' | 'disabled'
 type TypeFilter = 'all' | ScheduledTask['task_type']
 
+/**
+ * Internal system-managed tasks (name prefix `__internal_`, e.g.
+ * `__internal_triage`, `__internal_coolify_deployment`) are routed to a session
+ * dynamically at dispatch time and carry a null target_id by design. They are
+ * not user-editable, so the user-facing Tasks list excludes them.
+ */
+export function isInternalTask(s: Pick<ScheduledTask, 'name'>): boolean {
+  return s.name.startsWith('__internal_')
+}
+
 export function SchedulesPage({ token, onBack, subscribe }: Props) {
   const { schedules, loading, error, create, update, remove, toggle, runNow, refetch } = useSchedules(token)
   const [editorOpen, setEditorOpen] = useState(false)
@@ -30,6 +40,10 @@ export function SchedulesPage({ token, onBack, subscribe }: Props) {
   const filteredSchedules = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
     return schedules.filter(s => {
+      // Hide internal system-managed tasks (e.g. __internal_triage,
+      // __internal_coolify_deployment) — they have null targets by design
+      // and are not user-editable.
+      if (isInternalTask(s)) return false
       if (q && !s.name.toLowerCase().includes(q)) return false
       if (statusFilter === 'enabled' && s.enabled !== true) return false
       if (statusFilter === 'disabled' && s.enabled !== false) return false

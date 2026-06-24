@@ -1,0 +1,35 @@
+# Woodpecker CI — Linux PR-gate ported from .github/workflows/qc.yml (pr-gate job).
+# Bun + real Postgres service. The post-deploy-smoke and docs-drift checks are now
+# also on Woodpecker (sibling pipelines in this dir). Only the signed Windows
+# release-supervisor and the Windows/macOS mobile builds stay on GitHub Actions —
+# the Woodpecker runner is linux/amd64 only and signing secrets live in GHA.
+when:
+  - event: pull_request
+    branch: main
+
+labels:
+  platform: linux/amd64
+
+services:
+  - name: postgres
+    image: postgres:16
+    environment:
+      POSTGRES_USER: remo
+      POSTGRES_PASSWORD: remo
+      POSTGRES_DB: remo_ci
+
+steps:
+  - name: pr-gate
+    image: oven/bun:latest
+    environment:
+      DATABASE_URL: postgres://remo:remo@postgres:5432/remo_ci
+      JWT_SECRET: ci-placeholder-jwt-secret-min-32-chars-please-do-not-use-in-prod
+      REMO_E2E_DB_URL: postgres://remo:remo@postgres:5432/remo_ci
+    commands:
+      - apt-get update && apt-get install -y postgresql-client
+      - 'until pg_isready -h postgres -U remo -d remo_ci; do echo waiting-pg; sleep 2; done'
+      - bun install --frozen-lockfile
+      - bunx tsc --noEmit -p hub/tsconfig.json || echo 'typecheck informational (continue-on-error parity)'
+      - bun run check-baseline
+      - bun run migration-verify
+      - bun test hub/test/orchestrator-data-model.test.ts hub/test/orchestrator-queue.test.ts hub/test/orchestrator-run-log.test.ts hub/test/orchestrator-stage-presets.test.ts hub/test/orchestrator-merge-command.test.ts hub/test/migrate-legacy-tasks.test.ts hub/test/feedback-key-ownership.test.ts

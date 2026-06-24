@@ -54,3 +54,55 @@ export async function triggerRedeploy(
     return { ok: false, status: 0, detail: `redeploy_fetch_failed: ${err?.message}` }
   }
 }
+
+export interface AppLogsResult {
+  ok: boolean
+  status: number
+  /** Concatenated runtime log text (empty string when unavailable). */
+  logs: string
+  detail?: string
+}
+
+/**
+ * Fetch the runtime logs of an application (Phase 27 — log error-scan input).
+ * GET {base}/api/v1/applications/<uuid>/logs?lines=<n>
+ *
+ * Best-effort + READ-ONLY: never throws, never mutates prod. A failure (auth,
+ * network, route shape) returns ok=false + empty logs so the verify tail simply
+ * skips the log-scan rather than wedging the cycle. The Coolify logs endpoint
+ * returns `{ logs: "<text>" }`; we tolerate a bare string or array too.
+ */
+export async function fetchAppLogs(
+  cfg: CoolifyConfig,
+  applicationUuid: string,
+  opts: { lines?: number; fetchImpl?: typeof fetch } = {},
+): Promise<AppLogsResult> {
+  const lines = opts.lines ?? 200
+  const fetchImpl = opts.fetchImpl ?? fetch
+  const url = `${cfg.baseUrl}/api/v1/applications/${encodeURIComponent(applicationUuid)}/logs?lines=${lines}`
+  try {
+    const res = await fetchImpl(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${cfg.token}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => '')).slice(0, 500)
+      return { ok: false, status: res.status, logs: '', detail }
+    }
+    const body = await res.text().catch(() => '')
+    let logs = body
+    try {
+      const json = JSON.parse(body)
+      if (typeof json === 'string') logs = json
+      else if (Array.isArray(json)) logs = json.join('\n')
+      else if (json && typeof json.logs === 'string') logs = json.logs
+      else if (json && Array.isArray(json.logs)) logs = json.logs.join('\n')
+    } catch {
+      /* not JSON — treat the raw body as the log text */
+    }
+    return { ok: true, status: res.status, logs }
+  } catch (err: any) {
+    return { ok: false, status: 0, logs: '', detail: `logs_fetch_failed: ${err?.message}` }
+  }
+}

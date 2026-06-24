@@ -3,7 +3,7 @@
  *
  * Tracks the live subscriber count per session_id across every connected web
  * client. When the count drops to 0 we start a grace timer (config:
- * `REMO_SESSION_IDLE_GRACE_SECONDS`, default 300s); if no new subscriber
+ * `REMO_SESSION_IDLE_GRACE_SECONDS`, default 14400s = 4h); if no new subscriber
  * arrives in that window we send `{type:'shutdown', reason:'idle_no_subscribers'}`
  * to the session's owning agent channel. The SessionBridge handles `shutdown`
  * by calling `stopGracefully()` on the runner (SIGINT → SIGKILL after 3s).

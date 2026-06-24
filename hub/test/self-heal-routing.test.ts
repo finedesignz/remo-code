@@ -42,16 +42,20 @@ const FAKE_AGENT_SESSION = 'sess_heal_t008_agent'
 const fakeWs: any = { send: () => {}, close: () => {} }
 
 async function seed(): Promise<void> {
+  // users.preferred_supervisor_id is an FK → supervisors(id), so insert the
+  // user WITHOUT it first, seed the supervisors, then point at SUP_A.
   await sql.unsafe(`
-    INSERT INTO users (id, email, password_hash, role, preferred_supervisor_id)
-    VALUES ('${TEST_USER_ID}', 't008+heal@test.local', 'x', 'user', '${SUP_A}')
-    ON CONFLICT (id) DO UPDATE SET preferred_supervisor_id = '${SUP_A}';
+    INSERT INTO users (id, email, password_hash, role)
+    VALUES ('${TEST_USER_ID}', 't008+heal@test.local', 'x', 'user')
+    ON CONFLICT (id) DO UPDATE SET preferred_supervisor_id = NULL;
   `)
+  // Distinct purpose per key: idx_api_keys_user_purpose_active allows one active
+  // key per (user, purpose). capabilities is text[] in the schema, not jsonb.
   await sql.unsafe(`
-    INSERT INTO api_keys (id, user_id, key_hash, capabilities, name)
+    INSERT INTO api_keys (id, user_id, key_hash, capabilities, name, purpose)
     VALUES
-      ('${TEST_API_KEY_A}', '${TEST_USER_ID}', 'heal-a-hash', '["supervisor"]'::jsonb, 'heal a'),
-      ('${TEST_API_KEY_B}', '${TEST_USER_ID}', 'heal-b-hash', '["supervisor"]'::jsonb, 'heal b')
+      ('${TEST_API_KEY_A}', '${TEST_USER_ID}', 'heal-a-hash', ARRAY['supervisor']::text[], 'heal a', 'heal-a'),
+      ('${TEST_API_KEY_B}', '${TEST_USER_ID}', 'heal-b-hash', ARRAY['supervisor']::text[], 'heal b', 'heal-b')
     ON CONFLICT (id) DO NOTHING;
   `)
   // SUP_A: last_seen now (online); SUP_B: last_seen now (online). Budget 2 each.
@@ -64,6 +68,10 @@ async function seed(): Promise<void> {
       concurrency_budget = 2,
       concurrency_override = NULL,
       last_seen_at = EXCLUDED.last_seen_at;
+  `)
+  // Now SUP_A exists → set the user's preferred supervisor.
+  await sql.unsafe(`
+    UPDATE users SET preferred_supervisor_id = '${SUP_A}' WHERE id = '${TEST_USER_ID}';
   `)
   // Fake "session" row so registerChannel has something to reference.
   await sql.unsafe(`
@@ -208,15 +216,20 @@ maybe('pickSessionTarget routing', () => {
     bringSupervisorOnline(SUP_A, TEST_API_KEY_A)
     // SUP_B not online so the only possible target is SUP_A's 1 slot.
 
-    // Two concurrent picks; each successful one creates a session_runs row so
-    // the second-in-the-batch sees the higher count under FOR UPDATE serialisation.
-    const pickAndConsume = async () => {
-      const r = await pickSessionTarget(TEST_USER_ID)
-      if (r.kind === 'supervisor') {
-        await insertRun(r.supervisor_id)
-      }
-      return r
-    }
+    // Two concurrent picks. The slot-consuming INSERT happens INSIDE the
+    // reservation's FOR-UPDATE tx (via runFields), so the second-in-the-batch
+    // sees the committed reservation under FOR UPDATE serialisation — exactly
+    // one wins the single open slot.
+    const pickAndConsume = async () =>
+      pickSessionTarget(TEST_USER_ID, {
+        runFields: {
+          sessionId: null,
+          repoPath: '/tmp/heal-test',
+          branch: null,
+          pulled: false,
+          initialPrompt: null,
+        },
+      })
     const results = await Promise.all([pickAndConsume(), pickAndConsume()])
     const winners = results.filter((r: any) => r.kind === 'supervisor')
     const losers = results.filter((r: any) => r.kind === 'none')

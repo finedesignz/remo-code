@@ -21,10 +21,14 @@ import { errorProjectsRouter } from './api/error-projects'
 import { errorsRouter } from './api/errors'
 import { errorRunsRouter } from './api/error-runs'
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
+import { repoGroups as repoGroupsApi } from './api/repo-groups'
 import { instructions as instructionsApi } from './api/instructions'
 import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { revanoteWebhookRoutes } from './api/revanote-webhook'
+import { feedbackWebhookRoutes } from './api/feedback-webhook'
+import { feedbackKeys as feedbackKeysApi } from './api/feedback-keys'
+import { sourceIpFromHeaders } from './lib/cidr'
 import { telegramWebhookRoutes } from './api/telegram-webhook'
 import { telegram as telegramApi } from './api/telegram'
 import { revanoteMappings } from './api/revanote-mappings'
@@ -34,7 +38,9 @@ import { introspect as introspectApi } from './api/introspect'
 import { tasks as tasksApi } from './api/tasks'
 import { usage as usageApi } from './api/usage'
 import { wellKnown } from './api/well-known'
+import { clientConfig } from './api/client-config'
 import { orchestrator as orchestratorApi } from './api/orchestrator'
+import { orchestratorTasks as orchestratorTasksApi } from './api/orchestrator-tasks'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
 import { runMigrations } from './db/migrate'
@@ -46,6 +52,8 @@ import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/d
 import { getGraceBuffer as getDispatchGraceBuffer } from './dispatch/grace.ts'
 import { startRevanoteCallbackWorker } from './revanote/callback.ts'
 import { startTelegramBridge } from './telegram/bridge.ts'
+import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/queue.ts'
+import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchestrator/controller.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -58,6 +66,7 @@ import { parseSessionCookieFromHeader } from './session'
 import {
   createClientWsData, handleClientOpen, handleClientMessage, handleClientClose,
 } from './ws/client'
+import { isAllowedClientWsOrigin } from './ws/origin-guard'
 import {
   createAgentWsData, handleAgentOpen, handleAgentMessage, handleAgentClose,
 } from './ws/agent'
@@ -83,11 +92,12 @@ import { withHttpMetrics } from './observability/http-metrics'
 //        - /api/sentry          → sentryIntakeApi          (mounted ~L165)
 //        - /api/coolify         → coolifyWebhookRoutes      (mounted ~L170)
 //        - /api/revanote        → revanoteWebhookRoutes     (mounted ~L175)
+//        - /api/feedback        → feedbackWebhookRoutes      (mounted ~L178)
 //        - /api/telegram        → telegramWebhookRoutes     (mounted ~L181)
 //        - /webhooks/titanium   → webhooksTitanium          (mounted ~L185)
 //      The JWT/auth catch-all is `app.use('/api/*', ...)` (~L190) and its skip
 //      list MUST include each webhook subpath (`/api/sentry/`, `/api/coolify/
-//      webhook/`, `/api/revanote/webhook/`, `/api/telegram/webhook/`).
+//      webhook/`, `/api/revanote/webhook/`, `/api/feedback/`, `/api/telegram/webhook/`).
 //      (`/webhooks/titanium` is outside `/api/*` so the catch-all never sees it.)
 //
 //  (2) LICENSE GATE mounts AFTER auth. `requireActiveLicense` reads `userId`
@@ -140,6 +150,26 @@ app.use('/api/*', cors({
 // bearer-gated readiness endpoint, NOT a substitute for this cheap liveness ping.
 app.get('/health', (c) => c.json({ ok: true }))
 app.get('/healthz', (c) => c.json({ ok: true }))
+
+// Public embeddable feedback widget (Option A). Served at root (no auth) so any
+// app can <script src=".../feedback-widget.js" data-feedback-token="fb_...">.
+// Static, framework-agnostic vanilla JS; the token is supplied by the host page.
+app.get('/feedback-widget.js', async (c) => {
+  const candidates = [
+    resolve(import.meta.dir, '../public/feedback-widget.js'),
+    resolve('./hub/public/feedback-widget.js'),
+    resolve('./public/feedback-widget.js'),
+  ]
+  const path = candidates.find((p) => existsSync(p))
+  if (!path) return c.text('// feedback widget not found', 404)
+  const body = await Bun.file(path).text()
+  return new Response(body, {
+    headers: {
+      'content-type': 'application/javascript; charset=utf-8',
+      'cache-control': 'public, max-age=3600',
+    },
+  })
+})
 
 // B4 (obs): /healthz/deep + /metrics. Bearer-gated via HUB_INTROSPECT_TOKEN.
 // Mounted at root — bypasses /api/* auth, CSRF, license-gate, rate-limit
@@ -202,6 +232,12 @@ app.route('/api/auth', authRouter)
 // Setup routes (no auth required — guarded internally by user count check)
 app.route('/api/setup', setup)
 
+// Public client bootstrap config (single feature-gate boolean, no secrets).
+// Exposes the hub's REMO_PTY_INTERACTIVE flag so the SPA's default human surface
+// (TerminalSurface vs ChatSurface) stays in lockstep with the env flip.
+// MUST be mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
+app.route('/api/client-config', clientConfig)
+
 // Plugin routes (API key auth — MUST be before JWT catch-all)
 app.use('/api/plugin/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.req.header('authorization')?.slice(0, 20) || 'anon' }))
 app.use('/api/plugin/*', apiKeyMiddleware)
@@ -220,6 +256,21 @@ app.route('/api/coolify', coolifyWebhookRoutes)
 // secret embedded in path). MUST be mounted BEFORE the JWT catch-all
 // (see MOUNT-ORDER INVARIANT (1) at top).
 app.route('/api/revanote', revanoteWebhookRoutes)
+
+// Public end-user feedback intake (Option A). The :token in the URL IS the
+// credential (opaque fb_ token, SHA-256-hashed lookup). MUST be mounted BEFORE
+// the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top). Abuse is bounded by
+// (a) per-token + per-IP rate limits here, (b) the non-bypassable daily cost cap
+// inside dispatch. See hub/src/api/feedback-webhook.ts threat model.
+app.use('/api/feedback/*', rateLimitMulti({
+  buckets: [
+    // Per submit-token: 20/min — bounds a leaked-token flood.
+    { windowMs: 60_000, max: 20, keyFn: (c) => `fbtok:${c.req.path}` },
+    // Per source IP: 10/min — bounds a single-origin flood across tokens.
+    { windowMs: 60_000, max: 10, keyFn: (c) => `fbip:${sourceIpFromHeaders(c.req.raw.headers) || 'anon'}` },
+  ],
+}))
+app.route('/api/feedback', feedbackWebhookRoutes)
 
 // Phase 12: Public Telegram inbound webhook (URL-path secret). MUST be
 // mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
@@ -240,12 +291,15 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
+  if (c.req.path.startsWith('/api/feedback/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   // Phase 07: public auth endpoints (login request-link, callback, logout, me).
   // The authRouter handles its own auth state internally where needed.
   if (c.req.path.startsWith('/api/auth/')) return next()
   // Public setup bootstrap (guarded by user-count check inside).
   if (c.req.path.startsWith('/api/setup')) return next()
+  // Public client bootstrap config (single feature-gate boolean, no secrets).
+  if (c.req.path.startsWith('/api/client-config')) return next()
   return authMiddleware(c, next)
 })
 app.use('/api/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.get('userId') || 'anon' }))
@@ -261,9 +315,11 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/sentry/')) return next()
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
+  if (c.req.path.startsWith('/api/feedback/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
   if (c.req.path.startsWith('/api/setup')) return next()
+  if (c.req.path.startsWith('/api/client-config')) return next()
   return requireActiveLicense({ readOnlyOk: true })(c, next)
 })
 
@@ -333,9 +389,17 @@ app.use('/api/users/me/profile', async (c, next) =>
   isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/supervisors/:id/roots', async (c, next) =>
   isMutating(c) ? userMutationLimit(c, next) : next())
-// Orchestrator: mutating endpoints require fresh login (15-min step-up).
-app.use('/api/orchestrator', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
-app.use('/api/orchestrator/*', async (c, next) => isMutating(c) ? requireRecentAuth()(c, next) : next())
+// Orchestrator: prefs edits (PUT) require fresh login (15-min step-up) — they
+// carry custom_instructions that drive an autonomous agent. The session
+// lifecycle (POST /start, /stop) does NOT: it mirrors /api/supervisors/:id/start
+// (no step-up), and a long-lived cookie session (created_at can be weeks old)
+// must be able to launch the orchestrator without forcing a re-login round-trip.
+// requireRecentAuth is keyed on auth_sessions.created_at, so gating /start behind
+// it permanently 401s any session older than 15 min.
+const orchestratorStepUp = async (c: any, next: any) =>
+  c.req.method.toUpperCase() === 'PUT' ? requireRecentAuth()(c, next) : next()
+app.use('/api/orchestrator', orchestratorStepUp)
+app.use('/api/orchestrator/*', orchestratorStepUp)
 app.use('/api/orchestrator', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/orchestrator/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/mappings', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
@@ -372,11 +436,19 @@ app.route('/api/error-projects', errorProjectsRouter)
 app.route('/api/errors', errorsRouter)
 app.route('/api/error-runs', errorRunsRouter)
 app.route('/api/chat-tabs', chatTabsApi)
+app.route('/api/repo-groups', repoGroupsApi)
+// Feedback intake (Option A): authed key management (mint/list/disable). The
+// PUBLIC submit endpoint is /api/feedback/:token (mounted above, pre-auth).
+app.route('/api/feedback-keys', feedbackKeysApi)
 app.route('/api/instructions', instructionsApi)
 app.route('/api/error-setup', errorSetupApi)
 // Phase 08: JWT-authed revanote sub-routes (mappings + annotations).
 // The public webhook route lives at /api/revanote/webhook/* (mounted above).
 app.route('/api/orchestrator', orchestratorApi)
+// Phase 31 (auto-dev-orchestrator): authed config REST for the one-per-session
+// orchestrator task + its rows. Data-only (controller path is flag-OFF). Mounted
+// alongside the other authed user routes (post-auth catch-all).
+app.route('/api/orchestrator-tasks', orchestratorTasksApi)
 app.route('/api/revanote/mappings', revanoteMappings)
 app.route('/api/revanote/annotations', revanoteAnnotations)
 // Phase 12 Wave 4: authed Telegram REST. Mounted INSIDE the /api/* auth +
@@ -469,10 +541,17 @@ const server = Bun.serve({
 
     // WebSocket upgrades — with origin validation (C2 fix) and connection limits
     if (url.pathname === '/ws/client' || url.pathname === '/ws/agent') {
-      // Origin check for browser clients
+      // Origin / CSWSH check for browser clients (Phase 16 NH-3 / R-PTY-34).
+      // The /ws/client cookie ⇒ human actor inference treats ANY authenticated
+      // browser WS as human; a cross-site WebSocket handshake riding the user's
+      // cookie could then drive PTY input as "human". Enforce Origin ∈
+      // HUB_ALLOWED_ORIGINS at the handshake. HARDENED for CSWSH: a /ws/client
+      // handshake with a DISALLOWED **or MISSING** Origin is rejected — browsers
+      // always send Origin on a WS handshake, so an absent one is not a
+      // legitimate browser client and must not be treated as a human actor.
       if (url.pathname === '/ws/client') {
         const origin = req.headers.get('origin')
-        if (origin && !config.allowedOrigins.includes(origin)) {
+        if (!isAllowedClientWsOrigin(origin, config.allowedOrigins)) {
           return new Response('forbidden', { status: 403 })
         }
       }
@@ -592,6 +671,15 @@ runMigrations()
     // Phase 12 W3 — outbound Telegram bridge. No-op when TELEGRAM_BOT_TOKEN
     // is unset; otherwise subscribes to assistant_message:final events.
     startTelegramBridge()
+    // Phase 22 — auto-dev-orchestrator global routine-cycle queue drain worker.
+    // Dormant until Phase 23 registers a cycle-runner via setCycleRunner(); it
+    // claims nothing without one, so starting it here is safe.
+    startRoutineQueueWorker()
+    // Phase 32 — auto-dev-orchestrator live path. Registers the cycle-runner and
+    // starts the due-scan enqueue tick ONLY when REMO_ORCHESTRATOR_ENABLED is ON.
+    // With the flag OFF (default) this is a no-op: no runner is registered (queue
+    // stays dormant) and the due-scan tick never starts (nothing is enqueued).
+    registerCycleRunnerIfEnabled()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -603,6 +691,8 @@ function gracefulShutdown(signal: string) {
   console.log(`[shutdown] received ${signal}, pausing schedulers`)
   try { schedRegistry.pauseAll() } catch {}
   try { clearPostRunTimers() } catch {}
+  try { stopRoutineQueueWorker() } catch {}
+  try { stopDueOrchestratorTick() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

@@ -48,6 +48,7 @@ import { launchSessionForUser } from '../../telegram/launch.ts'
 import { log } from '../../observability/logger'
 import { extractDecisionBlock } from '../controller-schema.ts'
 import { extractFindingsBlock } from '../qc-schema.ts'
+import { getTaskTemplate, buildTemplatePrompt } from '../task-templates.ts'
 
 interface RunCtxLike {
   runId: string
@@ -101,6 +102,16 @@ const QC_REVIEW_TEMPLATE = readFileSync(
 )
 
 export function buildContent(task: ScheduledTask): string {
+  // F-01/F-02: template provenance is authoritative server-side. The web pre-bakes
+  // the identical guardrail prompt, but non-web creators (Telegram/API/orchestrator)
+  // may set only payload.template_id — resolve it here so guardrails (planFirst/
+  // autoMerge) are non-bypassable on EVERY automated run, and a template `dev` task
+  // can never collapse to CONTROLLER_TEMPLATE on an empty prompt.
+  const templateId = (task.payload as any)?.template_id
+  if (typeof templateId === 'string') {
+    const tpl = getTaskTemplate(templateId)
+    if (tpl) return buildTemplatePrompt(tpl)
+  }
   // Phase 11: legacy `skill`/`security_scan`(root)/`continue_dev` rewritten to
   // `dev`/`security` by the DB migration; their `prompt` column carries the
   // original text verbatim. The `security_scan` chained step (under the

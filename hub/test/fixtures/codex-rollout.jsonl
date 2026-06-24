@@ -1,0 +1,5 @@
+{"timestamp":"2026-05-31T10:00:00Z","type":"session_meta","payload":{"id":"codex-rollout-abc","cwd":"/home/u/proj"}}
+{"timestamp":"2026-05-31T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5-codex"}}
+{"timestamp":"2026-05-31T10:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":"thinking"}}
+{"timestamp":"2026-05-31T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":\"ls\"}"}}
+{"timestamp":"2026-05-31T10:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done listing files."}]}}

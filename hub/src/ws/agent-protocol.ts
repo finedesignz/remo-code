@@ -5,6 +5,7 @@ import {
   SupervisorCommandsSync, HostResourcesMessage,
   SupervisorRepoInventory, SetRootsAck,
   SupervisorSessionInventory,
+  RepoCreateProgress, RepoCreateFailed,
 } from './supervisor-protocol'
 
 // -- Agent -> Hub (inbound messages from the local streaming agent) --
@@ -143,6 +144,15 @@ const UsageWindow = z.object({
   utilization: z.number(),
   resets_at: z.string(),
 })
+// Phase 18 (R-PTY-17): the post-June-15-2026 Agent-SDK programmatic credit pool
+// — a monthly DOLLAR bucket, not a util% window. Carried ADDITIVELY: an
+// un-upgraded supervisor (or a pre-claim account) omits it and still validates.
+const ProgrammaticCredit = z.object({
+  used_usd: z.number(),
+  limit_usd: z.number(),
+  resets_at: z.string(),
+  claimed: z.boolean(),
+})
 export const AgentUsageReport = z.object({
   type: z.literal('usage_report'),
   usage: z.object({
@@ -150,6 +160,7 @@ export const AgentUsageReport = z.object({
     seven_day: UsageWindow,
     seven_day_opus: UsageWindow.nullable().optional(),
     seven_day_oauth_apps: UsageWindow.nullable().optional(),
+    programmatic_credit: ProgrammaticCredit.nullable().optional(),
   }),
 })
 export type AgentUsageReportT = z.infer<typeof AgentUsageReport>
@@ -198,6 +209,8 @@ export const AgentInbound = z.discriminatedUnion('type', [
   SupervisorRepoInventory,
   SetRootsAck,
   SupervisorSessionInventory,
+  RepoCreateProgress,
+  RepoCreateFailed,
 ])
 
 export type AgentInboundType = z.infer<typeof AgentInbound>

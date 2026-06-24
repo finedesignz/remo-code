@@ -1,11 +1,15 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { AuthUser } from '../lib/auth.ts'
 import type { CodeSession } from '../hooks/useSessions'
 import { githubOwnerRepo } from '../hooks/useSessions'
 import { sessionLabel, shortId } from './SessionDropdown'
-import { repoSessionList } from '../lib/session-list'
+import { repoSessionList, sessionRepoIdent } from '../lib/session-list'
+import { useRepoGroups } from '../hooks/useRepoGroups'
+import { partitionIntoGroups } from '../lib/group-partition'
+import { GroupSection } from './groups/GroupSection'
 import { SessionActionButton } from './SessionActionButton'
+import { SessionAvatar } from './SessionAvatar'
 import { UnreadBadge } from './UnreadBadge'
 import { SessionTooltip } from './SessionTooltip'
 import { CloneHereModal } from './CloneHereModal'
@@ -16,6 +20,10 @@ interface Props {
   activeSessionId: string | null
   onSelectSession: (id: string) => void
   onDeleteSession: (id: string) => Promise<void>
+  /** User Disconnect — takes a running session offline but KEEPS the row so a
+      later Play resumes the SAME session_id with history. Single-click,
+      reversible (no destructive confirm). Optional so existing callers compile. */
+  onDisconnectSession?: (id: string) => Promise<{ ok: boolean; error?: string }>
   onShowConnect: () => void
   onShowApiKey: () => void
   onNavigate: (hash: string) => void
@@ -37,11 +45,13 @@ interface Props {
   globalNudgeDefault?: boolean
   /** Phase 10 — set a session's per-session auto-nudge override (true/false force, null inherit). */
   onSetAutoNudge?: (id: string, value: boolean | null) => Promise<{ ok: boolean; error?: string }>
+  /** Per-session "bypass permissions" override (default OFF). */
+  onSetSkipPermissions?: (id: string, enabled: boolean) => Promise<{ ok: boolean; error?: string }>
 }
 
 export function Sidebar({
   sessions, activeSessionId, onSelectSession,
-  onDeleteSession, onShowConnect, onShowApiKey,
+  onDeleteSession, onDisconnectSession, onShowConnect, onShowApiKey,
   onNavigate, onRefresh,
   connected, user, signOut, onClose, unreadCounts = {},
   collapsed = false, onToggleCollapsed,
@@ -54,6 +64,7 @@ export function Sidebar({
   cloneHere,
   globalNudgeDefault = true,
   onSetAutoNudge,
+  onSetSkipPermissions,
 }: Props) {
   const [cloneModal, setCloneModal] = useState<{ sessionId: string; repoLabel: string } | null>(null)
   const [toast, setToast] = useState<string | null>(null)
@@ -63,6 +74,13 @@ export function Sidebar({
   }
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [hoverInfo, setHoverInfo] = useState<{ id: string; top: number; left: number } | null>(null)
+  // Per-row "more" popover: session id + auto-nudge toggle live here (off the
+  // row itself, to keep the row clean). Anchored to the kebab button.
+  const [moreInfo, setMoreInfo] = useState<{ id: string; top: number; left: number } | null>(null)
+  const openMore = (id: string, el: HTMLElement) => {
+    const rect = el.getBoundingClientRect()
+    setMoreInfo((prev) => (prev?.id === id ? null : { id, top: rect.bottom + 4, left: rect.right }))
+  }
 
   const handleRowEnter = (id: string, el: HTMLElement) => {
     const rect = el.getBoundingClientRect()
@@ -78,11 +96,48 @@ export function Sidebar({
       onSelectSession(id)
     }
   }
+  // Close the "more" popover on Escape or any outside pointer-down.
+  useEffect(() => {
+    if (!moreInfo) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMoreInfo(null) }
+    const onDown = (e: Event) => {
+      const t = e.target as HTMLElement | null
+      if (t && t.closest('[data-session-more]')) return
+      setMoreInfo(null)
+    }
+    window.addEventListener('keydown', onKey)
+    document.addEventListener('pointerdown', onDown)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.removeEventListener('pointerdown', onDown)
+    }
+  }, [moreInfo])
+
   // Resolve the running branch for a session's cwd, when the supervisor inventory knows it.
   const branchFor = (s: CodeSession): string | null => {
     const lp = (s.local_paths ?? []).find((p) => p.local_path === s.project_dir)
     return lp?.branch ?? null
   }
+
+  // Shared selector (web/src/lib/session-list): worktrees collapsed by
+  // repo_key, connected-first sort, orchestrator pinned. Active-only (online /
+  // thinking) — offline sessions are launched from Settings → Connections.
+  // Computed before the collapsed branch so the collapsed rail can render one
+  // project avatar per session.
+  const onlineOnly = (Array.isArray(sessions) ? sessions : []).filter(
+    (s) => s.status === 'online' || s.status === 'thinking',
+  )
+  const connectedList = repoSessionList(onlineOnly)
+
+  // Repo grouping (Phase 3) — shares groups + collapse state with Connections.
+  const groupsApi = useRepoGroups(token ?? null)
+  // Orchestrator pinned ABOVE all groups (unchanged); the rest partition.
+  const orchSession = connectedList.find((s) => s.is_orchestrator) ?? null
+  const groupableSessions = connectedList.filter((s) => !s.is_orchestrator)
+  const sessionSections =
+    groupsApi.groupView && groupsApi.groups.length > 0
+      ? partitionIntoGroups(groupableSessions, groupsApi.groups, sessionRepoIdent)
+      : null
 
   if (collapsed) {
     return (
@@ -99,6 +154,34 @@ export function Sidebar({
             <line x1="3" y1="15" x2="17" y2="15" />
           </svg>
         </button>
+        {/* Collapsed project rail — one square avatar per active session so the
+            rail is never blank. Click selects + expands the sidebar. A status
+            dot overlay mirrors the expanded rows (amber=thinking, green=idle). */}
+        <div className="flex flex-col items-center gap-1.5 mt-1 overflow-y-auto w-full">
+          {connectedList.map((s) => {
+            const label = githubOwnerRepo(s) ?? sessionLabel(s)
+            return (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => { onSelectSession(s.id); onToggleCollapsed?.() }}
+                title={label}
+                aria-label={`Open ${label}`}
+                className={`relative rounded-lg p-0.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                  s.id === activeSessionId ? 'ring-2 ring-blue-500' : 'hover:bg-[var(--bg-tertiary)]/50'
+                }`}
+              >
+                <SessionAvatar session={s} size={28} />
+                <span
+                  className={`absolute -bottom-0 -right-0 w-2.5 h-2.5 rounded-full ring-2 ring-[var(--bg-primary)] ${
+                    s.status === 'thinking' ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'
+                  }`}
+                  aria-hidden="true"
+                />
+              </button>
+            )
+          })}
+        </div>
         <div className="flex-1" />
         <button
           onClick={onShowConnect}
@@ -164,21 +247,12 @@ export function Sidebar({
     )
   }
 
-  // Shared selector (web/src/lib/session-list): worktrees collapsed by
-  // repo_key, connected-first sort, orchestrator pinned to the top. The sidebar
-  // is active-only, so filter to online sessions first; offline sessions are
-  // launched/managed from Settings → Connections instead.
-  const onlineOnly = (Array.isArray(sessions) ? sessions : []).filter(
-    (s) => s.status === 'online' || s.status === 'thinking',
-  )
-  const connectedList = repoSessionList(onlineOnly)
-
   const hoveredSession =
     hoverInfo ? connectedList.find(s => s.id === hoverInfo.id) : null
 
   return (
     <>
-      <div className="w-72 h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
+      <div className="w-full h-full border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-primary)] md:bg-[var(--bg-secondary)]/30 shrink-0">
         {/* Session list header — collapse hamburger (desktop) left of the
             "Sessions" label; refresh + add + mobile-close on the right. The
             logo header was removed (it's redundant with the AppShell <Brand/>). */}
@@ -234,7 +308,8 @@ export function Sidebar({
 
         {/* Session list — only connected sessions */}
         <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-          {connectedList.map(s => {
+          {(() => {
+          const renderSessionRow = (s: CodeSession) => {
             const ownerRepo = githubOwnerRepo(s)
             const primaryLabel = ownerRepo ?? sessionLabel(s)
             const branch = branchFor(s)
@@ -308,63 +383,112 @@ export function Sidebar({
                       ambient
                     </span>
                   )}
-                  <span className="text-[10px] text-[var(--text-muted)] font-mono shrink-0">{shortId(s)}</span>
                   <UnreadBadge count={unreadCounts[s.id] || 0} />
-                  {/* Phase 10 — per-session auto-nudge override. Effective state =
-                      explicit override, else the user's global default. Flip
-                      sets an explicit boolean and PATCHes instantly. */}
-                  {onSetAutoNudge && (
-                    <span
-                      className="shrink-0 flex items-center"
-                      onClick={(e) => e.stopPropagation()}
-                      title="Auto-nudge when idle — send a brief status-update prompt when you open this idle session"
+                  {/* Action controls — state-aware. The session id + auto-nudge
+                      toggle moved OFF the row into the "more" popover (kebab).
+                      Stop shows ONLY while the agent is busy (status==='thinking');
+                      Disconnect shows ONLY when the session is idle/stopped
+                      (online-but-not-thinking) since disconnect acts on a
+                      stopped session and resumes it later with history. */}
+                  <span className="flex items-center gap-0.5 shrink-0">
+                    {/* "More" — kebab opens a popover with the session id + the
+                        per-session auto-nudge toggle. */}
+                    <button
+                      type="button"
+                      data-session-more
+                      onClick={(e) => { e.stopPropagation(); openMore(s.id, e.currentTarget) }}
+                      className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                      title={`Session details for ${sessionLabel(s)}`}
+                      aria-label={`Session details for ${sessionLabel(s)}`}
+                      aria-haspopup="dialog"
+                      aria-expanded={moreInfo?.id === s.id}
                     >
-                      <Toggle
-                        checked={s.auto_nudge ?? globalNudgeDefault}
-                        onChange={(next) => { void onSetAutoNudge(s.id, next) }}
-                        aria-label={`Auto-nudge when idle for ${primaryLabel}`}
-                      />
-                    </span>
-                  )}
-                  {/* Action control — always visible (no hover-only affordance, per
-                      design prefs). Inline two-step confirm. For an online session
-                      this stops the supervisor subprocess and removes the row. */}
-                  <span className="flex items-center gap-1 shrink-0">
-                    {confirmingId === s.id ? (
-                      <>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setConfirmingId(null); onDeleteSession(s.id) }}
-                          className="px-2 py-1 text-[11px] font-medium text-white bg-red-600 hover:bg-red-500 rounded transition-colors"
-                          title="Confirm: stops the supervisor session and removes it"
-                        >
-                          Confirm stop
-                        </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setConfirmingId(null) }}
-                          className="px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 rounded transition-colors"
-                        >
-                          Cancel
-                        </button>
-                      </>
+                      <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                        <circle cx="10" cy="4" r="1.5" />
+                        <circle cx="10" cy="10" r="1.5" />
+                        <circle cx="10" cy="16" r="1.5" />
+                      </svg>
+                    </button>
+                    {s.status === 'thinking' ? (
+                      confirmingId === s.id ? (
+                        <>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setConfirmingId(null); onDeleteSession(s.id) }}
+                            className="px-2 py-1 text-[11px] font-medium text-white bg-red-600 hover:bg-red-500 rounded transition-colors"
+                            title="Confirm: stops the supervisor session and removes it"
+                          >
+                            Confirm stop
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setConfirmingId(null) }}
+                            className="px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 rounded transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <SessionActionButton
+                          kind="stop"
+                          onClick={() => setConfirmingId(s.id)}
+                          label={`Stop ${sessionLabel(s)} — the agent is working; this closes the subprocess and removes the session`}
+                        />
+                      )
                     ) : (
-                      <SessionActionButton
-                        kind="stop"
-                        onClick={() => setConfirmingId(s.id)}
-                        label={`Stop & remove ${sessionLabel(s)} — closes the Claude Code subprocess and removes the session`}
-                      />
+                      onDisconnectSession && (
+                        <SessionActionButton
+                          kind="disconnect"
+                          onClick={() => { void onDisconnectSession(s.id) }}
+                          label={`Disconnect ${sessionLabel(s)} — frees the slot; reconnect resumes this session with its history`}
+                        />
+                      )
                     )}
                   </span>
                 </div>
               </div>
             </div>
             )
-          })}
+          }
 
-          {connectedList.length === 0 && (
-            <p className="text-sm text-[var(--text-muted)] text-center py-8">
-              No active sessions. Connect a Claude Code instance to get started.
-            </p>
-          )}
+          if (sessionSections) {
+            return (
+              <>
+                {orchSession && renderSessionRow(orchSession)}
+                {sessionSections.map((section) => (
+                  <GroupSection
+                    key={section.id}
+                    id={section.id}
+                    name={section.name}
+                    count={section.count}
+                    collapsed={groupsApi.isCollapsed(section.id)}
+                    onToggle={groupsApi.toggleCollapsed}
+                    isUngrouped={section.isUngrouped}
+                    dense
+                  >
+                    <div className="space-y-0.5">
+                      {section.items.map((s) => renderSessionRow(s))}
+                    </div>
+                  </GroupSection>
+                ))}
+                {connectedList.length === 0 && (
+                  <p className="text-sm text-[var(--text-muted)] text-center py-8">
+                    No active sessions. Connect a Claude Code instance to get started.
+                  </p>
+                )}
+              </>
+            )
+          }
+
+          return (
+            <>
+              {connectedList.map((s) => renderSessionRow(s))}
+              {connectedList.length === 0 && (
+                <p className="text-sm text-[var(--text-muted)] text-center py-8">
+                  No active sessions. Connect a Claude Code instance to get started.
+                </p>
+              )}
+            </>
+          )
+          })()}
         </div>
 
         {toast && (
@@ -386,6 +510,51 @@ export function Sidebar({
           onToast={showToast}
         />
       )}
+      {moreInfo && (() => {
+        const s = connectedList.find(x => x.id === moreInfo.id)
+        if (!s) return null
+        const label = githubOwnerRepo(s) ?? sessionLabel(s)
+        return createPortal(
+          <div
+            data-session-more
+            role="dialog"
+            aria-label={`Session details for ${label}`}
+            style={{ position: 'fixed', top: moreInfo.top, left: moreInfo.left, transform: 'translateX(-100%)', zIndex: 70, minWidth: 200 }}
+            className="bg-[var(--bg-secondary)] ring-1 ring-[var(--border-color)] rounded-lg shadow-xl p-3 space-y-2.5"
+          >
+            <div className="text-[11px] text-[var(--text-muted)]">
+              <div className="font-medium text-[var(--text-secondary)] truncate" title={label}>{label}</div>
+              <div className="mt-0.5 flex items-center gap-1.5">
+                <span>Session</span>
+                <span className="font-mono text-[var(--text-primary)]">{shortId(s)}</span>
+              </div>
+            </div>
+            {onSetAutoNudge && (
+              <label className="flex items-center justify-between gap-3 text-[12px] text-[var(--text-secondary)]">
+                <span title="Send a brief status-update prompt when you open this idle session">Auto-nudge when idle</span>
+                <Toggle
+                  checked={s.auto_nudge ?? globalNudgeDefault}
+                  onChange={(next) => { void onSetAutoNudge(s.id, next) }}
+                  aria-label={`Auto-nudge when idle for ${label}`}
+                />
+              </label>
+            )}
+            {onSetSkipPermissions && (
+              <label className="flex items-center justify-between gap-3 text-[12px] text-[var(--text-secondary)]">
+                <span title="Bypass tool-approval prompts for this session (auto-allows every tool). Still capped by the supervisor host config.">
+                  Skip approval prompts
+                </span>
+                <Toggle
+                  checked={s.dangerously_skip_permissions === true}
+                  onChange={(next) => { void onSetSkipPermissions(s.id, next) }}
+                  aria-label={`Skip approval prompts for ${label}`}
+                />
+              </label>
+            )}
+          </div>,
+          document.body
+        )
+      })()}
       {hoveredSession && hoverInfo && createPortal(
         <div
           style={{ position: 'fixed', top: hoverInfo.top, left: hoverInfo.left, zIndex: 60, pointerEvents: 'none' }}

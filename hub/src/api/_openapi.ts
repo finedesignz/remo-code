@@ -15,6 +15,7 @@ import { authMiddleware } from "../auth/middleware.ts";
 import { getTodayTokenCostUsd } from "../db/token-usage-dal.ts";
 import { sql } from "../db/postgres.ts";
 import { getUserLicenseFields, getPendingPrompts, dismissLocalSession } from "../db/dal.ts";
+import { TASK_TEMPLATES } from "../scheduler/task-templates.ts";
 
 export const openapi = new OpenAPIHono();
 
@@ -254,6 +255,450 @@ openapi.openapi(dismissLocalRoute, async (c) => {
   await dismissLocalSession(userId, body.hostname, body.project_dir);
   return c.json({ dismissed: true as const }, 200);
 });
+
+// ── Repo grouping (per-user, many-to-many) ──────────────────────────────────
+// Spec-only registration. The plain-Hono router in `./repo-groups.ts` serves
+// traffic (it owns param-route ordering); these `registerPath` calls only
+// contribute to the OpenAPI spec, so there is NO double-mount.
+{
+  const Err = z.object({ error: z.string() });
+  const RepoIdent = z
+    .string()
+    .openapi({ example: "github://acme/app", description: "github://owner/repo or path://<abs>" });
+  const GroupMember = z.object({ repo_ident: RepoIdent, created_at: z.string() });
+  const Group = z.object({
+    id: z.string().uuid(),
+    name: z.string(),
+    sort_order: z.number().int(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  });
+  const GroupWithMembers = Group.extend({ members: z.array(GroupMember) });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const base = { tags: ["repo-groups"], security: [{ bearerAuth: [] }] } as const;
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/repo-groups",
+    summary: "List the user's repo groups with members",
+    ...base,
+    responses: {
+      200: { description: "Groups", ...json(z.object({ groups: z.array(GroupWithMembers) })) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/repo-groups",
+    summary: "Create a repo group",
+    ...base,
+    request: { body: json(z.object({ name: z.string().min(1).max(64) })) },
+    responses: {
+      201: { description: "Created", ...json(Group) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      409: { description: "Group name already exists", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "put",
+    path: "/api/repo-groups/reorder",
+    summary: "Bulk-reorder groups by id",
+    ...base,
+    request: { body: json(z.object({ ordered_ids: z.array(z.string().uuid()) })) },
+    responses: {
+      204: { description: "Reordered" },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "patch",
+    path: "/api/repo-groups/{id}",
+    summary: "Rename and/or reorder a group",
+    ...base,
+    request: {
+      params: z.object({ id: z.string().uuid() }),
+      body: json(z.object({ name: z.string().min(1).max(64).optional(), sort_order: z.number().int().optional() })),
+    },
+    responses: {
+      200: { description: "Updated", ...json(Group) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Not found", ...json(Err) },
+      409: { description: "Group name already exists", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "delete",
+    path: "/api/repo-groups/{id}",
+    summary: "Delete a group (members cascade)",
+    ...base,
+    request: { params: z.object({ id: z.string().uuid() }) },
+    responses: {
+      204: { description: "Deleted" },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/repo-groups/{id}/members",
+    summary: "Add a repo to a group (idempotent)",
+    ...base,
+    request: {
+      params: z.object({ id: z.string().uuid() }),
+      body: json(z.object({ repo_ident: RepoIdent })),
+    },
+    responses: {
+      204: { description: "Added" },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "put",
+    path: "/api/repo-groups/{id}/members",
+    summary: "Replace a group's full member set",
+    ...base,
+    request: {
+      params: z.object({ id: z.string().uuid() }),
+      body: json(z.object({ repo_idents: z.array(RepoIdent) })),
+    },
+    responses: {
+      204: { description: "Replaced" },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "delete",
+    path: "/api/repo-groups/{id}/members/{repo_ident}",
+    summary: "Remove a repo from a group (repo_ident URL-encoded)",
+    ...base,
+    request: { params: z.object({ id: z.string().uuid(), repo_ident: z.string() }) },
+    responses: {
+      204: { description: "Removed" },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "get",
+    path: "/api/repo-groups/collapse-state",
+    summary: "Get per-user collapsed group-section ids",
+    ...base,
+    responses: {
+      200: { description: "Collapse state", ...json(z.object({ collapsed_group_ids: z.array(z.string()) })) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "patch",
+    path: "/api/repo-groups/collapse-state",
+    summary: "Replace per-user collapsed group-section ids",
+    ...base,
+    request: { body: json(z.object({ collapsed_group_ids: z.array(z.string()) })) },
+    responses: {
+      200: { description: "Collapse state", ...json(z.object({ collapsed_group_ids: z.array(z.string()) })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+    },
+  });
+}
+// ── Auto-dev orchestrator task config (Phase 31) ────────────────────────────
+// Spec-only registration. The plain-Hono router in `./orchestrator-tasks.ts`
+// serves traffic; these declarations only contribute to the OpenAPI spec.
+{
+  const Err = z.object({ error: z.string() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const base = { tags: ["orchestrator-tasks"], security: [{ bearerAuth: [] }] } as const;
+  const Stage = z.enum(["development", "beta", "production-maintenance"]);
+  // Milestone TMAC: the macro task_type driving the autonomous routine prompt.
+  const MacroType = z.enum(["dev", "maintenance", "security", "brainstorming"]);
+  const ScheduleRule = z
+    .object({
+      interval: z.number().int(),
+      unit: z.enum(["minutes", "hours", "days", "weeks", "months"]),
+      start_at: z.string(),
+    })
+    .passthrough()
+    .nullable();
+  const OrchestratorTask = z.object({
+    id: z.string(),
+    user_id: z.string(),
+    session_id: z.string().nullable(),
+    name: z.string(),
+    lifecycle_stage: Stage,
+    macro_task_type: MacroType,
+    enabled: z.boolean(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  });
+  const OrchestratorRow = z.object({
+    id: z.string(),
+    task_id: z.string(),
+    command: z.string(),
+    enabled: z.boolean(),
+    schedule_rule: ScheduleRule,
+    frequency_label: z.string().nullable(),
+    micro_prompt: z.string().nullable(),
+    sort_order: z.number().int(),
+    created_at: z.string(),
+    updated_at: z.string(),
+  });
+  const TaskWithRows = z.object({
+    task: OrchestratorTask.nullable(),
+    rows: z.array(OrchestratorRow),
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/orchestrator-tasks/{sessionId}",
+    summary: "Get a session's orchestrator task + its rows (task null if none)",
+    ...base,
+    request: { params: z.object({ sessionId: z.string() }) },
+    responses: {
+      200: { description: "Task + rows", ...json(TaskWithRows) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Session not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/orchestrator-tasks/{sessionId}",
+    summary: "Create the one orchestrator task for a session",
+    ...base,
+    request: {
+      params: z.object({ sessionId: z.string() }),
+      body: json(
+        z.object({
+          lifecycle_stage: Stage.optional(),
+          name: z.string().optional(),
+          macro_task_type: MacroType.optional(),
+        }),
+      ),
+    },
+    responses: {
+      201: { description: "Created", ...json(TaskWithRows) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Session not found", ...json(Err) },
+      409: { description: "Session already has an orchestrator task", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "patch",
+    path: "/api/orchestrator-tasks/{taskId}",
+    summary: "Update the task's lifecycle stage and/or macro task type",
+    ...base,
+    request: {
+      params: z.object({ taskId: z.string() }),
+      // EITHER field (or both); at least one required (route enforces via .refine).
+      body: json(
+        z.object({
+          lifecycle_stage: Stage.optional(),
+          macro_task_type: MacroType.optional(),
+        }),
+      ),
+    },
+    responses: {
+      200: { description: "Updated", ...json(z.object({ task: OrchestratorTask })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Task not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/orchestrator-tasks/{taskId}/apply-preset",
+    summary: "Apply a lifecycle-stage frequency preset to the rows",
+    ...base,
+    request: {
+      params: z.object({ taskId: z.string() }),
+      body: json(z.object({ stage: Stage.optional(), overwrite: z.boolean().optional() })),
+    },
+    responses: {
+      200: { description: "Preset applied", ...json(z.object({ result: z.any(), rows: z.array(OrchestratorRow) })) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Task not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/orchestrator-tasks/{taskId}/rows",
+    summary: "Add a command row or a micro-prompt row",
+    ...base,
+    request: {
+      params: z.object({ taskId: z.string() }),
+      body: json(
+        z.object({
+          command: z.string().optional(),
+          micro_prompt: z.string().optional(),
+          enabled: z.boolean().optional(),
+          frequency_label: z.string().optional(),
+          schedule_rule: ScheduleRule.optional(),
+          sort_order: z.number().int().optional(),
+        }),
+      ),
+    },
+    responses: {
+      201: { description: "Created", ...json(z.object({ row: OrchestratorRow })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Task not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "patch",
+    path: "/api/orchestrator-tasks/rows/{rowId}",
+    summary: "Update a row (enabled / frequency / schedule_rule / micro_prompt / sort_order)",
+    ...base,
+    request: {
+      params: z.object({ rowId: z.string() }),
+      body: json(
+        z.object({
+          enabled: z.boolean().optional(),
+          frequency_label: z.string().nullable().optional(),
+          micro_prompt: z.string().nullable().optional(),
+          schedule_rule: ScheduleRule.optional(),
+          sort_order: z.number().int().optional(),
+        }),
+      ),
+    },
+    responses: {
+      200: { description: "Updated", ...json(z.object({ row: OrchestratorRow })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Row not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "delete",
+    path: "/api/orchestrator-tasks/rows/{rowId}",
+    summary: "Delete a row",
+    ...base,
+    request: { params: z.object({ rowId: z.string() }) },
+    responses: {
+      200: { description: "Deleted", ...json(z.object({ ok: z.boolean() })) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Row not found", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/orchestrator-tasks/{taskId}/rows/reorder",
+    summary: "Bulk-reorder a task's rows by id",
+    ...base,
+    request: {
+      params: z.object({ taskId: z.string() }),
+      body: json(z.object({ ordered_ids: z.array(z.string()) })),
+    },
+    responses: {
+      200: { description: "Reordered", ...json(z.object({ rows: z.array(OrchestratorRow) })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      404: { description: "Task not found", ...json(Err) },
+    },
+  });
+}
+// ── Scheduled tasks: GSD template catalog (read-only) ───────────────────────
+// Documented twin of the plain-Hono `GET /api/tasks/templates` in `./tasks.ts`.
+// The plain route serves traffic; this declaration only contributes to the
+// spec. The static catalog lives in `hub/src/scheduler/task-templates.ts`.
+
+const TaskTemplateSchema = z.object({
+  id: z.enum(["gsd_run", "gsd_audit", "gsd_review", "gsd_plan"]),
+  label: z.string(),
+  description: z.string(),
+  promptTemplate: z.string(),
+  taskType: z.literal("dev"),
+  defaultCron: z.string(),
+  cadenceLabel: z.string(),
+  requiredInputs: z.array(z.enum(["target_session", "cadence"])),
+  guardrails: z.object({
+    planFirst: z.boolean(),
+    autoMerge: z.boolean(),
+    inheritCostCap: z.literal(true),
+  }),
+  defaultPostRunActions: z.array(
+    z.object({
+      type: z.enum(["notify_telegram", "github_issue"]),
+      on: z.enum(["success", "failure", "always"]),
+      config: z.record(z.any()),
+    }),
+  ),
+  category: z.literal("gsd"),
+});
+
+const taskTemplatesRoute = createRoute({
+  method: "get",
+  path: "/api/tasks/templates",
+  tags: ["Tasks"],
+  summary: "Predefined GSD scheduled-task templates",
+  description:
+    "Returns the static, read-only catalog of GSD task templates (Run dev, Audit, Review PRs, Plan). A template pre-fills a normal scheduled-task CREATE — it is sugar over the existing payload (no new table). Each carries an injected GSD slash prompt, default cadence, guardrails (non-bypassable cost cap, plan-first), and default post-run actions.",
+  security: [{ bearerAuth: [] }],
+  responses: {
+    200: {
+      description: "GSD template catalog",
+      content: {
+        "application/json": {
+          schema: z.object({ templates: z.array(TaskTemplateSchema) }),
+        },
+      },
+    },
+    401: {
+      description: "Missing or invalid session",
+      content: { "application/json": { schema: z.object({ error: z.string() }) } },
+    },
+  },
+});
+
+openapi.use("/api/tasks/*", authMiddleware);
+openapi.openapi(taskTemplatesRoute, (c) => {
+  return c.json({ templates: TASK_TEMPLATES }, 200);
+});
+
+// ── Feedback intake (Option A) — public end-user feedback webhook ───────────
+// Spec-only registration. The plain-Hono router in `./feedback-webhook.ts`
+// serves traffic (mounted public, BEFORE the JWT catch-all); this only
+// contributes to the OpenAPI spec. No security scheme — the URL :token IS the
+// credential.
+{
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  reg.registerPath({
+    method: "post",
+    path: "/api/feedback/{token}",
+    tags: ["feedback"],
+    summary: "Submit end-user feedback (screenshot + description) into the bound session",
+    description:
+      "Public, unauthenticated-by-design. The opaque `fb_` token in the URL IS the credential (SHA-256-hashed lookup against feedback_keys). Accepts a bug description, optional screenshot (base64 data-URI), page URL, and captured console errors, and dispatches them into the app's bound remo-code session via the shared cost-capped dispatch pipeline. Bounded by per-token + per-IP rate limits and the non-bypassable daily cost cap.",
+    request: {
+      params: z.object({ token: z.string().openapi({ example: "fb_AbC123..." }) }),
+      body: json(
+        z.object({
+          comment: z.string().min(1).max(5000).openapi({ description: "Required bug/feedback description." }),
+          screenshot: z.string().optional().openapi({ description: "Optional base64 data-URI image (image/png|jpeg|gif|webp), ≤~10MB." }),
+          page_url: z.string().optional(),
+          console_errors: z.string().max(20000).optional(),
+        }),
+      ),
+    },
+    responses: {
+      202: { description: "Accepted + dispatched (fire-and-forget)", ...json(z.object({ ok: z.boolean(), status: z.string() })) },
+      400: { description: "Missing/invalid comment or screenshot", ...json(z.object({ error: z.string() })) },
+      403: { description: "Feedback key disabled", ...json(z.object({ error: z.string() })) },
+      404: { description: "Unknown token", ...json(z.object({ error: z.string() })) },
+      413: { description: "Payload too large (comment/screenshot/console_errors cap)", ...json(z.object({ error: z.string() })) },
+      429: { description: "Rate limited (per-token or per-IP)", ...json(z.object({ error: z.string() })) },
+    },
+  });
+}
 
 // OpenAPI security scheme registration.
 openapi.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {

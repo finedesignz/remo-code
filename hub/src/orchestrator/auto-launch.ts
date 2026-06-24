@@ -40,6 +40,7 @@ import {
 } from '../ws/supervisor-registry.ts';
 import { listSupervisorsForUser } from '../db/supervisor-dal.ts';
 import { markOrchestratorSession } from '../ws/idle-teardown.ts';
+import { getSessionSkipPermissions } from '../db/dal.ts';
 
 function publicHubUrl(): string {
   return (process.env.REMO_PUBLIC_URL || 'https://app.remo-code.com').replace(/\/+$/, '');
@@ -258,6 +259,7 @@ export async function launchOrchestrator(args: {
 
     await updateSupervisorState(target.supervisorId, 'starting', runId);
 
+    const skipPerms = await getSessionSkipPermissions(sessionId, args.userId);
     try {
       sendToSupervisor(target.supervisorId, {
         type: 'session.start',
@@ -267,6 +269,7 @@ export async function launchOrchestrator(args: {
         pull: false,
         api_key: '__use_local__',
         hub_url: '__same__',
+        dangerously_skip_permissions: skipPerms,
         orchestrator: {
           session_id: sessionId,
           name: prefs.orchestrator_name,

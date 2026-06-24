@@ -1,10 +1,13 @@
 import type { ServerWebSocket } from 'bun'
 import { ClientInbound, SUBSCRIBE_MAX } from './protocol'
+import { TermFrame, isTermFrameType, isClientToHubTermType } from './term-protocol'
 import { verifyJwt } from '../auth/jwt.ts'
 import { verifyAuthSessionToken } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
-import { insertMessage, listSessions, getSession, getUserLicenseFields } from '../db/dal'
+import { insertMessage, listSessions, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
+import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
+import { acquire, releaseByWriter } from '../telegram/turn-lock.ts'
 import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
@@ -45,6 +48,9 @@ interface ClientWsData {
   // config.titanium.licenseCacheTtlSeconds).
   licenseStatus?: string | null
   licenseCheckedAt?: number | null
+  // Phase 20: stable per-connection writer id for the PTY turn lock. A web
+  // xterm panel is one writer; Telegram injection is the other ('telegram').
+  writerId?: string
 }
 
 export function createClientWsData(): ClientWsData {
@@ -60,6 +66,7 @@ export function createClientWsData(): ClientWsData {
     authMethod: null,
     licenseStatus: null,
     licenseCheckedAt: null,
+    writerId: `client:${crypto.randomUUID()}`,
   }
 }
 
@@ -120,6 +127,88 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   let parsed: unknown
   try { parsed = JSON.parse(raw) } catch (e: any) {
     log.error('client.json_parse_error', { error: e.message })
+    return
+  }
+
+  // --- Raw-terminal channel (Phase 15 R-PTY-02/03; Phase 16 hardening) ---
+  // term.input/resize/attach/reattach from an authorized client are forwarded
+  // byte-faithfully to the session's agent channel and MUST NOT enter the
+  // structured client-protocol path. Short-circuit BEFORE ClientInbound.safeParse.
+  // No `messages` row is created. Phase-16 guards (composed here):
+  //   - DIRECTION ALLOWLIST (NH-2): /ws/client accepts ONLY client→PTY write
+  //     frames; a server→client output frame (term.data) injected by a client is
+  //     rejected.
+  //   - OWNERSHIP (H2): server-side subscription set + DB-backed canWriteTerminal
+  //     — a forged/foreign session_id is rejected (no cross-user/cross-session
+  //     hijack).
+  //   - HUMAN-ONLY (H1): the actor is SERVER-INFERRED as `human` from this
+  //     authenticated cookie connection (NEVER a payload field); the shared
+  //     humanOnlyPtyGate decision is applied to term.input on a pty-interactive
+  //     session. (A human connection always passes; this is the spoof-proof seam
+  //     that also covers the relay path, not just dispatch/pipeline.ts.)
+  if (isTermFrameType(parsed)) {
+    if (!data.authenticated || !data.userId) return
+    const tf = TermFrame.safeParse(parsed)
+    if (!tf.success) return
+    const frame = tf.data
+    // A PTY WRITE TURN injects bytes into stdin: term.input (keystrokes) and
+    // term.attach_file (writes a host temp file then types its path). Both get
+    // the license + human-only + turn-lock gates below; control frames
+    // (resize/attach/reattach) bypass them.
+    const isWriteTurn = frame.type === 'term.input' || frame.type === 'term.attach_file'
+    const _diag = frame.type === 'term.input'
+    if (_diag) log.info('term.input.diag.rx', { session_id: frame.session_id, user_id: data.userId })
+    // DIRECTION ALLOWLIST (NH-2/R-PTY-33): only client→hub write frames here.
+    if (!isClientToHubTermType(frame.type)) return
+    // OWNERSHIP (H2/R-PTY-29): the session must be in THIS connection's
+    // subscribed set AND owned by this user per the DB. Both checks — the
+    // subscription set is the live routing scope; canWriteTerminal is the DB
+    // ground-truth that defeats a forged session_id even if mis-subscribed.
+    const subscribed = data.clientEntry?.subscriptions?.has(frame.session_id) ?? false
+    if (!subscribed) { if (_diag) log.warn('term.input.diag.drop', { gate: 'not_subscribed', session_id: frame.session_id }); return }
+    if (!(await canWriteTerminal(data.userId, frame.session_id))) { if (_diag) log.warn('term.input.diag.drop', { gate: 'cannot_write', session_id: frame.session_id }); return }
+    const session = await getSession(frame.session_id, data.userId)
+    if (!session) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_session', session_id: frame.session_id }); return }
+    // License gate: a write turn drives a live session (a mutation).
+    if (isWriteTurn && !(await isLicenseActive(data))) {
+      log.warn('term.input.diag.drop', { gate: 'license_inactive', session_id: frame.session_id, frame: frame.type })
+      try { ws.send(JSON.stringify({ type: 'send_refused', reason: 'license_inactive' })) } catch {}
+      return
+    }
+    // HUMAN-ONLY guard on the relay (H1/R-PTY-28). Actor is SERVER-INFERRED as
+    // 'human' from this authenticated /ws/client cookie connection — never read
+    // from the frame. Applied to term.input (the write that drives the
+    // interactive entrypoint) on a pty-interactive session.
+    if (isWriteTurn) {
+      const runnerType = await getSessionRunnerType(frame.session_id, data.userId)
+      if (humanOnlyRejectsActor('human', runnerType)) {
+        log.warn('term.input.diag.drop', { gate: 'human_only', session_id: frame.session_id, runner_type: runnerType })
+        // Unreachable for a human actor by construction — but keep the SAME
+        // chokepoint so there is no second, ungated write route into a PTY.
+        return
+      }
+    }
+    const channel = getChannel(frame.session_id)
+    if (!channel) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_channel', session_id: frame.session_id }); return }
+    // PTY WRITE-ARBITRATION (Phase 20 / R-TG-10). A term.input from the xterm
+    // panel is a HUMAN TURN — it must hold the per-session turn lock before its
+    // bytes reach PTY stdin so it never interleaves with a Telegram-injected
+    // turn. The writerId is this connection (idempotent re-acquire while the same
+    // writer streams keystrokes within its turn). resize/attach/reattach are
+    // control frames, not turns — they bypass the lock. The lock releases on the
+    // observed transcript turn_complete (telegram/bridge → onTurnComplete).
+    if (isWriteTurn) {
+      const writerId = data.writerId ?? 'client:unknown'
+      const granted = await acquire(frame.session_id, writerId)
+      if (!granted) {
+        log.warn('term.input.diag.drop', { gate: 'lock_not_granted', session_id: frame.session_id, writer_id: writerId })
+        // Queued waiter was dropped (overflow/reset) — drop the frame rather than
+        // inject out-of-turn bytes.
+        return
+      }
+    }
+    if (_diag) log.info('term.input.diag.fwd', { session_id: frame.session_id })
+    try { channel.ws.send(JSON.stringify(frame)) } catch { if (_diag) log.warn('term.input.diag.drop', { gate: 'channel_send_threw', session_id: frame.session_id }) }
     return
   }
 
@@ -534,6 +623,10 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
 export function handleClientClose(ws: ServerWebSocket<ClientWsData>) {
   log.info('client.closed', { user_id: ws.data.userId })
   if (ws.data.authTimer) clearTimeout(ws.data.authTimer)
+  // PTY write-arbitration: release any turn lock this connection held (and drop its
+  // queued waiters) so a closed connection can never wedge another connection's
+  // term.input. writerId is unique per connection (createClientWsData).
+  if (ws.data.writerId) releaseByWriter(ws.data.writerId)
   if (ws.data.clientEntry) {
     // Bug B — capture the sessions this connection was subscribed to BEFORE
     // unregistering, then recompute counts for each so idle-teardown timers

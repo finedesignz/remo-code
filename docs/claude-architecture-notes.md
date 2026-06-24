@@ -558,7 +558,21 @@ The agent runs locally on the dev machine — it is NOT deployed to the server. 
 
 ## Phase 12: Telegram Bridge
 
-Bidirectional Telegram ↔ Claude Code session bridge. Inbound `POST /api/telegram/webhook/:secret` lands Telegram updates, routes commands (`/start`, `/session`, `/list`, `/help`) or forwards text/photo/document as `user_message` to a linked default session. Outbound subscribes to an internal `assistant_message:final` event bus and pushes the final reply back to the linked `chat_id`. One hub-wide bot serves all users, keyed by `users.telegram_chat_id`. Full architecture in [docs/telegram-bridge.md](docs/telegram-bridge.md).
+Bidirectional Telegram ↔ Claude Code / Codex session bridge. Inbound `POST /api/telegram/webhook/:secret` lands Telegram updates, routes commands (`/start`, `/session`, `/list`, `/help`) or forwards text/photo/document as `user_message` to a linked default session. One hub-wide bot serves all users, keyed by `users.telegram_chat_id`. Full architecture in [docs/telegram-bridge.md](docs/telegram-bridge.md).
+
+> **SUPERSEDED by Phase 20 (transcript-tail).** The outbound description above —
+> "subscribes to an internal `assistant_message:final` event bus" — is the
+> Phase-12 stream-json design. **Phase 17 deleted that event bus** with the
+> stream-json human runner. **Phase 20 re-sources the bridge from each backend's
+> on-disk TRANSCRIPT** (`hub/src/telegram/transcript/`): a backend-agnostic
+> `TranscriptSource` (Claude projects JSONL / Codex rollout JSONL + a fail-closed
+> terminal-byte scrape fallback), selected by `cli_kind`, normalized to a
+> `TranscriptEntry` union. Permission/`user_question` prompts are detected
+> fail-closed and answered by injecting **PTY keystrokes** via the Phase-16
+> `term.input` path (NOT `permission_response`), keyed by `(sessionId,requestId)`.
+> A per-session **turn lock** arbitrates the xterm + Telegram writers, and the
+> Phase-16 **human-only guard** keeps automation off the interactive PTY. No API
+> key; transcript reading is read-only. See [docs/telegram-bridge.md](docs/telegram-bridge.md) §transcript-tail.
 
 **File map (hub):**
 

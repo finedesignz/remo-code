@@ -4,6 +4,13 @@ import { useSupervisors } from '../hooks/useSupervisors'
 import { useWebSocketContext } from '../hooks/useWebSocket'
 import { Modal, Button } from './ui'
 import { SessionActionButton } from './SessionActionButton'
+import { isWorktreeOrNonCanonicalRepo } from '../lib/session-list'
+import { repoIdent as computeRepoIdent } from '../lib/repo-ident'
+import { useRepoGroups } from '../hooks/useRepoGroups'
+import { partitionIntoGroups } from '../lib/group-partition'
+import { GroupSection } from './groups/GroupSection'
+import { RepoGroupChips } from './groups/RepoGroupChips'
+import { GroupsManager } from './groups/GroupsManager'
 
 type OrchestratorSnapshot = {
   enabled: boolean
@@ -38,6 +45,11 @@ interface LocalRepo {
   branch: string | null
   dirty: boolean
   last_commit: string | null
+  // Worktree introspection (optional — absent on the legacy scan shape).
+  // When present, worktree entries are hidden from the list so only the
+  // canonical repo shows. Missing → treated as a canonical, non-worktree repo.
+  is_worktree?: boolean
+  is_canonical?: boolean
 }
 
 interface GitHubRepo {
@@ -79,6 +91,7 @@ interface Row {
   run?: ActiveRun
   status: 'running' | 'idle' | 'starting' | 'error'
   lastSeen: number     // ms since epoch (run started_at or local last_commit) — for sort
+  repoIdent: string | null  // github://owner/repo or path://<abs>; null = ungroupable
 }
 
 const hubUrl = import.meta.env.VITE_HUB_URL || ''
@@ -246,6 +259,9 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [refreshingGh, setRefreshingGh] = useState(false)
+  // Batch-launch selection: set of Row.key for checked repos.
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [launchingAll, setLaunchingAll] = useState(false)
 
   const activeSupervisor = supervisors.find((s) => s.id === activeSupervisorId)
 
@@ -254,6 +270,10 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   // pinned top row of the repo table.
   const orch = useOrchestrator(token)
   const orchRoot = activeSupervisor?.roots?.[0] || null
+
+  // ── Repo grouping (Phase 2) ──────────────────────────────────────────────
+  const groupsApi = useRepoGroups(token)
+  const [showGroupsManager, setShowGroupsManager] = useState(false)
 
   useEffect(() => {
     try { localStorage.setItem(FILTER_LS_KEY, filter) } catch {}
@@ -378,6 +398,10 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
 
     // 1) Locals (always shown if scanned)
     for (const l of localDeduped) {
+      // Feature 1 — hide git worktrees / branch-checkout siblings; only the
+      // canonical repo appears in the list. Fields are optional on the legacy
+      // scan shape, so absent → treat as a canonical repo (show it).
+      if (isWorktreeOrNonCanonicalRepo(l)) continue
       const matchedGh = ghDeduped.find((g) => l.remote?.includes(g.full_name))
       // installation filter: if user picked one and local has matched gh from another install, hide
       if (selectedInstallationId !== 'all' && matchedGh && matchedGh.installation_id !== selectedInstallationId) continue
@@ -405,6 +429,9 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
         run,
         status,
         lastSeen,
+        repoIdent: matchedGh
+          ? computeRepoIdent({ owner: matchedGh.owner, repo: matchedGh.name })
+          : computeRepoIdent({ path: l.path }),
       })
     }
 
@@ -425,6 +452,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
         github: g,
         status: 'idle',
         lastSeen: 0,
+        repoIdent: computeRepoIdent({ owner: g.owner, repo: g.name }),
       })
     }
 
@@ -458,6 +486,24 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     return filtered
   }, [localRepos, githubRepos, activeRuns, selectedInstallationId, search, filter, typeFilter, sortKey, sortDir, lastActivityByPath])
 
+  // Partition the ALREADY-filtered rows into group sections (filter → partition,
+  // so worktree-hidden rows never resurface as members). A repo in N groups
+  // renders under each. Only used when groupView is on.
+  const groupSections = useMemo(
+    () => partitionIntoGroups(rows, groupsApi.groups, (r) => r.repoIdent),
+    [rows, groupsApi.groups],
+  )
+
+  // Groupable repos in the current view — feeds the manager's bulk-membership
+  // checklist (dedupe by ident; label = display name).
+  const repoChoices = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const r of rows) {
+      if (r.repoIdent && !seen.has(r.repoIdent)) seen.set(r.repoIdent, r.name)
+    }
+    return Array.from(seen, ([ident, label]) => ({ ident, label }))
+  }, [rows])
+
   const toggleSort = (key: SortKey) => {
     if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
     else { setSortKey(key); setSortDir(key === 'seen' ? 'desc' : 'asc') }
@@ -474,6 +520,74 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const startRow = (row: Row) => {
     if (row.local) setStartTarget({ kind: 'local', repo: row.local, githubFallback: row.github })
     else if (row.github) setStartTarget({ kind: 'github', repo: row.github })
+  }
+
+  // Batch launch is only offered for rows that already have a local path —
+  // those launch directly via /start with no clone-target decision. GitHub-only
+  // rows (need a clone first) are not batch-selectable.
+  const launchableRows = useMemo(
+    () => rows.filter((r) => r.local && r.status !== 'running'),
+    [rows],
+  )
+  const launchableKeys = useMemo(() => new Set(launchableRows.map((r) => r.key)), [launchableRows])
+
+  // Drop stale selections (e.g. a repo that started running or got filtered out).
+  useEffect(() => {
+    setSelected((prev) => {
+      let changed = false
+      const next = new Set<string>()
+      for (const k of prev) { if (launchableKeys.has(k)) next.add(k); else changed = true }
+      return changed ? next : prev
+    })
+  }, [launchableKeys])
+
+  const toggleSelect = (key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key); else next.add(key)
+      return next
+    })
+  }
+
+  const allSelected = launchableRows.length > 0 && launchableRows.every((r) => selected.has(r.key))
+  const toggleSelectAll = () => {
+    setSelected(allSelected ? new Set() : new Set(launchableRows.map((r) => r.key)))
+  }
+
+  // Launch a session for each selected repo. Sequential-with-await on purpose:
+  // the supervisor enforces a local concurrency cap and rejects bursts with
+  // `concurrency_cap`, so we let each /start settle before the next.
+  const launchSelected = async () => {
+    if (!activeSupervisorId || launchingAll) return
+    const targets = launchableRows.filter((r) => selected.has(r.key))
+    if (targets.length === 0) return
+    setLaunchingAll(true)
+    let ok = 0
+    let failed = 0
+    try {
+      for (const row of targets) {
+        const repoPath = row.local?.path
+        if (!repoPath) { failed++; continue }
+        try {
+          const r = await apiFetch(token, `/api/supervisors/${activeSupervisorId}/start`, {
+            method: 'POST',
+            body: JSON.stringify({
+              repo_path: repoPath,
+              branch: row.local?.branch || undefined,
+              // Don't pull a dirty tree — supervisor refuses it anyway.
+              pull: !row.local?.dirty,
+            }),
+          })
+          if (r.ok) ok++; else failed++
+        } catch { failed++ }
+      }
+      setSelected(new Set())
+      await loadActiveRuns()
+      setInfo(`Launched ${ok} session${ok === 1 ? '' : 's'}${failed ? ` · ${failed} failed` : ''}`)
+      setTimeout(() => setInfo(null), 5000)
+    } finally {
+      setLaunchingAll(false)
+    }
   }
 
   const body = (
@@ -596,10 +710,44 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           >
             <Icon.Refresh className={refreshingGh || scanning ? 'animate-spin' : ''} />
           </button>
+          <button
+            onClick={launchSelected}
+            disabled={selected.size === 0 || launchingAll || !activeSupervisor?.online}
+            className="px-2.5 py-1 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {launchingAll ? 'Launching…' : `Launch selected${selected.size > 0 ? ` (${selected.size})` : ''}`}
+          </button>
+          {/* Repo grouping controls */}
+          <button
+            onClick={() => setShowGroupsManager(true)}
+            title="Manage repo groups"
+            className="px-2.5 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)] inline-flex items-center gap-1"
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><rect x="2" y="2.5" width="5" height="5" rx="1" /><rect x="9" y="2.5" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>
+            Groups
+          </button>
+          <button
+            onClick={() => groupsApi.setGroupView(!groupsApi.groupView)}
+            title={groupsApi.groupView ? 'Switch to flat list' : 'Group repos by your groups'}
+            aria-pressed={groupsApi.groupView}
+            className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${groupsApi.groupView ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
+          >
+            Group by
+          </button>
         </div>
 
         {/* Header (single responsive renderer; sort controls only matter on wider widths) */}
         <div className="hidden sm:flex items-center gap-3 px-3 py-2 text-[11px] uppercase tracking-wider text-[var(--text-muted)] border-b border-[var(--border-color)]/40">
+          <input
+            type="checkbox"
+            checked={allSelected}
+            ref={(el) => { if (el) el.indeterminate = !allSelected && selected.size > 0 }}
+            onChange={toggleSelectAll}
+            disabled={launchableRows.length === 0}
+            aria-label="Select all repos"
+            title="Select all"
+            className="w-3.5 h-3.5 shrink-0 accent-blue-600 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          />
           <span className="w-3 shrink-0" aria-hidden>•</span>
           <button onClick={() => toggleSort('repo')} className="flex items-center gap-1 hover:text-[var(--text-secondary)] text-left flex-1 min-w-0">
             Repo <Icon.ChevronUpDown />
@@ -620,20 +768,64 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           />
           {rows.length === 0 ? (
             <EmptyState onClear={() => { setSearch(''); setFilter('all') }} />
+          ) : groupsApi.groupView && groupsApi.groups.length > 0 ? (
+            groupSections.map((section) => (
+              <GroupSection
+                key={section.id}
+                id={section.id}
+                name={section.name}
+                count={section.count}
+                collapsed={groupsApi.isCollapsed(section.id)}
+                onToggle={groupsApi.toggleCollapsed}
+                isUngrouped={section.isUngrouped}
+              >
+                <div className="divide-y divide-[var(--border-color)]/40">
+                  {section.items.map((row) => (
+                    <RepoRow
+                      key={`${section.id}:${row.key}`}
+                      row={row}
+                      online={!!activeSupervisor?.online}
+                      selectable={launchableKeys.has(row.key)}
+                      selected={selected.has(row.key)}
+                      onToggleSelect={() => toggleSelect(row.key)}
+                      onRowClick={() => handleRowClick(row)}
+                      onStart={() => startRow(row)}
+                      onStop={() => row.run && stopRun(row.run.id)}
+                      groups={groupsApi.groups}
+                      memberGroupIds={row.repoIdent ? (groupsApi.identToGroupIds.get(row.repoIdent) ?? []) : []}
+                      onToggleMembership={groupsApi.toggleMembership}
+                    />
+                  ))}
+                </div>
+              </GroupSection>
+            ))
           ) : (
             rows.map((row) => (
               <RepoRow
                 key={row.key}
                 row={row}
                 online={!!activeSupervisor?.online}
+                selectable={launchableKeys.has(row.key)}
+                selected={selected.has(row.key)}
+                onToggleSelect={() => toggleSelect(row.key)}
                 onRowClick={() => handleRowClick(row)}
                 onStart={() => startRow(row)}
                 onStop={() => row.run && stopRun(row.run.id)}
+                groups={groupsApi.groups}
+                memberGroupIds={row.repoIdent ? (groupsApi.identToGroupIds.get(row.repoIdent) ?? []) : []}
+                onToggleMembership={groupsApi.toggleMembership}
               />
             ))
           )}
         </div>
       </div>
+
+      <GroupsManager
+        open={showGroupsManager}
+        onClose={() => setShowGroupsManager(false)}
+        groupsApi={groupsApi}
+        repoChoices={repoChoices}
+      />
 
       {startTarget && activeSupervisor && (
         <StartDialog
@@ -704,18 +896,37 @@ function RowActions({ row, online, onStart, onStop }: { row: Row; online: boolea
 
 /* ─────────────────────────── Repo row (single responsive renderer) ─────────────────────────── */
 
-function RepoRow({ row, online, onRowClick, onStart, onStop }: {
+function RepoRow({ row, online, selectable, selected, onToggleSelect, onRowClick, onStart, onStop, groups, memberGroupIds, onToggleMembership }: {
   row: Row
   online: boolean
+  selectable: boolean
+  selected: boolean
+  onToggleSelect: () => void
   onRowClick: () => void
   onStart: () => void
   onStop: () => void
+  groups: import('../lib/repo-groups').RepoGroup[]
+  memberGroupIds: string[]
+  onToggleMembership: (groupId: string, repoIdent: string, member: boolean) => void | Promise<void>
 }) {
   return (
     <div
       onClick={onRowClick}
       className={`flex items-center gap-3 px-3 py-2 hover:bg-[var(--bg-tertiary)]/40 ${row.run ? 'cursor-pointer' : ''}`}
     >
+      <span className="w-3.5 shrink-0 flex justify-center" onClick={(e) => e.stopPropagation()}>
+        {selectable ? (
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggleSelect}
+            aria-label={`Select ${row.name}`}
+            className="w-3.5 h-3.5 accent-blue-600 cursor-pointer"
+          />
+        ) : (
+          <span className="w-3.5 h-3.5" aria-hidden />
+        )}
+      </span>
       <span className="w-3 shrink-0 flex justify-center"><StatusDot status={row.status} online={online} /></span>
       {/* Metadata cell: name + icon, with branch · status · last-seen and the path as a truncated subline. */}
       <div className="flex-1 min-w-0">
@@ -734,6 +945,14 @@ function RepoRow({ row, online, onRowClick, onStart, onStop }: {
           {row.path && <span className="font-mono"> · <span title={row.path}>{truncateMiddle(row.path, 48)}</span></span>}
         </div>
       </div>
+      <span className="hidden sm:flex shrink-0 items-center max-w-[180px]" onClick={(e) => e.stopPropagation()}>
+        <RepoGroupChips
+          repoIdent={row.repoIdent}
+          groups={groups}
+          memberGroupIds={memberGroupIds}
+          onToggleMembership={onToggleMembership}
+        />
+      </span>
       <span className="hidden md:block w-24 shrink-0 text-xs text-[var(--text-muted)] truncate">
         {row.lastSeen > 0 ? timeAgo(row.lastSeen) : <span className="opacity-60">—</span>}
       </span>
@@ -807,6 +1026,7 @@ function OrchestratorRow({ orch, online, rootPath, hasSupervisor }: {
 
   return (
     <div className="flex items-center gap-3 px-3 py-2 bg-blue-600/5 hover:bg-blue-600/10">
+      <span className="w-3.5 shrink-0" aria-hidden />
       <span className="w-3 shrink-0 flex justify-center">
         <span title={statusLabel} className={`inline-block w-2.5 h-2.5 rounded-full ${dot}`} />
       </span>

@@ -110,6 +110,23 @@ Supervisor desktop app (Tauri MSI — one per host)
 Claude Code CLI / Codex CLI (one process per session)
 ```
 
+> **Terminal-surface cutover (Phases 15–19, in flight).** The human-coding path is
+> moving to a **universal raw-terminal (PTY) surface**: the supervisor spawns the
+> GENUINE interactive `claude` / `codex` TUI inside a PTY and relays raw terminal
+> bytes — **no `-p`, no `--input-format`/`--output-format`, no `stream-json`** on
+> the human path, and **no provider API key, ever** (the fallback is a backend-CLI
+> swap — Codex via ChatGPT sign-in, a stubbed Gemini seam — never the API). The
+> `stream-json` path described below is **preserved for unattended automation only**
+> (scheduler / orchestrator-background / auto-dev / error-capture), behind the
+> non-bypassable cost cap. From June 15 2026 subscription billing splits into an
+> **interactive** pool (human PTY turns) and a **programmatic** credit pool
+> (automation). Which pool an interactive PTY turn bills is verified by the
+> [June-15 cutover gate](docs/cutover-gate-june15.md); a fail-safe
+> default-backend selector keeps users off a programmatic-billed path until the
+> gate confirms. The ChatSurface (stream-json human UI) deletion + the default-on
+> flip are **gated** on that runbook + on-device attestations and have **not** yet
+> happened. See [docs/usage-cost.md](docs/usage-cost.md) §Phase 19.
+
 Three packages in a Bun workspace:
 
 - **hub/** — Bun + Hono server handling auth (Titanium Licensing magic-link + opaque cookie sessions — see [docs/auth.md](docs/auth.md)), message relay, and session management. Broadcasts Claude's activity events (thinking, tool use, text) to subscribed browsers.
@@ -144,6 +161,7 @@ Three packages in a Bun workspace:
 - **Grid View** — watch up to 12 Claude Code sessions side-by-side at `#/grid`. User-named tabs persist per account (`chat_tabs` + `chat_tab_sessions`), each with a layout mode (`3x3`, `4x3`, or `auto-fit`). One WebSocket subscribes to many sessions in one frame, message lists are virtualized, and streaming text is RAF-coalesced. On phones the grid auto-swaps to a single-pane accordion (only one chat mounted at a time). See [docs/grid-view.md](docs/grid-view.md). <!-- screenshot: docs/img/grid-view.png -->
 - **Coolify deployment self-heal (Phase 06, partial)** — a public HMAC-signed webhook endpoint (`POST /api/coolify/webhook/:user_id`) turns `deployment.failed` events into structured `triage` runs that ask Claude to emit a typed `TriageResult` (error_type, severity, root_cause, suggested_fix, confidence). A `github_issue` post-run action then files a labelled issue on the failing repo via the gateway-pair credentials (no `GITHUB_TOKEN` on the hub) with 24-hour idempotency. Webhook ingress, secret rotation, triage schema, and the GitHub-issue action are shipped; the final session-routing wire-up (`pickSessionTarget`) is pending the Phase 04 self-heal-routing plan landing. See [docs/coolify-webhook-migration.md](docs/coolify-webhook-migration.md) and the "Coolify webhook ingress" / "GitHub-issue post-run action" sections in [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
 - **Codex CLI + rootless ambient sessions** — sessions can run either Claude Code or [Codex](https://github.com/openai/codex) (`cli_kind` column). Each agent can also host "ambient" rootless sessions (one Claude + one Codex per host) with no project directory required, lazy-spawned on first message. Global instruction files (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.codex/config.toml`) sync from the hub on connect via `create_if_absent` — the agent never overwrites local files. Edit blobs in Settings → Instructions. See [docs/codex-and-rootless.md](docs/codex-and-rootless.md). Requires `npm i -g @openai/codex` + `codex login` (or `OPENAI_API_KEY`).
+- **Auto-dev orchestrator** (Phases 21–32, **flag-gated OFF** behind `REMO_ORCHESTRATOR_ENABLED`) — a session-level auto-dev layer: one `orchestrator` task per session owns per-command rows (`gsd-plan-phase`, `gsd-execute-phase`, `gsd-audit-fix`, `gap-scan`, `gsd-code-review`, `gsd-verify-work`, propose-tier `gsd-ship`/`gsd-complete-milestone`, off-hours `merge-to-main`). A hub-wide `routine_queue` + per-session lock drives a controller that, each tick, computes the DUE rows and runs dependency-aware waves — injecting a templated prompt into the bound session agent (which spawns its own subagents, opens a PR, and dispatches a reviewer; the hub ships text only). Includes gap-scan dimension rotation, a mandatory deploy+log verify tail, propose-to-chat for high-tier commands, and an off-hours-only auto-merge. See [docs/auto-dev-orchestrator.md](docs/auto-dev-orchestrator.md).
 - **Subscription quota strip** — the header shows live Anthropic Claude subscription utilization (5-hour + 7-day windows) reported by the supervisor's poll of `/api/oauth/usage`. Hover for exact %, reset countdowns, and Opus / OAuth-app sub-quotas when present.
 - **Unread badges** — know when sessions have new messages
 - **Light/dark theme** — toggle in the header

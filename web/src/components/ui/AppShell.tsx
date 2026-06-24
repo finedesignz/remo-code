@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "../../lib/ui/cn";
+import { MobileTopBar } from "./MobileTopBar";
 
 export interface AppShellSubTab {
   key: string;
@@ -164,25 +165,7 @@ export function AppShell({
   className,
   scrollMain = true,
 }: AppShellProps) {
-  const [navOpen, setNavOpen] = useState(false);
   const hasNav = !!nav && nav.length > 0;
-
-  // Close the flyout on Escape, and lock it shut when crossing to desktop.
-  useEffect(() => {
-    if (!navOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setNavOpen(false);
-    };
-    const onResize = () => {
-      if (window.innerWidth >= 768) setNavOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("resize", onResize);
-    };
-  }, [navOpen]);
 
   return (
     <div
@@ -192,24 +175,18 @@ export function AppShell({
       )}
     >
       <header className="shrink-0 flex items-center gap-3 px-3 md:px-6 h-14 border-b border-[var(--border-color)]/40 bg-[var(--bg-primary)] safe-top safe-x">
-        {/* Mobile hamburger — opens the Home/Tasks/Settings flyout. */}
-        {hasNav && (
-          <button
-            type="button"
-            onClick={() => setNavOpen(true)}
-            className="md:hidden p-1.5 -ml-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors"
-            aria-label="Open navigation"
-            aria-expanded={navOpen}
-          >
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
-              <line x1="3" y1="5" x2="17" y2="5" />
-              <line x1="3" y1="10" x2="17" y2="10" />
-              <line x1="3" y1="15" x2="17" y2="15" />
-            </svg>
-          </button>
+        {/* Mobile (< md): a row of large icon buttons replaces the hamburger +
+            left flyout. It consumes the same `nav` array and folds the
+            header-right cluster into its right side. */}
+        {hasNav ? (
+          <MobileTopBar nav={nav!} right={headerRight} />
+        ) : (
+          // No nav (rare) → keep the header-right cluster reachable on mobile.
+          <div className="md:hidden ml-auto flex items-center gap-2">{headerRight}</div>
         )}
 
-        {brand && <div className="flex items-center gap-2 shrink-0">{brand}</div>}
+        {/* Desktop brand (logo). On mobile the logo lives in MobileTopBar. */}
+        {brand && <div className="hidden md:flex items-center gap-2 shrink-0">{brand}</div>}
 
         {/* Desktop inline nav. The active page's sub-tabs hang off its nav
             item as a dropdown (replacing the old full-width <Tabs> strip). */}
@@ -221,86 +198,9 @@ export function AppShell({
           </nav>
         )}
 
-        <div className="ml-auto flex items-center gap-2">{headerRight}</div>
+        {/* Desktop header-right cluster. Mobile renders it inside MobileTopBar. */}
+        <div className="ml-auto hidden md:flex items-center gap-2">{headerRight}</div>
       </header>
-
-      {/* Mobile nav flyout (slide-over from the left). */}
-      {hasNav && navOpen && (
-        <div className="md:hidden fixed inset-0 z-50">
-          <div
-            className="absolute inset-0 bg-black/50"
-            onClick={() => setNavOpen(false)}
-            aria-hidden="true"
-          />
-          <nav
-            className="absolute inset-y-0 left-0 w-64 max-w-[80vw] bg-[var(--bg-secondary)] ring-1 ring-white/5 flex flex-col safe-top safe-x"
-            aria-label="Primary"
-          >
-            <div className="flex items-center justify-between px-4 h-14 border-b border-[var(--border-color)]/40">
-              <span className="text-sm font-semibold text-[var(--text-primary)]">Menu</span>
-              <button
-                type="button"
-                onClick={() => setNavOpen(false)}
-                className="p-1.5 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/40 transition-colors"
-                aria-label="Close navigation"
-              >
-                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
-                  <line x1="4" y1="4" x2="14" y2="14" />
-                  <line x1="14" y1="4" x2="4" y2="14" />
-                </svg>
-              </button>
-            </div>
-            <div className="p-2 space-y-1">
-              {nav!.map((item) => {
-                const showSubTabs =
-                  item.active && !!item.subTabs && item.subTabs.length > 0;
-                return (
-                  <div key={item.key}>
-                    <a
-                      href={item.href}
-                      onClick={() => setNavOpen(false)}
-                      className={cn(
-                        "block px-3 py-2.5 rounded-lg text-sm transition-colors",
-                        item.active
-                          ? "bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300"
-                          : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
-                      )}
-                    >
-                      {item.label}
-                    </a>
-                    {/* Active page's sub-tabs, indented under its nav item. */}
-                    {showSubTabs && (
-                      <div className="mt-1 ml-3 pl-2 border-l border-[var(--border-color)]/40 space-y-0.5">
-                        {item.subTabs!.map((t) => {
-                          const selected = t.key === item.activeSubTab;
-                          return (
-                            <button
-                              key={t.key}
-                              type="button"
-                              onClick={() => {
-                                item.onSubTabChange?.(t.key);
-                                setNavOpen(false);
-                              }}
-                              className={cn(
-                                "block w-full text-left px-3 py-2 rounded-lg text-sm transition-colors",
-                                selected
-                                  ? "bg-blue-600/20 text-blue-300"
-                                  : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
-                              )}
-                            >
-                              {t.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </nav>
-        </div>
-      )}
 
       <main
         className={cn(

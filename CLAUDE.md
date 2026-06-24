@@ -157,9 +157,44 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   Titanium / Telegram / mobile / scheduler envs are documented in the relevant `docs/*.md`.
 - **web/.env:** `VITE_HUB_URL`.
 - **Supervisor:** Tauri wizard → `%LOCALAPPDATA%\remo-code-supervisor\config.json`.
-- **Optional:** `REMO_SESSION_IDLE_GRACE_SECONDS` (default 300; `0` disables idle teardown),
+- **Optional:** `REMO_SESSION_IDLE_GRACE_SECONDS` (default 14400 = 4h; `0` disables idle teardown),
   `REMO_ORCHESTRATOR_AUTOLAUNCH` (`false` disables auto-launch), `TITANIUM_BYPASS` (currently
   `true` in prod — see docs/auth.md), `COOLIFY_TOKEN`, `E4A_*`.
+- **`REMO_ORCHESTRATOR_ENABLED`** (default **OFF** / `'0'`; accepts `1|true|yes|on`): gates the
+  **auto-dev orchestrator** live cycle path (Phases 21–32). When OFF,
+  `registerCycleRunnerIfEnabled()` (the ONLY caller of the Phase-22 queue `setCycleRunner`) is a
+  no-op, so the routine-queue drain worker (`hub/src/orchestrator/queue.ts`) claims nothing AND
+  the due-scan enqueue tick never starts — nothing is registered/enqueued/injected; prod stays
+  fully dormant on the e2e-unproven queue. `registerCycleRunnerIfEnabled()` is called once at boot
+  (`hub/src/index.ts`). Companion knobs: `REMO_ORCHESTRATOR_GLOBAL_CONCURRENCY` (default 2, global
+  concurrent-cycle cap), `REMO_ORCHESTRATOR_DRAIN_INTERVAL_MS` (default 1000, drain interval),
+  `REMO_ORCHESTRATOR_TICK_INTERVAL_MS` (default 60000, Phase-32 due-scan enqueue interval). The
+  Phase-32 controller→wave wiring drives dependency-aware waves directly from each tick's DUE rows
+  (`hub/src/orchestrator/controller.ts` `makeCycleRunner`→`runWavesFromDueRows`). **Milestone TMAC
+  (2026-06-08): the cycle-runner now defaults to the resume-heartbeat MACRO path** — `useMacroPath()`
+  routes each tick through `runMacroCycle` (resolve `scheduled_tasks.macro_task_type` → one autonomous
+  macro prompt via `task-macros.ts`, reconcile the prior reply's `<<STATE>>`/`<<NOTIFY>>`/`<<GATE>>`
+  sentinels via `sentinels.ts` into `routine_run_log` + stage-gated `notify.ts` fan-out, halt on an open
+  mandatory gate per `lifecycle_stage`, else re-inject — cost-capped). The legacy per-micro-command-row
+  wave path is preserved behind **`REMO_ORCHESTRATOR_LEGACY_WAVES=1`** (rollback only) and guarded by
+  `hub/test/orchestrator-macro-path-guard.test.ts`. Verify-tail target
+  envs (no-op when unset): `REMO_VERIFY_APP_UUID`, `REMO_VERIFY_BASE_URL`, `REMO_VERIFY_ROUTES`
+  (default `/api/sessions,/openapi.json,/docs`), plus `COOLIFY_TOKEN`. Off-hours merge-to-main runs
+  ONLY inside the merge row's `schedule_rule.active_window` (no separate env). Full architecture:
+  [docs/auto-dev-orchestrator.md](docs/auto-dev-orchestrator.md).
+- **`REMO_PTY_INTERACTIVE`** (prod: **ON** since the 2026-06-04 cutover): drives the **web**
+  default human surface — `GET /api/client-config` returns `pty_interactive`, and the SPA renders
+  `TerminalSurface` (interactive `claude`/`codex` TUI over the Rust ConPTY) instead of the
+  stream-json `ChatSurface`. The supervisor reads its OWN `REMO_PTY_INTERACTIVE` (process env) to
+  route human turns through `selectHumanPtyRunner` → `ClaudePtyBridge` (Rust `pty_host.rs`).
+  Requires supervisor ≥ v0.9.0 (the Rust-ConPTY wiring; older MSIs break on this flag). Backend
+  selection gated by `claude_interactive_confirmed` (supervisor config.json / `REMO_CLAUDE_INTERACTIVE_CONFIRMED=1`)
+  — operator-overridden to Claude-PTY now; **re-verify June-15 billing** (`docs/cutover-gate-june15.md`).
+- **`REMO_TELEGRAM_TRANSCRIPT_TAIL`** (default OFF — **keep OFF in Coolify**): independently gates
+  the Telegram outbound transcript-tail source. DECOUPLED from `REMO_PTY_INTERACTIVE` (#247) because
+  transcript-tail reads on-disk CLI transcripts that don't exist in the hub container; with it OFF,
+  Telegram outbound uses the host-agnostic stream-json event-bus. ChatSurface is **kept** as fallback
+  (deletion still gated on the device attestation in [docs/cutover-gate-june15.md](docs/cutover-gate-june15.md)).
 
 ## Docs map — subsystems & phases
 
@@ -170,6 +205,8 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 |---|---|---|
 | Scheduled tasks | [scheduled-tasks.md](docs/scheduled-tasks.md) | Hub cron scheduler (`hub/src/scheduler/`); fan-out, cost-cap, post-run actions, Phase-11 workflows. Contract test: `hub/test/scheduler.test.ts`. |
 | Error capture | [error-capture.md](docs/error-capture.md) | Sentry-style intake (`hub/src/error-capture/`) → dispatch into repo-bound session; SDK auto-install for 4 stacks. |
+| Feedback intake (Option A) | [feedback-intake.md](docs/feedback-intake.md) | Public per-app end-user feedback (`POST /api/feedback/:token`, `feedback_keys`) → screenshot+comment dispatched into bound session via shared pipeline. Embeddable `feedback-widget.js`. Bounded by per-token/per-IP rate limit + non-bypassable cost cap. NOT Revanote. |
+| Repo grouping | [repo-grouping.md](docs/repo-grouping.md) | Per-user, many-to-many repo groups (`/api/repo-groups`; `repo_groups`/`repo_group_members`/`user_repo_group_state`). Grouped + collapsible Connections table + sidebar; `repo_ident` = `github://owner/repo` or `path://<abs>`. Shared collapse state; a repo in N groups renders under each; trailing Ungrouped section. |
 | Grid view | [grid-view.md](docs/grid-view.md) | Multichat grid `#/grid` (up to 12 sessions); `ChatSurface` densities, `@tanstack/react-virtual`. Virtual **Default tab** (`__default__`) auto-shows all active sessions; sessions move between user tabs; active tab+cell persist in `user_grid_state` (`GET/PATCH /api/chat-tabs/grid-state`). |
 | Chat UI architecture | [chat-ui-architecture.md](docs/chat-ui-architecture.md) | Reusable `ChatSurface` spec: component tree, hooks, the transport-adapter seam (portable core vs remo-code WS), attachments/mic/streaming/permissions/slash, theming. Canonical chat-UI pattern for all apps. |
 | Codex + rootless | [codex-and-rootless.md](docs/codex-and-rootless.md) | Phase 05 — Codex CLI runner, rootless ambient sessions, instructions sync. |
@@ -177,10 +214,12 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | Auth (Titanium) | [auth.md](docs/auth.md) | Phase 07 — magic-link + opaque cookie sessions + license gate. `TITANIUM_BYPASS` active in prod. |
 | Revanote | [revanote.md](docs/revanote.md) | Phase 08 — visual-annotation webhook → session → `<<JSON>>` callback (retry curve). |
 | Orchestrator session | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | Auto-launching root-folder coordinator session; exactly one open per user. |
-| Telegram bridge | [telegram-bridge.md](docs/telegram-bridge.md) | Phase 12 — bidirectional Telegram ↔ session; orchestrator is the preferred default. |
+| Telegram bridge | [telegram-bridge.md](docs/telegram-bridge.md) | Phase 12 → **Phase 20 transcript-tail**: bidirectional Telegram ↔ session re-sourced from each backend's on-disk transcript (Claude projects JSONL / Codex rollout JSONL + scrape fallback) after the Phase-17 stream-json rip; fail-closed permission/`user_question` keystroke-injection keyed by `(sessionId,requestId)`; per-session PTY write-arbitration turn lock; human-only guard (no automation drives the PTY); no API key. |
 | Mobile Tauri client | [mobile-client.md](docs/mobile-client.md) · [phase-12-pause-state.md](docs/phase-12-pause-state.md) | Phase 12 — iOS/Android WebView shell + deep-link auth. **Paused 2026-05-28.** |
 | Shared dispatch + intake | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | `hub/src/dispatch/` (gates→queue→grace→finalize) + `hub/src/webhooks/intake.ts`. All inbound subsystems ride these. |
 | Usage cost ledger | [usage-cost.md](docs/usage-cost.md) | P2 — per-turn token+cost capture (`usage_event`) → `token_usage` + `token_usage_daily` → `GET /api/usage/cost`. SDK `total_cost_usd` authoritative; `hub/src/usage/pricing.ts` is fallback only. Cost is a list-price ESTIMATE. Cap (P3) unaffected. Needs supervisor ≥0.8.0. |
+| PTY terminal surface + cutover gate | [usage-cost.md](docs/usage-cost.md) · [cutover-gate-june15.md](docs/cutover-gate-june15.md) | Phases 15–19 — universal raw-terminal (PTY) human path (interactive `claude`/`codex` TUI, raw bytes, NO stream-json, NO API key). Phase-18 dual-bucket usage (interactive vs programmatic). Phase-19 fail-safe default-backend selector (`supervisor/src/runners/backend-selector.ts`), Codex/Gemini-stub fallback + shared `env-sanitize.ts`, and the June-15 cutover gate (`tools/cutover-deletion-gate.mjs`). Cutover flip + ChatSurface deletion are GATED (pending runbook + on-device attestations). |
+| Auto-dev orchestrator | [auto-dev-orchestrator.md](docs/auto-dev-orchestrator.md) · [.planning/architecture/auto-dev-task-prompts-SPEC.md](.planning/architecture/auto-dev-task-prompts-SPEC.md) | Phases 21–32 — session-level auto-dev: one `orchestrator` task per session + `orchestrator_rows`; global `routine_queue` + per-session lock; verify-tail. **Flag-gated OFF** (`REMO_ORCHESTRATOR_ENABLED`). **Milestone TMAC (2026-06-08): macro path is the default** — a task carries one `macro_task_type` (dev complete; maintenance/security/brainstorming stubs) resolved to ONE autonomous macro prompt (`task-macros.ts`); resume-heartbeat controller (`runMacroCycle`) reconciles `<<STATE>>`/`<<NOTIFY>>`/`<<GATE>>` sentinels (`sentinels.ts`) → `routine_run_log` + stage-gated `notify.ts` fan-out, halt on mandatory gate. Legacy micro-row wave path KEPT behind `REMO_ORCHESTRATOR_LEGACY_WAVES=1` (rollback) + guard test. Migrations: `hub/scripts/migrate-legacy-tasks-to-orchestrator.ts`, `migrate-orchestrator-macro-task-type.ts`. |
 | API docs | [api.md](docs/api.md) · `/openapi.json` · `/docs` | OpenAPI 3.1 assembled in `hub/src/api/_openapi.ts`; run `bun run docs:sync` after route changes (docs-drift CI enforces). |
 
 ## Cross-cutting invariants (do not violate)
@@ -196,6 +235,20 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   license gate after auth; `/ws/agent` keyed by `api_keys`. `hub/test/mount-order.test.ts` enforces.
 - **Don't hand-roll per-subsystem dispatch/queue/grace.** Round-2 collapse is complete — use
   `hub/src/dispatch/` (the old `scheduler/session-queue.ts` shim is deleted).
+- **No provider API key on the human PTY path — EVER.** The interactive terminal surface spawns the
+  GENUINE `claude`/`codex` TUI with an ALLOWLIST-OF-ONE argv — empty except for the optional
+  operator-blessed `--dangerously-skip-permissions` (a PERMISSION flag, gated by config
+  `allowDangerousSkipPermissions`; same ceiling as the stream-json runner). The forbidden programmatic
+  tokens stay forbidden: no `-p`/`--print`/`--input-format`/`--output-format`/`stream-json`, no API key.
+  The bridge threads it as the spawn-frame `dangerously_skip_permissions` field; `pty_host.rs` turns it
+  into the sole argv token. It routes every spawn env through the shared `supervisor/src/runners/env-sanitize.ts` (named denylist +
+  anchored credential-class patterns; scrubs inherited vars + setup-token). Fallback is a backend-CLI swap
+  (Codex via ChatGPT sign-in, stubbed Gemini), never the API. The fail-safe default-backend selector
+  (`backend-selector.ts`) resolves human sessions to `claude-pty`/`codex-pty` only — never the legacy
+  stream-json runner — and defaults to `codex-pty` until the June-15 cutover gate confirms interactive
+  billing. The stream-json path is PRESERVED for unattended automation only, behind the cost cap.
+  Cutover flip + ChatSurface deletion are GATED on `tools/cutover-deletion-gate.mjs` (Phase-16 on-device
+  attestations). Enforced by `supervisor/test/{no-api-key-no-streamjson-pty,no-apikey-fallback-guard,default-backend-selector}.test.ts`.
 - **schema.sql re-runs every boot** — idempotent DDL only; backfills → `hub/scripts/` one-shots.
 - **Orchestrator:** exactly one open per user (`idx_sessions_orchestrator_unique`); never set
   `orchestrator_enabled=false` without also setting `orchestrator_disabled_explicitly=true`
@@ -208,6 +261,22 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 - **Supervisor:** push a `supervisor-v*.*.*` tag → `.github/workflows/release-supervisor.yml`
   builds + signs the MSI + publishes a Release with `latest.json` for the auto-updater. Local:
   `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. Key setup: `supervisor/tauri/UPDATER-SETUP.md`.
+
+## CI (Woodpecker-first)
+
+CI/PR-checks/smoke run on **Woodpecker** (`.woodpecker/*.yaml`, one pipeline per file) —
+GitHub Actions is reserved for what Woodpecker's `linux/amd64` runner can't do.
+
+- **Woodpecker:** `qc.yaml` (PR-gate: typecheck + `check-baseline` + `migration-verify` +
+  orchestrator Postgres-e2e), `docs-drift.yaml` (PR docs-sync drift), `post-deploy-smoke.yaml`
+  (push-to-main prod HTTPS smoke after the Coolify rollout).
+- **GitHub Actions (platform-locked, keep here):** `release-supervisor.yml` (windows-latest +
+  signed MSI/`latest.json`, TAURI signing secrets), `release-mobile.yml` (Windows MSI/NSIS +
+  Android APK), `mobile-ios-build.yml` (macOS + Apple toolchain), `mobile-shell-typecheck.yml`
+  (paused, manual-only). The mobile workflows are dormant (Phase 12 paused).
+
+When adding a check, default to a new `.woodpecker/*.yaml` pipeline; only reach for GHA if it
+needs Windows/macOS or signing secrets.
 
 ## PR Hygiene
 

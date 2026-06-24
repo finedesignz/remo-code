@@ -114,15 +114,16 @@ export async function finalizeAnnotationReply(args: FinalizeArgs): Promise<void>
 
         if (repoSlug && repoKind && sandboxDir) {
           const { runMergeGate, applyGateToCallback, defaultMergeOps } = await import('./merge-gate.ts')
-          const { createLlmEscalator } = await import('./llm-escalator.ts')
           const installationId: number | undefined = typeof raw.installation_id === 'number' ? raw.installation_id : undefined
+          // Risk classification is heuristic-only. The LLM escalator (which used a
+          // raw ANTHROPIC_API_KEY Messages call) was removed — this app runs purely
+          // on the Claude subscription and never holds an Anthropic API key.
           const outcome = await runMergeGate({
             batchId, batchSize, annotationId: ann.id,
             sandboxDir, repoSlug, repoKind,
             needsClarification: result.needs_clarification === true,
             resolved: result.resolved,
             mergeOps: defaultMergeOps({ installationId }),
-            llm: createLlmEscalator(),
             annotationUrl: ann.annotation_url ?? null,
             notifyEmail: typeof raw.org_notify_email === 'string' ? raw.org_notify_email : null,
           })

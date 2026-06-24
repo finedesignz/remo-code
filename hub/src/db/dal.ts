@@ -27,7 +27,8 @@ export async function listSessions(userId: string) {
   return sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info,
            cli_kind, is_rootless, hostname, is_orchestrator,
-           repo_key, github_owner, github_repo, auto_nudge
+           repo_key, github_owner, github_repo, auto_nudge,
+           dangerously_skip_permissions
     FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST
   `;
@@ -41,10 +42,157 @@ export async function getSession(sessionId: string, userId: string) {
   const rows = await sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at,
            cli_kind, is_rootless, hostname, is_orchestrator,
-           repo_key, github_owner, github_repo, auto_nudge
+           repo_key, github_owner, github_repo, auto_nudge,
+           dangerously_skip_permissions,
+           runner_type, pty_backend_id, transcript_path
     FROM sessions WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
   `;
   return rows[0] ?? null;
+}
+
+// ── Phase 16 — per-session runner type + persisted PTY backend identity (H10) ─
+
+export type RunnerType = 'stream-json' | 'pty-interactive'
+
+/**
+ * Set a session's runner_type. User-scoped. GUARD (R-PTY-11): a Telegram-default
+ * session MUST NOT be switched to 'pty-interactive' this phase (Telegram stays
+ * stream-json until Phase 20 re-sources it onto the PTY surface). Returns:
+ *   - { runner_type } on success
+ *   - { error: 'telegram_default_pty_forbidden' } when blocked by the guard
+ *   - undefined when no owned session matched
+ */
+export async function setSessionRunnerType(
+  sessionId: string,
+  userId: string,
+  runnerType: RunnerType,
+): Promise<{ runner_type: RunnerType } | { error: string } | undefined> {
+  // Telegram-default guard — refuse pty-interactive for the user's tg-default session.
+  if (runnerType === 'pty-interactive') {
+    const tg = await sql<{ telegram_default_session_id: string | null }[]>`
+      SELECT telegram_default_session_id FROM users WHERE id = ${userId} LIMIT 1
+    `
+    if (tg[0]?.telegram_default_session_id === sessionId) {
+      return { error: 'telegram_default_pty_forbidden' }
+    }
+  }
+  const rows = await sql<{ runner_type: RunnerType }[]>`
+    UPDATE sessions SET runner_type = ${runnerType}
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    RETURNING runner_type
+  `
+  return rows[0]
+}
+
+/** Read the persisted runner_type (authoritative on resume — H10). Defaults to
+ *  'stream-json' for any row predating the column / missing it. */
+export async function getSessionRunnerType(
+  sessionId: string,
+  userId: string,
+): Promise<RunnerType> {
+  const rows = await sql<{ runner_type: RunnerType | null }[]>`
+    SELECT runner_type FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `
+  return (rows[0]?.runner_type as RunnerType) ?? 'stream-json'
+}
+
+/** Persist the backend PTY/tmux identity + transcript path captured at spawn so
+ *  a reconnect/restart re-binds the SAME backend (no dual-spawn — H10). */
+export async function setSessionPtyIdentity(
+  sessionId: string,
+  userId: string,
+  ptyBackendId: string | null,
+  transcriptPath: string | null,
+): Promise<void> {
+  await sql`
+    UPDATE sessions SET pty_backend_id = ${ptyBackendId}, transcript_path = ${transcriptPath}
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `
+}
+
+/**
+ * Phase 20 — resolve everything a `TranscriptSource.open(ctx)` needs for a
+ * session, by sessionId alone (server-side; the bridge operates per-session, not
+ * per-user). Returns the cli_kind, project_dir, and the PERSISTED transcript
+ * identity captured at PTY spawn (transcript_path + codex rollout id). The
+ * adapter degrades to scrape-mode when these are absent (never a newest-file
+ * guess). Null when no live (non-deleted) session row matches.
+ *
+ * `codex_rollout_id` is read from `pty_backend_id` for codex sessions: the
+ * Phase-16 spawn-time capture stores the backend identity there, and for codex
+ * the rollout `session_meta` id IS that backend identity. (When a future Phase-16
+ * revision adds a dedicated column this helper is the single place to update.)
+ */
+export async function getTranscriptOpenContext(
+  sessionId: string,
+): Promise<{
+  sessionId: string
+  projectDir: string
+  cliKind: 'claude' | 'codex'
+  transcriptPath: string | null
+  codexRolloutId: string | null
+} | null> {
+  const rows = await sql<
+    { project_dir: string | null; cli_kind: string | null; transcript_path: string | null; pty_backend_id: string | null }[]
+  >`
+    SELECT project_dir, cli_kind, transcript_path, pty_backend_id
+      FROM sessions
+     WHERE id = ${sessionId} AND deleted_at IS NULL
+     LIMIT 1
+  `
+  if (!rows[0]) return null
+  const cliKind = (rows[0].cli_kind as 'claude' | 'codex') ?? 'claude'
+  return {
+    sessionId,
+    projectDir: rows[0].project_dir ?? '',
+    cliKind,
+    transcriptPath: rows[0].transcript_path ?? null,
+    codexRolloutId: cliKind === 'codex' ? (rows[0].pty_backend_id ?? null) : null,
+  }
+}
+
+/** Read the persisted PTY backend identity (resume re-binds it — H10). */
+export async function getSessionPtyIdentity(
+  sessionId: string,
+  userId: string,
+): Promise<{ runner_type: RunnerType; pty_backend_id: string | null; transcript_path: string | null } | null> {
+  const rows = await sql<{ runner_type: RunnerType | null; pty_backend_id: string | null; transcript_path: string | null }[]>`
+    SELECT runner_type, pty_backend_id, transcript_path FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `
+  if (!rows[0]) return null
+  return {
+    runner_type: (rows[0].runner_type as RunnerType) ?? 'stream-json',
+    pty_backend_id: rows[0].pty_backend_id ?? null,
+    transcript_path: rows[0].transcript_path ?? null,
+  }
+}
+
+/**
+ * Server-side write-authorization for a terminal session (H2 / R-PTY-29). A
+ * `term.input`/`term.attach`/`term.reattach` is only allowed when the connection's
+ * user OWNS the target session. This is the DB-backed ownership check the relay
+ * composes with the per-connection subscribedSessions set — no cross-user/
+ * cross-session PTY hijack via a forged session_id.
+ */
+export async function canWriteTerminal(userId: string, sessionId: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    SELECT id FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    LIMIT 1
+  `
+  return rows.length > 0
+}
+
+/** Read the session's owning hostname (DB ground-truth for the H3/NH-1
+ *  cross-host validation — a supervisor may only relay term.* for sessions whose
+ *  DB hostname matches its own). Null when the row has no recorded hostname. */
+export async function getSessionHostname(sessionId: string): Promise<string | null> {
+  const rows = await sql<{ hostname: string | null }[]>`
+    SELECT hostname FROM sessions WHERE id = ${sessionId} AND deleted_at IS NULL LIMIT 1
+  `
+  return rows[0]?.hostname ?? null
 }
 
 // Phase 10 — set a session's per-session auto-nudge override. NULL clears the
@@ -62,6 +210,57 @@ export async function setSessionAutoNudge(
     RETURNING auto_nudge
   `;
   return rows[0];
+}
+
+// Per-session "bypass permissions" override. User-scoped. The hub passes the
+// REQUESTED value on session.start; the supervisor's config
+// `allow_dangerous_skip_permissions` is the hard ceiling (applied = requested
+// && allowed). Default OFF: a row that was never set reads as NULL (== OFF).
+export async function setSessionSkipPermissions(
+  sessionId: string,
+  userId: string,
+  enabled: boolean,
+): Promise<{ dangerously_skip_permissions: boolean } | undefined> {
+  const rows = await sql<{ dangerously_skip_permissions: boolean | null }[]>`
+    UPDATE sessions SET dangerously_skip_permissions = ${enabled}
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    RETURNING dangerously_skip_permissions
+  `;
+  if (!rows[0]) return undefined;
+  return { dangerously_skip_permissions: rows[0].dangerously_skip_permissions === true };
+}
+
+/** Effective per-session skip-permissions (default OFF when null/missing). The
+ *  supervisor still ANDs this with its host config ceiling. */
+export async function getSessionSkipPermissions(
+  sessionId: string,
+  userId: string,
+): Promise<boolean> {
+  const rows = await sql<{ dangerously_skip_permissions: boolean | null }[]>`
+    SELECT dangerously_skip_permissions FROM sessions
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+  `;
+  return rows[0]?.dangerously_skip_permissions === true;
+}
+
+/** Effective per-session skip-permissions resolved by repo working tree, for the
+ *  spawn paths that only have (userId, projectDir) and no sessionId. Picks the
+ *  most-recently-active matching session. Returns TRUE when no session row
+ *  matches (the column now defaults TRUE; absent-row mirrors that default-ON
+ *  intent). The supervisor still ANDs this with its host config ceiling, so a
+ *  spurious TRUE can never exceed host policy. */
+export async function getSessionSkipPermissionsByRepo(
+  userId: string,
+  projectDir: string,
+): Promise<boolean> {
+  const rows = await sql<{ dangerously_skip_permissions: boolean | null }[]>`
+    SELECT dangerously_skip_permissions FROM sessions
+    WHERE user_id = ${userId} AND project_dir = ${projectDir} AND deleted_at IS NULL
+    ORDER BY last_activity DESC NULLS LAST
+    LIMIT 1
+  `;
+  if (rows.length === 0) return true;
+  return rows[0].dangerously_skip_permissions === true;
 }
 
 // ── Phase 08 plan 004 — pending local repos + dismiss-local ───────────────────
@@ -390,6 +589,21 @@ export async function findOrCreateAgentSessionV2(
 
     if (legacyRows.length > 0) {
       const keeper = legacyRows[0]
+      // Supersede the non-keeper siblings FIRST. The keeper UPDATE below adopts
+      // `projectDir`, which may equal a sibling's current project_dir; the partial
+      // unique index idx_sessions_user_project_unique(user_id, project_dir)
+      // WHERE deleted_at IS NULL AND is_rootless=false would reject the keeper
+      // UPDATE while that sibling is still live. Soft-deleting siblings first
+      // removes them from the index so the keeper can take over the path.
+      for (let i = 1; i < legacyRows.length; i++) {
+        const other = legacyRows[i]
+        await tx`
+          UPDATE sessions
+             SET superseded_by = ${keeper.id},
+                 deleted_at = now()
+           WHERE id = ${other.id}
+        `
+      }
       const updated = tokenHash === null
         ? await tx`
             UPDATE sessions
@@ -412,15 +626,6 @@ export async function findOrCreateAgentSessionV2(
              WHERE id = ${keeper.id}
              RETURNING *
           `
-      for (let i = 1; i < legacyRows.length; i++) {
-        const other = legacyRows[i]
-        await tx`
-          UPDATE sessions
-             SET superseded_by = ${keeper.id},
-                 deleted_at = now()
-           WHERE id = ${other.id}
-        `
-      }
       return { ...updated[0], created: false, repo_keyed: true, migrated: true }
     }
 
@@ -579,6 +784,23 @@ export async function markSessionDisconnected(sessionId: string, userId: string)
   await sql`UPDATE sessions SET deleted_at = now(), status = 'offline' WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL`;
 }
 
+// User-initiated Disconnect (distinct from delete/markSessionDisconnected).
+// Takes the session OFFLINE — the caller stops the runner by sending a
+// `shutdown` to the channel — but KEEPS the row (deleted_at stays NULL) so the
+// SAME session_id can be relaunched later, resuming its persisted messages.
+// Returns true when an owned, non-deleted row matched (already-offline still
+// returns true — idempotent). NEVER soft-deletes; that is the whole point —
+// a soft-deleted row would force findOrCreateAgentSession to spawn a NEW
+// session on reconnect, losing history.
+export async function markSessionOffline(sessionId: string, userId: string): Promise<boolean> {
+  const rows = await sql`
+    UPDATE sessions SET status = 'offline'
+    WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
+    RETURNING id
+  `;
+  return rows.length > 0;
+}
+
 export async function setOfflineStaleAgentSessions() {
   await sql`UPDATE sessions SET status = 'offline' WHERE status = 'online'`;
 }
@@ -688,8 +910,45 @@ export async function revokeAllUserCredentials(userId: string): Promise<{ revoke
 // ── Users / Profiles ──────────────────────────────────────────────────────────
 
 export async function getUserById(id: string) {
-  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, auto_nudge_idle_sessions, notifications, created_at, updated_at FROM users WHERE id = ${id}`;
+  const rows = await sql`SELECT id, email, display_name, avatar_url, role, system_prompt, timezone, daily_cost_cap_usd, programmatic_halt_usd, web_push_enabled, claude_session_threshold_pct, claude_week_threshold_pct, auto_nudge_idle_sessions, notifications, notify_channels, created_at, updated_at FROM users WHERE id = ${id}`;
   return rows[0] ?? null;
+}
+
+// ── Milestone TMAC §7.1: per-channel orchestrator-notify opt-in ──────────────
+// users.notify_channels is a JSONB map {telegram,inapp,email,push}->bool.
+// Default all-on (set by the schema column default); a MISSING key reads as
+// opted-IN, so the notifier only mutes a channel on an explicit `false`.
+export type NotifyChannelKey = 'telegram' | 'inapp' | 'email' | 'push';
+export type NotifyChannelPrefs = Partial<Record<NotifyChannelKey, boolean>>;
+const NOTIFY_CHANNEL_KEYS: NotifyChannelKey[] = ['telegram', 'inapp', 'email', 'push'];
+
+export async function getUserNotifyChannels(userId: string): Promise<NotifyChannelPrefs> {
+  const rows = await sql<{ notify_channels: NotifyChannelPrefs | null }[]>`
+    SELECT notify_channels FROM users WHERE id = ${userId} LIMIT 1
+  `;
+  return rows[0]?.notify_channels ?? {};
+}
+
+// Merge a partial opt-in patch over the stored map (only provided keys change).
+// Returns the merged map. ATOMIC: a single JSONB `||` concat merges the sanitized
+// patch in-DB (no read-modify-write race; `||` overrides only the provided keys
+// and preserves the all-on default for unset keys). Unknown keys are dropped here.
+export async function updateUserNotifyChannels(
+  userId: string,
+  patch: NotifyChannelPrefs,
+): Promise<NotifyChannelPrefs> {
+  const sanitized: NotifyChannelPrefs = {};
+  for (const k of NOTIFY_CHANNEL_KEYS) {
+    if (typeof patch[k] === 'boolean') sanitized[k] = patch[k];
+  }
+  const rows = await sql<{ notify_channels: NotifyChannelPrefs | null }[]>`
+    UPDATE users
+    SET notify_channels = COALESCE(notify_channels, '{}'::jsonb) || ${sql.json(sanitized)}::jsonb,
+        updated_at = now()
+    WHERE id = ${userId}
+    RETURNING notify_channels
+  `;
+  return rows[0]?.notify_channels ?? sanitized;
 }
 
 // Phase 12 W2 — preferences / prompts / profile (extended)
@@ -1173,7 +1432,11 @@ export type CoolifyAttemptStatus =
   | 'ip_rejected'
   | 'bad_payload'
   | 'rate_limited'
-  | 'legacy_hmac';
+  | 'legacy_hmac'
+  // Well-formed Coolify event we recognize but intentionally do not act on
+  // (e.g. `task_failed` — a scheduled-command failure, NOT a deploy failure).
+  // Recorded so it never lands as `bad_payload`; no run/triage.
+  | 'ignored';
 
 export interface CoolifyAttemptInput {
   user_id: string;
@@ -1343,13 +1606,16 @@ export async function createUser(email: string, passwordHash: string, role: stri
   return rows[0];
 }
 
-export async function updateProfile(userId: string, fields: { display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string }) {
+export async function updateProfile(userId: string, fields: { display_name?: string; avatar_url?: string | null; system_prompt?: string | null; timezone?: string; programmatic_halt_usd?: number | null }) {
   // Build a partial update — only touch the columns provided.
   const sets: any[] = [];
   if (fields.display_name !== undefined) sets.push(sql`display_name = ${fields.display_name}`);
   if (fields.avatar_url !== undefined) sets.push(sql`avatar_url = ${fields.avatar_url}`);
   if (fields.system_prompt !== undefined) sets.push(sql`system_prompt = ${fields.system_prompt}`);
   if (fields.timezone !== undefined) sets.push(sql`timezone = ${fields.timezone}`);
+  // Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt bound. null clears
+  // it (OFF — the default).
+  if (fields.programmatic_halt_usd !== undefined) sets.push(sql`programmatic_halt_usd = ${fields.programmatic_halt_usd}`);
   if (sets.length === 0) return getUserById(userId);
   sets.push(sql`updated_at = now()`);
   let q = sql`UPDATE users SET `;
@@ -1510,6 +1776,47 @@ export async function claimDeployFailure(
     RETURNING fingerprint
   `;
   return rows.length > 0;
+}
+
+// ── feat/coolify-uuid-repo-map: application_uuid → repo_key cache ─────────────
+// Lazy-populated mapping resolved from the Coolify API (see
+// hub/src/sessions/coolify-app-repo.ts). user-scoped.
+
+export interface CoolifyAppRepoRow {
+  application_uuid: string;
+  user_id: string;
+  repo_key: string | null;
+  git_full_url: string | null;
+  updated_at: string;
+}
+
+export async function getCoolifyAppRepo(
+  applicationUuid: string,
+  userId: string,
+): Promise<CoolifyAppRepoRow | null> {
+  const rows = await sql<CoolifyAppRepoRow[]>`
+    SELECT application_uuid, user_id, repo_key, git_full_url, updated_at
+    FROM coolify_app_repo
+    WHERE application_uuid = ${applicationUuid} AND user_id = ${userId}
+    LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
+export async function upsertCoolifyAppRepo(input: {
+  application_uuid: string;
+  user_id: string;
+  repo_key: string | null;
+  git_full_url: string | null;
+}): Promise<void> {
+  await sql`
+    INSERT INTO coolify_app_repo (application_uuid, user_id, repo_key, git_full_url, updated_at)
+    VALUES (${input.application_uuid}, ${input.user_id}, ${input.repo_key}, ${input.git_full_url}, now())
+    ON CONFLICT (application_uuid, user_id) DO UPDATE SET
+      repo_key = EXCLUDED.repo_key,
+      git_full_url = EXCLUDED.git_full_url,
+      updated_at = now()
+  `;
 }
 
 // ── Phase 07: Titanium auth (additive) ────────────────────────────────────────

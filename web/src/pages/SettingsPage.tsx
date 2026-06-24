@@ -106,7 +106,7 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
         )}
         {tab === "usage" && (
           <ErrorBoundary tabKey="settings:usage">
-            <UsageTab token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
+            <UsageTab token={token} profile={profile} onUpdateProfile={onUpdateProfile} subscribe={subscribe} />
           </ErrorBoundary>
         )}
         {tab === "profile" && (

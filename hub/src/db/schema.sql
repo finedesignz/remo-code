@@ -47,7 +47,14 @@ CREATE TABLE IF NOT EXISTS api_keys (
   capabilities TEXT[] NOT NULL DEFAULT ARRAY['agent','supervisor']
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_active ON api_keys(user_id) WHERE revoked_at IS NULL;
+-- NOTE: the legacy one-active-key-per-user unique index
+-- (idx_api_keys_user_active) used to be created here, but it is unconditionally
+-- DROPped + replaced by the per-(user, purpose) variant idx_api_keys_user_purpose_active
+-- further down in this file. Creating it here was vestigial AND made re-applying
+-- the whole schema (sql.unsafe(schema.sql)) fail once a user legitimately had
+-- multiple active keys with distinct purposes — the CREATE would error on the
+-- now-valid data. Defining only the final purpose-aware index keeps schema
+-- application idempotent and order-independent.
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash) WHERE revoked_at IS NULL;
 
 -- Per-user system prompt injected at the start of every new Claude session
@@ -200,6 +207,11 @@ ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
     'log_pull', 'log_classify', 'log_triage',
     -- auto-dev P4: QC review → fix → verify (verify opens a PR, never merges)
     'qc_review', 'qc_fix', 'qc_verify',
+    -- Phase 21 (auto-dev-orchestrator): the session-level orchestrator task.
+    -- One per session (enforced by idx_scheduled_tasks_orchestrator_unique below).
+    -- Locked decision 3: REPLACES the many-tasks-per-session model — the
+    -- orchestrator task owns per-command rows in orchestrator_rows.
+    'orchestrator',
     -- Internal: synthesized by Coolify webhook
     'triage'
   ));
@@ -239,6 +251,144 @@ ALTER TABLE scheduled_tasks ALTER COLUMN session_id DROP NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next_fire
   ON scheduled_tasks(next_fire_at) WHERE enabled;
+
+-- ── Phase 21: auto-dev-orchestrator data model (additive, idempotent) ────────
+-- Foundational DDL ONLY — no behavior is wired here. Locked decisions 3, 4, 10
+-- (see .planning/architecture/auto-dev-orchestrator-SPEC.md §2). schema.sql
+-- re-runs in full every boot, so every statement below is idempotent. Any data
+-- backfill belongs in a one-shot hub/scripts/ script, NEVER inline here.
+
+-- D3: at most ONE orchestrator task per session. Partial unique index — only
+-- constrains rows where task_type='orchestrator'; all other task types are
+-- unaffected. A second insert for a session that already has an orchestrator
+-- task fails at the DB layer (duplicate key).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_tasks_orchestrator_unique
+  ON scheduled_tasks(session_id)
+  WHERE task_type = 'orchestrator';
+
+-- D10: manual lifecycle stage with per-stage frequency presets. Default
+-- 'development'. Constrained to the three stages. Named CHECK added guardedly
+-- so re-runs are no-ops (Postgres has no ADD CONSTRAINT IF NOT EXISTS).
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS lifecycle_stage TEXT NOT NULL DEFAULT 'development';
+DO $$ BEGIN
+  ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_lifecycle_stage_check
+    CHECK (lifecycle_stage IN ('development','beta','production-maintenance'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Milestone TMAC (autonomous task-type macro prompts): an orchestrator task now
+-- carries ONE macro task_type (dev|maintenance|security|brainstorming) that the
+-- controller resolves to a single autonomous macro prompt (task-macros.ts),
+-- REPLACING the per-orchestrator_rows micro-command model for that task. Default
+-- 'dev' (the fully-specified routine). Distinct from scheduled_tasks.task_type
+-- (which stays 'orchestrator' for the row). Idempotent: ADD COLUMN IF NOT EXISTS
+-- + guarded named CHECK.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS macro_task_type TEXT NOT NULL DEFAULT 'dev';
+DO $$ BEGIN
+  ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_macro_task_type_check
+    CHECK (macro_task_type IN ('dev','maintenance','security','brainstorming'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Milestone TMAC §7.2: tracks whether lifecycle_stage was set EXPLICITLY by the
+-- user (vs. left at the default). When false, the controller treats the stored
+-- stage as a default and may override it with an AUTO-DETECTED stage derived from
+-- prod-deploy state (stage-detect.ts). When true, the user's choice ALWAYS wins —
+-- auto-detect never flips an explicit stage. Additive, no backfill: existing rows
+-- default to false (= "not explicitly set", eligible for auto-detect), which is
+-- the conservative choice since the prior stage column also defaulted to
+-- 'development'. Set true by the PATCH /api/orchestrator-tasks lifecycle_stage path.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS lifecycle_stage_explicit BOOLEAN NOT NULL DEFAULT false;
+
+-- D1/D3: per-command rows owned by an orchestrator task. Each row is one
+-- routine command with its own schedule_rule (reusing the ScheduleRule JSONB
+-- shape: cron-equivalent interval/unit/start_at + active_window + bounds).
+-- frequency_label='Never' ⇒ disabled; 'Once' ⇒ max_runs=1 (enforced by the
+-- controller, not here). micro_prompt is optional free text appended to the
+-- command's prompt. No behavior wired in Phase 21.
+CREATE TABLE IF NOT EXISTS orchestrator_rows (
+  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  task_id         TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+  command         TEXT NOT NULL,
+  enabled         BOOLEAN NOT NULL DEFAULT true,
+  schedule_rule   JSONB,
+  frequency_label TEXT,
+  micro_prompt    TEXT,
+  sort_order      INTEGER NOT NULL DEFAULT 0,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_rows_task
+  ON orchestrator_rows(task_id, sort_order);
+
+-- D1/D4: append-only audit of every routine command the controller runs. The
+-- controller reads the last N entries each tick to feed runtime context.
+-- decision_rationale / outcome / gap_dimension capture the controller's
+-- structured decision; pr_url / reviewer_verdict / deploy_verify_result capture
+-- the downstream PR + QC + deploy-verify results.
+CREATE TABLE IF NOT EXISTS routine_run_log (
+  id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  session_id           TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  repo_key             TEXT,
+  command              TEXT NOT NULL,
+  decision_rationale   TEXT,
+  outcome              TEXT,
+  gap_dimension        TEXT,
+  pr_url               TEXT,
+  reviewer_verdict     TEXT,
+  deploy_verify_result TEXT,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_routine_run_log_session_created
+  ON routine_run_log(session_id, created_at DESC);
+
+-- D10: hub-wide routine queue + per-session single-cycle lock. The global
+-- concurrency cap (Phase 22) reads pending/running rows; the partial unique
+-- index guarantees at most one running cycle per session (a second due-tick is
+-- coalesced, not stacked). status constrained to the queue lifecycle.
+CREATE TABLE IF NOT EXISTS routine_queue (
+  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  priority    INTEGER NOT NULL DEFAULT 0,
+  status      TEXT NOT NULL DEFAULT 'pending',
+  enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at  TIMESTAMPTZ
+);
+DO $$ BEGIN
+  ALTER TABLE routine_queue ADD CONSTRAINT routine_queue_status_check
+    CHECK (status IN ('pending','running','done','failed','cancelled'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Per-session lock: at most one running cycle per session.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_routine_queue_session_running
+  ON routine_queue(session_id)
+  WHERE status = 'running';
+-- FIFO + priority drain order for the global queue (Phase 22).
+CREATE INDEX IF NOT EXISTS idx_routine_queue_pending
+  ON routine_queue(priority DESC, enqueued_at)
+  WHERE status = 'pending';
+
+-- D5/D8 (Phase 29): HITL approval markers consumed by the off-hours merge-to-main
+-- command. P28 proposes high-tier commands (ship / complete-milestone / tag /
+-- production-merge) to chat; a human approval writes one row here keyed by the
+-- proposal tuple (session_id, command, content_sha). The off-hours merge command
+-- reads UNCONSUMED markers, merges the matching PASS PRs, and marks them consumed
+-- so a re-fired window cannot double-merge (R-ADO-25 idempotency). content_sha is
+-- the proposal content hash (Phase 29 keys it on sha256(pr_url)). Append-only +
+-- consumed_at flip; no data backfill (schema.sql re-runs every boot).
+CREATE TABLE IF NOT EXISTS orchestrator_approvals (
+  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  command     TEXT NOT NULL,
+  content_sha TEXT NOT NULL,
+  approved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  consumed_at TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- One approval per proposal tuple (P28 HITL contract).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_approvals_tuple
+  ON orchestrator_approvals(session_id, command, content_sha);
+-- Fast unconsumed lookup per session (the merge command's hot read).
+CREATE INDEX IF NOT EXISTS idx_orchestrator_approvals_unconsumed
+  ON orchestrator_approvals(session_id)
+  WHERE consumed_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS scheduled_task_runs (
   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -285,6 +435,13 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_runs_chained
 -- Per-user daily spend cap for the scheduler cost guard and web push toggle.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_cost_cap_usd NUMERIC(10,4) NOT NULL DEFAULT 10.0000;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS web_push_enabled BOOLEAN NOT NULL DEFAULT true;
+
+-- Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt bound. NULL = OFF
+-- (the default — no surprise hard-stop). When set, dispatch on the programmatic/
+-- automation path is denied at dailyCostCapGate once the polled programmatic
+-- credit used_usd >= this bound. Human interactive PTY turns never hit this gate
+-- for this reason. Idempotent DDL; no backfill (schema.sql re-runs every boot).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS programmatic_halt_usd NUMERIC(10,4) NULL;
 
 -- ── Paused repos (per-(user, supervisor, repo_path)) ──────────────────────────
 -- Set when the user explicitly clicks "Disconnect" on a session whose
@@ -346,6 +503,53 @@ CREATE TABLE IF NOT EXISTS user_grid_state (
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ── Repo grouping (per-user, many-to-many) ───────────────────────────────────
+-- User-defined groups for organizing repos in the Connections tab + sidebar.
+-- A repo (identified by repo_ident below) may belong to 0..N groups, and a repo
+-- in N groups renders under EACH of those groups. Cascade chain:
+-- users → repo_groups → repo_group_members. Additive only — no backfill, safe
+-- to re-run every boot.
+--
+-- repo_ident is "github://<owner>/<repo>" for GitHub-backed repos (host-agnostic,
+-- matches hub/src/lib/repo-key.ts buildRepoKey) or "path://<abs-path>" for
+-- local-only folders. NOT foreign-keyed: repos live transiently in scan output /
+-- sessions / pending_local_repos, so a membership may reference a repo not
+-- currently scanned; the client tolerates stale idents (cf. user_grid_state).
+CREATE TABLE IF NOT EXISTS repo_groups (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (user_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_repo_groups_user_order
+  ON repo_groups(user_id, sort_order, name);
+
+CREATE TABLE IF NOT EXISTS repo_group_members (
+  group_id    UUID NOT NULL REFERENCES repo_groups(id) ON DELETE CASCADE,
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- denormalized for cheap user-scoped reads
+  repo_ident  TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (group_id, repo_ident)
+);
+CREATE INDEX IF NOT EXISTS idx_repo_group_members_user_ident
+  ON repo_group_members(user_id, repo_ident);   -- "which groups is this repo in?" per user
+CREATE INDEX IF NOT EXISTS idx_repo_group_members_group
+  ON repo_group_members(group_id);
+
+-- Per-user collapse state for group sections (cross-device, like user_grid_state).
+-- One row per user; collapsed_group_ids is a JSON array of group-id strings that
+-- are currently collapsed. The reserved literal '__ungrouped__' represents the
+-- implicit Ungrouped section. Absent group ids default to EXPANDED. Not
+-- FK-constrained: a deleted group leaves a stale id the client ignores.
+CREATE TABLE IF NOT EXISTS user_repo_group_state (
+  user_id             UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  collapsed_group_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ── Phase 05: per-session CLI selection + rootless ambient sessions ──────────
 -- cli_kind: which CLI the agent spawns for this session ('claude' | 'codex').
 -- is_rootless: ambient sessions that have no project_dir; at most one per
@@ -357,6 +561,20 @@ DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WH
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_rootless BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS hostname TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_rootless_unique ON sessions(user_id, hostname, cli_kind) WHERE is_rootless = true AND deleted_at IS NULL;
+
+-- ── Phase 16: per-session runner type + persisted PTY backend identity (H10) ─
+-- runner_type: 'stream-json' (existing structured ChatSurface runner) or
+--   'pty-interactive' (the Phase-16 raw-terminal PTY surface). Opt-in per
+--   session; default 'stream-json' so every existing row is unchanged. Idempotent
+--   ADD COLUMN — re-runs safely every boot. NO data backfill here (CLAUDE.md
+--   invariant: schema.sql is idempotent DDL only; backfills go in hub/scripts/).
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS runner_type TEXT NOT NULL DEFAULT 'stream-json';
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WHERE constraint_name='sessions_runner_type_check') THEN ALTER TABLE sessions ADD CONSTRAINT sessions_runner_type_check CHECK (runner_type IN ('stream-json','pty-interactive')); END IF; END $$;
+-- Backend PTY/tmux identity + transcript path/id captured at PTY spawn so a
+-- reconnect/restart RE-BINDS the same backend (no dual-spawn / no mis-route —
+-- H10). Nullable so non-PTY rows are unaffected; NO backfill.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pty_backend_id  TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS transcript_path TEXT;
 
 -- ── Phase 05: per-user instruction blobs synced to agents via auth_ok.seed_files
 -- create_if_absent semantics; agents never overwrite existing local files.
@@ -493,6 +711,24 @@ CREATE TABLE IF NOT EXISTS coolify_deploy_idempotency (
 );
 CREATE INDEX IF NOT EXISTS idx_coolify_deploy_idem_created ON coolify_deploy_idempotency(created_at);
 
+-- ── feat/coolify-uuid-repo-map: application_uuid → repo_key cache ─────────────
+-- Coolify's `deployment.failed` webhook carries only `application_uuid` (no
+-- `git_repository`), so the repo-keyed deploy-failure router can't derive a
+-- `repo_key` from the payload. This table caches the uuid→repo_key mapping
+-- resolved lazily from the Coolify API (GET /api/v1/applications/{uuid}) so the
+-- triage fix can land in the session bound to the failing repo. user-scoped.
+-- Lazy-populated at runtime (NO inline backfill — idempotent DDL only); a stale
+-- row (>24h) is re-resolved by the resolver. `git_full_url` is kept for audit.
+CREATE TABLE IF NOT EXISTS coolify_app_repo (
+  application_uuid TEXT NOT NULL,
+  user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  repo_key         TEXT,
+  git_full_url     TEXT,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (application_uuid, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_coolify_app_repo_user ON coolify_app_repo(user_id);
+
 -- ── Phase 04 plan 002: supervisor budget + preferred-supervisor routing ──────
 -- Columns the hub remembers for each supervisor's reported resource budget.
 -- A supervisor is SUPPOSED to report its cgroup-derived `concurrency_budget`
@@ -617,7 +853,7 @@ CREATE TABLE IF NOT EXISTS coolify_webhook_attempts (
   received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   source_ip TEXT,
   event_type TEXT,
-  status TEXT NOT NULL,        -- 'success' | 'auth_failed' | 'ip_rejected' | 'bad_payload' | 'rate_limited' | 'legacy_hmac'
+  status TEXT NOT NULL,        -- 'success' | 'auth_failed' | 'ip_rejected' | 'bad_payload' | 'rate_limited' | 'legacy_hmac' | 'ignored'
   reason TEXT,
   raw_body_preview TEXT        -- first 500 chars; never the token/secret
 );
@@ -1027,4 +1263,46 @@ CREATE INDEX IF NOT EXISTS idx_token_usage_daily_user_day ON token_usage_daily(u
 --   `session.auto_nudge ?? user.auto_nudge_idle_sessions` too — do NOT nudge
 --   unconditionally (NULL means inherit the per-user default, not "always on").
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS auto_nudge BOOLEAN;
+
+-- sessions.dangerously_skip_permissions: per-session toggle to bypass the CLI's
+--   tool-permission prompts (--dangerously-skip-permissions). NULL or FALSE means
+--   OFF; only TRUE requests skip. NEW sessions now DEFAULT ON (SET DEFAULT TRUE
+--   below) — the hub passes the REQUESTED value on session.start, but the
+--   supervisor's config `allow_dangerous_skip_permissions` is the HARD CEILING
+--   (applied = requested && allowed), so the default only REQUESTS the bypass and
+--   can never exceed the host config. Users can still turn an individual session
+--   OFF via the web toggle. The default flip is backfilled to existing rows by the
+--   one-shot `hub/scripts/backfill-skip-permissions-default-on.ts`.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS dangerously_skip_permissions BOOLEAN;
+ALTER TABLE sessions ALTER COLUMN dangerously_skip_permissions SET DEFAULT TRUE;
+
+-- ── Milestone TMAC §7.1: per-channel orchestrator-notify opt-in ──────────────
+-- users.notify_channels: per-user opt-in/out for each orchestrator notify
+--   channel. JSONB map {telegram,inapp,email,push}->bool. Consulted by
+--   hub/src/orchestrator/notify.ts BEFORE fanning a channel out. Additive, no
+--   backfill: DEFAULT is all-on so existing behavior is preserved, and a MISSING
+--   key is treated as opted-IN (only an explicit `false` mutes a channel).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_channels JSONB NOT NULL
+  DEFAULT '{"telegram":true,"inapp":true,"email":true,"push":true}'::jsonb;
+
+-- ── Feedback intake (Option A) — per-app end-user feedback → bound session ────
+-- feedback_keys: the per-app SUBMIT credential for the public feedback widget.
+--   ONE key per app. token_hash is the SHA-256 of an opaque `fb_`-prefixed
+--   token (32 random bytes, base64url) — the plaintext is shown ONCE at mint
+--   time and never stored (same pattern as auth_sessions / api_keys). The
+--   widget embeds the plaintext token and POSTs to /api/feedback/<token>; the
+--   hub hashes it, looks up this row, and (when enabled) dispatches the
+--   screenshot + comment into session_id via the shared dispatch pipeline.
+--   Disable a leaked key by setting enabled=false (revoke without delete).
+--   Idempotent DDL only — NO backfill (this re-runs every boot).
+CREATE TABLE IF NOT EXISTS feedback_keys (
+  token_hash  TEXT PRIMARY KEY,
+  session_id  TEXT NOT NULL,
+  user_id     TEXT NOT NULL,
+  label       TEXT,
+  enabled     BOOLEAN NOT NULL DEFAULT true,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_keys_user ON feedback_keys(user_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_keys_session ON feedback_keys(session_id);
 

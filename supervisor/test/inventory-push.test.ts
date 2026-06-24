@@ -7,7 +7,7 @@
  * drive ProcessManager state transitions directly.
  */
 import { describe, test, expect, beforeEach } from 'bun:test'
-import { mkdtempSync } from 'fs'
+import { mkdtempSync, mkdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ProcessManager, type RunSpec } from '../src/process-manager'
@@ -119,8 +119,12 @@ describe('ProcessManager.inventorySnapshot', () => {
   })
 
   test('snapshot is payload-bounded (well under 10KB even with multiple entries)', async () => {
+    // Distinct project_dir per run — same-project repeats are now deduped
+    // (concurrency-leak fix), so 8 entries requires 8 distinct (real) projects.
     for (let i = 0; i < 8; i++) {
-      await pm.start(makeSpec(`run_${i}`, REPO))
+      const proj = join(REPO, `proj_${i}`)
+      mkdirSync(proj, { recursive: true })
+      await pm.start(makeSpec(`run_${i}`, proj))
     }
     captured.forEach((b, i) => {
       b.cb.onSpawned({ pid: 1000 + i })

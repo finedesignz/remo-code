@@ -1,0 +1,2 @@
+{"timestamp":"2026-05-31T11:00:00Z","type":"totally_new_top_level_type","blob":{"x":1}}
+{"timestamp":"2026-05-31T11:00:01Z","type":"response_item","payload":{"type":"new_unknown_payload","foo":"bar"}}

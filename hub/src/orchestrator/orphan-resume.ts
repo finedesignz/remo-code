@@ -27,6 +27,7 @@
 
 import { reserveSessionSlot } from '../sessions/budget'
 import { listOnlineSupervisorIdsForUser, getSupervisor } from '../ws/supervisor-registry'
+import { getSessionSkipPermissionsByRepo } from '../db/dal'
 
 const MAX_RESTART_COUNT = 10
 
@@ -193,20 +194,23 @@ async function resumeOrphansInner(args: {
       continue
     }
 
-    // (d) Reserve a slot.
-    const reservation = await reserveSessionSlot(userId, supervisorId)
-    if (!reservation.ok) {
+    // (d) Reserve a slot AND create the new run row atomically inside the
+    // FOR-UPDATE tx (closes the over-admission race — see budget.ts).
+    const reservation = await reserveSessionSlot(userId, supervisorId, {
+      sessionId: null,
+      repoPath: o.repo_path,
+      branch: o.branch,
+      pulled: false,
+      initialPrompt: null,
+      restartOf: o.id,
+    })
+    if (!reservation.ok || !reservation.run) {
       result.skipped_capacity.push(o.id)
       continue
     }
 
-    // (e) Create the new run row and send session.start to the live socket.
-    const newRun = await sql`
-      INSERT INTO session_runs (user_id, supervisor_id, repo_path, branch, pulled, initial_prompt, restart_of)
-      VALUES (${userId}, ${supervisorId}, ${o.repo_path}, ${o.branch}, false, ${null}, ${o.id})
-      RETURNING id
-    `
-    const newRunId = newRun[0].id
+    // (e) Send session.start to the live socket.
+    const newRunId = reservation.run.id
 
     const entry = getSupervisor(supervisorId)
     if (!entry) {
@@ -217,6 +221,7 @@ async function resumeOrphansInner(args: {
       continue
     }
 
+    const skipPerms = await getSessionSkipPermissionsByRepo(userId, o.repo_path)
     try {
       entry.ws.send(JSON.stringify({
         type: 'session.start',
@@ -227,6 +232,7 @@ async function resumeOrphansInner(args: {
         pull: false,
         api_key: '__use_local__',
         hub_url: '__same__',
+        dangerously_skip_permissions: skipPerms,
       }))
       result.resumed.push(newRunId)
     } catch (err: any) {

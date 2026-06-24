@@ -141,12 +141,24 @@ export function cronCadence(cron: string): string {
  * Compute the locked, auto-generated prefix portion of a scheduled-task name.
  * Returns '' when not enough context to render (no target yet, etc.).
  */
+// GSD template id → leading label, so a template-created task reads
+// "Run dev on <repo> every 4h" instead of the generic "Dev on <repo> …".
+// Kept in lockstep with `hub/src/scheduler/task-templates.ts`.
+const TEMPLATE_LEADS: Record<string, string> = {
+  gsd_run: 'Run dev',
+  gsd_audit: 'Audit',
+  gsd_review: 'Review PRs',
+  gsd_plan: 'Plan phase',
+}
+
 export function computeTaskAutoName(task: TaskNameInput, ctx: TaskNameContext): string {
   const typeLbl = TYPE_LABELS[task.task_type] || task.task_type
   const target = targetLabel(task.target_kind, task.target_id ?? null, ctx)
   const cadence = cronCadence(task.cron_expr)
 
-  const leading = typeLbl
+  const templateId = task.payload?.template_id
+  const leading =
+    (typeof templateId === 'string' && TEMPLATE_LEADS[templateId]) || typeLbl
 
   if (!target) return ''
   if (!cadence) return leading + ' on ' + target

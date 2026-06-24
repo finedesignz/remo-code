@@ -20,6 +20,8 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useWebSocketContext } from '../hooks/useWebSocket'
 import { ChatSurface } from './ChatSurface'
+import { TerminalSurface } from './TerminalSurface'
+import { useClientConfig } from '../hooks/useClientConfig'
 import {
   type TabWithSessions,
   type SessionRef,
@@ -54,6 +56,16 @@ interface Props {
 export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   // REVIEW BL-01: shared WS from context.
   const { connected, connectionId, send, subscribe } = useWebSocketContext()
+
+  // PTY cutover (mirrors ChatLayout): when the client-config flag (or the
+  // dev/opt-in localStorage override) is set, each grid cell renders the
+  // raw-terminal TerminalSurface — the SAME surface single view uses — instead
+  // of the stream-json ChatSurface. ChatSurface stays the fallback when off.
+  const clientConfig = useClientConfig()
+  const localPtyOverride = (() => {
+    try { return localStorage.getItem('remo:pty-interactive') === '1' } catch { return false }
+  })()
+  const ptyInteractive = clientConfig.pty_interactive || localPtyOverride
 
   const [tabs, setTabs] = useState<TabWithSessions[]>([])
   const [loading, setLoading] = useState(true)
@@ -623,6 +635,7 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
                   wsConnected={connected}
                   seedMessages={seedByTab[activeTabId!]?.[s.session_id]}
                   unreadCount={unreadBySession[s.session_id] ?? 0}
+                  ptyInteractive={ptyInteractive}
                 />
               ))}
             </div>
@@ -645,6 +658,7 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
               token={token}
               wsConnected={connected}
               tabId={activeTabId}
+              ptyInteractive={ptyInteractive}
             />
           </div>
         </>
@@ -848,9 +862,11 @@ interface GridCellProps {
   wsConnected: boolean
   seedMessages?: ChatMessage[]
   unreadCount?: number
+  /** When true, render the raw-terminal TerminalSurface (same as single view) instead of ChatSurface. */
+  ptyInteractive?: boolean
 }
 
-function GridCell({ sessionRef, isActive, onActivate, onRemove, canRemove = true, moveTargets = [], onMove, subscribe, send, connectionId, token, wsConnected, seedMessages, unreadCount = 0 }: GridCellProps) {
+function GridCell({ sessionRef, isActive, onActivate, onRemove, canRemove = true, moveTargets = [], onMove, subscribe, send, connectionId, token, wsConnected, seedMessages, unreadCount = 0, ptyInteractive = false }: GridCellProps) {
   const isOnline = sessionRef.status === 'online' || sessionRef.status === 'thinking'
   return (
     <div
@@ -897,18 +913,30 @@ function GridCell({ sessionRef, isActive, onActivate, onRemove, canRemove = true
           >×</button>
         )}
       </div>
-      <div className="flex-1 min-h-0">
-        <ChatSurface
-          density="cell"
-          sessionId={sessionRef.session_id}
-          subscribe={subscribe}
-          send={send}
-          connectionId={connectionId}
-          token={token}
-          wsConnected={wsConnected}
-          seedMessages={seedMessages}
-          onActivate={onActivate}
-        />
+      <div className="flex-1 min-h-0 overflow-hidden">
+        {ptyInteractive ? (
+          // PTY-interactive: same raw-terminal surface single view uses. xterm
+          // owns its own scrollback inside the bounded min-h-0 host; the cell
+          // never lets the page scroll the terminal away.
+          <TerminalSurface
+            sessionId={sessionRef.session_id}
+            subscribe={subscribe}
+            send={send}
+            className="h-full p-1"
+          />
+        ) : (
+          <ChatSurface
+            density="cell"
+            sessionId={sessionRef.session_id}
+            subscribe={subscribe}
+            send={send}
+            connectionId={connectionId}
+            token={token}
+            wsConnected={wsConnected}
+            seedMessages={seedMessages}
+            onActivate={onActivate}
+          />
+        )}
       </div>
     </div>
   )

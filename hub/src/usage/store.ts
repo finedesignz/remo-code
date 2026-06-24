@@ -7,11 +7,22 @@ export interface UsageWindow {
   resets_at: string
 }
 
+// Phase 18 (R-PTY-17): the Agent-SDK programmatic credit pool — a dollar bucket
+// carried additively alongside the four util% windows. Null/absent = the
+// explicit pre-claim / unknown empty state (NEVER a fabricated balance).
+export interface ProgrammaticCredit {
+  used_usd: number
+  limit_usd: number
+  resets_at: string
+  claimed: boolean
+}
+
 export interface UsagePayload {
   five_hour: UsageWindow
   seven_day: UsageWindow
   seven_day_opus?: UsageWindow | null
   seven_day_oauth_apps?: UsageWindow | null
+  programmatic_credit?: ProgrammaticCredit | null
 }
 
 export interface UsageSnapshot {

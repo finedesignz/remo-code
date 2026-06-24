@@ -1,6 +1,48 @@
-import { hostname, platform, release, arch, cpus, totalmem } from 'os'
+import { hostname, platform, release, arch, cpus, totalmem, tmpdir } from 'os'
+import { mkdirSync, writeFileSync } from 'fs'
+import { join, basename, extname } from 'path'
 import { ClaudeRunner } from './claude-runner'
-import type { AgentToHub, CliRunner, HubToAgent, RunnerEvent } from './types'
+import { selectHumanPtyRunner } from './runner-factory'
+import { PtyPersistence } from './pty-persistence'
+import { getBackendSelectorConfig } from '../config'
+import type { AgentToHub, CliRunner, HubToAgent, PtyLike, RunnerEvent } from './types'
+
+/**
+ * Module-level supervisor-owned PTY persistence coordinator (R-PTY-07/27).
+ * Tracks the interactive PTY per remo-session so a dropped browser/phone WS
+ * detaches (not kills) and a reattach replays scrollback. Shared across all
+ * SessionBridge instances in this process.
+ */
+const ptyPersistence = new PtyPersistence()
+
+/**
+ * Phase-15 spike flag. When `REMO_PTY_INTERACTIVE=1`, a session hosts the
+ * raw-terminal interactive `claude` PTY runner instead of the stream-json
+ * ClaudeRunner, bridging onData → `term.data` frames and routing inbound
+ * `term.input`/`term.resize` to the PTY. ADDITIVE + flag-gated — the stream-json
+ * path is untouched when the flag is off. Full per-session runner-type selection
+ * is Phase 16 (this is the spike seam, not the production switch).
+ */
+function ptyInteractiveEnabled(): boolean {
+  return process.env.REMO_PTY_INTERACTIVE === '1'
+}
+
+/**
+ * Make an upload filename safe to write into a temp dir: strip any path
+ * components and traversal, drop control chars, and keep a sane extension.
+ * Never returns an empty string. Exported for unit testing.
+ */
+export function sanitizeAttachmentName(raw: string): string {
+  // basename() defeats path separators on both platforms; then strip anything
+  // that isn't a conservative filename char, collapse dots so `..` can't survive.
+  let name = basename(String(raw || ''))
+  const ext = extname(name).slice(0, 16) // bound the extension length
+  const stem = name.slice(0, name.length - ext.length)
+  const cleanStem = stem.replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.+/g, '.').replace(/^\.+/, '')
+  const cleanExt = ext.replace(/[^A-Za-z0-9.]/g, '')
+  name = (cleanStem || 'attachment') + cleanExt
+  return name.slice(0, 200)
+}
 
 /**
  * Per-session WebSocket bridge to the hub's `/ws/agent` endpoint. Restored
@@ -61,6 +103,12 @@ const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000]
 export class SessionBridge {
   private ws: WebSocket | null = null
   private runner: CliRunner | null = null
+  /** Interactive PTY runner (mutually exclusive with `runner`, active only under
+   *  REMO_PTY_INTERACTIVE=1). Raw bytes only — never emits RunnerEvent.
+   *  PTY-cutover Phase A: this is the Rust ConPTY `ClaudePtyBridge` in prod
+   *  (Option C), or the Node `ClaudePtyRunner` fallback when no Rust host —
+   *  both satisfy `PtyLike`, chosen by the gated runner-factory. */
+  private ptyRunner: PtyLike | null = null
   private sessionId: string | null = null
   private opts: SessionBridgeOptions
   private cb: SessionBridgeCallbacks
@@ -91,7 +139,23 @@ export class SessionBridge {
     if (this.stopped) return false
     if (this.ws?.readyState === WebSocket.OPEN) return true
     if (this.runner) return true
+    if (this.ptyRunner) return true
     return false
+  }
+
+  /**
+   * True once a runner subprocess has actually been spawned (onSpawned fired).
+   * The slot reconciler uses THIS — not the run's stored pid — to decide whether
+   * a counted slot is genuinely occupying a process. The stream-json runner
+   * reports spawn with a best-effort `pid: 0` (it never surfaces a real OS pid
+   * through its `ready` event), which ProcessManager stores as `null`; basing
+   * aliveness on `pid != null` therefore reaps every healthy idle session
+   * (#237 regression). `spawnReported` is the truthful signal: a bridge that
+   * authenticated (WS open) but never spawned a runner returns false and stays
+   * reclaimable; a bridge that has spawned and is alive returns true forever.
+   */
+  hasSpawnedRunner(): boolean {
+    return this.spawnReported
   }
 
   /** Stop runner + close WS. Idempotent. */
@@ -102,6 +166,14 @@ export class SessionBridge {
     if (this.runner) {
       try { await this.runner.stopGracefully() } catch {}
       this.runner = null
+    }
+    // Session close = KILL the PTY (R-PTY-27). Route through the persistence
+    // coordinator so it drops its registry entry + scrollback; fall back to a
+    // direct kill if the session was never registered.
+    if (this.ptyRunner) {
+      if (this.sessionId) { try { ptyPersistence.kill(this.sessionId, 'session_close') } catch {} }
+      try { this.ptyRunner.kill() } catch {}
+      this.ptyRunner = null
     }
     if (this.ws) {
       try { this.ws.close() } catch {}
@@ -172,6 +244,7 @@ export class SessionBridge {
       if (code === 4001 || code === 4002) {
         this.cb.onLog('error', `agent-bridge: terminal close code=${code}; bridge exiting`)
         if (this.runner) { try { this.runner.stop() } catch {} this.runner = null }
+        if (this.ptyRunner) { try { this.ptyRunner.kill() } catch {} this.ptyRunner = null }
         this.cb.onExit({ code: null, reason: `ws_close_${code}` })
         return
       }
@@ -204,7 +277,8 @@ export class SessionBridge {
       this.sessionId = msg.session_id
       this.cb.onLog('info', `agent-bridge: authenticated session=${this.sessionId.slice(0, 8)}`)
       try { this.cb.onSessionId?.(this.sessionId) } catch {}
-      this.ensureRunner()
+      if (ptyInteractiveEnabled()) this.ensurePtyRunner()
+      else this.ensureRunner()
       return
     }
     if (msg.type === 'auth_error') {
@@ -213,6 +287,46 @@ export class SessionBridge {
       return
     }
     if (!this.sessionId) return
+
+    // --- Raw-terminal channel (Phase 15) — additive, flag-gated. term.* frames
+    // are raw bytes routed straight to the PTY runner; they NEVER touch the
+    // stream-json runner or RunnerEvent translation. ---
+    if (ptyInteractiveEnabled()) {
+      const anyMsg = msg as any
+      if (anyMsg.type === 'term.input') {
+        const pty = this.ensurePtyRunner()
+        try { pty?.write(Buffer.from(String(anyMsg.bytes ?? ''), 'base64').toString('binary')) } catch {}
+        return
+      }
+      if (anyMsg.type === 'term.resize') {
+        this.ptyRunner?.resize(Number(anyMsg.cols) || 80, Number(anyMsg.rows) || 24)
+        return
+      }
+      if (anyMsg.type === 'term.attach') {
+        this.ensurePtyRunner()
+        return
+      }
+      if (anyMsg.type === 'term.attach_file') {
+        // Write the uploaded bytes to a per-session temp file on THIS host, then
+        // type the absolute path into the TUI so Claude/Codex can read it. The
+        // browser has no filesystem on the host; this is the path-injection seam.
+        try {
+          const pty = this.ensurePtyRunner()
+          const safe = sanitizeAttachmentName(String(anyMsg.filename ?? 'attachment'))
+          const dir = join(tmpdir(), 'remo-attachments', this.sessionId)
+          mkdirSync(dir, { recursive: true })
+          const abs = join(dir, safe)
+          const bytes = Buffer.from(String(anyMsg.data_b64 ?? ''), 'base64')
+          writeFileSync(abs, bytes)
+          // Trailing space so the path is a complete token at the TUI cursor.
+          pty?.write(abs + ' ')
+          this.cb.onLog('info', `term.attach_file: wrote ${bytes.length}B → ${abs}`)
+        } catch (err) {
+          this.cb.onLog('error', `term.attach_file failed: ${(err as Error)?.message ?? err}`)
+        }
+        return
+      }
+    }
 
     if (msg.type === 'user_message') {
       const runner = this.ensureRunner()
@@ -262,6 +376,53 @@ export class SessionBridge {
     this.runner = runner
     runner.start((e) => this.handleRunnerEvent(e))
     return runner
+  }
+
+  /** Phase-15 spike: lazily start the interactive PTY runner and bridge its
+   *  raw output bytes to the hub as `term.data` frames. base64 over the
+   *  existing /ws/agent JSON socket (see hub/src/ws/term-protocol.ts). */
+  private ensurePtyRunner(): PtyLike | null {
+    if (this.ptyRunner) return this.ptyRunner
+    // PTY-cutover Phase A: gated factory → Rust ConPTY bridge in prod (Option C),
+    // Node helper fallback when no Rust host. Default backend + cutover-gate
+    // flag come from the supervisor config (env-overridable). Human-only.
+    const pty = selectHumanPtyRunner({ isHuman: true }, getBackendSelectorConfig())
+    this.ptyRunner = pty
+    const sessionId = this.sessionId ?? undefined
+    // Register with the supervisor-owned persistence coordinator so a dropped
+    // client WS detaches (not kills) and reattach replays scrollback (R-PTY-27).
+    if (sessionId) ptyPersistence.register(sessionId, pty)
+    const emitTerm = (bytes: string) => {
+      if (!this.sessionId) return
+      this.sendToHub({
+        type: 'term.data',
+        session_id: this.sessionId,
+        bytes: Buffer.from(bytes, 'binary').toString('base64'),
+      })
+    }
+    pty.start({
+      sessionId,
+      cwd: this.opts.repoPath,
+      cols: 100,
+      rows: 30,
+      // Operator-gated bypass — same ceiling as the stream-json runner. The PTY
+      // appends `--dangerously-skip-permissions` (its SOLE permitted argv token).
+      dangerouslySkipPermissions: this.opts.allowDangerousSkipPermissions,
+      onData: (bytes) => {
+        if (sessionId) { try { ptyPersistence.recordOutput(sessionId, bytes) } catch {} }
+        emitTerm(bytes)
+      },
+      // Scrollback replay on (re)attach — Rust bridge only; sent as the same
+      // base64 term.data shape so the browser replays it before live output.
+      onScrollback: (bytes) => emitTerm(bytes),
+      onExit: (code) => {
+        this.cb.onLog('warn', `agent-bridge: pty runner exited code=${code}`)
+        this.ptyRunner = null
+        this.cb.onExit({ code, reason: 'pty_runner_exit' })
+      },
+    })
+    if (!this.spawnReported) { this.spawnReported = true; this.cb.onSpawned({ pid: pty.pid ?? 0 }) }
+    return pty
   }
 
   private handleRunnerEvent(e: RunnerEvent) {

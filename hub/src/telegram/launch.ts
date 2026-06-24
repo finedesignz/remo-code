@@ -20,9 +20,9 @@
 import { sql } from '../db/postgres.ts'
 import {
   listSupervisorsForUser,
-  createRun,
 } from '../db/supervisor-dal.ts'
 import { reserveSessionSlot } from '../sessions/budget.ts'
+import { getSessionSkipPermissions } from '../db/dal.ts'
 import {
   isSupervisorOnline,
   sendToSupervisor,
@@ -132,8 +132,14 @@ export async function launchSessionForUser(args: {
       return { ok: false, reason: 'no_online_supervisor' }
     }
 
-    // Concurrency gate — MUST come before createRun.
-    const reservation = await reserveSessionSlot(args.userId, pick.supervisorId)
+    // Concurrency gate — reserve + consume the run row atomically (one tx).
+    const reservation = await reserveSessionSlot(args.userId, pick.supervisorId, {
+      sessionId: null,
+      repoPath: session.project_dir,
+      branch: null,
+      pulled: false,
+      initialPrompt: null,
+    })
     if (!reservation.ok) {
       if (reservation.reason === 'at_capacity') {
         return {
@@ -145,18 +151,14 @@ export async function launchSessionForUser(args: {
       }
       return { ok: false, reason: 'no_online_supervisor' }
     }
+    if (!reservation.run) {
+      return { ok: false, reason: 'no_online_supervisor' }
+    }
 
-    const run = await createRun({
-      userId: args.userId,
-      sessionId: null,
-      supervisorId: pick.supervisorId,
-      repoPath: session.project_dir,
-      branch: null,
-      pulled: false,
-      initialPrompt: null,
-    })
+    const run = reservation.run
     await updateSupervisorState(pick.supervisorId, 'starting', run.id)
 
+    const skipPerms = await getSessionSkipPermissions(session.id, args.userId)
     try {
       sendToSupervisor(pick.supervisorId, {
         type: 'session.start',
@@ -168,6 +170,7 @@ export async function launchSessionForUser(args: {
         initial_prompt: undefined,
         api_key: '__use_local__',
         hub_url: '__same__',
+        dangerously_skip_permissions: skipPerms,
       } as any)
     } catch (err: any) {
       return { ok: false, reason: 'send_failed', error: err?.message ?? String(err) }

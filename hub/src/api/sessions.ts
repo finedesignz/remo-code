@@ -1,12 +1,11 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, getPendingPrompts, dismissLocalSession, setSessionAutoNudge } from '../db/dal'
+import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity, setSessionSkipPermissions, getSessionSkipPermissions, getSessionSkipPermissionsByRepo } from '../db/dal'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
 import { generateToken } from '../utils/token'
 import { pickSessionTarget } from '../sessions/routing.ts'
-import { createRun } from '../db/supervisor-dal.ts'
 import {
   sendToSupervisor,
   updateSupervisorState,
@@ -173,6 +172,62 @@ sessions.delete('/:id', async (c) => {
   }
 })
 
+// ── POST /api/sessions/:id/disconnect — user-initiated Disconnect ────────────
+// Takes a RUNNING session OFFLINE without removing it. Distinct from DELETE:
+//   - DELETE soft-deletes the row (deleted_at set) → findOrCreateAgentSession
+//     spawns a NEW session on the next connect, losing history.
+//   - disconnect KEEPS the row (deleted_at stays NULL), so a later /launch for
+//     the SAME session_id resumes the same row with its persisted messages —
+//     "I don't want a new session created every time it reconnects."
+// Steps:
+//   1. Ownership-check the session (404 when missing / not owned).
+//   2. Send `{type:'shutdown', reason:'user_disconnect'}` to the session's
+//      channel so the SessionBridge stops the runner (SIGINT→SIGKILL).
+//   3. End any open session_runs for this session so the supervisor / #223
+//      reconcile frees the concurrency slot.
+//   4. Mark the session status `offline` (KEEP the row).
+// Idempotent: when already offline + no channel + no open runs, it's a no-op
+// 200. Reversible — reconnect via /launch resumes; no destructive confirm.
+sessions.post('/:id/disconnect', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+
+  const session = await getSession(sessionId, userId)
+  if (!session) return c.json({ error: 'not_found' }, 404)
+
+  // Tell the runner to shut down (best-effort; offline sessions have no channel).
+  const channel = getChannel(sessionId)
+  if (channel) {
+    try {
+      channel.ws.send(JSON.stringify({ type: 'shutdown', reason: 'user_disconnect' }))
+    } catch {}
+  }
+
+  // End open runs so the slot is freed. Best-effort — never blocks the offline
+  // transition (the supervisor's runner.exit / #223 reconcile is the backstop).
+  try {
+    const { endOpenRunsForSession } = await import('../db/supervisor-dal.ts')
+    await endOpenRunsForSession(sessionId, userId, 'user_disconnect')
+  } catch (err: any) {
+    console.error('[sessions.disconnect] failed to end open runs', err?.message)
+  }
+
+  // KEEP the row — status offline only, never soft-delete.
+  await markSessionOffline(sessionId, userId)
+
+  // Give the runner ~5s to exit gracefully before forcibly closing the socket.
+  if (channel) {
+    setTimeout(() => {
+      const ch = getChannel(sessionId)
+      if (ch) {
+        try { ch.ws.close(4011, 'session disconnected by user') } catch {}
+      }
+    }, 5_000)
+  }
+
+  return c.json({ ok: true, status: 'offline' as const })
+})
+
 // Rotate session token — returns new raw token, invalidates old
 sessions.post('/:id/rotate-token', async (c) => {
   const userId = c.get('userId') as string
@@ -216,6 +271,65 @@ sessions.patch('/:id/auto-nudge', async (c) => {
   return c.json({ id: sessionId, auto_nudge: updated.auto_nudge })
 })
 
+// ── PATCH /api/sessions/:id/skip-permissions ─────────────────────────────────
+// Per-session "bypass permissions" override (default OFF). When ON, the hub
+// REQUESTS --dangerously-skip-permissions on session.start; the supervisor's
+// config `allow_dangerous_skip_permissions` is the HARD CEILING (applied =
+// requested && allowed), so a per-session opt-in can never exceed the host
+// config. User-scoped: only the owner can update. CSRF via the global /api/*
+// csrfGuard (hub/src/index.ts). Mirrors the auto-nudge PATCH shape.
+const SkipPermsBody = z.object({
+  enabled: z.boolean(),
+})
+
+sessions.patch('/:id/skip-permissions', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const parsed = SkipPermsBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_input', detail: parsed.error.issues[0]?.message }, 400)
+  }
+  const updated = await setSessionSkipPermissions(sessionId, userId, parsed.data.enabled)
+  if (!updated) return c.json({ error: 'not_found' }, 404)
+  return c.json({ id: sessionId, dangerously_skip_permissions: updated.dangerously_skip_permissions })
+})
+
+// ── Phase 16 — per-session runner type (opt-in; default stream-json) ──────────
+const RunnerTypeBody = z.object({
+  runner_type: z.enum(['stream-json', 'pty-interactive']),
+})
+
+// PATCH the session's runner_type. Opt-in per session. A Telegram-default
+// session cannot be switched to 'pty-interactive' (R-PTY-11 — the DAL guard
+// rejects it; Phase 20 supersedes by re-sourcing Telegram onto the PTY surface).
+sessions.patch('/:id/runner-type', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const parsed = RunnerTypeBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_input', detail: parsed.error.issues[0]?.message }, 400)
+  }
+  const result = await setSessionRunnerType(sessionId, userId, parsed.data.runner_type)
+  if (!result) return c.json({ error: 'not_found' }, 404)
+  if ('error' in result) {
+    // Telegram-default guard tripped — 409 Conflict (the session is reserved for
+    // the stream-json Telegram bridge this phase).
+    return c.json({ error: result.error }, 409)
+  }
+  return c.json({ id: sessionId, runner_type: result.runner_type })
+})
+
+// GET the persisted runner identity (runner_type + backend id + transcript
+// path). The resume path READS this so a session is re-bound to the SAME
+// backend on reconnect/restart — never dual-spawned or mis-routed (H10).
+sessions.get('/:id/runner-identity', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const identity = await getSessionPtyIdentity(sessionId, userId)
+  if (!identity) return c.json({ error: 'not_found' }, 404)
+  return c.json({ id: sessionId, ...identity })
+})
+
 // ── Phase 04 plan 008 — POST /api/sessions/heal ──────────────────────────────
 // The external claude-code-self-heal service (port 9114) calls this to launch
 // a fresh session on whatever target is available, deterministically. See
@@ -245,6 +359,15 @@ sessions.post('/heal', async (c) => {
   for (let hop = 0; hop < HEAL_MAX_HOPS; hop++) {
     const pick = await pickSessionTarget(userId, {
       excludeSupervisorIds: Array.from(exclude),
+      // Consume the run row atomically inside the reservation tx (closes the
+      // over-admission race — see budget.ts reserveSessionSlot).
+      runFields: {
+        sessionId: null,
+        repoPath: repo,
+        branch,
+        pulled: false,
+        initialPrompt: prompt,
+      },
     })
 
     if (pick.kind === 'quota_blocked') {
@@ -262,23 +385,13 @@ sessions.post('/heal', async (c) => {
     }
 
     if (pick.kind === 'supervisor') {
-      // Reservation is held — must release on dispatch failure.
-      let run: { id: string }
-      try {
-        run = await createRun({
-          userId,
-          sessionId: null,
-          supervisorId: pick.supervisor_id,
-          repoPath: repo,
-          branch,
-          pulled: false,
-          initialPrompt: prompt,
-        }) as { id: string }
-      } catch (err: any) {
-        await releaseSessionSlot(userId, pick.supervisor_id)
-        return c.json({ error: 'run_insert_failed', detail: err?.message ?? String(err) }, 500)
+      // Run row already consumed atomically inside the reservation tx.
+      if (!pick.run) {
+        return c.json({ error: 'run_insert_failed' }, 500)
       }
+      const run = pick.run
 
+      const skipPerms = await getSessionSkipPermissionsByRepo(userId, repo)
       try {
         sendToSupervisor(pick.supervisor_id, {
           type: 'session.start',
@@ -290,6 +403,7 @@ sessions.post('/heal', async (c) => {
           initial_prompt: prompt,
           api_key: '__use_local__',
           hub_url: '__same__',
+          dangerously_skip_permissions: skipPerms,
           ...(model ? { model } : {}),
         } as any)
       } catch (err: any) {
@@ -434,30 +548,29 @@ sessions.post('/:id/launch', async (c) => {
 
   // Concurrency gate — MUST come before createRun, exactly as the other
   // session.start senders (api/supervisors.ts, telegram/launch.ts).
-  const reservation = await reserveSessionSlot(userId, supervisorId)
+  // Reserve + consume the run row atomically inside the FOR-UPDATE tx.
+  let reservation
+  try {
+    reservation = await reserveSessionSlot(userId, supervisorId, {
+      sessionId: null,
+      repoPath: cwd,
+      branch: null,
+      pulled: false,
+      initialPrompt: null,
+    })
+  } catch (err: any) {
+    return c.json({ error: 'run_insert_failed', detail: err?.message ?? String(err) }, 500)
+  }
   if (!reservation.ok) {
     if (reservation.reason === 'at_capacity') {
       return c.json({ error: 'at_capacity', running: reservation.running, cap: reservation.cap }, 429)
     }
     return c.json({ error: 'supervisor_offline' }, 409)
   }
-
-  let run: { id: string }
-  try {
-    run = await createRun({
-      userId,
-      sessionId: null,
-      supervisorId,
-      repoPath: cwd,
-      branch: null,
-      pulled: false,
-      initialPrompt: null,
-    }) as { id: string }
-  } catch (err: any) {
-    await releaseSessionSlot(userId, supervisorId)
-    return c.json({ error: 'run_insert_failed', detail: err?.message ?? String(err) }, 500)
+  if (!reservation.run) {
+    return c.json({ error: 'run_insert_failed' }, 500)
   }
-  const run_id = run.id
+  const run_id = reservation.run.id
 
   try {
     sendToSupervisor(supervisorId, {
@@ -470,6 +583,10 @@ sessions.post('/:id/launch', async (c) => {
       initial_prompt: undefined,
       api_key: '__use_local__', // sentinel — supervisor uses its configured key
       hub_url: '__same__',
+      // Per-session bypass-permissions REQUEST (default OFF). The supervisor's
+      // config `allow_dangerous_skip_permissions` is the hard ceiling
+      // (applied = requested && allowed).
+      dangerously_skip_permissions: (session as any).dangerously_skip_permissions === true,
     } as any)
   } catch (err: any) {
     try {

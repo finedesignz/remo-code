@@ -25,6 +25,13 @@ const state: {
   createdRuns: any[]
   endRunCalls: Array<{ runId: string; reason: any }>
   releaseSlotCalls: Array<{ userId: string; supervisorId: string }>
+  // Disconnect-endpoint tracking.
+  channelOnline: boolean
+  channelSends: string[]
+  channelCloses: Array<{ code?: number; reason?: string }>
+  markOfflineCalls: Array<{ id: string; userId: string }>
+  endOpenRunsCalls: Array<{ sessionId: string; userId: string; reason: any }>
+  openRunsCount: number
 } = {
   session: null,
   supervisorOnline: true,
@@ -37,6 +44,12 @@ const state: {
   createdRuns: [],
   endRunCalls: [],
   releaseSlotCalls: [],
+  channelOnline: false,
+  channelSends: [],
+  channelCloses: [],
+  markOfflineCalls: [],
+  endOpenRunsCalls: [],
+  openRunsCount: 1,
 }
 
 // Spread the real shared modules so any export not explicitly overridden below
@@ -59,6 +72,14 @@ mock.module('../src/db/dal.ts', () => ({
   deleteSession: async () => ({}),
   updateSessionToken: async () => ({}),
   markSessionDisconnected: async () => ({}),
+  markSessionOffline: async (id: string, userId: string) => {
+    state.markOfflineCalls.push({ id, userId })
+    if (id === TEST_SESSION_ID && userId === TEST_USER_ID && state.session) {
+      state.session.status = 'offline'
+      return true
+    }
+    return false
+  },
   getPendingPrompts: async () => [],
   dismissLocalSession: async () => ({}),
 }))
@@ -78,6 +99,10 @@ mock.module('../src/db/supervisor-dal.ts', () => ({
     state.endRunCalls.push({ runId, reason })
     return {}
   },
+  endOpenRunsForSession: async (sessionId: string, userId: string, reason: any) => {
+    state.endOpenRunsCalls.push({ sessionId, userId, reason })
+    return state.openRunsCount
+  },
   // Phase 12 W2 — keep full export surface so the api/supervisors import in
   // cross-test load order resolves setSupervisorRoots.
   setSupervisorRoots: async () => null,
@@ -89,7 +114,15 @@ mock.module('../src/db/supervisor-dal.ts', () => ({
 }))
 
 mock.module('../src/ws/registry.ts', () => ({
-  getChannel: () => null,
+  getChannel: (sessionId: string) => {
+    if (!state.channelOnline || sessionId !== TEST_SESSION_ID) return null
+    return {
+      ws: {
+        send: (raw: string) => { state.channelSends.push(raw) },
+        close: (code?: number, reason?: string) => { state.channelCloses.push({ code, reason }) },
+      },
+    }
+  },
   broadcastToUser: (..._args: any[]) => {},
 }))
 
@@ -267,8 +300,19 @@ mock.module('../src/sessions/budget.ts', () => ({
   // this stub is the active mock. The /launch route now reserves a slot before
   // dispatching session.start (protocol-drift fix 2026-05-30), so this must
   // grant a slot for the happy-path launch tests; per-test capacity faults are
-  // driven via state.reserveResult.
-  reserveSessionSlot: async () => state.reserveResult,
+  // driven via state.reserveResult. The run row is now consumed INSIDE the
+  // reservation tx (atomic gate), so when runFields is supplied a granted
+  // reservation also carries the created run (and honours throwOnCreateRun).
+  reserveSessionSlot: async (_uid: string, _sid: string, runFields?: any) => {
+    const r = state.reserveResult
+    if (r.ok && runFields) {
+      if (state.throwOnCreateRun) throw new Error('createRun boom')
+      const row = { id: 'run_x', ...runFields }
+      state.createdRuns.push(row)
+      return { ...r, run: { id: row.id } }
+    }
+    return r
+  },
   getCapacitySnapshot: async () => null,
 }))
 
@@ -331,6 +375,12 @@ beforeEach(() => {
   state.createdRuns = []
   state.endRunCalls = []
   state.releaseSlotCalls = []
+  state.channelOnline = false
+  state.channelSends = []
+  state.channelCloses = []
+  state.markOfflineCalls = []
+  state.endOpenRunsCalls = []
+  state.openRunsCount = 1
 })
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -561,7 +611,7 @@ describe('POST /api/sessions/:id/launch', () => {
     expect(state.sentMessages).toHaveLength(0)
   })
 
-  test('run_insert_failed (createRun throws) → 500, slot released, no dispatch', async () => {
+  test('run_insert_failed (reservation INSERT throws) → 500, no leak, no dispatch', async () => {
     state.throwOnCreateRun = true
     const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
       method: 'POST',
@@ -570,9 +620,10 @@ describe('POST /api/sessions/:id/launch', () => {
     })
     expect(res.status).toBe(500)
     expect(((await res.json()) as any).error).toBe('run_insert_failed')
-    // Reserved slot released; no run row, no endRun, no dispatch.
-    expect(state.releaseSlotCalls).toHaveLength(1)
-    expect(state.releaseSlotCalls[0]).toEqual({ userId: TEST_USER_ID, supervisorId: TEST_SUPERVISOR_ID })
+    // The run row is consumed INSIDE the reservation tx now: when the INSERT
+    // throws the whole tx rolls back, so the slot is never committed — there is
+    // nothing to release. No run row, no endRun, no dispatch, no leaked slot.
+    expect(state.releaseSlotCalls).toHaveLength(0)
     expect(state.createdRuns).toHaveLength(0)
     expect(state.endRunCalls).toHaveLength(0)
     expect(state.sentMessages).toHaveLength(0)
@@ -594,6 +645,82 @@ describe('POST /api/sessions/:id/launch', () => {
     expect(state.createdRuns).toHaveLength(0)
     expect(state.sentMessages).toHaveLength(0)
     expect(state.releaseSlotCalls).toHaveLength(0)
+  })
+})
+
+describe('POST /api/sessions/:id/disconnect', () => {
+  test('online session → 200, shutdown sent to channel, runs ended, row KEPT + offline (no soft-delete)', async () => {
+    state.session.status = 'online'
+    state.channelOnline = true
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/disconnect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    })
+    expect(res.status).toBe(200)
+    const body: any = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.status).toBe('offline')
+    // Shutdown directive went to the channel with the user_disconnect reason.
+    expect(state.channelSends).toHaveLength(1)
+    const sent = JSON.parse(state.channelSends[0])
+    expect(sent.type).toBe('shutdown')
+    expect(sent.reason).toBe('user_disconnect')
+    // Open runs ended (slot freed) — scoped to this session + user.
+    expect(state.endOpenRunsCalls).toHaveLength(1)
+    expect(state.endOpenRunsCalls[0]).toEqual({ sessionId: TEST_SESSION_ID, userId: TEST_USER_ID, reason: 'user_disconnect' })
+    // Row marked offline via markSessionOffline (KEEP) — NOT markSessionDisconnected/delete.
+    expect(state.markOfflineCalls).toHaveLength(1)
+    expect(state.markOfflineCalls[0]).toEqual({ id: TEST_SESSION_ID, userId: TEST_USER_ID })
+    // The session row still resolves (not soft-deleted) and is offline.
+    expect(state.session.status).toBe('offline')
+    const after = await app.request(`/api/sessions/${TEST_SESSION_ID}`, { method: 'GET' })
+    expect(after.status).toBe(200)
+    expect(((await after.json()) as any).id).toBe(TEST_SESSION_ID)
+  })
+
+  test('idempotent: already offline + no channel → 200 no-op (no shutdown, row kept)', async () => {
+    state.session.status = 'offline'
+    state.channelOnline = false
+    state.openRunsCount = 0
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/disconnect`, { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(state.channelSends).toHaveLength(0)
+    // Still flips/keeps offline + frees any runs (no-op when none open).
+    expect(state.markOfflineCalls).toHaveLength(1)
+    expect(state.session.status).toBe('offline')
+  })
+
+  test('not found / not owned → 404', async () => {
+    const res = await app.request(`/api/sessions/sess_nope/disconnect`, { method: 'POST' })
+    expect(res.status).toBe(404)
+    expect(state.channelSends).toHaveLength(0)
+    expect(state.markOfflineCalls).toHaveLength(0)
+  })
+
+  test('disconnect → launch reuses the SAME session_id (no new session created, history kept)', async () => {
+    // 1. Online session gets disconnected (row kept, status offline).
+    state.session.status = 'online'
+    state.channelOnline = true
+    const disc = await app.request(`/api/sessions/${TEST_SESSION_ID}/disconnect`, { method: 'POST' })
+    expect(disc.status).toBe(200)
+    expect(state.session.status).toBe('offline')
+
+    // 2. The SAME session id still resolves via getSession (no soft-delete).
+    //    /launch resolves the existing row (it 404s when the row is gone) and
+    //    dispatches session.start bound to this session's repo_path — resuming
+    //    the same session, NOT creating a new one.
+    state.channelOnline = false // runner has exited
+    const launch = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(launch.status).toBe(202)
+    // No new session row was created (createSession is never called on launch);
+    // the dispatched start targets the existing session's canonical cwd.
+    expect(state.sentMessages).toHaveLength(1)
+    expect(state.sentMessages[0].msg.type).toBe('session.start')
+    expect(state.sentMessages[0].msg.repo_path).toBe('C:/Users/artic/GitHub/remo-code')
   })
 })
 

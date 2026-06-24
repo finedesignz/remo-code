@@ -71,7 +71,7 @@ const titaniumBypass = parseBool(process.env.TITANIUM_BYPASS, false);
 // + grid-view tab swaps. 0 disables idle teardown entirely.
 const sessionIdleGraceSeconds = (() => {
   const v = process.env.REMO_SESSION_IDLE_GRACE_SECONDS;
-  if (v === undefined || v === "") return 300;
+  if (v === undefined || v === "") return 14400; // 4h (was 300s/5m) — long-running dev sessions shouldn't be killed minutes after the UI walks away
   const n = Number(v);
   if (!Number.isInteger(n) || n < 0) {
     throw new Error(`REMO_SESSION_IDLE_GRACE_SECONDS must be a non-negative integer; got ${JSON.stringify(v)}`);
@@ -113,6 +113,25 @@ const telegramBotUsername = process.env.TELEGRAM_BOT_USERNAME || "";
 // tool-use lines to one-liners and finalizes with the assistant text. Default ON;
 // set TELEGRAM_SUMMARIZED_STREAMING=false to revert to a single final-blob send.
 const telegramSummarizedStreaming = process.env.TELEGRAM_SUMMARIZED_STREAMING !== "false";
+
+// PTY cutover flag (mirrors the supervisor's `REMO_PTY_INTERACTIVE === '1'`).
+// Drives the WEB default human surface via GET /api/client-config (TerminalSurface
+// vs the stream-json ChatSurface). It does NOT switch the Telegram outbound source
+// — that is governed independently by `telegramTranscriptTail` below, because the
+// transcript-tail path only works when the CLI transcript files are co-located with
+// the hub (NOT the Coolify split topology), whereas the web terminal works as soon
+// as a PTY-capable supervisor is connected.
+const ptyInteractive = process.env.REMO_PTY_INTERACTIVE === "1";
+
+// Telegram OUTBOUND transcript-tail flag — DECOUPLED from `ptyInteractive`.
+// OFF (prod default, incl. post-web-cutover): the Telegram bridge sources assistant
+// replies + permission prompts from the stream-json `assistant_message:final` /
+// permission event bus (host-agnostic; the only source that works in the split
+// hub/supervisor Coolify topology where the hub has no local CLI transcript files).
+// ON: the bridge tails on-disk CLI transcripts via the per-session TranscriptSource
+// manager — ONLY safe when transcripts are co-located with the hub process. Keep OFF
+// in the Coolify hub. See hub/src/telegram/bridge.ts.
+const telegramTranscriptTail = process.env.REMO_TELEGRAM_TRANSCRIPT_TAIL === "1";
 
 // B2 (obs): owner user_id for the hub's self-capture error_project row.
 // When unset, self-capture is inert (no row seeded, no hooks installed).
@@ -188,6 +207,12 @@ export const config = {
     botUsername: telegramBotUsername,
     summarizedStreaming: telegramSummarizedStreaming,
   },
+
+  // PTY cutover flag. Drives the WEB terminal surface (GET /api/client-config).
+  ptyInteractive,
+
+  // Telegram outbound transcript-tail flag (decoupled). OFF in prod → event-bus.
+  telegramTranscriptTail,
 
   // B4: observability bearer token (gates /healthz/deep + /metrics).
   hubIntrospectToken,

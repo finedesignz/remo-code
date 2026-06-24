@@ -1,0 +1,2 @@
+# Phase 18: billing-guardrail-dual-bucket-usage — PLAN (reconciliation placeholder)
+Shipped via the direct-PR workflow (not the GSD lifecycle); the detailed numbered `18-PLAN-*` files in this dir are the real historical plans. This bare PLAN.md exists only so the GSD SDK recognizes the phase as planned+complete (the SDK's plan counter matches only `PLAN.md` / `*-PLAN.md`, not the numbered `18-PLAN-001-*.md` form). See the `18-*-SUMMARY.md` files and `18-VERIFICATION.md`.

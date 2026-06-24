@@ -1,8 +1,11 @@
 {
   "name": "remo-code-supervisor",
   "private": true,
-  "type": "module",
   "scripts": {
     "build:sidecar": "bun run scripts/compile-sidecar.mjs"
+  },
+  "type": "module",
+  "dependencies": {
+    "node-pty": "^1.1.0"
   }
 }

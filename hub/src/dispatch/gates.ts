@@ -21,6 +21,8 @@ import { sql } from '../db/postgres.ts'
 import { getTodayTokenCostUsd } from '../db/token-usage-dal.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
 import { reserveSessionSlot } from '../sessions/budget.ts'
+import { getUsage } from '../usage/store.ts'
+import { isOverProgrammaticHalt } from '../usage/programmatic-leak.ts'
 import type { DispatchGate, DispatchRequest } from './pipeline.ts'
 
 /**
@@ -74,6 +76,30 @@ async function userTimezone(userId: string): Promise<string> {
 }
 
 /**
+ * Phase 18 (R-PTY-18): opt-in programmatic-credit hard-halt status.
+ *
+ * Reads the user's `programmatic_halt_usd` bound (NULL = OFF, the default) and
+ * the latest polled programmatic-credit snapshot from the in-memory usage store,
+ * delegating the comparison to the single `isOverProgrammaticHalt` predicate.
+ *
+ * Returns `{ halt, bound, used_usd }`. `halt` is true ONLY when the bound is set
+ * (>0) AND the claimed credit used_usd has crossed it. Absent config, absent /
+ * unclaimed credit, or a store miss => `halt:false` (fail-open — never a surprise
+ * stop). This is the hard-halt's TWIN to `getCostCapStatus`.
+ */
+export async function getProgrammaticHaltStatus(
+  userId: string,
+): Promise<{ halt: boolean; bound: number | null; used_usd: number | null }> {
+  const rows = await sql<{ bound: string | null }[]>`
+    SELECT programmatic_halt_usd::text AS bound FROM users WHERE id = ${userId} LIMIT 1
+  `
+  const bound = rows[0]?.bound == null ? null : Number(rows[0].bound)
+  const credit = getUsage(userId)?.usage.programmatic_credit ?? null
+  const halt = isOverProgrammaticHalt(bound, credit)
+  return { halt, bound: Number.isFinite(bound as number) ? (bound as number) : null, used_usd: credit?.used_usd ?? null }
+}
+
+/**
  * Claude usage threshold gate. Blocks with `quota_threshold_reached:<reason>`
  * when the user crossed their configured 5h / 7d utilization threshold.
  */
@@ -103,8 +129,82 @@ export const dailyCostCapGate: DispatchGate = {
       const reason = `over_daily_cost_cap:$${status.spent.toFixed(2)}>=$${status.cap.toFixed(2)}`
       return { ok: false, reason }
     }
+    // Phase 18 (R-PTY-18): the opt-in programmatic-credit hard-halt rides the
+    // SAME chokepoint as an additional predicate (no parallel gate). Default OFF
+    // (null bound) => never fires. When the user-configured bound is crossed,
+    // programmatic/automation dispatch is denied with a typed reason. Human
+    // interactive PTY turns never reach this gate for this reason (the
+    // human-only guard + interactive pool keep them off the programmatic path).
+    const halt = await getProgrammaticHaltStatus(req.userId)
+    if (halt.halt) {
+      const reason = `programmatic_credit_halt:$${(halt.used_usd ?? 0).toFixed(2)}>=$${(halt.bound ?? 0).toFixed(2)}`
+      return { ok: false, reason }
+    }
     return { ok: true }
   },
+}
+
+/**
+ * Human-only PTY gate (Phase 16, constraint 3 — R-PTY-10 / R-PTY-28 / H1).
+ *
+ * The SHARED chokepoint that rejects AUTOMATION sources from ever driving a
+ * `pty-interactive` session — the flagged "robot pressing enter via the
+ * interactive entrypoint" / ToS-risk move. It is composed into BOTH:
+ *   (a) the dispatch pipeline (this DispatchGate form), and
+ *   (b) the raw `term.input` relay ingress (the `rejectsActor` helper below),
+ * so there is NO second, ungated write route into a PTY session.
+ *
+ * The ACTOR is SERVER-INFERRED from the connection, never a client-asserted
+ * payload field (H1): an authenticated /ws/client opaque-cookie ⇒ `human`;
+ * /ws/agent api_keys ⇒ `agent`; dispatch sources name themselves (scheduler /
+ * orchestrator-background / auto-dev / error-capture). Only a `human` actor may
+ * write to a pty-interactive session.
+ *
+ * It composes WITH (never replaces) `dailyCostCapGate` — the PTY path introduces
+ * no uncapped dispatch route.
+ */
+export const AUTOMATION_ACTORS: ReadonlySet<string> = new Set([
+  'scheduler',
+  'orchestrator-background',
+  'auto-dev',
+  'error-capture',
+  'agent',
+])
+
+/** True when `actor` is an automation source that must NOT drive a
+ *  pty-interactive session. The single decision both the pipeline gate and the
+ *  relay ingress use. `human` (server-inferred from a /ws/client cookie) passes;
+ *  everything in AUTOMATION_ACTORS is rejected for pty-interactive. */
+export function humanOnlyRejectsActor(actor: string, runnerType: string): boolean {
+  if (runnerType !== 'pty-interactive') return false
+  return actor !== 'human' // any non-human actor (incl. all AUTOMATION_ACTORS) is rejected
+}
+
+/**
+ * DispatchGate form for the pipeline. Reads the dispatch source + the target
+ * session's runner_type. A pty-interactive session driven by an automation
+ * source is blocked with `automation_blocked_on_pty:<actor>`. Stream-json
+ * sessions are unaffected (still cost-capped by dailyCostCapGate).
+ *
+ * The source + runner_type are read off the DispatchRequest (the dispatch
+ * context already carries the source; runner_type is resolved via the DAL). To
+ * keep `DispatchRequest` unchanged we accept them on an optional augmentation
+ * the caller threads through — the pipeline composes this gate only for PTY-
+ * capable dispatches.
+ */
+export function humanOnlyPtyGate(
+  resolveActorAndRunnerType: (req: DispatchRequest) => Promise<{ actor: string; runnerType: string }>,
+): DispatchGate {
+  return {
+    name: 'human_only_pty',
+    async check(req: DispatchRequest) {
+      const { actor, runnerType } = await resolveActorAndRunnerType(req)
+      if (humanOnlyRejectsActor(actor, runnerType)) {
+        return { ok: false, reason: `automation_blocked_on_pty:${actor}` }
+      }
+      return { ok: true }
+    },
+  }
 }
 
 /**

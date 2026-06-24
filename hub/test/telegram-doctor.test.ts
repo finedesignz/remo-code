@@ -67,7 +67,16 @@ mock.module("../src/db/supervisor-dal.ts", () => ({
 }));
 
 mock.module("../src/sessions/budget.ts", () => ({
-  reserveSessionSlot: async (_uid: string, _sid: string) => state.reserveOutcome,
+  // Run row is consumed inside the reservation tx now (atomic gate): a granted
+  // reservation given runFields carries the created run.
+  reserveSessionSlot: async (_uid: string, _sid: string, runFields?: any) => {
+    const o: any = state.reserveOutcome;
+    if (o.ok && runFields) {
+      state.runIdCounter++;
+      return { ...o, running: o.running ?? 0, cap: o.cap ?? 1, run: { id: `run_${state.runIdCounter}` } };
+    }
+    return o;
+  },
 }));
 
 mock.module("../src/ws/registry.ts", () => ({

@@ -119,6 +119,27 @@ Canonical cwd selection (see ARCHITECTURE §15): when multiple local checkouts o
 
 To populate `branch`, `supervisor/src/git-introspect.ts` now runs `git symbolic-ref --short HEAD` per scanned repo (null on detached HEAD). The wire field is optional/back-compat — pre-0.5 supervisors that don't ship branch info still work; the picker simply omits the branch suffix.
 
+### Connections repo-list worktree hide (scan enrichment)
+
+The **settings → Connections** repo table is fed by `POST /api/supervisors/:id/scan`
+(`repo.scan` → the legacy `scanAll`/`ScannedRepo` shape), which is a *different*
+path from `GET /api/sessions`/`repo_inventory` and carries **no** worktree
+introspection. PR #249 added a web filter (`SupervisorPage`) to hide worktrees /
+non-canonical sibling clones, but the scan rows never carried `is_worktree` /
+`is_canonical`, so the filter was inert and worktrees + branch-checkout sibling
+clones still cluttered the list.
+
+Fix (no new supervisor MSI): the hub `/scan` handler now joins each scanned repo
+to the supervisor's already-stored `repo_inventory` (the introspection scan, which
+*does* carry `is_worktree` + `canonical`) by normalized `local_path` and stamps
+`is_worktree` / `is_canonical` onto the response
+(`hub/src/api/supervisors.ts::enrichScanWithInventory`). The web filter predicate
+is `isWorktreeOrNonCanonicalRepo()` in `web/src/lib/session-list.ts` (single source
+of truth; absent flags → shown, so legacy/unenriched entries still render). The
+sidebar/session-list path was already correct (collapse by `repo_key`); only the
+Connections list was broken. Tests: `hub/test/scan-worktree-enrich.test.ts`,
+`web/test/session-list.test.ts`.
+
 ## Create-on-GitHub flow
 
 For folders in **Needs attention**, the user can promote a local repo to a fresh GitHub repo:
