@@ -88,7 +88,12 @@ machine. Connects to `/ws/agent` with an API key; hosts one CLI subprocess per a
   in `hub/src/ws/supervisor-registry.ts` and folds it into `GET /api/sessions`'s `active` flag.
 - **Idle teardown** (`hub/src/ws/idle-teardown.ts`): subscriber count → 0 starts a
   `REMO_SESSION_IDLE_GRACE_SECONDS` timer → `shutdown`/`idle_no_subscribers`. Orchestrator
-  session is exempt.
+  session is exempt. On `shutdown` receipt the supervisor writes a fail-open "memory before
+  killing" breadcrumb (`supervisor/src/runners/session-breadcrumb.ts` →
+  `%LOCALAPPDATA%\remo-code-supervisor\session-breadcrumbs\<sessionId>.json`) recording
+  why/when the live process was reaped. Transcript itself is never lost (resume-by-`project_dir`);
+  the human-only PTY invariant forbids the hub injecting an agent turn pre-kill, so this is the
+  only invariant-safe place to persist the breadcrumb.
 - **Config:** `%LOCALAPPDATA%\remo-code-supervisor\config.json` (Tauri first-run wizard).
 
 ## Database
