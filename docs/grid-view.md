@@ -12,6 +12,19 @@ single inline square expand at a time.
 > DB-persisted active tab+cell).
 > Routes: `#/grid`, `#/grid/:tabId`.
 
+> **PTY cutover (`feat/grid-terminal-ui`):** when `pty_interactive` is set
+> (`GET /api/client-config` flag, or the `remo:pty-interactive=1` localStorage
+> dev override — the SAME selection `ChatLayout` uses for single view), each
+> grid cell and each mobile-accordion row renders **`TerminalSurface`** (the raw
+> `claude`/`codex` TUI over the supervisor ConPTY) instead of `ChatSurface`,
+> wired to the shared WS `subscribe`/`send`. The cell looks exactly like single
+> view's terminal + on-screen key toolbar (Esc/arrows/Tab/Enter/^C/**Ctrl+V
+> paste**/attach), laid out as the existing grid of tabbed windows. `ChatSurface`
+> remains the fallback when the flag is off (its deletion is gated separately —
+> see `docs/cutover-gate-june15.md`). The terminal owns its own scrollback inside
+> a bounded `min-h-0`/`overflow-hidden` (desktop) or `aspect-square` (mobile) box,
+> and the key toolbar is `sticky top-0` so it never scrolls off.
+
 ---
 
 ## Overview
@@ -61,9 +74,10 @@ This is what makes 12 cells × 5 msg/sec feasible.
 | File                                          | Role                                                                  |
 |-----------------------------------------------|-----------------------------------------------------------------------|
 | `web/src/components/GridPage.tsx`             | Top-level desktop view. Tab bar, layout picker, CSS grid, picker.     |
-| `web/src/components/ChatSurface.tsx`          | The chat surface — three densities (`full`, `cell`, `mobile-expanded`). Owns subscribe lifecycle. |
-| `web/src/components/MobileAccordion.tsx`      | Mobile branch — vertical rows, one expanded at a time, unmount on collapse. |
-| `web/src/components/MobileAccordionRow.tsx`   | Row UI + the conditional `<ChatSurface density="mobile-expanded">` mount. |
+| `web/src/components/ChatSurface.tsx`          | The chat surface — three densities (`full`, `cell`, `mobile-expanded`). Owns subscribe lifecycle. Fallback when `pty_interactive` is off. |
+| `web/src/components/TerminalSurface.tsx`      | Raw-terminal (PTY) surface rendered in each cell/row when `pty_interactive` is on. Sticky on-screen key toolbar (Esc/arrows/Tab/Enter/^C/Ctrl+V-paste/attach); xterm owns its own scroll. |
+| `web/src/components/MobileAccordion.tsx`      | Mobile branch — vertical rows, one expanded at a time, unmount on collapse. Forwards `ptyInteractive`. |
+| `web/src/components/MobileAccordionRow.tsx`   | Row UI + the conditional `<ChatSurface density="mobile-expanded">` (or `<TerminalSurface>` when `ptyInteractive`) mount. |
 | `web/src/components/SessionPicker.tsx`        | Add/remove sessions from the active tab.                              |
 | `web/src/lib/chat-tabs-api.ts`                | Typed `/api/chat-tabs/*` + batch-messages wrappers.                   |
 | `web/src/lib/raf-batch.ts`                    | RAF coalescer used by `ChatSurface` for `text_delta`.                 |
