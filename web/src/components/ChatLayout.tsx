@@ -236,7 +236,7 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
       {/* Main chat area — NO app header here; AppShell owns it. `md:pl-3` insets
           the whole chat column (header strip + content) off the sidebar so the
           header bar doesn't sit flush against the sidebar border. */}
-      <div className="flex-1 flex flex-col min-w-0 md:pl-3">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 md:pl-3">
         {/* Chat-specific session strip (kept — it's session chrome, not app chrome). */}
         <div className="relative z-40 flex items-center gap-2 sm:gap-3 px-3 md:px-6 py-2 safe-x border-b border-[var(--border-color)]/40 bg-[var(--bg-secondary)]/40 backdrop-blur-sm shrink-0">
           {/* Mobile (< md): the desktop left sidebar is hidden, so the session

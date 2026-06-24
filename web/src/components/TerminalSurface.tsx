@@ -128,6 +128,10 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     if (!hostRef.current) return
     const term = new Terminal({
       cursorBlink: true,
+      // Deep scrollback so the user can scroll back through prior output (normal
+      // buffer / shell). Full-screen TUIs use the alt-screen buffer and own their
+      // own scrolling — scrollback only applies to the normal buffer.
+      scrollback: 5000,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize: 13,
       theme: {
@@ -263,7 +267,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
           Esc, Tab, Ctrl-C) plus file attach. onMouseDown/preventDefault keeps
           terminal focus so typing stays live. */}
       <div
-        className="flex flex-wrap items-center gap-1 px-1 pb-1 shrink-0"
+        className="sticky top-0 z-10 flex flex-wrap items-center gap-1 px-1 py-1 shrink-0 bg-[var(--bg-primary)] border-b border-[var(--border-color)]/40"
         onMouseDown={(e) => e.preventDefault()}
       >
         <button type="button" className={btn} title="Escape" onClick={() => sendKey(KEY_SEQUENCES.esc)}>Esc</button>
@@ -289,7 +293,10 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       </div>
       <div
         ref={hostRef}
-        style={{ flex: 1, minHeight: 0, width: '100%', background: 'var(--bg-primary)' }}
+        // overflow:hidden bounds the host so xterm's own .xterm-viewport owns the
+        // scroll (touch + wheel) inside a definite height — without this the host
+        // can grow to its content and the page/toolbar scroll instead of the term.
+        style={{ flex: 1, minHeight: 0, width: '100%', overflow: 'hidden', background: 'var(--bg-primary)' }}
       />
     </div>
   )
