@@ -20,6 +20,8 @@ steps:
       JWT_SECRET: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
       DATABASE_URL: postgres://localhost:5432/placeholder
     commands:
+      # oven/bun image ships without git; the drift check below shells out to it.
+      - apt-get update && apt-get install -y git
       - bun install
       - bun run docs:sync
       - |
