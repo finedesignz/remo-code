@@ -484,7 +484,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase OEE-01: e2e-harness-and-ephemeral-postgres
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: Isolated e2e harness boots the real `hub/src/db/schema.sql` unmodified against an EPHEMERAL non-prod Postgres, guarded by an explicit non-prod DSN check that refuses to run if `DATABASE_URL` resembles the Coolify prod DSN. Single reusable setup/teardown others build on.
 - Depends on: []
@@ -493,7 +493,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase OEE-02: scripted-bound-session-sink
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: A scripted bound-session sink captures prompts injected by the orchestrator and replays canned agent replies containing `<<STATE>>`/`<<NOTIFY>>`/`<<GATE>>` sentinels — deterministic, no live `claude` subprocess.
 - Depends on: [Phase OEE-01]
@@ -502,7 +502,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase OEE-03: queue-lock-concurrency
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: E2e-prove `routine_queue` + drain worker + per-session running-lock under real PG: global concurrency cap holds, per-session coalescing (no stacking), stale/foreign queue entries are no-ops.
 - Depends on: [Phase OEE-01, Phase OEE-02]
@@ -511,7 +511,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase OEE-04: due-rows-to-waves
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: E2e-prove real `orchestrator_rows` + `schedule_rule` windows flow through the due-scan → controller → dependency-aware wave ordering (plan→execute→ship; merge-to-main excluded outside its active window).
 - Depends on: [Phase OEE-01, Phase OEE-02, Phase OEE-03]
@@ -520,7 +520,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase OEE-05: macro-cycle-and-sentinels
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: E2e-prove TMAC `runMacroCycle`: one macro prompt per `macro_task_type`, sentinel reconciliation into `routine_run_log` (STATE→rationale/outcome), halt on an open mandatory gate per `lifecycle_stage`, re-inject otherwise.
 - Depends on: [Phase OEE-01, Phase OEE-02, Phase OEE-04]
@@ -529,7 +529,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase OEE-06: costcap-holds-on-live-path
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: E2e-prove every injected turn traverses the non-bypassable `dailyCostCapGate`; force the cap and confirm dispatch is BLOCKED. Prove the invariant, never weaken it (no test-only bypass).
 - Depends on: [Phase OEE-01, Phase OEE-02, Phase OEE-05]
@@ -538,7 +538,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase OEE-07: stage-gated-notify
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: E2e-prove `notify.ts` stage matrix fires correctly off reconciled `<<NOTIFY>>`/`<<GATE>>` sentinels (dev=silent, prod-maintenance=halt+notify) with NO real outbound side effects (channels stubbed/captured).
 - Depends on: [Phase OEE-05]
@@ -547,7 +547,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase OEE-08: verify-tail
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: E2e-prove the terminal verify-tail runs every tick with `REMO_VERIFY_*` pointed at a stub target and records its result; confirm it is a clean no-op when the envs are unset.
 - Depends on: [Phase OEE-04, Phase OEE-05]
@@ -556,7 +556,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase OEE-09: legacy-wave-rollback-parity
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: Smoke the documented rollback lever (`REMO_ORCHESTRATOR_LEGACY_WAVES=1`) through the same harness so the rollback path is proven, not assumed.
 - Depends on: [Phase OEE-04]
@@ -565,7 +565,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase OEE-10: entrypoint-runbook-qc-and-docs
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: A single `bun run orchestrator:e2e` entrypoint wires the harness (OEE-01..09); write the go/no-go enablement runbook (staging-first flip checklist, concurrency/cost defaults, rollback). Triple-QC green (`bun run check-baseline`); docs sweep replaces "e2e-unproven" in `docs/auto-dev-orchestrator.md` with the proven matrix + runbook link; reconcile STATE.md. Prod flag stays OFF.
 - Depends on: [Phase OEE-06, Phase OEE-07, Phase OEE-08, Phase OEE-09]
