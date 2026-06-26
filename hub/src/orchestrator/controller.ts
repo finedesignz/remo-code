@@ -51,6 +51,22 @@ export function useMacroPath(): boolean {
   return !legacy;
 }
 
+// ── BSA-01: autospawn gate (default OFF) ─────────────────────────────────────
+/**
+ * REMO_ORCHESTRATOR_AUTOSPAWN gates the build-session AUTOSPAWN capability (BSA):
+ * when a due build task's session is OFFLINE but its supervisor is online, the
+ * inject seam (BSA-02) may spawn a hub-visible supervisor-hosted session to drive
+ * the macro prompt. Default OFF ('0'; accepts 1|true|yes|on). Read at CALL-TIME
+ * (like useMacroPath / isOrchestratorEnabled), not import-time, so tests toggle it
+ * via process.env. Carries the existing REMO_ORCHESTRATOR_ENABLED gate (BSA-02
+ * requires BOTH ON). No caller acts on this yet — this foundation only exposes the
+ * predicate for BSA-02 to wire.
+ */
+export function isAutospawnEnabled(): boolean {
+  const raw = (process.env.REMO_ORCHESTRATOR_AUTOSPAWN ?? '0').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
 // ── Live-path gate (carried Phase-22 gate; decision D10) ─────────────────────
 /**
  * REMO_ORCHESTRATOR_ENABLED gates the LIVE controller path. Default OFF ('0').

@@ -179,6 +179,32 @@ export async function getTodayTokenCostUsd(userId: string, timezone: string): Pr
   return Number(rows[0]?.sum ?? 0)
 }
 
+/**
+ * BSA-04 — today's accumulated TOKEN total for a user, in the user's IANA tz.
+ *
+ * The token-count twin of {@link getTodayTokenCostUsd}: backs the non-bypassable
+ * `dailyTokenCapGate` (dispatch/gates.ts) so the orchestrator has a real ceiling
+ * that means something on a flat-rate Max subscription (where the dollar cost cap
+ * is meaningless — issue #6). Sums ALL consumed tokens (input + output + both
+ * cache buckets) from `token_usage` with the SAME tz-day boundary the cost cap +
+ * GET /api/usage/cost "today" use, so all three windows agree. token_usage is the
+ * single source (every usage_event over /ws/agent — interactive, telegram,
+ * webhook, scheduled), so no double-count.
+ */
+export async function getTodayTokenTotal(userId: string, timezone: string): Promise<number> {
+  const tz = timezone || 'UTC'
+  const rows = await sql<{ sum: string | null }[]>`
+    SELECT COALESCE(SUM(
+      input_tokens + output_tokens
+      + cache_creation_input_tokens + cache_read_input_tokens
+    ), 0)::text AS sum
+    FROM token_usage
+    WHERE user_id = ${userId}
+      AND created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}
+  `
+  return Number(rows[0]?.sum ?? 0)
+}
+
 export interface SessionUsageRow extends UsageTotals {
   session_id: string | null
   session_name: string | null
