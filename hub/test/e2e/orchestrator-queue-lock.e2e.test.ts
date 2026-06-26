@@ -68,12 +68,17 @@ maybeDescribe('OEE-03 e2e — routine_queue + drain worker + per-session lock (r
     return rows[0].id;
   }
 
-  /** Clear all queue rows for this harness's sessions (per-test isolation). */
+  /**
+   * Clear the ENTIRE routine_queue before each test. The global concurrency cap is
+   * a GLOBAL invariant — `claimCycles` derives available slots from
+   * `count(*) WHERE status='running'` across ALL sessions (queue.ts), not per-user.
+   * On the shared CI Postgres, residual 'running' rows left by sibling test files
+   * would shrink the cap and make these assertions flaky (claim 0). This file runs
+   * in its own `bun test` process serially (check-baseline isolation), so wiping the
+   * whole table is safe and makes the global-cap measurement deterministic.
+   */
   async function clearQueue(): Promise<void> {
-    await h.sql`
-      DELETE FROM routine_queue
-      WHERE session_id IN (SELECT id FROM sessions WHERE user_id = ${h.userId})
-    `;
+    await h.sql`DELETE FROM routine_queue`;
   }
 
   // ── Proof 1: global concurrency cap holds ──────────────────────────────────
