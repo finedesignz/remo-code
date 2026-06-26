@@ -13,15 +13,13 @@ steps:
   - name: smoke
     image: oven/bun:latest
     commands:
-      # NOTE: values are hardcoded on purpose. Woodpecker rewrites `${...}` as its own
-      # pipeline vars before the shell runs (the original `sleep "${COOLIFY_DEPLOY_WAIT_SECONDS:-120}"`
-      # collapsed to `sleep ""` → "invalid time interval", failing every smoke), and the
-      # `${...}` / `$${...}` escape forms make Woodpecker's parser error ("unable to parse
-      # variable name") which blocks the whole repo pipeline config. Plain literals avoid both.
+      # Values are hardcoded on purpose. Woodpecker scans the whole file for its own
+      # dollar-brace variable syntax (even inside comments and shell strings) and rewrites
+      # it before the step runs, so any such reference collapsed the wait into an empty
+      # sleep and any escaped form errored the parser. Plain literals avoid both. The
+      # wait matches the Coolify rollout; the URL is the prod hub.
       - bun install --frozen-lockfile
       - echo "sleeping 120s for Coolify rollout"
       - sleep 120
       - echo "smoking https://app.remo-code.com"
       - bun run smoke -- https://app.remo-code.com
-
-# (re-triggered with a plain commit message to avoid the Woodpecker metadata var-parse error)
