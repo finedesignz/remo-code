@@ -175,14 +175,19 @@ maybe('OEE-09 e2e — legacy-wave rollback parity (REMO_ORCHESTRATOR_LEGACY_WAVE
     const runner = controllerMod.makeCycleRunner(undefined, waveRunnerMod.STUB_SEAMS);
     await runner(queueEntry(sessionId));
 
-    // The legacy wave engine wrote exactly one routine_run_log row for 'plan'.
+    // The legacy wave engine wrote a routine_run_log row for the seeded 'plan'
+    // command. Scope to THIS test's own session and assert CONTAINMENT of the
+    // expected legacy 'plan' row carrying the STUB_SEAMS placeholder outcome —
+    // robust to extra wave/verify rows (e.g. a 'deploy-verify' verify-tail row)
+    // that the wave engine may also emit. The macro path would write NEITHER.
     const logged = await sql<{ command: string; outcome: string | null }[]>`
       SELECT command, outcome FROM routine_run_log WHERE session_id = ${sessionId}
     `;
-    expect(logged.map((r) => r.command)).toEqual(['plan']);
-    // STUB_SEAMS reports its placeholder outcome — proves the WAVE engine ran (the
-    // macro path would never write this row).
-    expect(logged[0].outcome).toBe('skipped_phase25_stub');
+    expect(logged.map((r) => r.command)).toContain('plan');
+    // STUB_SEAMS reports its placeholder outcome on the 'plan' row — proves the
+    // WAVE engine ran (the macro path would never write this row).
+    const planRow = logged.find((r) => r.command === 'plan');
+    expect(planRow?.outcome).toBe('skipped_phase25_stub');
   });
 
   test('contrast — default (flag unset) macro path writes NO wave run-log row', async () => {
