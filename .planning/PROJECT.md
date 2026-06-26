@@ -1,0 +1,50 @@
+<!-- updated: 2026-06-25 -->
+# Project — remo-code
+
+## What This Is
+
+Web app to chat with local Claude Code / Codex CLI sessions from any browser or phone. A local
+**Tauri Supervisor** (MSI, one per host) spawns the CLI and relays activity to a **hub** (Bun + Hono,
+port 3040) over `/ws/agent`; browsers connect to `/ws/client`. Live in prod at **https://app.remo-code.com**
+(Coolify, Docker). Open-source: `finedesignz/remo-code`. Full architecture + invariants in `CLAUDE.md`
+and `.planning/STATE.md`.
+
+## Core Value
+
+Remote, full-visibility control of persistent local coding-agent sessions (thinking, tool calls,
+streaming text, scheduled tasks, grid view, Telegram bridge, error-capture self-heal) with a
+non-bypassable daily cost cap and Titanium-aligned auth.
+
+## Shipped Milestones
+
+- **v1.0** (Phases 01–14) — shipped + archived 2026-06-02 (`.planning/milestones/v1.0-*`).
+- **m-interactive-pty-runner** (Phases 15–20) — shipped + live 2026-06-04. Interactive `claude`/`codex`
+  PTY terminal is the default web/phone human surface. Cutover-flip + ChatSurface deletion DEFERRED
+  on a postponed Anthropic billing measurement (`docs/cutover-gate-june15.md`).
+- **TMAC** (Phases TMAC-01..06) — built + merged 2026-06-08. Autonomous task-type macro prompt path is
+  the default orchestrator cycle-runner; legacy micro-row wave engine kept behind a rollback flag.
+
+## Current Milestone: OEE — Orchestrator E2E Prove-Out
+
+**Goal:** Prove the Auto-Dev Orchestrator + TMAC macro path works end-to-end against real Postgres and a
+scripted bound session in an isolated harness (never prod), so `REMO_ORCHESTRATOR_ENABLED` can later be
+flipped with evidence. Pure validation of already-merged, flag-gated-OFF code.
+
+**Requirements:** `.planning/milestones/OEE-REQUIREMENTS.md` (OEE-01..11).
+
+## Evolution
+
+This document evolves at phase transitions and milestone boundaries.
+
+**After each phase transition** (via `/gsd-transition`):
+1. Requirements invalidated? → Move to Out of Scope with reason
+2. Requirements validated? → Move to Validated with phase reference
+3. New requirements emerged? → Add to Active
+4. Decisions to log? → Add to Key Decisions
+5. "What This Is" still accurate? → Update if drifted
+
+**After each milestone** (via `/gsd-complete-milestone`):
+1. Full review of all sections
+2. Core Value check — still the right priority?
+3. Audit Out of Scope — reasons still valid?
+4. Update Context with current state
