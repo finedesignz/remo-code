@@ -34,6 +34,8 @@ const UPCOMING_WINDOW_MS = 24 * 60 * 60 * 1000;
 interface Props {
   token: string;
   subscribe?: (handler: (msg: any) => void) => () => void;
+  /** Signed-in user's email — auto-fills the notes template NOTIFY_EMAIL. */
+  userEmail?: string;
 }
 
 interface ScheduleGroup {
@@ -42,7 +44,7 @@ interface ScheduleGroup {
   tasks: ScheduledTask[];
 }
 
-export function ScheduleTab({ token, subscribe }: Props) {
+export function ScheduleTab({ token, subscribe, userEmail }: Props) {
   const {
     schedules,
     loading,
@@ -51,6 +53,7 @@ export function ScheduleTab({ token, subscribe }: Props) {
     update,
     remove,
     toggle,
+    runNow,
     refetch,
   } = useSchedules(token);
 
@@ -61,6 +64,8 @@ export function ScheduleTab({ token, subscribe }: Props) {
   const [editTemplate, setEditTemplate] = useState<GsdTemplate | null>(null);
   const [drawerTaskId, setDrawerTaskId] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  const [runningId, setRunningId] = useState<string | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   // Single-page toolbar state (Upcoming folded into a sort + filter).
@@ -162,6 +167,22 @@ export function ScheduleTab({ token, subscribe }: Props) {
     }
     setConfirmingDelete(null);
   };
+  // Run a task immediately. Optimistic: disable the row's button + spinner,
+  // then refresh schedules so the new run's status (running/ok/failed) and the
+  // run-history drawer reflect it. Surfaces dispatch errors inline.
+  const handleRunNow = async (id: string) => {
+    setRunError(null);
+    setRunningId(id);
+    try {
+      await runNow(id);
+      setDrawerTaskId(id);
+      await refetch();
+    } catch (e: any) {
+      setRunError(e?.message ?? "Failed to run task");
+    } finally {
+      setRunningId(null);
+    }
+  };
   const toggleGroup = (key: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -246,6 +267,12 @@ export function ScheduleTab({ token, subscribe }: Props) {
         </select>
       </div>
 
+      {runError && (
+        <div className="rounded-lg bg-red-500/10 ring-1 ring-red-500/30 px-3 py-2 text-sm text-red-300">
+          {runError}
+        </div>
+      )}
+
       {isEmpty ? (
         <EmptyState
           title="No scheduled tasks"
@@ -284,7 +311,9 @@ export function ScheduleTab({ token, subscribe }: Props) {
                         key={t.id}
                         task={t}
                         confirming={confirmingDelete === t.id}
+                        running={runningId === t.id}
                         onClick={() => setDrawerTaskId(t.id)}
+                        onRunNow={() => void handleRunNow(t.id)}
                         onEdit={() => handleEdit(t)}
                         onToggle={() => void toggle(t.id, !t.enabled)}
                         onDelete={() => setConfirmingDelete(t.id)}
@@ -305,6 +334,7 @@ export function ScheduleTab({ token, subscribe }: Props) {
           token={token}
           existing={editing}
           template={editTemplate}
+          userEmail={userEmail}
           allSchedules={schedules}
           onClose={handleClose}
           onSave={async (data) => {
@@ -386,6 +416,20 @@ function NewTaskMenu({
   );
 }
 
+function PlayIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  );
+}
+
 function Chevron({ open }: { open: boolean }) {
   return (
     <svg
@@ -407,7 +451,9 @@ function Chevron({ open }: { open: boolean }) {
 function ScheduleRow({
   task,
   confirming,
+  running,
   onClick,
+  onRunNow,
   onEdit,
   onToggle,
   onDelete,
@@ -416,7 +462,9 @@ function ScheduleRow({
 }: {
   task: ScheduledTask;
   confirming: boolean;
+  running: boolean;
   onClick: () => void;
+  onRunNow: () => void;
   onEdit: () => void;
   onToggle: () => void;
   onDelete: () => void;
@@ -494,6 +542,15 @@ function ScheduleRow({
             </>
           ) : (
             <>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onRunNow}
+                loading={running}
+                icon={<PlayIcon />}
+                title="Run now"
+                aria-label="Run now"
+              />
               <Button variant="ghost" size="sm" onClick={onToggle}>
                 {task.enabled ? "Disable" : "Enable"}
               </Button>

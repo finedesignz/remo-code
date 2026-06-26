@@ -7,7 +7,7 @@ import { PostRunActionsEditor } from './PostRunActionsEditor'
 import { ScheduleRulesBuilder } from './ScheduleRulesBuilder'
 import { type ScheduleRule, ruleToCron, defaultRule, validateRule } from '../lib/schedule-rules'
 import { computeTaskAutoName } from '../lib/task-name'
-import { TASK_TEMPLATES, isReplaceableNotes } from '../lib/task-templates'
+import { TASK_TEMPLATES, fillNotesPlaceholders } from '../lib/task-templates'
 import { type GsdTemplate, templateScheduleRules, buildGsdTemplatePrompt } from '../lib/gsd-templates'
 
 interface Props {
@@ -21,6 +21,11 @@ interface Props {
    * `payload.template_id` + `payload.args.gsd` on save.
    */
   template?: GsdTemplate | null
+  /**
+   * Signed-in user's email, used to auto-fill the `<your@email>` /
+   * NOTIFY_EMAIL placeholder in the prefilled Notes template.
+   */
+  userEmail?: string
   onClose: () => void
   onSave: (data: ScheduleCreateInput) => Promise<void>
 }
@@ -57,7 +62,7 @@ const COMMON_TZS = [
   'Australia/Sydney',
 ]
 
-export function ScheduleEditor({ token, existing, allSchedules, template, onClose, onSave }: Props) {
+export function ScheduleEditor({ token, existing, allSchedules, template, userEmail, onClose, onSave }: Props) {
   // A template prefill only applies to NEW tasks (never override an edit).
   const tpl = existing ? null : template ?? null
   // Basic fields
@@ -78,13 +83,11 @@ export function ScheduleEditor({ token, existing, allSchedules, template, onClos
     const existingNotes = existing?.payload?.notes ?? ''
     if (existingNotes) return existingNotes
     const initialType = existing?.task_type ?? 'dev'
-    return TASK_TEMPLATES[initialType] ?? ''
+    return fillNotesPlaceholders(TASK_TEMPLATES[initialType] ?? '', { email: userEmail })
   })
-
-  useEffect(() => {
-    if (existing) return
-    setNotes(prev => isReplaceableNotes(prev) ? (TASK_TEMPLATES[taskType] ?? '') : prev)
-  }, [taskType, existing])
+  // Once the user types into Notes we never auto-overwrite their text (incl.
+  // editing an existing task, whose notes are treated as already authored).
+  const [notesEdited, setNotesEdited] = useState<boolean>(!!(existing?.payload?.notes))
 
   const [scheduleRules, setScheduleRules] = useState<ScheduleRule[]>(() => {
     const r = existing?.schedule_rules
@@ -101,6 +104,44 @@ export function ScheduleEditor({ token, existing, allSchedules, template, onClos
 
   const [targetKind, setTargetKind] = useState<TargetKind>(existing?.target_kind ?? 'session')
   const [targetId, setTargetId] = useState<string | null>(existing?.target_id ?? null)
+
+  // Coolify app bound to the selected target session (for the
+  // `<coolify-app-slug>` / `<coolify-uuid>` placeholders). Resolved lazily from
+  // the cache; unresolved values leave the placeholder intact.
+  const [coolifyApp, setCoolifyApp] = useState<{ slug: string | null; uuid: string | null }>({ slug: null, uuid: null })
+  useEffect(() => {
+    if (targetKind !== 'session' || !targetId || !token) {
+      setCoolifyApp({ slug: null, uuid: null })
+      return
+    }
+    let cancelled = false
+    void hubFetch<{ application_uuid?: string | null; app_slug?: string | null }>(
+      token, `/api/sessions/${targetId}/coolify-app`,
+    )
+      .then((d) => {
+        if (cancelled) return
+        setCoolifyApp({ slug: d?.app_slug ?? null, uuid: d?.application_uuid ?? null })
+      })
+      .catch(() => { if (!cancelled) setCoolifyApp({ slug: null, uuid: null }) })
+    return () => { cancelled = true }
+  }, [targetKind, targetId, token])
+
+  // The notes template prefilled with every placeholder we can resolve from the
+  // current user + selected target. Reactive: changing target/type re-resolves.
+  const resolvedNotesTemplate = useMemo(
+    () => fillNotesPlaceholders(TASK_TEMPLATES[taskType] ?? '', {
+      email: userEmail,
+      coolifyAppSlug: coolifyApp.slug,
+      coolifyAppUuid: coolifyApp.uuid,
+    }),
+    [taskType, userEmail, coolifyApp.slug, coolifyApp.uuid],
+  )
+
+  useEffect(() => {
+    if (existing) return
+    if (notesEdited) return
+    setNotes(resolvedNotesTemplate)
+  }, [resolvedNotesTemplate, notesEdited, existing])
 
   const [catchup, setCatchup] = useState<CatchupPolicy>(existing?.catchup_policy ?? 'skip')
   const [maxConcurrent, setMaxConcurrent] = useState(existing?.max_concurrent ?? 1)
@@ -460,7 +501,7 @@ export function ScheduleEditor({ token, existing, allSchedules, template, onClos
             <Field label="Notes (optional)">
               <textarea
                 value={notes}
-                onChange={(e) => setNotes(e.target.value)}
+                onChange={(e) => { setNotes(e.target.value); setNotesEdited(true) }}
                 rows={3}
                 placeholder="Any custom instructions..."
                 className="w-full px-3 py-2 bg-[var(--bg-primary)]/60 rounded-lg text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-orange-500 resize-y"

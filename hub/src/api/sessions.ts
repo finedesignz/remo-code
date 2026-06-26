@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity, setSessionSkipPermissions, getSessionSkipPermissions, getSessionSkipPermissionsByRepo } from '../db/dal'
+import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity, setSessionSkipPermissions, getSessionSkipPermissions, getSessionSkipPermissionsByRepo, getCoolifyAppByRepoKey } from '../db/dal'
+import { parseGitRemote } from '../lib/repo-key.ts'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
 import { getChannel } from '../ws/registry'
@@ -115,6 +116,40 @@ sessions.get('/:id', async (c) => {
   const session = await getSession(c.req.param('id'), userId)
   if (!session) return c.json({ error: 'not found' }, 404)
   return c.json(session)
+})
+
+/**
+ * Resolve the Coolify app bound to a session's repo, for auto-filling the
+ * `<coolify-uuid>` / `<coolify-app-slug>` placeholders in a scheduled-task's
+ * notes template. Best-effort + non-throwing: returns nulls when the session
+ * is not GitHub-keyed or no Coolify app has been mapped to its repo yet (the
+ * `coolify_app_repo` cache is lazily populated from deploy-failure webhooks).
+ * The client leaves unresolved placeholders intact.
+ */
+sessions.get('/:id/coolify-app', async (c) => {
+  const userId = c.get('userId') as string
+  const session = await getSession(c.req.param('id'), userId)
+  if (!session) return c.json({ error: 'not found' }, 404)
+
+  const repoKey = (session as any).repo_key as string | null
+  if (!repoKey) return c.json({ application_uuid: null, app_slug: null })
+
+  let applicationUuid: string | null = null
+  let gitUrl: string | null = null
+  try {
+    const row = await getCoolifyAppByRepoKey(repoKey, userId)
+    if (row) {
+      applicationUuid = row.application_uuid
+      gitUrl = row.git_full_url
+    }
+  } catch { /* best-effort — fall through to nulls */ }
+
+  // Derive a slug from the git remote's repo name (the common Coolify app slug
+  // convention), preferring the cached git URL, then the session's GitHub repo.
+  const fromGit = parseGitRemote(gitUrl)?.repo ?? null
+  const appSlug = fromGit ?? ((session as any).github_repo as string | null) ?? null
+
+  return c.json({ application_uuid: applicationUuid, app_slug: appSlug })
 })
 
 // Create a new session — returns the raw token ONCE

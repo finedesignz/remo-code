@@ -99,7 +99,7 @@ export function TasksPage({ token, user, signOut, onNavigate }: Props) {
         </div>
         {view === "schedules" ? (
           <ErrorBoundary tabKey="tasks:list">
-            <ScheduleTab token={token} subscribe={subscribe} />
+            <ScheduleTab token={token} subscribe={subscribe} userEmail={user.email} />
           </ErrorBoundary>
         ) : (
           <ErrorBoundary tabKey="tasks:orchestrator">
