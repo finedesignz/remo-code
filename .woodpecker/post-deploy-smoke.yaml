@@ -12,22 +12,14 @@ labels:
 steps:
   - name: smoke
     image: oven/bun:latest
-    environment:
-      # Defaults match the GHA job. To override, set these as Woodpecker repo
-      # env vars (Settings → Environment) — they take precedence over the
-      # in-script fallbacks below.
-      SMOKE_BASE_URL: https://app.remo-code.com
-      COOLIFY_DEPLOY_WAIT_SECONDS: '120'
     commands:
+      # NOTE: values are hardcoded on purpose. Woodpecker rewrites `${...}` as its own
+      # pipeline vars before the shell runs (the original `sleep "${COOLIFY_DEPLOY_WAIT_SECONDS:-120}"`
+      # collapsed to `sleep ""` → "invalid time interval", failing every smoke), and the
+      # `${...}` / `$${...}` escape forms make Woodpecker's parser error ("unable to parse
+      # variable name") which blocks the whole repo pipeline config. Plain literals avoid both.
       - bun install --frozen-lockfile
-      # Woodpecker interpolates ${...} as its OWN pipeline vars before the shell runs —
-      # the original `sleep "${COOLIFY_DEPLOY_WAIT_SECONDS:-120}"` collapsed to `sleep ""`
-      # (invalid time interval), failing every post-deploy smoke. Woodpecker can't parse
-      # the shell `:-default` form either, so we drop the fallback (both vars are set in
-      # the `environment:` block above) and escape `$` as `$$` so the POSIX shell expands.
-      - |
-        echo "sleeping $${COOLIFY_DEPLOY_WAIT_SECONDS}s for Coolify rollout"
-        sleep "$${COOLIFY_DEPLOY_WAIT_SECONDS}"
-      - |
-        echo "smoking $${SMOKE_BASE_URL}"
-        bun run smoke -- "$${SMOKE_BASE_URL}"
+      - echo "sleeping 120s for Coolify rollout"
+      - sleep 120
+      - echo "smoking https://app.remo-code.com"
+      - bun run smoke -- https://app.remo-code.com
