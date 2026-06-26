@@ -25,6 +25,8 @@ steps:
       DATABASE_URL: postgres://remo:remo@postgres:5432/remo_ci
       JWT_SECRET: ci-placeholder-jwt-secret-min-32-chars-please-do-not-use-in-prod
       REMO_E2E_DB_URL: postgres://remo:remo@postgres:5432/remo_ci
+      # The CI postgres service above is a disposable, ephemeral non-prod DB — opt in to the harness's non-local-host escape hatch.
+      REMO_E2E_ALLOW_NONLOCAL: '1'
     commands:
       - apt-get update && apt-get install -y postgresql-client
       - 'until pg_isready -h postgres -U remo -d remo_ci; do echo waiting-pg; sleep 2; done'
@@ -33,3 +35,5 @@ steps:
       - bun run check-baseline
       - bun run migration-verify
       - bun test hub/test/orchestrator-data-model.test.ts hub/test/orchestrator-queue.test.ts hub/test/orchestrator-run-log.test.ts hub/test/orchestrator-stage-presets.test.ts hub/test/orchestrator-merge-command.test.ts hub/test/migrate-legacy-tasks.test.ts hub/test/feedback-key-ownership.test.ts
+      # OEE orchestrator e2e prove-out — runs the OEE-01..09 suite against the real postgres:16 service (REMO_E2E_DB_URL set above) so the proof is VISIBLE in CI logs. check-baseline already executes these per-file; this is the explicit belt-and-suspenders run.
+      - bun run orchestrator:e2e
