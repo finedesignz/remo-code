@@ -23,3 +23,5 @@ steps:
       - sleep 120
       - echo "smoking https://app.remo-code.com"
       - bun run smoke -- https://app.remo-code.com
+
+# (re-triggered with a plain commit message to avoid the Woodpecker metadata var-parse error)
