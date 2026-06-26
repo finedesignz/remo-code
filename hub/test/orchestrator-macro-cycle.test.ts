@@ -233,6 +233,43 @@ describe('runMacroCycle — F-10 failure notify', () => {
   })
 })
 
+describe('runMacroCycle — BSA-06: dev macro drives the autospawn inject seam', () => {
+  // The autospawn context threaded to inject() is keyed off macro_task_type==='dev'
+  // (BSA-02, macro-cycle.ts §3). A BUILD (dev) task must hand the inject seam an
+  // autospawn-eligible context (isBuild=true + the repo_ident for the allowlist
+  // check); a NON-build task (e.g. the 31 live prod monitoring tasks, which are NOT
+  // 'dev') must NOT — the field is omitted, so the seam keeps its legacy offline
+  // no_session no-op and can never autospawn. The env gate (REMO_ORCHESTRATOR_AUTOSPAWN)
+  // is still required downstream; this only asserts the build SIGNAL, not the launch.
+  test("dev task → inject receives an autospawn-eligible context (isBuild=true, repoIdent)", async () => {
+    const captured: any[] = []
+    const { deps } = spyDeps({
+      inject: (async (input: any) => {
+        captured.push(input.autospawn)
+        return { kind: 'no_session' as const }
+      }) as any,
+    })
+    await runMacroCycle(baseInput({ macroTaskType: 'dev', repoIdent: 'github://acme/widget' }), deps)
+    expect(captured).toHaveLength(1)
+    expect(captured[0]).toBeTruthy()
+    expect(captured[0].isBuild).toBe(true)
+    expect(captured[0].repoIdent).toBe('github://acme/widget')
+  })
+
+  test("non-build task (maintenance — like the live monitoring tasks) → NO autospawn context", async () => {
+    const captured: any[] = []
+    const { deps } = spyDeps({
+      inject: (async (input: any) => {
+        captured.push(input.autospawn)
+        return { kind: 'no_session' as const }
+      }) as any,
+    })
+    await runMacroCycle(baseInput({ macroTaskType: 'maintenance' }), deps)
+    expect(captured).toHaveLength(1)
+    expect(captured[0]).toBeUndefined()
+  })
+})
+
 describe('runMacroCycle — robustness', () => {
   test('a throwing inject is swallowed (cycle never wedges)', async () => {
     const { deps } = spyDeps({

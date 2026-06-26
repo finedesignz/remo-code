@@ -187,6 +187,20 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   (default `/api/sessions,/openapi.json,/docs`), plus `COOLIFY_TOKEN`. Off-hours merge-to-main runs
   ONLY inside the merge row's `schedule_rule.active_window` (no separate env). Full architecture:
   [docs/auto-dev-orchestrator.md](docs/auto-dev-orchestrator.md).
+- **`REMO_ORCHESTRATOR_AUTOSPAWN`** (default **OFF** / `'0'`; accepts `1|true|yes|on`; milestone BSA):
+  gates the **build-session autospawn** capability — when a due `dev` build task's session is OFFLINE but
+  its supervisor is online, the inject seam (`hub/src/orchestrator/inject.ts`) spawns a hub-visible
+  supervisor-hosted session (reusing the scheduler `launchSessionForUser` primitive) and parks the macro
+  prompt in grace, so the orchestrator can take an allowlisted repo due→PR. `isAutospawnEnabled()`
+  (`hub/src/orchestrator/controller.ts`) carries `REMO_ORCHESTRATOR_ENABLED` (BOTH must be ON). True no-op
+  when OFF / empty allowlist. Companions: **`REMO_ORCHESTRATOR_DAILY_TOKEN_CAP`** (default **50_000_000**
+  = 50M tokens/day; non-positive/non-finite ⇒ disabled/fail-open) — the **non-bypassable daily TOKEN
+  ceiling** (`dailyTokenCapGate`, `hub/src/dispatch/gates.ts`), added ALONGSIDE the dollar cost cap because
+  the cost cap is meaningless on a flat-rate Max subscription; and **`REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES`**
+  (default **20**; non-positive/non-finite ⇒ disabled) — the per-day autospawn launch-count cap. Repo
+  allowlist table **`orchestrator_autospawn_allowlist`** (per-user `repo_ident`; default EMPTY ⇒ drives
+  nothing; `isRepoAutospawnAllowed`/`addRepoToAutospawnAllowlist` in `orchestrator-rows-dal.ts`). Flip
+  runbook: [docs/orchestrator-autospawn-runbook.md](docs/orchestrator-autospawn-runbook.md).
 - **`REMO_PTY_INTERACTIVE`** (prod: **ON** since the 2026-06-04 cutover): drives the **web**
   default human surface — `GET /api/client-config` returns `pty_interactive`, and the SPA renders
   `TerminalSurface` (interactive `claude`/`codex` TUI over the Rust ConPTY) instead of the
@@ -235,6 +249,10 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   via `getTodayTokenCostUsd` (same tz-day boundary as `/api/usage/cost`). **Manual / interactive
   chat IS now capped** — not just scheduled runs. `token_usage` is the single source (it records
   every `usage_event`, including scheduled runs), so scheduled-run cost is not double-counted.
+  **BSA (orchestrator inject path) adds a companion non-bypassable daily TOKEN cap** (`dailyTokenCapGate`,
+  default 50M tokens/day) ALONGSIDE the cost cap — `inject.ts` gate list is `[thresholdGate,
+  dailyCostCapGate, dailyTokenCapGate]`; the token cap never replaces the cost cap, and the dollar cost
+  cap is meaningless on a flat-rate Max subscription.
 - **Public webhooks: raw body BEFORE JSON parse**, constant-time secret compare, HMAC over
   `${ts}.${rawBody}`, reject >5min skew. Webhooks mount BEFORE the `/api/*` auth catch-all;
   license gate after auth; `/ws/agent` keyed by `api_keys`. `hub/test/mount-order.test.ts` enforces.

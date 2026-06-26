@@ -131,6 +131,71 @@ In-window it auto-merges PRs the dispatched reviewer marked PASS (FAIL/uncertain
 + surfaced to chat). Powerful commands consume an `orchestrator_approvals` marker
 before injecting so a re-fired window cannot double-merge.
 
+## Build-Session Autospawn (milestone BSA)
+
+**The gap it closes.** The macro path only INJECTS into ONLINE supervisor-connected
+sessions. The owner's real builds run as standalone local `claude` processes invisible
+to the hub, so every prod cycle for an offline build target resolves to `no_session`
+and `routine_run_log.pr_url` stays NULL forever — the orchestrator never actually
+produces a PR. BSA gives the macro path an online, hub-visible build session to drive.
+
+**How — reuse the scheduler launch primitive.** When a due `dev` build task's session
+is OFFLINE but its supervisor is online and autospawn is armed, the inject seam
+(`maybeAutospawnOffline` in `hub/src/orchestrator/inject.ts`) calls the SAME
+battle-tested `launchSessionForUser` / `maybeLaunchOfflineSession` path the scheduler
+uses: it spawns a supervisor-hosted (hub-visible) session, reserves a concurrency slot,
+and PARKS the macro prompt in grace exactly as the scheduler does. The launched runner
+drains the parked prompt on reconnect. The autospawn seam writes ONE
+`routine_run_log` row with `command = 'autospawn-launch'` per real spawn (also the
+source for the per-day launch cap).
+
+**The full gate AND-chain** (ANY miss ⇒ the legacy `no_session`, i.e. a strict no-op):
+
+```
+  autospawn.isBuild === true            (the macro is a BUILD/dev type)
+  && isOrchestratorEnabled()            (REMO_ORCHESTRATOR_ENABLED)
+  && isAutospawnEnabled()               (REMO_ORCHESTRATOR_AUTOSPAWN — default OFF)
+  && isRepoAutospawnAllowed(user, repo) (allowlist NON-EMPTY for this repo)
+  && supervisor online for this user
+  && NOT over the daily TOKEN cap        (dailyTokenCapGate)
+  && NOT over the per-day LAUNCH-count cap
+```
+
+Refusal reasons (typed `InjectOutcome`): `not_allowlisted`, `supervisor_offline`,
+`over_token_cap`, `launch_cap`; success ⇒ `autospawn_launched` / `autospawn_parked`.
+
+**New env knobs + defaults** (full semantics in [CLAUDE.md](../CLAUDE.md)):
+
+| Env | Default | Purpose |
+|---|---|---|
+| `REMO_ORCHESTRATOR_AUTOSPAWN` | OFF (`0`) | Arms the autospawn capability. Accepts `1\|true\|yes\|on`. Carries `REMO_ORCHESTRATOR_ENABLED` (both ON). |
+| `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` | `50_000_000` (50M) | Non-bypassable daily TOKEN ceiling. Non-positive/non-finite ⇒ disabled (fail-open). |
+| `REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES` | `20` | Per-day autospawn launch-count cap. Non-positive/non-finite ⇒ disabled. |
+
+**Repo allowlist.** `orchestrator_autospawn_allowlist` (per-user `repo_ident` =
+`github://owner/repo` or `path://<abs>`; idempotent additive DDL, **default EMPTY** so
+autospawn drives nothing). DAL: `isRepoAutospawnAllowed` / `listRepoAutospawnAllowlist`
+/ `addRepoToAutospawnAllowlist` (`hub/src/db/orchestrator-rows-dal.ts`). Autospawn
+fail-closes to `refused:not_allowlisted` for any repo not on the list.
+
+**Non-bypassable daily TOKEN cap — and WHY.** `dailyTokenCapGate`
+(`hub/src/dispatch/gates.ts`) counts REAL tokens from `token_usage` over the user's
+tz-day (mirroring `getTodayTokenCostUsd`) and blocks at `tokens >= cap`. It is ADDED
+ALONGSIDE the dollar `dailyCostCapGate` in the inject gate list (`[thresholdGate,
+dailyCostCapGate, dailyTokenCapGate]`), never replacing it — because the **dollar cost
+cap is meaningless on a flat-rate Max subscription** (no per-token billing), so a token
+count is what actually bounds a runaway autospawn loop. The seam also pre-checks the
+token cap BEFORE spawning, so it never launches over the ceiling.
+
+**OFF-by-default + inert until armed.** With `REMO_ORCHESTRATOR_AUTOSPAWN` unset OR the
+allowlist empty, the seam is a strict no-op (legacy `no_session`) — merging BSA changes
+NO prod behavior. Arming is the owner go/no-go in the
+[autospawn flip runbook](orchestrator-autospawn-runbook.md). **Proof:** the e2e test
+`hub/test/e2e/orchestrator-autospawn.e2e.test.ts` (real Postgres + stub supervisor,
+`REMO_E2E_DB_URL`-gated) drives due build task + offline session + online supervisor →
+asserts `session.start` fired, prompt parked, drain delivers, and
+`routine_run_log.pr_url` populated on a simulated reply.
+
 ## Gap-scan rotation
 
 `gap-rotation.ts` — a dimension wheel (security, performance, accessibility, test
@@ -195,7 +260,10 @@ Do NOT auto-run against prod — run by hand after reviewing the dry-run output.
 
 ## Cross-cutting invariants
 
-- Cost cap non-bypassable (`dailyCostCapGate` always in the inject gate list).
+- Cost cap non-bypassable (`dailyCostCapGate` always in the inject gate list); BSA adds the
+  companion non-bypassable `dailyTokenCapGate` ALONGSIDE it (never replacing the cost cap).
+- Autospawn (BSA) is OFF-by-default + empty-allowlist-by-default; plan-first, NEVER auto-merges
+  from an autospawned session (merge stays the off-hours window-gated path).
 - `schema.sql` is idempotent-only; data backfills are one-shots in `hub/scripts/`.
 - Single dispatch pipeline (`hub/src/dispatch/`) — no per-subsystem queue/grace.
 - Hub injects TEXT ONLY; the agent owns gh/git/PR/reviewer inside its turn.
