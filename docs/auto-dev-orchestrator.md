@@ -8,8 +8,12 @@ itself spawns parallel Task subagents (locked decision D6). The hub does NOT
 re-implement orchestration and never shells `gh`/git/merge — it ships TEXT ONLY.
 
 > **Default OFF.** With `REMO_ORCHESTRATOR_ENABLED` unset, nothing registers,
-> enqueues, or injects. The live path is e2e-unproven against real Postgres; flip
-> the flag only deliberately (see [Enablement gate](#enablement-gate)).
+> enqueues, or injects. The live path is **e2e-proven against real Postgres** — the OEE
+> suite (`hub/test/e2e/`, run in CI on every PR) proves queue/lock, due→waves,
+> macro-cycle + sentinels, cost-cap, the notify matrix, verify-tail, and legacy-wave
+> rollback parity. Enabling it in prod is still a separate, deliberate **human go/no-go**
+> — see the [Enablement gate](#enablement-gate) and the
+> [enablement runbook](orchestrator-e2e-runbook.md).
 
 ## Model — one orchestrator task per session
 
@@ -158,9 +162,17 @@ caller of the queue's `setCycleRunner` + the only starter of the enqueue tick. W
 the flag OFF: no runner is registered (the drain worker claims nothing), and the
 enqueue tick never starts — so NOTHING is registered, enqueued, or injected.
 
-**Remaining before live enablement:** a real-Postgres end-to-end soak (the wiring is
-unit-tested with injected DB/seams; it has not run against a live DB), and confirming
-the verify-tail target envs in prod.
+**Real-Postgres proof (DONE):** the OEE milestone added an isolated e2e harness + suite
+under `hub/test/e2e/` that drives the REAL orchestrator code against a REAL, disposable
+Postgres — queue/lock, due→waves, macro-cycle + sentinels, cost-cap, notify matrix,
+verify-tail, and legacy-wave rollback parity. It runs in CI on every PR
+(`.woodpecker/qc.yaml` → `bun run orchestrator:e2e` against a `postgres:16` service) and
+locally via `bun run orchestrator:e2e` with `REMO_E2E_DB_URL` set.
+
+**Remaining before live enablement:** confirm the verify-tail target envs in prod and
+complete the staging-first flip — the full go/no-go checklist lives in the
+**[enablement runbook](orchestrator-e2e-runbook.md)**. The prod flag-flip stays a
+separate HUMAN decision; it is NOT part of the OEE milestone.
 
 ## Legacy task migration
 
