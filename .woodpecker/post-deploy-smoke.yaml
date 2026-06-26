@@ -20,15 +20,14 @@ steps:
       COOLIFY_DEPLOY_WAIT_SECONDS: '120'
     commands:
       - bun install --frozen-lockfile
-      # Woodpecker interpolates ${...} as its OWN (here undefined) pipeline vars before
-      # the shell runs — that turned `sleep "${...}"` into `sleep ""` (invalid time
-      # interval) and made every post-deploy smoke fail. Escape `$` as `$$` so the
-      # POSIX shell does the expansion instead.
+      # Woodpecker interpolates ${...} as its OWN pipeline vars before the shell runs —
+      # the original `sleep "${COOLIFY_DEPLOY_WAIT_SECONDS:-120}"` collapsed to `sleep ""`
+      # (invalid time interval), failing every post-deploy smoke. Woodpecker can't parse
+      # the shell `:-default` form either, so we drop the fallback (both vars are set in
+      # the `environment:` block above) and escape `$` as `$$` so the POSIX shell expands.
       - |
-        wait_s="$${COOLIFY_DEPLOY_WAIT_SECONDS:-120}"
-        echo "sleeping $${wait_s}s for Coolify rollout"
-        sleep "$${wait_s}"
+        echo "sleeping $${COOLIFY_DEPLOY_WAIT_SECONDS}s for Coolify rollout"
+        sleep "$${COOLIFY_DEPLOY_WAIT_SECONDS}"
       - |
-        base="$${SMOKE_BASE_URL:-https://app.remo-code.com}"
-        echo "smoking $${base}"
-        bun run smoke -- "$$base"
+        echo "smoking $${SMOKE_BASE_URL}"
+        bun run smoke -- "$${SMOKE_BASE_URL}"
