@@ -239,6 +239,34 @@ export const TASK_TEMPLATES: Partial<Record<TaskType, string>> = {
   security: SECURITY_SCAN_TEMPLATE,
 }
 
+/**
+ * Substitute the literal placeholders in a notes template with real values
+ * resolved from the selected target session + signed-in user. Any value left
+ * undefined/empty keeps its original `<placeholder>` token intact (so the user
+ * can still fill it by hand) — we never blank a field we can't resolve.
+ */
+export interface NotesPlaceholderValues {
+  email?: string | null
+  coolifyAppSlug?: string | null
+  coolifyAppUuid?: string | null
+}
+
+export function fillNotesPlaceholders(
+  template: string,
+  values: NotesPlaceholderValues,
+): string {
+  let out = template
+  const sub = (token: string, value: string | null | undefined) => {
+    const v = (value ?? '').trim()
+    if (!v) return
+    out = out.split(token).join(v)
+  }
+  sub('<your@email>', values.email)
+  sub('<coolify-app-slug>', values.coolifyAppSlug)
+  sub('<coolify-uuid>', values.coolifyAppUuid)
+  return out
+}
+
 /** True if notes is empty or exactly matches any known template (user hasn't edited). */
 export function isReplaceableNotes(notes: string): boolean {
   if (!notes.trim()) return true

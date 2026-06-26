@@ -1803,6 +1803,27 @@ export async function getCoolifyAppRepo(
   return rows[0] ?? null;
 }
 
+/**
+ * Reverse lookup: given a session's `repo_key`, return the most-recently-seen
+ * Coolify app mapping for this user. Used by the schedule editor to auto-fill
+ * the `<coolify-uuid>` / `<coolify-app-slug>` placeholders in a task's notes.
+ * Returns null when no app has been mapped to this repo yet (the cache is
+ * lazily populated from deploy-failure webhooks).
+ */
+export async function getCoolifyAppByRepoKey(
+  repoKey: string,
+  userId: string,
+): Promise<CoolifyAppRepoRow | null> {
+  const rows = await sql<CoolifyAppRepoRow[]>`
+    SELECT application_uuid, user_id, repo_key, git_full_url, updated_at
+    FROM coolify_app_repo
+    WHERE repo_key = ${repoKey} AND user_id = ${userId}
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `;
+  return rows[0] ?? null;
+}
+
 export async function upsertCoolifyAppRepo(input: {
   application_uuid: string;
   user_id: string;
