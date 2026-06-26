@@ -75,6 +75,41 @@ export function bytesToB64(bytes: Uint8Array): string {
 }
 
 /**
+ * Map a textarea InputEvent (inputType, data) to the raw bytes the PTY expects.
+ * This is the EXACTLY-ONCE mobile/IME input seam: on iOS WebKit every keystroke
+ * is routed through composition (keydown keyCode 229) and never reaches xterm's
+ * keyboard handler, so xterm would otherwise both compose/echo the glyph locally
+ * AND let the PTY (claude) echo it back → doubled characters. We instead read the
+ * committed text straight off the helper <textarea>'s input events and send it
+ * once, suppressing xterm's own local render.
+ *
+ * Returns the byte string to send, or null when the event carries nothing to send
+ * (so the caller leaves xterm's onData to handle it — e.g. desktop control keys).
+ * Exported for the exactly-once regression test.
+ */
+export function inputEventToBytes(inputType: string, data: string | null): string | null {
+  switch (inputType) {
+    // Printable text — typed, composed (predictive/IME commit), autocorrect swap,
+    // dictation, or paste. `data` holds the committed string.
+    case 'insertText':
+    case 'insertCompositionText':
+    case 'insertReplacementText':
+    case 'insertFromPaste':
+    case 'insertFromComposition':
+      return data && data.length > 0 ? data : null
+    case 'insertLineBreak':
+    case 'insertParagraph':
+      return '\r'
+    case 'deleteContentBackward':
+      return '\x7f' // DEL — TUIs treat as backspace
+    case 'deleteContentForward':
+      return '\x1b[3~' // forward-delete
+    default:
+      return null
+  }
+}
+
+/**
  * On-screen key sequences for the toolbar. The user's Apple keyboard has no
  * arrow keys, so ↑/↓ (menu navigation) are the critical entries; Esc/Tab/Ctrl-C
  * round out TUI control. Each value is the exact raw byte string sent verbatim
@@ -181,22 +216,37 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       // enterkeyhint omitted: the TUI handles Enter; "go"/"send" labels imply submit
       ta.setAttribute('inputmode', 'text')
     }
-    // iOS COMPOSITION GATE. iOS predictive-text / IME starts a composition on
-    // the helper <textarea>; while composing, xterm fires onData for each
-    // intermediate composition state, which interleaves with claude's PTY echo
-    // and scrambles the in-progress line (chars scatter with gaps) until Enter
-    // makes claude redraw. We suppress those noisy intermediates and let only
-    // the committed string through: xterm fires onData with the FINAL composed
-    // text on compositionend, so guarding the send with `!composing` delivers
-    // the commit exactly once. (Attribute hardening above is necessary but not
-    // sufficient on its own.)
-    let composing = false
-    const onCompStart = () => { composing = true }
-    const onCompEnd = () => { composing = false }
-    if (ta) {
-      ta.addEventListener('compositionstart', onCompStart)
-      ta.addEventListener('compositionend', onCompEnd)
+    // EXACTLY-ONCE MOBILE/IME INPUT (the iOS double-character fix).
+    // On iOS WebKit every keystroke is routed through IME composition (keydown
+    // keyCode 229), so it never reaches xterm's keyboard handler. xterm's
+    // CompositionHelper then renders the composed glyph INLINE in the terminal
+    // buffer while the PTY (claude) ALSO echoes the committed bytes back over
+    // term.data — two glyph sources for the same character → doubling
+    // ("allsso iimm…"). The naive compositionend gate did not fix it.
+    //
+    // Fix: take deterministic control of the helper <textarea>. We read the
+    // committed text off its `beforeinput` events, send those bytes to the PTY
+    // EXACTLY ONCE, and preventDefault() so the textarea value never changes —
+    // which cancels the follow-on `input`/composition events, so xterm neither
+    // composes/echoes locally NOR fires onData for that text. The PTY's own echo
+    // is then the single glyph source. We also reset textarea.value='' so no
+    // composition state accumulates across keystrokes.
+    //
+    // Desktop is unaffected: xterm preventDefaults printable keydowns and emits
+    // onData itself, so no `beforeinput` fires for them — this handler only
+    // engages on the IME/mobile path. Control keys (arrows, Esc, Tab, Ctrl-C,
+    // fn-keys) on BOTH platforms still flow through keydown→onData below.
+    const onBeforeInput = (ev: Event) => {
+      const ie = ev as InputEvent
+      const bytes = inputEventToBytes(ie.inputType, ie.data)
+      if (bytes == null) return // not a text/edit input we own → let xterm handle
+      ev.preventDefault() // cancel local apply + the follow-on input/onData
+      send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(bytes) })
+      // Belt-and-suspenders: drop any text the IME may have already applied so
+      // composition state never accumulates and xterm can't echo it.
+      try { if (ta) ta.value = '' } catch {}
     }
+    if (ta) ta.addEventListener('beforeinput', onBeforeInput)
 
     // Mobile taps on the host div don't reliably focus xterm's hidden textarea,
     // so the keyboard opens but keystrokes go nowhere. Focus the terminal on tap.
@@ -209,11 +259,14 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     // re-clears before writing the replayed buffer.
     term.clear()
 
-    // Keystrokes → term.input (base64 raw bytes).
+    // Keystrokes → term.input (base64 raw bytes). This is the DESKTOP +
+    // control-key path: xterm emits onData for printable keydowns (desktop) and
+    // for control sequences (arrows/Esc/Tab/Ctrl-C/fn) on every platform. Mobile
+    // TEXT input never reaches here — it is consumed (and preventDefaulted) by
+    // the `beforeinput` handler above, so it is sent exactly once and not
+    // doubled. The two paths are disjoint by construction (beforeinput cancels
+    // the input event that would otherwise drive onData), so no guard is needed.
     const dataDisp = term.onData((d) => {
-      // Drop intermediate IME composition states; the committed string still
-      // arrives via the onData fired on compositionend (composing === false).
-      if (composing) return
       send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(d) })
     })
 
@@ -259,10 +312,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
 
     return () => {
       if (rafId) cancelAnimationFrame(rafId)
-      if (ta) {
-        ta.removeEventListener('compositionstart', onCompStart)
-        ta.removeEventListener('compositionend', onCompEnd)
-      }
+      if (ta) ta.removeEventListener('beforeinput', onBeforeInput)
       try { dataDisp.dispose() } catch {}
       try { unsub() } catch {}
       try { ro.disconnect() } catch {}

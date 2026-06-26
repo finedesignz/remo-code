@@ -12,7 +12,7 @@
  * re-base64s it unchanged) and assert the original bytes survive.
  */
 import { describe, test, expect } from 'bun:test'
-import { inputToB64, b64ToBytes } from '../src/components/TerminalSurface'
+import { inputToB64, b64ToBytes, inputEventToBytes } from '../src/components/TerminalSurface'
 
 // Mirror of the (now-correct) supervisor output seam: raw PTY bytes → base64.
 function supervisorWire(rawBytes: Uint8Array): string {
@@ -46,5 +46,41 @@ describe('PTY terminal byte encoding (regression)', () => {
 
   test('b64ToBytes is tolerant of garbage input (returns empty, never throws)', () => {
     expect(b64ToBytes('!!!not-base64!!!').length).toBe(0)
+  })
+})
+
+/**
+ * Exactly-once mobile/iOS input contract (the IME double-echo fix).
+ *
+ * iOS WebKit routes every keystroke through composition; we read committed text
+ * off the helper textarea's `beforeinput` events and send it ONCE. These guard
+ * the pure inputType→bytes mapping that the surface's beforeinput handler uses,
+ * proving a single insertText 'a' maps to exactly one 'a' byte (no double) and
+ * edit keys map to the right control bytes.
+ */
+describe('mobile input — exactly-once inputType→bytes mapping', () => {
+  test("insertText 'a' → single 'a' byte (no doubling)", () => {
+    const bytes = inputEventToBytes('insertText', 'a')
+    expect(bytes).toBe('a')
+    expect(Array.from(b64ToBytes(inputToB64(bytes!)))).toEqual([0x61])
+  })
+
+  test('composed/predictive commit (insertCompositionText) sends the committed text', () => {
+    expect(inputEventToBytes('insertCompositionText', 'hi')).toBe('hi')
+    expect(inputEventToBytes('insertReplacementText', 'the')).toBe('the')
+  })
+
+  test('Enter → CR, backspace → DEL, forward-delete → CSI 3~', () => {
+    expect(inputEventToBytes('insertLineBreak', null)).toBe('\r')
+    expect(inputEventToBytes('insertParagraph', null)).toBe('\r')
+    expect(inputEventToBytes('deleteContentBackward', null)).toBe('\x7f')
+    expect(inputEventToBytes('deleteContentForward', null)).toBe('\x1b[3~')
+  })
+
+  test('empty / unknown inputType yields null (caller defers to xterm onData)', () => {
+    expect(inputEventToBytes('insertText', '')).toBeNull()
+    expect(inputEventToBytes('insertText', null)).toBeNull()
+    expect(inputEventToBytes('historyUndo', null)).toBeNull()
+    expect(inputEventToBytes('formatBold', null)).toBeNull()
   })
 })
