@@ -314,7 +314,7 @@ export function ScheduleEditor({ token, existing, allSchedules, template, onClos
                   className={selectCls}
                 >
                   <option value="">Choose a session...</option>
-                  {sessions.map(s => (
+                  {[...sessions].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })).map(s => (
                     <option key={s.id} value={s.id}>{s.name}{s.project_dir ? ` — ${s.project_dir}` : ''}</option>
                   ))}
                 </select>
