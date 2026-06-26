@@ -24,6 +24,7 @@ mock.module('../src/db/postgres.ts', () => ({
 }))
 mock.module('../src/db/token-usage-dal.ts', () => ({
   getTodayTokenCostUsd: async () => state.spent,
+  getTodayTokenTotal: async () => 0,
 }))
 
 const gatesUrl = `../src/dispatch/gates.ts?t=${Date.now()}${Math.random()}`
