@@ -12,19 +12,14 @@ labels:
 steps:
   - name: smoke
     image: oven/bun:latest
-    environment:
-      # Defaults match the GHA job. To override, set these as Woodpecker repo
-      # env vars (Settings → Environment) — they take precedence over the
-      # in-script fallbacks below.
-      SMOKE_BASE_URL: https://app.remo-code.com
-      COOLIFY_DEPLOY_WAIT_SECONDS: '120'
     commands:
+      # Values are hardcoded on purpose. Woodpecker scans the whole file for its own
+      # dollar-brace variable syntax (even inside comments and shell strings) and rewrites
+      # it before the step runs, so any such reference collapsed the wait into an empty
+      # sleep and any escaped form errored the parser. Plain literals avoid both. The
+      # wait matches the Coolify rollout; the URL is the prod hub.
       - bun install --frozen-lockfile
-      - |
-        wait_s="${COOLIFY_DEPLOY_WAIT_SECONDS:-120}"
-        echo "sleeping ${wait_s}s for Coolify rollout"
-        sleep "${wait_s}"
-      - |
-        base="${SMOKE_BASE_URL:-https://app.remo-code.com}"
-        echo "smoking ${base}"
-        bun run smoke -- "$base"
+      - echo "sleeping 120s for Coolify rollout"
+      - sleep 120
+      - echo "smoking https://app.remo-code.com"
+      - bun run smoke -- https://app.remo-code.com
