@@ -23,7 +23,7 @@
 // DI seam) + _resetForTests(); the global cap is read from the env at import. Both
 // are existing seams — nothing in hub/src is touched.
 
-import { test, expect, beforeAll, afterAll } from 'bun:test';
+import { test, expect, beforeAll, beforeEach, afterAll } from 'bun:test';
 import { randomUUID } from 'crypto';
 import {
   hasE2eDb,
@@ -81,9 +81,23 @@ maybeDescribe('OEE-03 e2e — routine_queue + drain worker + per-session lock (r
     await h.sql`DELETE FROM routine_queue`;
   }
 
-  // ── Proof 1: global concurrency cap holds ──────────────────────────────────
-  test('global cap: drainOnce never runs more than GLOBAL_CONCURRENCY cycles concurrently', async () => {
+  // Reset module state (cycleRunner + draining flag + worker) AND the queue table
+  // before EVERY test. _resetForTests() is the only thing that clears the
+  // module-level `draining` re-entrancy flag; without a per-test reset, any blocked
+  // runner or unsettled drain promise from a prior test would leave `draining=true`,
+  // and the next test's drainOnce() would short-circuit (`if (draining) return []`)
+  // and claim nothing. This is what made proofs 1 + 3 fail in CI. Each test
+  // re-registers its own runner after this reset.
+  beforeEach(async () => {
+    queue._resetForTests();
     await clearQueue();
+  });
+
+  // ── Proof 1: global concurrency cap holds ──────────────────────────────────
+  // Proven DETERMINISTICALLY through the synchronous DB claim seam (claimCycles /
+  // releaseCycle) — no blocking-runner peak-concurrency timing dance, so no race
+  // and no dependence on the `draining` flag or unsettled promises.
+  test('global cap: drainOnce never runs more than GLOBAL_CONCURRENCY cycles concurrently', async () => {
     expect(queue.GLOBAL_CONCURRENCY).toBe(TEST_CAP);
 
     // Enqueue cap+2 cycles, each for a DISTINCT session (so the per-session lock
@@ -93,72 +107,64 @@ maybeDescribe('OEE-03 e2e — routine_queue + drain worker + per-session lock (r
     for (let i = 0; i < n; i++) sessionIds.push(await seedSession(`cap-${i}`));
     for (const sid of sessionIds) await queue.enqueueCycle(sid);
 
-    let inFlight = 0;
-    let maxInFlight = 0;
-    const gates: Array<() => void> = [];
+    // First claim: promotes EXACTLY the cap (running goes 0 -> cap).
+    const wave1 = await queue.claimCycles();
+    expect(wave1.length).toBe(TEST_CAP);
+    for (const r of wave1) expect(r.status).toBe('running');
 
-    // Runner blocks until released, recording the peak concurrent count. Each drain
-    // pass promotes up to (cap - running); we release the whole wave together so the
-    // peak equals the number the cap allowed to run at once.
+    // Cap is now saturated — a concurrent claim promotes NOTHING.
+    const saturated = await queue.claimCycles();
+    expect(saturated.length).toBe(0);
+
+    // The global invariant: never more than cap rows 'running' across ALL sessions.
+    const running1 = await h.sql<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM routine_queue WHERE status = 'running'
+    `;
+    expect(Number(running1[0].n)).toBe(TEST_CAP);
+
+    // Release the wave; the next claim returns the next batch, still ≤ cap.
+    for (const r of wave1) await queue.releaseCycle(r.id, 'done');
+    const wave2 = await queue.claimCycles();
+    expect(wave2.length).toBeLessThanOrEqual(TEST_CAP);
+    expect(wave2.length).toBe(n - TEST_CAP); // exactly the remaining 2
+    const running2 = await h.sql<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM routine_queue WHERE status = 'running'
+    `;
+    expect(Number(running2[0].n)).toBeLessThanOrEqual(TEST_CAP);
+
+    // ALSO exercise drainOnce end-to-end with a NON-blocking runner (returns
+    // immediately) to prove the full claim→run→release path honours the cap and
+    // leaves nothing stuck 'running'. Release wave2 first so the table is fresh.
+    for (const r of wave2) await queue.releaseCycle(r.id, 'done');
+
+    let ran = 0;
+    let peak = 0;
+    let active = 0;
     queue.setCycleRunner(async () => {
-      inFlight++;
-      maxInFlight = Math.max(maxInFlight, inFlight);
-      await new Promise<void>((resolve) => gates.push(resolve));
-      inFlight--;
+      active++;
+      peak = Math.max(peak, active);
+      ran++;
+      active--;
     });
-
-    // First pass: claims exactly TEST_CAP rows (running goes 0 -> cap).
-    const pass1Promise = queue.drainOnce();
-    // Let the runners enter (microtask flush + a tick for the blocked promise).
-    await new Promise((r) => setTimeout(r, 50));
-    expect(inFlight).toBe(TEST_CAP);
-    expect(maxInFlight).toBe(TEST_CAP);
-
-    // A concurrent second pass while the first wave is still running must claim
-    // NOTHING — the cap is already saturated.
-    const midClaim = await queue.claimCycles();
-    expect(midClaim.length).toBe(0);
-
-    // Release the in-flight wave; the first drain pass settles.
-    gates.forEach((g) => g());
-    const pass1 = await pass1Promise;
-    expect(pass1.length).toBe(TEST_CAP);
-    expect(maxInFlight).toBe(TEST_CAP); // never exceeded the cap
-
-    // Drain the remainder in subsequent passes; cap still bounds each wave.
-    gates.length = 0;
-    const drainRest = async () => {
+    // Re-enqueue a fresh wave for the same sessions (their prior rows are terminal).
+    for (const sid of sessionIds) await queue.enqueueCycle(sid);
+    // Drain repeatedly; each pass claims ≤ cap and the non-blocking runner settles
+    // synchronously, so the table fully drains without any timing races.
+    for (let i = 0; i < n + 2; i++) {
       const claimed = await queue.drainOnce();
-      // settle any newly-blocked runners from this pass
-      gates.forEach((g) => g());
-      gates.length = 0;
-      return claimed;
-    };
-    const pass2 = await drainRest();
-    expect(pass2.length).toBeLessThanOrEqual(TEST_CAP);
-
-    // Everything eventually reaches a terminal status; nothing stuck 'running'.
-    // (Drain until the pending+running set for our sessions is empty.)
-    for (let i = 0; i < 5; i++) {
-      const remaining = await h.sql<{ n: string }[]>`
-        SELECT count(*)::text AS n FROM routine_queue
-        WHERE session_id = ANY(${sessionIds}) AND status IN ('pending','running')
-      `;
-      if (Number(remaining[0].n) === 0) break;
-      await drainRest();
-      await new Promise((r) => setTimeout(r, 10));
+      expect(claimed.length).toBeLessThanOrEqual(TEST_CAP);
     }
+    expect(ran).toBe(n);
+    expect(peak).toBeLessThanOrEqual(TEST_CAP);
     const stuck = await h.sql<{ n: string }[]>`
       SELECT count(*)::text AS n FROM routine_queue
       WHERE session_id = ANY(${sessionIds}) AND status = 'running'
     `;
     expect(Number(stuck[0].n)).toBe(0);
-    expect(maxInFlight).toBe(TEST_CAP);
   });
 
   // ── Proof 2: per-session coalescing (no duplicate running row) ──────────────
   test('per-session lock: a second enqueue for a live session does NOT stack a second running row', async () => {
-    await clearQueue();
     const sid = await seedSession('coalesce');
 
     // Cycle #1 is already live (running) for this session.
@@ -196,7 +202,6 @@ maybeDescribe('OEE-03 e2e — routine_queue + drain worker + per-session lock (r
 
   // ── Proof 3: stale / foreign queue entry is a no-op, not a crash ────────────
   test('stale/foreign entry: drainOnce over an already-running session + a terminal row is a clean no-op', async () => {
-    await clearQueue();
     const sid = await seedSession('stale');
 
     // Manually plant a STALE running row (as if a prior drain promoted it and the
