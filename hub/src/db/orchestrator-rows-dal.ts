@@ -404,3 +404,75 @@ export async function markApprovalConsumed(id: string): Promise<OrchestratorAppr
   `;
   return rows[0] ?? null;
 }
+
+// ── BSA-03: build-session autospawn repo allowlist ───────────────────────────
+// Per-user allowlist of repos the orchestrator may autospawn a build session for.
+// EMPTY by default ⇒ fail-closed (drives nothing). repo_ident is the host-agnostic
+// "github://owner/repo" / "path://<abs>" form (see schema.sql + repo-key.ts).
+
+/**
+ * True IFF `(userId, repoIdent)` is on the autospawn allowlist. An empty
+ * allowlist ALWAYS returns false (fail-closed — the autospawn capability drives
+ * nothing until the owner explicitly adds a repo). BSA-02 calls this before
+ * spawning so a non-allowlisted repo is refused (`refused:not_allowlisted`).
+ */
+export async function isRepoAutospawnAllowed(
+  userId: string,
+  repoIdent: string,
+): Promise<boolean> {
+  if (!userId || !repoIdent) return false;
+  const rows = await sql<{ one: number }[]>`
+    SELECT 1 AS one FROM orchestrator_autospawn_allowlist
+    WHERE user_id = ${userId} AND repo_ident = ${repoIdent}
+    LIMIT 1
+  `;
+  return rows.length > 0;
+}
+
+/** List a user's allowlisted repo idents (for admin/diagnostics). */
+export async function listRepoAutospawnAllowlist(userId: string): Promise<string[]> {
+  const rows = await sql<{ repo_ident: string }[]>`
+    SELECT repo_ident FROM orchestrator_autospawn_allowlist
+    WHERE user_id = ${userId}
+    ORDER BY repo_ident
+  `;
+  return rows.map((r) => r.repo_ident);
+}
+
+/**
+ * BSA-04 launch ledger source: count today's autospawn LAUNCH run-log rows for a
+ * user, in the user's IANA tz (same tz-day boundary as the token/cost caps so all
+ * ceilings agree). The autospawn seam writes ONE `routine_run_log` row with
+ * `command = 'autospawn-launch'` per real spawn (BSA-02), so this count is the
+ * simplest correct source for the per-day launch cap — no separate ledger table.
+ * routine_run_log is keyed by session, so we join to sessions to scope by user.
+ */
+export const AUTOSPAWN_LAUNCH_COMMAND = 'autospawn-launch';
+
+export async function countAutospawnLaunchesToday(
+  userId: string,
+  timezone: string,
+): Promise<number> {
+  const tz = timezone || 'UTC';
+  const rows = await sql<{ n: string | null }[]>`
+    SELECT COUNT(*)::text AS n
+    FROM routine_run_log r
+    JOIN sessions s ON s.id = r.session_id
+    WHERE s.user_id = ${userId}
+      AND r.command = ${AUTOSPAWN_LAUNCH_COMMAND}
+      AND r.created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}
+  `;
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** Idempotent add (used by the BSA-08 flip runbook one-shot, not auto-run). */
+export async function addRepoToAutospawnAllowlist(
+  userId: string,
+  repoIdent: string,
+): Promise<void> {
+  await sql`
+    INSERT INTO orchestrator_autospawn_allowlist (user_id, repo_ident)
+    VALUES (${userId}, ${repoIdent})
+    ON CONFLICT (user_id, repo_ident) DO NOTHING
+  `;
+}

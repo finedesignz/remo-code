@@ -28,6 +28,7 @@ mock.module("../src/db/postgres.ts", () => ({
 }));
 mock.module("../src/db/token-usage-dal.ts", () => ({
   getTodayTokenCostUsd: async () => 0,
+  getTodayTokenTotal: async () => 0,
 }));
 mock.module("../src/usage/threshold.ts", () => ({
   checkUserThreshold: async () => ({ allowed: true }),

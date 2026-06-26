@@ -59,6 +59,7 @@ mock.module('../src/db/postgres.ts', () => ({
 }))
 mock.module('../src/db/token-usage-dal.ts', () => ({
   getTodayTokenCostUsd: async () => state.spent,
+  getTodayTokenTotal: async () => 0,
 }))
 mock.module('../src/usage/store.ts', () => ({
   getUsage: () => ({

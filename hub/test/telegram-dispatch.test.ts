@@ -49,6 +49,7 @@ mock.module("../src/db/postgres.ts", () => ({
 }));
 mock.module("../src/db/token-usage-dal.ts", () => ({
   getTodayTokenCostUsd: async () => (state.overCap ? 999 : 0),
+  getTodayTokenTotal: async () => 0,
 }));
 
 // gates.ts: thresholdGate → checkUserThreshold. Always allow in these tests.

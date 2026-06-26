@@ -571,3 +571,83 @@ and a best-effort fan-out notify helper.
 - Depends on: [Phase OEE-06, Phase OEE-07, Phase OEE-08, Phase OEE-09]
 - Requirements: [OEE-10, OEE-11]
 - Phase dir: `.planning/phases/OEE-10-entrypoint-runbook-qc-and-docs/`
+
+---
+
+<!-- Milestone BSA — Orchestrator Build-Session Autospawn — opened 2026-06-26. Reuse the proven
+     scheduler launch path so the macro can spawn a hub-visible build session and drive an
+     allowlisted repo due→PR. Entirely behind a new OFF-by-default REMO_ORCHESTRATOR_AUTOSPAWN
+     gate + empty repo allowlist + non-bypassable daily token ceiling — inert until owner arms.
+     Requirements: .planning/milestones/BSA-REQUIREMENTS.md. -->
+
+## Phase BSA-01: autospawn-gate
+
+- Status: Complete
+- Mode: standard
+- Goal: New `REMO_ORCHESTRATOR_AUTOSPAWN` env gate (default OFF) + `isAutospawnEnabled()` helper threaded into the macro cycle; no behavior change when OFF; carries the existing `REMO_ORCHESTRATOR_ENABLED` gate.
+- Depends on: []
+- Requirements: [BSA-01]
+- Phase dir: `.planning/phases/BSA-01-autospawn-gate/`
+
+## Phase BSA-02: inject-launch-seam
+
+- Status: Complete
+- Mode: standard
+- Goal: In `injectOrchestratorPrompt`, when the session is offline AND autospawn ON AND macro is a build type, reuse `maybeLaunchOfflineSession`/`launchSessionForUser` instead of returning `no_session`; park the prompt in grace via dispatch; map launch outcomes onto `InjectOutcome`.
+- Depends on: [Phase BSA-01]
+- Requirements: [BSA-02]
+- Phase dir: `.planning/phases/BSA-02-inject-launch-seam/`
+
+## Phase BSA-03: repo-allowlist
+
+- Status: Complete
+- Mode: standard
+- Goal: Per-user/per-task repo allowlist (idempotent DDL; backfill one-shot in `hub/scripts/`); autospawn refuses repos not on the allowlist (`refused:not_allowlisted`); default EMPTY = drives nothing.
+- Depends on: [Phase BSA-01]
+- Requirements: [BSA-03]
+- Phase dir: `.planning/phases/BSA-03-repo-allowlist/`
+
+## Phase BSA-04: token-rate-ceiling
+
+- Status: Complete
+- Mode: standard
+- Goal: New non-bypassable `dailyTokenCapGate` (real tokens from `token_usage`, tz-day boundary) + per-day autospawn-launch count cap, added to the orchestrator gate list ALONGSIDE the cost cap. Closes reality-doc issue #6.
+- Depends on: []
+- Requirements: [BSA-04]
+- Phase dir: `.planning/phases/BSA-04-token-rate-ceiling/`
+
+## Phase BSA-05: plan-first-and-no-merge-guard
+
+- Status: Complete
+- Mode: standard
+- Goal: Assert the build macro prompt is plan-first and an autospawned session cannot auto-merge to main (merge stays the off-hours window-gated path); guard test mirroring `orchestrator-macro-path-guard.test.ts`.
+- Depends on: [Phase BSA-02]
+- Requirements: [BSA-05]
+- Phase dir: `.planning/phases/BSA-05-plan-first-and-no-merge-guard/`
+
+## Phase BSA-06: autospawn-build-task-type
+
+- Status: Complete
+- Mode: standard
+- Goal: Ensure build-continuation tasks carry `macro_task_type=dev`; one-shot script to create/convert an allowlisted build task; bound concurrency via `REMO_ORCHESTRATOR_GLOBAL_CONCURRENCY`.
+- Depends on: [Phase BSA-03]
+- Requirements: [BSA-06]
+- Phase dir: `.planning/phases/BSA-06-autospawn-build-task-type/`
+
+## Phase BSA-07: e2e-proveout
+
+- Status: Complete
+- Mode: standard
+- Goal: OEE-style e2e (real Postgres + stub supervisor): due build task + offline session + online supervisor → assert `session.start` fired, prompt parked, drain delivers, `routine_run_log.pr_url` populated on a simulated reply. `REMO_E2E_DB_URL`-gated.
+- Depends on: [Phase BSA-02, Phase BSA-03, Phase BSA-04, Phase BSA-05, Phase BSA-06]
+- Requirements: [BSA-07]
+- Phase dir: `.planning/phases/BSA-07-e2e-proveout/`
+
+## Phase BSA-08: docs-and-gated-flip-runbook
+
+- Status: Complete
+- Mode: standard
+- Goal: Update `docs/auto-dev-orchestrator.md` + `CLAUDE.md` env section; write the flip runbook (allowlist → token ceiling → flip `REMO_ORCHESTRATOR_AUTOSPAWN=1` → monitor `routine_run_log` for first real `pr_url`); `bun run docs:sync` if routes change.
+- Depends on: [Phase BSA-01, Phase BSA-02, Phase BSA-03, Phase BSA-04, Phase BSA-05, Phase BSA-06, Phase BSA-07]
+- Requirements: [BSA-08]
+- Phase dir: `.planning/phases/BSA-08-docs-and-gated-flip-runbook/`

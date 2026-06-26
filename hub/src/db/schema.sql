@@ -550,6 +550,23 @@ CREATE TABLE IF NOT EXISTS user_repo_group_state (
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ── BSA-03: orchestrator build-session autospawn repo allowlist ──────────────
+-- Per-user allowlist of repos the auto-dev orchestrator may AUTOSPAWN a build
+-- session for. EMPTY by default ⇒ autospawn drives NOTHING (fail-closed). The
+-- whole autospawn capability is also gated OFF by REMO_ORCHESTRATOR_AUTOSPAWN, so
+-- this table is inert until both the flag is flipped AND a row is added.
+--
+-- repo_ident: "github://<owner>/<repo>" or "path://<abs-path>" — same host-
+-- agnostic format as repo_group_members (hub/src/lib/repo-key.ts). NOT FK'd to a
+-- repos table (repos live transiently in scan output / sessions), matching the
+-- repo-grouping convention. Additive, idempotent, no backfill — safe every boot.
+CREATE TABLE IF NOT EXISTS orchestrator_autospawn_allowlist (
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  repo_ident  TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, repo_ident)
+);
+
 -- ── Phase 05: per-session CLI selection + rootless ambient sessions ──────────
 -- cli_kind: which CLI the agent spawns for this session ('claude' | 'codex').
 -- is_rootless: ambient sessions that have no project_dir; at most one per

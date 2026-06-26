@@ -18,7 +18,7 @@
  * subsystem when migrating.
  */
 import { sql } from '../db/postgres.ts'
-import { getTodayTokenCostUsd } from '../db/token-usage-dal.ts'
+import { getTodayTokenCostUsd, getTodayTokenTotal } from '../db/token-usage-dal.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
 import { reserveSessionSlot } from '../sessions/budget.ts'
 import { getUsage } from '../usage/store.ts'
@@ -142,6 +142,97 @@ export const dailyCostCapGate: DispatchGate = {
     }
     return { ok: true }
   },
+}
+
+// ── BSA-04: non-bypassable daily TOKEN ceiling (ALONGSIDE the cost cap) ───────
+/**
+ * BSA-04 default daily token ceiling. The dollar cost cap is meaningless on a
+ * flat-rate Max subscription (reality-doc issue #6 — no per-token billing), so
+ * this token-count ceiling is what actually bounds a runaway autospawn loop.
+ *
+ * Default 50_000_000 (50M) tokens/day: a deliberately conservative-but-defensible
+ * ceiling — well above a heavy legitimate Max-20x dev day (cache-read tokens
+ * dominate and inflate raw counts), yet low enough to halt an unattended loop
+ * within a day. Owner sets the real prod number via REMO_ORCHESTRATOR_DAILY_TOKEN_CAP
+ * (this milestone ships the default only). A non-positive / non-finite value
+ * DISABLES the token ceiling (fail-open, mirroring the cost cap's 0/neg semantics).
+ */
+const DEFAULT_DAILY_TOKEN_CAP = 50_000_000
+
+function configuredDailyTokenCap(): number {
+  const raw = process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP
+  if (raw == null || raw.trim() === '') return DEFAULT_DAILY_TOKEN_CAP
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : DEFAULT_DAILY_TOKEN_CAP
+}
+
+/**
+ * Token-cap status: today's consumed tokens (user tz) vs the configured ceiling.
+ * `over` is true when tokens >= cap. A non-positive / non-finite cap returns
+ * `{ over:false, tokens:0, cap:0 }` (disabled, fail-open). Read at call-time so
+ * the env knob + tests apply without a reimport.
+ */
+export async function getTokenCapStatus(
+  userId: string,
+  timezone: string,
+): Promise<{ over: boolean; tokens: number; cap: number }> {
+  const cap = configuredDailyTokenCap()
+  if (!Number.isFinite(cap) || cap <= 0) return { over: false, tokens: 0, cap: 0 }
+  const tokens = await getTodayTokenTotal(userId, timezone)
+  return { over: tokens >= cap, tokens, cap }
+}
+
+/** Boolean convenience wrapper around {@link getTokenCapStatus}. */
+export async function isOverTokenCap(userId: string, timezone: string): Promise<boolean> {
+  return (await getTokenCapStatus(userId, timezone)).over
+}
+
+/**
+ * Daily TOKEN-cap gate (non-bypassable, BSA-04). ADDED ALONGSIDE
+ * `dailyCostCapGate` in the orchestrator inject gate list — it never replaces the
+ * cost cap. Resolves the user's tz (DispatchRequest carries none, like the cost
+ * gate) then delegates to `getTokenCapStatus`. Blocks with
+ * `over_daily_token_cap:<tokens>>=<cap>`.
+ */
+export const dailyTokenCapGate: DispatchGate = {
+  name: 'daily_token_cap',
+  async check(req: DispatchRequest) {
+    const timezone = await userTimezone(req.userId)
+    const status = await getTokenCapStatus(req.userId, timezone)
+    if (status.over) {
+      const reason = `over_daily_token_cap:${status.tokens}>=${status.cap}`
+      return { ok: false, reason }
+    }
+    return { ok: true }
+  },
+}
+
+// ── BSA-04: per-day autospawn LAUNCH-count cap ───────────────────────────────
+/**
+ * Max autospawn launches per user per day. A second, independent ceiling from the
+ * token cap: it bounds how many times the orchestrator may SPAWN a build session
+ * in a day (each launch is a cost/risk event regardless of tokens). Default 20.
+ * Non-positive / non-finite => disabled (fail-open). BSA-02 calls
+ * {@link isOverAutospawnDailyLaunchCap} BEFORE launching.
+ */
+const DEFAULT_AUTOSPAWN_DAILY_LAUNCHES = 20
+
+export function autospawnDailyLaunchCap(): number {
+  const raw = process.env.REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES
+  if (raw == null || raw.trim() === '') return DEFAULT_AUTOSPAWN_DAILY_LAUNCHES
+  const n = Number(raw)
+  return Number.isInteger(n) ? n : DEFAULT_AUTOSPAWN_DAILY_LAUNCHES
+}
+
+/**
+ * True when `launchesToday` has reached/exceeded the per-day autospawn launch cap.
+ * Pure predicate (BSA-02 supplies the count from its launch ledger) so it needs no
+ * DB here. A non-positive / non-finite cap => disabled (always false, fail-open).
+ */
+export function isOverAutospawnDailyLaunchCap(launchesToday: number): boolean {
+  const cap = autospawnDailyLaunchCap()
+  if (!Number.isInteger(cap) || cap <= 0) return false
+  return launchesToday >= cap
 }
 
 /**

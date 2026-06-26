@@ -56,6 +56,7 @@ mock.module("../src/ws/registry.ts", () => ({
 
 mock.module("../src/db/token-usage-dal.ts", () => ({
   getTodayTokenCostUsd: async () => state.costSpent,
+  getTodayTokenTotal: async () => 0,
 }));
 
 mock.module("../src/telegram/client.ts", () => ({

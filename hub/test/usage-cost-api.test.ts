@@ -28,6 +28,7 @@ const windows = {
   total: { input_tokens: 1000, output_tokens: 500, cache_creation_input_tokens: 100, cache_read_input_tokens: 2000, cost_usd: 5 },
 }
 mock.module('../src/db/token-usage-dal.ts', () => ({
+  getTodayTokenTotal: mock(async () => 0),
   sumUserTokenWindows: mock(async () => windows),
   usageBySession: mock(async () => [
     { session_id: 's1', session_name: 'sess', project_dir: '/p', input_tokens: 1000, output_tokens: 500, cache_creation_input_tokens: 100, cache_read_input_tokens: 2000, cost_usd: 5 },
