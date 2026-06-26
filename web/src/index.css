@@ -1,11 +1,24 @@
 @import "tailwindcss";
 
 html, body, #root {
-  height: 100dvh;
+  /* Drive real height from the visualViewport (--app-vh, set by
+   * useVisualViewportHeight) so the layout SHRINKS when the iOS soft keyboard
+   * opens — 100dvh does not. Falls back to 100dvh before the hook runs / when
+   * visualViewport is unavailable. */
+  height: var(--app-vh, 100dvh);
   margin: 0;
   padding: 0;
   overflow: hidden;
   overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* The xterm viewport is the explicit touch scroller: contain overscroll so a
+ * scroll inside the terminal never chains to the page (header/toolbar drift),
+ * and pan-y/touch momentum so flicking scrolls the buffer, not the document. */
+.xterm-viewport {
+  overscroll-behavior: contain;
+  touch-action: pan-y;
   -webkit-overflow-scrolling: touch;
 }
 

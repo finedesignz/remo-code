@@ -181,6 +181,23 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       // enterkeyhint omitted: the TUI handles Enter; "go"/"send" labels imply submit
       ta.setAttribute('inputmode', 'text')
     }
+    // iOS COMPOSITION GATE. iOS predictive-text / IME starts a composition on
+    // the helper <textarea>; while composing, xterm fires onData for each
+    // intermediate composition state, which interleaves with claude's PTY echo
+    // and scrambles the in-progress line (chars scatter with gaps) until Enter
+    // makes claude redraw. We suppress those noisy intermediates and let only
+    // the committed string through: xterm fires onData with the FINAL composed
+    // text on compositionend, so guarding the send with `!composing` delivers
+    // the commit exactly once. (Attribute hardening above is necessary but not
+    // sufficient on its own.)
+    let composing = false
+    const onCompStart = () => { composing = true }
+    const onCompEnd = () => { composing = false }
+    if (ta) {
+      ta.addEventListener('compositionstart', onCompStart)
+      ta.addEventListener('compositionend', onCompEnd)
+    }
+
     // Mobile taps on the host div don't reliably focus xterm's hidden textarea,
     // so the keyboard opens but keystrokes go nowhere. Focus the terminal on tap.
     const focusTerm = () => { try { term.focus() } catch {} }
@@ -194,6 +211,9 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
 
     // Keystrokes → term.input (base64 raw bytes).
     const dataDisp = term.onData((d) => {
+      // Drop intermediate IME composition states; the committed string still
+      // arrives via the onData fired on compositionend (composing === false).
+      if (composing) return
       send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(d) })
     })
 
@@ -239,6 +259,10 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
 
     return () => {
       if (rafId) cancelAnimationFrame(rafId)
+      if (ta) {
+        ta.removeEventListener('compositionstart', onCompStart)
+        ta.removeEventListener('compositionend', onCompEnd)
+      }
       try { dataDisp.dispose() } catch {}
       try { unsub() } catch {}
       try { ro.disconnect() } catch {}
