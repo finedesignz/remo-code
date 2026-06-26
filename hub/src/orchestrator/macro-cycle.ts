@@ -184,8 +184,20 @@ export async function runMacroCycle(
     }
 
     const token = `orch:${sessionId}:macro:${macroTaskType}:${Date.now()}`;
-    const outcome = await d.inject({ userId, sessionId, token, prompt: macro.prompt });
-    result.injected = outcome.kind === 'dispatched' || outcome.kind === 'queued';
+    // BSA-02: thread the autospawn decision for a BUILD (dev) macro. The inject
+    // seam only acts on it when fully gated ON (REMO_ORCHESTRATOR_AUTOSPAWN +
+    // allowlist + caps); for any other task_type the field is omitted, so the seam
+    // keeps its legacy offline `no_session` behaviour (true no-op when OFF).
+    const autospawn =
+      macroTaskType === 'dev'
+        ? { isBuild: true, repoIdent: input.repoIdent, tz: undefined }
+        : undefined;
+    const outcome = await d.inject({ userId, sessionId, token, prompt: macro.prompt, autospawn });
+    result.injected =
+      outcome.kind === 'dispatched' ||
+      outcome.kind === 'queued' ||
+      outcome.kind === 'autospawn_launched' ||
+      outcome.kind === 'autospawn_parked';
 
     // Observability: stamp this resume into the run-log.
     try {
@@ -207,8 +219,16 @@ export async function runMacroCycle(
       );
       // F-10: a refused/failed unattended resume must surface to the user (even
       // in dev). `no_session` is benign (offline session reconciles next tick) —
-      // do NOT page on it; everything else is a real failure/refusal.
-      if (outcome.kind !== 'no_session') {
+      // do NOT page on it. BSA-02: an autospawn GATE refusal (not_allowlisted /
+      // supervisor_offline / launch_cap / over_token_cap / a launch-primitive
+      // refusal) is ALSO benign — it is the expected state when autospawn is OFF /
+      // unconfigured, so it must NOT page either. A real cost-cap/threshold refusal
+      // or a hard failure still surfaces.
+      const benignAutospawnRefusal =
+        outcome.kind === 'refused' &&
+        ['not_allowlisted', 'supervisor_offline', 'launch_cap', 'over_token_cap'].includes(reason as string) ||
+        (typeof reason === 'string' && reason.startsWith('autospawn_launch_'));
+      if (outcome.kind !== 'no_session' && !benignAutospawnRefusal) {
         await emitFailure(d, input, `resume inject ${outcome.kind}: ${reason}`);
       }
     }

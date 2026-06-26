@@ -439,6 +439,32 @@ export async function listRepoAutospawnAllowlist(userId: string): Promise<string
   return rows.map((r) => r.repo_ident);
 }
 
+/**
+ * BSA-04 launch ledger source: count today's autospawn LAUNCH run-log rows for a
+ * user, in the user's IANA tz (same tz-day boundary as the token/cost caps so all
+ * ceilings agree). The autospawn seam writes ONE `routine_run_log` row with
+ * `command = 'autospawn-launch'` per real spawn (BSA-02), so this count is the
+ * simplest correct source for the per-day launch cap — no separate ledger table.
+ * routine_run_log is keyed by session, so we join to sessions to scope by user.
+ */
+export const AUTOSPAWN_LAUNCH_COMMAND = 'autospawn-launch';
+
+export async function countAutospawnLaunchesToday(
+  userId: string,
+  timezone: string,
+): Promise<number> {
+  const tz = timezone || 'UTC';
+  const rows = await sql<{ n: string | null }[]>`
+    SELECT COUNT(*)::text AS n
+    FROM routine_run_log r
+    JOIN sessions s ON s.id = r.session_id
+    WHERE s.user_id = ${userId}
+      AND r.command = ${AUTOSPAWN_LAUNCH_COMMAND}
+      AND r.created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}
+  `;
+  return Number(rows[0]?.n ?? 0);
+}
+
 /** Idempotent add (used by the BSA-08 flip runbook one-shot, not auto-run). */
 export async function addRepoToAutospawnAllowlist(
   userId: string,
