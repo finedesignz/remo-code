@@ -2,16 +2,32 @@
 gsd_state_version: 1.0
 milestone: OEE
 milestone_name: Orchestrator E2E Prove-Out
-status: planning
+status: shipped
 last_updated: "2026-06-26T05:17:19.259Z"
 last_activity: 2026-06-26
 progress:
-  total_phases: 0
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_phases: 10
+  completed_phases: 10
+  total_plans: 10
+  completed_plans: 10
+  percent: 100
 ---
+
+<!-- updated: 2026-06-26 -->
+
+> **Milestone OEE (Orchestrator E2E Prove-Out) SHIPPED + LIVE 2026-06-26.** All 10 phases
+> (OEE-01..10) built + merged (PR #300, docs closeout #301). An isolated e2e harness +
+> scripted sentinel session sink + 8 scenario suites (`hub/test/e2e/`) now PROVE the
+> flag-gated-OFF Auto-Dev Orchestrator + TMAC macro path end-to-end against REAL Postgres —
+> the Woodpecker qc gate runs them against its `postgres:16` service (`REMO_E2E_DB_URL`), so
+> GREEN CI = the standing proof (queue/lock, due→waves, macro-cycle+sentinels, non-bypassable
+> cost-cap, stage-gated notify, verify-tail, legacy-wave rollback parity). Zero `hub/src`/
+> `schema.sql` changes — pure validation via existing DI seams. Prod verified healthy
+> (/health 200, /api/sessions 401, /openapi.json 200). Real-PG e2e is no longer "unproven".
+> NB: `REMO_ORCHESTRATOR_ENABLED=1` is ALREADY live in prod (monitoring mode) — OEE proves the
+> macro machinery, it did not flip the flag. The remaining gap is architectural, not a flag:
+> the macro path only drives ONLINE supervisor-connected sessions (owner's local builds are
+> invisible to the hub → never produces a PR). See the overnight-autonomy reality note.
 
 <!-- updated: 2026-06-14 -->
 
