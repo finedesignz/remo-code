@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "../../lib/ui/cn";
 import { MobileTopBar } from "./MobileTopBar";
+import { useVisualViewportHeight } from "../../hooks/useVisualViewportHeight";
 
 export interface AppShellSubTab {
   key: string;
@@ -167,10 +168,15 @@ export function AppShell({
 }: AppShellProps) {
   const hasNav = !!nav && nav.length > 0;
 
+  // Keep the app height pinned to the visualViewport so the column shrinks when
+  // the mobile soft keyboard opens (only WRITES the --app-vh CSS var; harmless
+  // on desktop / every page).
+  useVisualViewportHeight();
+
   return (
     <div
       className={cn(
-        "flex flex-col h-[100dvh] min-h-0 bg-[var(--bg-primary)] text-[var(--text-primary)]",
+        "flex flex-col h-[var(--app-vh,100dvh)] min-h-0 bg-[var(--bg-primary)] text-[var(--text-primary)]",
         className
       )}
     >
