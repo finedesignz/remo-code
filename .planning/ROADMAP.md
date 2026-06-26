@@ -582,7 +582,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase BSA-01: autospawn-gate
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: New `REMO_ORCHESTRATOR_AUTOSPAWN` env gate (default OFF) + `isAutospawnEnabled()` helper threaded into the macro cycle; no behavior change when OFF; carries the existing `REMO_ORCHESTRATOR_ENABLED` gate.
 - Depends on: []
@@ -591,7 +591,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase BSA-02: inject-launch-seam
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: In `injectOrchestratorPrompt`, when the session is offline AND autospawn ON AND macro is a build type, reuse `maybeLaunchOfflineSession`/`launchSessionForUser` instead of returning `no_session`; park the prompt in grace via dispatch; map launch outcomes onto `InjectOutcome`.
 - Depends on: [Phase BSA-01]
@@ -600,7 +600,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase BSA-03: repo-allowlist
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: Per-user/per-task repo allowlist (idempotent DDL; backfill one-shot in `hub/scripts/`); autospawn refuses repos not on the allowlist (`refused:not_allowlisted`); default EMPTY = drives nothing.
 - Depends on: [Phase BSA-01]
@@ -609,7 +609,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase BSA-04: token-rate-ceiling
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: New non-bypassable `dailyTokenCapGate` (real tokens from `token_usage`, tz-day boundary) + per-day autospawn-launch count cap, added to the orchestrator gate list ALONGSIDE the cost cap. Closes reality-doc issue #6.
 - Depends on: []
@@ -618,7 +618,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase BSA-05: plan-first-and-no-merge-guard
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: Assert the build macro prompt is plan-first and an autospawned session cannot auto-merge to main (merge stays the off-hours window-gated path); guard test mirroring `orchestrator-macro-path-guard.test.ts`.
 - Depends on: [Phase BSA-02]
@@ -627,7 +627,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase BSA-06: autospawn-build-task-type
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: Ensure build-continuation tasks carry `macro_task_type=dev`; one-shot script to create/convert an allowlisted build task; bound concurrency via `REMO_ORCHESTRATOR_GLOBAL_CONCURRENCY`.
 - Depends on: [Phase BSA-03]
@@ -636,7 +636,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase BSA-07: e2e-proveout
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: OEE-style e2e (real Postgres + stub supervisor): due build task + offline session + online supervisor → assert `session.start` fired, prompt parked, drain delivers, `routine_run_log.pr_url` populated on a simulated reply. `REMO_E2E_DB_URL`-gated.
 - Depends on: [Phase BSA-02, Phase BSA-03, Phase BSA-04, Phase BSA-05, Phase BSA-06]
@@ -645,7 +645,7 @@ and a best-effort fan-out notify helper.
 
 ## Phase BSA-08: docs-and-gated-flip-runbook
 
-- Status: Not Started
+- Status: Complete
 - Mode: standard
 - Goal: Update `docs/auto-dev-orchestrator.md` + `CLAUDE.md` env section; write the flip runbook (allowlist → token ceiling → flip `REMO_ORCHESTRATOR_AUTOSPAWN=1` → monitor `routine_run_log` for first real `pr_url`); `bun run docs:sync` if routes change.
 - Depends on: [Phase BSA-01, Phase BSA-02, Phase BSA-03, Phase BSA-04, Phase BSA-05, Phase BSA-06, Phase BSA-07]
