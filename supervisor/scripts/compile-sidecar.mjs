@@ -6,10 +6,11 @@
  * (supervisor/tauri/scripts/build-and-update.ps1) and CI
  * (.github/workflows/release-supervisor.yml), so the two can never drift.
  *
- * Reads the `version` from supervisor/tauri/src-tauri/tauri.conf.json and bakes it
- * into the compiled bundle via Bun's `--define process.env.REMO_SUPERVISOR_VERSION`.
- * That env var is what supervisor/src/version.ts reads at runtime to report the
- * version to the hub — so the reported version always matches the MSI/manifest.
+ * The version is NOT injected here: supervisor/src/version.ts imports
+ * tauri.conf.json directly and Bun inlines that JSON into the compiled binary, so
+ * the reported version always matches the MSI/manifest. This script still reads +
+ * validates the version as a pre-compile sanity check (fail fast on a malformed
+ * manifest before a slow `--compile`).
  *
  * Paths are resolved relative to THIS script's location, not the cwd, so it works
  * regardless of where it's invoked from. The compile itself runs from `supervisor/`
@@ -29,22 +30,19 @@ if (!version || typeof version !== 'string') {
   console.error(`[compile-sidecar] no version found in ${tauriConfPath}`)
   process.exit(1)
 }
-// Strict semver-ish guard: a malformed or quote-bearing version would break the
-// `--define process.env.REMO_SUPERVISOR_VERSION="${version}"` string below.
+// Strict semver-ish guard: catch a malformed manifest before the slow compile.
 if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
   console.error(`[compile-sidecar] invalid version ${JSON.stringify(version)} in ${tauriConfPath} — expected MAJOR.MINOR.PATCH[-prerelease]`)
   process.exit(1)
 }
 
-console.log(`[compile-sidecar] injecting REMO_SUPERVISOR_VERSION=${version}`)
+console.log(`[compile-sidecar] compiling sidecar at version ${version} (imported from tauri.conf.json)`)
 
 // Mirror the CI command in release-supervisor.yml exactly (target + outfile verbatim).
 const args = [
   'build',
   '--compile',
   '--target=bun-windows-x64',
-  '--define',
-  `process.env.REMO_SUPERVISOR_VERSION="${version}"`,
   './src/index.ts',
   '--outfile',
   './tauri/src-tauri/binaries/remo-code-supervisor-x86_64-pc-windows-msvc.exe',
