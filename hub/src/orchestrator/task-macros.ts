@@ -104,7 +104,11 @@ Never DROP/reset a database without explicit human approval at ANY stage.
 
 STEP 4 — RELEASE (every ship): bump version (semver) across ALL sources in lockstep per
 this repo's release rule. Open PR, wait for CI (\`gh pr checks <N> --watch\`), fix red CI
-and re-push until green (looping is expected, not a gate). Merge (squash, delete branch),
+and re-push until green (looping is expected, not a gate) — NEVER merge while qc is
+red/failing and NEVER use \`--admin\`/force-merge to bypass a FAILING check; a GREEN qc is
+the only merge gate (\`--admin\` is allowed ONLY because branch protection can't observe
+Woodpecker, and ONLY once qc is green). If main itself is red, FIX main first. Merge
+(squash, delete branch),
 DEPLOY, then VERIFY LIVE: poll /health until 200, smoke-test the routes you touched, tail
 deploy logs. Errors or broken route → FIX + re-deploy; loop until live with a clean log
 tail. Then clean up merged worktrees + branches. On a successful ship/deploy: if
@@ -124,8 +128,12 @@ If paused on a mandatory gate, ALSO emit <<GATE reason="..." detail="...">> and
 <<NOTIFY level=blocking channel=all detail="...">>.
 
 Hard rules: daily cost cap is non-bypassable; never DROP/reset a DB without approval;
-never merge to main without green CI; the human PTY path never carries an API key; one
-phase = one branch = one PR.`;
+never merge to main without green CI and never bypass a red check with \`--admin\`/force-merge;
+never overwrite or delete a prior milestone's planning records (.planning/REQUIREMENTS.md,
+ROADMAP.md, or phase dirs) — archive them with the collision-safe procedure, then run the
+full test gate (\`bun run check-baseline\`) and fix any test that asserts on a moved/rotated
+path BEFORE opening a PR; the human PTY path never carries an API key; one phase = one
+branch = one PR.`;
 
 // ── MAINTENANCE prompt (SPEC §6 — same envelope as DEV) ──────────────────────
 // Driven by gsd-audit-fix + gsd-verify-work. NEVER ships new features. Same

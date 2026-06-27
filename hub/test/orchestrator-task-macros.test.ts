@@ -193,6 +193,26 @@ describe('task-macros — DEV scopes next milestone from the predetermined roadm
   })
 })
 
+describe('task-macros — DEV merge/clobber discipline (anti-admin-merge, anti-clobber)', () => {
+  const p = renderMacro('dev', CTX).prompt
+  const flat = p.replace(/\s+/g, ' ')
+
+  test('forbids merging while qc is red / bypassing a failing check', () => {
+    expect(flat).toContain('NEVER merge while qc is red/failing')
+    expect(flat).toContain('to bypass a FAILING check')
+    expect(flat).toContain('If main itself is red, FIX main first')
+    // green qc is the gate; --admin is allowed ONLY once qc is green (legit Woodpecker path)
+    expect(flat).toContain('ONLY once qc is green')
+  })
+
+  test('forbids clobbering prior-milestone planning records and requires the test gate first', () => {
+    expect(flat).toContain("never overwrite or delete a prior milestone's planning records")
+    expect(flat).toContain('collision-safe procedure')
+    expect(flat).toContain('check-baseline')
+    expect(flat).toContain('fix any test that asserts on a moved/rotated path BEFORE opening a PR')
+  })
+})
+
 describe('task-macros — unknown type', () => {
   test('coerces unknown to dev (safe fully-specified routine)', () => {
     const r = renderMacro('nope', CTX)
