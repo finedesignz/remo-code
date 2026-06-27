@@ -3,6 +3,7 @@ import type { ScheduledTask, ScheduleCreateInput, TaskType, TargetKind, CatchupP
 import { useSessions } from '../hooks/useSessions'
 import { hubFetch, HubFetchError } from '../lib/api'
 import { nextRuns, validate as validateCron, browserTimezone } from '../lib/cron'
+import { BranchPicker } from './BranchPicker'
 import { PostRunActionsEditor } from './PostRunActionsEditor'
 import { ScheduleRulesBuilder } from './ScheduleRulesBuilder'
 import { type ScheduleRule, ruleToCron, defaultRule, validateRule } from '../lib/schedule-rules'
@@ -104,6 +105,9 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
 
   const [targetKind, setTargetKind] = useState<TargetKind>(existing?.target_kind ?? 'session')
   const [targetId, setTargetId] = useState<string | null>(existing?.target_id ?? null)
+  // Branch the task should run against, mirroring the Connect/Start launch flow.
+  // Stored additively in `payload.branch` (loose JSONB — no schema change).
+  const [branch, setBranch] = useState<string>(existing?.payload?.branch ?? '')
 
   // Coolify app bound to the selected target session (for the
   // `<coolify-app-slug>` / `<coolify-uuid>` placeholders). Resolved lazily from
@@ -255,6 +259,11 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
     })
 
     const payload: Record<string, any> = {}
+    // Persist the chosen branch (repo→branch picker). Only meaningful for a
+    // single-session target; additive JSONB field, ignored by older readers.
+    if (targetKind === 'session' && targetId && branch.trim()) {
+      payload.branch = branch.trim()
+    }
     if (taskType === 'dev') payload.prompt = prompt.trim()
     if (taskType === 'security' || taskType === 'log_check') {
       if (notes.trim()) payload.notes = notes.trim()
@@ -347,11 +356,11 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
 
           {/* Row: Target selector + Timezone */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <Field label={targetKind === 'session' ? 'Session' : targetKind === 'supervisor' ? 'Supervisor' : 'Scope'}>
+            <Field label={targetKind === 'session' ? 'Repo (session)' : targetKind === 'supervisor' ? 'Supervisor' : 'Scope'}>
               {targetKind === 'session' && (
                 <select
                   value={targetId ?? ''}
-                  onChange={(e) => setTargetId(e.target.value || null)}
+                  onChange={(e) => { setTargetId(e.target.value || null); setBranch('') }}
                   className={selectCls}
                 >
                   <option value="">Choose a session...</option>
@@ -405,6 +414,22 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
               </div>
             </Field>
           </div>
+
+          {/* Branch picker — mirrors the Connect/Start launch flow. Only shown
+              for a single-session target (the session is the repo). */}
+          {targetKind === 'session' && (
+            <Field label="Branch">
+              <BranchPicker
+                token={token}
+                sessionId={targetId}
+                value={branch}
+                onChange={setBranch}
+              />
+              <p className="mt-1.5 text-xs text-[var(--text-muted)]">
+                Pick the branch this task runs against — same picker as launching a session.
+              </p>
+            </Field>
+          )}
 
           {/* Schedule + next-run preview */}
           <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 md:items-start">

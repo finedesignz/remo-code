@@ -9,12 +9,14 @@ import { generateToken } from '../utils/token'
 import { pickSessionTarget } from '../sessions/routing.ts'
 import {
   sendToSupervisor,
+  sendRequest,
   updateSupervisorState,
   listOnlineSupervisorIdsForUser,
   resolveLocalPathForRepoKey,
   getUserInventory,
   getKnownLocalPathsForRepoKey,
   getActiveSessionIdsForUser,
+  findSupervisorForSession,
 } from '../ws/supervisor-registry.ts'
 import { releaseSessionSlot, reserveSessionSlot } from '../sessions/budget.ts'
 import { probeGithubAppScope } from '../lib/github-scope.ts'
@@ -502,6 +504,49 @@ function mintLaunchNonce(userId: string, sessionId: string): string {
   launchNonces.set(nonce, { user_id: userId, session_id: sessionId, expires: Date.now() + 5 * 60_000 })
   return nonce
 }
+
+// List git branches for a session's bound repo. Mirrors the Connect/Start flow
+// branch source (`supervisors/:id/branches` → `repo.list_branches`) but keyed by
+// session, so the scheduled-task editor can offer the SAME repo→branch picker
+// the launch dialog does. Resolves the session's working tree (repo_key →
+// supervisor inventory canonical, else recorded project_dir) and the supervisor
+// hosting it (live host, else the user's first online supervisor). Read-only;
+// returns `{ branches, current }`. Empty/offline → `{ branches: [], current: null }`
+// so the editor falls back to a free-text branch input (never blocks the form).
+sessions.get('/:id/branches', async (c) => {
+  const userId = c.get('userId') as string
+  const sessionId = c.req.param('id')
+  const session = await getSession(sessionId, userId)
+  if (!session) return c.json({ error: 'not_found' }, 404)
+
+  // Resolve the repo working tree the same way /launch does.
+  const repoKey = (session as any).repo_key as string | null
+  let cwd: string | null = repoKey ? resolveLocalPathForRepoKey(userId, repoKey) : null
+  const inventoryHasRepo = !!repoKey && getKnownLocalPathsForRepoKey(userId, repoKey).length > 0
+  if (!cwd && !inventoryHasRepo) cwd = (session as any).project_dir ?? null
+  if (!cwd) return c.json({ branches: [], current: null })
+
+  // Prefer the supervisor currently hosting the session; fall back to the
+  // user's first online supervisor (branches live on disk regardless of host).
+  const hosted = findSupervisorForSession(sessionId)
+  const supervisorId =
+    hosted?.userId === userId && hosted.supervisorId
+      ? hosted.supervisorId
+      : listOnlineSupervisorIdsForUser(userId)[0]
+  if (!supervisorId) return c.json({ branches: [], current: null })
+
+  try {
+    const res: any = await sendRequest(
+      supervisorId,
+      { type: 'repo.list_branches', repo_path: cwd } as any,
+      15_000,
+    )
+    if (!res?.ok) return c.json({ branches: [], current: null })
+    return c.json({ branches: res.data?.branches || [], current: res.data?.current || null })
+  } catch {
+    return c.json({ branches: [], current: null })
+  }
+})
 
 sessions.post('/:id/launch', async (c) => {
   const userId = c.get('userId') as string
