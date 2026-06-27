@@ -21,6 +21,10 @@
 
 import { sql } from '../db/postgres.ts';
 import type { RoutineQueueEntry } from '../db/orchestrator-rows-dal.ts';
+import {
+  orchestratorCyclesEnqueued,
+  orchestratorCyclesDrained,
+} from '../observability/orchestrator-metrics.ts';
 
 // ── Priority enum (R-ADO-06) ─────────────────────────────────────────────────
 // Higher integer drains first. deploy-fix outranks build when the cap is
@@ -74,6 +78,7 @@ export async function enqueueCycle(
     VALUES (${sessionId}, ${priority}, 'pending')
     RETURNING *
   `;
+  try { orchestratorCyclesEnqueued.inc(); } catch { /* metrics must never break enqueue */ }
   return rows[0];
 }
 
@@ -166,6 +171,7 @@ export async function drainOnce(): Promise<RoutineQueueEntry[]> {
   draining = true;
   try {
     const claimed = await claimCycles();
+    try { orchestratorCyclesDrained.inc({}, claimed.length); } catch { /* metrics must never break drain */ }
     const runner = cycleRunner;
     await Promise.all(
       claimed.map(async (entry) => {
