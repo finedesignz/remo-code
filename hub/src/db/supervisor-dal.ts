@@ -283,6 +283,37 @@ export async function finalizeOpenRunsForSupervisor(supervisorId: string) {
   `
 }
 
+/**
+ * Ghost-run reconciliation. The supervisor's live `session_inventory` push is
+ * the authoritative liveness signal — `GET /api/sessions` already folds it into
+ * each row's `active` flag, so a session the supervisor is no longer hosting
+ * drops out of the Sessions list. But the Connections "running" dot reads
+ * `session_runs WHERE ended_at IS NULL` (see `/api/supervisors/:id/active`),
+ * which is NOT updated when an individual runner exits while the supervisor
+ * socket stays up (CLI crash, idle teardown). The open run row then leaks and
+ * the row shows a green "running" dot for a session that no longer exists.
+ *
+ * On every inventory push, close any open run for this supervisor whose
+ * `session_id` is absent from the live set — reconciling both views off the one
+ * source of truth. A 30s grace on `started_at` avoids racing a just-created run
+ * the supervisor hasn't echoed back into inventory yet (it pushes every ~10s).
+ */
+export async function finalizeOrphanedRunsForSupervisor(
+  supervisorId: string,
+  liveSessionIds: string[],
+): Promise<number> {
+  const rows = await sql`
+    UPDATE session_runs
+    SET ended_at = now(), exit_reason = 'orphaned_no_inventory'
+    WHERE supervisor_id = ${supervisorId}
+      AND ended_at IS NULL
+      AND started_at < now() - interval '30 seconds'
+      AND NOT (session_id = ANY(${liveSessionIds}))
+    RETURNING id
+  `
+  return rows.length
+}
+
 export async function listRunsForSupervisor(supervisorId: string, userId: string, limit = 50) {
   return sql`
     SELECT * FROM session_runs
