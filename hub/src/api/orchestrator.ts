@@ -1,10 +1,11 @@
 // hub/src/api/orchestrator.ts
 // REST surface for the orchestrator-session feature.
 //
-//   GET  /api/orchestrator         — read prefs + current session state
-//   PUT  /api/orchestrator         — update prefs (enabled/name/instructions)
-//   POST /api/orchestrator/start   — pick supervisor, mint key, dispatch session.start
-//   POST /api/orchestrator/stop    — send session.stop for the orchestrator's run_id
+//   GET  /api/orchestrator            — read prefs + current session state
+//   PUT  /api/orchestrator            — update prefs (enabled/name/instructions)
+//   POST /api/orchestrator/start      — pick supervisor, mint key, dispatch session.start
+//   POST /api/orchestrator/stop       — send session.stop for the orchestrator's run_id
+//   GET  /api/orchestrator/run-log    — paginated run-log read (OBSRV-01 / RUNLOG-01/02)
 //
 // License-gating: GET passes during EXPIRED grace via the existing
 // `readOnlyOk: true` gate. Mutations remain ACTIVE-only and additionally
@@ -20,6 +21,7 @@ import {
 } from '../db/orchestrator-dal';
 import { sendToSupervisor, listOnlineSupervisorIdsForUser } from '../ws/supervisor-registry';
 import { launchOrchestrator } from '../orchestrator/auto-launch';
+import { listRunLog } from '../orchestrator/run-log';
 
 export const orchestrator = new Hono();
 
@@ -106,6 +108,24 @@ orchestrator.post('/start', async (c) => {
     default:
       return c.json({ error: 'internal_error', detail: res.error }, 500);
   }
+});
+
+// OBSRV-01 / RUNLOG-01/02 — read-only, user-scoped, paginated run-log.
+// GET /api/orchestrator/run-log?limit=50&offset=0&session_id=<optional>
+// Returns rows newest-first. Zero dispatch-path changes.
+const RunLogQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+  session_id: z.string().optional(),
+});
+
+orchestrator.get('/run-log', async (c) => {
+  const userId = c.get('userId') as string;
+  const parsed = RunLogQuery.safeParse(Object.fromEntries(new URL(c.req.url).searchParams));
+  if (!parsed.success) return c.json({ error: 'invalid_query', detail: parsed.error.flatten() }, 400);
+  const { limit, offset, session_id } = parsed.data;
+  const rows = await listRunLog({ userId, sessionId: session_id ?? null, limit, offset });
+  return c.json({ items: rows, limit, offset });
 });
 
 orchestrator.post('/stop', async (c) => {

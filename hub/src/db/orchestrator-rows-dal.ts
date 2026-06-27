@@ -313,6 +313,38 @@ export async function recentRoutineRunLog(
   `;
 }
 
+// Paginated, user-scoped run-log read (OBSRV-01 / RUNLOG-01/02).
+// Joins through sessions.user_id to enforce the security invariant that a
+// user can only read their own rows. Optional session_id filter narrows to
+// per-session view; omit for hub-wide (all sessions for this user).
+export async function listRunLogForUser(opts: {
+  userId: string;
+  sessionId?: string | null;
+  limit: number;
+  offset: number;
+}): Promise<RoutineRunLogEntry[]> {
+  const { userId, sessionId, limit, offset } = opts;
+  if (sessionId) {
+    return sql<RoutineRunLogEntry[]>`
+      SELECT r.*
+      FROM routine_run_log r
+      JOIN sessions s ON s.id = r.session_id
+      WHERE s.user_id = ${userId}::uuid
+        AND r.session_id = ${sessionId}
+      ORDER BY r.created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  return sql<RoutineRunLogEntry[]>`
+    SELECT r.*
+    FROM routine_run_log r
+    JOIN sessions s ON s.id = r.session_id
+    WHERE s.user_id = ${userId}::uuid
+    ORDER BY r.created_at DESC
+    LIMIT ${limit} OFFSET ${offset}
+  `;
+}
+
 // ── routine_queue ──────────────────────────────────────────────────────────
 
 export type RoutineQueueStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';

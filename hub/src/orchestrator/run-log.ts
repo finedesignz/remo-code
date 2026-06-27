@@ -10,6 +10,7 @@
 import {
   insertRoutineRunLog,
   recentRoutineRunLog,
+  listRunLogForUser,
   type RoutineRunLogEntry,
   type NewRoutineRunLogEntry,
 } from '../db/orchestrator-rows-dal.ts';
@@ -24,4 +25,14 @@ export function appendRunLog(entry: NewRoutineRunLogEntry): Promise<RoutineRunLo
 /** Read the last `n` run-log entries for a session, newest first (D1/D4 context). */
 export function recentRunLog(sessionId: string, n = 20): Promise<RoutineRunLogEntry[]> {
   return recentRoutineRunLog(sessionId, n);
+}
+
+/** Paginated, user-scoped run-log read (OBSRV-01 / RUNLOG-01/02). */
+export function listRunLog(opts: {
+  userId: string;
+  sessionId?: string | null;
+  limit: number;
+  offset: number;
+}): Promise<RoutineRunLogEntry[]> {
+  return listRunLogForUser(opts);
 }

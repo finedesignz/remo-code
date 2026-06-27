@@ -663,6 +663,69 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   return c.json({ templates: TASK_TEMPLATES }, 200);
 });
 
+// ── Orchestrator run-log (OBSRV-01 / RUNLOG-01/02) ──────────────────────────
+// Spec-only registration — the plain-Hono router in `./orchestrator.ts` serves
+// traffic. This contributes to the OpenAPI spec without duplicating handler logic.
+{
+  const RunLogItem = z.object({
+    id: z.string(),
+    session_id: z.string(),
+    repo_key: z.string().nullable(),
+    command: z.string(),
+    decision_rationale: z.string().nullable(),
+    outcome: z.string().nullable(),
+    gap_dimension: z.string().nullable(),
+    pr_url: z.string().nullable(),
+    reviewer_verdict: z.string().nullable(),
+    deploy_verify_result: z.string().nullable(),
+    created_at: z.string(),
+  });
+  const reg = openapi.openAPIRegistry;
+  reg.registerPath({
+    method: "get",
+    path: "/api/orchestrator/run-log",
+    tags: ["orchestrator"],
+    summary: "Paginated run-log for the authenticated user",
+    description:
+      "Returns routine_run_log rows scoped to the authenticated user, newest first. " +
+      "Pass `session_id` to narrow to a single session; omit for all sessions. " +
+      "Read-only — zero impact on the dispatch path, gates, or caps.",
+    security: [{ bearerAuth: [] }],
+    request: {
+      query: z.object({
+        limit: z.coerce.number().int().min(1).max(200).default(50).optional()
+          .openapi({ description: "Page size (1–200, default 50)" }),
+        offset: z.coerce.number().int().min(0).default(0).optional()
+          .openapi({ description: "Row offset for pagination (default 0)" }),
+        session_id: z.string().optional()
+          .openapi({ description: "Filter to a single session (must belong to the authenticated user)" }),
+      }),
+    },
+    responses: {
+      200: {
+        description: "Paginated run-log entries",
+        content: {
+          "application/json": {
+            schema: z.object({
+              items: z.array(RunLogItem),
+              limit: z.number(),
+              offset: z.number(),
+            }),
+          },
+        },
+      },
+      400: {
+        description: "Invalid query parameters",
+        content: { "application/json": { schema: z.object({ error: z.string() }) } },
+      },
+      401: {
+        description: "Missing or invalid session",
+        content: { "application/json": { schema: z.object({ error: z.string() }) } },
+      },
+    },
+  });
+}
+
 // ── Feedback intake (Option A) — public end-user feedback webhook ───────────
 // Spec-only registration. The plain-Hono router in `./feedback-webhook.ts`
 // serves traffic (mounted public, BEFORE the JWT catch-all); this only
