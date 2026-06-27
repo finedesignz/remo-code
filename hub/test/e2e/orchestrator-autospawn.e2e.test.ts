@@ -117,6 +117,8 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
       // REAL env-gated predicates (set via process.env per-case).
       isOrchestratorEnabled,
       isAutospawnEnabled,
+      // Shadow OFF — these e2e cases exercise the REAL spawn path (OBSRV-04).
+      isAutospawnShadowEnabled: () => false,
       // REAL DB-backed allowlist + caps + ledger.
       isRepoAutospawnAllowed,
       getTokenCapStatus,
