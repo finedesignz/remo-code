@@ -201,6 +201,14 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   allowlist table **`orchestrator_autospawn_allowlist`** (per-user `repo_ident`; default EMPTY ⇒ drives
   nothing; `isRepoAutospawnAllowed`/`addRepoToAutospawnAllowlist` in `orchestrator-rows-dal.ts`). Flip
   runbook: [docs/orchestrator-autospawn-runbook.md](docs/orchestrator-autospawn-runbook.md).
+- **`REMO_ORCHESTRATOR_AUTOSPAWN_SHADOW`** (default **OFF** / `'0'`; accepts `1|true|yes|on`; milestone OBSRV-04):
+  gates the **autospawn shadow dry-run** — with this ON and the normal autospawn AND-chain satisfied,
+  `maybeAutospawnOffline` records a `routine_run_log` row (`command='autospawn-shadow'`,
+  `outcome='shadow_would_spawn'`) WITHOUT calling `launchSessionForUser` or dispatching any prompt.
+  Surface shadow records via `GET /api/orchestrator/run-log`. Shadow rows are NOT counted toward the
+  daily launch cap. SAFETY: `launchSessionForUser` is NEVER called in shadow mode (guard test:
+  `hub/test/orchestrator-autospawn-shadow.test.ts`). Set this before arming real autospawn to preview
+  which sessions would fire. See OBSRV-04 runbook in `.planning/phases/OBSRV-04-autospawn-shadow-dry-run/`.
 - **`REMO_PTY_INTERACTIVE`** (prod: **ON** since the 2026-06-04 cutover): drives the **web**
   default human surface — `GET /api/client-config` returns `pty_interactive`, and the SPA renders
   `TerminalSurface` (interactive `claude`/`codex` TUI over the Rust ConPTY) instead of the

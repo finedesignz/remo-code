@@ -27,7 +27,7 @@ import {
   type RunStore,
 } from '../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, isOverAutospawnDailyLaunchCap } from '../dispatch/gates.ts'
-import { isOrchestratorEnabled, isAutospawnEnabled } from './controller.ts'
+import { isOrchestratorEnabled, isAutospawnEnabled, isAutospawnShadowEnabled } from './controller.ts'
 import {
   isRepoAutospawnAllowed,
   countAutospawnLaunchesToday,
@@ -55,6 +55,9 @@ export type InjectOutcome =
   | { kind: 'autospawn_launched' }
   /** the macro prompt is parked in grace (launch already in flight, or dispatch parked). */
   | { kind: 'autospawn_parked' }
+  // ── OBSRV-04: shadow dry-run outcome ──────────────────────────────────────────
+  /** SHADOW-only: all gates passed but launchSessionForUser was NOT called. */
+  | { kind: 'shadow_would_spawn' }
 
 /**
  * BSA-02: per-call autospawn context. ONLY supplied by the macro cycle for a
@@ -90,6 +93,7 @@ export interface InjectDeps {
   // BSA-02 seams (all default to the real adapters; tests swap them).
   isOrchestratorEnabled: typeof isOrchestratorEnabled
   isAutospawnEnabled: typeof isAutospawnEnabled
+  isAutospawnShadowEnabled: typeof isAutospawnShadowEnabled
   isRepoAutospawnAllowed: typeof isRepoAutospawnAllowed
   getTokenCapStatus: typeof getTokenCapStatus
   countAutospawnLaunchesToday: typeof countAutospawnLaunchesToday
@@ -114,6 +118,7 @@ const REAL_DEPS: InjectDeps = {
   getChannel,
   isOrchestratorEnabled,
   isAutospawnEnabled,
+  isAutospawnShadowEnabled,
   isRepoAutospawnAllowed,
   getTokenCapStatus,
   countAutospawnLaunchesToday,
@@ -304,6 +309,25 @@ async function maybeAutospawnOffline(
   // earlier parked prompt already covers delivery on reconnect.
   if (deps.graceParkPending(sessionId)) {
     return { kind: 'autospawn_parked' }
+  }
+
+  // ── OBSRV-04: shadow dry-run intercept ────────────────────────────────────────
+  // All gates passed. If shadow mode is ON, record the would-be spawn and return
+  // WITHOUT calling launchSessionForUser or dispatching any prompt.
+  // SAFETY INVARIANT: launchSessionForUser MUST NOT be called in this branch.
+  if (deps.isAutospawnShadowEnabled()) {
+    try {
+      await deps.appendRunLog({
+        session_id: sessionId,
+        repo_key: autospawn.repoIdent,
+        command: 'autospawn-shadow',
+        decision_rationale: `[SHADOW] would-have-spawned build session for ${autospawn.repoIdent}; prompt_len=${prompt.length}`,
+        outcome: 'shadow_would_spawn',
+      })
+    } catch {
+      /* best-effort — log failure must not surface as a real spawn */
+    }
+    return { kind: 'shadow_would_spawn' }
   }
 
   let launch: LaunchResult

@@ -67,6 +67,21 @@ export function isAutospawnEnabled(): boolean {
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
+// ── OBSRV-04: autospawn shadow dry-run gate (default OFF) ─────────────────────
+/**
+ * REMO_ORCHESTRATOR_AUTOSPAWN_SHADOW enables observe-only shadow dry-runs of
+ * build-session autospawn. When ON, maybeAutospawnOffline runs the FULL AND-chain
+ * (allowlist, caps, supervisor check, grace dedup) but — instead of calling
+ * launchSessionForUser — writes a 'shadow_would_spawn' run-log record and returns
+ * without spawning or dispatching anything. Default OFF ('0'; accepts 1|true|yes|on).
+ * Read at call-time so tests can toggle via process.env.
+ * SAFETY: shadow mode MUST NEVER call launchSessionForUser. See guard test.
+ */
+export function isAutospawnShadowEnabled(): boolean {
+  const raw = (process.env.REMO_ORCHESTRATOR_AUTOSPAWN_SHADOW ?? '0').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
 // ── Live-path gate (carried Phase-22 gate; decision D10) ─────────────────────
 /**
  * REMO_ORCHESTRATOR_ENABLED gates the LIVE controller path. Default OFF ('0').
