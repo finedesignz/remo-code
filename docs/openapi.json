@@ -2968,6 +2968,177 @@
         }
       }
     },
+    "/api/orchestrator/run-log": {
+      "get": {
+        "tags": [
+          "orchestrator"
+        ],
+        "summary": "Paginated run-log for the authenticated user",
+        "description": "Returns routine_run_log rows scoped to the authenticated user, newest first. Pass `session_id` to narrow to a single session; omit for all sessions. Read-only — zero impact on the dispatch path, gates, or caps.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50,
+              "description": "Page size (1–200, default 50)"
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0,
+              "default": 0,
+              "description": "Row offset for pagination (default 0)"
+            },
+            "required": false,
+            "name": "offset",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Filter to a single session (must belong to the authenticated user)"
+            },
+            "required": false,
+            "name": "session_id",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated run-log entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "session_id": {
+                            "type": "string"
+                          },
+                          "repo_key": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "command": {
+                            "type": "string"
+                          },
+                          "decision_rationale": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "gap_dimension": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "pr_url": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "reviewer_verdict": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "deploy_verify_result": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "created_at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "session_id",
+                          "repo_key",
+                          "command",
+                          "decision_rationale",
+                          "outcome",
+                          "gap_dimension",
+                          "pr_url",
+                          "reviewer_verdict",
+                          "deploy_verify_result",
+                          "created_at"
+                        ]
+                      }
+                    },
+                    "limit": {
+                      "type": "number"
+                    },
+                    "offset": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "limit",
+                    "offset"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/feedback/{token}": {
       "post": {
         "tags": [

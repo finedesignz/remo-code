@@ -2731,6 +2731,125 @@ To perform this operation, you must be authenticated by means of one of the foll
 bearerAuth
 </aside>
 
+<h1 id="remo-code-hub-orchestrator">orchestrator</h1>
+
+## Paginated run-log for the authenticated user
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/orchestrator/run-log \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/orchestrator/run-log',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/orchestrator/run-log`
+
+Returns routine_run_log rows scoped to the authenticated user, newest first. Pass `session_id` to narrow to a single session; omit for all sessions. Read-only — zero impact on the dispatch path, gates, or caps.
+
+<h3 id="paginated-run-log-for-the-authenticated-user-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|limit|query|integer|false|none|
+|offset|query|integer|false|none|
+|session_id|query|string|false|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "items": [
+    {
+      "id": "string",
+      "session_id": "string",
+      "repo_key": "string",
+      "command": "string",
+      "decision_rationale": "string",
+      "outcome": "string",
+      "gap_dimension": "string",
+      "pr_url": "string",
+      "reviewer_verdict": "string",
+      "deploy_verify_result": "string",
+      "created_at": "string"
+    }
+  ],
+  "limit": 0,
+  "offset": 0
+}
+```
+
+<h3 id="paginated-run-log-for-the-authenticated-user-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Paginated run-log entries|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid query parameters|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid session|Inline|
+
+<h3 id="paginated-run-log-for-the-authenticated-user-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» items|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» session_id|string|true|none|none|
+|»» repo_key|string¦null|true|none|none|
+|»» command|string|true|none|none|
+|»» decision_rationale|string¦null|true|none|none|
+|»» outcome|string¦null|true|none|none|
+|»» gap_dimension|string¦null|true|none|none|
+|»» pr_url|string¦null|true|none|none|
+|»» reviewer_verdict|string¦null|true|none|none|
+|»» deploy_verify_result|string¦null|true|none|none|
+|»» created_at|string|true|none|none|
+|» limit|number|true|none|none|
+|» offset|number|true|none|none|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
 <h1 id="remo-code-hub-feedback">feedback</h1>
 
 ## Submit end-user feedback (screenshot + description) into the bound session

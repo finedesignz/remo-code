@@ -32,6 +32,10 @@ import {
   orchestratorDispatchOutcome,
   refreshOrchestratorCapGauges,
 } from '../observability/orchestrator-metrics.ts';
+import {
+  evaluateCapAlert,
+  type CapAlertDeps,
+} from '../observability/cap-alert.ts';
 
 export interface MacroCycleInput {
   userId: string;
@@ -52,6 +56,8 @@ export interface MacroCycleDeps {
   fanOut: typeof fanOutNotify;
   /** true when a run is already in flight for this session (per-session lock held). */
   isRunLive: (sessionId: string) => boolean;
+  /** OBSRV-05: cap-approach alert evaluator (injectable for tests; optional). */
+  evaluateCapAlert?: typeof evaluateCapAlert;
 }
 
 async function realDeps(): Promise<MacroCycleDeps> {
@@ -228,6 +234,20 @@ export async function runMacroCycle(
     // OBSRV-03: refresh cap gauges (best-effort, fail-open).
     try {
       await refreshOrchestratorCapGauges(userId, 'UTC');
+    } catch { /* fail-open */ }
+
+    // OBSRV-05: cap-approach alert (best-effort, fail-open, throttled once/day/cap).
+    try {
+      const { getCostCapStatus, getTokenCapStatus } = await import('../dispatch/gates.ts');
+      const [costStatus, tokenStatus] = await Promise.all([
+        getCostCapStatus(userId, 'UTC'),
+        getTokenCapStatus(userId, 'UTC'),
+      ]);
+      const capAlertFn = d.evaluateCapAlert ?? evaluateCapAlert;
+      await capAlertFn(
+        { userId, sessionId, tokenStatus, costStatus },
+        { fanOut: d.fanOut },
+      );
     } catch { /* fail-open */ }
 
     // Observability: stamp this resume into the run-log.
