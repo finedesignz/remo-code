@@ -36,6 +36,8 @@ function makeDeps(over: Partial<InjectDeps>, calls: Calls): InjectDeps {
     // override here). We override the predicates directly for determinism.
     isOrchestratorEnabled: () => true,
     isAutospawnEnabled: () => true,
+    // Shadow OFF by default — these cases exercise the REAL spawn path (OBSRV-04).
+    isAutospawnShadowEnabled: () => false,
     isRepoAutospawnAllowed: async () => true,
     getTokenCapStatus: async () => ({ over: false, tokens: 0, cap: 50_000_000 }),
     countAutospawnLaunchesToday: async () => 0,
