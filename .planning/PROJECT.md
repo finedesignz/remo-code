@@ -24,6 +24,15 @@ non-bypassable daily cost cap and Titanium-aligned auth.
 - **TMAC** (Phases TMAC-01..06) — built + merged 2026-06-08. Autonomous task-type macro prompt path is
   the default orchestrator cycle-runner; legacy micro-row wave engine kept behind a rollback flag.
 
+## Planned Milestones (Roadmap)
+
+This is the **ONLY** source the autonomous auto-dev orchestrator may draw the next milestone
+from. Entries are **owner-curated** (added here deliberately by the owner, never invented by the
+orchestrator); ordered top = next. When the current milestone ships and this list is empty, the
+orchestrator must STOP and request owner direction — it may NOT self-scope a novel product direction.
+
+- _(none planned — orchestrator must STOP and request direction when the current milestone ships)_
+
 ## Current Milestone: OBSRV — Orchestrator Observability & Shadow Dry-Run
 
 **Goal:** Build the read-only observability + safety-rehearsal layer for the auto-dev/autospawn path
