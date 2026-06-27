@@ -1,0 +1,139 @@
+/**
+ * Ghost-run reconciliation — finalizeOrphanedRunsForSupervisor.
+ *
+ * Regression for: Connections "running" dot stays green for a session that no
+ * longer appears in the Sessions list. The Sessions list is inventory-driven
+ * (drops dead sessions), but the running dot reads `session_runs.ended_at IS
+ * NULL`, which was only closed on supervisor socket close — not when an
+ * individual runner exited while the supervisor stayed connected. On every
+ * `session_inventory` push we now close open runs whose session is absent from
+ * the live set (with a 30s grace against the spawn race).
+ *
+ * Gated on REMO_E2E_DB_URL because it exercises real Postgres. Skips cleanly.
+ */
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-chars-long-aaaaaaaa'
+if (process.env.REMO_E2E_DB_URL) {
+  process.env.DATABASE_URL = process.env.REMO_E2E_DB_URL
+}
+
+import { describe, test, expect, beforeAll } from 'bun:test'
+
+const HAS_TEST_DB = !!process.env.REMO_E2E_DB_URL
+const maybe = HAS_TEST_DB ? describe : describe.skip
+
+maybe('finalizeOrphanedRunsForSupervisor', () => {
+  let finalizeOrphanedRunsForSupervisor: (id: string, live: string[]) => Promise<number>
+  let sql: any
+  let supervisorId: string
+  let userId: string
+
+  beforeAll(async () => {
+    ;({ finalizeOrphanedRunsForSupervisor } = await import('../src/db/supervisor-dal.ts'))
+    ;({ sql } = await import('../src/db/postgres.ts'))
+
+    await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`
+    await sql`
+      CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL DEFAULT '',
+        role TEXT NOT NULL DEFAULT 'user'
+      )
+    `
+    await sql`
+      CREATE TABLE IF NOT EXISTS session_runs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL,
+        session_id UUID,
+        supervisor_id TEXT NOT NULL,
+        repo_path TEXT NOT NULL DEFAULT '',
+        branch TEXT,
+        pulled BOOLEAN NOT NULL DEFAULT false,
+        initial_prompt TEXT,
+        restart_of UUID,
+        restart_count INT NOT NULL DEFAULT 0,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        ended_at TIMESTAMPTZ,
+        exit_code INT,
+        exit_reason TEXT
+      )
+    `
+
+    const userRow = await sql`
+      INSERT INTO users (email) VALUES (${`orphan-${Date.now()}@test.local`})
+      RETURNING id
+    `
+    userId = userRow[0].id
+    supervisorId = `sup_orphan_${Date.now()}`
+    await mkSupervisor(supervisorId)
+  })
+
+  async function mkSupervisor(id: string): Promise<void> {
+    const apiKeyId = `apikey_${id}`
+    await sql`
+      INSERT INTO api_keys (id, user_id, key_hash, capabilities, name, purpose)
+      VALUES (${apiKeyId}, ${userId}, ${`hash-${id}`}, ${['supervisor']}::text[], 'orphan test', ${`purpose-${id}`})
+      ON CONFLICT (id) DO NOTHING
+    `
+    await sql`
+      INSERT INTO supervisors (id, user_id, api_key_id, hostname, roots)
+      VALUES (${id}, ${userId}, ${apiKeyId}, ${'orphan-host'}, ARRAY[]::text[])
+      ON CONFLICT (id) DO NOTHING
+    `
+  }
+
+  test('closes runs absent from inventory, keeps live + spawning-grace runs', async () => {
+    const liveId = crypto.randomUUID()
+    const ghostId = crypto.randomUUID()
+    const freshGhostId = crypto.randomUUID()
+
+    // live run, started long ago, IS in inventory → keep
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, ${liveId}, ${supervisorId}, 'live', now() - interval '5 minutes')
+    `
+    // ghost run, started long ago, NOT in inventory → close
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, ${ghostId}, ${supervisorId}, 'ghost', now() - interval '5 minutes')
+    `
+    // just-created run, NOT yet echoed in inventory (spawn race) → keep (grace)
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, ${freshGhostId}, ${supervisorId}, 'fresh', now())
+    `
+
+    const closed = await finalizeOrphanedRunsForSupervisor(supervisorId, [liveId])
+    expect(closed).toBe(1)
+
+    const rows = await sql`
+      SELECT repo_path, ended_at, exit_reason FROM session_runs
+      WHERE supervisor_id = ${supervisorId} ORDER BY repo_path
+    `
+    const by = Object.fromEntries(rows.map((r: any) => [r.repo_path, r]))
+    expect(by.live.ended_at).toBeNull()
+    expect(by.fresh.ended_at).toBeNull()
+    expect(by.ghost.ended_at).not.toBeNull()
+    expect(by.ghost.exit_reason).toBe('orphaned_no_inventory')
+  })
+
+  test('empty inventory closes all grace-aged open runs', async () => {
+    const otherSup = `sup_orphan_empty_${Date.now()}`
+    await mkSupervisor(otherSup)
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, ${crypto.randomUUID()}, ${otherSup}, 'x', now() - interval '1 minute')
+    `
+    const closed = await finalizeOrphanedRunsForSupervisor(otherSup, [])
+    expect(closed).toBe(1)
+  })
+})
+
+describe('finalizeOrphanedRunsForSupervisor — env gate', () => {
+  test('e2e gated on REMO_E2E_DB_URL', () => {
+    if (!HAS_TEST_DB) {
+      console.log('[finalize-orphaned-runs] REMO_E2E_DB_URL not set — DB tests SKIPPED.')
+    }
+    expect(true).toBe(true)
+  })
+})

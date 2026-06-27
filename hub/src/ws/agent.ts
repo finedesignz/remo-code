@@ -6,7 +6,7 @@ import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
-import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows } from '../db/supervisor-dal'
+import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows, finalizeOrphanedRunsForSupervisor } from '../db/supervisor-dal'
 import { ensureSupervisorProject } from '../db/error-capture-dal'
 import { getCapacitySnapshot } from '../sessions/budget'
 import {
@@ -1096,6 +1096,16 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
           changed_session_ids: changedSessionIds,
           scanned_at: scannedAt,
         })
+      }
+      // Ghost-run reconciliation: the inventory we just received is the live
+      // runner set. Close any open `session_runs` for this supervisor whose
+      // session is no longer hosted, so the Connections "running" dot stops
+      // diverging from the (inventory-driven) Sessions list. See
+      // finalizeOrphanedRunsForSupervisor for the race-grace rationale.
+      const liveIds = msg.sessions.map((s) => s.session_id)
+      const closed = await finalizeOrphanedRunsForSupervisor(supervisorId, liveIds)
+      if (closed > 0) {
+        console.log(`[supervisor] reconciled ${closed} ghost run(s) supervisor=${supervisorId}`)
       }
     } catch (err: any) {
       console.error('[supervisor] session_inventory handler failed', err?.message)
