@@ -97,7 +97,7 @@ describe('no-indigo in OBSRV-02 files', () => {
   const obsrv02Files = [
     join(import.meta.dir, '../src/lib/run-log-api.ts'),
     join(import.meta.dir, '../src/components/AutoDevActivityPanel.tsx'),
-    join(import.meta.dir, '../src/pages/settings/ActivityTab.tsx'),
+    join(import.meta.dir, '../src/pages/settings/ConnectionsTab.tsx'),
   ];
 
   test('OBSRV-02 source files contain no indigo references', () => {

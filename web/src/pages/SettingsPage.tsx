@@ -23,15 +23,14 @@ import { ConnectionsTab } from "./settings/ConnectionsTab";
 import { CredentialsTab } from "./settings/CredentialsTab";
 import { UsageTab } from "./settings/UsageTab";
 import { ProfileTab } from "./settings/ProfileTab";
-import { ActivityTab } from "./settings/ActivityTab";
 
-type SettingsTab = "connections" | "credentials" | "usage" | "profile" | "activity";
+type SettingsTab = "connections" | "credentials" | "usage" | "profile";
 
 function readSettingsTab(): SettingsTab {
   const raw = readTabParam();
   if (
     raw === "connections" || raw === "credentials" ||
-    raw === "usage" || raw === "profile" || raw === "activity"
+    raw === "usage" || raw === "profile"
   ) {
     return raw;
   }
@@ -69,7 +68,7 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
   }, []);
 
   const handleTabChange = (next: string) => {
-    const t = (["connections", "credentials", "usage", "profile", "activity"].includes(next)
+    const t = (["connections", "credentials", "usage", "profile"].includes(next)
       ? next
       : "connections") as SettingsTab;
     setTab(t);
@@ -83,7 +82,6 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
       { key: "credentials", label: "Credentials" },
       { key: "usage", label: "Usage" },
       { key: "profile", label: "Profile" },
-      { key: "activity", label: "Activity" },
     ],
     activeSubTab: tab,
     onSubTabChange: handleTabChange,
@@ -114,11 +112,6 @@ export function SettingsPage({ token, user, profile, signOut, onNavigate, onUpda
         {tab === "profile" && (
           <ErrorBoundary tabKey="settings:profile">
             <ProfileTab token={token} profile={profile} onUpdateProfile={onUpdateProfile} />
-          </ErrorBoundary>
-        )}
-        {tab === "activity" && (
-          <ErrorBoundary tabKey="settings:activity">
-            <ActivityTab token={token} />
           </ErrorBoundary>
         )}
       </div>

@@ -8,8 +8,8 @@
 |------|---------|
 | `web/src/lib/run-log-api.ts` | Typed API client for `GET /api/orchestrator/run-log` |
 | `web/src/components/AutoDevActivityPanel.tsx` | Dual-mode panel (per-session + hub-wide) |
-| `web/src/pages/settings/ActivityTab.tsx` | Hub-wide feed mounted in Settings > Activity |
-| `web/src/pages/SettingsPage.tsx` | Added "activity" tab |
+| `web/src/components/SupervisorPage.tsx` | Orchestrator row → expandable per-session timeline |
+| `web/src/pages/settings/ConnectionsTab.tsx` | Collapsible hub-wide feed below the repo table |
 | `web/test/auto-dev-activity.test.tsx` | 6 unit tests |
 
 ## Constraints
@@ -32,5 +32,7 @@ GET /api/orchestrator/run-log?limit=N&offset=M[&session_id=X]
 when absent → hub-wide feed with a repo label badge per row. Expandable rows surface
 rationale / gap / reviewer verdict / deploy-verify detail via a blue left-border block.
 
-`ActivityTab` wraps the panel in hub-wide mode and is mounted as a 5th Settings tab
-alongside Connections / Credentials / Usage / Profile.
+The activity surface lives entirely inside the **Connections** view — NOT a Settings
+tab — to preserve the documented four-tab invariant (Connections / Credentials / Usage /
+Profile). Per-session timeline expands from the pinned orchestrator row; the hub-wide
+feed is a collapsible section beneath the repo table.
