@@ -11,6 +11,7 @@ import { partitionIntoGroups } from '../lib/group-partition'
 import { GroupSection } from './groups/GroupSection'
 import { RepoGroupChips } from './groups/RepoGroupChips'
 import { GroupsManager } from './groups/GroupsManager'
+import { AutoDevActivityPanel } from './AutoDevActivityPanel'
 
 type OrchestratorSnapshot = {
   enabled: boolean
@@ -765,6 +766,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
             online={!!activeSupervisor?.online}
             rootPath={orchRoot}
             hasSupervisor={supervisors.length > 0}
+            token={token}
           />
           {rows.length === 0 ? (
             <EmptyState onClear={() => { setSearch(''); setFilter('all') }} />
@@ -1010,23 +1012,37 @@ function useOrchestrator(token: string) {
   }
 }
 
-function OrchestratorRow({ orch, online, rootPath, hasSupervisor }: {
+function OrchestratorRow({ orch, online, rootPath, hasSupervisor, token }: {
   orch: ReturnType<typeof useOrchestrator>
   online: boolean
   rootPath: string | null
   hasSupervisor: boolean
+  token: string
 }) {
   const { snap, busy, error, setEnabled, start, stop } = orch
   const [showEnable, setShowEnable] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const status = snap?.status ?? 'disabled'
   const dot =
     status === 'running' ? 'bg-emerald-400' : status === 'enabled_idle' ? 'bg-blue-400' : 'bg-gray-500'
   const statusLabel =
     status === 'running' ? 'running' : status === 'enabled_idle' ? 'idle' : 'disabled'
+  const sessionId = snap?.session_id ?? null
 
   return (
-    <div className="flex items-center gap-3 px-3 py-2 bg-blue-600/5 hover:bg-blue-600/10">
-      <span className="w-3.5 shrink-0" aria-hidden />
+    <div className="bg-blue-600/5">
+    <div className="flex items-center gap-3 px-3 py-2 hover:bg-blue-600/10">
+      <button
+        type="button"
+        className="w-3.5 shrink-0 text-[var(--text-muted)] hover:text-blue-400 disabled:opacity-30"
+        aria-label={expanded ? 'Hide auto-dev activity' : 'Show auto-dev activity'}
+        aria-expanded={expanded}
+        disabled={!sessionId}
+        title={sessionId ? 'Auto-Dev activity' : 'No active orchestrator session'}
+        onClick={() => setExpanded((x) => !x)}
+      >
+        {expanded ? '▾' : '▸'}
+      </button>
       <span className="w-3 shrink-0 flex justify-center">
         <span title={statusLabel} className={`inline-block w-2.5 h-2.5 rounded-full ${dot}`} />
       </span>
@@ -1075,6 +1091,12 @@ function OrchestratorRow({ orch, online, rootPath, hasSupervisor }: {
           Only enable if you trust the system prompt and your machine is secure.
         </p>
       </Modal>
+    </div>
+    {expanded && sessionId && (
+      <div className="px-3 pb-3 pt-1">
+        <AutoDevActivityPanel token={token} sessionId={sessionId} title="Auto-Dev Activity" />
+      </div>
+    )}
     </div>
   )
 }
