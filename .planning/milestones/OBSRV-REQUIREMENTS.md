@@ -52,22 +52,4 @@
   via skip-reason metrics.
 
 ## Traceability
-
-| Requirement | Phase | Status |
-|-------------|-------|--------|
-| RUNLOG-01 | Phase 1 — OBSRV-01-run-log-read-api | Pending |
-| RUNLOG-02 | Phase 1 — OBSRV-01-run-log-read-api | Pending |
-| RUNLOG-03 | Phase 2 — OBSRV-02-web-auto-dev-activity | Pending |
-| RUNLOG-04 | Phase 2 — OBSRV-02-web-auto-dev-activity | Pending |
-| SHADOW-01 | Phase 4 — OBSRV-04-autospawn-shadow-dry-run | Pending |
-| SHADOW-02 | Phase 4 — OBSRV-04-autospawn-shadow-dry-run | Pending |
-| SHADOW-03 | Phase 4 — OBSRV-04-autospawn-shadow-dry-run | Pending |
-| SHADOW-04 | Phase 4 — OBSRV-04-autospawn-shadow-dry-run | Pending |
-| METRIC-01 | Phase 3 — OBSRV-03-orchestrator-metrics | Pending |
-| METRIC-02 | Phase 3 — OBSRV-03-orchestrator-metrics | Pending |
-| METRIC-03 | Phase 5 — OBSRV-05-cap-approach-alerting | Pending |
-| HARDEN-01 | Phase 6 — OBSRV-06-e2e-hardening-docs-release | Pending |
-| HARDEN-02 | Phase 6 — OBSRV-06-e2e-hardening-docs-release | Pending |
-| HARDEN-03 | Phase 6 — OBSRV-06-e2e-hardening-docs-release | Pending |
-
-**Coverage:** 14/14 OBSRV requirements mapped, each to exactly one phase. No orphans, no duplicates.
+_(filled by roadmap)_

@@ -1,19 +1,26 @@
 ---
 gsd_state_version: 1.0
-milestone: OEE
-milestone_name: Orchestrator E2E Prove-Out
-status: shipped
-last_updated: "2026-06-26T05:17:19.259Z"
-last_activity: 2026-06-26
+milestone: OBSRV
+milestone_name: Orchestrator Observability & Shadow Dry-Run
+status: roadmapped
+last_updated: "2026-06-27T12:16:13.375Z"
+last_activity: 2026-06-27
 progress:
-  total_phases: 10
-  completed_phases: 10
-  total_plans: 10
-  completed_plans: 10
-  percent: 100
+  total_phases: 6
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
-<!-- updated: 2026-06-26 -->
+<!-- updated: 2026-06-27 -->
+
+> **Milestone OBSRV roadmapped 2026-06-27.** 6 phases (OBSRV-01..06), fine granularity, all
+> milestone-scoped dirs under `.planning/phases/OBSRV-NN-slug/`. 14/14 requirements mapped
+> (RUNLOG/SHADOW/METRIC/HARDEN). Pure additive read/shadow work — ZERO live-dispatch behavior
+> change, no `gates.ts` cap-behavior change, no AUTOSPAWN flip / allowlist populate, no
+> no-auto-merge-guard touch, additive idempotent DDL only. Parallel-startable now: Phase 1
+> (run-log read API) + Phase 3 (metrics counters). See `.planning/ROADMAP.md`.
 
 > **Milestone OEE (Orchestrator E2E Prove-Out) SHIPPED + LIVE 2026-06-26.** All 10 phases
 > (OEE-01..10) built + merged (PR #300, docs closeout #301). An isolated e2e harness +
@@ -69,17 +76,29 @@ connection is the Tauri Supervisor MSI.
 
 ## Current position
 
-Phase: Not started (defining requirements)
+Phase: Not started (roadmap complete — OBSRV-01..06 ready to plan)
 Plan: —
-Status: Defining requirements
-Last activity: 2026-06-26 — Milestone OEE started
+Status: Roadmapped — next `/gsd-plan-phase 1` (or plan 1 + 3 in parallel)
+Last activity: 2026-06-27 — Milestone OBSRV roadmapped (6 phases)
 
-### Phase ledger (`.planning/phases/`)
+### OBSRV phase ledger (`.planning/phases/`)
+
+- OBSRV-01-run-log-read-api — RUNLOG-01,02 — read-only `GET /api/orchestrator/run-log` + OpenAPI. No deps.
+- OBSRV-02-web-auto-dev-activity — RUNLOG-03,04 — per-session timeline + hub-wide feed (UI). Dep: 1.
+- OBSRV-03-orchestrator-metrics — METRIC-01,02 — counters + skip-reason histogram + cap headroom. No deps.
+- OBSRV-04-autospawn-shadow-dry-run — SHADOW-01..04 — shadow records, no spawn/dispatch, guard test. Dep: 1.
+- OBSRV-05-cap-approach-alerting — METRIC-03 — throttled stage-gated notify at % of cap. Dep: 3.
+- OBSRV-06-e2e-hardening-docs-release — HARDEN-01..03 — real-PG e2e, docs, version bump, ship+smoke. Dep: 1–5.
+
+Parallel-startable now: Phase 1 + Phase 3 (no deps).
+
+### Prior phase ledger (shipped)
 
 03 multichat-grid-view · 04 coolify-dev-supervisor · 05 codex-cli-and-rootless ·
 06 error-capture / self-heal-absorb / supervisor-tray · 07 titanium-auth-cutover ·
 08 github-session-keying / revanote-integration · 09 retire-npm-packages ·
-11 structured-task-workflows · 12 mobile-tauri-client (PAUSED) / telegram-bridge / ui-restructure.
+11 structured-task-workflows · 12 mobile-tauri-client (PAUSED) / telegram-bridge / ui-restructure ·
+15–20 interactive-pty-runner · 21–32 auto-dev-orchestrator/TMAC · BSA-01..08 · OEE-01..10.
 
 ## Auth reality (important)
 
@@ -93,32 +112,15 @@ Web Login (`web/src/pages/Login.tsx`) supports both modes + magic-link-disabled 
 Prod has exactly ONE user: `articulatedesigns@gmail.com` (admin, display "Michael"). Password
 reset 2026-05-29 to unblock owner login. `jamie@theleadingpractice.com` is NOT a DB row.
 
-## Active / pending work
-
-- ✅ **Telegram bridge UX fix** — MERGED #189 (`0050cf4`), deployed + smoke-verified 2026-05-29.
-  Fix A `setMyCommands` slash menu, Fix B navigator hardening (no handler was actually dropped —
-  it only looked broken w/o the slash menu; pagination hardcode → `PAGE_SIZE`), Fix C inline
-  tap-to-approve permission prompts (`hub/src/telegram/approvals.ts`, `events/permission-events.ts`).
-  Security-reviewed SHIP. **Open fast-follow (MED, fails-closed, moot at 1 user):** pending-prompt
-  registry keys by `requestId` alone → shared-session collision; key by `sessionId+requestId` +
-  set of authorized userIds. Functional verify (slash menu render, live approve/deny) needs a real
-  Telegram session — user-testable.
-
-- 🟢 **Hub-deepening Round 2** — UNBLOCKED (Telegram PR landed). Subsystem migrations onto shared
-  `hub/src/dispatch/`. Round 1 foundations merged (#154/#155/#156). Coordinate before editing
-  `hub/src/{scheduler,error-capture,revanote,telegram,ws/agent}`. Note redundant sibling branch
-  `fix/telegram-three-bugs` (worktree `.claude/worktrees/tg-slash-nav`, #188) from another session
-  — superseded by #189, candidate for cleanup.
-
-- ⏸️ **Phase 12 mobile (Tauri)** — PAUSED 2026-05-28. Resume doc `docs/phase-12-pause-state.md`.
-  iOS never built; working MSI + APK exist.
-
 ## Cross-cutting invariants (do not violate)
 
-- Cost cap non-bypassable — all user→session dispatch via `hub/src/dispatch/gates.ts`.
+- Cost cap non-bypassable — all user→session dispatch via `hub/src/dispatch/gates.ts`. **OBSRV must
+  not change cap behavior here — read counters only.**
 - Public webhooks: raw body before JSON parse, constant-time secret compare, mount BEFORE
   `/api/*` auth catch-all (`hub/test/mount-order.test.ts` enforces).
-
 - `schema.sql` re-runs every boot — idempotent DDL only; backfills → `hub/scripts/` one-shots.
 - Orchestrator: exactly one open per user (`idx_sessions_orchestrator_unique`).
 - QC gate: `bun run check-baseline` (per-file test isolation; `tools/regression-baseline.json`).
+- **OBSRV-specific:** shadow mode NEVER calls `launchSessionForUser` / never dispatches; never flip
+  `REMO_ORCHESTRATOR_AUTOSPAWN`, never populate `orchestrator_autospawn_allowlist`, never touch the
+  no-auto-merge guard; additive idempotent DDL only.
