@@ -27,6 +27,11 @@ import { shouldNotify, fanOutNotify, type NotifyEvent } from './notify.ts';
 import { appendRunLog } from './run-log.ts';
 import { injectOrchestratorPrompt } from './inject.ts';
 import type { LifecycleStage, MacroTaskType } from '../db/orchestrator-rows-dal.ts';
+import {
+  orchestratorCycleSkipReason,
+  orchestratorDispatchOutcome,
+  refreshOrchestratorCapGauges,
+} from '../observability/orchestrator-metrics.ts';
 
 export interface MacroCycleInput {
   userId: string;
@@ -125,6 +130,7 @@ export async function runMacroCycle(
   //    so it never auto-resumes past an awaiting-approval proposal (SPEC §6).
   if (sentinels?.gate && (stageHalts(stage) || macroTaskType === 'brainstorming')) {
     result.halted = true;
+    try { orchestratorCycleSkipReason.inc({ reason: 'halted' }); } catch { /* fail-open */ }
     console.log(
       `[orchestrator.macro] session=${sessionId} HALTED on gate: ${sentinels.gate.reason ?? 'unspecified'} ` +
         `(stage=${stage}); awaiting human reply.`,
@@ -137,6 +143,7 @@ export async function runMacroCycle(
   //     heartbeat reconciles once the run finishes.
   if (d.isRunLive(sessionId)) {
     result.skipped = true;
+    try { orchestratorCycleSkipReason.inc({ reason: 'run_live' }); } catch { /* fail-open */ }
     try {
       await d.appendRunLog({
         session_id: sessionId,
@@ -165,6 +172,7 @@ export async function runMacroCycle(
     // run-log row instead of a silent dead run.
     if (!macro.complete) {
       result.stubNotReady = true;
+      try { orchestratorCycleSkipReason.inc({ reason: 'stub_not_ready' }); } catch { /* fail-open */ }
       console.log(
         `[orchestrator.macro] session=${sessionId} macro_task_type=${macroTaskType} is a STUB ` +
           `(complete=false) — skipping inject (stub_not_ready).`,
@@ -198,6 +206,29 @@ export async function runMacroCycle(
       outcome.kind === 'queued' ||
       outcome.kind === 'autospawn_launched' ||
       outcome.kind === 'autospawn_parked';
+
+    // OBSRV-03: dispatch-outcome counter + skip-reason on non-dispatch outcomes.
+    try {
+      orchestratorDispatchOutcome.inc({ kind: outcome.kind });
+      if (!result.injected) {
+        const skipReason =
+          outcome.kind === 'refused_cost_cap'
+            ? 'refused_cost_cap'
+            : outcome.kind === 'no_session'
+              ? 'no_session'
+              : outcome.kind === 'failed'
+                ? 'failed'
+                : outcome.kind === 'refused'
+                  ? ('reason' in outcome ? `refused_${(outcome as any).reason}` : 'refused')
+                  : outcome.kind;
+        orchestratorCycleSkipReason.inc({ reason: skipReason });
+      }
+    } catch { /* fail-open */ }
+
+    // OBSRV-03: refresh cap gauges (best-effort, fail-open).
+    try {
+      await refreshOrchestratorCapGauges(userId, 'UTC');
+    } catch { /* fail-open */ }
 
     // Observability: stamp this resume into the run-log.
     try {
