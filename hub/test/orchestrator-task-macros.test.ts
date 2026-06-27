@@ -171,6 +171,28 @@ describe('task-macros — BRAINSTORMING always gates for approval', () => {
   })
 })
 
+describe('task-macros — DEV scopes next milestone from the predetermined roadmap', () => {
+  const p = renderMacro('dev', CTX).prompt
+  const flat = p.replace(/\s+/g, ' ')
+
+  test('next milestone is drawn ONLY from the Planned Milestones (Roadmap) section', () => {
+    expect(flat).toContain('Planned Milestones (Roadmap)')
+    expect(flat).toContain('TOP\npending entry'.replace(/\s+/g, ' '))
+  })
+
+  test('roadmap-exhausted is a mandatory STOP gate at every stage', () => {
+    expect(flat).toContain('roadmap_exhausted')
+    expect(p).toContain('<<GATE reason="roadmap_exhausted"')
+    expect(flat).toContain('regardless of')
+  })
+
+  test('no longer treats novel product direction as an auto-invent grey-area gate', () => {
+    // the old wording that let it self-scope a new product direction is gone
+    expect(p).not.toContain('Novel product-direction scope here is a grey-area gate')
+    expect(flat).toContain('may NOT invent a new product-direction milestone')
+  })
+})
+
 describe('task-macros — unknown type', () => {
   test('coerces unknown to dev (safe fully-specified routine)', () => {
     const r = renderMacro('nope', CTX)

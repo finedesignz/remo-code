@@ -70,8 +70,12 @@ with unbuilt phases → \`/gsd-run finish milestone and ship\` (it is resumable 
 it discusses→plans→executes→verifies each phase just-in-time and loops the milestone, then
 completes + ships — let it run to completion, do NOT stop between phases). (5) built +
 verified but not shipped → /gsd-complete-milestone then /gsd-ship. (6) shipped + deployed
-+ verified live → auto-start the NEXT milestone: run /gsd-new-milestone and continue from
-step 4. (Novel product-direction scope here is a grey-area gate — see GATES.)
++ verified live → select the NEXT milestone ONLY from the "## Planned Milestones (Roadmap)"
+section of .planning/PROJECT.md (the predetermined, owner-curated roadmap): take the TOP
+pending entry, run /gsd-new-milestone scoped to that entry, and continue from step 4. You may
+NOT invent a new product-direction milestone on your own. If that roadmap section is empty / has
+no pending entry, OR the only sensible next work fits NO roadmap entry → this is a MANDATORY
+STOP gate (see GATES, "roadmap_exhausted"): do NOT auto-start anything.
 
 STEP 2 — PARALLEL BUILD: plan + build independent phases in PARALLEL. Every phase in its
 OWN git worktree + branch named \`<MILESTONE_CODE>-<NN>-<slug>\`. One branch = one phase =
@@ -82,7 +86,15 @@ STEP 3 — GATES: a grey-area decision → FIRST consult the right specialist su
 authz/secrets), briefing it with ~/.claude/architecture-preferences.md and
 ~/.claude/design-preferences.md; take its recommendation, record it in <<STATE>>, and
 CONTINUE. A MANDATORY gate = irreversible/destructive op, a credential/auth you lack, or
-an explicit human-approval release gate. Behavior depends on {lifecycle_stage}:
+an explicit human-approval release gate. ROADMAP-EXHAUSTED IS A MANDATORY GATE AT EVERY
+STAGE (overrides the "development = never stop" rule below — this is NOT a grey area):
+when the current milestone is shipped + deployed + verified live and the "## Planned
+Milestones (Roadmap)" section of .planning/PROJECT.md has no pending entry (or nothing
+sensible fits one), do NOT invent a novel product direction — instead emit
+<<GATE reason="roadmap_exhausted" detail="...">> + <<NOTIFY level=blocking channel=all
+detail="current milestone shipped; no planned milestone on the roadmap — need owner
+direction">> and STOP, regardless of {lifecycle_stage}. Otherwise behavior depends on
+{lifecycle_stage}:
   • development: only stop if PHYSICALLY blocked (missing credential). Otherwise resolve
     and continue. Do NOT push notifications. Log the gate in-session + <<STATE>>.
   • beta: emit <<NOTIFY level=blocking>> and halt on a blocking gate.
