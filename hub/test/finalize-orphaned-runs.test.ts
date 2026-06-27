@@ -68,6 +68,17 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
     await mkSupervisor(supervisorId)
   })
 
+  async function mkSession(id: string): Promise<string> {
+    // session_runs.session_id FKs to sessions(id) (TEXT) in the real schema —
+    // seed the parent row so the insert doesn't trip the FK constraint.
+    await sql`
+      INSERT INTO sessions (id, user_id, name, token_hash)
+      VALUES (${id}, ${userId}, ${`orphan-${id}`}, ${`hash-${id}`})
+      ON CONFLICT (id) DO NOTHING
+    `
+    return id
+  }
+
   async function mkSupervisor(id: string): Promise<void> {
     const apiKeyId = `apikey_${id}`
     await sql`
@@ -83,9 +94,9 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
   }
 
   test('closes runs absent from inventory, keeps live + spawning-grace runs', async () => {
-    const liveId = crypto.randomUUID()
-    const ghostId = crypto.randomUUID()
-    const freshGhostId = crypto.randomUUID()
+    const liveId = await mkSession(crypto.randomUUID())
+    const ghostId = await mkSession(crypto.randomUUID())
+    const freshGhostId = await mkSession(crypto.randomUUID())
 
     // live run, started long ago, IS in inventory → keep
     await sql`
@@ -120,9 +131,10 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
   test('empty inventory closes all grace-aged open runs', async () => {
     const otherSup = `sup_orphan_empty_${Date.now()}`
     await mkSupervisor(otherSup)
+    const orphanId = await mkSession(crypto.randomUUID())
     await sql`
       INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
-      VALUES (${userId}, ${crypto.randomUUID()}, ${otherSup}, 'x', now() - interval '1 minute')
+      VALUES (${userId}, ${orphanId}, ${otherSup}, 'x', now() - interval '1 minute')
     `
     const closed = await finalizeOrphanedRunsForSupervisor(otherSup, [])
     expect(closed).toBe(1)
