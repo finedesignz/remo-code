@@ -46,6 +46,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -211,14 +212,44 @@ fn spawn_session(
 }
 
 // ── live subscriber fan-out (so multiple bridge connections see the same PTY) ──
+//
+// Each subscriber carries a stable u64 id so a connection can REMOVE exactly its
+// own subscriber on disconnect (no leak) and REPLACE its own subscriber if it
+// re-spawns/reattaches the same session (no double broadcast → no doubled
+// keystroke echo). Without per-connection removal, a second live bridge
+// connection (reconnect / session re-start) fanned out every PTY byte twice.
 
 type Subscriber = Arc<Mutex<dyn FnMut(&[u8]) + Send>>;
-static SUBSCRIBERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, Vec<Subscriber>>>>> =
+static SUBSCRIBERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, Vec<(u64, Subscriber)>>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+static NEXT_SUB_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Register `cb` as a live subscriber for `session_id`; returns its stable id.
+fn add_subscriber(session_id: &str, cb: Subscriber) -> u64 {
+    let id = NEXT_SUB_ID.fetch_add(1, Ordering::Relaxed);
+    SUBSCRIBERS
+        .lock()
+        .entry(session_id.to_string())
+        .or_default()
+        .push((id, cb));
+    id
+}
+
+/// Remove the subscriber `sub_id` from `session_id` (idempotent). Used on bridge
+/// disconnect and when a connection replaces its own prior subscriber.
+fn remove_subscriber(session_id: &str, sub_id: u64) {
+    let mut map = SUBSCRIBERS.lock();
+    if let Some(subs) = map.get_mut(session_id) {
+        subs.retain(|(id, _)| *id != sub_id);
+        if subs.is_empty() {
+            map.remove(session_id);
+        }
+    }
+}
 
 fn broadcast_data(session_id: &str, bytes: &[u8]) {
     if let Some(subs) = SUBSCRIBERS.lock().get(session_id) {
-        for s in subs {
+        for (_, s) in subs {
             (s.lock())(bytes);
         }
     }
@@ -294,6 +325,11 @@ fn handle_connection(stream: std::net::TcpStream) {
     let writer = Arc::new(Mutex::new(stream.try_clone().expect("clone stream")));
     let mut reader = stream;
     let mut session_id: Option<String> = None;
+    // This connection's live subscribers, keyed by session id → sub id. Used to
+    // (a) REPLACE this connection's prior subscriber when it re-spawns/reattaches
+    // the same session (so one connection never double-broadcasts), and
+    // (b) REMOVE every subscriber this connection registered on disconnect.
+    let mut conn_subs: HashMap<String, u64> = HashMap::new();
 
     let mut acc: Vec<u8> = Vec::new();
     let mut buf = [0u8; 8192];
@@ -315,21 +351,23 @@ fn handle_connection(stream: std::net::TcpStream) {
             }
             let frame_bytes = acc[4..4 + len].to_vec();
             acc.drain(0..4 + len);
-            handle_frame(&frame_bytes, &writer, &mut session_id);
+            handle_frame(&frame_bytes, &writer, &mut session_id, &mut conn_subs);
         }
     }
-    // Bridge socket DISCONNECTED — DETACH, do NOT kill (R-PTY-27). The PTY +
-    // its scrollback survive in SESSIONS for a later reattach. We only drop this
-    // connection's subscriber.
-    // (Subscribers are keyed per-connection via a closure capture; the simplest
-    // correct behavior is to leave the session registry intact. A subsequent
-    // reattach re-subscribes.)
+    // Bridge socket DISCONNECTED — DETACH, do NOT kill (R-PTY-27). The PTY + its
+    // scrollback survive in SESSIONS for a later reattach. Remove ONLY this
+    // connection's subscriber(s) so a stale closed-socket writer no longer fans
+    // out (no leak, no double broadcast on the next reconnect).
+    for (sid, sub_id) in conn_subs.drain() {
+        remove_subscriber(&sid, sub_id);
+    }
 }
 
 fn handle_frame(
     frame_bytes: &[u8],
     writer: &Arc<Mutex<std::net::TcpStream>>,
     session_id: &mut Option<String>,
+    conn_subs: &mut HashMap<String, u64>,
 ) {
     let v: serde_json::Value = match serde_json::from_slice(frame_bytes) {
         Ok(v) => v,
@@ -371,12 +409,19 @@ fn handle_frame(
                             &serde_json::json!({ "t": "scrollback", "d": b64().encode(&snap) }),
                         );
                     }
-                    // Subscribe THIS connection to live output.
+                    // Subscribe THIS connection to live output. If this
+                    // connection already had a subscriber for this session (a
+                    // repeated spawn/reattach on the same socket), REPLACE it so
+                    // one connection never fans out the same byte twice.
+                    if let Some(prev) = conn_subs.remove(&sid) {
+                        remove_subscriber(&sid, prev);
+                    }
                     let w = writer.clone();
                     let sub: Subscriber = Arc::new(Mutex::new(move |bytes: &[u8]| {
                         send_frame(&w, &serde_json::json!({ "t": "data", "d": b64().encode(bytes) }));
                     }));
-                    SUBSCRIBERS.lock().entry(sid).or_default().push(sub);
+                    let sub_id = add_subscriber(&sid, sub);
+                    conn_subs.insert(sid, sub_id);
                 }
                 Err(e) => {
                     send_frame(writer, &serde_json::json!({ "t": "error", "message": e.to_string() }));
@@ -413,4 +458,108 @@ fn send_frame(writer: &Arc<Mutex<std::net::TcpStream>>, obj: &serde_json::Value)
     let _ = w.write_all(&len);
     let _ = w.write_all(&body);
     let _ = w.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A test subscriber that records every byte-chunk it receives into a shared
+    /// counter buffer, so we can assert HOW MANY times a given byte was delivered.
+    fn counting_sub(sink: Arc<Mutex<Vec<u8>>>) -> Subscriber {
+        Arc::new(Mutex::new(move |bytes: &[u8]| {
+            sink.lock().extend_from_slice(bytes);
+        }))
+    }
+
+    /// (a) A single logical connection that subscribes the SAME session twice
+    /// (e.g. spawn then reattach on one socket) must end up with exactly ONE
+    /// active subscriber, so a broadcast is delivered ONCE — not doubled.
+    #[test]
+    fn one_connection_replace_yields_single_subscriber_no_double_broadcast() {
+        let sid = "test-replace-session";
+        SUBSCRIBERS.lock().remove(sid);
+
+        // Simulate handle_connection's per-connection bookkeeping.
+        let mut conn_subs: HashMap<String, u64> = HashMap::new();
+        let sink = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        // First subscribe (spawn).
+        let id1 = add_subscriber(sid, counting_sub(sink.clone()));
+        conn_subs.insert(sid.to_string(), id1);
+
+        // Second subscribe on the SAME connection (reattach) — must REPLACE.
+        if let Some(prev) = conn_subs.remove(sid) {
+            remove_subscriber(sid, prev);
+        }
+        let id2 = add_subscriber(sid, counting_sub(sink.clone()));
+        conn_subs.insert(sid.to_string(), id2);
+
+        // Exactly one active subscriber for the session.
+        assert_eq!(SUBSCRIBERS.lock().get(sid).map(|v| v.len()), Some(1));
+
+        // A broadcast reaches the byte ONCE (would be twice with the old bug).
+        broadcast_data(sid, b"X");
+        assert_eq!(&*sink.lock(), b"X");
+
+        // cleanup
+        for (s, id) in conn_subs.drain() {
+            remove_subscriber(&s, id);
+        }
+        assert!(SUBSCRIBERS.lock().get(sid).is_none());
+    }
+
+    /// (b) After a connection's cleanup runs (disconnect), its subscriber is
+    /// removed and a subsequent broadcast does NOT reach it.
+    #[test]
+    fn cleanup_removes_subscriber_so_later_broadcast_skips_it() {
+        let sid = "test-cleanup-session";
+        SUBSCRIBERS.lock().remove(sid);
+
+        let mut conn_subs: HashMap<String, u64> = HashMap::new();
+        let sink = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        let id = add_subscriber(sid, counting_sub(sink.clone()));
+        conn_subs.insert(sid.to_string(), id);
+
+        // Live before cleanup.
+        broadcast_data(sid, b"A");
+        assert_eq!(&*sink.lock(), b"A");
+
+        // Disconnect cleanup (mirrors handle_connection's drain loop).
+        for (s, sub_id) in conn_subs.drain() {
+            remove_subscriber(&s, sub_id);
+        }
+        assert!(SUBSCRIBERS.lock().get(sid).is_none());
+
+        // Post-cleanup broadcast must NOT reach the removed subscriber.
+        broadcast_data(sid, b"B");
+        assert_eq!(&*sink.lock(), b"A");
+    }
+
+    /// Two DISTINCT live connections on one session each get exactly one
+    /// delivery; removing one leaves the other intact (no over-removal).
+    #[test]
+    fn two_connections_each_deliver_once_independent_removal() {
+        let sid = "test-two-conn-session";
+        SUBSCRIBERS.lock().remove(sid);
+
+        let sink_a = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sink_b = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let id_a = add_subscriber(sid, counting_sub(sink_a.clone()));
+        let id_b = add_subscriber(sid, counting_sub(sink_b.clone()));
+
+        broadcast_data(sid, b"1");
+        assert_eq!(&*sink_a.lock(), b"1");
+        assert_eq!(&*sink_b.lock(), b"1");
+
+        // Connection A disconnects.
+        remove_subscriber(sid, id_a);
+        broadcast_data(sid, b"2");
+        assert_eq!(&*sink_a.lock(), b"1"); // unchanged
+        assert_eq!(&*sink_b.lock(), b"12"); // still live
+
+        remove_subscriber(sid, id_b);
+        assert!(SUBSCRIBERS.lock().get(sid).is_none());
+    }
 }
