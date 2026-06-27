@@ -24,13 +24,30 @@ non-bypassable daily cost cap and Titanium-aligned auth.
 - **TMAC** (Phases TMAC-01..06) — built + merged 2026-06-08. Autonomous task-type macro prompt path is
   the default orchestrator cycle-runner; legacy micro-row wave engine kept behind a rollback flag.
 
-## Current Milestone: OEE — Orchestrator E2E Prove-Out
+## Current Milestone: OBSRV — Orchestrator Observability & Shadow Dry-Run
 
-**Goal:** Prove the Auto-Dev Orchestrator + TMAC macro path works end-to-end against real Postgres and a
-scripted bound session in an isolated harness (never prod), so `REMO_ORCHESTRATOR_ENABLED` can later be
-flipped with evidence. Pure validation of already-merged, flag-gated-OFF code.
+**Goal:** Build the read-only observability + safety-rehearsal layer for the auto-dev/autospawn path
+*before* the owner arms it (`REMO_ORCHESTRATOR_AUTOSPAWN=1`). ZERO behavior changes to the live dispatch
+path — pure additive read/shadow work over seams OEE already proved, so the eventual arming decision is
+informed and reversible.
 
-**Requirements:** `.planning/milestones/OEE-REQUIREMENTS.md` (OEE-01..11).
+**Target features:**
+- Surface the existing `routine_run_log` in the web UI — per-session "Auto-Dev Activity" panel + hub-wide
+  orchestrator run feed (rationale, command, outcome, PR url, reviewer verdict, deploy-verify, cost/tokens)
+  via a new read-only `GET /api/orchestrator/run-log`.
+- Autospawn SHADOW dry-run — flag-gated `REMO_ORCHESTRATOR_AUTOSPAWN_SHADOW=1` path where `inject.ts`
+  `maybeAutospawnOffline` runs the FULL gate/allowlist/cap AND-chain and records the would-be spawn+macro
+  prompt WITHOUT calling `launchSessionForUser` or dispatching (guard test asserts no spawn/dispatch).
+- Orchestrator metrics + cap-approach alerting — extend `hub/src/observability/metrics.ts` with orchestrator
+  counters (cycles enqueued/drained/skipped, skip-reason histogram incl `no_session`/`offline`, dispatch
+  outcomes, daily token+cost vs the 50M/`$` ceilings) + stage-gated `notify.ts` fan-out at a configurable %.
+
+**Out of scope (owner gates — keep out):** flipping `REMO_ORCHESTRATOR_AUTOSPAWN=1` / populating the
+allowlist (shadow mode is the deliberate substitute), changing any cap *behavior* in `dispatch/gates.ts`,
+touching the no-auto-merge guard, any destructive migration (additive idempotent DDL only), and redesigning
+the supervisor-invisible-local-build session model.
+
+**Requirements:** `.planning/REQUIREMENTS.md` (OBSRV-NN).
 
 ## Evolution
 
