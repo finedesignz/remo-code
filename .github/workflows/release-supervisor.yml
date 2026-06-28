@@ -54,10 +54,11 @@ jobs:
         run: |
           bun install
           mkdir -p tauri/src-tauri/binaries
-          # Single-source the sidecar compile (version read from tauri.conf.json and
-          # baked in via Bun's --define) so local + CI builds can't drift. The script
-          # lives at supervisor/scripts/compile-sidecar.mjs and is also invoked by
-          # supervisor/tauri/scripts/build-and-update.ps1.
+          # Single-source the sidecar compile: supervisor/src/version.ts imports
+          # tauri.conf.json directly and Bun inlines that JSON into the compiled
+          # binary, so local + CI builds report the manifest version and can't drift.
+          # The script lives at supervisor/scripts/compile-sidecar.mjs and is also
+          # invoked by supervisor/tauri/scripts/build-and-update.ps1.
           bun run build:sidecar
           ls -la tauri/src-tauri/binaries/
 

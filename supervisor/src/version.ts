@@ -1,41 +1,27 @@
 /**
- * Single source of truth for the supervisor version that is reported to the
- * hub in `supervisor.hello` (and used in the self-Sentry client string).
+ * Single source of truth for the supervisor version reported to the hub in
+ * `supervisor.hello` (and used in the self-Sentry client string).
  *
- * Why this module exists (RCA 2026-05-28):
- *   The version was previously a hand-maintained `const VERSION = '0.5.8'`
- *   duplicated in `hub-client.ts` and `index.ts`. It silently drifted from the
- *   real installed version (`tauri.conf.json` / `Cargo.toml` were at 0.6.3)
- *   because the compiled `bun build --compile` sidecar bakes in whatever
- *   string the source held, regardless of the Tauri/Cargo manifests. The web
- *   UI then showed the stale 0.5.8 forever, even after a user restart.
+ * The version is imported directly from the authoritative manifest
+ * (`tauri.conf.json`). Bun inlines JSON imports at `bun build --compile` time, so
+ * the value is baked into the compiled sidecar binary; under `bun run` (dev) the
+ * same import reads the live file. Either way the reported version always equals
+ * the MSI/manifest version — no compile-time `--define`, no hand-maintained
+ * fallback constant, and therefore nothing that can silently drift.
  *
- * Single-source mechanism:
- *   - At build time the release workflow injects the authoritative version from
- *     `tauri.conf.json` via Bun's `--define` flag:
- *         bun build --compile --define 'process.env.REMO_SUPERVISOR_VERSION="<v>"' ...
- *     so the compiled sidecar carries the manifest version, not this fallback.
- *   - `FALLBACK_VERSION` below is the dev/uncompiled value AND the value the
- *     drift guard (`supervisor/test/version-drift.test.ts`) asserts equals
- *     `tauri.conf.json`'s `version`. So even the fallback can never silently
- *     drift again — the test fails the build if it does.
+ * History (RCA 2026-05-28): the version used to be a hand-maintained constant
+ * duplicated across files; it drifted from the manifests and the web UI showed a
+ * stale version forever. A `--define`-injected env var + a `FALLBACK_VERSION`
+ * constant fixed the compiled path but reintroduced a second copy that drifted
+ * again at the 0.11.1 release. Importing the manifest removes the second copy
+ * entirely.
  *
- * Keep `FALLBACK_VERSION` in lockstep with:
- *   - supervisor/tauri/src-tauri/tauri.conf.json  (authoritative)
+ * Lockstep manifests still verified by supervisor/test/version-drift.test.ts:
+ *   - supervisor/tauri/src-tauri/tauri.conf.json  (authoritative, imported here)
  *   - supervisor/tauri/src-tauri/Cargo.toml
  *   - supervisor/tauri/ui/package.json
  */
+import tauriConf from '../tauri/src-tauri/tauri.conf.json'
 
-/**
- * Hard-coded fallback — must equal the `version` in tauri.conf.json. Enforced
- * by supervisor/test/version-drift.test.ts. Bump in lockstep on every release.
- */
-export const FALLBACK_VERSION = '0.11.0'
-
-/**
- * The version reported at runtime. Prefers the build-time-injected
- * `REMO_SUPERVISOR_VERSION` (set from tauri.conf.json during compile); falls
- * back to `FALLBACK_VERSION` for `bun run`/dev where no define is present.
- */
-export const VERSION: string =
-  (typeof process !== 'undefined' && process.env?.REMO_SUPERVISOR_VERSION) || FALLBACK_VERSION
+/** The version reported at runtime, sourced from tauri.conf.json. */
+export const VERSION: string = tauriConf.version
