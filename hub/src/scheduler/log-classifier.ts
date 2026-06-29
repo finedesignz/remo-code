@@ -60,8 +60,14 @@ const PATTERNS: PatternSpec[] = [
   { name: 'migration_failed', severity: 'high', re: /(migration\s+failed|migrate\s+(?:error|failed)|failed to (?:run|apply)\s+migrations?)/i },
   // 13. postgres FATAL / PANIC
   { name: 'postgres_fatal', severity: 'high', re: /\b(?:postgres|psql|pg)[^\n]*\b(FATAL|PANIC)\b/i },
-  // 14. JWT / auth failures (high-volume gate handled by caller — we just flag)
-  { name: 'auth_failure', severity: 'med', re: /(JWT\s+(?:malformed|expired|invalid|verification failed)|invalid (?:token|signature)|401\s+Unauthorized|403\s+Forbidden|authentication failed)/i },
+  // 14. JWT / auth failures — backend auth breakage only. NB: bare HTTP
+  //   `401 Unauthorized` / `403 Forbidden` are deliberately NOT matched here.
+  //   Those are normal access-log outcomes (e.g. uvicorn/FastAPI logging every
+  //   client request, including unauthenticated credential probes) and flooded
+  //   log_check with false "errors" for probe-heavy apps (titanium-edge-aios),
+  //   making every run report errors and defeating the cost-cap skip gate. Real
+  //   backend auth failure still flags via JWT / invalid-token / "authentication failed".
+  { name: 'auth_failure', severity: 'med', re: /(JWT\s+(?:malformed|expired|invalid|verification failed)|invalid (?:token|signature)|authentication failed)/i },
   // 15. out of disk
   { name: 'out_of_disk', severity: 'high', re: /(no space left on device|ENOSPC|disk\s+full|out of disk)/i },
   // 16. DNS resolution failure
