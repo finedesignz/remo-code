@@ -27,12 +27,16 @@ import { existsSync, statSync } from 'fs'
 import { join, isAbsolute, delimiter } from 'path'
 import { randomUUID } from 'crypto'
 import { sanitizeSpawnEnv } from '../runners/env-sanitize'
+import { writeTeabRunStart, writeTeabRunStop } from '../runners/teab-breadcrumb'
 import type { CommandResult } from './index'
 
 /** Ring-buffer cap for captured stdout/stderr lines per run. */
 const EVENTS_TAIL_CAP = 200
 /** How many tail lines teab_status returns. */
 const STATUS_TAIL_LINES = 50
+/** Bound registry memory: when terminal (exited) records exceed this, evict the
+ *  oldest ones. Running records are NEVER evicted. */
+const MAX_TERMINAL_RECORDS = 200
 
 export interface TeabRunRecord {
   runId: string
@@ -56,6 +60,42 @@ export function listRuns(): TeabRunRecord[] {
 }
 export function _resetRuns(): void {
   RUNS.clear()
+}
+
+/**
+ * Reap a finished run: release the child handle + detach its listeners so the
+ * process object can be GC'd, while keeping the TERMINAL record (state +
+ * exitCode + eventsTail) for `teab_status` polling. Idempotent.
+ */
+export function reapFinished(rec: TeabRunRecord): void {
+  const child = rec.child
+  if (!child) return
+  try {
+    child.stdout?.removeAllListeners?.('data')
+    child.stderr?.removeAllListeners?.('data')
+    child.removeAllListeners?.('exit')
+    child.removeAllListeners?.('error')
+  } catch {
+    /* fail-open: reaping must never throw */
+  }
+  rec.child = undefined
+}
+
+/**
+ * Bound registry memory: evict the oldest TERMINAL (exited) records once they
+ * exceed MAX_TERMINAL_RECORDS. Running records are preserved. Returns the number
+ * evicted. Exported for testing.
+ */
+export function evictOldTerminalRuns(max: number = MAX_TERMINAL_RECORDS): number {
+  const terminal = [...RUNS.values()]
+    .filter((r) => r.state === 'exited')
+    .sort((a, b) => a.startedAt - b.startedAt)
+  let evicted = 0
+  for (let i = 0; i < terminal.length - max; i++) {
+    RUNS.delete(terminal[i].runId)
+    evicted++
+  }
+  return evicted
 }
 
 function pushTail(rec: TeabRunRecord, chunk: string): void {
@@ -154,6 +194,21 @@ export interface TeabRunDeps extends TeabPreflightDeps {
   genRunId?: () => string
   /** Spawn-env producer (defaults to sanitized process.env). */
   sanitizeEnv?: () => NodeJS.ProcessEnv
+  /** Fail-open START breadcrumb writer (defaults to writeTeabRunStart). */
+  onRunStart?: (input: { runId: string; repoPath: string; pid?: number }) => void
+  /** Fail-open STOP breadcrumb writer (defaults to writeTeabRunStop). */
+  onRunStop?: (input: { runId: string; exitCode: number | null }) => void
+}
+
+/** Wrap a breadcrumb writer so it can NEVER throw into the spawn path. */
+function failOpen<T>(fn: (arg: T) => unknown): (arg: T) => void {
+  return (arg: T) => {
+    try {
+      fn(arg)
+    } catch {
+      /* fail-open: breadcrumb errors must never break a run */
+    }
+  }
 }
 
 function defaultGenRunId(): string {
@@ -173,6 +228,8 @@ export async function runTeabRun(args: string[], deps: TeabRunDeps = {}): Promis
   const { bin, args: spawnArgs } = buildTeabSpawnArgs(repoPath as string)
   const env = (deps.sanitizeEnv ?? (() => sanitizeSpawnEnv({ ...process.env })))()
   const spawnImpl = deps.spawnFn ?? spawn
+  const onRunStart = failOpen(deps.onRunStart ?? ((i) => void writeTeabRunStart(i)))
+  const onRunStop = failOpen(deps.onRunStop ?? ((i) => void writeTeabRunStop(i)))
 
   const rec: TeabRunRecord = {
     runId,
@@ -200,16 +257,24 @@ export async function runTeabRun(args: string[], deps: TeabRunDeps = {}): Promis
 
   rec.child = child
   rec.pid = child.pid
+  // Fail-open START breadcrumb (survives a supervisor restart wiping RUNS).
+  onRunStart({ runId, repoPath: repoPath as string, pid: child.pid })
   child.stdout?.on('data', (d: Buffer | string) => pushTail(rec, d.toString()))
   child.stderr?.on('data', (d: Buffer | string) => pushTail(rec, d.toString()))
   child.on('exit', (code: number | null) => {
     rec.state = 'exited'
     rec.exitCode = code ?? -1
+    onRunStop({ runId, exitCode: rec.exitCode })
+    reapFinished(rec)
+    evictOldTerminalRuns()
   })
   child.on('error', (e: Error) => {
     pushTail(rec, `spawn error: ${e.message}`)
     rec.state = 'exited'
     if (rec.exitCode == null) rec.exitCode = -1
+    onRunStop({ runId, exitCode: rec.exitCode })
+    reapFinished(rec)
+    evictOldTerminalRuns()
   })
   // Detach so a supervisor restart doesn't reap the long-running TEAB process.
   child.unref?.()
