@@ -17,6 +17,9 @@ export interface TaskNameInput {
   target_id?: string | null
   payload?: Record<string, any>
   cron_expr: string
+  // Milestone TEAB — used as the name "target" for `task_type === 'teab'` tasks,
+  // which self-resolve their supervisor from the repo rather than a fixed target.
+  teab_repo_ident?: string | null
 }
 
 // Phase 11: mirrors hub/src/scheduler/auto-name.ts TYPE_LABELS.
@@ -33,7 +36,16 @@ const TYPE_LABELS: Record<TaskType, string> = {
   log_pull: 'Log · Pull',
   log_classify: 'Log · Classify',
   log_triage: 'Log · Triage',
+  teab: 'TEAB Build',
   triage: 'Triage',
+}
+
+/** Repo label for a teab task's auto-name, derived from its repo_ident. */
+function teabRepoLabel(ident: string | null | undefined): string {
+  if (!ident) return ''
+  if (ident.startsWith('github://')) return ident.slice('github://'.length)
+  if (ident.startsWith('path://')) return shortenPath(ident.slice('path://'.length))
+  return ident
 }
 
 function shortenPath(p: string | null | undefined): string {
@@ -117,7 +129,9 @@ const TEMPLATE_LEADS: Record<string, string> = {
 
 export function computeTaskAutoName(task: TaskNameInput, ctx: TaskNameContext): string {
   const typeLbl = TYPE_LABELS[task.task_type] || task.task_type
-  const target = targetLabel(task.target_kind, task.target_id ?? null, ctx)
+  const target = task.task_type === 'teab'
+    ? (teabRepoLabel(task.teab_repo_ident) || 'all supervisors')
+    : targetLabel(task.target_kind, task.target_id ?? null, ctx)
   const cadence = cronCadence(task.cron_expr)
 
   const templateId = (task.payload as any)?.template_id

@@ -99,6 +99,9 @@ const CreateSchema = z.object({
   max_concurrent: z.number().int().min(1).max(10).optional(),
   enabled: z.boolean().optional(),
   post_run_actions: z.array(z.any()).optional(),
+  // Milestone TEAB — target repo (`repo_ident`) for a `task_type === 'teab'`
+  // build task. Persisted on the dedicated `teab_repo_ident` column.
+  teab_repo_ident: z.string().max(2000).nullable().optional(),
 })
 
 const PatchSchema = CreateSchema.partial()
@@ -376,6 +379,7 @@ scheduledTasks.post('/', async (c) => {
     name_prefix: built.prefix || null,
     name_suffix: built.suffix || null,
     schedule_rules: data.schedule_rules ?? null,
+    teab_repo_ident: data.teab_repo_ident ?? null,
   })
 
   registry.register(task)
@@ -506,6 +510,7 @@ scheduledTasks.patch('/:id', async (c) => {
     max_concurrent: data.max_concurrent,
     post_run_actions: data.post_run_actions !== undefined ? v.actions : undefined,
     schedule_rules: data.schedule_rules !== undefined ? (data.schedule_rules as any[]) : undefined,
+    teab_repo_ident: data.teab_repo_ident !== undefined ? (data.teab_repo_ident ?? null) : undefined,
   })
   if (!updated) return c.json({ error: 'not_found' }, 404)
 
