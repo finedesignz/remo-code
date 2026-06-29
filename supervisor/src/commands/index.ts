@@ -9,6 +9,7 @@
 import type { ScannedCommand } from '../commands-scanner'
 import { runErrorSetupProbe } from './error-setup-probe'
 import { runErrorSetupApply } from './error-setup-apply'
+import { runTeabRun, runTeabStatus } from './teab-run'
 
 export interface CommandResult {
   exit_code: number
@@ -39,6 +40,8 @@ const HANDLERS: Record<string, CommandHandler> = {
       }),
     }
   },
+  teab_run: (args) => runTeabRun(args),
+  teab_status: (args) => runTeabStatus(args),
 }
 
 export function getHandler(name: string): CommandHandler | null {
@@ -49,6 +52,8 @@ export function getHandler(name: string): CommandHandler | null {
 const NATIVE: Array<{ name: string; description: string }> = [
   { name: 'error_setup_probe', description: 'Read project files for error-tracking SDK detection' },
   { name: 'error_setup_apply', description: 'Install error-tracking SDK files into a repo + commit + push' },
+  { name: 'teab_run', description: 'Background-spawn Titanium Edge AutoBuilder (teab run --repo <repo>) detached; returns a started run id' },
+  { name: 'teab_status', description: 'Report state + recent events tail for a teab_run run id' },
 ]
 
 export function nativeSupervisorCommands(): ScannedCommand[] {
