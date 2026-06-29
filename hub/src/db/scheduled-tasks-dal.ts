@@ -21,6 +21,8 @@ export type TaskType =
   | 'log_pull' | 'log_classify' | 'log_triage'
   | 'qc_review' | 'qc_fix' | 'qc_verify'
   | 'triage'
+  // Milestone TEAB: Titanium Edge AutoBuilder run as a scheduled-task action.
+  | 'teab'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
 export type CatchupPolicy = 'skip' | 'run_once'
 export type RunStatus =
@@ -69,6 +71,11 @@ export interface ScheduledTask {
   // back to deriving a single rule from `cron_expr`). Array of
   // `{interval, unit, start_at}`.
   schedule_rules: any[] | null
+  // Milestone TEAB (additive, nullable on every non-TEAB row). `teab_repo_ident`
+  // is the target repo for `teab run --repo <X>`; `teab_last_status` mirrors the
+  // most recent supervisor `teab_status` poll result.
+  teab_repo_ident: string | null
+  teab_last_status: string | null
   // Derived from latest finalized run via LATERAL JOIN in listTasksForUser/getTask.
   last_run_cost_usd?: number | null
   last_run_duration_ms?: number | null
@@ -228,13 +235,16 @@ export async function createTaskV2(input: {
   name_prefix?: string | null
   name_suffix?: string | null
   schedule_rules?: any[] | null
+  teab_repo_ident?: string | null
+  teab_last_status?: string | null
 }): Promise<ScheduledTask> {
   const rows = await sql<ScheduledTask[]>`
     INSERT INTO scheduled_tasks (
       user_id, session_id, name, cron_expression, prompt, enabled,
       task_type, target_kind, target_id, payload, cron_expr, timezone,
       catchup_policy, max_concurrent, post_run_actions,
-      name_prefix, name_suffix, schedule_rules
+      name_prefix, name_suffix, schedule_rules,
+      teab_repo_ident, teab_last_status
     ) VALUES (
       ${input.user_id}, ${input.session_id}, ${input.name},
       ${input.cron_expression ?? input.cron_expr}, ${input.prompt ?? ''},
@@ -245,7 +255,8 @@ export async function createTaskV2(input: {
       ${input.max_concurrent ?? 1},
       ${sql.json((input.post_run_actions ?? []) as any)},
       ${input.name_prefix ?? null}, ${input.name_suffix ?? null},
-      ${input.schedule_rules ? sql.json(input.schedule_rules as any) : null}
+      ${input.schedule_rules ? sql.json(input.schedule_rules as any) : null},
+      ${input.teab_repo_ident ?? null}, ${input.teab_last_status ?? null}
     )
     RETURNING *
   `
@@ -271,6 +282,8 @@ export async function updateTaskV2(
     name_prefix: string | null
     name_suffix: string | null
     schedule_rules: any[] | null
+    teab_repo_ident: string | null
+    teab_last_status: string | null
   }>,
 ): Promise<ScheduledTask | null> {
   const sets: any[] = []
@@ -299,6 +312,8 @@ export async function updateTaskV2(
   if (fields.schedule_rules !== undefined) {
     sets.push(sql`schedule_rules = ${fields.schedule_rules ? sql.json(fields.schedule_rules as any) : null}`)
   }
+  if (fields.teab_repo_ident !== undefined) sets.push(sql`teab_repo_ident = ${fields.teab_repo_ident}`)
+  if (fields.teab_last_status !== undefined) sets.push(sql`teab_last_status = ${fields.teab_last_status}`)
   if (sets.length === 0) return getTask(id, userId)
   sets.push(sql`updated_at = now()`)
 

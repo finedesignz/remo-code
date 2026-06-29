@@ -243,6 +243,56 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
     return { runIds }
   }
 
+  // Milestone TEAB (Phase TEAB-04): a `teab` task self-resolves its target —
+  // the online supervisor that hosts `teab_repo_ident` — rather than a fixed
+  // session/supervisor target via resolveTargets (mirroring the triage branch
+  // above). It reaches here AFTER the threshold → cost-cap pre-gates, so the cap
+  // stays non-bypassable. The sender issues `run_command teab_run`; the
+  // poll-to-terminal + finalize loop lands in TEAB-05.
+  if (task.task_type === 'teab') {
+    const run = await insertRunV2({
+      task_id: task.id,
+      user_id: userId,
+      status: 'pending',
+      scheduled_for: now,
+      target_kind: 'supervisor',
+      target_id: null,
+      triggered_by_run_id: opts.triggeredByRunId ?? null,
+    })
+    const ctx: RunContext = {
+      runId: run.id,
+      taskId: task.id,
+      userId,
+      target: { kind: 'supervisor', online: true },
+      startedAt: now.getTime(),
+      parentFireId: null,
+      chainDepth: opts.chainDepth,
+      triggeredByRunId: opts.triggeredByRunId ?? null,
+      isManual,
+    }
+    trackRun(ctx)
+    broadcastScheduledRun(userId, {
+      type: 'scheduled_run_started',
+      run_id: run.id,
+      task_id: task.id,
+      scheduled_for: now.toISOString(),
+      target_kind: 'supervisor',
+      target_id: null,
+    })
+    try {
+      const { sendTeabTask } = await import('./senders/teab.ts')
+      void sendTeabTask(task, ctx).catch((err: any) => {
+        log.error('scheduler.dispatcher.teab_sender_failed', { run_id: run.id, task_id: task.id, error: err?.message })
+        void finalizeRun(run.id, 'failed', err?.message || 'teab_threw')
+      })
+    } catch (err: any) {
+      void finalizeRun(run.id, 'failed', err?.message || 'teab_import_failed')
+    }
+    if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
+    runIds.push(run.id)
+    return { runIds }
+  }
+
   const targets = await resolveTargets(task, userId)
   if (targets.length === 0) {
     const run = await insertRunV2({
