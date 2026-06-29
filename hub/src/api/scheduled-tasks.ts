@@ -54,6 +54,8 @@ const TaskTypeEnum = z.enum([
   // Phase 21 (auto-dev-orchestrator): the session-level orchestrator task.
   // Allowed by the DB CHECK constraint in schema.sql; must be accepted here too.
   'orchestrator',
+  // Milestone TEAB: Titanium Edge AutoBuilder run as a scheduled-task action.
+  'teab',
   // Internal (synthesized by Coolify webhook)
   'triage',
 ])

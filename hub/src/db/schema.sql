@@ -212,6 +212,8 @@ ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
     -- Locked decision 3: REPLACES the many-tasks-per-session model — the
     -- orchestrator task owns per-command rows in orchestrator_rows.
     'orchestrator',
+    -- Milestone TEAB: Titanium Edge AutoBuilder run as a scheduled-task action.
+    'teab',
     -- Internal: synthesized by Coolify webhook
     'triage'
   ));
@@ -243,6 +245,14 @@ ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS name_suffix TEXT;
 -- arm multiple cron registrations; fires from any rule route through the
 -- same dispatcher.fire(task.id).
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS schedule_rules JSONB;
+
+-- Milestone TEAB (additive, idempotent — no backfill). The target repo for a
+-- `teab run --repo <X>` action and the most recent supervisor `teab_status`
+-- poll result. NULL on every non-TEAB row. Canonical provisioning is the
+-- one-shot hub/scripts/migrate-teab-task-columns.ts; these IF NOT EXISTS lines
+-- keep a fresh-boot schema apply self-sufficient.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS teab_repo_ident TEXT;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS teab_last_status TEXT;
 
 -- W2/T8: drop legacy NOT NULL on session_id so fan-out tasks
 -- (all_agents/all_supervisors) and supervisor-targeted tasks can omit it.
