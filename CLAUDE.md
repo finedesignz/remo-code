@@ -214,6 +214,14 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   transcript-tail reads on-disk CLI transcripts that don't exist in the hub container; with it OFF,
   Telegram outbound uses the host-agnostic stream-json event-bus. ChatSurface is **kept** as fallback
   (deletion still gated on the device attestation in [docs/cutover-gate-june15.md](docs/cutover-gate-june15.md)).
+- **TEAB task knobs** (milestone TEAB; see [docs/teab-tasks.md](docs/teab-tasks.md)). Hub-side:
+  **`REMO_TEAB_POLL_INTERVAL_MS`** (default **30000** = 30s) — `teab_status` poll cadence for the
+  hub-driven poll-to-terminal loop; **`REMO_TEAB_MAX_RUN_MS`** (default **21600000** = 6h) — hard
+  ceiling after which an in-flight TEAB run is finalized as `teab_run_timeout`. Both read at
+  poll-start (non-positive/non-finite ⇒ default). Supervisor-side (process env): **`TEAB_BIN`**
+  (override the `teab` binary name/path), **`TEAB_CLAUDE_BIN`** / **`TEAB_GUARD_HOOK_PATH`** (TEAB's
+  own claude-binary / D3 guard-hook knobs). The supervisor `teab_run`/`teab_status` capability ships
+  ONLY with a new signed MSI (≥ the TEAB release) — release-gated.
 
 ## Docs map — subsystems & phases
 
@@ -240,6 +248,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | PTY terminal surface + cutover gate | [usage-cost.md](docs/usage-cost.md) · [cutover-gate-june15.md](docs/cutover-gate-june15.md) | Phases 15–19 — universal raw-terminal (PTY) human path (interactive `claude`/`codex` TUI, raw bytes, NO stream-json, NO API key). Phase-18 dual-bucket usage (interactive vs programmatic). Phase-19 fail-safe default-backend selector (`supervisor/src/runners/backend-selector.ts`), Codex/Gemini-stub fallback + shared `env-sanitize.ts`, and the June-15 cutover gate (`tools/cutover-deletion-gate.mjs`). Cutover flip + ChatSurface deletion are GATED (pending runbook + on-device attestations). |
 | Auto-dev orchestrator | [auto-dev-orchestrator.md](docs/auto-dev-orchestrator.md) · [.planning/architecture/auto-dev-task-prompts-SPEC.md](.planning/architecture/auto-dev-task-prompts-SPEC.md) | Phases 21–32 — session-level auto-dev: one `orchestrator` task per session + `orchestrator_rows`; global `routine_queue` + per-session lock; verify-tail. **Flag-gated OFF** (`REMO_ORCHESTRATOR_ENABLED`). **Milestone TMAC (2026-06-08): macro path is the default** — a task carries one `macro_task_type` (dev complete; maintenance/security/brainstorming stubs) resolved to ONE autonomous macro prompt (`task-macros.ts`); resume-heartbeat controller (`runMacroCycle`) reconciles `<<STATE>>`/`<<NOTIFY>>`/`<<GATE>>` sentinels (`sentinels.ts`) → `routine_run_log` + stage-gated `notify.ts` fan-out, halt on mandatory gate. Legacy micro-row wave path KEPT behind `REMO_ORCHESTRATOR_LEGACY_WAVES=1` (rollback) + guard test. Migrations: `hub/scripts/migrate-legacy-tasks-to-orchestrator.ts`, `migrate-orchestrator-macro-task-type.ts`. |
 | API docs | [api.md](docs/api.md) · `/openapi.json` · `/docs` | OpenAPI 3.1 assembled in `hub/src/api/_openapi.ts`; run `bun run docs:sync` after route changes (docs-drift CI enforces). |
+| TEAB tasks | [teab-tasks.md](docs/teab-tasks.md) · [.planning/TEAB-MILESTONE.md](.planning/TEAB-MILESTONE.md) | Milestone TEAB — `task_type:'teab'` scheduled task runs `teab run --repo <X>` on the supervisor host (allowlisted `teab_run`/`teab_status` commands; preflight fails closed; NO bypassPermissions / NO programmatic claude flags). Hub-driven background poll-to-terminal (idle-teardown-safe) → `finalizeRun` → post-run actions; cost/token cap unchanged. Columns `teab_repo_ident`/`teab_last_status`. **A new signed supervisor MSI is REQUIRED** for `teab_run` to exist on installed hosts. |
 
 ## Cross-cutting invariants (do not violate)
 
