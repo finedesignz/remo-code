@@ -14,6 +14,57 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 const PRIMARY_PORT: u16 = 9106;
 const FALLBACK_PORT: u16 = 9197;
 
+/// Image name of the Bun sidecar the tray manages. The tray process is
+/// `remo-supervisor-tauri.exe`, so killing by THIS image name can never touch
+/// the tray itself.
+#[cfg(target_os = "windows")]
+const SIDECAR_IMAGE: &str = "remo-code-supervisor.exe";
+
+/// Reap any orphaned Bun sidecar processes before the tray spawns its own
+/// managed one.
+///
+/// The tray is the SOLE owner of the sidecar (`sidecar::spawn_managed`). Any
+/// `remo-code-supervisor.exe` alive when a fresh tray boots is therefore an
+/// orphan from a prior manual MSI install (auto-update is OFF) or a crash. If
+/// left running it (a) makes the hub read the OLD sidecar's version, and (b)
+/// double-spawns PTY subscribers → doubled keystrokes. This MUST run BEFORE
+/// `preflight()` (so the loopback ports read as free) and BEFORE
+/// `sidecar::spawn_managed` (so we never kill our own child).
+///
+/// Best-effort: failures are logged and swallowed — never abort startup.
+#[cfg(target_os = "windows")]
+pub fn reap_orphan_sidecars() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    // `taskkill /F /IM <image>` force-kills every process with that image name.
+    // Safe here: the managed sidecar has not been spawned yet, and the tray
+    // itself runs under a different image name.
+    match Command::new("taskkill")
+        .args(["/F", "/IM", SIDECAR_IMAGE])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(out) => {
+            if out.status.success() {
+                log::info!("[reap] taskkill reaped orphan {SIDECAR_IMAGE} process(es)");
+            } else {
+                // Exit code 128 == "no such process" — the normal, clean case.
+                log::info!(
+                    "[reap] taskkill found no orphan {SIDECAR_IMAGE} to reap (status {:?})",
+                    out.status.code()
+                );
+            }
+        }
+        Err(e) => log::warn!("[reap] taskkill failed (best-effort, ignoring): {e}"),
+    }
+}
+
+/// No-op on non-Windows targets (the release target is Windows).
+#[cfg(not(target_os = "windows"))]
+pub fn reap_orphan_sidecars() {}
+
 pub fn preflight(app: &AppHandle) -> Result<()> {
     // 1) Legacy NSSM service detected -> hard refuse. The tray app replaced
     // the old `npx remo-code-supervisor install` NSSM path. Anyone upgrading
@@ -33,15 +84,20 @@ pub fn preflight(app: &AppHandle) -> Result<()> {
         return Err(anyhow!("legacy NSSM service RemoCodeSupervisor is running"));
     }
 
-    // 2) Loopback probe. If we can CONNECT to 9106, another supervisor owns it.
-    if probe_in_use(PRIMARY_PORT) && probe_in_use(FALLBACK_PORT) {
+    // 2) Loopback probe. If we can CONNECT to EITHER 9106 or the 9197 fallback,
+    // a live sidecar owns the mutex and another supervisor is already running.
+    // (Previously this required BOTH ports — a single stale sidecar holding only
+    // 9106 slipped through and got double-spawned. We now reap orphan sidecars
+    // in setup() BEFORE this runs, so a true orphan is gone by the time we probe
+    // and this only fires for a genuinely-live second instance.)
+    if probe_in_use(PRIMARY_PORT) || probe_in_use(FALLBACK_PORT) {
         show_blocking_dialog(
             app,
             "Another Remo Code Supervisor instance is already running.\n\n\
              Only one supervisor can run on this machine at a time.",
         );
         return Err(anyhow!(
-            "loopback mutex probe: both {PRIMARY_PORT} and {FALLBACK_PORT} appear in use"
+            "loopback mutex probe: {PRIMARY_PORT} or {FALLBACK_PORT} appears in use"
         ));
     }
 
