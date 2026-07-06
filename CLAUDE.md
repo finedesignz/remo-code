@@ -338,8 +338,10 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 
 - **Hub:** Docker multi-stage (`Dockerfile`) on Coolify at `app.remo-code.com`, port 3040.
   The supervisor runs locally on the dev machine — **not** deployed.
-- **Supervisor:** push a `supervisor-v*.*.*` tag → `.github/workflows/release-supervisor.yml`
-  builds + signs the MSI + publishes a Release with `latest.json` for the auto-updater. Local:
+- **Supervisor:** per-user NSIS installer (UAC-free auto-update; `installMode: currentUser`,
+  `auto_update` defaults ON since v0.13.0). Push a `supervisor-v*.*.*` tag →
+  `.github/workflows/release-supervisor.yml` builds + signs the `-setup.exe` + publishes a
+  Release with `latest.json` for the auto-updater. Local:
   `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. Key setup: `supervisor/tauri/UPDATER-SETUP.md`.
 
 ## CI (Woodpecker-first)

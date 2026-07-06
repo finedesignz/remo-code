@@ -8,12 +8,12 @@
      `supervisor/tauri/.last-built-sha`. If no files under `supervisor/tauri/`
      (or root `package.json` / `Cargo.toml` / `Cargo.lock`) changed since that
      SHA, exits early with "no changes".
-  3. Builds the UI (`bun install && bun run build`) and the Tauri MSI
-     (`cargo tauri build`).
-  4. Writes the new HEAD SHA into `.last-built-sha` and prints the MSI path.
+  3. Builds the UI (`bun install && bun run build`) and the Tauri per-user NSIS
+     installer (`cargo tauri build`).
+  4. Writes the new HEAD SHA into `.last-built-sha` and prints the installer path.
 
 .PARAMETER Install
-  After a successful build, run the MSI via msiexec /passive /i.
+  After a successful build, run the NSIS -setup.exe silently (/S).
 
 .PARAMETER Watch
   Loop forever, polling `git fetch` every 5 minutes and rebuilding when a
@@ -45,7 +45,7 @@ $SupervisorDir= Join-Path $RepoRoot 'supervisor\tauri'
 $UiDir        = Join-Path $SupervisorDir 'ui'
 $SrcTauriDir  = Join-Path $SupervisorDir 'src-tauri'
 $StampFile    = Join-Path $SupervisorDir '.last-built-sha'
-$BundleDir    = Join-Path $SrcTauriDir 'target\release\bundle\msi'
+$BundleDir    = Join-Path $SrcTauriDir 'target\release\bundle\nsis'
 
 function Write-Section($title) {
     Write-Host ""
@@ -156,32 +156,32 @@ function Build-Once {
     # lives next to src-tauri). `tauri-cli` is invoked via cargo subcommand.
     Invoke-Native 'cargo' @('tauri', 'build') $SupervisorDir
 
-    $msi = Get-ChildItem -Path $BundleDir -Filter '*.msi' -ErrorAction SilentlyContinue |
+    $setup = Get-ChildItem -Path $BundleDir -Filter '*-setup.exe' -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $msi) {
-        throw "Build reported success but no .msi found under $BundleDir"
+    if (-not $setup) {
+        throw "Build reported success but no -setup.exe found under $BundleDir"
     }
 
     Write-Stamp $headSha
     Write-Section 'build OK'
-    Write-Host ("MSI: {0}" -f $msi.FullName) -ForegroundColor Green
-    $script:LastMsi = $msi.FullName
+    Write-Host ("Installer: {0}" -f $setup.FullName) -ForegroundColor Green
+    $script:LastSetup = $setup.FullName
     return $true
 }
 
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
-$script:LastMsi = $null
+$script:LastSetup = $null
 
 if ($Watch) {
     Write-Section 'watch mode — Ctrl-C to stop'
     while ($true) {
         try {
             $built = Build-Once
-            if ($built -and $Install -and $script:LastMsi) {
-                Write-Section 'install (msiexec /passive)'
-                Start-Process msiexec -ArgumentList @('/i', $script:LastMsi, '/passive') -Wait
+            if ($built -and $Install -and $script:LastSetup) {
+                Write-Section 'install (nsis -setup.exe /S)'
+                Start-Process $script:LastSetup -ArgumentList @('/S') -Wait
             }
         } catch {
             Write-Host "build cycle failed: $_" -ForegroundColor Red
@@ -192,9 +192,9 @@ if ($Watch) {
     }
 } else {
     $built = Build-Once
-    if ($built -and $Install -and $script:LastMsi) {
-        Write-Section 'install (msiexec /passive)'
-        Start-Process msiexec -ArgumentList @('/i', $script:LastMsi, '/passive') -Wait
+    if ($built -and $Install -and $script:LastSetup) {
+        Write-Section 'install (nsis -setup.exe /S)'
+        Start-Process $script:LastSetup -ArgumentList @('/S') -Wait
         Write-Host "install complete." -ForegroundColor Green
     }
 }
