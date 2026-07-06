@@ -50,6 +50,14 @@ pub fn run() {
             // Idempotent and gated by a per-version marker file.
             legacy_cleanup::run_once();
 
+            // Reap orphaned Bun sidecars from a prior manual MSI install/crash
+            // BEFORE the preflight port probe and BEFORE we spawn our own
+            // managed sidecar. The tray is the sole owner of the sidecar, so any
+            // `remo-code-supervisor.exe` alive now is an orphan — leaving it
+            // running double-spawns PTY subscribers (doubled keystrokes) and
+            // makes the hub read the stale version. Best-effort; never aborts.
+            mutex_probe::reap_orphan_sidecars();
+
             // Pre-flight: refuse to spawn if NSSM service is running OR another
             // supervisor instance already holds the loopback mutex on
             // 127.0.0.1:9106 (fallback 9197).

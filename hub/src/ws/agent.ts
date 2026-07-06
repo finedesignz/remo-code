@@ -1200,6 +1200,14 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     } catch (err: any) {
       console.error('[supervisor] run event handler failed', err?.message)
     }
+    // TEAB-05: the same run lifecycle drives the hub-side TEAB poll-to-terminal
+    // loop. Each handler ignores run ids it doesn't own, so calling both is safe.
+    try {
+      const teab = await import('../scheduler/senders/teab.ts')
+      await teab.handleTeabRunEvent(supervisorId, userId, msg)
+    } catch (err: any) {
+      console.error('[supervisor] teab run event handler failed', err?.message)
+    }
     return
   }
 }
