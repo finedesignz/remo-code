@@ -59,6 +59,25 @@ partial unique index on `(session_id) WHERE status='running'`) guarantees at mos
 one running cycle per session; a second due-tick for a running session is coalesced,
 not stacked. Priority: a `deploy-fix`/`merge-to-main` row outranks `build` work.
 
+### Stale-lock reaper (`hub/src/orchestrator/stale-lock-reaper.ts`)
+
+Separate from `routine_queue`'s DB lock (which already releases each cycle) is an
+**in-memory** per-session lock in `SessionQueue` (`hub/src/dispatch/session-queue.ts`):
+`inFlight` is set on dispatch and cleared ONLY by `markFinished(sessionId)`. If a
+session's CLI turn never completes (dead/unauthed local session), `markFinished` is
+never called and the lock is held FOREVER — `runMacroCycle`'s `isRunLive` check then
+makes every heartbeat silently `skipped "run live"` indefinitely, with no work and no
+alert (verified in prod: wedged ~2 days).
+
+`reapStaleOrchestratorLocks` runs alongside the due-scan tick (`startDueOrchestratorTick`,
+same `REMO_ORCHESTRATOR_TICK_INTERVAL_MS` cadence): for every enabled orchestrator task
+whose session's in-memory lock age is ≥ `REMO_ORCHESTRATOR_STALE_LOCK_MS` (default 4h),
+it `abandon()`s the lock so the next heartbeat can re-inject, appends a `failed`
+`routine_run_log` row, and fires a one-shot `failure` notify (cooldown-deduped by
+`REMO_ORCHESTRATOR_REAP_NOTIFY_COOLDOWN_MS`, default 1h, so a session that stays wedged
+across several ticks doesn't re-page every minute — it still reaps every tick, just
+notifies at most once per cooldown window).
+
 ## The tick / async model (controller → waves, end-to-end)
 
 This is the Phase-32 wiring that closes the Phase-25 deferral. The hub DRIVES the

@@ -173,7 +173,12 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   fully dormant on the e2e-unproven queue. `registerCycleRunnerIfEnabled()` is called once at boot
   (`hub/src/index.ts`). Companion knobs: `REMO_ORCHESTRATOR_GLOBAL_CONCURRENCY` (default 2, global
   concurrent-cycle cap), `REMO_ORCHESTRATOR_DRAIN_INTERVAL_MS` (default 1000, drain interval),
-  `REMO_ORCHESTRATOR_TICK_INTERVAL_MS` (default 60000, Phase-32 due-scan enqueue interval). The
+  `REMO_ORCHESTRATOR_TICK_INTERVAL_MS` (default 60000, Phase-32 due-scan enqueue interval),
+  `REMO_ORCHESTRATOR_STALE_LOCK_MS` (default 14_400_000 = 4h — the stale-lock reaper's threshold;
+  fixes a wedge where a session whose CLI turn never completes holds the in-memory `SessionQueue`
+  lock forever, silently skip-forever-ing `"run live"`) and `REMO_ORCHESTRATOR_REAP_NOTIFY_COOLDOWN_MS`
+  (default 3_600_000 = 1h — min gap between repeat reap notifies for the same session; see
+  `hub/src/orchestrator/stale-lock-reaper.ts`). The
   Phase-32 controller→wave wiring drives dependency-aware waves directly from each tick's DUE rows
   (`hub/src/orchestrator/controller.ts` `makeCycleRunner`→`runWavesFromDueRows`). **Milestone TMAC
   (2026-06-08): the cycle-runner now defaults to the resume-heartbeat MACRO path** — `useMacroPath()`

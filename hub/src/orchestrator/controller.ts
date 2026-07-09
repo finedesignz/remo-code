@@ -39,6 +39,7 @@ import {
 } from '../db/orchestrator-rows-dal.ts';
 import { runMacroCycle } from './macro-cycle.ts';
 import { detectLifecycleStage } from './stage-detect.ts';
+import { reapStaleOrchestratorLocks } from './stale-lock-reaper.ts';
 
 // Milestone TMAC: route an orchestrator cycle through the resume-heartbeat MACRO
 // path (task_type → one autonomous macro prompt) instead of the legacy per-micro-
@@ -758,6 +759,13 @@ export function startDueOrchestratorTick(): void {
   dueTickTimer = setInterval(() => {
     scanAndEnqueueDueCycles().catch((err) =>
       console.warn(`[orchestrator] due-scan tick error: ${err?.message ?? err}`),
+    );
+    // fix/dispatch-stale-lock-reaper: recover a wedged in-memory SessionQueue
+    // lock (a session whose CLI turn never completes never calls markFinished,
+    // silently skipping "run live" forever). Independent of the due-scan enqueue
+    // above; runs every tick alongside it.
+    reapStaleOrchestratorLocks().catch((err) =>
+      console.warn(`[orchestrator] stale-lock reap error: ${err?.message ?? err}`),
     );
   }, DUE_TICK_INTERVAL_MS);
   (dueTickTimer as any).unref?.();
