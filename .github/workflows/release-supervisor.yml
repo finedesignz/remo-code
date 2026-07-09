@@ -62,12 +62,76 @@ jobs:
           bun run build:sidecar
           ls -la tauri/src-tauri/binaries/
 
+      # ---------------------------------------------------------------------
+      # Authenticode signing via Azure Trusted Signing (GATED, default OFF).
+      #
+      # These steps run ONLY when the repo variable ENABLE_MSI_SIGNING == 'true'.
+      # Until the Azure cert profile exists and that variable is flipped on, none
+      # of them run and the build is byte-for-byte identical to today's unsigned
+      # release. See supervisor/tauri/signing/README.md.
+      #
+      # CORRECTNESS: signing happens DURING tauri bundling via bundle.windows.signCommand
+      # (injected just below), so the Tauri updater .sig is computed over the already
+      # Authenticode-signed MSI. A post-build signtool step would sign AFTER the updater
+      # .sig was generated and break updater verification — so we must NOT do that.
+      - name: Install Trusted Signing dlib (Microsoft.Trusted.Signing.Client)
+        if: vars.ENABLE_MSI_SIGNING == 'true'
+        shell: pwsh
+        run: |
+          $ver = '1.0.60'
+          $out = Join-Path $env:RUNNER_TEMP 'trusted-signing'
+          # nuget.exe ships on windows-latest runners; fall back to a direct install if not.
+          nuget install Microsoft.Trusted.Signing.Client -Version $ver -OutputDirectory $out -ExcludeVersion:$false
+          $dll = Join-Path $out "Microsoft.Trusted.Signing.Client.$ver\bin\x64\Azure.CodeSigning.Dlib.dll"
+          if (-not (Test-Path -LiteralPath $dll)) {
+            Write-Error "Trusted Signing dlib not found at $dll"
+            exit 1
+          }
+          "TRUSTED_SIGNING_DLIB=$dll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "TRUSTED_SIGNING_DLIB=$dll"
+
+      - name: Configure signing (cert profile + inject signCommand)
+        if: vars.ENABLE_MSI_SIGNING == 'true'
+        shell: pwsh
+        run: |
+          # (a) Optionally override CertificateProfileName from a secret/var without a code edit.
+          $profile = '${{ vars.CERT_PROFILE_NAME }}'
+          if ([string]::IsNullOrWhiteSpace($profile)) { $profile = '${{ secrets.CERT_PROFILE_NAME }}' }
+          $metaPath = 'supervisor/tauri/signing/trusted-signing-metadata.json'
+          if (-not [string]::IsNullOrWhiteSpace($profile)) {
+            $meta = Get-Content -Raw -LiteralPath $metaPath | ConvertFrom-Json
+            $meta.CertificateProfileName = $profile
+            ($meta | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $metaPath -Encoding utf8
+            Write-Host "CertificateProfileName overridden to '$profile'"
+          } else {
+            Write-Host "CERT_PROFILE_NAME unset; keeping committed default in $metaPath"
+          }
+
+          # (b) Inject bundle.windows.signCommand into tauri.conf.json for THIS build only.
+          # Tauri runs signCommand with cwd = the src-tauri dir, so the script path is
+          # relative to supervisor/tauri/src-tauri -> ../signing/sign.ps1.
+          $confPath = 'supervisor/tauri/src-tauri/tauri.conf.json'
+          $conf = Get-Content -Raw -LiteralPath $confPath | ConvertFrom-Json
+          $signCmd = 'powershell -ExecutionPolicy Bypass -File ../signing/sign.ps1 %1'
+          if (-not $conf.bundle.windows) {
+            $conf.bundle | Add-Member -NotePropertyName windows -NotePropertyValue (@{}) -Force
+          }
+          $conf.bundle.windows | Add-Member -NotePropertyName signCommand -NotePropertyValue $signCmd -Force
+          ($conf | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $confPath -Encoding utf8
+          Write-Host "Injected bundle.windows.signCommand: $signCmd"
+
       - name: Build, sign, and release with tauri-action
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Azure Trusted Signing creds — harmless when signing is OFF (no signCommand
+          # is injected, so the Dlib never runs and these vars are simply ignored).
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          TRUSTED_SIGNING_DLIB: ${{ env.TRUSTED_SIGNING_DLIB }}
         with:
           projectPath: supervisor/tauri
           tagName: supervisor-v__VERSION__
