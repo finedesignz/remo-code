@@ -251,13 +251,23 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     })
 
     // Resize → fit + term.resize. Debounced via rAF so a burst of viewport
-    // events (mobile keyboard open) collapses to one resize.
+    // events (mobile keyboard open) collapses to one resize. We ALSO dedup on
+    // (cols,rows): the mobile keyboard/visualViewport fires a storm of resize
+    // events that fit() often resolves to the SAME grid — re-sending an
+    // identical term.resize makes the alt-screen TUI (claude/codex) repaint
+    // mid-frame, leaving ghost cells (garbled "Kne"+"message" overwrites). Only
+    // emit when the grid actually changed.
     let rafId = 0
+    let lastCols = 0
+    let lastRows = 0
     const sendResize = () => {
       if (rafId) cancelAnimationFrame(rafId)
       rafId = requestAnimationFrame(() => {
         rafId = 0
         try { fit.fit() } catch {}
+        if (term.cols === lastCols && term.rows === lastRows) return
+        lastCols = term.cols
+        lastRows = term.rows
         send({ type: 'term.resize', session_id: sessionId, cols: term.cols, rows: term.rows })
       })
     }
