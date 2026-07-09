@@ -192,8 +192,20 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     // Mobile taps on the host div don't reliably focus xterm's hidden textarea,
     // so the keyboard opens but keystrokes go nowhere. Focus the terminal on tap.
     const focusTerm = () => { try { term.focus() } catch {} }
-    hostRef.current.addEventListener('touchstart', focusTerm, { passive: true })
-    hostRef.current.addEventListener('mousedown', focusTerm)
+    const host = hostRef.current
+    host.addEventListener('touchstart', focusTerm, { passive: true })
+    host.addEventListener('mousedown', focusTerm)
+    // Contain touch INSIDE the terminal: a drag xterm's viewport can't consume
+    // (empty alt-screen buffer, toolbar, padding) must NOT bleed to the page — on
+    // iOS body{overflow:hidden} does not stop the visualViewport panning under the
+    // address bar, which drags the sticky header/toolbar with it. Let a real
+    // scrollable normal-buffer viewport scroll through; block everything else.
+    const containTouch = (e: TouchEvent) => {
+      const vp = (e.target as HTMLElement | null)?.closest?.('.xterm-viewport') as HTMLElement | null
+      if (vp && vp.scrollHeight > vp.clientHeight) return
+      e.preventDefault()
+    }
+    host?.addEventListener('touchmove', containTouch, { passive: false })
 
     // SESSION SWITCH / mount: start from a clean buffer so a prior session's
     // bytes never bleed into this one (T-16-10). Scrollback replay (below)
@@ -253,6 +265,9 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       window.removeEventListener('resize', sendResize)
       window.removeEventListener('orientationchange', sendResize)
       vv?.removeEventListener('resize', sendResize)
+      host?.removeEventListener('touchmove', containTouch)
+      host?.removeEventListener('touchstart', focusTerm)
+      host?.removeEventListener('mousedown', focusTerm)
       try { term.dispose() } catch {}
       termRef.current = null
       fitRef.current = null
