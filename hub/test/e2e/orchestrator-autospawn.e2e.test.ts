@@ -114,6 +114,8 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
       }) as InjectDeps['dispatch'],
       // OFFLINE until the simulated runner reconnects.
       getChannel: ((_sessionId: string) => (cap.online ? ({} as any) : null)) as InjectDeps['getChannel'],
+      // Live iff the simulated runner is online (mirrors getChannel; no ghost in e2e).
+      isSessionLive: (async (_sessionId: string) => cap.online) as InjectDeps['isSessionLive'],
       // REAL env-gated predicates (set via process.env per-case).
       isOrchestratorEnabled,
       isAutospawnEnabled,

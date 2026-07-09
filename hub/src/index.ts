@@ -54,6 +54,7 @@ import { startRevanoteCallbackWorker } from './revanote/callback.ts'
 import { startTelegramBridge } from './telegram/bridge.ts'
 import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/queue.ts'
 import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchestrator/controller.ts'
+import { startGhostReaperSweep, stopGhostReaperSweep } from './ws/ghost-reaper.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -680,6 +681,10 @@ runMigrations()
     // With the flag OFF (default) this is a no-op: no runner is registered (queue
     // stays dormant) and the due-scan tick never starts (nothing is enqueued).
     registerCycleRunnerIfEnabled()
+    // fix/ghost-session-reaper — periodic sweep that reaps "ghost" sessions
+    // (status='online', hostname=NULL phantom channels that survive restarts and
+    // wedge the orchestrator inject). No-op when REMO_GHOST_REAPER_DISABLED is set.
+    startGhostReaperSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -693,6 +698,7 @@ function gracefulShutdown(signal: string) {
   try { clearPostRunTimers() } catch {}
   try { stopRoutineQueueWorker() } catch {}
   try { stopDueOrchestratorTick() } catch {}
+  try { stopGhostReaperSweep() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

@@ -165,6 +165,19 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
 - **Optional:** `REMO_SESSION_IDLE_GRACE_SECONDS` (default 14400 = 4h; `0` disables idle teardown),
   `REMO_ORCHESTRATOR_AUTOLAUNCH` (`false` disables auto-launch), `TITANIUM_BYPASS` (currently
   `true` in prod — see docs/auth.md), `COOLIFY_TOKEN`, `E4A_*`.
+- **Ghost-session reaper** (`hub/src/ws/ghost-reaper.ts`): a boot-started sweep that reaps
+  **ghost sessions** — a `sessions` row stuck `status='online' AND hostname IS NULL` with a live
+  phantom agent channel but no genuinely-live CLI behind it (a hostname-less `/ws/agent` re-auth;
+  see the agent-auth path in `hub/src/ws/agent.ts`). A ghost fools the orchestrator inject's
+  `getChannel != null` liveness check, so it dispatches into the void and autospawn never fires.
+  The sweep closes the phantom socket (`4004 ghost_reaped`), unregisters the channel, and flips the
+  row `offline` so the next tick autospawns a real session. Never reaps `is_orchestrator=true`.
+  Knobs: **`REMO_GHOST_GRACE_MS`** (default **120000** = 2min; non-positive/non-finite ⇒ default) —
+  min age of the online+hostname-NULL signature before it's a ghost; **`REMO_GHOST_SWEEP_INTERVAL_MS`**
+  (default **60000**) — sweep cadence; **`REMO_GHOST_REAPER_DISABLED`** (accepts `1|true|yes|on`) —
+  escape hatch making the sweep a no-op. Companion inject-side guard: `injectOrchestratorPrompt`
+  routes ghosts to `maybeAutospawnOffline` via an `isSessionLive` check (channel present AND NOT a
+  ghost) instead of the raw `getChannel != null`.
 - **`REMO_ORCHESTRATOR_ENABLED`** (default **OFF** / `'0'`; accepts `1|true|yes|on`): gates the
   **auto-dev orchestrator** live cycle path (Phases 21–32). When OFF,
   `registerCycleRunnerIfEnabled()` (the ONLY caller of the Phase-22 queue `setCycleRunner`) is a

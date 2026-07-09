@@ -288,6 +288,34 @@ Do NOT auto-run against prod — run by hand after reviewing the dry-run output.
 - Hub injects TEXT ONLY; the agent owns gh/git/PR/reviewer inside its turn.
 - Off-hours merge is the ONLY auto-merge-to-main path.
 
+## Ghost-session reaper (fix/ghost-session-reaper)
+
+A **ghost session** is a `sessions` row stuck `status='online' AND hostname IS NULL` that has a
+registered agent WebSocket channel but no genuinely-live/productive CLI behind it. It arises when a
+SessionBridge resumes on `/ws/agent` WITHOUT a hostname: the agent-auth path
+(`hub/src/ws/agent.ts`) always `registerChannel` + `setSessionStatus('online')` but only persists
+`hostname` when the auth frame carries one, so the row is left online with a live phantom channel
+that survives hub restarts (the bridge re-auths). Because `getChannel(sessionId) != null`, the
+orchestrator inject treats the ghost as online and dispatches into the void; autospawn (which needs
+`getChannel == null`) never fires, so no real build session spawns and no PRs are produced.
+
+Two-part fix:
+
+- **Reaper** (`hub/src/ws/ghost-reaper.ts`): a boot-started sweep (`startGhostReaperSweep`, wired in
+  `hub/src/index.ts`) enumerates live channels (`listChannelSessionIds` in `ws/registry.ts`), loads
+  each session, and classifies a ghost as `status='online' AND hostname IS NULL AND now - last_activity
+  >= GHOST_GRACE_MS`, never `is_orchestrator=true`. For each ghost it closes the phantom socket
+  (`4004 ghost_reaped`), `unregisterChannel`s it, and flips the row `offline` — after which the next
+  tick sees `getChannel == null` and autospawns a real session. Fail-open per session. Legit
+  supervisor/rootless sessions always carry a hostname, so the signature is low-false-positive.
+- **Inject guard** (`hub/src/orchestrator/inject.ts`): the raw `getChannel(sessionId) == null`
+  liveness check is replaced by an injectable `isSessionLive(sessionId)` (channel present AND NOT a
+  ghost). A ghost therefore routes to `maybeAutospawnOffline` instead of dispatching into the void.
+
+Env: `REMO_GHOST_GRACE_MS` (default 120000), `REMO_GHOST_SWEEP_INTERVAL_MS` (default 60000),
+`REMO_GHOST_REAPER_DISABLED` (`1|true|yes|on` ⇒ no-op). Tests: `hub/test/ghost-reaper.test.ts`,
+`hub/test/orchestrator-autospawn-inject.test.ts` (ghost → autospawn path).
+
 ## Key files
 
 `hub/src/orchestrator/`: `controller.ts` (cycle runner + resolution + enqueue tick),

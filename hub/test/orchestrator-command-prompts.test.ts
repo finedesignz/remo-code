@@ -162,6 +162,7 @@ function spyInject(outcomeKind: string) {
   const calls: Array<{ req: any; gateNames: string[] }> = []
   const deps: InjectDeps = {
     getChannel: () => ({ ws: { send: () => {} } }) as any, // session "online"
+    isSessionLive: async () => true, // live, non-ghost
     dispatch: (async (req: any, pdeps: any) => {
       calls.push({ req, gateNames: pdeps.gates.map((g: any) => g.name) })
       return { kind: outcomeKind, runId: req.token }
@@ -192,6 +193,7 @@ describe('makeLiveSeams.executeCommand — rides the dispatch pipeline', () => {
   test('cost-cap refusal → outcome refused_cost_cap, prompt still composed', async () => {
     const deps: InjectDeps = {
       getChannel: () => ({ ws: { send: () => {} } }) as any,
+      isSessionLive: async () => true,
       dispatch: (async () => ({ kind: 'skipped', reason: 'over_daily_cost_cap:$10.42>=$10.00' })) as any,
     }
     const seams = makeLiveSeams(deps)
@@ -206,6 +208,7 @@ describe('makeLiveSeams.executeCommand — rides the dispatch pipeline', () => {
     let dispatched = false
     const deps: InjectDeps = {
       getChannel: () => undefined as any,
+      isSessionLive: async () => false, // no channel ⇒ not live
       dispatch: (async () => {
         dispatched = true
         return { kind: 'dispatched', runId: 'x' }
