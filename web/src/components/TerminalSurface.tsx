@@ -193,19 +193,34 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     // so the keyboard opens but keystrokes go nowhere. Focus the terminal on tap.
     const focusTerm = () => { try { term.focus() } catch {} }
     const host = hostRef.current
-    host.addEventListener('touchstart', focusTerm, { passive: true })
-    host.addEventListener('mousedown', focusTerm)
-    // Contain touch INSIDE the terminal: a drag xterm's viewport can't consume
-    // (empty alt-screen buffer, toolbar, padding) must NOT bleed to the page — on
-    // iOS body{overflow:hidden} does not stop the visualViewport panning under the
-    // address bar, which drags the sticky header/toolbar with it. Let a real
-    // scrollable normal-buffer viewport scroll through; block everything else.
-    const containTouch = (e: TouchEvent) => {
-      const vp = (e.target as HTMLElement | null)?.closest?.('.xterm-viewport') as HTMLElement | null
-      if (vp && vp.scrollHeight > vp.clientHeight) return
+
+    // TOUCH SCROLL (mobile). xterm renders `.xterm-screen` (the content) as an
+    // overlay SIBLING on top of the scrollable `.xterm-viewport`, so a finger
+    // drag lands on the screen and never scrolls the viewport — only the thin
+    // scrollbar does. We drive the buffer scroll ourselves: record the viewport
+    // scrollTop on touchstart, then translate the drag delta into scrollTop on
+    // touchmove. Always preventDefault so the gesture is CONTAINED — on iOS
+    // body{overflow:hidden} does not stop the visualViewport panning under the
+    // address bar (which drags the sticky header/toolbar). No scrollable buffer
+    // (alt-screen TUI, empty shell) ⇒ nothing to scroll, gesture still contained.
+    const vpEl = () => host?.querySelector('.xterm-viewport') as HTMLElement | null
+    let dragY = 0
+    let dragTop = 0
+    const onTouchStart = (e: TouchEvent) => {
+      focusTerm()
+      dragY = e.touches[0]?.clientY ?? 0
+      dragTop = vpEl()?.scrollTop ?? 0
+    }
+    const onTouchMove = (e: TouchEvent) => {
+      const vp = vpEl()
+      if (vp && vp.scrollHeight > vp.clientHeight) {
+        vp.scrollTop = dragTop - ((e.touches[0]?.clientY ?? dragY) - dragY)
+      }
       e.preventDefault()
     }
-    host?.addEventListener('touchmove', containTouch, { passive: false })
+    host.addEventListener('touchstart', onTouchStart, { passive: false })
+    host.addEventListener('touchmove', onTouchMove, { passive: false })
+    host.addEventListener('mousedown', focusTerm)
 
     // SESSION SWITCH / mount: start from a clean buffer so a prior session's
     // bytes never bleed into this one (T-16-10). Scrollback replay (below)
@@ -265,8 +280,8 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       window.removeEventListener('resize', sendResize)
       window.removeEventListener('orientationchange', sendResize)
       vv?.removeEventListener('resize', sendResize)
-      host?.removeEventListener('touchmove', containTouch)
-      host?.removeEventListener('touchstart', focusTerm)
+      host?.removeEventListener('touchstart', onTouchStart)
+      host?.removeEventListener('touchmove', onTouchMove)
       host?.removeEventListener('mousedown', focusTerm)
       try { term.dispose() } catch {}
       termRef.current = null
