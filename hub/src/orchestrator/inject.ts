@@ -87,6 +87,11 @@ export interface InjectInput {
 export interface InjectDeps {
   dispatch: typeof dispatch
   getChannel: typeof getChannel
+  // fix/ghost-session-reaper — a session is "live" only if it has a channel AND
+  // is not a ghost (NOT online-with-hostname-NULL). A ghost has a phantom
+  // channel but no genuinely-live CLI; treating it as live dispatches into the
+  // void. `isSessionLive` returns false for ghosts so they route to autospawn.
+  isSessionLive: (sessionId: string) => Promise<boolean>
   // BSA-02 seams (all default to the real adapters; tests swap them).
   isOrchestratorEnabled: typeof isOrchestratorEnabled
   isAutospawnEnabled: typeof isAutospawnEnabled
@@ -109,9 +114,33 @@ async function defaultSupervisorOnlineForUser(userId: string): Promise<boolean> 
   }
 }
 
+/**
+ * Default liveness check: a session is live only if it has a live agent channel
+ * AND is not a ghost. A ghost is `status='online' AND hostname IS NULL` (a
+ * phantom channel from a hostname-less re-auth). On any DB error we fail OPEN to
+ * "live" (channel present ⇒ preserve the legacy dispatch behaviour for genuine
+ * sessions rather than mis-route them to autospawn on a transient read error).
+ */
+async function defaultIsSessionLive(sessionId: string): Promise<boolean> {
+  if (getChannel(sessionId) == null) return false
+  try {
+    const { sql } = await import('../db/postgres.ts')
+    const rows = await sql<{ status: string | null; hostname: string | null }[]>`
+      SELECT status, hostname FROM sessions WHERE id = ${sessionId} AND deleted_at IS NULL LIMIT 1
+    `
+    const row = rows[0]
+    if (!row) return true // channel present but no row — treat as live (best-effort)
+    const isGhost = row.status === 'online' && row.hostname == null
+    return !isGhost
+  } catch {
+    return true // fail-open to live — never mis-route a genuine session on a read error
+  }
+}
+
 const REAL_DEPS: InjectDeps = {
   dispatch,
   getChannel,
+  isSessionLive: defaultIsSessionLive,
   isOrchestratorEnabled,
   isAutospawnEnabled,
   isRepoAutospawnAllowed,
@@ -195,9 +224,12 @@ export async function injectOrchestratorPrompt(
 ): Promise<InjectOutcome> {
   const { userId, sessionId, token, prompt } = input
 
-  // OFFLINE target. Legacy behaviour is `no_session`. BSA-02 converts this into a
-  // GATED opt-in autospawn; ANY gate not satisfied falls back to `no_session`.
-  if (deps.getChannel(sessionId) == null) {
+  // OFFLINE-or-GHOST target. Legacy behaviour is `no_session`. BSA-02 converts
+  // this into a GATED opt-in autospawn; ANY gate not satisfied falls back to
+  // `no_session`. fix/ghost-session-reaper: a ghost (online + hostname=NULL) has
+  // a phantom channel but no live CLI — `isSessionLive` returns false for it so
+  // it routes here (to autospawn) instead of dispatching into the void.
+  if (!(await deps.isSessionLive(sessionId))) {
     return await maybeAutospawnOffline(input, deps)
   }
 

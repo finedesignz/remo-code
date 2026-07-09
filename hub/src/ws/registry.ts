@@ -46,6 +46,13 @@ export function isSessionOnline(sessionId: string) {
   return channels.has(sessionId)
 }
 
+// fix/ghost-session-reaper — enumerate all live agent-channel session IDs.
+// Used by the ghost-reaper sweep to classify + reap phantom channels
+// (status='online', hostname=NULL) that survive hub restarts.
+export function listChannelSessionIds(): string[] {
+  return Array.from(channels.keys())
+}
+
 // Plan 04-008 — list connected agent-channel session IDs for a user.
 // Used by `pickSessionTarget` for the local-agent fallback (step 3).
 export function listOnlineAgentSessionsForUser(userId: string): string[] {
