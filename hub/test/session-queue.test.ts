@@ -95,4 +95,55 @@ describe('SessionQueue', () => {
     expect(q.currentInFlight('s1')).toBe(null)
     expect(q.currentInFlight('s2')).toBe(null)
   })
+
+  // Stale-lock reaper support (fix/dispatch-stale-lock-reaper): a dispatched
+  // token stamps `inFlightSince`, and `staleInFlight`/`inFlightAgeMs` read it
+  // back deterministically off an explicit `now` (never wall-clock in tests).
+  test('dispatched enqueue stamps an in-flight timestamp', () => {
+    const q = new SessionQueue()
+    q.enqueue('s1', 'r1')
+    expect(q.inFlightAgeMs('s1', Date.now())).toBeGreaterThanOrEqual(0)
+  })
+
+  test('staleInFlight returns the session only once age >= threshold', () => {
+    const q = new SessionQueue()
+    q.enqueue('s1', 'r1')
+    const age = q.inFlightAgeMs('s1')! // real timestamp just stamped
+    const now = Date.now()
+    // Below threshold: not yet stale.
+    expect(q.staleInFlight(age + 60_000, now)).toEqual([])
+    // At/above threshold: stale.
+    expect(q.staleInFlight(0, now)).toEqual(['s1'])
+  })
+
+  test('markFinished promotion resets the in-flight timestamp', async () => {
+    const q = new SessionQueue()
+    q.enqueue('s1', 'r1')
+    const firstAge = q.inFlightAgeMs('s1')!
+    q.enqueue('s1', 'r2') // waiter
+    await new Promise((r) => setTimeout(r, 5))
+    const promoted = q.markFinished('s1')
+    expect(promoted).toBe('r2')
+    const secondAge = q.inFlightAgeMs('s1')!
+    // The promoted lock's age is measured from ITS OWN stamp, not the first
+    // token's — so it should be smaller than "firstAge + the sleep" would be.
+    expect(secondAge).toBeLessThan(firstAge + 5_000)
+  })
+
+  test('abandon removes the in-flight timestamp', () => {
+    const q = new SessionQueue()
+    q.enqueue('s1', 'r1')
+    q.abandon('s1')
+    expect(q.inFlightAgeMs('s1')).toBe(null)
+    expect(q.staleInFlight(0)).toEqual([])
+  })
+
+  test('a queued (not dispatched) token does not create an in-flight timestamp', () => {
+    const q = new SessionQueue()
+    q.enqueue('s1', 'r1') // dispatched — has a timestamp
+    q.enqueue('s1', 'r2') // queued — waiter has no timestamp of its own
+    // Only one slot's inFlightSince exists (the dispatched r1's); staleInFlight
+    // with threshold 0 must report s1 exactly once, not twice.
+    expect(q.staleInFlight(0)).toEqual(['s1'])
+  })
 })
