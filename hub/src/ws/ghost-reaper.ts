@@ -98,23 +98,43 @@ const REAL_DEPS: GhostReaperDeps = {
 }
 
 /**
- * A row is a ghost when it is `status='online'`, `hostname IS NULL`, has aged
- * past GHOST_GRACE_MS, and is NOT the orchestrator session (never reaped — the
+ * Does the row match the ghost SHAPE (independent of time): `status='online'`,
+ * `hostname IS NULL`, and NOT the orchestrator session (never reaped — the
  * orchestrator is a legit hostname-less coordinator and its own concern).
  */
-function isGhost(row: GhostSessionRow, now: number): boolean {
+function isGhostShape(row: GhostSessionRow): boolean {
   if (row.is_orchestrator) return false
   if (row.status !== 'online') return false
   if (row.hostname != null) return false
-  if (row.last_activity_ms == null) return false
-  return now - row.last_activity_ms >= GHOST_GRACE_MS
+  return true
+}
+
+/**
+ * First time (epoch ms) each currently-live channel was observed in the ghost
+ * SHAPE. The grace window is measured against THIS cached instant — NOT against
+ * `sessions.last_activity`, which the supervisor's 10s `session_inventory`
+ * upsert (`findOrCreateSessionForRepoV2`, tokenHash=null path) refreshes to
+ * `now()` on every push. A supervisor-anchored ghost therefore never ages past
+ * grace by `last_activity`, so the reaper would never fire on it (verified in
+ * prod 2026-07-09: reaped once at boot, then re-anchored and immortal). Caching
+ * the first-seen instant makes the grace immune to that churn: once recorded we
+ * never move it forward, so continuous ghost-shape presence ages correctly. The
+ * seed is `min(now, last_activity)` so a ghost already stale at boot reaps on
+ * the first sweep (preserving the observed boot behaviour).
+ */
+const firstSeenGhostAt = new Map<string, number>()
+
+/** Clear the first-seen cache (test hook + graceful-shutdown hygiene). */
+export function _resetGhostReaperState(): void {
+  firstSeenGhostAt.clear()
 }
 
 /**
  * One reap pass: for every live agent channel, load its session row and — if it
- * matches the ghost signature — close the phantom socket, unregister the
- * channel, and flip the row to `offline`. Best-effort per session (a DB/socket
- * error on one session never aborts the sweep). Returns the sessionIds reaped.
+ * has matched the ghost shape continuously for GHOST_GRACE_MS — close the
+ * phantom socket, unregister the channel, and flip the row to `offline`.
+ * Best-effort per session (a DB/socket error on one session never aborts the
+ * sweep). Returns the sessionIds reaped.
  */
 export async function reapGhostSessions(
   now: number = Date.now(),
@@ -131,21 +151,43 @@ export async function reapGhostSessions(
     return reaped
   }
 
+  const liveIds = new Set(ids)
+
   for (const id of ids) {
     try {
       const row = await d.loadSession(id)
-      if (!row || !isGhost(row, now)) continue
+      if (!row || !isGhostShape(row)) {
+        // No longer a ghost (resolved a hostname / went offline / is the
+        // orchestrator / row gone) — forget any prior first-seen instant so a
+        // future re-ghost starts a fresh grace window.
+        firstSeenGhostAt.delete(id)
+        continue
+      }
+
+      // Record (or reuse) the first instant this channel was seen in ghost
+      // shape. Seed from last_activity so a boot-time stale ghost reaps at once.
+      const seed = row.last_activity_ms == null ? now : Math.min(now, row.last_activity_ms)
+      const firstSeen = firstSeenGhostAt.get(id) ?? seed
+      firstSeenGhostAt.set(id, firstSeen)
+
+      if (now - firstSeen < GHOST_GRACE_MS) continue // still inside grace
 
       d.closeChannel(id)
       d.unregisterChannel(id)
       await d.setSessionStatus(id, 'offline')
+      firstSeenGhostAt.delete(id)
       reaped.push(id)
       console.warn(
-        `[ghost-reaper] reaped session=${id} (online + hostname=NULL, aged past ${GHOST_GRACE_MS}ms) — flipped offline so next tick can autospawn a real session`,
+        `[ghost-reaper] reaped session=${id} (online + hostname=NULL, ghost-shape for ≥${GHOST_GRACE_MS}ms) — flipped offline so next tick can autospawn a real session`,
       )
     } catch (err: any) {
       console.warn(`[ghost-reaper] reap failed session=${id}: ${err?.message ?? err}`)
     }
+  }
+
+  // Prune first-seen entries for channels that have since disconnected.
+  for (const id of firstSeenGhostAt.keys()) {
+    if (!liveIds.has(id)) firstSeenGhostAt.delete(id)
   }
 
   return reaped

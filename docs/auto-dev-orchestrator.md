@@ -303,8 +303,13 @@ Two-part fix:
 
 - **Reaper** (`hub/src/ws/ghost-reaper.ts`): a boot-started sweep (`startGhostReaperSweep`, wired in
   `hub/src/index.ts`) enumerates live channels (`listChannelSessionIds` in `ws/registry.ts`), loads
-  each session, and classifies a ghost as `status='online' AND hostname IS NULL AND now - last_activity
-  >= GHOST_GRACE_MS`, never `is_orchestrator=true`. For each ghost it closes the phantom socket
+  each session, and classifies a ghost by SHAPE (`status='online' AND hostname IS NULL`, never
+  `is_orchestrator=true`) that has held that shape continuously for `GHOST_GRACE_MS`. The grace is
+  measured against an in-memory first-seen instant (cached per channel, seeded from `last_activity` on
+  first observation), NOT against live `sessions.last_activity` — the supervisor's 10s
+  `session_inventory` upsert refreshes `last_activity` to `now()` on every push, so a
+  `last_activity`-based grace would never age a supervisor-anchored ghost past the window (verified in
+  prod 2026-07-09: reaped once at boot, then re-anchored and immortal). For each ghost it closes the phantom socket
   (`4004 ghost_reaped`), `unregisterChannel`s it, and flips the row `offline` — after which the next
   tick sees `getChannel == null` and autospawns a real session. Fail-open per session. Legit
   supervisor/rootless sessions always carry a hostname, so the signature is low-false-positive.

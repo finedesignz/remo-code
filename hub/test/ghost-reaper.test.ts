@@ -13,12 +13,14 @@ import {
   GHOST_GRACE_MS,
   startGhostReaperSweep,
   stopGhostReaperSweep,
+  _resetGhostReaperState,
   type GhostReaperDeps,
   type GhostSessionRow,
 } from '../src/ws/ghost-reaper.ts'
 
 afterEach(() => {
   stopGhostReaperSweep()
+  _resetGhostReaperState() // clear the cross-call first-seen cache between tests
   delete process.env.REMO_GHOST_REAPER_DISABLED
 })
 
@@ -118,6 +120,34 @@ describe('reapGhostSessions', () => {
     const reaped = await reapGhostSessions(NOW, deps)
     expect(reaped).toEqual([])
     expect(calls.closed).toEqual([])
+  })
+
+  test('churn-immune: reaps once first-seen ages past grace even as last_activity keeps refreshing', async () => {
+    // Simulates the prod supervisor-anchored ghost: last_activity is bumped to
+    // ~now on every inventory push, so a last_activity-based grace never fires.
+    // The cached first-seen instant must age regardless.
+    const t0 = 1_000_000_000
+    // Sweep 1: fresh ghost, last_activity == now ⇒ inside grace, not reaped.
+    const s1 = spyDeps(['g'], { g: row({ last_activity_ms: t0 }) })
+    expect(await reapGhostSessions(t0, s1.deps)).toEqual([])
+    // Sweep 2: grace elapsed, but last_activity was just refreshed to ~now.
+    const now2 = t0 + GHOST_GRACE_MS + 1
+    const s2 = spyDeps(['g'], { g: row({ last_activity_ms: now2 - 500 }) })
+    expect(await reapGhostSessions(now2, s2.deps)).toEqual(['g'])
+    expect(s2.calls.statuses).toEqual([['g', 'offline']])
+  })
+
+  test('grace resets if the session stops being a ghost between sweeps', async () => {
+    const t0 = 2_000_000_000
+    const s1 = spyDeps(['g'], { g: row({ last_activity_ms: t0 }) })
+    expect(await reapGhostSessions(t0, s1.deps)).toEqual([]) // ghost, within grace
+    // It resolves a hostname (genuine session) — first-seen must be forgotten.
+    const s2 = spyDeps(['g'], { g: row({ hostname: 'TitaniumTower', last_activity_ms: t0 }) })
+    expect(await reapGhostSessions(t0 + GHOST_GRACE_MS + 1, s2.deps)).toEqual([])
+    // Later it re-ghosts: a FRESH grace window starts, so no immediate reap.
+    const t3 = t0 + GHOST_GRACE_MS + 2
+    const s3 = spyDeps(['g'], { g: row({ last_activity_ms: t3 }) })
+    expect(await reapGhostSessions(t3, s3.deps)).toEqual([])
   })
 })
 
