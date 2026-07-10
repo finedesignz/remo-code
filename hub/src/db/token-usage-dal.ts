@@ -185,19 +185,20 @@ export async function getTodayTokenCostUsd(userId: string, timezone: string): Pr
  * The token-count twin of {@link getTodayTokenCostUsd}: backs the non-bypassable
  * `dailyTokenCapGate` (dispatch/gates.ts) so the orchestrator has a real ceiling
  * that means something on a flat-rate Max subscription (where the dollar cost cap
- * is meaningless — issue #6). Sums ALL consumed tokens (input + output + both
- * cache buckets) from `token_usage` with the SAME tz-day boundary the cost cap +
- * GET /api/usage/cost "today" use, so all three windows agree. token_usage is the
- * single source (every usage_event over /ws/agent — interactive, telegram,
- * webhook, scheduled), so no double-count.
+ * is meaningless — issue #6). Counts ONLY real I/O tokens (`input_tokens +
+ * output_tokens`) — cache-read (and cache-creation) tokens are EXCLUDED. Rationale
+ * (2026-07-09): cache-read is near-free yet dominates the raw count — a prod day
+ * showed 50.9M "tokens" of which 50.7M were cache-read and only 214K were I/O, so
+ * the all-buckets sum tripped the 50M cap on essentially free cache traffic and
+ * froze all dispatch with zero real work done. Counting I/O only makes the ceiling
+ * track genuine generation spend. Same tz-day boundary as the cost cap +
+ * GET /api/usage/cost "today". token_usage is the single source (every usage_event
+ * over /ws/agent — interactive, telegram, webhook, scheduled), so no double-count.
  */
 export async function getTodayTokenTotal(userId: string, timezone: string): Promise<number> {
   const tz = timezone || 'UTC'
   const rows = await sql<{ sum: string | null }[]>`
-    SELECT COALESCE(SUM(
-      input_tokens + output_tokens
-      + cache_creation_input_tokens + cache_read_input_tokens
-    ), 0)::text AS sum
+    SELECT COALESCE(SUM(input_tokens + output_tokens), 0)::text AS sum
     FROM token_usage
     WHERE user_id = ${userId}
       AND created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}
