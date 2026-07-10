@@ -38,6 +38,18 @@ export async function updateSessionAgentInfo(sessionId: string, info: unknown) {
   await sql`UPDATE sessions SET agent_info = ${JSON.stringify(info)}::jsonb WHERE id = ${sessionId}`;
 }
 
+/**
+ * Backfill a session's hostname when it is currently NULL (COALESCE never
+ * downgrades an existing host). The single chokepoint that enforces the
+ * no-online-with-NULL-hostname invariant at the agent-auth online transition,
+ * independent of which findOrCreateAgentSessionV2 branch ran. No-op when
+ * hostname is falsy or the row already has one.
+ */
+export async function backfillSessionHostname(sessionId: string, hostname: string | null): Promise<void> {
+  if (!hostname || !hostname.trim()) return
+  await sql`UPDATE sessions SET hostname = COALESCE(hostname, ${hostname}) WHERE id = ${sessionId}`
+}
+
 export async function getSession(sessionId: string, userId: string) {
   const rows = await sql`
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at,
@@ -551,10 +563,15 @@ export async function findOrCreateAgentSessionV2(
       // Plan 08-003 T4: when tokenHash is null (supervisor inventory path)
       // preserve the existing token_hash so a previously-attached runner row
       // keeps its binding. Otherwise overwrite.
+      // Backfill hostname on reuse when the row lacks one (COALESCE never
+      // downgrades an existing host). Without this, a session whose row predates
+      // host-keying — or was created NULL — stays online+NULL-hostname forever
+      // (a ghost: unroutable, autospawn refuses supervisor_offline).
       const updated = tokenHash === null
         ? await tx`
             UPDATE sessions
                SET project_dir = ${nextProjectDir},
+                   hostname = COALESCE(hostname, ${hostname}),
                    last_activity = now()
              WHERE id = ${row.id}
              RETURNING *
@@ -563,6 +580,7 @@ export async function findOrCreateAgentSessionV2(
             UPDATE sessions
                SET token_hash = ${tokenHash},
                    project_dir = ${nextProjectDir},
+                   hostname = COALESCE(hostname, ${hostname}),
                    last_activity = now()
              WHERE id = ${row.id}
              RETURNING *
@@ -611,6 +629,7 @@ export async function findOrCreateAgentSessionV2(
                    github_owner = ${owner},
                    github_repo = ${repo},
                    project_dir = ${projectDir},
+                   hostname = COALESCE(hostname, ${hostname}),
                    last_activity = now()
              WHERE id = ${keeper.id}
              RETURNING *
@@ -622,6 +641,7 @@ export async function findOrCreateAgentSessionV2(
                    github_repo = ${repo},
                    token_hash = ${tokenHash},
                    project_dir = ${projectDir},
+                   hostname = COALESCE(hostname, ${hostname}),
                    last_activity = now()
              WHERE id = ${keeper.id}
              RETURNING *
@@ -872,6 +892,28 @@ export async function verifyApiKey(keyHash: string) {
   if (!rows[0]) return null;
   await sql`UPDATE api_keys SET last_used_at = now() WHERE key_hash = ${keyHash} AND revoked_at IS NULL`;
   return rows[0].user_id as string;
+}
+
+/**
+ * Resolve the hostname of the supervisor that owns a given api_key (by hash).
+ * An agent socket authenticates with the SAME api_key as its host supervisor,
+ * so this is the authoritative fallback hostname when the agent's `auth` frame
+ * omits `hostname` — without it the session flips `online` with `hostname=NULL`
+ * (a ghost: unroutable by pickSupervisorForSession → autospawn refuses
+ * `supervisor_offline`, and the ghost-reaper's grace keeps resetting). Returns
+ * null when no supervisor row is bound to that key.
+ */
+export async function getSupervisorHostnameForApiKey(keyHash: string): Promise<string | null> {
+  const rows = await sql<{ hostname: string | null }[]>`
+    SELECT s.hostname
+      FROM supervisors s
+      JOIN api_keys k ON k.id = s.api_key_id
+     WHERE k.key_hash = ${keyHash} AND k.revoked_at IS NULL
+     ORDER BY s.last_seen_at DESC NULLS LAST
+     LIMIT 1
+  `
+  const h = rows[0]?.hostname
+  return h && h.trim() ? h : null
 }
 
 export async function listApiKeys(userId: string) {
