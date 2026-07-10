@@ -60,9 +60,13 @@ maybe('ghost-hostname backfill', () => {
   }
 
   test('getSupervisorHostnameForApiKey resolves the supervisor host by key hash', async () => {
+    // Unique hostname — other DB-gated tests share this Postgres and run
+    // cross-user `WHERE hostname='TitaniumTower'` queries; a literal collision
+    // would leak this supervisor row into their expectations.
+    const host = `GhostHostTest-${crypto.randomUUID()}`
     const keyHash = `kh-${crypto.randomUUID()}`
-    await mkSupervisor(keyHash, 'TitaniumTower')
-    expect(await getSupervisorHostnameForApiKey(keyHash)).toBe('TitaniumTower')
+    await mkSupervisor(keyHash, host)
+    expect(await getSupervisorHostnameForApiKey(keyHash)).toBe(host)
     expect(await getSupervisorHostnameForApiKey(`kh-none-${crypto.randomUUID()}`)).toBeNull()
   })
 
