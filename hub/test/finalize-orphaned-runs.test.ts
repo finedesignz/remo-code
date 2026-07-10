@@ -128,6 +128,27 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
     expect(by.ghost.exit_reason).toBe('orphaned_no_inventory')
   })
 
+  test('null-session runs are NOT reconcilable — why launches must bind session_id', async () => {
+    // Regression for the autospawn/launch at_capacity leak: launchSessionForUser
+    // used to reserve its run with session_id = NULL. The reconciler filters on
+    // `NOT (session_id = ANY(live))`, and SQL `NULL = ANY(array)` is NULL, so a
+    // null-session row can NEVER match — even with empty inventory it stays open
+    // forever, refilling the concurrency cap. The fix binds the real session id
+    // at reserve time; this test pins the semantics that made the bug possible.
+    const sup = `sup_orphan_nullsess_${Date.now()}`
+    await mkSupervisor(sup)
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, NULL, ${sup}, 'nullsess', now() - interval '5 minutes')
+    `
+    const closed = await finalizeOrphanedRunsForSupervisor(sup, [])
+    expect(closed).toBe(0)
+    const rows = await sql`
+      SELECT ended_at FROM session_runs WHERE supervisor_id = ${sup}
+    `
+    expect(rows[0].ended_at).toBeNull()
+  })
+
   test('empty inventory closes all grace-aged open runs', async () => {
     const otherSup = `sup_orphan_empty_${Date.now()}`
     await mkSupervisor(otherSup)
