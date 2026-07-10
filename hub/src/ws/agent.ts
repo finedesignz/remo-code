@@ -1,7 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
 import { TermFrame, isTermFrameType, isAgentToHubTermType } from './term-protocol'
-import { verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo, getSessionHostname } from '../db/dal'
+import { verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo, getSessionHostname, getSupervisorHostnameForApiKey, backfillSessionHostname } from '../db/dal'
 import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
@@ -326,13 +326,26 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     const tokenHash = await hashToken(rawToken)
     const cliKind: 'claude' | 'codex' = (msg as any).cli_kind ?? 'claude'
     const gitInput = (msg as any).git as Parameters<typeof findOrCreateAgentSessionV2>[4]
+    // Resolve a non-null hostname for the session. An online session with a NULL
+    // hostname is a ghost: pickSupervisorForSession can't map it (autospawn
+    // refuses `supervisor_offline`) and the ghost-reaper's grace keeps resetting.
+    // Fallback chain: auth frame → agent_info → the supervisor bound to this
+    // api_key (an agent shares its host supervisor's key). Never invent one.
+    const advertisedHostname = (msg.hostname || (msg as any).agent_info?.hostname || '').toString().trim()
+    let effectiveHostname = advertisedHostname
+    if (!effectiveHostname) {
+      try { effectiveHostname = (await getSupervisorHostnameForApiKey(keyHash)) ?? '' } catch { effectiveHostname = '' }
+      if (effectiveHostname) {
+        console.warn(`[agent] auth omitted hostname; resolved '${effectiveHostname}' from api_key supervisor to avoid a ghost session`)
+      }
+    }
     const session = await findOrCreateAgentSessionV2(
       userId,
       projectDir,
       tokenHash,
       cliKind,
       gitInput,
-      msg.hostname ?? null,
+      effectiveHostname || null,
     )
 
     if (!session.created) {
@@ -352,17 +365,23 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
     console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir} cli=${cliKind} reused=${!session.created} repo_keyed=${session.repo_keyed} migrated=${session.migrated ?? false}`)
     registerChannel(session.id, userId, ws as any)
-    await setSessionStatus(session.id, 'online')
 
-    // Persist agent host info (OS, CPU, RAM, runtime versions) for the Settings UI.
+    // Persist the resolved hostname BEFORE flipping the session online so it is
+    // never observable as online+NULL-hostname (a ghost). agent_info (when sent)
+    // carries the richer host detail for the Settings UI; either way the
+    // hostname column is backfilled from effectiveHostname.
     if ((msg as any).agent_info) {
-      const info = { ...(msg as any).agent_info, hostname: (msg as any).agent_info.hostname || msg.hostname }
+      const info = { ...(msg as any).agent_info, hostname: (msg as any).agent_info.hostname || effectiveHostname || undefined }
       try { await updateSessionAgentInfo(session.id, info) } catch (e: any) {
         console.error('[agent] failed to persist agent_info', e?.message)
       }
-    } else if (msg.hostname) {
-      try { await updateSessionAgentInfo(session.id, { hostname: msg.hostname }) } catch {}
     }
+    // Chokepoint: guarantee the row carries a hostname before it flips online,
+    // so it is never observable as a routable-but-unroutable ghost. Backfill
+    // only (COALESCE) — never clobber an existing host.
+    try { await backfillSessionHostname(session.id, effectiveHostname || null) } catch {}
+
+    await setSessionStatus(session.id, 'online')
 
     // Phase 05: handle rootless ambient-session advertisement.
     // The agent sends `rootless_sessions: ['claude','codex'?]` to opt-in to
