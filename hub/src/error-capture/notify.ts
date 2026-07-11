@@ -236,7 +236,7 @@ async function sendEmail(
   }
 
   const url = `${baseUrl.replace(/\/+$/, '')}/v1/messages/send`
-  const payload = JSON.stringify({ inbox_id: inboxId, to, subject, text })
+  const payload = JSON.stringify({ from_inbox_id: inboxId, to, subject, text })
 
   // 5s timeout, 1 retry on 5xx/network.
   for (let attempt = 0; attempt < 2; attempt++) {
