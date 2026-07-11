@@ -102,6 +102,9 @@ const CreateSchema = z.object({
   // Milestone TEAB — target repo (`repo_ident`) for a `task_type === 'teab'`
   // build task. Persisted on the dedicated `teab_repo_ident` column.
   teab_repo_ident: z.string().max(2000).nullable().optional(),
+  // Default-on run-summary email opt-out. Omitted ⇒ true (owner gets a summary
+  // per root run). Set false to suppress. See docs/scheduled-tasks.md.
+  email_summary: z.boolean().optional(),
 })
 
 const PatchSchema = CreateSchema.partial()
@@ -380,6 +383,7 @@ scheduledTasks.post('/', async (c) => {
     name_suffix: built.suffix || null,
     schedule_rules: data.schedule_rules ?? null,
     teab_repo_ident: data.teab_repo_ident ?? null,
+    email_summary: data.email_summary,
   })
 
   registry.register(task)
@@ -511,6 +515,7 @@ scheduledTasks.patch('/:id', async (c) => {
     post_run_actions: data.post_run_actions !== undefined ? v.actions : undefined,
     schedule_rules: data.schedule_rules !== undefined ? (data.schedule_rules as any[]) : undefined,
     teab_repo_ident: data.teab_repo_ident !== undefined ? (data.teab_repo_ident ?? null) : undefined,
+    email_summary: data.email_summary,
   })
   if (!updated) return c.json({ error: 'not_found' }, 404)
 

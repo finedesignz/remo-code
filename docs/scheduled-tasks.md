@@ -645,6 +645,31 @@ whose `on` condition matches. Each action has an optional `delay_seconds`
 | `webhook`           | `{ url }`                                         | POST JSON with `X-Remo-Signature: sha256=...`   |
 | `github_issue`      | `{ repo_full_name, labels?, assignees? }`         | Creates a GitHub issue from a `triage` run result; gateway-pair creds |
 
+### Default run-summary email (opt-out)
+
+Every **root** run (`chainDepth === 0`) emails the task **owner** a run summary
+by default — on success *and* failure — even when the task configures no
+post-run actions of its own. The dispatcher synthesizes an in-memory
+`notify_email` action (`buildDefaultEmailActions` in `post-run/dispatcher.ts`,
+`on: 'always'`, `to` omitted → resolves to the owner's account email) and folds
+it into the fired set before the "no actions → return" guard.
+
+Eligibility (ALL must hold):
+
+- `chainDepth === 0` — internal chain / controller / QC-fix / verify steps
+  (`chainDepth > 0`) never synthesize one.
+- `email_summary !== false` — the per-task opt-out column
+  (`scheduled_tasks.email_summary BOOLEAN NOT NULL DEFAULT true`; `PATCH
+  /api/scheduled-tasks/:id` accepts `email_summary`). Existing rows default on.
+- The task has **no** `notify_email` action of its own — a user-configured email
+  is respected and never duplicated.
+
+The fan-out aggregate path also fires through the same seam at `chainDepth 0`, so
+exactly **one** default email is sent per finalized parent fire. Other
+notification types (`notify_telegram`, `notify_web_push`, `webhook`) remain
+opt-in — only email is default-on. Actual delivery still requires the `E4A_*`
+env (`E4A_API_KEY` + `E4A_INBOX_ID`); unset → the send is logged and skipped.
+
 ### `on` conditions
 
 - `success` — run status is exactly `success`

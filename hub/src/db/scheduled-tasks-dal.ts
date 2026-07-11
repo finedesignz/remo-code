@@ -76,6 +76,10 @@ export interface ScheduledTask {
   // most recent supervisor `teab_status` poll result.
   teab_repo_ident: string | null
   teab_last_status: string | null
+  // Default-on run-summary email. When true (the default), every ROOT run of
+  // this task emails the owner a summary unless a custom notify_email action is
+  // already configured. Set false to opt out. See post-run/dispatcher.ts.
+  email_summary: boolean
   // Derived from latest finalized run via LATERAL JOIN in listTasksForUser/getTask.
   last_run_cost_usd?: number | null
   last_run_duration_ms?: number | null
@@ -196,6 +200,8 @@ function normalize(row: any): ScheduledTask {
     schedule_rules,
     last_run_cost_usd,
     last_run_duration_ms,
+    // NULL/undefined ⇒ true; only an explicit false opts out.
+    email_summary: row.email_summary !== false,
   }
 }
 
@@ -237,6 +243,7 @@ export async function createTaskV2(input: {
   schedule_rules?: any[] | null
   teab_repo_ident?: string | null
   teab_last_status?: string | null
+  email_summary?: boolean
 }): Promise<ScheduledTask> {
   const rows = await sql<ScheduledTask[]>`
     INSERT INTO scheduled_tasks (
@@ -244,7 +251,7 @@ export async function createTaskV2(input: {
       task_type, target_kind, target_id, payload, cron_expr, timezone,
       catchup_policy, max_concurrent, post_run_actions,
       name_prefix, name_suffix, schedule_rules,
-      teab_repo_ident, teab_last_status
+      teab_repo_ident, teab_last_status, email_summary
     ) VALUES (
       ${input.user_id}, ${input.session_id}, ${input.name},
       ${input.cron_expression ?? input.cron_expr}, ${input.prompt ?? ''},
@@ -256,7 +263,8 @@ export async function createTaskV2(input: {
       ${sql.json((input.post_run_actions ?? []) as any)},
       ${input.name_prefix ?? null}, ${input.name_suffix ?? null},
       ${input.schedule_rules ? sql.json(input.schedule_rules as any) : null},
-      ${input.teab_repo_ident ?? null}, ${input.teab_last_status ?? null}
+      ${input.teab_repo_ident ?? null}, ${input.teab_last_status ?? null},
+      ${input.email_summary ?? true}
     )
     RETURNING *
   `
@@ -284,6 +292,7 @@ export async function updateTaskV2(
     schedule_rules: any[] | null
     teab_repo_ident: string | null
     teab_last_status: string | null
+    email_summary: boolean
   }>,
 ): Promise<ScheduledTask | null> {
   const sets: any[] = []
@@ -314,6 +323,7 @@ export async function updateTaskV2(
   }
   if (fields.teab_repo_ident !== undefined) sets.push(sql`teab_repo_ident = ${fields.teab_repo_ident}`)
   if (fields.teab_last_status !== undefined) sets.push(sql`teab_last_status = ${fields.teab_last_status}`)
+  if (fields.email_summary !== undefined) sets.push(sql`email_summary = ${fields.email_summary}`)
   if (sets.length === 0) return getTask(id, userId)
   sets.push(sql`updated_at = now()`)
 
