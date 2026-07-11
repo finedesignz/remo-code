@@ -10,6 +10,7 @@
  *   task.payload.application_uuid → app to query
  */
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
+import { getSession, getCoolifyAppByRepoKey } from '../../db/dal.ts'
 import { finalizeRun } from '../dispatcher.ts'
 import { classifyLogs } from '../log-classifier.ts'
 
@@ -19,14 +20,45 @@ const DEFAULT_BASE = 'https://coolify.titaniumlabs.us'
 const MAX_SNIPPET = 4000
 const MAX_LINES = 200
 
+/**
+ * Resolve the Coolify app to query for this task.
+ *
+ * Prod bug (2026-07): repo-bound `log_check` tasks carry no `application_uuid`
+ * in their payload, so every 6h fire finalized `failed / no_application_uuid` —
+ * pure noise, and `failed` fires `on:'failure'` post-run chains. Before giving
+ * up we now resolve the uuid the same way `GET /api/sessions/:id/coolify-app`
+ * does: session → `repo_key` → `coolify_app_repo` map (user-scoped).
+ * Best-effort + non-throwing; returns null when unresolvable.
+ */
+async function resolveAppUuid(task: ScheduledTask, userId: string): Promise<string | null> {
+  const payload = task.payload as any
+  const fromPayload: string | undefined = payload?.application_uuid || payload?.app_uuid
+  if (fromPayload) return fromPayload
+
+  const sessionId = task.session_id
+    ?? (task.target_kind === 'session' ? task.target_id : null)
+  if (!sessionId) return null
+
+  try {
+    const session = await getSession(sessionId, userId) as any
+    const repoKey: string | null = session?.repo_key ?? null
+    if (!repoKey) return null
+    const row = await getCoolifyAppByRepoKey(repoKey, userId)
+    return row?.application_uuid ?? null
+  } catch {
+    return null
+  }
+}
+
 export async function sendLogCheck(task: ScheduledTask, ctx: RunCtxLike): Promise<void> {
   const token = process.env.COOLIFY_TOKEN
   const baseUrl = process.env.COOLIFY_BASE_URL || DEFAULT_BASE
   if (!token) { await finalizeRun(ctx.runId, 'failed', 'coolify_unconfigured'); return }
 
-  const payload = task.payload as any
-  const appUuid: string | undefined = payload?.application_uuid || payload?.app_uuid
-  if (!appUuid) { await finalizeRun(ctx.runId, 'failed', 'no_application_uuid'); return }
+  const appUuid = await resolveAppUuid(task, ctx.userId)
+  // Nothing to check is NOT a failure: finalize `skipped` so `on:'failure'`
+  // post-run chains don't fire on a task that simply isn't bound to an app.
+  if (!appUuid) { await finalizeRun(ctx.runId, 'skipped', 'no_application_uuid'); return }
 
   const url = `${baseUrl.replace(/\/+$/, '')}/api/v1/applications/${appUuid}/logs`
   const startedAt = Date.now()

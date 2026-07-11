@@ -208,6 +208,21 @@ User-pickable roots (three only — see Phase 11 narrowing):
 - **log_check** — Coolify log analysis workflow
 - **qc** — periodic QC-and-fix routine (auto-dev P4): 3-lens review → fix → verify
 
+#### log_check app-uuid resolution (fix/sched-qc, 2026-07)
+
+`senders/coolify.ts` resolves the Coolify app to query in this order:
+
+1. `payload.application_uuid` / `payload.app_uuid`;
+2. otherwise the task's session → `sessions.repo_key` → the per-user
+   `coolify_app_repo` map (`getCoolifyAppByRepoKey`), the same resolution
+   `GET /api/sessions/:id/coolify-app` uses.
+
+If it's STILL unresolvable, the run finalizes **`skipped` / `no_application_uuid`**
+— not `failed`. A task that simply isn't bound to a Coolify app is not a failure,
+and `failed` would fire `on:'failure'` post-run chains every cycle (observed in
+prod: repo-bound log_check tasks failing forever). A missing `COOLIFY_TOKEN`
+stays `failed` / `coolify_unconfigured` — that IS a real misconfiguration.
+
 Chained workflow step kinds (auto-created when a root is saved — PLAN.md decision #3):
 
 - `dev_controller` → `dev_plan` → `dev_execute` → `dev_ship`
@@ -489,6 +504,32 @@ collects every fire that would have happened between its `last_fire_at`
 
 The cap exists so a hub that was offline for weeks doesn't queue thousands
 of fires.
+
+---
+
+## Stale-run reaper (fix/sched-qc, 2026-07)
+
+`hub/src/scheduler/run-reaper.ts` — boot-started sweep (registered in
+`hub/src/index.ts` next to the ghost reaper), mirroring
+`hub/src/ws/ghost-reaper.ts` / `hub/src/orchestrator/stale-lock-reaper.ts`.
+
+**Bug it fixes:** a run dispatched to a session whose CLI turn never completes is
+inserted `pending` and nothing ever finalizes it — prod had `scheduled_task_runs`
+rows pending since 2026-07-08, so post-run actions and the email summary never
+fired and the task looked perpetually in-flight.
+
+Every `REMO_RUN_REAPER_INTERVAL_MS` (default 5min) the sweep finalizes any run
+`status='pending'` older than `REMO_RUN_MAX_MS` (default 6h, measured from
+`started_at` falling back to `scheduled_for`) as **`failed` / `run_timeout`**
+through the shared `finalizeRun`, so post-run actions + the email summary behave
+exactly as for any other failure. `REMO_RUN_REAPER_DISABLED` (`1|true|yes|on`)
+makes it a no-op.
+
+**No double-finalize.** The reaper calls `finalizeRun(..., { only_if_pending: true })`,
+which threads `onlyIfPending` into `updateRunStatus` → `UPDATE … WHERE id = $1 AND
+status = 'pending'`. A run another poller owns (TEAB's poll-to-terminal loop with
+its own `REMO_TEAB_MAX_RUN_MS` ceiling) can't be clobbered: the losing finalizer
+gets no row back, skips the broadcast + post-run fan-out, and returns.
 
 ---
 
@@ -862,6 +903,9 @@ The scheduler does not introduce new required env vars. Optional vars:
 | `E4A_BASE_URL`     | `post-run/email.ts`              | `https://api.emails4agents.com`  | emails4agents base URL                               |
 | `E4A_INBOX_ID`     | `post-run/email.ts`              | —                                | Inbox to send through                                |
 | `REMO_E2E_DB_URL`  | `hub/test/scheduled-tasks.e2e.test.ts` | —                          | Disposable Postgres for e2e tests (skipped if unset) |
+| `REMO_RUN_MAX_MS`  | `scheduler/run-reaper.ts`        | `21600000` (6h)                  | Max age of a `pending` run before the reaper finalizes it `failed/run_timeout` (non-positive/non-finite ⇒ default) |
+| `REMO_RUN_REAPER_INTERVAL_MS` | `scheduler/run-reaper.ts` | `300000` (5min)              | Stale-run sweep cadence                              |
+| `REMO_RUN_REAPER_DISABLED` | `scheduler/run-reaper.ts`    | unset                            | Escape hatch (`1\|true\|yes\|on`) — sweep is a no-op |
 
 Per the global rule, email notifications always default to **emails4agents**
 — never SendGrid/Postmark/Mailgun/Resend without explicit user request.

@@ -55,6 +55,7 @@ import { startTelegramBridge } from './telegram/bridge.ts'
 import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/queue.ts'
 import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchestrator/controller.ts'
 import { startGhostReaperSweep, stopGhostReaperSweep } from './ws/ghost-reaper.ts'
+import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -685,6 +686,11 @@ runMigrations()
     // (status='online', hostname=NULL phantom channels that survive restarts and
     // wedge the orchestrator inject). No-op when REMO_GHOST_REAPER_DISABLED is set.
     startGhostReaperSweep()
+    // fix/sched-qc — periodic sweep that finalizes scheduled_task_runs stuck in
+    // `pending` past REMO_RUN_MAX_MS (default 6h) as failed/run_timeout, so a
+    // dead CLI turn can't leave a task perpetually in-flight. No-op when
+    // REMO_RUN_REAPER_DISABLED is set.
+    startRunReaperSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -699,6 +705,7 @@ function gracefulShutdown(signal: string) {
   try { stopRoutineQueueWorker() } catch {}
   try { stopDueOrchestratorTick() } catch {}
   try { stopGhostReaperSweep() } catch {}
+  try { stopRunReaperSweep() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

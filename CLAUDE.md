@@ -232,6 +232,17 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   transcript-tail reads on-disk CLI transcripts that don't exist in the hub container; with it OFF,
   Telegram outbound uses the host-agnostic stream-json event-bus. ChatSurface is **kept** as fallback
   (deletion still gated on the device attestation in [docs/cutover-gate-june15.md](docs/cutover-gate-june15.md)).
+- **Stale-run reaper** (`hub/src/scheduler/run-reaper.ts`): boot-started sweep that finalizes
+  `scheduled_task_runs` stuck `status='pending'` (a dispatched run whose CLI turn never completed —
+  nothing else finalizes it) as `failed`/`run_timeout` via the shared `finalizeRun`, so post-run
+  actions + the email summary behave normally. Knobs: **`REMO_RUN_MAX_MS`** (default **21600000** =
+  6h; non-positive/non-finite ⇒ default) — max pending age; **`REMO_RUN_REAPER_INTERVAL_MS`**
+  (default **300000**) — sweep cadence; **`REMO_RUN_REAPER_DISABLED`** (`1|true|yes|on`) — no-op
+  escape hatch. Finalizes with `only_if_pending` (conditional `UPDATE … AND status='pending'`) so it
+  can never double-finalize a run another poller owns (e.g. TEAB's `REMO_TEAB_MAX_RUN_MS` loop).
+  Companion fix: `log_check` with no resolvable Coolify app now finalizes **`skipped`**, not `failed`
+  (uuid resolved from `payload` → session `repo_key` → `coolify_app_repo`). See
+  [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
 - **TEAB task knobs** (milestone TEAB; see [docs/teab-tasks.md](docs/teab-tasks.md)). Hub-side:
   **`REMO_TEAB_POLL_INTERVAL_MS`** (default **30000** = 30s) — `teab_status` poll cadence for the
   hub-driven poll-to-terminal loop; **`REMO_TEAB_MAX_RUN_MS`** (default **21600000** = 6h) — hard

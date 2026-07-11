@@ -429,6 +429,7 @@ export async function updateRunStatus(
     finished_at: Date | null
     started_at: Date | null
   }>,
+  opts: { onlyIfPending?: boolean } = {},
 ): Promise<ScheduledTaskRun | null> {
   const sets: any[] = []
   if (fields.status !== undefined) sets.push(sql`status = ${fields.status}`)
@@ -447,7 +448,12 @@ export async function updateRunStatus(
   for (let i = 0; i < sets.length; i++) {
     q = i === 0 ? sql`${q}${sets[i]}` : sql`${q}, ${sets[i]}`
   }
-  const rows = await sql<ScheduledTaskRun[]>`${q} WHERE id = ${runId} RETURNING *`
+  // `onlyIfPending` makes the write a claim: it only lands while the row is still
+  // pending, so a second finalizer (e.g. the stale-run reaper racing the TEAB
+  // poller) gets `null` back and can no-op instead of clobbering a terminal row.
+  const rows = opts.onlyIfPending
+    ? await sql<ScheduledTaskRun[]>`${q} WHERE id = ${runId} AND status = 'pending' RETURNING *`
+    : await sql<ScheduledTaskRun[]>`${q} WHERE id = ${runId} RETURNING *`
   return rows[0] ?? null
 }
 
