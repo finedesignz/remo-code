@@ -232,6 +232,24 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   transcript-tail reads on-disk CLI transcripts that don't exist in the hub container; with it OFF,
   Telegram outbound uses the host-agnostic stream-json event-bus. ChatSurface is **kept** as fallback
   (deletion still gated on the device attestation in [docs/cutover-gate-june15.md](docs/cutover-gate-june15.md)).
+- **Stale-run reaper** (`hub/src/scheduler/run-reaper.ts`): boot-started sweep that finalizes
+  `scheduled_task_runs` stuck `status='pending'` (a dispatched run whose CLI turn never completed —
+  nothing else finalizes it) as `failed`/`run_timeout` via the shared `finalizeRun`, so post-run
+  actions + the email summary behave normally. Knobs: **`REMO_RUN_MAX_MS`** (default **21600000** =
+  6h; non-positive/non-finite ⇒ default) — max pending age; **`REMO_RUN_REAPER_INTERVAL_MS`**
+  (default **300000**) — sweep cadence; **`REMO_RUN_REAPER_DISABLED`** (`1|true|yes|on`) — no-op
+  escape hatch. Finalizes with `only_if_active` (conditional `UPDATE … AND status IN
+  ('pending','in_flight')`) — and so do the two finalizers that can complete AFTER a reap (TEAB's
+  poll loop, the agent sender's reply path) — so a raced run is never double-finalized / its post-run
+  chain never re-fires. **Ceiling coupling:** `REMO_TEAB_MAX_RUN_MS` (6h) == `REMO_RUN_MAX_MS` (6h) by
+  default, so `task_type='teab'` rows use a per-row reap ceiling of
+  `max(REMO_RUN_MAX_MS, REMO_TEAB_MAX_RUN_MS)` — a TEAB build is never reaped inside its own poll
+  window (raising the TEAB knob raises the reaper's teab ceiling automatically).
+  Companion fix: `log_check` with no resolvable Coolify app now finalizes **`skipped`**, not `failed`
+  (uuid resolved from `payload` → session `repo_key` → `coolify_app_repo`). NOTE `skipped` still
+  matches `on:'failure'` post-run chains (`post-run/dispatcher.ts` matches failed|skipped|cancelled) —
+  the change buys a truthful status, not chain suppression. See
+  [docs/scheduled-tasks.md](docs/scheduled-tasks.md).
 - **TEAB task knobs** (milestone TEAB; see [docs/teab-tasks.md](docs/teab-tasks.md)). Hub-side:
   **`REMO_TEAB_POLL_INTERVAL_MS`** (default **30000** = 30s) — `teab_status` poll cadence for the
   hub-driven poll-to-terminal loop; **`REMO_TEAB_MAX_RUN_MS`** (default **21600000** = 6h) — hard

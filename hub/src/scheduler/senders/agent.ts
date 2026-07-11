@@ -313,7 +313,13 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
       } else {
         snippet = replyContent.length > 500 ? replyContent.slice(0, 500) + '...' : replyContent
       }
-      await finalizeRun(token, 'success', null, { duration_ms: duration, output_snippet: snippet })
+      // `only_if_active`: a reply can land AFTER the stale-run reaper already
+      // finalized this run as run_timeout (> REMO_RUN_MAX_MS). The claim guard
+      // makes the late write a no-op instead of clobbering the row and re-firing
+      // the post-run chain a second time.
+      await finalizeRun(token, 'success', null, {
+        duration_ms: duration, output_snippet: snippet, only_if_active: true,
+      })
       removeRunContext(token)
       clearActive(sessionId, token)
     },

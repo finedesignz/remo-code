@@ -429,6 +429,7 @@ export async function updateRunStatus(
     finished_at: Date | null
     started_at: Date | null
   }>,
+  opts: { onlyIfActive?: boolean } = {},
 ): Promise<ScheduledTaskRun | null> {
   const sets: any[] = []
   if (fields.status !== undefined) sets.push(sql`status = ${fields.status}`)
@@ -447,7 +448,14 @@ export async function updateRunStatus(
   for (let i = 0; i < sets.length; i++) {
     q = i === 0 ? sql`${q}${sets[i]}` : sql`${q}, ${sets[i]}`
   }
-  const rows = await sql<ScheduledTaskRun[]>`${q} WHERE id = ${runId} RETURNING *`
+  // `onlyIfActive` makes the write a claim: it only lands while the row is still
+  // non-terminal (`pending` or `in_flight`), so a second finalizer (e.g. the
+  // stale-run reaper racing the TEAB poll-to-terminal loop, which flips its row
+  // to `in_flight` at dispatch) gets `null` back and can no-op instead of
+  // clobbering an already-terminal row and re-firing its post-run chain.
+  const rows = opts.onlyIfActive
+    ? await sql<ScheduledTaskRun[]>`${q} WHERE id = ${runId} AND status IN ('pending','in_flight') RETURNING *`
+    : await sql<ScheduledTaskRun[]>`${q} WHERE id = ${runId} RETURNING *`
   return rows[0] ?? null
 }
 

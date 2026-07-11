@@ -555,6 +555,14 @@ export async function finalizeRun(
     cost_usd?: number | null
     duration_ms?: number | null
     output_snippet?: string | null
+    /**
+     * Claim-then-finalize: only write while the run row is still non-terminal
+     * (`pending` or `in_flight`). Used by BOTH racers on a long-running run —
+     * the stale-run reaper and TEAB's poll-to-terminal loop — so whichever
+     * writes second gets no row back and no-ops instead of clobbering the
+     * terminal row and re-firing its post-run chain.
+     */
+    only_if_active?: boolean
   } = {},
 ): Promise<void> {
   const ctx = inFlightByRun.get(runId)
@@ -570,7 +578,14 @@ export async function finalizeRun(
     duration_ms: dur,
     output_snippet: fields.output_snippet ?? null,
     finished_at: finishedAt,
-  })
+  }, { onlyIfActive: fields.only_if_active === true })
+
+  // Lost the claim race — another finalizer already took this run to a terminal
+  // state. Do NOT broadcast or re-fire post-run actions.
+  if (fields.only_if_active === true && !updated) {
+    inFlightByRun.delete(runId); syncQueueDepthGauge()
+    return
+  }
 
   if (ctx) {
     // Round-2 migration: the per-session queue slot is released by the shared
