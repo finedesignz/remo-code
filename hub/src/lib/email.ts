@@ -22,7 +22,7 @@ export async function sendEmail(input: SendEmailInput): Promise<boolean> {
     const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/v1/messages/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-      body: JSON.stringify({ inbox_id: inboxId, to: input.to, subject: input.subject, html: input.html, text: input.text }),
+      body: JSON.stringify({ from_inbox_id: inboxId, to: input.to, subject: input.subject, html: input.html, text: input.text }),
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) {
