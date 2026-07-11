@@ -254,6 +254,13 @@ ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS schedule_rules JSONB;
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS teab_repo_ident TEXT;
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS teab_last_status TEXT;
 
+-- Default-on run-summary email (feat/scheduled-default-email-summary). Every
+-- ROOT scheduled-task run (chainDepth===0) emails the task owner a summary
+-- unless this flag is false OR the task already configures its own notify_email
+-- post-run action. DEFAULT true so every existing + new task opts in; set false
+-- to opt out. Synthesized in hub/src/scheduler/post-run/dispatcher.ts.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS email_summary BOOLEAN NOT NULL DEFAULT true;
+
 -- W2/T8: drop legacy NOT NULL on session_id so fan-out tasks
 -- (all_agents/all_supervisors) and supervisor-targeted tasks can omit it.
 -- Idempotent — Postgres no-ops if the column is already nullable.

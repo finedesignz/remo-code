@@ -35,6 +35,47 @@ const RUN_URL_PREFIX = process.env.REMO_PUBLIC_URL || 'https://app.remo-code.com
 
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
 
+/**
+ * feat/scheduled-default-email-summary — synthesize a default run-summary email.
+ *
+ * Every ROOT scheduled-task run (chainDepth===0) emails the task owner a summary
+ * BY DEFAULT unless: the task opted out (`email_summary === false`), OR it already
+ * configures its own `notify_email` action (respect the user's config; don't
+ * double-send). Internal chain/controller/qc steps (chainDepth>0) never synthesize.
+ *
+ * `to` is omitted so executeEmail resolves it to the owner's account email. The
+ * template uses only plain `{{var}}` substitutions (template.render supports no
+ * conditionals/sections). Pure helper — unit-tested in isolation.
+ */
+export function buildDefaultEmailActions(
+  task: ScheduledTask,
+  chainDepth: number,
+  actions: PostRunAction[],
+): PostRunAction[] {
+  if (chainDepth !== 0) return []
+  if ((task as any).email_summary === false) return []
+  if (actions.some((a) => a.type === 'notify_email')) return []
+  return [
+    {
+      type: 'notify_email',
+      on: 'always',
+      config: {
+        subject: 'Remo task "{{task_name}}" — {{status}}',
+        body: [
+          'Task: {{task_name}}',
+          'Status: {{status}}',
+          'Cost: ${{cost_usd}}   Duration: {{duration_ms}}ms',
+          '{{error}}',
+          '---',
+          '{{output_snippet}}',
+          '---',
+          'View run: {{run_url}}',
+        ].join('\n'),
+      },
+    } as PostRunAction,
+  ]
+}
+
 export function clearPendingTimers(): void {
   for (const t of pendingTimers) clearTimeout(t)
   pendingTimers.clear()
@@ -82,7 +123,14 @@ export async function fireWithContext(args: FireCtxArgs): Promise<void> {
     )
     return
   }
-  const actions = parsed.value
+  // Default-on run-summary email: fold a synthesized notify_email into the fired
+  // set for eligible ROOT runs (chainDepth===0, not opted out, no custom email).
+  // The fan-out aggregate path also calls fireWithContext with chainDepth 0, so
+  // this yields exactly ONE default email per fired context.
+  const actions = [
+    ...parsed.value,
+    ...buildDefaultEmailActions(args.task, args.chainDepth, parsed.value),
+  ]
   if (actions.length === 0) return
 
   if (args.chainDepth >= MAX_CHAIN_DEPTH) {
