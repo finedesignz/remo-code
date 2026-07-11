@@ -2,10 +2,14 @@
  * fix/sched-qc — `log_check` sender app-uuid resolution.
  *
  * Prod bug: repo-bound log_check tasks with no `application_uuid` in payload
- * finalized `failed / no_application_uuid` every 6h forever (noise + fired
- * `on:'failure'` post-run chains). Now: resolve the uuid from the
- * `coolify_app_repo` map via the task's session repo_key; if still unresolvable,
- * finalize `skipped` (not `failed`).
+ * finalized `failed / no_application_uuid` every 6h forever — a task that simply
+ * isn't bound to a Coolify app was reported as a hard failure. Now: resolve the
+ * uuid from the `coolify_app_repo` map via the task's session repo_key; if still
+ * unresolvable, finalize `skipped` (not `failed`).
+ *
+ * `skipped` is about TRUTHFUL STATUS, not chain suppression: post-run
+ * `on:'failure'` matches failed|skipped|cancelled (post-run/dispatcher.ts), so a
+ * skipped run STILL fires failure chains. That matcher is deliberately unchanged.
  *
  * DAL + dispatcher mocked via `mock.module` (spread-real; see memory:
  * bun-mock-pollution). No DB required.
@@ -100,7 +104,7 @@ describe('sendLogCheck app-uuid resolution', () => {
     expect(requested).toContain('/applications/payload-uuid/logs')
   })
 
-  test('unresolvable uuid finalizes SKIPPED (not failed) — no failure chains', async () => {
+  test('unresolvable uuid finalizes SKIPPED (not failed) — honest status, not a hard failure', async () => {
     globalThis.fetch = (async () => { throw new Error('should not fetch') }) as any
 
     await sendLogCheck(task({ session_id: SESSION_NOREPO }), ctx)

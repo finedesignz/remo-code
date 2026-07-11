@@ -8,7 +8,7 @@
  * or double-finalize one another poller (e.g. TEAB) already owns.
  */
 import { describe, test, expect } from 'bun:test'
-import { reapStaleRuns, RUN_MAX_MS } from '../src/scheduler/run-reaper.ts'
+import { reapStaleRuns, RUN_MAX_MS, reapCeilingMs, teabMaxRunMs } from '../src/scheduler/run-reaper.ts'
 
 const NOW = 1_800_000_000_000
 
@@ -26,7 +26,37 @@ describe('reapStaleRuns', () => {
     expect(calls[0][1]).toBe('failed')
     expect(calls[0][2]).toBe('run_timeout')
     // Idempotency: must claim-then-finalize so a run another poller owns is a no-op.
-    expect(calls[0][3]).toEqual({ only_if_pending: true })
+    expect(calls[0][3]).toEqual({ only_if_active: true })
+  })
+
+  test('does NOT reap a teab run inside its own REMO_TEAB_MAX_RUN_MS ceiling', async () => {
+    // REMO_TEAB_MAX_RUN_MS (6h) == REMO_RUN_MAX_MS (6h) by default: a plain
+    // RUN_MAX_MS sweep would reap a legitimately-running TEAB build out from
+    // under its own poller. teab rows use max(RUN_MAX_MS, TEAB_MAX_RUN_MS).
+    const ceiling = reapCeilingMs('teab')
+    expect(ceiling).toBe(Math.max(RUN_MAX_MS, teabMaxRunMs()))
+
+    const calls: any[] = []
+    const reaped = await reapStaleRuns(NOW, {
+      loadPendingRuns: async () => [
+        { id: 'teab-inflight', started_at_ms: NOW - ceiling + 1000, task_type: 'teab' },
+      ],
+      finalizeRun: (async (...args: any[]) => { calls.push(args) }) as any,
+    })
+    expect(reaped).toEqual([])
+    expect(calls).toHaveLength(0)
+  })
+
+  test('DOES reap a teab run past its TEAB ceiling', async () => {
+    const calls: any[] = []
+    const reaped = await reapStaleRuns(NOW, {
+      loadPendingRuns: async () => [
+        { id: 'teab-dead', started_at_ms: NOW - reapCeilingMs('teab') - 1000, task_type: 'teab' },
+      ],
+      finalizeRun: (async (...args: any[]) => { calls.push(args) }) as any,
+    })
+    expect(reaped).toEqual(['teab-dead'])
+    expect(calls[0][3]).toEqual({ only_if_active: true })
   })
 
   test('leaves a fresh pending run alone', async () => {

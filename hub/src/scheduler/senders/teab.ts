@@ -158,6 +158,11 @@ export async function sendTeabTask(task: ScheduledTask, ctx: RunCtxLike): Promis
 //   • REMO_TEAB_POLL_INTERVAL_MS  — poll cadence, default 30000 (30s).
 //   • REMO_TEAB_MAX_RUN_MS        — hard ceiling before a run is finalized as a
 //                                   timeout failure, default 21600000 (6h).
+//                                   COUPLED to the stale-run reaper: it reaps
+//                                   `teab` rows only past
+//                                   max(REMO_RUN_MAX_MS, REMO_TEAB_MAX_RUN_MS),
+//                                   so a TEAB build is never reaped inside its
+//                                   own poll window (run-reaper.ts).
 //
 // Read at poll-start (not module-load) so tests/operators can tune per run.
 
@@ -217,9 +222,13 @@ async function finalizeTeabPoll(
   if (rec.terminal) return
   rec.terminal = true
   clearTeabPoll(rec)
+  // Claim-then-finalize (`only_if_active`): the stale-run reaper can race this
+  // poller on a long run. Whoever writes second finds the row already terminal,
+  // gets no row back, and no-ops — no clobbered row, no re-fired post-run chain.
   await finalizeRun(rec.runId, status, error, {
     duration_ms: Date.now() - rec.startedAt,
     output_snippet: snippet ?? null,
+    only_if_active: true,
   })
   log.info('scheduler.teab.finalized', {
     run_id: rec.runId, task_id: rec.taskId, status, error,

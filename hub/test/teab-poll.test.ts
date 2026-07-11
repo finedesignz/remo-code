@@ -122,6 +122,19 @@ describe('TEAB poll-to-terminal (Phase TEAB-05)', () => {
     expect(teab._getTeabPoll('run-a')).toBeUndefined()
   })
 
+  test('(a2) finalize is claim-guarded (only_if_active) — losing the reaper race is a no-op', async () => {
+    // fix/sched-qc: the stale-run reaper can race this poller on a long build.
+    // Every TEAB finalize must claim-then-write, so whichever finalizer loses
+    // gets no row back (WHERE … AND status IN ('pending','in_flight')) and
+    // neither clobbers the terminal row nor re-fires the post-run chain.
+    teab.startTeabPoll({ runId: 'run-a2', taskId: 'task-a2', userId: 'u1', supervisorId: 'sup-1' })
+    await teab.handleTeabRunEvent('sup-1', 'u1', ack('run-a2'))
+    await teab.handleTeabRunEvent('sup-1', 'u1', statusReply('run-a2', 'exited', 0))
+
+    expect(state.finalizeCalls).toHaveLength(1)
+    expect(state.finalizeCalls[0].fields.only_if_active).toBe(true)
+  })
+
   test('(b) exited(non-zero) finalizes failed', async () => {
     teab.startTeabPoll({ runId: 'run-b', taskId: 'task-b', userId: 'u1', supervisorId: 'sup-1' })
     await teab.handleTeabRunEvent('sup-1', 'u1', ack('run-b'))

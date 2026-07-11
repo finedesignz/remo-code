@@ -25,8 +25,8 @@ const MAX_LINES = 200
  *
  * Prod bug (2026-07): repo-bound `log_check` tasks carry no `application_uuid`
  * in their payload, so every 6h fire finalized `failed / no_application_uuid` —
- * pure noise, and `failed` fires `on:'failure'` post-run chains. Before giving
- * up we now resolve the uuid the same way `GET /api/sessions/:id/coolify-app`
+ * pure noise, and the run history read as a perpetually-failing task. Before
+ * giving up we now resolve the uuid the same way `GET /api/sessions/:id/coolify-app`
  * does: session → `repo_key` → `coolify_app_repo` map (user-scoped).
  * Best-effort + non-throwing; returns null when unresolvable.
  */
@@ -56,8 +56,16 @@ export async function sendLogCheck(task: ScheduledTask, ctx: RunCtxLike): Promis
   if (!token) { await finalizeRun(ctx.runId, 'failed', 'coolify_unconfigured'); return }
 
   const appUuid = await resolveAppUuid(task, ctx.userId)
-  // Nothing to check is NOT a failure: finalize `skipped` so `on:'failure'`
-  // post-run chains don't fire on a task that simply isn't bound to an app.
+  // Nothing to check is NOT a failure — it's the same "no work" outcome as
+  // `no_errors_detected`, so finalize `skipped`, matching this sender's own
+  // semantics and keeping the run history honest.
+  //
+  // NOTE (do not misread this): `skipped` does NOT stop `on:'failure'` post-run
+  // chains. `post-run/dispatcher.ts` matches `on:'failure'` against
+  // failed|skipped|cancelled, so a `skipped` run still fires them — exactly as
+  // `no_errors_detected` already did. The benefit here is truthful status, not
+  // chain suppression. Changing the global `on:'failure'` matcher would regress
+  // every other subsystem, so it is deliberately left alone.
   if (!appUuid) { await finalizeRun(ctx.runId, 'skipped', 'no_application_uuid'); return }
 
   const url = `${baseUrl.replace(/\/+$/, '')}/api/v1/applications/${appUuid}/logs`

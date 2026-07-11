@@ -11,11 +11,19 @@
 // RUN_MAX_MS and finalizes them `failed` / `run_timeout` through the shared
 // `finalizeRun` (so post-run actions + email summary behave normally).
 //
-// Idempotency: the reaper finalizes with `only_if_pending` — a conditional
-// UPDATE that only lands while the row is still pending. A run another poller
-// owns (e.g. TEAB's poll-to-terminal loop, which has its own
-// REMO_TEAB_MAX_RUN_MS ceiling) can therefore never be double-finalized: the
-// loser of the race writes nothing and skips the broadcast + post-run fan-out.
+// Idempotency: the reaper finalizes with `only_if_active` — a conditional
+// UPDATE that only lands while the row is still non-terminal (pending or
+// in_flight). A run another poller owns (e.g. TEAB's poll-to-terminal loop) can
+// therefore never be double-finalized: the loser of the race writes nothing and
+// skips the broadcast + post-run fan-out. TEAB's loop passes the same guard.
+//
+// Ceiling coupling: a TEAB run legitimately runs up to REMO_TEAB_MAX_RUN_MS
+// (default 6h) — the SAME default as REMO_RUN_MAX_MS — so a plain RUN_MAX_MS
+// sweep could reap a TEAB run out from under its own poller. The reaper
+// therefore uses a per-row ceiling: `teab` rows are only reaped once they exceed
+// max(REMO_RUN_MAX_MS, REMO_TEAB_MAX_RUN_MS), i.e. after TEAB's own poll has had
+// its full window to finalize (its deadline tick fires first at
+// REMO_TEAB_MAX_RUN_MS).
 
 import { finalizeRun } from './dispatcher.ts'
 
@@ -39,11 +47,26 @@ export const RUN_REAPER_INTERVAL_MS = parsePositiveIntEnv(
   300_000,
 )
 
+/**
+ * Max age of an in-flight TEAB run before the reaper may touch it. Read live so
+ * it always tracks the sender's own ceiling (senders/teab.ts, same default).
+ */
+export function teabMaxRunMs(): number {
+  return parsePositiveIntEnv(process.env.REMO_TEAB_MAX_RUN_MS, 21_600_000)
+}
+
+/** Per-row reap ceiling. `teab` rows get max(RUN_MAX_MS, REMO_TEAB_MAX_RUN_MS). */
+export function reapCeilingMs(taskType: string | null | undefined): number {
+  return taskType === 'teab' ? Math.max(RUN_MAX_MS, teabMaxRunMs()) : RUN_MAX_MS
+}
+
 /** Minimal run shape the reaper needs. */
 export interface StaleRunRow {
   id: string
   /** started_at as epoch millis. */
   started_at_ms: number
+  /** Owning task's `task_type` — drives the per-row ceiling (TEAB runs longer). */
+  task_type?: string | null
 }
 
 // Injectable seams (tests swap these; defaults are the real adapters).
@@ -55,14 +78,21 @@ export interface RunReaperDeps {
 const REAL_DEPS: RunReaperDeps = {
   loadPendingRuns: async () => {
     const { sql } = await import('../db/postgres.ts')
-    const rows = await sql<{ id: string; started_at_ms: string | null }[]>`
-      SELECT id, EXTRACT(EPOCH FROM COALESCE(started_at, scheduled_for)) * 1000 AS started_at_ms
-      FROM scheduled_task_runs
-      WHERE status = 'pending'
+    const rows = await sql<{ id: string; started_at_ms: string | null; task_type: string | null }[]>`
+      SELECT r.id,
+             EXTRACT(EPOCH FROM COALESCE(r.started_at, r.scheduled_for)) * 1000 AS started_at_ms,
+             t.task_type
+      FROM scheduled_task_runs r
+      LEFT JOIN scheduled_tasks t ON t.id = r.task_id
+      WHERE r.status = 'pending'
     `
     return rows
       .filter((r) => r.started_at_ms != null)
-      .map((r) => ({ id: r.id, started_at_ms: Number(r.started_at_ms) }))
+      .map((r) => ({
+        id: r.id,
+        started_at_ms: Number(r.started_at_ms),
+        task_type: r.task_type ?? null,
+      }))
   },
   finalizeRun,
 }
@@ -89,12 +119,13 @@ export async function reapStaleRuns(
 
   for (const run of runs) {
     const age = now - run.started_at_ms
-    if (!(age >= RUN_MAX_MS)) continue
+    const ceiling = reapCeilingMs(run.task_type)
+    if (!(age >= ceiling)) continue
     try {
-      await d.finalizeRun(run.id, 'failed', 'run_timeout', { only_if_pending: true })
+      await d.finalizeRun(run.id, 'failed', 'run_timeout', { only_if_active: true })
       reaped.push(run.id)
       console.warn(
-        `[run-reaper] finalized stale run=${run.id} (pending for ${Math.round(age / 60_000)}m ≥ ${RUN_MAX_MS}ms) as failed/run_timeout`,
+        `[run-reaper] finalized stale run=${run.id} (pending for ${Math.round(age / 60_000)}m ≥ ${ceiling}ms) as failed/run_timeout`,
       )
     } catch (err: any) {
       console.warn(`[run-reaper] reap failed run=${run.id}: ${err?.message ?? err}`)
