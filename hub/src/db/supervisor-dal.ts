@@ -307,8 +307,99 @@ export async function finalizeOrphanedRunsForSupervisor(
     SET ended_at = now(), exit_reason = 'orphaned_no_inventory'
     WHERE supervisor_id = ${supervisorId}
       AND ended_at IS NULL
+      AND session_id IS NOT NULL
       AND started_at < now() - interval '30 seconds'
       AND NOT (session_id = ANY(${liveSessionIds}))
+    RETURNING id
+  `
+  return rows.length
+}
+
+/**
+ * NULL-session run binding (the fix for the `at_capacity` run leak).
+ *
+ * Every `session.start` sender (web launch, /api/supervisors/:id/start, telegram,
+ * scheduler, heal, spawn-on-error, orphan-resume) reserves its slot BEFORE the
+ * session exists hub-side: `session.start` carries no session_id, and the runner
+ * is bound to a session by `project_dir` match in the supervisor's later
+ * `session_inventory` push. So the `session_runs` row is inserted with
+ * `session_id = NULL` — legitimately, but only *transiently*.
+ *
+ * Nothing used to ever backfill it, and every session-keyed close path is
+ * unreachable for a NULL row:
+ *   - `endOpenRunsForSession` keys off `session_id`.
+ *   - `finalizeOrphanedRunsForSupervisor`'s `NOT (session_id = ANY(...))` is
+ *     NULL (not TRUE) when `session_id IS NULL` — SQL three-valued logic silently
+ *     skips the row.
+ * The row therefore stays `ended_at IS NULL` forever and permanently consumes a
+ * concurrency slot, until the supervisor's whole socket drops. Enough of them and
+ * `reserveSessionSlot` rejects every launch with `at_capacity`.
+ *
+ * This closes the loop at the source: on each inventory push, bind open
+ * NULL-session runs to the live runner hosting the same `repo_path`
+ * (`project_dir`) — the exact binding contract the start senders already rely on.
+ * Once bound, the existing reconcile/close paths reach the row normally.
+ *
+ * Binds at most ONE run per live session (the newest by `started_at`), so a
+ * duplicate/racing reservation for the same repo does not alias onto the same
+ * session; leftovers are reaped by `finalizeUnboundRunsForSupervisor`.
+ */
+export async function bindOpenRunsToInventory(
+  supervisorId: string,
+  live: Array<{ session_id: string; project_dir: string }>,
+): Promise<number> {
+  if (live.length === 0) return 0
+  const sessionIds = live.map((s) => s.session_id)
+  const projectDirs = live.map((s) => s.project_dir)
+  const rows = await sql`
+    WITH live(session_id, project_dir) AS (
+      SELECT * FROM unnest(${sessionIds}::text[], ${projectDirs}::text[])
+    ),
+    pairs AS (
+      SELECT DISTINCT ON (l.session_id) r.id AS run_id, l.session_id
+      FROM live l
+      JOIN sessions s ON s.id = l.session_id
+      JOIN session_runs r
+        ON r.supervisor_id = ${supervisorId}
+       AND r.ended_at IS NULL
+       AND r.session_id IS NULL
+       AND r.repo_path = l.project_dir
+      ORDER BY l.session_id, r.started_at DESC
+    )
+    UPDATE session_runs r
+    SET session_id = p.session_id
+    FROM pairs p
+    WHERE r.id = p.run_id
+    RETURNING r.id
+  `
+  return rows.length
+}
+
+/**
+ * Reap open runs that are STILL unbound after `graceMs`.
+ *
+ * Called only from the `session_inventory` handler, i.e. the supervisor has
+ * proven it is alive and just told us its complete live runner set. An open
+ * `session_id IS NULL` run older than the grace therefore means no runner ever
+ * came up for it (spawn rejected, CLI died before inventory, session row deleted
+ * — `session_runs.session_id` is `ON DELETE SET NULL`). It can never be bound or
+ * closed by any other path, so it would leak its slot forever.
+ *
+ * Grace is generous (default 2 min) because the supervisor pushes inventory every
+ * ~10s and a cold spawn takes seconds — a genuinely-starting run is never reaped.
+ */
+export async function finalizeUnboundRunsForSupervisor(
+  supervisorId: string,
+  graceMs: number,
+): Promise<number> {
+  const graceSeconds = Math.max(1, Math.floor(graceMs / 1000))
+  const rows = await sql`
+    UPDATE session_runs
+    SET ended_at = now(), exit_reason = 'unbound_no_session'
+    WHERE supervisor_id = ${supervisorId}
+      AND ended_at IS NULL
+      AND session_id IS NULL
+      AND started_at < now() - (${graceSeconds} || ' seconds')::interval
     RETURNING id
   `
   return rows.length

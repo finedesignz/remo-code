@@ -6,7 +6,7 @@ import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
-import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows, finalizeOrphanedRunsForSupervisor } from '../db/supervisor-dal'
+import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows, finalizeOrphanedRunsForSupervisor, bindOpenRunsToInventory, finalizeUnboundRunsForSupervisor } from '../db/supervisor-dal'
 import { ensureSupervisorProject } from '../db/error-capture-dal'
 import { getCapacitySnapshot } from '../sessions/budget'
 import {
@@ -19,6 +19,20 @@ import { log } from '../observability/logger'
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
 const RATE_LIMIT = { max: 120, windowMs: 10_000 }
+
+/**
+ * How long an open `session_runs` row may stay `session_id IS NULL` before the
+ * inventory reconciler reaps it as `unbound_no_session`. Default 2min — the
+ * supervisor pushes `session_inventory` every ~10s and a cold spawn takes
+ * seconds, so a genuinely-starting run is never caught. Env override:
+ * REMO_UNBOUND_RUN_GRACE_MS (non-positive / non-finite ⇒ default).
+ */
+export const UNBOUND_RUN_GRACE_MS = (() => {
+  const raw = process.env.REMO_UNBOUND_RUN_GRACE_MS
+  if (raw == null || raw === '') return 120_000
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : 120_000
+})()
 
 /**
  * Set of `last_exit.reason` values that supervisor's `process-manager.ts`
@@ -1116,15 +1130,34 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
           scanned_at: scannedAt,
         })
       }
-      // Ghost-run reconciliation: the inventory we just received is the live
-      // runner set. Close any open `session_runs` for this supervisor whose
-      // session is no longer hosted, so the Connections "running" dot stops
-      // diverging from the (inventory-driven) Sessions list. See
-      // finalizeOrphanedRunsForSupervisor for the race-grace rationale.
+      // Run reconciliation against the live runner set, in three ordered steps.
+      //
+      // (1) BIND. Every start sender reserves its slot before the session exists
+      //     (`session.start` carries no session_id — the runner binds by
+      //     project_dir), so the run row lands with session_id = NULL. Bind those
+      //     rows to the live runner hosting the same repo_path. Without this the
+      //     row is unreachable by every session-keyed close path and leaks its
+      //     concurrency slot forever → `at_capacity`.
+      // (2) GHOST-CLOSE. Close bound runs whose session is no longer hosted, so
+      //     the Connections "running" dot stops diverging from the Sessions list.
+      // (3) UNBOUND-REAP. Anything still NULL past the grace never came up at all
+      //     (spawn rejected / died pre-inventory / session deleted → the FK's
+      //     ON DELETE SET NULL). Close it; nothing else can.
+      const bound = await bindOpenRunsToInventory(
+        supervisorId,
+        msg.sessions.map((s) => ({ session_id: s.session_id, project_dir: s.project_dir })),
+      )
+      if (bound > 0) {
+        console.log(`[supervisor] bound ${bound} run(s) to live sessions supervisor=${supervisorId}`)
+      }
       const liveIds = msg.sessions.map((s) => s.session_id)
       const closed = await finalizeOrphanedRunsForSupervisor(supervisorId, liveIds)
       if (closed > 0) {
         console.log(`[supervisor] reconciled ${closed} ghost run(s) supervisor=${supervisorId}`)
+      }
+      const reaped = await finalizeUnboundRunsForSupervisor(supervisorId, UNBOUND_RUN_GRACE_MS)
+      if (reaped > 0) {
+        console.log(`[supervisor] reaped ${reaped} unbound run(s) supervisor=${supervisorId}`)
       }
     } catch (err: any) {
       console.error('[supervisor] session_inventory handler failed', err?.message)
