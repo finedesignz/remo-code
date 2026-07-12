@@ -1,5 +1,5 @@
 {
   "Endpoint": "https://eus.codesigning.azure.net",
   "CodeSigningAccountName": "titaniumlabs-signing",
-  "CertificateProfileName": "titaniumlabs-public-trust"
+  "CertificateProfileName": "TitaniumLabsLLC"
 }
