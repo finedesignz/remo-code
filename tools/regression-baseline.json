@@ -1,15 +1,15 @@
 {
-  "_comment": "Snapshot of expected hub test counts. Updated when intentionally adding/removing tests. CI fails if actual drifts beyond tolerance.",
-  "captured_at": "2026-06-29",
-  "captured_from": "per-file-isolated `bun run check-baseline` (each hub/test file in its own process — order-independent). Phase 20 (telegram-transcript-tail) adds 7 hub test files. OBSRV milestone (01, 03, 05) adds orchestrator-run-log-api, orchestrator-metrics, orchestrator-cap-alert test files. OBSRV-02 adds web/test/auto-dev-activity.test.tsx (6 tests). Milestone TEAB adds 4 hub test files (teab-task-type 3 + teab-sender 4 + teab-poll 5 + teab-e2e 2 = 14 tests; the 3 supervisor teab test files are not in the hub-only baseline scan). pass/total here are informational; the enforced gate is pass_min/skip_max/fail_max. fail_max stays 0.",
-  "pass": 1709,
-  "skip": 232,
+  "_comment": "Snapshot of expected hub test counts, from per-file-isolated `bun run check-baseline` (each hub/test file in its own process — Bun's mock.module is process-global and first-write-wins, so a shared process makes the suite order-dependent). The enforced gate is pass_min/skip_max/fail_max; pass/skip/total below are the informational actuals.",
+  "captured_at": "2026-07-12",
+  "captured_from": "Bare checkout, NO ambient env, NO database (post-#345, which made this configuration green): `bun run check-baseline` → pass=1827 skip=236 fail=0 total=2063. This is the FLOOR configuration. CI (.woodpecker/qc.yaml) additionally exports REMO_E2E_DB_URL against a real postgres:16 service, which UN-SKIPS the e2e suites — so CI sees strictly MORE passes and FEWER skips than the numbers here. There are no inverse (run-only-without-a-DB) gates, so this floor is valid for both configurations.",
+  "pass": 1827,
+  "skip": 236,
   "fail": 0,
-  "total": 1956,
+  "total": 2063,
   "tolerance": {
-    "_comment": "Allow modest growth without churn; any fail > 0 always fails CI. skip_max raised to 175 for Phase 22 (orchestrator-queue) env-gated (REMO_E2E_DB_URL) e2e skips. Raised to 178 for feedback-intake key-ownership e2e. Raised to 200 for milestone OEE. Raised to 250 for milestone OBSRV (01/03/05): additional e2e suites under REMO_E2E_DB_URL gate.",
-    "pass_min": 700,
-    "skip_max": 250,
+    "_comment": "pass_min is a REAL floor (1800 vs 1827 actual — ~1.5% headroom), not a formality. It was 700 against 1827 actual passes, which meant roughly 1,100 tests could silently stop running and check-baseline would still print OK: a ratchet, not a gate. fail_max:0 only catches tests that RUN and fail — it cannot catch tests that vanish. That is what pass_min is for, so keep it tight. If you legitimately remove tests, lower it deliberately in the same PR and say why. skip_max 245 vs 236 actual: EVERY skip in the suite is REMO_E2E_DB_URL-gated with an explicit reason — there are no unconditional or laundered skips. Keep it that way; a skip added for any other reason is a failure in disguise and must not be absorbed by this budget. fail_max stays 0.",
+    "pass_min": 1800,
+    "skip_max": 245,
     "fail_max": 0
   }
 }

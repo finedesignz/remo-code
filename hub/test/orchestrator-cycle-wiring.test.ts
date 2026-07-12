@@ -86,6 +86,10 @@ function spySeams(): { seams: WaveSeams; executed: { command: string; micro: str
     async createPrForUnit() { return null },
     async dispatchReviewer() { return null },
     async proposeToChat(unit) { proposed.push(unit.command) },
+    // DB-backed and called unconditionally by the legacy wave path — stub them, or
+    // this unit test opens a real postgres connection and flakes on the 5s timeout.
+    async runVerifyTail() { return null },
+    async markRowsFired() { return null },
   }
   return { seams, executed, proposed }
 }
