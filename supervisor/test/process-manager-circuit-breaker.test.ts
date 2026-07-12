@@ -71,6 +71,7 @@ function makePM() {
   )
   pm.bridgeFactory = bridgeFactorySpy as any
   pm.circuitCooldownMs = 25 // keep the test fast
+  pm.circuitProbeHealthyMs = 25 // survival window the probe must clear to close
   return { pm, logs, events }
 }
 
@@ -162,7 +163,7 @@ describe('ProcessManager circuit breaker', () => {
     expect(bridges.every((b) => b.opts.runId !== 'h1')).toBe(false) // sanity: the original is there
   })
 
-  test('CLOSES when the next GENUINE hub-dispatched start spawns (gated by construction)', async () => {
+  test('CLOSES only once the admitted probe SURVIVES the health window', async () => {
     const { pm } = makePM()
     await pm.start(spec({ runId: 's1' }))
     bridgesFor('s1')[0].cb.onSpawned({ pid: 1 })
@@ -171,13 +172,42 @@ describe('ProcessManager circuit breaker', () => {
     expect(pm.circuitBreakerSnapshot()[0].state).toBe('half_open')
 
     // Half-open ADMITS the next real start (which came through the hub's dispatch
-    // gate chain — cost cap, token cap and all). Its successful spawn closes the
-    // breaker: the supervisor self-heals with no human restart and no synthetic work.
+    // gate chain — cost cap, token cap and all).
     const r = await pm.start(spec({ runId: 's2' }))
     expect(r).toBeNull()
     bridgesFor('s2')[0].cb.onSpawned({ pid: 2 })
 
+    // Spawn alone does NOT close it — a startup crash-looper spawns every time.
+    expect(pm.circuitBreakerSnapshot()[0].state).toBe('half_open')
+
+    // Survives the health window → closed. Self-heal, no human restart, no synthetic work.
+    await sleep(60)
     expect(pm.circuitBreakerSnapshot()).toEqual([])
+  })
+
+  test('SAFETY: probe that SPAWNS then CRASHES re-opens and increments failed_probes', async () => {
+    // The bug this pins: closing on `onSpawned` meant a repo whose CLI crash-loops
+    // ON STARTUP always "passed" its probe (it spawned!), the breaker closed, the
+    // process died, and onExit no longer saw half_open — so failed_probes never
+    // incremented and the repo escaped the probe budget, retrying forever. Health
+    // is SURVIVAL, not spawn.
+    const { pm } = makePM()
+    await pm.start(spec({ runId: 'x1' }))
+    bridgesFor('x1')[0].cb.onSpawned({ pid: 1 })
+    crashUntilOpen(bridgesFor('x1')[0].cb)
+    await sleep(60)
+    expect(pm.circuitBreakerSnapshot()[0].state).toBe('half_open')
+
+    // Probe admitted, spawns fine (the crash-loop shape), then dies inside the window.
+    await pm.start(spec({ runId: 'x2' }))
+    bridgesFor('x2')[0].cb.onSpawned({ pid: 2 })
+    bridgesFor('x2')[0].cb.onExit({ code: 1, reason: 'runner_exit' })
+
+    const snap = pm.circuitBreakerSnapshot()
+    expect(snap[0].state).toBe('open')          // re-opened, not closed
+    expect(snap[0].failed_probes).toBe(1)       // budget consumed
+    // And the repo cannot keep retrying while open.
+    expect((await pm.start(spec({ runId: 'x3' })))?.reason).toBe('circuit_open')
   })
 
   test('RE-OPENS if the admitted probe crashes, with a longer cooldown and a failed-probe count', async () => {

@@ -35,6 +35,15 @@ describe('stale session_run reaper', () => {
     expect(sessionRunMaxMs()).toBe(86_400_000)
   })
 
+  test('a dangerously low ceiling is CLAMPED to the 60s floor (it is a global, tenant-wide write)', () => {
+    // REMO_SESSION_RUN_MAX_MS=1 would otherwise force-close every live run of every
+    // tenant on the next sweep. Nothing under 60s is a legitimate max-run age.
+    process.env.REMO_SESSION_RUN_MAX_MS = '1'
+    expect(sessionRunMaxMs()).toBe(60_000)
+    process.env.REMO_SESSION_RUN_MAX_MS = '59999'
+    expect(sessionRunMaxMs()).toBe(60_000)
+  })
+
   test('sweep passes the configured ceiling to the DAL and returns the reaped ids', async () => {
     process.env.REMO_SESSION_RUN_MAX_MS = '7200000'
     const seen: number[] = []

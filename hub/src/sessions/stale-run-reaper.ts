@@ -30,13 +30,30 @@ function envFlagOn(raw: string | undefined): boolean {
 }
 
 /**
+ * Sanity FLOOR on the ceiling. `finalizeAgedOpenRuns` is a global write with no
+ * tenant filter, so a typo'd `REMO_SESSION_RUN_MAX_MS=1` would force-close EVERY
+ * live run, for every tenant, on the next sweep. Nothing below 60s can be a
+ * legitimate max-run age; clamp up rather than nuke the fleet.
+ */
+const SESSION_RUN_MAX_MS_FLOOR = 60_000
+
+/**
  * Max age of an OPEN `session_runs` row before it is force-closed
  * (`exit_reason='run_max_age'`). Default 24h — comfortably above the hub's own
  * idle-teardown bound (REMO_SESSION_IDLE_GRACE_SECONDS, default 4h), so a
- * healthy long-lived session is never reaped. Env: REMO_SESSION_RUN_MAX_MS.
+ * healthy long-lived session is never reaped. Env: REMO_SESSION_RUN_MAX_MS,
+ * clamped to a 60s floor (see above).
  */
 export function sessionRunMaxMs(): number {
-  return parsePositiveIntEnv(process.env.REMO_SESSION_RUN_MAX_MS, 86_400_000)
+  const configured = parsePositiveIntEnv(process.env.REMO_SESSION_RUN_MAX_MS, 86_400_000)
+  if (configured < SESSION_RUN_MAX_MS_FLOOR) {
+    console.warn(
+      `[stale-run-reaper] REMO_SESSION_RUN_MAX_MS=${configured} is below the ${SESSION_RUN_MAX_MS_FLOOR}ms floor ` +
+      '— clamping. A ceiling that low would force-close every live run on the next sweep.',
+    )
+    return SESSION_RUN_MAX_MS_FLOOR
+  }
+  return configured
 }
 
 /** Sweep cadence. Default 15min. Env: REMO_SESSION_RUN_REAPER_INTERVAL_MS. */

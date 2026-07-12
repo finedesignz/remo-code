@@ -54,8 +54,15 @@ interface Breaker {
   state: BreakerState
   openedAt: number
   failedProbes: number
+  /** Cooldown timer (open) or probe-survival timer (half_open). */
   timer: ReturnType<typeof setTimeout> | null
   lastReason: string | null
+  /**
+   * The runId admitted as the probe while half_open. The breaker stays half_open
+   * (i.e. an exit is still attributed to the PROBE) until this run has SURVIVED
+   * the health window — spawning is not health.
+   */
+  probeRunId: string | null
 }
 
 export interface ProcessManagerCallbacks {
@@ -90,6 +97,20 @@ const CIRCUIT_THRESHOLD = 5
 const CIRCUIT_COOLDOWN_MS = 5 * 60_000
 const CIRCUIT_MAX_COOLDOWN_MS = 30 * 60_000
 const CIRCUIT_MAX_PROBES = 5
+/**
+ * How long the admitted probe must STAY UP before the breaker closes.
+ *
+ * Closing on `onSpawned` was a second instance of the same bug: a CLI that
+ * crash-loops ON STARTUP — precisely what the breaker exists for — "succeeds" at
+ * spawning every time, so the breaker would close, the process would die a moment
+ * later, `onExit` would no longer see `half_open`, `failedProbes` would never
+ * increment, and the repo would escape the probe budget and retry forever.
+ *
+ * Health = SURVIVAL, not spawn. We reuse the file's existing liveness grace
+ * (`SLOT_STALE_GRACE_MS`, 30s — the same bound the slot reconciler already uses to
+ * decide a runner is real) rather than inventing a second notion of "healthy".
+ */
+const CIRCUIT_PROBE_HEALTHY_MS = 30_000
 /** Hard cap on restart attempts (from PR #86). After this, the run is
  *  finalized as `max_restarts_exceeded` and the supervisor stops respawning. */
 const MAX_RESTART_COUNT = 10
@@ -141,8 +162,10 @@ export class ProcessManager {
   private cfg: SupervisorConfig
   /** Test hook: when set, used instead of `new SessionBridge(...)`. */
   bridgeFactory: BridgeFactory | null = null
-  /** Test hook: overrides the cooldown before a half-open probe. */
+  /** Test hook: overrides the cooldown before the half-open transition. */
   circuitCooldownMs: number | null = null
+  /** Test hook: overrides how long an admitted probe must survive to close the breaker. */
+  circuitProbeHealthyMs: number | null = null
 
   constructor(cb: ProcessManagerCallbacks, cfg: SupervisorConfig) {
     this.cb = cb
@@ -403,6 +426,7 @@ export class ProcessManager {
       failedProbes,
       timer: null,
       lastReason: reason,
+      probeRunId: null,
     }
     this.breakers.set(spec.repoPath, breaker)
 
@@ -448,6 +472,7 @@ export class ProcessManager {
     if (!breaker) return
     breaker.timer = null
     breaker.state = 'half_open'
+    breaker.probeRunId = null
     this.cb.onLog(
       'warn',
       `circuit breaker half-open for ${repoPath} — the next hub-dispatched start is admitted as the probe (no synthetic spawn, no prompt replay)`,
@@ -455,16 +480,36 @@ export class ProcessManager {
   }
 
   /**
-   * A runner for this repo reached `running` — the CLI actually spawned. Any
-   * breaker for it is CLOSED (the half-open probe succeeded, or the repo simply
-   * recovered).
+   * The admitted probe's CLI spawned. That is NOT yet health — a startup
+   * crash-looper spawns fine and dies a second later. Start the survival timer;
+   * the breaker stays `half_open` (so a crash before the timer fires is still
+   * attributed to the probe by `onExit` → `tripBreaker` → `failedProbes + 1`) and
+   * only CLOSES once the probe has stayed up for CIRCUIT_PROBE_HEALTHY_MS.
    */
-  private closeBreaker(repoPath: string) {
+  private noteProbeSpawned(repoPath: string, runId: string) {
+    const breaker = this.breakers.get(repoPath)
+    if (!breaker || breaker.state !== 'half_open') return
+    if (breaker.probeRunId !== runId) return
+    if (breaker.timer) clearTimeout(breaker.timer)
+    const healthyMs = this.circuitProbeHealthyMs ?? CIRCUIT_PROBE_HEALTHY_MS
+    breaker.timer = setTimeout(() => {
+      // Still the same probe, still half_open, still alive → genuinely healthy.
+      const b = this.breakers.get(repoPath)
+      if (!b || b.state !== 'half_open' || b.probeRunId !== runId) return
+      const run = this.runs.get(runId)
+      if (!run || (run.state !== 'running' && run.state !== 'starting')) return
+      this.closeBreaker(repoPath, `probe run ${runId} survived ${healthyMs}ms`)
+    }, healthyMs)
+    ;(breaker.timer as any)?.unref?.()
+  }
+
+  /** Close + forget the breaker for a repo (probe survived the health window). */
+  private closeBreaker(repoPath: string, why: string) {
     const breaker = this.breakers.get(repoPath)
     if (!breaker) return
     if (breaker.timer) clearTimeout(breaker.timer)
     this.breakers.delete(repoPath)
-    this.cb.onLog('info', `circuit breaker closed — ${repoPath} spawned successfully`)
+    this.cb.onLog('info', `circuit breaker closed — ${repoPath}: ${why}`)
   }
 
   /**
@@ -543,6 +588,12 @@ export class ProcessManager {
           exhausted: breaker.failedProbes >= CIRCUIT_MAX_PROBES,
         },
       }
+    }
+    if (breaker && breaker.state === 'half_open' && breaker.probeRunId == null) {
+      // This genuine (gate-passed) start is the probe. Remember it so a crash can
+      // be attributed to the probe even after it has spawned.
+      breaker.probeRunId = spec.runId
+      this.cb.onLog('warn', `circuit breaker half-open — admitting run as the probe for ${spec.repoPath}`, spec.runId)
     }
 
     // Don't race a crashed-pending-restart entry for the same repo — its
@@ -626,9 +677,9 @@ export class ProcessManager {
       onSpawned: (info) => {
         run.pid = info.pid || null
         this.setState(run, 'running', { runId: spec.runId, repoPath: spec.repoPath, pid: run.pid ?? undefined })
-        // A live CLI for this repo — the half-open probe (or a plain recovery)
-        // succeeded: CLOSE the breaker.
-        this.closeBreaker(spec.repoPath)
+        // Spawning is NOT health (a startup crash-looper spawns every time). Start
+        // the probe's survival timer; the breaker only closes if it stays up.
+        this.noteProbeSpawned(spec.repoPath, spec.runId)
       },
       onSessionId: (sessionId) => this.noteSessionIdForRun(spec.runId, sessionId),
       onActivity: () => this.noteActivityForRun(spec.runId),

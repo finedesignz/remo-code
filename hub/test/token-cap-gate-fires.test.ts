@@ -29,7 +29,7 @@ mock.module('../src/db/token-usage-dal.ts', () => ({
 }))
 
 const gatesUrl = `../src/dispatch/gates.ts?t=${Date.now()}${Math.random()}`
-const { dailyTokenCapGate, getTokenCapStatus, isOverTokenCap } = await import(gatesUrl)
+const { dailyTokenCapGate, getTokenCapStatus, isOverTokenCap, assertTokenCapConfig } = await import(gatesUrl)
 
 const req = { userId: 'u1', sessionId: 's1', token: 't1', prompt: 'hi' }
 const DEFAULT_CAP = 50_000_000
@@ -78,14 +78,43 @@ describe('dailyTokenCapGate fires', () => {
     expect((await dailyTokenCapGate.check(req)).ok).toBe(true)
   })
 
-  test('non-positive / non-finite cap DISABLES the ceiling (fail-open, documented)', async () => {
+  // SAFETY: a bad cap value must FAIL CLOSED. The previous behaviour — '0' or '-1'
+  // silently DISABLING the ceiling — meant one typo in Coolify env turned the
+  // product's headline guarantee ("a hard spend ceiling you set") into an unbounded
+  // spend path, invisibly. That is the same class of failure as the 2.83B-token
+  // incident, and the old test PINNED it. It does not any more.
+  test('a non-positive / unparseable cap FAILS CLOSED (falls back to the default, still capped)', async () => {
     state.tokens = 9_999_999_999
-    process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP = '0'
-    expect((await dailyTokenCapGate.check(req)).ok).toBe(true)
-    process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP = '-1'
-    expect((await dailyTokenCapGate.check(req)).ok).toBe(true)
-    // Garbage falls back to the DEFAULT (still capped — never silently disabled).
-    process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP = 'nonsense'
+    for (const bad of ['0', '-1', 'nonsense', '5O']) {
+      process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP = bad
+      const r = await dailyTokenCapGate.check(req)
+      expect(r.ok).toBe(false) // still blocking — the ceiling is NOT disabled
+      expect((await getTokenCapStatus('u1', 'UTC')).cap).toBe(DEFAULT_CAP)
+    }
+  })
+
+  test('a bad cap value REFUSES TO BOOT (assertTokenCapConfig throws)', () => {
+    for (const bad of ['0', '-1', 'nonsense']) {
+      process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP = bad
+      expect(() => assertTokenCapConfig()).toThrow(/positive/i)
+    }
+    process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP = '1000'
+    expect(() => assertTokenCapConfig()).not.toThrow()
+    delete process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP
+    expect(() => assertTokenCapConfig()).not.toThrow() // unset ⇒ 50M default
+  })
+
+  test('the ONLY way to disable the ceiling is the explicit, self-describing flag', async () => {
+    state.tokens = 9_999_999_999
+    process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED = '1'
+    try {
+      expect((await dailyTokenCapGate.check(req)).ok).toBe(true)
+      expect((await getTokenCapStatus('u1', 'UTC')).cap).toBe(0)
+      expect(() => assertTokenCapConfig()).not.toThrow() // deliberate ⇒ boots (loudly)
+    } finally {
+      delete process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED
+    }
+    // And with the flag gone, the ceiling is back.
     expect((await dailyTokenCapGate.check(req)).ok).toBe(false)
   })
 })

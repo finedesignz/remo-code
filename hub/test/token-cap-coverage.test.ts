@@ -31,21 +31,51 @@ function walk(dir: string): string[] {
   return out
 }
 
-/** Every `gates: [ ... ]` literal in hub/src, with its file. */
-function gateLists(): Array<{ file: string; list: string }> {
-  const found: Array<{ file: string; list: string }> = []
+/**
+ * Every `gates: [ ... ]` literal in hub/src, with its file.
+ *
+ * Bracket-BALANCED scan, not `[^\]]*`. A naive regex terminates at the first `]`,
+ * so a gate list containing a nested bracket (a gate factory taking an array arg, a
+ * multi-line list with an inline array) would be truncated or skipped — and a
+ * dispatcher could then omit `dailyTokenCapGate` without ever failing CI. A guard
+ * with a hole in it is not a guard. Anything this scanner CANNOT parse is reported
+ * as `unparsed` and HARD-FAILS the test; it is never silently ignored.
+ */
+function gateLists(): { lists: Array<{ file: string; list: string }>; unparsed: string[] } {
+  const lists: Array<{ file: string; list: string }> = []
+  const unparsed: string[] = []
   for (const file of walk(SRC)) {
     const src = readFileSync(file, 'utf-8')
-    for (const m of src.matchAll(/gates:\s*\[([^\]]*)\]/g)) {
-      found.push({ file: file.slice(SRC.length + 1).replace(/\\/g, '/'), list: m[1] })
+    const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
+    for (const m of src.matchAll(/gates:\s*\[/g)) {
+      const open = m.index! + m[0].length - 1 // index of the '['
+      let depth = 0
+      let end = -1
+      for (let i = open; i < src.length; i++) {
+        const ch = src[i]
+        if (ch === '[' || ch === '(' || ch === '{') depth++
+        else if (ch === ']' || ch === ')' || ch === '}') {
+          depth--
+          if (depth === 0) { end = i; break }
+        }
+      }
+      if (end === -1) {
+        unparsed.push(`${rel}: unbalanced gates: [ at offset ${open}`)
+        continue
+      }
+      lists.push({ file: rel, list: src.slice(open + 1, end) })
     }
   }
-  return found
+  return { lists, unparsed }
 }
 
 describe('daily TOKEN cap covers every dispatch entry point', () => {
+  test('every gates: [ ... ] occurrence is PARSEABLE (an unparsed list must fail CI, never pass silently)', () => {
+    expect(gateLists().unparsed).toEqual([])
+  })
+
   test('at least the known dispatchers are present (the scan actually found them)', () => {
-    const files = new Set(gateLists().map((g) => g.file))
+    const files = new Set(gateLists().lists.map((g) => g.file))
     for (const expected of [
       'orchestrator/inject.ts',
       'scheduler/senders/agent.ts',
@@ -60,7 +90,7 @@ describe('daily TOKEN cap covers every dispatch entry point', () => {
   })
 
   test('EVERY gates[] list carries dailyTokenCapGate AND dailyCostCapGate', () => {
-    const offenders = gateLists()
+    const offenders = gateLists().lists
       .filter((g) => !g.list.includes('dailyTokenCapGate') || !g.list.includes('dailyCostCapGate'))
       .map((g) => `${g.file}: gates: [${g.list.trim()}]`)
     expect(offenders).toEqual([])

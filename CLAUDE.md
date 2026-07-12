@@ -255,8 +255,10 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   (prod 2026-07-07→11: zero CLI spawns for four days while the hub reported healthy). It now
   half-opens after a cooldown (5min, exponential to 30min, max 5 probes). **Half-open spawns nothing** —
   it ADMITS the next genuine hub-dispatched start as the probe (so the probe is cost/token-gated by
-  construction; the supervisor never replays a prompt outside `dispatch()`), CLOSES on that probe's
-  successful spawn, RE-OPENS if it crashes, and REPORTS state to the hub in the `session_inventory`
+  construction; the supervisor never replays a prompt outside `dispatch()`). The breaker closes only
+  once that probe has **SURVIVED** a 30s health window — spawning is not health (a startup crash-looper
+  spawns every time); a probe that spawns then dies RE-OPENS the breaker and consumes a probe. It
+  REPORTS state to the hub in the `session_inventory`
   frame (`circuit_breakers[]` → `hub/src/ws/supervisor-registry.ts` → `GET /api/supervisors`, plus a
   loud hub log on every new trip). `circuit_open` is a per-run start-rejection reason
   (`SUPERVISOR_START_REJECT_REASONS`), never a supervisor-wide `stopped`.
@@ -332,9 +334,14 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   triage, error-capture, feedback, revanote, telegram (fix/stop-the-bleed; it previously rode ONLY the
   inject path, leaving every other path bounded solely by a dollar cap that is meaningless on a
   flat-rate Max subscription). The token cap never replaces the cost cap. Enforced by
-  `hub/test/token-cap-coverage.test.ts` (scans every `gates: [...]` in `hub/src`); proven to actually
-  FIRE by `hub/test/token-cap-gate-fires.test.ts` + `hub/test/e2e/orchestrator-tokencap.e2e.test.ts`
-  (cache-read alone trips it — the 2026-07 incident shape).
+  `hub/test/token-cap-coverage.test.ts` (bracket-balanced scan of every `gates: [...]` in `hub/src`; an
+  unparseable list hard-fails CI); proven to actually FIRE by `hub/test/token-cap-gate-fires.test.ts` +
+  `hub/test/e2e/orchestrator-tokencap.e2e.test.ts` (cache-read alone trips it — the 2026-07 incident
+  shape). **The token cap FAILS CLOSED**: a non-positive / unparseable
+  `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` no longer disables the ceiling — it falls back to the 50M default
+  AND the hub **refuses to boot** (`assertTokenCapConfig()` in `hub/src/index.ts`). The ONLY way to run
+  with no ceiling is the explicit **`REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1`** (boots with a loud
+  warning). A typo'd `0` must never silently become an unbounded spend path.
 - **Public webhooks: raw body BEFORE JSON parse**, constant-time secret compare, HMAC over
   `${ts}.${rawBody}`, reject >5min skew. Webhooks mount BEFORE the `/api/*` auth catch-all;
   license gate after auth; `/ws/agent` keyed by `api_keys`. `hub/test/mount-order.test.ts` enforces.

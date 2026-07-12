@@ -160,25 +160,77 @@ export const dailyCostCapGate: DispatchGate = {
  */
 const DEFAULT_DAILY_TOKEN_CAP = 50_000_000
 
-function configuredDailyTokenCap(): number {
-  const raw = process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP
-  if (raw == null || raw.trim() === '') return DEFAULT_DAILY_TOKEN_CAP
+/**
+ * The ONLY way to run with no token ceiling. It is a separate, self-describing
+ * variable ON PURPOSE: the hard spend ceiling is the product's core promise, and a
+ * single-character typo (`0`, `-1`, `5O`) in the cap value must NEVER silently
+ * convert it into an unbounded spend path — that is exactly the class of invisible
+ * failure that produced the 2.83B-token incident. Disabling the fuse box has to be
+ * a deliberate act, in a variable whose name states the consequence.
+ */
+function isTokenCapExplicitlyDisabled(): boolean {
+  const raw = process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED
+  if (raw == null) return false
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase())
+}
+
+/** Parse result for the configured cap. `invalid` ⇒ the value is unusable. */
+function parseDailyTokenCap(raw: string | undefined): { ok: boolean; cap: number } {
+  if (raw == null || raw.trim() === '') return { ok: true, cap: DEFAULT_DAILY_TOKEN_CAP }
   const n = Number(raw)
-  return Number.isFinite(n) ? n : DEFAULT_DAILY_TOKEN_CAP
+  if (Number.isFinite(n) && n > 0) return { ok: true, cap: n }
+  return { ok: false, cap: DEFAULT_DAILY_TOKEN_CAP }
 }
 
 /**
- * Token-cap status: today's consumed tokens (user tz) vs the configured ceiling.
- * `over` is true when tokens >= cap. A non-positive / non-finite cap returns
- * `{ over:false, tokens:0, cap:0 }` (disabled, fail-open). Read at call-time so
- * the env knob + tests apply without a reimport.
+ * The daily token ceiling in force. FAILS CLOSED: a non-positive / unparseable
+ * `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` does NOT disable the cap — it falls back to
+ * the 50M default (and the hub refuses to boot, see {@link assertTokenCapConfig}).
+ * Only `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED` turns the ceiling off, and it
+ * returns 0 to say so.
+ */
+function configuredDailyTokenCap(): number {
+  if (isTokenCapExplicitlyDisabled()) return 0
+  return parseDailyTokenCap(process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP).cap
+}
+
+/**
+ * Boot guard (called once from hub/src/index.ts). A misconfigured cap is a
+ * SAFETY defect, not a warning: refuse to boot rather than run a product whose
+ * headline guarantee is silently off.
+ */
+export function assertTokenCapConfig(): void {
+  if (isTokenCapExplicitlyDisabled()) {
+    console.warn(
+      '[gates] ⚠ DAILY TOKEN CAP IS DISABLED (REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED). ' +
+      'Token spend is UNBOUNDED. This is only ever correct if you meant it.',
+    )
+    return
+  }
+  const raw = process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP
+  const parsed = parseDailyTokenCap(raw)
+  if (!parsed.ok) {
+    throw new Error(
+      `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP="${raw}" is not a positive integer, so the daily token ` +
+      'ceiling — the hard spend limit this product promises — would be meaningless. Refusing to boot. ' +
+      'Set it to a positive number of tokens/day, or set REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 ' +
+      'to explicitly and deliberately run with NO ceiling.',
+    )
+  }
+}
+
+/**
+ * Token-cap status: today's consumed tokens (user tz) vs the ceiling in force.
+ * `over` is true when tokens >= cap. Returns `{ over:false, tokens:0, cap:0 }` ONLY
+ * when the cap is EXPLICITLY disabled — a bad cap value never disables it (fail
+ * CLOSED). Read at call-time so the env knob + tests apply without a reimport.
  */
 export async function getTokenCapStatus(
   userId: string,
   timezone: string,
 ): Promise<{ over: boolean; tokens: number; cap: number }> {
   const cap = configuredDailyTokenCap()
-  if (!Number.isFinite(cap) || cap <= 0) return { over: false, tokens: 0, cap: 0 }
+  if (cap <= 0) return { over: false, tokens: 0, cap: 0 } // explicitly disabled only
   const tokens = await getTodayTokenTotal(userId, timezone)
   return { over: tokens >= cap, tokens, cap }
 }
