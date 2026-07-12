@@ -247,6 +247,30 @@ describe('ProcessManager circuit breaker', () => {
     expect(pm.circuitBreakerSnapshot().some((b) => b.repo_path === REPO)).toBe(false)
   })
 
+  test('SAFETY: half-open admits EXACTLY ONE probe — a second start is refused by the breaker itself', async () => {
+    // Half-open means "one gated trial run, nothing else". The breaker must hold that
+    // invariant itself rather than leaning on the duplicate-run check further down
+    // start(); otherwise a second concurrent CLI could slip through and re-enter the
+    // crash-loop/spend path the breaker exists to contain.
+    const { pm } = makePM()
+    await pm.start(spec({ runId: 'p1' }))
+    bridgesFor('p1')[0].cb.onSpawned({ pid: 1 })
+    crashUntilOpen(bridgesFor('p1')[0].cb)
+    await sleep(60)
+    expect(pm.circuitBreakerSnapshot()[0].state).toBe('half_open')
+
+    // First genuine start is admitted as the probe.
+    expect(await pm.start(spec({ runId: 'p2' }))).toBeNull()
+    bridgesFor('p2')[0].cb.onSpawned({ pid: 2 })
+
+    // Second start, while that probe is still in flight, is refused BY THE BREAKER
+    // (circuit_open, naming the in-flight probe) — not by the duplicate check.
+    const second = await pm.start(spec({ runId: 'p3' }))
+    expect(second?.reason).toBe('circuit_open')
+    expect((second?.detail as any)?.probe_in_flight).toBe('p2')
+    expect(bridgesFor('p3').length).toBe(0)
+  })
+
   test('RE-OPENS if the admitted probe crashes, with a longer cooldown and a failed-probe count', async () => {
     const { pm } = makePM()
     await pm.start(spec({ runId: 'r1' }))

@@ -595,6 +595,29 @@ export class ProcessManager {
         },
       }
     }
+    // Half-open admits EXACTLY ONE probe. While that probe is in flight the breaker
+    // itself refuses every other start for the repo — it does not lean on the
+    // duplicate-run check below to hold the invariant. Half-open means "one gated
+    // trial run, nothing else", so a second concurrent CLI can never slip through
+    // and re-enter the crash-loop/spend path the breaker exists to contain.
+    if (breaker && breaker.state === 'half_open' && breaker.probeRunId != null && breaker.probeRunId !== spec.runId) {
+      this.cb.onLog('warn', `Refusing start — circuit breaker half-open, probe ${breaker.probeRunId} already in flight for ${spec.repoPath}`, spec.runId)
+      this.cb.onStateChange('stopped', {
+        runId: spec.runId,
+        repoPath: spec.repoPath,
+        lastExit: { code: null, reason: 'circuit_open' },
+      })
+      this.writeAudit(spec, false, 'circuit_open')
+      return {
+        reason: 'circuit_open',
+        detail: {
+          repo_path: spec.repoPath,
+          opened_at: new Date(breaker.openedAt).toISOString(),
+          failed_probes: breaker.failedProbes,
+          probe_in_flight: breaker.probeRunId,
+        },
+      }
+    }
     // Don't race a crashed-pending-restart entry for the same repo — its
     // backoff timer will reclaim the slot. Treat as duplicate to keep the
     // N+1 window during backoff closed.
