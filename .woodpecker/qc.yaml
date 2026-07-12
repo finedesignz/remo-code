@@ -31,7 +31,13 @@ steps:
       - apt-get update && apt-get install -y postgresql-client
       - 'until pg_isready -h postgres -U remo -d remo_ci; do echo waiting-pg; sleep 2; done'
       - bun install --frozen-lockfile
-      - bunx tsc --noEmit -p hub/tsconfig.json || echo 'typecheck informational (continue-on-error parity)'
+      # hub/tsconfig.json did not exist until this PR, so `tsc -p` exited 2 instantly and
+      # the `|| echo` swallowed it: this step has NEVER typechecked anything. With the
+      # config in place it now really runs — and surfaces 393 pre-existing errors
+      # (200 hub/src, 192 hub/test, 1 hub/scripts) that accumulated while the check was
+      # dead. The guard therefore STAYS for now; removing it would red every PR.
+      # Follow-up: burn the 393 down, then delete the `|| echo` so this actually gates.
+      - bunx tsc --noEmit -p hub/tsconfig.json || echo 'typecheck informational — 393 known pre-existing errors; see hub/tsconfig.json PR'
       - bun run check-baseline
       - bun run migration-verify
       - bun test hub/test/orchestrator-data-model.test.ts hub/test/orchestrator-queue.test.ts hub/test/orchestrator-run-log.test.ts hub/test/orchestrator-stage-presets.test.ts hub/test/orchestrator-merge-command.test.ts hub/test/migrate-legacy-tasks.test.ts hub/test/feedback-key-ownership.test.ts
