@@ -26,7 +26,9 @@ type OutboundMsg =
   | { type: 'repo.clone_progress'; req_id: string; stage: string; percent?: number }
   | { type: 'supervisor.commands_sync'; commands: Array<{ kind: 'command' | 'skill'; name: string; description: string | null; source: string; path: string }> }
   | { type: 'supervisor.repo_inventory'; scanned_at: string; repos: Array<{ local_path: string; is_git_repo: boolean; is_worktree: boolean; worktree_parent_path: string | null; git_remote: string | null; git_origin_github: { owner: string; repo: string } | null; branch?: string | null; canonical?: boolean }> }
-  | { type: 'session_inventory'; sessions: Array<{ session_id: string; cli_kind: 'claude' | 'codex'; project_dir: string; pid: number | null; started_at: string; last_activity_at: string | null; status: 'spawning' | 'running' | 'idle' | 'stopping' }> }
+  // `circuit_breakers` (fix/stop-the-bleed) makes an OPEN spawn-breaker VISIBLE to
+  // the hub. Optional so an older hub simply ignores it (zod: .optional()).
+  | { type: 'session_inventory'; sessions: Array<{ session_id: string; cli_kind: 'claude' | 'codex'; project_dir: string; pid: number | null; started_at: string; last_activity_at: string | null; status: 'spawning' | 'running' | 'idle' | 'stopping' }>; circuit_breakers?: Array<{ repo_path: string; state: 'open' | 'half_open'; opened_at: string; failed_probes: number; exhausted: boolean; last_reason: string | null }> }
   | { type: 'run_started'; run_id: string }
   | { type: 'run_output'; run_id: string; chunk: string }
   | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
@@ -520,7 +522,11 @@ export class SupervisorClient {
         last_activity_at: r.lastActivityAt,
         status: r.status,
       }))
-    this.send({ type: 'session_inventory', sessions })
+    // fix/stop-the-bleed: ship the spawn circuit-breaker state alongside the
+    // inventory. A latched-open breaker used to be invisible to the hub — the
+    // supervisor spawned ZERO CLIs for four days while the hub looked healthy.
+    // Empty array in the steady state.
+    this.send({ type: 'session_inventory', sessions, circuit_breakers: this.pm.circuitBreakerSnapshot() })
   }
 
   /**

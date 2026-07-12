@@ -9,7 +9,7 @@ import { getSessionSkipPermissionsByRepo } from '../db/dal'
 import {
   getSupervisor as getSupervisorRegistryEntry, isSupervisorOnline,
   sendRequest, sendToSupervisor, updateSupervisorState,
-  getUserInventory,
+  getUserInventory, getSupervisorCircuitBreakers,
 } from '../ws/supervisor-registry'
 import { isGitHubAppConfigured, mintTokenizedCloneUrl } from '../auth/github-app'
 import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
@@ -23,6 +23,10 @@ supervisors.get('/', async (c) => {
   const enriched = rows.map((r: any) => ({
     ...r,
     online: isSupervisorOnline(r.id),
+    // fix/stop-the-bleed — an OPEN spawn circuit-breaker means this supervisor is
+    // refusing to spawn CLIs for those repos (silent autonomy loss in prod
+    // 2026-07). Empty array = healthy, or a pre-fix supervisor that doesn't report.
+    circuit_breakers: getSupervisorCircuitBreakers(r.id),
   }))
   return c.json({ supervisors: enriched })
 })

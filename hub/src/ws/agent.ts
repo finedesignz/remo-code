@@ -13,6 +13,7 @@ import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
   updateSupervisorState, heartbeatSupervisor, getSupervisor,
   setSupervisorSessionInventory,
+  setSupervisorCircuitBreakers,
 } from './supervisor-registry'
 import { log } from '../observability/logger'
 
@@ -64,6 +65,9 @@ export const SUPERVISOR_START_REJECT_REASONS: ReadonlySet<string> = new Set([
   'sandbox_escape',
   'not_git_repo',
   'legacy_agent_spawn_disabled',
+  // fix/stop-the-bleed — the supervisor's spawn circuit-breaker refused THIS run
+  // (the repo is crash-looping). Per-run, not a supervisor-wide 'stopped'.
+  'circuit_open',
 ])
 
 /**
@@ -1162,6 +1166,20 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       const closed = await finalizeOrphanedRunsForSupervisor(supervisorId, liveIds)
       if (closed > 0) {
         console.log(`[supervisor] reconciled ${closed} ghost run(s) supervisor=${supervisorId}`)
+      }
+      // fix/stop-the-bleed — record the supervisor's spawn circuit-breaker state
+      // (absent on pre-fix supervisors ⇒ treated as "healthy/unknown", the old
+      // behaviour). A NEWLY-open breaker is logged loudly: prod 2026-07 the
+      // breaker latched open for FOUR DAYS with zero CLI spawns while the hub
+      // reported perfectly healthy. `GET /api/supervisors` surfaces it too.
+      const breakers = msg.circuit_breakers ?? []
+      const { newlyOpen } = setSupervisorCircuitBreakers(supervisorId, breakers)
+      for (const b of newlyOpen) {
+        console.error(
+          `[supervisor] CIRCUIT BREAKER ${b.state.toUpperCase()} supervisor=${supervisorId} repo=${b.repo_path} ` +
+          `failed_probes=${b.failed_probes} exhausted=${b.exhausted} reason=${b.last_reason ?? 'unknown'} — ` +
+          `NO CLI will spawn for this repo until it closes`,
+        )
       }
     } catch (err: any) {
       console.error('[supervisor] session_inventory handler failed', err?.message)

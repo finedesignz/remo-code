@@ -21,6 +21,23 @@ export interface SessionInventoryEntry {
   status: 'spawning' | 'running' | 'idle' | 'stopping'
 }
 
+/**
+ * fix/stop-the-bleed — supervisor spawn circuit-breaker state, pushed alongside
+ * `session_inventory`. A non-empty array means the supervisor is REFUSING to
+ * spawn CLIs for those repos. Prod 2026-07: the breaker latched open for four
+ * days with NO hub-visible signal — zero CLI spawns while the hub reported
+ * healthy. Surfacing it here (and on `GET /api/supervisors`) is what makes that
+ * failure mode observable.
+ */
+export interface CircuitBreakerEntry {
+  repo_path: string
+  state: 'open' | 'half_open'
+  opened_at: string
+  failed_probes: number
+  exhausted: boolean
+  last_reason?: string | null
+}
+
 interface SupervisorEntry {
   ws: ServerWebSocket<any>
   supervisorId: string
@@ -35,6 +52,8 @@ interface SupervisorEntry {
    *  hasn't sent one yet (pre-0.5.7 supervisor). */
   sessionInventory: SessionInventoryEntry[]
   sessionInventoryAt: string | null
+  /** fix/stop-the-bleed — most recent circuit-breaker snapshot (empty = healthy). */
+  circuitBreakers: CircuitBreakerEntry[]
   pendingReqs: Map<string, { resolve: (v: any) => void; reject: (e: any) => void; timer: ReturnType<typeof setTimeout> }>
 }
 
@@ -202,6 +221,7 @@ export function registerSupervisor(args: {
     hostname: args.hostname ?? '',
     sessionInventory: [],
     sessionInventoryAt: null,
+    circuitBreakers: [],
     pendingReqs: new Map(),
   }
   const isReplace = supervisors.has(args.supervisorId)
@@ -376,6 +396,28 @@ export function setSupervisorSessionInventory(
   entry.sessionInventory = sessions
   entry.sessionInventoryAt = scannedAt
   return { changedSessionIds: Array.from(changed), userId: entry.userId }
+}
+
+/**
+ * fix/stop-the-bleed — record the supervisor's circuit-breaker snapshot. Returns
+ * the breakers that are NEWLY open since the last push, so the caller can log /
+ * alert once per trip instead of every 10s.
+ */
+export function setSupervisorCircuitBreakers(
+  supervisorId: string,
+  breakers: CircuitBreakerEntry[],
+): { newlyOpen: CircuitBreakerEntry[]; userId: string | null } {
+  const entry = supervisors.get(supervisorId)
+  if (!entry) return { newlyOpen: [], userId: null }
+  const before = new Set(entry.circuitBreakers.map((b) => b.repo_path))
+  const newlyOpen = breakers.filter((b) => !before.has(b.repo_path))
+  entry.circuitBreakers = breakers
+  return { newlyOpen, userId: entry.userId }
+}
+
+/** Current circuit-breaker snapshot for a supervisor (empty = healthy/unknown). */
+export function getSupervisorCircuitBreakers(supervisorId: string): CircuitBreakerEntry[] {
+  return supervisors.get(supervisorId)?.circuitBreakers ?? []
 }
 
 /**
