@@ -1,76 +1,123 @@
-<!-- updated: 2026-06-25 -->
+<!-- updated: 2026-07-12 -->
 # Project — remo-code
 
 ## What This Is
 
-Web app to chat with local Claude Code / Codex CLI sessions from any browser or phone. A local
-**Tauri Supervisor** (MSI, one per host) spawns the CLI and relays activity to a **hub** (Bun + Hono,
-port 3040) over `/ws/agent`; browsers connect to `/ws/client`. Live in prod at **https://app.remo-code.com**
-(Coolify, Docker). Open-source: `finedesignz/remo-code`. Full architecture + invariants in `CLAUDE.md`
-and `.planning/STATE.md`.
+Open-source control plane for local coding-agent CLIs. A **Tauri Supervisor** (MSI, one per host)
+runs on the developer's own machine, spawns their own `claude`/`codex` CLI against their own
+subscription, and relays to a **hub** (Bun + Hono, port 3040) over `/ws/agent`; browsers and phones
+connect to `/ws/client`. Live at **https://app.remo-code.com** (Coolify, Docker). Repo:
+`finedesignz/remo-code`. Architecture + invariants: `CLAUDE.md`, `.planning/codebase/`.
 
-## Core Value
+**The source code never leaves the developer's machine. The hub never sees a provider API key.**
+That is a compliance posture, not an implementation detail — it is enforced by an argv
+allowlist-of-one, `env-sanitize.ts`, and guard tests that fail the build on regression.
 
-Remote, full-visibility control of persistent local coding-agent sessions (thinking, tool calls,
-streaming text, scheduled tasks, grid view, Telegram bridge, error-capture self-heal) with a
-non-bypassable daily cost cap and Titanium-aligned auth.
+## Core Value — sell the governor, not the engine
+
+**Anthropic already ships remote chat.** "Remote Control" (Feb 2026) bridges a local Claude Code
+session to the web + iOS/Android apps, free, first-party. Remote chat is commodity. We do not
+compete there — we give it away.
+
+**What no one ships is the fuse box.** remo-code is the **governance and reliability layer for
+fleets of coding agents**:
+
+- **Hard, non-bypassable token ceilings** on every dispatch path (not dollar caps — dollars are
+  meaningless on a flat-rate subscription; tokens are the real currency).
+- **A per-agent, per-repo, per-turn spend-and-action ledger** (`token_usage`, `routine_run_log`,
+  `session_runs`) — the CloudTrail for what your team's agents actually did.
+- **Self-heal**: ghost-reaper, run-reaper, stale-lock reaper, supervisor circuit breaker with
+  half-open recovery, resume-by-`project_dir`, error-capture → auto-repair. Anthropic's Remote
+  Control has none of this and breaks.
+- **Multi-repo fleet ops**: scheduled unattended runs, dependency-aware waves, deploy-verify tails.
+- **A kill switch.**
+
+This was earned the hard way. On 2026-07-11 a runaway orchestrator loop burned **2.83 billion
+cache-read tokens in two days and killed the owner's Claude Max subscription**. The cap existed and
+was blind to cache-read. Worse, a subsequent audit found `dailyTokenCapGate` rode **only** the
+orchestrator inject path — scheduler, error-capture, feedback, revanote, and Telegram were six more
+unbounded spend paths. All seven are now gated, and the cap is *proven to fire* against real
+Postgres. The scar tissue is the product.
+
+## Who It's For
+
+**The buyer is the eng manager / agency with 20–40 Claude Max seats and no visibility into who
+burned what.** Not the solo dev — solo devs self-host and pay $0, and that is structural, not a
+pricing mistake: for this ICP, willingness-to-pay and capability-to-self-host are the *same trait*.
+
+Open-core, on the GitLab/Sentry line:
+
+| Free / MIT — the funnel | Paid — the business |
+|---|---|
+| Hub, supervisor, terminal, chat | Teams, SSO, RBAC |
+| Single-user scheduling, Telegram | Org spend ledger + policy caps |
+| Self-host it, fork it, love it | Audit log with retention, org-wide kill switch |
+| | Hosted, supported, SLA |
+
+**Never** gate on session count (a tax on evangelists, patched out in an afternoon). **Never**
+paywall the orchestrator (it paywalls the weakest asset and gives away the strongest).
+
+## Position on Anthropic
+
+Automation drives the **genuine interactive TUI**, on the user's own subscription — the path
+Anthropic subsidizes and promotes. Their enforcement targets *abuse and runaway over-usage*; a
+capped, rate-limited, audited orchestrator is the opposite of that. **Our governance layer is our
+ToS position**: we are the operator who caps, logs, and can prove it.
+
+Engineered metering-agnostic regardless: caps are denominated in **tokens**, the
+interactive-vs-programmatic dual-bucket ledger is the early-warning signal, and if programmatic use
+is ever metered at API rates we re-price the team tier — we do not rearchitect.
 
 ## Shipped Milestones
 
-- **v1.0** (Phases 01–14) — shipped + archived 2026-06-02 (`.planning/milestones/v1.0-*`).
-- **m-interactive-pty-runner** (Phases 15–20) — shipped + live 2026-06-04. Interactive `claude`/`codex`
-  PTY terminal is the default web/phone human surface. Cutover-flip + ChatSurface deletion DEFERRED
-  on a postponed Anthropic billing measurement (`docs/cutover-gate-june15.md`).
-- **TMAC** (Phases TMAC-01..06) — built + merged 2026-06-08. Autonomous task-type macro prompt path is
-  the default orchestrator cycle-runner; legacy micro-row wave engine kept behind a rollback flag.
+- **v1.0** (Phases 01–14) — shipped + archived 2026-06-02.
+- **m-interactive-pty-runner** (Phases 15–20) — interactive PTY is the default human surface, 2026-06-04.
+- **TMAC** (Phases TMAC-01..06) — macro-prompt orchestrator cycle-runner, 2026-06-08.
+
+## Cancelled
+
+- **OBSRV** (Orchestrator Observability & Shadow Dry-Run) — **CANCELLED 2026-07-12**, 0/6 phases.
+  It was scoped by the orchestrator *for itself* (a governance violation that also broke `main`),
+  and it was six phases of scaffolding to safely arm a subsystem whose entire premise has since
+  changed. Its good half survives: the `routine_run_log` read API + Activity panel become the
+  **receipts page** (Milestone GOV). The built `OBSRV-04` autospawn-shadow work is salvaged, not
+  discarded.
 
 ## Planned Milestones (Roadmap)
 
-This is the **ONLY** source the autonomous auto-dev orchestrator may draw the next milestone
-from. Entries are **owner-curated** (added here deliberately by the owner, never invented by the
-orchestrator); ordered top = next. When the current milestone ships and this list is empty, the
-orchestrator must STOP and request owner direction — it may NOT self-scope a novel product direction.
+Owner-curated. **The autonomous orchestrator may draw its next milestone ONLY from this list.** It
+may never self-scope a product direction; when this list empties, it STOPS and asks.
 
-- _(none planned — orchestrator must STOP and request direction when the current milestone ships)_
+1. **BLEED** — close the three CRITICALs + prove the caps. *(in flight)*
+2. **PTYCAP** — token-gate the interactive PTY path. **Blocks everything else.**
+3. **GOV** — the governance surface: org spend ledger, policy caps, audit, kill switch, receipts page.
+4. **TENANT** — real multi-tenancy: retire `TITANIUM_BYPASS`, working magic-link, per-user supervisor pairing, prove isolation.
+5. **MONEY** — Titanium Licensing billing, plans, entitlements, the paid tier.
+6. **ONBOARD** — a stranger self-serves: signup → MSI → pair → first session → first scheduled task.
+7. **AUTO** — governed PTY autonomy + the 30-night public receipts log. **Monetized only after the log is green.**
+8. **DEBT** — retire the half-live flags (legacy waves, ChatSurface/cutover gate, TEAB MSI, mobile).
 
-## Current Milestone: OBSRV — Orchestrator Observability & Shadow Dry-Run
+## Current Milestone: BLEED — Stop the Bleeding
 
-**Goal:** Build the read-only observability + safety-rehearsal layer for the auto-dev/autospawn path
-*before* the owner arms it (`REMO_ORCHESTRATOR_AUTOSPAWN=1`). ZERO behavior changes to the live dispatch
-path — pure additive read/shadow work over seams OEE already proved, so the eventual arming decision is
-informed and reversible.
+**Goal:** the app cannot silently wedge, and the spend ceiling is proven — not asserted.
 
-**Target features:**
-- Surface the existing `routine_run_log` in the web UI — per-session "Auto-Dev Activity" panel + hub-wide
-  orchestrator run feed (rationale, command, outcome, PR url, reviewer verdict, deploy-verify, cost/tokens)
-  via a new read-only `GET /api/orchestrator/run-log`.
-- Autospawn SHADOW dry-run — flag-gated `REMO_ORCHESTRATOR_AUTOSPAWN_SHADOW=1` path where `inject.ts`
-  `maybeAutospawnOffline` runs the FULL gate/allowlist/cap AND-chain and records the would-be spawn+macro
-  prompt WITHOUT calling `launchSessionForUser` or dispatching (guard test asserts no spawn/dispatch).
-- Orchestrator metrics + cap-approach alerting — extend `hub/src/observability/metrics.ts` with orchestrator
-  counters (cycles enqueued/drained/skipped, skip-reason histogram incl `no_session`/`offline`, dispatch
-  outcomes, daily token+cost vs the 50M/`$` ceilings) + stage-gated `notify.ts` fan-out at a configurable %.
+Four independent fixers in flight:
+- **#346** — NULL-`session_id` run leak (permanent `at_capacity` lockout); circuit breaker latched
+  open 5 days with no alarm; `dailyTokenCapGate` extended to all seven dispatch paths + proven to
+  fire against real Postgres.
+- **safety-fences** — CI lint fencing `schema.sql` (it re-runs in full every boot); delete the
+  `REMO_ORCHESTRATOR_LEGACY_WAVES` dead rollback path; snippet↔envelope contract test.
+- **baseline-triage** — the 129 known-failing tests. A green suite that hides a ninth of itself is
+  how all three CRITICALs shipped undetected. One test literally pinned the run-leak bug as
+  *intended behavior*.
+- **ghost-hostname** — stop hostname-NULL ghost-session churn at the supervisor source.
 
-**Out of scope (owner gates — keep out):** flipping `REMO_ORCHESTRATOR_AUTOSPAWN=1` / populating the
-allowlist (shadow mode is the deliberate substitute), changing any cap *behavior* in `dispatch/gates.ts`,
-touching the no-auto-merge guard, any destructive migration (additive idempotent DDL only), and redesigning
-the supervisor-invisible-local-build session model.
+**Definition of Done:** zero known-failing tests; every dispatch path provably gated; no run can
+leak; the breaker self-heals and is visible; `schema.sql` cannot carry a mutating statement.
 
-**Requirements:** `.planning/REQUIREMENTS.md` (OBSRV-NN).
+## Untested Assumption (the biggest open risk)
 
-## Evolution
-
-This document evolves at phase transitions and milestone boundaries.
-
-**After each phase transition** (via `/gsd-transition`):
-1. Requirements invalidated? → Move to Out of Scope with reason
-2. Requirements validated? → Move to Validated with phase reference
-3. New requirements emerged? → Add to Active
-4. Decisions to log? → Add to Key Decisions
-5. "What This Is" still accurate? → Update if drifted
-
-**After each milestone** (via `/gsd-complete-milestone`):
-1. Full review of all sections
-2. Core Value check — still the right priority?
-3. Audit Out of Scope — reasons still valid?
-4. Update Context with current state
+**Nobody has ever paid for this, and demand for the team tier is unvalidated.** The cheapest test —
+post the fleet-ops angle (N repos, overnight, hard ceiling, reviewable PR in the morning) to
+r/ClaudeAI + HN with a $99/mo team waitlist — has **not been run**. Fewer than 20 emails and the
+ICP is wrong, learned for the price of one Reddit post. Run it before building Milestone MONEY.

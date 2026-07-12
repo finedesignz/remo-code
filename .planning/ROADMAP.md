@@ -1,115 +1,112 @@
-<!-- updated: 2026-06-27 -->
-# Roadmap — Milestone OBSRV (Orchestrator Observability & Shadow Dry-Run)
+<!-- updated: 2026-07-12 -->
+# Roadmap — Milestone PTYCAP (Token-Gate the Interactive PTY Path)
 
-> Read-only observability + safety-rehearsal layer for the auto-dev/autospawn path, built
-> *before* the owner arms `REMO_ORCHESTRATOR_AUTOSPAWN=1`. **ZERO behavior change to the live
-> dispatch path** — pure additive read/shadow work over seams OEE already proved. Phase
-> dirs/labels are milestone-scoped (`OBSRV-NN-slug`). Prior-milestone roadmaps archived under
-> `.planning/milestones/`.
+> **This milestone blocks every other milestone.** The owner has decided the orchestrator will
+> drive the interactive PTY (see `.planning/PROJECT.md` → Position on Anthropic). The PTY path
+> currently has **no token ceiling** — usage is recorded only post-hoc, and `dailyCostCapGate` is a
+> *dollar* cap, which is theatre on a flat-rate subscription. Arming automation on the PTY before
+> gating it points the exact gun that killed the owner's Max subscription on 2026-07-11.
+>
+> Prior-milestone roadmaps archived under `.planning/milestones/`. Phase dirs are milestone-scoped
+> (`PTYCAP-NN-slug`).
 
-## Hard invariants (encoded in every relevant phase's success criteria)
+## Hard invariants (encoded in every phase's success criteria)
 
-- ZERO behavior change to the live dispatch path (`hub/src/dispatch/`).
-- Shadow mode NEVER calls `launchSessionForUser` and NEVER dispatches a prompt.
-- Never flip `REMO_ORCHESTRATOR_AUTOSPAWN` / never populate `orchestrator_autospawn_allowlist`.
-- Never change cap *behavior* in `hub/src/dispatch/gates.ts` (read counters only).
-- Never touch the no-auto-merge guard.
-- Additive idempotent DDL only (`hub/src/db/schema.sql` re-runs every boot); backfills → `hub/scripts/` one-shots. No DROP/ALTER of existing columns.
+- **No provider API key on the PTY path — ever.** The argv allowlist-of-one, `env-sanitize.ts`, and
+  the no-API-key guard tests stay green. Relaxing *human-only* does NOT relax *no-API-key*.
+- **The actor is server-inferred, never client-asserted** (cookie ⇒ human, api_key ⇒ agent). A
+  spoofed `source` field must never be able to impersonate a human turn.
+- **No dispatch path may spend outside the gate chain.** `hub/test/token-cap-coverage.test.ts`
+  scans every `gates: [...]` in `hub/src` and fails CI on omission. Anything that spawns a CLI turn
+  *outside* `dispatch()` (e.g. the supervisor's circuit-breaker probe) is a defect, not an exception.
+- **Caps are denominated in tokens.** Dollars are advisory.
+- Additive idempotent DDL only (`schema.sql` re-runs every boot); backfills → `hub/scripts/` one-shots.
 
 ## Phases
 
-- [ ] **Phase 1: Run-Log Read DAL + API** — read-only user-scoped paginated `GET /api/orchestrator/run-log` over `routine_run_log` + OpenAPI docs.
-- [ ] **Phase 2: Web Auto-Dev Activity** — per-session timeline panel + hub-wide orchestrator run feed (blue accent, no indigo).
-- [ ] **Phase 3: Orchestrator Metrics Counters** — orchestrator counters + skip-reason histogram + daily token/cost vs ceilings in `metrics.ts`.
-- [ ] **Phase 4: Autospawn Shadow Dry-Run** — `REMO_ORCHESTRATOR_AUTOSPAWN_SHADOW=1` records would-be spawns with no spawn/dispatch; guard test.
-- [ ] **Phase 5: Cap-Approach Alerting** — stage-gated throttled `notify.ts` fan-out at a configurable % of either cap.
-- [ ] **Phase 6: E2E Hardening + Docs + Release** — real-Postgres e2e, docs, version bump, ship + smoke-verify live.
+- [ ] **Phase 1: PTY Token Accounting** — live, mid-turn token accounting for a PTY turn (post-hoc is too late; a TUI turn can run for many minutes).
+- [ ] **Phase 2: PTY Pre-Flight Gate** — a programmatic turn cannot be written to the PTY without passing the full gate chain.
+- [ ] **Phase 3: Governed-Automation Guard** — `humanOnlyPtyGate` → `governedAutomationPtyGate`, new flag, default OFF.
+- [ ] **Phase 4: Lifetime Inject Counter + Kill Switch** — rate ceilings don't stop a slow grind; add a lifetime per-task counter and a real kill switch.
+- [ ] **Phase 5: Throwaway-Repo Due→PR Proof** — prove the thing actually works, once, on a repo nobody cares about.
+- [ ] **Phase 6: Hardening + Docs + Release** — real-Postgres e2e, docs, version bump, ship, smoke-verify.
 
 ## Phase Details
 
-### Phase 1: Run-Log Read DAL + API
-**Goal**: A user can fetch their orchestrator run history through a read-only, user-scoped, paginated API over the existing `routine_run_log` table.
-**Depends on**: Nothing (first phase; reads an existing table — no schema change required, additive read index only if needed).
-**Requirements**: RUNLOG-01, RUNLOG-02
-**Success Criteria** (what must be TRUE):
-  1. `GET /api/orchestrator/run-log` returns the caller's own runs only, paginated, with `?session_id=` per-session filter and a hub-wide (no filter) mode.
-  2. Each row exposes rationale, command, outcome, PR url, reviewer verdict, deploy-verify result, and per-cycle token/cost.
-  3. The route is documented in `/openapi.json` + `docs/api.md` with `bun run docs:sync` clean (docs-drift CI green).
-  4. No write path, no dispatch path, and `hub/src/dispatch/gates.ts` are touched; any DDL is additive idempotent only.
-**Plans**: TBD
+### Phase 1: PTY Token Accounting
+**Goal**: The hub knows what a PTY turn is spending *while it spends it*, not after.
+**Depends on**: #346 (token gate on all stream-json paths) merged.
+**Success Criteria**:
+  1. A live PTY turn's token usage is observable mid-turn, not only on completion.
+  2. Interactive and programmatic usage remain in separate buckets (the metering early-warning signal).
+  3. A long-running TUI turn that crosses the ceiling mid-flight is detectable.
 
-### Phase 2: Web Auto-Dev Activity
-**Goal**: A user can see what the orchestrator did, per session and across all their sessions, in the web UI.
-**Depends on**: Phase 1 (consumes `GET /api/orchestrator/run-log`).
-**Requirements**: RUNLOG-03, RUNLOG-04
-**Success Criteria** (what must be TRUE):
-  1. A per-session "Auto-Dev Activity" panel renders a timeline: rationale → command → outcome → PR/verdict/deploy-verify.
-  2. A hub-wide orchestrator run feed shows runs across all the user's sessions.
-  3. Accent is blue, with no indigo (passes `web/test/no-indigo.test.ts`).
-  4. The UI is read-only — no control that can trigger a spawn or dispatch.
-**Plans**: TBD
-**UI hint**: yes
+### Phase 2: PTY Pre-Flight Gate
+**Goal**: No programmatic turn reaches the PTY without passing the full gate chain.
+**Depends on**: Phase 1.
+**Success Criteria**:
+  1. A programmatic write to the PTY passes `[thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]` or it does not happen.
+  2. `token-cap-coverage.test.ts` is extended to cover the PTY path.
+  3. Human turns are unaffected — a human at a keyboard is never gated by an inject-rate ceiling.
 
-### Phase 3: Orchestrator Metrics Counters
-**Goal**: The orchestrator's cycle activity and cap headroom are observable as metrics.
-**Depends on**: Nothing (additive counters in `metrics.ts`; parallel with Phases 1/2/4).
-**Requirements**: METRIC-01, METRIC-02
-**Success Criteria** (what must be TRUE):
-  1. `hub/src/observability/metrics.ts` exposes counters for cycles enqueued/drained/skipped and a skip-reason histogram including `no_session` and `offline`.
-  2. Dispatch outcomes are counted as metrics.
-  3. Daily accumulated token + cost are tracked against the 50M-token / dollar ceilings and exposed as metrics (read-only — cap behavior in `gates.ts` unchanged).
-**Plans**: TBD
+### Phase 3: Governed-Automation Guard
+**Goal**: Automation may drive the PTY, but only under governance.
+**Depends on**: Phase 2 (the gate must exist before the door opens).
+**Success Criteria**:
+  1. `humanOnlyPtyGate` becomes `governedAutomationPtyGate`: a non-human actor is admitted **only** when carrying token cap + inject-rate ceiling + lifetime counter + kill switch.
+  2. Actor remains server-inferred. A spoofed `source` cannot impersonate a human (negative test).
+  3. Flag-gated, **default OFF**. A true no-op when off.
+  4. The no-API-key and argv-allowlist guard tests still pass unchanged.
 
-### Phase 4: Autospawn Shadow Dry-Run
-**Goal**: The owner can see exactly what arming autospawn would do against real due rows, with zero spend and zero side effects.
-**Depends on**: Phase 1 (shadow records surface through the same run-log API/UI per SHADOW-03).
-**Requirements**: SHADOW-01, SHADOW-02, SHADOW-03, SHADOW-04
-**Success Criteria** (what must be TRUE):
-  1. With `REMO_ORCHESTRATOR_AUTOSPAWN_SHADOW=1`, `maybeAutospawnOffline` runs the full gate/allowlist/cap AND-chain and records a "would-have-spawned" record (spawn + macro prompt).
-  2. A guard test asserts that while shadow mode is active, `launchSessionForUser` is never called and no prompt is dispatched.
-  3. Shadow records appear in the same run-log API/UI as real runs, clearly flagged as shadow.
-  4. Shadow mode is OFF by default and a true no-op when off or when the allowlist is empty; `REMO_ORCHESTRATOR_AUTOSPAWN` is never flipped and the allowlist is never populated.
-**Plans**: TBD
+### Phase 4: Lifetime Inject Counter + Kill Switch
+**Goal**: A slow grind is as impossible as a fast loop.
+**Depends on**: Phase 3.
+**Success Criteria**:
+  1. A **lifetime** per-task inject counter (4/hr forever is still 35,000/year).
+  2. An owner-facing kill switch halts all automation immediately, hub-wide and per-session.
+  3. Alarm emails the owner at 60% of the daily token ceiling.
+  4. Default daily token cap lowered from 50M to a survivable figure (~20M).
 
-### Phase 5: Cap-Approach Alerting
-**Goal**: The owner is warned before the daily token or cost ceiling is reached.
-**Depends on**: Phase 3 (reads the daily token/cost-vs-ceiling metrics).
-**Requirements**: METRIC-03
-**Success Criteria** (what must be TRUE):
-  1. A stage-gated `notify.ts` fan-out fires when daily token OR cost accumulation crosses a configurable % threshold of either cap.
-  2. The alert is throttled (no repeated spam within a window) and reuses existing notify plumbing.
-  3. The threshold % is configurable via env/config and the alert is a true no-op below threshold.
-  4. No cap *behavior* in `dispatch/gates.ts` changes — alerting is observe-only.
-**Plans**: TBD
+### Phase 5: Throwaway-Repo Due→PR Proof
+**Goal**: The orchestrator produces one reviewable PR, unattended, on a repo nobody cares about.
+**Depends on**: Phase 4.
+**Success Criteria**:
+  1. Branch-only. **Never merges to main.** One whitelisted repo. Hard budget.
+  2. It produces a reviewable PR with a green CI check, or it cleanly does nothing and says why.
+  3. This has **never once happened**. Until it does, the orchestrator is unproven and unsellable.
 
-### Phase 6: E2E Hardening + Docs + Release
-**Goal**: The whole observability + shadow surface is proven against real Postgres, documented, and shipped live.
+### Phase 6: Hardening + Docs + Release
+**Goal**: Shipped, documented, verified live.
 **Depends on**: Phases 1–5.
-**Requirements**: HARDEN-01, HARDEN-02, HARDEN-03
-**Success Criteria** (what must be TRUE):
-  1. E2E coverage extending `hub/test/e2e/` proves the run-log API, the shadow no-op invariant, and the alert-threshold crossing against real Postgres (Woodpecker qc gate green).
-  2. `docs/orchestrator-observability.md` documents the surface and CLAUDE.md's env section lists the new flag(s) + thresholds.
-  3. Version is bumped (semver) across all sources in lockstep; deployed; the new `GET /api/orchestrator/run-log` route is smoke-verified live at app.remo-code.com.
-**Plans**: TBD
+**Success Criteria**:
+  1. Real-Postgres e2e covers the PTY gate + the governed-automation guard + the kill switch.
+  2. `CLAUDE.md` env section + `docs/` updated; `bun run docs:sync` clean (docs-drift CI green).
+  3. Version bumped in lockstep, deployed, smoke-verified at app.remo-code.com.
 
 ## Progress
 
-| Phase | Plans Complete | Status | Completed |
-|-------|----------------|--------|-----------|
-| 1. Run-Log Read DAL + API | 0/0 | Not started | - |
-| 2. Web Auto-Dev Activity | 0/0 | Not started | - |
-| 3. Orchestrator Metrics Counters | 0/0 | Not started | - |
-| 4. Autospawn Shadow Dry-Run | 0/0 | Not started | - |
-| 5. Cap-Approach Alerting | 0/0 | Not started | - |
-| 6. E2E Hardening + Docs + Release | 0/0 | Not started | - |
+| Phase | Status |
+|-------|--------|
+| 1. PTY Token Accounting | Not started (blocked on #346) |
+| 2. PTY Pre-Flight Gate | Not started |
+| 3. Governed-Automation Guard | Not started |
+| 4. Lifetime Counter + Kill Switch | Not started |
+| 5. Throwaway-Repo Due→PR Proof | Not started |
+| 6. Hardening + Docs + Release | Not started |
 
-## Dependency graph (parallelism)
+## Dependency graph
 
 ```
-Phase 1 ──┬─> Phase 2
-          └─> Phase 4
-Phase 3 ──────> Phase 5
-All ──────────> Phase 6
+#346 ──> Phase 1 ──> Phase 2 ──> Phase 3 ──> Phase 4 ──> Phase 5 ──> Phase 6
 ```
 
-Parallel-startable now: **Phase 1** and **Phase 3** (no deps). Phase 4 unblocks after 1; Phase 2 after 1; Phase 5 after 3; Phase 6 last.
+Strictly serial by design. Each phase is a safety precondition for the next. **Do not parallelize
+Phase 3 ahead of Phase 2** — that is the ordering that caused the 2026-07-11 incident.
+
+## After PTYCAP
+
+Milestone **GOV** (the governance surface: org spend ledger, policy caps, audit, kill switch UI,
+receipts page) — that is the product being sold. See `.planning/PROJECT.md` → Planned Milestones.
+
+**Before Milestone MONEY**: run the 48-hour demand test (fleet-ops angle, $99/mo team waitlist,
+r/ClaudeAI + HN). It is unrun, it is free, and it is the biggest untested assumption in the project.
