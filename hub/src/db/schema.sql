@@ -79,7 +79,13 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'comp
 
 -- Migration for existing rows (idempotent — only adds column if missing)
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS capabilities TEXT[] NOT NULL DEFAULT ARRAY['agent','supervisor'];
--- Ensure all active keys have the supervisor cap (idempotent backfill)
+-- Ensure all active keys have the supervisor cap (idempotent backfill).
+-- LANDMINE (audited 2026-07-12): convergent only because BOTH key minters
+-- (orchestrator-dal.ts, auto-launch.ts) grant 'supervisor'. The day anyone mints
+-- a NARROWER key, the next hub boot silently REWRITES its capabilities to
+-- ['agent','supervisor'] — escalating it and dropping its extra caps. Replace
+-- with a one-shot hub/scripts/ backfill when a narrower key becomes possible.
+-- schema-lint: allow convergent today (every minted key already carries 'supervisor' ⇒ WHERE matches 0 rows)
 UPDATE api_keys SET capabilities = ARRAY['agent','supervisor'] WHERE capabilities IS NULL OR NOT ('supervisor' = ANY(capabilities));
 
 -- ── Supervisor feature tables ──────────────────────────────────────────────────
@@ -186,8 +192,10 @@ ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS task_type TEXT NOT NULL DEF
 --
 -- Step A — rewrite legacy user-pickable rows to the new triad. Prompt text is
 -- preserved verbatim in payload.prompt (no payload changes here).
+-- schema-lint: allow convergent — the CHECK constraint below forbids the legacy values, so WHERE matches 0 rows
 UPDATE scheduled_tasks SET task_type = 'dev'
   WHERE task_type IN ('prompt', 'skill', 'continue_dev');
+-- schema-lint: allow convergent — same CHECK constraint; 'security_scan' is unreachable once applied
 UPDATE scheduled_tasks SET task_type = 'security'
   WHERE task_type = 'security_scan';
 -- log_check and triage are unchanged.
@@ -996,6 +1004,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_disabled_explicitly BOOL
 -- this whole file on EVERY hub boot — without the guard the UPDATE row-locks +
 -- rewrites every non-sentinel user row on every deploy (bloat/autovacuum churn).
 -- With it, the statement matches 0 rows once converged.
+-- schema-lint: allow convergent — `AND orchestrator_enabled = false` guard ⇒ WHERE matches 0 rows once converged
 UPDATE users SET orchestrator_enabled = true
   WHERE orchestrator_disabled_explicitly = false AND orchestrator_enabled = false;
 
@@ -1009,12 +1018,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_orchestrator_unique
 -- the per-user single-supervisor api_keys uniqueness. Existing rows backfill
 -- to 'supervisor'.
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'supervisor';
+-- schema-lint: allow convergent — column is NOT NULL DEFAULT 'supervisor' ⇒ NULL/'' matches 0 rows once applied
 UPDATE api_keys SET purpose = 'supervisor' WHERE purpose IS NULL OR purpose = '';
 
 -- The legacy partial unique index `idx_api_keys_user_active` enforces ONE
 -- active key per user — incompatible with an orchestrator-purpose key
 -- coexisting with the supervisor key. Replace it with a per-(user, purpose)
 -- variant so each purpose has at most one active row. Idempotent.
+-- schema-lint: allow idempotent DDL — IF EXISTS drop of a legacy index; no-op on every boot after the first
 DROP INDEX IF EXISTS idx_api_keys_user_active;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_purpose_active
   ON api_keys(user_id, purpose) WHERE revoked_at IS NULL;

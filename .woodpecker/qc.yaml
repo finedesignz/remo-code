@@ -38,6 +38,9 @@ steps:
       # dead. The guard therefore STAYS for now; removing it would red every PR.
       # Follow-up: burn the 393 down, then delete the `|| echo` so this actually gates.
       - bunx tsc --noEmit -p hub/tsconfig.json || echo 'typecheck informational — 393 known pre-existing errors; see hub/tsconfig.json PR'
+      # schema.sql re-runs IN FULL on every hub boot — hard-fail any un-pragma'd
+      # UPDATE/INSERT/DELETE/DROP/TRUNCATE before it can re-fire against prod.
+      - bun run schema-lint
       - bun run check-baseline
       - bun run migration-verify
       - bun test hub/test/orchestrator-data-model.test.ts hub/test/orchestrator-queue.test.ts hub/test/orchestrator-run-log.test.ts hub/test/orchestrator-stage-presets.test.ts hub/test/orchestrator-merge-command.test.ts hub/test/migrate-legacy-tasks.test.ts hub/test/feedback-key-ownership.test.ts
