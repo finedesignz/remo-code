@@ -64,7 +64,10 @@ function resolveDeps(dueRows: DueRow[]): ResolveDeps {
       timezone: 'UTC',
     })) as any,
     buildControllerContext: (async () => ctxWithDue(dueRows)) as any,
-  }
+    // DB-backed — stub it, or this unit test opens a real postgres connection and
+    // flakes on the 5s timeout (#348's de-flake, preserved after the wave seam died).
+    markRowsFired: async () => null,
+  } as any
 }
 
 const entry = { id: 'q1', session_id: 's1', priority: 0, status: 'running', enqueued_at: '', started_at: null } as any
