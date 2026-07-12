@@ -400,8 +400,14 @@ export function setSupervisorSessionInventory(
 
 /**
  * fix/stop-the-bleed — record the supervisor's circuit-breaker snapshot. Returns
- * the breakers that are NEWLY open since the last push, so the caller can log /
- * alert once per trip instead of every 10s.
+ * the breakers that are NEWLY OPEN since the last push, so the caller alerts once
+ * per trip instead of every 10s.
+ *
+ * Identity is `(repo_path, state, opened_at)` — NOT repo_path alone. A breaker
+ * cycling open → half_open → open for the same repo is a RE-TRIP and must alert
+ * again; keying on repo_path alone would keep it "already seen" forever. Only
+ * `state === 'open'` entries are returned (half_open is a recovery step, not an
+ * alarm).
  */
 export function setSupervisorCircuitBreakers(
   supervisorId: string,
@@ -409,8 +415,9 @@ export function setSupervisorCircuitBreakers(
 ): { newlyOpen: CircuitBreakerEntry[]; userId: string | null } {
   const entry = supervisors.get(supervisorId)
   if (!entry) return { newlyOpen: [], userId: null }
-  const before = new Set(entry.circuitBreakers.map((b) => b.repo_path))
-  const newlyOpen = breakers.filter((b) => !before.has(b.repo_path))
+  const key = (b: CircuitBreakerEntry) => `${b.repo_path}|${b.state}|${b.opened_at}`
+  const before = new Set(entry.circuitBreakers.map(key))
+  const newlyOpen = breakers.filter((b) => b.state === 'open' && !before.has(key(b)))
   entry.circuitBreakers = breakers
   return { newlyOpen, userId: entry.userId }
 }

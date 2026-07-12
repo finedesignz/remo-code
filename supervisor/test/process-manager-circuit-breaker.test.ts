@@ -138,40 +138,49 @@ describe('ProcessManager circuit breaker', () => {
     expect(bridgesFor('c').length).toBe(before)
   })
 
-  test('transitions to half-open after the cooldown and fires ONE probe spawn', async () => {
+  test('SAFETY: half-open spawns NOTHING — no synthetic run, no prompt replay, no spend', async () => {
+    // The whole point. A supervisor-manufactured probe carrying the tripped run's
+    // RunSpec (incl. initialPrompt) would RE-EXECUTE a user/scheduler prompt with
+    // no hub dispatch, no cost/token gate, no dedupe, no session_run row — a
+    // seventh un-gated spend path AND a loop generator (re-running the very prompt
+    // that crashed the CLI). Half-open must therefore be a pure state flip.
     const { pm } = makePM()
-    await pm.start(spec({ runId: 'h1' }))
+    await pm.start(spec({ runId: 'h1', initialPrompt: 'expensive user prompt' }))
+    expect(bridgesFor('h1').length).toBe(1)
     bridgesFor('h1')[0].cb.onSpawned({ pid: 1 })
     crashUntilOpen(bridgesFor('h1')[0].cb)
     expect(pm.circuitBreakerSnapshot()[0].state).toBe('open')
 
-    expect(bridgesFor('h1').length).toBe(1)
+    const before = bridges.length
     await sleep(60) // > cooldown (25ms)
 
-    // Exactly one probe spawn (runId `h1-probe1`).
-    expect(bridgesFor('h1').length).toBe(2)
-    expect(bridgesFor('h1-probe').length).toBe(1)
+    // Cooldown elapsed → half_open, and ZERO new bridges anywhere: nothing spawned,
+    // so nothing can spend. The prompt is never replayed.
     expect(pm.circuitBreakerSnapshot()[0].state).toBe('half_open')
+    expect(bridges.length).toBe(before)
+    expect(bridgesFor('h1').length).toBe(1)
+    expect(bridges.every((b) => b.opts.runId !== 'h1')).toBe(false) // sanity: the original is there
   })
 
-  test('CLOSES on a successful probe — the supervisor self-heals with no human restart', async () => {
+  test('CLOSES when the next GENUINE hub-dispatched start spawns (gated by construction)', async () => {
     const { pm } = makePM()
     await pm.start(spec({ runId: 's1' }))
     bridgesFor('s1')[0].cb.onSpawned({ pid: 1 })
     crashUntilOpen(bridgesFor('s1')[0].cb)
     await sleep(60)
+    expect(pm.circuitBreakerSnapshot()[0].state).toBe('half_open')
 
-    // Probe spawns successfully → breaker closes.
-    const probe = bridgesFor('s1-probe')[0]
-    probe.cb.onSpawned({ pid: 2 })
+    // Half-open ADMITS the next real start (which came through the hub's dispatch
+    // gate chain — cost cap, token cap and all). Its successful spawn closes the
+    // breaker: the supervisor self-heals with no human restart and no synthetic work.
+    const r = await pm.start(spec({ runId: 's2' }))
+    expect(r).toBeNull()
+    bridgesFor('s2')[0].cb.onSpawned({ pid: 2 })
 
     expect(pm.circuitBreakerSnapshot()).toEqual([])
-    // And a normal start for the repo is admitted again (not circuit_open).
-    const r = await pm.start(spec({ runId: 's2' }))
-    expect(r?.reason).not.toBe('circuit_open')
   })
 
-  test('RE-OPENS if the probe crashes, with a longer cooldown and a failed-probe count', async () => {
+  test('RE-OPENS if the admitted probe crashes, with a longer cooldown and a failed-probe count', async () => {
     const { pm } = makePM()
     await pm.start(spec({ runId: 'r1' }))
     bridgesFor('r1')[0].cb.onSpawned({ pid: 1 })
@@ -179,8 +188,10 @@ describe('ProcessManager circuit breaker', () => {
     await sleep(60)
     expect(pm.circuitBreakerSnapshot()[0].state).toBe('half_open')
 
-    // ONE crash while half-open re-opens immediately (no re-earning the threshold).
-    const probe = bridgesFor('r1-probe')[0]
+    // The next genuine start is admitted as the probe, and it crashes: ONE crash
+    // while half-open re-opens immediately (no re-earning the threshold).
+    await pm.start(spec({ runId: 'r2' }))
+    const probe = bridgesFor('r2')[0]
     probe.cb.onExit({ code: 1, reason: 'runner_exit' })
 
     const snap = pm.circuitBreakerSnapshot()

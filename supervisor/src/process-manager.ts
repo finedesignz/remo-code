@@ -56,8 +56,6 @@ interface Breaker {
   failedProbes: number
   timer: ReturnType<typeof setTimeout> | null
   lastReason: string | null
-  /** Spec to re-probe with when the cooldown elapses. */
-  spec: RunSpec | null
 }
 
 export interface ProcessManagerCallbacks {
@@ -77,10 +75,14 @@ const CIRCUIT_THRESHOLD = 5
  * healthy — scheduled tasks, orchestrator and Telegram all silently no-opped,
  * and recovery needed a human to notice and restart the supervisor by hand.
  *
- * The breaker now self-heals: after the cooldown it goes HALF-OPEN and fires a
- * single probe spawn. A probe that reaches `running` CLOSES the breaker; a probe
- * that crashes RE-OPENS it (cooldown doubles up to the cap). After
- * `CIRCUIT_MAX_PROBES` consecutive failed probes the breaker stays open and is
+ * The breaker now self-heals: after the cooldown it goes HALF-OPEN, which ADMITS
+ * the next GENUINE hub-dispatched start for that repo as the probe. It NEVER
+ * spawns synthetic work — a supervisor-manufactured probe carrying the tripped
+ * run's `initialPrompt` would replay a user/scheduler prompt with no hub dispatch
+ * and no cost/token gate (an un-gated spend path AND a loop generator). The
+ * admitted probe is gated by construction. It CLOSES the breaker if the CLI
+ * reaches `running`; it RE-OPENS it if it crashes (cooldown doubles up to the
+ * cap). After `CIRCUIT_MAX_PROBES` consecutive failed probes it stays open and is
  * marked `exhausted` — but it is REPORTED to the hub either way
  * (`circuitBreakerSnapshot` rides the session_inventory push), so an open breaker
  * can never again fail silently.
@@ -386,9 +388,10 @@ export class ProcessManager {
   }
 
   /**
-   * Trip (or re-trip) the breaker for a repo: stop the run, and — unless the
-   * probe budget is exhausted — schedule a half-open probe after the cooldown so
-   * the supervisor self-heals without a human restart.
+   * Trip (or re-trip) the breaker for a repo: stop the run and — unless the probe
+   * budget is exhausted — schedule the half-open transition after the cooldown, so
+   * the supervisor self-heals without a human restart. The transition ADMITS the
+   * next genuine hub-dispatched start; it never spawns anything itself.
    */
   private tripBreaker(run: RunInstance, code: number | null, reason: string) {
     const spec = run.spec
@@ -400,7 +403,6 @@ export class ProcessManager {
       failedProbes,
       timer: null,
       lastReason: reason,
-      spec,
     }
     this.breakers.set(spec.repoPath, breaker)
 
@@ -419,25 +421,36 @@ export class ProcessManager {
     const cooldown = this.cooldownFor(failedProbes)
     this.cb.onLog(
       'error',
-      `circuit breaker open — stopping; half-open probe in ${cooldown}ms (probe ${failedProbes + 1}/${CIRCUIT_MAX_PROBES})`,
+      `circuit breaker open — stopping; half-open in ${cooldown}ms (probe ${failedProbes + 1}/${CIRCUIT_MAX_PROBES})`,
       spec.runId,
     )
-    breaker.timer = setTimeout(() => this.halfOpenProbe(spec.repoPath), cooldown)
+    breaker.timer = setTimeout(() => this.halfOpen(spec.repoPath), cooldown)
     ;(breaker.timer as any)?.unref?.()
   }
 
-  /** Cooldown elapsed → go HALF-OPEN and fire exactly one probe spawn. */
-  private halfOpenProbe(repoPath: string) {
+  /**
+   * Cooldown elapsed → go HALF-OPEN. **No synthetic spawn.**
+   *
+   * The supervisor NEVER manufactures its own run to probe with. An earlier draft
+   * re-spawned the tripped `RunSpec` (prompt and all) under a synthetic run id —
+   * which would REPLAY a user/scheduler prompt with no hub dispatch, no cost/token
+   * gate, no dedupe and no session_run row: a seventh un-gated spend path, and a
+   * loop generator (the prompt that crashed the CLI gets re-run forever). Exactly
+   * the failure class this branch exists to kill.
+   *
+   * Instead half-open simply ADMITS the next GENUINE hub-dispatched start for this
+   * repo. That start is gated by construction (it came through `dispatch()`), so
+   * the probe can never spend outside the gate chain. It closes the breaker if the
+   * CLI spawns, and re-opens it (longer cooldown, +1 failed probe) if it crashes.
+   */
+  private halfOpen(repoPath: string) {
     const breaker = this.breakers.get(repoPath)
-    if (!breaker || !breaker.spec) return
+    if (!breaker) return
     breaker.timer = null
     breaker.state = 'half_open'
-    this.cb.onLog('warn', `circuit breaker half-open — probing ${repoPath}`, breaker.spec.runId)
-    // Fresh run instance for the probe (the tripped one was evicted). start()
-    // lets a half_open breaker through; a crash re-opens it, a successful spawn
-    // closes it.
-    void this.start({ ...breaker.spec, runId: `${breaker.spec.runId}-probe${breaker.failedProbes + 1}` }).catch(
-      (err: any) => this.cb.onLog('error', `circuit probe failed to start: ${err?.message ?? err}`, breaker.spec?.runId),
+    this.cb.onLog(
+      'warn',
+      `circuit breaker half-open for ${repoPath} — the next hub-dispatched start is admitted as the probe (no synthetic spawn, no prompt replay)`,
     )
   }
 

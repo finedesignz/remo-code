@@ -348,7 +348,7 @@ export async function finalizeAgedOpenRuns(maxAgeMs: number): Promise<string[]> 
     UPDATE session_runs
     SET ended_at = now(), exit_reason = 'run_max_age'
     WHERE ended_at IS NULL
-      AND started_at < now() - (${seconds} || ' seconds')::interval
+      AND started_at < now() - make_interval(secs => ${seconds})
     RETURNING id
   `
   return rows.map((r) => r.id)

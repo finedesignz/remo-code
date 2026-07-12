@@ -253,8 +253,10 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
 - **Supervisor spawn circuit-breaker self-heal** (`supervisor/src/process-manager.ts`,
   fix/stop-the-bleed): the breaker used to latch OPEN forever — no cooldown, no probe, no hub signal
   (prod 2026-07-07→11: zero CLI spawns for four days while the hub reported healthy). It now
-  half-opens after a cooldown (5min, exponential to 30min, max 5 probes), CLOSES on a successful
-  probe spawn, RE-OPENS if the probe crashes, and REPORTS state to the hub in the `session_inventory`
+  half-opens after a cooldown (5min, exponential to 30min, max 5 probes). **Half-open spawns nothing** —
+  it ADMITS the next genuine hub-dispatched start as the probe (so the probe is cost/token-gated by
+  construction; the supervisor never replays a prompt outside `dispatch()`), CLOSES on that probe's
+  successful spawn, RE-OPENS if it crashes, and REPORTS state to the hub in the `session_inventory`
   frame (`circuit_breakers[]` → `hub/src/ws/supervisor-registry.ts` → `GET /api/supervisors`, plus a
   loud hub log on every new trip). `circuit_open` is a per-run start-rejection reason
   (`SUPERVISOR_START_REJECT_REASONS`), never a supervisor-wide `stopped`.
