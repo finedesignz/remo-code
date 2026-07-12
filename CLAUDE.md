@@ -247,12 +247,17 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   leak — NULL-`session_id` rows that `finalizeOrphanedRunsForSupervisor` could never match, because
   SQL `NULL = ANY(...)` is NULL so `NOT (...)` is never TRUE — is fixed in the reconciler itself
   (`session_id IS NULL OR NOT (session_id = ANY(...))`); this sweep closes the whole CLASS (rows whose
-  supervisor never pushes inventory again are invisible to the reconciler). **The predicate is LIVENESS,
-  NOT AGE**: a run is reaped only when its session appears in NO connected supervisor's
-  `session_inventory` (`getAllLiveSessionIds()`), AND it is older than the grace. Age alone cannot tell a
-  leaked row from a legitimate 7h TEAB build — force-closing one would free its slot while the CLI kept
-  running (a second CLI could launch on top of it), which is the same bogus-capacity bug from the other
-  side. A run a connected supervisor reports as live is NEVER closed here, however old. Knobs:
+  supervisor never pushes inventory again are invisible to the reconciler). **The predicate is POSITIVE
+  KNOWLEDGE, SCOPED PER SUPERVISOR** — never age, never a global `UPDATE`. The sweep runs only for
+  supervisors that are CONNECTED **and have pushed `session_inventory` at least once since boot**
+  (`getInventoriedSupervisors()`); for those, and only those, "absent from your inventory" proves the
+  session is gone. **Zero such supervisors ⇒ the sweep is a NO-OP** (a hub that just restarted knows
+  nothing and must reap nothing — an empty live-set means "I don't know", not "nothing is alive"). A
+  DISCONNECTED supervisor's runs are closed by `finalizeOpenRunsForSupervisor` on socket close, not here.
+  NULL-`session_id` rows are attributed by their (NOT NULL) `supervisor_id`, so they are reaped by their
+  owning supervisor's sweep. Age survives only as a grace within a supervisor's scope. A run a supervisor
+  reports as live is NEVER closed here, however old (age alone cannot tell a leaked row from a legitimate
+  7h TEAB build; force-closing one would free its slot while the CLI kept running). Knobs:
   **`REMO_SESSION_RUN_MAX_MS`** (grace, default **86400000** = 24h; clamped to a 60s floor **inside the
   DAL**, `SESSION_RUN_MIN_AGE_FLOOR_MS`, so no caller can turn it into a fleet-wide force-close),
   **`REMO_SESSION_RUN_REAPER_INTERVAL_MS`** (default **900000**), **`REMO_SESSION_RUN_REAPER_DISABLED`**
