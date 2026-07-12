@@ -32,9 +32,21 @@ That task owns a set of **command rows** in `orchestrator_rows`.
 | `frequency_label` | `Never` (⇒ disabled), `Once` (⇒ max_runs=1, auto-disables after one run), or a cadence label |
 | `micro_prompt` | free text for a custom row, wrapped in the finish→PR→reviewer envelope |
 | `sort_order` | row ordering in the UI |
+| `last_fired_at` | when the due-scan last DISPATCHED this row — the **cadence state**. A row is due again only once `schedule_rule`'s interval has ELAPSED since this stamp |
 
 The schedule is **eligibility**, not the trigger: when the routine fires, a
 controller computes EVERY due row this tick and runs them all (decision D1).
+
+**Cadence advances on dispatch.** `shouldSkipFire()` only answers *"is this rule
+eligible at `now`"* (start_at / week+month parity / `active_window`) — for a
+minutes/hours/days rule it says "fire" for every `now` past `start_at`. The hub
+scheduler pairs it with `scheduled_tasks.next_fire_at`; orchestrator rows use
+`last_fired_at`, stamped by `scanAndEnqueueDueCycles` on every row it dispatches
+(`markOrchestratorRowsFired`). Without it an `Every 4h` row is DUE on all 1440 daily
+60s ticks and the macro prompt is re-injected once a minute (see the 2026-07-10
+per-tick re-inject incident). The due-scan additionally **skips any session with an
+unsettled (`pending`/`running`) `routine_queue` row**, so a macro turn still in flight
+never gets a second cycle stacked behind it.
 
 Two always-on **implicit** rows are NOT in the table: `status-check/decide` (first,
 context gathering) and `deploy+log-verify` (terminal, every tick — see

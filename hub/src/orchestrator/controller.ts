@@ -26,7 +26,7 @@ import {
 import { humanizeRule } from '../scheduler/schedule-rules.ts';
 import { computeDueRowsForTask, type DueRow } from './due-rows.ts';
 import { appendRunLog, recentRunLog, type RoutineRunLogEntry } from './run-log.ts';
-import { setCycleRunner, enqueueCycle, CyclePriority, type CycleRunner } from './queue.ts';
+import { setCycleRunner, enqueueCycle, hasActiveCycle, CyclePriority, type CycleRunner } from './queue.ts';
 import { planWaves } from './waves.ts';
 import { runWavePlan, STUB_SEAMS, makeLiveSeams, type WaveRunContext, type WaveRunSummary, type WaveSeams } from './wave-runner.ts';
 import { runVerifyTail } from './verify-tail.ts';
@@ -34,6 +34,7 @@ import { MERGE_COMMAND, isMergeCommand, runMergeToMain, type MergeOutcome } from
 import { getSessionById } from '../db/dal.ts';
 import {
   getOrchestratorTaskForSession,
+  markOrchestratorRowsFired,
   type LifecycleStage,
   type MacroTaskType,
 } from '../db/orchestrator-rows-dal.ts';
@@ -734,6 +735,12 @@ export async function scanAndEnqueueDueCycles(now: Date = new Date()): Promise<s
   for (const task of tasks) {
     if (!task.session_id) continue;
     try {
+      // IN-FLIGHT GUARD (fix/orchestrator-tick-reinject): a session whose previous
+      // cycle has not settled (pending OR running) must NOT get another one — that
+      // just stacks a duplicate macro inject behind the turn still in flight. The
+      // queue's per-session lock only excludes `running`, so pending rows piled up.
+      if (await hasActiveCycle(task.session_id)) continue;
+
       const dueRows = await computeDueRowsForTask(task.id, {
         sessionId: task.session_id,
         now,
@@ -744,6 +751,10 @@ export async function scanAndEnqueueDueCycles(now: Date = new Date()): Promise<s
         (d) => d.row.command === 'deploy-fix' || isMergeCommand(d.row.command),
       );
       await enqueueCycle(task.session_id, hot ? CyclePriority.DEPLOY_FIX : CyclePriority.BUILD);
+      // ADVANCE THE CADENCE (fix/orchestrator-tick-reinject): stamp last_fired_at on
+      // the rows we just dispatched, so they are not DUE again until their interval
+      // has elapsed. Without this the same rows are DUE on the very next 60s tick.
+      await markOrchestratorRowsFired(dueRows.map((d) => d.row.id), now);
       enqueued.push(task.session_id);
     } catch (err: any) {
       console.warn(
