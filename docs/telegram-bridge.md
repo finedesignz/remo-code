@@ -132,8 +132,9 @@ In Coolify, on the `remo-code` app:
 | `TELEGRAM_BOT_TOKEN` | the token BotFather returned |
 | `TELEGRAM_WEBHOOK_SECRET` | a random URL-safe token (32+ chars) you generate |
 | `TELEGRAM_BOT_USERNAME` | the bot's username **without** the `@` (e.g. `remo_code_prod_bot`) |
+| `TELEGRAM_COLLAPSE_ACTIVITY` | *(optional)* `false` disables the expandable-blockquote collapsing of the working-message activity feed. Default **on**. |
 
-All three are required for the bridge to do any work. If any is unset, the bridge
+The first three are required for the bridge to do any work. If any is unset, the bridge
 silently no-ops, `/api/telegram/status` returns `bot_configured: false`, and the
 Settings UI renders a disabled card.
 
@@ -392,21 +393,53 @@ a turn runs, the bridge maintains **one editable "working…" message per
   outbound read-only fanout, **not** a dispatch path (dispatch = inbound
   user→session in `hub/src/dispatch/`); the cost-cap gate is untouched.
 - **Working message.** On the first `tool_use` of a turn the bridge sends
-  `⏳ *Working…*` (MarkdownV2) and records `{ messageId, lines }`. Each subsequent
-  `tool_use` appends a collapsed one-liner — `🔧 Edit hub/src/foo.ts`,
+  `⏳ *Working…*` (MarkdownV2) and records `{ messageId, lines, toolCount, startedAtMs }`.
+  Each subsequent `tool_use` appends a collapsed one-liner — `🔧 Edit hub/src/foo.ts`,
   `🔧 Bash <cmd>` — and edits the message in place (throttled ~900ms, list capped
   at the last 12 lines). `thinking` is omitted entirely.
+- **Collapsed activity (expandable blockquote, HTML parse_mode).** The one-liners
+  render INSIDE a **native Telegram expandable blockquote** — `<blockquote expandable>`
+  (Bot API 7.4+) — so activity is collapsed by default with a tap-to-expand "read more"
+  control instead of flooding the chat. A summary line stays OUTSIDE the block and is
+  readable while collapsed: `⏳ <b>Working…</b> — 🔧 4 tool calls · 12s` (`toolCount` is
+  the turn TOTAL, not the 12-line window). `expandableQuote()` in
+  `hub/src/telegram/bridge.ts` owns the markup and `escapeHtml()`s every line.
+  **These messages (and ONLY these) are sent as HTML** via `sendMessageHtml` /
+  `editMessageTextHtml`; `parse_mode` is per-message, so the permission/question
+  prompts stay MarkdownV2. **Why HTML, not MarkdownV2:** the MarkdownV2 expandable
+  blockquote is a fragile line-prefix construct (`**>` opener, `>` per line, `||`
+  terminator) on top of an 18-char reserved set — and getting the terminator wrong
+  **does not 400, it silently renders a plain non-expandable blockquote** (verified
+  live: `**>a\n>b**` → entity `blockquote`; `**>a\n>b||` → `expandable_blockquote`).
+  HTML is one unambiguous tag with a 3-char escape surface (`& < >`), so a `>` or `.`
+  in a tool detail cannot break the block.
+- **Live-verified markup.** `tools/telegram-render-probe.ts` pushes the real
+  `renderWorking` / `renderFinal` output through the real `sendMessage` endpoint and
+  asserts Telegram parses an **`expandable_blockquote` entity** — proof from the API,
+  not from our own unit test. Run it after ANY change to the collapsing renderers:
+  `TELEGRAM_BOT_TOKEN=<t> TELEGRAM_PROBE_CHAT_ID=<chat> bun run tools/telegram-render-probe.ts`
 - **Typing indicator.** `sendChatAction(chat, "typing")` fires immediately and
   then every ~4s (Telegram's typing state expires ~5s) until the turn finalizes.
 - **Finalize.** On `assistant_message:final` the bridge stops typing and **edits
-  the same working message** to the full assistant text (escaped MarkdownV2). If
-  the final text exceeds 4096 chars it leaves the working summary and sends the
-  full text as a follow-up. When no `tool_use` ran (or streaming is off) there is
-  no working message and the final text is sent as a fresh MarkdownV2 message.
-- **Reversible flag.** Gated on `config.telegram.summarizedStreaming` (env
+  the same working message** to the full assistant text (escaped MarkdownV2). The
+  answer stays **OUTSIDE** the blockquote, fully visible; the turn's activity is
+  appended below it, still collapsed. If the combined text would exceed Telegram's
+  4096-char cap the collapsed tail is **dropped** (never split a blockquote across
+  messages) and the answer is sent alone. The cap is measured on the **escaped**
+  string — that's what Telegram counts. An over-cap answer is then chunked by
+  `splitHtmlForTelegram`, which is entity-safe (it will never cut an `&amp;` in half,
+  which would 400). When no `tool_use` ran (or streaming is off) there is no working
+  message and the final text is sent as a fresh message.
+- **NEVER collapsed: permission prompts + `user_question` prompts.** Those are their
+  own messages with inline keyboards (`sendMessageWithKeyboard`) and never touch the
+  working message or the blockquote — a buried approval prompt is a broken product.
+  Enforced by `hub/test/telegram-collapse-activity.test.ts`.
+- **Reversible flags.** Gated on `config.telegram.summarizedStreaming` (env
   `TELEGRAM_SUMMARIZED_STREAMING`, default **on**; set to `false` to revert to a
   single final-blob send). The flag only affects the working-message behavior —
-  finalization (and MarkdownV2) work regardless.
+  finalization (and MarkdownV2) work regardless. Collapsing itself is independently
+  gated on `config.telegram.collapseActivity` (env `TELEGRAM_COLLAPSE_ACTIVITY`,
+  default **on**; `false` restores the flat inline one-liner list).
 
 **MarkdownV2 safety.** `sendMessageMd` / `editMessageTextMd` send with
 `parse_mode: MarkdownV2`; an unescaped reserved char makes Telegram reject the
@@ -549,6 +582,11 @@ Key boundaries:
 - Summarized streaming edits one working message per turn; it does NOT stream raw
   token deltas (by design — `thinking`/`text_delta` are dropped). Disable via
   `TELEGRAM_SUMMARIZED_STREAMING=false`.
+- Expandable blockquotes need **Bot API 7.4+** (server-side; no client opt-in) and are
+  sent as **HTML** parse_mode. A blockquote is never split across messages — on 4096
+  overflow the collapsed tail is dropped and the answer is sent alone; the remaining
+  answer chunks via the entity-safe `splitHtmlForTelegram`. Disable via
+  `TELEGRAM_COLLAPSE_ACTIVITY=false`.
 
 ## Migration from the legacy per-user post-run telegram path
 
@@ -588,7 +626,7 @@ has soaked. Until then, both code paths coexist.
 
 ### Modified (hub)
 
-- `hub/src/config.ts` — `config.telegram.{botToken,webhookSecret,botUsername,summarizedStreaming}` (all optional; `summarizedStreaming` defaults true, env `TELEGRAM_SUMMARIZED_STREAMING=false` disables).
+- `hub/src/config.ts` — `config.telegram.{botToken,webhookSecret,botUsername,summarizedStreaming,collapseActivity}` (all optional; `summarizedStreaming` defaults true, env `TELEGRAM_SUMMARIZED_STREAMING=false` disables; `collapseActivity` defaults true, env `TELEGRAM_COLLAPSE_ACTIVITY=false` disables the expandable-blockquote collapsing).
 - `hub/src/db/schema.sql` — additive: `users.telegram_chat_id` (BIGINT UNIQUE), `telegram_default_session_id`, `telegram_default_explicit` (BOOLEAN NOT NULL DEFAULT false — distinguishes an explicit `/session`/tap choice from an auto-pin), `telegram_link_code`, `telegram_link_code_expires_at`; new `telegram_inbound_log` table with `(user_id, received_at DESC)` index.
 - `hub/src/db/dal.ts` — Telegram DAL helpers (folded into the existing dal module, not a separate `telegram-dal.ts` as the plan envisioned — deviation noted in SUMMARY): `getUserByTelegramChatId`, `getUserByLinkCode`, `setLinkCode`, `linkChatId`, `unlinkChatId`, `setDefaultSession`, `getTelegramStatus`, `appendInboundLog`, `trimInboundLog`, `getUsersWithTelegramDefaultSession`.
 - `hub/src/csrf.ts` — Telegram REST routes covered by the existing double-submit middleware (no new exclusions).
