@@ -297,6 +297,19 @@ export async function finalizeOpenRunsForSupervisor(supervisorId: string) {
  * `session_id` is absent from the live set — reconciling both views off the one
  * source of truth. A 30s grace on `started_at` avoids racing a just-created run
  * the supervisor hasn't echoed back into inventory yet (it pushes every ~10s).
+ *
+ * NULL-`session_id` runs (CRITICAL bug, fixed here). The web "Start ▶" /
+ * launch paths reserve a run with `session_id = NULL`. The old predicate was
+ * `AND NOT (session_id = ANY($2))`, and in SQL three-valued logic
+ * `NULL = ANY('{...}')` is NULL ⇒ `NOT NULL` is NULL ⇒ the row NEVER matched and
+ * was NEVER reaped. Those rows are open forever, and `sessions/budget.ts` counts
+ * every `ended_at IS NULL` run against the supervisor's concurrency cap — so a
+ * long-lived supervisor accumulated them until EVERY launch returned
+ * `at_capacity` 429 (the "Start button silently does nothing" prod wedge).
+ *
+ * A NULL `session_id` can never appear in the supervisor's inventory (nothing
+ * ever backfills the column), so such a run is orphaned BY CONSTRUCTION once it
+ * is past the 30s spawn grace. The NULL-safe predicate below reaps it.
  */
 export async function finalizeOrphanedRunsForSupervisor(
   supervisorId: string,
@@ -308,10 +321,37 @@ export async function finalizeOrphanedRunsForSupervisor(
     WHERE supervisor_id = ${supervisorId}
       AND ended_at IS NULL
       AND started_at < now() - interval '30 seconds'
-      AND NOT (session_id = ANY(${liveSessionIds}))
+      AND (session_id IS NULL OR NOT (session_id = ANY(${liveSessionIds})))
     RETURNING id
   `
   return rows.length
+}
+
+/**
+ * Absolute-age backstop for open `session_runs` (defence in depth).
+ *
+ * The orphan reconciler above only runs when a supervisor pushes inventory. If
+ * the NEXT run-leak bug takes a different shape (supervisor never pushes, rows
+ * bound to a supervisor that no longer exists, a predicate that misses again),
+ * the leaked rows still eat the concurrency budget forever. This sweep closes
+ * ANY open run older than `maxAgeMs` regardless of session_id / supervisor /
+ * inventory, so no run can wedge the app indefinitely.
+ *
+ * The ceiling is deliberately well above any legitimate session lifetime the hub
+ * itself bounds (idle teardown at REMO_SESSION_IDLE_GRACE_SECONDS, default 4h),
+ * so a healthy long-running session is never reaped out from under a user.
+ * Returns the ids closed.
+ */
+export async function finalizeAgedOpenRuns(maxAgeMs: number): Promise<string[]> {
+  const seconds = Math.floor(maxAgeMs / 1000)
+  const rows = await sql<{ id: string }[]>`
+    UPDATE session_runs
+    SET ended_at = now(), exit_reason = 'run_max_age'
+    WHERE ended_at IS NULL
+      AND started_at < now() - (${seconds} || ' seconds')::interval
+    RETURNING id
+  `
+  return rows.map((r) => r.id)
 }
 
 export async function listRunsForSupervisor(supervisorId: string, userId: string, limit = 50) {

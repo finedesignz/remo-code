@@ -128,17 +128,18 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
     expect(by.ghost.exit_reason).toBe('orphaned_no_inventory')
   })
 
-  test('null-session runs are NOT reconcilable — why launches must bind session_id', async () => {
-    // Regression for the autospawn/launch at_capacity leak: launchSessionForUser
-    // used to reserve its run with session_id = NULL. The reconciler filters on
-    // `NOT (session_id = ANY(live))`, and SQL `NULL = ANY(array)` is NULL, so a
-    // null-session row can NEVER match when inventory is non-empty (the real prod
-    // condition: the supervisor always hosts other sessions). `NULL = ANY('{id}')`
-    // is NULL, so `NOT (...)` is NULL, never TRUE — the run stays open forever,
-    // refilling the concurrency cap. (Note: `= ANY('{}')` on an EMPTY array is
-    // FALSE, not NULL, so an empty inventory would close it — but prod inventory
-    // is virtually never empty.) The fix binds the real session id at reserve
-    // time; this test pins the semantics that made the bug possible.
+  test('NULL-session runs ARE reaped (regression: at_capacity run leak)', async () => {
+    // CRITICAL regression (fix/stop-the-bleed). The web "Start ▶"/launch paths
+    // reserve a run with session_id = NULL. The reconciler filtered on
+    // `NOT (session_id = ANY(live))`, and SQL `NULL = ANY('{id}')` is NULL, so
+    // `NOT (...)` is NULL — never TRUE. The row was NEVER closed, stayed open
+    // forever, and kept eating the supervisor concurrency cap (budget.ts counts
+    // `ended_at IS NULL`) until every launch 429'd with `at_capacity`.
+    //
+    // A NULL session_id can never appear in inventory (nothing backfills the
+    // column), so past the 30s spawn grace the run is orphaned by construction.
+    // The NULL-safe predicate must reap it — with a NON-EMPTY inventory, which is
+    // the real prod condition and the exact case the old SQL missed.
     const sup = `sup_orphan_nullsess_${Date.now()}`
     await mkSupervisor(sup)
     const otherLive = await mkSession(crypto.randomUUID())
@@ -147,11 +148,53 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
       VALUES (${userId}, NULL, ${sup}, 'nullsess', now() - interval '5 minutes')
     `
     const closed = await finalizeOrphanedRunsForSupervisor(sup, [otherLive])
-    expect(closed).toBe(0)
+    expect(closed).toBe(1)
     const rows = await sql`
-      SELECT ended_at FROM session_runs WHERE supervisor_id = ${sup}
+      SELECT ended_at, exit_reason FROM session_runs WHERE supervisor_id = ${sup}
     `
-    expect(rows[0].ended_at).toBeNull()
+    expect(rows[0].ended_at).not.toBeNull()
+    expect(rows[0].exit_reason).toBe('orphaned_no_inventory')
+  })
+
+  test('NULL-session run inside the 30s spawn grace is kept', async () => {
+    // The grace still applies: a just-reserved launch row (session_id not yet
+    // bound / not yet echoed in inventory) must not be reaped out from under a
+    // spawn in flight.
+    const sup = `sup_orphan_nullfresh_${Date.now()}`
+    await mkSupervisor(sup)
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, NULL, ${sup}, 'nullfresh', now())
+    `
+    const closed = await finalizeOrphanedRunsForSupervisor(sup, [])
+    expect(closed).toBe(0)
+  })
+
+  test('finalizeAgedOpenRuns force-closes any open run past the ceiling', async () => {
+    // Absolute-age backstop: whatever shape the NEXT leak takes, an open run
+    // older than the ceiling is closed regardless of session_id / inventory.
+    const { finalizeAgedOpenRuns } = await import('../src/db/supervisor-dal.ts')
+    const sup = `sup_orphan_aged_${Date.now()}`
+    await mkSupervisor(sup)
+    const freshId = await mkSession(crypto.randomUUID())
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, NULL, ${sup}, 'aged-null', now() - interval '48 hours')
+    `
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, ${freshId}, ${sup}, 'aged-young', now() - interval '1 hour')
+    `
+    const ids = await finalizeAgedOpenRuns(24 * 60 * 60 * 1000)
+    const rows = await sql`
+      SELECT repo_path, ended_at, exit_reason FROM session_runs
+      WHERE supervisor_id = ${sup} ORDER BY repo_path
+    `
+    const by = Object.fromEntries(rows.map((r: any) => [r.repo_path, r]))
+    expect(by['aged-null'].ended_at).not.toBeNull()
+    expect(by['aged-null'].exit_reason).toBe('run_max_age')
+    expect(by['aged-young'].ended_at).toBeNull()
+    expect(ids.length).toBeGreaterThanOrEqual(1)
   })
 
   test('empty inventory closes all grace-aged open runs', async () => {

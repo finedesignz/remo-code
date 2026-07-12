@@ -56,6 +56,7 @@ import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/
 import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchestrator/controller.ts'
 import { startGhostReaperSweep, stopGhostReaperSweep } from './ws/ghost-reaper.ts'
 import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.ts'
+import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -691,6 +692,11 @@ runMigrations()
     // dead CLI turn can't leave a task perpetually in-flight. No-op when
     // REMO_RUN_REAPER_DISABLED is set.
     startRunReaperSweep()
+    // fix/stop-the-bleed — absolute-age backstop: force-close any OPEN
+    // session_runs row older than REMO_SESSION_RUN_MAX_MS (default 24h). Leaked
+    // open runs eat the supervisor concurrency cap and wedge every launch with
+    // `at_capacity`. No-op when REMO_SESSION_RUN_REAPER_DISABLED is set.
+    startStaleRunReaperSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -706,6 +712,7 @@ function gracefulShutdown(signal: string) {
   try { stopDueOrchestratorTick() } catch {}
   try { stopGhostReaperSweep() } catch {}
   try { stopRunReaperSweep() } catch {}
+  try { stopStaleRunReaperSweep() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
