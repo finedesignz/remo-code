@@ -75,6 +75,25 @@ QUEUED (bounded FIFO); the lock releases only on the observed `turn_complete`
 RESPONSE is exempt — it completes the in-flight turn rather than starting a new
 one, so it never deadlocks.
 
+**One client writer per session (fix/dup-pty-writer, 2026-07-12).** The lock
+arbitrates writer CLASSES; it had no rule on how many `/ws/client` connections
+could be writers for one session. A leaked browser socket (superseded in
+`useWebSocket` but never closed) made TWO client writers drive one PTY: the lock
+ping-ponged between a holder and a queuer, the queuer enqueued a waiter for EVERY
+keystroke until the bound overflowed (evicting the FIFO head — including
+Telegram's waiter), and every Telegram message came back "Session busy". Three
+invariants now hold:
+- **client** — one `term.onData` → exactly one `term.input`; a disposed/unmounted
+  `TerminalSurface` sends nothing; `useWebSocket` supersedes its previous socket
+  on every `connect()` and a superseded socket may not null `wsRef`, deliver
+  frames, or schedule a reconnect (`web/test/pty-single-writer.test.tsx`).
+- **turn lock** — a writer that is already queued COALESCES onto its existing
+  waiter instead of enqueuing another (no queue spam, no overflow eviction).
+- **hub** — `ws/term-writers.ts` enforces last-writer-wins: the newest client
+  connection to write a session becomes THE client writer and the previous
+  `client:*` writer is released from the lock. Telegram is never superseded
+  (`hub/test/pty-single-client-writer.test.ts`).
+
 **Lock lifecycle / self-heal (fixes wedged typing).** In prod the transcript
 `turn_complete` signal is OFF (`REMO_TELEGRAM_TRANSCRIPT_TAIL=0`, #247) and PTY
 sessions emit raw bytes (no stream-json `turn_complete`), so the TTL is the only

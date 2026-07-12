@@ -15,6 +15,7 @@
     "orchestrator:e2e": "bun test hub/test/e2e/*.e2e.test.ts"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "^20.10.6",
     "@tailwindcss/vite": "^4.2.2",
     "pg": "^8.20.0"
   },

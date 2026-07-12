@@ -227,8 +227,14 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     // re-clears before writing the replayed buffer.
     term.clear()
 
-    // Keystrokes → term.input (base64 raw bytes).
+    // Keystrokes → term.input (base64 raw bytes). STRICTLY 1:1 — one onData, one
+    // frame. `disposed` fences the handler: an unmounted/session-switched
+    // terminal (whose onData disposable a straggler event still holds) must
+    // NEVER write to the PTY. Two surfaces feeding one session is what doubled
+    // keystrokes and starved the hub's turn lock.
+    let disposed = false
     const dataDisp = term.onData((d) => {
+      if (disposed) return
       send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(d) })
     })
 
@@ -283,6 +289,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     sendResize()
 
     return () => {
+      disposed = true
       if (rafId) cancelAnimationFrame(rafId)
       try { dataDisp.dispose() } catch {}
       try { unsub() } catch {}

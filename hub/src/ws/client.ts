@@ -8,6 +8,7 @@ import { config } from '../config.ts'
 import { insertMessage, listSessions, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
 import { acquire, releaseByWriter } from '../telegram/turn-lock.ts'
+import { claimTermWriter, currentTermWriter, dropTermWriter } from './term-writers.ts'
 import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
@@ -157,7 +158,9 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // (resize/attach/reattach) bypass them.
     const isWriteTurn = frame.type === 'term.input' || frame.type === 'term.attach_file'
     const _diag = frame.type === 'term.input'
-    if (_diag) log.info('term.input.diag.rx', { session_id: frame.session_id, user_id: data.userId })
+    // writer_id in the rx diag: without it, prod could not tell whether a doubled
+    // keystroke came from one connection sending twice or from TWO connections.
+    if (_diag) log.info('term.input.diag.rx', { session_id: frame.session_id, user_id: data.userId, writer_id: data.writerId })
     // DIRECTION ALLOWLIST (NH-2/R-PTY-33): only client→hub write frames here.
     if (!isClientToHubTermType(frame.type)) return
     // OWNERSHIP (H2/R-PTY-29): the session must be in THIS connection's
@@ -199,11 +202,38 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // observed transcript turn_complete (telegram/bridge → onTurnComplete).
     if (isWriteTurn) {
       const writerId = data.writerId ?? 'client:unknown'
+      // SINGLE CLIENT WRITER PER SESSION (fix/dup-pty-writer). This connection
+      // becomes THE client writer for the session; any earlier client connection
+      // (a leaked/stale socket, or the tab the user just left) is superseded and
+      // released from the turn lock. Without this, two client writers ping-pong
+      // the lock, queue-spam it and starve Telegram. Telegram is never
+      // superseded here — it is arbitrated by the turn lock alone.
+      const superseded = claimTermWriter(frame.session_id, writerId)
+      if (superseded) {
+        log.warn('term.writer.superseded', { session_id: frame.session_id, superseded, writer_id: writerId })
+      }
       const granted = await acquire(frame.session_id, writerId)
       if (!granted) {
         log.warn('term.input.diag.drop', { gate: 'lock_not_granted', session_id: frame.session_id, writer_id: writerId })
         // Queued waiter was dropped (overflow/reset) — drop the frame rather than
         // inject out-of-turn bytes.
+        return
+      }
+      // ENFORCE the invariant, don't just record it. `acquire` awaits: while this
+      // frame sat in the turn-lock queue another client connection may have claimed
+      // the session and superseded us. Claiming alone would leave the loser's bytes
+      // still reaching PTY stdin — the stale socket would be unable to WEDGE the
+      // lock but would not be MUZZLED. Drop the frame when this connection is no
+      // longer the session's client writer. Logged with writer_id so a recurrence
+      // of the prod two-writer ingress is visible instead of silent.
+      const current = currentTermWriter(frame.session_id)
+      if (current !== writerId) {
+        log.warn('term.input.diag.drop', {
+          gate: 'not_current_writer',
+          session_id: frame.session_id,
+          writer_id: writerId,
+          current_writer: current,
+        })
         return
       }
     }
@@ -626,7 +656,11 @@ export function handleClientClose(ws: ServerWebSocket<ClientWsData>) {
   // PTY write-arbitration: release any turn lock this connection held (and drop its
   // queued waiters) so a closed connection can never wedge another connection's
   // term.input. writerId is unique per connection (createClientWsData).
-  if (ws.data.writerId) releaseByWriter(ws.data.writerId)
+  if (ws.data.writerId) {
+    releaseByWriter(ws.data.writerId)
+    // Drop this connection's single-client-writer claims (fix/dup-pty-writer).
+    dropTermWriter(ws.data.writerId)
+  }
   if (ws.data.clientEntry) {
     // Bug B — capture the sessions this connection was subscribed to BEFORE
     // unregistering, then recompute counts for each so idle-teardown timers

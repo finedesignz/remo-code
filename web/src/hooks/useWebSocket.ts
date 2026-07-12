@@ -121,6 +121,27 @@ export function useWebSocket(token: string | null) {
     authedRef.current = false
     setReconnecting(false)
 
+    // SINGLE-SOCKET INVARIANT (fix/dup-pty-writer). Every connect() SUPERSEDES
+    // whatever socket is current: we detach its handlers and close it before
+    // opening the replacement. Without this, a socket could be left open,
+    // authenticated and subscribed with nothing referencing it — a second live
+    // `/ws/client` writer for the same session, which double-delivered PTY
+    // output into the xterm and ping-ponged the hub's per-session turn lock
+    // (holder vs queuer) until Telegram could never acquire it.
+    if (reconnectRef.current) {
+      clearTimeout(reconnectRef.current)
+      reconnectRef.current = undefined
+    }
+    const superseded = wsRef.current
+    if (superseded) {
+      superseded.onopen = null
+      superseded.onmessage = null
+      superseded.onclose = null // its close must NOT schedule a reconnect
+      superseded.onerror = null
+      try { superseded.close() } catch {}
+      wsRef.current = null
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = import.meta.env.VITE_HUB_URL
       ? new URL(import.meta.env.VITE_HUB_URL).host
@@ -130,7 +151,11 @@ export function useWebSocket(token: string | null) {
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
 
+    /** This socket is only allowed to act while it is still the current one. */
+    const isCurrent = () => wsRef.current === ws
+
     ws.onopen = () => {
+      if (!isCurrent()) { try { ws.close() } catch {}; return }
       // Cookie path: empty auth — the hub reads __Host-remo_sid off the
       // upgrade request. Soak path: include bearer token.
       const authMsg: any = { type: 'auth' }
@@ -139,6 +164,9 @@ export function useWebSocket(token: string | null) {
     }
 
     ws.onmessage = (event) => {
+      // A superseded socket must never deliver frames to the shared handler set
+      // — that is how one PTY byte got written to the xterm twice.
+      if (!isCurrent()) { try { ws.close() } catch {}; return }
       let msg: WsMessage
       try { msg = JSON.parse(event.data) } catch { return }
 
@@ -202,6 +230,10 @@ export function useWebSocket(token: string | null) {
     }
 
     ws.onclose = (event) => {
+      // IDENTITY GUARD: a socket we already replaced must not null out `wsRef`
+      // (which now points at the LIVE socket) nor schedule a reconnect — that
+      // orphaned the live socket and opened a third one (the prod leak).
+      if (!isCurrent()) return
       authedRef.current = false
       setConnected(false)
       wsRef.current = null
