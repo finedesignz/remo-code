@@ -527,6 +527,19 @@ if (config.titaniumBypass) {
   }
 }
 
+// fix/stop-the-bleed — FAIL CLOSED on a misconfigured daily token ceiling, BEFORE the
+// port binds (so the hub never accepts a single request while its headline safety
+// guarantee is off). The hard spend cap is the product's core promise; a typo'd '0'
+// must never silently turn it into an unbounded spend path. Exits with a legible
+// startup error unless the cap is a positive number, or
+// REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 says otherwise on purpose.
+try {
+  assertTokenCapConfig()
+} catch (err: any) {
+  console.error(`[startup] FATAL: ${err?.message ?? err}`)
+  process.exit(1)
+}
+
 // Start Bun server with WebSocket upgrade handling.
 //
 // REVIEW BL-06: idleTimeout — Bun's default is 10s, which kills any HTTP
@@ -654,18 +667,6 @@ const server = Bun.serve({
     },
   },
 })
-
-// fix/stop-the-bleed — FAIL CLOSED on a misconfigured daily token ceiling, BEFORE
-// anything else boots. The hard spend cap is the product's core promise; a typo'd
-// '0' must never silently turn it into an unbounded spend path. Throws (refusing to
-// boot, with a legible startup error naming the fix) unless the cap is a positive
-// number, or REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 says otherwise on purpose.
-try {
-  assertTokenCapConfig()
-} catch (err: any) {
-  console.error(`[startup] FATAL: ${err?.message ?? err}`)
-  process.exit(1)
-}
 
 // On startup: apply migrations, then mark all sessions as offline,
 // boot the W2 scheduler (registry + catchup) alongside the legacy v0.

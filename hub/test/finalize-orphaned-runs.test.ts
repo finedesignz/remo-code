@@ -170,13 +170,47 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
     expect(closed).toBe(0)
   })
 
-  test('finalizeUnbackedOpenRuns: OLD but LIVE is NOT reaped; unbacked + NULL-session ARE', async () => {
+  test('finalizeUnbackedOpenRunsForSupervisor is SCOPED — supervisor B is untouched by A\'s sweep', async () => {
+    // The UPDATE must never be global. B may be disconnected (or simply not yet have
+    // pushed inventory after a hub restart), in which case the hub knows NOTHING about
+    // B's runs — and a sweep driven by A's inventory must not touch them. B's open runs
+    // are closed by finalizeOpenRunsForSupervisor on socket close, not here.
+    const { finalizeUnbackedOpenRunsForSupervisor } = await import('../src/db/supervisor-dal.ts')
+    const supA = `sup_scope_a_${Date.now()}`
+    const supB = `sup_scope_b_${Date.now()}`
+    await mkSupervisor(supA)
+    await mkSupervisor(supB)
+    const aDead = await mkSession(crypto.randomUUID())
+    const bAlive = await mkSession(crypto.randomUUID())
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, ${aDead}, ${supA}, 'a-unbacked', now() - interval '48 hours')
+    `
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, ${bAlive}, ${supB}, 'b-untouched', now() - interval '48 hours')
+    `
+    // Only A is connected + inventoried, and its inventory is empty.
+    const ids = await finalizeUnbackedOpenRunsForSupervisor({
+      supervisorId: supA,
+      liveSessionIds: [],
+      minAgeMs: 24 * 60 * 60 * 1000,
+    })
+    expect(ids.length).toBe(1)
+    const aRow = await sql`SELECT ended_at, exit_reason FROM session_runs WHERE supervisor_id = ${supA}`
+    const bRow = await sql`SELECT ended_at FROM session_runs WHERE supervisor_id = ${supB}`
+    expect(aRow[0].ended_at).not.toBeNull()
+    expect(aRow[0].exit_reason).toBe('no_live_backing')
+    expect(bRow[0].ended_at).toBeNull() // B's 48h-old run survives — we know nothing about it
+  })
+
+  test('finalizeUnbackedOpenRunsForSupervisor: OLD but LIVE is NOT reaped; unbacked + NULL-session ARE', async () => {
     // The backstop's predicate is LIVENESS, not age. Age alone cannot distinguish a
     // leaked row from a 7h TEAB build — and force-closing a live run would free its
     // slot while the CLI kept running (a second CLI could then launch on top of it,
     // and the real exit result is lost). Same bogus-capacity failure class this
     // branch exists to kill, from the opposite direction.
-    const { finalizeUnbackedOpenRuns } = await import('../src/db/supervisor-dal.ts')
+    const { finalizeUnbackedOpenRunsForSupervisor } = await import('../src/db/supervisor-dal.ts')
     const sup = `sup_orphan_unbacked_${Date.now()}`
     await mkSupervisor(sup)
     const liveOldId = await mkSession(crypto.randomUUID())  // a legit long build
@@ -201,7 +235,8 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
     `
 
     // A connected supervisor reports ONLY liveOldId in its inventory.
-    const ids = await finalizeUnbackedOpenRuns({
+    const ids = await finalizeUnbackedOpenRunsForSupervisor({
+      supervisorId: sup,
       liveSessionIds: [liveOldId],
       minAgeMs: 24 * 60 * 60 * 1000,
     })
@@ -225,10 +260,10 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
     expect(ids.length).toBe(2)
   })
 
-  test('finalizeUnbackedOpenRuns clamps minAgeMs to the 60s floor INSIDE the DAL', async () => {
+  test('finalizeUnbackedOpenRunsForSupervisor clamps minAgeMs to the 60s floor INSIDE the DAL', async () => {
     // The clamp lives in the DAL, not the caller: a future direct caller passing
     // minAgeMs=1 must not be able to force-close the whole fleet's live runs.
-    const { finalizeUnbackedOpenRuns } = await import('../src/db/supervisor-dal.ts')
+    const { finalizeUnbackedOpenRunsForSupervisor } = await import('../src/db/supervisor-dal.ts')
     const sup = `sup_orphan_floor_${Date.now()}`
     await mkSupervisor(sup)
     await sql`
@@ -236,7 +271,7 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
       VALUES (${userId}, NULL, ${sup}, 'just-started', now() - interval '5 seconds')
     `
     // minAgeMs=1 would reap a 5s-old row without the floor. With it (60s), it doesn't.
-    const ids = await finalizeUnbackedOpenRuns({ liveSessionIds: [], minAgeMs: 1 })
+    const ids = await finalizeUnbackedOpenRunsForSupervisor({ supervisorId: sup, liveSessionIds: [], minAgeMs: 1 })
     expect(ids.length).toBe(0)
     const rows = await sql`SELECT ended_at FROM session_runs WHERE supervisor_id = ${sup}`
     expect(rows[0].ended_at).toBeNull()

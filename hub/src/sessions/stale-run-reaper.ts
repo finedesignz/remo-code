@@ -11,19 +11,34 @@
 // this sweep closes the CLASS — a row whose supervisor never pushes inventory again
 // (gone / crashed / never reconnected) is invisible to the reconciler forever.
 //
-// PREDICATE = LIVENESS, NOT AGE.
-// An earlier draft reaped purely on age. That was WRONG, and would have traded one
-// capacity bug for another: a 7h TEAB build or a long autonomous run is legitimately
-// old, and force-closing it frees its slot while the CLI keeps running — inviting a
-// second CLI to launch on top of it and losing the real exit result. So we reap only
-// runs that NOTHING LIVE BACKS: the session appears in no connected supervisor's
-// `session_inventory` (a NULL `session_id` can never appear in one, so those rows are
-// unbacked by construction). Age is only a GRACE on top of that, so a spawn in flight
-// or a briefly-reconnecting supervisor is never caught. A run a connected supervisor
-// still reports as LIVE is NEVER closed here, no matter how old.
+// PREDICATE = POSITIVE KNOWLEDGE, PER SUPERVISOR. Never age. Never a global UPDATE.
+//
+// This reaper has been wrong twice, both times by treating ABSENCE OF EVIDENCE AS
+// EVIDENCE OF ABSENCE:
+//   1. Age-only: killed live long-running builds (a 7h TEAB build is legitimately old).
+//   2. Global "not in any connected supervisor's inventory": killed live runs whenever
+//      the liveness data was merely MISSING. Worst case — the hub restarts, this sweep
+//      fires before any supervisor has reconnected and pushed inventory (~10s cadence),
+//      the live-set is EMPTY, and every old open run in the fleet is closed while its
+//      CLI keeps running. The age floor does not help: those runs are old by definition.
+//
+// An empty live-set means "I don't know", NOT "nothing is alive". So:
+//   - We sweep PER SUPERVISOR, and only supervisors that are CONNECTED **and have
+//     pushed session_inventory at least once since boot** (`getInventoriedSupervisors`).
+//     That is the only condition under which "your session is not in your inventory"
+//     proves the session is gone.
+//   - Zero such supervisors ⇒ the sweep is a NO-OP. A hub that just booted knows
+//     nothing and must reap nothing.
+//   - A DISCONNECTED supervisor's runs are NOT ours: `finalizeOpenRunsForSupervisor`
+//     already closes them on socket close.
+//   - NULL-`session_id` rows (the known leak; they can never appear in ANY inventory)
+//     are attributed by their `supervisor_id`, which they always carry — so they are
+//     reaped by their OWNING supervisor's sweep, once that supervisor has proven it is
+//     alive and inventorying.
+// Age survives only as a GRACE within a supervisor's scope (a spawn in flight).
 
-import { finalizeUnbackedOpenRuns } from '../db/supervisor-dal.ts'
-import { getAllLiveSessionIds } from '../ws/supervisor-registry.ts'
+import { finalizeUnbackedOpenRunsForSupervisor } from '../db/supervisor-dal.ts'
+import { getInventoriedSupervisors } from '../ws/supervisor-registry.ts'
 
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
   if (raw == null || raw === '') return fallback
@@ -52,35 +67,57 @@ export function sessionRunReaperIntervalMs(): number {
 }
 
 export interface StaleRunReaperDeps {
-  finalizeUnbackedOpenRuns: typeof finalizeUnbackedOpenRuns
-  getAllLiveSessionIds: typeof getAllLiveSessionIds
+  finalizeUnbackedOpenRunsForSupervisor: typeof finalizeUnbackedOpenRunsForSupervisor
+  getInventoriedSupervisors: typeof getInventoriedSupervisors
 }
 
-const REAL_DEPS: StaleRunReaperDeps = { finalizeUnbackedOpenRuns, getAllLiveSessionIds }
+const REAL_DEPS: StaleRunReaperDeps = {
+  finalizeUnbackedOpenRunsForSupervisor,
+  getInventoriedSupervisors,
+}
 
 /**
- * One sweep pass: close open runs that NO connected supervisor reports as live and
- * that are past the grace. Returns the run ids closed. Never throws (a DB blip must
- * not take the boot-started interval down).
+ * One sweep pass. For each supervisor that is connected AND has pushed inventory,
+ * close ITS open runs that are absent from ITS just-pushed inventory and past the
+ * grace. NO-OP when no supervisor has pushed inventory yet (e.g. right after a hub
+ * restart) — the hub has no knowledge, so it reaps nothing. Never throws (a DB blip
+ * must not take the boot-started interval down); one supervisor's failure does not
+ * abort the others.
  */
 export async function reapUnbackedSessionRuns(
   deps?: Partial<StaleRunReaperDeps>,
 ): Promise<string[]> {
   const d: StaleRunReaperDeps = { ...REAL_DEPS, ...deps }
+  const reaped: string[] = []
+  let scopes: Array<{ supervisorId: string; liveSessionIds: string[] }> = []
   try {
-    const liveSessionIds = d.getAllLiveSessionIds()
-    const ids = await d.finalizeUnbackedOpenRuns({ liveSessionIds, minAgeMs: sessionRunMaxMs() })
-    if (ids.length > 0) {
-      console.warn(
-        `[stale-run-reaper] closed ${ids.length} open session_run(s) with NO live supervisor backing ` +
-        `(older than ${sessionRunMaxMs()}ms; exit_reason=no_live_backing)`,
-      )
-    }
-    return ids
+    scopes = d.getInventoriedSupervisors()
   } catch (err: any) {
-    console.warn(`[stale-run-reaper] sweep failed: ${err?.message ?? err}`)
-    return []
+    console.warn(`[stale-run-reaper] registry read failed: ${err?.message ?? err}`)
+    return reaped
   }
+  if (scopes.length === 0) return reaped // knows nothing ⇒ reaps nothing
+
+  const minAgeMs = sessionRunMaxMs()
+  for (const scope of scopes) {
+    try {
+      const ids = await d.finalizeUnbackedOpenRunsForSupervisor({
+        supervisorId: scope.supervisorId,
+        liveSessionIds: scope.liveSessionIds,
+        minAgeMs,
+      })
+      if (ids.length > 0) {
+        reaped.push(...ids)
+        console.warn(
+          `[stale-run-reaper] closed ${ids.length} open session_run(s) absent from supervisor=${scope.supervisorId}'s ` +
+          `live inventory and older than ${minAgeMs}ms (exit_reason=no_live_backing)`,
+        )
+      }
+    } catch (err: any) {
+      console.warn(`[stale-run-reaper] sweep failed supervisor=${scope.supervisorId}: ${err?.message ?? err}`)
+    }
+  }
+  return reaped
 }
 
 let sweepTimer: ReturnType<typeof setInterval> | null = null

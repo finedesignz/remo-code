@@ -41,30 +41,54 @@ describe('unbacked session_run reaper', () => {
     expect(sessionRunMaxMs()).toBe(86_400_000)
   })
 
-  test('the sweep hands the DAL the LIVE session set + the grace', async () => {
-    // Liveness is the predicate: a run backed by a connected supervisor's inventory
-    // must never be reaped, however old. The sweep's job is to supply that set.
-    process.env.REMO_SESSION_RUN_MAX_MS = '7200000'
-    const seen: Array<{ liveSessionIds: string[]; minAgeMs: number }> = []
+  test('HUB RESTART: no supervisor has pushed inventory yet ⇒ the sweep is a NO-OP', async () => {
+    // THE regression. The hub restarts; supervisors reconnect and push inventory ~10s
+    // later; if the sweep fires first with an empty live-set and a GLOBAL update, every
+    // old open run in the fleet is closed while its CLI keeps running — capacity freed,
+    // real exit result lost. An empty live-set means "I don't know", not "nothing is
+    // alive". Knowing nothing ⇒ reaping nothing. The DAL must not even be called.
+    let dalCalls = 0
     const ids = await reapUnbackedSessionRuns({
-      getAllLiveSessionIds: () => ['live-a', 'live-b'],
-      finalizeUnbackedOpenRuns: async (args) => {
+      getInventoriedSupervisors: () => [], // connected-but-not-yet-pushed, or nothing connected
+      finalizeUnbackedOpenRunsForSupervisor: async () => {
+        dalCalls++
+        return ['should-never-happen']
+      },
+    })
+    expect(dalCalls).toBe(0)
+    expect(ids).toEqual([])
+  })
+
+  test('sweeps ONLY inventoried supervisors, each scoped to its OWN live set', async () => {
+    // Supervisor A is connected and has pushed; B is disconnected / has never pushed,
+    // so the registry does not report it and its runs are untouched (B's open runs are
+    // closed by finalizeOpenRunsForSupervisor on socket close — not our business).
+    process.env.REMO_SESSION_RUN_MAX_MS = '7200000'
+    const seen: Array<{ supervisorId: string; liveSessionIds: string[]; minAgeMs: number }> = []
+    const ids = await reapUnbackedSessionRuns({
+      getInventoriedSupervisors: () => [{ supervisorId: 'sup-a', liveSessionIds: ['live-a'] }],
+      finalizeUnbackedOpenRunsForSupervisor: async (args) => {
         seen.push(args)
         return ['run-a']
       },
     })
-    expect(seen).toEqual([{ liveSessionIds: ['live-a', 'live-b'], minAgeMs: 7_200_000 }])
+    expect(seen).toEqual([{ supervisorId: 'sup-a', liveSessionIds: ['live-a'], minAgeMs: 7_200_000 }])
+    expect(seen.some((s) => s.supervisorId === 'sup-b')).toBe(false)
     expect(ids).toEqual(['run-a'])
   })
 
-  test('a DB error never throws out of the sweep (boot interval must survive)', async () => {
+  test('one supervisor failing never aborts the others (and never throws out of the sweep)', async () => {
     const ids = await reapUnbackedSessionRuns({
-      getAllLiveSessionIds: () => [],
-      finalizeUnbackedOpenRuns: async () => {
-        throw new Error('connection reset')
+      getInventoriedSupervisors: () => [
+        { supervisorId: 'sup-bad', liveSessionIds: [] },
+        { supervisorId: 'sup-ok', liveSessionIds: [] },
+      ],
+      finalizeUnbackedOpenRunsForSupervisor: async ({ supervisorId }) => {
+        if (supervisorId === 'sup-bad') throw new Error('connection reset')
+        return ['run-ok']
       },
     })
-    expect(ids).toEqual([])
+    expect(ids).toEqual(['run-ok'])
   })
 
   test('REMO_SESSION_RUN_REAPER_DISABLED makes the sweep start a no-op', () => {

@@ -432,18 +432,28 @@ export function getSupervisorCircuitBreakers(supervisorId: string): CircuitBreak
  * supervisors. Used by `GET /api/sessions` to mark rows `active=true`.
  */
 /**
- * Union of `session_inventory` across ALL currently-connected supervisors — the
- * hub's ground truth for "which sessions are actually live right now", regardless
- * of owner. The stale-run backstop (`hub/src/sessions/stale-run-reaper.ts`) reaps
- * open `session_runs` that NOTHING in here backs; a run that IS backed is never
- * closed, however old it is.
+ * Supervisors that are CONNECTED **and have pushed `session_inventory` at least once
+ * since this hub process booted** (`sessionInventoryAt != null`), with the live
+ * session set each one just reported.
+ *
+ * This is POSITIVE KNOWLEDGE, and it is the only basis on which the stale-run
+ * backstop (`hub/src/sessions/stale-run-reaper.ts`) may reap: for these supervisors —
+ * and ONLY these — "your session is absent from your inventory" actually proves the
+ * session is gone. A supervisor that is connected but has not yet pushed (a hub that
+ * just restarted; inventory arrives ~10s later) contributes NOTHING here, so its runs
+ * are untouchable. An empty result means the hub knows nothing yet and the sweep must
+ * be a NO-OP. Absence of evidence is not evidence of absence.
+ *
+ * Disconnected supervisors are deliberately absent: their open runs are already closed
+ * by `finalizeOpenRunsForSupervisor` on socket close.
  */
-export function getAllLiveSessionIds(): string[] {
-  const out = new Set<string>()
-  for (const [, e] of supervisors) {
-    for (const s of e.sessionInventory) out.add(s.session_id)
+export function getInventoriedSupervisors(): Array<{ supervisorId: string; liveSessionIds: string[] }> {
+  const out: Array<{ supervisorId: string; liveSessionIds: string[] }> = []
+  for (const [supervisorId, e] of supervisors) {
+    if (e.sessionInventoryAt == null) continue // connected, but has never pushed → unknown
+    out.push({ supervisorId, liveSessionIds: e.sessionInventory.map((s) => s.session_id) })
   }
-  return Array.from(out)
+  return out
 }
 
 export function getActiveSessionIdsForUser(userId: string): Set<string> {
