@@ -106,6 +106,8 @@ mock.module('../src/dispatch/gates.ts', () => ({
       return state.capExceeded ? { ok: false, reason: 'daily_cost_cap' } : { ok: true }
     },
   },
+  // fix/stop-the-bleed: the token cap now rides EVERY dispatch gate list.
+  dailyTokenCapGate: { name: 'daily_token_cap', async check() { return { ok: true } } },
 }))
 
 // Import AFTER mocks. Pipeline + adapter are REAL.

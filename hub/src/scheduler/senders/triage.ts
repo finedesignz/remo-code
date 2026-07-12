@@ -41,7 +41,7 @@ import {
   type PipelineDeps,
   type RunStore,
 } from '../../dispatch/pipeline.ts'
-import { thresholdGate, dailyCostCapGate } from '../../dispatch/gates.ts'
+import { thresholdGate, dailyCostCapGate, dailyTokenCapGate } from '../../dispatch/gates.ts'
 
 export interface TriagePayload {
   application_uuid: string
@@ -224,7 +224,7 @@ export async function sendTriage(
 
   const deps: PipelineDeps = {
     // IR-1 / IR-2: cost-cap non-bypassable; threshold → cost-cap (+ promotion re-check).
-    gates: [thresholdGate, dailyCostCapGate],
+    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Triage runs are not replayed on reconnect (they carry per-event payload

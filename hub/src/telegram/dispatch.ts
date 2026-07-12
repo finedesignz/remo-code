@@ -10,9 +10,11 @@
  * Telegram is USER traffic, not a scheduled task, so:
  *   - `store: null` — no run row. The pipeline tolerates a null store (skips
  *     open/markSkipped/onFinalize/markFailed).
- *   - `gates: [thresholdGate, dailyCostCapGate]` — the locally-replicated
- *     `isOverCostCap` copy is GONE; the shared `dailyCostCapGate` is the single
- *     source of truth (IR-1: cost-cap non-bypassable).
+ *   - gates threshold → cost-cap → TOKEN-cap → human-only guard. The locally-
+ *     replicated `isOverCostCap` copy is GONE; the shared `dailyCostCapGate` is
+ *     the single source of truth (IR-1: cost-cap non-bypassable), and
+ *     `dailyTokenCapGate` rides alongside it (fix/stop-the-bleed — the dollar cap
+ *     is meaningless on a flat-rate Max plan; the token ceiling is the real one).
  *   - `token: tg:<chatId>:<updateId>` — the existing convention (queue token +
  *     dedupe-friendly; the webhook's (chat_id, update_id) audit row is the real
  *     dedupe).
@@ -42,7 +44,7 @@ import {
   type DispatchRequest,
   type PipelineDeps,
 } from "../dispatch/pipeline.ts";
-import { thresholdGate, dailyCostCapGate, humanOnlyPtyGate } from "../dispatch/gates.ts";
+import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, humanOnlyPtyGate } from "../dispatch/gates.ts";
 import { getSessionRunnerType } from "../db/dal.ts";
 
 export type DispatchOutcome =
@@ -171,7 +173,7 @@ export async function dispatchToSession(input: DispatchInput): Promise<DispatchO
   const deps: PipelineDeps = {
     // IR-1: cost-cap non-bypassable. IR-2: threshold first, then cost-cap.
     // R-TG-11: human-only PTY guard composed WITH (never replacing) the cost cap.
-    gates: [thresholdGate, dailyCostCapGate, guard],
+    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, guard],
     // Telegram is user traffic — no run row.
     store: null,
     isOnline: (req) => getChannel(req.sessionId) != null,

@@ -190,10 +190,15 @@ export async function isOverTokenCap(userId: string, timezone: string): Promise<
 
 /**
  * Daily TOKEN-cap gate (non-bypassable, BSA-04). ADDED ALONGSIDE
- * `dailyCostCapGate` in the orchestrator inject gate list — it never replaces the
- * cost cap. Resolves the user's tz (DispatchRequest carries none, like the cost
- * gate) then delegates to `getTokenCapStatus`. Blocks with
- * `over_daily_token_cap:<tokens>>=<cap>`.
+ * `dailyCostCapGate` — it never replaces the cost cap. Resolves the user's tz
+ * (DispatchRequest carries none, like the cost gate) then delegates to
+ * `getTokenCapStatus`. Blocks with `over_daily_token_cap:<tokens>>=<cap>`.
+ *
+ * fix/stop-the-bleed: this gate is now in EVERY dispatch gate list — orchestrator
+ * inject, scheduler agent + triage, error-capture, feedback, revanote, telegram.
+ * It previously rode ONLY the orchestrator inject path, so every other path could
+ * spend unbounded tokens behind a DOLLAR cap that is meaningless on a flat-rate
+ * Max subscription. Enforced by `hub/test/token-cap-coverage.test.ts`.
  */
 export const dailyTokenCapGate: DispatchGate = {
   name: 'daily_token_cap',

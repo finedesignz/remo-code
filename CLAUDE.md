@@ -239,6 +239,25 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   transcript-tail reads on-disk CLI transcripts that don't exist in the hub container; with it OFF,
   Telegram outbound uses the host-agnostic stream-json event-bus. ChatSurface is **kept** as fallback
   (deletion still gated on the device attestation in [docs/cutover-gate-june15.md](docs/cutover-gate-june15.md)).
+- **Session-run leak backstop** (`hub/src/sessions/stale-run-reaper.ts`, fix/stop-the-bleed):
+  boot-started sweep that force-closes any OPEN `session_runs` row older than
+  **`REMO_SESSION_RUN_MAX_MS`** (default **86400000** = 24h) with `exit_reason='run_max_age'`.
+  `hub/src/sessions/budget.ts` derives the supervisor concurrency cap from
+  `COUNT(session_runs WHERE ended_at IS NULL)`, so ANY leaked open run permanently eats a slot and
+  eventually every launch 429s `at_capacity` (the "Start ▶ silently does nothing" wedge). The KNOWN
+  leak — NULL-`session_id` rows that `finalizeOrphanedRunsForSupervisor` could never match, because
+  SQL `NULL = ANY(...)` is NULL so `NOT (...)` is never TRUE — is fixed in the reconciler itself
+  (`session_id IS NULL OR NOT (session_id = ANY(...))`); this sweep closes the whole CLASS. Knobs:
+  **`REMO_SESSION_RUN_REAPER_INTERVAL_MS`** (default **900000**), **`REMO_SESSION_RUN_REAPER_DISABLED`**
+  (`1|true|yes|on`).
+- **Supervisor spawn circuit-breaker self-heal** (`supervisor/src/process-manager.ts`,
+  fix/stop-the-bleed): the breaker used to latch OPEN forever — no cooldown, no probe, no hub signal
+  (prod 2026-07-07→11: zero CLI spawns for four days while the hub reported healthy). It now
+  half-opens after a cooldown (5min, exponential to 30min, max 5 probes), CLOSES on a successful
+  probe spawn, RE-OPENS if the probe crashes, and REPORTS state to the hub in the `session_inventory`
+  frame (`circuit_breakers[]` → `hub/src/ws/supervisor-registry.ts` → `GET /api/supervisors`, plus a
+  loud hub log on every new trip). `circuit_open` is a per-run start-rejection reason
+  (`SUPERVISOR_START_REJECT_REASONS`), never a supervisor-wide `stopped`.
 - **Stale-run reaper** (`hub/src/scheduler/run-reaper.ts`): boot-started sweep that finalizes
   `scheduled_task_runs` stuck `status='pending'` (a dispatched run whose CLI turn never completed —
   nothing else finalizes it) as `failed`/`run_timeout` via the shared `finalizeRun`, so post-run
@@ -306,10 +325,14 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   via `getTodayTokenCostUsd` (same tz-day boundary as `/api/usage/cost`). **Manual / interactive
   chat IS now capped** — not just scheduled runs. `token_usage` is the single source (it records
   every `usage_event`, including scheduled runs), so scheduled-run cost is not double-counted.
-  **BSA (orchestrator inject path) adds a companion non-bypassable daily TOKEN cap** (`dailyTokenCapGate`,
-  default 50M tokens/day) ALONGSIDE the cost cap — `inject.ts` gate list is `[thresholdGate,
-  dailyCostCapGate, dailyTokenCapGate]`; the token cap never replaces the cost cap, and the dollar cost
-  cap is meaningless on a flat-rate Max subscription.
+  **The companion non-bypassable daily TOKEN cap** (`dailyTokenCapGate`, default 50M tokens/day) rides
+  ALONGSIDE the cost cap on **EVERY** dispatch gate list — orchestrator inject, scheduler agent +
+  triage, error-capture, feedback, revanote, telegram (fix/stop-the-bleed; it previously rode ONLY the
+  inject path, leaving every other path bounded solely by a dollar cap that is meaningless on a
+  flat-rate Max subscription). The token cap never replaces the cost cap. Enforced by
+  `hub/test/token-cap-coverage.test.ts` (scans every `gates: [...]` in `hub/src`); proven to actually
+  FIRE by `hub/test/token-cap-gate-fires.test.ts` + `hub/test/e2e/orchestrator-tokencap.e2e.test.ts`
+  (cache-read alone trips it — the 2026-07 incident shape).
 - **Public webhooks: raw body BEFORE JSON parse**, constant-time secret compare, HMAC over
   `${ts}.${rawBody}`, reject >5min skew. Webhooks mount BEFORE the `/api/*` auth catch-all;
   license gate after auth; `/ws/agent` keyed by `api_keys`. `hub/test/mount-order.test.ts` enforces.
