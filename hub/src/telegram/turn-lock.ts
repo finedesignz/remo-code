@@ -43,6 +43,8 @@ interface Waiter {
   writerId: WriterId
   resolve: (granted: boolean) => void
   enqueuedAtMs: number
+  /** The promise handed to every acquire() call that COALESCED onto this waiter. */
+  promise: Promise<boolean>
 }
 
 interface LockState {
@@ -108,15 +110,25 @@ export function acquire(sessionId: string, writerId: WriterId): Promise<boolean>
     return Promise.resolve(true)
   }
   // Held by another writer → queue (bounded).
-  return new Promise<boolean>((resolve) => {
-    const waiter: Waiter = { writerId, resolve, enqueuedAtMs: Date.now() }
-    st.queue.push(waiter)
-    if (st.queue.length > queueBound) {
-      const dropped = st.queue.shift()!
-      console.warn(`[turn-lock] queue overflow session=${sessionId} — dropping oldest writer=${dropped.writerId}`)
-      dropped.resolve(false)
-    }
-  })
+  // COALESCE PER WRITER (fix/dup-pty-writer): a writer that ALREADY has a queued
+  // waiter must not enqueue another. A blocked xterm streams one acquire() per
+  // KEYSTROKE; enqueuing each one queued ~26 waiters for a single writer,
+  // overflowed the bound (evicting the legitimate FIFO head — including
+  // Telegram's waiter) and turned the lock into a ping-pong. One writer = at
+  // most one waiter; every keystroke of that writer awaits the same grant.
+  const queued = st.queue.find((w) => w.writerId === writerId)
+  if (queued) return queued.promise
+
+  let resolve!: (granted: boolean) => void
+  const promise = new Promise<boolean>((r) => { resolve = r })
+  const waiter: Waiter = { writerId, resolve, enqueuedAtMs: Date.now(), promise }
+  st.queue.push(waiter)
+  if (st.queue.length > queueBound) {
+    const dropped = st.queue.shift()!
+    console.warn(`[turn-lock] queue overflow session=${sessionId} — dropping oldest writer=${dropped.writerId}`)
+    dropped.resolve(false)
+  }
+  return promise
 }
 
 /**

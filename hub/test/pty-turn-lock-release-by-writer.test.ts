@@ -36,9 +36,11 @@ describe("releaseByWriter (disconnect-driven release)", () => {
   it("drops the departing writer's queued waiters (their promises resolve false)", async () => {
     await acquire("s2", "client:H"); // H holds
     const qa = acquire("s2", "client:Q"); // Q queued
-    const qb = acquire("s2", "client:Q"); // Q queued again (2nd waiter, same writer)
+    const qb = acquire("s2", "client:Q"); // Q keystroke #2 — COALESCES onto the same waiter
     await new Promise((r) => setTimeout(r, 5));
-    expect(queueDepth("s2")).toBe(2);
+    // fix/dup-pty-writer: one writer = at most ONE waiter. Pre-fix this was 2, and a
+    // blocked xterm queued one waiter PER KEYSTROKE until the bound overflowed.
+    expect(queueDepth("s2")).toBe(1);
 
     // Q's connection closes while queued → both its waiters resolve false; H keeps lock.
     releaseByWriter("client:Q");
