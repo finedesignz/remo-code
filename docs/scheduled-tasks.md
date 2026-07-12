@@ -542,6 +542,39 @@ row back, skips the broadcast + post-run fan-out, and returns. Short-lived
 finalizers (triage, which has its own sub-minute timeout, and the sender-side
 early-exit paths) can't outlive a 6h reap window and are left first-write-wins.
 
+---
+
+## fix/sched-failures (2026-07-12) — three live prod failure modes
+
+**1. `security` root → `empty_content`.** `senders/agent.ts` `buildContent()` gave
+`dev` → the controller template and `qc` → the QC review template, but the
+`security` workflow ROOT had no fallback: with no custom prompt it fell through to
+`''` and the run failed instantly (`finalizeRun(..., 'failed', 'empty_content')`).
+A bare `security` root now renders step 1 of the security chain
+(`scheduler/prompts/security/scan.md`), exactly as `dev`/`qc` render theirs. A
+custom `payload.prompt` / `task.prompt` still wins, and the chained
+`security_scan` step keeps its `/security-review` shortcut.
+
+**2. `triage_timeout` on healthy runs.** `senders/triage.ts` hardcoded a 5-minute
+ceiling on the supervisor-picked triage waiter; real Coolify triage turns exceed
+it (~5.5min observed), so healthy runs were finalized `failed`/`triage_timeout`.
+The ceiling is now **`REMO_TRIAGE_TIMEOUT_MS`**, default **15min** (900000), read
+at sweep time (non-positive/non-finite ⇒ default).
+
+**3. Double run row per fire (the source of the `run_timeout` rows).** When a
+scheduled session target was OFFLINE, the agent sender launched the session and
+let `dispatch()` park the run in the grace buffer — but the parked `replay` thunk
+called `runNow(task.id)`, which fired the task afresh and **inserted a SECOND
+`scheduled_task_runs` row**. Nothing finalizes a parked row on drain (`onParkExpire`
+only fires on TTL lapse), so the ORIGINAL row sat `pending` until the 6h stale-run
+reaper marked it `failed`/`run_timeout`. Prod showed exactly this: one `pending` +
+one `success` row per fire (e.g. the Nightly GitHub sync task) plus 14
+`run_timeout` rows. The replay thunk now re-enters `sendAgentTask(task, ctx)` with
+the SAME `ctx` — `RunStore.open()` returns `ctx.runId` and inserts nothing — so one
+fire produces exactly one run row. (This mirrors what the supervisor-target grace
+branch in `dispatcher.ts` already did explicitly, which is why only the session
+path leaked.)
+
 **Ceiling coupling with TEAB.** `REMO_TEAB_MAX_RUN_MS` (default 6h) and
 `REMO_RUN_MAX_MS` (default 6h) are the same by default, so a naive sweep would
 reap a legitimately-running TEAB build out from under its own poller. The reaper
@@ -928,6 +961,7 @@ The scheduler does not introduce new required env vars. Optional vars:
 | `REMO_RUN_MAX_MS`  | `scheduler/run-reaper.ts`        | `21600000` (6h)                  | Max age of a `pending` run before the reaper finalizes it `failed/run_timeout` (non-positive/non-finite ⇒ default) |
 | `REMO_RUN_REAPER_INTERVAL_MS` | `scheduler/run-reaper.ts` | `300000` (5min)              | Stale-run sweep cadence                              |
 | `REMO_RUN_REAPER_DISABLED` | `scheduler/run-reaper.ts`    | unset                            | Escape hatch (`1\|true\|yes\|on`) — sweep is a no-op |
+| `REMO_TRIAGE_TIMEOUT_MS` | `scheduler/senders/triage.ts`  | `900000` (15min)                 | Max age of a pending supervisor-picked triage turn before it's finalized `failed/triage_timeout` (non-positive/non-finite ⇒ default) |
 
 Per the global rule, email notifications always default to **emails4agents**
 — never SendGrid/Postmark/Mailgun/Resend without explicit user request.
