@@ -23,6 +23,12 @@ export interface OrchestratorRow {
   sort_order: number;
   created_at: string;
   updated_at: string;
+  /**
+   * fix/orchestrator-tick-reinject: when this row last FIRED (was dispatched by the
+   * due-scan). The cadence gate in `isRowDue()` requires the rule's interval to have
+   * elapsed since this stamp; null ⇒ never fired ⇒ eligible immediately.
+   */
+  last_fired_at: string | null;
 }
 
 export interface NewOrchestratorRow {
@@ -94,6 +100,25 @@ export async function updateOrchestratorRowFields(
     RETURNING *
   `;
   return rows[0] ?? null;
+}
+
+/**
+ * fix/orchestrator-tick-reinject: stamp `last_fired_at` on the rows the due-scan
+ * just dispatched. This is what ADVANCES the cadence — without it a row stays DUE
+ * on every 60s tick and the macro prompt is re-injected once a minute forever.
+ * Best-effort no-op on an empty id list.
+ */
+export async function markOrchestratorRowsFired(
+  ids: string[],
+  firedAt: Date = new Date(),
+): Promise<number> {
+  if (ids.length === 0) return 0;
+  const rows = await sql`
+    UPDATE orchestrator_rows SET last_fired_at = ${firedAt}
+    WHERE id IN ${sql(ids)}
+    RETURNING id
+  `;
+  return rows.length;
 }
 
 // Delete a single row. Returns true when a row was removed. (Phase 31 — UI CRUD.)

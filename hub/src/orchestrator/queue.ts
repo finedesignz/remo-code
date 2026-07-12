@@ -82,6 +82,22 @@ export async function enqueueCycle(
   return rows[0];
 }
 
+/**
+ * fix/orchestrator-tick-reinject: true when this session already has a cycle in the
+ * queue that has not settled (pending OR running). The due-scan uses this as an
+ * IN-FLIGHT GUARD: enqueueing a second cycle for a session whose macro turn is still
+ * working just stacks another inject behind it. The claim's per-session lock only
+ * excludes `running`, so pending rows could pile up unbounded.
+ */
+export async function hasActiveCycle(sessionId: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    SELECT id FROM routine_queue
+    WHERE session_id = ${sessionId} AND status IN ('pending','running')
+    LIMIT 1
+  `;
+  return rows.length > 0;
+}
+
 // ── Atomic claim (R-ADO-05 + R-ADO-07) ───────────────────────────────────────
 /**
  * Claim up to (cap - running) pending rows, marking each 'running'. Runs inside

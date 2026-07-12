@@ -36,6 +36,7 @@ function row(command: string): OrchestratorRow {
     sort_order: 0,
     created_at: '',
     updated_at: '',
+    last_fired_at: null,
   }
 }
 

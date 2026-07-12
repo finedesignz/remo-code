@@ -336,6 +336,15 @@ CREATE TABLE IF NOT EXISTS orchestrator_rows (
 CREATE INDEX IF NOT EXISTS idx_orchestrator_rows_task
   ON orchestrator_rows(task_id, sort_order);
 
+-- fix/orchestrator-tick-reinject: CADENCE STATE. `schedule_rule` alone is an
+-- ELIGIBILITY predicate (start_at / week-month parity / active_window) — it has no
+-- notion of "has the interval elapsed since the last fire". Without a per-row
+-- last-fire stamp, an `Every 4h` row was DUE on EVERY 60s due-scan tick, so the
+-- orchestrator re-injected its macro prompt once a minute, forever (incident:
+-- session 4090d376, ~60 turns/hour × 2 days, 2.83B cache-read tokens). This column
+-- is that stamp; `isRowDue()` now requires interval-elapsed since it.
+ALTER TABLE orchestrator_rows ADD COLUMN IF NOT EXISTS last_fired_at TIMESTAMPTZ;
+
 -- D1/D4: append-only audit of every routine command the controller runs. The
 -- controller reads the last N entries each tick to feed runtime context.
 -- decision_rationale / outcome / gap_dimension capture the controller's

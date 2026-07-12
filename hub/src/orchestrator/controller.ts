@@ -26,7 +26,7 @@ import {
 import { humanizeRule } from '../scheduler/schedule-rules.ts';
 import { computeDueRowsForTask, type DueRow } from './due-rows.ts';
 import { appendRunLog, recentRunLog, type RoutineRunLogEntry } from './run-log.ts';
-import { setCycleRunner, enqueueCycle, CyclePriority, type CycleRunner } from './queue.ts';
+import { setCycleRunner, enqueueCycle, hasActiveCycle, CyclePriority, type CycleRunner } from './queue.ts';
 import { planWaves } from './waves.ts';
 import { runWavePlan, STUB_SEAMS, makeLiveSeams, type WaveRunContext, type WaveRunSummary, type WaveSeams } from './wave-runner.ts';
 import { runVerifyTail } from './verify-tail.ts';
@@ -34,6 +34,7 @@ import { MERGE_COMMAND, isMergeCommand, runMergeToMain, type MergeOutcome } from
 import { getSessionById } from '../db/dal.ts';
 import {
   getOrchestratorTaskForSession,
+  markOrchestratorRowsFired,
   type LifecycleStage,
   type MacroTaskType,
 } from '../db/orchestrator-rows-dal.ts';
@@ -619,6 +620,21 @@ export function makeCycleRunner(
     const { sessionId, userId, repoKey, tz, controllerContext } = resolved;
     const dueRows = controllerContext.dueRows;
 
+    // ADVANCE THE CADENCE (fix/orchestrator-tick-reinject) — here, NOT at enqueue.
+    // The cycle has now SELECTED its rows (both paths below consume `dueRows`: the
+    // macro path resumes the task these rows made due; the legacy wave path runs
+    // them directly). Stamping them fired is what stops the next 60s due-scan from
+    // finding the same rows DUE and re-injecting the macro prompt once a minute.
+    // Best-effort: a stamp failure must not wedge the cycle (the in-flight guard
+    // still holds until this cycle settles; worst case the row fires one tick early).
+    if (dueRows.length > 0) {
+      try {
+        await markOrchestratorRowsFired(dueRows.map((d) => d.row.id));
+      } catch (err: any) {
+        console.warn(`[orchestrator] cadence stamp failed session=${sessionId}: ${err?.message ?? err}`);
+      }
+    }
+
     // ── Milestone TMAC: resume-heartbeat MACRO path (REPLACES the wave path) ──
     // Resolve macro_task_type → one autonomous macro prompt, reconcile the prior
     // turn's sentinels, halt on an open mandatory gate, else (re)inject to resume.
@@ -734,6 +750,12 @@ export async function scanAndEnqueueDueCycles(now: Date = new Date()): Promise<s
   for (const task of tasks) {
     if (!task.session_id) continue;
     try {
+      // IN-FLIGHT GUARD (fix/orchestrator-tick-reinject): a session whose previous
+      // cycle has not settled (pending OR running) must NOT get another one — that
+      // just stacks a duplicate macro inject behind the turn still in flight. The
+      // queue's per-session lock only excludes `running`, so pending rows piled up.
+      if (await hasActiveCycle(task.session_id)) continue;
+
       const dueRows = await computeDueRowsForTask(task.id, {
         sessionId: task.session_id,
         now,
@@ -743,6 +765,13 @@ export async function scanAndEnqueueDueCycles(now: Date = new Date()): Promise<s
       const hot = dueRows.some(
         (d) => d.row.command === 'deploy-fix' || isMergeCommand(d.row.command),
       );
+      // NOTE: the cadence is NOT advanced here. The queue entry carries only
+      // `session_id` and the CYCLE re-selects its DUE rows when it actually runs —
+      // stamping at enqueue-time would make those rows non-due by the time the cycle
+      // ran, so the cycle would execute ZERO commands (a silent autopilot no-op).
+      // `markOrchestratorRowsFired` is called by the cycle runner, on the rows it
+      // actually selected. The in-flight guard above is what stops the next 60s tick
+      // from stacking a second cycle in the meantime.
       await enqueueCycle(task.session_id, hot ? CyclePriority.DEPLOY_FIX : CyclePriority.BUILD);
       enqueued.push(task.session_id);
     } catch (err: any) {
