@@ -1,143 +1,117 @@
 # Technology Stack
 
-**Analysis Date:** 2026-05-28
+**Analysis Date:** 2026-07-12
 
 ## Languages
 
 **Primary:**
-- TypeScript ~5.7 — hub, web, supervisor sidecar, supervisor UI
-- Rust (edition 2021, MSRV 1.77) — Tauri shell (`supervisor/tauri/src-tauri/`)
+- TypeScript 5.7 — all three packages (`hub/`, `web/`, `supervisor/src/`, `supervisor/tauri/ui/`)
+- Rust (edition 2021, `rust-version = "1.77"`) — Tauri tray shell + ConPTY host (`supervisor/tauri/src-tauri/`, notably `src/pty_host.rs`)
 
 **Secondary:**
-- SQL — `hub/src/db/schema.sql` (Postgres DDL)
-- Markdown — `.planning/`, `docs/`, scheduler/revanote prompt templates (`hub/src/scheduler/prompts/**/*.md`, `hub/src/revanote/prompt.ts`)
+- SQL — `hub/src/db/schema.sql` (idempotent DDL, re-runs in full every hub boot)
+- YAML — CI pipelines (`.woodpecker/*.yaml`, `.github/workflows/*.yml`)
+- JS (mjs) — build/gate scripts (`supervisor/scripts/compile-sidecar.mjs`, `tools/cutover-deletion-gate.mjs`)
 
 ## Runtime
 
-**Server (hub + supervisor sidecar):**
-- Bun 1.x (`oven/bun:1` Docker base; `bun --watch` dev; `bun build --compile` for sidecar)
-
-**Desktop (supervisor):**
-- Tauri 2.11.2 (Windows MSI, `windows-latest` CI, MSVC `x86_64-pc-windows-msvc`)
-- Sidecar is a single-file `bun build --compile` exe at `tauri/src-tauri/binaries/remo-code-supervisor-x86_64-pc-windows-msvc.exe`
-
-**Web:**
-- Browser (modern, ESM); built with Vite 6 → static dist served by hub at `/`
+**Environment:**
+- **Bun** — runtime for hub, the supervisor sidecar, all tests, and every `tools/*.ts` script. No Node runtime dependency (`node-pty` is the only native dep).
+- Browser for `web/`; Tauri v2 WebView2 for the supervisor settings UI.
 
 **Package Manager:**
-- Bun workspaces — root `package.json` workspaces: `hub`, `web`
-- Lockfile: `bun.lock` (frozen-lockfile in Docker + CI)
-- `supervisor/` and `supervisor/tauri/ui/` are NOT in workspaces; each has its own `bun install`
+- Bun workspaces. Root `package.json` declares `workspaces: ["hub", "web"]`.
+- `supervisor/` and `supervisor/tauri/ui/` carry their own `package.json` (deliberately outside the workspace array).
+- Lockfile: `bun.lock` present; CI uses `bun install --frozen-lockfile`.
+- Rust deps via Cargo (`supervisor/tauri/src-tauri/Cargo.toml`).
 
 ## Frameworks
 
-**Hub (Bun + Hono):**
-- `hono` ^4.7 — HTTP + WS server, port 3040
-- `@hono/zod-openapi` ^0.18 — OpenAPI 3.1 routes (incremental migration)
-- `@scalar/hono-api-reference` ^0.10 — `/docs` UI
-- `zod` ^3.24 — runtime validation (REST + WS protocols)
+**Core:**
+- **Hono ^4.7** + **@hono/zod-openapi ^0.18.4** — hub HTTP router + OpenAPI 3.1 (`hub/src/api/_openapi.ts`)
+- **@scalar/hono-api-reference ^0.10.19** — serves `/docs`
+- **React 19** + **Vite 6** + **Tailwind CSS 4** (`@tailwindcss/vite`) — `web/` SPA and `supervisor/tauri/ui/`
+- **Tauri 2.11.2** — supervisor desktop shell (features `tray-icon`, `image-png`)
+- **Zod ^3.24** — every WS frame + API body (`hub/src/ws/protocol.ts`, `hub/src/ws/agent-protocol.ts`)
 
-**Web (React 19 SPA):**
-- `react` / `react-dom` ^19
-- `vite` ^6.2, `@vitejs/plugin-react` ^4.4
-- `tailwindcss` ^4 + `@tailwindcss/vite` ^4.2 (no PostCSS config — Vite plugin)
-- `@tanstack/react-virtual` ^3.13 — message-list virtualization (Grid view)
-- `react-markdown` ^9 + `remark-gfm` ^4 + `rehype-sanitize` ^6
-- `cronstrue` ^3.14, `croner` ^10 (shared with hub for "next 3 runs" preview)
+**Testing:**
+- **`bun test`** is the only runner. No jest/vitest/playwright in-repo.
+- QC gate: `bun run check-baseline` → `tools/check-baseline.ts`, which runs each hub test file in its **own process** (Bun `mock.module` is process-global and pollutes siblings). Baseline: `tools/regression-baseline.json`.
+- `bun run orchestrator:e2e` → `hub/test/e2e/*.e2e.test.ts` against a real Postgres 16.
+- `bun run migration-verify` → `tools/migration-verify.ts`.
+- Guard tests are load-bearing: `supervisor/test/no-legacy-agent-spawn.test.ts`, `no-api-key-no-streamjson-pty.test.ts`, `no-apikey-fallback-guard.test.ts`, `default-backend-selector.test.ts`, `web/test/no-indigo.test.ts`, `hub/test/mount-order.test.ts`, `hub/test/orchestrator-macro-path-guard.test.ts`.
 
-**Supervisor sidecar (Bun TS):**
-- No web framework — raw WebSocket client to hub `/ws/agent`
-- Spawns child processes (`claude --input-format stream-json --output-format stream-json --verbose`, `codex app-server`)
+**Build/Dev:**
+- `vite build` (+ `tsc -b`) for both SPAs
+- `bun build --compile` → supervisor sidecar binary (`supervisor/scripts/compile-sidecar.mjs`)
+- `cargo tauri build` → Windows MSI
+- `bun --watch src/index.ts` for hub dev
+- Docs: `bun run docs:sync` → `hub/scripts/dump-openapi.ts` → `docs/openapi.json` → `widdershins@4.0.1` → `docs/api.md`
 
-**Supervisor Tauri shell (Rust):**
-- `tauri` 2.11.2 with `tray-icon`, `image-png`
-- Plugins: `single-instance` 2.4, `autostart` 2.5, `global-shortcut` 2.3, `updater` 2.10, `process` 2.3, `shell` 2.3.5, `dialog` 2
-- `tokio` (time, sync, rt, macros, process, io-util), `parking_lot`, `dirs` 5, `once_cell`, `windows` 0.58 (Win32_Foundation/Threading/WinSock)
-- UI: separate React 19 + Vite + Tailwind 4 app under `supervisor/tauri/ui/`, uses `@tauri-apps/api` ^2.1, plugin bindings (`plugin-dialog`, `plugin-process`, `plugin-updater`), `react-router-dom` ^7.1
+## Key Dependencies
 
-## Key Dependencies (hub)
+**Hub (`hub/package.json`):**
+- `postgres ^3.4.9` — porsager/postgres tagged-template client. **Not an ORM** — no Drizzle/Prisma/Kysely.
+- `ioredis ^5.10.1` — Redis for magic-link `jti` single-use replay protection (`hub/src/api/auth.ts`, key `magic_link:used:{jti}` EX 900). **Hard-fails at verify time** unless `TITANIUM_REQUIRE_REDIS=false`.
+- `jose ^6.2.3` — Ed25519 verification of Titanium license JWTs
+- `jsonwebtoken ^9.0.3` + `bcryptjs ^3.0.3` — legacy email/password login (behind `ALLOW_LEGACY_LOGIN`, default **true**; the only working prod auth path under `TITANIUM_BYPASS`)
+- `croner ^10.0.1` — cron engine for `hub/src/scheduler/`
+- `@octokit/rest ^22.0.1` — GitHub App API (issue creation, PR/CI-gate polling)
+- `nanoid ^5.1`
 
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `postgres` | ^3.4.9 | Postgres client (primary DAL) |
-| `pg` | ^8.20 (root devDep) | Migration scripts, tests |
-| `ioredis` | ^5.10 | Magic-link JTI replay-protect (required when `TITANIUM_REQUIRE_REDIS=true`) |
-| `jose` | ^6.2 | JWKS verification for Titanium Keygen EdDSA license tokens |
-| `jsonwebtoken` | ^9.0 | Legacy bearer JWTs (gated by `ALLOW_LEGACY_LOGIN`, removed in Phase 07.5) |
-| `bcryptjs` | ^3.0 | Legacy password hashing (Phase 07.5 will delete) |
-| `nanoid` | ^5.1 | ID generation |
-| `croner` | ^10.0 | Cron scheduler (scheduled tasks, revanote dispatcher) |
-| `@octokit/rest` | ^22.0 | GitHub API (issue creation, repo introspection, PR ops) |
+**Web (`web/package.json`):**
+- `@xterm/xterm ^6.0.0` + `@xterm/addon-fit ^0.11` — the interactive PTY terminal surface (`TerminalSurface`)
+- `@tanstack/react-virtual ^3.13` — grid-view virtualization
+- `react-markdown ^9` + `remark-gfm ^4` + `rehype-sanitize ^6` — message rendering (sanitize is mandatory)
+- `croner` + `cronstrue ^3.14` — client-side schedule preview/description
 
-## Build / Dev Tooling
+**Supervisor:**
+- `node-pty ^1.1.0` — only runtime dep of the TS sidecar
+- Rust: `portable-pty 0.8` (the real human-path ConPTY), `tokio`, `parking_lot`, `base64 0.22`, `windows 0.58`, `anyhow`, `once_cell`, `dirs 5`
+- Tauri plugins: `single-instance 2.4.2`, `autostart 2.5.1`, `global-shortcut 2.3.1`, `updater 2.10.1`, `process 2.3.1`, `shell 2.3.5`, `dialog 2`
 
-| Tool | Purpose |
-|------|---------|
-| `tsc -b` | Web typecheck before Vite build |
-| `vite` ^6.2 | Web + supervisor UI dev/build |
-| `bun --watch` | Hub dev hot-reload (`bun run dev:hub`) |
-| `bun build --compile` | Compile supervisor sidecar to single Windows exe |
-| `cargo tauri build` | MSI build (called via `tauri-action` in CI) |
-| `widdershins` 4.0.1 | OpenAPI → `docs/api.md` (npx, no install — `bun run docs:sync`) |
+**Root devDeps:** `pg ^8.20` (scripts only), `@tailwindcss/vite ^4.2.2`, `rehype-sanitize ^6`.
 
 ## Configuration
 
-**Hub env (required):**
-- `DATABASE_URL`, `JWT_SECRET` (≥32 chars), `PORT` (3040), `HUB_ALLOWED_ORIGINS`
+**Environment:**
+- `hub/.env` — `DATABASE_URL`, `JWT_SECRET` (≥32), `SESSION_SECRET`, `PORT` (3040), `HUB_ALLOWED_ORIGINS`. Single parse point: `hub/src/config.ts` (`parseBool` for all flags). Full flag inventory in INTEGRATIONS.md.
+- `web/.env` — `VITE_HUB_URL`
+- Supervisor — `%LOCALAPPDATA%\remo-code-supervisor\config.json` (Tauri first-run wizard: hub URL + API key + ≥1 root), plus process env for `REMO_PTY_INTERACTIVE`, `REMO_CLAUDE_INTERACTIVE_CONFIRMED`, `TEAB_BIN`, `TEAB_CLAUDE_BIN`, `TEAB_GUARD_HOOK_PATH`.
 
-**Hub env (Titanium auth, Phase 07):**
-- `TITANIUM_KEYGEN_API_URL`, `TITANIUM_KEYGEN_ACCOUNT_ID`, `TITANIUM_KEYGEN_PRODUCT_ID`, `TITANIUM_KEYGEN_PORTAL_TOKEN`, `TITANIUM_KEYGEN_ADMIN_TOKEN`
-- `MAGIC_LINK_SECRET`, `SESSION_SECRET`, `ALLOW_LEGACY_LOGIN`, `LICENSE_REQUIRED`, `TITANIUM_BYPASS`
-- `TITANIUM_LICENSE_CACHE_TTL_SECONDS`, `TITANIUM_REDIS_URL`, `TITANIUM_REQUIRE_REDIS`
-- `TITANIUM_WEBHOOK_SECRET` (license-changed webhook HMAC)
+**Build:**
+- `hub/tsconfig.json`, `web/tsconfig*.json`, `web/vite.config.ts`, `supervisor/tauri/src-tauri/tauri.conf.json`, `Dockerfile`
 
-**Hub env (feature toggles + integrations):**
-- `REMO_PUBLIC_URL` (default `https://app.remo-code.com`)
-- `REMO_SESSION_IDLE_GRACE_SECONDS`
-- `COOLIFY_TOKEN`, `COOLIFY_BASE_URL` (error-capture auto-install, scheduler `log_check`, revanote deploy)
-- `OPENAI_API_KEY`, `OPENAI_TRANSCRIBE_MODEL` (`/api/transcribe`)
-- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_BOT_USERNAME`
-- `E4A_API_KEY`, `E4A_BASE_URL`, `E4A_INBOX_ID` (emails4agents)
-- `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_SLUG`
-- `GATEWAY_URL`, `GATEWAY_API_KEY`, `FALLBACK_GATEWAY_URL`, `FALLBACK_GATEWAY_API_KEY` (Ottolax + Claude Gateway pair, GitHub creds)
-- `MOBILE_TAURI_ORIGINS_ENABLED`, `MOBILE_APPLE_TEAM_ID`, `MOBILE_ANDROID_SHA`, `MOBILE_BUNDLE_ID` (mobile shell)
-- `CI_GATE_TIMEOUT_MS`, `CI_GATE_POLL_MS`, `CI_GATE_NOCI_GRACE_MS` (revanote CI gate)
-- `REVANOTE_AUTOMERGE_BRANCH`, `REVANOTE_STAGING_BRANCH`, `REVANOTE_DEPLOY_BRANCH`
-- `LLM_ESCALATOR_CACHE_TTL_MS`
-- `REMO_E2E_DB_URL` (e2e tests only)
+## Versioning
 
-**Web env (Vite, baked at build):**
-- `VITE_HUB_URL`, `VITE_TITANIUM_PORTAL_URL`
+Supervisor version is **single-sourced** from `supervisor/tauri/src-tauri/tauri.conf.json` (currently **0.12.1**), imported by `supervisor/src/version.ts`. `Cargo.toml` and `supervisor/tauri/ui/package.json` are kept in lockstep at the same value. Never reintroduce a `--define` / `FALLBACK_VERSION` build-time inject (it silently mis-reported 0.11.1 as 0.11.0).
 
-**Supervisor config:**
-- Path: `%LOCALAPPDATA%\remo-code-supervisor\config.json` (Windows)
-- Managed by Tauri first-run wizard; holds hub URL, API key, repo roots
-- File logs at `%LOCALAPPDATA%\remo-code-supervisor\supervisor.log` (5MB rotate)
+Hub and web `package.json` sit at `0.0.1` and are not the release surface — the hub ships as a Docker image on Coolify, the supervisor as a tagged signed MSI.
+
+## CI
+
+**Woodpecker-first** (`.woodpecker/*.yaml`, one pipeline per file; runner is `linux/amd64` only):
+- `qc.yaml` — PR gate on `main`. Service `postgres:16`, image `oven/bun:latest`. `bun install --frozen-lockfile` → `tsc --noEmit` (informational) → `bun run check-baseline` → `bun run migration-verify` → targeted orchestrator tests → `bun run orchestrator:e2e` (`REMO_E2E_DB_URL` + `REMO_E2E_ALLOW_NONLOCAL=1`).
+- `docs-drift.yaml` — fails the PR when `docs/openapi.json` / `docs/api.md` are stale vs the routes.
+- `post-deploy-smoke.yaml` — push-to-main prod HTTPS smoke (`tools/smoke-https.ts`, `SMOKE_BASE_URL`) after the Coolify rollout.
+
+**GitHub Actions — platform-locked only** (`.github/workflows/`):
+- `release-supervisor.yml` — windows-latest, signed MSI + `latest.json` for the Tauri auto-updater (signing secrets live in GHA).
+- `release-mobile.yml` (Windows MSI/NSIS + Android APK), `mobile-ios-build.yml` (macOS/Apple toolchain), `mobile-shell-typecheck.yml` (manual-only). All three **dormant** — Phase 12 paused.
+
+New checks default to a new `.woodpecker/*.yaml`; reach for GHA only for Windows/macOS or signing secrets. Gotcha: Woodpecker rewrites `${...}` **anywhere** in the yaml, including comments — use plain literals.
 
 ## Platform Requirements
 
-**Dev:** Bun 1.x; Node only via `npx` (widdershins); Rust stable + MSVC toolchain (supervisor build only).
+**Development:**
+- Bun. Rust 1.77+ and the Tauri v2 toolchain only when building the supervisor MSI.
+- Windows for the supervisor (ConPTY, WebView2, MSI).
+- A reachable Postgres 16 for hub tests / orchestrator e2e.
 
-**Hub prod:** Coolify (`coolify.titaniumlabs.us`); Docker `oven/bun:1`; port 3040; non-root `appuser`. Domain `app.remo-code.com`.
-
-**Supervisor prod:** Windows MSI from GH Releases (`supervisor-v*.*.*` tag), signed with Tauri updater key, auto-update via `latest.json`.
-
-## CI / CD
-
-| Workflow | Trigger | Job |
-|----------|---------|-----|
-| `.github/workflows/docs-drift.yml` | PR touching `hub/src/**` or `docs/openapi.json`/`api.md` | `bun run docs:sync`, fail if diff non-empty |
-| `.github/workflows/release-supervisor.yml` | tag `supervisor-v*.*.*` | `windows-latest`: build UI → `bun build --compile` sidecar → `tauri-action` MSI build+sign → GH Release with `latest.json` |
-| `.github/workflows/mobile-shell-typecheck.yml` | (Phase 12 mobile shell) | TS typecheck for mobile shim |
-
-**Hub deploy:** Coolify auto-deploys on push to `main` (Git webhook → multi-stage `Dockerfile`). No deploy workflow in-repo.
-
-## Database
-
-- **Postgres** (self-hosted on Coolify) — single instance, schema in `hub/src/db/schema.sql`, additive `CREATE TABLE IF NOT EXISTS` only.
-- **Redis** (optional; required when `TITANIUM_REQUIRE_REDIS=true`) — magic-link JTI single-use store.
-- **SQLite** — not used.
+**Production:**
+- **Hub:** multi-stage `Dockerfile` on Coolify at `app.remo-code.com`, port 3040; serves the built SPA as static files.
+- **Supervisor:** never deployed — installed locally per host from the signed MSI (`supervisor-v*.*.*` tag → GHA release → auto-updater).
 
 ---
 
-*Stack analysis: 2026-05-28*
+*Stack analysis: 2026-07-12*
