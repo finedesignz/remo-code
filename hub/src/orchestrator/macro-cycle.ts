@@ -58,7 +58,23 @@ export interface MacroCycleDeps {
   isRunLive: (sessionId: string) => boolean;
   /** OBSRV-05: cap-approach alert evaluator (injectable for tests; optional). */
   evaluateCapAlert?: typeof evaluateCapAlert;
+  /** OBSRV-03: cap-gauge refresh (DB-backed; injectable so the cycle stays IO-free under test). */
+  refreshCapGauges?: typeof refreshOrchestratorCapGauges;
+  /** OBSRV-05: cap-status fetch (DB-backed; injectable so the cycle stays IO-free under test). */
+  getCapStatuses?: (
+    userId: string,
+    tz: string,
+  ) => Promise<{ costStatus: Parameters<typeof evaluateCapAlert>[0]['costStatus']; tokenStatus: Parameters<typeof evaluateCapAlert>[0]['tokenStatus'] }>;
 }
+
+const realCapStatuses: NonNullable<MacroCycleDeps['getCapStatuses']> = async (userId, tz) => {
+  const { getCostCapStatus, getTokenCapStatus } = await import('../dispatch/gates.ts');
+  const [costStatus, tokenStatus] = await Promise.all([
+    getCostCapStatus(userId, tz),
+    getTokenCapStatus(userId, tz),
+  ]);
+  return { costStatus, tokenStatus };
+};
 
 async function realDeps(): Promise<MacroCycleDeps> {
   const dal = await import('../db/dal.ts');
@@ -233,16 +249,12 @@ export async function runMacroCycle(
 
     // OBSRV-03: refresh cap gauges (best-effort, fail-open).
     try {
-      await refreshOrchestratorCapGauges(userId, 'UTC');
+      await (d.refreshCapGauges ?? refreshOrchestratorCapGauges)(userId, 'UTC');
     } catch { /* fail-open */ }
 
     // OBSRV-05: cap-approach alert (best-effort, fail-open, throttled once/day/cap).
     try {
-      const { getCostCapStatus, getTokenCapStatus } = await import('../dispatch/gates.ts');
-      const [costStatus, tokenStatus] = await Promise.all([
-        getCostCapStatus(userId, 'UTC'),
-        getTokenCapStatus(userId, 'UTC'),
-      ]);
+      const { costStatus, tokenStatus } = await (d.getCapStatuses ?? realCapStatuses)(userId, 'UTC');
       const capAlertFn = d.evaluateCapAlert ?? evaluateCapAlert;
       await capAlertFn(
         { userId, sessionId, tokenStatus, costStatus },
