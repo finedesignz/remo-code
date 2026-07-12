@@ -64,9 +64,11 @@ import {
 import type { TranscriptEntry } from "./transcript/types.ts";
 import {
   sendMessageMd,
+  sendMessageHtml,
   sendMessageWithKeyboard,
   sendChatAction,
-  editMessageTextMd,
+  editMessageTextHtml,
+  escapeHtml,
   escapeMarkdownV2,
   setMyCommands,
   setWebhook,
@@ -120,48 +122,62 @@ function toolLine(toolName: string, detail?: string): string {
 }
 
 /**
- * Wrap already-plain lines in a NATIVE Telegram EXPANDABLE blockquote
- * (Bot API 7.4+, MarkdownV2): first line prefixed `**>`, every line prefixed `>`,
- * the last line closed with `**`. Renders collapsed with a tap-to-expand control —
- * the "read more" the activity feed needs. Lines are escaped here.
+ * Wrap already-plain lines in a NATIVE Telegram EXPANDABLE blockquote — rendered
+ * collapsed with a tap-to-expand control (the "read more" the activity feed needs).
+ *
+ * HTML parse_mode, NOT MarkdownV2: `<blockquote expandable>` is ONE unambiguous
+ * tag, whereas the MarkdownV2 form is a fragile line-prefix construct (`**>` opener,
+ * `>` per line, a terminator that is easy to get wrong) layered on top of an 18-char
+ * reserved set — a `>` or `.` inside a tool detail is enough to break the block or
+ * 400 the whole message. HTML's escape surface is just `& < >`. parse_mode is
+ * per-message, so only these activity messages are HTML; the permission/question
+ * prompts stay MarkdownV2 and are untouched.
  */
 export function expandableQuote(lines: string[]): string {
-  const body = lines.map((l) => ">" + escapeMarkdownV2(l)).join("\n");
-  return "**" + body + "**";
+  const body = lines.map((l) => escapeHtml(l)).join("\n");
+  return `<blockquote expandable>${body}</blockquote>`;
 }
 
 /** One-liner shown OUTSIDE the collapsed block: "🔧 4 tool calls · 12s". */
-function activitySummary(toolCount: number, startedAtMs: number, nowMs: number = Date.now()): string {
+export function activitySummary(toolCount: number, startedAtMs: number, nowMs: number): string {
   const secs = Math.max(0, Math.round((nowMs - startedAtMs) / 1000));
   return `🔧 ${toolCount} tool call${toolCount === 1 ? "" : "s"} · ${secs}s`;
 }
 
 /**
- * The in-flight "Working…" message. With collapsing ON (default) the tool
+ * The in-flight "Working…" message (HTML). With collapsing ON (default) the tool
  * one-liners live inside an expandable blockquote behind a visible summary line;
  * with it OFF the legacy flat list is rendered.
  */
-function renderWorking(st: Pick<WorkingState, "lines" | "toolCount" | "startedAtMs">): string {
-  const head = "⏳ *Working…*";
+export function renderWorking(
+  st: Pick<WorkingState, "lines" | "toolCount" | "startedAtMs">,
+  nowMs: number = Date.now(),
+): string {
+  const head = "⏳ <b>Working…</b>";
   if (st.lines.length === 0) return head;
   if (!config.telegram.collapseActivity) {
-    return head + "\n\n" + st.lines.map((l) => escapeMarkdownV2(l)).join("\n");
+    return head + "\n\n" + st.lines.map((l) => escapeHtml(l)).join("\n");
   }
-  const summary = escapeMarkdownV2(activitySummary(st.toolCount, st.startedAtMs));
+  const summary = escapeHtml(activitySummary(st.toolCount, st.startedAtMs, nowMs));
   return head + " — " + summary + "\n\n" + expandableQuote(st.lines);
 }
 
 /**
- * The FINAL turn message: the assistant's answer stays OUTSIDE the blockquote,
- * fully visible; the turn's activity is appended collapsed underneath. Falls back
- * to the answer alone when the combined text would blow Telegram's 4096-char cap
- * (never split a blockquote across messages — the markup would break).
+ * The FINAL turn message (HTML): the assistant's answer stays OUTSIDE the
+ * blockquote, fully visible; the turn's activity is appended collapsed underneath.
+ * Drops the collapsed tail when the combined text would blow Telegram's 4096-char
+ * cap — a blockquote must NEVER be split across messages (the tag would break).
+ * The cap is measured on the ESCAPED string, which is what Telegram counts.
  */
-function renderFinal(text: string, st: WorkingState | undefined): string {
-  const answer = escapeMarkdownV2(text);
+export function renderFinal(
+  text: string,
+  st: Pick<WorkingState, "lines" | "toolCount" | "startedAtMs"> | undefined,
+  nowMs: number = Date.now(),
+): string {
+  const answer = escapeHtml(text);
   if (!st || !config.telegram.collapseActivity || st.lines.length === 0) return answer;
   const tail =
-    "\n\n" + escapeMarkdownV2(activitySummary(st.toolCount, st.startedAtMs)) + "\n" + expandableQuote(st.lines);
+    "\n\n" + escapeHtml(activitySummary(st.toolCount, st.startedAtMs, nowMs)) + "\n" + expandableQuote(st.lines);
   if (answer.length + tail.length > MAX_TG_LEN) return answer;
   return answer + tail;
 }
@@ -223,7 +239,7 @@ async function onToolUse(sessionId: string, toolName: string, detail?: string): 
           await sendChatAction(chatId as number | string, "typing");
           const startedAtMs = Date.now();
           const seed = { lines: [line], toolCount: 1, startedAtMs };
-          const sent = await sendMessageMd(chatId as number | string, renderWorking(seed), keyboard);
+          const sent = await sendMessageHtml(chatId as number | string, renderWorking(seed), keyboard);
           const messageId = sent?.message_id ?? 0;
           if (!messageId) return;
           rememberStoppable(sessionId, u.id, { chatId, messageId });
@@ -240,7 +256,7 @@ async function onToolUse(sessionId: string, toolName: string, detail?: string): 
         const sinceEdit = Date.now() - st.lastEditAt;
         if (sinceEdit >= EDIT_THROTTLE_MS) {
           st.lastEditAt = Date.now();
-          await editMessageTextMd(chatId as number | string, st.messageId, renderWorking(st), keyboard);
+          await editMessageTextHtml(chatId as number | string, st.messageId, renderWorking(st), keyboard);
         }
       } catch (err: any) {
         console.warn(
@@ -269,22 +285,23 @@ async function onAssistantText(sessionId: string, text: string): Promise<void> {
     void enqueueForChat(chatId, async () => {
       const st = workingByKey.get(key);
       // Answer OUTSIDE the blockquote; the turn's activity collapsed underneath.
-      const finalMd = renderFinal(text, st);
+      const finalHtml = renderFinal(text, st);
       try {
         if (st) {
           stopTyping(st);
           workingByKey.delete(key);
           forgetStoppable(sessionId);
-          if (finalMd.length <= MAX_TG_LEN) {
-            await editMessageTextMd(chatId as number | string, st.messageId, finalMd);
+          if (finalHtml.length <= MAX_TG_LEN) {
+            await editMessageTextHtml(chatId as number | string, st.messageId, finalHtml);
             return;
           }
-          // Too long to edit in place — sendMessageMd chunks it (renderFinal has
-          // already dropped the blockquote tail, so no markup is split).
-          await sendMessageMd(chatId as number | string, finalMd);
+          // Too long to edit in place — sendMessageHtml chunks it via
+          // splitHtmlForTelegram (entity-safe). renderFinal has already dropped the
+          // blockquote tail at this size, so no tag is ever split.
+          await sendMessageHtml(chatId as number | string, finalHtml);
           return;
         }
-        await sendMessageMd(chatId as number | string, finalMd);
+        await sendMessageHtml(chatId as number | string, finalHtml);
       } catch (err: any) {
         if (st) stopTyping(st);
         workingByKey.delete(key);

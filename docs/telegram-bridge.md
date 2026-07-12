@@ -397,14 +397,27 @@ a turn runs, the bridge maintains **one editable "working…" message per
   Each subsequent `tool_use` appends a collapsed one-liner — `🔧 Edit hub/src/foo.ts`,
   `🔧 Bash <cmd>` — and edits the message in place (throttled ~900ms, list capped
   at the last 12 lines). `thinking` is omitted entirely.
-- **Collapsed activity (expandable blockquote).** The one-liners render INSIDE a
-  **native Telegram expandable blockquote** (Bot API 7.4+; MarkdownV2 — first line
-  `**>`, every line `>`, closed with `**`), so activity is collapsed by default with
-  a tap-to-expand "read more" control instead of flooding the chat. A summary line
-  stays OUTSIDE the block and is readable while collapsed:
-  `⏳ *Working…* — 🔧 4 tool calls · 12s` (`toolCount` is the turn TOTAL, not the
-  12-line window). `expandableQuote()` in `hub/src/telegram/bridge.ts` owns the markup
-  and escapes every line, so a reserved char inside a tool detail can't break it.
+- **Collapsed activity (expandable blockquote, HTML parse_mode).** The one-liners
+  render INSIDE a **native Telegram expandable blockquote** — `<blockquote expandable>`
+  (Bot API 7.4+) — so activity is collapsed by default with a tap-to-expand "read more"
+  control instead of flooding the chat. A summary line stays OUTSIDE the block and is
+  readable while collapsed: `⏳ <b>Working…</b> — 🔧 4 tool calls · 12s` (`toolCount` is
+  the turn TOTAL, not the 12-line window). `expandableQuote()` in
+  `hub/src/telegram/bridge.ts` owns the markup and `escapeHtml()`s every line.
+  **These messages (and ONLY these) are sent as HTML** via `sendMessageHtml` /
+  `editMessageTextHtml`; `parse_mode` is per-message, so the permission/question
+  prompts stay MarkdownV2. **Why HTML, not MarkdownV2:** the MarkdownV2 expandable
+  blockquote is a fragile line-prefix construct (`**>` opener, `>` per line, `||`
+  terminator) on top of an 18-char reserved set — and getting the terminator wrong
+  **does not 400, it silently renders a plain non-expandable blockquote** (verified
+  live: `**>a\n>b**` → entity `blockquote`; `**>a\n>b||` → `expandable_blockquote`).
+  HTML is one unambiguous tag with a 3-char escape surface (`& < >`), so a `>` or `.`
+  in a tool detail cannot break the block.
+- **Live-verified markup.** `tools/telegram-render-probe.ts` pushes the real
+  `renderWorking` / `renderFinal` output through the real `sendMessage` endpoint and
+  asserts Telegram parses an **`expandable_blockquote` entity** — proof from the API,
+  not from our own unit test. Run it after ANY change to the collapsing renderers:
+  `TELEGRAM_BOT_TOKEN=<t> TELEGRAM_PROBE_CHAT_ID=<chat> bun run tools/telegram-render-probe.ts`
 - **Typing indicator.** `sendChatAction(chat, "typing")` fires immediately and
   then every ~4s (Telegram's typing state expires ~5s) until the turn finalizes.
 - **Finalize.** On `assistant_message:final` the bridge stops typing and **edits
@@ -412,9 +425,11 @@ a turn runs, the bridge maintains **one editable "working…" message per
   answer stays **OUTSIDE** the blockquote, fully visible; the turn's activity is
   appended below it, still collapsed. If the combined text would exceed Telegram's
   4096-char cap the collapsed tail is **dropped** (never split a blockquote across
-  messages) and the answer is sent alone. When no `tool_use` ran (or streaming is
-  off) there is no working message and the final text is sent as a fresh MarkdownV2
-  message.
+  messages) and the answer is sent alone. The cap is measured on the **escaped**
+  string — that's what Telegram counts. An over-cap answer is then chunked by
+  `splitHtmlForTelegram`, which is entity-safe (it will never cut an `&amp;` in half,
+  which would 400). When no `tool_use` ran (or streaming is off) there is no working
+  message and the final text is sent as a fresh message.
 - **NEVER collapsed: permission prompts + `user_question` prompts.** Those are their
   own messages with inline keyboards (`sendMessageWithKeyboard`) and never touch the
   working message or the blockquote — a buried approval prompt is a broken product.
@@ -567,9 +582,11 @@ Key boundaries:
 - Summarized streaming edits one working message per turn; it does NOT stream raw
   token deltas (by design — `thinking`/`text_delta` are dropped). Disable via
   `TELEGRAM_SUMMARIZED_STREAMING=false`.
-- Expandable blockquotes need **Bot API 7.4+** (server-side; no client opt-in). A
-  blockquote is never split across messages — on 4096 overflow the collapsed tail is
-  dropped and the answer is sent alone. Disable via `TELEGRAM_COLLAPSE_ACTIVITY=false`.
+- Expandable blockquotes need **Bot API 7.4+** (server-side; no client opt-in) and are
+  sent as **HTML** parse_mode. A blockquote is never split across messages — on 4096
+  overflow the collapsed tail is dropped and the answer is sent alone; the remaining
+  answer chunks via the entity-safe `splitHtmlForTelegram`. Disable via
+  `TELEGRAM_COLLAPSE_ACTIVITY=false`.
 
 ## Migration from the legacy per-user post-run telegram path
 
