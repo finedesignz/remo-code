@@ -271,6 +271,55 @@ describe('ProcessManager circuit breaker', () => {
     expect(bridgesFor('p3').length).toBe(0)
   })
 
+  describe('SAFETY: a probe that ends WITHOUT crashing releases the slot (no silent re-latch)', () => {
+    // The bug this pins (QC of #346): the probe slot was documented as "released only
+    // by a probe EXIT", but FIVE terminal paths remove a run with no crash signal —
+    // clean exit / hub_shutdown, userStop, stop(), stranded-slot eviction, and
+    // max_restarts_exceeded. halfOpen() arms no timer, so a probe that ended via any
+    // of those left the breaker pinned half_open pointing at a DEAD runId forever:
+    // every later start for the repo was refused circuit_open until a human restarted
+    // the supervisor. And it was SILENT — the hub alert only fires on state==='open'.
+    // That is the original four-day zero-spawn latch, resurrected on the RECOVERY path,
+    // and a hub redeploy or a CLI exiting 0 inside the 30s survival window triggers it.
+    //
+    // Invariant: however the probe departs, the NEXT genuine start must be admitted.
+    async function halfOpenWithProbe(prefix: string) {
+      const { pm } = makePM()
+      await pm.start(spec({ runId: `${prefix}1` }))
+      bridgesFor(`${prefix}1`)[0].cb.onSpawned({ pid: 1 })
+      crashUntilOpen(bridgesFor(`${prefix}1`)[0].cb)
+      await sleep(60)
+      expect(pm.circuitBreakerSnapshot()[0].state).toBe('half_open')
+      await pm.start(spec({ runId: `${prefix}2` })) // admitted as the probe
+      bridgesFor(`${prefix}2`)[0].cb.onSpawned({ pid: 2 })
+      return pm
+    }
+
+    /** However the probe left, a later genuine start must NOT be refused circuit_open. */
+    async function expectNextStartAdmitted(pm: ProcessManager, runId: string) {
+      const rejection = await pm.start(spec({ runId }))
+      expect(rejection).toBeNull() // pre-fix: {reason:'circuit_open', detail:{probe_in_flight:<dead id>}}
+    }
+
+    test('probe exits CLEANLY (code 0) — slot released, next start admitted', async () => {
+      const pm = await halfOpenWithProbe('e')
+      bridgesFor('e2')[0].cb.onExit({ code: 0, reason: 'runner_exit' })
+      await expectNextStartAdmitted(pm, 'e3')
+    })
+
+    test('probe exits on hub_shutdown (redeploy) — slot released, next start admitted', async () => {
+      const pm = await halfOpenWithProbe('d')
+      bridgesFor('d2')[0].cb.onExit({ code: 0, reason: 'hub_shutdown' })
+      await expectNextStartAdmitted(pm, 'd3')
+    })
+
+    test('probe is STOPPED by the user / idle-teardown — slot released, next start admitted', async () => {
+      const pm = await halfOpenWithProbe('u')
+      await pm.stop('u2')
+      await expectNextStartAdmitted(pm, 'u3')
+    })
+  })
+
   test('RE-OPENS if the admitted probe crashes, with a longer cooldown and a failed-probe count', async () => {
     const { pm } = makePM()
     await pm.start(spec({ runId: 'r1' }))
