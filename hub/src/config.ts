@@ -114,6 +114,14 @@ const telegramBotUsername = process.env.TELEGRAM_BOT_USERNAME || "";
 // set TELEGRAM_SUMMARIZED_STREAMING=false to revert to a single final-blob send.
 const telegramSummarizedStreaming = process.env.TELEGRAM_SUMMARIZED_STREAMING !== "false";
 
+// Collapse the "working…" agent-activity feed (tool one-liners) into a NATIVE
+// Telegram expandable blockquote (Bot API 7.4+, MarkdownV2 `**>…**`), so progress
+// chatter renders as a one-line summary with a tap-to-expand control instead of
+// flooding the chat. Default ON; `TELEGRAM_COLLAPSE_ACTIVITY=false` restores the
+// flat inline list. NEVER applies to permission prompts / user_question prompts —
+// those are separate messages and must stay immediately visible + actionable.
+const telegramCollapseActivity = process.env.TELEGRAM_COLLAPSE_ACTIVITY !== "false";
+
 // PTY cutover flag (mirrors the supervisor's `REMO_PTY_INTERACTIVE === '1'`).
 // Drives the WEB default human surface via GET /api/client-config (TerminalSurface
 // vs the stream-json ChatSurface). It does NOT switch the Telegram outbound source
@@ -206,6 +214,7 @@ export const config = {
     webhookSecret: telegramWebhookSecret,
     botUsername: telegramBotUsername,
     summarizedStreaming: telegramSummarizedStreaming,
+    collapseActivity: telegramCollapseActivity,
   },
 
   // PTY cutover flag. Drives the WEB terminal surface (GET /api/client-config).

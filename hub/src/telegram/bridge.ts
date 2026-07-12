@@ -94,10 +94,15 @@ const sessionUnsubs = new Map<string, () => void>();
 const TYPING_REFRESH_MS = 4000;
 const EDIT_THROTTLE_MS = 900;
 const MAX_TOOL_LINES = 12;
+/** Telegram's hard per-message cap (UTF-16 code units). */
+const MAX_TG_LEN = 4096;
 
 interface WorkingState {
   messageId: number;
   lines: string[];
+  /** TOTAL tool calls this turn (not capped by MAX_TOOL_LINES — drives the summary). */
+  toolCount: number;
+  startedAtMs: number;
   typingTimer: ReturnType<typeof setInterval> | null;
   lastEditAt: number;
 }
@@ -114,11 +119,51 @@ function toolLine(toolName: string, detail?: string): string {
   return `🔧 ${toolName}${short ? " " + short : ""}`;
 }
 
-function renderWorking(lines: string[]): string {
+/**
+ * Wrap already-plain lines in a NATIVE Telegram EXPANDABLE blockquote
+ * (Bot API 7.4+, MarkdownV2): first line prefixed `**>`, every line prefixed `>`,
+ * the last line closed with `**`. Renders collapsed with a tap-to-expand control —
+ * the "read more" the activity feed needs. Lines are escaped here.
+ */
+export function expandableQuote(lines: string[]): string {
+  const body = lines.map((l) => ">" + escapeMarkdownV2(l)).join("\n");
+  return "**" + body + "**";
+}
+
+/** One-liner shown OUTSIDE the collapsed block: "🔧 4 tool calls · 12s". */
+function activitySummary(toolCount: number, startedAtMs: number, nowMs: number = Date.now()): string {
+  const secs = Math.max(0, Math.round((nowMs - startedAtMs) / 1000));
+  return `🔧 ${toolCount} tool call${toolCount === 1 ? "" : "s"} · ${secs}s`;
+}
+
+/**
+ * The in-flight "Working…" message. With collapsing ON (default) the tool
+ * one-liners live inside an expandable blockquote behind a visible summary line;
+ * with it OFF the legacy flat list is rendered.
+ */
+function renderWorking(st: Pick<WorkingState, "lines" | "toolCount" | "startedAtMs">): string {
   const head = "⏳ *Working…*";
-  if (lines.length === 0) return head;
-  const body = lines.map((l) => escapeMarkdownV2(l)).join("\n");
-  return head + "\n\n" + body;
+  if (st.lines.length === 0) return head;
+  if (!config.telegram.collapseActivity) {
+    return head + "\n\n" + st.lines.map((l) => escapeMarkdownV2(l)).join("\n");
+  }
+  const summary = escapeMarkdownV2(activitySummary(st.toolCount, st.startedAtMs));
+  return head + " — " + summary + "\n\n" + expandableQuote(st.lines);
+}
+
+/**
+ * The FINAL turn message: the assistant's answer stays OUTSIDE the blockquote,
+ * fully visible; the turn's activity is appended collapsed underneath. Falls back
+ * to the answer alone when the combined text would blow Telegram's 4096-char cap
+ * (never split a blockquote across messages — the markup would break).
+ */
+function renderFinal(text: string, st: WorkingState | undefined): string {
+  const answer = escapeMarkdownV2(text);
+  if (!st || !config.telegram.collapseActivity || st.lines.length === 0) return answer;
+  const tail =
+    "\n\n" + escapeMarkdownV2(activitySummary(st.toolCount, st.startedAtMs)) + "\n" + expandableQuote(st.lines);
+  if (answer.length + tail.length > MAX_TG_LEN) return answer;
+  return answer + tail;
 }
 
 function stopKeyboard(sessionId: string): InlineKeyboard {
@@ -176,23 +221,26 @@ async function onToolUse(sessionId: string, toolName: string, detail?: string): 
       try {
         if (!st) {
           await sendChatAction(chatId as number | string, "typing");
-          const sent = await sendMessageMd(chatId as number | string, renderWorking([line]), keyboard);
+          const startedAtMs = Date.now();
+          const seed = { lines: [line], toolCount: 1, startedAtMs };
+          const sent = await sendMessageMd(chatId as number | string, renderWorking(seed), keyboard);
           const messageId = sent?.message_id ?? 0;
           if (!messageId) return;
           rememberStoppable(sessionId, u.id, { chatId, messageId });
           const typingTimer = setInterval(() => {
             void sendChatAction(chatId as number | string, "typing");
           }, TYPING_REFRESH_MS);
-          st = { messageId, lines: [line], typingTimer, lastEditAt: Date.now() };
+          st = { messageId, ...seed, typingTimer, lastEditAt: Date.now() };
           workingByKey.set(key, st);
           return;
         }
         st.lines.push(line);
+        st.toolCount += 1;
         if (st.lines.length > MAX_TOOL_LINES) st.lines = st.lines.slice(-MAX_TOOL_LINES);
         const sinceEdit = Date.now() - st.lastEditAt;
         if (sinceEdit >= EDIT_THROTTLE_MS) {
           st.lastEditAt = Date.now();
-          await editMessageTextMd(chatId as number | string, st.messageId, renderWorking(st.lines), keyboard);
+          await editMessageTextMd(chatId as number | string, st.messageId, renderWorking(st), keyboard);
         }
       } catch (err: any) {
         console.warn(
@@ -214,22 +262,25 @@ async function onAssistantText(sessionId: string, text: string): Promise<void> {
   }
   if (users.length === 0) return;
 
-  const finalMd = escapeMarkdownV2(text);
   for (const u of users) {
     const chatId = u.telegram_chat_id;
     if (chatId === null || chatId === undefined) continue;
     const key = workKey(chatId, sessionId);
     void enqueueForChat(chatId, async () => {
       const st = workingByKey.get(key);
+      // Answer OUTSIDE the blockquote; the turn's activity collapsed underneath.
+      const finalMd = renderFinal(text, st);
       try {
         if (st) {
           stopTyping(st);
           workingByKey.delete(key);
           forgetStoppable(sessionId);
-          if (text.length <= 4096) {
+          if (finalMd.length <= MAX_TG_LEN) {
             await editMessageTextMd(chatId as number | string, st.messageId, finalMd);
             return;
           }
+          // Too long to edit in place — sendMessageMd chunks it (renderFinal has
+          // already dropped the blockquote tail, so no markup is split).
           await sendMessageMd(chatId as number | string, finalMd);
           return;
         }
