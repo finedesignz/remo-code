@@ -166,6 +166,19 @@ export const SupervisorSessionInventory = z.object({
     last_activity_at: z.string().nullable().optional(),
     status: z.enum(['spawning', 'running', 'idle', 'stopping']),
   })).max(64),
+  // fix/stop-the-bleed — supervisor spawn circuit-breaker state. OPTIONAL:
+  // pre-fix supervisors never send it (the hub then knows nothing, exactly as
+  // before). A non-empty array means the supervisor is REFUSING to spawn a CLI
+  // for those repos — the failure mode that silently killed autonomy for four
+  // days in 2026-07 while the hub reported healthy.
+  circuit_breakers: z.array(z.object({
+    repo_path: z.string().max(4096),
+    state: z.enum(['open', 'half_open']),
+    opened_at: z.string(),
+    failed_probes: z.number().int().nonnegative(),
+    exhausted: z.boolean(),
+    last_reason: z.string().max(512).nullable().optional(),
+  })).max(64).optional(),
 })
 export type SupervisorSessionInventoryT = z.infer<typeof SupervisorSessionInventory>
 

@@ -297,6 +297,19 @@ export async function finalizeOpenRunsForSupervisor(supervisorId: string) {
  * `session_id` is absent from the live set — reconciling both views off the one
  * source of truth. A 30s grace on `started_at` avoids racing a just-created run
  * the supervisor hasn't echoed back into inventory yet (it pushes every ~10s).
+ *
+ * NULL-`session_id` runs (CRITICAL bug, fixed here). The web "Start ▶" /
+ * launch paths reserve a run with `session_id = NULL`. The old predicate was
+ * `AND NOT (session_id = ANY($2))`, and in SQL three-valued logic
+ * `NULL = ANY('{...}')` is NULL ⇒ `NOT NULL` is NULL ⇒ the row NEVER matched and
+ * was NEVER reaped. Those rows are open forever, and `sessions/budget.ts` counts
+ * every `ended_at IS NULL` run against the supervisor's concurrency cap — so a
+ * long-lived supervisor accumulated them until EVERY launch returned
+ * `at_capacity` 429 (the "Start button silently does nothing" prod wedge).
+ *
+ * A NULL `session_id` can never appear in the supervisor's inventory (nothing
+ * ever backfills the column), so such a run is orphaned BY CONSTRUCTION once it
+ * is past the 30s spawn grace. The NULL-safe predicate below reaps it.
  */
 export async function finalizeOrphanedRunsForSupervisor(
   supervisorId: string,
@@ -308,10 +321,74 @@ export async function finalizeOrphanedRunsForSupervisor(
     WHERE supervisor_id = ${supervisorId}
       AND ended_at IS NULL
       AND started_at < now() - interval '30 seconds'
-      AND NOT (session_id = ANY(${liveSessionIds}))
+      AND (session_id IS NULL OR NOT (session_id = ANY(${liveSessionIds})))
     RETURNING id
   `
   return rows.length
+}
+
+/** Hard floor on the backstop's min-age, enforced HERE so no caller can bypass it. */
+export const SESSION_RUN_MIN_AGE_FLOOR_MS = 60_000
+
+/**
+ * Leak backstop for open `session_runs` — reaps ONLY on POSITIVE knowledge that a
+ * run is dead, and ONLY within one supervisor's scope.
+ *
+ * Why the scoping is the whole design. This function has been wrong twice, both
+ * times by treating **absence of evidence as evidence of absence**:
+ *   1. An age-only predicate killed live long-running builds (a 7h TEAB build is
+ *      legitimately old).
+ *   2. A global "not in any connected supervisor's inventory" predicate killed live
+ *      runs whenever the liveness data was merely MISSING — most brutally right after
+ *      a hub restart, when the sweep can fire before any supervisor has reconnected
+ *      and pushed inventory (~10s cadence, 15min sweep): the live-set is EMPTY, and
+ *      every old open run in the fleet gets closed while its CLI keeps running,
+ *      freeing capacity and losing the real exit result.
+ *
+ * An empty live-set means "I don't know", NOT "nothing is alive". So the caller
+ * (`hub/src/sessions/stale-run-reaper.ts`) may only invoke this for a supervisor that
+ * is CONNECTED **and has pushed `session_inventory` at least once since boot** — the
+ * only condition under which "your session is not in your inventory" actually proves
+ * the session is gone. With no such supervisor, the sweep is a NO-OP: a hub that just
+ * booted knows nothing and must reap nothing. A DISCONNECTED supervisor's runs are
+ * already closed by `finalizeOpenRunsForSupervisor` on socket close — that path exists
+ * and is not this one's business.
+ *
+ * The UPDATE is therefore scoped by `supervisor_id` and never global. Within that
+ * scope a run is closed when its session is absent from THAT supervisor's just-pushed
+ * inventory AND it is older than `minAgeMs` (a grace covering a spawn in flight).
+ *
+ * NULL-`session_id` rows (the known leak — they can never appear in ANY inventory)
+ * are attributed by their `supervisor_id`, which they always carry (`session_runs.
+ * supervisor_id` is NOT NULL; `createRun`/`reserveSessionSlot` always set it). So they
+ * are reaped by their OWNING supervisor's sweep — which means they, too, are only
+ * touched once that supervisor has proven it is alive and inventorying. A row whose
+ * supervisor never reconnects is left alone here and closed by the socket-close path.
+ *
+ * A run the supervisor still reports as LIVE is NEVER closed here, however old. (If we
+ * ever believe such a run is wedged, the correct action is to tell the supervisor to
+ * STOP the process — not to abandon the row while the CLI keeps burning tokens.)
+ *
+ * `minAgeMs` is clamped to SESSION_RUN_MIN_AGE_FLOOR_MS here, IN THE DAL, so no
+ * caller — present or future — can turn this into a force-close. Returns ids closed.
+ */
+export async function finalizeUnbackedOpenRunsForSupervisor(args: {
+  supervisorId: string
+  liveSessionIds: string[]
+  minAgeMs: number
+}): Promise<string[]> {
+  const effective = Math.max(args.minAgeMs, SESSION_RUN_MIN_AGE_FLOOR_MS)
+  const seconds = Math.floor(effective / 1000)
+  const rows = await sql<{ id: string }[]>`
+    UPDATE session_runs
+    SET ended_at = now(), exit_reason = 'no_live_backing'
+    WHERE supervisor_id = ${args.supervisorId}
+      AND ended_at IS NULL
+      AND started_at < now() - make_interval(secs => ${seconds})
+      AND (session_id IS NULL OR NOT (session_id = ANY(${args.liveSessionIds})))
+    RETURNING id
+  `
+  return rows.map((r) => r.id)
 }
 
 export async function listRunsForSupervisor(supervisorId: string, userId: string, limit = 50) {

@@ -42,7 +42,7 @@ import {
   type PipelineDeps,
   type RunStore,
 } from '../../dispatch/pipeline.ts'
-import { thresholdGate, dailyCostCapGate } from '../../dispatch/gates.ts'
+import { thresholdGate, dailyCostCapGate, dailyTokenCapGate } from '../../dispatch/gates.ts'
 import { getGraceBuffer } from '../../dispatch/grace.ts'
 import { launchSessionForUser } from '../../telegram/launch.ts'
 import { log } from '../../observability/logger'
@@ -351,7 +351,7 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
     // gates here IS the waiter-promotion re-check the legacy `setOnPromote`
     // handler did — a user who crossed the cap while queued is skipped when the
     // pipeline re-dispatches the promoted waiter through this same gate list.
-    gates: [thresholdGate, dailyCostCapGate],
+    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Offline replay on reconnect: re-send THIS run (same `scheduled_task_runs`

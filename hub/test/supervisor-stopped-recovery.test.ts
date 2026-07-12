@@ -83,6 +83,7 @@ describe('isStartRejectStateMessage', () => {
     // If the supervisor adds a new StartRejection reason, this test fails
     // loudly so the hub mirror is updated in lock-step.
     expect([...SUPERVISOR_START_REJECT_REASONS].sort()).toEqual([
+      'circuit_open',
       'concurrency_cap',
       'duplicate_run',
       'legacy_agent_spawn_disabled',

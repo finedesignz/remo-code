@@ -56,6 +56,8 @@ import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/
 import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchestrator/controller.ts'
 import { startGhostReaperSweep, stopGhostReaperSweep } from './ws/ghost-reaper.ts'
 import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.ts'
+import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
+import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -525,6 +527,19 @@ if (config.titaniumBypass) {
   }
 }
 
+// fix/stop-the-bleed — FAIL CLOSED on a misconfigured daily token ceiling, BEFORE the
+// port binds (so the hub never accepts a single request while its headline safety
+// guarantee is off). The hard spend cap is the product's core promise; a typo'd '0'
+// must never silently turn it into an unbounded spend path. Exits with a legible
+// startup error unless the cap is a positive number, or
+// REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 says otherwise on purpose.
+try {
+  assertTokenCapConfig()
+} catch (err: any) {
+  console.error(`[startup] FATAL: ${err?.message ?? err}`)
+  process.exit(1)
+}
+
 // Start Bun server with WebSocket upgrade handling.
 //
 // REVIEW BL-06: idleTimeout — Bun's default is 10s, which kills any HTTP
@@ -691,6 +706,11 @@ runMigrations()
     // dead CLI turn can't leave a task perpetually in-flight. No-op when
     // REMO_RUN_REAPER_DISABLED is set.
     startRunReaperSweep()
+    // fix/stop-the-bleed — absolute-age backstop: force-close any OPEN
+    // session_runs row older than REMO_SESSION_RUN_MAX_MS (default 24h). Leaked
+    // open runs eat the supervisor concurrency cap and wedge every launch with
+    // `at_capacity`. No-op when REMO_SESSION_RUN_REAPER_DISABLED is set.
+    startStaleRunReaperSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -706,6 +726,7 @@ function gracefulShutdown(signal: string) {
   try { stopDueOrchestratorTick() } catch {}
   try { stopGhostReaperSweep() } catch {}
   try { stopRunReaperSweep() } catch {}
+  try { stopStaleRunReaperSweep() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

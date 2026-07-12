@@ -152,6 +152,8 @@ mock.module('../src/dispatch/gates.ts', () => ({
     }
     return { ok: true }
   } },
+  // fix/stop-the-bleed: the token cap now rides EVERY dispatch gate list.
+  dailyTokenCapGate: { name: 'daily_token_cap', async check() { return { ok: true } } },
 }))
 
 // Import AFTER mocks. Pipeline + the revanote adapter (incl. revanoteBudgetGate)

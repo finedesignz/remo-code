@@ -30,7 +30,7 @@ import {
   type PipelineDeps,
   type RunStore,
 } from '../dispatch/pipeline.ts'
-import { thresholdGate, dailyCostCapGate } from '../dispatch/gates.ts'
+import { thresholdGate, dailyCostCapGate, dailyTokenCapGate } from '../dispatch/gates.ts'
 import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
 
 export interface FeedbackSubmission {
@@ -127,7 +127,7 @@ export async function dispatchFeedback(
 
   const deps: PipelineDeps = {
     // IR-1 / IR-2: threshold then non-bypassable cost-cap.
-    gates: [thresholdGate, dailyCostCapGate],
+    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Wake an offline bound session (opt-in via REMO_SPAWN_ON_ERROR). Leak-safe
