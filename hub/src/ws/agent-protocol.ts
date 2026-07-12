@@ -55,6 +55,16 @@ export const AgentAuth = z.object({
   // sessions) can connect without a project dir. Hub-side handler rejects when
   // BOTH project_dir AND rootless_sessions are missing.
   project_dir: z.string().min(1).optional(),
+  // REQUIRED BY CONTRACT (fix/supervisor-hostname-required). A hostname-less
+  // auth mints a `status='online', hostname=NULL` ghost row that fools the
+  // orchestrator's liveness check. Every supervisor build since #96 sends it,
+  // so it stays `.optional()` only for the COMPAT WINDOW (older installed MSIs
+  // + hub-side hostname resolution fallbacks). An EMPTY string is rejected
+  // outright — it carries no information and is never legitimate. The hub
+  // enforces presence in `agent.ts` (warn by default; hard 4001
+  // `hostname_required` once REMO_WS_REQUIRE_HOSTNAME is flipped on) — NOT in
+  // the schema, so an old client gets a diagnosable close code instead of a
+  // bare zod protocol error. An empty string is treated as absent there.
   hostname: z.string().optional(),
   role: z.enum(['agent', 'supervisor']).optional(),
   agent_info: AgentInfo.optional(),

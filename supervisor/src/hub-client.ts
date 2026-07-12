@@ -1,4 +1,5 @@
 import { hostname, platform, release } from 'os'
+import { resolveHostname } from './hostname'
 import { writeFileSync, mkdirSync, watch as fsWatch, existsSync, readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { scanAll, scanRoots } from './repo-scanner'
@@ -145,7 +146,9 @@ export class SupervisorClient {
         type: 'auth',
         api_key: this.cfg.apiKey,
         project_dir: '__supervisor__',
-        hostname: hostname(),
+        // resolveHostname(), not os.hostname(): a transient empty os.hostname()
+        // on RE-auth is what mints hostname-NULL ghost sessions on the hub.
+        hostname: resolveHostname(),
         role: 'supervisor',
       })
     }
