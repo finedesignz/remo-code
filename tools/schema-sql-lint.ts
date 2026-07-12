@@ -134,7 +134,12 @@ function splitStatements(sqlText: string): Array<{ prefix: string; code: string;
     if (c === "/" && c2 === "*") { blockDepth = 1; raw += c + c2; i += 2; continue; }
     if (c === "$") {
       const tag = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(sqlText.slice(i));
-      if (tag) { raw += tag[0]; pushCode(tag[0]); i += tag[0].length; continue; }
+      if (tag) {
+        // OPEN a dollar-quoted body ($$ … $$ / $tag$ … $tag$). Everything up to the
+        // matching close tag — including semicolons — is INSIDE this statement.
+        dollarTag = tag[0];
+        raw += tag[0]; pushCode(tag[0]); i += tag[0].length; continue;
+      }
       raw += c; pushCode(c); i++; continue;
     }
     if (c === "'") { inSingle = true; raw += c; pushCode(c); i++; continue; }
@@ -149,17 +154,46 @@ function splitStatements(sqlText: string): Array<{ prefix: string; code: string;
   return out;
 }
 
+/**
+ * Blank out the DDL-legal uses of the banned words so they don't false-positive:
+ *   - referential actions:  ON DELETE CASCADE / ON UPDATE NO ACTION / …
+ *   - column/constraint DDL: ALTER … DROP CONSTRAINT|COLUMN|NOT NULL|DEFAULT|EXPRESSION
+ * Everything else — including a mutation hidden inside a `DO $$ … $$` body or a
+ * data-modifying CTE (`WITH x AS (DELETE …)`) — stays visible to the scan.
+ */
+function maskLegalDdl(code: string): string {
+  return code
+    .replace(/\bON\s+(DELETE|UPDATE)\s+(CASCADE|RESTRICT|NO\s+ACTION|SET\s+NULL|SET\s+DEFAULT)\b/gi, ' ')
+    .replace(/\bDROP\s+(CONSTRAINT|COLUMN|DEFAULT|EXPRESSION|IDENTITY|NOT\s+NULL)\b/gi, ' ');
+}
+
+const BANNED_ANYWHERE = new RegExp(`\\b(${BANNED.join('|')})\\b`, 'i');
+
+/**
+ * Exposed for the cross-check test: this splitter MUST agree with
+ * `hub/src/db/migrate.ts`'s `splitSqlStatements` on statement boundaries (same
+ * quoting/comment/dollar-quote rules) — it cannot simply reuse it, because the lint
+ * additionally needs, per statement, (a) a comments-stripped `code` view (so prose
+ * like "rows are INSERTED by the app" can't trip it) and (b) the leading comment
+ * block (where the `-- schema-lint: allow` pragma lives) and (c) a line number.
+ * `splitSqlStatements` returns only comment-inclusive statement strings. The test
+ * pins the two to identical boundaries so they can't drift.
+ */
+export const splitStatementsForTest = splitStatements;
+
 export function lintSchemaSql(sqlText: string): Finding[] {
   const findings: Finding[] = [];
   for (const stmt of splitStatements(sqlText)) {
     const code = stmt.code.trim();
-    const first = /^([A-Za-z]+)/.exec(code)?.[1]?.toUpperCase();
-    if (!first || !(BANNED as readonly string[]).includes(first)) continue;
+    // Scan the WHOLE statement body, not just its leading keyword — a mutation
+    // inside a DO block or a CTE re-fires against prod exactly the same way.
+    const m2 = BANNED_ANYWHERE.exec(maskLegalDdl(code));
+    if (!m2) continue;
     // A pragma is only honoured in the comment block attached to THIS statement.
     const m = PRAGMA.exec(stmt.prefix);
     findings.push({
       line: stmt.line,
-      keyword: first,
+      keyword: m2[1].toUpperCase(),
       statement: code.split("\n")[0].trim(),
       allowedReason: m ? (m[1] ?? "").trim() || "(no reason given)" : null,
     });

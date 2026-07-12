@@ -10,7 +10,8 @@
 import { describe, test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { lintSchemaSql } from '../../tools/schema-sql-lint.ts'
+import { lintSchemaSql, splitStatementsForTest } from '../../tools/schema-sql-lint.ts'
+import { splitSqlStatements } from '../src/db/migrate.ts'
 
 const SCHEMA_PATH = resolve(import.meta.dir, '../src/db/schema.sql')
 const schemaText = readFileSync(SCHEMA_PATH, 'utf-8')
@@ -56,5 +57,79 @@ describe('schema.sql lint', () => {
   test('the REAL schema.sql has no un-pragma\'d mutating statement', () => {
     const found = violations(schemaText)
     expect(found).toEqual([])
+  })
+})
+
+// ── dollar-quoting: semicolons inside $$ … $$ are NOT statement terminators ────
+
+const DO_BLOCK = `DO $$
+BEGIN
+  PERFORM 1;
+  PERFORM 2;
+END
+$$;`
+
+const FUNC = `CREATE OR REPLACE FUNCTION touch() RETURNS trigger AS $func$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$func$ LANGUAGE plpgsql;`
+
+describe('schema.sql lint — dollar-quoted bodies', () => {
+  test('a DO $$ … $$ block with internal semicolons is ONE statement', () => {
+    const stmts = splitStatementsForTest(DO_BLOCK)
+    expect(stmts.length).toBe(1)
+    expect(stmts[0].code).toContain('PERFORM 2')
+  })
+
+  test('a custom $func$ tag with internal semicolons is ONE statement', () => {
+    const stmts = splitStatementsForTest(FUNC)
+    expect(stmts.length).toBe(1)
+    expect(stmts[0].code).toContain('RETURN NEW')
+  })
+
+  test('neither trips the lint (no mutating keyword in the body)', () => {
+    expect(violations(DO_BLOCK)).toEqual([])
+    expect(violations(FUNC)).toEqual([])
+  })
+
+  test('boundaries agree with migrate.ts splitSqlStatements (one splitter, one behavior)', () => {
+    for (const src of [DO_BLOCK, FUNC, schemaText]) {
+      expect(splitStatementsForTest(src).length).toBe(splitSqlStatements(src).length)
+    }
+  })
+})
+
+// ── evasions: a mutation is caught ANYWHERE in the statement body ──────────────
+
+describe('schema.sql lint — evasions', () => {
+  test('a mutation hidden in a DO $$ … $$ block is caught', () => {
+    const sql = `DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM api_keys) THEN
+    UPDATE api_keys SET capabilities = ARRAY['agent'];
+  END IF;
+END
+$$;`
+    const found = violations(sql)
+    expect(found.length).toBe(1)
+    expect(found[0].keyword).toBe('UPDATE')
+  })
+
+  test('a data-modifying CTE (WITH x AS (DELETE …)) is caught', () => {
+    const found = violations(`WITH gone AS (DELETE FROM sessions WHERE deleted_at IS NOT NULL RETURNING id)\nSELECT count(*) FROM gone;`)
+    expect(found.length).toBe(1)
+    expect(found[0].keyword).toBe('DELETE')
+  })
+
+  test('legal DDL uses of the banned words are still not false positives', () => {
+    const sql = [
+      'CREATE TABLE IF NOT EXISTS t (id INT, u UUID REFERENCES users(id) ON DELETE CASCADE, deleted_at TIMESTAMPTZ);',
+      'ALTER TABLE t DROP CONSTRAINT IF EXISTS t_chk;',
+      'ALTER TABLE t ALTER COLUMN u DROP NOT NULL;',
+      'CREATE INDEX IF NOT EXISTS i ON t(id) WHERE deleted_at IS NULL;',
+    ].join('\n')
+    expect(violations(sql)).toEqual([])
   })
 })

@@ -79,14 +79,12 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'comp
 
 -- Migration for existing rows (idempotent — only adds column if missing)
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS capabilities TEXT[] NOT NULL DEFAULT ARRAY['agent','supervisor'];
--- Ensure all active keys have the supervisor cap (idempotent backfill).
--- LANDMINE (audited 2026-07-12): convergent only because BOTH key minters
--- (orchestrator-dal.ts, auto-launch.ts) grant 'supervisor'. The day anyone mints
--- a NARROWER key, the next hub boot silently REWRITES its capabilities to
--- ['agent','supervisor'] — escalating it and dropping its extra caps. Replace
--- with a one-shot hub/scripts/ backfill when a narrower key becomes possible.
--- schema-lint: allow convergent today (every minted key already carries 'supervisor' ⇒ WHERE matches 0 rows)
-UPDATE api_keys SET capabilities = ARRAY['agent','supervisor'] WHERE capabilities IS NULL OR NOT ('supervisor' = ANY(capabilities));
+-- The supervisor-cap backfill that used to live here was a privilege-escalation
+-- landmine: it re-ran on EVERY hub boot and would silently rewrite any key minted
+-- WITHOUT the 'supervisor' cap (least-privilege / multi-tenant keys) to
+-- ['agent','supervisor'] — escalating it AND stripping its extra caps. Moved to the
+-- one-shot backfill hub/scripts/backfill-api-key-capabilities.ts (2026-07-12).
+-- The column DEFAULT above already gives every NEW key ['agent','supervisor'].
 
 -- ── Supervisor feature tables ──────────────────────────────────────────────────
 

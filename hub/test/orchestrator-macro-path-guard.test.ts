@@ -89,6 +89,9 @@ describe('macro-path guard — the legacy wave rollback path is GONE', () => {
     await makeCycleRunner(resolveDeps([{ row: row('gsd-plan-phase'), autoDisableAfter: false }]))(entry)
   })
 
+  // TRIPWIRE, not a behavioral guarantee: this asserts by string-matching the
+  // controller source, so an alias/re-export of the wave seams would slip past it.
+  // The behavioral guarantee is the test above (no seam argument exists to call).
   test('the cycle-runner body drives runMacroCycle and nothing else', () => {
     const body = CONTROLLER_SRC.slice(CONTROLLER_SRC.indexOf('export function makeCycleRunner'))
     expect(body).toContain('await runMacroCycle({')
