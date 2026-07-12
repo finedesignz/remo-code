@@ -101,6 +101,17 @@ const QC_REVIEW_TEMPLATE = readFileSync(
   'utf8',
 )
 
+// fix/sched-failures: the `security` ROOT (Phase-11 workflow root) had no
+// fallback — a `security` task with no custom prompt fell through to `''` and
+// failed instantly with `empty_content` (observed daily in prod). Render step 1
+// of the security chain (`prompts/security/scan.md`), mirroring how a bare `dev`
+// root renders the controller template and a bare `qc` root renders the review
+// template. A custom prompt still wins.
+const SECURITY_SCAN_TEMPLATE = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts', 'security', 'scan.md'),
+  'utf8',
+)
+
 export function buildContent(task: ScheduledTask): string {
   // F-01/F-02: template provenance is authoritative server-side. The web pre-bakes
   // the identical guardrail prompt, but non-web creators (Telegram/API/orchestrator)
@@ -132,6 +143,12 @@ export function buildContent(task: ScheduledTask): string {
   if (task.task_type === 'qc_review') return custom || QC_REVIEW_TEMPLATE
   if (task.task_type === 'qc') {
     return custom || QC_REVIEW_TEMPLATE
+  }
+  // A bare `security` root with no user-supplied prompt renders the scan
+  // template (step 1 of the security chain). Chained `security_triage` /
+  // `security_fix_or_issue` steps fall through to their own prompts.
+  if (task.task_type === 'security') {
+    return custom || SECURITY_SCAN_TEMPLATE
   }
   return custom || ''
 }
@@ -337,11 +354,19 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
     gates: [thresholdGate, dailyCostCapGate],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
-    // Offline replay: re-run the task via runNow (fresh run row), mirroring the
-    // legacy grace drain. Manual runs never park (handled below).
+    // Offline replay on reconnect: re-send THIS run (same `scheduled_task_runs`
+    // row), not a fresh `runNow` fire.
+    //
+    // fix/sched-failures — the old `runNow` replay minted a SECOND run row and
+    // left this one `pending` forever: nothing finalizes a parked row on drain
+    // (onParkExpire only fires on TTL lapse), so the original sat pending until
+    // the 6h stale-run reaper marked it failed/run_timeout. That is the observed
+    // prod pattern (one `pending` + one `success` row per fire, and 14
+    // `run_timeout` rows). Re-entering sendAgentTask with the same ctx reuses the
+    // existing row (RunStore.open returns ctx.runId — no insert), so one fire
+    // produces exactly one run row.
     replay: async () => {
-      const { runNow } = await import('../dispatcher.ts')
-      await runNow(task.id, ctx.userId, {})
+      await sendAgentTask(task, ctx)
     },
     // Grace TTL lapse → legacy expire-mark (skipped/target_offline).
     onParkExpire: async () => {

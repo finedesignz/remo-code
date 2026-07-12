@@ -62,7 +62,22 @@ interface PendingTriage {
 // a fresh session per run so collisions are not expected.
 const pending = new Map<string, PendingTriage>()
 
-const TRIAGE_TIMEOUT_MS = 5 * 60 * 1000
+function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
+  if (raw == null || raw === '') return fallback
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+/**
+ * Max age of a pending supervisor-picked triage turn before it's finalized
+ * `failed`/`triage_timeout`. Default 15min — the hardcoded 5min ceiling was
+ * shorter than a real Coolify triage turn (~5.5min observed in prod), so healthy
+ * runs were falsely failed. Read at sweep time (not module load) so a Coolify env
+ * change takes effect on the next tick; non-positive/non-finite ⇒ default.
+ */
+export function triageTimeoutMs(): number {
+  return parsePositiveIntEnv(process.env.REMO_TRIAGE_TIMEOUT_MS, 900_000)
+}
 
 interface RunCtxLike {
   runId: string
@@ -278,8 +293,9 @@ export async function onTriageAssistantMessage(
 
 setInterval(() => {
   const now = Date.now()
+  const timeoutMs = triageTimeoutMs()
   for (const [sid, p] of pending) {
-    if (now - p.startedAt > TRIAGE_TIMEOUT_MS) {
+    if (now - p.startedAt > timeoutMs) {
       pending.delete(sid)
       void finalizeRun(p.runId, 'failed', 'triage_timeout')
       removeRunContext(p.runId)

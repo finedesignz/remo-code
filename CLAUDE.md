@@ -252,6 +252,11 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   default, so `task_type='teab'` rows use a per-row reap ceiling of
   `max(REMO_RUN_MAX_MS, REMO_TEAB_MAX_RUN_MS)` — a TEAB build is never reaped inside its own poll
   window (raising the TEAB knob raises the reaper's teab ceiling automatically).
+  Companion knob (fix/sched-failures): **`REMO_TRIAGE_TIMEOUT_MS`** (default **900000** = 15min;
+  non-positive/non-finite ⇒ default; read at sweep time) — max age of a pending supervisor-picked
+  triage turn (`hub/src/scheduler/senders/triage.ts`) before it's finalized `failed`/`triage_timeout`.
+  Replaces a hardcoded 5min that was shorter than a real Coolify triage turn and falsely failed
+  healthy runs.
   Companion fix: `log_check` with no resolvable Coolify app now finalizes **`skipped`**, not `failed`
   (uuid resolved from `payload` → session `repo_key` → `coolify_app_repo`). NOTE `skipped` still
   matches `on:'failure'` post-run chains (`post-run/dispatcher.ts` matches failed|skipped|cancelled) —
