@@ -653,16 +653,6 @@ export class ProcessManager {
       return { reason: 'concurrency_cap', detail: { limit: this.cfg.maxConcurrent } }
     }
 
-    // Claim the half-open probe slot only once the start has cleared EVERY
-    // rejection check above. Claiming it earlier pins probeRunId to a run that
-    // never spawns (duplicate_run / concurrency_cap), and since the slot is only
-    // released by a probe exit, the breaker would sit half-open forever and no
-    // later genuine start could ever be admitted as the probe.
-    if (breaker && breaker.state === 'half_open' && breaker.probeRunId == null) {
-      breaker.probeRunId = spec.runId
-      this.cb.onLog('warn', `circuit breaker half-open — admitting run as the probe for ${spec.repoPath}`, spec.runId)
-    }
-
     if (spec.dangerouslySkipPermissions && !this.cfg.allowDangerousSkipPermissions) {
       this.cb.onLog(
         'warn',
@@ -686,8 +676,30 @@ export class ProcessManager {
     ;(run as any).startedAt = new Date().toISOString()
     ;(run as any).lastActivityAt = null
     ;(run as any).sessionId = null
+
+    // Claim the half-open probe slot LAST — immediately before the spawn, after
+    // every rejection check has cleared, and release it if the spawn itself throws.
+    //
+    // The slot is only ever released by a probe EXIT. So a claim made before any
+    // path that can still bail out (a rejection, a throw) pins probeRunId to a run
+    // that never spawns: the breaker then sits half_open forever, every later
+    // genuine start fails the `probeRunId == null` guard and is never tracked as a
+    // probe, and the breaker can never close. Claiming here makes "claimed" and
+    // "spawned" the same instant, so no future early-return added above can leak it.
+    const claimedProbe = breaker != null && breaker.state === 'half_open' && breaker.probeRunId == null
+    if (claimedProbe) {
+      breaker!.probeRunId = spec.runId
+      this.cb.onLog('warn', `circuit breaker half-open — admitting run as the probe for ${spec.repoPath}`, spec.runId)
+    }
+
     this.runs.set(spec.runId, run)
-    this.spawn(run)
+    try {
+      this.spawn(run)
+    } catch (err) {
+      if (claimedProbe && breaker!.probeRunId === spec.runId) breaker!.probeRunId = null
+      this.runs.delete(spec.runId)
+      throw err
+    }
     return null
   }
 
