@@ -8,7 +8,7 @@ import { config } from '../config.ts'
 import { insertMessage, listSessions, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
 import { acquire, releaseByWriter } from '../telegram/turn-lock.ts'
-import { claimTermWriter, dropTermWriter } from './term-writers.ts'
+import { claimTermWriter, currentTermWriter, dropTermWriter } from './term-writers.ts'
 import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
@@ -217,6 +217,23 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
         log.warn('term.input.diag.drop', { gate: 'lock_not_granted', session_id: frame.session_id, writer_id: writerId })
         // Queued waiter was dropped (overflow/reset) — drop the frame rather than
         // inject out-of-turn bytes.
+        return
+      }
+      // ENFORCE the invariant, don't just record it. `acquire` awaits: while this
+      // frame sat in the turn-lock queue another client connection may have claimed
+      // the session and superseded us. Claiming alone would leave the loser's bytes
+      // still reaching PTY stdin — the stale socket would be unable to WEDGE the
+      // lock but would not be MUZZLED. Drop the frame when this connection is no
+      // longer the session's client writer. Logged with writer_id so a recurrence
+      // of the prod two-writer ingress is visible instead of silent.
+      const current = currentTermWriter(frame.session_id)
+      if (current !== writerId) {
+        log.warn('term.input.diag.drop', {
+          gate: 'not_current_writer',
+          session_id: frame.session_id,
+          writer_id: writerId,
+          current_writer: current,
+        })
         return
       }
     }

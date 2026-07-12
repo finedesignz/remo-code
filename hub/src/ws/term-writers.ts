@@ -16,14 +16,22 @@
  * SUPERSEDED — its turn-lock ownership + queued waiters are released, so a
  * stale/leaked connection can neither hold nor queue-spam the lock.
  *
+ * This module RECORDS the claim; it does not by itself stop a superseded socket's
+ * bytes. The write path (`ws/client.ts`) ENFORCES the invariant: after acquiring
+ * the turn lock it re-checks `currentTermWriter(session) === writerId` and DROPS
+ * the frame otherwise (`gate: 'not_current_writer'`). `acquire` awaits, so a
+ * connection can be superseded while its frame sits in the queue — without that
+ * post-acquire check a superseded writer could not WEDGE the lock but its bytes
+ * would still reach PTY stdin.
+ *
  * Last-writer-wins is deliberate: a user moving between tabs/devices must always
  * be able to take the keyboard. Only `client:*` writers are superseded here —
  * the Telegram writer is arbitrated by the turn lock alone and is never evicted
- * by this module.
+ * by this module, nor is it ever dropped by the client write path.
  *
  * Module-level Map (single-process hub), same shape as turn-lock.
  */
-import { releaseByWriter, type WriterId } from '../telegram/turn-lock'
+import { releaseWriterInSession, type WriterId } from '../telegram/turn-lock'
 
 /** sessionId → the current client writer id (`client:<uuid>`). */
 const writers = new Map<string, WriterId>()
@@ -35,15 +43,19 @@ export function isClientWriter(writerId: WriterId): boolean {
 /**
  * Claim `sessionId` for `writerId` (called on a client terminal attach/write).
  * When a DIFFERENT client connection held the claim, that stale writer is
- * released from the turn lock (holder → released + promoted; queued waiters →
- * resolved false) and its id is returned. Returns null when nothing was
- * superseded.
+ * released from the turn lock FOR THIS SESSION ONLY (holder → released +
+ * promoted; queued waiters → resolved false) and its id is returned. Returns null
+ * when nothing was superseded.
+ *
+ * Scoped, not the all-sessions `releaseByWriter`: one socket can legitimately
+ * drive up to 12 sessions (grid view), and losing session A's claim must not drop
+ * that socket's queued waiter on session B.
  */
 export function claimTermWriter(sessionId: string, writerId: WriterId): WriterId | null {
   const prev = writers.get(sessionId)
   writers.set(sessionId, writerId)
   if (!prev || prev === writerId || !isClientWriter(prev)) return null
-  releaseByWriter(prev)
+  releaseWriterInSession(sessionId, prev)
   return prev
 }
 

@@ -167,20 +167,33 @@ export function release(sessionId: string): void {
 export function releaseByWriter(writerId: WriterId): void {
   // Snapshot session ids — release() mutates `locks` (may delete entries).
   for (const sessionId of Array.from(locks.keys())) {
-    const st = locks.get(sessionId)
-    if (!st) continue
-    // Drop this writer's queued waiters first (resolve false so awaiters unblock).
-    if (st.queue.length > 0) {
-      const remaining: Waiter[] = []
-      for (const w of st.queue) {
-        if (w.writerId === writerId) w.resolve(false)
-        else remaining.push(w)
-      }
-      st.queue = remaining
-    }
-    // If this writer holds the turn, release it (promotes next queued waiter).
-    if (st.holder === writerId) release(sessionId)
+    releaseWriterInSession(sessionId, writerId)
   }
+}
+
+/**
+ * `releaseByWriter` scoped to ONE session — the surgical form.
+ *
+ * Supersede (term-writers) is a PER-SESSION event: connection C losing the writer
+ * claim on session A says nothing about C's legitimate queued waiter on session B
+ * (the grid view drives up to 12 sessions from one socket). The all-sessions sweep
+ * would resolve that B waiter `false` too, silently dropping one frame there.
+ * Disconnect stays all-sessions — a dead socket owns nothing anywhere.
+ */
+export function releaseWriterInSession(sessionId: string, writerId: WriterId): void {
+  const st = locks.get(sessionId)
+  if (!st) return
+  // Drop this writer's queued waiters first (resolve false so awaiters unblock).
+  if (st.queue.length > 0) {
+    const remaining: Waiter[] = []
+    for (const w of st.queue) {
+      if (w.writerId === writerId) w.resolve(false)
+      else remaining.push(w)
+    }
+    st.queue = remaining
+  }
+  // If this writer holds the turn, release it (promotes next queued waiter).
+  if (st.holder === writerId) release(sessionId)
 }
 
 /**
