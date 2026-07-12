@@ -60,6 +60,21 @@ export interface WaveSeams {
   dispatchReviewer(prUrl: string | null, unit: WaveUnit, ctx: WaveRunContext): Promise<ReviewerVerdict | null>;
   /** Phase-28: surface a propose-to-chat for high-tier (ship/milestone/tag) units. */
   proposeToChat(unit: WaveUnit, ctx: WaveRunContext): Promise<void>;
+  /**
+   * Phase-27/D9 terminal verify tail. DB-backed (writes a run-log row) and called
+   * UNCONDITIONALLY by the legacy wave path — including when zero rows are due — so
+   * it must be stubbable, or a "unit" test of makeCycleRunner opens a real postgres
+   * connection and intermittently blows the 5s test timeout. Optional: unset ⇒ the
+   * real runVerifyTail.
+   */
+  runVerifyTail?: (args: {
+    sessionId: string;
+    repoKey: string | null;
+    userId: string;
+    decisionRationale: string;
+  }) => Promise<unknown>;
+  /** Cadence stamp for the fired due rows. DB-backed — stubbable for the same reason. */
+  markRowsFired?: (rowIds: string[]) => Promise<unknown>;
 }
 
 /**

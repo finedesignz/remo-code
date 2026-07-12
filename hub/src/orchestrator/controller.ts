@@ -629,7 +629,7 @@ export function makeCycleRunner(
     // still holds until this cycle settles; worst case the row fires one tick early).
     if (dueRows.length > 0) {
       try {
-        await markOrchestratorRowsFired(dueRows.map((d) => d.row.id));
+        await (seams.markRowsFired ?? markOrchestratorRowsFired)(dueRows.map((d) => d.row.id));
       } catch (err: any) {
         console.warn(`[orchestrator] cadence stamp failed session=${sessionId}: ${err?.message ?? err}`);
       }
@@ -689,7 +689,7 @@ export function makeCycleRunner(
     // (c) MANDATORY terminal verify tail (Phase 27 / D9). No-ops gracefully when
     // COOLIFY_TOKEN + REMO_VERIFY_* are unset (writes a `skipped` run-log row).
     try {
-      await runVerifyTail({
+      await (seams.runVerifyTail ?? runVerifyTail)({
         sessionId,
         repoKey,
         userId,
