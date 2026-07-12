@@ -188,8 +188,32 @@ Refusal reasons (typed `InjectOutcome`): `not_allowlisted`, `supervisor_offline`
 | Env | Default | Purpose |
 |---|---|---|
 | `REMO_ORCHESTRATOR_AUTOSPAWN` | OFF (`0`) | Arms the autospawn capability. Accepts `1\|true\|yes\|on`. Carries `REMO_ORCHESTRATOR_ENABLED` (both ON). |
-| `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` | `50_000_000` (50M) | Non-bypassable daily TOKEN ceiling. Non-positive/non-finite ⇒ disabled (fail-open). |
+| `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` | `50_000_000` (50M) | Non-bypassable daily TOKEN ceiling. Counts **all four buckets: input + output + cache_creation + cache_read** (see below). Non-positive/non-finite ⇒ disabled (fail-open). |
+| `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` | `4` | Per-session orchestrator inject-RATE ceiling (`sessionInjectRateGate`). Non-positive/non-finite ⇒ disabled (fail-open). |
 | `REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES` | `20` | Per-day autospawn launch-count cap. Non-positive/non-finite ⇒ disabled. |
+
+### 2026-07 runaway-loop incident — what the caps now enforce
+
+The orchestrator injected a macro prompt into ONE session every 60s, 24/7, for 2 days —
+**2,192 turns**, each re-reading a ~1M-token context: **2.83 BILLION `cache_read_input_tokens`**,
+which torched the owner's Claude subscription. Nothing stopped it:
+
+- **The daily token cap never tripped.** `getTodayTokenTotal` counted only `input + output`
+  (PR #335 called cache-read "free"). Cache-read is *not* free against a **subscription rate
+  limit** — only against per-token billing. **Fixed:** the cap now sums
+  `input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens`
+  (same tz-day boundary as `/api/usage/cost`).
+- **Nothing bounded the RATE.** **Fixed:** `sessionInjectRateGate`
+  (`hub/src/dispatch/gates.ts`) counts this session's injects in the trailing 60 minutes from
+  the existing `routine_run_log` (rows whose `outcome` ∈
+  `dispatched | queued | autospawn_launched | autospawn_parked` — refusals/skips don't consume
+  budget) and refuses at/over `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` (default **4**) with
+  `over_session_inject_rate:<n>>=<cap>`. Rows age out of the rolling window, so it re-opens
+  by itself. A legitimate autonomous cycle takes far longer than 15 minutes per unit of work.
+
+Both gates sit in the orchestrator inject gate list ALONGSIDE (never replacing) the threshold
+and dollar cost-cap gates: `[thresholdGate, dailyCostCapGate, dailyTokenCapGate,
+sessionInjectRateGate]` (`hub/src/orchestrator/inject.ts`, both the online and autospawn paths).
 
 **Repo allowlist.** `orchestrator_autospawn_allowlist` (per-user `repo_ident` =
 `github://owner/repo` or `path://<abs>`; idempotent additive DDL, **default EMPTY** so

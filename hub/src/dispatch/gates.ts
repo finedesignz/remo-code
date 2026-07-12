@@ -19,6 +19,7 @@
  */
 import { sql } from '../db/postgres.ts'
 import { getTodayTokenCostUsd, getTodayTokenTotal } from '../db/token-usage-dal.ts'
+import { countSessionInjectsSince } from '../db/orchestrator-rows-dal.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
 import { reserveSessionSlot } from '../sessions/budget.ts'
 import { getUsage } from '../usage/store.ts'
@@ -202,6 +203,50 @@ export const dailyTokenCapGate: DispatchGate = {
     if (status.over) {
       const reason = `over_daily_token_cap:${status.tokens}>=${status.cap}`
       return { ok: false, reason }
+    }
+    return { ok: true }
+  },
+}
+
+// ── Per-session orchestrator INJECT-RATE ceiling ─────────────────────────────
+/**
+ * Max orchestrator injects per session per rolling hour. Default 4.
+ *
+ * The 2026-07 incident: a wedged 60s tick loop injected a macro prompt into ONE
+ * session 1,440x/day for 2 days (2,192 turns, 2.83B cache-read tokens). Nothing
+ * bounded the RATE — only the (then cache-blind) daily totals. This ceiling makes
+ * that shape impossible regardless of what the totals say: a legitimate autonomous
+ * cycle finishes a unit of work in far more than 15 minutes, so 4/hour is generous.
+ *
+ * Non-positive / non-finite ⇒ DISABLED (fail-open), mirroring the cost/token caps.
+ */
+const DEFAULT_MAX_INJECTS_PER_HOUR = 4
+
+export function maxInjectsPerHour(): number {
+  const raw = process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR
+  if (raw == null || raw.trim() === '') return DEFAULT_MAX_INJECTS_PER_HOUR
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : DEFAULT_MAX_INJECTS_PER_HOUR
+}
+
+/**
+ * Per-session inject-rate gate. Counts this session's orchestrator injects in the
+ * trailing 60 minutes (`countSessionInjectsSince` over the existing
+ * `routine_run_log` — no new table) and blocks with
+ * `over_session_inject_rate:<n>>=<cap>` once the ceiling is reached. Rows age out
+ * of the rolling window, so the gate re-opens on its own.
+ *
+ * Wired into the orchestrator inject gate list ALONGSIDE thresholdGate /
+ * dailyCostCapGate / dailyTokenCapGate — it replaces none of them.
+ */
+export const sessionInjectRateGate: DispatchGate = {
+  name: 'session_inject_rate',
+  async check(req: DispatchRequest) {
+    const cap = maxInjectsPerHour()
+    if (!Number.isFinite(cap) || cap <= 0) return { ok: true } // disabled (fail-open)
+    const injects = await countSessionInjectsSince(req.sessionId, 60)
+    if (injects >= cap) {
+      return { ok: false, reason: `over_session_inject_rate:${injects}>=${cap}` }
     }
     return { ok: true }
   },

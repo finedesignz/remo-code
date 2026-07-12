@@ -497,6 +497,42 @@ export async function countAutospawnLaunchesToday(
   return Number(rows[0]?.n ?? 0);
 }
 
+/**
+ * Inject-rate source: count the orchestrator prompt INJECTS for one session in the
+ * trailing `windowMinutes` (default 60). Reuses `routine_run_log` — the macro cycle
+ * already writes exactly one row per inject with `outcome = <InjectOutcome.kind>`
+ * (macro-cycle.ts), so the rows whose outcome means "a prompt actually went to the
+ * CLI" are the injects. No new table, no new column.
+ *
+ * Counted outcomes: dispatched | queued | autospawn_launched | autospawn_parked.
+ * Everything else (skipped / refused* / no_session / failed / stub_not_ready) did
+ * NOT drive a turn and must not consume the session's hourly budget.
+ *
+ * Backs `sessionInjectRateGate` (dispatch/gates.ts) — the ceiling that makes the
+ * 2026-07 wedged-tick-loop incident (1,440 injects/day into one session) impossible.
+ */
+export const INJECT_OUTCOMES = [
+  'dispatched',
+  'queued',
+  'autospawn_launched',
+  'autospawn_parked',
+] as const;
+
+export async function countSessionInjectsSince(
+  sessionId: string,
+  windowMinutes = 60,
+): Promise<number> {
+  const minutes = Number.isFinite(windowMinutes) && windowMinutes > 0 ? windowMinutes : 60;
+  const rows = await sql<{ n: string | null }[]>`
+    SELECT COUNT(*)::text AS n
+    FROM routine_run_log
+    WHERE session_id = ${sessionId}
+      AND outcome = ANY(${[...INJECT_OUTCOMES]}::text[])
+      AND created_at >= now() - make_interval(mins => ${minutes})
+  `;
+  return Number(rows[0]?.n ?? 0);
+}
+
 /** Idempotent add (used by the BSA-08 flip runbook one-shot, not auto-run). */
 export async function addRepoToAutospawnAllowlist(
   userId: string,
