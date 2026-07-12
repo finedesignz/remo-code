@@ -37,16 +37,23 @@ That task owns a set of **command rows** in `orchestrator_rows`.
 The schedule is **eligibility**, not the trigger: when the routine fires, a
 controller computes EVERY due row this tick and runs them all (decision D1).
 
-**Cadence advances on dispatch.** `shouldSkipFire()` only answers *"is this rule
-eligible at `now`"* (start_at / week+month parity / `active_window`) — for a
+**Cadence advances when the CYCLE runs.** `shouldSkipFire()` only answers *"is this
+rule eligible at `now`"* (start_at / week+month parity / `active_window`) — for a
 minutes/hours/days rule it says "fire" for every `now` past `start_at`. The hub
 scheduler pairs it with `scheduled_tasks.next_fire_at`; orchestrator rows use
-`last_fired_at`, stamped by `scanAndEnqueueDueCycles` on every row it dispatches
-(`markOrchestratorRowsFired`). Without it an `Every 4h` row is DUE on all 1440 daily
-60s ticks and the macro prompt is re-injected once a minute (see the 2026-07-10
-per-tick re-inject incident). The due-scan additionally **skips any session with an
-unsettled (`pending`/`running`) `routine_queue` row**, so a macro turn still in flight
-never gets a second cycle stacked behind it.
+`last_fired_at`. Without it an `Every 4h` row is DUE on all 1440 daily 60s ticks and
+the macro prompt is re-injected once a minute (the 2026-07-10 per-tick re-inject
+incident).
+
+The stamp is written by the **cycle runner** (`makeCycleRunner` →
+`markOrchestratorRowsFired`), on the rows the cycle actually selected — **not** at
+enqueue-time. A `routine_queue` entry carries only `session_id`, so the cycle
+re-selects its DUE rows when it drains; stamping at enqueue would leave that cycle
+with zero due rows (a silent autopilot no-op). Between the enqueue and the drain,
+what prevents a second cycle is the due-scan's **in-flight guard**: it skips any
+session with an unsettled (`pending`/`running`) `routine_queue` row. A non-null but
+unparseable stamp is treated as *just fired* (fail-closed), so a corrupt timestamp can
+never re-open per-tick firing.
 
 Two always-on **implicit** rows are NOT in the table: `status-check/decide` (first,
 context gathering) and `deploy+log-verify` (terminal, every tick — see

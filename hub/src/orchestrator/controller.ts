@@ -620,6 +620,21 @@ export function makeCycleRunner(
     const { sessionId, userId, repoKey, tz, controllerContext } = resolved;
     const dueRows = controllerContext.dueRows;
 
+    // ADVANCE THE CADENCE (fix/orchestrator-tick-reinject) — here, NOT at enqueue.
+    // The cycle has now SELECTED its rows (both paths below consume `dueRows`: the
+    // macro path resumes the task these rows made due; the legacy wave path runs
+    // them directly). Stamping them fired is what stops the next 60s due-scan from
+    // finding the same rows DUE and re-injecting the macro prompt once a minute.
+    // Best-effort: a stamp failure must not wedge the cycle (the in-flight guard
+    // still holds until this cycle settles; worst case the row fires one tick early).
+    if (dueRows.length > 0) {
+      try {
+        await markOrchestratorRowsFired(dueRows.map((d) => d.row.id));
+      } catch (err: any) {
+        console.warn(`[orchestrator] cadence stamp failed session=${sessionId}: ${err?.message ?? err}`);
+      }
+    }
+
     // ── Milestone TMAC: resume-heartbeat MACRO path (REPLACES the wave path) ──
     // Resolve macro_task_type → one autonomous macro prompt, reconcile the prior
     // turn's sentinels, halt on an open mandatory gate, else (re)inject to resume.
@@ -750,11 +765,14 @@ export async function scanAndEnqueueDueCycles(now: Date = new Date()): Promise<s
       const hot = dueRows.some(
         (d) => d.row.command === 'deploy-fix' || isMergeCommand(d.row.command),
       );
+      // NOTE: the cadence is NOT advanced here. The queue entry carries only
+      // `session_id` and the CYCLE re-selects its DUE rows when it actually runs —
+      // stamping at enqueue-time would make those rows non-due by the time the cycle
+      // ran, so the cycle would execute ZERO commands (a silent autopilot no-op).
+      // `markOrchestratorRowsFired` is called by the cycle runner, on the rows it
+      // actually selected. The in-flight guard above is what stops the next 60s tick
+      // from stacking a second cycle in the meantime.
       await enqueueCycle(task.session_id, hot ? CyclePriority.DEPLOY_FIX : CyclePriority.BUILD);
-      // ADVANCE THE CADENCE (fix/orchestrator-tick-reinject): stamp last_fired_at on
-      // the rows we just dispatched, so they are not DUE again until their interval
-      // has elapsed. Without this the same rows are DUE on the very next 60s tick.
-      await markOrchestratorRowsFired(dueRows.map((d) => d.row.id), now);
       enqueued.push(task.session_id);
     } catch (err: any) {
       console.warn(

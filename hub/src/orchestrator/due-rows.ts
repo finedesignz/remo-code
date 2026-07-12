@@ -116,10 +116,15 @@ export function isRowDue(
   }
 
   // CADENCE GATE: the interval must have ELAPSED since this row last fired.
-  const lastFired = row.last_fired_at ? Date.parse(row.last_fired_at) : NaN;
-  if (Number.isFinite(lastFired)) {
-    const elapsed = now.getTime() - lastFired;
-    if (elapsed < ruleIntervalMs(rule)) return { due: false, autoDisableAfter: false };
+  // FAIL-CLOSED: a NON-NULL but unparseable stamp is treated as "just fired" (NOT
+  // due) — otherwise a corrupt timestamp silently disables the gate and restores
+  // per-tick firing. Only a NULL stamp (never fired) is a cold start.
+  if (row.last_fired_at != null) {
+    const lastFired = Date.parse(row.last_fired_at);
+    if (!Number.isFinite(lastFired)) return { due: false, autoDisableAfter: false };
+    if (now.getTime() - lastFired < ruleIntervalMs(rule)) {
+      return { due: false, autoDisableAfter: false };
+    }
   }
 
   return { due: true, autoDisableAfter: false };
