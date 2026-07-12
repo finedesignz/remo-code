@@ -58,12 +58,6 @@ import { startGhostReaperSweep, stopGhostReaperSweep } from './ws/ghost-reaper.t
 import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.ts'
 import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
-
-// fix/stop-the-bleed — FAIL CLOSED on a misconfigured daily token ceiling. The hard
-// spend cap is the product's core promise; a typo'd '0' must never silently turn it
-// into an unbounded spend path. Throws (refuses to boot) unless the cap is a positive
-// number or REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 says otherwise on purpose.
-assertTokenCapConfig()
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
@@ -660,6 +654,18 @@ const server = Bun.serve({
     },
   },
 })
+
+// fix/stop-the-bleed — FAIL CLOSED on a misconfigured daily token ceiling, BEFORE
+// anything else boots. The hard spend cap is the product's core promise; a typo'd
+// '0' must never silently turn it into an unbounded spend path. Throws (refusing to
+// boot, with a legible startup error naming the fix) unless the cap is a positive
+// number, or REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 says otherwise on purpose.
+try {
+  assertTokenCapConfig()
+} catch (err: any) {
+  console.error(`[startup] FATAL: ${err?.message ?? err}`)
+  process.exit(1)
+}
 
 // On startup: apply migrations, then mark all sessions as offline,
 // boot the W2 scheduler (registry + catchup) alongside the legacy v0.

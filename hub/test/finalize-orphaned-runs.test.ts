@@ -170,31 +170,76 @@ maybe('finalizeOrphanedRunsForSupervisor', () => {
     expect(closed).toBe(0)
   })
 
-  test('finalizeAgedOpenRuns force-closes any open run past the ceiling', async () => {
-    // Absolute-age backstop: whatever shape the NEXT leak takes, an open run
-    // older than the ceiling is closed regardless of session_id / inventory.
-    const { finalizeAgedOpenRuns } = await import('../src/db/supervisor-dal.ts')
-    const sup = `sup_orphan_aged_${Date.now()}`
+  test('finalizeUnbackedOpenRuns: OLD but LIVE is NOT reaped; unbacked + NULL-session ARE', async () => {
+    // The backstop's predicate is LIVENESS, not age. Age alone cannot distinguish a
+    // leaked row from a 7h TEAB build — and force-closing a live run would free its
+    // slot while the CLI kept running (a second CLI could then launch on top of it,
+    // and the real exit result is lost). Same bogus-capacity failure class this
+    // branch exists to kill, from the opposite direction.
+    const { finalizeUnbackedOpenRuns } = await import('../src/db/supervisor-dal.ts')
+    const sup = `sup_orphan_unbacked_${Date.now()}`
     await mkSupervisor(sup)
-    const freshId = await mkSession(crypto.randomUUID())
+    const liveOldId = await mkSession(crypto.randomUUID())  // a legit long build
+    const deadOldId = await mkSession(crypto.randomUUID())  // leaked, nothing backs it
+    const youngId = await mkSession(crypto.randomUUID())    // unbacked but inside the grace
+
     await sql`
       INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
-      VALUES (${userId}, NULL, ${sup}, 'aged-null', now() - interval '48 hours')
+      VALUES (${userId}, ${liveOldId}, ${sup}, 'old-but-live', now() - interval '48 hours')
     `
     await sql`
       INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
-      VALUES (${userId}, ${freshId}, ${sup}, 'aged-young', now() - interval '1 hour')
+      VALUES (${userId}, ${deadOldId}, ${sup}, 'old-unbacked', now() - interval '48 hours')
     `
-    const ids = await finalizeAgedOpenRuns(24 * 60 * 60 * 1000)
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, NULL, ${sup}, 'null-session', now() - interval '48 hours')
+    `
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, ${youngId}, ${sup}, 'young-unbacked', now() - interval '1 minute')
+    `
+
+    // A connected supervisor reports ONLY liveOldId in its inventory.
+    const ids = await finalizeUnbackedOpenRuns({
+      liveSessionIds: [liveOldId],
+      minAgeMs: 24 * 60 * 60 * 1000,
+    })
+
     const rows = await sql`
       SELECT repo_path, ended_at, exit_reason FROM session_runs
       WHERE supervisor_id = ${sup} ORDER BY repo_path
     `
     const by = Object.fromEntries(rows.map((r: any) => [r.repo_path, r]))
-    expect(by['aged-null'].ended_at).not.toBeNull()
-    expect(by['aged-null'].exit_reason).toBe('run_max_age')
-    expect(by['aged-young'].ended_at).toBeNull()
-    expect(ids.length).toBeGreaterThanOrEqual(1)
+    // 48h old, but a supervisor says it is LIVE → left alone. This is the case an
+    // age-only reaper would have wrongly killed.
+    expect(by['old-but-live'].ended_at).toBeNull()
+    // Old and nothing live backs it → reaped.
+    expect(by['old-unbacked'].ended_at).not.toBeNull()
+    expect(by['old-unbacked'].exit_reason).toBe('no_live_backing')
+    // NULL session_id can never appear in inventory → unbacked by construction.
+    expect(by['null-session'].ended_at).not.toBeNull()
+    expect(by['null-session'].exit_reason).toBe('no_live_backing')
+    // Unbacked but inside the grace → left alone (spawn in flight / reconnecting sup).
+    expect(by['young-unbacked'].ended_at).toBeNull()
+    expect(ids.length).toBe(2)
+  })
+
+  test('finalizeUnbackedOpenRuns clamps minAgeMs to the 60s floor INSIDE the DAL', async () => {
+    // The clamp lives in the DAL, not the caller: a future direct caller passing
+    // minAgeMs=1 must not be able to force-close the whole fleet's live runs.
+    const { finalizeUnbackedOpenRuns } = await import('../src/db/supervisor-dal.ts')
+    const sup = `sup_orphan_floor_${Date.now()}`
+    await mkSupervisor(sup)
+    await sql`
+      INSERT INTO session_runs (user_id, session_id, supervisor_id, repo_path, started_at)
+      VALUES (${userId}, NULL, ${sup}, 'just-started', now() - interval '5 seconds')
+    `
+    // minAgeMs=1 would reap a 5s-old row without the floor. With it (60s), it doesn't.
+    const ids = await finalizeUnbackedOpenRuns({ liveSessionIds: [], minAgeMs: 1 })
+    expect(ids.length).toBe(0)
+    const rows = await sql`SELECT ended_at FROM session_runs WHERE supervisor_id = ${sup}`
+    expect(rows[0].ended_at).toBeNull()
   })
 
   test('empty inventory closes all grace-aged open runs', async () => {

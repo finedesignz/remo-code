@@ -327,28 +327,52 @@ export async function finalizeOrphanedRunsForSupervisor(
   return rows.length
 }
 
+/** Hard floor on the backstop's min-age, enforced HERE so no caller can bypass it. */
+export const SESSION_RUN_MIN_AGE_FLOOR_MS = 60_000
+
 /**
- * Absolute-age backstop for open `session_runs` (defence in depth).
+ * Global leak backstop for open `session_runs` — keyed on LIVENESS, not age.
  *
- * The orphan reconciler above only runs when a supervisor pushes inventory. If
- * the NEXT run-leak bug takes a different shape (supervisor never pushes, rows
- * bound to a supervisor that no longer exists, a predicate that misses again),
- * the leaked rows still eat the concurrency budget forever. This sweep closes
- * ANY open run older than `maxAgeMs` regardless of session_id / supervisor /
- * inventory, so no run can wedge the app indefinitely.
+ * The orphan reconciler above only fires when a supervisor pushes inventory, so a
+ * leaked row whose supervisor never pushes (gone, crashed, never reconnected) or a
+ * row bound to no session at all still eats the concurrency budget forever
+ * (`sessions/budget.ts` counts every `ended_at IS NULL` run) until every launch
+ * 429s `at_capacity`.
  *
- * The ceiling is deliberately well above any legitimate session lifetime the hub
- * itself bounds (idle teardown at REMO_SESSION_IDLE_GRACE_SECONDS, default 4h),
- * so a healthy long-running session is never reaped out from under a user.
- * Returns the ids closed.
+ * The predicate is: **nothing live backs this run.** `liveSessionIds` is the union
+ * of `session_inventory` across ALL currently-connected supervisors — the same
+ * ground truth `finalizeOrphanedRunsForSupervisor` already reaps against. A run is
+ * closed only when its session appears in NO connected supervisor's inventory (a
+ * NULL `session_id` can never appear in one, so those rows — the known leak — are
+ * always unbacked), AND it is older than `minAgeMs` (a grace, so a spawn in flight
+ * or a briefly-reconnecting supervisor is never caught).
+ *
+ * AGE ALONE IS NOT A REAP PREDICATE, and an earlier draft of this function got that
+ * wrong: a 7h TEAB build or a long autonomous run is legitimately old. Force-closing
+ * it would free its slot while the CLI kept running — letting a second CLI launch on
+ * top of it and losing the real exit result. That is the same bogus-capacity-
+ * accounting failure class this branch exists to kill, approached from the opposite
+ * side. A run a connected supervisor still reports as LIVE is NEVER closed here, no
+ * matter how old. (If we ever believe such a run is wedged, the correct action is to
+ * tell the supervisor to STOP the process — not to abandon the row while the CLI
+ * keeps burning tokens.)
+ *
+ * `minAgeMs` is clamped to SESSION_RUN_MIN_AGE_FLOOR_MS here, in the DAL, so a
+ * misconfigured (or future direct) caller cannot turn this into a fleet-wide
+ * force-close. Returns the ids closed.
  */
-export async function finalizeAgedOpenRuns(maxAgeMs: number): Promise<string[]> {
-  const seconds = Math.floor(maxAgeMs / 1000)
+export async function finalizeUnbackedOpenRuns(args: {
+  liveSessionIds: string[]
+  minAgeMs: number
+}): Promise<string[]> {
+  const effective = Math.max(args.minAgeMs, SESSION_RUN_MIN_AGE_FLOOR_MS)
+  const seconds = Math.floor(effective / 1000)
   const rows = await sql<{ id: string }[]>`
     UPDATE session_runs
-    SET ended_at = now(), exit_reason = 'run_max_age'
+    SET ended_at = now(), exit_reason = 'no_live_backing'
     WHERE ended_at IS NULL
       AND started_at < now() - make_interval(secs => ${seconds})
+      AND (session_id IS NULL OR NOT (session_id = ANY(${args.liveSessionIds})))
     RETURNING id
   `
   return rows.map((r) => r.id)

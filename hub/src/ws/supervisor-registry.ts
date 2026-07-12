@@ -431,6 +431,21 @@ export function getSupervisorCircuitBreakers(supervisorId: string): CircuitBreak
  * Set of session_ids currently reported as live by any of the user's online
  * supervisors. Used by `GET /api/sessions` to mark rows `active=true`.
  */
+/**
+ * Union of `session_inventory` across ALL currently-connected supervisors — the
+ * hub's ground truth for "which sessions are actually live right now", regardless
+ * of owner. The stale-run backstop (`hub/src/sessions/stale-run-reaper.ts`) reaps
+ * open `session_runs` that NOTHING in here backs; a run that IS backed is never
+ * closed, however old it is.
+ */
+export function getAllLiveSessionIds(): string[] {
+  const out = new Set<string>()
+  for (const [, e] of supervisors) {
+    for (const s of e.sessionInventory) out.add(s.session_id)
+  }
+  return Array.from(out)
+}
+
 export function getActiveSessionIdsForUser(userId: string): Set<string> {
   const out = new Set<string>()
   for (const [, e] of supervisors) {

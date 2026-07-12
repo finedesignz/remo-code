@@ -473,6 +473,12 @@ export class ProcessManager {
     breaker.timer = null
     breaker.state = 'half_open'
     breaker.probeRunId = null
+    // Deliberately UNBOUNDED: if no genuine start ever arrives for this repo, the
+    // breaker just sits in half_open. That is the correct resting state — nothing is
+    // being refused (the next start is admitted), nothing is running, and the state
+    // is reported to the hub every 10s. A repo nobody dispatches to needs no
+    // recovery; adding a timeout would only decide, arbitrarily, whether to forget a
+    // crash history that costs nothing to keep.
     this.cb.onLog(
       'warn',
       `circuit breaker half-open for ${repoPath} — the next hub-dispatched start is admitted as the probe (no synthetic spawn, no prompt replay)`,

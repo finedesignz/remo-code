@@ -240,14 +240,21 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   Telegram outbound uses the host-agnostic stream-json event-bus. ChatSurface is **kept** as fallback
   (deletion still gated on the device attestation in [docs/cutover-gate-june15.md](docs/cutover-gate-june15.md)).
 - **Session-run leak backstop** (`hub/src/sessions/stale-run-reaper.ts`, fix/stop-the-bleed):
-  boot-started sweep that force-closes any OPEN `session_runs` row older than
-  **`REMO_SESSION_RUN_MAX_MS`** (default **86400000** = 24h) with `exit_reason='run_max_age'`.
-  `hub/src/sessions/budget.ts` derives the supervisor concurrency cap from
-  `COUNT(session_runs WHERE ended_at IS NULL)`, so ANY leaked open run permanently eats a slot and
+  boot-started sweep that closes OPEN `session_runs` rows **that nothing live backs** —
+  `exit_reason='no_live_backing'`. `hub/src/sessions/budget.ts` derives the supervisor concurrency cap
+  from `COUNT(session_runs WHERE ended_at IS NULL)`, so ANY leaked open run permanently eats a slot and
   eventually every launch 429s `at_capacity` (the "Start ▶ silently does nothing" wedge). The KNOWN
   leak — NULL-`session_id` rows that `finalizeOrphanedRunsForSupervisor` could never match, because
   SQL `NULL = ANY(...)` is NULL so `NOT (...)` is never TRUE — is fixed in the reconciler itself
-  (`session_id IS NULL OR NOT (session_id = ANY(...))`); this sweep closes the whole CLASS. Knobs:
+  (`session_id IS NULL OR NOT (session_id = ANY(...))`); this sweep closes the whole CLASS (rows whose
+  supervisor never pushes inventory again are invisible to the reconciler). **The predicate is LIVENESS,
+  NOT AGE**: a run is reaped only when its session appears in NO connected supervisor's
+  `session_inventory` (`getAllLiveSessionIds()`), AND it is older than the grace. Age alone cannot tell a
+  leaked row from a legitimate 7h TEAB build — force-closing one would free its slot while the CLI kept
+  running (a second CLI could launch on top of it), which is the same bogus-capacity bug from the other
+  side. A run a connected supervisor reports as live is NEVER closed here, however old. Knobs:
+  **`REMO_SESSION_RUN_MAX_MS`** (grace, default **86400000** = 24h; clamped to a 60s floor **inside the
+  DAL**, `SESSION_RUN_MIN_AGE_FLOOR_MS`, so no caller can turn it into a fleet-wide force-close),
   **`REMO_SESSION_RUN_REAPER_INTERVAL_MS`** (default **900000**), **`REMO_SESSION_RUN_REAPER_DISABLED`**
   (`1|true|yes|on`).
 - **Supervisor spawn circuit-breaker self-heal** (`supervisor/src/process-manager.ts`,

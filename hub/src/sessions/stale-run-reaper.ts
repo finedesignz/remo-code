@@ -1,22 +1,29 @@
 // hub/src/sessions/stale-run-reaper.ts
-// fix/stop-the-bleed — absolute-age backstop for leaked `session_runs` rows.
+// fix/stop-the-bleed — global backstop for leaked `session_runs` rows.
 //
-// BUG (prod, repeatedly): `sessions/budget.ts` computes the supervisor's
-// effective concurrency from `COUNT(session_runs WHERE ended_at IS NULL)`. Any
-// open run that never gets closed permanently consumes a slot, and once the
-// leaked rows reach the cap EVERY launch returns `at_capacity` 429 — the web
-// "Start ▶" button silently does nothing. The known instance was the NULL-
-// `session_id` rows the orphan reconciler could never match (SQL three-valued
-// logic; fixed in supervisor-dal.finalizeOrphanedRunsForSupervisor).
+// BUG (prod, repeatedly): `sessions/budget.ts` computes the supervisor's effective
+// concurrency from `COUNT(session_runs WHERE ended_at IS NULL)`. Any open run that
+// never gets closed permanently consumes a slot, and once the leaked rows reach the
+// cap EVERY launch returns `at_capacity` 429 — the web "Start ▶" button silently
+// does nothing. The known instance was the NULL-`session_id` rows the orphan
+// reconciler could never match (SQL three-valued logic; fixed in
+// supervisor-dal.finalizeOrphanedRunsForSupervisor). That fix closes the KNOWN leak;
+// this sweep closes the CLASS — a row whose supervisor never pushes inventory again
+// (gone / crashed / never reconnected) is invisible to the reconciler forever.
 //
-// That fix closes the KNOWN leak. This sweep closes the CLASS: any open run
-// older than the ceiling is force-closed regardless of session_id, supervisor,
-// or inventory, so no future leak of this shape can wedge the app again.
-//
-// NOT a replacement for the reconciler (which closes runs within seconds); this
-// is the slow backstop that guarantees an upper bound.
+// PREDICATE = LIVENESS, NOT AGE.
+// An earlier draft reaped purely on age. That was WRONG, and would have traded one
+// capacity bug for another: a 7h TEAB build or a long autonomous run is legitimately
+// old, and force-closing it frees its slot while the CLI keeps running — inviting a
+// second CLI to launch on top of it and losing the real exit result. So we reap only
+// runs that NOTHING LIVE BACKS: the session appears in no connected supervisor's
+// `session_inventory` (a NULL `session_id` can never appear in one, so those rows are
+// unbacked by construction). Age is only a GRACE on top of that, so a spawn in flight
+// or a briefly-reconnecting supervisor is never caught. A run a connected supervisor
+// still reports as LIVE is NEVER closed here, no matter how old.
 
-import { finalizeAgedOpenRuns } from '../db/supervisor-dal.ts'
+import { finalizeUnbackedOpenRuns } from '../db/supervisor-dal.ts'
+import { getAllLiveSessionIds } from '../ws/supervisor-registry.ts'
 
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
   if (raw == null || raw === '') return fallback
@@ -30,57 +37,43 @@ function envFlagOn(raw: string | undefined): boolean {
 }
 
 /**
- * Sanity FLOOR on the ceiling. `finalizeAgedOpenRuns` is a global write with no
- * tenant filter, so a typo'd `REMO_SESSION_RUN_MAX_MS=1` would force-close EVERY
- * live run, for every tenant, on the next sweep. Nothing below 60s can be a
- * legitimate max-run age; clamp up rather than nuke the fleet.
- */
-const SESSION_RUN_MAX_MS_FLOOR = 60_000
-
-/**
- * Max age of an OPEN `session_runs` row before it is force-closed
- * (`exit_reason='run_max_age'`). Default 24h — comfortably above the hub's own
- * idle-teardown bound (REMO_SESSION_IDLE_GRACE_SECONDS, default 4h), so a
- * healthy long-lived session is never reaped. Env: REMO_SESSION_RUN_MAX_MS,
- * clamped to a 60s floor (see above).
+ * Grace: how old an UNBACKED open run must be before it is closed. Default 24h.
+ * The DAL clamps this to SESSION_RUN_MIN_AGE_FLOOR_MS (60s), so no caller — present
+ * or future — can turn the sweep into a fleet-wide force-close. Read at call time.
+ * Env: REMO_SESSION_RUN_MAX_MS.
  */
 export function sessionRunMaxMs(): number {
-  const configured = parsePositiveIntEnv(process.env.REMO_SESSION_RUN_MAX_MS, 86_400_000)
-  if (configured < SESSION_RUN_MAX_MS_FLOOR) {
-    console.warn(
-      `[stale-run-reaper] REMO_SESSION_RUN_MAX_MS=${configured} is below the ${SESSION_RUN_MAX_MS_FLOOR}ms floor ` +
-      '— clamping. A ceiling that low would force-close every live run on the next sweep.',
-    )
-    return SESSION_RUN_MAX_MS_FLOOR
-  }
-  return configured
+  return parsePositiveIntEnv(process.env.REMO_SESSION_RUN_MAX_MS, 86_400_000)
 }
 
-/** Sweep cadence. Default 15min. Env: REMO_SESSION_RUN_REAPER_INTERVAL_MS. */
-export const SESSION_RUN_REAPER_INTERVAL_MS = parsePositiveIntEnv(
-  process.env.REMO_SESSION_RUN_REAPER_INTERVAL_MS,
-  900_000,
-)
+/** Sweep cadence. Default 15min. Read at call time. Env: REMO_SESSION_RUN_REAPER_INTERVAL_MS. */
+export function sessionRunReaperIntervalMs(): number {
+  return parsePositiveIntEnv(process.env.REMO_SESSION_RUN_REAPER_INTERVAL_MS, 900_000)
+}
 
 export interface StaleRunReaperDeps {
-  finalizeAgedOpenRuns: typeof finalizeAgedOpenRuns
+  finalizeUnbackedOpenRuns: typeof finalizeUnbackedOpenRuns
+  getAllLiveSessionIds: typeof getAllLiveSessionIds
 }
 
-const REAL_DEPS: StaleRunReaperDeps = { finalizeAgedOpenRuns }
+const REAL_DEPS: StaleRunReaperDeps = { finalizeUnbackedOpenRuns, getAllLiveSessionIds }
 
 /**
- * One sweep pass. Returns the run ids closed. Never throws (a DB blip must not
- * take the boot-started interval down).
+ * One sweep pass: close open runs that NO connected supervisor reports as live and
+ * that are past the grace. Returns the run ids closed. Never throws (a DB blip must
+ * not take the boot-started interval down).
  */
-export async function reapAgedSessionRuns(
+export async function reapUnbackedSessionRuns(
   deps?: Partial<StaleRunReaperDeps>,
 ): Promise<string[]> {
   const d: StaleRunReaperDeps = { ...REAL_DEPS, ...deps }
   try {
-    const ids = await d.finalizeAgedOpenRuns(sessionRunMaxMs())
+    const liveSessionIds = d.getAllLiveSessionIds()
+    const ids = await d.finalizeUnbackedOpenRuns({ liveSessionIds, minAgeMs: sessionRunMaxMs() })
     if (ids.length > 0) {
       console.warn(
-        `[stale-run-reaper] force-closed ${ids.length} open session_run(s) older than ${sessionRunMaxMs()}ms (exit_reason=run_max_age)`,
+        `[stale-run-reaper] closed ${ids.length} open session_run(s) with NO live supervisor backing ` +
+        `(older than ${sessionRunMaxMs()}ms; exit_reason=no_live_backing)`,
       )
     }
     return ids
@@ -103,8 +96,8 @@ export function startStaleRunReaperSweep(): void {
   }
   if (sweepTimer) return
   sweepTimer = setInterval(() => {
-    void reapAgedSessionRuns()
-  }, SESSION_RUN_REAPER_INTERVAL_MS)
+    void reapUnbackedSessionRuns()
+  }, sessionRunReaperIntervalMs())
   ;(sweepTimer as any)?.unref?.()
 }
 
