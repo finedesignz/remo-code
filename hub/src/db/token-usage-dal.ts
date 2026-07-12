@@ -185,20 +185,28 @@ export async function getTodayTokenCostUsd(userId: string, timezone: string): Pr
  * The token-count twin of {@link getTodayTokenCostUsd}: backs the non-bypassable
  * `dailyTokenCapGate` (dispatch/gates.ts) so the orchestrator has a real ceiling
  * that means something on a flat-rate Max subscription (where the dollar cost cap
- * is meaningless — issue #6). Counts ONLY real I/O tokens (`input_tokens +
- * output_tokens`) — cache-read (and cache-creation) tokens are EXCLUDED. Rationale
- * (2026-07-09): cache-read is near-free yet dominates the raw count — a prod day
- * showed 50.9M "tokens" of which 50.7M were cache-read and only 214K were I/O, so
- * the all-buckets sum tripped the 50M cap on essentially free cache traffic and
- * froze all dispatch with zero real work done. Counting I/O only makes the ceiling
- * track genuine generation spend. Same tz-day boundary as the cost cap +
- * GET /api/usage/cost "today". token_usage is the single source (every usage_event
- * over /ws/agent — interactive, telegram, webhook, scheduled), so no double-count.
+ * is meaningless — issue #6). Counts ALL FOUR token buckets billed against the
+ * subscription: `input_tokens + output_tokens + cache_creation_input_tokens +
+ * cache_read_input_tokens`.
+ *
+ * History: PR #335 EXCLUDED the cache buckets on the theory that cache-read is
+ * "free". It is not free against a subscription RATE LIMIT. The 2026-07-09→11
+ * incident proved it: a wedged orchestrator tick loop injected a macro every 60s
+ * for 2 days (2,192 turns), each re-reading a ~1M-token context — 2.83 BILLION
+ * cache_read_input_tokens — while the I/O-only cap never came close to tripping,
+ * and the owner's Claude subscription was torched. Cache-read counts.
+ *
+ * Same tz-day boundary as the cost cap + GET /api/usage/cost "today". token_usage
+ * is the single source (every usage_event over /ws/agent — interactive, telegram,
+ * webhook, scheduled), so no double-count.
  */
 export async function getTodayTokenTotal(userId: string, timezone: string): Promise<number> {
   const tz = timezone || 'UTC'
   const rows = await sql<{ sum: string | null }[]>`
-    SELECT COALESCE(SUM(input_tokens + output_tokens), 0)::text AS sum
+    SELECT COALESCE(SUM(
+      input_tokens + output_tokens
+      + cache_creation_input_tokens + cache_read_input_tokens
+    ), 0)::text AS sum
     FROM token_usage
     WHERE user_id = ${userId}
       AND created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}

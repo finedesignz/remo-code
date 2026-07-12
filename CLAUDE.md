@@ -214,7 +214,14 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   when OFF / empty allowlist. Companions: **`REMO_ORCHESTRATOR_DAILY_TOKEN_CAP`** (default **50_000_000**
   = 50M tokens/day; non-positive/non-finite ⇒ disabled/fail-open) — the **non-bypassable daily TOKEN
   ceiling** (`dailyTokenCapGate`, `hub/src/dispatch/gates.ts`), added ALONGSIDE the dollar cost cap because
-  the cost cap is meaningless on a flat-rate Max subscription; and **`REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES`**
+  the cost cap is meaningless on a flat-rate Max subscription. **The token cap counts ALL FOUR buckets —
+  `input + output + cache_creation + cache_read`** (`getTodayTokenTotal`, `hub/src/db/token-usage-dal.ts`).
+  Cache-read is NOT free against a subscription rate limit: PR #335 excluded it, and the 2026-07 wedged
+  tick-loop burned **2.83B cache-read tokens in 2 days** without ever tripping the I/O-only cap.
+  **`REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR`** (default **4**; non-positive/non-finite ⇒ disabled) — the
+  **per-session inject-RATE ceiling** (`sessionInjectRateGate`), counting this session's injects in the
+  trailing 60min from `routine_run_log` (outcome ∈ dispatched|queued|autospawn_launched|autospawn_parked);
+  it makes a 1,440-turns/day tick loop impossible. And **`REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES`**
   (default **20**; non-positive/non-finite ⇒ disabled) — the per-day autospawn launch-count cap. Repo
   allowlist table **`orchestrator_autospawn_allowlist`** (per-user `repo_ident`; default EMPTY ⇒ drives
   nothing; `isRepoAutospawnAllowed`/`addRepoToAutospawnAllowlist` in `orchestrator-rows-dal.ts`). Flip

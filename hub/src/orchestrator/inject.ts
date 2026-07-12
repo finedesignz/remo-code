@@ -26,7 +26,13 @@ import {
   type PipelineDeps,
   type RunStore,
 } from '../dispatch/pipeline.ts'
-import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, isOverAutospawnDailyLaunchCap } from '../dispatch/gates.ts'
+import {
+  thresholdGate,
+  dailyCostCapGate,
+  dailyTokenCapGate,
+  sessionInjectRateGate,
+  isOverAutospawnDailyLaunchCap,
+} from '../dispatch/gates.ts'
 import { isOrchestratorEnabled, isAutospawnEnabled } from './controller.ts'
 import {
   isRepoAutospawnAllowed,
@@ -185,9 +191,11 @@ function buildSend(prompt: string, token: string, deps: InjectDeps): PipelineDep
 /**
  * Inject a templated orchestrator prompt into the bound session via the shared
  * dispatch pipeline. The gate list is `[thresholdGate, dailyCostCapGate,
- * dailyTokenCapGate]` — the scheduler's session list PLUS the BSA-04
- * non-bypassable daily TOKEN ceiling (ADDED ALONGSIDE the cost cap, never
- * replacing it) so an autospawn-driven turn is token- AND cost-capped (IR-1).
+ * dailyTokenCapGate, sessionInjectRateGate]` — the scheduler's session list PLUS the
+ * BSA-04 non-bypassable daily TOKEN ceiling (ADDED ALONGSIDE the cost cap, never
+ * replacing it) PLUS the per-session inject-RATE ceiling (default 4/hour, env
+ * REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR) so a wedged tick loop can never do
+ * 1,440 turns/day into one session again (2026-07 incident).
  *
  * BSA-02 — offline build-session AUTOSPAWN (default OFF, true no-op when OFF):
  * when the target session has no live channel, the LEGACY behaviour is
@@ -249,8 +257,9 @@ export async function injectOrchestratorPrompt(
   const send = buildSend(prompt, token, deps)
   const deployDeps: PipelineDeps = {
     // IR-1: cost-cap non-bypassable. BSA-04: the token cap is ADDED ALONGSIDE it
-    // (never replacing). Order: threshold → cost-cap → token-cap.
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate],
+    // (never replacing). The per-session inject-RATE ceiling is added last (2026-07
+    // wedged-tick-loop incident). Order: threshold → cost-cap → token-cap → rate.
+    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
     store,
     isOnline: (req) => deps.getChannel(req.sessionId) != null,
     // Online path: park is unexpected (we gated on getChannel above) — no-op.
@@ -378,7 +387,7 @@ async function maybeAutospawnOffline(
   }
   const send = buildSend(prompt, token, deps)
   const deployDeps: PipelineDeps = {
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate],
+    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
     store,
     isOnline: (req) => deps.getChannel(req.sessionId) != null,
     // Grace drain (on the launched runner's reconnect) re-runs this: deliver the
