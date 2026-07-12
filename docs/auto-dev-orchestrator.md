@@ -117,7 +117,9 @@ blocks — those are a reconciliation read, see below).
    `routine_run_log` entries + the **DUE rows** (`computeDueRowsForTask`).
 5. `renderControllerPrompt(ctx)` is stamped as the run-log `decision_rationale`
    (context). The DUE ROWS are the authoritative command set:
-   `runWavesFromDueRows(dueRows, ctx, makeLiveSeams())`.
+   `runWavesFromDueRows(dueRows, ctx, makeLiveSeams())`. **(Legacy: the cycle-runner
+   no longer calls this — see the TMAC macro path. `REMO_ORCHESTRATOR_LEGACY_WAVES`
+   and the legacy branch are DELETED; the wave engine remains only as a library.)**
    - `planWaves` groups the due commands into dependency-aware waves (independent
      commands parallel; `plan→execute→ship` sequenced). `merge-to-main` is EXCLUDED.
    - Each row's `micro_prompt` is carried onto its `WaveUnit`.

@@ -26,10 +26,12 @@ proves one live-path invariant:
 | OEE-06 | `orchestrator-costcap.e2e.test.ts` | Non-bypassable daily cost cap halts the cycle (real `token_usage`-backed `isOverCostCap`). |
 | OEE-07 | `orchestrator-notify.e2e.test.ts` | Stage-gated notify matrix (dev = silent, prod = halt+notify) fan-out. |
 | OEE-08 | `orchestrator-verify-tail.e2e.test.ts` | Mandatory terminal verify-tail (`runVerifyTail`) always-runs path against a stub `REMO_VERIFY_*` target. |
-| OEE-09 | `orchestrator-legacy-wave-parity.e2e.test.ts` | Rollback lever `REMO_ORCHESTRATOR_LEGACY_WAVES=1` reaches the preserved legacy per-row wave engine. |
 
 Together: queue/lock, due→waves, macro-cycle + sentinels, cost-cap, notify matrix,
-verify-tail, and legacy-wave rollback parity are all exercised end-to-end.
+and verify-tail are all exercised end-to-end. (OEE-09 covered the
+`REMO_ORCHESTRATOR_LEGACY_WAVES` rollback lever; the flag and the legacy wave path
+were DELETED — rollback to a subsystem that never shipped a PR is rollback to
+nothing. The macro path is the only cycle path.)
 
 ## How to run the suite
 
@@ -56,7 +58,6 @@ green PR-gate IS the standing proof that the live path works against real Postgr
 | `REMO_ORCHESTRATOR_TICK_INTERVAL_MS` | `60000` | Due-scan enqueue tick interval. |
 | `REMO_VERIFY_APP_UUID` / `REMO_VERIFY_BASE_URL` / `REMO_VERIFY_ROUTES` | unset / default routes | Verify-tail target (no-op when unset). Confirm these point at the right app before enabling. |
 | `COOLIFY_TOKEN` | — | Needed for verify-tail deploy/redeploy. |
-| `REMO_ORCHESTRATOR_LEGACY_WAVES` | OFF | Rollback to the legacy per-micro-row wave engine (see Rollback). |
 
 ## Staging-first flip checklist
 
@@ -73,7 +74,7 @@ green PR-gate IS the standing proof that the live path works against real Postgr
 ## Rollback
 
 - **Instant disable:** unset / set `REMO_ORCHESTRATOR_ENABLED=0` and redeploy. With the flag OFF, nothing registers, enqueues, or injects — the system returns to fully dormant.
-- **Macro→legacy path rollback:** set `REMO_ORCHESTRATOR_LEGACY_WAVES=1` to fall back from the default TMAC macro path to the preserved legacy per-micro-command-row wave engine (parity proven by OEE-09). This does NOT disable the orchestrator — combine with the flag-off above for a full stop.
+- **Macro→legacy path rollback: REMOVED.** `REMO_ORCHESTRATOR_LEGACY_WAVES` and the legacy per-micro-command-row wave path are deleted; `REMO_ORCHESTRATOR_ENABLED=0` is the only rollback lever.
 
 ## Out of scope (explicit)
 
