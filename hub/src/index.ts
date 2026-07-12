@@ -706,10 +706,13 @@ runMigrations()
     // dead CLI turn can't leave a task perpetually in-flight. No-op when
     // REMO_RUN_REAPER_DISABLED is set.
     startRunReaperSweep()
-    // fix/stop-the-bleed — absolute-age backstop: force-close any OPEN
-    // session_runs row older than REMO_SESSION_RUN_MAX_MS (default 24h). Leaked
-    // open runs eat the supervisor concurrency cap and wedge every launch with
-    // `at_capacity`. No-op when REMO_SESSION_RUN_REAPER_DISABLED is set.
+    // fix/stop-the-bleed — LIVENESS-scoped backstop (NOT an absolute-age force-close;
+    // an age-only reaper would close live long-running builds). Closes an OPEN
+    // session_runs row only when its supervisor has pushed inventory and the row's
+    // session is absent from that live set, and the row is older than
+    // REMO_SESSION_RUN_MAX_MS (default 24h — a grace inside the liveness predicate,
+    // not a lifetime cap). Leaked open runs eat the supervisor concurrency cap and
+    // wedge every launch with `at_capacity`. No-op when REMO_SESSION_RUN_REAPER_DISABLED.
     startStaleRunReaperSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })

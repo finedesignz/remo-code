@@ -629,10 +629,19 @@ sessions.post('/:id/launch', async (c) => {
   // Concurrency gate — MUST come before createRun, exactly as the other
   // session.start senders (api/supervisors.ts, telegram/launch.ts).
   // Reserve + consume the run row atomically inside the FOR-UPDATE tx.
+  //
+  // Bind the REAL session_id (we have it — see mintLaunchNonce above). Reserving
+  // this row with `session_id = NULL` made it indistinguishable from an orphan:
+  // `finalizeOrphanedRunsForSupervisor` reaps every NULL-session row 30s past
+  // creation (correctly — a NULL row can never appear in supervisor inventory,
+  // and leaked ones wedged every launch at `at_capacity`). But THIS run is alive,
+  // so closing its row makes `budget.ts` — which counts open runs — UNDER-count
+  // the supervisor's concurrency, silently over-admitting past the cap. Binding
+  // the id lets the reaper match the row against live inventory and leave it be.
   let reservation
   try {
     reservation = await reserveSessionSlot(userId, supervisorId, {
-      sessionId: null,
+      sessionId,
       repoPath: cwd,
       branch: null,
       pulled: false,

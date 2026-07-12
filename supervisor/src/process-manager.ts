@@ -263,7 +263,7 @@ export class ProcessManager {
       if (r.restartTimer) { clearTimeout(r.restartTimer); r.restartTimer = null }
       if (r.bridge) { void r.bridge.stop().catch(() => {}); r.bridge = null }
       this.setState(r, 'stopped', { runId, lastExit: { code: null, reason: 'reconciled_stranded_slot' } })
-      this.runs.delete(runId)
+      this.forgetRun(runId, 'reconciled_stranded_slot')
     }
   }
 
@@ -509,6 +509,46 @@ export class ProcessManager {
     ;(breaker.timer as any)?.unref?.()
   }
 
+  /**
+   * Remove a run, ALWAYS releasing the half-open probe slot it may have held.
+   *
+   * REGRESSION (found in QC of #346): the probe slot was documented as "released
+   * only by a probe EXIT", but five terminal paths delete a run WITHOUT any crash
+   * signal — clean exit / `hub_shutdown`, `userStop`, `stop()`, stranded-slot
+   * eviction, and `max_restarts_exceeded`. `halfOpen()` arms no timer, so a probe
+   * that ended via any of those left the breaker pinned in `half_open` pointing at
+   * a DEAD runId forever. Every later start for that repo was then refused
+   * `circuit_open`, and the hub's alert only fires on `state === 'open'` — so it
+   * was SILENT. That is the original four-day zero-spawn latch, resurrected on the
+   * recovery path, and a mundane hub redeploy or a CLI exiting 0 inside the 30s
+   * survival window was enough to trigger it.
+   *
+   * Every removal goes through here so no future terminal path can reintroduce it.
+   * A departing probe frees the slot and the breaker STAYS half_open, so the next
+   * genuine hub-dispatched start is admitted as the next probe. Crash attribution
+   * is unaffected: `onExit`'s crash path runs `tripBreaker` BEFORE the run is
+   * forgotten, so a probe that dies badly still re-opens the breaker and burns a
+   * failed-probe budget.
+   */
+  private forgetRun(runId: string, why: string) {
+    const run = this.runs.get(runId)
+    this.runs.delete(runId)
+    if (!run) return
+    const breaker = this.breakers.get(run.spec.repoPath)
+    if (breaker && breaker.probeRunId === runId) {
+      breaker.probeRunId = null
+      if (breaker.timer) {
+        clearTimeout(breaker.timer)
+        breaker.timer = null
+      }
+      this.cb.onLog(
+        'warn',
+        `circuit breaker: probe ${runId} for ${run.spec.repoPath} ended (${why}) without surviving the health window — releasing the probe slot; the next dispatched start is admitted as the next probe`,
+        runId,
+      )
+    }
+  }
+
   /** Close + forget the breaker for a repo (probe survived the health window). */
   private closeBreaker(repoPath: string, why: string) {
     const breaker = this.breakers.get(repoPath)
@@ -732,12 +772,12 @@ export class ProcessManager {
         this.cb.onLog(code === 0 ? 'info' : 'error', `bridge exited code=${code} reason=${reason}`, spec.runId)
         if (run.userStop) {
           this.setState(run, 'idle', { runId: spec.runId, lastExit: { code, reason } })
-          this.runs.delete(spec.runId)
+          this.forgetRun(spec.runId, 'user_stop')
           return
         }
         if (reason === 'hub_shutdown' || code === 0) {
           this.setState(run, 'idle', { runId: spec.runId, lastExit: { code, reason } })
-          this.runs.delete(spec.runId)
+          this.forgetRun(spec.runId, reason === 'hub_shutdown' ? 'hub_shutdown' : 'clean_exit')
           return
         }
         // Crash path — apply circuit-breaker + restart cap.
@@ -779,7 +819,7 @@ export class ProcessManager {
         runId: run.spec.runId,
         lastExit: { code: exitCode, reason: 'max_restarts_exceeded' },
       })
-      this.runs.delete(run.spec.runId)
+      this.forgetRun(run.spec.runId, 'max_restarts_exceeded')
       return
     }
     const delay = BACKOFF_SCHEDULE[Math.min(run.restartCount, BACKOFF_SCHEDULE.length - 1)]
@@ -817,7 +857,7 @@ export class ProcessManager {
       // broken stdout pipe). Otherwise the slot leaks and eventually every
       // launch is denied `concurrency_cap`. This is the belt to logging's
       // suspenders (logging is now EPIPE-safe, but never depend on that here).
-      this.runs.delete(runId)
+      this.forgetRun(runId, 'stop')
     }
   }
 
