@@ -1,9 +1,9 @@
 name: release-supervisor
 
 # Cuts a GitHub Release for the Remo Code Supervisor (Tauri 2) app when a tag
-# matching `supervisor-v*.*.*` is pushed. Builds the MSI, signs it with the
-# Tauri updater private key, and uploads both the MSI and the signed
-# `latest.json` manifest the in-app updater fetches.
+# matching `supervisor-v*.*.*` is pushed. Builds the per-user NSIS installer
+# (`-setup.exe`), signs it with the Tauri updater private key, and uploads both
+# the installer and the signed `latest.json` manifest the in-app updater fetches.
 
 on:
   push:
@@ -136,7 +136,7 @@ jobs:
           projectPath: supervisor/tauri
           tagName: supervisor-v__VERSION__
           releaseName: 'Supervisor v__VERSION__'
-          releaseBody: 'See the assets to download and install. The Windows MSI auto-updates existing installs via the in-app updater.'
+          releaseBody: 'See the assets to download and install. The Windows installer (per-user NSIS) silently auto-updates existing installs via the in-app updater — no UAC prompt. NOTE: upgrading from a pre-0.13.0 per-machine MSI install requires a one-time manual reinstall of the new -setup.exe.'
           releaseDraft: false
           prerelease: false
           args: --target x86_64-pc-windows-msvc

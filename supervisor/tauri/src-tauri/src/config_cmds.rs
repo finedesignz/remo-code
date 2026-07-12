@@ -77,13 +77,12 @@ pub struct RootsConfig {
     pub configured: bool,
 }
 
-/// Read the `auto_update` preference. Defaults to `false` when absent
-/// (changed 2026-05-31 after the owner's machine hung mid-install): silent
-/// background `downloadAndInstall()` trips a Windows UAC/SmartScreen elevation
-/// prompt, which corrupts the supervisor if it fires while the user is away.
-/// New installs and key-less configs therefore get notify-and-approve (the
-/// manual `UpdateNotifier` prompt) by default; silent background install is
-/// opt-in via Settings.
+/// Read the `auto_update` preference. Defaults to `true` when absent
+/// (changed 2026-07-06 with the per-user NSIS installer cutover): the installer
+/// now installs to the current user (`installMode: currentUser`), so an
+/// in-app `downloadAndInstall()` no longer triggers a Windows UAC/SmartScreen
+/// elevation prompt and cannot hang mid-install. Silent background auto-update
+/// is therefore safe as the default; users can still opt out via Settings.
 #[tauri::command]
 pub fn get_auto_update() -> Result<bool, String> {
     let map = read_raw()?;
@@ -91,9 +90,10 @@ pub fn get_auto_update() -> Result<bool, String> {
 }
 
 /// Pure defaulting logic for `auto_update`, split out so it's unit-testable
-/// without touching the on-disk config. Absent/non-bool → `false` (notify-only).
+/// without touching the on-disk config. Absent/non-bool → `true` (silent
+/// per-user NSIS auto-update). Explicit `false` disables it.
 fn auto_update_from_map(map: &Map<String, Value>) -> bool {
-    map.get("auto_update").and_then(|v| v.as_bool()).unwrap_or(false)
+    map.get("auto_update").and_then(|v| v.as_bool()).unwrap_or(true)
 }
 
 /// Write the `auto_update` preference. Idempotent — preserves all other keys.
@@ -360,16 +360,17 @@ mod tests {
     }
 
     #[test]
-    fn auto_update_defaults_false_when_absent() {
-        // The 2026-05-31 fix: a key-less config must NOT silently auto-install.
-        assert_eq!(auto_update_from_map(&Map::new()), false);
+    fn auto_update_defaults_true_when_absent() {
+        // 2026-07-06 per-user NSIS cutover: silent auto-update is UAC-free and
+        // safe by default, so a key-less config auto-installs.
+        assert_eq!(auto_update_from_map(&Map::new()), true);
     }
 
     #[test]
-    fn auto_update_defaults_false_when_non_bool() {
-        assert_eq!(auto_update_from_map(&map_with(json!("yes"))), false);
-        assert_eq!(auto_update_from_map(&map_with(json!(1))), false);
-        assert_eq!(auto_update_from_map(&map_with(Value::Null)), false);
+    fn auto_update_defaults_true_when_non_bool() {
+        assert_eq!(auto_update_from_map(&map_with(json!("yes"))), true);
+        assert_eq!(auto_update_from_map(&map_with(json!(1))), true);
+        assert_eq!(auto_update_from_map(&map_with(Value::Null)), true);
     }
 
     #[test]
