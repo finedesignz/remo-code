@@ -1,4 +1,5 @@
-import { hostname, platform, release, arch, cpus, totalmem, tmpdir } from 'os'
+import { platform, release, arch, cpus, totalmem, tmpdir } from 'os'
+import { resolveHostname } from '../hostname'
 import { mkdirSync, writeFileSync } from 'fs'
 import { join, basename, extname } from 'path'
 import { ClaudeRunner } from './claude-runner'
@@ -205,10 +206,13 @@ export class SessionBridge {
         type: 'auth',
         api_key: this.opts.apiKey,
         project_dir: repoSlash,
-        hostname: hostname(),
+        // resolveHostname(), not os.hostname(): this frame is re-sent on EVERY
+        // reconnect, and a single empty hostname here mints a hostname-NULL
+        // ghost session on the hub (live phantom channel, no CLI behind it).
+        hostname: resolveHostname(),
         role: 'agent',
         agent_info: {
-          hostname: hostname(),
+          hostname: resolveHostname(),
           platform: platform(),
           os_release: release(),
           arch: arch(),

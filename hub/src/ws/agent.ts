@@ -21,6 +21,29 @@ const HEARTBEAT_INTERVAL_MS = 30_000
 const RATE_LIMIT = { max: 120, windowMs: 10_000 }
 
 /**
+ * fix/supervisor-hostname-required — hostname is REQUIRED on a `/ws/agent` auth
+ * frame. A hostname-less auth mints a live phantom channel behind a
+ * `status='online', hostname=NULL` row (a ghost): `getChannel() != null` so the
+ * orchestrator dispatches into the void and autospawn never fires. The
+ * ghost-reaper mops these up, but the tap keeps running.
+ *
+ * COMPAT: the supervisor ships as a signed MSI on user machines. Hard-rejecting
+ * today would lock out any installed build that doesn't send a hostname, so the
+ * default is LOG-AND-ACCEPT (after the hub's own hostname-resolution fallback
+ * chain, which is what actually prevents the ghost row). Flip
+ * `REMO_WS_REQUIRE_HOSTNAME=1` (accepts 1|true|yes|on) once every installed
+ * supervisor is known to be ≥ the release that guarantees a hostname; the hub
+ * then closes the socket with 4001 `hostname_required` instead of guessing.
+ */
+export function isHostnameRequiredOnAgentAuth(
+  env: Record<string, string | undefined> = process.env as any,
+): boolean {
+  const raw = env.REMO_WS_REQUIRE_HOSTNAME
+  if (raw == null) return false
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase())
+}
+
+/**
  * Set of `last_exit.reason` values that supervisor's `process-manager.ts`
  * emits when it REJECTS a start request (the run never began). Kept in lock-
  * step with `supervisor/src/process-manager.ts` `StartRejection.reason`.
@@ -334,6 +357,20 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     const advertisedHostname = (msg.hostname || (msg as any).agent_info?.hostname || '').toString().trim()
     let effectiveHostname = advertisedHostname
     if (!effectiveHostname) {
+      // Contract violation: every supported supervisor sends a hostname. Emit a
+      // metric-able warn on EVERY such frame so the compat window is
+      // observable (count → 0 means it's safe to flip REMO_WS_REQUIRE_HOSTNAME).
+      log.warn('agent.auth_hostname_missing', {
+        user_id: userId,
+        project_dir: projectDir,
+        hash_prefix: keyHash.slice(0, 8),
+        enforced: isHostnameRequiredOnAgentAuth(),
+      })
+      if (isHostnameRequiredOnAgentAuth()) {
+        ws.send(JSON.stringify({ type: 'auth_error', error: 'hostname required on /ws/agent auth', reason: 'hostname_required' }))
+        ws.close(4001, 'hostname_required')
+        return
+      }
       try { effectiveHostname = (await getSupervisorHostnameForApiKey(keyHash)) ?? '' } catch { effectiveHostname = '' }
       if (effectiveHostname) {
         console.warn(`[agent] auth omitted hostname; resolved '${effectiveHostname}' from api_key supervisor to avoid a ghost session`)
