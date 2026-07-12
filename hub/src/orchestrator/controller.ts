@@ -42,17 +42,6 @@ import { runMacroCycle } from './macro-cycle.ts';
 import { detectLifecycleStage } from './stage-detect.ts';
 import { reapStaleOrchestratorLocks } from './stale-lock-reaper.ts';
 
-// Milestone TMAC: route an orchestrator cycle through the resume-heartbeat MACRO
-// path (task_type → one autonomous macro prompt) instead of the legacy per-micro-
-// command-row wave engine. Default ON (every task carries a macro_task_type,
-// defaulting to 'dev'). The env escape hatch re-enables the legacy wave path for
-// a controlled migration rollback only.
-export function useMacroPath(): boolean {
-  const raw = (process.env.REMO_ORCHESTRATOR_LEGACY_WAVES ?? '0').trim().toLowerCase();
-  const legacy = raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
-  return !legacy;
-}
-
 // ── BSA-01: autospawn gate (default OFF) ─────────────────────────────────────
 /**
  * REMO_ORCHESTRATOR_AUTOSPAWN gates the build-session AUTOSPAWN capability (BSA):
@@ -515,6 +504,14 @@ export interface ResolveDeps {
   // Milestone TMAC §7.2: auto-detect the DEFAULT stage from prod-deploy state.
   // Used ONLY when the task's stage is not explicitly set; an explicit stage wins.
   detectLifecycleStage: typeof detectLifecycleStage;
+  /**
+   * Cadence stamp for the fired due rows. DB-backed, so it must be stubbable —
+   * otherwise a "unit" test of `makeCycleRunner` opens a real postgres connection
+   * and intermittently blows the 5s test timeout (#348). Optional: unset ⇒ the real
+   * `markOrchestratorRowsFired`. (#348 hung this off `WaveSeams`; that seam died
+   * with the legacy wave path, so it lives here now — same guarantee.)
+   */
+  markRowsFired?: (rowIds: string[]) => Promise<unknown>;
 }
 const REAL_RESOLVE_DEPS: ResolveDeps = {
   getSessionById,
@@ -586,27 +583,19 @@ export async function resolveCycleContext(
  * Build the CycleRunner injected into the Phase-22 queue. Per claimed cycle:
  *   1. resolve session→user→task→stage + build the controller context (DUE rows,
  *      run-log, project state) via `resolveCycleContext`;
- *   2. render the controller prompt → use it as the run-log decision_rationale
- *      (the prompt is context; the DUE ROWS are the authoritative command set);
- *   3. drive the dependency-aware waves directly from the DUE rows
- *      (`runWavesFromDueRows`) — each unit injects its templated prompt through
- *      the cost-capped dispatch pipeline (makeLiveSeams). The gsd work + PR +
- *      reviewer run ASYNC inside the agent turn; pr_url/verdict reconcile on a
- *      later tick when buildControllerContext re-reads routine_run_log;
- *   4. route a due off-hours `merge-to-main` row through `dispatchMergeIfDue`;
- *   5. always run the mandatory terminal verify tail (Phase 27).
+ *   2. stamp the DUE rows fired (cadence advance — stops the next due-scan from
+ *      re-injecting the same rows every tick);
+ *   3. drive the resume-heartbeat MACRO cycle (`runMacroCycle`): macro_task_type →
+ *      one autonomous macro prompt, reconcile the prior turn's sentinels, halt on
+ *      an open mandatory gate, else (re)inject through the cost-capped dispatch
+ *      pipeline. The macro prompt itself owns merge + release + deploy-verify.
  *
  * The queue owns claim/release; every step is best-effort (a throw is logged, not
- * propagated, so one bad step never wedges the tick). `runWaves`/`runWavePlan`
- * still DEFAULT to STUB_SEAMS, so only this flag-gated runner opts into the live
- * seams — non-live callers + tests stay inert.
+ * propagated, so one bad step never wedges the tick).
  *
- * `resolveDeps` is injectable for tests; `seams` defaults to the live seams.
+ * `resolveDeps` is injectable for tests.
  */
-export function makeCycleRunner(
-  resolveDeps: ResolveDeps = REAL_RESOLVE_DEPS,
-  seams: WaveSeams = makeLiveSeams(),
-): CycleRunner {
+export function makeCycleRunner(resolveDeps: ResolveDeps = REAL_RESOLVE_DEPS): CycleRunner {
   return async (entry) => {
     const resolved = await resolveCycleContext(entry.session_id, resolveDeps);
     if (!resolved) {
@@ -617,86 +606,41 @@ export function makeCycleRunner(
       return;
     }
 
-    const { sessionId, userId, repoKey, tz, controllerContext } = resolved;
+    const { sessionId, userId, repoKey, controllerContext } = resolved;
     const dueRows = controllerContext.dueRows;
 
     // ADVANCE THE CADENCE (fix/orchestrator-tick-reinject) — here, NOT at enqueue.
-    // The cycle has now SELECTED its rows (both paths below consume `dueRows`: the
-    // macro path resumes the task these rows made due; the legacy wave path runs
-    // them directly). Stamping them fired is what stops the next 60s due-scan from
+    // The cycle has now SELECTED its rows (the macro path resumes the task these
+    // rows made due). Stamping them fired is what stops the next 60s due-scan from
     // finding the same rows DUE and re-injecting the macro prompt once a minute.
     // Best-effort: a stamp failure must not wedge the cycle (the in-flight guard
     // still holds until this cycle settles; worst case the row fires one tick early).
     if (dueRows.length > 0) {
       try {
-        await (seams.markRowsFired ?? markOrchestratorRowsFired)(dueRows.map((d) => d.row.id));
+        await (resolveDeps.markRowsFired ?? markOrchestratorRowsFired)(dueRows.map((d) => d.row.id));
       } catch (err: any) {
         console.warn(`[orchestrator] cadence stamp failed session=${sessionId}: ${err?.message ?? err}`);
       }
     }
 
-    // ── Milestone TMAC: resume-heartbeat MACRO path (REPLACES the wave path) ──
+    // ── Milestone TMAC: resume-heartbeat MACRO path (the ONLY cycle path) ─────
     // Resolve macro_task_type → one autonomous macro prompt, reconcile the prior
     // turn's sentinels, halt on an open mandatory gate, else (re)inject to resume.
-    // The macro prompt itself owns release + deploy-verify (SPEC §4 STEP 4), so we
-    // do NOT run the legacy merge/verify-tail seams on this path.
-    if (useMacroPath()) {
-      try {
-        await runMacroCycle({
-          userId,
-          sessionId,
-          taskId: resolved.taskId,
-          macroTaskType: resolved.macroTaskType,
-          stage: controllerContext.stage,
-          repoPath: resolved.repoPath,
-          repoIdent: resolved.repoIdent,
-          repoKey,
-        });
-      } catch (err: any) {
-        console.warn(`[orchestrator] macro cycle threw (ignored): ${err?.message ?? err}`);
-      }
-      return;
-    }
-
-    // ── Legacy wave path (rollback only, REMO_ORCHESTRATOR_LEGACY_WAVES=1) ────
-    // The controller prompt is the tick's decision context; it is stamped as the
-    // run-log decision_rationale (truncated). The DUE ROWS are the command set.
-    const prompt = renderControllerPrompt(controllerContext);
-    const decisionRationale = prompt.slice(0, 500);
-
-    const ctx: WaveRunContext = { sessionId, repoKey, userId, decisionRationale };
-
-    console.log(
-      `[orchestrator] cycle session=${sessionId} due=${dueRows.length} ` +
-        `commands=[${dueRows.map((d) => d.row.command).join(',')}]`,
-    );
-
-    // (a) drive the dependency-aware waves from the DUE rows (live inject).
+    // The macro prompt itself owns release + deploy-verify (SPEC §4 STEP 4), so the
+    // cycle-runner runs no merge/verify-tail seams.
     try {
-      await runWavesFromDueRows(dueRows, ctx, seams);
-    } catch (err: any) {
-      console.warn(`[orchestrator] wave dispatch threw (ignored): ${err?.message ?? err}`);
-    }
-
-    // (b) off-hours merge-to-main (EXCLUDED from the wave planner) — window-gated.
-    try {
-      await dispatchMergeIfDue(dueRows, { sessionId, userId, repoKey, tz });
-    } catch (err: any) {
-      console.warn(`[orchestrator] merge-to-main path threw (ignored): ${err?.message ?? err}`);
-    }
-    void MERGE_COMMAND; // referenced for the special-path constant (see dispatchMergeIfDue).
-
-    // (c) MANDATORY terminal verify tail (Phase 27 / D9). No-ops gracefully when
-    // COOLIFY_TOKEN + REMO_VERIFY_* are unset (writes a `skipped` run-log row).
-    try {
-      await (seams.runVerifyTail ?? runVerifyTail)({
-        sessionId,
-        repoKey,
+      await runMacroCycle({
         userId,
-        decisionRationale,
+        sessionId,
+        taskId: resolved.taskId,
+        macroTaskType: resolved.macroTaskType,
+        stage: controllerContext.stage,
+        repoPath: resolved.repoPath,
+        repoIdent: resolved.repoIdent,
+        repoKey,
       });
     } catch (err: any) {
-      console.warn(`[orchestrator] verify-tail threw (ignored): ${err?.message ?? err}`);
+      console.warn(`[orchestrator] macro cycle threw (ignored): ${err?.message ?? err}`);
     }
   };
 }

@@ -1,24 +1,24 @@
 /**
- * Milestone TMAC — Phase TMAC-06: macro-path retirement guard.
+ * Macro-path guard (CONCERNS item 5 — legacy-wave rollback path DELETED).
  *
- * Asserts the live cycle-runner routes through the resume-heartbeat MACRO path by
- * default (NOT the legacy per-micro-command-row wave engine), and that the legacy
- * modules are KEPT importable (retired from the live path, not deleted — removed
- * in a dedicated cleanup phase once migration is verified). A regression that
- * silently restores the micro-row path as the default fails here.
+ * Milestone TMAC retired the legacy per-micro-command-row wave engine from the live
+ * cycle-runner but kept it reachable behind `REMO_ORCHESTRATOR_LEGACY_WAVES=1` —
+ * a rollback path to a subsystem that has never shipped a PR, i.e. rollback to
+ * nothing. It is now GONE: `makeCycleRunner` unconditionally drives `runMacroCycle`,
+ * and no env var can put the wave engine back on the live path.
  *
- * Reqs: R-TMAC-06.
+ * These tests fail if anyone reintroduces the flag or re-wires the wave seams into
+ * the cycle-runner. Reqs: R-TMAC-06.
  */
 import { describe, test, expect, afterEach } from 'bun:test'
-import {
-  makeCycleRunner,
-  useMacroPath,
-  type ResolveDeps,
-  type ControllerContext,
-} from '../src/orchestrator/controller.ts'
-import type { WaveSeams, ExecuteResult } from '../src/orchestrator/wave-runner.ts'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import * as controller from '../src/orchestrator/controller.ts'
+import { makeCycleRunner, type ResolveDeps, type ControllerContext } from '../src/orchestrator/controller.ts'
 import type { DueRow } from '../src/orchestrator/due-rows.ts'
 import type { OrchestratorRow } from '../src/db/orchestrator-rows-dal.ts'
+
+const CONTROLLER_SRC = readFileSync(resolve(import.meta.dir, '../src/orchestrator/controller.ts'), 'utf-8')
 
 afterEach(() => {
   delete process.env.REMO_ORCHESTRATOR_LEGACY_WAVES
@@ -64,67 +64,42 @@ function resolveDeps(dueRows: DueRow[]): ResolveDeps {
       timezone: 'UTC',
     })) as any,
     buildControllerContext: (async () => ctxWithDue(dueRows)) as any,
-  }
-}
-
-function spySeams(): { seams: WaveSeams; executed: string[] } {
-  const executed: string[] = []
-  const seams: WaveSeams = {
-    async executeCommand(unit): Promise<ExecuteResult> {
-      executed.push(unit.command)
-      return { outcome: 'dispatched' }
-    },
-    async createPrForUnit() {
-      return null
-    },
-    async dispatchReviewer() {
-      return null
-    },
-    async proposeToChat() {},
-  }
-  return { seams, executed }
+    // DB-backed — stub it, or this unit test opens a real postgres connection and
+    // flakes on the 5s timeout (#348's de-flake, preserved after the wave seam died).
+    markRowsFired: async () => null,
+  } as any
 }
 
 const entry = { id: 'q1', session_id: 's1', priority: 0, status: 'running', enqueued_at: '', started_at: null } as any
 
-describe('macro-path retirement guard', () => {
-  test('default: useMacroPath() is true (wave engine NOT the default)', () => {
-    delete process.env.REMO_ORCHESTRATOR_LEGACY_WAVES
-    expect(useMacroPath()).toBe(true)
+describe('macro-path guard — the legacy wave rollback path is GONE', () => {
+  test('the REMO_ORCHESTRATOR_LEGACY_WAVES flag no longer exists in the controller', () => {
+    expect(CONTROLLER_SRC).not.toContain('REMO_ORCHESTRATOR_LEGACY_WAVES')
   })
 
-  test('default cycle-runner does NOT invoke the wave executeCommand seam', async () => {
-    delete process.env.REMO_ORCHESTRATOR_LEGACY_WAVES
-    const { seams, executed } = spySeams()
-    // The macro path injects via injectOrchestratorPrompt (no agent socket online
-    // here → no_session), and NEVER touches the wave seam.
-    await makeCycleRunner(resolveDeps([row('gsd-plan-phase')]), seams)(entry)
-    expect(executed).toEqual([])
+  test('useMacroPath() is no longer exported (there is only one path)', () => {
+    expect('useMacroPath' in controller).toBe(false)
   })
 
-  test('rollback flag re-enables the legacy wave path (useMacroPath flips off)', () => {
-    // Wave EXECUTION under the flag is covered end-to-end by
-    // orchestrator-cycle-wiring.test.ts; here we assert only the selector flip so
-    // this guard stays DB-free.
+  test('makeCycleRunner takes no wave-seams argument', () => {
+    expect(makeCycleRunner.length).toBe(0) // resolveDeps has a default ⇒ arity 0
+  })
+
+  test('setting the retired flag cannot resurrect the wave path', async () => {
     process.env.REMO_ORCHESTRATOR_LEGACY_WAVES = '1'
-    expect(useMacroPath()).toBe(false)
-    process.env.REMO_ORCHESTRATOR_LEGACY_WAVES = 'true'
-    expect(useMacroPath()).toBe(false)
-    process.env.REMO_ORCHESTRATOR_LEGACY_WAVES = '0'
-    expect(useMacroPath()).toBe(true)
+    // The macro path injects via injectOrchestratorPrompt (no agent socket online
+    // here → no_session) and must not throw. There is no seam left to invoke.
+    await makeCycleRunner(resolveDeps([{ row: row('gsd-plan-phase'), autoDisableAfter: false }]))(entry)
   })
 
-  test('legacy micro-row modules are KEPT importable (not deleted yet)', async () => {
-    const cp = await import('../src/orchestrator/command-prompts.ts')
-    const waves = await import('../src/orchestrator/waves.ts')
-    const wr = await import('../src/orchestrator/wave-runner.ts')
-    const dr = await import('../src/orchestrator/due-rows.ts')
-    const gr = await import('../src/orchestrator/gap-rotation.ts')
-    expect(typeof cp.composeCommandPrompt === 'function').toBe(true)
-    expect(typeof cp.MICRO_PROMPT_COMMAND).toBe('string')
-    expect(typeof waves.planWaves).toBe('function')
-    expect(typeof wr.runWavePlan).toBe('function')
-    expect(typeof dr.computeDueRowsForTask).toBe('function')
-    expect(gr).toBeDefined()
+  // TRIPWIRE, not a behavioral guarantee: this asserts by string-matching the
+  // controller source, so an alias/re-export of the wave seams would slip past it.
+  // The behavioral guarantee is the test above (no seam argument exists to call).
+  test('the cycle-runner body drives runMacroCycle and nothing else', () => {
+    const body = CONTROLLER_SRC.slice(CONTROLLER_SRC.indexOf('export function makeCycleRunner'))
+    expect(body).toContain('await runMacroCycle({')
+    expect(body).not.toContain('runWavesFromDueRows(')
+    expect(body).not.toContain('dispatchMergeIfDue(')
+    expect(body).not.toContain('runVerifyTail(')
   })
 })

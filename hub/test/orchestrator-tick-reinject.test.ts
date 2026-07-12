@@ -93,7 +93,6 @@ const TASK = { id: 'task-1', session_id: 'sess-1', timezone: 'UTC' }
 let rows: OrchestratorRow[] = []
 let enqueued: string[] = []
 let active = false
-let executed: string[] = []
 let macroResumes = 0
 let fakeNow = T0
 
@@ -174,16 +173,6 @@ async function runCycleForSession(now: Date): Promise<void> {
       }),
       detectLifecycleStage: async () => 'development' as const,
     } as any,
-    // Legacy-wave seams: record the commands the cycle actually EXECUTES.
-    {
-      executeCommand: async (unit: any) => {
-        executed.push(unit.command)
-        return { ok: true }
-      },
-      createPrForUnit: async () => null,
-      dispatchReviewer: async () => null,
-      proposeToChat: async () => {},
-    } as any,
   )
   await runner({ id: 'q1', session_id: 'sess-1' } as any)
   active = false // the cycle settled
@@ -193,24 +182,9 @@ describe('due-scan tick + cycle — no per-tick re-inject, and the cycle still R
   beforeEach(() => {
     rows = [row({ id: 'r-exec', schedule_rule: every(1, 'days') })]
     enqueued = []
-    executed = []
     macroResumes = 0
     active = false
     fakeNow = T0
-    delete process.env.REMO_ORCHESTRATOR_LEGACY_WAVES
-  })
-
-  test('BLOCKER regression: the queued cycle still has its DUE rows and EXECUTES them', async () => {
-    process.env.REMO_ORCHESTRATOR_LEGACY_WAVES = '1' // legacy wave path: assert real command execution
-    const { scanAndEnqueueDueCycles } = await import('../src/orchestrator/controller.ts')
-
-    await scanAndEnqueueDueCycles(T0)
-    expect(enqueued).toEqual(['sess-1'])
-    expect(rows[0].last_fired_at).toBeNull() // NOT stamped at enqueue-time
-
-    await runCycleForSession(new Date(T0.getTime() + 1500)) // drained a moment later
-    expect(executed).toEqual(['gsd-execute-phase']) // the cycle ran its row — NOT a no-op
-    expect(rows[0].last_fired_at).not.toBeNull() // cadence advanced BY THE CYCLE
   })
 
   test('macro path: the cycle resumes the macro AND advances the cadence', async () => {

@@ -2,23 +2,19 @@
  * Phase 32 (auto-dev-orchestrator) — controller→wave END-TO-END wiring.
  *
  * Closes the Phase-25 deferral: a claimed queue entry now resolves
- * session→user→task→stage, computes DUE rows, and drives the dependency-aware
- * waves DIRECTLY from those rows (each unit injects its templated prompt). These
- * tests are DB-free: ResolveDeps + WaveSeams are injected so we assert the
- * resolution + the exact command set handed to the execution seam, plus the
- * flag-OFF guarantee that nothing is registered/enqueued/injected.
+ * session→user→task→stage and computes DUE rows. These tests are DB-free:
+ * ResolveDeps is injected so we assert the resolution, plus the flag-OFF
+ * guarantee that nothing is registered/enqueued/injected.
  *
  * Reqs: closes R-ADO-11..14 wiring; preserves D10 (flag-OFF dormant).
  */
-import { describe, test, expect, afterEach, beforeAll, afterAll } from 'bun:test'
+import { describe, test, expect, afterEach } from 'bun:test'
 import {
   resolveCycleContext,
-  makeCycleRunner,
   registerCycleRunnerIfEnabled,
   type ResolveDeps,
   type ControllerContext,
 } from '../src/orchestrator/controller.ts'
-import type { WaveSeams, ExecuteResult } from '../src/orchestrator/wave-runner.ts'
 import type { DueRow } from '../src/orchestrator/due-rows.ts'
 import type { OrchestratorRow } from '../src/db/orchestrator-rows-dal.ts'
 import * as queue from '../src/orchestrator/queue.ts'
@@ -74,28 +70,6 @@ function resolveDeps(
   }
 }
 
-/** Spy seams: record every executeCommand call's unit command + microPrompt. */
-function spySeams(): { seams: WaveSeams; executed: { command: string; micro: string | null }[]; proposed: string[] } {
-  const executed: { command: string; micro: string | null }[] = []
-  const proposed: string[] = []
-  const seams: WaveSeams = {
-    async executeCommand(unit): Promise<ExecuteResult> {
-      executed.push({ command: unit.command, micro: unit.microPrompt ?? null })
-      return { outcome: 'dispatched' }
-    },
-    async createPrForUnit() { return null },
-    async dispatchReviewer() { return null },
-    async proposeToChat(unit) { proposed.push(unit.command) },
-    // DB-backed and called unconditionally by the legacy wave path — stub them, or
-    // this unit test opens a real postgres connection and flakes on the 5s timeout.
-    async runVerifyTail() { return null },
-    async markRowsFired() { return null },
-  }
-  return { seams, executed, proposed }
-}
-
-const entry = { id: 'q1', session_id: 'sess-1', priority: 0, status: 'running', enqueued_at: '', started_at: null } as any
-
 // ── resolveCycleContext ─────────────────────────────────────────────────────
 
 describe('resolveCycleContext', () => {
@@ -140,68 +114,6 @@ describe('resolveCycleContext', () => {
     const detectStage = async () => { throw new Error('probe down') }
     const r = await resolveCycleContext('sess-1', resolveDeps(due('gsd-plan-phase'), { task, detectStage }))
     expect(r!.controllerContext.stage).toBe('development')
-  })
-})
-
-// ── makeCycleRunner — drives waves from the REAL due-row command set ──────────
-
-describe('makeCycleRunner — due rows drive the wave command set', () => {
-  // Milestone TMAC: the resume-heartbeat macro path is now the cycle-runner
-  // default. This block exercises the LEGACY wave path (preserved behind the
-  // rollback flag), so pin REMO_ORCHESTRATOR_LEGACY_WAVES=1 for its lifetime.
-  let prevLegacy: string | undefined
-  beforeAll(() => {
-    prevLegacy = process.env.REMO_ORCHESTRATOR_LEGACY_WAVES
-    process.env.REMO_ORCHESTRATOR_LEGACY_WAVES = '1'
-  })
-  afterAll(() => {
-    if (prevLegacy === undefined) delete process.env.REMO_ORCHESTRATOR_LEGACY_WAVES
-    else process.env.REMO_ORCHESTRATOR_LEGACY_WAVES = prevLegacy
-  })
-
-  test('executeCommand seam is called with the real due commands', async () => {
-    const dueRows = due('gsd-plan-phase', 'gsd-execute-phase')
-    const { seams, executed } = spySeams()
-    const runner = makeCycleRunner(resolveDeps(dueRows), seams)
-    await runner(entry)
-    const cmds = executed.map((e) => e.command).sort()
-    expect(cmds).toEqual(['gsd-execute-phase', 'gsd-plan-phase'])
-  })
-
-  test('a due row micro_prompt is carried onto the executed unit', async () => {
-    const dueRows: DueRow[] = [{ row: row('gsd-audit-fix', 'focus on the auth module'), autoDisableAfter: false }]
-    const { seams, executed } = spySeams()
-    await makeCycleRunner(resolveDeps(dueRows), seams)(entry)
-    expect(executed.length).toBe(1)
-    expect(executed[0].micro).toBe('focus on the auth module')
-  })
-
-  test('propose-tier rows (gsd-ship) route to proposeToChat, never executeCommand', async () => {
-    const dueRows = due('gsd-execute-phase', 'gsd-ship')
-    const { seams, executed, proposed } = spySeams()
-    await makeCycleRunner(resolveDeps(dueRows), seams)(entry)
-    expect(executed.map((e) => e.command)).toContain('gsd-execute-phase')
-    expect(executed.map((e) => e.command)).not.toContain('gsd-ship')
-    expect(proposed).toContain('gsd-ship')
-  })
-
-  test('merge-to-main is EXCLUDED from the wave planner (off-hours special path)', async () => {
-    const dueRows = due('gsd-execute-phase', 'merge-to-main')
-    const { seams, executed } = spySeams()
-    await makeCycleRunner(resolveDeps(dueRows), seams)(entry)
-    expect(executed.map((e) => e.command)).not.toContain('merge-to-main')
-  })
-
-  test('no due rows ⇒ no executeCommand calls (nothing injected)', async () => {
-    const { seams, executed } = spySeams()
-    await makeCycleRunner(resolveDeps([]), seams)(entry)
-    expect(executed.length).toBe(0)
-  })
-
-  test('stale/foreign entry (no task) ⇒ no executeCommand calls', async () => {
-    const { seams, executed } = spySeams()
-    await makeCycleRunner(resolveDeps([], { task: null }), seams)(entry)
-    expect(executed.length).toBe(0)
   })
 })
 
