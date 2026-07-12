@@ -210,6 +210,43 @@ describe('ProcessManager circuit breaker', () => {
     expect((await pm.start(spec({ runId: 'x3' })))?.reason).toBe('circuit_open')
   })
 
+  test('SAFETY: a REJECTED start never claims the probe slot (breaker cannot wedge half-open)', async () => {
+    // The bug this pins: the probe slot was claimed as soon as a half-open breaker
+    // saw a start, BEFORE the duplicate_run / concurrency_cap rejections below it.
+    // A rejected start therefore pinned probeRunId to a run that never spawned, and
+    // since the slot is only released by a probe EXIT, the breaker sat half-open
+    // forever — every later genuine start failed the `probeRunId == null` guard and
+    // was never tracked as a probe, so the breaker could never close.
+    const { pm } = makePM()
+    ;(pm as any).cfg.maxConcurrent = 1
+
+    await pm.start(spec({ runId: 'w1' }))
+    bridgesFor('w1')[0].cb.onSpawned({ pid: 1 })
+    crashUntilOpen(bridgesFor('w1')[0].cb)
+    await sleep(60)
+    expect(pm.circuitBreakerSnapshot()[0].state).toBe('half_open')
+
+    // Fill the only slot with an unrelated repo, then a start for the tripped repo
+    // is rejected on concurrency_cap — it must NOT have taken the probe slot.
+    const other = join(ROOT, 'other')
+    mkdirSync(join(other, '.git'), { recursive: true })
+    await pm.start(spec({ runId: 'w2', repoPath: other }))
+    bridgesFor('w2')[0].cb.onSpawned({ pid: 2 })
+
+    const rejected = await pm.start(spec({ runId: 'w3' }))
+    expect(rejected?.reason).toBe('concurrency_cap')
+    expect(bridgesFor('w3').length).toBe(0)
+
+    // Free the slot, then the next GENUINE start is still admitted as the probe and
+    // can close the breaker. Before the fix, w3 held probeRunId and this never closed.
+    bridgesFor('w2')[0].cb.onExit({ code: 0, reason: 'runner_exit' })
+    const admitted = await pm.start(spec({ runId: 'w4' }))
+    expect(admitted).toBeNull()
+    bridgesFor('w4')[0].cb.onSpawned({ pid: 3 })
+    await sleep(60)
+    expect(pm.circuitBreakerSnapshot().some((b) => b.repo_path === REPO)).toBe(false)
+  })
+
   test('RE-OPENS if the admitted probe crashes, with a longer cooldown and a failed-probe count', async () => {
     const { pm } = makePM()
     await pm.start(spec({ runId: 'r1' }))

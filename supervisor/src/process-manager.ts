@@ -595,13 +595,6 @@ export class ProcessManager {
         },
       }
     }
-    if (breaker && breaker.state === 'half_open' && breaker.probeRunId == null) {
-      // This genuine (gate-passed) start is the probe. Remember it so a crash can
-      // be attributed to the probe even after it has spawned.
-      breaker.probeRunId = spec.runId
-      this.cb.onLog('warn', `circuit breaker half-open — admitting run as the probe for ${spec.repoPath}`, spec.runId)
-    }
-
     // Don't race a crashed-pending-restart entry for the same repo — its
     // backoff timer will reclaim the slot. Treat as duplicate to keep the
     // N+1 window during backoff closed.
@@ -635,6 +628,16 @@ export class ProcessManager {
       })
       this.writeAudit(spec, false, 'concurrency_cap')
       return { reason: 'concurrency_cap', detail: { limit: this.cfg.maxConcurrent } }
+    }
+
+    // Claim the half-open probe slot only once the start has cleared EVERY
+    // rejection check above. Claiming it earlier pins probeRunId to a run that
+    // never spawns (duplicate_run / concurrency_cap), and since the slot is only
+    // released by a probe exit, the breaker would sit half-open forever and no
+    // later genuine start could ever be admitted as the probe.
+    if (breaker && breaker.state === 'half_open' && breaker.probeRunId == null) {
+      breaker.probeRunId = spec.runId
+      this.cb.onLog('warn', `circuit breaker half-open — admitting run as the probe for ${spec.repoPath}`, spec.runId)
     }
 
     if (spec.dangerouslySkipPermissions && !this.cfg.allowDangerousSkipPermissions) {
