@@ -81,7 +81,14 @@ jobs:
           $ver = '1.0.60'
           $out = Join-Path $env:RUNNER_TEMP 'trusted-signing'
           # nuget.exe ships on windows-latest runners; fall back to a direct install if not.
-          nuget install Microsoft.Trusted.Signing.Client -Version $ver -OutputDirectory $out -ExcludeVersion:$false
+          # NOTE: no -ExcludeVersion flag. `-ExcludeVersion:$false` is PowerShell's
+          # switch-with-value syntax, which only works on PS cmdlets — nuget.exe is a
+          # NATIVE binary, so PowerShell hands it the literal string
+          # "-ExcludeVersion:False" and nuget dies with `Unknown option`. The step then
+          # hard-failed and signing was skipped entirely (v0.13.1's first signed build).
+          # Omitting it is also what we want: nuget's DEFAULT keeps the version in the
+          # folder name, which is exactly what the $dll path below expects.
+          nuget install Microsoft.Trusted.Signing.Client -Version $ver -OutputDirectory $out
           $dll = Join-Path $out "Microsoft.Trusted.Signing.Client.$ver\bin\x64\Azure.CodeSigning.Dlib.dll"
           if (-not (Test-Path -LiteralPath $dll)) {
             Write-Error "Trusted Signing dlib not found at $dll"
