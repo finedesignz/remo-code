@@ -2,6 +2,7 @@
 //!
 //! T4: NSSM-service collision check + loopback mutex probe.
 
+mod auto_update;
 mod config_cmds;
 mod first_run;
 mod legacy_cleanup;
@@ -104,6 +105,14 @@ pub fn run() {
             // the tray tooltip + status menu item. Graceful when sidecar is
             // unreachable (grey dot, no crash).
             tray::spawn_status_poller(app.handle().clone());
+
+            // fix/headless-autoupdate — the periodic update check MUST live in
+            // the backend. It used to be a React `useEffect` in the webview, so
+            // on a tray app with no window open it never ran: the owner's host
+            // sat 14h on v0.13.1 with v0.13.2 published and never even checked.
+            // This task ticks with or without a webview and is the SINGLE owner
+            // of check→download→install→relaunch.
+            auto_update::spawn_watcher(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -113,6 +122,8 @@ pub fn run() {
             config_cmds::rescan_now,
             config_cmds::get_auto_update,
             config_cmds::set_auto_update,
+            auto_update::auto_update_check_now,
+            auto_update::auto_update_status,
             runtime_cmds::get_runtime_status,
             runtime_cmds::get_inventory,
             runtime_cmds::open_external_url,

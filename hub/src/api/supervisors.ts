@@ -9,7 +9,7 @@ import { getSessionSkipPermissionsByRepo } from '../db/dal'
 import {
   getSupervisor as getSupervisorRegistryEntry, isSupervisorOnline,
   sendRequest, sendToSupervisor, updateSupervisorState,
-  getUserInventory, getSupervisorCircuitBreakers,
+  getUserInventory, getSupervisorCircuitBreakers, getSupervisorStatusServer,
 } from '../ws/supervisor-registry'
 import { isGitHubAppConfigured, mintTokenizedCloneUrl } from '../auth/github-app'
 import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
@@ -27,6 +27,11 @@ supervisors.get('/', async (c) => {
     // refusing to spawn CLIs for those repos (silent autonomy loss in prod
     // 2026-07). Empty array = healthy, or a pre-fix supervisor that doesn't report.
     circuit_breakers: getSupervisorCircuitBreakers(r.id),
+    // fix/headless-autoupdate — `{healthy:false}` means this supervisor is running
+    // WITHOUT its loopback status server (bind failed, e.g. a zombie listener on
+    // 9106): /sup/status is gone and it is retrying the bind. null = pre-fix
+    // supervisor that doesn't report.
+    status_server: getSupervisorStatusServer(r.id),
   }))
   return c.json({ supervisors: enriched })
 })

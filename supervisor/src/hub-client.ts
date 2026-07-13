@@ -28,7 +28,9 @@ type OutboundMsg =
   | { type: 'supervisor.repo_inventory'; scanned_at: string; repos: Array<{ local_path: string; is_git_repo: boolean; is_worktree: boolean; worktree_parent_path: string | null; git_remote: string | null; git_origin_github: { owner: string; repo: string } | null; branch?: string | null; canonical?: boolean }> }
   // `circuit_breakers` (fix/stop-the-bleed) makes an OPEN spawn-breaker VISIBLE to
   // the hub. Optional so an older hub simply ignores it (zod: .optional()).
-  | { type: 'session_inventory'; sessions: Array<{ session_id: string; cli_kind: 'claude' | 'codex'; project_dir: string; pid: number | null; started_at: string; last_activity_at: string | null; status: 'spawning' | 'running' | 'idle' | 'stopping' }>; circuit_breakers?: Array<{ repo_path: string; state: 'open' | 'half_open'; opened_at: string; failed_probes: number; exhausted: boolean; last_reason: string | null }> }
+  // `status_server` (fix/headless-autoupdate) makes a supervisor that failed to
+  // bind its loopback status server VISIBLY degraded rather than silently so.
+  | { type: 'session_inventory'; sessions: Array<{ session_id: string; cli_kind: 'claude' | 'codex'; project_dir: string; pid: number | null; started_at: string; last_activity_at: string | null; status: 'spawning' | 'running' | 'idle' | 'stopping' }>; circuit_breakers?: Array<{ repo_path: string; state: 'open' | 'half_open'; opened_at: string; failed_probes: number; exhausted: boolean; last_reason: string | null }>; status_server?: StatusServerHealth }
   | { type: 'run_started'; run_id: string }
   | { type: 'run_output'; run_id: string; chunk: string }
   | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
@@ -42,8 +44,17 @@ type OutboundMsg =
   | { type: 'repo_create_failed'; job_id: string; stage: string; error: string }
   | { type: 'pong' }
 
+/** fix/headless-autoupdate — loopback status-server health, reported to the hub. */
+export interface StatusServerHealth {
+  healthy: boolean
+  port: number | null
+  last_error: string | null
+}
+
 export class SupervisorClient {
   private ws: WebSocket | null = null
+  /** Set by index.ts once the supervised status server is up. */
+  private statusServerHealth: (() => StatusServerHealth) | null = null
   private cfg: SupervisorConfig
   private authenticated = false
   private reconnectAttempts = 0
@@ -502,6 +513,15 @@ export class SupervisorClient {
   }
 
   /**
+   * fix/headless-autoupdate — wire the supervised status server's health into the
+   * `session_inventory` push, the same way the spawn circuit-breaker state rides
+   * it. A supervisor with no status server must be VISIBLY degraded.
+   */
+  setStatusServerHealthProvider(fn: () => StatusServerHealth) {
+    this.statusServerHealth = fn
+  }
+
+  /**
    * Bug A — snapshot the ProcessManager's live runner set and send it to the
    * hub. Drops entries that haven't received a session_id from the hub yet
    * (those would be unaddressable on the hub side). Best-effort; ws.send
@@ -526,7 +546,15 @@ export class SupervisorClient {
     // inventory. A latched-open breaker used to be invisible to the hub — the
     // supervisor spawned ZERO CLIs for four days while the hub looked healthy.
     // Empty array in the steady state.
-    this.send({ type: 'session_inventory', sessions, circuit_breakers: this.pm.circuitBreakerSnapshot() })
+    this.send({
+      type: 'session_inventory',
+      sessions,
+      circuit_breakers: this.pm.circuitBreakerSnapshot(),
+      // fix/headless-autoupdate — same idea as circuit_breakers: a supervisor
+      // whose status server never bound (zombie listener on 9106) used to be
+      // invisible to the hub. Undefined when no provider is wired (tests).
+      status_server: this.statusServerHealth?.(),
+    })
   }
 
   /**

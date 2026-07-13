@@ -179,6 +179,17 @@ export const SupervisorSessionInventory = z.object({
     exhausted: z.boolean(),
     last_reason: z.string().max(512).nullable().optional(),
   })).max(64).optional(),
+  // fix/headless-autoupdate — loopback status-server health. OPTIONAL: pre-fix
+  // supervisors never send it. `healthy:false` means the supervisor could not
+  // bind 127.0.0.1:9106 (or the 9197 fallback) — its /sup/status endpoint does
+  // not exist, so the tray and any :9106 probe are blind. Prod 2026-07: a ZOMBIE
+  // listener (dead PID still holding the socket) made this permanent for >1 day
+  // and nothing surfaced it beyond one ERROR line at boot.
+  status_server: z.object({
+    healthy: z.boolean(),
+    port: z.number().int().nullable().optional(),
+    last_error: z.string().max(512).nullable().optional(),
+  }).optional(),
 })
 export type SupervisorSessionInventoryT = z.infer<typeof SupervisorSessionInventory>
 

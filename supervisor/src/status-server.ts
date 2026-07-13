@@ -43,13 +43,52 @@ export interface StatusServer {
   stop: () => void
 }
 
+/**
+ * Self-healing handle. `healthy` is what the hub sees in `session_inventory`
+ * (→ `GET /api/supervisors`): a supervisor with no status server is now VISIBLY
+ * degraded instead of silently degraded.
+ */
+export interface SupervisedStatusServer {
+  isHealthy: () => boolean
+  getPort: () => number | null
+  getLastError: () => string | null
+  stop: () => void
+}
+
 const PRIMARY_PORT = 9106
 const FALLBACK_PORT = 9197
 
+/** Retry curve for a failed bind: 5s → 10s → … capped at 5min, forever. */
+const RETRY_BASE_MS = 5_000
+const RETRY_MAX_MS = 300_000
+
 /**
- * Bind on PRIMARY first; if EADDRINUSE (another supervisor lost a race, or
- * a stale process), try FALLBACK. If both fail, throw — the Tauri preflight
- * is supposed to have caught this, so it's safe to surface here.
+ * Does this error mean "the port is taken" (retryable) rather than something
+ * structural?
+ *
+ * fix/headless-autoupdate: this used to test only /EADDRINUSE|address already in
+ * use/i — but Bun's actual message is `Failed to start server. Is port 9106 in
+ * use?`, which matches NEITHER. So the PRIMARY bind failure rethrew immediately,
+ * the FALLBACK port was never even attempted, and index.ts logged one
+ * `[status] failed to bind` line and ran on with no status server, forever. On
+ * the owner's host a ZOMBIE listener (a dead PID still holding 127.0.0.1:9106)
+ * made that permanent: >1 day status-blind, `:9106/sup/status` connection-refused.
+ */
+export function isPortInUseError(err: unknown): boolean {
+  const msg = (err as any)?.message ?? String(err ?? '')
+  const code = (err as any)?.code ?? ''
+  return (
+    code === 'EADDRINUSE' ||
+    /EADDRINUSE/i.test(msg) ||
+    /address already in use/i.test(msg) ||
+    /is port \d+ in use/i.test(msg) ||
+    /failed to start server/i.test(msg)
+  )
+}
+
+/**
+ * Bind on PRIMARY first; if the port is taken (another supervisor lost a race, a
+ * stale process, or a zombie socket), try FALLBACK. If both fail, throw.
  */
 export function startStatusServer(provider: StatusSnapshotProvider): StatusServer {
   let server: Server | null = null
@@ -57,7 +96,7 @@ export function startStatusServer(provider: StatusSnapshotProvider): StatusServe
   try {
     server = Bun.serve({ hostname: '127.0.0.1', port: PRIMARY_PORT, fetch: makeHandler(provider) })
   } catch (err: any) {
-    if (!/EADDRINUSE|address already in use/i.test(err?.message ?? '')) throw err
+    if (!isPortInUseError(err)) throw err
     try {
       server = Bun.serve({ hostname: '127.0.0.1', port: FALLBACK_PORT, fetch: makeHandler(provider) })
       port = FALLBACK_PORT
@@ -69,6 +108,75 @@ export function startStatusServer(provider: StatusSnapshotProvider): StatusServe
     port,
     url: `http://127.0.0.1:${port}`,
     stop: () => { try { server?.stop(true) } catch {} },
+  }
+}
+
+/**
+ * Start the status server and KEEP TRYING if it can't bind.
+ *
+ * A zombie listener holding 9106 (and/or 9197) can be released later — by the OS
+ * reaping the socket, or by whatever held it going away — so a one-shot bind that
+ * gives up forever is the wrong shape. We retry on a bounded backoff until we get
+ * a listener, and report health in the meantime.
+ *
+ * We deliberately do NOT try to free the port ourselves: killing a process by
+ * name/glob to steal a socket is out of bounds (CLAUDE.md rule 17).
+ */
+export function startStatusServerSupervised(
+  provider: StatusSnapshotProvider,
+  opts: {
+    log?: (level: 'info' | 'warn' | 'error', msg: string) => void
+    retryBaseMs?: number
+    retryMaxMs?: number
+  } = {},
+): SupervisedStatusServer {
+  const log = opts.log ?? ((level, msg) => (level === 'info' ? console.log(msg) : console.error(msg)))
+  const baseMs = opts.retryBaseMs ?? RETRY_BASE_MS
+  const maxMs = opts.retryMaxMs ?? RETRY_MAX_MS
+
+  let server: StatusServer | null = null
+  let lastError: string | null = null
+  let attempt = 0
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let stopped = false
+
+  const attemptBind = () => {
+    if (stopped || server) return
+    try {
+      server = startStatusServer(provider)
+      lastError = null
+      const suffix = attempt > 0 ? ` (recovered after ${attempt} failed attempt${attempt === 1 ? '' : 's'})` : ''
+      attempt = 0
+      log('info', `[status] listening on ${server.url}/sup/status${suffix}`)
+    } catch (err: any) {
+      attempt += 1
+      lastError = err?.message ?? String(err)
+      const delay = Math.min(baseMs * 2 ** (attempt - 1), maxMs)
+      log(
+        'error',
+        `[status] failed to bind (attempt ${attempt}): ${lastError} — ` +
+          `supervisor is running DEGRADED (no /sup/status; tray + :9106 probe blind). ` +
+          `Retrying in ${Math.round(delay / 1000)}s.`,
+      )
+      timer = setTimeout(attemptBind, delay)
+      // Don't hold the event loop open on account of the retry timer.
+      ;(timer as any)?.unref?.()
+    }
+  }
+
+  attemptBind()
+
+  return {
+    isHealthy: () => server !== null,
+    getPort: () => server?.port ?? null,
+    getLastError: () => lastError,
+    stop: () => {
+      stopped = true
+      if (timer) clearTimeout(timer)
+      timer = null
+      try { server?.stop() } catch {}
+      server = null
+    },
   }
 }
 
