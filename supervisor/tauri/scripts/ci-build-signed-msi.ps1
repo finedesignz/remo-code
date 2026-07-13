@@ -28,6 +28,15 @@ $BundleDir     = Join-Path $SrcTauriDir 'target\x86_64-pc-windows-msvc\release\b
 
 function Section($m) { Write-Host "`n=== $m ===" -ForegroundColor Cyan }
 
+# Write UTF-8 WITHOUT a BOM.
+# Windows PowerShell 5.1's `Set-Content -Encoding utf8` emits a BOM, and a BOM at the
+# head of tauri.conf.json makes every strict JSON parser fail -- bun dies with
+# "JSON Parse error: Unrecognized token '<feff>'" when compile-sidecar.mjs reads it.
+function Write-JsonNoBom($Path, $Object) {
+    $json = $Object | ConvertTo-Json -Depth 20
+    [IO.File]::WriteAllText($Path, $json, (New-Object Text.UTF8Encoding($false)))
+}
+
 # ---------------------------------------------------------------------------
 # 0. Normalise secrets coming from Woodpecker.
 #    Woodpecker rejects empty secret values, so an empty updater-key passphrase
@@ -55,7 +64,7 @@ Section 'configure signing metadata'
 if (-not [string]::IsNullOrWhiteSpace($env:CERT_PROFILE_NAME)) {
     $meta = Get-Content -Raw -LiteralPath $MetaPath | ConvertFrom-Json
     $meta.CertificateProfileName = $env:CERT_PROFILE_NAME
-    ($meta | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $MetaPath -Encoding utf8
+    Write-JsonNoBom $MetaPath $meta
     Write-Host "CertificateProfileName = $($env:CERT_PROFILE_NAME)"
 }
 Get-Content -Raw -LiteralPath $MetaPath | Write-Host
@@ -71,7 +80,7 @@ if (-not $conf.bundle.windows) {
     $conf.bundle | Add-Member -NotePropertyName windows -NotePropertyValue (@{}) -Force
 }
 $conf.bundle.windows | Add-Member -NotePropertyName signCommand -NotePropertyValue $signCmd -Force
-($conf | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $ConfPath -Encoding utf8
+Write-JsonNoBom $ConfPath $conf
 Write-Host "signCommand = $signCmd"
 
 # ---------------------------------------------------------------------------
