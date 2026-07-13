@@ -50,25 +50,13 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -eq '__EMPTY__') {
 # only accepts true/false -> "invalid value 'woodpecker' for '--ci'". Normalise it.
 if ($env:CI -and $env:CI -notin @('true','false')) { $env:CI = 'true' }
 
-# PROOF MODE (PROOF_SKIP_UPDATER_SIG=1): skip ONLY the Tauri updater .sig, so the
-# Windows-agent + Azure-Trusted-Signing path can be proven end-to-end without the
-# updater key passphrase. Azure Authenticode signing stays MANDATORY.
-# A build produced this way MUST NOT be released: the in-app updater rejects an MSI
-# with no .sig. Never set this on a tag/release run.
-$SkipUpdaterSig = $env:PROOF_SKIP_UPDATER_SIG -eq '1'
-
 # Fail closed: never let a "successful" build ship an unsigned or unsignable MSI.
-$required = @('AZURE_CLIENT_ID','AZURE_CLIENT_SECRET','AZURE_TENANT_ID','TRUSTED_SIGNING_DLIB')
-if (-not $SkipUpdaterSig) { $required += 'TAURI_SIGNING_PRIVATE_KEY' }
-foreach ($v in $required) {
+# TAURI_SIGNING_PRIVATE_KEY is non-negotiable: tauri.conf.json carries an updater
+# pubkey, so Tauri hard-fails the bundle without the matching private key anyway.
+foreach ($v in 'AZURE_CLIENT_ID','AZURE_CLIENT_SECRET','AZURE_TENANT_ID','TRUSTED_SIGNING_DLIB','TAURI_SIGNING_PRIVATE_KEY') {
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($v))) {
         throw "required env var $v is not set - refusing to build"
     }
-}
-if ($SkipUpdaterSig) {
-    Write-Warning 'PROOF_SKIP_UPDATER_SIG=1 -> updater .sig will NOT be generated. NOT RELEASABLE.'
-    Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
-    Remove-Item Env:\TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
 }
 if (-not (Test-Path -LiteralPath $env:TRUSTED_SIGNING_DLIB)) {
     throw "TRUSTED_SIGNING_DLIB points at a missing file: $($env:TRUSTED_SIGNING_DLIB)"
@@ -159,7 +147,7 @@ if ($LASTEXITCODE) { throw "signtool verify FAILED - MSI is not validly signed (
 $sig = "$($msi.FullName).sig"
 if (Test-Path -LiteralPath $sig) {
     Write-Host "updater .sig present (computed over the SIGNED msi): $sig"
-} elseif (-not $SkipUpdaterSig) {
+} else {
     Write-Warning "no updater .sig produced"
 }
 
