@@ -48,5 +48,10 @@ steps:
       #   TRUSTED_SIGNING_DLIB -> Azure.CodeSigning.Dlib.dll (Microsoft.Trusted.Signing.Client 1.0.60)
       SIGNTOOL_PATH: C:\tools\winsdk\bin\10.0.22621.0\x64\signtool.exe
       TRUSTED_SIGNING_DLIB: C:\tools\trusted-signing\bin\x64\Azure.CodeSigning.Dlib.dll
+      # PROOF_SKIP_UPDATER_SIG is NOT declared here on purpose. It is supplied only as a
+      # manual-pipeline variable (Woodpecker injects those into the step env) to prove the
+      # Windows + Azure-Trusted-Signing path without the updater key passphrase. Azure
+      # Authenticode signing still runs. Such a build has no updater .sig and MUST NOT be
+      # released -- a tag/push run never sets it, so releases stay fail-closed.
     commands:
       - powershell -NoProfile -ExecutionPolicy Bypass -File supervisor/tauri/scripts/ci-build-signed-msi.ps1
