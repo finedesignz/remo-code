@@ -96,7 +96,9 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const pasteBoxRef = useRef<HTMLTextAreaElement | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [pasteOpen, setPasteOpen] = useState(false)
 
   // Send a raw key sequence as a term.input keystroke, then refocus the terminal
   // so the on-screen button press doesn't steal the cursor.
@@ -105,18 +107,38 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     try { termRef.current?.focus() } catch {}
   }, [send, sessionId])
 
-  // Ctrl+V / paste: read clipboard text and inject it as a term.input keystroke
-  // (same raw-byte path as on-screen keys). Image paste stays on the dedicated
-  // upload effect below; this covers the text case the on-screen keyboard can't
-  // reach on a phone. Falls back to a notice if the clipboard read is blocked.
+  // Ctrl+V / paste. Two paths, in order:
+  //
+  //  1. navigator.clipboard.readText() — works on desktop Chrome/Edge/Safari.
+  //  2. PASTE CAPTURE BOX — the iOS path. readText() is not usable there (Safari
+  //     gates it behind its own permission UI and rejects when the gesture isn't
+  //     attributed), AND the device long-press "Paste" menu can never reach the
+  //     terminal on its own: xterm's capture target is a hidden 1px/opacity-0
+  //     helper <textarea>, which iOS refuses to show an edit menu for. So we open
+  //     a REAL, visible, focused textarea — a native paste target the OS is happy
+  //     to offer its Paste menu on — and forward whatever lands in it to the PTY.
+  //
+  // Both paths end at the same raw-byte term.input frame as the on-screen keys.
   const pasteClipboard = useCallback(async () => {
+    let text = ''
     try {
-      const text = await navigator.clipboard.readText()
-      if (text) sendKey(text)
+      text = await navigator.clipboard.readText()
     } catch {
-      setNotice('Clipboard read blocked — use the device paste gesture')
-      setTimeout(() => setNotice(null), 4000)
+      text = ''
     }
+    if (text) {
+      sendKey(text)
+      try { termRef.current?.focus() } catch {}
+      return
+    }
+    // Clipboard read blocked or empty-by-permission (iOS): fall back to the box.
+    setPasteOpen(true)
+  }, [sendKey])
+
+  // Commit whatever the user got into the capture box, close it, refocus the term.
+  const commitPasteBox = useCallback((text: string) => {
+    setPasteOpen(false)
+    if (text) sendKey(text)
     try { termRef.current?.focus() } catch {}
   }, [sendKey])
 
@@ -373,6 +395,61 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
           }}
         />
       </div>
+      {/* PASTE CAPTURE BOX (iOS / blocked-clipboard fallback). A real textarea so
+          the OS offers its native long-press Paste menu — the hidden xterm helper
+          textarea never gets one. Pasted text (or typed text) is forwarded to the
+          PTY as raw bytes; pasted images route through the same upload path as a
+          drop. */}
+      {pasteOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center p-4 pt-16 bg-black/60"
+          onMouseDown={(e) => { if (e.target === e.currentTarget) commitPasteBox('') }}
+        >
+          <div className="w-full max-w-md rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-3 shadow-xl">
+            <div className="mb-2 text-xs text-[var(--text-muted)]">
+              Long-press below and choose <span className="text-[var(--text-primary)]">Paste</span>, then Send.
+            </div>
+            <textarea
+              ref={pasteBoxRef}
+              autoFocus
+              rows={4}
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              className="w-full rounded border border-[var(--border)] bg-[var(--bg-primary)] p-2 text-sm text-[var(--text-primary)] font-mono"
+              onPaste={(e) => {
+                const items = e.clipboardData?.items
+                if (items) {
+                  for (const it of items) {
+                    if (it.kind === 'file' && it.type.startsWith('image/')) {
+                      const f = it.getAsFile()
+                      if (f) { e.preventDefault(); setPasteOpen(false); uploadFile(f); return }
+                    }
+                  }
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') { e.preventDefault(); commitPasteBox('') }
+                // Enter sends (Shift+Enter keeps a newline in the pasted payload).
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  commitPasteBox(e.currentTarget.value)
+                }
+              }}
+            />
+            <div className="mt-2 flex justify-end gap-2">
+              <button type="button" className={btn} onClick={() => commitPasteBox('')}>Cancel</button>
+              <button
+                type="button"
+                className={btn}
+                onClick={() => commitPasteBox(pasteBoxRef.current?.value ?? '')}
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div
         ref={hostRef}
         // overflow:hidden bounds the host so xterm's own .xterm-viewport owns the
