@@ -46,6 +46,10 @@ if ($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -eq '__EMPTY__') {
     $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
 }
 
+# Woodpecker exports CI=woodpecker. The Tauri CLI maps $CI onto its --ci flag, which
+# only accepts true/false -> "invalid value 'woodpecker' for '--ci'". Normalise it.
+if ($env:CI -and $env:CI -notin @('true','false')) { $env:CI = 'true' }
+
 # Fail closed: never let a "successful" build ship an unsigned or unsignable MSI.
 foreach ($v in 'AZURE_CLIENT_ID','AZURE_CLIENT_SECRET','AZURE_TENANT_ID','TRUSTED_SIGNING_DLIB','TAURI_SIGNING_PRIVATE_KEY') {
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($v))) {
