@@ -1,0 +1,50 @@
+# Woodpecker port of .github/workflows/release-supervisor.yml
+#
+# Runs on the self-hosted NATIVE WINDOWS agent (local backend), which is what
+# lets us move Tauri MSI builds off paid GitHub Actions minutes.
+#
+# CORRECTNESS (do not "optimise" this away):
+#   Authenticode signing happens DURING tauri bundling via bundle.windows.signCommand,
+#   which ci-build-signed-msi.ps1 injects before `cargo tauri build`. The Tauri updater
+#   `.sig` is computed over the final MSI bytes, so a post-build `signtool sign` pass
+#   would mutate the MSI *after* the .sig was generated and silently break updater
+#   verification for every existing install.
+#
+# Secrets are scoped to push/tag/manual only - never pull_request - so a PR can
+# never expose the Azure signing credential.
+
+when:
+  - event: push
+    branch: ci/woodpecker-windows-release
+  - event: tag
+    ref: refs/tags/supervisor-v*
+  - event: manual
+
+# Target the native Windows agent (id 6, TITANIUMTOWER, local backend).
+labels:
+  platform: windows/amd64
+
+steps:
+  - name: build-signed-msi
+    # local backend: no container image; steps run as native host processes,
+    # which is precisely what the Tauri toolchain (MSVC, WiX, signtool) needs.
+    environment:
+      AZURE_CLIENT_ID:
+        from_secret: azure_client_id
+      AZURE_CLIENT_SECRET:
+        from_secret: azure_client_secret
+      AZURE_TENANT_ID:
+        from_secret: azure_tenant_id
+      CERT_PROFILE_NAME:
+        from_secret: cert_profile_name
+      TAURI_SIGNING_PRIVATE_KEY:
+        from_secret: tauri_signing_private_key
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        from_secret: tauri_signing_private_key_password
+      # Host-installed signing toolchain (persisted as Machine env vars on the agent):
+      #   SIGNTOOL_PATH        -> Windows SDK 10.0.22621 signtool (has /dlib; 10.0.19041 does NOT)
+      #   TRUSTED_SIGNING_DLIB -> Azure.CodeSigning.Dlib.dll (Microsoft.Trusted.Signing.Client 1.0.60)
+      SIGNTOOL_PATH: C:\tools\winsdk\bin\10.0.22621.0\x64\signtool.exe
+      TRUSTED_SIGNING_DLIB: C:\tools\trusted-signing\bin\x64\Azure.CodeSigning.Dlib.dll
+    commands:
+      - powershell -NoProfile -ExecutionPolicy Bypass -File supervisor/tauri/scripts/ci-build-signed-msi.ps1
