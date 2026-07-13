@@ -26,8 +26,10 @@ labels:
 
 steps:
   - name: build-signed-msi
-    # local backend: no container image; steps run as native host processes,
-    # which is precisely what the Tauri toolchain (MSVC, WiX, signtool) needs.
+    # The local backend runs steps as native host processes (no container), which is
+    # precisely what the Tauri toolchain (MSVC, WiX, signtool) needs. It still requires
+    # an `image`, but repurposes it to select the SHELL rather than pull a container.
+    image: powershell
     environment:
       AZURE_CLIENT_ID:
         from_secret: azure_client_id
