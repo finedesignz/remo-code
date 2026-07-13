@@ -14,6 +14,7 @@ import {
   updateSupervisorState, heartbeatSupervisor, getSupervisor,
   setSupervisorSessionInventory,
   setSupervisorCircuitBreakers,
+  setSupervisorStatusServer,
 } from './supervisor-registry'
 import { log } from '../observability/logger'
 
@@ -1179,6 +1180,18 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
           `[supervisor] CIRCUIT BREAKER ${b.state.toUpperCase()} supervisor=${supervisorId} repo=${b.repo_path} ` +
           `failed_probes=${b.failed_probes} exhausted=${b.exhausted} reason=${b.last_reason ?? 'unknown'} — ` +
           `NO CLI will spawn for this repo until it closes`,
+        )
+      }
+      // fix/headless-autoupdate — record loopback status-server health. A
+      // supervisor that could not bind 9106 has NO /sup/status: the tray and the
+      // owner's probe are blind. Log once per trip; `GET /api/supervisors`
+      // surfaces the standing state.
+      const { newlyDegraded } = setSupervisorStatusServer(supervisorId, msg.status_server)
+      if (newlyDegraded) {
+        console.error(
+          `[supervisor] STATUS SERVER DOWN supervisor=${supervisorId} ` +
+          `port=${msg.status_server?.port ?? 'none'} error=${msg.status_server?.last_error ?? 'unknown'} — ` +
+          `/sup/status is unavailable (tray + :9106 probe blind); supervisor is retrying the bind`,
         )
       }
     } catch (err: any) {

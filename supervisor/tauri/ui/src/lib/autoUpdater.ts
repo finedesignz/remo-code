@@ -1,35 +1,33 @@
-// Background auto-update watcher.
+// Auto-update BRIDGE (fix/headless-autoupdate, 2026-07-13).
 //
-// Polls Tauri's updater on a 15-minute cadence. Each check re-reads the
-// `auto_update` preference so toggling it mid-session takes effect on the
-// next tick.
+// This module NO LONGER polls or installs anything. It used to own a 15-minute
+// `check()` → `downloadAndInstall()` loop started from a React `useEffect` in
+// App.tsx — which meant it only ever ran while the Settings WINDOW was open. The
+// supervisor is a tray app that normally has NO window open, so on a headless,
+// always-on host the watcher never mounted, never ticked, and the app never
+// updated (owner's machine: 14h uptime on v0.13.1 with v0.13.2 published).
 //
-// DEFAULT (changed 2026-07-06 with the per-user NSIS installer cutover): silent
-// background install is now the DEFAULT. The `auto_update` pref defaults to TRUE
-// (get_auto_update in config_cmds.rs). The installer now targets the current
-// user (NSIS `installMode: currentUser`), so `downloadAndInstall()` no longer
-// trips a Windows UAC/SmartScreen elevation prompt and cannot hang mid-install
-// while the owner is away — the earlier crash mode that forced opt-out is gone.
+// The watcher now lives in the Rust backend (`src-tauri/src/auto_update.rs`),
+// spawned from the Tauri `setup` hook, so it runs with or without a webview.
+// This module is a thin read/trigger bridge onto its commands. Keeping exactly
+// ONE implementation is also what guarantees the JS and Rust paths can never
+// race on `download_and_install`.
 //
-// So out of the box this watcher downloads + installs silently and relaunches —
-// no dialog, no confirmation, no elevation. Users can still opt OUT via Settings
-// (`auto_update: false`), which makes this module inert and hands control to the
-// manual `UpdateNotifier` prompt ("Update available [Later] [Install]").
+// Opt-out is unchanged: `auto_update: false` makes the Rust watcher inert and
+// the manual `UpdateNotifier` prompt takes over.
 
-import { check } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { invoke } from "@tauri-apps/api/core";
 
-const STARTUP_DELAY_MS = 15_000;
-const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15min
+const POLL_INTERVAL_MS = 5_000;
 
 export interface AutoUpdateStatus {
   lastCheckedAt: number | null;
-  lastResult: "none" | "update-found" | "installed" | "error";
+  lastResult: "none" | "disabled" | "update-found" | "installed" | "error";
   lastError: string | null;
+  lastVersion?: string | null;
 }
 
-const status: AutoUpdateStatus = {
+let status: AutoUpdateStatus = {
   lastCheckedAt: null,
   lastResult: "none",
   lastError: null,
@@ -37,20 +35,19 @@ const status: AutoUpdateStatus = {
 
 type Listener = (s: AutoUpdateStatus) => void;
 const listeners = new Set<Listener>();
+let pollTimer: number | null = null;
 
 export function getAutoUpdateStatus(): AutoUpdateStatus {
   return { ...status };
 }
 
-export function subscribeAutoUpdateStatus(fn: Listener): () => void {
-  listeners.add(fn);
-  fn(getAutoUpdateStatus());
-  return () => {
-    listeners.delete(fn);
-  };
-}
-
-function notify() {
+async function refresh(): Promise<void> {
+  try {
+    status = await invoke<AutoUpdateStatus>("auto_update_status");
+  } catch (e) {
+    console.warn("[autoUpdater] failed to read backend status:", e);
+    return;
+  }
   const snap = getAutoUpdateStatus();
   for (const fn of listeners) {
     try {
@@ -61,82 +58,36 @@ function notify() {
   }
 }
 
-async function readAutoUpdatePref(): Promise<boolean> {
-  try {
-    return await invoke<boolean>("get_auto_update");
-  } catch (e) {
-    console.warn("[autoUpdater] failed to read auto_update pref:", e);
-    return false;
+/**
+ * Subscribe to the BACKEND watcher's status. Polls the Rust side while at least
+ * one listener is mounted (the Settings window); stops when the last unsubscribes.
+ */
+export function subscribeAutoUpdateStatus(fn: Listener): () => void {
+  listeners.add(fn);
+  fn(getAutoUpdateStatus());
+  void refresh();
+  if (pollTimer === null) {
+    pollTimer = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
   }
-}
-
-async function runCheck(): Promise<void> {
-  status.lastCheckedAt = Date.now();
-  status.lastError = null;
-
-  const enabled = await readAutoUpdatePref();
-  if (!enabled) {
-    status.lastResult = "none";
-    notify();
-    return;
-  }
-
-  try {
-    const update = await check();
-    if (!update) {
-      status.lastResult = "none";
-      notify();
-      return;
+  return () => {
+    listeners.delete(fn);
+    if (listeners.size === 0 && pollTimer !== null) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
     }
-    console.log(
-      `[autoUpdater] update available: v${update.version} — installing silently`,
-    );
-    status.lastResult = "update-found";
-    notify();
-    await update.downloadAndInstall();
-    status.lastResult = "installed";
-    notify();
-    await relaunch();
-  } catch (e) {
-    const msg = String(e);
-    console.warn("[autoUpdater] check/install failed:", msg);
-    status.lastResult = "error";
-    status.lastError = msg;
-    notify();
-  }
+  };
 }
 
-let started = false;
-let startTimer: number | null = null;
-let intervalTimer: number | null = null;
-
-export function startAutoUpdateWatcher(): () => void {
-  if (started) return stopAutoUpdateWatcher;
-  started = true;
-
-  startTimer = window.setTimeout(() => {
-    void runCheck();
-    intervalTimer = window.setInterval(() => {
-      void runCheck();
-    }, CHECK_INTERVAL_MS);
-  }, STARTUP_DELAY_MS);
-
-  return stopAutoUpdateWatcher;
-}
-
-export function stopAutoUpdateWatcher(): void {
-  started = false;
-  if (startTimer !== null) {
-    window.clearTimeout(startTimer);
-    startTimer = null;
-  }
-  if (intervalTimer !== null) {
-    window.clearInterval(intervalTimer);
-    intervalTimer = null;
-  }
-}
-
-/** Force an immediate check (used by Settings UI after a toggle change). */
+/** Settings "Check for updates" button — force one backend pass now. */
 export async function triggerAutoUpdateCheckNow(): Promise<void> {
-  await runCheck();
+  try {
+    status = await invoke<AutoUpdateStatus>("auto_update_check_now");
+  } catch (e) {
+    status = {
+      lastCheckedAt: Date.now(),
+      lastResult: "error",
+      lastError: String(e),
+    };
+  }
+  await refresh();
 }

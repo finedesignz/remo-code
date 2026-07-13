@@ -38,6 +38,19 @@ export interface CircuitBreakerEntry {
   last_reason?: string | null
 }
 
+/**
+ * fix/headless-autoupdate — loopback status-server health, pushed alongside
+ * `session_inventory`. `healthy:false` = the supervisor is running WITHOUT a
+ * /sup/status endpoint (bind failed, e.g. a zombie listener squatting on 9106),
+ * so the tray and the owner's `:9106/sup/status` probe see nothing. Undefined =
+ * pre-fix supervisor that doesn't report (treated as unknown, i.e. not degraded).
+ */
+export interface StatusServerHealth {
+  healthy: boolean
+  port?: number | null
+  last_error?: string | null
+}
+
 interface SupervisorEntry {
   ws: ServerWebSocket<any>
   supervisorId: string
@@ -54,6 +67,8 @@ interface SupervisorEntry {
   sessionInventoryAt: string | null
   /** fix/stop-the-bleed — most recent circuit-breaker snapshot (empty = healthy). */
   circuitBreakers: CircuitBreakerEntry[]
+  /** fix/headless-autoupdate — most recent status-server health (null = not reported). */
+  statusServer: StatusServerHealth | null
   pendingReqs: Map<string, { resolve: (v: any) => void; reject: (e: any) => void; timer: ReturnType<typeof setTimeout> }>
 }
 
@@ -222,6 +237,7 @@ export function registerSupervisor(args: {
     sessionInventory: [],
     sessionInventoryAt: null,
     circuitBreakers: [],
+    statusServer: null,
     pendingReqs: new Map(),
   }
   const isReplace = supervisors.has(args.supervisorId)
@@ -425,6 +441,27 @@ export function setSupervisorCircuitBreakers(
 /** Current circuit-breaker snapshot for a supervisor (empty = healthy/unknown). */
 export function getSupervisorCircuitBreakers(supervisorId: string): CircuitBreakerEntry[] {
   return supervisors.get(supervisorId)?.circuitBreakers ?? []
+}
+
+/**
+ * fix/headless-autoupdate — record the supervisor's status-server health.
+ * Returns `newlyDegraded:true` on the transition healthy/unknown → unhealthy, so
+ * the caller can log it ONCE per trip instead of every 10s.
+ */
+export function setSupervisorStatusServer(
+  supervisorId: string,
+  health: StatusServerHealth | undefined,
+): { newlyDegraded: boolean } {
+  const entry = supervisors.get(supervisorId)
+  if (!entry || !health) return { newlyDegraded: false }
+  const wasDegraded = entry.statusServer?.healthy === false
+  entry.statusServer = health
+  return { newlyDegraded: !health.healthy && !wasDegraded }
+}
+
+/** Current status-server health (null = pre-fix supervisor / not yet reported). */
+export function getSupervisorStatusServer(supervisorId: string): StatusServerHealth | null {
+  return supervisors.get(supervisorId)?.statusServer ?? null
 }
 
 /**

@@ -274,6 +274,17 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   frame (`circuit_breakers[]` → `hub/src/ws/supervisor-registry.ts` → `GET /api/supervisors`, plus a
   loud hub log on every new trip). `circuit_open` is a per-run start-rejection reason
   (`SUPERVISOR_START_REJECT_REASONS`), never a supervisor-wide `stopped`.
+- **Status-server self-heal** (`supervisor/src/status-server.ts`, fix/headless-autoupdate): the
+  loopback `/sup/status` server (127.0.0.1:**9106**, fallback **9197**) is now SUPERVISED —
+  a failed bind retries on backoff (5s → ×2 → cap 5min, forever) instead of logging one
+  `[status] failed to bind` line and running status-blind forever. The original defect was the
+  in-use predicate: it tested only `/EADDRINUSE|address already in use/i`, but Bun's actual
+  message is `Failed to start server. Is port 9106 in use?` — matching NEITHER, so the PRIMARY
+  failure rethrew and the FALLBACK port was **never even tried**. A zombie listener (a dead PID
+  still holding 9106) made that permanent. Health rides the `session_inventory` frame
+  (`status_server: {healthy, port, last_error}` → `hub/src/ws/supervisor-registry.ts` →
+  `GET /api/supervisors`), same pattern as `circuit_breakers`, so a supervisor with no status
+  server is VISIBLY degraded. It never force-frees the port (no kill-by-name — CLAUDE.md rule 17).
 - **Stale-run reaper** (`hub/src/scheduler/run-reaper.ts`): boot-started sweep that finalizes
   `scheduled_task_runs` stuck `status='pending'` (a dispatched run whose CLI turn never completed —
   nothing else finalizes it) as `failed`/`run_timeout` via the shared `finalizeRun`, so post-run
@@ -383,7 +394,16 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 - **Hub:** Docker multi-stage (`Dockerfile`) on Coolify at `app.remo-code.com`, port 3040.
   The supervisor runs locally on the dev machine — **not** deployed.
 - **Supervisor:** per-user NSIS installer (UAC-free auto-update; `installMode: currentUser`,
-  `auto_update` defaults ON since v0.13.0). Push a `supervisor-v*.*.*` tag →
+  `auto_update` defaults ON since v0.13.0). **The periodic update check lives in the RUST
+  BACKEND** (`supervisor/tauri/src-tauri/src/auto_update.rs`, spawned from the Tauri `setup`
+  hook: 15s startup delay, then every 15min, re-reading the `auto_update` pref each tick).
+  It must NEVER move back into the webview — it lived in a React `useEffect`
+  (`tauri/ui/src/App.tsx` → `lib/autoUpdater.ts`) until v0.13.3, and since the supervisor is a
+  tray app that normally runs with NO WINDOW OPEN, the watcher never mounted and the app never
+  checked for updates at all on exactly the headless hosts it was built for. Rust is the SINGLE
+  owner of check→download→install→relaunch; `lib/autoUpdater.ts` is now a thin bridge onto the
+  `auto_update_status` / `auto_update_check_now` commands, and `UpdateNotifier` remains the
+  manual prompt for `auto_update:false`. Push a `supervisor-v*.*.*` tag →
   `.github/workflows/release-supervisor.yml` builds + signs the `-setup.exe` + publishes a
   Release with `latest.json` for the auto-updater. Local:
   `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. Key setup: `supervisor/tauri/UPDATER-SETUP.md`.

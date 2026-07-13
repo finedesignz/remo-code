@@ -5,7 +5,7 @@ import { scanAll } from './repo-scanner'
 import { existsSync, mkdirSync, renameSync, statSync, createWriteStream, type WriteStream } from 'fs'
 import { join } from 'path'
 import { homedir, hostname } from 'os'
-import { startStatusServer, type StatusServer } from './status-server'
+import { startStatusServerSupervised, type SupervisedStatusServer } from './status-server'
 import { VERSION } from './version'
 import { isBrokenPipe, installStreamErrorGuards, makeSafeTee } from './safe-logging'
 import { ClaudePtyRunner } from './runners/claude-pty-runner'
@@ -161,23 +161,29 @@ async function main() {
     // mutex_probe.rs TCP-connects to 127.0.0.1:9106 to detect duplicate
     // supervisors). Single GET /sup/status, no auth — loopback bind makes
     // it unreachable from off-host.
-    let statusServer: StatusServer | null = null
-    try {
-      statusServer = startStatusServer({
-        version: VERSION,
-        getHubConnected: () => client.isHubConnected(),
-        getHubState: () => client.getHubState(),
-        getLastReconnectMsAgo: () => client.getLastReconnectMsAgo(),
-        getLastError: () => client.getLastError(),
-        getRunners: () => client.getRunnersSnapshot(),
-        getQueueDepth: () => client.getRunnersSnapshot().length,
-        getSupervisorId: () => client.getSupervisorId(),
-        getHostname: () => hostname(),
-      })
-      console.log(`[status] listening on ${statusServer.url}/sup/status`)
-    } catch (err: any) {
-      console.error(`[status] failed to bind: ${err.message}`)
-    }
+    //
+    // fix/headless-autoupdate: this is SUPERVISED now. A failed bind used to log
+    // one line and give up forever — with a zombie listener squatting on 9106
+    // (a dead PID still holding the socket), the owner's supervisor ran
+    // status-blind for >1 day and nothing ever surfaced it. It now retries on a
+    // backoff until the port frees up, and its health rides the
+    // `session_inventory` frame so the hub can show the supervisor as degraded.
+    const statusServer: SupervisedStatusServer = startStatusServerSupervised({
+      version: VERSION,
+      getHubConnected: () => client.isHubConnected(),
+      getHubState: () => client.getHubState(),
+      getLastReconnectMsAgo: () => client.getLastReconnectMsAgo(),
+      getLastError: () => client.getLastError(),
+      getRunners: () => client.getRunnersSnapshot(),
+      getQueueDepth: () => client.getRunnersSnapshot().length,
+      getSupervisorId: () => client.getSupervisorId(),
+      getHostname: () => hostname(),
+    })
+    client.setStatusServerHealthProvider(() => ({
+      healthy: statusServer.isHealthy(),
+      port: statusServer.getPort(),
+      last_error: statusServer.getLastError(),
+    }))
 
     // B6: crash capture. POST uncaughtException + unhandledRejection to the
     // hub's Sentry intake using the per-host sentry_key planted by
