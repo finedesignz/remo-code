@@ -55,8 +55,15 @@ use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 /// Default bounded scrollback ring-buffer cap (bytes) for replay on reattach.
-/// ~256 KiB is enough for several screens of a TUI without unbounded growth.
-const SCROLLBACK_CAP_BYTES: usize = 256 * 1024;
+///
+/// 1 MiB (was 256 KiB). Keep in lockstep with `DEFAULT_SCROLLBACK_CAP_BYTES` in
+/// supervisor/src/runners/pty-persistence.ts. The ring holds RAW PTY bytes, and a
+/// TUI's escape sequences dominate that volume, so 256 KiB replayed as only a
+/// couple of readable screens. The client clears its buffer on (re)attach and
+/// re-writes ONLY this ring, so the ring is the hard ceiling on post-reconnect
+/// scroll depth. 1 MiB per live session stays bounded and well under the 10 MB WS
+/// message cap once base64-encoded.
+const SCROLLBACK_CAP_BYTES: usize = 1024 * 1024;
 
 /// A single hosted interactive-`claude` PTY + its bounded scrollback ring.
 struct PtySession {

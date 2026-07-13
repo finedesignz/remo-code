@@ -99,11 +99,44 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
   const pasteBoxRef = useRef<HTMLTextAreaElement | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [pasteOpen, setPasteOpen] = useState(false)
+  const [kbOpen, setKbOpen] = useState(false)
+  // TRUE once this surface has seen a touch — i.e. we're on a touch device. On a
+  // touch device the ONLY thing allowed to summon the on-screen keyboard is the
+  // ⌨ toggle: nothing else may call term.focus() (a focus IS the keyboard on iOS).
+  const touchOriginRef = useRef(false)
+  // Mirror of kbOpen readable synchronously (and outside React's render cycle) by
+  // the DOM event handlers below.
+  const kbOpenRef = useRef(false)
+
+  // Explicit keyboard control (iOS): focusing xterm's hidden textarea summons the
+  // on-screen keyboard; blurring dismisses it. Tapping the terminal body now
+  // BLURS (the body is for reading — a tap means "get out of my way"), so the ⌨
+  // button is the SOLE way to summon the keyboard on a phone, and also the only
+  // dismiss affordance Safari gives us.
+  //
+  // The focus/blur happens HERE, not inside a setState updater: an updater must be
+  // PURE (React StrictMode double-invokes it in dev, which would fire focus/blur
+  // twice per press).
+  const applyKeyboard = useCallback((open: boolean) => {
+    const term = termRef.current
+    try {
+      if (open) term?.focus()
+      else term?.textarea?.blur()
+    } catch {}
+    kbOpenRef.current = open
+    setKbOpen(open)
+  }, [])
+  const toggleKeyboard = useCallback(() => {
+    applyKeyboard(!kbOpenRef.current)
+  }, [applyKeyboard])
 
   // Send a raw key sequence as a term.input keystroke, then refocus the terminal
-  // so the on-screen button press doesn't steal the cursor.
+  // so the on-screen button press doesn't steal the cursor. On a TOUCH device a
+  // refocus would pop the keyboard, so we skip it there (the PTY receives the
+  // bytes regardless — focus is only about where the *browser* routes keystrokes).
   const sendKey = useCallback((seq: string) => {
     send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(seq) })
+    if (touchOriginRef.current) return
     try { termRef.current?.focus() } catch {}
   }, [send, sessionId])
 
@@ -128,17 +161,24 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     }
     if (text) {
       sendKey(text)
-      try { termRef.current?.focus() } catch {}
+      // Refocus so typing continues after the button press — but NEVER on a touch
+      // device: a focus IS the on-screen keyboard on iOS, and a paste must not
+      // summon it (same rule sendKey follows).
+      if (!touchOriginRef.current) { try { termRef.current?.focus() } catch {} }
       return
     }
     // Clipboard read blocked or empty-by-permission (iOS): fall back to the box.
     setPasteOpen(true)
   }, [sendKey])
 
-  // Commit whatever the user got into the capture box, close it, refocus the term.
+  // Commit whatever the user got into the capture box, close it, and (desktop
+  // only) refocus the terminal. On touch, closing the box blurs the textarea and
+  // the keyboard goes away — re-summoning it here is exactly the bug #360 fixed,
+  // so the ⌨ toggle stays the sole keyboard summon on a touch device.
   const commitPasteBox = useCallback((text: string) => {
     setPasteOpen(false)
     if (text) sendKey(text)
+    if (touchOriginRef.current) return
     try { termRef.current?.focus() } catch {}
   }, [sendKey])
 
@@ -152,7 +192,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
         send({ type: 'term.attach_file', session_id: sessionId, filename: file.name, data_b64: bytesToB64(bytes) })
         setNotice(`Uploaded ${file.name} → path inserted`)
         setTimeout(() => setNotice(null), 4000)
-        try { termRef.current?.focus() } catch {}
+        if (!touchOriginRef.current) { try { termRef.current?.focus() } catch {} }
       } catch {
         setNotice('Attachment upload failed')
         setTimeout(() => setNotice(null), 4000)
@@ -168,7 +208,10 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       // Deep scrollback so the user can scroll back through prior output (normal
       // buffer / shell). Full-screen TUIs use the alt-screen buffer and own their
       // own scrolling — scrollback only applies to the normal buffer.
-      scrollback: 5000,
+      // 10k lines: a long agent reply on a phone (~40 cols) wraps hard, and 5k
+      // lines was cutting the top off. xterm allocates buffer lines lazily, so
+      // the cost is only paid for lines actually emitted.
+      scrollback: 10000,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       fontSize: 13,
       theme: {
@@ -211,37 +254,129 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     // fix needs a beforeinput-based input path instead (tracked separately); the
     // plain 1:1 onData→term.input below is correct on desktop.
 
-    // Mobile taps on the host div don't reliably focus xterm's hidden textarea,
-    // so the keyboard opens but keystrokes go nowhere. Focus the terminal on tap.
-    const focusTerm = () => { try { term.focus() } catch {} }
+    // DESKTOP click-to-focus. A mouse focus opens no keyboard, so a click on the
+    // terminal must still focus it (typing after a click keeps working). Guarded
+    // against the SYNTHETIC mousedown Safari replays after a touch gesture: if the
+    // last interaction was a touch, this is not a real mouse and must not focus
+    // (that would re-summon the iOS keyboard we just dismissed).
+    const focusTerm = () => {
+      if (touchOriginRef.current) return
+      applyKeyboard(true)
+    }
+    // TOUCH tap → BLUR. The terminal body is for READING: on a touch device a tap
+    // on the output means "dismiss the keyboard so I can see the output".
+    const blurTerm = () => applyKeyboard(false)
     const host = hostRef.current
 
-    // TOUCH SCROLL (mobile). xterm renders `.xterm-screen` (the content) as an
-    // overlay SIBLING on top of the scrollable `.xterm-viewport`, so a finger
-    // drag lands on the screen and never scrolls the viewport — only the thin
-    // scrollbar does. We drive the buffer scroll ourselves: record the viewport
-    // scrollTop on touchstart, then translate the drag delta into scrollTop on
-    // touchmove. Always preventDefault so the gesture is CONTAINED — on iOS
-    // body{overflow:hidden} does not stop the visualViewport panning under the
-    // address bar (which drags the sticky header/toolbar). No scrollable buffer
-    // (alt-screen TUI, empty shell) ⇒ nothing to scroll, gesture still contained.
-    const vpEl = () => host?.querySelector('.xterm-viewport') as HTMLElement | null
-    let dragY = 0
-    let dragTop = 0
+    // TOUCH SCROLL + TAP-TO-BLUR (mobile). Three prod bugs, one gesture handler:
+    //
+    //  1. DRAG DIDN'T SCROLL. The old handler poked `.xterm-viewport`.scrollTop.
+    //     xterm has no touch support and renders `.xterm-screen` as an overlay
+    //     SIBLING above the scrollable viewport, so the DOM scroll path is
+    //     unreliable on iOS (and is a no-op the moment the viewport isn't the
+    //     element the browser considers scrollable). We now drive xterm's OWN
+    //     buffer API — `term.scrollLines(±n)` — computed from drag pixels ÷ row
+    //     height. That works regardless of the DOM overlay problem.
+    //  2. KEYBOARD POPPED ON EVERY TOUCH. The old handler called focus() on
+    //     touchSTART, so merely touching the screen to scroll summoned the iOS
+    //     keyboard (shrinking the very output the user was trying to read, and
+    //     firing a visualViewport resize storm). NOTHING on the touch path focuses
+    //     any more: a drag is pure scroll, and a TAP (≤10px, ≤500ms) BLURS —
+    //     tapping the output DISMISSES the keyboard. The ⌨ toggle in the key bar
+    //     is the SOLE way to summon it on a touch device. Desktop mousedown still
+    //     focuses (a mouse focus opens no keyboard).
+    //  3. ALT SCREEN. A full-screen TUI owns the alt buffer and has NO scrollback;
+    //     a drag there is a deliberate NO-OP. We never synthesize keystrokes to
+    //     fake scrolling (human-only PTY invariant: scrolling is not input).
+    //
+    // We always preventDefault on touchmove so the gesture is CONTAINED — on iOS
+    // body{overflow:hidden} does not stop visualViewport panning under the address
+    // bar (which drags the sticky header/toolbar).
+    const TAP_SLOP_PX = 10
+    const TAP_MAX_MS = 500
+    const isAltScreen = () => {
+      try { return term.buffer?.active?.type === 'alternate' } catch { return false }
+    }
+    // Row height in CSS px, derived from the rendered grid (no xterm private API).
+    const rowPx = () => {
+      const h = host?.clientHeight ?? 0
+      const rows = term.rows || 24
+      const px = h > 0 ? h / rows : 0
+      return px >= 4 ? px : 17 // fallback when the host isn't laid out yet
+    }
+    // SCROLLBAR-THUMB ZONE. xterm renders a thin native scrollbar at the right edge
+    // of `.xterm-viewport`; the owner scrolls with it today. `touch-action` hands us
+    // the gesture there too, so if we applied the CONTENT mapping (finger follows
+    // content) a thumb drag would INVERT: pulling the thumb DOWN would reveal OLDER
+    // output. So a gesture that STARTS in the right-edge strip gets THUMB semantics —
+    // down = forward — scaled by the buffer/viewport ratio so the thumb still spans
+    // the whole scrollback in one track length.
+    const THUMB_ZONE_PX = 24
+    const bufferScale = () => {
+      try {
+        const rows = term.rows || 24
+        const total = (term.buffer?.active?.baseY ?? 0) + rows
+        return Math.max(1, total / rows)
+      } catch { return 1 }
+    }
+    let lastY = 0
+    let startY = 0
+    let startX = 0
+    let startT = 0
+    let maxMove = 0
+    let accumPx = 0
+    let onThumb = false
     const onTouchStart = (e: TouchEvent) => {
-      focusTerm()
-      dragY = e.touches[0]?.clientY ?? 0
-      dragTop = vpEl()?.scrollTop ?? 0
+      touchOriginRef.current = true // this is a touch device — never auto-focus again
+      const t = e.touches[0]
+      startY = lastY = t?.clientY ?? 0
+      startX = t?.clientX ?? 0
+      startT = Date.now()
+      maxMove = 0
+      accumPx = 0
+      const r = host?.getBoundingClientRect?.()
+      // width 0 ⇒ nothing laid out (jsdom/happy-dom): never a thumb drag.
+      onThumb = !!r && r.width > 0 && startX >= r.right - THUMB_ZONE_PX
+      // NOTE: deliberately NO focusTerm() here — see (2) above.
     }
     const onTouchMove = (e: TouchEvent) => {
-      const vp = vpEl()
-      if (vp && vp.scrollHeight > vp.clientHeight) {
-        vp.scrollTop = dragTop - ((e.touches[0]?.clientY ?? dragY) - dragY)
+      // Multi-finger: hand the gesture back to the browser so pinch-zoom (the
+      // accessibility escape hatch) still works over the terminal.
+      if (e.touches.length > 1) return
+      const t = e.touches[0]
+      const y = t?.clientY ?? lastY
+      const x = t?.clientX ?? startX
+      maxMove = Math.max(maxMove, Math.abs(y - startY), Math.abs(x - startX))
+      const dy = y - lastY
+      lastY = y
+      if (!isAltScreen()) {
+        accumPx += dy
+        const px = rowPx()
+        const units = Math.trunc(accumPx / px)
+        if (units !== 0) {
+          accumPx -= units * px
+          try {
+            // Finger DOWN (dy > 0) on the CONTENT reveals OLDER output ⇒ scroll the
+            // buffer UP. On the THUMB it means the opposite: down = toward newer.
+            if (onThumb) term.scrollLines(Math.trunc(units * bufferScale()))
+            else term.scrollLines(-units)
+          } catch {}
+        }
       }
       e.preventDefault()
     }
+    const onTouchEnd = (e: TouchEvent) => {
+      const isTap = maxMove <= TAP_SLOP_PX && Date.now() - startT <= TAP_MAX_MS
+      // Always suppress the synthetic mouse events Safari replays after a touch
+      // gesture — they would re-focus the terminal and re-open the keyboard.
+      e.preventDefault()
+      if (isTap) blurTerm()
+    }
     host.addEventListener('touchstart', onTouchStart, { passive: false })
     host.addEventListener('touchmove', onTouchMove, { passive: false })
+    host.addEventListener('touchend', onTouchEnd, { passive: false })
+    // Desktop click-to-focus is unchanged — a mouse focus opens no keyboard.
+    // (focusTerm no-ops once a touch has been seen; see touchOriginRef.)
     host.addEventListener('mousedown', focusTerm)
 
     // SESSION SWITCH / mount: start from a clean buffer so a prior session's
@@ -321,12 +456,13 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       vv?.removeEventListener('resize', sendResize)
       host?.removeEventListener('touchstart', onTouchStart)
       host?.removeEventListener('touchmove', onTouchMove)
+      host?.removeEventListener('touchend', onTouchEnd)
       host?.removeEventListener('mousedown', focusTerm)
       try { term.dispose() } catch {}
       termRef.current = null
       fitRef.current = null
     }
-  }, [sessionId, subscribe, send])
+  }, [sessionId, subscribe, send, applyKeyboard])
 
   // Image paste (Ctrl-V / mobile paste): xterm's text paste can't carry image
   // bytes, so intercept paste events that contain image files and route them
@@ -352,6 +488,14 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
   const btn = 'px-2 py-1 rounded text-xs font-medium leading-none select-none ' +
     'bg-[var(--bg-secondary)] text-[var(--text-primary)] border border-[var(--border)] ' +
     'hover:bg-[var(--bg-tertiary)] active:opacity-80 min-h-[32px] min-w-[32px]'
+
+  // ⌨ toggle, ON state: BLUE accent (per design-preferences; the forbidden
+  // purple-blue accent is never used), so "the keyboard is up" is unmistakable at a
+  // glance on a phone.
+  const btnOn = 'px-2 py-1 rounded text-xs font-medium leading-none select-none ' +
+    'bg-[var(--accent-blue,#3b82f6)] text-[var(--text-on-accent,#ffffff)] ' +
+    'border border-[var(--accent-blue,#3b82f6)] ring-1 ring-[var(--accent-blue,#3b82f6)] ' +
+    'active:opacity-80 min-h-[32px] min-w-[32px]'
 
   return (
     <div className={className} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%' }}>
@@ -382,6 +526,15 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
             <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
           </svg>
         </button>
+        <button
+          type="button"
+          className={kbOpen ? btnOn : btn}
+          title={kbOpen ? 'Hide keyboard' : 'Show keyboard'}
+          aria-label={kbOpen ? 'Hide keyboard' : 'Show keyboard'}
+          aria-pressed={kbOpen}
+          data-testid="kb-toggle"
+          onClick={toggleKeyboard}
+        >⌨</button>
         <button type="button" className={btn} title="Attach file" onClick={() => fileInputRef.current?.click()}>📎</button>
         {notice && <span className="text-xs text-[var(--text-muted)] ml-1">{notice}</span>}
         <input
@@ -455,7 +608,12 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
         // overflow:hidden bounds the host so xterm's own .xterm-viewport owns the
         // scroll (touch + wheel) inside a definite height — without this the host
         // can grow to its content and the page/toolbar scroll instead of the term.
-        style={{ flex: 1, minHeight: 0, width: '100%', overflow: 'hidden', background: 'var(--bg-primary)' }}
+        // touchAction:'pinch-zoom' hands the single-finger vertical gesture to our
+        // touchmove handler (instead of letting Safari pan the page/visualViewport
+        // with it) while KEEPING pinch-zoom — the browser's accessibility escape
+        // hatch — alive over the largest surface on the page. Our touchmove bails
+        // out on multi-touch so the pinch reaches Safari untouched.
+        style={{ flex: 1, minHeight: 0, width: '100%', overflow: 'hidden', background: 'var(--bg-primary)', touchAction: 'pinch-zoom' }}
       />
     </div>
   )
