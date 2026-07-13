@@ -1,0 +1,27 @@
+# Ported from .github/workflows/mobile-shell-typecheck.yml (GHA purge, 2026-07-12).
+# That workflow's push/pull_request triggers were commented out 2026-05-29 during the
+# Phase 12 mobile pause (see docs/phase-12-pause-state.md) leaving only workflow_dispatch —
+# i.e. it was dormant coverage burning zero CI minutes on GHA. Porting to Woodpecker
+# restores real push/PR coverage on the linux/amd64 runner, path-filtered so it only
+# fires when mobile/tauri actually changes.
+when:
+  - event: pull_request
+    path:
+      - "mobile/tauri/**"
+      - ".woodpecker/mobile-shell-typecheck.yaml"
+  - event: push
+    branch: main
+    path:
+      - "mobile/tauri/**"
+      - ".woodpecker/mobile-shell-typecheck.yaml"
+
+labels:
+  platform: linux/amd64
+
+steps:
+  - name: cargo-check
+    image: rust:latest
+    commands:
+      - apt-get update && apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config
+      - cargo check --manifest-path mobile/tauri/src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu
+      - cargo test --manifest-path mobile/tauri/src-tauri/Cargo.toml --lib --target x86_64-unknown-linux-gnu
