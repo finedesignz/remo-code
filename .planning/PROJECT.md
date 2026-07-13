@@ -90,12 +90,13 @@ may never self-scope a product direction; when this list empties, it STOPS and a
 
 1. **BLEED** — close the three CRITICALs + prove the caps. *(in flight)*
 2. **PTYCAP** — token-gate the interactive PTY path. **Blocks everything else.**
-3. **GOV** — the governance surface: org spend ledger, policy caps, audit, kill switch, receipts page.
-4. **TENANT** — real multi-tenancy: retire `TITANIUM_BYPASS`, working magic-link, per-user supervisor pairing, prove isolation.
-5. **MONEY** — Titanium Licensing billing, plans, entitlements, the paid tier.
-6. **ONBOARD** — a stranger self-serves: signup → MSI → pair → first session → first scheduled task.
-7. **AUTO** — governed PTY autonomy + the 30-night public receipts log. **Monetized only after the log is green.**
-8. **DEBT** — retire the half-live flags (legacy waves, ChatSurface/cutover gate, TEAB MSI, mobile).
+3. **MSESS** — multiple sessions per repo / worktree / branch: N independent CLI sessions on one repo, like N terminal tabs. *(spend amplifier — multiplies concurrent PTYs; gated on PTYCAP. Scope: `.planning/milestones/MSESS-REQUIREMENTS.md`)*
+4. **GOV** — the governance surface: org spend ledger, policy caps, audit, kill switch, receipts page.
+5. **TENANT** — real multi-tenancy: retire `TITANIUM_BYPASS`, working magic-link, per-user supervisor pairing, prove isolation.
+6. **MONEY** — Titanium Licensing billing, plans, entitlements, the paid tier.
+7. **ONBOARD** — a stranger self-serves: signup → MSI → pair → first session → first scheduled task.
+8. **AUTO** — governed PTY autonomy + the 30-night public receipts log. **Monetized only after the log is green.**
+9. **DEBT** — retire the half-live flags (legacy waves, ChatSurface/cutover gate, TEAB MSI, mobile).
 
 ## Current Milestone: BLEED — Stop the Bleeding
 
