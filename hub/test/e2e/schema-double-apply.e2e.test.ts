@@ -45,10 +45,27 @@ async function applySchemaStrict(client: ReturnType<typeof postgres>) {
 
 describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () => {
   beforeAll(async () => {
-    sql = postgres(process.env.REMO_E2E_DB_URL!, { max: 2, idle_timeout: 5, connect_timeout: 10 })
-    await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS ${NS}`)
-    // Isolated namespace; `public` stays on the path for extensions (pgcrypto).
-    await sql.unsafe(`SET search_path TO ${NS}, public`)
+    // Bootstrap connection (default search_path) just to create the namespace.
+    const boot = postgres(process.env.REMO_E2E_DB_URL!, { max: 1, idle_timeout: 5, connect_timeout: 10 })
+    try { await boot.unsafe(`CREATE SCHEMA IF NOT EXISTS ${NS}`) } finally { await boot.end({ timeout: 5 }) }
+
+    // Pin search_path as a CONNECTION PARAMETER, not a session `SET`: postgres.js
+    // pools connections, so a bare `SET search_path` would bind to ONE connection
+    // and later statements could land in `public`. `connection.search_path` is sent on
+    // EVERY connection in the pool.
+    //
+    // The path is the private namespace ONLY — `public` is deliberately NOT on it:
+    // schema.sql is all `CREATE TABLE IF NOT EXISTS`, and IF-NOT-EXISTS resolves
+    // against the whole search_path, so with `public` on the path this test would see
+    // the OEE suite's public.* tables, skip creation, and then operate ON THEM —
+    // polluting the shared e2e database. gen_random_uuid() lives in pg_catalog
+    // (implicitly on the path in pg13+), so nothing here needs `public`.
+    sql = postgres(process.env.REMO_E2E_DB_URL!, {
+      max: 2,
+      idle_timeout: 5,
+      connect_timeout: 10,
+      connection: { search_path: NS },
+    })
   })
 
   afterAll(async () => {
@@ -86,10 +103,10 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
     // Boot 3, for good measure (convergence, not just one-shot tolerance).
     await applySchemaStrict(sql)
 
-    const [{ count: still }] = await sql<{ count: string }[]>`
+    const [stillRow] = await sql<{ still: string }[]>`
       SELECT count(*)::text AS still FROM api_keys WHERE user_id = ${user.id} AND revoked_at IS NULL
     `
-    expect(Number(still)).toBe(3)
+    expect(Number(stillRow.still)).toBe(3)
   })
 
   it('the stale (user_id, purpose) unique index is GONE and does not come back', async () => {
