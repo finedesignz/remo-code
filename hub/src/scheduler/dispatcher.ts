@@ -16,7 +16,7 @@ import {
   setTaskFireTimestamps,
   countFiresForTask,
   disableTaskWithReason,
-  finalizeOnceTask,
+  claimOnceTask,
 } from '../db/scheduled-tasks-dal.ts'
 import { boundReason, type ScheduleRule } from './schedule-rules.ts'
 import { isOverCostCap } from '../dispatch/gates.ts'
@@ -72,15 +72,30 @@ export async function fire(taskId: string): Promise<void> {
   // Milestone once: a one-time task fires EXACTLY ONCE then self-finalizes so it
   // never re-arms. No cron rule / bound is evaluated (there is none). It reuses
   // the ENTIRE downstream pipeline — fireTask → sender → finalizeRun → post-run
-  // → email — unchanged; only the "don't fire again" bookkeeping differs. We
-  // dispatch as MANUAL so an offline target fails fast instead of parking in the
-  // grace buffer for a replay (a replay would re-fire a task meant to run once).
+  // → email — unchanged; only the "don't fire again" bookkeeping differs.
+  //
+  // CLAIM-THEN-FIRE (double-fire crash-window fix): flip the row to enabled=false
+  // BEFORE dispatching, in one conditional UPDATE (`AND enabled = true`). Only
+  // dispatch if THIS caller won the claim. A hub restart AFTER the dispatch but
+  // BEFORE this commit therefore cannot re-arm the row (it is already disabled),
+  // and a concurrent second fire loses the claim and no-ops — closing the window
+  // at the source. We dispatch as MANUAL so an offline target fails fast instead
+  // of parking in the grace buffer for a replay (a replay would re-fire a
+  // run-once task).
   if ((task as any).schedule_kind === 'once') {
-    await fireTask(task, { chainDepth: 0, skipCronUpdate: true, isManual: true })
-    try { await finalizeOnceTask(taskId) } catch (err: any) {
-      log.error('scheduler.dispatcher.once_finalize_failed', { task_id: taskId, error: err?.message })
+    let claimed = false
+    try { claimed = await claimOnceTask(taskId) } catch (err: any) {
+      log.error('scheduler.dispatcher.once_claim_failed', { task_id: taskId, error: err?.message })
+      // Fail closed: an errored claim must NOT dispatch (a re-arm is safer than a
+      // double client-site touch). The still-enabled row is retried on next fire.
+      return
     }
     try { (await import('./registry.ts')).unregister(taskId) } catch {}
+    if (!claimed) {
+      log.info('scheduler.dispatcher.once_claim_lost', { task_id: taskId })
+      return
+    }
+    await fireTask(task, { chainDepth: 0, skipCronUpdate: true, isManual: true })
     return
   }
   // P1 end-bounds: scheduled (cron) fires honor `until`/`max_runs`. When a

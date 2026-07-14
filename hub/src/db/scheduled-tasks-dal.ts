@@ -386,15 +386,21 @@ export async function disableTaskWithReason(taskId: string, reason: string): Pro
 }
 
 /**
- * Milestone once. Self-finalize a one-time task after its single fire: disable
- * it (so `listEnabledTasks` skips it on the next boot and it never re-arms) and
- * clear the next-fire timestamps. Records the stop reason under
- * `payload.completed_reason`, mirroring `disableTaskWithReason`. Idempotent.
- * The IN-FLIGHT run is unaffected (it lives in the dispatcher's inFlightByRun
- * map and finalizes independently — enabled=false does not touch it).
+ * Milestone once. CLAIM-then-fire for a one-time task: atomically flip the row to
+ * `enabled=false` **only while it is still enabled** (`AND enabled = true`) and
+ * return true iff THIS caller won the claim. The caller must dispatch ONLY when
+ * this returns true. This closes the double-fire crash window at the source: a
+ * hub restart between dispatch and the disable commit finds the row already
+ * `enabled=false`, so `listEnabledTasks` never re-arms it; a concurrent second
+ * fire loses the claim (0 rows) and must not dispatch.
+ *
+ * Also clears the next-fire timestamps and records the stop reason under
+ * `payload.completed_reason` (mirrors `disableTaskWithReason`). The IN-FLIGHT run
+ * is unaffected — it lives in the dispatcher's inFlightByRun map and finalizes
+ * independently of `enabled`.
  */
-export async function finalizeOnceTask(taskId: string, reason: string = 'once_completed'): Promise<void> {
-  await sql`
+export async function claimOnceTask(taskId: string, reason: string = 'once_completed'): Promise<boolean> {
+  const rows = await sql`
     UPDATE scheduled_tasks
     SET enabled = false,
         next_fire_at = NULL,
@@ -403,8 +409,10 @@ export async function finalizeOnceTask(taskId: string, reason: string = 'once_co
           || jsonb_build_object('completed_reason', ${reason}::text,
                                 'completed_at', to_jsonb(now())),
         updated_at = now()
-    WHERE id = ${taskId} AND schedule_kind = 'once'
+    WHERE id = ${taskId} AND schedule_kind = 'once' AND enabled = true
+    RETURNING id
   `
+  return rows.length > 0
 }
 
 export async function setTaskFireTimestamps(

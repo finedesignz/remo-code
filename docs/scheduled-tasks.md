@@ -340,14 +340,23 @@ summary — there is **no parallel one-time queue**.
    already past (immediate items with `run_at=now`, or a row that outlived a hub
    restart before firing) → it fires on the next tick. **No cron rule is ever
    evaluated for a once row.**
-2. **Fire** — `dispatcher.fire()` short-circuits `schedule_kind='once'`: it calls
-   `fireTask` exactly once (as a MANUAL dispatch, so an offline target fails fast
-   instead of grace-parking for a replay), then **self-finalizes** via
-   `finalizeOnceTask` (sets `enabled=false`, clears `next_fire_at`/`next_run_at`,
-   records `payload.completed_reason='once_completed'`) and `registry.unregister`s
-   the job. It can therefore never re-arm — on the next boot `listEnabledTasks`
-   skips it. The in-flight run is untouched (it lives in the dispatcher's
-   `inFlightByRun` map and finalizes independently of `enabled`).
+2. **Fire (CLAIM-then-fire)** — `dispatcher.fire()` short-circuits
+   `schedule_kind='once'`: it FIRST **claims** the row via `claimOnceTask` — a
+   single conditional `UPDATE … SET enabled=false, next_fire_at=NULL, … WHERE
+   id=$id AND schedule_kind='once' AND enabled=true RETURNING id`. It dispatches
+   (`fireTask`, MANUAL so an offline target fails fast instead of grace-replaying)
+   **only if the claim returned a row**. This closes a sub-second double-fire
+   window at the source: a hub restart AFTER a dispatch but BEFORE the disable
+   commit finds the row already `enabled=false`, so `listEnabledTasks` never
+   re-arms it; a concurrent second fire loses the claim (0 rows) and no-ops; an
+   errored claim fails closed (no dispatch). The in-flight run is untouched (it
+   lives in `inFlightByRun` and finalizes independently of `enabled`).
+   **Belt-and-braces:** `dispatchWork` is ALSO idempotent per `work_id` — if the
+   `work_runs` row has advanced past `queued` it returns
+   `skipped/already_dispatched` without re-running gates or re-sending, so a live
+   client site can never be touched twice even if a re-fire slips through. Proven
+   by `test/once-tasks.test.ts` (claim-lost dispatches nothing) +
+   `test/once-work-idempotency.test.ts`.
 3. **Downstream is UNCHANGED** — the run row, `finalizeRun`, post-run actions, and
    the email summary are exactly what a cron task uses. `bun test
    test/once-tasks.test.ts` proves fire-once + no-re-arm + pipeline reuse.

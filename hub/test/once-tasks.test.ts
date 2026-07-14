@@ -18,7 +18,8 @@
 import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
 
 const state = {
-  onceFinalized: [] as string[],
+  claimCalls: [] as string[],
+  claimResult: true,
   unregistered: [] as string[],
   countFiresCalls: 0,
   runsInserted: [] as any[],
@@ -40,7 +41,8 @@ mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
   disableTaskWithReason: async (taskId: string, reason: string) => {
     state.disableCalls.push({ taskId, reason })
   },
-  finalizeOnceTask: async (taskId: string) => { state.onceFinalized.push(taskId) },
+  // The atomic claim: returns true iff THIS caller won it (row was still enabled).
+  claimOnceTask: async (taskId: string) => { state.claimCalls.push(taskId); return state.claimResult },
 }))
 
 // Threshold NOT allowed → fireTask short-circuits into the skipped_quota run row
@@ -97,7 +99,8 @@ const baseTask = (over: any = {}) => ({
 })
 
 beforeEach(() => {
-  state.onceFinalized = []
+  state.claimCalls = []
+  state.claimResult = true
   state.unregistered = []
   state.countFiresCalls = 0
   state.runsInserted = []
@@ -109,48 +112,65 @@ beforeEach(() => {
 afterAll(() => mock.restore())
 
 describe('one-time task fire semantics', () => {
-  test('(a) a schedule_kind=once task self-finalizes (disable + unregister) and never re-arms', async () => {
+  test('(a) a schedule_kind=once task CLAIMS (disable) BEFORE dispatch, and never re-arms', async () => {
     state.task = baseTask()
     await fire('task-once-1')
 
-    // Fired: a run row was inserted (the pipeline ran).
-    expect(state.runsInserted.length).toBe(1)
-
-    // Self-finalized exactly once — the "never re-arm" guarantee.
-    expect(state.onceFinalized).toEqual(['task-once-1'])
+    // Claimed exactly once — the "never re-arm" guarantee (row is enabled=false
+    // before any dispatch), and unregistered.
+    expect(state.claimCalls).toEqual(['task-once-1'])
     expect(state.unregistered).toEqual(['task-once-1'])
 
-    // The cron end-bound machinery is NEVER consulted for a once task (there is
-    // no cron rule / max_runs to evaluate).
+    // Fired: a run row was inserted (the pipeline ran) AFTER the claim.
+    expect(state.runsInserted.length).toBe(1)
+
+    // The cron end-bound machinery is NEVER consulted for a once task.
     expect(state.countFiresCalls).toBe(0)
+  })
+
+  test('DOUBLE-FIRE GUARD: a lost claim (already enabled=false — e.g. reboot/2nd fire) dispatches NOTHING', async () => {
+    // Simulate the row already claimed by a prior fire (or a concurrent winner):
+    // claimOnceTask returns false. The sender/pipeline must NOT run.
+    state.claimResult = false
+    state.task = baseTask()
+    await fire('task-once-1')
+
+    expect(state.claimCalls).toEqual(['task-once-1'])
+    expect(state.runsInserted.length).toBe(0)   // ZERO additional dispatch
+    expect(state.afterRunCalls.length).toBe(0)
+    // Still unregistered (defensive — the stale croner job is torn down).
+    expect(state.unregistered).toEqual(['task-once-1'])
   })
 
   test('(b) the once path REUSES the shared finalize→post-run pipeline (not a fork)', async () => {
     state.task = baseTask()
     await fire('task-once-1')
+    // onRunFinalized is dispatched fire-and-forget (void) via a dynamic import;
+    // flush the microtask/macrotask queue so afterRun has landed.
+    await new Promise((r) => setTimeout(r, 20))
     // onRunFinalized → afterRun fired for THIS task — same seam a cron task uses.
     expect(state.afterRunCalls.length).toBe(1)
     expect(state.afterRunCalls[0].taskId).toBe('task-once-1')
   })
 
-  test('control: a schedule_kind=cron task does NOT self-finalize and DOES evaluate bounds', async () => {
+  test('control: a schedule_kind=cron task does NOT claim and DOES evaluate bounds', async () => {
     // A recurring task with a bound rule reaches the cron `countFiresForTask`
-    // path and never touches the once bookkeeping.
+    // path and never touches the once claim bookkeeping.
     state.task = baseTask({
       schedule_kind: 'cron',
       run_at: null,
       schedule_rules: [{ interval: 1, unit: 'hours', start_at: new Date().toISOString(), max_runs: 100 }],
     })
     await fire('task-once-1')
-    expect(state.onceFinalized).toEqual([])   // never self-finalizes
+    expect(state.claimCalls).toEqual([])       // never claims
     expect(state.unregistered).toEqual([])
     expect(state.countFiresCalls).toBe(1)      // cron bound WAS evaluated
   })
 
-  test('a disabled once task is a no-op (fire returns before any pipeline work)', async () => {
+  test('a disabled once task is a no-op (fire returns before claim/dispatch)', async () => {
     state.task = baseTask({ enabled: false })
     await fire('task-once-1')
+    expect(state.claimCalls).toEqual([])
     expect(state.runsInserted.length).toBe(0)
-    expect(state.onceFinalized).toEqual([])
   })
 })

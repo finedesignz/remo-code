@@ -40,7 +40,7 @@ mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
   setTaskFireTimestamps: async () => {},
   // Milestone once: dispatcher.fire() now imports this (used only on the
   // schedule_kind='once' short-circuit, which these cron-bound tasks never hit).
-  finalizeOnceTask: async () => {},
+  claimOnceTask: async () => true,
 }))
 
 mock.module('../src/scheduler/registry.ts', () => ({

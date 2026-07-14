@@ -31,22 +31,25 @@ interface RunCtxLike {
 }
 
 export async function sendWorkTask(task: ScheduledTask, ctx: RunCtxLike): Promise<void> {
+  // only_if_active on every finalize: the scheduled_task_run is only written while
+  // still non-terminal (pending/in_flight), so a raced finalizer (e.g. the
+  // stale-run reaper) can never double-fire this run's post-run actions.
   const p = (task.payload ?? {}) as Record<string, any>
   const workId = p.work_id as string | undefined
   if (!workId) {
-    await finalizeRun(ctx.runId, 'failed', 'work_payload_missing_work_id')
+    await finalizeRun(ctx.runId, 'failed', 'work_payload_missing_work_id', { only_if_active: true })
     return
   }
 
   const work = await getWorkRun(workId, ctx.userId)
   if (!work) {
-    await finalizeRun(ctx.runId, 'failed', 'work_run_not_found')
+    await finalizeRun(ctx.runId, 'failed', 'work_run_not_found', { only_if_active: true })
     return
   }
 
   const site = await findWorkSite(ctx.userId, work.repo_ident, work.site_key)
   if (!site) {
-    await finalizeRun(ctx.runId, 'failed', 'work_site_not_found')
+    await finalizeRun(ctx.runId, 'failed', 'work_site_not_found', { only_if_active: true })
     return
   }
 
@@ -70,13 +73,13 @@ export async function sendWorkTask(task: ScheduledTask, ctx: RunCtxLike): Promis
   switch (outcome.kind) {
     case 'dispatched':
     case 'queued':
-      await finalizeRun(ctx.runId, 'success', null, { output_snippet: note })
+      await finalizeRun(ctx.runId, 'success', null, { output_snippet: note, only_if_active: true })
       return
     case 'skipped':
-      await finalizeRun(ctx.runId, 'skipped', outcome.reason, { output_snippet: note })
+      await finalizeRun(ctx.runId, 'skipped', outcome.reason, { output_snippet: note, only_if_active: true })
       return
     case 'failed':
-      await finalizeRun(ctx.runId, 'failed', outcome.reason, { output_snippet: note })
+      await finalizeRun(ctx.runId, 'failed', outcome.reason, { output_snippet: note, only_if_active: true })
       return
   }
 }
