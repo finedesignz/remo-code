@@ -35,6 +35,7 @@ import {
 import { EXT_ACTOR } from '../auth/ext-api-key-middleware.ts'
 import { finalizeAsk, markAskDispatched } from '../db/ask-dal.ts'
 import { parseAskOutput } from './result-schema.ts'
+import { askNonce } from './prompt.ts'
 
 export interface AskSessionRow {
   id: string
@@ -101,7 +102,9 @@ export async function dispatchAsk(input: {
       await markAskDispatched(askId)
     },
     async onFinalize(_token, replyContent) {
-      const parsed = parseAskOutput(replyContent)
+      // Nonce-scoped parse: an envelope forged inside the injected (untrusted)
+      // transcript/memory cannot know this ask's nonce, so it can never win.
+      const parsed = parseAskOutput(replyContent, askNonce(askId))
       await finalizeAsk(askId, 'answered', {
         answer: parsed.value.answer,
         confidence: parsed.value.confidence,

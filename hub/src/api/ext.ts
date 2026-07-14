@@ -261,6 +261,7 @@ ext.post('/sessions/:id/ask', async (c) => {
   })
 
   const prompt = renderAskPrompt({
+    askId: ask.id,
     question: body.question,
     context: body.context,
     targetSessionName: target.name,
