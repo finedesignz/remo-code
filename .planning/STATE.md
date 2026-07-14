@@ -1,7 +1,7 @@
 ---
 gsd_state_version: 1.0
-milestone: OBSRV
-milestone_name: Orchestrator Observability & Shadow Dry-Run
+milestone: PTYCAP
+milestone_name: Token-Gate the Interactive PTY Path
 status: roadmapped
 last_updated: "2026-06-27T12:16:13.375Z"
 last_activity: 2026-06-27
