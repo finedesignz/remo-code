@@ -35,7 +35,7 @@ import {
   workRepoAllowlistGate,
 } from '../dispatch/gates.ts'
 import { EXT_WORK_ACTOR } from '../auth/ext-api-key-middleware.ts'
-import { finalizeWork, markWorkDispatched, markWorkVerifying, type WorkSite } from '../db/work-dal.ts'
+import { finalizeWork, markWorkDispatched, markWorkVerifying, getWorkRun, type WorkSite } from '../db/work-dal.ts'
 import { runHubQc } from './verify.ts'
 import { publishWork } from './publish.ts'
 import { parseWorkOutput } from './result-schema.ts'
@@ -248,6 +248,24 @@ export async function finalizeWorkFromReply(
  */
 export async function dispatchWork(input: DispatchWorkInput): Promise<WorkDispatchOutcome> {
   const { workId, userId, apiKeyId, sessionId, repoIdent, nonce, prompt } = input
+
+  // IDEMPOTENCY GUARD (belt-and-braces to the once-task claim): a work item must
+  // be dispatched at MOST ONCE. If the work_runs row has already advanced past
+  // `queued` (dispatched / verifying / any terminal state), a second dispatchWork
+  // — from a re-armed once row that slipped through, a raced replay, or any other
+  // path — is a NO-OP. It never re-runs the gate list or re-sends to the agent,
+  // so a live client site can never be touched twice. A parked-offline item stays
+  // `queued`, so a legitimate grace replay is NOT blocked here.
+  try {
+    const existing = await getWorkRun(workId, userId)
+    if (existing && existing.status !== 'queued') {
+      return { kind: 'skipped', reason: 'already_dispatched' }
+    }
+  } catch (err: any) {
+    // A read failure must not open a double-dispatch path; fail closed.
+    console.warn(`[work] idempotency check failed work=${workId}: ${err?.message ?? err}`)
+    return { kind: 'skipped', reason: 'idempotency_check_failed' }
+  }
 
   const store: RunStore = {
     // The work row already exists (the route inserted it so the caller gets an id

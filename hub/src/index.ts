@@ -59,6 +59,7 @@ import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.
 import { startAskReaperSweep, stopAskReaperSweep } from './ask/reaper.ts'
 import { startWorkReaperSweep, stopWorkReaperSweep } from './work/reaper.ts'
 import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
+import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { extApiKeyMiddleware } from './auth/ext-api-key-middleware'
@@ -740,6 +741,12 @@ runMigrations()
     // not a lifetime cap). Leaked open runs eat the supervisor concurrency cap and
     // wedge every launch with `at_capacity`. No-op when REMO_SESSION_RUN_REAPER_DISABLED.
     startStaleRunReaperSweep()
+    // Milestone once — DURABLE tick source of truth for one-time tasks. Fires any
+    // `schedule_kind='once'` row that is due (run_at<=now) and still enabled, so an
+    // immediate/one-time task dispatches even if the registry's setTimeout(0)
+    // latency-optimization is lost (restart / thrown fire / swallowed register).
+    // claimOnceTask keeps it exactly-once. No-op when REMO_ONCE_SWEEP_DISABLED.
+    startOnceDueSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -758,6 +765,7 @@ function gracefulShutdown(signal: string) {
   try { stopAskReaperSweep() } catch {}
   try { stopWorkReaperSweep() } catch {}
   try { stopStaleRunReaperSweep() } catch {}
+  try { stopOnceDueSweep() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

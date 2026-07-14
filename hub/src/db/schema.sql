@@ -220,6 +220,10 @@ ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
     'orchestrator',
     -- Milestone TEAB: Titanium Edge AutoBuilder run as a scheduled-task action.
     'teab',
+    -- Milestone once (feat/once-tasks): an inbound external work item
+    -- (/api/ext/work) is enqueued as a one-time 'work' task. Its sender calls the
+    -- existing dispatchWork; work_runs remains the typed result/audit record.
+    'work',
     -- Internal: synthesized by Coolify webhook
     'triage'
   ));
@@ -320,6 +324,23 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- the conservative choice since the prior stage column also defaulted to
 -- 'development'. Set true by the PATCH /api/orchestrator-tasks lifecycle_stage path.
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS lifecycle_stage_explicit BOOLEAN NOT NULL DEFAULT false;
+
+-- ── Milestone once (feat/once-tasks): one-time tasks ─────────────────────────
+-- A scheduled task fires EITHER on a recurring cron (`schedule_kind='cron'`, the
+-- default — `schedule_rules`/`cron_expr` evaluated by the croner registry) OR
+-- exactly ONCE at `run_at` (`schedule_kind='once'`). A 'once' row evaluates NO
+-- cron rule; the dispatcher fires it a single time then self-finalizes the row
+-- (enabled=false, next_fire_at cleared) so it never re-arms. Everything
+-- downstream — the shared dispatch pipeline, gates, finalizeRun, post-run
+-- actions, email summary — is UNCHANGED. Additive + idempotent + NO backfill:
+-- every existing row keeps schedule_kind='cron' (its current behavior) and
+-- run_at NULL. `run_at` is required (app-enforced) only when schedule_kind='once'.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS schedule_kind TEXT NOT NULL DEFAULT 'cron';
+DO $$ BEGIN
+  ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_schedule_kind_check
+    CHECK (schedule_kind IN ('cron','once'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS run_at TIMESTAMPTZ;
 
 -- D1/D3: per-command rows owned by an orchestrator task. Each row is one
 -- routine command with its own schedule_rule (reusing the ScheduleRule JSONB
