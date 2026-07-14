@@ -1365,3 +1365,34 @@ CREATE TABLE IF NOT EXISTS feedback_keys (
 CREATE INDEX IF NOT EXISTS idx_feedback_keys_user ON feedback_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_keys_session ON feedback_keys(session_id);
 
+
+-- ── Milestone ASK — external session-ask API (Phase 1 + 2) ───────────────────
+-- Idempotent DDL only — this file RE-RUNS IN FULL on every hub boot. No backfills.
+
+-- api_keys.scopes: ADDITIVE and NULLABLE. NULL = legacy full access (every key
+-- minted before this milestone keeps working, including /ws/agent). A key with a
+-- non-null array must carry 'ext:read' to use the /api/ext read surface and
+-- 'ext:ask' to spend tokens via POST /api/ext/sessions/:id/ask.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT[];
+
+-- session_asks: one row per external ask. `session_id` is the session ANSWERING
+-- (a stream-json ask-session bound to the target's project_dir); `target_session_id`
+-- is the session ASKED ABOUT (may be pty-interactive — we never write to it).
+CREATE TABLE IF NOT EXISTS session_asks (
+  id                TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id           TEXT NOT NULL,
+  session_id        TEXT NOT NULL,
+  target_session_id TEXT,
+  api_key_id        TEXT,
+  question          TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'queued',
+  answer            TEXT,
+  confidence        TEXT,
+  evidence          JSONB,
+  raw_reply         TEXT,
+  reason            TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  answered_at       TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_session_asks_user_created ON session_asks(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_asks_status ON session_asks(status);
