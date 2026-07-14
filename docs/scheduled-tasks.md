@@ -317,6 +317,109 @@ API-compatible.
 
 ---
 
+## One-time tasks (`schedule_kind='once'`, milestone once)
+
+A scheduled task fires **either** on a recurring cron (`schedule_kind='cron'`, the
+default — `schedule_rules`/`cron_expr` evaluated) **or exactly once** at `run_at`
+(`schedule_kind='once'`). Both are rows in the SAME `scheduled_tasks` table and
+ride the SAME dispatch pipeline, gates, `finalizeRun`, post-run actions, and email
+summary — there is **no parallel one-time queue**.
+
+**Columns** (additive, idempotent, no backfill — every existing row stays
+`schedule_kind='cron'` / `run_at` NULL):
+
+| Column          | Meaning                                                        |
+|-----------------|---------------------------------------------------------------|
+| `schedule_kind` | `'cron'` (default) or `'once'`. CHECK-constrained.            |
+| `run_at`        | The single fire time for a `once` row. NULL on every cron row. |
+
+**Lifecycle of a `once` row:**
+
+1. **Arm** — `registry.registerInternal` special-cases `schedule_kind='once'`:
+   `run_at` in the future → a croner **Date** job fires it a single time; `run_at`
+   already past → a `setTimeout(0)` fires it. **No cron rule is ever evaluated for
+   a once row.** The `setTimeout(0)` is a **latency optimization ONLY** — it is not
+   durable.
+   **Durable source of truth: the once-due sweep** (`scheduler/once-due-sweep.ts`,
+   boot-started `setInterval`, default 10s, `REMO_ONCE_SWEEP_INTERVAL_MS` /
+   `REMO_ONCE_SWEEP_DISABLED`). Every tick it selects `schedule_kind='once' AND
+   enabled=true AND run_at<=now` (`listDueOnceTasks`) and fires each via
+   `dispatcher.fire`. Because a row stays `enabled=true` until a fire **claims** it,
+   the sweep re-arms AND re-fires any due row whose `setTimeout` was lost — a
+   process death before the callback, a throw inside the fire, or a swallowed
+   `register()` error. `claimOnceTask` keeps the sweep and the `setTimeout`
+   mutually exclusive: **exactly one dispatch, ever.** This is what closes the
+   "accept-never-dispatch" silent-drop for the email→website work path.
+2. **Fire (CLAIM-then-fire)** — `dispatcher.fire()` short-circuits
+   `schedule_kind='once'`: it FIRST **claims** the row via `claimOnceTask` — a
+   single conditional `UPDATE … SET enabled=false, next_fire_at=NULL, … WHERE
+   id=$id AND schedule_kind='once' AND enabled=true RETURNING id`. It dispatches
+   (`fireTask`, MANUAL so an offline target fails fast instead of grace-replaying)
+   **only if the claim returned a row**. This closes a sub-second double-fire
+   window at the source: a hub restart AFTER a dispatch but BEFORE the disable
+   commit finds the row already `enabled=false`, so `listEnabledTasks` never
+   re-arms it; a concurrent second fire loses the claim (0 rows) and no-ops; an
+   errored claim fails closed (no dispatch). The in-flight run is untouched (it
+   lives in `inFlightByRun` and finalizes independently of `enabled`).
+   **Belt-and-braces:** `dispatchWork` is ALSO idempotent per `work_id` — if the
+   `work_runs` row has advanced past `queued` it returns
+   `skipped/already_dispatched` without re-running gates or re-sending, so a live
+   client site can never be touched twice even if a re-fire slips through. Proven
+   by `test/once-tasks.test.ts` (claim-lost dispatches nothing) +
+   `test/once-work-idempotency.test.ts`.
+3. **Downstream is UNCHANGED** — the run row, `finalizeRun`, post-run actions, and
+   the email summary are exactly what a cron task uses. `bun test
+   test/once-tasks.test.ts` proves fire-once + no-re-arm + pipeline reuse.
+
+**Create via REST:** `POST /api/scheduled-tasks` with
+`{ schedule_kind: 'once', run_at: '<ISO 8601>', … }`. `run_at` is required and
+`cron_expr`/`schedule_rules` are ignored for a once task. `withNext3` surfaces
+`run_at` as the row's only "next run".
+
+### `/api/ext` work + ask are one-time tasks (the unify)
+
+`POST /api/ext/work` (inbound-email → repo agent) now **enqueues** each item as a
+`schedule_kind='once'`, `task_type='work'` `scheduled_tasks` row — the unified
+queue entry, Tasks-list appearance, and audit anchor — created with `run_at=now`
+so it fires immediately. Its sender (`hub/src/scheduler/senders/work.ts`) is a
+THIN adapter that reconstructs the input from `work_runs` + `payload` and calls the
+**existing** `dispatchWork`; the work verify/publish machinery is untouched.
+
+- **Two-lifecycle model (deliberate):** the `scheduled_task_run` records "the work
+  item was ACCEPTED into the pipeline" (finalized on the dispatch outcome); the
+  `work_runs` row is the TYPED TERMINAL result (`branch`/`hub_qc`/`published`/…),
+  finalized by dispatchWork's poll-to-terminal flow. `GET /api/ext/work/:id` reads
+  `work_runs`, which stays the source of truth for the outcome. The synthesized
+  once row sets `email_summary=false` (work has its own result surface).
+- **Shared-gate guarantee (the back-door closer):** the once row is created **only
+  after** every trust check (`repo allowlist` → `site` → `sender`) passes at the
+  route, so a forbidden repo/site/sender still `403`s with ZERO rows and ZERO
+  spend — a one-time task can never reach a repo the allowlist forbids. At RUN
+  time, `dispatchWork`'s own non-negotiable gate list (`dailyCostCapGate` ·
+  `dailyTokenCapGate` · `humanOnlyPtyGate` · `workRateGate` ·
+  `workRepoAllowlistGate`) runs again. **No scheduling path reaches a repo/site
+  that direct dispatch couldn't.** Proven by `test/ext-work-containment.test.ts`
+  (b) + `test/ext-work-gates.test.ts` + `test/once-work-sender.test.ts`.
+- **`wait_ms` contract (async dispatch):** work now dispatches ASYNC (the once
+  task fires via the `setTimeout(0)` + the durable once-due sweep), so `wait_ms` is
+  a **best-effort latency convenience**, not a guarantee. The route polls
+  `work_runs` until terminal or the window lapses; a non-terminal return
+  (`queued`/`dispatched`/`verifying`) is a **DEFINED, POLLABLE** state — the
+  once-due sweep guarantees the item is dispatched and the work-reaper guarantees
+  it reaches terminal — so the caller simply polls `GET /api/ext/work/:work_id`
+  until `status` is terminal. It is never a silent race / dropped item.
+- **Enqueue failure is never a phantom queue entry:** if `createTaskV2` throws
+  AFTER the `work_runs` row is inserted, the route finalizes that row `failed` and
+  returns **502** (the caller retries) — never a 201/202 with a `queued` row that
+  nothing drives. A `register()` failure is non-fatal: the once row is persisted,
+  so the once-due sweep drives it on the next tick.
+- **`/api/ext/ask` is NOT yet rerouted** (TODO in `ext.ts`): ask already rides the
+  SAME shared dispatch pipeline + non-bypassable gates (`hub/src/ask/dispatch.ts`),
+  so the caps/gate unification is already satisfied; only the queue-entry/Tasks-list
+  unification remains. Work was rerouted first (higher value, higher risk).
+
+---
+
 ## Schedule rules — active windows, end bounds, units (P1)
 
 Structured `schedule_rules` (`hub/src/scheduler/schedule-rules.ts`, mirrored at

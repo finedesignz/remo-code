@@ -313,7 +313,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 
 | Subsystem / phase | Doc | One-liner |
 |---|---|---|
-| Scheduled tasks | [scheduled-tasks.md](docs/scheduled-tasks.md) | Hub cron scheduler (`hub/src/scheduler/`); fan-out, cost-cap, post-run actions, Phase-11 workflows. Contract test: `hub/test/scheduler.test.ts`. |
+| Scheduled tasks | [scheduled-tasks.md](docs/scheduled-tasks.md) | Hub cron scheduler (`hub/src/scheduler/`); fan-out, cost-cap, post-run actions, Phase-11 workflows. **Milestone once:** `schedule_kind='once'` + `run_at` — one-time tasks fire exactly once then self-finalize (no re-arm), reusing the whole dispatch/finalize/post-run pipeline; `/api/ext/work` enqueues each item as a gated `task_type='work'` one-time task (`/api/ext/ask` still on its own path, TODO). Contract tests: `hub/test/scheduler.test.ts`, `hub/test/once-tasks.test.ts`, `hub/test/once-work-sender.test.ts`. |
 | Error capture | [error-capture.md](docs/error-capture.md) | Sentry-style intake (`hub/src/error-capture/`) → dispatch into repo-bound session; SDK auto-install for 4 stacks. |
 | Feedback intake (Option A) | [feedback-intake.md](docs/feedback-intake.md) | Public per-app end-user feedback (`POST /api/feedback/:token`, `feedback_keys`) → screenshot+comment dispatched into bound session via shared pipeline. Embeddable `feedback-widget.js`. Bounded by per-token/per-IP rate limit + non-bypassable cost cap. NOT Revanote. |
 | Repo grouping | [repo-grouping.md](docs/repo-grouping.md) | Per-user, many-to-many repo groups (`/api/repo-groups`; `repo_groups`/`repo_group_members`/`user_repo_group_state`). Grouped + collapsible Connections table + sidebar; `repo_ident` = `github://owner/repo` or `path://<abs>`. Shared collapse state; a repo in N groups renders under each; trailing Ungrouped section. |
@@ -387,6 +387,13 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   license gate after auth; `/ws/agent` keyed by `api_keys`. `hub/test/mount-order.test.ts` enforces.
 - **Don't hand-roll per-subsystem dispatch/queue/grace.** Round-2 collapse is complete — use
   `hub/src/dispatch/` (the old `scheduler/session-queue.ts` shim is deleted).
+- **One-time tasks are `scheduled_tasks`, not a parallel queue (milestone once).** A
+  `schedule_kind='once'` row fires exactly once at `run_at` then self-finalizes; it reuses the
+  SAME dispatch pipeline, gates, `finalizeRun`, post-run actions, and email summary as a cron
+  task. `/api/ext/work` (and, later, `/ask`) creates a GATED one-time task as its queue entry —
+  the trust checks (repo allowlist · site · sender) run at CREATE (403 before any row/spend) and
+  `dispatchWork`'s non-bypassable gate list runs again at RUN. No scheduling path may reach a
+  repo/site that direct dispatch couldn't. See docs/scheduled-tasks.md §one-time.
 - **No provider API key on the human PTY path — EVER.** The interactive terminal surface spawns the
   GENUINE `claude`/`codex` TUI with an ALLOWLIST-OF-ONE argv — empty except for the optional
   operator-blessed `--dangerously-skip-permissions` (a PERMISSION flag, gated by config
