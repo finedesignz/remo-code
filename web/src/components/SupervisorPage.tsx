@@ -12,6 +12,7 @@ import { GroupSection } from './groups/GroupSection'
 import { RepoGroupChips } from './groups/RepoGroupChips'
 import { GroupsManager } from './groups/GroupsManager'
 import { AutoDevActivityPanel } from './AutoDevActivityPanel'
+import { SupervisorRootsEditor } from './SupervisorRootsEditor'
 
 type OrchestratorSnapshot = {
   enabled: boolean
@@ -193,7 +194,7 @@ function StatusDot({ status, online = true }: { status: Row['status']; online?: 
 
 export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const { subscribe, connectionId } = useWebSocketContext()
-  const { supervisors: supervisorsRaw } = useSupervisors(token, subscribe, connectionId)
+  const { supervisors: supervisorsRaw, refetch: refetchSupervisors } = useSupervisors(token, subscribe, connectionId)
   const supervisors: Supervisor[] = useMemo(
     () =>
       (supervisorsRaw || []).map((r) => ({
@@ -669,6 +670,18 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           </>
         )}
       </div>
+
+      {/* Per-supervisor root folders — add custom (incl. non-GitHub) scan paths */}
+      {activeSupervisor && (
+        <SupervisorRootsEditor
+          key={activeSupervisor.id}
+          token={token}
+          supervisorId={activeSupervisor.id}
+          roots={activeSupervisor.roots}
+          online={activeSupervisor.online}
+          onSaved={refetchSupervisors}
+        />
+      )}
 
       {/* Repos table */}
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl">

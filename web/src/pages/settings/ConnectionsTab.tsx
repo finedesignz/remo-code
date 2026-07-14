@@ -2,10 +2,12 @@
  * Settings → Connections tab.
  *
  * Composes:
- *   1. SupervisorPage embedded — supervisor selection, repo list (with the
- *      pinned orchestrator row; expand that row for its per-session Auto-Dev
- *      timeline). Root-folder setup moved to the supervisor first-run wizard
- *      (Phase 09); roots are no longer edited in the web UI.
+ *   1. SupervisorPage embedded — supervisor selection, a per-supervisor
+ *      root-folder editor (add/remove absolute scan paths, incl. custom
+ *      non-GitHub folders), and the repo list (with the pinned orchestrator
+ *      row; expand that row for its per-session Auto-Dev timeline). The
+ *      first-run wizard still seeds the initial root; roots can also be
+ *      managed here after connect.
  *   2. A collapsible hub-wide "Auto-Dev Activity" feed (all sessions) — the
  *      orchestrator run-log surface lives here, NOT as a separate Settings tab
  *      (the four-tab invariant is enforced).
