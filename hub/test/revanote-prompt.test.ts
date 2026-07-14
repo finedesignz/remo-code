@@ -52,7 +52,7 @@ describe('renderAnnotationPrompt', () => {
       mapping: {
         id: 'm1', user_id: 'u', hostname_pattern: 'app.example.com',
         repo_path: 'C:/code/app', supervisor_id: null,
-        deploy_strategy: 'pr', auto_merge: true, enabled: true,
+        deploy_strategy: 'pr', auto_merge: true, trusted: true, enabled: true,
         auto_created: false, created_at: '', updated_at: '',
       },
     })
@@ -71,7 +71,7 @@ describe('renderAnnotationPrompt', () => {
       mapping: {
         id: 'm1', user_id: 'u', hostname_pattern: '*.example.com',
         repo_path: 'C:/code/app', supervisor_id: null,
-        deploy_strategy: 'direct', auto_merge: false, enabled: true,
+        deploy_strategy: 'direct', auto_merge: false, trusted: true, enabled: true,
         auto_created: false, created_at: '', updated_at: '',
       },
     })

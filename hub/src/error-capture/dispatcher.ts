@@ -49,7 +49,7 @@ import {
   type PipelineDeps,
   type RunStore,
 } from '../dispatch/pipeline.ts'
-import { thresholdGate, dailyCostCapGate, dailyTokenCapGate } from '../dispatch/gates.ts'
+import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
 import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
 
 export type DispatchOutcome =
@@ -162,7 +162,9 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
 
   const deps: PipelineDeps = {
     // IR-1: cost-cap is non-bypassable. IR-2: threshold first, then cost-cap.
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate],
+    // sessionInjectRateGate: an error flood (the sentry key is a public DSN) must not
+    // drive N turns/hour into the bound session — a rate ceiling, not just a $ / token one.
+    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Spawn-on-error (opt-in via REMO_SPAWN_ON_ERROR): when the bound session

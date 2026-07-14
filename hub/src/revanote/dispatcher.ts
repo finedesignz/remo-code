@@ -65,7 +65,7 @@ import {
   type PipelineDeps,
   type RunStore,
 } from '../dispatch/pipeline.ts'
-import { thresholdGate, dailyCostCapGate, dailyTokenCapGate } from '../dispatch/gates.ts'
+import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
 
 export type DispatchOutcome =
   | { status: 'dispatched'; run_id: string; session_id: string }
@@ -277,7 +277,9 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
 
   const deps: PipelineDeps = {
     // IR-1: cost-cap non-bypassable. IR-2: threshold → cost-cap → revanote-budget.
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, revanoteBudgetGate(userId, tz)],
+    // sessionInjectRateGate: an annotation flood must not drive N turns/hour into the
+    // bound session — a rate ceiling, not just a $ / token one.
+    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate, revanoteBudgetGate(userId, tz)],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Offline replay: re-run the full dispatch for this pending annotation.

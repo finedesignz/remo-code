@@ -80,6 +80,19 @@ by layered controls (see the header comment in `feedback-webhook.ts`):
    end-user-originated, the agent must INVESTIGATE and PROPOSE a fix as a PULL
    REQUEST for human review — it must NOT push to the default branch, NOT merge,
    and must NOT be treated as an auto-ship. (Trusted app-origin error-capture may
+
+   **This pattern is now SHARED.** `hub/src/dispatch/untrusted.ts` exports
+   `fenceUntrusted(label, content, maxLen)` (escapes every `<` so a payload cannot
+   close the fence; explicit `[truncated]` marker) and `SCOPE_CONTRACT`
+   (data-not-instructions, minimal change, no unrelated files/deps/CI, stop rather
+   than guess, propose-only). Error-capture, revanote and Coolify triage now use it
+   too — feedback was the reference implementation. Unit test:
+   `hub/test/dispatch-untrusted.test.ts`.
+
+   The feedback gate list also carries `sessionInjectRateGate` (default 4
+   injects/session/hour), so a feedback flood on the public submit token cannot drive
+   N turns/hour into the bound session, and `spawn-on-error.ts` forces
+   `dangerously_skip_permissions: false` when it wakes the session (machine path).
    auto-repair; anonymous end-user feedback is propose-only.) Regression:
    `feedback-prompt.test.ts`.
 

@@ -49,7 +49,6 @@
  */
 import { getChannel } from '../ws/registry.ts'
 import { log } from '../observability/logger.ts'
-import { getSessionSkipPermissions } from '../db/dal.ts'
 
 // Heavy deps (supervisor-registry, budget, DAL) are imported LAZILY inside the
 // function below — not statically — so that merely importing this module (e.g.
@@ -192,7 +191,10 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
     }
     const runId = reservation.run.id
 
-    const skipPerms = await getSessionSkipPermissions(sessionId, userId)
+    // MACHINE-TRIGGERED path: this wake is driven by error-capture / feedback intake
+    // (untrusted, anonymous-reachable), never by a human. It never runs with
+    // permission prompts disabled, whatever the session row's default says.
+    const skipPerms = false
     try {
       sendToSupervisor(supervisorId, {
         type: 'session.start',
