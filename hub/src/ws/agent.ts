@@ -1295,6 +1295,14 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     } catch (err: any) {
       console.error('[supervisor] teab run event handler failed', err?.message)
     }
+    // Milestone ASK Phase 1: the same run lifecycle carries the READ-ONLY
+    // session_transcript_tail / session_memory replies. Ignores foreign run ids.
+    try {
+      const ext = await import('../ext/supervisor-read.ts')
+      ext.handleExtRunEvent(supervisorId, userId, msg)
+    } catch (err: any) {
+      console.error('[supervisor] ext read event handler failed', err?.message)
+    }
     return
   }
 }
