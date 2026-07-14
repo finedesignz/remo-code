@@ -1,4 +1,4 @@
-//! First-launch autostart enable + one-time notice marker.
+//! Autostart reconciliation + one-time first-launch notice marker.
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -11,7 +11,31 @@ fn marker_path() -> Option<PathBuf> {
     Some(appdata.join("remo-code-supervisor").join(".first-run-done"))
 }
 
+/// Reconcile the OS autostart registration with the desired state on EVERY boot.
+///
+/// The registration lives outside our config (an HKCU `Run` entry on Windows) and can be
+/// removed behind our back — the per-machine MSI -> per-user NSIS switch strips it on
+/// uninstall. The `.first-run-done` marker survives that, so gating `enable()` on the marker
+/// leaves the supervisor permanently unregistered: config claims autostart is on, the registry
+/// has no entry, and nothing ever retries.
+///
+/// So the marker gates only the one-time welcome dialog. The registration itself is converged
+/// from observed state.
 pub fn maybe_enable_autostart(app: &AppHandle) -> Result<()> {
+    let mgr = app.autolaunch();
+
+    match mgr.is_enabled() {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Err(e) = mgr.enable() {
+                log::warn!("autostart enable failed: {e}");
+            } else {
+                log::info!("autostart registration was missing — re-enabled");
+            }
+        }
+        Err(e) => log::warn!("autostart state unreadable, leaving as-is: {e}"),
+    }
+
     let marker = match marker_path() {
         Some(p) => p,
         None => return Ok(()),
@@ -20,24 +44,22 @@ pub fn maybe_enable_autostart(app: &AppHandle) -> Result<()> {
         return Ok(());
     }
 
-    // Enable autostart.
-    let mgr = app.autolaunch();
-    if let Err(e) = mgr.enable() {
-        log::warn!("autostart enable failed: {e}");
-    }
-
-    // Show one-time toast/dialog (modal — fine on first run only).
-    let _ = app
-        .dialog()
+    // First launch only: one-time welcome dialog.
+    //
+    // NON-blocking on purpose. `blocking_show()` here blocks Tauri's `setup()`, which is what
+    // spawns the sidecar — so an unclicked welcome modal (e.g. one that opened off-screen or
+    // behind another window) leaves the supervisor permanently sidecar-less and offline while
+    // the tray icon looks perfectly healthy. The notice is informational; it must never gate
+    // startup.
+    app.dialog()
         .message(
             "Remo Code Supervisor will start with Windows.\n\nYou can change this in Settings.",
         )
         .title("Welcome to Remo Code Supervisor")
         .kind(MessageDialogKind::Info)
         .buttons(MessageDialogButtons::Ok)
-        .blocking_show();
+        .show(|_| {});
 
-    // Write marker last so a failed enable can be retried.
     if let Some(parent) = marker.parent() {
         let _ = std::fs::create_dir_all(parent);
     }

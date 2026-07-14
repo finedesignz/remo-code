@@ -178,7 +178,7 @@ The supervisor (`supervisor/src/index.ts`, compiled into the Tauri sidecar binar
 
 **Idle teardown (hub-side):** the hub maintains a per-session subscriber count from `/ws/client` `subscribe`/`unsubscribe`/close events (`hub/src/ws/idle-teardown.ts`). When the count drops to 0, a `REMO_SESSION_IDLE_GRACE_SECONDS` timer starts; if no new subscriber arrives, the hub sends `{type:'shutdown', reason:'idle_no_subscribers'}` to the agent channel, which causes the SessionBridge to call `runner.stopGracefully()` (SIGINT → SIGKILL after 3s). A new subscribe inside the window cancels the timer. Default grace 300s — covers refreshes and grid-view tab swaps.
 
-**Config:** stored in `%LOCALAPPDATA%\remo-code-supervisor\config.json` on Windows (managed by the Tauri first-run wizard).
+**Config:** stored in `%APPDATA%\remo-code\supervisor.json` on Windows (managed by the Tauri first-run wizard; see `config_path()` in `supervisor/tauri/src-tauri/src/config_cmds.rs`).
 
 ## Database
 
@@ -220,7 +220,7 @@ All WS messages validated with Zod schemas in `hub/src/ws/protocol.ts` and `hub/
 
 **web/.env**: `VITE_HUB_URL`
 
-**Supervisor config**: managed by the Tauri first-run wizard; stored at `%LOCALAPPDATA%\remo-code-supervisor\config.json` on Windows. Holds hub URL, API key, repo roots.
+**Supervisor config**: managed by the Tauri first-run wizard; stored at `%APPDATA%\remo-code\supervisor.json` on Windows. Holds hub URL, API key, repo roots.
 
 **Scheduled tasks (optional):**
 - `REMO_PUBLIC_URL` — prefix for `{{run_url}}` template var in post-run actions (default `https://app.remo-code.com`).

@@ -94,7 +94,10 @@ machine. Connects to `/ws/agent` with an API key; hosts one CLI subprocess per a
   why/when the live process was reaped. Transcript itself is never lost (resume-by-`project_dir`);
   the human-only PTY invariant forbids the hub injecting an agent turn pre-kill, so this is the
   only invariant-safe place to persist the breadcrumb.
-- **Config:** `%LOCALAPPDATA%\remo-code-supervisor\config.json` (Tauri first-run wizard).
+- **Config:** `%APPDATA%\remo-code\supervisor.json` (Tauri first-run wizard; path is defined by
+  `config_path()` in `supervisor/tauri/src-tauri/src/config_cmds.rs`). Not to be confused with
+  `%LOCALAPPDATA%\remo-code-supervisor\`, which holds runtime state (session breadcrumbs,
+  first-run marker) — not the config.
 
 ## Database
 
@@ -161,7 +164,7 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
 - **hub/.env:** `DATABASE_URL`, `JWT_SECRET` (min 32), `PORT` (3040), `HUB_ALLOWED_ORIGINS`.
   Titanium / Telegram / mobile / scheduler envs are documented in the relevant `docs/*.md`.
 - **web/.env:** `VITE_HUB_URL`.
-- **Supervisor:** Tauri wizard → `%LOCALAPPDATA%\remo-code-supervisor\config.json`.
+- **Supervisor:** Tauri wizard → `%APPDATA%\remo-code\supervisor.json`.
 - **Optional:** `REMO_SESSION_IDLE_GRACE_SECONDS` (default 14400 = 4h; `0` disables idle teardown),
   `REMO_ORCHESTRATOR_AUTOLAUNCH` (`false` disables auto-launch), `TITANIUM_BYPASS` (currently
   `true` in prod — see docs/auth.md), `COOLIFY_TOKEN`, `E4A_*`.
