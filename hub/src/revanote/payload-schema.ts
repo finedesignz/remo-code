@@ -21,13 +21,16 @@ const Reply = z.object({
 
 export const RevanotePayload = z.object({
   source: z.literal('revanote').optional(),
-  revanote_version: z.string().optional(),
+  // Accept both `1` and `'1'` — revanote shipped the number form for a while.
+  revanote_version: z.union([z.string(), z.number()]).optional(),
   annotation_id: z.string().min(1).max(256),
   annotation_url: z.string().url().optional().nullable(),
   page_url: z.string().min(1).max(4096),
   screenshot_url: z.string().optional().nullable(),
-  x: z.number().optional().nullable(),
-  y: z.number().optional().nullable(),
+  // Coerce: revanote reads these from a Postgres `numeric`, which its driver
+  // hands back as a string.
+  x: z.coerce.number().optional().nullable(),
+  y: z.coerce.number().optional().nullable(),
   element_selector: z.string().optional().nullable(),
   element_meta: z.unknown().optional(),
   capture_viewport: z.unknown().optional(),
