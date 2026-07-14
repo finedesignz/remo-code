@@ -30,13 +30,21 @@ export const DEFAULT_MAX_LEN = 4000
  * `</label>` (nor any other tag) can survive inside the block. Truncation is
  * explicit — a `[truncated]` marker is appended so the agent knows the text is
  * incomplete rather than silently mis-reading a clipped payload.
+ *
+ * SENTINEL defence (milestone ASK): the hub's reply protocols are sentinel-framed —
+ * revanote `<<JSON>>…<<END>>`, the orchestrator `<<STATE>>`/`<<NOTIFY>>`/`<<GATE>>`,
+ * the external ask `<<ASK:nonce>>…<<END:nonce>>`. Untrusted content that contains a
+ * literal sentinel could FORGE a reply envelope and make the hub act on a fabricated
+ * result. Escaping `<` already kills every `<<…` opener; we also neutralise the `>>`
+ * closer so no half-sentinel survives to pair with a genuine one.
  */
 export function fenceUntrusted(label: string, content: string, maxLen = DEFAULT_MAX_LEN): string {
   const raw = (content ?? '').toString()
   const clipped = raw.length > maxLen ? `${raw.slice(0, maxLen)}\n[truncated]` : raw
   // Neutralise every tag-open: a closing-tag lookalike can no longer terminate
-  // the fence, and no nested tag can be injected.
-  const safe = clipped.replace(/</g, '&lt;')
+  // the fence, and no nested tag can be injected. Then neutralise the sentinel
+  // closer so `<<JSON>>` / `<<STATE>>` / `<<ASK:…>>` cannot be forged from data.
+  const safe = clipped.replace(/</g, '&lt;').replace(/>>/g, '&gt;&gt;')
   return `<${label}>\n${safe}\n</${label}>`
 }
 

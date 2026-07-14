@@ -30,6 +30,8 @@ Base URLs:
 
 # Authentication
 
+- HTTP Authentication, scheme: bearer A remo-code api_key (`remokey_…`) from Settings → Credentials. Optional scopes: `ext:read` (free reads) and `ext:ask` (spends tokens). A key with NULL scopes keeps legacy full access.
+
 - HTTP Authentication, scheme: bearer 
 
 <h1 id="remo-code-hub-profile">profile</h1>
@@ -2979,6 +2981,725 @@ Status Code **429**
 
 <aside class="success">
 This operation does not require authentication
+</aside>
+
+<h1 id="remo-code-hub-ext">ext</h1>
+
+## List the caller's sessions (FREE — zero tokens)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/sessions \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/sessions`
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "sessions": [
+    {
+      "id": "string",
+      "name": "string",
+      "repo_ident": "string",
+      "project_dir": "string",
+      "runner_type": "string",
+      "active": true,
+      "last_activity": "string"
+    }
+  ]
+}
+```
+
+<h3 id="list-the-caller's-sessions-(free-—-zero-tokens)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Sessions|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the ext:read scope|Inline|
+
+<h3 id="list-the-caller's-sessions-(free-—-zero-tokens)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» sessions|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» name|string|true|none|none|
+|»» repo_ident|string¦null|true|none|none|
+|»» project_dir|string¦null|true|none|none|
+|»» runner_type|string|true|none|none|
+|»» active|boolean|true|none|none|
+|»» last_activity|string¦null|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Tail of the session's on-disk CLI transcript (FREE — zero tokens, no PTY write)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/sessions/{id}/transcript \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/transcript',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/sessions/{id}/transcript`
+
+Proxied to the supervisor host's allowlisted READ-ONLY `session_transcript_tail` command. Works for pty-interactive sessions too. Byte-capped.
+
+<h3 id="tail-of-the-session's-on-disk-cli-transcript-(free-—-zero-tokens,-no-pty-write)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|tail|query|integer|false|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "session_id": "string",
+  "turns": [
+    {
+      "role": "string",
+      "text": "string"
+    }
+  ],
+  "truncated": true
+}
+```
+
+<h3 id="tail-of-the-session's-on-disk-cli-transcript-(free-—-zero-tokens,-no-pty-write)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Transcript tail|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|Session has no project_dir|Inline|
+|502|[Bad Gateway](https://tools.ietf.org/html/rfc7231#section-6.6.3)|Supervisor could not read the transcript|Inline|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|No (or ambiguous) online supervisor for this user|Inline|
+
+<h3 id="tail-of-the-session's-on-disk-cli-transcript-(free-—-zero-tokens,-no-pty-write)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» session_id|string|true|none|none|
+|» turns|[object]|true|none|none|
+|»» role|string|true|none|none|
+|»» text|string|true|none|none|
+|» truncated|boolean|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **502**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **503**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## The session project's memory files (FREE — zero tokens, no PTY write)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/sessions/{id}/memory \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/memory',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/sessions/{id}/memory`
+
+<h3 id="the-session-project's-memory-files-(free-—-zero-tokens,-no-pty-write)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "session_id": "string",
+  "files": [
+    {
+      "name": "string",
+      "content": "string"
+    }
+  ],
+  "truncated": true
+}
+```
+
+<h3 id="the-session-project's-memory-files-(free-—-zero-tokens,-no-pty-write)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Memory files|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session|Inline|
+|502|[Bad Gateway](https://tools.ietf.org/html/rfc7231#section-6.6.3)|Supervisor could not read memory|Inline|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|No (or ambiguous) online supervisor|Inline|
+
+<h3 id="the-session-project's-memory-files-(free-—-zero-tokens,-no-pty-write)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» session_id|string|true|none|none|
+|» files|[object]|true|none|none|
+|»» name|string|true|none|none|
+|»» content|string|true|none|none|
+|» truncated|boolean|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **502**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **503**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Cheap status roll-up for a session (FREE)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/sessions/{id}/state \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/state',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/sessions/{id}/state`
+
+<h3 id="cheap-status-roll-up-for-a-session-(free)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "session_id": "string",
+  "repo_ident": "string",
+  "runner_type": "string",
+  "active": true,
+  "status": "string",
+  "last_activity": "string",
+  "last_assistant_message_at": "string",
+  "open_session_runs": 0
+}
+```
+
+<h3 id="cheap-status-roll-up-for-a-session-(free)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|State|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session|Inline|
+
+<h3 id="cheap-status-roll-up-for-a-session-(free)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» session_id|string|true|none|none|
+|» repo_ident|string¦null|true|none|none|
+|» runner_type|string|true|none|none|
+|» active|boolean|true|none|none|
+|» status|string|true|none|none|
+|» last_activity|string¦null|true|none|none|
+|» last_assistant_message_at|string¦null|true|none|none|
+|» open_session_runs|integer|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Ask the session a question (PAID — spends tokens)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/ext/sessions/{id}/ask \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "question": "string",
+  "context": "string",
+  "wait_ms": 120000,
+  "include_transcript": true,
+  "include_memory": true
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/ask',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/ext/sessions/{id}/ask`
+
+Dispatches a short-lived stream-json ask-session bound to the target's project_dir (the human's PTY is NEVER written to). Rides the non-bypassable daily cost cap + daily token cap + human-only-PTY guard + per-key ask-rate ceiling. `wait_ms` long-polls up to 120s; on expiry poll the ask endpoint.
+
+> Body parameter
+
+```json
+{
+  "question": "string",
+  "context": "string",
+  "wait_ms": 120000,
+  "include_transcript": true,
+  "include_memory": true
+}
+```
+
+<h3 id="ask-the-session-a-question-(paid-—-spends-tokens)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|body|body|object|false|none|
+|» question|body|string|true|none|
+|» context|body|string|false|none|
+|» wait_ms|body|integer|false|none|
+|» include_transcript|body|boolean|false|none|
+|» include_memory|body|boolean|false|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "ask_id": "string",
+  "status": "queued",
+  "answer": "string",
+  "confidence": "string",
+  "evidence": [
+    "string"
+  ],
+  "reason": "string",
+  "raw_reply": "string",
+  "created_at": "string",
+  "answered_at": "string"
+}
+```
+
+<h3 id="ask-the-session-a-question-(paid-—-spends-tokens)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Ask created (answer inline when the long-poll caught it)|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the ext:ask scope|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|No stream-json ask session for this project_dir|Inline|
+
+<h3 id="ask-the-session-a-question-(paid-—-spends-tokens)-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ask_id|string|true|none|none|
+|» status|string|true|none|none|
+|» answer|string¦null|true|none|none|
+|» confidence|string¦null|true|none|none|
+|» evidence|[string]¦null|true|none|none|
+|» reason|string¦null|true|none|Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask, session_offline, ask_timeout.|
+|» raw_reply|string¦null|true|none|none|
+|» created_at|string|true|none|none|
+|» answered_at|string¦null|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|status|queued|
+|status|dispatched|
+|status|answered|
+|status|timeout|
+|status|skipped|
+|status|failed|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Poll an ask (no new tokens)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/sessions/{id}/ask/{ask_id} \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/ask/{ask_id}',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/sessions/{id}/ask/{ask_id}`
+
+<h3 id="poll-an-ask-(no-new-tokens)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|ask_id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "ask_id": "string",
+  "status": "queued",
+  "answer": "string",
+  "confidence": "string",
+  "evidence": [
+    "string"
+  ],
+  "reason": "string",
+  "raw_reply": "string",
+  "created_at": "string",
+  "answered_at": "string"
+}
+```
+
+<h3 id="poll-an-ask-(no-new-tokens)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Ask|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such ask|Inline|
+
+<h3 id="poll-an-ask-(no-new-tokens)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ask_id|string|true|none|none|
+|» status|string|true|none|none|
+|» answer|string¦null|true|none|none|
+|» confidence|string¦null|true|none|none|
+|» evidence|[string]¦null|true|none|none|
+|» reason|string¦null|true|none|Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask, session_offline, ask_timeout.|
+|» raw_reply|string¦null|true|none|none|
+|» created_at|string|true|none|none|
+|» answered_at|string¦null|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|status|queued|
+|status|dispatched|
+|status|answered|
+|status|timeout|
+|status|skipped|
+|status|failed|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
 </aside>
 
 # Schemas

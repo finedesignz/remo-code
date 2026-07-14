@@ -1,7 +1,11 @@
 {
   "name": "remo-code",
   "private": true,
-  "workspaces": ["hub", "web"],
+  "workspaces": [
+    "hub",
+    "web",
+    "mcp"
+  ],
   "scripts": {
     "dev:hub": "cd hub && bun run dev",
     "dev:web": "cd web && bun run dev",
