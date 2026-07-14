@@ -49,7 +49,6 @@
  */
 import { getChannel } from '../ws/registry.ts'
 import { log } from '../observability/logger.ts'
-import { getSessionSkipPermissions } from '../db/dal.ts'
 
 // Heavy deps (supervisor-registry, budget, DAL) are imported LAZILY inside the
 // function below — not statically — so that merely importing this module (e.g.
