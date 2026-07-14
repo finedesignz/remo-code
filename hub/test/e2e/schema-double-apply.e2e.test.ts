@@ -217,8 +217,8 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
       INSERT INTO users (email, password_hash, role) VALUES (${email}, 'x', 'user') RETURNING id
     `
     const [sess] = await sql<{ id: string }[]>`
-      INSERT INTO sessions (user_id, name, project_dir)
-      VALUES (${user.id}, 'once-sess', '/repos/clientco') RETURNING id
+      INSERT INTO sessions (user_id, name, project_dir, token_hash)
+      VALUES (${user.id}, 'once-sess', '/repos/clientco', ${'h-once-' + randomUUID()}) RETURNING id
     `
     // A one-time 'work' task: no cron (@once sentinel), run_at set, schedule_kind='once'.
     const [task] = await sql<{ id: string; schedule_kind: string }[]>`
