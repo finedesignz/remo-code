@@ -948,6 +948,115 @@ openapi.openapi(taskTemplatesRoute, (c) => {
       404: { description: "No such ask", ...json(Err) },
     },
   });
+
+  // ── Milestone WORK: inbound-email → repo agent → QC → gated publish ────────
+  const Work = z
+    .object({
+      work_id: z.string(),
+      session_id: z.string().optional(),
+      status: z.enum([
+        "queued",
+        "dispatched",
+        "verifying",
+        "completed",
+        "qc_failed",
+        "needs_human",
+        "timeout",
+        "skipped",
+        "failed",
+      ]),
+      summary: z.string().nullable(),
+      branch: z.string().nullable().openapi({
+        description: "The branch the agent pushed. Its authority ends here — it does not deploy, publish or merge.",
+      }),
+      files_changed: z.array(z.string()).openapi({
+        description: "HUB-OBSERVED — derived from the branch diff, not from the agent's claimed file list.",
+      }),
+      commit_shas: z.array(z.string()),
+      hub_qc: z.unknown().nullable().openapi({
+        description:
+          "HUB-OBSERVED evidence: the diff-scope check (every file under work_sites.site_dir), the real build exit code, and the hub's own HTTPS probe. This — not the agent — gates the publish.",
+      }),
+      agent_self_check: z.unknown().nullable().openapi({
+        description: "The agent's self-report. ADVISORY metadata only; never the basis of a publish decision.",
+      }),
+      deploy_status: z.string().nullable().openapi({
+        description: "not_permitted | qc_failed | branch_moved_after_qc | merge_failed | deploy_failed | live_probe_failed | published",
+      }),
+      diff_url: z.string().nullable(),
+      pr_url: z.string().nullable(),
+      preview_url: z.string().nullable(),
+      published: z.boolean().openapi({
+        description:
+          "TRUE only when the HUB ITSELF performed the deploy (site.auto_publish AND hub-verified diff-scope AND hub-verified build AND hub-verified 2xx probe). The agent cannot set it; finalizeWork also ANDs it with the site flag in SQL as a backstop.",
+      }),
+      live_url: z.string().nullable(),
+      blocker: z.string().nullable().openapi({
+        description: "e.g. suspected_injection, unparseable_reply, or why a human is needed.",
+      }),
+      reason: z.string().nullable().openapi({
+        description:
+          "Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work, session_offline, work_timeout.",
+      }),
+      auto_publish: z.boolean(),
+      repo_ident: z.string(),
+      site_key: z.string(),
+    })
+    .openapi("ExtWork");
+
+  reg.registerPath({
+    method: "post",
+    path: "/api/ext/work",
+    summary: "Inbound client request → repo agent → QC → GATED publish (PAID — writes code)",
+    description:
+      "Points an UNTRUSTED inbound client email at the repo's stream-json session. THE AGENT PROPOSES, THE HUB DISPOSES: the agent's authority ends at a pushed `work/<id>` branch (it has no deploy credentials and is not even told whether the site auto-publishes). The HUB then verifies the branch diff touches ONLY `work_sites.site_dir`, runs the build itself, probes the site over real HTTPS, and performs the merge + deploy itself — only when the site carries `auto_publish=true`. Entry containment (all default-OFF): the repo must be in `work_repo_allowlist` (403 otherwise — no dispatch, no spend); the site must exist in `work_sites`; `source.from` must match that site's `client_emails` (403 `unknown_sender`). Rides the non-bypassable daily cost + token caps, the human-only-PTY guard, and a per-user work-rate ceiling (REMO_WORK_MAX_PER_HOUR, default 4).",
+    ...base,
+    request: {
+      body: json(
+        z.object({
+          repo: z.string().min(1),
+          site: z.string().min(1),
+          request_text: z.string().min(1).max(20000),
+          source: z.object({
+            kind: z.literal("email"),
+            from: z.string().min(1).max(320),
+            subject: z.string().max(2000).optional(),
+            message_id: z.string().max(998).optional(),
+          }),
+          wait_ms: z.number().int().min(0).max(120000).optional(),
+        }),
+      ),
+    },
+    responses: {
+      202: { description: "Work item created", ...json(Work) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: {
+        description:
+          "Key lacks the ext:work scope, OR repo_not_allowlisted, OR unknown_site, OR unknown_sender — no dispatch, no spend.",
+        ...json(Err),
+      },
+      404: { description: "No session for that repo", ...json(Err) },
+      409: { description: "No stream-json session for this project_dir", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/work/{work_id}",
+    summary: "Poll a work item (no new tokens)",
+    ...base,
+    request: {
+      params: z.object({
+        work_id: z.string().openapi({ param: { name: "work_id", in: "path" } }),
+      }),
+    },
+    responses: {
+      200: { description: "Work item", ...json(Work) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such work item", ...json(Err) },
+    },
+  });
 }
 
 // OpenAPI security scheme registration.

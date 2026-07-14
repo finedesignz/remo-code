@@ -28,7 +28,126 @@
         "bearerFormat": "JWT"
       }
     },
-    "schemas": {},
+    "schemas": {
+      "ExtWork": {
+        "type": "object",
+        "properties": {
+          "work_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "dispatched",
+              "verifying",
+              "completed",
+              "qc_failed",
+              "needs_human",
+              "timeout",
+              "skipped",
+              "failed"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "nullable": true
+          },
+          "branch": {
+            "type": "string",
+            "nullable": true,
+            "description": "The branch the agent pushed. Its authority ends here — it does not deploy, publish or merge."
+          },
+          "files_changed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "HUB-OBSERVED — derived from the branch diff, not from the agent's claimed file list."
+          },
+          "commit_shas": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "hub_qc": {
+            "nullable": true,
+            "description": "HUB-OBSERVED evidence: the diff-scope check (every file under work_sites.site_dir), the real build exit code, and the hub's own HTTPS probe. This — not the agent — gates the publish."
+          },
+          "agent_self_check": {
+            "nullable": true,
+            "description": "The agent's self-report. ADVISORY metadata only; never the basis of a publish decision."
+          },
+          "deploy_status": {
+            "type": "string",
+            "nullable": true,
+            "description": "not_permitted | qc_failed | branch_moved_after_qc | merge_failed | deploy_failed | live_probe_failed | published"
+          },
+          "diff_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "pr_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "preview_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "published": {
+            "type": "boolean",
+            "description": "TRUE only when the HUB ITSELF performed the deploy (site.auto_publish AND hub-verified diff-scope AND hub-verified build AND hub-verified 2xx probe). The agent cannot set it; finalizeWork also ANDs it with the site flag in SQL as a backstop."
+          },
+          "live_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "blocker": {
+            "type": "string",
+            "nullable": true,
+            "description": "e.g. suspected_injection, unparseable_reply, or why a human is needed."
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work, session_offline, work_timeout."
+          },
+          "auto_publish": {
+            "type": "boolean"
+          },
+          "repo_ident": {
+            "type": "string"
+          },
+          "site_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_id",
+          "status",
+          "summary",
+          "branch",
+          "files_changed",
+          "commit_shas",
+          "deploy_status",
+          "diff_url",
+          "pr_url",
+          "preview_url",
+          "published",
+          "live_url",
+          "blocker",
+          "reason",
+          "auto_publish",
+          "repo_ident",
+          "site_key"
+        ]
+      }
+    },
     "parameters": {}
   },
   "paths": {
@@ -4234,6 +4353,277 @@
           },
           "404": {
             "description": "No such ask",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ext/work": {
+      "post": {
+        "summary": "Inbound client request → repo agent → QC → GATED publish (PAID — writes code)",
+        "description": "Points an UNTRUSTED inbound client email at the repo's stream-json session. THE AGENT PROPOSES, THE HUB DISPOSES: the agent's authority ends at a pushed `work/<id>` branch (it has no deploy credentials and is not even told whether the site auto-publishes). The HUB then verifies the branch diff touches ONLY `work_sites.site_dir`, runs the build itself, probes the site over real HTTPS, and performs the merge + deploy itself — only when the site carries `auto_publish=true`. Entry containment (all default-OFF): the repo must be in `work_repo_allowlist` (403 otherwise — no dispatch, no spend); the site must exist in `work_sites`; `source.from` must match that site's `client_emails` (403 `unknown_sender`). Rides the non-bypassable daily cost + token caps, the human-only-PTY guard, and a per-user work-rate ceiling (REMO_WORK_MAX_PER_HOUR, default 4).",
+        "tags": [
+          "ext"
+        ],
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "repo": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "site": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "request_text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 20000
+                  },
+                  "source": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "email"
+                        ]
+                      },
+                      "from": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 320
+                      },
+                      "subject": {
+                        "type": "string",
+                        "maxLength": 2000
+                      },
+                      "message_id": {
+                        "type": "string",
+                        "maxLength": 998
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "from"
+                    ]
+                  },
+                  "wait_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 120000
+                  }
+                },
+                "required": [
+                  "repo",
+                  "site",
+                  "request_text",
+                  "source"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Work item created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtWork"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid api key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key lacks the ext:work scope, OR repo_not_allowlisted, OR unknown_site, OR unknown_sender — no dispatch, no spend.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No session for that repo",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No stream-json session for this project_dir",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ext/work/{work_id}": {
+      "get": {
+        "summary": "Poll a work item (no new tokens)",
+        "tags": [
+          "ext"
+        ],
+        "security": [
+          {
+            "apiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "work_id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Work item",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtWork"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid api key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such work item",
             "content": {
               "application/json": {
                 "schema": {

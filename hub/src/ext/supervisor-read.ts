@@ -15,8 +15,24 @@
 import { randomUUID } from 'crypto'
 import { getSupervisor } from '../ws/supervisor-registry.ts'
 
-/** Commands this seam may issue. Anything else is refused (fail closed). */
-export const EXT_READ_COMMANDS = ['session_transcript_tail', 'session_memory'] as const
+/**
+ * Commands this seam may issue. Anything else is refused (fail closed).
+ *
+ * Milestone WORK adds three NON-read commands (`work_diff_scope` = read, `work_build`
+ * and `work_publish` = writes). They ride this same correlated-RPC seam because it is
+ * the only hub→supervisor command transport, but they are issued ONLY by
+ * hub/src/work/{verify,publish}.ts, never by an /api/ext route and never by an agent.
+ * `work_publish` in particular is reachable only after `runHubQc().ok` AND
+ * `site.auto_publish` (see hub/src/work/publish.ts).
+ */
+export const EXT_READ_COMMANDS = [
+  'session_transcript_tail',
+  'session_memory',
+  'work_push_branch',
+  'work_diff_scope',
+  'work_build',
+  'work_publish',
+] as const
 export type ExtReadCommand = (typeof EXT_READ_COMMANDS)[number]
 
 export interface ExtCommandResult {
