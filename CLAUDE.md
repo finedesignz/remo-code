@@ -386,6 +386,13 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   billing. The stream-json path is PRESERVED for unattended automation only, behind the cost cap.
   Cutover flip + ChatSurface deletion are GATED on `tools/cutover-deletion-gate.mjs` (Phase-16 on-device
   attestations). Enforced by `supervisor/test/{no-api-key-no-streamjson-pty,no-apikey-fallback-guard,default-backend-selector}.test.ts`.
+- **API keys are scoped; `agent` IS the host-spawn credential.** `api_keys.scopes` (TEXT[],
+  NULLABLE — NULL/empty = legacy full access, zero migration) gates: `agent` (`/ws/agent` both
+  roles + `/api/plugin/*`), `ext:read`, `ext:ask` (`/api/ext/*`). An external consumer gets an
+  `ext:*`-only key and can never spawn a CLI on a host. **`/api/api-keys` is cookie-auth ONLY —
+  an api key must NEVER be able to mint an api key.** N keys per user; only `purpose='supervisor'`
+  and `purpose='orchestrator'` stay at-most-one-active (partial unique indexes). Helpers:
+  `hub/src/auth/scopes.ts`; enforced by `hub/test/api-keys-scopes.test.ts`. See docs/auth.md.
 - **schema.sql re-runs every boot** — idempotent DDL only; backfills → `hub/scripts/` one-shots.
 - **Orchestrator:** exactly one open per user (`idx_sessions_orchestrator_unique`); never set
   `orchestrator_enabled=false` without also setting `orchestrator_disabled_explicitly=true`
