@@ -109,6 +109,12 @@ function registerInternal(task: ScheduledTask): void {
     if (runAt.getTime() <= Date.now()) {
       // Track an empty entry so size()/unregister() see the task, then fire off
       // the hot path (non-blocking — the create route returns immediately).
+      //
+      // setTimeout(0) is a LATENCY OPTIMIZATION ONLY. It is NOT durable — a process
+      // death before the callback, or a throw inside fireOnce, would otherwise drop
+      // the task. Correctness is guaranteed independently by the DURABLE once-due
+      // sweep (scheduler/once-due-sweep.ts), which re-fires any due+enabled once row
+      // every tick; claimOnceTask keeps the two mutually exclusive (exactly-once).
       jobs.set(task.id, [])
       setTimeout(() => { void fireOnce() }, 0)
     } else {

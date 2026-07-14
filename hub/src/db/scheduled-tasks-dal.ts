@@ -229,6 +229,31 @@ export async function listEnabledTasks(): Promise<ScheduledTask[]> {
   return rows.map(normalize)
 }
 
+/**
+ * Milestone once — the DURABLE tick source of truth for one-time tasks. Returns
+ * the ids of `schedule_kind='once'` rows that are DUE (`run_at <= now`) and still
+ * `enabled = true` (i.e. NOT yet claimed by a prior fire). The once-due sweep
+ * fires each via `dispatcher.fire`, whose atomic `claimOnceTask` makes this
+ * exactly-once even if the in-process `setTimeout(0)` latency-optimization also
+ * fires: whoever wins the `... AND enabled = true` UPDATE dispatches, the loser
+ * no-ops. This is what makes a work item SAFE across a restart / a thrown fire /
+ * a swallowed register() error — the row stays enabled until claimed, so the next
+ * tick re-arms AND re-fires it. Cheap: covered by idx_scheduled_tasks_next_fire /
+ * the user_enabled index; the id list is small (immediate items drain fast).
+ */
+export async function listDueOnceTasks(now: Date = new Date(), limit = 100): Promise<string[]> {
+  const rows = await sql<{ id: string }[]>`
+    SELECT id FROM scheduled_tasks
+     WHERE schedule_kind = 'once'
+       AND enabled = true
+       AND run_at IS NOT NULL
+       AND run_at <= ${now}
+     ORDER BY run_at ASC
+     LIMIT ${limit}
+  `
+  return rows.map((r) => r.id)
+}
+
 export async function createTaskV2(input: {
   user_id: string
   name: string

@@ -337,9 +337,19 @@ summary — there is **no parallel one-time queue**.
 
 1. **Arm** — `registry.registerInternal` special-cases `schedule_kind='once'`:
    `run_at` in the future → a croner **Date** job fires it a single time; `run_at`
-   already past (immediate items with `run_at=now`, or a row that outlived a hub
-   restart before firing) → it fires on the next tick. **No cron rule is ever
-   evaluated for a once row.**
+   already past → a `setTimeout(0)` fires it. **No cron rule is ever evaluated for
+   a once row.** The `setTimeout(0)` is a **latency optimization ONLY** — it is not
+   durable.
+   **Durable source of truth: the once-due sweep** (`scheduler/once-due-sweep.ts`,
+   boot-started `setInterval`, default 10s, `REMO_ONCE_SWEEP_INTERVAL_MS` /
+   `REMO_ONCE_SWEEP_DISABLED`). Every tick it selects `schedule_kind='once' AND
+   enabled=true AND run_at<=now` (`listDueOnceTasks`) and fires each via
+   `dispatcher.fire`. Because a row stays `enabled=true` until a fire **claims** it,
+   the sweep re-arms AND re-fires any due row whose `setTimeout` was lost — a
+   process death before the callback, a throw inside the fire, or a swallowed
+   `register()` error. `claimOnceTask` keeps the sweep and the `setTimeout`
+   mutually exclusive: **exactly one dispatch, ever.** This is what closes the
+   "accept-never-dispatch" silent-drop for the email→website work path.
 2. **Fire (CLAIM-then-fire)** — `dispatcher.fire()` short-circuits
    `schedule_kind='once'`: it FIRST **claims** the row via `claimOnceTask` — a
    single conditional `UPDATE … SET enabled=false, next_fire_at=NULL, … WHERE
@@ -390,6 +400,19 @@ THIN adapter that reconstructs the input from `work_runs` + `payload` and calls 
   `workRepoAllowlistGate`) runs again. **No scheduling path reaches a repo/site
   that direct dispatch couldn't.** Proven by `test/ext-work-containment.test.ts`
   (b) + `test/ext-work-gates.test.ts` + `test/once-work-sender.test.ts`.
+- **`wait_ms` contract (async dispatch):** work now dispatches ASYNC (the once
+  task fires via the `setTimeout(0)` + the durable once-due sweep), so `wait_ms` is
+  a **best-effort latency convenience**, not a guarantee. The route polls
+  `work_runs` until terminal or the window lapses; a non-terminal return
+  (`queued`/`dispatched`/`verifying`) is a **DEFINED, POLLABLE** state — the
+  once-due sweep guarantees the item is dispatched and the work-reaper guarantees
+  it reaches terminal — so the caller simply polls `GET /api/ext/work/:work_id`
+  until `status` is terminal. It is never a silent race / dropped item.
+- **Enqueue failure is never a phantom queue entry:** if `createTaskV2` throws
+  AFTER the `work_runs` row is inserted, the route finalizes that row `failed` and
+  returns **502** (the caller retries) — never a 201/202 with a `queued` row that
+  nothing drives. A `register()` failure is non-fatal: the once row is persisted,
+  so the once-due sweep drives it on the next tick.
 - **`/api/ext/ask` is NOT yet rerouted** (TODO in `ext.ts`): ask already rides the
   SAME shared dispatch pipeline + non-bypassable gates (`hub/src/ask/dispatch.ts`),
   so the caps/gate unification is already satisfied; only the queue-entry/Tasks-list

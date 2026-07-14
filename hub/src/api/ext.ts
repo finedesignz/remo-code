@@ -35,6 +35,7 @@ import {
   isKnownSender,
   insertWorkRun,
   getWorkRun,
+  finalizeWork,
   type WorkRun,
 } from '../db/work-dal.ts'
 import { renderWorkPrompt } from '../work/prompt.ts'
@@ -494,34 +495,54 @@ ext.post('/work', async (c) => {
   // `work_runs` (inserted above) remains the typed TERMINAL result the GET
   // endpoints read. email_summary=false: the work path has its own result
   // surface, so we suppress a misleading "dispatched" summary email.
-  const onceTask = await createTaskV2({
-    user_id: userId,
-    session_id: workSession.id,
-    name: `Work · ${site.site_key} · ${ident}`,
-    task_type: 'work',
-    target_kind: 'session',
-    target_id: workSession.id,
-    timezone: 'UTC',
-    enabled: true,
-    schedule_kind: 'once',
-    run_at: new Date(),
-    email_summary: false,
-    payload: {
-      work_id: work.id,
-      work_session_id: workSession.id,
-      api_key_id: apiKeyId,
-      project_dir: target.project_dir,
-      supervisor_id: supervisorId,
-      repo_ident: ident,
-      site_key: site.site_key,
-    },
-  })
+  let onceTask
+  try {
+    onceTask = await createTaskV2({
+      user_id: userId,
+      session_id: workSession.id,
+      name: `Work · ${site.site_key} · ${ident}`,
+      task_type: 'work',
+      target_kind: 'session',
+      target_id: workSession.id,
+      timezone: 'UTC',
+      enabled: true,
+      schedule_kind: 'once',
+      run_at: new Date(),
+      email_summary: false,
+      payload: {
+        work_id: work.id,
+        work_session_id: workSession.id,
+        api_key_id: apiKeyId,
+        project_dir: target.project_dir,
+        supervisor_id: supervisorId,
+        repo_ident: ident,
+        site_key: site.site_key,
+      },
+    })
+  } catch (err: any) {
+    // Enqueue failed AFTER the work_runs row was inserted. NEVER return a phantom
+    // 'queued' row with nothing driving it (ai-review finding #2) — finalize the
+    // work run terminal so the caller sees a real failure and can retry.
+    await finalizeWork(work.id, 'failed', { reason: `enqueue_failed: ${err?.message ?? err}` }).catch(() => {})
+    return c.json({ error: 'enqueue_failed', work_id: work.id, detail: err?.message ?? String(err) }, 502)
+  }
   try {
     scheduleRegistry.register(onceTask)
   } catch (err: any) {
-    console.error(`[ext.work] failed to arm once task=${onceTask.id}: ${err?.message ?? err}`)
+    // Non-fatal: the once row is PERSISTED, so the durable once-due sweep
+    // (scheduler/once-due-sweep.ts) fires it on the next tick regardless. The work
+    // item is NOT dropped — register() is only the in-process latency optimization.
+    console.error(`[ext.work] register failed (once-due sweep will drive) task=${onceTask.id}: ${err?.message ?? err}`)
   }
 
+  // wait_ms CONTRACT (ai-review finding #1): work now dispatches ASYNC (the once
+  // task fires via registry setTimeout(0) + the durable once-due sweep). wait_ms
+  // is a best-effort latency convenience — it polls work_runs until terminal or
+  // the window lapses. A non-terminal return (`queued`/`dispatched`/`verifying`)
+  // is a DEFINED, POLLABLE state, NOT a dropped item: the once-due sweep
+  // GUARANTEES the work is dispatched and the work-reaper GUARANTEES it reaches a
+  // terminal state. The caller polls `GET /api/ext/work/:work_id` (returned as
+  // work_id) until `status` is terminal. It is never a silent race.
   const waitMs = Math.min(body.wait_ms ?? 0, MAX_WAIT_MS)
   const deadline = Date.now() + waitMs
   let current = (await getWorkRun(work.id, userId)) ?? work
