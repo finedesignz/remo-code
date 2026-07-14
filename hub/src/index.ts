@@ -57,6 +57,7 @@ import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchest
 import { startGhostReaperSweep, stopGhostReaperSweep } from './ws/ghost-reaper.ts'
 import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.ts'
 import { startAskReaperSweep, stopAskReaperSweep } from './ask/reaper.ts'
+import { startWorkReaperSweep, stopWorkReaperSweep } from './work/reaper.ts'
 import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
@@ -727,6 +728,10 @@ runMigrations()
     // external caller never polls a dead ask forever. Conditional finalize, so a
     // late reply can't be double-finalized. No-op when REMO_ASK_REAPER_DISABLED.
     startAskReaperSweep()
+    // Milestone WORK — finalizes `work_runs` stuck queued/dispatched past
+    // REMO_WORK_MAX_MS (default 45min) as `timeout`. Conditional finalize, so a late
+    // reply can't be double-finalized. No-op when REMO_WORK_REAPER_DISABLED.
+    startWorkReaperSweep()
     // fix/stop-the-bleed — LIVENESS-scoped backstop (NOT an absolute-age force-close;
     // an age-only reaper would close live long-running builds). Closes an OPEN
     // session_runs row only when its supervisor has pushed inventory and the row's
@@ -751,6 +756,7 @@ function gracefulShutdown(signal: string) {
   try { stopGhostReaperSweep() } catch {}
   try { stopRunReaperSweep() } catch {}
   try { stopAskReaperSweep() } catch {}
+  try { stopWorkReaperSweep() } catch {}
   try { stopStaleRunReaperSweep() } catch {}
   setTimeout(() => process.exit(0), 250)
 }

@@ -948,6 +948,100 @@ openapi.openapi(taskTemplatesRoute, (c) => {
       404: { description: "No such ask", ...json(Err) },
     },
   });
+
+  // ── Milestone WORK: inbound-email → repo agent → QC → gated publish ────────
+  const Work = z
+    .object({
+      work_id: z.string(),
+      session_id: z.string().optional(),
+      status: z.enum([
+        "queued",
+        "dispatched",
+        "completed",
+        "qc_failed",
+        "needs_human",
+        "timeout",
+        "skipped",
+        "failed",
+      ]),
+      summary: z.string().nullable(),
+      files_changed: z.array(z.string()),
+      commit_shas: z.array(z.string()),
+      qc: z.unknown().nullable(),
+      diff_url: z.string().nullable(),
+      pr_url: z.string().nullable(),
+      preview_url: z.string().nullable(),
+      published: z.boolean().openapi({
+        description:
+          "The HUB's record, not the agent's claim: a site without the auto_publish trust flag can NEVER have published=true (finalizeWork ANDs the claim with the flag in SQL).",
+      }),
+      live_url: z.string().nullable(),
+      blocker: z.string().nullable().openapi({
+        description: "e.g. suspected_injection, unparseable_reply, or why a human is needed.",
+      }),
+      reason: z.string().nullable().openapi({
+        description:
+          "Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work, session_offline, work_timeout.",
+      }),
+      auto_publish: z.boolean(),
+      repo_ident: z.string(),
+      site_key: z.string(),
+    })
+    .openapi("ExtWork");
+
+  reg.registerPath({
+    method: "post",
+    path: "/api/ext/work",
+    summary: "Inbound client request → repo agent → QC → GATED publish (PAID — writes code)",
+    description:
+      "Points an UNTRUSTED inbound client email at the repo's stream-json session. Containment (all default-OFF): the repo must be in `work_repo_allowlist` (403 otherwise — no dispatch, no spend); the site must exist in `work_sites`; `source.from` must match that site's `client_emails` (403 `unknown_sender`); the agent may only touch the site's `site_dir`; QC (build + HTTPS deploy-verify) must pass BEFORE any publish; and production publish happens ONLY when the site carries `auto_publish=true` — otherwise it is fix + QC + PREVIEW + report. Rides the non-bypassable daily cost + token caps, the human-only-PTY guard, and a per-user work-rate ceiling (REMO_WORK_MAX_PER_HOUR, default 4).",
+    ...base,
+    request: {
+      body: json(
+        z.object({
+          repo: z.string().min(1),
+          site: z.string().min(1),
+          request_text: z.string().min(1).max(20000),
+          source: z.object({
+            kind: z.literal("email"),
+            from: z.string().min(1).max(320),
+            subject: z.string().max(2000).optional(),
+            message_id: z.string().max(998).optional(),
+          }),
+          wait_ms: z.number().int().min(0).max(120000).optional(),
+        }),
+      ),
+    },
+    responses: {
+      202: { description: "Work item created", ...json(Work) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: {
+        description:
+          "Key lacks the ext:work scope, OR repo_not_allowlisted, OR unknown_site, OR unknown_sender — no dispatch, no spend.",
+        ...json(Err),
+      },
+      404: { description: "No session for that repo", ...json(Err) },
+      409: { description: "No stream-json session for this project_dir", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/work/{work_id}",
+    summary: "Poll a work item (no new tokens)",
+    ...base,
+    request: {
+      params: z.object({
+        work_id: z.string().openapi({ param: { name: "work_id", in: "path" } }),
+      }),
+    },
+    responses: {
+      200: { description: "Work item", ...json(Work) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such work item", ...json(Err) },
+    },
+  });
 }
 
 // OpenAPI security scheme registration.
