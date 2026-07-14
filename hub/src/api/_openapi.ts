@@ -763,7 +763,200 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   });
 }
 
+// ── /api/ext — external session-ask API (milestone ASK) ─────────────────────
+// Spec-only registration; `./ext.ts` (plain Hono) serves traffic. Auth is an
+// api_key Bearer (`apiKeyAuth`), NOT the cookie/JWT session. See docs/session-ask.md.
+{
+  const Err = z.object({ error: z.string(), detail: z.string().optional() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const base = { tags: ["ext"], security: [{ apiKeyAuth: [] }] } as const;
+  const SessionParam = z.object({
+    id: z.string().openapi({
+      param: { name: "id", in: "path" },
+      description: "Session id, repo_ident (github://owner/repo | path://<abs>), or repo name",
+      example: "github://finedesignz/remo-code",
+    }),
+  });
+  const Ask = z.object({
+    ask_id: z.string(),
+    status: z.enum(["queued", "dispatched", "answered", "timeout", "skipped", "failed"]),
+    answer: z.string().nullable(),
+    confidence: z.string().nullable(),
+    evidence: z.array(z.string()).nullable(),
+    reason: z.string().nullable().openapi({
+      description:
+        "Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask, session_offline, ask_timeout.",
+    }),
+    raw_reply: z.string().nullable(),
+    created_at: z.string(),
+    answered_at: z.string().nullable(),
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/sessions",
+    summary: "List the caller's sessions (FREE — zero tokens)",
+    ...base,
+    responses: {
+      200: {
+        description: "Sessions",
+        ...json(
+          z.object({
+            sessions: z.array(
+              z.object({
+                id: z.string(),
+                name: z.string(),
+                repo_ident: z.string().nullable(),
+                project_dir: z.string().nullable(),
+                runner_type: z.string(),
+                active: z.boolean(),
+                last_activity: z.string().nullable(),
+              }),
+            ),
+          }),
+        ),
+      },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: { description: "Key lacks the ext:read scope", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/sessions/{id}/transcript",
+    summary: "Tail of the session's on-disk CLI transcript (FREE — zero tokens, no PTY write)",
+    description:
+      "Proxied to the supervisor host's allowlisted READ-ONLY `session_transcript_tail` command. Works for pty-interactive sessions too. Byte-capped.",
+    ...base,
+    request: {
+      params: SessionParam,
+      query: z.object({ tail: z.coerce.number().int().min(1).max(200).optional() }),
+    },
+    responses: {
+      200: {
+        description: "Transcript tail",
+        ...json(
+          z.object({
+            session_id: z.string(),
+            turns: z.array(z.object({ role: z.string(), text: z.string() })),
+            truncated: z.boolean(),
+          }),
+        ),
+      },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such session", ...json(Err) },
+      409: { description: "Session has no project_dir", ...json(Err) },
+      502: { description: "Supervisor could not read the transcript", ...json(Err) },
+      503: { description: "No (or ambiguous) online supervisor for this user", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/sessions/{id}/memory",
+    summary: "The session project's memory files (FREE — zero tokens, no PTY write)",
+    ...base,
+    request: { params: SessionParam },
+    responses: {
+      200: {
+        description: "Memory files",
+        ...json(
+          z.object({
+            session_id: z.string(),
+            files: z.array(z.object({ name: z.string(), content: z.string() })),
+            truncated: z.boolean(),
+          }),
+        ),
+      },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such session", ...json(Err) },
+      502: { description: "Supervisor could not read memory", ...json(Err) },
+      503: { description: "No (or ambiguous) online supervisor", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/sessions/{id}/state",
+    summary: "Cheap status roll-up for a session (FREE)",
+    ...base,
+    request: { params: SessionParam },
+    responses: {
+      200: {
+        description: "State",
+        ...json(
+          z.object({
+            session_id: z.string(),
+            repo_ident: z.string().nullable(),
+            runner_type: z.string(),
+            active: z.boolean(),
+            status: z.string(),
+            last_activity: z.string().nullable(),
+            last_assistant_message_at: z.string().nullable(),
+            open_session_runs: z.number().int(),
+          }),
+        ),
+      },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such session", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "post",
+    path: "/api/ext/sessions/{id}/ask",
+    summary: "Ask the session a question (PAID — spends tokens)",
+    description:
+      "Dispatches a short-lived stream-json ask-session bound to the target's project_dir (the human's PTY is NEVER written to). Rides the non-bypassable daily cost cap + daily token cap + human-only-PTY guard + per-key ask-rate ceiling. `wait_ms` long-polls up to 120s; on expiry poll the ask endpoint.",
+    ...base,
+    request: {
+      params: SessionParam,
+      body: json(
+        z.object({
+          question: z.string().min(1).max(8000),
+          context: z.string().max(8000).optional(),
+          wait_ms: z.number().int().min(0).max(120000).optional(),
+          include_transcript: z.boolean().optional(),
+          include_memory: z.boolean().optional(),
+        }),
+      ),
+    },
+    responses: {
+      202: { description: "Ask created (answer inline when the long-poll caught it)", ...json(Ask) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: { description: "Key lacks the ext:ask scope", ...json(Err) },
+      404: { description: "No such session", ...json(Err) },
+      409: { description: "No stream-json ask session for this project_dir", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/sessions/{id}/ask/{ask_id}",
+    summary: "Poll an ask (no new tokens)",
+    ...base,
+    request: {
+      params: SessionParam.extend({
+        ask_id: z.string().openapi({ param: { name: "ask_id", in: "path" } }),
+      }),
+    },
+    responses: {
+      200: { description: "Ask", ...json(Ask) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such ask", ...json(Err) },
+    },
+  });
+}
+
 // OpenAPI security scheme registration.
+openapi.openAPIRegistry.registerComponent("securitySchemes", "apiKeyAuth", {
+  type: "http",
+  scheme: "bearer",
+  description:
+    "A remo-code api_key (`remokey_…`) from Settings → Credentials. Optional scopes: `ext:read` (free reads) and `ext:ask` (spends tokens). A key with NULL scopes keeps legacy full access.",
+});
 openapi.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
   type: "http",
   scheme: "bearer",
