@@ -1,6 +1,7 @@
 import { sql } from "./postgres.ts";
 import { buildRepoKey, type GitOriginGithub } from "../lib/repo-key.ts";
 import { log } from "../observability/logger.ts";
+import { hasScope } from "../auth/scopes.ts";
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
@@ -916,23 +917,85 @@ export async function getSupervisorHostnameForApiKey(keyHash: string): Promise<s
   return h && h.trim() ? h : null
 }
 
+/**
+ * Milestone SKEY — full key row + scopes. Touches last_used_at.
+ * Returns null for unknown/revoked keys.
+ */
+export async function verifyApiKeyFull(
+  keyHash: string,
+): Promise<{ id: string; user_id: string; scopes: string[] | null; purpose: string } | null> {
+  const rows = await sql<{ id: string; user_id: string; scopes: string[] | null; purpose: string }[]>`
+    SELECT id, user_id, scopes, purpose FROM api_keys
+    WHERE key_hash = ${keyHash} AND revoked_at IS NULL LIMIT 1
+  `;
+  if (!rows[0]) return null;
+  await sql`UPDATE api_keys SET last_used_at = now() WHERE key_hash = ${keyHash} AND revoked_at IS NULL`;
+  return rows[0];
+}
+
+/** Scope-checked verify. NULL/empty scopes = legacy full access. */
+export async function verifyApiKeyWithScope(
+  keyHash: string,
+  scope: string,
+): Promise<{ userId: string; apiKeyId: string } | { error: 'not_found' | 'missing_scope' }> {
+  const row = await verifyApiKeyFull(keyHash);
+  if (!row) return { error: 'not_found' };
+  if (!hasScope(row.scopes, scope)) return { error: 'missing_scope' };
+  return { userId: row.user_id, apiKeyId: row.id };
+}
+
 export async function listApiKeys(userId: string) {
   return sql`
-    SELECT id, name, created_at, last_used_at FROM api_keys
+    SELECT id, name, purpose, scopes, key_prefix, created_at, last_used_at FROM api_keys
     WHERE user_id = ${userId} AND revoked_at IS NULL ORDER BY created_at DESC
   `;
 }
 
-export async function createApiKey(userId: string, keyHash: string, name: string) {
-  await sql`UPDATE api_keys SET revoked_at = now() WHERE user_id = ${userId} AND revoked_at IS NULL`;
+/**
+ * Mint a key. Milestone SKEY: N keys per user are legal — we ONLY revoke a prior
+ * active key of the SAME `purpose` (so minting an `external` key never kills the
+ * supervisor's spawn credential, and rotating the supervisor key still has
+ * rotate semantics). `purpose='supervisor'|'orchestrator'` stay at-most-one-active
+ * per user (partial unique indexes).
+ */
+export async function createApiKey(
+  userId: string,
+  keyHash: string,
+  name: string,
+  opts: { purpose?: string; scopes?: string[] | null; keyPrefix?: string | null } = {},
+) {
+  const purpose = opts.purpose ?? 'supervisor';
+  if (purpose === 'supervisor' || purpose === 'orchestrator') {
+    await sql`
+      UPDATE api_keys SET revoked_at = now()
+      WHERE user_id = ${userId} AND purpose = ${purpose} AND revoked_at IS NULL
+    `;
+  }
   const rows = await sql`
-    INSERT INTO api_keys (user_id, key_hash, name) VALUES (${userId}, ${keyHash}, ${name}) RETURNING *
+    INSERT INTO api_keys (user_id, key_hash, name, purpose, scopes, key_prefix)
+    VALUES (${userId}, ${keyHash}, ${name}, ${purpose}, ${opts.scopes ?? null}, ${opts.keyPrefix ?? null})
+    RETURNING id, name, purpose, scopes, key_prefix, created_at, last_used_at
   `;
   return rows[0];
 }
 
-export async function revokeApiKey(userId: string) {
-  await sql`UPDATE api_keys SET revoked_at = now() WHERE user_id = ${userId} AND revoked_at IS NULL`;
+/** Revoke exactly ONE key, scoped to its owner. Returns the revoked row or null. */
+export async function revokeApiKeyById(userId: string, id: string) {
+  const rows = await sql`
+    UPDATE api_keys SET revoked_at = now()
+    WHERE id = ${id} AND user_id = ${userId} AND revoked_at IS NULL
+    RETURNING id, name, purpose
+  `;
+  return rows[0] ?? null;
+}
+
+/** Fetch one active key row (owner-scoped) — used by rotate. */
+export async function getApiKeyById(userId: string, id: string) {
+  const rows = await sql<{ id: string; name: string; purpose: string; scopes: string[] | null }[]>`
+    SELECT id, name, purpose, scopes FROM api_keys
+    WHERE id = ${id} AND user_id = ${userId} AND revoked_at IS NULL LIMIT 1
+  `;
+  return rows[0] ?? null;
 }
 
 // Phase 07-G: admin force-reissue. Revokes ALL active api_keys + deletes ALL

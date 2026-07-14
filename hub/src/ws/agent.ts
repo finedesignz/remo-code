@@ -1,7 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
 import { TermFrame, isTermFrameType, isAgentToHubTermType } from './term-protocol'
-import { verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo, getSessionHostname, getSupervisorHostnameForApiKey, backfillSessionHostname } from '../db/dal'
+import { verifyApiKeyWithScope, verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo, getSessionHostname, getSupervisorHostnameForApiKey, backfillSessionHostname } from '../db/dal'
 import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
@@ -268,6 +268,18 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
   if (msg.type === 'auth') {
     if (ws.data.authenticated) return
     const keyHash = await hashToken(msg.api_key)
+
+    // Milestone SKEY — /ws/agent (both roles) is the HOST-SPAWN surface and
+    // requires the `agent` scope. NULL/empty scopes = legacy full access, so
+    // every pre-existing key keeps working with zero migration. A scoped
+    // external key (ext:read / ext:ask only) is rejected here by construction.
+    const scoped = await verifyApiKeyWithScope(keyHash, 'agent')
+    if ('error' in scoped && scoped.error === 'missing_scope') {
+      log.warn('agent.auth_fail', { reason: 'missing_agent_scope', hash_prefix: keyHash.slice(0, 8) })
+      ws.send(JSON.stringify({ type: 'auth_error', error: 'missing scope: agent', reason: 'missing_scope' }))
+      ws.close(4001, 'missing_agent_scope')
+      return
+    }
 
     if (msg.role === 'supervisor') {
       const verified = await verifyApiKeyWithCapability(keyHash, 'supervisor')

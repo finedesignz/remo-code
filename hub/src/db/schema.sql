@@ -1021,12 +1021,15 @@ UPDATE api_keys SET purpose = 'supervisor' WHERE purpose IS NULL OR purpose = ''
 
 -- The legacy partial unique index `idx_api_keys_user_active` enforces ONE
 -- active key per user — incompatible with an orchestrator-purpose key
--- coexisting with the supervisor key. Replace it with a per-(user, purpose)
--- variant so each purpose has at most one active row. Idempotent.
+-- coexisting with the supervisor key. Dropped here.
+-- Its former replacement (`idx_api_keys_user_purpose_active`, unique on
+-- (user_id, purpose)) is GONE too — milestone SKEY allows N active
+-- purpose='external' keys per user, so a (user_id, purpose) unique would
+-- unique_violation on schema apply and prevent the hub from booting. The
+-- surviving invariants (one active supervisor key, one active orchestrator key)
+-- are enforced by the purpose-specific partial uniques at the SKEY block below.
 -- schema-lint: allow idempotent DDL — IF EXISTS drop of a legacy index; no-op on every boot after the first
 DROP INDEX IF EXISTS idx_api_keys_user_active;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_purpose_active
-  ON api_keys(user_id, purpose) WHERE revoked_at IS NULL;
 
 -- ── Phase 08: Revanote annotation integration ────────────────────────────────
 -- Per-user webhook secret (UUID). NULL = unconfigured. Doubles as URL-path
@@ -1396,3 +1399,32 @@ CREATE TABLE IF NOT EXISTS session_asks (
 );
 CREATE INDEX IF NOT EXISTS idx_session_asks_user_created ON session_asks(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_session_asks_status ON session_asks(status);
+
+
+-- ── Milestone SKEY — named, scoped, multi API keys ───────────────────────────
+-- Idempotent DDL only — this file RE-RUNS IN FULL on every hub boot. No backfills.
+-- `scopes` is declared once, above (milestone ASK). SKEY adds 'agent' to the
+-- vocabulary: a non-null array must carry 'agent' to authenticate a
+-- supervisor/agent socket (/ws/agent, /api/plugin/*).
+
+-- Display-only prefix of the plaintext key (e.g. 'remokey_ab12…'), captured at
+-- mint time so the Credentials table can identify a row without ever storing the
+-- key. NULL on legacy rows (the plaintext is gone — UI shows an em dash).
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_prefix TEXT;
+
+-- N keys per user. The old per-(user,purpose) unique index made every key a
+-- singleton per purpose, which blocks minting several scoped 'external' keys.
+-- Keep the at-most-one-active invariant ONLY where it is load-bearing:
+-- purpose='supervisor' (the spawn credential) and purpose='orchestrator'.
+-- The superseded CREATE of idx_api_keys_user_purpose_active is DELETED (not
+-- guarded) further up — schema.sql re-runs IN FULL every boot, so leaving the
+-- stale CREATE alongside this DROP would recreate a (user_id,purpose) unique
+-- index each boot and hard-fail the apply (hub does not boot) the moment a user
+-- legitimately holds two active purpose='external' keys. Same failure mode the
+-- comment at the top of this file documents. Regression: hub/test/schema-double-apply.test.ts.
+-- schema-lint: allow idempotent DDL — IF EXISTS drop of a legacy index; no-op once no such index exists
+DROP INDEX IF EXISTS idx_api_keys_user_purpose_active;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_supervisor_active
+  ON api_keys(user_id) WHERE revoked_at IS NULL AND purpose = 'supervisor';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_orchestrator_active
+  ON api_keys(user_id) WHERE revoked_at IS NULL AND purpose = 'orchestrator';
