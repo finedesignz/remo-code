@@ -115,9 +115,13 @@ Subsystem tables are documented in their respective `docs/*.md`.
 tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect to Connections.
 
 - **Connections** — single responsive repo table; the orchestrator is a pinned special top
-  "folder" row (enable/disable/start/stop in-row), not its own tab. Root-folder paths are no
-  longer edited here — root setup lives in the supervisor first-run wizard (hub URL + API key
-  + ≥1 root).
+  "folder" row (enable/disable/start/stop in-row), not its own tab. **Per-supervisor root folders
+  CAN be managed here** — a `SupervisorRootsEditor` above the repo table lists the active
+  supervisor's scan roots (each removable) and takes an "Add folder" absolute path, including
+  custom non-GitHub paths like `D:\ClientWork`. It whole-array `PATCH /api/supervisors/:id/roots`
+  (step-up / recent-auth gated; `re_auth_required` surfaces the fresh-magic-link hint inline),
+  then the supervisor rescans. The first-run wizard still seeds the initial root (hub URL + API
+  key + ≥1 root).
 - **Usage** — single "Claude Usage and Cost Controls" card (thresholds + daily cost cap merged);
   token counts under the `$` figures; autosave.
 - **Profile** — display name + timezone (autosave); no Telegram card (the hub `/api/telegram/*`
