@@ -62,4 +62,8 @@ export const api = {
       'GET',
       `/api/ext/sessions/${encodeURIComponent(session)}/ask/${encodeURIComponent(askId)}`,
     ),
+  work: (cfg: ExtClientConfig, body: Record<string, unknown>) =>
+    call<any>(cfg, 'POST', '/api/ext/work', body),
+  getWork: (cfg: ExtClientConfig, workId: string) =>
+    call<any>(cfg, 'GET', `/api/ext/work/${encodeURIComponent(workId)}`),
 }

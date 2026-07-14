@@ -1400,7 +1400,6 @@ CREATE TABLE IF NOT EXISTS session_asks (
 CREATE INDEX IF NOT EXISTS idx_session_asks_user_created ON session_asks(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_session_asks_status ON session_asks(status);
 
-
 -- ── Milestone SKEY — named, scoped, multi API keys ───────────────────────────
 -- Idempotent DDL only — this file RE-RUNS IN FULL on every hub boot. No backfills.
 -- `scopes` is declared once, above (milestone ASK). SKEY adds 'agent' to the
@@ -1428,3 +1427,93 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_supervisor_active
   ON api_keys(user_id) WHERE revoked_at IS NULL AND purpose = 'supervisor';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_orchestrator_active
   ON api_keys(user_id) WHERE revoked_at IS NULL AND purpose = 'orchestrator';
+
+-- ── Milestone WORK (remo_work): inbound-email → repo agent → QC → gated publish ──
+-- THREAT MODEL: `work_runs.request_text` originates in a CLIENT EMAIL — the least
+-- trusted input in the system (anyone who knows the address can send one). These
+-- three tables are the containment: a repo must be ALLOWLISTED, a site must be
+-- KNOWN and its sender RECOGNISED, and publishing to production requires an
+-- explicit per-site trust flag that DEFAULTS OFF. Both allowlist tables start
+-- EMPTY, so the feature drives nothing until an operator opts a repo/site in.
+
+-- Repo allowlist (audit finding F6). EMPTY BY DEFAULT ⇒ every /api/ext/work call
+-- is rejected 403 `repo_not_allowlisted` with no dispatch and no spend.
+CREATE TABLE IF NOT EXISTS work_repo_allowlist (
+  user_id    TEXT NOT NULL,
+  repo_ident TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, repo_ident)
+);
+
+-- Per-site trust record. `auto_publish` DEFAULTS FALSE: a site without the flag
+-- gets fix + QC + preview deploy + report, and NEVER touches production.
+-- `client_emails` is the sender allowlist — an email from an unknown address
+-- never reaches a session. `site_dir` scopes the agent's write blast radius.
+-- NOTE: `build_cmd` / `publish_cmd` / `coolify_app_uuid` are OPERATOR-configured and
+-- executed BY THE HUB/SUPERVISOR, never by the agent. The agent's authority ends at a
+-- pushed branch; the hub verifies the diff scope, runs the build, probes HTTPS, and
+-- performs the publish itself.
+CREATE TABLE IF NOT EXISTS work_sites (
+  id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id       TEXT NOT NULL,
+  repo_ident    TEXT NOT NULL,
+  site_key      TEXT NOT NULL,
+  site_dir      TEXT NOT NULL,
+  client_emails TEXT[] NOT NULL DEFAULT '{}',
+  auto_publish  BOOLEAN NOT NULL DEFAULT false,
+  publish_cmd   TEXT,
+  verify_url    TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Hub-side QC + publish inputs (added after the "agent proposes, hub disposes" rewrite).
+ALTER TABLE work_sites ADD COLUMN IF NOT EXISTS build_cmd TEXT;
+ALTER TABLE work_sites ADD COLUMN IF NOT EXISTS preview_verify_url TEXT;
+ALTER TABLE work_sites ADD COLUMN IF NOT EXISTS coolify_app_uuid TEXT;
+ALTER TABLE work_sites ADD COLUMN IF NOT EXISTS default_branch TEXT NOT NULL DEFAULT 'main';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_sites_key ON work_sites(user_id, repo_ident, site_key);
+
+-- Audit trail (audit finding F9). One row per work item: the source email
+-- metadata, the FULL prompt that was sent, the resulting commits/files, whether it
+-- published, and the QC evidence. This is what answers "which live-site commits
+-- came from an inbound email?".
+CREATE TABLE IF NOT EXISTS work_runs (
+  id                TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id           TEXT NOT NULL,
+  session_id        TEXT NOT NULL,
+  api_key_id        TEXT,
+  repo_ident        TEXT NOT NULL,
+  site_key          TEXT NOT NULL,
+  site_id           TEXT,
+  auto_publish      BOOLEAN NOT NULL DEFAULT false,
+  source_kind       TEXT NOT NULL DEFAULT 'email',
+  source_from       TEXT,
+  source_subject    TEXT,
+  source_message_id TEXT,
+  request_text      TEXT NOT NULL,
+  prompt            TEXT NOT NULL,
+  nonce             TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'queued',
+  summary           TEXT,
+  files_changed     JSONB,
+  commit_shas       JSONB,
+  qc                JSONB,
+  diff_url          TEXT,
+  pr_url            TEXT,
+  preview_url       TEXT,
+  live_url          TEXT,
+  published         BOOLEAN NOT NULL DEFAULT false,
+  blocker           TEXT,
+  reason            TEXT,
+  raw_reply         TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at       TIMESTAMPTZ
+);
+-- The agent's authority ends at `branch` + `commit_shas`. Everything about what went
+-- live is HUB-OBSERVED: `hub_qc` holds the hub's own diff-scope check, build result and
+-- HTTPS probe; `published` is written ONLY on the publish path the HUB executed.
+ALTER TABLE work_runs ADD COLUMN IF NOT EXISTS branch TEXT;
+ALTER TABLE work_runs ADD COLUMN IF NOT EXISTS hub_qc JSONB;
+ALTER TABLE work_runs ADD COLUMN IF NOT EXISTS deploy_status TEXT;
+CREATE INDEX IF NOT EXISTS idx_work_runs_user_created ON work_runs(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_runs_status ON work_runs(status);
+CREATE INDEX IF NOT EXISTS idx_work_runs_published ON work_runs(published, created_at DESC);

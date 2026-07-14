@@ -47,7 +47,70 @@ export const CREDENTIAL_PATTERNS: readonly RegExp[] = [
   /_SETUP_TOKEN$/i,
 ] as const
 
+/**
+ * DEPLOY-credential envs (milestone WORK). Scrubbed from every CLI spawn env so that
+ * "do not publish" is TRUE rather than merely REQUESTED: an agent that has been
+ * prompt-injected into trying to deploy has no credential to deploy WITH.
+ *
+ * Deliberately does NOT include GITHUB_TOKEN / GH_TOKEN: the work contract requires the
+ * agent to PUSH A BRANCH, and a branch push is not a publish. The publish path (merge +
+ * deploy) runs in the hub / in `work_publish`, not in the agent's process.
+ */
+export const DEPLOY_KEY_DENYLIST: readonly string[] = [
+  'COOLIFY_TOKEN',
+  'COOLIFY_API_KEY',
+  'COOLIFY_URL',
+  'VERCEL_TOKEN',
+  'NETLIFY_AUTH_TOKEN',
+  'CLOUDFLARE_API_TOKEN',
+  'CLOUDFLARE_API_KEY',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'FTP_PASSWORD',
+  'SSH_DEPLOY_KEY',
+  'DEPLOY_KEY',
+  'DEPLOY_TOKEN',
+  'RENDER_API_KEY',
+  'FLY_API_TOKEN',
+] as const
+
+/** Anchored deploy-credential-class patterns. */
+export const DEPLOY_PATTERNS: readonly RegExp[] = [
+  /^COOLIFY_/i,
+  /^VERCEL_/i,
+  /^NETLIFY_/i,
+  /_DEPLOY_TOKEN$/i,
+  /_DEPLOY_KEY$/i,
+] as const
+
+/**
+ * GIT-PUSH credential envs (milestone WORK, option (a)). Scrubbed from the WORK session
+ * env so the agent cannot push ANYWHERE — least authority. The agent commits locally on
+ * `work/<nonce>`; the SUPERVISOR (a hub-commanded run_command the agent cannot invoke)
+ * pushes that branch. Removing these makes "the agent does not push" structural.
+ *
+ * CAVEAT (documented in docs/remo-work.md): env scrubbing stops a token PASSED IN THE
+ * ENV. On a host whose git credentials come from the OS credential manager, an SSH agent,
+ * or a remote URL with embedded creds, git can still authenticate without an env var. The
+ * enforceable backstop is server-side BRANCH PROTECTION on the client repo's default
+ * branch — see the runbook.
+ */
+export const GIT_PUSH_KEY_DENYLIST: readonly string[] = [
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_ENTERPRISE_TOKEN',
+  'GIT_ASKPASS',
+  'GIT_TOKEN',
+  'GITHUB_PAT',
+] as const
+
+export const GIT_PUSH_PATTERNS: readonly RegExp[] = [/^GITHUB_.*TOKEN$/i, /^GH_.*TOKEN$/i] as const
+
 const DENY_SET = new Set(PROVIDER_KEY_DENYLIST.map((k) => k.toUpperCase()))
+const DEPLOY_DENY_SET = new Set(DEPLOY_KEY_DENYLIST.map((k) => k.toUpperCase()))
+const GIT_PUSH_DENY_SET = new Set(GIT_PUSH_KEY_DENYLIST.map((k) => k.toUpperCase()))
 
 /** True when `name` is a provider credential env (named OR pattern-matched). */
 export function isCredentialEnvName(name: string): boolean {
@@ -55,15 +118,32 @@ export function isCredentialEnvName(name: string): boolean {
   return CREDENTIAL_PATTERNS.some((re) => re.test(name))
 }
 
+/** True when `name` is a DEPLOY/publish credential env (named OR pattern-matched). */
+export function isDeployCredentialEnvName(name: string): boolean {
+  if (DEPLOY_DENY_SET.has(name.toUpperCase())) return true
+  return DEPLOY_PATTERNS.some((re) => re.test(name))
+}
+
+/** True when `name` is a GIT-PUSH credential env (named OR pattern-matched). */
+export function isGitPushCredentialEnvName(name: string): boolean {
+  if (GIT_PUSH_DENY_SET.has(name.toUpperCase())) return true
+  return GIT_PUSH_PATTERNS.some((re) => re.test(name))
+}
+
 /**
  * Return a COPY of `baseEnv` with every provider-credential env removed. Operates
  * on the resolved env (caller passes `{ ...process.env, ...overrides }`), so an
  * inherited key is deleted.
  */
-export function sanitizeSpawnEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function sanitizeSpawnEnv(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  opts: { scrubDeployCredentials?: boolean; scrubGitPush?: boolean } = {},
+): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {}
   for (const [k, v] of Object.entries(baseEnv)) {
     if (isCredentialEnvName(k)) continue
+    if (opts.scrubDeployCredentials && isDeployCredentialEnvName(k)) continue
+    if (opts.scrubGitPush && isGitPushCredentialEnvName(k)) continue
     out[k] = v
   }
   return out

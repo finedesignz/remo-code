@@ -3702,5 +3702,358 @@ To perform this operation, you must be authenticated by means of one of the foll
 apiKeyAuth
 </aside>
 
+## Inbound client request → repo agent → QC → GATED publish (PAID — writes code)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/ext/work \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "repo": "string",
+  "site": "string",
+  "request_text": "string",
+  "source": {
+    "kind": "email",
+    "from": "string",
+    "subject": "string",
+    "message_id": "string"
+  },
+  "wait_ms": 120000
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/work',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/ext/work`
+
+Points an UNTRUSTED inbound client email at the repo's stream-json session. THE AGENT PROPOSES, THE HUB DISPOSES: the agent's authority ends at a pushed `work/<id>` branch (it has no deploy credentials and is not even told whether the site auto-publishes). The HUB then verifies the branch diff touches ONLY `work_sites.site_dir`, runs the build itself, probes the site over real HTTPS, and performs the merge + deploy itself — only when the site carries `auto_publish=true`. Entry containment (all default-OFF): the repo must be in `work_repo_allowlist` (403 otherwise — no dispatch, no spend); the site must exist in `work_sites`; `source.from` must match that site's `client_emails` (403 `unknown_sender`). Rides the non-bypassable daily cost + token caps, the human-only-PTY guard, and a per-user work-rate ceiling (REMO_WORK_MAX_PER_HOUR, default 4).
+
+> Body parameter
+
+```json
+{
+  "repo": "string",
+  "site": "string",
+  "request_text": "string",
+  "source": {
+    "kind": "email",
+    "from": "string",
+    "subject": "string",
+    "message_id": "string"
+  },
+  "wait_ms": 120000
+}
+```
+
+<h3 id="inbound-client-request-→-repo-agent-→-qc-→-gated-publish-(paid-—-writes-code)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» repo|body|string|true|none|
+|» site|body|string|true|none|
+|» request_text|body|string|true|none|
+|» source|body|object|true|none|
+|»» kind|body|string|true|none|
+|»» from|body|string|true|none|
+|»» subject|body|string|false|none|
+|»» message_id|body|string|false|none|
+|» wait_ms|body|integer|false|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|»» kind|email|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "work_id": "string",
+  "session_id": "string",
+  "status": "queued",
+  "summary": "string",
+  "branch": "string",
+  "files_changed": [
+    "string"
+  ],
+  "commit_shas": [
+    "string"
+  ],
+  "hub_qc": null,
+  "agent_self_check": null,
+  "deploy_status": "string",
+  "diff_url": "string",
+  "pr_url": "string",
+  "preview_url": "string",
+  "published": true,
+  "live_url": "string",
+  "blocker": "string",
+  "reason": "string",
+  "auto_publish": true,
+  "repo_ident": "string",
+  "site_key": "string"
+}
+```
+
+<h3 id="inbound-client-request-→-repo-agent-→-qc-→-gated-publish-(paid-—-writes-code)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Work item created|[ExtWork](#schemaextwork)|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the ext:work scope, OR repo_not_allowlisted, OR unknown_site, OR unknown_sender — no dispatch, no spend.|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No session for that repo|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|No stream-json session for this project_dir|Inline|
+
+<h3 id="inbound-client-request-→-repo-agent-→-qc-→-gated-publish-(paid-—-writes-code)-responseschema">Response Schema</h3>
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Poll a work item (no new tokens)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/work/{work_id} \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/work/{work_id}',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/work/{work_id}`
+
+<h3 id="poll-a-work-item-(no-new-tokens)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|work_id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "work_id": "string",
+  "session_id": "string",
+  "status": "queued",
+  "summary": "string",
+  "branch": "string",
+  "files_changed": [
+    "string"
+  ],
+  "commit_shas": [
+    "string"
+  ],
+  "hub_qc": null,
+  "agent_self_check": null,
+  "deploy_status": "string",
+  "diff_url": "string",
+  "pr_url": "string",
+  "preview_url": "string",
+  "published": true,
+  "live_url": "string",
+  "blocker": "string",
+  "reason": "string",
+  "auto_publish": true,
+  "repo_ident": "string",
+  "site_key": "string"
+}
+```
+
+<h3 id="poll-a-work-item-(no-new-tokens)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Work item|[ExtWork](#schemaextwork)|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such work item|Inline|
+
+<h3 id="poll-a-work-item-(no-new-tokens)-responseschema">Response Schema</h3>
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
 # Schemas
+
+<h2 id="tocS_ExtWork">ExtWork</h2>
+<!-- backwards compatibility -->
+<a id="schemaextwork"></a>
+<a id="schema_ExtWork"></a>
+<a id="tocSextwork"></a>
+<a id="tocsextwork"></a>
+
+```json
+{
+  "work_id": "string",
+  "session_id": "string",
+  "status": "queued",
+  "summary": "string",
+  "branch": "string",
+  "files_changed": [
+    "string"
+  ],
+  "commit_shas": [
+    "string"
+  ],
+  "hub_qc": null,
+  "agent_self_check": null,
+  "deploy_status": "string",
+  "diff_url": "string",
+  "pr_url": "string",
+  "preview_url": "string",
+  "published": true,
+  "live_url": "string",
+  "blocker": "string",
+  "reason": "string",
+  "auto_publish": true,
+  "repo_ident": "string",
+  "site_key": "string"
+}
+
+```
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|work_id|string|true|none|none|
+|session_id|string|false|none|none|
+|status|string|true|none|none|
+|summary|string¦null|true|none|none|
+|branch|string¦null|true|none|The branch the agent pushed. Its authority ends here — it does not deploy, publish or merge.|
+|files_changed|[string]|true|none|HUB-OBSERVED — derived from the branch diff, not from the agent's claimed file list.|
+|commit_shas|[string]|true|none|none|
+|hub_qc|any|false|none|HUB-OBSERVED evidence: the diff-scope check (every file under work_sites.site_dir), the real build exit code, and the hub's own HTTPS probe. This — not the agent — gates the publish.|
+|agent_self_check|any|false|none|The agent's self-report. ADVISORY metadata only; never the basis of a publish decision.|
+|deploy_status|string¦null|true|none|not_permitted | qc_failed | branch_moved_after_qc | merge_failed | deploy_failed | live_probe_failed | published|
+|diff_url|string¦null|true|none|none|
+|pr_url|string¦null|true|none|none|
+|preview_url|string¦null|true|none|none|
+|published|boolean|true|none|TRUE only when the HUB ITSELF performed the deploy (site.auto_publish AND hub-verified diff-scope AND hub-verified build AND hub-verified 2xx probe). The agent cannot set it; finalizeWork also ANDs it with the site flag in SQL as a backstop.|
+|live_url|string¦null|true|none|none|
+|blocker|string¦null|true|none|e.g. suspected_injection, unparseable_reply, or why a human is needed.|
+|reason|string¦null|true|none|Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work, session_offline, work_timeout.|
+|auto_publish|boolean|true|none|none|
+|repo_ident|string|true|none|none|
+|site_key|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|status|queued|
+|status|dispatched|
+|status|verifying|
+|status|completed|
+|status|qc_failed|
+|status|needs_human|
+|status|timeout|
+|status|skipped|
+|status|failed|
 

@@ -348,6 +348,64 @@ export function askRateGate(apiKeyId: string | null): DispatchGate {
   }
 }
 
+// ── Milestone WORK: inbound-email work gates ─────────────────────────────────
+/**
+ * Max inbound-email work items per user per rolling hour. Default 4.
+ *
+ * A work item is far more expensive than an ask — it spends a full build/QC turn
+ * AND can touch a live site. The daily cost/token caps bound the DAY; this bounds
+ * the RATE, so a client (or an attacker) mailing the address in a loop cannot turn
+ * the inbox into a spend pump. Non-positive / non-finite ⇒ disabled (fail-open),
+ * mirroring the other rate ceilings.
+ */
+const DEFAULT_MAX_WORK_PER_HOUR = 4
+
+export function maxWorkPerHour(): number {
+  const raw = process.env.REMO_WORK_MAX_PER_HOUR
+  if (raw == null || raw.trim() === '') return DEFAULT_MAX_WORK_PER_HOUR
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : DEFAULT_MAX_WORK_PER_HOUR
+}
+
+/** Per-user work-rate gate. Blocks with `over_work_rate:<n>>=<cap>`. */
+export function workRateGate(userId: string): DispatchGate {
+  return {
+    name: 'work_rate',
+    async check(_req: DispatchRequest) {
+      const cap = maxWorkPerHour()
+      if (!Number.isFinite(cap) || cap <= 0) return { ok: true } // disabled (fail-open)
+      const { countWorkRunsForUserSince } = await import('../db/work-dal.ts')
+      const n = await countWorkRunsForUserSince(userId, 60)
+      if (n > cap) return { ok: false, reason: `over_work_rate:${n}>=${cap}` }
+      return { ok: true }
+    },
+  }
+}
+
+/**
+ * Repo-allowlist gate (audit finding F6). The `work_repo_allowlist` table is EMPTY
+ * by default, so email-driven work drives NOTHING until an operator explicitly opts
+ * a repo in. FAILS CLOSED: a DB error blocks rather than admits.
+ *
+ * The route also rejects a non-allowlisted repo with a 403 BEFORE any row is
+ * inserted or any token is spent — this gate is the defence-in-depth copy that a
+ * future caller of `dispatchWork` cannot forget.
+ */
+export function workRepoAllowlistGate(userId: string, repoIdent: string): DispatchGate {
+  return {
+    name: 'work_repo_allowlist',
+    async check(_req: DispatchRequest) {
+      try {
+        const { isRepoWorkAllowed } = await import('../db/work-dal.ts')
+        if (await isRepoWorkAllowed(userId, repoIdent)) return { ok: true }
+      } catch (err: any) {
+        return { ok: false, reason: `work_allowlist_check_failed:${err?.message ?? err}` }
+      }
+      return { ok: false, reason: `repo_not_allowlisted:${repoIdent}` }
+    },
+  }
+}
+
 // ── BSA-04: per-day autospawn LAUNCH-count cap ───────────────────────────────
 /**
  * Max autospawn launches per user per day. A second, independent ceiling from the
