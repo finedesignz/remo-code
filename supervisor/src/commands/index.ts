@@ -10,6 +10,7 @@ import type { ScannedCommand } from '../commands-scanner'
 import { runErrorSetupProbe } from './error-setup-probe'
 import { runErrorSetupApply } from './error-setup-apply'
 import { runTeabRun, runTeabStatus } from './teab-run'
+import { runSessionTranscriptTail, runSessionMemory } from './session-read'
 
 export interface CommandResult {
   exit_code: number
@@ -42,6 +43,10 @@ const HANDLERS: Record<string, CommandHandler> = {
   },
   teab_run: (args) => runTeabRun(args),
   teab_status: (args) => runTeabStatus(args),
+  // Milestone ASK Phase 1 — READ-ONLY. Derive the CLI's own transcript/memory dir
+  // from the session's project_dir; never read an arbitrary hub-supplied path.
+  session_transcript_tail: (args) => runSessionTranscriptTail(args),
+  session_memory: (args) => runSessionMemory(args),
 }
 
 export function getHandler(name: string): CommandHandler | null {
@@ -54,6 +59,8 @@ const NATIVE: Array<{ name: string; description: string }> = [
   { name: 'error_setup_apply', description: 'Install error-tracking SDK files into a repo + commit + push' },
   { name: 'teab_run', description: 'Background-spawn Titanium Edge AutoBuilder (teab run --repo <repo>) detached; returns a started run id' },
   { name: 'teab_status', description: 'Report state + recent events tail for a teab_run run id' },
+  { name: 'session_transcript_tail', description: 'READ-ONLY: last N turns of the CLI transcript for a project_dir' },
+  { name: 'session_memory', description: 'READ-ONLY: project memory files (~/.claude/projects/<slug>/memory/*.md)' },
 ]
 
 export function nativeSupervisorCommands(): ScannedCommand[] {
