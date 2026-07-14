@@ -309,6 +309,45 @@ export const sessionInjectRateGate: DispatchGate = {
   },
 }
 
+// ── Milestone ASK: per-api-key ask-RATE ceiling ──────────────────────────────
+/**
+ * Max external asks per api_key per rolling hour. Default 10.
+ *
+ * An ask spends tokens, and the caller is a machine (a Claude Desktop scheduled
+ * task) that could loop. The daily cost/token caps bound the DAY; this bounds the
+ * RATE, exactly like `sessionInjectRateGate` does for the orchestrator — the shape
+ * that produced the 2026-07 burn. Non-positive / non-finite ⇒ disabled (fail-open),
+ * mirroring the other rate ceilings.
+ */
+const DEFAULT_MAX_ASKS_PER_HOUR = 10
+
+export function maxAsksPerHour(): number {
+  const raw = process.env.REMO_ASK_MAX_PER_HOUR
+  if (raw == null || raw.trim() === '') return DEFAULT_MAX_ASKS_PER_HOUR
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : DEFAULT_MAX_ASKS_PER_HOUR
+}
+
+/**
+ * Per-api-key ask-rate gate. Counts this key's `session_asks` rows in the trailing
+ * 60 minutes and blocks with `over_ask_rate:<n>>=<cap>`. Rides ALONGSIDE (never
+ * instead of) `dailyCostCapGate` + `dailyTokenCapGate`.
+ */
+export function askRateGate(apiKeyId: string | null): DispatchGate {
+  return {
+    name: 'ask_rate',
+    async check(_req: DispatchRequest) {
+      const cap = maxAsksPerHour()
+      if (!Number.isFinite(cap) || cap <= 0) return { ok: true } // disabled (fail-open)
+      if (!apiKeyId) return { ok: true } // no key to attribute → nothing to rate-limit
+      const { countAsksForKeySince } = await import('../db/ask-dal.ts')
+      const asks = await countAsksForKeySince(apiKeyId, 60)
+      if (asks >= cap) return { ok: false, reason: `over_ask_rate:${asks}>=${cap}` }
+      return { ok: true }
+    },
+  }
+}
+
 // ── BSA-04: per-day autospawn LAUNCH-count cap ───────────────────────────────
 /**
  * Max autospawn launches per user per day. A second, independent ceiling from the

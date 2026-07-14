@@ -160,6 +160,40 @@ describe('mount-order: protected /api/* routes are behind the JWT catch-all', ()
   });
 });
 
+describe('mount-order: /api/ext is api-key-authed and mounted BEFORE the cookie catch-all', () => {
+  // Milestone ASK. /api/ext/* must (a) be reachable (never 404 = swallowed by the
+  // catch-all), (b) reject a request with no api_key (401 from extApiKeyMiddleware,
+  // NOT from the cookie catch-all), and (c) NOT be authenticated by a cookie.
+  test('unauth GET /api/ext/sessions → 401 (api-key middleware ran, not a 404)', async () => {
+    const res = await app.request('/api/ext/sessions', { method: 'GET' });
+    expect(
+      res.status,
+      `GET /api/ext/sessions returned ${res.status}; expected 401. A 404 means the route ` +
+        `fell into (or behind) the /api/* cookie catch-all — mount it right after /api/plugin.`,
+    ).toBe(401);
+  });
+
+  test('a bogus Bearer key is rejected 401', async () => {
+    const res = await app.request('/api/ext/sessions', {
+      method: 'GET',
+      headers: { authorization: 'Bearer remokey_totally-bogus' },
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test('POST /api/ext/.../ask with no key → 401, never a CSRF rejection', async () => {
+    const res = await app.request('/api/ext/sessions/abc/ask', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"question":"done?"}',
+    });
+    expect(res.status).toBe(401);
+    let body: any = null;
+    try { body = await res.clone().json(); } catch { /* ignore */ }
+    expect(body?.error).not.toBe('csrf_failed');
+  });
+});
+
 describe('mount-order: CSRF guard SKIPS the public webhook paths', () => {
   // A no-CSRF-token POST to a webhook must NOT be rejected with the CSRF error
   // (`{error:"csrf_failed"}`, 403). It must reach the webhook's own auth — i.e.

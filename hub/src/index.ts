@@ -56,9 +56,12 @@ import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/
 import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchestrator/controller.ts'
 import { startGhostReaperSweep, stopGhostReaperSweep } from './ws/ghost-reaper.ts'
 import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.ts'
+import { startAskReaperSweep, stopAskReaperSweep } from './ask/reaper.ts'
 import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
+import { extApiKeyMiddleware } from './auth/ext-api-key-middleware'
+import { ext } from './api/ext'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
 import { csrfGuard } from './csrf'
@@ -247,6 +250,16 @@ app.use('/api/plugin/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.
 app.use('/api/plugin/*', apiKeyMiddleware)
 app.route('/api/plugin', plugin)
 
+// Milestone ASK — external agent surface (/api/ext). api_keys + the additive
+// nullable `scopes` column (ext:read / ext:ask). MUST be mounted BEFORE the JWT
+// catch-all (see MOUNT-ORDER INVARIANT (1) at top) — it authenticates with a
+// Bearer api_key, never a cookie. Abuse is bounded by (a) this rate limit,
+// (b) the per-key askRateGate, and (c) the non-bypassable daily cost + token caps
+// inside dispatch. See docs/session-ask.md.
+app.use('/api/ext/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.req.header('authorization')?.slice(0, 24) || 'anon' }))
+app.use('/api/ext/*', extApiKeyMiddleware)
+app.route('/api/ext', ext)
+
 // Sentry-style error intake — public, sentry_key in X-Sentry-Auth IS the credential.
 // MUST be mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
 app.use('/api/sentry/*', rateLimit({ windowMs: 60_000, max: 600, keyFn: (c) => c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || 'anon' }))
@@ -297,6 +310,9 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
   if (c.req.path.startsWith('/api/feedback/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
+  // Milestone ASK: /api/ext/* authenticates with an api_key Bearer (already
+  // enforced by extApiKeyMiddleware above), never a cookie.
+  if (c.req.path.startsWith('/api/ext/')) return next()
   // Phase 07: public auth endpoints (login request-link, callback, logout, me).
   // The authRouter handles its own auth state internally where needed.
   if (c.req.path.startsWith('/api/auth/')) return next()
@@ -706,6 +722,11 @@ runMigrations()
     // dead CLI turn can't leave a task perpetually in-flight. No-op when
     // REMO_RUN_REAPER_DISABLED is set.
     startRunReaperSweep()
+    // Milestone ASK — periodic sweep that finalizes `session_asks` stuck
+    // queued/dispatched past REMO_ASK_MAX_MS (default 15min) as `timeout`, so an
+    // external caller never polls a dead ask forever. Conditional finalize, so a
+    // late reply can't be double-finalized. No-op when REMO_ASK_REAPER_DISABLED.
+    startAskReaperSweep()
     // fix/stop-the-bleed — LIVENESS-scoped backstop (NOT an absolute-age force-close;
     // an age-only reaper would close live long-running builds). Closes an OPEN
     // session_runs row only when its supervisor has pushed inventory and the row's
@@ -729,6 +750,7 @@ function gracefulShutdown(signal: string) {
   try { stopDueOrchestratorTick() } catch {}
   try { stopGhostReaperSweep() } catch {}
   try { stopRunReaperSweep() } catch {}
+  try { stopAskReaperSweep() } catch {}
   try { stopStaleRunReaperSweep() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
