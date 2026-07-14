@@ -19,8 +19,10 @@
 export const SCOPE_AGENT = 'agent'
 export const SCOPE_EXT_READ = 'ext:read'
 export const SCOPE_EXT_ASK = 'ext:ask'
+/** Writes code + can publish to a LIVE client site. Highest authority on /api/ext. */
+export const SCOPE_EXT_WORK = 'ext:work'
 
-export const ALL_SCOPES = [SCOPE_AGENT, SCOPE_EXT_READ, SCOPE_EXT_ASK] as const
+export const ALL_SCOPES = [SCOPE_AGENT, SCOPE_EXT_READ, SCOPE_EXT_ASK, SCOPE_EXT_WORK] as const
 export type Scope = (typeof ALL_SCOPES)[number]
 
 export function isScope(s: unknown): s is Scope {
@@ -34,6 +36,16 @@ export function hasScope(scopes: string[] | null | undefined, scope: string): bo
   if (scopes == null) return true
   if (!Array.isArray(scopes) || scopes.length === 0) return true
   return scopes.includes(scope)
+}
+
+/**
+ * EXPLICIT-membership check — NULL/empty does NOT satisfy. Use for the highest-
+ * authority scopes (e.g. `ext:work`, which can publish to a live client site) that
+ * a legacy full-access (NULL-scopes) key must NEVER acquire implicitly. Deliberately
+ * does NOT share `hasScope`'s NULL-permissive semantics; do not merge the two.
+ */
+export function hasExplicitScope(scopes: string[] | null | undefined, scope: string): boolean {
+  return Array.isArray(scopes) && scopes.includes(scope)
 }
 
 /** Normalize a caller-supplied scope list. Returns null (= legacy full) for empty. */

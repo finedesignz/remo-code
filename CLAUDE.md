@@ -425,7 +425,10 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 - **API keys are scoped; `agent` IS the host-spawn credential.** `api_keys.scopes` (TEXT[],
   NULLABLE — NULL/empty = legacy full access, zero migration) gates: `agent` (`/ws/agent` both
   roles + `/api/plugin/*`), `ext:read`, `ext:ask` (`/api/ext/*`). An external consumer gets an
-  `ext:*`-only key and can never spawn a CLI on a host. **`/api/api-keys` is cookie-auth ONLY —
+  `ext:*`-only key and can never spawn a CLI on a host. **`ext:work` (live-site publish via
+  `POST /api/ext/work`) is EXPLICIT-only** — the gate uses `hasExplicitScope`, so a legacy/NULL
+  key (incl. the supervisor's own `purpose='supervisor'` spawn key) does NOT satisfy it and can
+  no longer publish to a client site; `ext:read`/`ext:ask` stay NULL-permissive by design. **`/api/api-keys` is cookie-auth ONLY —
   an api key must NEVER be able to mint an api key.** N keys per user; only `purpose='supervisor'`
   and `purpose='orchestrator'` stay at-most-one-active (partial unique indexes). Helpers:
   `hub/src/auth/scopes.ts`; enforced by `hub/test/api-keys-scopes.test.ts`. See docs/auth.md.
