@@ -153,4 +153,56 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
     } catch { threwOrch = true }
     expect(threwOrch).toBe(true)
   })
+
+  // Milestone WORK: work_sites / work_repo_allowlist / work_runs must converge through the
+  // SAME strict double-apply. The `ALTER TABLE … ADD COLUMN IF NOT EXISTS` statements that
+  // grow work_sites/work_runs on the "agent proposes, hub disposes" rewrite are the risky
+  // shape — this seeds a row carrying those columns and re-applies schema.sql twice.
+  it('work_* tables converge with seeded rows through a double-apply', async () => {
+    await applySchemaStrict(sql)
+
+    const email = `work-${randomUUID()}@invalid.local`
+    const [user] = await sql<{ id: string }[]>`
+      INSERT INTO users (email, password_hash, role) VALUES (${email}, 'x', 'user') RETURNING id
+    `
+    const ident = 'github://acme/hyperoptimizedwebsites'
+    await sql`INSERT INTO work_repo_allowlist (user_id, repo_ident) VALUES (${user.id}, ${ident})`
+    const [site] = await sql<{ id: string; auto_publish: boolean; default_branch: string }[]>`
+      INSERT INTO work_sites (user_id, repo_ident, site_key, site_dir, client_emails,
+                              build_cmd, verify_url, preview_verify_url, coolify_app_uuid)
+      VALUES (${user.id}, ${ident}, 'clientco', 'sites/clientco', ARRAY['owner@clientco.com'],
+              'bun run build', 'https://clientco.example/', 'https://preview.example/', 'uuid-1')
+      RETURNING id, auto_publish, default_branch
+    `
+    // Defaults land: auto_publish FALSE, default_branch 'main' (the hub-disposes columns).
+    expect(site.auto_publish).toBe(false)
+    expect(site.default_branch).toBe('main')
+
+    await sql`
+      INSERT INTO work_runs (user_id, session_id, repo_ident, site_key, site_id,
+                             request_text, prompt, nonce, branch, status, hub_qc, deploy_status)
+      VALUES (${user.id}, 'sess-1', ${ident}, 'clientco', ${site.id},
+              'change the headline', 'FULL PROMPT TEXT', 'noncedeadbeef',
+              'work/noncedeadbeef', 'verifying', ${JSON.stringify({ ok: false })}::jsonb, 'not_published')
+    `
+
+    // Boot 2 + 3 — schema.sql re-runs IN FULL. Must NOT throw with these rows present.
+    await applySchemaStrict(sql)
+    await applySchemaStrict(sql)
+
+    const [{ c }] = await sql<{ c: string }[]>`
+      SELECT count(*)::text AS c FROM work_runs WHERE user_id = ${user.id}
+    `
+    expect(Number(c)).toBe(1)
+
+    // The unique (user_id, repo_ident, site_key) index still bites.
+    let dup = false
+    try {
+      await sql`
+        INSERT INTO work_sites (user_id, repo_ident, site_key, site_dir)
+        VALUES (${user.id}, ${ident}, 'clientco', 'sites/clientco')
+      `
+    } catch { dup = true }
+    expect(dup).toBe(true)
+  })
 })

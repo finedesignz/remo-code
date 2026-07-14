@@ -20,8 +20,17 @@ import { verifyApiKeyForExt, hasScope } from '../db/ask-dal.ts'
 /** The actor name every /api/ext dispatch carries. Automation, by construction. */
 export const EXT_ACTOR = 'external-ask'
 
+/**
+ * Milestone WORK. The actor for an inbound-email work item — SERVER-INFERRED from
+ * the api_key + the route, never a client-assertable body field. `humanOnlyPtyGate`
+ * therefore can never be talked into letting an email drive a human's PTY.
+ */
+export const EXT_WORK_ACTOR = 'external-work'
+
 export const SCOPE_READ = 'ext:read'
 export const SCOPE_ASK = 'ext:ask'
+/** Writes code + can publish. Strictly more dangerous than ext:ask — its own scope. */
+export const SCOPE_WORK = 'ext:work'
 
 export async function extApiKeyMiddleware(c: Context, next: Next) {
   const authHeader = c.req.header('Authorization') ?? ''
@@ -51,10 +60,16 @@ export async function extApiKeyMiddleware(c: Context, next: Next) {
   if (c.req.method === 'POST' && c.req.path.endsWith('/ask') && !hasScope(key.scopes, SCOPE_ASK)) {
     return c.json({ error: 'insufficient_scope', required: SCOPE_ASK }, 403)
   }
+  // Milestone WORK: writing code (and possibly publishing) needs its OWN scope.
+  // ext:ask is NOT sufficient — an answer and a live-site change are not the same
+  // authority.
+  if (c.req.method === 'POST' && c.req.path.endsWith('/work') && !hasScope(key.scopes, SCOPE_WORK)) {
+    return c.json({ error: 'insufficient_scope', required: SCOPE_WORK }, 403)
+  }
 
   c.set('userId', key.user_id)
   c.set('apiKeyId', key.id)
-  c.set('actor', EXT_ACTOR)
+  c.set('actor', c.req.path.includes('/work') ? EXT_WORK_ACTOR : EXT_ACTOR)
 
   await next()
 }
