@@ -73,8 +73,13 @@ above**, which is why the code controls exist.
   it, the change itself is gated by diff-scope + build pre-publish, and by the
   **post-publish re-probe** (which records `deploy_status:'live_probe_failed'` + the revert
   command).
-- An api_key with **NULL `scopes`** keeps legacy full access and therefore satisfies
-  `ext:work`. **Mint a scoped key** (`ext:read`, `ext:work`).
+- **`ext:work` is EXPLICIT-only (closed 2026-07).** Unlike `ext:read` / `ext:ask`, a
+  legacy/NULL-scopes key does **NOT** satisfy `ext:work` — the `POST /api/ext/work` gate
+  uses `hasExplicitScope` (real array membership), so only a key whose `scopes` array
+  literally contains `ext:work` can publish. This closes the prior residual where a
+  legacy full-access key (including the supervisor's own `purpose='supervisor'` spawn
+  key) could drive a live-site change. **Mint a scoped key** (`ext:read`, `ext:work`).
+  Read (`ext:read`) and ask (`ext:ask`) remain NULL-permissive by design.
 - `build_cmd` / `publish_cmd` are operator-supplied shell run on the supervisor host. They
   are as trusted as the operator's own DB. They are never agent- or email-supplied.
 - **On-disk credentials the env-scrub does NOT cover (checked on the reference host, and

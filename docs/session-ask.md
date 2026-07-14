@@ -68,8 +68,12 @@ plus an **additive, NULLABLE** `api_keys.scopes TEXT[]`:
 
 - `scopes IS NULL` ⇒ **legacy full access** — every existing key keeps working
   (including `/ws/agent`). Nothing is broken by this milestone.
-- `ext:read` ⇒ the free read surface.
-- `ext:ask` ⇒ **also** allowed to spend tokens on `POST …/ask`.
+- `ext:read` ⇒ the free read surface. *(NULL-permissive: a legacy NULL key satisfies it.)*
+- `ext:ask` ⇒ **also** allowed to spend tokens on `POST …/ask`. *(NULL-permissive.)*
+- `ext:work` ⇒ writes code + can publish to a live client site (`POST /api/ext/work`).
+  **EXPLICIT-only** — a legacy/NULL-scopes key does NOT satisfy it (gate uses
+  `hasExplicitScope`, not the NULL-permissive `hasScope`). Mint a scoped key. See
+  [remo-work.md](remo-work.md).
 
 Mint a read-only key for a checker task:
 
