@@ -60,24 +60,30 @@ describe('(a) unknown sender never reaches a session', () => {
 // file; see feedback_bun_mock_pollution).
 
 // ── (b′) the ROUTE rejects before any spend ──────────────────────────────────
-describe('(b) the route itself 403s a non-allowlisted repo BEFORE inserting or dispatching', () => {
-  test('the allowlist check precedes insertWorkRun/dispatchWork in ext.ts', async () => {
+describe('(b) the route itself 403s a non-allowlisted repo BEFORE inserting or enqueuing', () => {
+  test('the allowlist check precedes insertWorkRun/enqueue in ext.ts', async () => {
     const src = await Bun.file(new URL('../src/api/ext.ts', import.meta.url)).text()
     const post = src.slice(src.indexOf("ext.post('/work'"))
     const iAllow = post.indexOf('isRepoWorkAllowed')
     const iSite = post.indexOf('findWorkSite')
     const iSender = post.indexOf('isKnownSender')
     const iInsert = post.indexOf('insertWorkRun')
-    const iDispatch = post.indexOf('dispatchWork')
+    // Milestone once: the route no longer calls dispatchWork directly — it enqueues
+    // a schedule_kind='once' task (createTaskV2) whose sender calls dispatchWork.
+    // The containment claim is unchanged: NOTHING is created until all three trust
+    // checks pass, so a forbidden repo 403s with zero rows and zero spend.
+    const iEnqueue = post.indexOf('createTaskV2')
     expect(iAllow).toBeGreaterThan(-1)
-    // allowlist → site → sender → insert → dispatch. Nothing is spent until all
-    // three trust checks have passed.
+    // allowlist → site → sender → insert → enqueue.
     expect(iAllow).toBeLessThan(iSite)
     expect(iSite).toBeLessThan(iSender)
     expect(iSender).toBeLessThan(iInsert)
-    expect(iInsert).toBeLessThan(iDispatch)
+    expect(iInsert).toBeLessThan(iEnqueue)
     expect(post).toContain('repo_not_allowlisted')
     expect(post).toContain('unknown_sender')
+    // The one-time task is created ONLY after the trust checks (defence-in-depth
+    // regression lock: the enqueue must not migrate above the allowlist gate).
+    expect(iAllow).toBeLessThan(iEnqueue)
   })
 })
 

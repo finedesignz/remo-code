@@ -205,4 +205,67 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
     } catch { dup = true }
     expect(dup).toBe(true)
   })
+
+  // Milestone once: scheduled_tasks grows `schedule_kind` (CHECK cron|once) +
+  // `run_at`. A seeded 'once' row (incl. the new task_type='work') must converge
+  // through the SAME strict double-apply, and the CHECK must still bite.
+  it('scheduled_tasks converges with a schedule_kind=once / task_type=work row through a double-apply', async () => {
+    await applySchemaStrict(sql)
+
+    const email = `once-${randomUUID()}@invalid.local`
+    const [user] = await sql<{ id: string }[]>`
+      INSERT INTO users (email, password_hash, role) VALUES (${email}, 'x', 'user') RETURNING id
+    `
+    const [sess] = await sql<{ id: string }[]>`
+      INSERT INTO sessions (user_id, name, project_dir)
+      VALUES (${user.id}, 'once-sess', '/repos/clientco') RETURNING id
+    `
+    // A one-time 'work' task: no cron (@once sentinel), run_at set, schedule_kind='once'.
+    const [task] = await sql<{ id: string; schedule_kind: string }[]>`
+      INSERT INTO scheduled_tasks (
+        user_id, session_id, name, cron_expression, prompt,
+        task_type, target_kind, target_id, timezone,
+        schedule_kind, run_at, payload
+      ) VALUES (
+        ${user.id}, ${sess.id}, 'Work · clientco', '@once', '',
+        'work', 'session', ${sess.id}, 'UTC',
+        'once', now(), ${JSON.stringify({ work_id: 'w1' })}::jsonb
+      )
+      RETURNING id, schedule_kind
+    `
+    expect(task.schedule_kind).toBe('once')
+
+    // Boot 2 + 3 — schema.sql re-runs IN FULL. Must NOT throw with the once row present.
+    await applySchemaStrict(sql)
+    await applySchemaStrict(sql)
+
+    const [row] = await sql<{ schedule_kind: string; run_at: string | null; task_type: string }[]>`
+      SELECT schedule_kind, run_at, task_type FROM scheduled_tasks WHERE id = ${task.id}
+    `
+    expect(row.schedule_kind).toBe('once')
+    expect(row.task_type).toBe('work')
+    expect(row.run_at).not.toBeNull()
+
+    // Every pre-existing row defaults to schedule_kind='cron' / run_at NULL (no backfill).
+    const [legacy] = await sql<{ id: string }[]>`
+      INSERT INTO scheduled_tasks (user_id, session_id, name, cron_expression, prompt, task_type, target_kind, target_id, timezone)
+      VALUES (${user.id}, ${sess.id}, 'Cron dev', '0 * * * *', 'go', 'dev', 'session', ${sess.id}, 'UTC')
+      RETURNING id
+    `
+    const [legacyRow] = await sql<{ schedule_kind: string; run_at: string | null }[]>`
+      SELECT schedule_kind, run_at FROM scheduled_tasks WHERE id = ${legacy.id}
+    `
+    expect(legacyRow.schedule_kind).toBe('cron')
+    expect(legacyRow.run_at).toBeNull()
+
+    // The CHECK constraint bites: an out-of-domain schedule_kind is rejected.
+    let bad = false
+    try {
+      await sql`
+        INSERT INTO scheduled_tasks (user_id, session_id, name, cron_expression, prompt, target_kind, timezone, schedule_kind)
+        VALUES (${user.id}, ${sess.id}, 'bad', '@once', '', 'session', 'UTC', 'weekly')
+      `
+    } catch { bad = true }
+    expect(bad).toBe(true)
+  })
 })

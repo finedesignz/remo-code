@@ -83,6 +83,47 @@ function registerInternal(task: ScheduledTask): void {
   if (!task.enabled) return
   const tz = task.timezone || 'UTC'
 
+  // ── Milestone once: one-time tasks ─────────────────────────────────────────
+  // A `schedule_kind='once'` row fires EXACTLY ONCE at `run_at` and never
+  // evaluates a cron rule. `dispatcher.fire()` self-finalizes it after the
+  // single fire (disable + clear next_fire_at + unregister), so it cannot
+  // re-arm. Two cases:
+  //   • run_at in the FUTURE → arm a croner Date job (fires once, then done).
+  //   • run_at already PAST (immediate work items with run_at=now, OR a once
+  //     row that outlived a hub restart before firing) → fire on the next tick.
+  if ((task as any).schedule_kind === 'once') {
+    const runAtRaw = (task as any).run_at
+    const runAt = runAtRaw ? new Date(runAtRaw) : null
+    if (!runAt || Number.isNaN(runAt.getTime())) {
+      console.error(`[scheduler.registry] once task=${task.id} has no valid run_at`)
+      return
+    }
+    const fireOnce = async () => {
+      try {
+        const d = await dispatcher()
+        await d.fire(task.id)
+      } catch (err: any) {
+        console.error(`[scheduler.registry] once fire failed task=${task.id}: ${err?.message ?? err}`)
+      }
+    }
+    if (runAt.getTime() <= Date.now()) {
+      // Track an empty entry so size()/unregister() see the task, then fire off
+      // the hot path (non-blocking — the create route returns immediately).
+      jobs.set(task.id, [])
+      setTimeout(() => { void fireOnce() }, 0)
+    } else {
+      try {
+        const job = new Cron(runAt, { timezone: tz, protect: true, paused: false }, () => { void fireOnce() })
+        jobs.set(task.id, [job])
+      } catch (err: any) {
+        console.error(`[scheduler.registry] once arm failed task=${task.id}: ${err?.message ?? err}`)
+        return
+      }
+    }
+    void setTaskFireTimestamps(task.id, task.last_fire_at ? new Date(task.last_fire_at) : null, runAt)
+    return
+  }
+
   // Resolve schedule sources, in priority:
   //   1) task.schedule_rules (new shape)
   //   2) task.cron_expr / cron_expression (legacy)

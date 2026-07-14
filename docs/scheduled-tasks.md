@@ -317,6 +317,77 @@ API-compatible.
 
 ---
 
+## One-time tasks (`schedule_kind='once'`, milestone once)
+
+A scheduled task fires **either** on a recurring cron (`schedule_kind='cron'`, the
+default — `schedule_rules`/`cron_expr` evaluated) **or exactly once** at `run_at`
+(`schedule_kind='once'`). Both are rows in the SAME `scheduled_tasks` table and
+ride the SAME dispatch pipeline, gates, `finalizeRun`, post-run actions, and email
+summary — there is **no parallel one-time queue**.
+
+**Columns** (additive, idempotent, no backfill — every existing row stays
+`schedule_kind='cron'` / `run_at` NULL):
+
+| Column          | Meaning                                                        |
+|-----------------|---------------------------------------------------------------|
+| `schedule_kind` | `'cron'` (default) or `'once'`. CHECK-constrained.            |
+| `run_at`        | The single fire time for a `once` row. NULL on every cron row. |
+
+**Lifecycle of a `once` row:**
+
+1. **Arm** — `registry.registerInternal` special-cases `schedule_kind='once'`:
+   `run_at` in the future → a croner **Date** job fires it a single time; `run_at`
+   already past (immediate items with `run_at=now`, or a row that outlived a hub
+   restart before firing) → it fires on the next tick. **No cron rule is ever
+   evaluated for a once row.**
+2. **Fire** — `dispatcher.fire()` short-circuits `schedule_kind='once'`: it calls
+   `fireTask` exactly once (as a MANUAL dispatch, so an offline target fails fast
+   instead of grace-parking for a replay), then **self-finalizes** via
+   `finalizeOnceTask` (sets `enabled=false`, clears `next_fire_at`/`next_run_at`,
+   records `payload.completed_reason='once_completed'`) and `registry.unregister`s
+   the job. It can therefore never re-arm — on the next boot `listEnabledTasks`
+   skips it. The in-flight run is untouched (it lives in the dispatcher's
+   `inFlightByRun` map and finalizes independently of `enabled`).
+3. **Downstream is UNCHANGED** — the run row, `finalizeRun`, post-run actions, and
+   the email summary are exactly what a cron task uses. `bun test
+   test/once-tasks.test.ts` proves fire-once + no-re-arm + pipeline reuse.
+
+**Create via REST:** `POST /api/scheduled-tasks` with
+`{ schedule_kind: 'once', run_at: '<ISO 8601>', … }`. `run_at` is required and
+`cron_expr`/`schedule_rules` are ignored for a once task. `withNext3` surfaces
+`run_at` as the row's only "next run".
+
+### `/api/ext` work + ask are one-time tasks (the unify)
+
+`POST /api/ext/work` (inbound-email → repo agent) now **enqueues** each item as a
+`schedule_kind='once'`, `task_type='work'` `scheduled_tasks` row — the unified
+queue entry, Tasks-list appearance, and audit anchor — created with `run_at=now`
+so it fires immediately. Its sender (`hub/src/scheduler/senders/work.ts`) is a
+THIN adapter that reconstructs the input from `work_runs` + `payload` and calls the
+**existing** `dispatchWork`; the work verify/publish machinery is untouched.
+
+- **Two-lifecycle model (deliberate):** the `scheduled_task_run` records "the work
+  item was ACCEPTED into the pipeline" (finalized on the dispatch outcome); the
+  `work_runs` row is the TYPED TERMINAL result (`branch`/`hub_qc`/`published`/…),
+  finalized by dispatchWork's poll-to-terminal flow. `GET /api/ext/work/:id` reads
+  `work_runs`, which stays the source of truth for the outcome. The synthesized
+  once row sets `email_summary=false` (work has its own result surface).
+- **Shared-gate guarantee (the back-door closer):** the once row is created **only
+  after** every trust check (`repo allowlist` → `site` → `sender`) passes at the
+  route, so a forbidden repo/site/sender still `403`s with ZERO rows and ZERO
+  spend — a one-time task can never reach a repo the allowlist forbids. At RUN
+  time, `dispatchWork`'s own non-negotiable gate list (`dailyCostCapGate` ·
+  `dailyTokenCapGate` · `humanOnlyPtyGate` · `workRateGate` ·
+  `workRepoAllowlistGate`) runs again. **No scheduling path reaches a repo/site
+  that direct dispatch couldn't.** Proven by `test/ext-work-containment.test.ts`
+  (b) + `test/ext-work-gates.test.ts` + `test/once-work-sender.test.ts`.
+- **`/api/ext/ask` is NOT yet rerouted** (TODO in `ext.ts`): ask already rides the
+  SAME shared dispatch pipeline + non-bypassable gates (`hub/src/ask/dispatch.ts`),
+  so the caps/gate unification is already satisfied; only the queue-entry/Tasks-list
+  unification remains. Work was rerouted first (higher value, higher risk).
+
+---
+
 ## Schedule rules — active windows, end bounds, units (P1)
 
 Structured `schedule_rules` (`hub/src/scheduler/schedule-rules.ts`, mirrored at

@@ -37,8 +37,9 @@ import {
   getWorkRun,
   type WorkRun,
 } from '../db/work-dal.ts'
-import { dispatchWork } from '../work/dispatch.ts'
 import { renderWorkPrompt } from '../work/prompt.ts'
+import { createTaskV2 } from '../db/scheduled-tasks-dal.ts'
+import * as scheduleRegistry from '../scheduler/registry.ts'
 
 export const ext = new Hono()
 
@@ -209,6 +210,13 @@ function askView(a: SessionAsk) {
   }
 }
 
+// TODO(milestone once): reroute /ask to enqueue a `schedule_kind='once'`
+// `task_type='ask'` scheduled task as its queue entry, mirroring /work above.
+// Deferred deliberately — ask already rides the SAME shared dispatch pipeline +
+// non-bypassable gates (dailyCostCapGate · dailyTokenCapGate · humanOnlyPtyGate ·
+// askRateGate in hub/src/ask/dispatch.ts), so the caps/gate unification the
+// owner requires is ALREADY satisfied; only the Tasks-list/queue-entry
+// unification remains. WORK was rerouted first (higher-value, higher-risk).
 ext.post('/sessions/:id/ask', async (c) => {
   const userId = c.get('userId') as string
   const apiKeyId = (c.get('apiKeyId') as string) ?? null
@@ -473,19 +481,46 @@ ext.post('/work', async (c) => {
   })
 
   const workSup = supervisorForSession(userId, workSession.id)
-  await dispatchWork({
-    workId: work.id,
-    userId,
-    apiKeyId,
-    sessionId: workSession.id,
-    repoIdent: ident,
-    nonce,
-    prompt,
-    site,
-    projectDir: target.project_dir,
-    supervisorId: 'error' in workSup ? null : workSup.id,
-    branch,
+  const supervisorId = 'error' in workSup ? null : workSup.id
+
+  // ── UNIFY (milestone once): enqueue as a one-time scheduled task ────────────
+  // The work item becomes a `schedule_kind='once'` `task_type='work'` row — the
+  // SINGLE queue entry, Tasks-list appearance, and audit anchor. It is created
+  // ONLY AFTER every gate above (repo allowlist · site trust · sender allowlist)
+  // has passed, so a forbidden repo/site/sender still 403s with ZERO spend and
+  // ZERO rows — the back-door stays closed. The one-time task fires immediately
+  // (run_at=now); its sender (`scheduler/senders/work.ts`) calls the EXISTING
+  // `dispatchWork`, whose own non-negotiable gate list re-runs at RUN time.
+  // `work_runs` (inserted above) remains the typed TERMINAL result the GET
+  // endpoints read. email_summary=false: the work path has its own result
+  // surface, so we suppress a misleading "dispatched" summary email.
+  const onceTask = await createTaskV2({
+    user_id: userId,
+    session_id: workSession.id,
+    name: `Work · ${site.site_key} · ${ident}`,
+    task_type: 'work',
+    target_kind: 'session',
+    target_id: workSession.id,
+    timezone: 'UTC',
+    enabled: true,
+    schedule_kind: 'once',
+    run_at: new Date(),
+    email_summary: false,
+    payload: {
+      work_id: work.id,
+      work_session_id: workSession.id,
+      api_key_id: apiKeyId,
+      project_dir: target.project_dir,
+      supervisor_id: supervisorId,
+      repo_ident: ident,
+      site_key: site.site_key,
+    },
   })
+  try {
+    scheduleRegistry.register(onceTask)
+  } catch (err: any) {
+    console.error(`[ext.work] failed to arm once task=${onceTask.id}: ${err?.message ?? err}`)
+  }
 
   const waitMs = Math.min(body.wait_ms ?? 0, MAX_WAIT_MS)
   const deadline = Date.now() + waitMs

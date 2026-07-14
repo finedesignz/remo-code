@@ -16,6 +16,7 @@ import {
   setTaskFireTimestamps,
   countFiresForTask,
   disableTaskWithReason,
+  finalizeOnceTask,
 } from '../db/scheduled-tasks-dal.ts'
 import { boundReason, type ScheduleRule } from './schedule-rules.ts'
 import { isOverCostCap } from '../dispatch/gates.ts'
@@ -67,6 +68,21 @@ export function trackRun(ctx: RunContext): void {
 export async function fire(taskId: string): Promise<void> {
   const task = await getTaskById(taskId)
   if (!task || !task.enabled) return
+
+  // Milestone once: a one-time task fires EXACTLY ONCE then self-finalizes so it
+  // never re-arms. No cron rule / bound is evaluated (there is none). It reuses
+  // the ENTIRE downstream pipeline — fireTask → sender → finalizeRun → post-run
+  // → email — unchanged; only the "don't fire again" bookkeeping differs. We
+  // dispatch as MANUAL so an offline target fails fast instead of parking in the
+  // grace buffer for a replay (a replay would re-fire a task meant to run once).
+  if ((task as any).schedule_kind === 'once') {
+    await fireTask(task, { chainDepth: 0, skipCronUpdate: true, isManual: true })
+    try { await finalizeOnceTask(taskId) } catch (err: any) {
+      log.error('scheduler.dispatcher.once_finalize_failed', { task_id: taskId, error: err?.message })
+    }
+    try { (await import('./registry.ts')).unregister(taskId) } catch {}
+    return
+  }
   // P1 end-bounds: scheduled (cron) fires honor `until`/`max_runs`. When a
   // bound is reached we auto-disable the task (so it stops cleanly + surfaces
   // a "completed" reason) and skip this fire. Manual run-now / chained runs go
@@ -287,6 +303,59 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       })
     } catch (err: any) {
       void finalizeRun(run.id, 'failed', err?.message || 'teab_import_failed')
+    }
+    if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
+    runIds.push(run.id)
+    return { runIds }
+  }
+
+  // Milestone once: an inbound external work item (/api/ext/work) enqueued as a
+  // one-time 'work' task. Like triage/teab it self-resolves its target (the
+  // stream-json session pinned in payload) rather than via resolveTargets. It
+  // reaches here AFTER the threshold → cost-cap pre-gates, so the caps stay
+  // non-bypassable, and the sender calls the EXISTING dispatchWork (whose own
+  // non-negotiable gate list — repo allowlist, work rate, token/cost — runs
+  // again). The scheduled_task_run records "work item ACCEPTED into the
+  // pipeline"; work_runs remains the typed TERMINAL result/audit record.
+  if (task.task_type === 'work') {
+    const run = await insertRunV2({
+      task_id: task.id,
+      user_id: userId,
+      status: 'pending',
+      scheduled_for: now,
+      target_kind: 'session',
+      target_id: (task.payload?.work_session_id as string) ?? null,
+      session_id: (task.payload?.work_session_id as string) ?? null,
+      triggered_by_run_id: opts.triggeredByRunId ?? null,
+    })
+    const ctx: RunContext = {
+      runId: run.id,
+      taskId: task.id,
+      userId,
+      target: { kind: 'session', sessionId: (task.payload?.work_session_id as string) ?? null, online: true },
+      startedAt: now.getTime(),
+      parentFireId: null,
+      chainDepth: opts.chainDepth,
+      triggeredByRunId: opts.triggeredByRunId ?? null,
+      isManual,
+    }
+    trackRun(ctx)
+    broadcastScheduledRun(userId, {
+      type: 'scheduled_run_started',
+      run_id: run.id,
+      task_id: task.id,
+      scheduled_for: now.toISOString(),
+      target_kind: 'session',
+      target_id: ctx.target.sessionId,
+    })
+    try {
+      const { sendWorkTask } = await import('./senders/work.ts')
+      void sendWorkTask(task, ctx).catch((err: any) => {
+        log.error('scheduler.dispatcher.work_sender_failed', { run_id: run.id, task_id: task.id, error: err?.message })
+        void finalizeRun(run.id, 'failed', err?.message || 'work_threw')
+      })
+    } catch (err: any) {
+      void finalizeRun(run.id, 'failed', err?.message || 'work_import_failed')
     }
     if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
     runIds.push(run.id)

@@ -23,7 +23,12 @@ export type TaskType =
   | 'triage'
   // Milestone TEAB: Titanium Edge AutoBuilder run as a scheduled-task action.
   | 'teab'
+  // Milestone once: an inbound external work item enqueued as a one-time task.
+  | 'work'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
+// Milestone once: 'cron' = recurring (schedule_rules/cron_expr); 'once' = fire
+// exactly once at run_at, then self-finalize (never re-arm).
+export type ScheduleKind = 'cron' | 'once'
 export type CatchupPolicy = 'skip' | 'run_once'
 export type RunStatus =
   | 'pending'
@@ -76,6 +81,11 @@ export interface ScheduledTask {
   // most recent supervisor `teab_status` poll result.
   teab_repo_ident: string | null
   teab_last_status: string | null
+  // Milestone once. `schedule_kind='once'` fires a single time at `run_at`
+  // (no cron rule evaluated) then self-finalizes; 'cron' (default) is the
+  // recurring path. `run_at` is NULL on every cron row.
+  schedule_kind: ScheduleKind
+  run_at: string | null
   // Default-on run-summary email. When true (the default), every ROOT run of
   // this task emails the owner a summary unless a custom notify_email action is
   // already configured. Set false to opt out. See post-run/dispatcher.ts.
@@ -226,7 +236,9 @@ export async function createTaskV2(input: {
   target_kind: TargetKind
   target_id?: string | null
   payload?: Record<string, any>
-  cron_expr: string
+  // Optional: 'once' tasks carry no cron. When absent a '@once' sentinel is
+  // written to the NOT NULL `cron_expression` column and `cron_expr` stays NULL.
+  cron_expr?: string
   timezone: string
   catchup_policy?: CatchupPolicy
   max_concurrent?: number
@@ -244,27 +256,35 @@ export async function createTaskV2(input: {
   teab_repo_ident?: string | null
   teab_last_status?: string | null
   email_summary?: boolean
+  // Milestone once. Omitted ⇒ 'cron' / NULL run_at (unchanged behavior).
+  schedule_kind?: ScheduleKind
+  run_at?: Date | string | null
 }): Promise<ScheduledTask> {
+  // A one-time row carries no cron; `cron_expression` is NOT NULL in the legacy
+  // schema, so persist a sentinel ('@once') when the caller has no cron string.
+  const cronExpression = input.cron_expression ?? input.cron_expr ?? '@once'
   const rows = await sql<ScheduledTask[]>`
     INSERT INTO scheduled_tasks (
       user_id, session_id, name, cron_expression, prompt, enabled,
       task_type, target_kind, target_id, payload, cron_expr, timezone,
       catchup_policy, max_concurrent, post_run_actions,
       name_prefix, name_suffix, schedule_rules,
-      teab_repo_ident, teab_last_status, email_summary
+      teab_repo_ident, teab_last_status, email_summary,
+      schedule_kind, run_at
     ) VALUES (
       ${input.user_id}, ${input.session_id}, ${input.name},
-      ${input.cron_expression ?? input.cron_expr}, ${input.prompt ?? ''},
+      ${cronExpression}, ${input.prompt ?? ''},
       ${input.enabled ?? true},
       ${input.task_type}, ${input.target_kind}, ${input.target_id ?? null},
-      ${sql.json((input.payload ?? {}) as any)}, ${input.cron_expr},
+      ${sql.json((input.payload ?? {}) as any)}, ${input.cron_expr ?? null},
       ${input.timezone}, ${input.catchup_policy ?? 'skip'},
       ${input.max_concurrent ?? 1},
       ${sql.json((input.post_run_actions ?? []) as any)},
       ${input.name_prefix ?? null}, ${input.name_suffix ?? null},
       ${input.schedule_rules ? sql.json(input.schedule_rules as any) : null},
       ${input.teab_repo_ident ?? null}, ${input.teab_last_status ?? null},
-      ${input.email_summary ?? true}
+      ${input.email_summary ?? true},
+      ${input.schedule_kind ?? 'cron'}, ${input.run_at ?? null}
     )
     RETURNING *
   `
@@ -362,6 +382,28 @@ export async function disableTaskWithReason(taskId: string, reason: string): Pro
                                 'completed_at', to_jsonb(now())),
         updated_at = now()
     WHERE id = ${taskId}
+  `
+}
+
+/**
+ * Milestone once. Self-finalize a one-time task after its single fire: disable
+ * it (so `listEnabledTasks` skips it on the next boot and it never re-arms) and
+ * clear the next-fire timestamps. Records the stop reason under
+ * `payload.completed_reason`, mirroring `disableTaskWithReason`. Idempotent.
+ * The IN-FLIGHT run is unaffected (it lives in the dispatcher's inFlightByRun
+ * map and finalizes independently — enabled=false does not touch it).
+ */
+export async function finalizeOnceTask(taskId: string, reason: string = 'once_completed'): Promise<void> {
+  await sql`
+    UPDATE scheduled_tasks
+    SET enabled = false,
+        next_fire_at = NULL,
+        next_run_at = NULL,
+        payload = COALESCE(payload, '{}'::jsonb)
+          || jsonb_build_object('completed_reason', ${reason}::text,
+                                'completed_at', to_jsonb(now())),
+        updated_at = now()
+    WHERE id = ${taskId} AND schedule_kind = 'once'
   `
 }
 
