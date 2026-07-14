@@ -20,6 +20,7 @@
 //! The defaulting rule is NOT duplicated here — we call
 //! `config_cmds::get_auto_update()` so absent/non-bool ⇒ `true` stays in one place.
 
+use crate::sidecar;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -31,6 +32,11 @@ use tauri_plugin_updater::UpdaterExt;
 const STARTUP_DELAY: Duration = Duration::from_secs(15);
 /// Cadence of subsequent checks (same as the retired JS watcher).
 const CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// How long to wait for the sidecar to exit before letting the installer run anyway.
+/// Generous: a stuck sidecar that outlives this produces the "Error opening file for
+/// writing" dialog, which is exactly what this reap exists to prevent.
+const SIDECAR_REAP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -133,10 +139,37 @@ pub async fn run_check(app: &AppHandle) {
             let version = update.version.clone();
             log::info!("[auto_update] update available: v{version} — downloading");
             set_status("update-found", None, Some(version.clone()));
+
+            // Reap the sidecar in the download-finished callback — i.e. AFTER the
+            // (possibly slow) download, immediately BEFORE the installer runs — so the
+            // supervisor stays up for the whole download and is down only for the install.
+            //
+            // WHY: the NSIS installer overwrites `remo-code-supervisor.exe`, and the
+            // sidecar WE spawned holds that file open. Installing with it alive fails with
+            // "Error opening file for writing", and the natural response to that dialog
+            // (Ignore) SKIPS the sidecar — leaving a NEW tray driving an OLD sidecar.
+            // That exact split (v0.14.0 tray on a v0.13.3 sidecar) is what silently took
+            // the supervisor offline for two days: the tray looked healthy the whole time.
+            // The installer must find the file unlocked.
+            let reap_app = app.clone();
+            let reap_version = version.clone();
             let res = update
                 .download_and_install(
                     |_chunk, _total| {},
-                    || log::info!("[auto_update] download finished — installing v{}", version),
+                    move || {
+                        log::info!(
+                            "[auto_update] download finished — reaping sidecar before installing v{reap_version}"
+                        );
+                        if !sidecar::shutdown_blocking(&reap_app, SIDECAR_REAP_TIMEOUT) {
+                            log::warn!(
+                                "[auto_update] sidecar did not exit within {:?} — the installer may fail to overwrite it",
+                                SIDECAR_REAP_TIMEOUT
+                            );
+                        }
+                        // Belt-and-braces: a sidecar from a PRIOR tray (crash, manual run)
+                        // holds the same file and is not ours to shut down gracefully.
+                        crate::mutex_probe::reap_orphan_sidecars();
+                    },
                 )
                 .await;
             match res {
@@ -149,6 +182,11 @@ pub async fn run_check(app: &AppHandle) {
                 }
                 Err(e) => {
                     log::error!("[auto_update] install of v{version} failed: {e}");
+                    // We already reaped the sidecar for the install. Without this the host
+                    // is left with a live tray and NO supervisor — silently offline — until
+                    // someone restarts it by hand.
+                    log::info!("[auto_update] install failed — restarting the sidecar");
+                    sidecar::start(&app);
                     set_status("error", Some(e.to_string()), Some(version));
                     IN_PROGRESS.store(false, Ordering::SeqCst);
                 }
@@ -219,6 +257,48 @@ mod tests {
     fn cadence_matches_the_retired_js_watcher() {
         assert_eq!(STARTUP_DELAY.as_secs(), 15);
         assert_eq!(CHECK_INTERVAL.as_secs(), 15 * 60);
+    }
+
+    /// Canary. The reap itself needs a real updater + a real NSIS run to exercise, so
+    /// guard it at the source level instead of pretending a unit test covers it.
+    ///
+    /// If the sidecar is not reaped before `download_and_install` runs the installer, the
+    /// installer cannot overwrite `remo-code-supervisor.exe` (the live sidecar holds it
+    /// open). The user gets "Error opening file for writing", clicks Ignore, and ends up
+    /// with a NEW tray driving an OLD sidecar — a split that looks completely healthy from
+    /// the tray and took the supervisor offline for two days. Do not remove the reap.
+    #[test]
+    fn install_reaps_the_sidecar_first() {
+        // Scan ONLY the implementation, never the test module — otherwise this test's own
+        // source satisfies every `find()` below and the canary passes forever. Needles are
+        // built with concat! for the same reason: the whole literal must never appear here.
+        let full = include_str!("auto_update.rs");
+        let src = full
+            .split_once("#[cfg(test)]")
+            .expect("test module marker missing")
+            .0;
+
+        let install_at = src
+            .find(concat!("download", "_and_install"))
+            .expect("download_and_install call vanished — did the update flow move?");
+        let reap_at = src
+            .find(concat!("sidecar", "::shutdown_blocking"))
+            .expect("sidecar reap removed: the installer cannot overwrite a RUNNING sidecar");
+        assert!(
+            reap_at > install_at,
+            "the reap must live INSIDE the download-finished callback (after the download, \
+             before the install), not before the download — otherwise the supervisor is down \
+             for the entire download"
+        );
+        assert!(
+            src.contains(concat!("reap", "_orphan_sidecars")),
+            "orphan-sidecar reap removed: a sidecar from a PRIOR tray holds the same exe"
+        );
+        assert!(
+            src.contains(concat!("sidecar", "::start(&app)")),
+            "failed-install recovery removed: reaping the sidecar and then failing the \
+             install leaves a live tray with NO supervisor, silently offline"
+        );
     }
 
     #[test]
