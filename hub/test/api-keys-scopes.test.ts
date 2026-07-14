@@ -81,6 +81,50 @@ describe('apiKeyMiddleware scope enforcement', () => {
   })
 })
 
+describe('/api/ext scope enforcement (milestone ASK middleware × SKEY scopes)', () => {
+  async function extApp(scopes: string[] | null) {
+    mock.module(join(SRC, 'db/ask-dal.ts'), () => ({
+      verifyApiKeyForExt: async () => ({ id: 'k1', user_id: 'u1', scopes }),
+      hasScope: (s: string[] | null | undefined, scope: string) => hasScope(s, scope),
+    }))
+    const { extApiKeyMiddleware } = await import(
+      `../src/auth/ext-api-key-middleware.ts?ext=${encodeURIComponent(JSON.stringify(scopes))}`
+    )
+    const app = new Hono()
+    app.use('/api/ext/*', extApiKeyMiddleware)
+    app.get('/api/ext/sessions', (c) => c.json({ ok: true }))
+    app.post('/api/ext/sessions/s1/ask', (c) => c.json({ ok: true }))
+    return app
+  }
+  const auth = { headers: { Authorization: 'Bearer remokey_x' } }
+
+  it('ext:read-only key CAN read but is REJECTED 403 on the ask endpoint', async () => {
+    const app = await extApp(['ext:read'])
+    expect((await app.request('/api/ext/sessions', auth)).status).toBe(200)
+    const res = await app.request('/api/ext/sessions/s1/ask', { method: 'POST', ...auth })
+    expect(res.status).toBe(403)
+    expect(await res.json()).toEqual({ error: 'insufficient_scope', required: 'ext:ask' })
+  })
+
+  it('ext:read + ext:ask key may ask', async () => {
+    const app = await extApp(['ext:read', 'ext:ask'])
+    expect((await app.request('/api/ext/sessions/s1/ask', { method: 'POST', ...auth })).status).toBe(200)
+  })
+
+  it('agent-only key is REJECTED on /api/ext (403 ext:read)', async () => {
+    const app = await extApp(['agent'])
+    const res = await app.request('/api/ext/sessions', auth)
+    expect(res.status).toBe(403)
+    expect(await res.json()).toEqual({ error: 'insufficient_scope', required: 'ext:read' })
+  })
+
+  it('legacy NULL-scopes key retains full /api/ext access', async () => {
+    const app = await extApp(null)
+    expect((await app.request('/api/ext/sessions', auth)).status).toBe(200)
+    expect((await app.request('/api/ext/sessions/s1/ask', { method: 'POST', ...auth })).status).toBe(200)
+  })
+})
+
 describe('/ws/agent requires the agent scope', () => {
   it('agent.ts gates auth on verifyApiKeyWithScope(…, agent) and closes missing_agent_scope', () => {
     const src = readFileSync(join(SRC, 'ws/agent.ts'), 'utf8')
