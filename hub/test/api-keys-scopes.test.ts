@@ -10,7 +10,7 @@ import { describe, it, expect, afterAll, mock } from 'bun:test'
 import { Hono } from 'hono'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { hasScope, normalizeScopes, SCOPE_AGENT, SCOPE_EXT_ASK, SCOPE_EXT_READ } from '../src/auth/scopes.ts'
+import { hasScope, hasExplicitScope, normalizeScopes, SCOPE_AGENT, SCOPE_EXT_ASK, SCOPE_EXT_READ, SCOPE_EXT_WORK } from '../src/auth/scopes.ts'
 
 const SRC = join(import.meta.dir, '..', 'src')
 
@@ -28,6 +28,18 @@ describe('scopes helper', () => {
     expect(hasScope([SCOPE_EXT_READ], SCOPE_AGENT)).toBe(false)
     expect(hasScope([SCOPE_EXT_READ], SCOPE_EXT_ASK)).toBe(false)
     expect(hasScope([SCOPE_AGENT], SCOPE_AGENT)).toBe(true)
+  })
+
+  it('hasExplicitScope requires explicit membership — NULL/empty NEVER satisfy', () => {
+    expect(hasExplicitScope(null, SCOPE_EXT_WORK)).toBe(false)
+    expect(hasExplicitScope(undefined, SCOPE_EXT_WORK)).toBe(false)
+    expect(hasExplicitScope([], SCOPE_EXT_WORK)).toBe(false)
+    expect(hasExplicitScope([SCOPE_EXT_READ], SCOPE_EXT_WORK)).toBe(false)
+    expect(hasExplicitScope([SCOPE_EXT_READ, SCOPE_EXT_WORK], SCOPE_EXT_WORK)).toBe(true)
+  })
+
+  it('normalizeScopes accepts ext:work as a known scope', () => {
+    expect(normalizeScopes(['ext:read', 'ext:work'])).toEqual({ ok: true, scopes: ['ext:read', 'ext:work'] })
   })
 
   it('normalizeScopes rejects unknown scopes and dedupes', () => {
@@ -94,6 +106,7 @@ describe('/api/ext scope enforcement (milestone ASK middleware × SKEY scopes)',
     app.use('/api/ext/*', extApiKeyMiddleware)
     app.get('/api/ext/sessions', (c) => c.json({ ok: true }))
     app.post('/api/ext/sessions/s1/ask', (c) => c.json({ ok: true }))
+    app.post('/api/ext/work', (c) => c.json({ ok: true }))
     return app
   }
   const auth = { headers: { Authorization: 'Bearer remokey_x' } }
@@ -118,10 +131,36 @@ describe('/api/ext scope enforcement (milestone ASK middleware × SKEY scopes)',
     expect(await res.json()).toEqual({ error: 'insufficient_scope', required: 'ext:read' })
   })
 
-  it('legacy NULL-scopes key retains full /api/ext access', async () => {
+  it('legacy NULL-scopes key retains full read+ask /api/ext access (unchanged)', async () => {
     const app = await extApp(null)
     expect((await app.request('/api/ext/sessions', auth)).status).toBe(200)
     expect((await app.request('/api/ext/sessions/s1/ask', { method: 'POST', ...auth })).status).toBe(200)
+  })
+
+  // ── ext:work must be EXPLICIT — a legacy/NULL key can no longer publish ──────
+  it('legacy NULL-scopes key is REJECTED 403 on /work (needs EXPLICIT ext:work)', async () => {
+    const app = await extApp(null)
+    // read + ask still work for the same NULL key (proved above); only /work tightens.
+    const res = await app.request('/api/ext/work', { method: 'POST', ...auth })
+    expect(res.status).toBe(403)
+    expect(await res.json()).toEqual({ error: 'insufficient_scope', required: 'ext:work' })
+  })
+
+  it('empty-array scopes key is REJECTED 403 on /work', async () => {
+    const app = await extApp([])
+    expect((await app.request('/api/ext/work', { method: 'POST', ...auth })).status).toBe(403)
+  })
+
+  it('ext:read + ext:ask key (no ext:work) is REJECTED 403 on /work', async () => {
+    const app = await extApp(['ext:read', 'ext:ask'])
+    const res = await app.request('/api/ext/work', { method: 'POST', ...auth })
+    expect(res.status).toBe(403)
+    expect(await res.json()).toEqual({ error: 'insufficient_scope', required: 'ext:work' })
+  })
+
+  it('a key with EXPLICIT ext:work passes the /work scope gate', async () => {
+    const app = await extApp(['ext:read', 'ext:work'])
+    expect((await app.request('/api/ext/work', { method: 'POST', ...auth })).status).toBe(200)
   })
 })
 

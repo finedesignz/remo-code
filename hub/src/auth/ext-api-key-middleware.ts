@@ -16,6 +16,7 @@
 import type { Context, Next } from 'hono'
 import { hashToken } from '../lib/crypto'
 import { verifyApiKeyForExt, hasScope } from '../db/ask-dal.ts'
+import { hasExplicitScope } from './scopes.ts'
 
 /** The actor name every /api/ext dispatch carries. Automation, by construction. */
 export const EXT_ACTOR = 'external-ask'
@@ -60,10 +61,13 @@ export async function extApiKeyMiddleware(c: Context, next: Next) {
   if (c.req.method === 'POST' && c.req.path.endsWith('/ask') && !hasScope(key.scopes, SCOPE_ASK)) {
     return c.json({ error: 'insufficient_scope', required: SCOPE_ASK }, 403)
   }
-  // Milestone WORK: writing code (and possibly publishing) needs its OWN scope.
-  // ext:ask is NOT sufficient — an answer and a live-site change are not the same
-  // authority.
-  if (c.req.method === 'POST' && c.req.path.endsWith('/work') && !hasScope(key.scopes, SCOPE_WORK)) {
+  // Milestone WORK: writing code (and possibly publishing to a LIVE client site)
+  // needs its OWN scope, and — unlike read/ask — it must be EXPLICITLY present.
+  // A legacy/NULL-scopes key (which includes the supervisor's own spawn credential)
+  // must NOT acquire live-site-publish authority implicitly, so `hasExplicitScope`
+  // is used here instead of the NULL-permissive `hasScope`. ext:ask is NOT
+  // sufficient — an answer and a live-site change are not the same authority.
+  if (c.req.method === 'POST' && c.req.path.endsWith('/work') && !hasExplicitScope(key.scopes, SCOPE_WORK)) {
     return c.json({ error: 'insufficient_scope', required: SCOPE_WORK }, 403)
   }
 
