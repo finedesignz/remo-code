@@ -143,7 +143,10 @@ export async function sendTriage(
     }
     const run = pick.run
 
-    const skipPerms = await getSessionSkipPermissionsByRepo(ctx.userId, repo)
+    // MACHINE-TRIGGERED path: a triage session is spawned by a Coolify webhook, not
+    // a human, and its prompt carries attacker-influenceable log lines. It never runs
+    // with permission prompts disabled, whatever the session row's default says.
+    const skipPerms = false
     try {
       sendToSupervisor(pick.supervisor_id, {
         type: 'session.start',

@@ -1062,6 +1062,13 @@ CREATE TABLE IF NOT EXISTS revanote_app_mappings (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Self-heal containment: `deploy_strategy='direct'` and `auto_merge=true` let a
+-- WEBHOOK-DERIVED (untrusted) annotation reach main without human review. They stay
+-- possible, but only for a mapping the owner has explicitly marked trusted. Default
+-- false = propose-only (PR). Idempotent DDL — schema.sql re-runs every boot.
+ALTER TABLE revanote_app_mappings
+  ADD COLUMN IF NOT EXISTS trusted BOOLEAN NOT NULL DEFAULT false;
+
 CREATE INDEX IF NOT EXISTS idx_revanote_app_mappings_user
   ON revanote_app_mappings(user_id);
 CREATE INDEX IF NOT EXISTS idx_revanote_app_mappings_user_host

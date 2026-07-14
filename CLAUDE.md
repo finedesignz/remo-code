@@ -365,6 +365,18 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   AND the hub **refuses to boot** (`assertTokenCapConfig()` in `hub/src/index.ts`). The ONLY way to run
   with no ceiling is the explicit **`REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1`** (boots with a loud
   warning). A typo'd `0` must never silently become an unbounded spend path.
+- **Untrusted inbound payloads are FENCED as data and every machine-triggered dispatch carries
+  the scope contract; machine self-heal is propose-only (PR) unless an explicit per-key trust
+  flag says otherwise.** One shared module — `hub/src/dispatch/untrusted.ts` (`fenceUntrusted`
+  escapes every `<` so a payload can't close its own fence, and truncates with an explicit
+  `[truncated]` marker; `SCOPE_CONTRACT` = data-not-instructions + minimal change + no unrelated
+  files/deps/CI + stop-rather-than-guess + propose-only). Used by error-capture, revanote,
+  feedback and Coolify triage prompt builders. A machine path NEVER instructs the agent to push
+  to main / merge / deploy: revanote's `deploy_strategy='direct'` and `auto_merge` are inert
+  unless `revanote_app_mappings.trusted = true` (default FALSE). Machine-triggered spawns force
+  `dangerously_skip_permissions: false` (`dispatch/spawn-on-error.ts`, `scheduler/senders/triage.ts`)
+  regardless of the session-row default. Every self-heal gate list carries `sessionInjectRateGate`
+  alongside the cost + token caps — a report flood cannot buy N turns/hour.
 - **Public webhooks: raw body BEFORE JSON parse**, constant-time secret compare, HMAC over
   `${ts}.${rawBody}`, reject >5min skew. Webhooks mount BEFORE the `/api/*` auth catch-all;
   license gate after auth; `/ws/agent` keyed by `api_keys`. `hub/test/mount-order.test.ts` enforces.

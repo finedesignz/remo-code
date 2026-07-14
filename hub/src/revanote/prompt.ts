@@ -12,6 +12,7 @@
  *   reliably emits `<<JSON>>...<<END>>` at the end of its reply.
  */
 import type { AnnotationRow, RevanoteMapping } from '../db/revanote-dal.ts'
+import { fenceUntrusted, SCOPE_CONTRACT } from '../dispatch/untrusted.ts'
 
 export function previewComment(comment: string, max = 30): string {
   const trimmed = (comment ?? '').replace(/\s+/g, ' ').trim()
@@ -58,9 +59,14 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
         .join('\n')
     : '  (none)'
 
-  const deployStrategy = m?.deploy_strategy ?? 'pr'
+  // SECURITY: an annotation body is webhook-derived, untrusted prose. `direct`
+  // (commit straight to main) and `auto_merge` (squash-merge without review) stay
+  // POSSIBLE, but only for a mapping the owner has explicitly marked `trusted`.
+  // Untrusted mapping ⇒ propose-only (PR, human merges), whatever the payload says.
+  const trusted = m?.trusted === true
+  const deployStrategy = trusted ? (m?.deploy_strategy ?? 'pr') : 'pr'
   const repoPath = m?.repo_path ?? '(no mapping configured for this host — fix in-tree only)'
-  const autoMerge = m?.auto_merge === true
+  const autoMerge = trusted && m?.auto_merge === true
   const branch = `revanote/annotation-${a.annotation_id_external}`
 
   const strategyInstructions =
@@ -89,22 +95,36 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
     ? `Annotation deep-link: ${a.annotation_url}\n`
     : ''
 
-  return [
-    `A reviewer left a Revanote annotation on a deployed page. Please address it.`,
-    ``,
-    `Repo: ${repoPath}`,
+  // Everything reviewer-authored (comment, replies, element_meta, selector) is
+  // untrusted webhook input → one fenced DATA block.
+  const untrusted = [
     `Page: ${a.page_url}`,
-    annotationUrl ? annotationUrl : null,
-    a.element_selector ? `Element: \`${a.element_selector}\`` : null,
+    annotationUrl ? annotationUrl.trimEnd() : null,
+    a.element_selector ? `Element: ${a.element_selector}` : null,
     a.x !== null && a.y !== null ? `Click position: (${a.x}, ${a.y})` : null,
     a.screenshot_url ? `Screenshot: ${a.screenshot_url}` : null,
     extraContext || null,
     ``,
     `Reviewer's comment:`,
-    `> ${a.comment.replace(/\n/g, '\n> ')}`,
+    a.comment,
     ``,
     `Replies/thread:`,
     repliesText,
+  ]
+    .filter((l) => l !== null && l !== undefined)
+    .join('\n')
+
+  return [
+    `A reviewer left a Revanote annotation on a deployed page. Please address it.`,
+    ``,
+    `Repo: ${repoPath}`,
+    ``,
+    SCOPE_CONTRACT,
+    trusted
+      ? `NOTE: this mapping is operator-TRUSTED — the Deploy plan below overrides rule 4.`
+      : null,
+    ``,
+    fenceUntrusted('untrusted_annotation', untrusted),
     ``,
     `Deploy plan:`,
     strategyInstructions,

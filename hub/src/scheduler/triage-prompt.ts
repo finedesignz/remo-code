@@ -8,6 +8,8 @@
  * No DB access, no side effects — pure string formatting.
  */
 
+import { fenceUntrusted, SCOPE_CONTRACT } from '../dispatch/untrusted.ts'
+
 export interface RenderTriagePromptInput {
   application_uuid: string
   deployment_uuid: string
@@ -25,16 +27,28 @@ export function renderTriagePrompt(input: RenderTriagePromptInput): string {
   return [
     'You are a deployment triage assistant. A Coolify deployment failed and you must analyze the build/runtime logs to produce a structured root-cause report.',
     '',
-    'Deployment context:',
-    `- application_uuid: ${input.application_uuid}`,
-    `- deployment_uuid: ${input.deployment_uuid}`,
-    `- git_repository: ${repo}`,
-    `- commit_sha: ${sha}`,
+    SCOPE_CONTRACT,
+    'ANALYSIS-ONLY: this task makes NO code changes at all — not even a branch or a PR.',
+    'Read the logs, output the JSON report below, and change nothing.',
     '',
-    'Failure logs (last 100 lines):',
-    '```',
-    tail,
-    '```',
+    // SECURITY: build logs echo attacker-influenced content (dependency names, test
+    // output, request paths) and `git_repository` is webhook-supplied. Fence the lot
+    // as data — a crafted log line must not be able to close the block and issue
+    // instructions (a ``` fence could; `fenceUntrusted` escapes every `<`).
+    fenceUntrusted(
+      'untrusted_deployment_logs',
+      [
+        'Deployment context:',
+        `- application_uuid: ${input.application_uuid}`,
+        `- deployment_uuid: ${input.deployment_uuid}`,
+        `- git_repository: ${repo}`,
+        `- commit_sha: ${sha}`,
+        '',
+        'Failure logs (last 100 lines):',
+        tail,
+      ].join('\n'),
+      8000,
+    ),
     '',
     'Respond with a SINGLE JSON object — no markdown, no prose, no code fences around it — matching this exact shape:',
     '{',
