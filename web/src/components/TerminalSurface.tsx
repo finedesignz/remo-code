@@ -126,10 +126,11 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
   const kbOpenRef = useRef(false)
 
   // Explicit keyboard control (iOS): focusing xterm's hidden textarea summons the
-  // on-screen keyboard; blurring dismisses it. Tapping the terminal body now
-  // BLURS (the body is for reading — a tap means "get out of my way"), so the ⌨
-  // button is the SOLE way to summon the keyboard on a phone, and also the only
-  // dismiss affordance Safari gives us.
+  // on-screen keyboard; blurring dismisses it. A genuine TAP on the terminal body
+  // now FOCUSES/summons the keyboard ("I want to type here" — reverses #360's
+  // tap-to-blur per owner), while a DRAG stays a pure scroll and never touches the
+  // keyboard. The ⌨ button TOGGLES — it both summons and dismisses — so it remains
+  // the way to HIDE the keyboard on a phone.
   //
   // The focus/blur happens HERE, not inside a setState updater: an updater must be
   // PURE (React StrictMode double-invokes it in dev, which would fire focus/blur
@@ -283,12 +284,9 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       if (recentTouch()) return
       applyKeyboard(true)
     }
-    // TOUCH tap → BLUR. The terminal body is for READING: on a touch device a tap
-    // on the output means "dismiss the keyboard so I can see the output".
-    const blurTerm = () => applyKeyboard(false)
     const host = hostRef.current
 
-    // TOUCH SCROLL + TAP-TO-BLUR (mobile). Three prod bugs, one gesture handler:
+    // TOUCH SCROLL + TAP-TO-FOCUS (mobile). Three prod bugs, one gesture handler:
     //
     //  1. DRAG DIDN'T SCROLL. The old handler poked `.xterm-viewport`.scrollTop.
     //     xterm has no touch support and renders `.xterm-screen` as an overlay
@@ -297,17 +295,23 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     //     element the browser considers scrollable). We now drive xterm's OWN
     //     buffer API — `term.scrollLines(±n)` — computed from drag pixels ÷ row
     //     height. That works regardless of the DOM overlay problem.
-    //  2. KEYBOARD POPPED ON EVERY TOUCH. The old handler called focus() on
+    //  2. TAP = FOCUS/TYPE, DRAG = SCROLL. The FIRST-generation handler focused on
     //     touchSTART, so merely touching the screen to scroll summoned the iOS
-    //     keyboard (shrinking the very output the user was trying to read, and
-    //     firing a visualViewport resize storm). NOTHING on the touch path focuses
-    //     any more: a drag is pure scroll, and a TAP (≤10px, ≤500ms) BLURS —
-    //     tapping the output DISMISSES the keyboard. The ⌨ toggle in the key bar
-    //     is the SOLE way to summon it on a touch device. Desktop mousedown still
-    //     focuses (a mouse focus opens no keyboard).
-    //  3. ALT SCREEN. A full-screen TUI owns the alt buffer and has NO scrollback;
-    //     a drag there is a deliberate NO-OP. We never synthesize keystrokes to
-    //     fake scrolling (human-only PTY invariant: scrolling is not input).
+    //     keyboard (a resize storm over the output being read). #360 over-corrected
+    //     to tap-to-BLUR, which left the owner unable to type at all ("tap activates
+    //     then blurs, can't activate again"). The owner's rule: a TAP (≤10px,
+    //     ≤500ms, not on the scrollbar thumb) FOCUSES and summons the keyboard —
+    //     "I want to type here" — and a DRAG stays a PURE SCROLL that never touches
+    //     the keyboard (keeps #360's real fix). We focus SYNCHRONOUSLY in touchEND
+    //     (the user gesture iOS requires to open the keyboard). The ⌨ toggle in the
+    //     key bar TOGGLES — it both summons AND dismisses — so it stays the way to
+    //     HIDE the keyboard. Desktop mousedown still focuses (a mouse focus opens no
+    //     keyboard).
+    //  3. ALT SCREEN. A full-screen TUI (claude/codex) owns the alt buffer and has
+    //     NO scrollback; a DRAG there is a deliberate NO-OP. A TAP there still
+    //     FOCUSES — the alt-screen TUI is exactly where the owner types — and we
+    //     never synthesize keystrokes to fake scrolling (human-only PTY invariant:
+    //     scrolling is not input).
     //
     // We always preventDefault on touchmove so the gesture is CONTAINED — on iOS
     // body{overflow:hidden} does not stop visualViewport panning under the address
@@ -390,11 +394,16 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       const isTap = maxMove <= TAP_SLOP_PX && Date.now() - startT <= TAP_MAX_MS
       // Re-open the suppression window from the gesture END: the synthetic mousedown
       // follows touchEND, so a >700ms drag measured from touchstart would wrongly
-      // let that replay focus. Always suppress those replays — they'd re-focus the
-      // terminal and re-open the keyboard.
+      // let that replay focus. Suppressing the replay ALSO means the tap-focus below
+      // is the SINGLE focus for this gesture — the replayed mousedown can't re-fire it.
       lastTouchAtRef.current = _touchNowMs()
       e.preventDefault()
-      if (isTap) blurTerm()
+      // A genuine TAP = "type here": focus + summon the keyboard. Skip the scrollbar
+      // thumb zone (a tap there is scrollbar territory, not a request to type). We call
+      // applyKeyboard(true) DIRECTLY (not focusTerm, which recentTouch()-guards against
+      // the synthetic replay) so the focus lands inside THIS user-gesture handler — the
+      // only place iOS will honor .focus() to raise the keyboard.
+      if (isTap && !onThumb) applyKeyboard(true)
     }
     host.addEventListener('touchstart', onTouchStart, { passive: false })
     host.addEventListener('touchmove', onTouchMove, { passive: false })

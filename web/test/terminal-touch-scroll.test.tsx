@@ -12,13 +12,14 @@
  *
  *   2. "the keyboard auto pops up when clicking the screen". The handler called
  *      term.focus() on touchSTART, so any touch — including a scroll drag —
- *      summoned the iOS keyboard over the output being read. FIX (owner-corrected
- *      semantics): NOTHING on the touch path focuses. A drag is pure scroll, and a
- *      TAP (≤10px, ≤500ms) BLURS the helper textarea — "when i click the text in
- *      the terminal, it should blur the input box and hide the keyboard on ios".
- *      The ⌨ toggle in the key bar is the SOLE way to summon the keyboard on touch.
- *      DESKTOP is unchanged: a mouse click still focuses (a mouse focus opens no
- *      keyboard), so typing after a click keeps working.
+ *      summoned the iOS keyboard over the output being read. #360 over-corrected to
+ *      tap-to-BLUR, which left the owner unable to type ("tap activates then blurs,
+ *      can't activate again"). CURRENT (owner-corrected) semantics: a DRAG is a pure
+ *      scroll that never touches the keyboard, and a TAP (≤10px, ≤500ms, not on the
+ *      scrollbar thumb) FOCUSES the helper textarea and summons the keyboard — "a tap
+ *      means I want to type here". The ⌨ toggle in the key bar TOGGLES (summon AND
+ *      dismiss), so it stays the way to hide the keyboard. DESKTOP is unchanged: a
+ *      mouse click still focuses (a mouse focus opens no keyboard).
  *
  *   3. Alt screen. A full-screen TUI owns the alt buffer and has NO scrollback, so
  *      a drag there must be an inert no-op — and must NEVER be turned into
@@ -154,7 +155,7 @@ describe('BUG 1 — a finger drag scrolls the terminal BUFFER', () => {
   })
 })
 
-describe('BUG 2 — on TOUCH, a tap BLURS (hides the keyboard); only ⌨ summons it', () => {
+describe('BUG 2 — on TOUCH, a tap FOCUSES (summons the keyboard); a drag is pure scroll', () => {
   test('a DRAG never focuses and never blurs (pure scroll)', async () => {
     const { termHost, act } = await mountSurface()
     await act(async () => {
@@ -166,15 +167,50 @@ describe('BUG 2 — on TOUCH, a tap BLURS (hides the keyboard); only ⌨ summons
     expect(stub.blurCount).toBe(0)
   })
 
-  test('a TAP BLURS the helper textarea and NEVER focuses (iOS keyboard dismissed)', async () => {
+  test('a TAP FOCUSES the helper textarea and NEVER blurs (iOS keyboard summoned)', async () => {
     const { termHost, act } = await mountSurface()
     await act(async () => {
       termHost.dispatchEvent(touch('touchstart', 100))
       termHost.dispatchEvent(touch('touchmove', 102)) // 2px < 10px slop
       termHost.dispatchEvent(touch('touchend', 102))
     })
+    expect(stub.focusCount).toBe(1)
+    expect(stub.blurCount).toBe(0)
+  })
+
+  test('a TAP with NO move at all (pure touchstart→touchend) FOCUSES', async () => {
+    const { termHost, act } = await mountSurface()
+    await act(async () => {
+      termHost.dispatchEvent(touch('touchstart', 150))
+      termHost.dispatchEvent(touch('touchend', 150))
+    })
+    expect(stub.focusCount).toBe(1)
+    expect(stub.blurCount).toBe(0)
+  })
+
+  test('a TAP on the ALT screen (full TUI) still FOCUSES — that is where the owner types', async () => {
+    stub.bufferType = 'alternate'
+    const { termHost, act } = await mountSurface()
+    await act(async () => {
+      termHost.dispatchEvent(touch('touchstart', 100))
+      termHost.dispatchEvent(touch('touchend', 100))
+    })
+    expect(stub.focusCount).toBe(1)
+    // A tap is not a drag: no scroll on the alt buffer either.
+    expect(stub.scrolled.length).toBe(0)
+  })
+
+  test('a TAP in the scrollbar-THUMB zone does NOT focus (thumb is scroll territory)', async () => {
+    const { termHost, act } = await mountSurface()
+    ;(termHost as any).getBoundingClientRect = () => ({
+      x: 0, y: 0, left: 0, top: 0, right: 300, bottom: 408, width: 300, height: 408, toJSON() {},
+    })
+    await act(async () => {
+      termHost.dispatchEvent(touch('touchstart', 100, 295)) // inside 24px right strip
+      termHost.dispatchEvent(touch('touchend', 100, 295))
+    })
     expect(stub.focusCount).toBe(0)
-    expect(stub.blurCount).toBe(1)
+    expect(stub.blurCount).toBe(0)
   })
 
   test('touchstart alone does nothing (the old handler focused here)', async () => {
@@ -221,16 +257,16 @@ describe('BUG 2 — on TOUCH, a tap BLURS (hides the keyboard); only ⌨ summons
     expect(stub.blurCount).toBe(0)
   })
 
-  test('a mousedown REPLAYED by Safari after a touch does NOT re-focus', async () => {
+  test('a TAP focuses exactly ONCE — the synthetic Safari mousedown replay is suppressed', async () => {
     const { termHost, act } = await mountSurface()
     await act(async () => {
       termHost.dispatchEvent(touch('touchstart', 100))
-      termHost.dispatchEvent(touch('touchend', 100))
-      // Safari's synthetic compat mouse event after the tap.
+      termHost.dispatchEvent(touch('touchend', 100)) // tap → focus (1)
+      // Safari's synthetic compat mouse event after the tap must NOT re-focus.
       termHost.dispatchEvent(new Event('mousedown', { bubbles: true, cancelable: true }))
     })
-    expect(stub.focusCount).toBe(0)
-    expect(stub.blurCount).toBe(1)
+    expect(stub.focusCount).toBe(1)
+    expect(stub.blurCount).toBe(0)
   })
 })
 
