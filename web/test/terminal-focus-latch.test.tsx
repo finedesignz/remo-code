@@ -14,6 +14,13 @@
  *
  * We drive the injectable `__setTouchClockForTest` clock to prove BOTH cases
  * deterministically (production still reads Date.now).
+ *
+ * NOTE (fix/mobile-tap-focus): a genuine TAP (touchstart→touchend, no drag) now
+ * FOCUSES the terminal itself (owner: "a tap means I want to type here"). So the
+ * touchstart+touchend used as SETUP in these cases contributes ONE focus of its
+ * own. The #375 invariant under test is unchanged and asserted as the mousedown's
+ * DELTA: the synthetic replay WITHIN the window adds NO focus; a genuine click
+ * AFTER the window adds exactly one.
  */
 import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
@@ -100,33 +107,43 @@ describe('touch-focus suppression is TIME-BOUNDED (not a permanent latch)', () =
     const { termHost, act } = await mountSurface()
     await act(async () => {
       termHost.dispatchEvent(touch('touchstart', 100))
-      termHost.dispatchEvent(touch('touchend', 100))
+      termHost.dispatchEvent(touch('touchend', 100)) // TAP → focuses once
+    })
+    const afterTap = stub.focusCount
+    expect(afterTap).toBe(1) // the tap-to-focus baseline
+    await act(async () => {
       advance(300) // Safari replays its synthetic mousedown ~a few hundred ms later
       termHost.dispatchEvent(mousedown())
     })
-    expect(stub.focusCount).toBe(0)
+    // The replayed mousedown adds NO focus — it is suppressed inside the window.
+    expect(stub.focusCount - afterTap).toBe(0)
   })
 
   test('mousedown MORE than the window after the last touch DOES focus (the fix)', async () => {
     const { termHost, act, TOUCH_SUPPRESS_MS } = await mountSurface()
     await act(async () => {
       termHost.dispatchEvent(touch('touchstart', 100))
-      termHost.dispatchEvent(touch('touchend', 100))
+      termHost.dispatchEvent(touch('touchend', 100)) // TAP → focuses once
+    })
+    const afterTap = stub.focusCount
+    await act(async () => {
       advance(TOUCH_SUPPRESS_MS + 1) // a genuine, deliberate click later
       termHost.dispatchEvent(mousedown())
     })
-    expect(stub.focusCount).toBe(1)
+    // A real click AFTER the window focuses again — exactly one more.
+    expect(stub.focusCount - afterTap).toBe(1)
   })
 
   test('a stray touch does not latch focus off forever — a much later click still focuses', async () => {
     const { termHost, act } = await mountSurface()
     await act(async () => {
       termHost.dispatchEvent(touch('touchstart', 100))
-      termHost.dispatchEvent(touch('touchend', 100))
+      termHost.dispatchEvent(touch('touchend', 100)) // TAP → focuses once
     })
+    const afterTap = stub.focusCount
     advance(60_000) // a full minute of hybrid-desktop use later
     await act(async () => { termHost.dispatchEvent(mousedown()) })
-    expect(stub.focusCount).toBe(1)
+    expect(stub.focusCount - afterTap).toBe(1)
   })
 
   test('window is measured from gesture END: a long drag then an immediate replay is still suppressed', async () => {
