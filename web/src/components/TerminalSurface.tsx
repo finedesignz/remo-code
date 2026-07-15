@@ -91,6 +91,20 @@ export const KEY_SEQUENCES = {
   ctrlC: '\x03',
 } as const
 
+// Touch-focus suppression window. After a touch gesture we swallow the SYNTHETIC
+// mousedown Safari replays (~a few hundred ms later) so it can't re-summon the iOS
+// keyboard the user just dismissed by tapping. But ONLY for this short window — a
+// genuine mouse click a second+ after any touch (hybrid touchscreen laptop /
+// precision touchpad / pen) must still focus. 700ms clears the synthetic replay
+// with margin while staying well under any deliberate later click.
+export const TOUCH_SUPPRESS_MS = 700
+// Injectable clock: prod reads Date.now; the focus-latch test advances it to prove
+// a mouse click LONG after a touch refocuses (the permanent-latch regression).
+let _touchNowMs: () => number = () => Date.now()
+export function __setTouchClockForTest(fn: (() => number) | null): void {
+  _touchNowMs = fn ?? (() => Date.now())
+}
+
 export function TerminalSurface({ sessionId, subscribe, send, className }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -100,10 +114,13 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
   const [notice, setNotice] = useState<string | null>(null)
   const [pasteOpen, setPasteOpen] = useState(false)
   const [kbOpen, setKbOpen] = useState(false)
-  // TRUE once this surface has seen a touch — i.e. we're on a touch device. On a
-  // touch device the ONLY thing allowed to summon the on-screen keyboard is the
-  // ⌨ toggle: nothing else may call term.focus() (a focus IS the keyboard on iOS).
-  const touchOriginRef = useRef(false)
+  // Timestamp (ms, from `_touchNowMs`) of the END of the most recent touch gesture.
+  // `recentTouch()` is true only inside the TOUCH_SUPPRESS_MS window after it: while
+  // true we swallow the synthetic mousedown Safari replays post-tap (a focus IS the
+  // keyboard on iOS), while a genuine mouse click later still focuses. NOT a
+  // permanent "is a touch device" latch — that broke click-to-focus on hybrids.
+  const lastTouchAtRef = useRef(0)
+  const recentTouch = () => _touchNowMs() - lastTouchAtRef.current < TOUCH_SUPPRESS_MS
   // Mirror of kbOpen readable synchronously (and outside React's render cycle) by
   // the DOM event handlers below.
   const kbOpenRef = useRef(false)
@@ -136,7 +153,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
   // bytes regardless — focus is only about where the *browser* routes keystrokes).
   const sendKey = useCallback((seq: string) => {
     send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(seq) })
-    if (touchOriginRef.current) return
+    if (recentTouch()) return
     try { termRef.current?.focus() } catch {}
   }, [send, sessionId])
 
@@ -164,7 +181,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       // Refocus so typing continues after the button press — but NEVER on a touch
       // device: a focus IS the on-screen keyboard on iOS, and a paste must not
       // summon it (same rule sendKey follows).
-      if (!touchOriginRef.current) { try { termRef.current?.focus() } catch {} }
+      if (!recentTouch()) { try { termRef.current?.focus() } catch {} }
       return
     }
     // Clipboard read blocked or empty-by-permission (iOS): fall back to the box.
@@ -178,7 +195,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
   const commitPasteBox = useCallback((text: string) => {
     setPasteOpen(false)
     if (text) sendKey(text)
-    if (touchOriginRef.current) return
+    if (recentTouch()) return
     try { termRef.current?.focus() } catch {}
   }, [sendKey])
 
@@ -192,7 +209,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
         send({ type: 'term.attach_file', session_id: sessionId, filename: file.name, data_b64: bytesToB64(bytes) })
         setNotice(`Uploaded ${file.name} → path inserted`)
         setTimeout(() => setNotice(null), 4000)
-        if (!touchOriginRef.current) { try { termRef.current?.focus() } catch {} }
+        if (!recentTouch()) { try { termRef.current?.focus() } catch {} }
       } catch {
         setNotice('Attachment upload failed')
         setTimeout(() => setNotice(null), 4000)
@@ -256,11 +273,14 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
 
     // DESKTOP click-to-focus. A mouse focus opens no keyboard, so a click on the
     // terminal must still focus it (typing after a click keeps working). Guarded
-    // against the SYNTHETIC mousedown Safari replays after a touch gesture: if the
-    // last interaction was a touch, this is not a real mouse and must not focus
-    // (that would re-summon the iOS keyboard we just dismissed).
+    // against the SYNTHETIC mousedown Safari replays right after a touch gesture:
+    // within TOUCH_SUPPRESS_MS of the last touch this is that replay, not a real
+    // mouse, and must not focus (it would re-summon the iOS keyboard we just
+    // dismissed). Outside that window a genuine mouse click DOES focus — the fix
+    // for the hybrid-device regression where one stray touch latched focus off
+    // forever.
     const focusTerm = () => {
-      if (touchOriginRef.current) return
+      if (recentTouch()) return
       applyKeyboard(true)
     }
     // TOUCH tap → BLUR. The terminal body is for READING: on a touch device a tap
@@ -327,7 +347,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     let accumPx = 0
     let onThumb = false
     const onTouchStart = (e: TouchEvent) => {
-      touchOriginRef.current = true // this is a touch device — never auto-focus again
+      lastTouchAtRef.current = _touchNowMs() // open the synthetic-mousedown suppression window
       const t = e.touches[0]
       startY = lastY = t?.clientY ?? 0
       startX = t?.clientX ?? 0
@@ -349,6 +369,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       maxMove = Math.max(maxMove, Math.abs(y - startY), Math.abs(x - startX))
       const dy = y - lastY
       lastY = y
+      lastTouchAtRef.current = _touchNowMs() // refresh: measure the window from gesture END, not start
       if (!isAltScreen()) {
         accumPx += dy
         const px = rowPx()
@@ -367,8 +388,11 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     }
     const onTouchEnd = (e: TouchEvent) => {
       const isTap = maxMove <= TAP_SLOP_PX && Date.now() - startT <= TAP_MAX_MS
-      // Always suppress the synthetic mouse events Safari replays after a touch
-      // gesture — they would re-focus the terminal and re-open the keyboard.
+      // Re-open the suppression window from the gesture END: the synthetic mousedown
+      // follows touchEND, so a >700ms drag measured from touchstart would wrongly
+      // let that replay focus. Always suppress those replays — they'd re-focus the
+      // terminal and re-open the keyboard.
+      lastTouchAtRef.current = _touchNowMs()
       e.preventDefault()
       if (isTap) blurTerm()
     }
@@ -376,7 +400,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     host.addEventListener('touchmove', onTouchMove, { passive: false })
     host.addEventListener('touchend', onTouchEnd, { passive: false })
     // Desktop click-to-focus is unchanged — a mouse focus opens no keyboard.
-    // (focusTerm no-ops once a touch has been seen; see touchOriginRef.)
+    // (focusTerm no-ops only for the brief post-touch window; see recentTouch.)
     host.addEventListener('mousedown', focusTerm)
 
     // SESSION SWITCH / mount: start from a clean buffer so a prior session's
