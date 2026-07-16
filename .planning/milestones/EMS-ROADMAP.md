@@ -5,9 +5,23 @@
 **Phase dirs:** `.planning/phases/EMS-NN-slug/` — the `EMS-` prefix is **mandatory**; a bare
 `NN-slug` collides with concurrent milestones (`PTYCAP`, `MSESS`, `OBSRV`, `OEE`) when
 `.planning/` merges.
-**Status:** scoped only. Not in flight. Worktree `remo-code-ext-mcp-ship`, branch
-`feat/ext-mcp-ship`, off `main`. Sequencing relative to `PTYCAP`/other milestones: independent —
-EMS ships an isolated `/api/ext` surface and does not touch the PTY dispatch path.
+**Status:** EMS-01/02/04 COMPLETE (2026-07-16). Worktree `remo-code-ext-mcp-ship`, branch
+`feat/ext-mcp-ship`, off `main` — consolidated, hub-QC green, ext-scope-QC green. Not merged, not
+deployed. Sequencing relative to `PTYCAP`/other milestones: independent — EMS ships an isolated
+`/api/ext` surface and does not touch the PTY dispatch path.
+
+> **SCOPE CHANGE (2026-07-16, owner-authorized): build the HUB API ONLY.** The MCP server/client
+> package moved to a separate repo (`../mcpfactory`). **EMS-03 (mcp binary QC) and EMS-06 (publish/
+> wire mcp client) are OUT-OF-SCOPE here** — they belong to mcpfactory. `mcp/src` files that rode
+> along inside shared cherry-picks are left in-tree, inert; they are NOT built, depended on, or
+> QC'd by this milestone. **EMS-08 and EMS-09 now depend on mcpfactory's mcp server** (the
+> invocation string + running binary), not on an EMS-06 deliverable.
+>
+> **API cherry-pick set (EMS-01, executed):** exactly 7 commits, in order — `617e8e5`, `1f596a7`,
+> `e4938b9`, `d546607`, `d794663`, `1b4efb2`, `357ba2f`. **`fca3393` EXCLUDED** (Dockerfile
+> `COPY mcp/package.json` — pure mcp-workspace build glue; would drag the mcp workspace into the
+> hub Docker build). Two trivial conflicts resolved: `VERIFICATION.md` kept-deleted (stale QC doc),
+> supervisor version bump took `0.14.0`.
 
 ## Risk / gating summary
 
@@ -21,8 +35,8 @@ EMS ships an isolated `/api/ext` surface and does not touch the PTY dispatch pat
 **Hard ordering constraints**
 1. **01 before everything.** Nothing else is meaningful until the branch is a clean, buildable
    consolidation of exactly the 8-commit core.
-2. **02–04 (QC) before 05 (merge/deploy).** Never merge a branch that hasn't proven hub build,
-   mcp binary, and scope enforcement independently.
+2. **02 + 04 (QC) before 05 (merge/deploy).** Never merge a branch that hasn't proven hub build
+   and scope enforcement independently. (EMS-03 mcp-binary QC is OUT-OF-SCOPE — done in mcpfactory.)
 3. **05 before 06 is NOT required** (npm publish doesn't depend on the hub being live), but **06
    before 07 IS required** (the API key's consuming invocation must be decided before it's wired
    into a config that names it). **05 before 07 IS required** (the key must be created against the
@@ -37,15 +51,15 @@ EMS ships an isolated `/api/ext` surface and does not touch the PTY dispatch pat
 
 ## Phases
 
-- [ ] **EMS-01: Consolidate the ext/mcp core** — cherry-pick the 8-commit core onto a clean branch, untangled from 10 unrelated commits.
-- [ ] **EMS-02: QC — hub builds clean** — hub typechecks, full existing test suite green, no regression from the cherry-pick.
-- [ ] **EMS-03: QC — mcp package + binary** — `mcp/` builds; `remo-code-mcp` starts and lists its 5 tools over the MCP protocol.
-- [ ] **EMS-04: QC — ext API scope enforcement** — `ext-api-key-middleware` proven: 401 unauth, 403 wrong-scope, 2xx correct-scope; legacy/NULL keys locked out of `ext:work`.
-- [ ] **EMS-05: Ship hub (GATED)** — merge to main, deploy to Coolify, verify `/api/ext` live; docs/openapi updated.
-- [ ] **EMS-06: Publish/wire mcp client (GATED)** — decide npm-publish vs pinned invocation; prove the chosen invocation actually starts the server and lists tools.
+- [x] **EMS-01: Consolidate the ext API core** — cherry-picked the 7-commit ext/hub API core (`fca3393` excluded) onto a clean branch. DONE 2026-07-16.
+- [x] **EMS-02: QC — hub builds clean** — root `bun install` clean; ext/api-key/mount test suite 120 pass / 0 fail; no regression from the cherry-pick. DONE 2026-07-16.
+- [ ] ~~**EMS-03: QC — mcp package + binary**~~ — **OUT-OF-SCOPE** (mcp moved to `../mcpfactory`; QC'd there, not here).
+- [x] **EMS-04: QC — ext API scope enforcement** — `ext-api-key-middleware` proven: 401 unauth, 403 no `ext:read`, 403 no `ext:ask` on `/ask`, legacy/NULL keys locked out of `ext:work` via `hasExplicitScope`. DONE 2026-07-16.
+- [ ] **EMS-05: Ship hub (GATED)** — merge to main, deploy to Coolify, verify `/api/ext` live; docs/openapi updated. Depends on EMS-02 + EMS-04 (both green).
+- [ ] ~~**EMS-06: Publish/wire mcp client (GATED)**~~ — **OUT-OF-SCOPE** (mcp server/client built + published from `../mcpfactory`).
 - [ ] **EMS-07: Provision the API key** — create a scoped `ext:read`+`ext:ask` key in Settings → Credentials against the live hub.
-- [ ] **EMS-08: Register the connector in the TLP sweep** — wire the key + invocation into the scheduled verify-close skill's connector config (outside this repo).
-- [ ] **EMS-09: End-to-end second-witness proof** — a real sweep run loads the 5 tools and reconciles a verdict against a remo-owned session.
+- [ ] **EMS-08: Register the connector in the TLP sweep** — wire the key + mcpfactory invocation into the scheduled verify-close skill's connector config (outside this repo). **Now depends on mcpfactory's mcp server**, not EMS-06.
+- [ ] **EMS-09: End-to-end second-witness proof** — a real sweep run loads mcpfactory's 5 tools and reconciles a verdict against a remo-owned session. **Depends on mcpfactory's mcp server.**
 
 ## Phase Details
 
@@ -104,7 +118,7 @@ not merely inspected.
 
 ### EMS-05: Ship hub (GATED — outward-facing, needs owner go-ahead)
 **Goal**: The proven branch is live on `app.remo-code.com`.
-**Depends on**: EMS-02, EMS-03, EMS-04 (all QC phases green). **Explicit owner go-ahead required
+**Depends on**: EMS-02, EMS-04 (both QC phases green; EMS-03 out-of-scope). **Explicit owner go-ahead required
 before executing — this merges to `main` and redeploys the live hub.**
 **Requirements**: SHIP-01, SHIP-02, SHIP-03
 **Success Criteria**:
@@ -141,7 +155,8 @@ required: npm-publish vs pinned local/tarball invocation — do not default sile
 
 ### EMS-08: Register the connector in the TLP sweep
 **Goal**: The TLP scheduled verify-close sweep's Claude config knows how to reach the connector.
-**Depends on**: EMS-06 (invocation decided), EMS-07 (key exists).
+**Depends on**: mcpfactory's mcp server (invocation string decided + binary runnable — replaces
+the former EMS-06 dependency), EMS-07 (key exists).
 **Requirements**: PROV-02
 **Success Criteria**:
   1. `C:\Users\artic\Claude\Scheduled\`'s verify-close skill Appendix B connector block is updated
