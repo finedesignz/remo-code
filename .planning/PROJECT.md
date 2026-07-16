@@ -1,4 +1,4 @@
-<!-- updated: 2026-07-12 -->
+<!-- updated: 2026-07-16 -->
 # Project — remo-code
 
 ## What This Is
@@ -97,6 +97,7 @@ may never self-scope a product direction; when this list empties, it STOPS and a
 7. **ONBOARD** — a stranger self-serves: signup → MSI → pair → first session → first scheduled task.
 8. **AUTO** — governed PTY autonomy + the 30-night public receipts log. **Monetized only after the log is green.**
 9. **DEBT** — retire the half-live flags (legacy waves, ChatSurface/cutover gate, TEAB MSI, mobile).
+10. **EMS** — ship the already-built ext/mcp "second-witness" connector (`@remo-code/mcp` + `/api/ext`): finish, QC, merge, deploy, publish/wire, and prove `remo_*` tools reconcile a verdict in the TLP verify-close sweep. *(independent of PTYCAP/MSESS — isolated `/api/ext` surface, no PTY dispatch touch. Scope: `.planning/milestones/EMS-REQUIREMENTS.md`)*
 
 ## Current Milestone: BLEED — Stop the Bleeding
 

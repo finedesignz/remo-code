@@ -124,3 +124,12 @@ reset 2026-05-29 to unblock owner login. `jamie@theleadingpractice.com` is NOT a
 - **OBSRV-specific:** shadow mode NEVER calls `launchSessionForUser` / never dispatches; never flip
   `REMO_ORCHESTRATOR_AUTOSPAWN`, never populate `orchestrator_autospawn_allowlist`, never touch the
   no-auto-merge guard; additive idempotent DDL only.
+
+## Milestone EMS — ext/mcp "second-witness" connector ship (2026-07-16, scoped only)
+
+Roadmapped, not started. 9 phases (EMS-01..09, fine granularity), 16/16 requirements mapped.
+Scope: `.planning/milestones/EMS-REQUIREMENTS.md` + `.planning/milestones/EMS-ROADMAP.md`.
+Worktree `remo-code-ext-mcp-ship`, branch `feat/ext-mcp-ship`, off `main`. Independent of
+PTYCAP/MSESS/OBSRV — an isolated `/api/ext` surface, no PTY dispatch touch. EMS-01 (consolidate
+the 8-commit ext/mcp core onto this branch) is next; EMS-05 (hub merge+deploy) and EMS-06
+(npm publish / pinned invocation) are GATED on explicit owner go-ahead before execution.
