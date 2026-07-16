@@ -155,6 +155,26 @@ On load, `GridPage` restores the active tab from `user_grid_state` (falling
 back to `__default__` if the persisted tab no longer exists) and the active
 cell from grid-state (with a `sessionStorage` fast-cache layer).
 
+### Invariant: every session payload must be enriched
+
+Default-tab membership is `sessions.filter(s => s.active)`. **`active` is a
+DERIVED field** — there is no such column on `sessions`; it is computed per
+read from the supervisor inventory (∪ `status`) by the single shared enricher
+`hub/src/sessions/enrich.ts`. Raw `listSessions()` (the DAL) cannot return it.
+
+`useSessions` **replaces its entire list** on every WS `session_list` frame,
+and the hub pushes one immediately on client WS auth. So `session_list` and
+`GET /api/sessions` MUST send the same shape: an unenriched broadcast silently
+strips `active` off the rows the REST call had just populated, and the Default
+tab empties to "No active sessions" while List View — keyed on `status` — keeps
+working. That exact divergence was the 2026-07-16 "grid view doesn't load
+sessions" bug (`fix/ui-session-nav`).
+
+Every `session_list` emitter therefore goes through
+`listSessionsForUserEnriched`, guarded by
+`hub/test/session-list-active-flag.test.ts`; the web-side symptom is pinned by
+`web/test/grid-default-tab-active.test.tsx`.
+
 ## WS subscribe overload
 
 The existing `subscribe` op in `hub/src/ws/protocol.ts` is overloaded —

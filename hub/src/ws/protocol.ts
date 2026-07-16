@@ -276,7 +276,12 @@ export type HubToClient =
   | { type: 'session_list'; sessions: Array<{ id: string; name: string; project_dir: string | null; status: string; last_activity: string | null; created_at: string; agent_info?: unknown;
       // Plan 05-002: surface CLI + rootless attribution so the sidebar can
       // render the right badge and group ambient sessions under their host.
-      cli_kind: 'claude' | 'codex'; is_rootless: boolean; hostname: string | null }> }
+      cli_kind: 'claude' | 'codex'; is_rootless: boolean; hostname: string | null;
+      // Derived (hub/src/sessions/enrich.ts) — NOT a `sessions` column. The web
+      // replaces its whole list on this frame, so it must carry every derived
+      // field `GET /api/sessions` sends or the grid's Default tab (membership =
+      // `filter(s => s.active)`) empties out.
+      active: boolean }> }
   | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
   | { type: 'user_question'; session_id: string; request_id: string; question: string;
       options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }

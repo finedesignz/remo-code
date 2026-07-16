@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createSession, listSessions, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity, setSessionSkipPermissions, getSessionSkipPermissions, getSessionSkipPermissionsByRepo, getCoolifyAppByRepoKey } from '../db/dal'
+import { createSession, getSession, deleteSession, updateSessionToken, markSessionDisconnected, markSessionOffline, getPendingPrompts, dismissLocalSession, setSessionAutoNudge, setSessionRunnerType, getSessionPtyIdentity, setSessionSkipPermissions, getSessionSkipPermissions, getSessionSkipPermissionsByRepo, getCoolifyAppByRepoKey } from '../db/dal'
 import { parseGitRemote } from '../lib/repo-key.ts'
 import { getMessagesForSessions } from '../db/chat-tabs-dal.ts'
 import { hashToken } from '../lib/crypto'
@@ -15,10 +15,10 @@ import {
   resolveLocalPathForRepoKey,
   getUserInventory,
   getKnownLocalPathsForRepoKey,
-  getActiveSessionIdsForUser,
   findSupervisorForSession,
 } from '../ws/supervisor-registry.ts'
 import { releaseSessionSlot, reserveSessionSlot } from '../sessions/budget.ts'
+import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { probeGithubAppScope } from '../lib/github-scope.ts'
 import { enqueueCreateGithubRepoJob } from '../lib/github-repo-job.ts'
 import { randomUUID } from 'node:crypto'
@@ -40,26 +40,12 @@ const sessions = new Hono()
 // List all sessions for the authenticated user
 sessions.get('/', async (c) => {
   const userId = c.get('userId') as string
-  const data = await listSessions(userId)
-  // Bug A (2026-05-28) — `active` flag derives from the supervisor's
-  // session_inventory push (authoritative ground-truth: the supervisor is
-  // currently hosting a runner for this session_id). Falls back to the DB
-  // status column for pre-0.5.7 supervisors that don't push inventory.
-  const activeIds = getActiveSessionIdsForUser(userId)
-  // Phase 08.6 — enrich each GitHub-keyed session with the known local working
-  // trees from the supervisor inventory cache so the sidebar can collapse to
-  // one row per repo and the Launch flow can offer a worktree/branch picker.
-  // Non-GitHub-keyed sessions get an empty array (the field is always present
-  // so the web type is non-optional).
-  const enriched = (data as any[]).map((s) => {
-    const active = activeIds.has(s.id) || s.status === 'online' || s.status === 'thinking'
-    const base = { ...s, active }
-    if (s.repo_key) {
-      return { ...base, local_paths: getKnownLocalPathsForRepoKey(userId, s.repo_key) }
-    }
-    return { ...base, local_paths: [] }
-  })
-  return c.json(enriched)
+  // Bug A (2026-05-28) — `active` derives from the supervisor's
+  // session_inventory push; Phase 08.6 — `local_paths` from the inventory
+  // cache. Both live in the shared enricher, which the WS `session_list`
+  // broadcasts use too: the web replaces its whole list on each broadcast, so
+  // the two payloads must stay identical (see hub/src/sessions/enrich.ts).
+  return c.json(await listSessionsForUserEnriched(userId))
 })
 
 // Batch-fetch messages for up to 12 sessions at once. Used by the multichat
