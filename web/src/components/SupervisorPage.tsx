@@ -13,6 +13,8 @@ import { RepoGroupChips } from './groups/RepoGroupChips'
 import { GroupsManager } from './groups/GroupsManager'
 import { AutoDevActivityPanel } from './AutoDevActivityPanel'
 import { SupervisorRootsEditor } from './SupervisorRootsEditor'
+import { navigateToSession } from '../lib/ui/nav'
+import { waitForRunSessionId } from '../lib/session-nav'
 
 type OrchestratorSnapshot = {
   enabled: boolean
@@ -72,6 +74,8 @@ interface ActiveRun {
   started_at: string
   restart_count: number
   state?: string
+  /** Bound by the hub only once the supervisor launches and authenticates. */
+  session_id?: string | null
 }
 
 type FilterKey = 'all' | 'running' | 'idle'
@@ -330,6 +334,11 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     finally { setScanning(false) }
   }, [token, activeSupervisorId])
 
+  // Play button → start → wait for the run to bind a session id → open it.
+  const [startingSession, setStartingSession] = useState(false)
+  const navAbortRef = useRef<AbortController | null>(null)
+  useEffect(() => () => navAbortRef.current?.abort(), [])
+
   const loadActiveRuns = useCallback(async () => {
     if (!activeSupervisorId) { setActiveRuns([]); return }
     const r = await apiFetch(token, `/api/supervisors/${activeSupervisorId}/active`)
@@ -338,6 +347,33 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
       setActiveRuns(d.runs || [])
     }
   }, [token, activeSupervisorId])
+
+  const openStartedRun = useCallback(async (runId: string) => {
+    if (!activeSupervisorId) return
+    navAbortRef.current?.abort()
+    const ctl = new AbortController()
+    navAbortRef.current = ctl
+    setStartingSession(true)
+    try {
+      const sessionId = await waitForRunSessionId(
+        async () => {
+          const r = await apiFetch(token, `/api/supervisors/${activeSupervisorId}/active`)
+          if (!r.ok) throw new Error('active fetch failed')
+          return (await r.json()).runs || []
+        },
+        runId,
+        { signal: ctl.signal },
+      )
+      if (ctl.signal.aborted) return
+      if (sessionId) { navigateToSession(sessionId); return }
+      setInfo(null)
+      setError(`Run ${runId.slice(0, 8)} started but hasn't connected a session yet — open it from Home once it comes online.`)
+      setTimeout(() => setError(null), 8000)
+    } finally {
+      if (!ctl.signal.aborted) setStartingSession(false)
+      loadActiveRuns()
+    }
+  }, [token, activeSupervisorId, loadActiveRuns])
 
   useEffect(() => {
     loadGitHub()
@@ -512,11 +548,11 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   }
 
   const handleRowClick = (row: Row) => {
-    if (row.run) {
-      // open chat for run — no wiring yet; surface info
-      setInfo(`Chat for ${row.name} — session ${row.run.id.slice(0, 8)}`)
-      setTimeout(() => setInfo(null), 2500)
-    }
+    if (!row.run) return
+    if (row.run.session_id) { navigateToSession(row.run.session_id); return }
+    // Run started but hasn't bound a session yet — nothing to open.
+    setInfo(`${row.name} is still connecting…`)
+    setTimeout(() => setInfo(null), 2500)
   }
 
   const startRow = (row: Row) => {
@@ -596,6 +632,12 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     <div className="space-y-3 w-full">
       {error && <div className="px-3 py-2 bg-red-900/30 rounded-lg text-sm text-red-200">{error}</div>}
       {info && <div className="px-3 py-2 bg-emerald-900/30 rounded-lg text-sm text-emerald-200">{info}</div>}
+      {startingSession && (
+        <div role="status" className="flex items-center gap-2 px-3 py-2 bg-blue-500/10 ring-1 ring-blue-500/30 rounded-lg text-sm text-blue-200">
+          <span className="w-3 h-3 rounded-full border-2 border-blue-300/40 border-t-blue-300 animate-spin" aria-hidden="true" />
+          Starting session…
+        </div>
+      )}
 
       {/* Supervisor selector row */}
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-2.5">
@@ -848,7 +890,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           supervisorId={activeSupervisor.id}
           target={startTarget}
           onClose={() => setStartTarget(null)}
-          onStarted={(runId) => { setStartTarget(null); setInfo(`Started run ${runId.slice(0, 8)}`); setTimeout(() => setInfo(null), 4000); loadActiveRuns() }}
+          onStarted={(runId) => { setStartTarget(null); setInfo(null); openStartedRun(runId) }}
           onError={(msg) => { setError(msg); setTimeout(() => setError(null), 6000) }}
         />
       )}

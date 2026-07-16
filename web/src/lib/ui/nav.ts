@@ -71,6 +71,38 @@ export function readTabParam(hash: string = window.location.hash, key = "tab"): 
 }
 
 /**
+ * Read the `session` param out of the hash (`#/?session=<id>`). Set by
+ * `navigateToSession` after a supervisor start binds a session id; ChatLayout
+ * consumes it to select that session, then clears it.
+ */
+export function readSessionParam(hash: string = window.location.hash): string | null {
+  return readTabParam(hash, "session");
+}
+
+/**
+ * Drop the `session` param from the hash via `replaceState`, so a later manual
+ * session selection isn't clobbered by a re-read of a stale hash.
+ */
+export function clearSessionParam(): void {
+  const hash = window.location.hash || "#/";
+  const [path, query] = hash.split("?");
+  const params = new URLSearchParams(query || "");
+  if (!params.has("session")) return;
+  params.delete("session");
+  const rest = params.toString();
+  const next = rest ? `${path}?${rest}` : path;
+  window.history.replaceState(null, "", window.location.pathname + window.location.search + next);
+}
+
+/**
+ * Navigate to Home with `sessionId` selected. Used by the Connections table's
+ * Play button once the started run has bound a real session id.
+ */
+export function navigateToSession(sessionId: string): void {
+  window.location.hash = `#/?session=${encodeURIComponent(sessionId)}`;
+}
+
+/**
  * Write the tab query param into the hash via `replaceState` (no history entry).
  * Preserves the path portion (`#/tasks`) and any other query params.
  */

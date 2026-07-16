@@ -26,6 +26,7 @@ import { MobileSessionControls } from './MobileSessionControls'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
 import { hubFetch } from '../lib/api'
 import { useClientConfig } from '../hooks/useClientConfig'
+import { readSessionParam, clearSessionParam } from '../lib/ui/nav'
 
 const NUDGE_TEXT = "Status update? Briefly: what's the current state, what would you recommend doing next, or what input do you need from me?"
 
@@ -38,7 +39,11 @@ interface Props {
 
 export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
   const clientConfig = useClientConfig()
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+  // `#/?session=<id>` (written by the Connections Play button once its run binds
+  // a session) selects that session. Read as the initial value so it is already
+  // set before the orchestrator auto-select effect below runs, then stripped
+  // from the hash so a later manual selection isn't clobbered.
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(() => readSessionParam())
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem('remo:sidebar-collapsed') === '1' } catch { return false }
   })
@@ -119,6 +124,20 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
       }
     })
   }, [subscribe, sessionsHook.updateSessionStatus, sessionsHook.setSessions])
+
+  // Consume the `session` hash param: clear it on mount, and honor later
+  // navigations to `#/?session=<id>` while this layout is already mounted.
+  useEffect(() => {
+    clearSessionParam()
+    const onHashChange = () => {
+      const id = readSessionParam()
+      if (!id) return
+      setActiveSessionId(id)
+      clearSessionParam()
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
 
   // Auto-select the default session ONLY on initial load (when nothing is selected).
   // Default resolution (R-PROFILE-02): prefer the user's orchestrator session,
