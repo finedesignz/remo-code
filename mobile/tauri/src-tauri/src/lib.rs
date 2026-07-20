@@ -12,7 +12,7 @@
 // via `cargo tauri ios init` / `cargo tauri android init` on a host with the
 // appropriate toolchain — see mobile/tauri/README.md.
 
-use tauri::{Emitter, Listener, Manager, Url, WebviewWindow};
+use tauri::{Emitter, Manager, Url, WebviewWindow};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 const FINALIZE_PATH: &str = "/api/auth/finalize-mobile";
@@ -138,8 +138,8 @@ pub fn run() {
 
             // Emit a `mobile-ready` event for the thin UI shell.
             let _ = app.emit("mobile-ready", ());
-            // Suppress unused-import warnings for Listener on platforms where
-            // it isn't strictly needed by the codegen.
+            // Keep `handle` referenced on platforms where the codegen path
+            // above doesn't otherwise consume it.
             let _ = &handle as &dyn std::any::Any;
             Ok(())
         })
