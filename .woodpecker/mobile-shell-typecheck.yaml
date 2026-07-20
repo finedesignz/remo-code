@@ -23,5 +23,10 @@ steps:
     image: rust:latest
     commands:
       - apt-get update && apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config
+      # tauri::generate_context! resolves frontendDist ("../ui/dist") at compile
+      # time and panics if it is absent. This is a Rust-only typecheck gate (no
+      # bundling), so stub a minimal dist instead of building the vite UI.
+      - mkdir -p mobile/tauri/ui/dist
+      - echo '<!doctype html><title>remo-code mobile shell</title>' > mobile/tauri/ui/dist/index.html
       - cargo check --manifest-path mobile/tauri/src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu
       - cargo test --manifest-path mobile/tauri/src-tauri/Cargo.toml --lib --target x86_64-unknown-linux-gnu
