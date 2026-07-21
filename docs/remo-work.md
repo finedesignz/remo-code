@@ -100,6 +100,15 @@ above**, which is why the code controls exist.
 
 ---
 
+## Precondition / limitation
+
+`remo_work` needs a **non-interactive (stream-json) session** on the target repo's
+`project_dir` — work is never routed into a human's PTY. A default **prod install is
+PTY-interactive**, so `POST /api/ext/work` may return **409 `no_work_session`** (with a
+`detail` explaining the precondition). Fix: create a stream-json session on the repo,
+then retry. Autospawning a work-session on demand is deliberately NOT done (token-cost
+decision, owner-gated).
+
 ## 2. Flow
 
 ```

@@ -40,6 +40,21 @@ describe('ask gate list', () => {
   }
 })
 
+describe('findAskSession never resolves an orchestrator session (QC F7)', () => {
+  // The orchestrator session is EXEMPT from the git-push-credential scrub
+  // (scrubGitPush: !isOrchestratorSession), so routing an ask/work prompt into it
+  // would run WITH a live push credential — bypassing agent-proposes/hub-disposes.
+  // findWorkSession reuses findAskSession, so this single filter covers both paths.
+  test('the resolver query filters is_orchestrator = false', () => {
+    const q = askDispatchSrc.slice(
+      askDispatchSrc.indexOf('export async function findAskSession'),
+      askDispatchSrc.indexOf('return rows[0]'),
+    )
+    expect(q).toContain('is_orchestrator = false')
+    expect(q).toContain("runner_type = 'stream-json'")
+  })
+})
+
 describe('the actor is server-inferred automation', () => {
   test('an external ask can NEVER drive a pty-interactive session', () => {
     expect(humanOnlyRejectsActor(EXT_ACTOR, 'pty-interactive')).toBe(true)

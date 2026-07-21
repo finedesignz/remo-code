@@ -92,13 +92,26 @@ async function resolveSession(userId: string, id: string): Promise<SessionRow | 
 }
 
 /** Which supervisor host holds this session's transcript. */
-function supervisorForSession(userId: string, sessionId: string): { id: string } | { error: string } {
+function supervisorForSession(
+  userId: string,
+  sessionId: string,
+): { id: string } | { error: string; detail: string } {
   const live = findSupervisorForSession(sessionId)
   if (live && live.userId === userId) return { id: live.supervisorId }
   const online = listOnlineSupervisorIdsForUser(userId)
   if (online.length === 1) return { id: online[0] }
-  if (online.length === 0) return { error: 'supervisor_offline' }
-  return { error: 'supervisor_ambiguous' }
+  if (online.length === 0) {
+    return {
+      error: 'supervisor_offline',
+      detail: 'No supervisor is currently online for this user to read the session host.',
+    }
+  }
+  return {
+    error: 'supervisor_ambiguous',
+    detail:
+      `${online.length} supervisors are online and none is bound to this session, so the ` +
+      'host is ambiguous. Start the session (which binds it to one host) and retry.',
+  }
 }
 
 // ── Read surface (Phase 1) — zero tokens, zero PTY writes ────────────────────
@@ -132,7 +145,7 @@ ext.get('/sessions/:id/transcript', async (c) => {
   if (!session.project_dir) return c.json({ error: 'no_project_dir' }, 409)
 
   const sup = supervisorForSession(userId, session.id)
-  if ('error' in sup) return c.json({ error: sup.error }, 503)
+  if ('error' in sup) return c.json({ error: sup.error, detail: sup.detail }, 503)
 
   const tailRaw = Number(c.req.query('tail'))
   const tail = Number.isFinite(tailRaw) && tailRaw > 0 ? String(Math.floor(tailRaw)) : '30'
@@ -153,7 +166,7 @@ ext.get('/sessions/:id/memory', async (c) => {
   if (!session.project_dir) return c.json({ error: 'no_project_dir' }, 409)
 
   const sup = supervisorForSession(userId, session.id)
-  if ('error' in sup) return c.json({ error: sup.error }, 503)
+  if ('error' in sup) return c.json({ error: sup.error, detail: sup.detail }, 503)
 
   const res = await runSupervisorReadCommand(sup.id, userId, 'session_memory', [session.project_dir])
   const payload = parseSnippet<{ files: unknown[]; truncated: boolean }>(res)
@@ -241,8 +254,10 @@ ext.post('/sessions/:id/ask', async (c) => {
       {
         error: 'no_ask_session',
         detail:
-          'No stream-json session exists for this project_dir. Create one (or start the ' +
-          'orchestrator) — the ask is never routed into a pty-interactive session.',
+          'No non-interactive (stream-json) session exists for this project_dir, so there is ' +
+          'nothing to answer the ask — it is never routed into a pty-interactive session. Note ' +
+          'a default prod install is PTY-interactive; the precondition is a stream-json session ' +
+          'on the target repo. Create one (or start the orchestrator) and retry.',
       },
       409,
     )
@@ -315,6 +330,11 @@ ext.get('/sessions/:id/ask/:ask_id', async (c) => {
   const userId = c.get('userId') as string
   const ask = await getAsk(c.req.param('ask_id'), userId)
   if (!ask) return c.json({ error: 'ask_not_found' }, 404)
+  // The `:id` path segment is the session the ask was ABOUT (its target). Assert it
+  // resolves to that same target so the segment is load-bearing, not decorative — a
+  // mismatched `:id` is a 404, not a silently-ignored param.
+  const target = await resolveSession(userId, c.req.param('id'))
+  if (!target || target.id !== ask.target_session_id) return c.json({ error: 'ask_not_found' }, 404)
   return c.json({ session_id: ask.session_id, target_session_id: ask.target_session_id, ...askView(ask) })
 })
 
@@ -419,7 +439,10 @@ ext.post('/work', async (c) => {
 
   // (3) SENDER ALLOWLIST — an unknown sender never reaches a session.
   if (!isKnownSender(site, body.source.from)) {
-    return c.json({ error: 'unknown_sender' }, 403)
+    return c.json(
+      { error: 'unknown_sender', detail: `sender not permitted for site ${body.site}` },
+      403,
+    )
   }
 
   // The ANSWERING/WORKING session: a stream-json CLI on the repo's project_dir. We
@@ -430,8 +453,10 @@ ext.post('/work', async (c) => {
       {
         error: 'no_work_session',
         detail:
-          'No stream-json session exists for this project_dir. Create one — work is never ' +
-          'routed into a pty-interactive session.',
+          'No non-interactive (stream-json) session exists for this project_dir, so there is ' +
+          'nothing to run the work — it is never routed into a pty-interactive session. Note a ' +
+          'default prod install is PTY-interactive; the precondition is a stream-json session on ' +
+          'the target repo. Create one and retry.',
       },
       409,
     )

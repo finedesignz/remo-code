@@ -15,8 +15,11 @@
  */
 import type { Context, Next } from 'hono'
 import { hashToken } from '../lib/crypto'
-import { verifyApiKeyForExt, hasScope } from '../db/ask-dal.ts'
-import { hasExplicitScope } from './scopes.ts'
+import { verifyApiKeyForExt } from '../db/ask-dal.ts'
+// hasScope MUST come from the canonical scopes.ts: its NULL/empty ⇒ full-access
+// (legacy) semantics matches the contract. The ask-dal copy returned FALSE for an
+// empty array `[]`, wrongly 403'ing a key minted with `scopes = '{}'`.
+import { hasScope, hasExplicitScope } from './scopes.ts'
 
 /** The actor name every /api/ext dispatch carries. Automation, by construction. */
 export const EXT_ACTOR = 'external-ask'

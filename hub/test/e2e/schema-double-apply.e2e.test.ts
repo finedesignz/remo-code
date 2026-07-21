@@ -109,6 +109,32 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
     expect(Number(stillRow.still)).toBe(3)
   })
 
+  // QC F3: the inline `UPDATE api_keys SET purpose='supervisor' WHERE purpose IS NULL
+  // OR purpose=''` was DELETED (forbidden data-mutation in schema.sql, which re-runs
+  // every boot). It was REDUNDANT: `ADD COLUMN ... NOT NULL DEFAULT 'supervisor'` fills
+  // every existing row at ADD time. This proves a key inserted WITHOUT a purpose still
+  // lands 'supervisor' via the column default — so nothing regressed by removing it.
+  it('api_keys.purpose defaults to supervisor via the column default (no UPDATE needed)', async () => {
+    await applySchemaStrict(sql)
+    const email = `purpose-${randomUUID()}@invalid.local`
+    const [user] = await sql<{ id: string }[]>`
+      INSERT INTO users (email, password_hash, role) VALUES (${email}, 'x', 'user') RETURNING id
+    `
+    const [key] = await sql<{ purpose: string }[]>`
+      INSERT INTO api_keys (user_id, key_hash, name)
+      VALUES (${user.id}, ${'h-nopurpose-' + randomUUID()}, 'Legacy no-purpose')
+      RETURNING purpose
+    `
+    expect(key.purpose).toBe('supervisor')
+    // And schema.sql re-applying does not disturb it (no boot-time UPDATE fighting the
+    // idx_api_keys_user_supervisor_active unique index).
+    await applySchemaStrict(sql)
+    const [{ purpose }] = await sql<{ purpose: string }[]>`
+      SELECT purpose FROM api_keys WHERE user_id = ${user.id}
+    `
+    expect(purpose).toBe('supervisor')
+  })
+
   it('the stale (user_id, purpose) unique index is GONE and does not come back', async () => {
     await applySchemaStrict(sql)
     const rows = await sql<{ indexname: string }[]>`

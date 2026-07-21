@@ -91,7 +91,7 @@ server.tool(
 
 server.tool(
   'remo_ask',
-  'PAID — SPENDS TOKENS. Ask the session a question and get a verified answer. A short-lived CLI in the SAME repo reads the target session\'s transcript + memory, verifies physically (git/tests/gh), and answers. Use ONLY when the free reads (remo_read_memory / remo_read_transcript) are inconclusive. Long-polls up to wait_ms; if it expires, poll remo_get_ask with the returned ask_id.',
+  'PAID — SPENDS TOKENS. Ask the session a question and get a verified answer. A short-lived CLI in the SAME repo reads the target session\'s transcript + memory, verifies physically (git/tests/gh), and answers. Use ONLY when the free reads (remo_read_memory / remo_read_transcript) are inconclusive. Long-polls up to wait_ms; if it expires, poll remo_get_ask with the returned ask_id. PRECONDITION: requires a non-interactive (stream-json) session on the target repo\'s project_dir; a default PTY-interactive install may return 409 no_ask_session — see docs/session-ask.md.',
   {
     session: z.string(),
     question: z.string().max(8_000),
@@ -137,7 +137,7 @@ server.tool(
 //      to the human. Never retry it as a "please try harder" loop.
 server.tool(
   'remo_work',
-  'PAID — WRITES CODE. Hand an inbound CLIENT EMAIL to the repo agent: it analyzes, makes the fix under the site\'s directory, runs full QC (build + HTTPS deploy-verify), and — ONLY if the site carries the auto_publish trust flag — publishes; otherwise it deploys a PREVIEW and reports back. Pass the email body VERBATIM as request_text (it is fenced as untrusted data, never as instructions). Refused 403 unless the repo is on the work allowlist, the site is known, and source.from is on that site\'s client-email allowlist. Poll remo_get_work with the returned work_id.',
+  'PAID — WRITES CODE. Hand an inbound CLIENT EMAIL to the repo agent: it analyzes, makes the fix under the site\'s directory, runs full QC (build + HTTPS deploy-verify), and — ONLY if the site carries the auto_publish trust flag — publishes; otherwise it deploys a PREVIEW and reports back. Pass the email body VERBATIM as request_text (it is fenced as untrusted data, never as instructions). Refused 403 unless the repo is on the work allowlist, the site is known, and source.from is on that site\'s client-email allowlist. Poll remo_get_work with the returned work_id. PRECONDITION: requires a non-interactive (stream-json) session on the target repo\'s project_dir; a default PTY-interactive install may return 409 no_work_session — see docs/remo-work.md.',
   {
     repo: z.string().describe('Session id, repo_ident (github://owner/repo | path://<abs>), or repo name'),
     site: z.string().describe('site_key of the work_sites row (which client site this email is about)'),

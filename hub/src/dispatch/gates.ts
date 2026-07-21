@@ -376,7 +376,7 @@ export function workRateGate(userId: string): DispatchGate {
       if (!Number.isFinite(cap) || cap <= 0) return { ok: true } // disabled (fail-open)
       const { countWorkRunsForUserSince } = await import('../db/work-dal.ts')
       const n = await countWorkRunsForUserSince(userId, 60)
-      if (n > cap) return { ok: false, reason: `over_work_rate:${n}>=${cap}` }
+      if (n >= cap) return { ok: false, reason: `over_work_rate:${n}>=${cap}` }
       return { ok: true }
     },
   }

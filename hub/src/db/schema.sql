@@ -1036,9 +1036,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_orchestrator_unique
 -- Tag rows produced by the orchestrator-key mint so they don't conflict with
 -- the per-user single-supervisor api_keys uniqueness. Existing rows backfill
 -- to 'supervisor'.
+-- ADD COLUMN ... DEFAULT 'supervisor' makes Postgres fill the value for EVERY
+-- existing row at ADD time (and the column is NOT NULL, so '' cannot occur), so
+-- there is NOTHING to backfill. A prior inline `UPDATE api_keys SET purpose = ...`
+-- was REDUNDANT and forbidden here: schema.sql re-runs IN FULL every hub boot, and
+-- data-mutating statements belong in one-shot hub/scripts/, not this idempotent DDL
+-- (the UPDATE could also fight idx_api_keys_user_supervisor_active under a 2-key edge).
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'supervisor';
--- schema-lint: allow convergent — column is NOT NULL DEFAULT 'supervisor' ⇒ NULL/'' matches 0 rows once applied
-UPDATE api_keys SET purpose = 'supervisor' WHERE purpose IS NULL OR purpose = '';
 
 -- The legacy partial unique index `idx_api_keys_user_active` enforces ONE
 -- active key per user — incompatible with an orchestrator-purpose key
