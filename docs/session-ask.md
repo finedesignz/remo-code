@@ -39,6 +39,15 @@ Design spec: [`.planning/architecture/SESSION-ASK-API-SPEC.md`](../.planning/arc
 - Transcript + memory enter the ask prompt as **fenced untrusted DATA**, never as
   instructions (`hub/src/ask/prompt.ts` `fenceUntrusted`).
 
+## Precondition / limitation
+
+`remo_ask` needs a **non-interactive (stream-json) session** on the target repo's
+`project_dir` to answer. A default **prod install is PTY-interactive**, so no such
+session may exist — in that case `POST /api/ext/sessions/:id/ask` returns **409
+`no_ask_session`** (with a `detail` explaining the precondition). Fix: create a
+stream-json session on the repo (or start the orchestrator), then retry. Autospawning
+an ask-session on demand is deliberately NOT done (token-cost decision, owner-gated).
+
 ## Endpoints
 
 Mounted at `/api/ext`, immediately after `/api/plugin` and **BEFORE** the cookie/JWT

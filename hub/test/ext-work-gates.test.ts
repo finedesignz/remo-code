@@ -64,11 +64,16 @@ describe('workRateGate — bounds an inbox turned into a spend pump', () => {
     expect(maxWorkPerHour()).toBe(4)
   })
 
-  test('under the ceiling passes, over it blocks', async () => {
+  test('uses >= (like every sibling rate gate): count reaching the cap blocks', async () => {
+    // QC F5: workRateGate used `n > cap`, permitting cap+1/hour while its own reason
+    // string said `n>=cap` and askRateGate/cost/token/inject/launch all use `>=`. The
+    // work_runs row is inserted pre-dispatch so `n` counts the current item; with cap=4
+    // the 4th item (n=4) must be REJECTED — previously it slipped through and only the
+    // 5th (n=5) blocked.
     delete process.env.REMO_WORK_MAX_PER_HOUR
-    workCount = 4 // this item is already counted (the row is inserted pre-dispatch)
+    workCount = 3 // under the cap → the current item is allowed
     expect((await workRateGate('u1').check(REQ)).ok).toBe(true)
-    workCount = 5
+    workCount = 4 // n === cap → BLOCK (was wrongly allowed under `>`)
     const res = await workRateGate('u1').check(REQ)
     expect(res.ok).toBe(false)
     expect((res as any).reason).toContain('over_work_rate')

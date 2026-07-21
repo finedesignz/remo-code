@@ -63,6 +63,11 @@ export async function findAskSession(
        AND project_dir = ${projectDir}
        AND deleted_at IS NULL
        AND runner_type = 'stream-json'
+       -- NEVER route automation into the orchestrator session: it is exempt from the
+       -- git-push-credential scrub (scrubGitPush: !isOrchestratorSession), so an ask/work
+       -- prompt landing there would run WITH a live push credential, bypassing the
+       -- agent-proposes/hub-disposes invariant. (findWorkSession reuses this resolver.)
+       AND is_orchestrator = false
      ORDER BY (status = 'online') DESC, last_activity DESC NULLS LAST
      LIMIT 1
   `

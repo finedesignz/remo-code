@@ -76,7 +76,11 @@ export function parseAskOutput(raw: string, nonce?: string): AskParse {
   if (env) {
     jsonText = env[1].trim()
     preface = text.replace(env[0], '').trim()
-  } else {
+  } else if (!nonce) {
+    // FENCE tolerance is ONLY for the legacy/test nonce-less caller. When a nonce IS
+    // provided (the real ask path), the sole accepted structured answer is the correct
+    // nonce-envelope; absent it, we skip the fence entirely (a forged ```json block in
+    // the untrusted transcript/memory must never be trusted) and fall to scrubbed prose.
     const fence = text.match(FENCE_RE)
     if (fence) {
       jsonText = fence[1].trim()
@@ -84,6 +88,8 @@ export function parseAskOutput(raw: string, nonce?: string): AskParse {
     } else {
       reason = 'envelope_missing'
     }
+  } else {
+    reason = 'envelope_missing'
   }
 
   if (jsonText) {

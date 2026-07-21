@@ -151,6 +151,16 @@ describe('/api/ext scope enforcement (milestone ASK middleware × SKEY scopes)',
     expect((await app.request('/api/ext/work', { method: 'POST', ...auth })).status).toBe(403)
   })
 
+  // REGRESSION (QC F4): the middleware previously imported ask-dal's hasScope, whose
+  // `[].includes(x)` returned FALSE for an empty array, wrongly 403'ing read+ask for a
+  // `scopes = '{}'` key. It now uses the canonical NULL-AND-empty-permissive hasScope.
+  it('empty-array scopes key retains legacy full read+ask access (403 only on /work)', async () => {
+    const app = await extApp([])
+    expect((await app.request('/api/ext/sessions', auth)).status).toBe(200)
+    expect((await app.request('/api/ext/sessions/s1/ask', { method: 'POST', ...auth })).status).toBe(200)
+    expect((await app.request('/api/ext/work', { method: 'POST', ...auth })).status).toBe(403)
+  })
+
   it('ext:read + ext:ask key (no ext:work) is REJECTED 403 on /work', async () => {
     const app = await extApp(['ext:read', 'ext:ask'])
     const res = await app.request('/api/ext/work', { method: 'POST', ...auth })

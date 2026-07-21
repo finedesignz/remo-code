@@ -24,7 +24,7 @@
  * Failure reasons (fail closed): invalid_project_dir | path_escape | no_transcript |
  * no_memory
  */
-import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
+import { existsSync, readFileSync, readdirSync, statSync, realpathSync } from 'fs'
 import { homedir } from 'os'
 import { join, resolve, sep, isAbsolute } from 'path'
 import type { CommandResult } from './index'
@@ -73,6 +73,23 @@ export function resolveSessionDir(
   // Containment: the resolved dir MUST live strictly under the base.
   if (dir !== base && !dir.startsWith(base + sep)) return { ok: false, error: 'path_escape' }
   return { ok: true, dir }
+}
+
+/**
+ * Symlink-escape guard: the string-prefix containment in `resolveSessionDir` is
+ * computed on the LEXICAL path, but `readFileSync`/`readdirSync` follow symlinks. A
+ * symlink inside the session dir (or a symlinked session dir itself) pointing at, say,
+ * `~/.ssh/id_rsa` would pass the lexical check and leak the target. `realpathSync`
+ * resolves EVERY symlink in the path, so asserting the REAL path still lives under the
+ * base closes that escape. Fails closed (unreadable/broken symlink ⇒ rejected).
+ */
+export function realPathContained(full: string, base: string): boolean {
+  try {
+    const real = realpathSync(full)
+    return real === base || real.startsWith(base + sep)
+  } catch {
+    return false
+  }
 }
 
 /** Truncate `s` to MAX_BYTES, keeping the TAIL. Returns [text, truncated]. */
@@ -151,6 +168,9 @@ export async function runSessionTranscriptTail(args: string[]): Promise<CommandR
   if (!existsSync(r.dir)) return { exit_code: 1, error: 'no_transcript' }
   const file = newestJsonl(r.dir)
   if (!file) return { exit_code: 1, error: 'no_transcript' }
+  // realpath check catches a symlinked transcript file OR a symlinked session dir
+  // resolving outside `~/.claude/projects`.
+  if (!realPathContained(file, claudeProjectsBase())) return { exit_code: 1, error: 'path_escape' }
 
   let raw: string
   try {
@@ -210,6 +230,9 @@ export async function runSessionMemory(args: string[]): Promise<CommandResult> {
     }
     const full = resolve(join(memDir, n))
     if (!full.startsWith(memDir + sep)) continue // never follow a name out of the dir
+    // realpath check catches a symlinked memory file (or symlinked memDir) whose real
+    // target escapes `~/.claude/projects` — the lexical prefix check above cannot.
+    if (!realPathContained(full, claudeProjectsBase())) continue
     let content: string
     try {
       content = readFileSync(full, 'utf8')

@@ -5,7 +5,7 @@
  *   2. The returned payload is BYTE-CAPPED.
  */
 import { describe, test, expect } from 'bun:test'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -15,8 +15,10 @@ import {
   claudeProjectsBase,
   slugForProjectDir,
   runSessionMemory,
+  realPathContained,
   MAX_BYTES,
 } from '../src/commands/session-read'
+import { sep } from 'path'
 
 describe('resolveSessionDir — path traversal fails closed', () => {
   const bad = [
@@ -126,5 +128,53 @@ describe('runSessionMemory — byte cap applies to the real read path', () => {
     const res = await runSessionMemory(['../../../etc'])
     expect(res.exit_code).toBe(1)
     expect(['invalid_project_dir', 'path_escape']).toContain(res.error)
+  })
+
+  // A symlink INSIDE the jail whose real target escapes the base must NOT leak the
+  // target. String-prefix containment misses this — the realpath check catches it.
+  test('a symlinked memory file pointing OUTSIDE the base is not read', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ask-home-sym-'))
+    const outside = mkdtempSync(join(tmpdir(), 'ask-secret-'))
+    const prevHome = process.env.HOME
+    const prevUserProfile = process.env.USERPROFILE
+    process.env.HOME = home
+    process.env.USERPROFILE = home
+    try {
+      const secret = join(outside, 'id_rsa')
+      writeFileSync(secret, 'SUPER-SECRET-KEY-MATERIAL')
+      const projectDir = process.platform === 'win32' ? 'C:/fake/repo2' : '/fake/repo2'
+      const dir = join(home, '.claude', 'projects', slugForProjectDir(projectDir), 'memory')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'MEMORY.md'), 'legit index\n')
+      let symlinked = false
+      try {
+        symlinkSync(secret, join(dir, 'leak.md'))
+        symlinked = true
+      } catch {
+        // Windows without symlink privilege — fall through to the unit assertion below.
+      }
+
+      const res = await runSessionMemory([projectDir])
+      if (res.exit_code === 0) {
+        const payload = JSON.parse(res.snippet!)
+        const blob = JSON.stringify(payload)
+        expect(blob).not.toContain('SUPER-SECRET-KEY-MATERIAL')
+        expect(payload.files.some((f: any) => f.name === 'leak.md')).toBe(false)
+      }
+      // Unit-level proof the realpath guard rejects a real path outside the base,
+      // independent of whether the FS allowed the symlink.
+      expect(realPathContained(secret, claudeProjectsBase())).toBe(false)
+      if (symlinked) {
+        expect(realPathContained(join(dir, 'leak.md'), claudeProjectsBase())).toBe(false)
+      }
+      // Use the REAL base (tmpdir may itself be a symlink, e.g. /tmp→/private/tmp).
+      expect(realPathContained(join(dir, 'MEMORY.md'), realpathSync(join(home, '.claude', 'projects')))).toBe(true)
+      void sep
+    } finally {
+      process.env.HOME = prevHome
+      process.env.USERPROFILE = prevUserProfile
+      rmSync(home, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 })

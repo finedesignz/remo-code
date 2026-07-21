@@ -30,11 +30,10 @@ export async function verifyApiKeyForExt(keyHash: string): Promise<ExtApiKey | n
   return { id: row.id, user_id: row.user_id, scopes: row.scopes ?? null }
 }
 
-/** NULL scopes ⇒ legacy full access. Otherwise the scope must be present. */
-export function hasScope(scopes: string[] | null, scope: string): boolean {
-  if (scopes == null) return true
-  return scopes.includes(scope)
-}
+// NOTE: the former `hasScope` here treated an empty array `[]` as "no access"
+// (`[].includes(x)` ⇒ false), diverging from the canonical NULL-AND-empty-permissive
+// `hasScope` in ../auth/scopes.ts. It had a single importer (ext-api-key-middleware),
+// now switched to the canonical one, so it was DELETED to avoid two divergent copies.
 
 export type AskStatus = 'queued' | 'dispatched' | 'answered' | 'timeout' | 'skipped' | 'failed'
 
