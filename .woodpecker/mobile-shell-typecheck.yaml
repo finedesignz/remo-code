@@ -21,6 +21,22 @@ labels:
 steps:
   - name: cargo-check
     image: rust:latest
+    # Persistent cargo cache (added 2026-07-21). Cold Tauri dep compiles were
+    # taking 30min+ and stalling agents; the old GHA used actions/cache for the
+    # cargo registry + target dir. Woodpecker docker backend has no cache plugin
+    # here, so we bind-mount a per-repo host dir shared across all agents on the
+    # box. Requires repo trusted.volumes=true (granted via API). CARGO_HOME is a
+    # fresh mounted path (registry + git + installed bins) — safe because the
+    # rust image's toolchain proxies live in RUSTUP_HOME=/usr/local/rustup and
+    # the cargo binary stays on PATH. CARGO_TARGET_DIR caches the compiled
+    # dependency tree (the real 30min pole). Cargo's own file locks serialize any
+    # concurrent runs sharing the dir rather than corrupting it.
+    environment:
+      CARGO_HOME: /cargo-cache/home
+      CARGO_TARGET_DIR: /cargo-cache/target
+    volumes:
+      - /var/lib/woodpecker-cache/remo-code/home:/cargo-cache/home
+      - /var/lib/woodpecker-cache/remo-code/target:/cargo-cache/target
     commands:
       - apt-get update && apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config
       # tauri::generate_context! resolves frontendDist ("../ui/dist") at compile
