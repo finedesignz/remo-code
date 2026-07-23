@@ -91,7 +91,7 @@ export function _resetSpawnLocks(): void {
 async function resolveStartTarget(
   userId: string,
   sessionId: string,
-): Promise<{ supervisorId: string; cwd: string } | null> {
+): Promise<{ supervisorId: string; cwd: string; sessionSkipPerms: boolean } | null> {
   const { listOnlineSupervisorIdsForUser, isSupervisorOnline } = await import(
     '../ws/supervisor-registry.ts'
   )
@@ -106,8 +106,9 @@ async function resolveStartTarget(
   if (!session) return null
   const cwd = (session as any).project_dir as string | null
   if (!cwd) return null
+  const sessionSkipPerms = (session as any).dangerously_skip_permissions === true
 
-  return { supervisorId, cwd }
+  return { supervisorId, cwd, sessionSkipPerms }
 }
 
 async function waitForOnline(sessionId: string, deadline: number): Promise<boolean> {
@@ -127,7 +128,11 @@ async function waitForOnline(sessionId: string, deadline: number): Promise<boole
  * Intended to be passed as the pipeline's `ensureOnline` dep. Safe to call even
  * when the session is already online (returns true immediately).
  */
-export async function ensureSessionOnline(userId: string, sessionId: string): Promise<boolean> {
+export async function ensureSessionOnline(
+  userId: string,
+  sessionId: string,
+  opts: { useSessionSkipPermissions?: boolean } = {},
+): Promise<boolean> {
   // Fast path: already online (e.g. raced online between isOnline and here).
   if (getChannel(sessionId) != null) return true
   if (!spawnOnErrorEnabled()) return false
@@ -147,7 +152,7 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
       log.info('spawn_on_error.no_target', { user_id: userId, session_id: sessionId })
       return false
     }
-    const { supervisorId, cwd } = target
+    const { supervisorId, cwd, sessionSkipPerms } = target
 
     const { reserveSessionSlot, releaseSessionSlot } = await import('../sessions/budget.ts')
     const { endRun } = await import('../db/supervisor-dal.ts')
@@ -191,10 +196,16 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
     }
     const runId = reservation.run.id
 
-    // MACHINE-TRIGGERED path: this wake is driven by error-capture / feedback intake
-    // (untrusted, anonymous-reachable), never by a human. It never runs with
-    // permission prompts disabled, whatever the session row's default says.
-    const skipPerms = false
+    // Permission posture. Default OFF: error-capture / feedback intake is
+    // untrusted + anonymous-reachable, so it never runs with prompts disabled,
+    // whatever the session row's default says. A caller MAY opt in to the
+    // SESSION's own `dangerously_skip_permissions` (revanote auto-wake): a
+    // headless stream-json runner cannot answer live permission prompts, so
+    // without this the woken agent replies but never edits any files. The
+    // supervisor's `allow_dangerous_skip_permissions` config remains the hard
+    // ceiling (applied = requested && allowed), so opting in can never exceed
+    // what the operator already permitted for that host.
+    const skipPerms = opts.useSessionSkipPermissions ? sessionSkipPerms : false
     try {
       sendToSupervisor(supervisorId, {
         type: 'session.start',
