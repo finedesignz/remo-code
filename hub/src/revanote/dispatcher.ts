@@ -35,7 +35,9 @@
  *   - no session/mapping → annotation 'failed' + reject callback ('no_target').
  *   - offline target → grace park + annotation 'pending'(skip_reason
  *     'session_offline'); TTL lapse → 'failed_offline'(target_offline_expired)
- *     (now via onParkExpire).
+ *     (now via onParkExpire). Revanote now opts into spawn-on-error via the
+ *     `ensureOnline` dep (REMO_SPAWN_ON_ERROR): an offline-but-mapped target is
+ *     lazy-STARTed through the supervisor before parking, mirroring error-capture.
  *   - queue dropped → annotation 'failed'(session_busy) + reject callback
  *     ('session_busy').
  *   - dispatched → insert annotation_run(in_flight), persist user message,
@@ -66,6 +68,7 @@ import {
   type RunStore,
 } from '../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
+import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
 
 export type DispatchOutcome =
   | { status: 'dispatched'; run_id: string; session_id: string }
@@ -282,6 +285,11 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
     gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate, revanoteBudgetGate(userId, tz)],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
+    // Spawn-on-error (opt-in via REMO_SPAWN_ON_ERROR): when the bound session is
+    // offline, lazy-START it via the supervisor before parking, so an offline-but-
+    // mapped target auto-wakes on an inbound annotation. Runs only after the gate
+    // list passes (cost-cap etc. stay non-bypassable); leak-safe + dormant by default.
+    ensureOnline: (req) => ensureSessionOnline(req.userId, req.sessionId),
     // Offline replay: re-run the full dispatch for this pending annotation.
     replay: async () => {
       await dispatchPendingAnnotation(ann.id)
