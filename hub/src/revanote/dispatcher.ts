@@ -289,7 +289,12 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
     // offline, lazy-START it via the supervisor before parking, so an offline-but-
     // mapped target auto-wakes on an inbound annotation. Runs only after the gate
     // list passes (cost-cap etc. stay non-bypassable); leak-safe + dormant by default.
-    ensureOnline: (req) => ensureSessionOnline(req.userId, req.sessionId),
+    // Wake with the session's OWN permission posture (bounded by the supervisor's
+    // allow_dangerous_skip_permissions ceiling) so the revived headless runner can
+    // actually apply fixes, not just reply — a stream-json runner started without
+    // skip-permissions stalls on the first prompt and edits nothing.
+    ensureOnline: (req) =>
+      ensureSessionOnline(req.userId, req.sessionId, { useSessionSkipPermissions: true }),
     // Offline replay: re-run the full dispatch for this pending annotation.
     replay: async () => {
       await dispatchPendingAnnotation(ann.id)
@@ -299,6 +304,12 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
       await updateAnnotationStatus(ann.id, 'failed_offline', {
         skip_reason: 'target_offline_expired',
       })
+      // Tell revanote the dispatch failed so its annotation reverts
+      // in_progress → todo (via how-callback resolved:false), matching the other
+      // rejection paths (no_target / session_busy / budget). Without this an
+      // offline-expired comment hangs in_progress in the revanote UI forever with
+      // no reply and can never be re-dispatched.
+      await enqueueRejectionCallback(ann, 'target_offline', 'target_offline_expired')
     },
     // Ship the user_message: persist chat history, broadcast to subscribers,
     // then forward on the socket.
