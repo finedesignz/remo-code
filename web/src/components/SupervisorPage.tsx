@@ -13,6 +13,7 @@ import { RepoGroupChips } from './groups/RepoGroupChips'
 import { GroupsManager } from './groups/GroupsManager'
 import { AutoDevActivityPanel } from './AutoDevActivityPanel'
 import { SupervisorRootsEditor } from './SupervisorRootsEditor'
+import { hubFetch } from '../lib/api'
 
 type OrchestratorSnapshot = {
   enabled: boolean
@@ -253,6 +254,35 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     }
     return m
   }, [sessions])
+  // Single-repo Start → land the user IN the session that just started.
+  // `POST /start` only returns a run_id; the hub `sessions` row appears
+  // asynchronously once the supervisor's CLI connects (matched by project_dir),
+  // so poll `/api/sessions` for a NEW row on that path and route to it.
+  const navigateToStartedSession = useCallback(async (repoPath: string): Promise<boolean> => {
+    const norm = (p: string | null | undefined) =>
+      (p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const target = norm(repoPath)
+    if (!target) return false
+    // Snapshot the ids that already existed so we never jump to an unrelated session.
+    const before = new Set((Array.isArray(sessions) ? sessions : []).map((s) => s.id))
+    const deadline = Date.now() + 45_000
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1500))
+      try {
+        const list = await hubFetch<Array<{ id: string; project_dir: string | null }>>(
+          token, '/api/sessions'
+        )
+        const hit = (Array.isArray(list) ? list : []).find(
+          (s) => !before.has(s.id) && norm(s.project_dir) === target
+        )
+        if (hit) {
+          window.location.hash = `#/?session=${encodeURIComponent(hit.id)}`
+          return true
+        }
+      } catch {}
+    }
+    return false
+  }, [token, sessions])
   const [startTarget, setStartTarget] = useState<
     | { kind: 'local'; repo: LocalRepo; githubFallback?: GitHubRepo }
     | { kind: 'github'; repo: GitHubRepo }
@@ -848,7 +878,17 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           supervisorId={activeSupervisor.id}
           target={startTarget}
           onClose={() => setStartTarget(null)}
-          onStarted={(runId) => { setStartTarget(null); setInfo(`Started run ${runId.slice(0, 8)}`); setTimeout(() => setInfo(null), 4000); loadActiveRuns() }}
+          onStarted={(runId, repoPath) => {
+            setStartTarget(null)
+            loadActiveRuns()
+            setInfo('Starting session…')
+            navigateToStartedSession(repoPath).then((found) => {
+              if (found) return
+              // Timed out waiting for the session row — fall back to the toast.
+              setInfo(`Started run ${runId.slice(0, 8)}`)
+              setTimeout(() => setInfo(null), 4000)
+            })
+          }}
           onError={(msg) => { setError(msg); setTimeout(() => setError(null), 6000) }}
         />
       )}
@@ -1121,7 +1161,8 @@ interface StartDialogProps {
     | { kind: 'local'; repo: LocalRepo; githubFallback?: GitHubRepo }
     | { kind: 'github'; repo: GitHubRepo }
   onClose: () => void
-  onStarted: (runId: string) => void
+  /** `repoPath` is the resolved absolute project dir the session will report. */
+  onStarted: (runId: string, repoPath: string) => void
   onError: (msg: string) => void
 }
 
@@ -1213,7 +1254,7 @@ function StartDialog(props: StartDialogProps) {
       })
       if (!r.ok) { onError((await r.json()).error || 'start failed'); return }
       const data = await r.json()
-      onStarted(data.run_id)
+      onStarted(data.run_id, repoPath)
     } finally { setBusy(false) }
   }
 

@@ -53,9 +53,13 @@ export function HeaderRight({ token, user, signOut, onNavigate, subscribe }: Hea
         title="Reload"
         aria-label="Reload"
       >
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M1 4v-3h3" /><path d="M3.51 11a7 7 0 0 0 12.13-3.5" />
-          <path d="M15 12v3h-3" /><path d="M12.49 5a7 7 0 0 0-12.13 3.5" />
+        {/* Conventional circular-arrows refresh, on a 24-grid so the arrowheads
+            stay legible when rendered at 16px. */}
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20 12a8 8 0 0 1-13.7 5.6L4 15.3" />
+          <path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.7" />
+          <path d="M20 4v4.7h-4.7" />
+          <path d="M4 20v-4.7h4.7" />
         </svg>
       </button>
       <button

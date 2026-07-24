@@ -26,6 +26,7 @@ import { MobileSessionControls } from './MobileSessionControls'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
 import { hubFetch } from '../lib/api'
 import { useClientConfig } from '../hooks/useClientConfig'
+import { readTabParam } from '../lib/ui/nav'
 
 const NUDGE_TEXT = "Status update? Briefly: what's the current state, what would you recommend doing next, or what input do you need from me?"
 
@@ -120,16 +121,31 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     })
   }, [subscribe, sessionsHook.updateSessionStatus, sessionsHook.setSessions])
 
-  // Auto-select the default session ONLY on initial load (when nothing is selected).
-  // Default resolution (R-PROFILE-02): prefer the user's orchestrator session,
-  // else the first connected session.
+  // `#/?session=<id>` selects that session explicitly (used by "Start" in
+  // Settings → Connections to land the user IN the session it just started).
+  // Same query-param convention as `tab=` (see lib/ui/nav.ts).
+  const [urlSessionId, setUrlSessionId] = useState<string | null>(
+    () => readTabParam(window.location.hash, 'session')
+  )
   useEffect(() => {
-    if (activeSessionId) return
+    const onHash = () => setUrlSessionId(readTabParam(window.location.hash, 'session'))
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+  useEffect(() => {
+    if (urlSessionId) setActiveSessionId(urlSessionId)
+  }, [urlSessionId])
+
+  // Auto-select the default session ONLY on initial load (when nothing is selected
+  // and the URL didn't name one). Default resolution (R-PROFILE-02): prefer the
+  // user's orchestrator session, else the first connected session.
+  useEffect(() => {
+    if (activeSessionId || urlSessionId) return
     const onl = connectedSessions(sessionsHook.sessions)
     if (onl.length === 0) return
     const orchestrator = onl.find(s => s.is_orchestrator)
     setActiveSessionId((orchestrator ?? onl[0]).id)
-  }, [sessionsHook.sessions, activeSessionId])
+  }, [sessionsHook.sessions, activeSessionId, urlSessionId])
 
   // Auto-nudge on session click (matches Layout behavior).
   const handleSelectSession = useCallback((id: string) => {
