@@ -86,6 +86,18 @@ machine. Connects to `/ws/agent` with an API key; hosts one CLI subprocess per a
 - **Session resume** by matching `project_dir` — restart reconnects with full history.
 - **Session inventory push** (supervisor ≥0.5.7): `session_inventory` every 10s, hub stores it
   in `hub/src/ws/supervisor-registry.ts` and folds it into `GET /api/sessions`'s `active` flag.
+- **Periodic repo inventory rescan** (`supervisor/src/hub-client.ts`, fix/supervisor-periodic-repo-rescan):
+  the supervisor re-emits `supervisor.repo_inventory` on a timer so a repo cloned/forked AFTER connect
+  reaches the hub WITHOUT a reconnect or a hand-edit of `supervisor.json`. Fires once on `auth_ok`, then
+  every **`REMO_REPO_INVENTORY_INTERVAL_MS`** (supervisor process env; default **300000** = 5min;
+  non-positive/non-finite ⇒ default). Cancelled on disconnect (like the session-inventory push). An
+  in-flight-scan guard (`repoInventoryInFlight`) prevents a slow scan from overlapping the next tick.
+  The web "Refresh repos" button also forces a fresh full scan: `POST /api/supervisors/:id/scan` first
+  sends the allowlisted `supervisor.rescan_repos` command (supervisor replies `supervisor.rescan_ack`),
+  THEN reads the enriched legacy `repo.scan` — so a just-cloned repo appears on demand. A pre-fix
+  supervisor that doesn't handle `rescan_repos` times out and the route falls through to `repo.scan`
+  unchanged (no regression). **A new signed supervisor MSI is REQUIRED** for the supervisor half
+  (periodic rescan + `rescan_repos` handler) to reach installed hosts.
 - **Idle teardown** (`hub/src/ws/idle-teardown.ts`): subscriber count → 0 starts a
   `REMO_SESSION_IDLE_GRACE_SECONDS` timer → `shutdown`/`idle_no_subscribers`. Orchestrator
   session is exempt. On `shutdown` receipt the supervisor writes a fail-open "memory before

@@ -16,6 +16,21 @@ import { pollUsage, USAGE_POLL_INTERVAL_MS, type UsagePayload } from './usage/oa
 /** Bug A — push the live runner set to the hub every 10s after auth_ok. */
 const SESSION_INVENTORY_INTERVAL_MS = 10_000
 
+/**
+ * fix/supervisor-periodic-repo-rescan — re-emit `supervisor.repo_inventory` on
+ * a timer so a repo cloned AFTER the supervisor connected reaches the hub
+ * without a reconnect or a hand-edit of supervisor.json. Default 5 min,
+ * overridable via `REMO_REPO_INVENTORY_INTERVAL_MS`.
+ */
+export const REPO_INVENTORY_INTERVAL_DEFAULT_MS = 300_000
+
+/** Non-positive / non-finite / unset ⇒ default (repo-wide knob convention). */
+export function resolveRepoInventoryIntervalMs(raw?: string | null): number {
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return REPO_INVENTORY_INTERVAL_DEFAULT_MS
+  return n
+}
+
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
   | { type: 'supervisor.hello'; version: string; os: string; hostname: string; roots: string[]; capabilities: string[]; allow_dangerous_skip_permissions: boolean; restrict_to_git: boolean; max_concurrent: number; audit_log_enabled: boolean }
@@ -35,6 +50,8 @@ type OutboundMsg =
   | { type: 'run_output'; run_id: string; chunk: string }
   | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
   | { type: 'supervisor.set_roots_ack'; req_id: string; ok: boolean; applied_roots?: string[]; error?: string }
+  // fix/supervisor-periodic-repo-rescan — ack for a hub-initiated rescan.
+  | { type: 'supervisor.rescan_ack'; req_id: string; ok: boolean; error?: string }
   // P1 usage poll — parsed, non-secret Anthropic OAuth utilization snapshot.
   // The OAuth token is read locally in usage/oauth-poll.ts and NEVER serialized
   // here; only the four utilization windows + reset times cross the wire.
@@ -71,6 +88,14 @@ export class SupervisorClient {
   /** P1 — interval handle for the Anthropic OAuth usage poll; null when not
    *  auth'd. Fires once on auth_ok + every 5 min. */
   private usagePollTimer: ReturnType<typeof setInterval> | null = null
+
+  /** fix/supervisor-periodic-repo-rescan — interval handle for the periodic
+   *  repo inventory re-emit; null when not auth'd. */
+  private repoInventoryTimer: ReturnType<typeof setInterval> | null = null
+
+  /** Guards against a slow scan overlapping the next tick (or a hub-initiated
+   *  rescan racing the timer). */
+  private repoInventoryInFlight = false
 
   // ── B6: observability state ──────────────────────────────────────────────
   /** Last `auth_ok` timestamp (ms). Drives `last_reconnect_ms_ago` in
@@ -176,6 +201,7 @@ export class SupervisorClient {
       this.authenticated = false
       this.stopSessionInventoryPush()
       this.stopUsagePoll()
+      this.stopRepoInventoryPush()
       const code = (ev as any)?.code as number | undefined
       const reason = (ev as any)?.reason as string | undefined
       this.log('warn', `WebSocket closed code=${code ?? '?'} reason=${reason || '(none)'}`)
@@ -285,9 +311,9 @@ export class SupervisorClient {
       // Phase 08 §15 — push full repo inventory to the hub. The hub upserts
       // sessions (github-keyed) + pending_local_repos (local-only). When roots
       // is empty, we emit a needs-roots log instead so the UI can prompt.
-      void this.sendRepoInventory().catch((err) => {
-        this.log('warn', `repo_inventory failed: ${err.message}`)
-      })
+      // fix/supervisor-periodic-repo-rescan — fires immediately, then every
+      // REMO_REPO_INVENTORY_INTERVAL_MS (default 5 min); cancels on disconnect.
+      this.startRepoInventoryPush()
       // Bug A — start the session_inventory push interval. Fires once
       // immediately + every 10s; cancels on disconnect.
       this.startSessionInventoryPush()
@@ -317,6 +343,7 @@ export class SupervisorClient {
       case 'create_local_repo_and_push': await this.onCreateLocalRepoAndPush(msg); break
       case 'key_rotated': this.onKeyRotated(msg); break
       case 'supervisor.set_roots': await this.onSetRoots(msg); break
+      case 'supervisor.rescan_repos': await this.onRescanRepos(msg); break
       default:
         // unknown
         break
@@ -408,6 +435,21 @@ export class SupervisorClient {
       this.send({ type: 'supervisor.repo_inventory', scanned_at: new Date().toISOString(), repos: [] })
       return
     }
+    // A root scan can outlive the tick interval on a large tree; never let two
+    // scans run at once (the second would only duplicate work + IO).
+    if (this.repoInventoryInFlight) {
+      this.log('info', 'repo_inventory skipped: a scan is already in flight')
+      return
+    }
+    this.repoInventoryInFlight = true
+    try {
+      await this.scanAndSendInventory()
+    } finally {
+      this.repoInventoryInFlight = false
+    }
+  }
+
+  private async scanAndSendInventory(): Promise<void> {
     const entries = await scanRoots({ roots: this.cfg.roots, scan: this.cfg.scan })
     const scannedAt = new Date().toISOString()
     const repos = entries.map((e) => ({
@@ -481,6 +523,51 @@ export class SupervisorClient {
     if (!this.usagePollTimer) return
     clearInterval(this.usagePollTimer)
     this.usagePollTimer = null
+  }
+
+  /**
+   * fix/supervisor-periodic-repo-rescan — start the periodic repo inventory
+   * re-emit loop. Idempotent (no-op if already running). The immediate first
+   * emit happens here too; subsequent ticks are on the interval. Stopped on
+   * every disconnect. Overlap is guarded inside sendRepoInventory
+   * (repoInventoryInFlight); an empty-roots tick is a cheap no-op emit.
+   */
+  private startRepoInventoryPush() {
+    if (this.repoInventoryTimer) return
+    // Immediate first scan (replaces the old one-shot auth_ok emit).
+    void this.sendRepoInventory().catch((err) => {
+      this.log('warn', `repo_inventory failed: ${err?.message ?? err}`)
+    })
+    const intervalMs = resolveRepoInventoryIntervalMs(process.env.REMO_REPO_INVENTORY_INTERVAL_MS)
+    this.repoInventoryTimer = setInterval(() => {
+      void this.sendRepoInventory().catch((err) => {
+        this.log('warn', `repo_inventory failed: ${err?.message ?? err}`)
+      })
+    }, intervalMs)
+  }
+
+  private stopRepoInventoryPush() {
+    if (!this.repoInventoryTimer) return
+    clearInterval(this.repoInventoryTimer)
+    this.repoInventoryTimer = null
+  }
+
+  /**
+   * fix/supervisor-periodic-repo-rescan — hub-initiated rescan (web "Refresh
+   * repos" button). Forces a fresh full inventory emit and acks. Overlap with
+   * the periodic timer is guarded by repoInventoryInFlight inside
+   * sendRepoInventory. A scan failure surfaces as ok:false — never a silent
+   * swap to a stale inventory.
+   */
+  private async onRescanRepos(msg: { req_id: string }) {
+    const reqId = msg.req_id
+    try {
+      await this.sendRepoInventory()
+      this.send({ type: 'supervisor.rescan_ack', req_id: reqId, ok: true })
+    } catch (err: any) {
+      this.log('warn', `rescan_repos failed: ${err?.message ?? err}`)
+      this.send({ type: 'supervisor.rescan_ack', req_id: reqId, ok: false, error: String(err?.message ?? err) })
+    }
   }
 
   /**

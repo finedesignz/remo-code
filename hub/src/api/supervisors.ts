@@ -49,6 +49,18 @@ supervisors.post('/:id/scan', async (c) => {
   const a = await authorizeSupervisor(c)
   if ('error' in a) return a.error
   try {
+    // fix/supervisor-periodic-repo-rescan — force a fresh full repo_inventory
+    // FIRST so a repo cloned after the supervisor connected is reflected in the
+    // registry cache that enrichScanWithInventory (below) joins against. This
+    // makes the web "Refresh repos" button actually discover new repos rather
+    // than only re-reading the legacy scan shape. Best-effort: an older
+    // supervisor that doesn't handle rescan_repos times out; we still fall
+    // through to the legacy repo.scan so the button never regresses.
+    try {
+      await sendRequest(a.supervisorId, { type: 'supervisor.rescan_repos' } as any, 20_000)
+    } catch (rescanErr: any) {
+      console.warn(`[supervisors] rescan_repos failed (falling back to repo.scan): ${rescanErr?.message}`)
+    }
     const res: any = await sendRequest(a.supervisorId, { type: 'repo.scan' } as any, 20_000)
     // The legacy `repo.scan` shape (ScannedRepo) carries no worktree/canonical
     // introspection, so the web's worktree filter (SupervisorPage) had nothing
