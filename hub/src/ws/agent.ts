@@ -1070,6 +1070,17 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     return
   }
 
+  // fix/supervisor-periodic-repo-rescan — rescan ack from supervisor → resolve
+  // the pending request the POST /api/supervisors/:id/scan handler is awaiting.
+  if (msg.type === 'supervisor.rescan_ack') {
+    if (msg.ok) {
+      resolveRequest(supervisorId, msg.req_id, msg)
+    } else {
+      rejectRequest(supervisorId, msg.req_id, msg.error || 'rescan_failed')
+    }
+    return
+  }
+
   if (msg.type === 'supervisor.repo_inventory') {
     // Phase 08 §15 (Plan 003 T4): fan inventory into sessions + pending_local_repos.
     try {

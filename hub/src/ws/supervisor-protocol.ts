@@ -295,12 +295,27 @@ export const SetRootsAck = z.object({
   error: z.string().max(2000).optional(),
 })
 
+/**
+ * fix/supervisor-periodic-repo-rescan — ack for a hub-initiated rescan
+ * (`supervisor.rescan_repos`). The supervisor re-scans its roots and emits a
+ * fresh `supervisor.repo_inventory` on a separate frame; this ack lets the
+ * PATCH/POST route await the completion. `ok:false` surfaces a scan error
+ * rather than silently swapping in a stale inventory.
+ */
+export const RescanAck = z.object({
+  type: z.literal('supervisor.rescan_ack'),
+  req_id: z.string(),
+  ok: z.boolean(),
+  error: z.string().max(2000).optional(),
+})
+
 export const SupervisorInboundV2 = [
   ...SupervisorInbound,
   SessionLaunchFailed,
   RepoCreateProgress,
   RepoCreateFailed,
   SetRootsAck,
+  RescanAck,
 ]
 
 // -- Hub -> Supervisor (constructed by hub, not validated) --
@@ -348,3 +363,8 @@ export type HubToSupervisor =
   // running supervisor. Supervisor writes supervisor.json (no BOM via
   // Bun.write/native UTF-8 writeFileSync), re-scans, then emits set_roots_ack.
   | { type: 'supervisor.set_roots'; req_id: string; roots: string[] }
+  // fix/supervisor-periodic-repo-rescan — hub asks the supervisor to re-scan
+  // its roots NOW and emit a fresh repo_inventory. Supervisor replies with
+  // supervisor.rescan_ack. Used by the web "Refresh repos" button so a repo
+  // cloned after connect appears without waiting for the periodic timer.
+  | { type: 'supervisor.rescan_repos'; req_id: string }
