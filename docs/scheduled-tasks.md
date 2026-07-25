@@ -279,13 +279,16 @@ Internal kind (NOT user-pickable; synthesized by Coolify webhook + classifier):
   `TriageResult` JSON (`error_type`, `severity`, `root_cause`, `suggested_fix`,
   `confidence`, `affected_files?`), and stores the validated JSON in
   `scheduled_task_runs.output_snippet`. On parse failure the run is marked
-  `status='failed', error='triage_parse_error'`. **Wire-up status:** the
+  `status='failed', error='triage_parse_error'`. **Wire-up status:** LIVE. The
   `triage` task_kind, prompt template, schema, and parse helper are shipped
-  (`hub/src/scheduler/triage-schema.ts`, `triage-prompt.ts`); the
-  webhook-to-session routing (Phase 06 plan 008) is **pending Phase 04 plan
-  008** (`pickSessionTarget` + `POST /api/sessions/heal`) being merged. Until
-  then, triage runs from the webhook persist metadata but `dispatchTriageStub`
-  is a no-op — they do not dispatch to a session.
+  (`hub/src/scheduler/triage-schema.ts`, `triage-prompt.ts`), and
+  webhook-to-session routing is real: `dispatchTriage`
+  (`hub/src/api/coolify-webhook.ts`) storm-dedupes the deploy failure, probes
+  routability, fetches the failing app's logs, and fires the `__internal_triage`
+  task, which `senders/triage.ts` dispatches to a live local-agent session
+  (repo-keyed first, else any online agent session; none ⇒ immediate
+  `failed`/`no_target_available`). `dispatchTriageStub` survives only as a
+  back-compat alias of `dispatchTriage` — it is NOT a stub.
 
 ### Target kinds
 
@@ -987,8 +990,9 @@ metadata row only (no LLM spend).
   - `git_repository TEXT`
   - `commit_sha TEXT`
 - **Event mapping:**
-  - `deployment.failed` → row inserted with metadata; triage dispatch
-    stubbed (awaits plan 008)
+  - `deployment.failed` → row inserted with metadata, then `dispatchTriage`
+    fires the `__internal_triage` task for a live agent session (storm-deduped,
+    with the app's log tail attached)
   - `deployment.succeeded` / `deployment.in_progress` → metadata-only row,
     `status='success'`, no spend
 - **Response:** `202 { ok: true, run_id }`
