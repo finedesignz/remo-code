@@ -47,7 +47,6 @@ import { runNow as dispatcherRunNow, finalizeRun } from '../scheduler/dispatcher
 import { deployFailureFingerprint, DEPLOY_DEDUPE_WINDOW_MS } from '../scheduler/deploy-fingerprint.ts'
 import { hasActiveSessionForRepo, resolveRepoKeyedAgentSession } from '../sessions/repo-routing.ts'
 import { listOnlineAgentSessionsForUser } from '../ws/registry.ts'
-import { listOnlineSupervisorIdsForUser } from '../ws/supervisor-registry.ts'
 import { ipAllowed, sourceIpFromHeaders } from '../lib/cidr.ts'
 
 export const coolifyWebhookRoutes = new Hono()
@@ -176,9 +175,10 @@ export async function dispatchTriage(
       payload.application_uuid,
     )
     if (!repoKeyed) {
-      const hasLiveTarget =
-        listOnlineAgentSessionsForUser(userId).length > 0 ||
-        listOnlineSupervisorIdsForUser(userId).length > 0
+      // Local-agent sessions ONLY: triage no longer supervisor-spawns (see
+      // scheduler/senders/triage.ts header), so an online supervisor with no
+      // agent session is NOT a routable triage target.
+      const hasLiveTarget = listOnlineAgentSessionsForUser(userId).length > 0
       if (!hasLiveTarget) {
         await finalizeRun(deploymentRunId, 'skipped', 'no_routable_session')
         console.info(

@@ -1,12 +1,12 @@
 // fix/sched-failures — regression tests for the three live prod scheduler bugs:
 //   1. `security` root with no custom prompt → empty_content (failed daily, 8ms).
-//   2. triage timeout hardcoded at 5min → healthy ~5.5min Coolify triage runs
-//      falsely finalized failed/triage_timeout.
+//   2. (removed) triage supervisor-spawn timeout — the supervisor-spawn triage
+//      path and its REMO_TRIAGE_TIMEOUT_MS sweeper were deleted in
+//      fix/sched-triage-routing; triage is local-agent-only and fails fast.
 //   3. offline-session grace replay minted a SECOND run row via runNow and left
 //      the original `pending` forever (→ reaped as run_timeout at 6h).
-import { describe, it, expect, afterEach } from 'bun:test'
+import { describe, it, expect } from 'bun:test'
 import { buildContent } from '../src/scheduler/senders/agent'
-import { triageTimeoutMs } from '../src/scheduler/senders/triage'
 import type { ScheduledTask } from '../src/db/scheduled-tasks-dal'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -60,31 +60,6 @@ describe('BUG 1 — buildContent(security) never returns empty', () => {
 
   it('the chained security_scan step keeps the /security-review shortcut', () => {
     expect(buildContent(task({ task_type: 'security_scan', prompt: '' }))).toBe('/security-review')
-  })
-})
-
-describe('BUG 2 — REMO_TRIAGE_TIMEOUT_MS', () => {
-  const prev = process.env.REMO_TRIAGE_TIMEOUT_MS
-  afterEach(() => {
-    if (prev == null) delete process.env.REMO_TRIAGE_TIMEOUT_MS
-    else process.env.REMO_TRIAGE_TIMEOUT_MS = prev
-  })
-
-  it('defaults to 15 minutes (raised from the hardcoded 5min)', () => {
-    delete process.env.REMO_TRIAGE_TIMEOUT_MS
-    expect(triageTimeoutMs()).toBe(900_000)
-  })
-
-  it('honors a valid override', () => {
-    process.env.REMO_TRIAGE_TIMEOUT_MS = '120000'
-    expect(triageTimeoutMs()).toBe(120_000)
-  })
-
-  it('falls back to the default on empty / non-positive / non-finite values', () => {
-    for (const bad of ['', '0', '-1', 'abc', 'NaN', 'Infinity']) {
-      process.env.REMO_TRIAGE_TIMEOUT_MS = bad
-      expect(triageTimeoutMs()).toBe(900_000)
-    }
   })
 })
 

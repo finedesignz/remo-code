@@ -658,11 +658,16 @@ A bare `security` root now renders step 1 of the security chain
 custom `payload.prompt` / `task.prompt` still wins, and the chained
 `security_scan` step keeps its `/security-review` shortcut.
 
-**2. `triage_timeout` on healthy runs.** `senders/triage.ts` hardcoded a 5-minute
-ceiling on the supervisor-picked triage waiter; real Coolify triage turns exceed
-it (~5.5min observed), so healthy runs were finalized `failed`/`triage_timeout`.
-The ceiling is now **`REMO_TRIAGE_TIMEOUT_MS`**, default **15min** (900000), read
-at sweep time (non-positive/non-finite ⇒ default).
+**2. `triage_timeout` (SUPERSEDED — the waiter is gone).** The supervisor-picked
+triage waiter was first given a longer ceiling (`REMO_TRIAGE_TIMEOUT_MS`, 15min);
+fix/sched-triage-routing then deleted the whole supervisor-spawn path, because it
+could never complete: the waiter was keyed by the SUPERVISOR RUN id while the only
+reader (`ws/agent.ts` assistant_message) looks it up by SESSION id, and the spawn
+passed `repo_path = git_repository` (a GitHub slug, not a local worktree path).
+Prod: 31/32 triage runs `failed/triage_timeout` at ~878s, `session_id` NULL on all.
+Triage is now LOCAL-AGENT ONLY (repo-keyed session first, else any online agent
+session) and finalizes `failed`/`no_target_available` immediately when none is
+online. `REMO_TRIAGE_TIMEOUT_MS` no longer exists.
 
 **3. Double run row per fire (the source of the `run_timeout` rows).** When a
 scheduled session target was OFFLINE, the agent sender launched the session and
@@ -1064,7 +1069,6 @@ The scheduler does not introduce new required env vars. Optional vars:
 | `REMO_RUN_MAX_MS`  | `scheduler/run-reaper.ts`        | `21600000` (6h)                  | Max age of a `pending` run before the reaper finalizes it `failed/run_timeout` (non-positive/non-finite ⇒ default) |
 | `REMO_RUN_REAPER_INTERVAL_MS` | `scheduler/run-reaper.ts` | `300000` (5min)              | Stale-run sweep cadence                              |
 | `REMO_RUN_REAPER_DISABLED` | `scheduler/run-reaper.ts`    | unset                            | Escape hatch (`1\|true\|yes\|on`) — sweep is a no-op |
-| `REMO_TRIAGE_TIMEOUT_MS` | `scheduler/senders/triage.ts`  | `900000` (15min)                 | Max age of a pending supervisor-picked triage turn before it's finalized `failed/triage_timeout` (non-positive/non-finite ⇒ default) |
 
 Per the global rule, email notifications always default to **emails4agents**
 — never SendGrid/Postmark/Mailgun/Resend without explicit user request.
