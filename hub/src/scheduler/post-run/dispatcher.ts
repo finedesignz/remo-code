@@ -19,6 +19,7 @@ import { executeChain } from './chain.ts'
 import { getTaskById } from '../../db/scheduled-tasks-dal.ts'
 import { parseControllerDecision, nextStepForAction } from '../controller-schema.ts'
 import { parseQcFindings, findingHash } from '../qc-schema.ts'
+import { isTerminalSummary } from '../summary-line.ts'
 import { hasVerifiedFinding, recordVerifiedFinding } from '../../db/dal.ts'
 import { findQcReviewSnippetForRun } from '../../db/scheduled-tasks-dal.ts'
 import { executeEmail } from './email.ts'
@@ -83,16 +84,18 @@ export function buildDefaultEmailActions(
 }
 
 /**
- * A run the owner must hear about even mid-chain: a hard failure, or a step that
- * self-reported `Summary: BLOCKED: ...` in its output (the workflow prompts'
- * convention for "I stopped and need a human").
+ * A run the owner must hear about even mid-chain: a hard failure, or a step whose
+ * output carries a terminal `Summary:` verdict — BLOCKED / FAILED / SKIPPED /
+ * DEPLOY UNHEALTHY (the workflow prompts' convention for "I stopped without
+ * finishing"). All of those wedge a chain identically while the run itself
+ * finalizes `success`.
  */
 export function isFailedOrBlocked(
   outcome?: { status: RunStatus; output_snippet: string | null },
 ): boolean {
   if (!outcome) return false
   if (outcome.status === 'failed') return true
-  return /^\s*Summary:\s*BLOCKED\b/im.test(outcome.output_snippet ?? '')
+  return isTerminalSummary(outcome.output_snippet)
 }
 
 export function clearPendingTimers(): void {
