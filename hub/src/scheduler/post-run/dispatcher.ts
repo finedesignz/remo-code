@@ -43,6 +43,11 @@ const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
  * configures its own `notify_email` action (respect the user's config; don't
  * double-send). Internal chain/controller/qc steps (chainDepth>0) never synthesize.
  *
+ * CHAINED steps (chainDepth>0) stay silent on success — one email per chain step
+ * would be spam — but a chained step that FAILED or self-reported `BLOCKED` must
+ * still reach the owner. Prod: a `dev_ship` step emitting `Summary: BLOCKED: ...`
+ * produced ZERO notification, so an unattended chain could wedge invisibly.
+ *
  * `to` is omitted so executeEmail resolves it to the owner's account email. The
  * template uses only plain `{{var}}` substitutions (template.render supports no
  * conditionals/sections). Pure helper — unit-tested in isolation.
@@ -51,8 +56,9 @@ export function buildDefaultEmailActions(
   task: ScheduledTask,
   chainDepth: number,
   actions: PostRunAction[],
+  outcome?: { status: RunStatus; output_snippet: string | null },
 ): PostRunAction[] {
-  if (chainDepth !== 0) return []
+  if (chainDepth !== 0 && !isFailedOrBlocked(outcome)) return []
   if ((task as any).email_summary === false) return []
   if (actions.some((a) => a.type === 'notify_email')) return []
   return [
@@ -74,6 +80,19 @@ export function buildDefaultEmailActions(
       },
     } as PostRunAction,
   ]
+}
+
+/**
+ * A run the owner must hear about even mid-chain: a hard failure, or a step that
+ * self-reported `Summary: BLOCKED: ...` in its output (the workflow prompts'
+ * convention for "I stopped and need a human").
+ */
+export function isFailedOrBlocked(
+  outcome?: { status: RunStatus; output_snippet: string | null },
+): boolean {
+  if (!outcome) return false
+  if (outcome.status === 'failed') return true
+  return /^\s*Summary:\s*BLOCKED\b/im.test(outcome.output_snippet ?? '')
 }
 
 export function clearPendingTimers(): void {
@@ -129,7 +148,10 @@ export async function fireWithContext(args: FireCtxArgs): Promise<void> {
   // this yields exactly ONE default email per fired context.
   const actions = [
     ...parsed.value,
-    ...buildDefaultEmailActions(args.task, args.chainDepth, parsed.value),
+    ...buildDefaultEmailActions(args.task, args.chainDepth, parsed.value, {
+      status: args.status,
+      output_snippet: args.output_snippet,
+    }),
   ]
   if (actions.length === 0) return
 
