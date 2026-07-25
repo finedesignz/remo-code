@@ -48,6 +48,7 @@ import { deployFailureFingerprint, DEPLOY_DEDUPE_WINDOW_MS } from '../scheduler/
 import { hasActiveSessionForRepo, resolveRepoKeyedAgentSession } from '../sessions/repo-routing.ts'
 import { listOnlineAgentSessionsForUser } from '../ws/registry.ts'
 import { ipAllowed, sourceIpFromHeaders } from '../lib/cidr.ts'
+import { coolifyConfigFromEnv, fetchAppLogs } from '../lib/coolify-client.ts'
 
 export const coolifyWebhookRoutes = new Hono()
 
@@ -193,6 +194,8 @@ export async function dispatchTriage(
     )
   }
 
+  const log_snippet = await fetchTriageLogSnippet(payload.application_uuid)
+
   const taskId = await ensureInternalTriageTask(userId)
   await dispatcherRunNow(taskId, userId, {
     triggeredByRunId: deploymentRunId,
@@ -202,9 +205,35 @@ export async function dispatchTriage(
       deployment_uuid: payload.deployment_uuid,
       git_repository: payload.git_repository,
       commit_sha: payload.commit_sha,
-      log_snippet: '',
+      log_snippet,
     },
   })
+}
+
+/** Max bytes of deployment log text handed to the triage prompt (tail-biased). */
+export const TRIAGE_LOG_SNIPPET_MAX = 8192
+
+/**
+ * Fetch the failing application's logs for the triage prompt.
+ *
+ * Triage previously ran with `log_snippet: ''` — the model was asked to diagnose
+ * a deploy failure with zero evidence. Returns the LAST `TRIAGE_LOG_SNIPPET_MAX`
+ * bytes (the failure is at the tail). Never throws: on a missing token or a
+ * failed fetch it returns an explicit `[log_fetch_failed: ...]` marker so the
+ * prompt states the logs are unavailable rather than silently implying "no logs".
+ */
+export async function fetchTriageLogSnippet(
+  applicationUuid: string,
+  deps: { config?: typeof coolifyConfigFromEnv; fetchLogs?: typeof fetchAppLogs } = {},
+): Promise<string> {
+  const cfg = (deps.config ?? coolifyConfigFromEnv)()
+  if (!cfg) return '[log_fetch_failed: COOLIFY_TOKEN unset]'
+  const res = await (deps.fetchLogs ?? fetchAppLogs)(cfg, applicationUuid, { lines: 400 })
+  if (!res.ok) return `[log_fetch_failed: status=${res.status} ${res.detail ?? ''}`.trim() + ']'
+  if (!res.logs) return '[log_fetch_failed: empty log body]'
+  return res.logs.length > TRIAGE_LOG_SNIPPET_MAX
+    ? res.logs.slice(-TRIAGE_LOG_SNIPPET_MAX)
+    : res.logs
 }
 
 // Back-compat export.
