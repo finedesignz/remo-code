@@ -20,6 +20,11 @@ export interface TokenUsageInput {
   cacheReadInputTokens: number
   costUsd: number
   costSource: 'sdk' | 'estimated'
+  /** PTYCAP Phase 1 — which runner produced this row. Optional for back-compat
+   *  with every pre-existing caller; defaults to 'stream-json'. token_usage_daily
+   *  is deliberately NOT split by runner_type — it stays a combined-bucket cache
+   *  for the cost cap; the per-runner split lives in the precise ledger table. */
+  runnerType?: 'stream-json' | 'pty-interactive'
 }
 
 /**
@@ -30,17 +35,18 @@ export interface TokenUsageInput {
 export async function recordTokenUsage(u: TokenUsageInput): Promise<{ id: string }> {
   const model = u.model ?? null
   const dailyModel = model ?? '' // PK column is NOT NULL; '' = unknown bucket
+  const runnerType = u.runnerType ?? 'stream-json'
   const rows = await sql<{ id: string }[]>`
     INSERT INTO token_usage (
       user_id, session_id, model,
       input_tokens, output_tokens,
       cache_creation_input_tokens, cache_read_input_tokens,
-      cost_usd, cost_source
+      cost_usd, cost_source, runner_type
     ) VALUES (
       ${u.userId}, ${u.sessionId}, ${model},
       ${u.inputTokens}, ${u.outputTokens},
       ${u.cacheCreationInputTokens}, ${u.cacheReadInputTokens},
-      ${u.costUsd}, ${u.costSource}
+      ${u.costUsd}, ${u.costSource}, ${runnerType}
     )
     RETURNING id
   `
@@ -212,6 +218,38 @@ export async function getTodayTokenTotal(userId: string, timezone: string): Prom
       AND created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}
   `
   return Number(rows[0]?.sum ?? 0)
+}
+
+/**
+ * PTYCAP Phase 1, criterion 2 — today's token total SPLIT by runner_type
+ * ('stream-json' vs 'pty-interactive'), same tz-day boundary and 4-bucket sum as
+ * {@link getTodayTokenTotal}. Observability only: this does NOT feed the cap gate
+ * (`getTodayTokenTotal` already sums both buckets combined, unchanged) — it's the
+ * early-warning signal a human/dashboard reads to see interactive spend growing
+ * separately from programmatic spend.
+ */
+export async function getTodayTokenTotalByRunner(
+  userId: string,
+  timezone: string,
+): Promise<{ streamJson: number; ptyInteractive: number }> {
+  const tz = timezone || 'UTC'
+  const rows = await sql<{ runner_type: string; sum: string | null }[]>`
+    SELECT runner_type, COALESCE(SUM(
+      input_tokens + output_tokens
+      + cache_creation_input_tokens + cache_read_input_tokens
+    ), 0)::text AS sum
+    FROM token_usage
+    WHERE user_id = ${userId}
+      AND created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}
+    GROUP BY runner_type
+  `
+  let streamJson = 0
+  let ptyInteractive = 0
+  for (const r of rows) {
+    if (r.runner_type === 'pty-interactive') ptyInteractive = Number(r.sum ?? 0)
+    else streamJson += Number(r.sum ?? 0) // any other/legacy value buckets with stream-json
+  }
+  return { streamJson, ptyInteractive }
 }
 
 export interface SessionUsageRow extends UsageTotals {

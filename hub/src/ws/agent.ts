@@ -786,6 +786,9 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
         cacheReadInputTokens: msg.cache_read_input_tokens,
         costUsd,
         costSource,
+        // PTYCAP Phase 1 — tag the ledger row by which runner produced it.
+        // Absent on an older supervisor build ⇒ defaults to 'stream-json'.
+        runnerType: msg.runner_type ?? 'stream-json',
       })
     } catch (err: any) {
       console.error('[agent] usage_event handler failed', err?.message)

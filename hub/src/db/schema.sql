@@ -1324,6 +1324,14 @@ CREATE TABLE IF NOT EXISTS token_usage (
 CREATE INDEX IF NOT EXISTS idx_token_usage_user_created ON token_usage(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
 
+-- PTYCAP Phase 1 — which runner produced this ledger row. 'stream-json' covers
+-- every pre-existing row (DEFAULT); 'pty-interactive' is the new PtyUsageTailer
+-- source (transcript-tail, no API key, no PTY write). Additive ADD COLUMN — safe
+-- to re-run every boot; NO backfill (CLAUDE.md invariant).
+ALTER TABLE token_usage ADD COLUMN IF NOT EXISTS runner_type TEXT NOT NULL DEFAULT 'stream-json';
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WHERE constraint_name='token_usage_runner_type_check') THEN ALTER TABLE token_usage ADD CONSTRAINT token_usage_runner_type_check CHECK (runner_type IN ('stream-json','pty-interactive')); END IF; END $$;
+CREATE INDEX IF NOT EXISTS idx_token_usage_user_runner_created ON token_usage(user_id, runner_type, created_at DESC);
+
 -- Daily per-(user, model) rollup, upserted on each usage_event for cheap
 -- today/7d/total aggregates without scanning the full ledger.
 CREATE TABLE IF NOT EXISTS token_usage_daily (
