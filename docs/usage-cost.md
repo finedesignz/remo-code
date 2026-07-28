@@ -268,8 +268,10 @@ constraint and indexed by `idx_token_usage_user_runner_created`
 pre-existing column on a different table with its own `sessions_runner_type_check` —
 same name, unrelated purpose: it records which runner a SESSION uses, not which
 runner produced a ledger ROW.) An older supervisor build that predates this phase
-omits the field entirely; zod defaults it to `'stream-json'` so old and new
-supervisors both record correctly.
+omits the field entirely; the hub's `usage_event` handler falls back to
+`'stream-json'` (`msg.runner_type ?? 'stream-json'`) so old and new supervisors
+both record correctly — the zod field itself stays `undefined` when absent (see
+`token-usage-runner-type.test.ts`).
 
 ### Four decisions recorded here so they read as decisions, not oversights
 
