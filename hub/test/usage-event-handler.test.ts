@@ -26,10 +26,10 @@ const daily = new Map<string, DailyRow>()
 function fakeSql(strings: TemplateStringsArray, ...values: any[]) {
   const text = strings.join('?')
   if (text.includes('INSERT INTO token_usage ') && text.includes('RETURNING id')) {
-    // values order: userId, sessionId, model, in, out, cc, cr, cost, source
-    const [userId, sessionId, model, inp, out, cc, cr, cost, source] = values
+    // values order: userId, sessionId, model, in, out, cc, cr, cost, source, runnerType
+    const [userId, sessionId, model, inp, out, cc, cr, cost, source, runnerType] = values
     const id = `tu_${ledger.length + 1}`
-    ledger.push({ id, userId, sessionId, model, inp, out, cc, cr, cost, source })
+    ledger.push({ id, userId, sessionId, model, inp, out, cc, cr, cost, source, runnerType })
     return Promise.resolve([{ id }])
   }
   if (text.includes('INSERT INTO token_usage_daily')) {
@@ -112,5 +112,32 @@ describe('recordTokenUsage (P2 persist)', () => {
     })
     expect(daily.has('u1|2026-05-30|')).toBe(true)
     expect(ledger[0].model).toBeNull()
+  })
+
+  // PTYCAP Phase 1, plan 02 — backward-compat regression: an older supervisor
+  // that has never heard of runner_type must still produce a correctly
+  // bucketed 'stream-json' ledger row (the pre-PTYCAP shape).
+  test('runnerType omitted (pre-PTYCAP supervisor shape) records as stream-json', async () => {
+    ledger.length = 0
+    daily.clear()
+    await recordTokenUsage({
+      userId: 'u1', sessionId: 's1', model: 'claude-opus-4',
+      inputTokens: 1, outputTokens: 1,
+      cacheCreationInputTokens: 0, cacheReadInputTokens: 0,
+      costUsd: 0.001, costSource: 'estimated',
+    })
+    expect(ledger[0].runnerType).toBe('stream-json')
+  })
+
+  test('runnerType: pty-interactive is captured verbatim (the default is a default, not a hardcode)', async () => {
+    ledger.length = 0
+    daily.clear()
+    await recordTokenUsage({
+      userId: 'u1', sessionId: 's1', model: 'claude-opus-4',
+      inputTokens: 1, outputTokens: 1,
+      cacheCreationInputTokens: 0, cacheReadInputTokens: 0,
+      costUsd: 0.001, costSource: 'estimated', runnerType: 'pty-interactive',
+    })
+    expect(ledger[0].runnerType).toBe('pty-interactive')
   })
 })
