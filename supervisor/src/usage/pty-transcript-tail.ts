@@ -19,7 +19,7 @@
 import { watch, type FSWatcher } from 'node:fs'
 import { open as fsOpen, stat } from 'node:fs/promises'
 
-export const POLL_INTERVAL_MS = 500
+const POLL_INTERVAL_MS = 500
 
 export interface JsonlTail {
   close(): void
