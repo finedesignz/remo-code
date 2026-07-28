@@ -294,4 +294,30 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
     } catch { bad = true }
     expect(bad).toBe(true)
   })
+
+  // PTYCAP Phase 1, plan 02 (SC-2) — token_usage_runner_type_check is LIVE against
+  // real Postgres, not just present in the schema.sql source. REMO_E2E_DB_URL-gated
+  // (this whole describe skips without it) — the only sanctioned kind of skip here.
+  it('token_usage_runner_type_check accepts pty-interactive and rejects an out-of-enum value', async () => {
+    await applySchemaStrict(sql)
+
+    const email = `ptycap-runner-type-${randomUUID()}@invalid.local`
+    const [user] = await sql<{ id: string }[]>`
+      INSERT INTO users (email, password_hash, role) VALUES (${email}, 'x', 'user') RETURNING id
+    `
+
+    const [row] = await sql<{ runner_type: string }[]>`
+      INSERT INTO token_usage (user_id, runner_type) VALUES (${user.id}, 'pty-interactive')
+      RETURNING runner_type
+    `
+    expect(row.runner_type).toBe('pty-interactive')
+
+    let rejected = false
+    try {
+      await sql`INSERT INTO token_usage (user_id, runner_type) VALUES (${user.id}, 'api-key')`
+    } catch {
+      rejected = true
+    }
+    expect(rejected).toBe(true)
+  })
 })
