@@ -17,9 +17,13 @@ const SUMMARY_LINE_RE = /^[^\S\n]*\*{0,2}\s*Summary:/i
  * Verdicts that mean "this step did NOT complete its job" — a chain that hits
  * any of them is wedged and the owner must hear about it, even though the run
  * itself finalizes `success` (the model answered; it just refused to proceed).
+ *
+ * `SKIPPED` is deliberately NOT here: `prompts/log_check/pull.md:23-24` emits it
+ * as a BY-DESIGN no-op for a tauri target / a task with no deploy target, so
+ * treating it as terminal would email the owner on every routine run forever.
  */
 const TERMINAL_SUMMARY_RE =
-  /^[^\S\n]*\*{0,2}\s*Summary:\*{0,2}\s*(BLOCKED|FAILED|SKIPPED|DEPLOY UNHEALTHY)\b/im
+  /^[^\S\n]*\*{0,2}\s*Summary:\*{0,2}\s*(BLOCKED|FAILED|DEPLOY UNHEALTHY)\b/i
 
 /** The LAST `Summary:` line of a reply, trimmed. Null when there is none. */
 export function extractSummaryLine(raw: string): string | null {
@@ -30,7 +34,15 @@ export function extractSummaryLine(raw: string): string | null {
   return null
 }
 
-/** True when the text carries a BLOCKED / FAILED / SKIPPED / DEPLOY UNHEALTHY summary. */
+/**
+ * True when the reply's FINAL verdict is BLOCKED / FAILED / DEPLOY UNHEALTHY.
+ *
+ * Tests only the LAST `Summary:` line — never the raw text. A reply that quotes
+ * or code-fences an earlier `Summary: BLOCKED` (retry narrative, a QC step
+ * echoing a previous run, example output) must not fire on the quoted line when
+ * its own verdict is fine.
+ */
 export function isTerminalSummary(text: string | null | undefined): boolean {
-  return TERMINAL_SUMMARY_RE.test(text ?? '')
+  const line = extractSummaryLine(text ?? '')
+  return line != null && TERMINAL_SUMMARY_RE.test(line)
 }

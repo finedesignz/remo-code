@@ -131,7 +131,17 @@ if (!REMO_E2E_DB_URL) {
         SELECT id, status, task_id FROM scheduled_task_runs WHERE user_id = ${TEST_USER_ID}
       `
       expect(runs.length).toBeGreaterThanOrEqual(2) // metadata row + triage row
-      expect(pickCalls).toBeGreaterThanOrEqual(1)
+      // fix/sched-triage-routing: triage no longer goes through pickSessionTarget
+      // (it preferred a supervisor, whose spawn path could never finalize). It
+      // routes straight to a live local-agent session, so assert the run row for
+      // the internal triage task exists instead of counting pick calls.
+      const triageRuns = await sql<{ id: string }[]>`
+        SELECT r.id FROM scheduled_task_runs r
+        JOIN scheduled_tasks t ON t.id = r.task_id
+        WHERE r.user_id = ${TEST_USER_ID} AND t.name = '__internal_triage'
+      `
+      expect(triageRuns.length).toBeGreaterThanOrEqual(1)
+      expect(pickCalls).toBe(0)
     })
   })
 }

@@ -68,6 +68,28 @@ mock.module('../src/scheduler/post-run/email.ts', () => ({
 }))
 
 const { sendAgentTask, buildRunSnippet } = await import('../src/scheduler/senders/agent.ts')
+const { isTerminalSummary, extractSummaryLine } = await import('../src/scheduler/summary-line.ts')
+
+describe('isTerminalSummary — LAST Summary line wins', () => {
+  test('a fenced earlier BLOCKED does not override a SHIPPED verdict', () => {
+    const raw = '```\nSummary: BLOCKED: old example\n```\nSummary: SHIPPED: v1'
+    expect(extractSummaryLine(raw)).toBe('Summary: SHIPPED: v1')
+    expect(isTerminalSummary(raw)).toBe(false)
+  })
+
+  test('a real trailing BLOCKED still fires after an earlier quoted success', () => {
+    const raw = 'ran it\nSummary: SHIPPED: (last run)\n\nSummary: BLOCKED: needs approval'
+    expect(isTerminalSummary(raw)).toBe(true)
+  })
+
+  test('SKIPPED is not terminal (by-design no-op)', () => {
+    expect(isTerminalSummary('Summary: SKIPPED: no deploy target configured')).toBe(false)
+  })
+
+  test('no Summary line at all → not terminal', () => {
+    expect(isTerminalSummary('just some prose about being blocked')).toBe(false)
+  })
+})
 
 const shipTask = {
   id: 'ship-1',
@@ -126,12 +148,29 @@ describe('chained step that reports a terminal Summary notifies the owner', () =
     expect(emailFires.length).toBe(1)
   })
 
-  for (const verdict of ['DEPLOY UNHEALTHY', 'SKIPPED', 'FAILED']) {
+  for (const verdict of ['DEPLOY UNHEALTHY', 'FAILED']) {
     test(`"Summary: ${verdict}:" wedges the chain → owner notified`, async () => {
       await finalizeThroughSender(longReply(`Summary: ${verdict}: see logs`))
       expect(emailFires.length).toBe(1)
     })
   }
+
+  // log_check/pull.md:23-24 emits SKIPPED as a BY-DESIGN no-op (tauri target /
+  // no deploy target). Paging on it would spam the owner on every routine run.
+  test('by-design "Summary: SKIPPED:" no-op stays silent', async () => {
+    await finalizeThroughSender(longReply('Summary: SKIPPED: no logs for tauri target'))
+    expect(emailFires.length).toBe(0)
+  })
+
+  // The verdict is the LAST Summary line — a quoted/fenced earlier BLOCKED from a
+  // retry narrative must not fire.
+  test('a code-fenced earlier BLOCKED does not fire when the real verdict is fine', async () => {
+    const reply = longReply(
+      '```\nSummary: BLOCKED: old example from the previous run\n```\nSummary: SHIPPED: v1.2.3 live',
+    )
+    await finalizeThroughSender(reply)
+    expect(emailFires.length).toBe(0)
+  })
 
   test('a chained step that actually SHIPPED stays silent', async () => {
     await finalizeThroughSender(longReply('Summary: SHIPPED: v1.2.3 live'))
