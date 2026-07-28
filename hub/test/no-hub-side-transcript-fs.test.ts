@@ -72,7 +72,7 @@ function stripComments(src: string): string {
     .join('\n')
 }
 
-const HOMEDIR_IDENTIFIER = /\bhomedir\b/
+const HOMEDIR_IDENTIFIER = /\bhomedir\b|process\.env\.(HOME|USERPROFILE)\b/
 
 function scanFile(absPath: string): Finding[] {
   let raw: string
