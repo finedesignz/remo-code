@@ -58,14 +58,14 @@
   2. (SC-2) Interactive and programmatic usage remain in separate buckets (the metering early-warning signal).
   3. (SC-3) A long-running TUI turn that crosses the ceiling mid-flight is detectable.
 
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans executed
 
 Plans:
 
 - [x] 01-01-PLAN.md — TRACER: one PTY assistant turn's tokens reach the ledger end-to-end (supervisor transcript tail → `usage_event` tagged `pty-interactive` → `token_usage.runner_type`)
 - [x] 01-02-PLAN.md — SC-2: bucket split proven at the DAL, the zod WS contract, the DDL source, and the live Postgres CHECK constraint; untagged frames still record as `stream-json`
 - [x] 01-03-PLAN.md — SC-3 mid-flight visibility of `getTodayTokenTotal()`, plus the Pitfall-1 hub-side-fs guard canary and the ASVS-V4 transcript path-containment negative test
-- [ ] 01-04-PLAN.md — wire the SC-1 proof into the Woodpecker PR gate, re-measure `tools/regression-baseline.json`, document the path and its four explicit deferrals
+- [x] 01-04-PLAN.md — wire the SC-1 proof into the Woodpecker PR gate, re-measure `tools/regression-baseline.json`, document the path and its four explicit deferrals
 
 ### Phase 2: PTY Pre-Flight Gate
 
