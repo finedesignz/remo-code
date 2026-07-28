@@ -224,3 +224,106 @@ same denylist + patterns as defense-in-depth (it cannot import the `.ts`).
 
 No REST endpoint changed (selector + gate are internal), so `docs:sync` is a no-op
 for this phase too.
+
+## PTYCAP Phase 1 — PTY-interactive token accounting (`runner_type` split)
+
+The interactive PTY path (Phase 15-19 above) had no token/cost capture of its own —
+only the stream-json `result` event does. PTYCAP Phase 1 adds a second, independent
+capture path for the interactive CLI, RECORDING into the same `token_usage` ledger
+tagged by source.
+
+### Flow
+
+```
+Claude CLI (interactive PTY/TUI)  writes its OWN per-project transcript JSONL
+   (on the SUPERVISOR host, same file the CLI always wrote — not a new capture)
+   ↓  supervisor: PtyUsageEmitter (usage/pty-usage-emitter.ts)
+   ↓    tails it via tailJsonl (usage/pty-transcript-tail.ts), one pinned file per session
+agent→hub WS  `usage_event`  { session_id, model, tokens, cost_usd (estimated),
+                                cost_source:'estimated', runner_type:'pty-interactive', ts }
+   ↓  hub/src/ws/agent.ts  (RECORD only — same handler, same code path as stream-json)
+recordTokenUsage()  →  INSERT token_usage(runner_type)  +  UPSERT token_usage_daily (accumulate, unsplit)
+   ↓
+GET /api/usage/cost  → same aggregates as today; getTodayTokenTotalByRunner() gives a
+                        per-runner-type split read for anything that wants it
+```
+
+### Why the tail is supervisor-side, not hub-side
+
+The hub runs in a Coolify container with no `~/.claude/projects` — a hub-side read of
+a home-directory-derived transcript path would work in local dev and silently do
+NOTHING in production, the exact failure shape `REMO_TELEGRAM_TRANSCRIPT_TAIL` is
+documented "keep OFF in Coolify" for. Every new filesystem read this phase adds lives
+under `supervisor/src/usage/`. `hub/test/no-hub-side-transcript-fs.test.ts` is the
+structural guard: it fails any FUTURE `hub/src/**` module that calls Node's
+home-directory resolver, with the single pre-existing allowlisted exception
+(`hub/src/telegram/transcript/`).
+
+### The `runner_type` domain
+
+`token_usage.runner_type` is a two-value TEXT column (`'stream-json'` default |
+`'pty-interactive'`), enforced live by the `token_usage_runner_type_check` CHECK
+constraint and indexed by `idx_token_usage_user_runner_created`
+`(user_id, runner_type, created_at DESC)`. (`sessions.runner_type` is a separate,
+pre-existing column on a different table with its own `sessions_runner_type_check` —
+same name, unrelated purpose: it records which runner a SESSION uses, not which
+runner produced a ledger ROW.) An older supervisor build that predates this phase
+omits the field entirely; zod defaults it to `'stream-json'` so old and new
+supervisors both record correctly.
+
+### Four decisions recorded here so they read as decisions, not oversights
+
+- **`token_usage_daily`'s primary key `(user_id, day, model)` is unchanged — NOT
+  extended with `runner_type`.** The daily rollup stays runner-agnostic; only the
+  per-turn `token_usage` rows (and `getTodayTokenTotalByRunner()`) carry the split.
+  Splitting the daily PK would fragment the cost-cap/summary aggregation path that
+  deliberately sums every source together (the 2026-07 cache-read incident fix
+  exists precisely because splitting by source let a bucket hide from the cap) — a
+  fourth PK dimension is only worth adding if a future phase needs a PTY-specific
+  daily cap.
+- **The hub's `sessions.transcript_path` / `setSessionPtyIdentity()` (the Session-Ask
+  API's transcript-tail source) remains unwired to this accounting path.**
+  `PtyUsageEmitter` resolves and pins its own transcript path independently
+  (`resolveTranscriptPath()`, capture-once locator) rather than reading or writing
+  the hub's already-known path. The two are different consumers with different
+  trust models — Session-Ask is an on-demand hub-triggered read, this is a
+  continuously-tailing supervisor-local process — and unifying them was out of
+  scope for this phase.
+- **Accounting is claude-only for now; Codex PTY sessions are not tagged or
+  tailed.** `PtyUsageEmitter.start()` no-ops when `cliKind !== 'claude'`. Codex's
+  rollout JSONL has not been verified to carry an equivalent per-turn usage block;
+  claiming Codex support without that verification risks silently mis-recording (or
+  silently recording zero) Codex PTY spend. Fast-follow once verified.
+- **PTY-sourced `cost_usd` is always `cost_source:'estimated'`, never `'sdk'`.** The
+  interactive CLI's transcript JSONL carries token counts but no per-record dollar
+  cost (unlike the stream-json `result` event's `total_cost_usd`), so the hub's
+  list-price pricing fallback (`hub/src/usage/pricing.ts`) is the only cost source
+  available for a PTY-tagged row.
+
+This section is RECORD only, exactly like P2 above — gating the interactive PTY path
+against the daily cost/token caps is milestone PTYCAP's Phase 2, not this phase.
+
+### Operator smoke check (not a CI gate)
+
+01-RESEARCH.md's Assumption A2 asks for one live confirmation before trusting this in
+production, preserved here rather than dropped: spawn a real PTY session through this
+branch's supervisor build on a live host, drive one turn, and confirm (a) the
+interactive CLI's transcript JSONL appears under the expected per-project directory
+and (b) its usage record reaches `token_usage` tagged `runner_type='pty-interactive'`.
+This is an operator action — CI has no real interactive PTY host to prove it against —
+record the result out-of-band when performed.
+
+### Tests (PTYCAP Phase 1)
+
+- `supervisor/test/pty-usage-tail.test.ts` — `PtyUsageEmitter` / `extractUsage` /
+  `resolveTranscriptPath` core behavior. **Not** counted by `bun run check-baseline`
+  (it walks `hub/test` only) — run as its own explicit `.woodpecker/qc.yaml` step.
+- `supervisor/test/pty-usage-path-containment.test.ts` — ASVS V4 negative test: a
+  relative/traversal/NUL-byte `projectDir`, and a located transcript whose real path
+  escapes the projects base, both refuse before any read.
+- `hub/test/token-usage-runner-type.test.ts` — DAL bucket split, the
+  `AgentUsageEvent` zod round-trip, and a schema.sql CHECK-constraint source
+  assertion.
+- `hub/test/no-hub-side-transcript-fs.test.ts` — the Pitfall-1 guard canary above.
+- `hub/test/pty-usage-midflight-visibility.test.ts` — proves `getTodayTokenTotal()`
+  climbs mid-turn with no session-close event anywhere (REMO_E2E_DB_URL-gated).
