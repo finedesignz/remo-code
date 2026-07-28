@@ -87,31 +87,41 @@ export function tailJsonl(
     }
   }
 
-  // Initial replay (default: from start so prior turns are visible).
-  if (opts?.fromStart === false) {
-    void stat(path)
-      .then((s) => {
-        offset = s.size
-      })
-      .catch(() => undefined)
-  } else {
-    void pump()
+  // Initial replay (default: from start so prior turns are visible). The
+  // watcher/poll must NOT be armed until this initial offset is settled —
+  // otherwise, for a `fromStart:false` resumed transcript whose mtime is
+  // recent precisely because the CLI just appended to it, a `fs.watch`
+  // notification can fire and call `pump()` while `offset` is still its
+  // initialized `0`, replaying every historical turn as new.
+  async function initOffset(): Promise<void> {
+    if (opts?.fromStart === false) {
+      try {
+        offset = (await stat(path)).size
+      } catch {
+        // file not present yet — leave offset at 0; poll/watch will pick it up naturally
+      }
+    } else {
+      await pump()
+    }
   }
 
-  try {
-    watcher = watch(path, () => {
+  void initOffset().then(() => {
+    if (closed) return
+    try {
+      watcher = watch(path, () => {
+        void pump()
+      })
+      watcher.on('error', () => {
+        // watch failed mid-flight — the poll fallback below keeps us live.
+      })
+    } catch {
+      watcher = null
+    }
+    // Poll fallback always runs (cheap stat); covers watch gaps + initial absence.
+    pollTimer = setInterval(() => {
       void pump()
-    })
-    watcher.on('error', () => {
-      // watch failed mid-flight — the poll fallback below keeps us live.
-    })
-  } catch {
-    watcher = null
-  }
-  // Poll fallback always runs (cheap stat); covers watch gaps + initial absence.
-  pollTimer = setInterval(() => {
-    void pump()
-  }, POLL_INTERVAL_MS)
+    }, POLL_INTERVAL_MS)
+  })
 
   return {
     close() {
