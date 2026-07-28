@@ -48,6 +48,38 @@ import { launchSessionForUser } from '../../telegram/launch.ts'
 import { log } from '../../observability/logger'
 import { extractDecisionBlock } from '../controller-schema.ts'
 import { extractFindingsBlock } from '../qc-schema.ts'
+import { extractSummaryLine } from '../summary-line.ts'
+
+/**
+ * Build the `scheduled_task_runs.output_snippet` for a reply.
+ *
+ * auto-dev P2/P4: a controller emits a `<<DECISION ... DECISION>>` block and a
+ * qc_review emits a `<<FINDINGS ... FINDINGS>>` block at the END of its turn.
+ * The default head-truncation (first 500 chars) would drop them, so when such a
+ * block is present, snippet the block itself so the post-run router can parse it.
+ * Findings blocks can exceed 500 chars (multiple findings) — cap higher so the qc
+ * router sees the whole batch.
+ *
+ * Same problem, third marker (fix/chained-step-notify): workflow prompts close a
+ * turn with `Summary: BLOCKED|FAILED|SKIPPED|DEPLOY UNHEALTHY: ...`, and any real
+ * ship turn blows past 500 chars, so head-truncation cut the verdict off and the
+ * post-run notifier never saw it. Append the trailing `Summary:` line when
+ * truncation dropped it.
+ */
+export function buildRunSnippet(replyContent: string): string {
+  const decisionBlock = extractDecisionBlock(replyContent)
+  if (decisionBlock) {
+    return decisionBlock.length > 500 ? decisionBlock.slice(0, 500) + '...' : decisionBlock
+  }
+  const findingsBlock = extractFindingsBlock(replyContent)
+  if (findingsBlock) {
+    return findingsBlock.length > 4000 ? findingsBlock.slice(0, 4000) + '...' : findingsBlock
+  }
+  if (replyContent.length <= 500) return replyContent
+  const head = replyContent.slice(0, 500) + '...'
+  const summary = extractSummaryLine(replyContent)
+  return summary && !head.includes(summary) ? `${head}\n${summary}` : head
+}
 import { getTaskTemplate, buildTemplatePrompt } from '../task-templates.ts'
 
 interface RunCtxLike {
@@ -310,26 +342,7 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
     // with the reply snippet. `finalizeRun` fires the post-run action pipeline.
     async onFinalize(token, replyContent) {
       const duration = Date.now() - startedAt
-      // auto-dev P2/P4: a controller emits a `<<DECISION ... DECISION>>` block
-      // and a qc_review emits a `<<FINDINGS ... FINDINGS>>` block at the END of
-      // its turn. The default head-truncation (first 500 chars) would drop them,
-      // so when such a block is present, snippet the block itself so the post-run
-      // router can parse it. Findings blocks can exceed 500 chars (multiple
-      // findings) — cap higher so the qc router sees the whole batch.
-      const decisionBlock = extractDecisionBlock(replyContent)
-      const findingsBlock = decisionBlock ? null : extractFindingsBlock(replyContent)
-      let snippet: string
-      if (decisionBlock) {
-        snippet = decisionBlock.length > 500
-          ? decisionBlock.slice(0, 500) + '...'
-          : decisionBlock
-      } else if (findingsBlock) {
-        snippet = findingsBlock.length > 4000
-          ? findingsBlock.slice(0, 4000) + '...'
-          : findingsBlock
-      } else {
-        snippet = replyContent.length > 500 ? replyContent.slice(0, 500) + '...' : replyContent
-      }
+      const snippet = buildRunSnippet(replyContent)
       // `only_if_active`: a reply can land AFTER the stale-run reaper already
       // finalized this run as run_timeout (> REMO_RUN_MAX_MS). The claim guard
       // makes the late write a no-op instead of clobbering the row and re-firing

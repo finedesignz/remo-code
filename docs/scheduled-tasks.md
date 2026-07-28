@@ -279,13 +279,16 @@ Internal kind (NOT user-pickable; synthesized by Coolify webhook + classifier):
   `TriageResult` JSON (`error_type`, `severity`, `root_cause`, `suggested_fix`,
   `confidence`, `affected_files?`), and stores the validated JSON in
   `scheduled_task_runs.output_snippet`. On parse failure the run is marked
-  `status='failed', error='triage_parse_error'`. **Wire-up status:** the
+  `status='failed', error='triage_parse_error'`. **Wire-up status:** LIVE. The
   `triage` task_kind, prompt template, schema, and parse helper are shipped
-  (`hub/src/scheduler/triage-schema.ts`, `triage-prompt.ts`); the
-  webhook-to-session routing (Phase 06 plan 008) is **pending Phase 04 plan
-  008** (`pickSessionTarget` + `POST /api/sessions/heal`) being merged. Until
-  then, triage runs from the webhook persist metadata but `dispatchTriageStub`
-  is a no-op — they do not dispatch to a session.
+  (`hub/src/scheduler/triage-schema.ts`, `triage-prompt.ts`), and
+  webhook-to-session routing is real: `dispatchTriage`
+  (`hub/src/api/coolify-webhook.ts`) storm-dedupes the deploy failure, probes
+  routability, fetches the failing app's logs, and fires the `__internal_triage`
+  task, which `senders/triage.ts` dispatches to a live local-agent session
+  (repo-keyed first, else any online agent session; none ⇒ immediate
+  `failed`/`no_target_available`). `dispatchTriageStub` survives only as a
+  back-compat alias of `dispatchTriage` — it is NOT a stub.
 
 ### Target kinds
 
@@ -658,11 +661,16 @@ A bare `security` root now renders step 1 of the security chain
 custom `payload.prompt` / `task.prompt` still wins, and the chained
 `security_scan` step keeps its `/security-review` shortcut.
 
-**2. `triage_timeout` on healthy runs.** `senders/triage.ts` hardcoded a 5-minute
-ceiling on the supervisor-picked triage waiter; real Coolify triage turns exceed
-it (~5.5min observed), so healthy runs were finalized `failed`/`triage_timeout`.
-The ceiling is now **`REMO_TRIAGE_TIMEOUT_MS`**, default **15min** (900000), read
-at sweep time (non-positive/non-finite ⇒ default).
+**2. `triage_timeout` (SUPERSEDED — the waiter is gone).** The supervisor-picked
+triage waiter was first given a longer ceiling (`REMO_TRIAGE_TIMEOUT_MS`, 15min);
+fix/sched-triage-routing then deleted the whole supervisor-spawn path, because it
+could never complete: the waiter was keyed by the SUPERVISOR RUN id while the only
+reader (`ws/agent.ts` assistant_message) looks it up by SESSION id, and the spawn
+passed `repo_path = git_repository` (a GitHub slug, not a local worktree path).
+Prod: 31/32 triage runs `failed/triage_timeout` at ~878s, `session_id` NULL on all.
+Triage is now LOCAL-AGENT ONLY (repo-keyed session first, else any online agent
+session) and finalizes `failed`/`no_target_available` immediately when none is
+online. `REMO_TRIAGE_TIMEOUT_MS` no longer exists.
 
 **3. Double run row per fire (the source of the `run_timeout` rows).** When a
 scheduled session target was OFFLINE, the agent sender launched the session and
@@ -982,8 +990,9 @@ metadata row only (no LLM spend).
   - `git_repository TEXT`
   - `commit_sha TEXT`
 - **Event mapping:**
-  - `deployment.failed` → row inserted with metadata; triage dispatch
-    stubbed (awaits plan 008)
+  - `deployment.failed` → row inserted with metadata, then `dispatchTriage`
+    fires the `__internal_triage` task for a live agent session (storm-deduped,
+    with the app's log tail attached)
   - `deployment.succeeded` / `deployment.in_progress` → metadata-only row,
     `status='success'`, no spend
 - **Response:** `202 { ok: true, run_id }`
@@ -1064,7 +1073,6 @@ The scheduler does not introduce new required env vars. Optional vars:
 | `REMO_RUN_MAX_MS`  | `scheduler/run-reaper.ts`        | `21600000` (6h)                  | Max age of a `pending` run before the reaper finalizes it `failed/run_timeout` (non-positive/non-finite ⇒ default) |
 | `REMO_RUN_REAPER_INTERVAL_MS` | `scheduler/run-reaper.ts` | `300000` (5min)              | Stale-run sweep cadence                              |
 | `REMO_RUN_REAPER_DISABLED` | `scheduler/run-reaper.ts`    | unset                            | Escape hatch (`1\|true\|yes\|on`) — sweep is a no-op |
-| `REMO_TRIAGE_TIMEOUT_MS` | `scheduler/senders/triage.ts`  | `900000` (15min)                 | Max age of a pending supervisor-picked triage turn before it's finalized `failed/triage_timeout` (non-positive/non-finite ⇒ default) |
 
 Per the global rule, email notifications always default to **emails4agents**
 — never SendGrid/Postmark/Mailgun/Resend without explicit user request.

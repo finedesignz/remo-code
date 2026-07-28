@@ -39,9 +39,46 @@ describe('buildDefaultEmailActions', () => {
     expect(buildDefaultEmailActions(opted, 0, [])).toEqual([])
   })
 
-  test('(d) chainDepth>0 → never synthesizes', () => {
+  test('(d) chainDepth>0 on a SUCCESSFUL step → never synthesizes (no per-step spam)', () => {
     expect(buildDefaultEmailActions(baseTask, 1, [])).toEqual([])
     expect(buildDefaultEmailActions(baseTask, 5, [])).toEqual([])
+    const ok = { status: 'success' as const, output_snippet: 'Summary: SHIPPED' }
+    expect(buildDefaultEmailActions(baseTask, 1, [], ok)).toEqual([])
+  })
+
+  // fix/chained-step-notify: a chained step that fails or self-reports BLOCKED
+  // produced ZERO notification, so an unattended chain wedged invisibly.
+  test('(e) chainDepth>0 + status=failed → notifies', () => {
+    const out = buildDefaultEmailActions(baseTask, 2, [], {
+      status: 'failed',
+      output_snippet: null,
+    })
+    expect(out.length).toBe(1)
+    expect(out[0].type).toBe('notify_email')
+  })
+
+  test('(f) chainDepth>0 + "Summary: BLOCKED:" in the output → notifies', () => {
+    const out = buildDefaultEmailActions(baseTask, 1, [], {
+      status: 'success',
+      output_snippet: 'did stuff\nSummary: BLOCKED: needs a human to approve the merge',
+    })
+    expect(out.length).toBe(1)
+  })
+
+  test('(g) chained failure on a task with its own notify_email → no duplicate', () => {
+    const existing = [
+      { type: 'notify_email', on: 'failure', config: { subject: 's', body: 'b' } },
+    ] as any
+    expect(
+      buildDefaultEmailActions(baseTask, 1, existing, { status: 'failed', output_snippet: null }),
+    ).toEqual([])
+  })
+
+  test('(h) chained failure with email_summary=false → still suppressed (explicit opt-out)', () => {
+    const opted = { ...baseTask, email_summary: false }
+    expect(
+      buildDefaultEmailActions(opted, 1, [], { status: 'failed', output_snippet: null }),
+    ).toEqual([])
   })
 
   test('email_summary undefined (legacy row) defaults on', () => {

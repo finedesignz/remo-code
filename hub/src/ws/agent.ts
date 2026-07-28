@@ -717,19 +717,6 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     } catch (err: any) {
       console.warn('[agent] emitAssistantMessageFinal failed', err?.message)
     }
-    // Phase 06 plan 008 — finalize a SUPERVISOR-SPAWNED triage run for this
-    // session. The supervisor-spawn triage path is NOT a per-session-queue
-    // dispatch (it spawns a fresh session via the supervisor, parallel to
-    // sendSupervisorTask), so it stays on the legacy `pending` map +
-    // onTriageAssistantMessage hook. triageActiveForSession is true only for
-    // those spawned sessions; LOCAL-AGENT triage finalizes via onSessionReply
-    // below. Telegram's outbound bridge is also unmigrated (subsystem 4).
-    try {
-      const tri = await import('../scheduler/senders/triage.ts')
-      if (tri.triageActiveForSession(sessionId)) {
-        void tri.onTriageAssistantMessage(sessionId, msg.content)
-      }
-    } catch {}
     // Round-2: scheduler (session sends + local-agent triage), error-capture, and
     // revanote ALL finalize via the shared dispatch pipeline's finalize hook
     // (RunStore.onFinalize) + waiter promotion. onSessionReply no-ops for any
