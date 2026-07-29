@@ -22,178 +22,139 @@ files_reviewed_list:
   - supervisor/test/pty-usage-path-containment.test.ts
   - supervisor/test/pty-usage-tail.test.ts
   - tools/regression-baseline.json
+  - hub/src/telegram/transcript/tail.ts
 findings:
-  critical: 1
-  warning: 3
-  info: 0
-  total: 4
+  critical: 0
+  warning: 1
+  info: 1
+  total: 2
 status: issues_found
 ---
 
-# Phase PTYCAP-01: Code Review Report
+# Phase PTYCAP-01: Code Review Report (Iteration 2 — Fix Re-Review)
 
 **Reviewed:** 2026-07-28
 **Depth:** standard
 **Files Reviewed:** 18
-**Status:** issues_found
+**Status:** issues_found (prior CRITICAL and 2 of 3 prior WARNINGs confirmed genuinely fixed; 1
+new low-severity WARNING + 1 INFO found on this pass; prior WR-03 remains open by design)
 
 ## Summary
 
-Reviewed the PTYCAP Phase 1 PTY-interactive token-accounting path: schema (`token_usage.runner_type`
-+ CHECK constraint), the DAL split (`recordTokenUsage`/`getTodayTokenTotalByRunner`), the WS
-protocol addition (`AgentUsageEvent.runner_type`), the hub's `usage_event` handler, the new
-supervisor-side `PtyUsageEmitter`/`tailJsonl` capture path, and the CI wiring. The core design is
-sound and matches the four documented Phase-1 decisions in `docs/usage-cost.md` (unsplit daily
-rollup, unwired `transcript_path`, claude-only gate, `cost_source:'estimated'` always). The
-specific security surfaces called out for verification — the `runner_type` zod field-name contract
-(confirmed exact match across `agent-protocol.ts` / `types.ts` / `pty-usage-emitter.ts`, and a
-round-trip test proves zod would catch a rename-typo regression), and the hub-side-filesystem-read
-guard (`no-hub-side-transcript-fs.test.ts` is non-vacuous and correctly scoped) — both check out.
+This is iteration 2 — a fix-verification pass over PTYCAP Phase 1 (PTY-interactive token
+accounting, `runner_type` split). Rather than trusting the fix report, each claimed fix was
+independently re-derived against the current tree, and the git history was checked to confirm
+no unrelated changes rode along (`git log d809964..HEAD` shows exactly the three claimed fix
+commits: `7ed137f`, `bf84802`, `ad4b463`).
 
-One real gap: the path-traversal/symlink-escape negative test for the new PTY tailer
-(`pty-usage-path-containment.test.ts`) is never actually executed by any CI gate, despite the
-qc.yaml comment explicitly stating a belt-and-suspenders step was added *because* `check-baseline`
-misses `supervisor/test/**`. That step only runs the sibling `pty-usage-tail.test.ts`. This is
-exactly the kind of "test exists, but nothing runs it" gap the adversarial stance is meant to
-surface — the containment guard could regress silently. Additionally, a subtle async race
-(inherited, ported verbatim from the hub's transcript tailer) in `tailJsonl`'s `fromStart:false`
-path could replay a resumed transcript's historical turns as new PTY usage under an unlucky
-timing window.
+- **CR-01 (prior CRITICAL — `pty-usage-path-containment.test.ts` never ran in CI): CONFIRMED FIXED.**
+  `.woodpecker/qc.yaml` line 46 now runs
+  `bun test supervisor/test/pty-usage-tail.test.ts supervisor/test/pty-usage-path-containment.test.ts`.
+  Ran it directly against this tree: **23 pass / 0 fail** (17 + 6, matching
+  `tools/regression-baseline.json`'s `_skip_note_ptycap` narrative, which was also corrected in
+  the same commit to stop implying CI coverage it didn't have). The ASVS V4
+  path-traversal/symlink-escape negative test is now genuinely exercised by CI, not just present
+  in the repo.
 
-## Critical Issues
+- **WR-01 (prior — async offset-init race in `tailJsonl`): CONFIRMED FIXED, correctly, in both
+  files.** Diffed commit `bf84802` and read both resulting files in full:
+  `supervisor/src/usage/pty-transcript-tail.ts` and `hub/src/telegram/transcript/tail.ts` are
+  character-for-character equivalent apart from the file-header comment and one `export` keyword
+  (see IN-01 below) — the port genuinely happened to both copies as the commit message claims. The
+  fix correctly wraps the initial replay in an `initOffset()` async function and defers arming
+  `fs.watch` + the poll timer until it resolves (`void initOffset().then(() => { ...arm... })`),
+  closing the exact race described in the commit message: a `fromStart:false` resumed transcript
+  whose recent mtime is caused by the CLI's own in-flight append could previously have a `fs.watch`
+  notification fire `pump()` while `offset` was still `0`, replaying the file's entire history as
+  new usage.
 
-### CR-01: The PTY usage-tailer's path-traversal/symlink-escape negative test never runs in CI
+  Checked specifically for regressions the fix could plausibly introduce, per this review's brief:
+  - **No new unhandled-rejection / deadlock risk.** `void initOffset().then(...)` has no
+    `.catch()`, but this is *unchanged* from the pre-fix code, which did `void pump()` with the
+    same absence of a catch (confirmed via `git show bf84802`) — `pump()`'s only internal
+    try/catch covers the `stat()` failure; a thrown `fsOpen`/`read`/`close` error was already an
+    unhandled rejection before this fix and still is after it. Not a regression introduced by
+    WR-01, and no lock/mutex was added that could deadlock — `close()` correctly checks `closed`
+    inside the deferred `.then()` before arming, so calling `close()` before `initOffset()`
+    resolves cannot leak a watcher/timer.
+  - **No behavior change for the `fromStart:true`/default path** beyond the intended fix: the
+    watcher/poll timer now wait for the initial `pump()` replay to finish before arming
+    (previously they armed synchronously alongside a fire-and-forget `pump()`). This is a strict
+    correctness improvement, not a regression — a same-tick `fs.watch` notification during the old
+    initial read could only ever hit `pump()`'s pre-existing `reading` guard and return early, so
+    no double-read was possible under the old code either; the new code just removes the race
+    window entirely rather than changing observable behavior.
+  - Ran `hub/test/transcript-adapter-claude.test.ts` + `hub/test/transcript-adapter-codex.test.ts`
+    (the two hub-side callers of the ported `tail.ts`) as a regression check on the hub copy: 16
+    pass / 0 fail.
 
-**File:** `.woodpecker/qc.yaml:44-46`
-**Issue:** `check-baseline` walks `hub/test` only, so `supervisor/test/**` is invisible to it. The
-qc.yaml comment on line 45 (`# check-baseline covers hub/test only, so this SC-1 proof needs its
-own step here.`) acknowledges this gap and adds exactly one explicit step:
+- **WR-02 (prior — docs misattributed the `runner_type` default to zod): CONFIRMED FIXED.**
+  `docs/usage-cost.md` now reads "the hub's `usage_event` handler falls back to `'stream-json'`
+  (`msg.runner_type ?? 'stream-json'`) ... the zod field itself stays `undefined` when absent" —
+  verified this is exactly what `hub/src/ws/agent.ts:791` does
+  (`runnerType: msg.runner_type ?? 'stream-json'`), and that
+  `hub/src/ws/agent-protocol.ts`'s `AgentUsageEvent.runner_type` is a bare
+  `z.enum([...]).optional()` with no `.default(...)`, so the fallback genuinely lives in the
+  handler, not zod, matching the corrected doc wording and the existing
+  `token-usage-runner-type.test.ts` assertion (`expect(parsed.runner_type).toBeUndefined()`).
 
-```yaml
-- bun run check-baseline
-# check-baseline covers hub/test only, so this SC-1 proof needs its own step here.
-- bun test supervisor/test/pty-usage-tail.test.ts
-- bun run migration-verify
-```
+- **WR-03 (prior — real-timer test flakiness): left open, as the prior review explicitly marked
+  it non-blocking.** No new instance of this pattern was introduced elsewhere in this file set on
+  this pass. Both affected test files (`supervisor/test/pty-usage-tail.test.ts`,
+  `supervisor/test/pty-usage-path-containment.test.ts`) still pass reliably in this run (23/23),
+  so it is not re-raised as a fresh finding — noted here only for traceability.
 
-but `supervisor/test/pty-usage-path-containment.test.ts` — the ASVS V4 negative test this phase
-added specifically to prove the emitter refuses a relative/traversal/NUL-byte `projectDir` and a
-located transcript whose real path escapes the projects base (per `docs/usage-cost.md`'s own
-"Tests (PTYCAP Phase 1)" list and the file's own header comment) — is not listed anywhere: not in
-`check-baseline`, not in this explicit qc.yaml step, and `tools/regression-baseline.json`'s own
-narrative claims "supervisor/test/pty-usage-path-containment.test.ts, 6 passing" as evidence of
-coverage, which is misleading — those 6 tests only pass when someone runs them manually/locally.
-Confirmed via repo-wide grep: no `.yaml`/`.yml`/`package.json` script anywhere references
-`pty-usage-path-containment`.
-
-Net effect: a future regression to `PtyUsageEmitter.start()`'s reuse of `resolveSessionDir` /
-`realPathContained` (e.g. someone "simplifies" the containment check, or a refactor accidentally
-drops the `realPathContained(pinnedPath, projectsBase())` guard in `pinAndTail`) would break the
-security-relevant refusal behavior, and CI (`.woodpecker/qc.yaml`) would report green.
-
-**Fix:**
-```yaml
-      - bun run check-baseline
-      # check-baseline covers hub/test only, so these SC-1/ASVS-V4 proofs need their own step here.
-      - bun test supervisor/test/pty-usage-tail.test.ts supervisor/test/pty-usage-path-containment.test.ts
-      - bun run migration-verify
-```
-Also correct the `tools/regression-baseline.json` narrative note (`_skip_note_ptycap`) so it no
-longer implies this file is CI-gated when it currently is not.
+Beyond re-verifying the three fixes, this pass did a full standard-depth read of every file
+currently in scope (not just the diff), including `schema.sql`'s `token_usage`/`token_usage_daily`
+DDL and CHECK constraint (matches the DAL and the doc exactly), the full `AgentUsageEvent`/
+`AgentInbound` zod contract, `hub/src/ws/agent.ts`'s complete `usage_event` handler (including the
+SDK-vs-estimated cost branch, and confirming that PTY-tagged frames actually reach that handler —
+`SessionBridge` authenticates each session on its own `role:'agent'` socket, distinct from the
+multiplexed `role:'supervisor'` socket used by `SupervisorClient`/`supervisor.hello`, so a
+`usage_event` from a PTY session is never mis-routed into `handleSupervisorMessage`, which has no
+case for it and would silently drop it), `PtyUsageEmitter`'s locate/pin/dedupe lifecycle
+(`session-bridge.ts`, `pty-usage-emitter.ts`), and the full DAL/e2e/unit test suite. No new
+BLOCKER/CRITICAL findings. One new low-severity WARNING and one INFO item follow.
 
 ## Warnings
 
-### WR-01: Async race in the ported `tailJsonl` can replay a resumed transcript's history as new PTY usage
+### WR-04: `no-hub-side-transcript-fs.test.ts`'s guard regex is narrower than its stated goal
 
-**File:** `supervisor/src/usage/pty-transcript-tail.ts:90-114`
-**Issue:** When `fromStart === false` (the mode `PtyUsageEmitter` always uses — see
-`pty-usage-emitter.ts:230`), the initial offset is set **asynchronously**:
-
+**File:** `hub/test/no-hub-side-transcript-fs.test.ts:75` (`const HOMEDIR_IDENTIFIER = /\bhomedir\b/`)
+**Issue:** The canary's own docstring says it "fails any FUTURE `hub/src/**` module that calls
+Node's home-directory resolver," but the regex only matches the literal word `homedir`. It
+correctly catches `os.homedir()` (contains that word), but a future hub-side module that derives a
+home-directory path via `process.env.HOME` or `process.env.USERPROFILE` directly — rather than
+`os.homedir()` — would silently pass this guard while reproducing exactly the Pitfall-1 failure
+mode the test exists to prevent (works in local dev against a real `$HOME`, silently does nothing
+in the Coolify container where those env vars aren't the CLI's real home). This isn't hypothetical:
+`process.env.HOME`/`process.env.USERPROFILE` are precisely the two variables this same phase's own
+supervisor-side tests use to redirect home-directory resolution
+(`supervisor/test/pty-usage-tail.test.ts`'s `makeHome()`), so the pattern is already live in this
+codebase — just not yet attempted on the hub side.
+**Fix:** Broaden the pattern to also catch the common escape hatches, e.g.:
 ```ts
-if (opts?.fromStart === false) {
-  void stat(path).then((s) => { offset = s.size })
-  ...
-}
-...
-watcher = watch(path, () => { void pump() })
-...
-pollTimer = setInterval(() => { void pump() }, POLL_INTERVAL_MS)
+const HOMEDIR_IDENTIFIER = /\bhomedir\b|process\.env\.(HOME|USERPROFILE)\b/
 ```
+Not a blocker for this phase (no hub-side module currently does this — the two-test structural
+proof is otherwise sound and non-vacuous), but worth tightening before the allowlist is ever asked
+to grow, since a bypass here reproduces the exact production failure mode the guard was built for.
 
-`watcher`/`pollTimer` are armed synchronously immediately after, while `offset` is still its
-initialized value of `0` until the `stat()` promise resolves. `PtyUsageEmitter.pinAndTail()` is
-only invoked once `resolveTranscriptPath()` has located a file whose `mtimeMs` is within
-`LOCATE_MTIME_SLACK_MS` (2s) of "now" — i.e. a file the CLI touched *very recently*. For a brand
-new transcript this race is harmless (offset=0 is the correct start point either way). But for a
-**resumed** session reusing an existing transcript with substantial prior turns (the codebase's
-own "Session resume by matching `project_dir`" behavior, and Claude Code CLI append-to-same-file
-resume), the CLI's own append is what makes the file's mtime recent enough to be discovered in the
-first place — meaning a fresh write is landing on the file right as `pinAndTail`/`tailJsonl` starts.
-If `fs.watch`'s change notification fires before the `stat()` promise in the `then()` callback
-resolves, `pump()` will read from `offset=0` and treat **every historical turn already in the
-file** as a brand-new record, emitting mis-attributed `usage_event`s for token spend that may be
-hours/days old (the uuid dedupe set only protects against a duplicate `pump()` within *this*
-emitter instance's lifetime — it does nothing to prevent the first pump from over-reading).
+## Info
 
-The emitter's own test suite (`pty-usage-tail.test.ts` / `pty-usage-path-containment.test.ts`)
-never exercises this because every test's `writeFileSync(..., {flag:'a'})` append happens only
-after an explicit `await wait(200)`, which reliably gives the `stat()` promise time to resolve
-first — the tests are not adversarial to this specific timing window.
+### IN-01: `POLL_INTERVAL_MS` export inconsistency between the ported file and its declared source of truth
 
-**Fix:** Make the initial offset assignment synchronous-before-watch, e.g. resolve it before
-arming the watcher/poll timer:
-```ts
-async function initOffset(): Promise<void> {
-  if (opts?.fromStart === false) {
-    try { offset = (await stat(path)).size } catch { /* file not present yet */ }
-  } else {
-    await pump()
-  }
-}
-void initOffset().then(() => {
-  watcher = watch(path, () => { void pump() })
-  pollTimer = setInterval(() => { void pump() }, POLL_INTERVAL_MS)
-})
-```
-Since this file is documented as a verbatim port of `hub/src/telegram/transcript/tail.ts`, port the
-fix to both copies per the file's own header comment ("port any future fix there over here too").
-
-### WR-02: `docs/usage-cost.md` misattributes the `runner_type` default to zod, not the handler
-
-**File:** `docs/usage-cost.md:271` / `hub/src/ws/agent-protocol.ts:194-201`
-**Issue:** The doc states: *"An older supervisor build that predates this phase omits the field
-entirely; zod defaults it to `'stream-json'` so old and new supervisors both record correctly."*
-But `AgentUsageEvent.runner_type` is declared as `z.enum(['stream-json',
-'pty-interactive']).optional()` — there is no `.default('stream-json')`. After
-`AgentUsageEvent.parse(...)`, an omitted field yields `undefined`, not `'stream-json'` (proven by
-`hub/test/token-usage-runner-type.test.ts`'s own test: `expect(parsed.runner_type).toBeUndefined()`
-immediately following a comment that says the opposite of what the schema actually does). The
-actual default is applied downstream, in the handler: `runnerType: msg.runner_type ??
-'stream-json'` (`hub/src/ws/agent.ts:791`). Behavior is correct end-to-end, but the doc will
-mislead a future maintainer who inspects the zod schema expecting to see the default there and,
-finding `undefined`, may "fix" it by adding a redundant/conflicting `.default()` or miss that the
-real fallback lives in the WS handler.
-**Fix:** Reword the doc sentence to: *"...omits the field entirely; the hub's `usage_event` handler
-falls back to `'stream-json'` (`msg.runner_type ?? 'stream-json'`) so old and new supervisors both
-record correctly — the zod field itself stays `undefined` when absent (see
-`token-usage-runner-type.test.ts`)."*
-
-### WR-03: New PTY-tailer tests are timing-dependent real-timer tests (flakiness risk under CI load)
-
-**File:** `supervisor/test/pty-usage-tail.test.ts`, `supervisor/test/pty-usage-path-containment.test.ts`
-**Issue:** Both files assert emission counts after fixed real-timer waits (`await wait(200/700/1300)`)
-layered on top of `fs.watch` + a 500ms poll fallback + a 1000ms locate-poll — e.g.
-`await wait(1300) // allow the locate poll to find the file, then attempt containment`. Under a
-loaded CI runner (the shared Woodpecker `linux/amd64` label, alongside a real Postgres service in
-the same job), these margins can be tight enough to occasionally miss a write/notify cycle,
-producing an intermittent false failure (or, worse, a false pass if a race like WR-01 shifts
-timing just enough to dodge detection). This mirrors a pre-existing pattern already used by
-`hub/test/transcript-adapter-claude.test.ts`-style tests, so it isn't a new anti-pattern introduced
-by this phase, but this phase adds ~23 more such cases, increasing the surface for CI flakiness.
-**Fix:** Not blocking; consider a follow-up that replaces fixed waits with a poll-until-condition
-helper (`await waitUntil(() => captured.length === 1, { timeoutMs: 2000 })`) so the tests pass as
-soon as the condition is true and only fail after a real timeout, rather than gambling on a fixed
-sleep being "enough."
+**File:** `supervisor/src/usage/pty-transcript-tail.ts:22` vs `hub/src/telegram/transcript/tail.ts:16`
+**Issue:** The supervisor copy exports `POLL_INTERVAL_MS` (`export const POLL_INTERVAL_MS = 500`)
+while the hub original keeps it module-private (`const POLL_INTERVAL_MS = 500`). The supervisor
+file's own header comment claims this is a "VERBATIM PORT... The ONLY difference is the module
+home," but this `export` is a second, small divergence. Harmless — grepped the supervisor package
+and nothing imports the export — but worth flagging since the header comment's "verbatim" claim
+isn't quite exact, and a future side-by-side diff against the hub original would flag this line as
+a spurious difference.
+**Fix:** Either drop the `export` to match the hub original exactly, or, if the export is
+intentional (e.g. as a future test seam), update the header comment to note the one deliberate
+divergence rather than claiming byte-parity.
 
 ---
 
