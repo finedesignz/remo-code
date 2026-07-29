@@ -64,40 +64,77 @@ export function extractUsage(record: unknown): TranscriptUsageRecord | null {
 }
 
 /**
- * Capture-once locator (P1-D-B): find the `.jsonl` in `dir` that THIS session's
- * freshly-spawned CLI touched — the entry with the LOWEST mtimeMs that still
- * qualifies as new (`mtimeMs >= sinceMs - LOCATE_MTIME_SLACK_MS`). Picking the
- * lowest qualifying mtime (not the newest) means the emitter, called once and
- * never re-resolved, cannot later have its attribution stolen by some other
- * concurrently-active session's own JSONL landing in the same project dir with
- * a fresher mtime. Returns null when no entry qualifies. Unreadable entries —
+ * A pre-spawn snapshot of `.jsonl` basenames in a project's Claude session dir,
+ * paired with whether the snapshot itself can be trusted.
+ *
+ * `reliable: true` means the directory existed and was readable at snapshot
+ * time — `names` is a complete, trustworthy list of everything that pre-dated
+ * this session's spawn, so anything absent from it is genuinely new.
+ *
+ * `reliable: false` means the directory was absent or unreadable at snapshot
+ * time — `names` is (necessarily) empty, but that emptiness proves NOTHING:
+ * it is indistinguishable from "nothing pre-existed" and "we simply couldn't
+ * see what was there." Treating an empty-because-unreadable snapshot the same
+ * as an empty-because-genuinely-fresh snapshot is exactly the bug this type
+ * exists to prevent — a caller must never fall back to "accept any fresh
+ * file" when `reliable` is false.
+ */
+export interface TranscriptSnapshot {
+  reliable: boolean
+  names: ReadonlySet<string>
+}
+
+/** Why `resolveTranscriptPath` declined to pin a file this call. */
+export type LocateSkipReason = 'unreliable' | 'ambiguous'
+
+/**
+ * Capture-once locator (P1-D-B): find the ONE `.jsonl` in `dir` that THIS
+ * session's freshly-spawned CLI touched — the entry that (a) is absent from
+ * `snapshot.names` (a genuinely new file, when `snapshot` is supplied) and
+ * (b) has `mtimeMs >= sinceMs - LOCATE_MTIME_SLACK_MS`. Unreadable entries —
  * including the directory itself not existing yet — are skipped, never thrown.
  *
- * `excludeNames` (QC fix) — a snapshot of `.jsonl` basenames that were ALREADY
- * present in `dir` before this session's CLI was spawned. mtime alone is not a
- * safe identity signal: a sibling session's transcript that has been open for
- * hours still gets its mtime bumped by every turn the SIBLING types, so a
- * merely-active-but-pre-existing file can satisfy the mtime/slack window purely
- * by coincidence of timing and get mis-pinned as THIS session's transcript —
- * silently attributing another session's spend under this session_id. A file
- * present in `excludeNames` is never a valid candidate regardless of its mtime;
- * only a genuinely NEW file (absent from the pre-spawn snapshot) can qualify.
- * Omitted/undefined preserves the old mtime-only behavior for callers that
- * cannot supply a snapshot (e.g. direct unit tests of this function).
+ * Fails closed on ambiguity, not just on absence. Two failure modes are
+ * both treated as "cannot safely pin," never as "pick something anyway":
+ *
+ * 1. **Unreliable snapshot** — `snapshot.reliable === false`. The exclusion
+ *    set cannot be trusted (see `TranscriptSnapshot`), so no candidate is
+ *    ever accepted, however clean the mtime match looks. Callers should
+ *    normally intercept this earlier (`PtyUsageEmitter.start` short-circuits
+ *    on it) — checked again here so this function alone never mis-attributes
+ *    even if called directly with an unreliable snapshot.
+ * 2. **Multiple viable candidates** — more than one qualifying (new-enough,
+ *    unexcluded) file exists at resolve time. Previously this picked the
+ *    lowest-mtime one deterministically; that is exactly the kind of guess
+ *    between two candidates that causes mis-attribution when two sessions
+ *    spawn into the same project dir close together. Now: refuse, pin
+ *    nothing, and let the caller log it loudly. A later poll tick, once
+ *    only one candidate remains new-and-unexcluded, can still resolve it.
+ *
+ * `snapshot` omitted preserves the old mtime-only behavior (no exclusion,
+ * still ambiguity-safe) for callers/tests that don't need pre-existing-file
+ * exclusion. `onSkip` is an optional side-channel so callers can log why a
+ * tick found nothing to pin, without changing the `string | null` return.
  */
 export function resolveTranscriptPath(
   dir: string,
   sinceMs: number,
-  excludeNames?: ReadonlySet<string>,
+  snapshot?: TranscriptSnapshot,
+  onSkip?: (reason: LocateSkipReason, candidateCount?: number) => void,
 ): string | null {
+  if (snapshot && !snapshot.reliable) {
+    onSkip?.('unreliable')
+    return null
+  }
   let names: string[]
   try {
     names = readdirSync(dir).filter((n) => n.endsWith('.jsonl'))
   } catch {
     return null
   }
+  const excludeNames = snapshot?.names
   const threshold = sinceMs - LOCATE_MTIME_SLACK_MS
-  let best: { path: string; mtime: number } | null = null
+  const candidates: { path: string; mtime: number }[] = []
   for (const n of names) {
     if (excludeNames?.has(n)) continue // pre-existed the spawn — never a valid candidate
     const full = join(dir, n)
@@ -110,27 +147,37 @@ export function resolveTranscriptPath(
       continue
     }
     if (mtime < threshold) continue
-    if (!best || mtime < best.mtime) best = { path: full, mtime }
+    candidates.push({ path: full, mtime })
   }
-  return best?.path ?? null
+  if (candidates.length === 0) return null
+  if (candidates.length > 1) {
+    onSkip?.('ambiguous', candidates.length)
+    return null
+  }
+  return candidates[0].path
 }
 
 /**
  * Snapshot the `.jsonl` basenames already present in `projectDir`'s Claude
  * session dir. The CALLER MUST invoke this BEFORE spawning the CLI process, so
  * the snapshot cannot possibly include the about-to-be-created file for THIS
- * session. Fed back in as `resolveTranscriptPath`'s `excludeNames` (via
- * `PtyUsageEmitterOpts.preExistingNames`). Fails safe to an empty set — an
- * unresolvable/nonexistent dir has no pre-existing files to exclude, which is
- * the correct (and safe) default.
+ * session. Fed back in as `resolveTranscriptPath`'s `snapshot` (via
+ * `PtyUsageEmitterOpts.preExistingNames`).
+ *
+ * Returns `reliable: false` — never a silently-empty-but-trusted set — when
+ * the directory can't be proven to have been fully enumerated: an
+ * unresolvable project dir, a session dir that doesn't exist yet (this
+ * project's very first PTY session), or a `readdirSync` failure (e.g. a
+ * permissions error, or the dir vanishing between resolve and read). All
+ * three are "we don't know what was there," not "nothing was there."
  */
-export function snapshotPreExistingTranscripts(projectDir: string): Set<string> {
+export function snapshotPreExistingTranscripts(projectDir: string): TranscriptSnapshot {
   const dirResult = resolveSessionDir(projectDir)
-  if (!dirResult.ok) return new Set()
+  if (!dirResult.ok) return { reliable: false, names: new Set() }
   try {
-    return new Set(readdirSync(dirResult.dir).filter((n) => n.endsWith('.jsonl')))
+    return { reliable: true, names: new Set(readdirSync(dirResult.dir).filter((n) => n.endsWith('.jsonl'))) }
   } catch {
-    return new Set()
+    return { reliable: false, names: new Set() }
   }
 }
 
@@ -159,8 +206,10 @@ export interface PtyUsageEmitterOpts {
   /** Test seam — defaults to claudeProjectsBase. */
   projectsBase?: () => string
   /** Pre-spawn snapshot from `snapshotPreExistingTranscripts()` — see that
-   *  function's doc. Omitted falls back to mtime-only qualification. */
-  preExistingNames?: ReadonlySet<string>
+   *  function's doc. Omitted falls back to mtime-only qualification (no
+   *  exclusion, but still ambiguity-safe). A snapshot with `reliable: false`
+   *  makes `start()` refuse to locate anything for this session at all. */
+  preExistingNames?: TranscriptSnapshot
 }
 
 /**
@@ -182,6 +231,20 @@ export class PtyUsageEmitter {
       opts.onLog?.('info', `pty-usage: accounting is claude-only for this phase — no-op for cliKind=${opts.cliKind}`)
       return
     }
+    // Fail closed on an unreliable pre-spawn snapshot (round-2 QC fix): if the
+    // session dir didn't exist / wasn't readable when the caller snapshotted
+    // it, there is no trustworthy way to tell a genuinely-new transcript from
+    // a pre-existing sibling's — so this session gets NO usage accounting
+    // rather than a chance at mis-pinning someone else's spend under its
+    // session_id. Checked once here, up front, rather than every poll tick —
+    // the condition can't change mid-session (the snapshot was already taken).
+    if (opts.preExistingNames && !opts.preExistingNames.reliable) {
+      opts.onLog?.(
+        'warn',
+        'pty-usage: pre-spawn transcript snapshot unreliable (session dir absent/unreadable at snapshot time) — refusing to locate a transcript for this session; no usage will be emitted',
+      )
+      return
+    }
     const dirResult = resolveSessionDir(opts.projectDir)
     if (!dirResult.ok) {
       opts.onLog?.('warn', `pty-usage: cannot resolve session dir (${dirResult.error})`)
@@ -193,9 +256,18 @@ export class PtyUsageEmitter {
     const spawnedAt = now()
     const deadline = spawnedAt + LOCATE_TIMEOUT_MS
 
+    let loggedAmbiguous = false
     const tryLocate = () => {
       if (this.stopped) return
-      const found = resolveTranscriptPath(dir, spawnedAt, opts.preExistingNames)
+      const found = resolveTranscriptPath(dir, spawnedAt, opts.preExistingNames, (reason, count) => {
+        if (reason === 'ambiguous' && !loggedAmbiguous) {
+          loggedAmbiguous = true
+          opts.onLog?.(
+            'warn',
+            `pty-usage: ${count} viable new transcript candidates at once — refusing to guess between them; will keep watching in case it resolves to exactly one`,
+          )
+        }
+      })
       if (found) {
         if (this.locateTimer) {
           clearInterval(this.locateTimer)

@@ -139,16 +139,16 @@ describe('resolveTranscriptPath — capture-once locator (P1-D-B)', () => {
     }
   })
 
-  test('QC fix: a pre-existing sibling .jsonl with a fresh mtime (active concurrent session) is excluded via excludeNames even though it would otherwise satisfy the mtime/slack window', () => {
+  test('QC fix: a pre-existing sibling .jsonl with a fresh mtime (active concurrent session) is excluded via a reliable snapshot even though it would otherwise satisfy the mtime/slack window', () => {
     const dir = mkdtempSync(join(tmpdir(), 'locate-sibling-'))
     try {
       const now = Date.now()
       // The sibling file EXISTED before spawn (it's in the snapshot) but its
       // mtime is fresh — right now — because the sibling session is actively
-      // being typed in concurrently. Without excludeNames this would win.
+      // being typed in concurrently. Without exclusion this would win.
       const sibling = join(dir, 'sibling-session.jsonl')
       writeFileSync(sibling, '')
-      const preExisting = new Set(['sibling-session.jsonl'])
+      const preExisting = { reliable: true, names: new Set(['sibling-session.jsonl']) }
       // No genuinely new file has appeared yet — nothing should qualify.
       expect(resolveTranscriptPath(dir, now, preExisting)).toBeNull()
       // Once the real new file lands (absent from the snapshot), it — and only
@@ -160,26 +160,66 @@ describe('resolveTranscriptPath — capture-once locator (P1-D-B)', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  test('round-2 QC fix: an UNRELIABLE snapshot (reliable:false) never yields a candidate, however clean the mtime match — absence of entries proves nothing when the dir could not be enumerated', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locate-unreliable-'))
+    try {
+      const now = Date.now()
+      const fresh = join(dir, 'fresh.jsonl')
+      writeFileSync(fresh, '')
+      const unreliable = { reliable: false, names: new Set<string>() }
+      let skipped: string | undefined
+      expect(resolveTranscriptPath(dir, now, unreliable, (reason) => { skipped = reason })).toBeNull()
+      expect(skipped).toBe('unreliable')
+      // The SAME directory, with a RELIABLE (empty) snapshot, picks it up fine —
+      // proves the refusal above is specifically about snapshot trust, not the
+      // directory contents.
+      const reliable = { reliable: true, names: new Set<string>() }
+      expect(resolveTranscriptPath(dir, now, reliable)).toBe(fresh)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('round-2 QC fix: two viable new candidates at once are never guessed between — refuses and reports ambiguous, not the previous lowest-mtime tie-break', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locate-ambiguous-'))
+    try {
+      const now = Date.now()
+      const a = join(dir, 'candidate-a.jsonl')
+      const b = join(dir, 'candidate-b.jsonl')
+      writeFileSync(a, '')
+      writeFileSync(b, '')
+      let skipped: string | undefined
+      let count: number | undefined
+      expect(resolveTranscriptPath(dir, now, undefined, (reason, c) => { skipped = reason; count = c })).toBeNull()
+      expect(skipped).toBe('ambiguous')
+      expect(count).toBe(2)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('snapshotPreExistingTranscripts', () => {
-  test('returns the pre-existing .jsonl basenames for a resolvable project dir', () => {
+  test('returns reliable:true + the pre-existing .jsonl basenames for a resolvable, readable project dir', () => {
     const { restore } = makeHome()
     try {
       const projectDir = process.platform === 'win32' ? 'C:/fake/pty-usage-snap' : '/fake/pty-usage-snap'
       const file = setupSessionFile(projectDir) // writes .../sess.jsonl
       const snap = snapshotPreExistingTranscripts(projectDir)
-      expect(snap.has(file.split(/[\\/]/).pop()!)).toBe(true)
+      expect(snap.reliable).toBe(true)
+      expect(snap.names.has(file.split(/[\\/]/).pop()!)).toBe(true)
     } finally {
       restore()
     }
   })
 
-  test('returns an empty set when the project dir does not exist yet', () => {
+  test('round-2 QC fix: returns reliable:false (not an empty-but-trusted set) when the project dir does not exist yet', () => {
     const { restore } = makeHome()
     try {
       const snap = snapshotPreExistingTranscripts(process.platform === 'win32' ? 'C:/fake/never-spawned' : '/fake/never-spawned')
-      expect(snap.size).toBe(0)
+      expect(snap.reliable).toBe(false)
+      expect(snap.names.size).toBe(0)
     } finally {
       restore()
     }
@@ -388,7 +428,8 @@ describe('PtyUsageEmitter — end-to-end mid-turn accounting (SC-1/SC-2/SC-3)', 
       // calling pty.start(). The sibling is captured; the new session's own file
       // does not exist yet.
       const preExisting = snapshotPreExistingTranscripts(projectDir)
-      expect(preExisting.has('sibling-real-session.jsonl')).toBe(true)
+      expect(preExisting.reliable).toBe(true)
+      expect(preExisting.names.has('sibling-real-session.jsonl')).toBe(true)
 
       const captured: PtyUsageEventFrame[] = []
       emitter.start({
@@ -426,6 +467,97 @@ describe('PtyUsageEmitter — end-to-end mid-turn accounting (SC-1/SC-2/SC-3)', 
       expect(captured.length).toBe(1)
       expect(captured[0].input_tokens).toBe(42)
       expect(captured[0].session_id).toBe('sess-cross')
+    } finally {
+      emitter.stop()
+      restore()
+    }
+  })
+
+  test('round-2 QC fix, scenario 1: session dir absent at snapshot time (unreliable snapshot) + a sibling transcript appearing concurrently afterward — never pinned, never emitted, for the LIFE of the session', async () => {
+    const { restore } = makeHome()
+    const emitter = new PtyUsageEmitter()
+    try {
+      const projectDir = process.platform === 'win32' ? 'C:/fake/pty-usage-i' : '/fake/pty-usage-i'
+      // Snapshot BEFORE the session dir exists at all — this is what
+      // session-bridge.ts does for the very first PTY session in a brand-new
+      // project dir. resolveSessionDir has nothing to enumerate yet.
+      const preExisting = snapshotPreExistingTranscripts(projectDir)
+      expect(preExisting.reliable).toBe(false)
+
+      const captured: PtyUsageEventFrame[] = []
+      const logs: Array<[string, string]> = []
+      emitter.start({
+        sessionId: 'sess-i',
+        projectDir,
+        cliKind: 'claude',
+        emit: (f) => captured.push(f),
+        onLog: (lvl, m) => logs.push([lvl, m]),
+        preExistingNames: preExisting,
+      })
+      // start() should refuse synchronously — no timer even armed.
+      expect(captured.length).toBe(0)
+      expect(logs.some(([lvl, m]) => lvl === 'warn' && m.includes('unreliable'))).toBe(true)
+
+      // NOW the directory (and a sibling's real, concurrently-active transcript)
+      // shows up — exactly the door round 1's mtime-based fix didn't close.
+      const r = resolveSessionDir(projectDir)
+      if (!r.ok) throw new Error('test setup failed')
+      mkdirSync(r.dir, { recursive: true })
+      const siblingFile = join(r.dir, 'sibling-appeared-after.jsonl')
+      writeFileSync(siblingFile, '')
+      await wait(300)
+      writeFileSync(
+        siblingFile,
+        JSON.stringify({ type: 'assistant', uuid: 'sibling-after-u1', message: { usage: { input_tokens: 500, output_tokens: 500, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }) + '\n',
+        { flag: 'a' },
+      )
+      await wait(1500) // well past the locate-poll interval, if one had been armed
+
+      // Nothing was ever pinned or emitted — the gap is accepted, the
+      // mis-attribution is not.
+      expect(captured.length).toBe(0)
+    } finally {
+      emitter.stop()
+      restore()
+    }
+  })
+
+  test('round-2 QC fix, scenario 2: two viable new transcript candidates present at resolve time — nothing is pinned, nothing emitted, until it resolves to exactly one', async () => {
+    const { restore } = makeHome()
+    const emitter = new PtyUsageEmitter()
+    try {
+      const projectDir = process.platform === 'win32' ? 'C:/fake/pty-usage-j' : '/fake/pty-usage-j'
+      const r = resolveSessionDir(projectDir)
+      if (!r.ok) throw new Error('test setup failed')
+      mkdirSync(r.dir, { recursive: true })
+      // Reliable, empty snapshot — a genuinely fresh project dir at spawn time.
+      const preExisting = snapshotPreExistingTranscripts(projectDir)
+      expect(preExisting.reliable).toBe(true)
+      expect(preExisting.names.size).toBe(0)
+
+      const captured: PtyUsageEventFrame[] = []
+      const logs: Array<[string, string]> = []
+      emitter.start({
+        sessionId: 'sess-j',
+        projectDir,
+        cliKind: 'claude',
+        emit: (f) => captured.push(f),
+        onLog: (lvl, m) => logs.push([lvl, m]),
+        preExistingNames: preExisting,
+      })
+
+      // TWO new files land in the same poll window — e.g. this session's own
+      // CLI plus another session racing into the same project dir. Neither was
+      // in the pre-spawn snapshot, so both are "new"; the old code would have
+      // silently picked the lowest-mtime one.
+      const candA = join(r.dir, 'race-a.jsonl')
+      const candB = join(r.dir, 'race-b.jsonl')
+      writeFileSync(candA, '')
+      writeFileSync(candB, '')
+      await wait(1500) // past the 1000ms locate-poll interval, more than once
+
+      expect(captured.length).toBe(0)
+      expect(logs.some(([lvl, m]) => lvl === 'warn' && m.includes('viable new transcript candidates'))).toBe(true)
     } finally {
       emitter.stop()
       restore()
