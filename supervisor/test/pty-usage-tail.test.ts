@@ -19,6 +19,7 @@ import {
   PtyUsageEmitter,
   extractUsage,
   resolveTranscriptPath,
+  snapshotPreExistingTranscripts,
   type PtyUsageEventFrame,
 } from '../src/usage/pty-usage-emitter'
 
@@ -135,6 +136,52 @@ describe('resolveTranscriptPath — capture-once locator (P1-D-B)', () => {
       expect(resolveTranscriptPath(dir, now)).toBeNull()
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('QC fix: a pre-existing sibling .jsonl with a fresh mtime (active concurrent session) is excluded via excludeNames even though it would otherwise satisfy the mtime/slack window', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locate-sibling-'))
+    try {
+      const now = Date.now()
+      // The sibling file EXISTED before spawn (it's in the snapshot) but its
+      // mtime is fresh — right now — because the sibling session is actively
+      // being typed in concurrently. Without excludeNames this would win.
+      const sibling = join(dir, 'sibling-session.jsonl')
+      writeFileSync(sibling, '')
+      const preExisting = new Set(['sibling-session.jsonl'])
+      // No genuinely new file has appeared yet — nothing should qualify.
+      expect(resolveTranscriptPath(dir, now, preExisting)).toBeNull()
+      // Once the real new file lands (absent from the snapshot), it — and only
+      // it — qualifies, even though the sibling is still mtime-fresher-or-equal.
+      const newFile = join(dir, 'new-session.jsonl')
+      writeFileSync(newFile, '')
+      expect(resolveTranscriptPath(dir, now, preExisting)).toBe(newFile)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('snapshotPreExistingTranscripts', () => {
+  test('returns the pre-existing .jsonl basenames for a resolvable project dir', () => {
+    const { restore } = makeHome()
+    try {
+      const projectDir = process.platform === 'win32' ? 'C:/fake/pty-usage-snap' : '/fake/pty-usage-snap'
+      const file = setupSessionFile(projectDir) // writes .../sess.jsonl
+      const snap = snapshotPreExistingTranscripts(projectDir)
+      expect(snap.has(file.split(/[\\/]/).pop()!)).toBe(true)
+    } finally {
+      restore()
+    }
+  })
+
+  test('returns an empty set when the project dir does not exist yet', () => {
+    const { restore } = makeHome()
+    try {
+      const snap = snapshotPreExistingTranscripts(process.platform === 'win32' ? 'C:/fake/never-spawned' : '/fake/never-spawned')
+      expect(snap.size).toBe(0)
+    } finally {
+      restore()
     }
   })
 })
@@ -319,6 +366,68 @@ describe('PtyUsageEmitter — end-to-end mid-turn accounting (SC-1/SC-2/SC-3)', 
       await wait(700)
       expect(captured.length).toBe(0)
     } finally {
+      restore()
+    }
+  })
+
+  test('QC BLOCKING fix: a pre-existing, actively-active sibling transcript in the same project dir is NEVER attributed to a new session — the new file (once it lands) is picked instead', async () => {
+    const { restore } = makeHome()
+    const emitter = new PtyUsageEmitter()
+    try {
+      const projectDir = process.platform === 'win32' ? 'C:/fake/pty-usage-cross' : '/fake/pty-usage-cross'
+      const r = resolveSessionDir(projectDir)
+      if (!r.ok) throw new Error('test setup failed')
+      mkdirSync(r.dir, { recursive: true })
+      // A DIFFERENT, already-running Claude session's transcript in the same
+      // project dir. It's not new — it existed before this test's "spawn" — but
+      // it IS actively being appended to (simulating a concurrently-active
+      // sibling PTY session), so its mtime is fresh at every step below.
+      const siblingFile = join(r.dir, 'sibling-real-session.jsonl')
+      writeFileSync(siblingFile, '')
+      // Snapshot BEFORE "spawn" — this is what session-bridge.ts now does before
+      // calling pty.start(). The sibling is captured; the new session's own file
+      // does not exist yet.
+      const preExisting = snapshotPreExistingTranscripts(projectDir)
+      expect(preExisting.has('sibling-real-session.jsonl')).toBe(true)
+
+      const captured: PtyUsageEventFrame[] = []
+      emitter.start({
+        sessionId: 'sess-cross',
+        projectDir,
+        cliKind: 'claude',
+        emit: (f) => captured.push(f),
+        preExistingNames: preExisting,
+      })
+
+      // While the new session's CLI is still starting up, the SIBLING keeps
+      // getting real turns appended — bumping its mtime into the locator's
+      // qualifying window on every poll tick. Without the fix this used to win.
+      await wait(150)
+      writeFileSync(
+        siblingFile,
+        JSON.stringify({ type: 'assistant', uuid: 'sibling-u-1', message: { usage: { input_tokens: 999, output_tokens: 999, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }) + '\n',
+        { flag: 'a' },
+      )
+      await wait(150)
+
+      // Only now does the genuinely new session's own transcript file appear.
+      const newFile = join(r.dir, 'new-real-session.jsonl')
+      writeFileSync(newFile, '')
+      await wait(1200) // past the 1000ms locate-poll interval
+
+      writeFileSync(
+        newFile,
+        JSON.stringify({ type: 'assistant', uuid: 'new-u-1', message: { model: 'claude-sonnet-5', usage: { input_tokens: 42, output_tokens: 7, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }) + '\n',
+        { flag: 'a' },
+      )
+      await wait(800)
+
+      // Exactly the new session's own record was emitted — never the sibling's.
+      expect(captured.length).toBe(1)
+      expect(captured[0].input_tokens).toBe(42)
+      expect(captured[0].session_id).toBe('sess-cross')
+    } finally {
+      emitter.stop()
       restore()
     }
   })

@@ -72,8 +72,24 @@ export function extractUsage(record: unknown): TranscriptUsageRecord | null {
  * concurrently-active session's own JSONL landing in the same project dir with
  * a fresher mtime. Returns null when no entry qualifies. Unreadable entries —
  * including the directory itself not existing yet — are skipped, never thrown.
+ *
+ * `excludeNames` (QC fix) — a snapshot of `.jsonl` basenames that were ALREADY
+ * present in `dir` before this session's CLI was spawned. mtime alone is not a
+ * safe identity signal: a sibling session's transcript that has been open for
+ * hours still gets its mtime bumped by every turn the SIBLING types, so a
+ * merely-active-but-pre-existing file can satisfy the mtime/slack window purely
+ * by coincidence of timing and get mis-pinned as THIS session's transcript —
+ * silently attributing another session's spend under this session_id. A file
+ * present in `excludeNames` is never a valid candidate regardless of its mtime;
+ * only a genuinely NEW file (absent from the pre-spawn snapshot) can qualify.
+ * Omitted/undefined preserves the old mtime-only behavior for callers that
+ * cannot supply a snapshot (e.g. direct unit tests of this function).
  */
-export function resolveTranscriptPath(dir: string, sinceMs: number): string | null {
+export function resolveTranscriptPath(
+  dir: string,
+  sinceMs: number,
+  excludeNames?: ReadonlySet<string>,
+): string | null {
   let names: string[]
   try {
     names = readdirSync(dir).filter((n) => n.endsWith('.jsonl'))
@@ -83,6 +99,7 @@ export function resolveTranscriptPath(dir: string, sinceMs: number): string | nu
   const threshold = sinceMs - LOCATE_MTIME_SLACK_MS
   let best: { path: string; mtime: number } | null = null
   for (const n of names) {
+    if (excludeNames?.has(n)) continue // pre-existed the spawn — never a valid candidate
     const full = join(dir, n)
     let mtime: number
     try {
@@ -96,6 +113,25 @@ export function resolveTranscriptPath(dir: string, sinceMs: number): string | nu
     if (!best || mtime < best.mtime) best = { path: full, mtime }
   }
   return best?.path ?? null
+}
+
+/**
+ * Snapshot the `.jsonl` basenames already present in `projectDir`'s Claude
+ * session dir. The CALLER MUST invoke this BEFORE spawning the CLI process, so
+ * the snapshot cannot possibly include the about-to-be-created file for THIS
+ * session. Fed back in as `resolveTranscriptPath`'s `excludeNames` (via
+ * `PtyUsageEmitterOpts.preExistingNames`). Fails safe to an empty set — an
+ * unresolvable/nonexistent dir has no pre-existing files to exclude, which is
+ * the correct (and safe) default.
+ */
+export function snapshotPreExistingTranscripts(projectDir: string): Set<string> {
+  const dirResult = resolveSessionDir(projectDir)
+  if (!dirResult.ok) return new Set()
+  try {
+    return new Set(readdirSync(dirResult.dir).filter((n) => n.endsWith('.jsonl')))
+  } catch {
+    return new Set()
+  }
 }
 
 export interface PtyUsageEventFrame {
@@ -122,6 +158,9 @@ export interface PtyUsageEmitterOpts {
   now?: () => number
   /** Test seam — defaults to claudeProjectsBase. */
   projectsBase?: () => string
+  /** Pre-spawn snapshot from `snapshotPreExistingTranscripts()` — see that
+   *  function's doc. Omitted falls back to mtime-only qualification. */
+  preExistingNames?: ReadonlySet<string>
 }
 
 /**
@@ -156,7 +195,7 @@ export class PtyUsageEmitter {
 
     const tryLocate = () => {
       if (this.stopped) return
-      const found = resolveTranscriptPath(dir, spawnedAt)
+      const found = resolveTranscriptPath(dir, spawnedAt, opts.preExistingNames)
       if (found) {
         if (this.locateTimer) {
           clearInterval(this.locateTimer)
@@ -178,7 +217,25 @@ export class PtyUsageEmitter {
     tryLocate() // don't make the common case wait a full poll interval
   }
 
-  /** PINS `pinnedPath` for the life of the emitter — never re-resolved (P1-D-B). */
+  /**
+   * PINS `pinnedPath` for the life of the emitter — never re-resolved (P1-D-B).
+   *
+   * QC INFO (judged, not fixed): `realPathContained` runs once, here, before
+   * `tailJsonl` starts its own repeated `open()`s on the SAME path string. A
+   * classic TOCTOU would let an attacker swap a path component for a symlink
+   * between this check and a later reopen. Not re-validated on reopen because
+   * the threat model doesn't support it: both this check and every later
+   * `tailJsonl` read happen supervisor-side, against the LOCAL filesystem, on
+   * the SAME host as the process running this code — never hub-reachable, no
+   * network boundary crosses it (see the file header). An attacker able to
+   * plant a symlink inside this user's own `~/.claude/projects` between poll
+   * ticks already has local write access to that user's home directory, which
+   * is strictly more powerful than anything this check could deny them (they
+   * could read the target file directly, no symlink needed). Re-validating on
+   * every reopen would buy no real containment here — only ceremony. If this
+   * module is ever exposed to a less-trusted actor (e.g. a shared-account
+   * host), revisit and re-check `realPathContained` on each reopen.
+   */
   private pinAndTail(pinnedPath: string, opts: PtyUsageEmitterOpts, projectsBase: () => string): void {
     if (this.stopped) return
     if (!realPathContained(pinnedPath, projectsBase())) {

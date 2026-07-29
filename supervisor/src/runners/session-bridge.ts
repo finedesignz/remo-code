@@ -3,12 +3,12 @@ import { resolveHostname } from '../hostname'
 import { mkdirSync, writeFileSync } from 'fs'
 import { join, basename, extname } from 'path'
 import { ClaudeRunner } from './claude-runner'
-import { selectHumanPtyRunner } from './runner-factory'
+import { runnerForHumanBackend } from './runner-factory'
 import { resolveHumanBackend } from './backend-selector'
 import { PtyPersistence } from './pty-persistence'
 import { writeSessionBreadcrumb } from './session-breadcrumb'
 import { getBackendSelectorConfig } from '../config'
-import { PtyUsageEmitter } from '../usage/pty-usage-emitter'
+import { PtyUsageEmitter, snapshotPreExistingTranscripts } from '../usage/pty-usage-emitter'
 import type { AgentToHub, CliRunner, HubToAgent, PtyLike, RunnerEvent } from './types'
 
 /**
@@ -414,7 +414,12 @@ export class SessionBridge {
     // PTY-cutover Phase A: gated factory → Rust ConPTY bridge in prod (Option C),
     // Node helper fallback when no Rust host. Default backend + cutover-gate
     // flag come from the supervisor config (env-overridable). Human-only.
-    const pty = selectHumanPtyRunner({ isHuman: true }, getBackendSelectorConfig())
+    // Resolve the backend id ONCE and reuse it below for `cliKind` — a second
+    // independent `resolveHumanBackend()` call could in principle disagree with
+    // this one (e.g. a config read that changes between calls), silently
+    // misrouting or disabling usage capture. See PTYCAP Phase-1 QC WARNING.
+    const backendId = resolveHumanBackend({ isHuman: true }, getBackendSelectorConfig())
+    const pty = runnerForHumanBackend(backendId)
     this.ptyRunner = pty
     const sessionId = this.sessionId ?? undefined
     // Register with the supervisor-owned persistence coordinator so a dropped
@@ -428,6 +433,13 @@ export class SessionBridge {
         bytes: Buffer.from(bytes, 'binary').toString('base64'),
       })
     }
+    // PTYCAP Phase 1 QC BLOCKING fix — snapshot the `.jsonl` transcripts already
+    // present in this project's session dir BEFORE the CLI process spawns below,
+    // so the usage emitter can later refuse to pin any file that pre-existed the
+    // spawn (a sibling session's active-but-old transcript can never satisfy a
+    // mtime-only check by coincidence of timing). Cheap (one readdir); computed
+    // even when `sessionId` is empty for simplicity — only consumed below when set.
+    const preExistingTranscripts = snapshotPreExistingTranscripts(this.opts.repoPath)
     pty.start({
       sessionId,
       cwd: this.opts.repoPath,
@@ -453,14 +465,11 @@ export class SessionBridge {
     })
     // PTYCAP Phase 1 (SC-1/SC-2/SC-3) — start the usage-ledger tailer alongside
     // the PTY itself. Never on the critical path: any failure here is caught and
-    // logged, never prevents the human's PTY from starting. `resolveHumanBackend`
-    // is a pure re-derivation of the SAME id `selectHumanPtyRunner` (above) just
-    // resolved — the existing call is left untouched (same seam other tests key
-    // off), this is purely so `cliKind` is known here without threading a new
-    // return value through the runner-factory.
+    // logged, never prevents the human's PTY from starting. `cliKind` is derived
+    // from the SAME `backendId` already resolved above for the runner itself —
+    // no second `resolveHumanBackend()` call, so the two can never disagree.
     if (sessionId) {
       try {
-        const backendId = resolveHumanBackend({ isHuman: true }, getBackendSelectorConfig())
         const cliKind: 'claude' | 'codex' = backendId === 'codex-pty' ? 'codex' : 'claude'
         const usage = new PtyUsageEmitter()
         this.ptyUsage = usage
@@ -470,6 +479,7 @@ export class SessionBridge {
           cliKind,
           emit: (frame) => this.sendToHub(frame),
           onLog: (lvl, m) => this.cb.onLog(lvl, `pty-usage: ${m}`),
+          preExistingNames: preExistingTranscripts,
         })
       } catch (err: any) {
         this.cb.onLog('warn', `agent-bridge: pty usage accounting failed to start: ${err?.message ?? err}`)
