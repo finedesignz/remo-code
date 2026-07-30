@@ -20,6 +20,7 @@ import type { Hono } from 'hono'
 import { ensureSelfProject, type ErrorProject } from '../db/error-capture-dal.ts'
 import { fingerprint } from '../error-capture/fingerprint.ts'
 import { recordError } from '../error-capture/record.ts'
+import { reportSelfErrorToAgentautofix } from '../agentautofix/reporter.ts'
 
 const SELF_PROJECT_NAME = '__hub_self__'
 
@@ -72,6 +73,12 @@ export async function captureSelfError(err: unknown, source: string): Promise<vo
       },
       { dispatch: false },
     )
+    // AgentAutofix (directive B): recordError above deliberately never
+    // dispatches self-errors into a Claude session (see module docstring) —
+    // forward them here instead so this class of defect still gets a fix
+    // attempt, without duplicating the in-house pipeline for user-facing
+    // errors. No-ops when AgentAutofix isn't configured; never throws.
+    void reportSelfErrorToAgentautofix({ fingerprint: fp, errorType: type, errorValue: value, stack, source })
   } catch (recordErr) {
     // Last-resort logging — never re-throw from a global error hook.
     console.error('[self-capture] recordError failed:', (recordErr as Error)?.message ?? recordErr)

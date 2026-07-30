@@ -54,7 +54,10 @@ export function ApiKeyModal({ token, onClose }: Props) {
             <div className="space-y-4">
               <div className="p-4 bg-emerald-900/20 border border-emerald-800/50 rounded-xl">
                 <p className="text-xs text-emerald-300 font-semibold mb-2">Your new API key (shown once):</p>
-                <div className="relative group">
+                {/* data-autofix-exclude: this is a live secret rendered as plain
+                    DOM text — the AgentAutofix click-to-comment widget must
+                    never ship it. See hub/src/agentautofix/. */}
+                <div className="relative group" data-autofix-exclude="">
                   <code className="block bg-[var(--code-bg)] rounded-lg p-3 text-xs text-emerald-200 font-mono break-all select-all">
                     {newKey}
                   </code>
