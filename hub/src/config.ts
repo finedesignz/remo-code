@@ -154,6 +154,21 @@ const hubIntrospectToken = requireMinLenIfSet(
   16,
 );
 
+// AgentAutofix integration (widget + hub-self-error forwarding). ALL five vars
+// optional — the whole feature is inert (no-op token route, no widget script,
+// no forwarding) unless every one of them is set. Never reuse `jwtSecret` for
+// AGENTAUTOFIX_SIGNING_SECRET — the plugin identity JWT must be forgeable only
+// with its own secret, never with the session-cookie secret.
+const agentautofixHost = parseUrlOptional("AGENTAUTOFIX_HOST", process.env.AGENTAUTOFIX_HOST);
+const agentautofixAppId = process.env.AGENTAUTOFIX_APP_ID || "";
+const agentautofixPublicKey = process.env.AGENTAUTOFIX_PUBLIC_KEY || "";
+const agentautofixSigningSecret = requireMinLenIfSet(
+  "AGENTAUTOFIX_SIGNING_SECRET",
+  process.env.AGENTAUTOFIX_SIGNING_SECRET,
+  16,
+);
+const agentautofixOrigin = parseUrlOptional("AGENTAUTOFIX_ORIGIN", process.env.AGENTAUTOFIX_ORIGIN);
+
 if ((telegramBotToken && !telegramWebhookSecret) || (!telegramBotToken && telegramWebhookSecret)) {
   console.warn(
     "[config] Telegram bridge partially configured: set BOTH TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET, or neither.",
@@ -225,4 +240,19 @@ export const config = {
 
   // B4: observability bearer token (gates /healthz/deep + /metrics).
   hubIntrospectToken,
+
+  // AgentAutofix (click-to-comment widget + hub-self-error forwarding).
+  // `configured` is true only when every var is present — every call site
+  // must check it before minting a token or forwarding a report.
+  agentautofix: {
+    host: agentautofixHost,
+    appId: agentautofixAppId,
+    publicKey: agentautofixPublicKey,
+    signingSecret: agentautofixSigningSecret,
+    origin: agentautofixOrigin,
+    configured: Boolean(
+      agentautofixHost && agentautofixAppId && agentautofixPublicKey &&
+        agentautofixSigningSecret && agentautofixOrigin,
+    ),
+  },
 };
