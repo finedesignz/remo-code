@@ -157,4 +157,25 @@ describe('insertAnnotation — duplicate dispatch must not discard fix_contract'
     expect(prompt).toContain('Fix contract: attempt a reasonable best-guess default')
     expect(prompt).toContain('"assumption":')
   })
+
+  test('a thinner retry dispatch (no fix_contract) does NOT clobber a previously-stored fix_contract', async () => {
+    const dal = await freshRevanoteDal()
+
+    // First dispatch: rich payload carrying a fix_contract.
+    const fixContract = { version: 1, default: 'best_guess', ask_reasons: ['ambiguous_intent'] }
+    const first = await dal.insertAnnotation(
+      basePayload({ payload_raw: { fix_contract: fixContract } }),
+    )
+    expect(first.payload_raw?.fix_contract).toEqual(fixContract)
+
+    // Late/out-of-order duplicate for the SAME annotation, this time with a
+    // thinner payload_raw that lacks fix_contract entirely (e.g. an
+    // older/duplicate dispatch that arrives after the enriched one).
+    const second = await dal.insertAnnotation(basePayload({ payload_raw: {} }))
+
+    // Same row (idempotent upsert) — the previously-stored fix_contract must
+    // survive; an absent fix_contract on retry must never erase a stored one.
+    expect(second.id).toBe(first.id)
+    expect(second.payload_raw?.fix_contract).toEqual(fixContract)
+  })
 })
