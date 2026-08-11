@@ -84,6 +84,7 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
 
   const elementMeta = (a.payload_raw as any)?.element_meta ?? null
   const viewport = (a.payload_raw as any)?.capture_viewport ?? null
+  const fixContract = (a.payload_raw as any)?.fix_contract ?? null
   const extraContext = [
     elementMeta ? `Element meta: ${JSON.stringify(elementMeta).slice(0, 800)}` : null,
     viewport ? `Capture viewport: ${JSON.stringify(viewport).slice(0, 400)}` : null,
@@ -114,6 +115,33 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
     .filter((l) => l !== null && l !== undefined)
     .join('\n')
 
+  // Phase 5 — best-guess-default fix contract. Only rendered when the
+  // dispatch payload carries a `fix_contract` block; absent ⇒ these arrays
+  // are empty and the rendered prompt is byte-identical to pre-Phase-5.
+  const fixContractInstructions = fixContract
+    ? [
+        `Fix contract: attempt a reasonable best-guess default and mark the fix`,
+        `resolved rather than asking, whenever the comment is resolvable.`,
+        `Carve-out: this default does NOT apply to destructive or`,
+        `high-blast-radius changes — deleting or overwriting real content,`,
+        `force-pushing, or anything that loses data still warrants a question`,
+        `even under best-guess-default.`,
+        `"needs_clarification": true is honored ONLY when paired with a`,
+        `"clarification_reason" from exactly these four values:`,
+        `ambiguous_intent, conflicting_instruction, missing_target, out_of_scope.`,
+        `Citing one of these to avoid doing resolvable work is a contract`,
+        `violation — the reason code does not excuse it.`,
+      ]
+    : []
+  const assumptionEnvelopeLine = fixContract
+    ? [`  "assumption": "one sentence describing the default you chose, when resolved without asking",`]
+    : []
+  const clarificationReasonEnvelopeLine = fixContract
+    ? [
+        `  "clarification_reason": "one of: ambiguous_intent | conflicting_instruction | missing_target | out_of_scope (required when needs_clarification is true)",`,
+      ]
+    : []
+
   return [
     `A reviewer left a Revanote annotation on a deployed page. Please address it.`,
     ``,
@@ -124,6 +152,8 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
       ? `NOTE: this mapping is operator-TRUSTED — the Deploy plan below overrides rule 4.`
       : null,
     ``,
+    ...fixContractInstructions,
+    fixContract ? `` : null,
     fenceUntrusted('untrusted_annotation', untrusted),
     ``,
     `Deploy plan:`,
@@ -137,14 +167,19 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
     `{`,
     `  "resolved": true,`,
     `  "action_taken": "short summary of what you did",`,
+    ...assumptionEnvelopeLine,
     `  "files_changed": ["path/one.tsx", "path/two.ts"],`,
     `  "deployed": true,`,
+    ...clarificationReasonEnvelopeLine,
     `  "needs_clarification": false`,
     `}`,
     `<<END>>`,
     ``,
     `If you cannot fix it autonomously, set "resolved": false, "needs_clarification": true,`,
-    `and put a single question in "clarification_question".`,
+    fixContract
+      ? `and set "clarification_reason" to one of the four values above, and put a single`
+      : `and put a single question in "clarification_question".`,
+    fixContract ? `question in "clarification_question".` : null,
   ]
     .filter((line) => line !== null && line !== undefined)
     .join('\n')

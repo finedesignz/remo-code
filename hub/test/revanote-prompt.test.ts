@@ -82,4 +82,34 @@ describe('renderAnnotationPrompt', () => {
     const out = renderAnnotationPrompt({ annotation: ann, mapping: null })
     expect(out).toContain('no mapping configured')
   })
+
+  test('fix_contract present → best-guess instruction + envelope keys injected', () => {
+    const annWithContract = {
+      ...ann,
+      payload_raw: {
+        element_meta: { tag: 'button' },
+        capture_viewport: { w: 1280 },
+        fix_contract: {
+          version: 1,
+          default: 'best_guess',
+          ask_reasons: ['ambiguous_intent', 'conflicting_instruction', 'missing_target', 'out_of_scope'],
+        },
+      },
+    }
+    const out = renderAnnotationPrompt({ annotation: annWithContract, mapping: null })
+    expect(out).toContain('best-guess')
+    expect(out).toContain('ambiguous_intent')
+    expect(out).toContain('conflicting_instruction')
+    expect(out).toContain('missing_target')
+    expect(out).toContain('out_of_scope')
+    expect(out).toContain('"assumption":')
+    expect(out).toContain('"clarification_reason":')
+  })
+
+  test('fix_contract absent → no fix-contract text, envelope byte-identical to pre-Phase-5', () => {
+    const out = renderAnnotationPrompt({ annotation: ann, mapping: null })
+    expect(out).not.toContain('ambiguous_intent')
+    expect(out).not.toContain('"assumption":')
+    expect(out).not.toContain('"clarification_reason":')
+  })
 })
