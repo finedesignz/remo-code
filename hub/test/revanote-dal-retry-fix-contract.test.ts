@@ -14,11 +14,14 @@
  * This test exercises the REAL `insertAnnotation` (not a re-mocked stub)
  * against an in-memory `sql` double that mirrors Postgres upsert semantics
  * DERIVED FROM insertAnnotation's OWN literal SQL text (parses the actual
- * column list and the actual `DO UPDATE SET ... = EXCLUDED...` clause via
- * regex) rather than a hand-rolled reimplementation of "what it should do".
- * If the production SET clause is missing `payload_raw`, this mock — and
- * therefore this test — reproduces exactly that bug; once the SET clause
- * includes `payload_raw`, the mock (and the test) reflects that fix.
+ * column list, the actual `DO UPDATE SET ... = EXCLUDED...` clause, and — for
+ * the jsonb key-preserving `payload_raw` merge — the actual
+ * `CASE WHEN col ? 'key' THEN ... ELSE ... END` clause, all via regex) rather
+ * than a hand-rolled reimplementation of "what it should do". If the
+ * production SET clause regresses to an unconditional `payload_raw =
+ * EXCLUDED.payload_raw`, this mock — and therefore this test — reproduces
+ * exactly the clobber bug; once the SET clause includes the fix_contract-
+ * preserving CASE, the mock (and the test) reflects that behavior.
  *
  * Implementation note: other test files mocking `../src/db/postgres.ts` are
  * process-global (Bun `mock.module`) and can be last-registration-wins
@@ -54,13 +57,41 @@ function installMocks() {
       // the real query text — this is what makes the mock faithful to
       // whatever insertAnnotation's SQL literally says, pre- or post-fix.
       const setClauseMatch = text.match(/DO UPDATE\s+SET([\s\S]*?)RETURNING/)
-      const updateCols = setClauseMatch
-        ? Array.from(setClauseMatch[1].matchAll(/(\w+)\s*=\s*EXCLUDED\.\1/g)).map((m) => m[1])
+      const setClauseText = setClauseMatch ? setClauseMatch[1] : ''
+      const updateCols = Array.from(setClauseText.matchAll(/(\w+)\s*=\s*EXCLUDED\.\1/g)).map(
+        (m) => m[1],
+      )
+
+      // Also parse a jsonb key-preserving CASE clause of the shape:
+      //   col = CASE
+      //     WHEN EXCLUDED.col ? 'key' THEN EXCLUDED.col
+      //     WHEN annotations.col ? 'key' THEN jsonb_set(EXCLUDED.col, '{key}', annotations.col -> 'key')
+      //     ELSE EXCLUDED.col
+      //   END
+      // This mirrors real Postgres jsonb `?` (has-key) + `jsonb_set` semantics
+      // for the specific col/key the SQL text names — still derived from the
+      // literal query, not a hand-rolled "what the fix should do".
+      const caseClausePattern =
+        /(\w+)\s*=\s*CASE\s+WHEN\s+EXCLUDED\.\1\s*\?\s*'(\w+)'\s+THEN\s+EXCLUDED\.\1\s+WHEN\s+annotations\.\1\s*\?\s*'\2'\s+THEN\s+jsonb_set\(EXCLUDED\.\1,\s*'\{\2\}',\s*annotations\.\1\s*->\s*'\2'\)\s+ELSE\s+EXCLUDED\.\1\s+END/
+      const caseClauseMatch = setClauseText.match(caseClausePattern)
+      const keyPreservingCols = caseClauseMatch
+        ? [{ col: caseClauseMatch[1], key: caseClauseMatch[2] }]
         : []
 
       const existing = table.get(key)
       if (existing) {
         for (const col of updateCols) existing[col] = incoming[col]
+        for (const { col, key: k } of keyPreservingCols) {
+          const incomingVal = incoming[col]
+          const existingVal = existing[col]
+          if (incomingVal && Object.prototype.hasOwnProperty.call(incomingVal, k)) {
+            existing[col] = incomingVal
+          } else if (existingVal && Object.prototype.hasOwnProperty.call(existingVal, k)) {
+            existing[col] = { ...incomingVal, [k]: existingVal[k] }
+          } else {
+            existing[col] = incomingVal
+          }
+        }
         return [existing]
       }
 
