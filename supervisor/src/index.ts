@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { loadConfig, parseRoots, CONFIG_PATH } from './config'
+import { loadConfig, parseRoots, getConfigPath } from './config'
 import { SupervisorClient } from './hub-client'
 import { scanAll } from './repo-scanner'
 import { existsSync, mkdirSync, renameSync, statSync, createWriteStream, type WriteStream } from 'fs'
@@ -131,7 +131,7 @@ Distribution:
   https://github.com/finedesignz/remo-code/releases/latest
   The tray app bundles this runtime as a managed sidecar.
 
-Config file: ${CONFIG_PATH}
+Config file: ${getConfigPath()}
 `)
 }
 

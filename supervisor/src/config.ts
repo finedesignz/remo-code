@@ -55,7 +55,39 @@ export interface SupervisorConfig {
   claudeInteractiveConfirmed: boolean
 }
 
+/**
+ * fix/supervisor-config-write-isolation — explicit override for the
+ * supervisor config directory. Tests/dev tooling set this to a sandbox dir
+ * so a `SupervisorClient` never resolves to (and clobbers) the real
+ * per-user `%APPDATA%\remo-code\supervisor.json`. Takes precedence over
+ * every OS-default lookup below.
+ */
+function configDirOverride(): string | undefined {
+  const v = process.env.REMO_CODE_CONFIG_DIR
+  return v && v.trim() ? v : undefined
+}
+
+/**
+ * fix/supervisor-config-write-isolation — fail loud instead of silently
+ * writing/reading the real user config from an automated test run. `bun
+ * test` sets `NODE_ENV=test` itself (verified: unset outside `bun test`),
+ * so any test that forgets to set `REMO_CODE_CONFIG_DIR` hits this instead
+ * of touching live `%APPDATA%\remo-code\supervisor.json`.
+ */
+function assertNotUnisolatedTestRun(): void {
+  if (process.env.NODE_ENV === 'test' && !configDirOverride()) {
+    throw new Error(
+      'supervisor config: NODE_ENV=test but REMO_CODE_CONFIG_DIR is not set. ' +
+        'Tests must set REMO_CODE_CONFIG_DIR to a sandbox directory before touching ' +
+        'config.ts / hub-client.ts — refusing to resolve the real user config path.',
+    )
+  }
+}
+
 function defaultConfigDir(): string {
+  const override = configDirOverride()
+  if (override) return override
+  assertNotUnisolatedTestRun()
   if (platform() === 'win32') {
     const appData = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming')
     return join(appData, 'remo-code')
@@ -72,14 +104,22 @@ function defaultAuditLogPath(): string {
   return join(homedir(), '.local', 'share', 'remo-code-supervisor', 'audit.jsonl')
 }
 
-export const CONFIG_DIR = defaultConfigDir()
-export const CONFIG_PATH = join(CONFIG_DIR, 'supervisor.json')
 const DEFAULT_HUB_URL = 'https://app.remo-code.com'
 const DEFAULT_KILL_SWITCH_HOTKEY = 'Ctrl+Shift+Alt+K'
 
+/**
+ * fix/supervisor-config-write-isolation — resolved LIVE on every call (not
+ * cached at module load) so `REMO_CODE_CONFIG_DIR` set by a test after this
+ * module is imported still takes effect, and so the guard in
+ * `defaultConfigDir()` runs on every access, not just the first.
+ */
+export function getConfigDir(): string {
+  return defaultConfigDir()
+}
+
 /** Phase 08 §15 — explicit accessor for the resolved supervisor.json path. */
 export function getConfigPath(): string {
-  return CONFIG_PATH
+  return join(getConfigDir(), 'supervisor.json')
 }
 
 function readScanFromRaw(raw: any): ScanSettings {
@@ -113,10 +153,11 @@ function readClaudeInteractiveConfirmed(raw: any): boolean {
 }
 
 export function loadConfig(): SupervisorConfig {
-  if (!existsSync(CONFIG_PATH)) {
-    throw new Error(`Supervisor not configured. Open the Remo Code tray app and complete the first-run setup (or write ${CONFIG_PATH} manually).`)
+  const configPath = getConfigPath()
+  if (!existsSync(configPath)) {
+    throw new Error(`Supervisor not configured. Open the Remo Code tray app and complete the first-run setup (or write ${configPath} manually).`)
   }
-  const raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8'))
+  const raw = JSON.parse(readFileSync(configPath, 'utf-8'))
   if (!raw.api_key) throw new Error('config missing api_key')
   return {
     hubUrl: raw.hub_url || DEFAULT_HUB_URL,
@@ -162,8 +203,10 @@ export function defaultConfig(): SupervisorConfig {
 }
 
 export function saveConfig(cfg: Partial<SupervisorConfig> & { apiKey: string }) {
-  mkdirSync(CONFIG_DIR, { recursive: true })
-  const existing = existsSync(CONFIG_PATH) ? JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) : {}
+  const configDir = getConfigDir()
+  const configPath = getConfigPath()
+  mkdirSync(configDir, { recursive: true })
+  const existing = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf-8')) : {}
   const merged = {
     ...existing,
     api_key: cfg.apiKey,
@@ -192,7 +235,7 @@ export function saveConfig(cfg: Partial<SupervisorConfig> & { apiKey: string }) 
     claude_interactive_confirmed:
       cfg.claudeInteractiveConfirmed ?? existing.claude_interactive_confirmed ?? false,
   }
-  writeFileSync(CONFIG_PATH, JSON.stringify(merged, null, 2), 'utf-8')
+  writeFileSync(configPath, JSON.stringify(merged, null, 2), 'utf-8')
 }
 
 /**
