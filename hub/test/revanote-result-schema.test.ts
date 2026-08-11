@@ -66,6 +66,41 @@ describe('parseRevanoteOutput', () => {
       expect(r.value.clarification_reason).toBe('ambiguous_intent')
     }
   })
+
+  // BLOCKER 3 (05-QC.md) — an agent emitting explicit `null` for a field it
+  // didn't use (no assumption made, no clarification needed) must NOT blow
+  // up the parse. A genuinely successful fix must not be marked `failed`.
+  test('explicit null assumption on a resolved result still parses ok (BLOCKER 3)', () => {
+    const r = parseRevanoteOutput(
+      '<<JSON>>\n{"resolved":true,"action_taken":"did it","assumption":null,"files_changed":[]}\n<<END>>',
+    )
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value.resolved).toBe(true)
+      expect(r.value.assumption ?? null).toBeNull()
+    }
+  })
+
+  test('explicit null clarification_reason on a resolved result still parses ok (BLOCKER 3)', () => {
+    const r = parseRevanoteOutput(
+      '<<JSON>>\n{"resolved":true,"action_taken":"did it","clarification_reason":null,"files_changed":[]}\n<<END>>',
+    )
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value.resolved).toBe(true)
+      expect(r.value.clarification_reason ?? null).toBeNull()
+    }
+  })
+
+  test('explicit null on pre-existing optional siblings still parses ok', () => {
+    const r = parseRevanoteOutput(
+      '<<JSON>>\n{"resolved":true,"action_taken":"did it","agent_reply":null,"deployed":null,"needs_clarification":null,"clarification_question":null,"files_changed":[]}\n<<END>>',
+    )
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value.resolved).toBe(true)
+    }
+  })
 })
 
 describe('stripRevanoteEnvelope', () => {

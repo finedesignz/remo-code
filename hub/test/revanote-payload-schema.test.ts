@@ -69,4 +69,32 @@ describe('RevanotePayload Phase 5 fields', () => {
       expect(r.data.fix_contract?.default).toBe('best_guess')
     }
   })
+
+  // BLOCKER 4 (05-QC.md) — a caller (or revanote itself) sending an explicit
+  // `fix_contract: null` for an annotation with no contract configured must
+  // degrade to the no-contract prompt path, not hard-400 and drop the
+  // annotation.
+  test('accepts explicit null fix_contract, treated as absent (BLOCKER 4)', () => {
+    const r = RevanotePayload.safeParse({ ...base, fix_contract: null })
+    expect(r.success).toBe(true)
+    if (r.success) {
+      expect(r.data.fix_contract ?? null).toBeNull()
+    }
+  })
+
+  test('accepts explicit null on pre-existing nullable-gap sibling fields', () => {
+    const r = RevanotePayload.safeParse({
+      ...base,
+      source: null,
+      revanote_version: null,
+      comment_preview: null,
+      timestamp: null,
+      batch_id: null,
+      batch_size: null,
+      batch_index: null,
+      repo_slug: null,
+      repo_kind: null,
+    })
+    expect(r.success).toBe(true)
+  })
 })
