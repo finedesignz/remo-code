@@ -29,14 +29,22 @@ export interface SessionBreadcrumb {
   killed_at: string
 }
 
+/** `%LOCALAPPDATA%\remo-code-supervisor` (win32) or the XDG state equivalent —
+ *  the shared supervisor-owned state dir. Mirrors `defaultAuditLogPath` in
+ *  config.ts. Reused by force-update-marker.ts so the sidecar and the Rust
+ *  tray watcher agree on one base dir without duplicating the resolution. */
+export function supervisorStateDir(): string {
+  if (platform() === 'win32') {
+    const local = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')
+    return join(local, 'remo-code-supervisor')
+  }
+  return join(homedir(), '.local', 'share', 'remo-code-supervisor')
+}
+
 /** `%LOCALAPPDATA%\remo-code-supervisor\session-breadcrumbs` (win32) or the
  *  XDG state equivalent. Mirrors `defaultAuditLogPath` in config.ts. */
 export function breadcrumbDir(): string {
-  if (platform() === 'win32') {
-    const local = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local')
-    return join(local, 'remo-code-supervisor', 'session-breadcrumbs')
-  }
-  return join(homedir(), '.local', 'share', 'remo-code-supervisor', 'session-breadcrumbs')
+  return join(supervisorStateDir(), 'session-breadcrumbs')
 }
 
 /**

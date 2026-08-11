@@ -309,6 +309,21 @@ export const RescanAck = z.object({
   error: z.string().max(2000).optional(),
 })
 
+/**
+ * milestone remote-update-trigger — ack for a hub-initiated forced supervisor
+ * update (`supervisor.force_update`). Mirrors RescanAck's shape/pattern: the
+ * sidecar writes the force-update marker file and acks immediately; the Rust
+ * tray watcher picks up the marker on its own poll and performs the actual
+ * check→download→install→relaunch via the existing auto_update::run_check.
+ * `ok:false` surfaces a marker-write failure (never a silent no-op).
+ */
+export const ForceUpdateAck = z.object({
+  type: z.literal('supervisor.force_update_ack'),
+  req_id: z.string(),
+  ok: z.boolean(),
+  error: z.string().max(2000).optional(),
+})
+
 export const SupervisorInboundV2 = [
   ...SupervisorInbound,
   SessionLaunchFailed,
@@ -316,6 +331,7 @@ export const SupervisorInboundV2 = [
   RepoCreateFailed,
   SetRootsAck,
   RescanAck,
+  ForceUpdateAck,
 ]
 
 // -- Hub -> Supervisor (constructed by hub, not validated) --
@@ -368,3 +384,9 @@ export type HubToSupervisor =
   // supervisor.rescan_ack. Used by the web "Refresh repos" button so a repo
   // cloned after connect appears without waiting for the periodic timer.
   | { type: 'supervisor.rescan_repos'; req_id: string }
+  // milestone remote-update-trigger — hub asks the supervisor sidecar to force
+  // a check for the latest signed release NOW (web Settings "Update to latest"
+  // button). The sidecar writes a marker file the Rust tray watcher polls and
+  // consumes, then replies with supervisor.force_update_ack. An old sidecar
+  // without this handler simply times out — same compat behavior as rescan.
+  | { type: 'supervisor.force_update'; req_id: string; requested_by?: string }

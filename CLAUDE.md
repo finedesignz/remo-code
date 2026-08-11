@@ -471,6 +471,26 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   `.github/workflows/release-supervisor.yml` builds + signs the `-setup.exe` + publishes a
   Release with `latest.json` for the auto-updater. Local:
   `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. Key setup: `supervisor/tauri/UPDATER-SETUP.md`.
+- **Remote force-update (milestone remote-update-trigger):** web Settings → Connections has
+  an "Update to latest" button on the machine row (`SupervisorPage.tsx`) that forces the
+  LOCAL supervisor to check for and install the latest signed release without waiting for
+  the periodic Rust watcher. Chain: `POST /api/supervisors/:id/update` (`hub/src/api/
+  supervisors.ts`, same `authorizeSupervisor` gate as `/scan`) → hub WS command
+  `supervisor.force_update` over `/ws/agent` → sidecar (`supervisor/src/hub-client.ts`
+  `onForceUpdate`) writes a marker file `%LOCALAPPDATA%\remo-code-supervisor\force-update.json`
+  (`supervisor/src/runners/force-update-marker.ts`, reusing the same LOCALAPPDATA base dir as
+  the session-breadcrumb writer via `supervisorStateDir()`) and acks `supervisor.force_update_ack`
+  — the ack only confirms the marker was queued, not that the update finished. The Rust tray
+  (`supervisor/tauri/src-tauri/src/force_update_watcher.rs`, spawned from the same `setup` hook
+  as `auto_update::spawn_watcher`) polls that marker every ~20s; on finding a new
+  `requested_at` it DELETES the marker first (so a relaunched post-install sidecar can never
+  re-trigger off the same file) and then calls the existing `auto_update::run_check` — no new
+  download/install logic, a force just fast-paths the same check→download→install→relaunch
+  pass, and it runs even when the periodic `auto_update` pref is off (`run_check`'s own
+  `IN_PROGRESS` guard still makes a force during an active install a no-op). **A NEW SIGNED
+  SUPERVISOR MSI IS REQUIRED** for the sidecar+tray halves to reach installed hosts — the
+  hub+web halves work immediately, but an old sidecar without the `supervisor.force_update`
+  handler just times out the request (502), same compat behavior as `/scan`'s `rescan_repos`.
 
 ## CI (Woodpecker-first)
 
