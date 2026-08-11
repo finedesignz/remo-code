@@ -46,6 +46,26 @@ describe('parseRevanoteOutput', () => {
     expect(r.ok).toBe(false)
     expect(r.value.resolved).toBe(false)
   })
+
+  test('envelope with assumption is preserved (Phase 5 fix contract)', () => {
+    const r = parseRevanoteOutput(
+      '<<JSON>>\n{"resolved":true,"action_taken":"did it","assumption":"assumed the primary CTA","files_changed":[]}\n<<END>>',
+    )
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value.assumption).toBe('assumed the primary CTA')
+    }
+  })
+
+  test('envelope with clarification_reason is preserved (Phase 5 fix contract)', () => {
+    const r = parseRevanoteOutput(
+      '<<JSON>>\n{"resolved":false,"action_taken":"","files_changed":[],"needs_clarification":true,"clarification_reason":"ambiguous_intent"}\n<<END>>',
+    )
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      expect(r.value.clarification_reason).toBe('ambiguous_intent')
+    }
+  })
 })
 
 describe('stripRevanoteEnvelope', () => {

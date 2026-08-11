@@ -31,6 +31,9 @@ export const RevanoteResult = z.object({
   deployed: z.boolean().optional(),
   needs_clarification: z.boolean().optional(),
   clarification_question: z.string().optional(),
+  // Phase 5 — best-guess-default fix contract (additive).
+  assumption: z.string().optional(),
+  clarification_reason: z.string().optional(),
 })
 
 export type RevanoteResult = z.infer<typeof RevanoteResult>
