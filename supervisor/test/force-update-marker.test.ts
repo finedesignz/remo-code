@@ -68,15 +68,21 @@ describe('SupervisorClient.onForceUpdate', () => {
     ;(client as any).send = (m: any) => sent.push(m)
 
     // Force the marker writer's mkdirSync/writeFileSync path to fail by
-    // pointing LOCALAPPDATA somewhere unwritable-shaped (a null byte is
-    // rejected by the filesystem on both win32 and posix).
-    const prev = process.env.LOCALAPPDATA
-    process.env.LOCALAPPDATA = '\0invalid'
+    // pointing supervisorStateDir()'s base dir somewhere unwritable-shaped.
+    // A null byte in a path string is rejected by Node's fs bindings
+    // (ERR_INVALID_ARG_VALUE) synchronously on every platform — but
+    // supervisorStateDir() only reads LOCALAPPDATA on win32; on posix it
+    // reads homedir(), which Node's os.homedir() derives from HOME. So the
+    // env var under test must match the platform supervisorStateDir()
+    // actually consults, or this never forces a real failure on posix CI.
+    const envVar = process.platform === 'win32' ? 'LOCALAPPDATA' : 'HOME'
+    const prev = process.env[envVar]
+    process.env[envVar] = '\0invalid'
     try {
       ;(client as any).onForceUpdate({ req_id: 'req_2' })
     } finally {
-      if (prev === undefined) delete process.env.LOCALAPPDATA
-      else process.env.LOCALAPPDATA = prev
+      if (prev === undefined) delete process.env[envVar]
+      else process.env[envVar] = prev
     }
 
     const ack = sent.find((m) => m.type === 'supervisor.force_update_ack' && m.req_id === 'req_2')

@@ -226,6 +226,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const [selectedInstallationId, setSelectedInstallationId] = useState<number | 'all'>('all')
   const [scanning, setScanning] = useState(false)
   const [updating, setUpdating] = useState(false)
+  const [confirmingUpdate, setConfirmingUpdate] = useState(false)
   const [filter, setFilter] = useState<FilterKey>(() => {
     try {
       const v = localStorage.getItem(FILTER_LS_KEY)
@@ -363,6 +364,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
 
   const requestUpdate = useCallback(async () => {
     if (!activeSupervisorId) return
+    setConfirmingUpdate(false)
     setUpdating(true); setError(null); setInfo(null)
     try {
       const r = await apiFetch(token, `/api/supervisors/${activeSupervisorId}/update`, { method: 'POST' })
@@ -388,6 +390,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     return () => window.removeEventListener('focus', onFocus)
   }, [])
   useEffect(() => { if (activeSupervisorId && activeSupervisor?.online) scan() }, [activeSupervisorId])
+  useEffect(() => { setConfirmingUpdate(false) }, [activeSupervisorId])
   useEffect(() => { loadActiveRuns() }, [loadActiveRuns])
   // supervisor list polling removed — useSupervisors() is WS-reactive.
   useEffect(() => { const t = setInterval(loadActiveRuns, 5_000); return () => clearInterval(t) }, [loadActiveRuns])
@@ -682,16 +685,40 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               ))}
             </select>
             {activeSupervisor?.online && (
-              <button
-                onClick={requestUpdate}
-                disabled={updating}
-                aria-label="Update supervisor to the latest signed release"
-                title="Force this machine's Remo Code Supervisor to check for and install the latest signed release"
-                className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                <Icon.Refresh className={updating ? 'animate-spin' : ''} />
-                {updating ? 'Updating…' : 'Update to latest'}
-              </button>
+              confirmingUpdate ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="text-xs text-[var(--text-secondary)] px-1">Briefly disconnect &amp; relaunch — active sessions may be interrupted?</span>
+                  <button
+                    type="button"
+                    onClick={requestUpdate}
+                    disabled={updating}
+                    aria-label="Confirm update supervisor to the latest signed release"
+                    className="px-2.5 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {updating ? 'Updating…' : 'Confirm update'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingUpdate(false)}
+                    disabled={updating}
+                    aria-label="Cancel update"
+                    className="px-2.5 py-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                </span>
+              ) : (
+                <button
+                  onClick={() => setConfirmingUpdate(true)}
+                  disabled={updating}
+                  aria-label="Update supervisor to the latest signed release"
+                  title="Force this machine's Remo Code Supervisor to check for and install the latest signed release"
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  <Icon.Refresh className={updating ? 'animate-spin' : ''} />
+                  {updating ? 'Updating…' : 'Update to latest'}
+                </button>
+              )
             )}
             {githubConfigured && installations.length > 0 && (
               <>
