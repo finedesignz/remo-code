@@ -49,6 +49,18 @@ export const RevanotePayload = z.object({
   batch_index: z.number().int().min(0).optional(),
   repo_slug: z.string().min(1).max(512).optional(),
   repo_kind: z.enum(['github', 'local_path']).optional(),
+  // Phase 5 — best-guess-default fix contract (additive, optional). Already
+  // survives via the outer .passthrough() into payload_raw; typed here so
+  // prompt.ts gets a typed field instead of an untyped cast, and so this
+  // schema regression-tests the shape if revanote ever changes it.
+  fix_contract: z
+    .object({
+      version: z.number().optional(),
+      default: z.string().optional(),
+      ask_reasons: z.array(z.string()).optional(),
+    })
+    .passthrough()
+    .optional(),
 }).passthrough()
 
 export type RevanotePayload = z.infer<typeof RevanotePayload>

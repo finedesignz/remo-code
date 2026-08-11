@@ -54,4 +54,19 @@ describe('RevanotePayload Phase 5 fields', () => {
     const r = RevanotePayload.safeParse({ ...base, batch_index: -1 })
     expect(r.success).toBe(false)
   })
+
+  test('accepts fix_contract when present (Phase 5)', () => {
+    const r = RevanotePayload.safeParse({
+      ...base,
+      fix_contract: {
+        version: 1,
+        default: 'best_guess',
+        ask_reasons: ['ambiguous_intent', 'conflicting_instruction', 'missing_target', 'out_of_scope'],
+      },
+    })
+    expect(r.success).toBe(true)
+    if (r.success) {
+      expect(r.data.fix_contract?.default).toBe('best_guess')
+    }
+  })
 })
