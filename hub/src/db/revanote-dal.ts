@@ -357,7 +357,8 @@ export async function insertAnnotation(opts: {
        ${opts.callback_url}, ${opts.mapping_id}, ${opts.source_ip},
        ${sql.json(opts.payload_raw)})
     ON CONFLICT (user_id, annotation_id_external) DO UPDATE
-       SET callback_url = EXCLUDED.callback_url
+       SET callback_url = EXCLUDED.callback_url,
+           payload_raw = EXCLUDED.payload_raw
     RETURNING *
   `
   return rows[0]
