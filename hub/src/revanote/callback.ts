@@ -33,6 +33,9 @@ export interface RevanoteCallbackPayload {
   deployed: boolean
   needs_clarification?: boolean
   clarification_question?: string | null
+  // Phase 5 — best-guess-default fix contract (additive).
+  assumption?: string | null
+  clarification_reason?: string | null
   error?: string | null
   // Phase 5 batched-secure-dispatch additions (all optional, additive).
   batch_id?: string | null
