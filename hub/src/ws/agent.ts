@@ -1068,6 +1068,18 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     return
   }
 
+  // milestone remote-update-trigger — force-update ack from supervisor →
+  // resolve the pending request the POST /api/supervisors/:id/update handler
+  // is awaiting. Mirrors the rescan_ack handling above.
+  if (msg.type === 'supervisor.force_update_ack') {
+    if (msg.ok) {
+      resolveRequest(supervisorId, msg.req_id, msg)
+    } else {
+      rejectRequest(supervisorId, msg.req_id, msg.error || 'force_update_failed')
+    }
+    return
+  }
+
   if (msg.type === 'supervisor.repo_inventory') {
     // Phase 08 §15 (Plan 003 T4): fan inventory into sessions + pending_local_repos.
     try {

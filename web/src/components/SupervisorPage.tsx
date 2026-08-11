@@ -225,6 +225,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const [installations, setInstallations] = useState<any[]>([])
   const [selectedInstallationId, setSelectedInstallationId] = useState<number | 'all'>('all')
   const [scanning, setScanning] = useState(false)
+  const [updating, setUpdating] = useState(false)
   const [filter, setFilter] = useState<FilterKey>(() => {
     try {
       const v = localStorage.getItem(FILTER_LS_KEY)
@@ -358,6 +359,17 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
       setLocalRepos(data.repos || [])
     } catch (e: any) { setError(e.message) }
     finally { setScanning(false) }
+  }, [token, activeSupervisorId])
+
+  const requestUpdate = useCallback(async () => {
+    if (!activeSupervisorId) return
+    setUpdating(true); setError(null); setInfo(null)
+    try {
+      const r = await apiFetch(token, `/api/supervisors/${activeSupervisorId}/update`, { method: 'POST' })
+      if (!r.ok) { setError((await r.json().catch(() => ({}))).error || 'update request failed'); return }
+      setInfo('Update requested — the machine will briefly disconnect and relaunch on the latest version.')
+    } catch (e: any) { setError(e.message) }
+    finally { setUpdating(false) }
   }, [token, activeSupervisorId])
 
   const loadActiveRuns = useCallback(async () => {
@@ -669,6 +681,18 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 <option key={s.id} value={s.id}>{s.hostname} · {s.online ? s.state : 'offline'} · v{s.version || '?'}</option>
               ))}
             </select>
+            {activeSupervisor?.online && (
+              <button
+                onClick={requestUpdate}
+                disabled={updating}
+                aria-label="Update supervisor to the latest signed release"
+                title="Force this machine's Remo Code Supervisor to check for and install the latest signed release"
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Icon.Refresh className={updating ? 'animate-spin' : ''} />
+                {updating ? 'Updating…' : 'Update to latest'}
+              </button>
+            )}
             {githubConfigured && installations.length > 0 && (
               <>
                 <span className="text-xs text-[var(--text-muted)] px-1">Install:</span>

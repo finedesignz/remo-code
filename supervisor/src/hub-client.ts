@@ -12,6 +12,7 @@ import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
 import { log as obs } from './observability/logger'
 import { VERSION } from './version'
 import { pollUsage, USAGE_POLL_INTERVAL_MS, type UsagePayload } from './usage/oauth-poll'
+import { writeForceUpdateMarker } from './runners/force-update-marker'
 
 /** Bug A — push the live runner set to the hub every 10s after auth_ok. */
 const SESSION_INVENTORY_INTERVAL_MS = 10_000
@@ -52,6 +53,8 @@ type OutboundMsg =
   | { type: 'supervisor.set_roots_ack'; req_id: string; ok: boolean; applied_roots?: string[]; error?: string }
   // fix/supervisor-periodic-repo-rescan — ack for a hub-initiated rescan.
   | { type: 'supervisor.rescan_ack'; req_id: string; ok: boolean; error?: string }
+  // milestone remote-update-trigger — ack for a hub-initiated forced update.
+  | { type: 'supervisor.force_update_ack'; req_id: string; ok: boolean; error?: string }
   // P1 usage poll — parsed, non-secret Anthropic OAuth utilization snapshot.
   // The OAuth token is read locally in usage/oauth-poll.ts and NEVER serialized
   // here; only the four utilization windows + reset times cross the wire.
@@ -344,6 +347,7 @@ export class SupervisorClient {
       case 'key_rotated': this.onKeyRotated(msg); break
       case 'supervisor.set_roots': await this.onSetRoots(msg); break
       case 'supervisor.rescan_repos': await this.onRescanRepos(msg); break
+      case 'supervisor.force_update': this.onForceUpdate(msg); break
       default:
         // unknown
         break
@@ -567,6 +571,25 @@ export class SupervisorClient {
     } catch (err: any) {
       this.log('warn', `rescan_repos failed: ${err?.message ?? err}`)
       this.send({ type: 'supervisor.rescan_ack', req_id: reqId, ok: false, error: String(err?.message ?? err) })
+    }
+  }
+
+  /**
+   * milestone remote-update-trigger — hub-initiated forced update (web
+   * Settings "Update to latest" button). The SIDECAR has no updater — the
+   * Rust tray owns check→download→install→relaunch (auto_update.rs). This
+   * only drops a marker file the tray's own poll loop consumes; it acks as
+   * soon as the marker is written, not when the update actually completes.
+   */
+  private onForceUpdate(msg: { req_id: string; requested_by?: string }) {
+    const reqId = msg.req_id
+    const path = writeForceUpdateMarker(msg.requested_by)
+    if (path) {
+      this.log('info', `force_update requested${msg.requested_by ? ` by ${msg.requested_by}` : ''}; marker written to ${path}`)
+      this.send({ type: 'supervisor.force_update_ack', req_id: reqId, ok: true })
+    } else {
+      this.log('warn', 'force_update: marker write failed')
+      this.send({ type: 'supervisor.force_update_ack', req_id: reqId, ok: false, error: 'marker_write_failed' })
     }
   }
 

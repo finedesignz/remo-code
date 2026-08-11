@@ -3,7 +3,7 @@ import {
   SupervisorHello, SupervisorState, SupervisorLog,
   RepoScanResult, RepoCloneProgress, RepoOpResult,
   SupervisorCommandsSync, HostResourcesMessage,
-  SupervisorRepoInventory, SetRootsAck, RescanAck,
+  SupervisorRepoInventory, SetRootsAck, RescanAck, ForceUpdateAck,
   SupervisorSessionInventory,
   RepoCreateProgress, RepoCreateFailed,
 } from './supervisor-protocol'
@@ -219,6 +219,7 @@ export const AgentInbound = z.discriminatedUnion('type', [
   SupervisorRepoInventory,
   SetRootsAck,
   RescanAck,
+  ForceUpdateAck,
   SupervisorSessionInventory,
   RepoCreateProgress,
   RepoCreateFailed,
