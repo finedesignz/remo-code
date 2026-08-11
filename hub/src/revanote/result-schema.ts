@@ -26,14 +26,20 @@ import { z } from 'zod'
 export const RevanoteResult = z.object({
   resolved: z.boolean(),
   action_taken: z.string().default(''),
-  agent_reply: z.string().optional(),
+  // `.nullable()` alongside `.optional()`: an agent that made no assumption /
+  // needs no clarification may emit an explicit `null` for the unused key
+  // rather than omitting it. Every consumer already normalizes via `?? null`
+  // or `=== true`, so null is treated identically to absent end-to-end (05-QC
+  // BLOCKER 3 — without this, a genuinely successful fix gets parsed as
+  // schema_invalid and reported to revanote as `failed`).
+  agent_reply: z.string().optional().nullable(),
   files_changed: z.array(z.string()).default([]),
-  deployed: z.boolean().optional(),
-  needs_clarification: z.boolean().optional(),
-  clarification_question: z.string().optional(),
+  deployed: z.boolean().optional().nullable(),
+  needs_clarification: z.boolean().optional().nullable(),
+  clarification_question: z.string().optional().nullable(),
   // Phase 5 — best-guess-default fix contract (additive).
-  assumption: z.string().optional(),
-  clarification_reason: z.string().optional(),
+  assumption: z.string().optional().nullable(),
+  clarification_reason: z.string().optional().nullable(),
 })
 
 export type RevanoteResult = z.infer<typeof RevanoteResult>
