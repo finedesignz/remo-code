@@ -58,6 +58,10 @@ Three packages in a Bun workspace:
   Connects to `/ws/agent` with an API key, spawns Claude/Codex CLIs on demand, relays
   stream-json events to the hub.
 
+## Git Hooks
+
+Run once per clone: `git config core.hooksPath .githooks`. Wires a `commit-msg` hook that blocks Google Antigravity IDE autosave commits (bare `sync` message, staged `node_modules/` paths, force-added gitignored files). Override for a genuinely intentional matching commit with `ALLOW_AUTOSAVE_COMMIT=1 git commit -m "..."`.
+
 ## Commands
 
 ```bash
