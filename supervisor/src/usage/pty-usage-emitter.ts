@@ -164,19 +164,27 @@ export function resolveTranscriptPath(
  * session. Fed back in as `resolveTranscriptPath`'s `snapshot` (via
  * `PtyUsageEmitterOpts.preExistingNames`).
  *
- * Returns `reliable: false` — never a silently-empty-but-trusted set — when
- * the directory can't be proven to have been fully enumerated: an
- * unresolvable project dir, a session dir that doesn't exist yet (this
- * project's very first PTY session), or a `readdirSync` failure (e.g. a
- * permissions error, or the dir vanishing between resolve and read). All
- * three are "we don't know what was there," not "nothing was there."
+ * Returns `reliable: true` with an EMPTY name set when the session dir simply
+ * doesn't exist yet (ENOENT) — this project's very first PTY session, where
+ * there is nothing ambiguous to exclude: no directory means no pre-existing
+ * transcripts, full stop. This case must stay reliable, or first-session PTY
+ * token usage is silently never recorded (undercounting the daily token cap's
+ * own inputs — see `start()`'s fail-closed check below).
+ *
+ * Returns `reliable: false` — never a silently-empty-but-trusted set — only
+ * when the directory truly can't be proven to have been fully enumerated: an
+ * unresolvable/invalid project dir, or a genuine `readdirSync` failure that
+ * ISN'T "the dir doesn't exist" (e.g. a permissions error, or a non-ENOENT
+ * race). Those are "we don't know what was there," not "nothing was there."
  */
 export function snapshotPreExistingTranscripts(projectDir: string): TranscriptSnapshot {
   const dirResult = resolveSessionDir(projectDir)
   if (!dirResult.ok) return { reliable: false, names: new Set() }
   try {
     return { reliable: true, names: new Set(readdirSync(dirResult.dir).filter((n) => n.endsWith('.jsonl'))) }
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === 'ENOENT') return { reliable: true, names: new Set() }
     return { reliable: false, names: new Set() }
   }
 }
@@ -208,7 +216,9 @@ export interface PtyUsageEmitterOpts {
   /** Pre-spawn snapshot from `snapshotPreExistingTranscripts()` — see that
    *  function's doc. Omitted falls back to mtime-only qualification (no
    *  exclusion, but still ambiguity-safe). A snapshot with `reliable: false`
-   *  makes `start()` refuse to locate anything for this session at all. */
+   *  (a genuine read failure — NOT a first-session absent dir, which is
+   *  `reliable: true` with an empty set) makes `start()` refuse to locate
+   *  anything for this session at all. */
   preExistingNames?: TranscriptSnapshot
 }
 

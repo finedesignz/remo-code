@@ -214,10 +214,29 @@ describe('snapshotPreExistingTranscripts', () => {
     }
   })
 
-  test('round-2 QC fix: returns reliable:false (not an empty-but-trusted set) when the project dir does not exist yet', () => {
+  test('PTYCAP fix: returns reliable:true + an EMPTY set when the project dir does not exist yet (this project\'s very first PTY session) — absent-because-nothing-has-run-yet is not the same as an unreadable/unresolvable dir, and must not disable usage accounting for the first-ever session', () => {
     const { restore } = makeHome()
     try {
       const snap = snapshotPreExistingTranscripts(process.platform === 'win32' ? 'C:/fake/never-spawned' : '/fake/never-spawned')
+      expect(snap.reliable).toBe(true)
+      expect(snap.names.size).toBe(0)
+    } finally {
+      restore()
+    }
+  })
+
+  test('PTYCAP fix: a genuine read failure (ENOTDIR — a file sits where the session dir should be) still returns reliable:false, distinct from the absent-dir case above', () => {
+    const { restore } = makeHome()
+    try {
+      const projectDir = process.platform === 'win32' ? 'C:/fake/pty-usage-unreadable' : '/fake/pty-usage-unreadable'
+      const r = resolveSessionDir(projectDir)
+      if (!r.ok) throw new Error('test setup: resolveSessionDir failed')
+      // Create the PARENT, then put a FILE (not a directory) exactly where the
+      // session dir would be — readdirSync on it throws ENOTDIR, a genuine
+      // "can't enumerate" failure, never an ENOENT "doesn't exist yet".
+      mkdirSync(join(r.dir, '..'), { recursive: true })
+      writeFileSync(r.dir, '')
+      const snap = snapshotPreExistingTranscripts(projectDir)
       expect(snap.reliable).toBe(false)
       expect(snap.names.size).toBe(0)
     } finally {
@@ -473,7 +492,7 @@ describe('PtyUsageEmitter — end-to-end mid-turn accounting (SC-1/SC-2/SC-3)', 
     }
   })
 
-  test('round-2 QC fix, scenario 1: session dir absent at snapshot time (unreliable snapshot) + a sibling transcript appearing concurrently afterward — never pinned, never emitted, for the LIFE of the session', async () => {
+  test('PTYCAP fix, scenario 1: session dir ABSENT at snapshot time (this project\'s first-ever PTY session) — snapshot is reliable+empty, and this session\'s OWN transcript, once it lands, IS picked up and emitted (first-session usage is no longer silently dropped)', async () => {
     const { restore } = makeHome()
     const emitter = new PtyUsageEmitter()
     try {
@@ -482,40 +501,37 @@ describe('PtyUsageEmitter — end-to-end mid-turn accounting (SC-1/SC-2/SC-3)', 
       // session-bridge.ts does for the very first PTY session in a brand-new
       // project dir. resolveSessionDir has nothing to enumerate yet.
       const preExisting = snapshotPreExistingTranscripts(projectDir)
-      expect(preExisting.reliable).toBe(false)
+      expect(preExisting.reliable).toBe(true)
+      expect(preExisting.names.size).toBe(0)
 
       const captured: PtyUsageEventFrame[] = []
-      const logs: Array<[string, string]> = []
       emitter.start({
         sessionId: 'sess-i',
         projectDir,
         cliKind: 'claude',
         emit: (f) => captured.push(f),
-        onLog: (lvl, m) => logs.push([lvl, m]),
         preExistingNames: preExisting,
       })
-      // start() should refuse synchronously — no timer even armed.
-      expect(captured.length).toBe(0)
-      expect(logs.some(([lvl, m]) => lvl === 'warn' && m.includes('unreliable'))).toBe(true)
+      expect(captured.length).toBe(0) // nothing yet — the CLI hasn't written its transcript
 
-      // NOW the directory (and a sibling's real, concurrently-active transcript)
-      // shows up — exactly the door round 1's mtime-based fix didn't close.
+      // NOW the directory shows up along with THIS session's own transcript —
+      // the exact first-session flow the pre-fix code refused to account for.
       const r = resolveSessionDir(projectDir)
       if (!r.ok) throw new Error('test setup failed')
       mkdirSync(r.dir, { recursive: true })
-      const siblingFile = join(r.dir, 'sibling-appeared-after.jsonl')
-      writeFileSync(siblingFile, '')
-      await wait(300)
+      const ownFile = join(r.dir, 'first-ever-session.jsonl')
+      writeFileSync(ownFile, '')
+      await wait(1200) // past the 1000ms locate-poll interval
       writeFileSync(
-        siblingFile,
-        JSON.stringify({ type: 'assistant', uuid: 'sibling-after-u1', message: { usage: { input_tokens: 500, output_tokens: 500, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }) + '\n',
+        ownFile,
+        JSON.stringify({ type: 'assistant', uuid: 'first-u1', message: { usage: { input_tokens: 11, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } }) + '\n',
         { flag: 'a' },
       )
-      await wait(1500) // well past the locate-poll interval, if one had been armed
+      await wait(800)
 
-      // Nothing was ever pinned or emitted — the gap is accepted, the
-      // mis-attribution is not.
-      expect(captured.length).toBe(0)
+      expect(captured.length).toBe(1)
+      expect(captured[0].input_tokens).toBe(11)
+      expect(captured[0].session_id).toBe('sess-i')
     } finally {
       emitter.stop()
       restore()
