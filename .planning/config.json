@@ -19,6 +19,7 @@
     "discuss_mode": "discuss",
     "pattern_mapper": true,
     "ai_integration_phase": false,
-    "plan_review_convergence": true
+    "plan_review_convergence": true,
+    "use_worktrees": false
   }
 }

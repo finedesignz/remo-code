@@ -294,4 +294,105 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
     } catch { bad = true }
     expect(bad).toBe(true)
   })
+
+  // PTYCAP Phase 1, plan 02 (SC-2) — token_usage_runner_type_check is LIVE against
+  // real Postgres, not just present in the schema.sql source. REMO_E2E_DB_URL-gated
+  // (this whole describe skips without it) — the only sanctioned kind of skip here.
+  it('token_usage_runner_type_check accepts pty-interactive and rejects an out-of-enum value', async () => {
+    await applySchemaStrict(sql)
+
+    const email = `ptycap-runner-type-${randomUUID()}@invalid.local`
+    const [user] = await sql<{ id: string }[]>`
+      INSERT INTO users (email, password_hash, role) VALUES (${email}, 'x', 'user') RETURNING id
+    `
+
+    const [row] = await sql<{ runner_type: string }[]>`
+      INSERT INTO token_usage (user_id, runner_type) VALUES (${user.id}, 'pty-interactive')
+      RETURNING runner_type
+    `
+    expect(row.runner_type).toBe('pty-interactive')
+
+    let rejected = false
+    try {
+      await sql`INSERT INTO token_usage (user_id, runner_type) VALUES (${user.id}, 'api-key')`
+    } catch {
+      rejected = true
+    }
+    expect(rejected).toBe(true)
+  })
+
+  // fix(01): the constraint-existence guard used to be
+  // `information_schema.check_constraints WHERE constraint_name=...` — UNSCOPED
+  // by table, so a same-NAMED constraint sitting on ANY table visible on the
+  // search_path (even in a different schema) satisfies "IF NOT EXISTS" and the
+  // real per-table constraint is never created. Reproduces that exact collision
+  // by planting a decoy table + same-named constraint in a SIBLING schema that IS
+  // on this connection's search_path, then proves the real constraint still gets
+  // created on `token_usage`/`sessions` and actually bites.
+  it('constraint guard is scoped by table (pg_constraint + conrelid), not by bare name — a same-named constraint on another table never fools it', async () => {
+    const decoyNs = `${NS}_decoy`
+    await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS ${decoyNs}`)
+    // Put the decoy schema on this connection's search_path (ahead of NS is not
+    // required — information_schema.check_constraints has no schema ordering,
+    // it just matches by bare name across every schema the role can see).
+    await sql.unsafe(`SET search_path TO ${NS}, ${decoyNs}`)
+    try {
+      // A same-named constraint on an unrelated decoy table — this is exactly
+      // what silently satisfied the old unscoped guard.
+      await sql.unsafe(`
+        CREATE TABLE IF NOT EXISTS ${decoyNs}.decoy_token_usage (id serial PRIMARY KEY, runner_type text)
+      `)
+      await sql.unsafe(`
+        DO $$ BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='token_usage_runner_type_check' AND conrelid = '${decoyNs}.decoy_token_usage'::regclass) THEN
+            ALTER TABLE ${decoyNs}.decoy_token_usage ADD CONSTRAINT token_usage_runner_type_check CHECK (runner_type IN ('decoy'));
+          END IF;
+        END $$;
+      `)
+
+      // Re-apply the WHOLE schema now that a same-named constraint exists
+      // elsewhere on the search_path. Must not throw, AND must actually create
+      // the real constraint on THIS namespace's token_usage table.
+      await applySchemaStrict(sql)
+
+      const email = `ptycap-scoped-guard-${randomUUID()}@invalid.local`
+      const [user] = await sql<{ id: string }[]>`
+        INSERT INTO users (email, password_hash, role) VALUES (${email}, 'x', 'user') RETURNING id
+      `
+      let rejected = false
+      try {
+        await sql`INSERT INTO token_usage (user_id, runner_type) VALUES (${user.id}, 'not-a-real-runner-type')`
+      } catch {
+        rejected = true
+      }
+      expect(rejected).toBe(true)
+
+      // Same collision shape for the sessions-table constraints (both guarded
+      // by the same pattern) — cli_kind and runner_type both actually bite.
+      let cliKindRejected = false
+      try {
+        await sql`
+          INSERT INTO sessions (user_id, name, project_dir, token_hash, cli_kind)
+          VALUES (${user.id}, 'scoped-guard-test', '/tmp/scoped-guard-test', ${'h-' + randomUUID()}, 'not-a-real-cli-kind')
+        `
+      } catch {
+        cliKindRejected = true
+      }
+      expect(cliKindRejected).toBe(true)
+
+      // A second full apply, with the decoy constraint STILL present on the
+      // search_path, must remain a clean idempotent no-op (schema.sql re-runs
+      // in full on every hub boot).
+      await applySchemaStrict(sql)
+      const [{ count: constraintCount }] = await sql<{ count: string }[]>`
+        SELECT count(*)::text AS count
+        FROM pg_constraint
+        WHERE conname = 'token_usage_runner_type_check' AND conrelid = 'token_usage'::regclass
+      `
+      expect(Number(constraintCount)).toBe(1)
+    } finally {
+      await sql.unsafe(`SET search_path TO ${NS}`)
+      await sql.unsafe(`DROP SCHEMA IF EXISTS ${decoyNs} CASCADE`)
+    }
+  })
 })

@@ -1,5 +1,11 @@
 /**
- * Phase 20 — JSONL file tail helper shared by both adapters.
+ * PTYCAP Phase 1 — supervisor-side port of `hub/src/telegram/transcript/tail.ts`.
+ *
+ * VERBATIM PORT: signature, `JsonlTail` interface, `POLL_INTERVAL_MS`, and every
+ * byte-offset/carry/truncation-reset/watch-plus-poll-fallback internal are
+ * unchanged from the hub original. The ONLY difference is the module home —
+ * the hub original stays the source of truth for future edits to this logic;
+ * port any future fix there over here too rather than diverging.
  *
  * Tails an append-only JSONL file: reads from a byte offset, splits complete
  * lines, hands each parsed JSON object to a callback, and advances the offset.
@@ -23,7 +29,7 @@ export interface JsonlTail {
  * Start tailing `path`. Existing content is replayed first (so an already-open
  * transcript surfaces its prior turns), then appends stream live. `onRecord`
  * receives each parsed JSON object; a line that fails JSON.parse is skipped
- * (logged by the adapter via `onParseError`).
+ * (logged by the caller via `onParseError`).
  */
 export function tailJsonl(
   path: string,

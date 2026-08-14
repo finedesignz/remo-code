@@ -1,15 +1,18 @@
 ---
 gsd_state_version: 1.0
 milestone: PTYCAP
-milestone_name: Token-Gate the Interactive PTY Path
-status: roadmapped
-last_updated: "2026-06-27T12:16:13.375Z"
-last_activity: 2026-06-27
+milestone_name: Milestone **GOV**
+current_phase: 01
+current_phase_name: pty-token-accounting
+status: executing
+last_updated: "2026-07-28T10:23:42.313Z"
+last_activity: 2026-07-28
+last_activity_desc: Phase PTYCAP-01 execution started
 progress:
   total_phases: 6
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_plans: 4
+  completed_plans: 1
   percent: 0
 ---
 
@@ -76,10 +79,10 @@ connection is the Tauri Supervisor MSI.
 
 ## Current position
 
-Phase: Not started (roadmap complete — OBSRV-01..06 ready to plan)
-Plan: —
-Status: Roadmapped — next `/gsd-plan-phase 1` (or plan 1 + 3 in parallel)
-Last activity: 2026-06-27 — Milestone OBSRV roadmapped (6 phases)
+Phase: PTYCAP-01 (pty-token-accounting) — EXECUTING
+Plan: 1 of 4
+Status: Executing Phase PTYCAP-01
+Last activity: 2026-07-28 — Phase PTYCAP-01 execution started
 
 ### OBSRV phase ledger (`.planning/phases/`)
 
@@ -116,8 +119,10 @@ reset 2026-05-29 to unblock owner login. `jamie@theleadingpractice.com` is NOT a
 
 - Cost cap non-bypassable — all user→session dispatch via `hub/src/dispatch/gates.ts`. **OBSRV must
   not change cap behavior here — read counters only.**
+
 - Public webhooks: raw body before JSON parse, constant-time secret compare, mount BEFORE
   `/api/*` auth catch-all (`hub/test/mount-order.test.ts` enforces).
+
 - `schema.sql` re-runs every boot — idempotent DDL only; backfills → `hub/scripts/` one-shots.
 - Orchestrator: exactly one open per user (`idx_sessions_orchestrator_unique`).
 - QC gate: `bun run check-baseline` (per-file test isolation; `tools/regression-baseline.json`).

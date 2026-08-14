@@ -3,10 +3,12 @@ import { resolveHostname } from '../hostname'
 import { mkdirSync, writeFileSync } from 'fs'
 import { join, basename, extname } from 'path'
 import { ClaudeRunner } from './claude-runner'
-import { selectHumanPtyRunner } from './runner-factory'
+import { runnerForHumanBackend } from './runner-factory'
+import { resolveHumanBackend } from './backend-selector'
 import { PtyPersistence } from './pty-persistence'
 import { writeSessionBreadcrumb } from './session-breadcrumb'
 import { getBackendSelectorConfig } from '../config'
+import { PtyUsageEmitter, snapshotPreExistingTranscripts } from '../usage/pty-usage-emitter'
 import type { AgentToHub, CliRunner, HubToAgent, PtyLike, RunnerEvent } from './types'
 
 /**
@@ -111,6 +113,11 @@ export class SessionBridge {
    *  (Option C), or the Node `ClaudePtyRunner` fallback when no Rust host —
    *  both satisfy `PtyLike`, chosen by the gated runner-factory. */
   private ptyRunner: PtyLike | null = null
+  /** PTYCAP Phase 1 — per-session PTY usage-ledger tailer. Lifecycle mirrors
+   *  `ptyRunner` exactly: born in `ensurePtyRunner()`, torn down at all three
+   *  PTY teardown sites. Never stopped on a plain socket detach (the Rust host
+   *  keeps the PTY and its transcript writes alive across a reattach). */
+  private ptyUsage: PtyUsageEmitter | null = null
   private sessionId: string | null = null
   private opts: SessionBridgeOptions
   private cb: SessionBridgeCallbacks
@@ -177,6 +184,8 @@ export class SessionBridge {
       try { this.ptyRunner.kill() } catch {}
       this.ptyRunner = null
     }
+    try { this.ptyUsage?.stop() } catch {}
+    this.ptyUsage = null
     if (this.ws) {
       try { this.ws.close() } catch {}
       this.ws = null
@@ -250,6 +259,8 @@ export class SessionBridge {
         this.cb.onLog('error', `agent-bridge: terminal close code=${code}; bridge exiting`)
         if (this.runner) { try { this.runner.stop() } catch {} this.runner = null }
         if (this.ptyRunner) { try { this.ptyRunner.kill() } catch {} this.ptyRunner = null }
+        try { this.ptyUsage?.stop() } catch {}
+        this.ptyUsage = null
         this.cb.onExit({ code: null, reason: `ws_close_${code}` })
         return
       }
@@ -403,7 +414,12 @@ export class SessionBridge {
     // PTY-cutover Phase A: gated factory → Rust ConPTY bridge in prod (Option C),
     // Node helper fallback when no Rust host. Default backend + cutover-gate
     // flag come from the supervisor config (env-overridable). Human-only.
-    const pty = selectHumanPtyRunner({ isHuman: true }, getBackendSelectorConfig())
+    // Resolve the backend id ONCE and reuse it below for `cliKind` — a second
+    // independent `resolveHumanBackend()` call could in principle disagree with
+    // this one (e.g. a config read that changes between calls), silently
+    // misrouting or disabling usage capture. See PTYCAP Phase-1 QC WARNING.
+    const backendId = resolveHumanBackend({ isHuman: true }, getBackendSelectorConfig())
+    const pty = runnerForHumanBackend(backendId)
     this.ptyRunner = pty
     const sessionId = this.sessionId ?? undefined
     // Register with the supervisor-owned persistence coordinator so a dropped
@@ -417,6 +433,13 @@ export class SessionBridge {
         bytes: Buffer.from(bytes, 'binary').toString('base64'),
       })
     }
+    // PTYCAP Phase 1 QC BLOCKING fix — snapshot the `.jsonl` transcripts already
+    // present in this project's session dir BEFORE the CLI process spawns below,
+    // so the usage emitter can later refuse to pin any file that pre-existed the
+    // spawn (a sibling session's active-but-old transcript can never satisfy a
+    // mtime-only check by coincidence of timing). Cheap (one readdir); computed
+    // even when `sessionId` is empty for simplicity — only consumed below when set.
+    const preExistingTranscripts = snapshotPreExistingTranscripts(this.opts.repoPath)
     pty.start({
       sessionId,
       cwd: this.opts.repoPath,
@@ -435,9 +458,33 @@ export class SessionBridge {
       onExit: (code) => {
         this.cb.onLog('warn', `agent-bridge: pty runner exited code=${code}`)
         this.ptyRunner = null
+        try { this.ptyUsage?.stop() } catch {}
+        this.ptyUsage = null
         this.cb.onExit({ code, reason: 'pty_runner_exit' })
       },
     })
+    // PTYCAP Phase 1 (SC-1/SC-2/SC-3) — start the usage-ledger tailer alongside
+    // the PTY itself. Never on the critical path: any failure here is caught and
+    // logged, never prevents the human's PTY from starting. `cliKind` is derived
+    // from the SAME `backendId` already resolved above for the runner itself —
+    // no second `resolveHumanBackend()` call, so the two can never disagree.
+    if (sessionId) {
+      try {
+        const cliKind: 'claude' | 'codex' = backendId === 'codex-pty' ? 'codex' : 'claude'
+        const usage = new PtyUsageEmitter()
+        this.ptyUsage = usage
+        usage.start({
+          sessionId,
+          projectDir: this.opts.repoPath,
+          cliKind,
+          emit: (frame) => this.sendToHub(frame),
+          onLog: (lvl, m) => this.cb.onLog(lvl, `pty-usage: ${m}`),
+          preExistingNames: preExistingTranscripts,
+        })
+      } catch (err: any) {
+        this.cb.onLog('warn', `agent-bridge: pty usage accounting failed to start: ${err?.message ?? err}`)
+      }
+    }
     if (!this.spawnReported) { this.spawnReported = true; this.cb.onSpawned({ pid: pty.pid ?? 0 }) }
     return pty
   }

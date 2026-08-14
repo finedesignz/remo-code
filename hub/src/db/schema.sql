@@ -627,7 +627,12 @@ CREATE TABLE IF NOT EXISTS orchestrator_autospawn_allowlist (
 -- hostname: populated for rootless rows so the partial unique index can scope
 --   uniqueness per host. Project sessions leave it NULL.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cli_kind TEXT NOT NULL DEFAULT 'claude';
-DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WHERE constraint_name='sessions_cli_kind_check') THEN ALTER TABLE sessions ADD CONSTRAINT sessions_cli_kind_check CHECK (cli_kind IN ('claude','codex')); END IF; END $$;
+-- pg_constraint scoped by conrelid (this table's OID), NOT information_schema.check_constraints
+-- by bare name (round-2 QC fix, milestone SKEY): the latter matches a same-named constraint in
+-- ANY schema visible in the catalog, so on a shared real Postgres where another schema already
+-- carries this constraint name, IF NOT EXISTS is falsely satisfied and THIS table's constraint
+-- is silently never created — confirmed against real Postgres 16 (see hub/test/e2e/schema-double-apply.e2e.test.ts).
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='sessions_cli_kind_check' AND conrelid = 'sessions'::regclass) THEN ALTER TABLE sessions ADD CONSTRAINT sessions_cli_kind_check CHECK (cli_kind IN ('claude','codex')); END IF; END $$;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_rootless BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS hostname TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_rootless_unique ON sessions(user_id, hostname, cli_kind) WHERE is_rootless = true AND deleted_at IS NULL;
@@ -639,7 +644,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_rootless_unique ON sessions(user_
 --   ADD COLUMN — re-runs safely every boot. NO data backfill here (CLAUDE.md
 --   invariant: schema.sql is idempotent DDL only; backfills go in hub/scripts/).
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS runner_type TEXT NOT NULL DEFAULT 'stream-json';
-DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM information_schema.check_constraints WHERE constraint_name='sessions_runner_type_check') THEN ALTER TABLE sessions ADD CONSTRAINT sessions_runner_type_check CHECK (runner_type IN ('stream-json','pty-interactive')); END IF; END $$;
+-- pg_constraint scoped by conrelid — see the sessions_cli_kind_check comment above.
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='sessions_runner_type_check' AND conrelid = 'sessions'::regclass) THEN ALTER TABLE sessions ADD CONSTRAINT sessions_runner_type_check CHECK (runner_type IN ('stream-json','pty-interactive')); END IF; END $$;
 -- Backend PTY/tmux identity + transcript path/id captured at PTY spawn so a
 -- reconnect/restart RE-BINDS the same backend (no dual-spawn / no mis-route —
 -- H10). Nullable so non-PTY rows are unaffected; NO backfill.
@@ -1323,6 +1329,15 @@ CREATE TABLE IF NOT EXISTS token_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_token_usage_user_created ON token_usage(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage(session_id);
+
+-- PTYCAP Phase 1 — which runner produced this ledger row. 'stream-json' covers
+-- every pre-existing row (DEFAULT); 'pty-interactive' is the new PtyUsageTailer
+-- source (transcript-tail, no API key, no PTY write). Additive ADD COLUMN — safe
+-- to re-run every boot; NO backfill (CLAUDE.md invariant).
+ALTER TABLE token_usage ADD COLUMN IF NOT EXISTS runner_type TEXT NOT NULL DEFAULT 'stream-json';
+-- pg_constraint scoped by conrelid — see the sessions_cli_kind_check comment near line 630.
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='token_usage_runner_type_check' AND conrelid = 'token_usage'::regclass) THEN ALTER TABLE token_usage ADD CONSTRAINT token_usage_runner_type_check CHECK (runner_type IN ('stream-json','pty-interactive')); END IF; END $$;
+CREATE INDEX IF NOT EXISTS idx_token_usage_user_runner_created ON token_usage(user_id, runner_type, created_at DESC);
 
 -- Daily per-(user, model) rollup, upserted on each usage_event for cheap
 -- today/7d/total aggregates without scanning the full ledger.
