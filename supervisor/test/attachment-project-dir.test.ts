@@ -89,7 +89,8 @@ describe('ensureAttachmentsGitignored', () => {
     expect(contents).toContain('node_modules/')
     expect(contents).toContain('.remo/')
     ensureAttachmentsGitignored(repo)
-    const occurrences = contents.split(/\r?\n/).filter((l) => l.trim() === '.remo/').length
+    const contentsAfterSecondCall = readFileSync(gitignorePath, 'utf8')
+    const occurrences = contentsAfterSecondCall.split(/\r?\n/).filter((l) => l.trim() === '.remo/').length
     expect(occurrences).toBe(1)
   })
 })
