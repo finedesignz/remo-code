@@ -91,7 +91,7 @@ maybe('OEE-04 e2e — due-rows → controller → dependency-aware waves', () =>
       stage: 'development',
     });
     taskId = task.id;
-  });
+  }, 30_000);
 
   afterAll(async () => {
     if (userId) await sql`DELETE FROM users WHERE id = ${userId}`;

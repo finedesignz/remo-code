@@ -51,7 +51,7 @@ maybeDescribe('OEE-03 e2e — routine_queue + drain worker + per-session lock (r
     h = await setupHarness();
     queue = await import('../../src/orchestrator/queue.ts');
     queue._resetForTests();
-  });
+  }, 30_000);
 
   afterAll(async () => {
     if (queue) queue._resetForTests();

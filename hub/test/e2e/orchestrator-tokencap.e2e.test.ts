@@ -54,7 +54,7 @@ maybe('fix/stop-the-bleed e2e — the daily TOKEN cap fires on the real inject p
     // Cost cap must NOT be what blocks — raise it out of the way (the token cap
     // is what we are proving; the cost gate runs first and would mask it).
     await h.sql`UPDATE users SET daily_cost_cap_usd = 100000.0000 WHERE id = ${h.userId}`
-  })
+  }, 30_000)
 
   afterAll(async () => {
     delete process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR

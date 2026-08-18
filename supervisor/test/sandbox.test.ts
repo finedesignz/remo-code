@@ -1,8 +1,16 @@
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
+import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'fs'
+import { realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError } from '../src/sandbox'
+import {
+  assertWithinRoots,
+  assertTargetWithinRoots,
+  SandboxEscapeError,
+  SandboxCheckTimeoutError,
+  __setSandboxFsImplForTests,
+  __setSandboxTimeoutMsForTests,
+} from '../src/sandbox'
 
 let TMP: string
 let ROOT_A: string
@@ -34,67 +42,113 @@ afterAll(() => {
 })
 
 describe('assertWithinRoots', () => {
-  test('allows a path inside a configured root', () => {
-    const r = assertWithinRoots(INSIDE, [ROOT_A, ROOT_B])
+  test('allows a path inside a configured root', async () => {
+    const r = await assertWithinRoots(INSIDE, [ROOT_A, ROOT_B])
     expect(r.realRepo).toContain('repoX')
   })
 
-  test('rejects a path outside every root', () => {
-    expect(() => assertWithinRoots(OUTSIDE, [ROOT_A, ROOT_B])).toThrow(SandboxEscapeError)
+  test('rejects a path outside every root', async () => {
+    await expect(assertWithinRoots(OUTSIDE, [ROOT_A, ROOT_B])).rejects.toThrow(SandboxEscapeError)
   })
 
-  test('rejects C:\\Windows\\System32 against a github root', () => {
-    expect(() => assertWithinRoots('C:\\Windows\\System32', [ROOT_A])).toThrow(SandboxEscapeError)
+  test('rejects C:\\Windows\\System32 against a github root', async () => {
+    await expect(assertWithinRoots('C:\\Windows\\System32', [ROOT_A])).rejects.toThrow(SandboxEscapeError)
   })
 
-  test('symlink escape is rejected (realpath check)', () => {
+  test('symlink escape is rejected (realpath check)', async () => {
     // Skip silently if symlink couldn't be created (no admin / dev-mode on Windows).
     try {
-      // If the symlink doesn't exist, this throws — treat as skip.
-      const { realpathSync } = require('fs')
-      realpathSync(SYM_TO_OUTSIDE)
+      await realpath(SYM_TO_OUTSIDE)
     } catch {
       return
     }
-    expect(() => assertWithinRoots(SYM_TO_OUTSIDE, [ROOT_A])).toThrow(SandboxEscapeError)
+    await expect(assertWithinRoots(SYM_TO_OUTSIDE, [ROOT_A])).rejects.toThrow(SandboxEscapeError)
   })
 
-  test('rejects a non-existent path (realpath fails)', () => {
-    expect(() => assertWithinRoots(join(TMP, 'does-not-exist'), [ROOT_A])).toThrow(SandboxEscapeError)
+  test('rejects a non-existent path (realpath fails)', async () => {
+    await expect(assertWithinRoots(join(TMP, 'does-not-exist'), [ROOT_A])).rejects.toThrow(SandboxEscapeError)
   })
 
-  test('skips stale roots silently', () => {
+  test('skips stale roots silently', async () => {
     // A bogus root in the list shouldn't poison the others.
-    const r = assertWithinRoots(INSIDE, [join(TMP, 'bogus'), ROOT_A])
+    const r = await assertWithinRoots(INSIDE, [join(TMP, 'bogus'), ROOT_A])
     expect(r.realRepo).toContain('repoX')
   })
 })
 
 describe('assertTargetWithinRoots (clone target — path does not yet exist)', () => {
-  test('allows a non-existent target under a root', () => {
-    expect(() => assertTargetWithinRoots(join(ROOT_A, 'newRepo'), [ROOT_A])).not.toThrow()
+  test('allows a non-existent target under a root', async () => {
+    await expect(assertTargetWithinRoots(join(ROOT_A, 'newRepo'), [ROOT_A])).resolves.toBeUndefined()
   })
 
-  test('allows a deeply-nested non-existent target under a root', () => {
-    expect(() => assertTargetWithinRoots(join(ROOT_A, 'a', 'b', 'c'), [ROOT_A])).not.toThrow()
+  test('allows a deeply-nested non-existent target under a root', async () => {
+    await expect(assertTargetWithinRoots(join(ROOT_A, 'a', 'b', 'c'), [ROOT_A])).resolves.toBeUndefined()
   })
 
-  test('rejects a non-existent target outside every root', () => {
-    expect(() => assertTargetWithinRoots(join(TMP, 'evil', 'foo'), [ROOT_A, ROOT_B])).toThrow(SandboxEscapeError)
+  test('rejects a non-existent target outside every root', async () => {
+    await expect(assertTargetWithinRoots(join(TMP, 'evil', 'foo'), [ROOT_A, ROOT_B])).rejects.toThrow(SandboxEscapeError)
   })
 
-  test('rejects C:\\Windows\\System32\\newRepo against a github root', () => {
-    expect(() => assertTargetWithinRoots('C:\\Windows\\System32\\newRepo', [ROOT_A])).toThrow(SandboxEscapeError)
+  test('rejects C:\\Windows\\System32\\newRepo against a github root', async () => {
+    await expect(assertTargetWithinRoots('C:\\Windows\\System32\\newRepo', [ROOT_A])).rejects.toThrow(SandboxEscapeError)
   })
 
-  test('rejects a target whose nearest existing ancestor escapes via realpath', () => {
+  test('rejects a target whose nearest existing ancestor escapes via realpath', async () => {
     // Skip silently if symlink couldn't be created.
     try {
-      const { realpathSync } = require('fs')
-      realpathSync(SYM_TO_OUTSIDE)
+      await realpath(SYM_TO_OUTSIDE)
     } catch {
       return
     }
-    expect(() => assertTargetWithinRoots(join(SYM_TO_OUTSIDE, 'newRepo'), [ROOT_A])).toThrow(SandboxEscapeError)
+    await expect(assertTargetWithinRoots(join(SYM_TO_OUTSIDE, 'newRepo'), [ROOT_A])).rejects.toThrow(SandboxEscapeError)
+  })
+})
+
+/**
+ * 2026-08-18 QC (D4) — the original version of this test used a bogus UNC
+ * path (`\\256.256.256.256\...`). `realpath` rejects a malformed address like
+ * that IMMEDIATELY (measured: whole file ran in 56ms) — the 5s timer never
+ * fired, and the test would pass against the UN-fixed code too (any rejection
+ * satisfies `err instanceof Error` and `<8000ms`). That proved nothing about
+ * the timeout path.
+ *
+ * Fixed: inject a `realpath` that genuinely never resolves via the test-only
+ * seam in sandbox.ts (`__setSandboxFsImplForTests`), and shrink the timeout
+ * via `__setSandboxTimeoutMsForTests` so the test is fast without touching
+ * the real 5s production constant. This actually reaches
+ * `SandboxCheckTimeoutError` and proves the fail-closed contract: a hung
+ * filesystem check must reject with that specific error, not merely "some
+ * error", and must do so within the configured bound.
+ */
+describe('sandbox check timeout', () => {
+  afterEach(() => {
+    __setSandboxFsImplForTests(null)
+    __setSandboxTimeoutMsForTests(null)
+  })
+
+  test('assertWithinRoots rejects with SandboxCheckTimeoutError when realpath never resolves', async () => {
+    __setSandboxTimeoutMsForTests(50)
+    __setSandboxFsImplForTests({ realpath: () => new Promise(() => { /* never resolves */ }) })
+
+    const start = Date.now()
+    await expect(assertWithinRoots(INSIDE, [ROOT_A])).rejects.toBeInstanceOf(SandboxCheckTimeoutError)
+    // Bounded by the (shrunk) timeout, not by however long the hung call
+    // would otherwise have run — proves the race actually wins.
+    expect(Date.now() - start).toBeLessThan(2000)
+  })
+
+  test('assertTargetWithinRoots rejects with SandboxCheckTimeoutError when access never resolves', async () => {
+    __setSandboxTimeoutMsForTests(50)
+    __setSandboxFsImplForTests({ access: () => new Promise(() => { /* never resolves */ }) })
+
+    const start = Date.now()
+    await expect(assertTargetWithinRoots(join(ROOT_A, 'newRepo'), [ROOT_A])).rejects.toBeInstanceOf(SandboxCheckTimeoutError)
+    expect(Date.now() - start).toBeLessThan(2000)
+  })
+
+  test('a real (non-hanging) check still resolves normally once the injected impl is cleared', async () => {
+    // Guards against the injection seam leaking between tests.
+    const r = await assertWithinRoots(INSIDE, [ROOT_A, ROOT_B])
+    expect(r.realRepo).toContain('repoX')
   })
 })

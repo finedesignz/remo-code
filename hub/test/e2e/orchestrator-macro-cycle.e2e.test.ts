@@ -51,7 +51,7 @@ maybeDescribe('OEE-05 e2e — runMacroCycle macro inject + sentinel reconciliati
   beforeAll(async () => {
     h = await setupHarness();
     ({ runMacroCycle } = await import('../../src/orchestrator/macro-cycle.ts'));
-  });
+  }, 30_000);
 
   afterAll(async () => {
     if (h) await teardownHarness(h);

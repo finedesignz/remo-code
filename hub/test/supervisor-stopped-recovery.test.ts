@@ -23,6 +23,26 @@ import {
   isStartRejectStateMessage,
   SUPERVISOR_START_REJECT_REASONS,
 } from '../src/ws/agent.ts'
+// 2026-08-18 QC round 2 follow-up — import the supervisor's actual runtime
+// source of truth instead of a second hand-copied literal array. Round-one
+// D2 was exactly this drift: a new reason added supervisor-side with no hub
+// update, and a hardcoded-literal test couldn't catch it because nothing
+// forced the literal to track the supervisor's type. This makes the
+// assertion below fail the moment the two definitions diverge in either
+// direction (a hub-side deletion OR a supervisor-side addition).
+// 2026-08-18 QC round 3 (R3-2) — import the dependency-free LEAF module, not
+// process-manager.ts. process-manager.ts sits at the center of the
+// supervisor's runtime graph; hub/tsconfig.json includes "test", so
+// importing it here pulled the supervisor's entire transitive dependency
+// graph (sandbox, audit, session-bridge -> claude-runner, runner-factory,
+// pty-persistence) into what the hub's tsconfig typechecks — measured +10
+// tsc errors on the branch vs main, all inside
+// supervisor/src/runners/claude-runner.ts, now counted against the hub.
+// start-rejection-reasons.ts has zero imports, so this import brings in
+// exactly the one array and nothing else — matching the shape of the
+// existing git-introspect.ts -> hub/src/lib/repo-key.ts precedent (also a
+// leaf on the other side of the boundary).
+import { START_REJECTION_REASONS } from '../../supervisor/src/start-rejection-reasons.ts'
 
 describe('isStartRejectStateMessage', () => {
   test('treats concurrency_cap as start-reject (the prod symptom)', () => {
@@ -79,16 +99,14 @@ describe('isStartRejectStateMessage', () => {
   })
 
   test('reason set matches process-manager.ts StartRejection union', () => {
-    // Lock-step contract with supervisor/src/process-manager.ts:33.
-    // If the supervisor adds a new StartRejection reason, this test fails
-    // loudly so the hub mirror is updated in lock-step.
-    expect([...SUPERVISOR_START_REJECT_REASONS].sort()).toEqual([
-      'circuit_open',
-      'concurrency_cap',
-      'duplicate_run',
-      'legacy_agent_spawn_disabled',
-      'not_git_repo',
-      'sandbox_escape',
-    ])
+    // Lock-step contract with supervisor/src/process-manager.ts's
+    // START_REJECTION_REASONS (the runtime source of truth for
+    // StartRejection.reason). Derived from the actual export, not a second
+    // hand-copied literal — see the import comment above. If the supervisor
+    // adds or removes a reason, this test fails loudly so the hub mirror is
+    // updated in lock-step, in EITHER direction.
+    expect([...SUPERVISOR_START_REJECT_REASONS].sort()).toEqual(
+      [...START_REJECTION_REASONS].sort(),
+    )
   })
 })

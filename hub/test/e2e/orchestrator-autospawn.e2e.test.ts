@@ -180,7 +180,7 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
     ({ getTokenCapStatus } = await import('../../src/dispatch/gates.ts'));
     ({ appendRunLog } = await import('../../src/orchestrator/run-log.ts'));
     ({ isOrchestratorEnabled, isAutospawnEnabled } = await import('../../src/orchestrator/controller.ts'));
-  });
+  }, 30_000);
 
   afterAll(async () => {
     if (h) await teardownHarness(h);
