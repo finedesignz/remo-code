@@ -247,13 +247,35 @@ export async function scanRoots(cfg: {
     }
   }
 
-  // Introspect. Synchronous spawnSync per dir — fine for the scale we target
-  // (hundreds of dirs at depth≤2). We wrap in Promise.resolve to keep the API
-  // async for future I/O concurrency.
+  // 2026-08-18 (fix/session-start-freeze) — introspect() does 3-4 spawnSync
+  // git subprocess calls per candidate directory. The "fine for the scale we
+  // target (hundreds of dirs)" assumption above was wrong: live-reproduced on
+  // this box, a 303-candidate scan of a real ~60-repo-plus-worktrees roots
+  // tree (C:\Users\artic\GitHub) took 4m07s of UNINTERRUPTED synchronous
+  // blocking — spawnSync blocks Bun's single main thread for the FULL scan
+  // duration, since running it in a for-loop with no `await` inside never
+  // yields back to the event loop. This is called unconditionally on every
+  // hub reconnect (sendRepoInventory, fired right after `hello`), so it froze
+  // the whole process on every connect: the loopback status server stopped
+  // answering HTTP requests (verified directly — curl to /sup/status hung for
+  // 2+ minutes), session_inventory's 10s push never got a chance to start
+  // (its own start call sits on the next line after the fire-and-forget
+  // sendRepoInventory(), so it too was blocked), and any inbound WS frame —
+  // including a `session.start` landing mid-scan — sat unprocessed until the
+  // scan finished.
+  //
+  // Fix: yield the event loop after each candidate's introspection via
+  // setImmediate. Doesn't shrink the scan's total wall time (spawnSync is
+  // still synchronous per-call — there's no cheap way to interrupt a running
+  // child-process wait), but caps how long ANY single pending frame can be
+  // starved to roughly one introspect() call (tens to a couple hundred ms)
+  // instead of the whole scan (minutes). A `session.start` arriving mid-scan
+  // now gets serviced between candidates instead of after all of them.
   const rootSet = new Set(cfg.roots.map((r) => r.replace(/\\/g, '/')))
   const entries: RepoEntry[] = []
   for (const path of allCandidates) {
     const gi = introspect(path)
+    await new Promise<void>((resolve) => setImmediate(resolve))
     if (!gi.is_git_repo) {
       // Only emit non-repo entries that ARE a configured root — those become
       // pending_local_repos. Skipping every other plain workspace folder.
