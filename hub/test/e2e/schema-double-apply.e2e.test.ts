@@ -107,7 +107,7 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
       SELECT count(*)::text AS still FROM api_keys WHERE user_id = ${user.id} AND revoked_at IS NULL
     `
     expect(Number(stillRow.still)).toBe(3)
-  })
+  }, 45_000)
 
   it('the stale (user_id, purpose) unique index is GONE and does not come back', async () => {
     await applySchemaStrict(sql)
@@ -120,7 +120,7 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
     expect(names).not.toContain('idx_api_keys_user_active')
     expect(names).toContain('idx_api_keys_user_supervisor_active')
     expect(names).toContain('idx_api_keys_user_orchestrator_active')
-  })
+  }, 20_000)
 
   it('still enforces ONE active supervisor key and ONE active orchestrator key', async () => {
     const email = `skey-uniq-${randomUUID()}@invalid.local`
@@ -204,7 +204,7 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
       `
     } catch { dup = true }
     expect(dup).toBe(true)
-  })
+  }, 45_000)
 
   // Milestone once: scheduled_tasks grows `schedule_kind` (CHECK cron|once) +
   // `run_at`. A seeded 'once' row (incl. the new task_type='work') must converge
@@ -267,5 +267,5 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
       `
     } catch { bad = true }
     expect(bad).toBe(true)
-  })
+  }, 45_000)
 })

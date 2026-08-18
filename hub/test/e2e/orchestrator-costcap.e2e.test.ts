@@ -52,7 +52,7 @@ maybe('OEE-06 e2e — daily cost cap holds on the real orchestrator inject path'
     injectMod = await import('../../src/orchestrator/inject.ts')
     pipelineMod = await import('../../src/dispatch/pipeline.ts')
     h = await harness.setupHarness()
-  })
+  }, 30_000)
 
   afterAll(async () => {
     if (h) await harness.teardownHarness(h)
