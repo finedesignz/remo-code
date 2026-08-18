@@ -251,6 +251,49 @@ describe('spawn-on-error: ensureSessionOnline', () => {
     expect(ok).toBe(false)
     expect(state.createRunCalls).toBe(0)
   })
+
+  // Root-cause coverage for the repo_path placeholder investigation: a
+  // session's project_dir can be a non-filesystem sentinel (e.g. the
+  // `__web_self__` row hub/scripts/ensure-web-error-project.ts provisions as
+  // an FK anchor for browser error capture, status='offline', never meant to
+  // launch). Forwarding that literal as session.start's repo_path used to
+  // reach the supervisor, which correctly rejected it as sandbox_escape —
+  // but that's a false-positive security denial, not a real escape, and it
+  // polluted the audit log with a placeholder indistinguishable from genuine
+  // attempts. These sessions must never even be dispatched.
+  test('project_dir is a non-path sentinel (__web_self__) → no spawn, false', async () => {
+    state.sessionProjectDir = '__web_self__'
+    const ok = await ensureSessionOnline('u1', 's1')
+    expect(ok).toBe(false)
+    expect(state.createRunCalls).toBe(0)
+    expect(state.sentMessages.length).toBe(0)
+  })
+
+  test('project_dir is a non-path sentinel (unknown) → no spawn, false', async () => {
+    state.sessionProjectDir = 'unknown'
+    const ok = await ensureSessionOnline('u1', 's1')
+    expect(ok).toBe(false)
+    expect(state.createRunCalls).toBe(0)
+    expect(state.sentMessages.length).toBe(0)
+  })
+
+  test('project_dir is a real Windows-style absolute path → still dispatches', async () => {
+    state.sessionProjectDir = 'C:\\Users\\artic\\GitHub\\ottolax'
+    setTimeout(() => { state.online = true }, 50)
+    const ok = await ensureSessionOnline('u1', 's1')
+    expect(ok).toBe(true)
+    expect(state.createRunCalls).toBe(1)
+    expect(state.sentMessages[0].repo_path).toBe('C:\\Users\\artic\\GitHub\\ottolax')
+  })
+
+  test('project_dir is a real POSIX absolute path → still dispatches', async () => {
+    state.sessionProjectDir = '/repo/app'
+    setTimeout(() => { state.online = true }, 50)
+    const ok = await ensureSessionOnline('u1', 's1')
+    expect(ok).toBe(true)
+    expect(state.createRunCalls).toBe(1)
+    expect(state.sentMessages[0].repo_path).toBe('/repo/app')
+  })
 })
 
 // ── Pipeline integration (no DB; pure mock deps) ────────────────────────────
