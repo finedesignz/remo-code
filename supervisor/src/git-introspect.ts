@@ -1,16 +1,34 @@
 // supervisor/src/git-introspect.ts
 //
-// Phase 08: deterministic git introspection. Pure, synchronous. SECURITY:
-// every subprocess call uses spawnSync with an arg-vector — never shell:true,
-// never string concatenation of `cwd`. `cwd` is passed via the `-C` flag (still
-// as a separate argv entry), so even pathological paths (spaces, ampersands,
+// Phase 08: deterministic git introspection. SECURITY: every subprocess call
+// uses execFile with an arg-vector — never shell:true, never string
+// concatenation of `cwd`. `cwd` is passed via the `-C` flag (still as a
+// separate argv entry), so even pathological paths (spaces, ampersands,
 // backticks) cannot inject. Wrapped in try/catch — failures yield null/false
 // defaults; this module never throws.
+//
+// 2026-08-18 (fix/session-start-freeze) — was `spawnSync`. `scanRoots()`
+// calls this once per candidate directory with no yield in between; against
+// a real ~300-directory roots tree that meant 300 * ~5 spawnSync calls =
+// minutes of the single-threaded supervisor process being fully unable to do
+// anything else (verified live: the loopback status HTTP server stopped
+// answering entirely, session_inventory's push never got a chance to start,
+// and an inbound `session.start` WS frame sat unprocessed until the scan
+// finished). `execFile` hands the actual subprocess wait to libuv's thread
+// pool instead of blocking the JS main thread, so the event loop stays
+// genuinely free between (and during) these calls — not merely yielded
+// cooperatively. This is the root-cause fix; a `setImmediate` yield in the
+// caller's loop was a starvation-bound mitigation on top of the same
+// underlying blocking calls and is no longer needed once the calls
+// themselves are non-blocking.
 
-import { spawnSync } from 'child_process'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { existsSync, readFileSync, statSync } from 'fs'
 import { dirname, join } from 'path'
 import { parseGitRemote, type GitOriginGithub } from '../../hub/src/lib/repo-key'
+
+const execFileAsync = promisify(execFile)
 
 export type GitIntrospection = {
   is_git_repo: boolean
@@ -22,23 +40,22 @@ export type GitIntrospection = {
   branch: string | null
 }
 
-function runGit(cwd: string, args: string[]): { ok: boolean; stdout: string } {
+async function runGit(cwd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
   try {
-    const r = spawnSync('git', ['-C', cwd, ...args], {
+    // NEVER shell:true. NEVER concatenate args.
+    const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
       encoding: 'utf8',
-      // NEVER shell:true. NEVER concatenate args.
       shell: false,
       windowsHide: true,
     })
-    if (r.error) return { ok: false, stdout: '' }
-    if (typeof r.status === 'number' && r.status !== 0) return { ok: false, stdout: '' }
-    return { ok: true, stdout: (r.stdout ?? '').toString() }
+    return { ok: true, stdout: stdout ?? '' }
   } catch {
+    // Non-zero exit, spawn failure, or missing git — all treated as "no answer".
     return { ok: false, stdout: '' }
   }
 }
 
-export function introspect(cwd: string): GitIntrospection {
+export async function introspect(cwd: string): Promise<GitIntrospection> {
   const out: GitIntrospection = {
     is_git_repo: false,
     is_worktree: false,
@@ -49,14 +66,14 @@ export function introspect(cwd: string): GitIntrospection {
   }
 
   // 1. Is a git repo?
-  const gd = runGit(cwd, ['rev-parse', '--git-dir'])
+  const gd = await runGit(cwd, ['rev-parse', '--git-dir'])
   if (!gd.ok) return out
   out.is_git_repo = true
 
   // 2. Is a worktree? Canonical: compare --git-dir to --git-common-dir.
   try {
-    const gitDirRes = runGit(cwd, ['rev-parse', '--path-format=absolute', '--git-dir'])
-    const commonRes = runGit(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+    const gitDirRes = await runGit(cwd, ['rev-parse', '--path-format=absolute', '--git-dir'])
+    const commonRes = await runGit(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
     if (gitDirRes.ok && commonRes.ok) {
       const gitDirAbs = gitDirRes.stdout.trim()
       const commonAbs = commonRes.stdout.trim()
@@ -94,7 +111,7 @@ export function introspect(cwd: string): GitIntrospection {
   }
 
   // 4. Origin URL.
-  const remote = runGit(cwd, ['remote', 'get-url', 'origin'])
+  const remote = await runGit(cwd, ['remote', 'get-url', 'origin'])
   if (remote.ok) {
     const url = remote.stdout.trim()
     if (url) out.git_remote = url
@@ -106,7 +123,7 @@ export function introspect(cwd: string): GitIntrospection {
   // 6. Current branch name. `symbolic-ref --short HEAD` returns the branch on
   //    success and exits non-zero on detached-HEAD — runGit swallows that and
   //    we leave `branch` as null.
-  const br = runGit(cwd, ['symbolic-ref', '--short', 'HEAD'])
+  const br = await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'])
   if (br.ok) {
     const name = br.stdout.trim()
     if (name) out.branch = name

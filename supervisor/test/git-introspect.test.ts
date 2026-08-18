@@ -48,33 +48,33 @@ afterAll(() => {
 })
 
 describe.skipIf(!GIT_AVAILABLE)('introspect()', () => {
-  test('non-git directory → is_git_repo:false', () => {
+  test('non-git directory → is_git_repo:false', async () => {
     const dir = join(TMP, 'empty-' + Date.now())
     mkdirSync(dir, { recursive: true })
-    const r = introspect(dir)
+    const r = await introspect(dir)
     expect(r.is_git_repo).toBe(false)
     expect(r.is_worktree).toBe(false)
     expect(r.git_remote).toBeNull()
     expect(r.git_origin_github).toBeNull()
   })
 
-  test('git init with no remote → is_git_repo:true, no origin', () => {
+  test('git init with no remote → is_git_repo:true, no origin', async () => {
     const dir = join(TMP, 'plain-' + Date.now())
     mkdirSync(dir, { recursive: true })
     git(dir, ['init', '-q'])
-    const r = introspect(dir)
+    const r = await introspect(dir)
     expect(r.is_git_repo).toBe(true)
     expect(r.is_worktree).toBe(false)
     expect(r.git_remote).toBeNull()
     expect(r.git_origin_github).toBeNull()
   })
 
-  test('SSH GitHub origin → parsed correctly', () => {
+  test('SSH GitHub origin → parsed correctly', async () => {
     const dir = join(TMP, 'ssh-' + Date.now())
     mkdirSync(dir, { recursive: true })
     git(dir, ['init', '-q'])
     git(dir, ['remote', 'add', 'origin', 'git@github.com:Acme/Widget.git'])
-    const r = introspect(dir)
+    const r = await introspect(dir)
     expect(r.is_git_repo).toBe(true)
     // Note: a user's global `url.<X>.insteadOf` config can rewrite the remote
     // (e.g. `git@github.com:` → `https://github.com/`). We only assert that
@@ -84,7 +84,7 @@ describe.skipIf(!GIT_AVAILABLE)('introspect()', () => {
     expect(r.git_origin_github).toEqual({ owner: 'acme', repo: 'widget' })
   })
 
-  test('git worktree → is_worktree:true with parent path', () => {
+  test('git worktree → is_worktree:true with parent path', async () => {
     const parent = join(TMP, 'parent-' + Date.now())
     mkdirSync(parent, { recursive: true })
     git(parent, ['init', '-q'])
@@ -98,7 +98,7 @@ describe.skipIf(!GIT_AVAILABLE)('introspect()', () => {
     const sibling = join(TMP, 'parent-sibling-' + Date.now())
     git(parent, ['worktree', 'add', '-q', '-b', 'feat/test', sibling])
 
-    const r = introspect(sibling)
+    const r = await introspect(sibling)
     expect(r.is_git_repo).toBe(true)
     expect(r.is_worktree).toBe(true)
     expect(r.worktree_parent_path).not.toBeNull()

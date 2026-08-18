@@ -1,7 +1,61 @@
 import { readdirSync, statSync, existsSync, readFileSync } from 'fs'
 import { join, basename } from 'path'
-import { introspect } from './git-introspect'
+import { introspect, type GitIntrospection } from './git-introspect'
 import type { ScanSettings } from './config'
+
+/** Cap on concurrent `introspect()` calls during a `scanRoots()` pass. Each
+ *  call spawns up to 5 git subprocesses via `execFile` (off the JS thread via
+ *  libuv), so this bounds concurrent child-process/file-handle pressure
+ *  rather than event-loop time. */
+const INTROSPECT_CONCURRENCY = 8
+
+/**
+ * 2026-08-18 (fix/session-start-freeze) — per-path introspection cache, keyed
+ * by the mtime of `.git/HEAD` (or the directory itself for non-repo
+ * candidates). See the long-form rationale at the `scanRoots()` call site.
+ * Process-lifetime cache — cleared implicitly on supervisor restart, which is
+ * fine: a restart already pays a fresh scan, same as before this change.
+ */
+const introspectCache = new Map<string, { mtimeMs: number; result: GitIntrospection }>()
+
+function introspectCacheKeyMtime(path: string): number {
+  try {
+    return statSync(join(path, '.git', 'HEAD')).mtimeMs
+  } catch {
+    try {
+      return statSync(path).mtimeMs
+    } catch {
+      return -1
+    }
+  }
+}
+
+async function introspectCached(path: string): Promise<GitIntrospection> {
+  const mtimeMs = introspectCacheKeyMtime(path)
+  const cached = introspectCache.get(path)
+  if (cached && mtimeMs !== -1 && cached.mtimeMs === mtimeMs) {
+    return cached.result
+  }
+  const result = await introspect(path)
+  introspectCache.set(path, { mtimeMs, result })
+  return result
+}
+
+/** Bounded-concurrency `Promise.all`-style map — runs at most `limit` calls
+ *  to `fn` at once, preserving input order in the returned array. */
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let next = 0
+  async function worker() {
+    while (true) {
+      const i = next++
+      if (i >= items.length) return
+      results[i] = await fn(items[i])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
+}
 
 export interface ScannedRepo {
   path: string
@@ -247,35 +301,39 @@ export async function scanRoots(cfg: {
     }
   }
 
-  // 2026-08-18 (fix/session-start-freeze) — introspect() does 3-4 spawnSync
-  // git subprocess calls per candidate directory. The "fine for the scale we
-  // target (hundreds of dirs)" assumption above was wrong: live-reproduced on
-  // this box, a 303-candidate scan of a real ~60-repo-plus-worktrees roots
-  // tree (C:\Users\artic\GitHub) took 4m07s of UNINTERRUPTED synchronous
-  // blocking — spawnSync blocks Bun's single main thread for the FULL scan
-  // duration, since running it in a for-loop with no `await` inside never
-  // yields back to the event loop. This is called unconditionally on every
-  // hub reconnect (sendRepoInventory, fired right after `hello`), so it froze
-  // the whole process on every connect: the loopback status server stopped
-  // answering HTTP requests (verified directly — curl to /sup/status hung for
-  // 2+ minutes), session_inventory's 10s push never got a chance to start
-  // (its own start call sits on the next line after the fire-and-forget
-  // sendRepoInventory(), so it too was blocked), and any inbound WS frame —
-  // including a `session.start` landing mid-scan — sat unprocessed until the
-  // scan finished.
+  // 2026-08-18 (fix/session-start-freeze) — ROOT CAUSE (not a mitigation):
+  // introspect() used to run 3-5 `spawnSync` git calls per candidate
+  // directory. spawnSync blocks Bun's single main thread for the full
+  // subprocess wait; called from a plain for-loop with no `await` inside, a
+  // 303-candidate scan of a real roots tree (C:\Users\artic\GitHub) live-
+  // reproduced as 4m07s of UNINTERRUPTED blocking — the loopback status
+  // server stopped answering HTTP entirely, session_inventory's 10s push
+  // never got a chance to start, and an inbound `session.start` WS frame
+  // landing mid-scan sat unprocessed until the scan finished. This fires
+  // unconditionally on every hub reconnect (sendRepoInventory, called right
+  // after `hello`), so every reconnect froze the process.
   //
-  // Fix: yield the event loop after each candidate's introspection via
-  // setImmediate. Doesn't shrink the scan's total wall time (spawnSync is
-  // still synchronous per-call — there's no cheap way to interrupt a running
-  // child-process wait), but caps how long ANY single pending frame can be
-  // starved to roughly one introspect() call (tens to a couple hundred ms)
-  // instead of the whole scan (minutes). A `session.start` arriving mid-scan
-  // now gets serviced between candidates instead of after all of them.
+  // Fixed at the source in git-introspect.ts: `introspect()` now uses
+  // `execFile` (libuv thread pool), which genuinely frees the JS event loop
+  // while a git subprocess runs, instead of blocking it. A `setImmediate`
+  // yield between candidates was tried first but is a starvation-bound
+  // mitigation on top of the same blocking calls, not a fix — removed now
+  // that the calls themselves don't block.
+  //
+  // Also cached here, keyed by path + the mtime of `.git/HEAD` (falls back to
+  // the directory's own mtime for non-repo candidates). None of the fields
+  // introspect() reports (is_git_repo/is_worktree/git_remote/branch) change on
+  // a plain commit — only on checkout/clone/remote-change, all of which touch
+  // `.git/HEAD` or the directory itself — so an unchanged mtime is a valid,
+  // cheap signal that a re-scan can reuse the prior result and skip every git
+  // spawn for that path entirely. A reconnect against an unchanged roots tree
+  // now costs one `stat()` per candidate instead of five subprocess spawns.
   const rootSet = new Set(cfg.roots.map((r) => r.replace(/\\/g, '/')))
   const entries: RepoEntry[] = []
-  for (const path of allCandidates) {
-    const gi = introspect(path)
-    await new Promise<void>((resolve) => setImmediate(resolve))
+  const introResults = await mapWithConcurrency(allCandidates, INTROSPECT_CONCURRENCY, introspectCached)
+  for (let i = 0; i < allCandidates.length; i++) {
+    const path = allCandidates[i]
+    const gi = introResults[i]
     if (!gi.is_git_repo) {
       // Only emit non-repo entries that ARE a configured root — those become
       // pending_local_repos. Skipping every other plain workspace folder.
