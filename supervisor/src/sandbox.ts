@@ -22,10 +22,12 @@ export class SandboxEscapeError extends Error {
  */
 export class SandboxCheckTimeoutError extends Error {
   readonly path: string
-  constructor(path: string) {
-    super(`sandbox_check_timeout: filesystem check on ${path} did not resolve within ${SANDBOX_FS_TIMEOUT_MS}ms`)
+  readonly timeoutMs: number
+  constructor(path: string, timeoutMs: number) {
+    super(`sandbox_check_timeout: filesystem check on ${path} did not resolve within ${timeoutMs}ms`)
     this.name = 'SandboxCheckTimeoutError'
     this.path = path
+    this.timeoutMs = timeoutMs
   }
 }
 
@@ -51,12 +53,35 @@ export class SandboxCheckTimeoutError extends Error {
  * bounded time instead of hanging forever, and the event loop stays free to
  * keep servicing the hub connection throughout.
  */
-const SANDBOX_FS_TIMEOUT_MS = 5_000
+// Per-fs-call budget, not a total-call budget — `assertWithinRoots` with N
+// roots can make up to N+1 checks (repo + each root), so worst case is
+// ~(N+1) * this value, not a flat 5s ceiling.
+const DEFAULT_SANDBOX_FS_TIMEOUT_MS = 5_000
+
+// 2026-08-18 QC (D4) — test-only injection seam. Production code always goes
+// through the real `fs/promises` functions and the real timeout; tests can
+// swap either to deterministically exercise the timeout/fail-closed path
+// without waiting out a real 5s timer or needing an actually-stalled
+// filesystem (which isn't reproducible portably in CI). Never used outside
+// `test/sandbox.test.ts`.
+let _realpath: typeof realpathAsync = realpathAsync
+let _access: typeof access = access
+let _timeoutMs: number = DEFAULT_SANDBOX_FS_TIMEOUT_MS
+
+export function __setSandboxFsImplForTests(impl: { realpath?: typeof realpathAsync; access?: typeof access } | null): void {
+  _realpath = impl?.realpath ?? realpathAsync
+  _access = impl?.access ?? access
+}
+
+export function __setSandboxTimeoutMsForTests(ms: number | null): void {
+  _timeoutMs = ms ?? DEFAULT_SANDBOX_FS_TIMEOUT_MS
+}
 
 async function withTimeout<T>(path: string, p: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout>
+  const timeoutMs = _timeoutMs
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new SandboxCheckTimeoutError(path)), SANDBOX_FS_TIMEOUT_MS)
+    timer = setTimeout(() => reject(new SandboxCheckTimeoutError(path, timeoutMs)), timeoutMs)
   })
   try {
     return await Promise.race([p, timeout])
@@ -67,7 +92,7 @@ async function withTimeout<T>(path: string, p: Promise<T>): Promise<T> {
 
 async function tryRealpath(path: string): Promise<string | null> {
   try {
-    return await withTimeout(path, realpathAsync(path))
+    return await withTimeout(path, _realpath(path))
   } catch (err) {
     if (err instanceof SandboxCheckTimeoutError) throw err
     return null
@@ -76,7 +101,7 @@ async function tryRealpath(path: string): Promise<string | null> {
 
 async function pathExists(path: string): Promise<boolean> {
   try {
-    await withTimeout(path, access(path))
+    await withTimeout(path, _access(path))
     return true
   } catch (err) {
     if (err instanceof SandboxCheckTimeoutError) throw err

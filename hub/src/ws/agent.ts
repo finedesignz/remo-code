@@ -64,6 +64,14 @@ export const SUPERVISOR_START_REJECT_REASONS: ReadonlySet<string> = new Set([
   'concurrency_cap',
   'duplicate_run',
   'sandbox_escape',
+  // fix/session-start-freeze (2026-08-18 QC/D2) — the sandbox check (realpath
+  // on the repo path / configured roots) hit its own bounded timeout instead
+  // of definitively resolving. Per-run rejection, same as 'sandbox_escape' —
+  // MUST stay in this set or a single stalled-filesystem rejection persists
+  // the whole supervisor row as `state='stopped'`, exactly the 2026-05-28 bug
+  // this set exists to prevent. Kept in lock-step with
+  // `supervisor/src/process-manager.ts` `StartRejection.reason`.
+  'sandbox_check_timeout',
   'not_git_repo',
   'legacy_agent_spawn_disabled',
   // fix/stop-the-bleed — the supervisor's spawn circuit-breaker refused THIS run

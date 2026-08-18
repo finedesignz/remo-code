@@ -88,6 +88,7 @@ describe('isStartRejectStateMessage', () => {
       'duplicate_run',
       'legacy_agent_spawn_disabled',
       'not_git_repo',
+      'sandbox_check_timeout',
       'sandbox_escape',
     ])
   })

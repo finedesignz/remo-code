@@ -1,6 +1,6 @@
 import { readdirSync, statSync, existsSync, readFileSync } from 'fs'
 import { join, basename } from 'path'
-import { introspect, type GitIntrospection } from './git-introspect'
+import { introspect, resolveGitCacheKeyPaths, type GitIntrospection } from './git-introspect'
 import type { ScanSettings } from './config'
 
 /** Cap on concurrent `introspect()` calls during a `scanRoots()` pass. Each
@@ -10,34 +10,99 @@ import type { ScanSettings } from './config'
 const INTROSPECT_CONCURRENCY = 8
 
 /**
- * 2026-08-18 (fix/session-start-freeze) — per-path introspection cache, keyed
- * by the mtime of `.git/HEAD` (or the directory itself for non-repo
- * candidates). See the long-form rationale at the `scanRoots()` call site.
- * Process-lifetime cache — cleared implicitly on supervisor restart, which is
- * fine: a restart already pays a fresh scan, same as before this change.
+ * 2026-08-18 QC (D6) — hard cap on cache size. Entries are only ever added
+ * for paths that produced a trustworthy (non -1) key, so the cache tracks
+ * roughly the live candidate set (a few hundred here) — this cap is a
+ * backstop against unbounded growth if a long-lived process scans many
+ * different roots over its lifetime (scratch dirs, temp clones, etc.), not a
+ * bound expected to bind in normal operation.
  */
-const introspectCache = new Map<string, { mtimeMs: number; result: GitIntrospection }>()
+const INTROSPECT_CACHE_MAX_ENTRIES = 2_000
 
-function introspectCacheKeyMtime(path: string): number {
-  try {
-    return statSync(join(path, '.git', 'HEAD')).mtimeMs
-  } catch {
+/**
+ * 2026-08-18 (fix/session-start-freeze) — per-path introspection cache.
+ * Process-lifetime — cleared implicitly on supervisor restart, which is
+ * fine: a restart already pays a fresh scan, same as before this change.
+ *
+ * 2026-08-18 QC (D1) — the cache key USED TO BE just `mtime('.git/HEAD')`
+ * (falling back to the directory's own mtime). Proven stale two ways on live
+ * git repos:
+ *   (a) Worktrees: `.git` is a FILE there, so `stat('<path>/.git/HEAD')`
+ *       always threw ENOENT and the key silently degraded to the worktree
+ *       directory's own mtime — which a branch switch inside the worktree
+ *       does NOT change. Every worktree reported its first-scan branch for
+ *       the rest of the process's life.
+ *   (b) `git remote add` / `git remote set-url` write `.git/config`, which
+ *       touches neither `.git/HEAD` nor the directory — so `git_remote` and
+ *       `git_origin_github` (the grouping/dedup key for the whole
+ *       worktree-canonical computation below) went permanently stale too.
+ *
+ * Fixed: the key now folds in BOTH `HEAD` and `config` mtimes, resolved via
+ * `resolveGitCacheKeyPaths()` (git-introspect.ts) — the single source of
+ * truth for "which files does introspect() actually depend on", including
+ * the worktree case (own `HEAD`, but the canonical repo's SHARED `config`
+ * two levels up). When neither path can be trusted (non-repo, unreadable,
+ * unrecognized `gitdir:` shape), the key is `-1` and `introspectCached`
+ * treats that as DO-NOT-CACHE — always re-introspect, never store under `-1`
+ * (an unreadable key isn't a valid cache entry; storing it just accumulates
+ * dead weight, which was D6 the first time around).
+ */
+const introspectCache = new Map<string, { key: number; result: GitIntrospection }>()
+
+function introspectCacheKey(path: string): number {
+  const { headPath, configPath } = resolveGitCacheKeyPaths(path)
+  if (!headPath && !configPath) {
+    // No git structure recognized at all (plain non-repo candidate, or an
+    // unrecognized `.git` shape) — fall back to the directory's own mtime.
+    // Valid enough for `is_git_repo:false`: that only flips if a `.git`
+    // appears, which touches the directory.
     try {
       return statSync(path).mtimeMs
     } catch {
       return -1
     }
   }
+  let headMtime = -1
+  let configMtime = -1
+  if (headPath) {
+    try {
+      headMtime = statSync(headPath).mtimeMs
+    } catch {
+      headMtime = -1
+    }
+  }
+  if (configPath) {
+    try {
+      configMtime = statSync(configPath).mtimeMs
+    } catch {
+      configMtime = -1
+    }
+  }
+  if (headMtime === -1 && configMtime === -1) return -1
+  // Combine into one comparable number. These are independent timestamps —
+  // collision requires both to change by exactly offsetting amounts between
+  // scans, which is acceptable for a staleness heuristic (not a security
+  // boundary; the worst case is one extra re-introspect, not a wrong result).
+  return (headMtime === -1 ? 0 : headMtime) + (configMtime === -1 ? 0 : configMtime)
 }
 
 async function introspectCached(path: string): Promise<GitIntrospection> {
-  const mtimeMs = introspectCacheKeyMtime(path)
+  const key = introspectCacheKey(path)
+  if (key === -1) {
+    // No trustworthy staleness signal — never cache, always fresh. (D1/D6)
+    return introspect(path)
+  }
   const cached = introspectCache.get(path)
-  if (cached && mtimeMs !== -1 && cached.mtimeMs === mtimeMs) {
+  if (cached && cached.key === key) {
     return cached.result
   }
   const result = await introspect(path)
-  introspectCache.set(path, { mtimeMs, result })
+  if (introspectCache.size >= INTROSPECT_CACHE_MAX_ENTRIES && !introspectCache.has(path)) {
+    // Evict oldest (Maps preserve insertion order) to keep the cache bounded.
+    const oldest = introspectCache.keys().next().value
+    if (oldest !== undefined) introspectCache.delete(oldest)
+  }
+  introspectCache.set(path, { key, result })
   return result
 }
 
@@ -283,7 +348,33 @@ function walkRoot(root: string, settings: ScanSettings, compiledGlobs: RegExp[])
  *   5. Dirs where introspection finds no `.git` AND they're not a root are
  *      dropped — we don't want to flood the hub with every workspace folder.
  */
-export async function scanRoots(cfg: {
+/**
+ * 2026-08-18 QC (D7) — `scanRoots()` is re-entrant now that it no longer
+ * blocks: `hub-client.ts` fires `void this.sendRepoInventory()` from three
+ * separate call sites (initial `auth_ok`, config-change re-emit, rescan
+ * request) with no coordination between them. Before this PR, the previous
+ * blocking implementation serialized overlapping calls BY ACCIDENT — one
+ * scan monopolized the process, so a second couldn't even start until the
+ * first returned. Now two overlapping reconnects could otherwise run two
+ * full scans concurrently (16 git children instead of 8). Guard with a
+ * single in-flight promise: a `scanRoots()` call that lands while one is
+ * already running just awaits the SAME promise instead of starting a second
+ * scan. Safe because `cfg` is process-wide in practice (the caller always
+ * passes `this.cfg`); if it ever needs to support genuinely different
+ * concurrent configs this would need a keyed guard instead of a single one.
+ */
+let scanRootsInFlight: Promise<RepoEntry[]> | null = null
+
+export function scanRoots(cfg: { roots: string[]; scan: ScanSettings }): Promise<RepoEntry[]> {
+  if (scanRootsInFlight) return scanRootsInFlight
+  const p = scanRootsInner(cfg).finally(() => {
+    scanRootsInFlight = null
+  })
+  scanRootsInFlight = p
+  return p
+}
+
+async function scanRootsInner(cfg: {
   roots: string[]
   scan: ScanSettings
 }): Promise<RepoEntry[]> {
@@ -314,20 +405,22 @@ export async function scanRoots(cfg: {
   // after `hello`), so every reconnect froze the process.
   //
   // Fixed at the source in git-introspect.ts: `introspect()` now uses
-  // `execFile` (libuv thread pool), which genuinely frees the JS event loop
-  // while a git subprocess runs, instead of blocking it. A `setImmediate`
-  // yield between candidates was tried first but is a starvation-bound
-  // mitigation on top of the same blocking calls, not a fix — removed now
-  // that the calls themselves don't block.
+  // `execFile` (libuv thread pool) instead of blocking on every git spawn. A
+  // `setImmediate` yield between candidates was tried first but is a
+  // starvation-bound mitigation on top of the same blocking calls, not a fix
+  // — removed now that the calls themselves don't block. NOT a claim that the
+  // event loop is fully free during a scan: `walkRoot` below (readdirSync/
+  // statSync over the whole tree) plus one `statSync`-based cache-key check
+  // per candidate are still synchronous. Measured worst-case event-loop lag
+  // against the real roots tree: 596ms (vs. the pre-fix 4m07s total lockout)
+  // — the multi-minute freeze is gone; brief synchronous stat bursts remain.
   //
-  // Also cached here, keyed by path + the mtime of `.git/HEAD` (falls back to
-  // the directory's own mtime for non-repo candidates). None of the fields
-  // introspect() reports (is_git_repo/is_worktree/git_remote/branch) change on
-  // a plain commit — only on checkout/clone/remote-change, all of which touch
-  // `.git/HEAD` or the directory itself — so an unchanged mtime is a valid,
-  // cheap signal that a re-scan can reuse the prior result and skip every git
-  // spawn for that path entirely. A reconnect against an unchanged roots tree
-  // now costs one `stat()` per candidate instead of five subprocess spawns.
+  // Also cached (see `introspectCached`/`introspectCacheKey` above), keyed by
+  // path + the mtimes of the files that actually determine `introspect()`'s
+  // output (`.git/HEAD` and `.git/config`, worktree-aware). An unchanged key
+  // means a re-scan can reuse the prior result and skip every git spawn for
+  // that path — a reconnect against an unchanged roots tree costs a couple of
+  // `stat()` calls per candidate instead of up to 5 subprocess spawns.
   const rootSet = new Set(cfg.roots.map((r) => r.replace(/\\/g, '/')))
   const entries: RepoEntry[] = []
   const introResults = await mapWithConcurrency(allCandidates, INTROSPECT_CONCURRENCY, introspectCached)

@@ -14,13 +14,16 @@
 // anything else (verified live: the loopback status HTTP server stopped
 // answering entirely, session_inventory's push never got a chance to start,
 // and an inbound `session.start` WS frame sat unprocessed until the scan
-// finished). `execFile` hands the actual subprocess wait to libuv's thread
-// pool instead of blocking the JS main thread, so the event loop stays
-// genuinely free between (and during) these calls — not merely yielded
-// cooperatively. This is the root-cause fix; a `setImmediate` yield in the
-// caller's loop was a starvation-bound mitigation on top of the same
-// underlying blocking calls and is no longer needed once the calls
-// themselves are non-blocking.
+// finished). `execFile` hands each subprocess WAIT to libuv's thread pool
+// instead of blocking the JS main thread, so the event loop is free while a
+// git call is in flight — measured worst-case event-loop lag against the
+// real ~300-candidate roots tree dropped from "the whole scan" (4m07s) to
+// 596ms (the still-synchronous directory walk + per-candidate stat calls in
+// repo-scanner.ts, not this file). Not "genuinely free" in an absolute sense
+// — there is still synchronous work elsewhere in the scan path — but the
+// multi-minute total-lockout defect this file caused is gone. A `setImmediate`
+// yield in the caller's loop was tried first as a starvation-bound mitigation
+// on top of the same underlying blocking calls; superseded by this fix.
 
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -40,6 +43,15 @@ export type GitIntrospection = {
   branch: string | null
 }
 
+// 2026-08-18 QC (D3) — `spawnSync` had no timeout either, so a hung git was
+// never a NEW hazard, but the consequence changed: before, a hang blocked the
+// loop visibly; now it silently holds one of `mapWithConcurrency`'s 8 slots
+// forever, `scanRoots()` never resolves, and `sendRepoInventory()`'s callers
+// only `.catch()` — the inventory silently stops updating for the rest of the
+// process's life and the child leaks. Symmetric with the sandbox-check half
+// of this fix (SANDBOX_FS_TIMEOUT_MS in sandbox.ts): bound every git spawn.
+const GIT_SPAWN_TIMEOUT_MS = 5_000
+
 async function runGit(cwd: string, args: string[]): Promise<{ ok: boolean; stdout: string }> {
   try {
     // NEVER shell:true. NEVER concatenate args.
@@ -47,10 +59,14 @@ async function runGit(cwd: string, args: string[]): Promise<{ ok: boolean; stdou
       encoding: 'utf8',
       shell: false,
       windowsHide: true,
+      timeout: GIT_SPAWN_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
     })
     return { ok: true, stdout: stdout ?? '' }
   } catch {
-    // Non-zero exit, spawn failure, or missing git — all treated as "no answer".
+    // Non-zero exit, spawn failure, timeout, or missing git — all treated as
+    // "no answer". A timed-out call still resolves (rejects) within
+    // GIT_SPAWN_TIMEOUT_MS, so this never blocks past that bound.
     return { ok: false, stdout: '' }
   }
 }
@@ -130,4 +146,68 @@ export async function introspect(cwd: string): Promise<GitIntrospection> {
   }
 
   return out
+}
+
+/**
+ * 2026-08-18 QC (D1) — cheap, git-spawn-free resolution of which on-disk
+ * files determine whether a cached `introspect()` result for `cwd` might be
+ * stale. Used by `repo-scanner.ts`'s cache key. Deliberately mirrors the same
+ * `.git`-file worktree sniff as step 3 of `introspect()` above (same target
+ * pattern, same `dirname` chain) so the two can't drift apart — this is the
+ * single source of truth for "which files, if touched, mean this result is
+ * no longer trustworthy":
+ *
+ *   - `.git` is a directory (canonical / non-worktree checkout): HEAD lives at
+ *     `.git/HEAD`, remotes at `.git/config`. Both live directly under `.git`.
+ *   - `.git` is a `gitdir:` file pointing at `<repo>/.git/worktrees/<name>`
+ *     (a worktree): that directory holds this worktree's OWN `HEAD` (branch
+ *     switches inside the worktree do NOT touch the top-level worktree
+ *     directory's mtime, and do NOT touch `.git` since it's a plain file that
+ *     never changes) — but NOT its own `config`; remotes are shared via the
+ *     canonical repo's config two `dirname()`s up, same derivation
+ *     `introspect()` uses for `worktree_parent_path`.
+ *   - Anything else (non-repo, unreadable, unrecognized `gitdir:` shape):
+ *     both paths come back null — the caller must treat this as "no reliable
+ *     staleness signal", not "nothing ever changes here".
+ *
+ * Never spawns git; only stats/reads `.git` itself, so it's safe to call
+ * before deciding whether `introspect()` (which does spawn git) is needed.
+ */
+export interface GitCacheKeyPaths {
+  headPath: string | null
+  configPath: string | null
+}
+
+export function resolveGitCacheKeyPaths(cwd: string): GitCacheKeyPaths {
+  const dotGit = join(cwd, '.git')
+  let st: ReturnType<typeof statSync>
+  try {
+    st = statSync(dotGit)
+  } catch {
+    return { headPath: null, configPath: null }
+  }
+
+  if (st.isDirectory()) {
+    return { headPath: join(dotGit, 'HEAD'), configPath: join(dotGit, 'config') }
+  }
+
+  if (st.isFile()) {
+    try {
+      const txt = readFileSync(dotGit, 'utf8').trim()
+      if (txt.startsWith('gitdir:')) {
+        const target = txt.slice('gitdir:'.length).trim()
+        if (target.includes('/.git/worktrees/') || target.includes('\\.git\\worktrees\\')) {
+          // `.../<repo>/.git/worktrees/<name>` → up two levels is `.../<repo>/.git`,
+          // where the shared (canonical) config lives.
+          const commonGitDir = dirname(dirname(target))
+          return { headPath: join(target, 'HEAD'), configPath: join(commonGitDir, 'config') }
+        }
+      }
+    } catch {
+      /* fall through to null below */
+    }
+  }
+
+  // Unrecognized shape — no trustworthy signal.
+  return { headPath: null, configPath: null }
 }

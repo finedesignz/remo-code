@@ -1,9 +1,16 @@
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
+import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test'
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'fs'
 import { realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError, SandboxCheckTimeoutError } from '../src/sandbox'
+import {
+  assertWithinRoots,
+  assertTargetWithinRoots,
+  SandboxEscapeError,
+  SandboxCheckTimeoutError,
+  __setSandboxFsImplForTests,
+  __setSandboxTimeoutMsForTests,
+} from '../src/sandbox'
 
 let TMP: string
 let ROOT_A: string
@@ -98,32 +105,50 @@ describe('assertTargetWithinRoots (clone target — path does not yet exist)', (
 })
 
 /**
- * Regression test for fix/session-start-freeze (2026-08-18): a sandbox check
- * that never resolves (a stalled network path, a hung filesystem filter
- * driver) must reject in bounded time instead of hanging the caller — and by
- * extension the single-threaded event loop — forever. We can't easily
- * fabricate a truly-hanging filesystem in a unit test, so this proves the
- * *mechanism*: `withTimeout` (exercised here indirectly via a root whose
- * realpath resolution we substitute with a never-resolving promise) always
- * settles, never hangs the test runner itself.
+ * 2026-08-18 QC (D4) — the original version of this test used a bogus UNC
+ * path (`\\256.256.256.256\...`). `realpath` rejects a malformed address like
+ * that IMMEDIATELY (measured: whole file ran in 56ms) — the 5s timer never
+ * fired, and the test would pass against the UN-fixed code too (any rejection
+ * satisfies `err instanceof Error` and `<8000ms`). That proved nothing about
+ * the timeout path.
+ *
+ * Fixed: inject a `realpath` that genuinely never resolves via the test-only
+ * seam in sandbox.ts (`__setSandboxFsImplForTests`), and shrink the timeout
+ * via `__setSandboxTimeoutMsForTests` so the test is fast without touching
+ * the real 5s production constant. This actually reaches
+ * `SandboxCheckTimeoutError` and proves the fail-closed contract: a hung
+ * filesystem check must reject with that specific error, not merely "some
+ * error", and must do so within the configured bound.
  */
 describe('sandbox check timeout', () => {
-  test('assertWithinRoots rejects (does not hang) when a filesystem check never resolves', async () => {
-    // A UNC-style path pointing at a host that will never answer simulates a
-    // stalled network share without actually needing one — Node's realpath
-    // on an unreachable host either errors (fast) or hangs depending on OS
-    // network stack behavior; either way this must not hang the test.
+  afterEach(() => {
+    __setSandboxFsImplForTests(null)
+    __setSandboxTimeoutMsForTests(null)
+  })
+
+  test('assertWithinRoots rejects with SandboxCheckTimeoutError when realpath never resolves', async () => {
+    __setSandboxTimeoutMsForTests(50)
+    __setSandboxFsImplForTests({ realpath: () => new Promise(() => { /* never resolves */ }) })
+
     const start = Date.now()
-    let threw = false
-    try {
-      await assertWithinRoots('\\\\256.256.256.256\\nonexistent\\share', [ROOT_A])
-    } catch (err) {
-      threw = true
-      expect(err).toBeInstanceOf(Error)
-    }
-    expect(threw).toBe(true)
-    // Must resolve well under the 5s SANDBOX_FS_TIMEOUT_MS bound + slack,
-    // proving the call cannot hang indefinitely.
-    expect(Date.now() - start).toBeLessThan(8000)
-  }, 10_000)
+    await expect(assertWithinRoots(INSIDE, [ROOT_A])).rejects.toBeInstanceOf(SandboxCheckTimeoutError)
+    // Bounded by the (shrunk) timeout, not by however long the hung call
+    // would otherwise have run — proves the race actually wins.
+    expect(Date.now() - start).toBeLessThan(2000)
+  })
+
+  test('assertTargetWithinRoots rejects with SandboxCheckTimeoutError when access never resolves', async () => {
+    __setSandboxTimeoutMsForTests(50)
+    __setSandboxFsImplForTests({ access: () => new Promise(() => { /* never resolves */ }) })
+
+    const start = Date.now()
+    await expect(assertTargetWithinRoots(join(ROOT_A, 'newRepo'), [ROOT_A])).rejects.toBeInstanceOf(SandboxCheckTimeoutError)
+    expect(Date.now() - start).toBeLessThan(2000)
+  })
+
+  test('a real (non-hanging) check still resolves normally once the injected impl is cleared', async () => {
+    // Guards against the injection seam leaking between tests.
+    const r = await assertWithinRoots(INSIDE, [ROOT_A, ROOT_B])
+    expect(r.realRepo).toContain('repoX')
+  })
 })

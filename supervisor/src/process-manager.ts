@@ -588,7 +588,7 @@ export class ProcessManager {
       await assertWithinRoots(spec.repoPath, this.cfg.roots)
     } catch (err) {
       if (err instanceof SandboxCheckTimeoutError) {
-        const detail = { repo_path: spec.repoPath, timeout_ms: err.message }
+        const detail = { repo_path: spec.repoPath, timeout_ms: err.timeoutMs, error: err.message }
         this.cb.onLog('error', `[security] sandbox_check_timeout: ${spec.repoPath} — filesystem check hung, refusing start`, spec.runId)
         this.cb.onStateChange('stopped', {
           runId: spec.runId,
