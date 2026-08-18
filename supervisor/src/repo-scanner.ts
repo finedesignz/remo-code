@@ -387,6 +387,20 @@ function walkRoot(root: string, settings: ScanSettings, compiledGlobs: RegExp[])
  *     settled from that one follow-up scan's result.
  *   - The guard clears in `.finally()`, so a failed/rejected scan can never
  *     wedge it — the queued follow-up (if any) still runs.
+ *
+ * CONTRACT — "latest cfg wins": when several distinct-cfg calls queue behind
+ * one in-flight scan, only the LAST one queued is actually scanned; every
+ * caller that queued (including ones whose own cfg got superseded) is
+ * settled from that single follow-up's result, not from a scan of their own
+ * specific cfg. This is correct for every current call site: all of
+ * `hub-client.ts`'s callers read off the ONE mutating `SupervisorClient`
+ * config, so "the latest cfg" and "MY cfg" are the same object by the time
+ * the follow-up runs. It would be WRONG if a second, independently-configured
+ * `SupervisorClient` (or any caller with genuinely different, still-relevant
+ * roots) ever coexisted in the same process — a superseded caller's cfg would
+ * silently never be honored. There is no such caller today; if one is ever
+ * added, this guard needs a keyed queue (one pending slot per distinct cfg),
+ * not a single one.
  */
 interface QueuedScanRoots {
   cfg: { roots: string[]; scan: ScanSettings }

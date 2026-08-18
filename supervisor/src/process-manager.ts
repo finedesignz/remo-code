@@ -29,31 +29,17 @@ export interface RunSpec {
   }
 }
 
-/**
- * 2026-08-18 QC round 2 follow-up — single source of truth for
- * `StartRejection.reason`, as a runtime array (not just a type) so
- * `hub/test/supervisor-stopped-recovery.test.ts` can import it directly and
- * assert `hub/src/ws/agent.ts`'s `SUPERVISOR_START_REJECT_REASONS` matches
- * it exactly. Round-one D2 was a NEW reason (`sandbox_check_timeout`) added
- * here without the hub-side set being updated — a hardcoded literal array in
- * the hub test caught a hub-side deletion but not a supervisor-side
- * addition, since nothing forced the test's literal to track this file. This
- * makes the hub test derive from the actual source instead of a second
- * hand-copied literal, so the next new reason added here fails the hub
- * test's `toEqual` immediately instead of silently drifting.
- */
-export const START_REJECTION_REASONS = [
-  'sandbox_escape',
-  'sandbox_check_timeout',
-  'not_git_repo',
-  'concurrency_cap',
-  'duplicate_run',
-  'legacy_agent_spawn_disabled',
-  'circuit_open',
-] as const
+// 2026-08-18 QC round 3 (R3-2) — START_REJECTION_REASONS moved to the
+// dependency-free leaf module start-rejection-reasons.ts. Re-exported here
+// so nothing else in the supervisor needs to change its import path; see
+// that file's header comment for why it moved (the hub's cross-package
+// import of this file was pulling in the whole supervisor runtime graph
+// under the hub's tsconfig).
+export { START_REJECTION_REASONS, type StartRejectionReason } from './start-rejection-reasons'
+import type { StartRejectionReason as _StartRejectionReason } from './start-rejection-reasons'
 
 export interface StartRejection {
-  reason: (typeof START_REJECTION_REASONS)[number]
+  reason: _StartRejectionReason
   detail?: Record<string, unknown>
 }
 

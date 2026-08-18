@@ -53,7 +53,14 @@ beforeAll(() => {
   // in-flight regardless of how fast either scan actually completes.
   for (let i = 0; i < 3; i++) makeRepo(rootA, `repo-a${i}`, `git@github.com:AcmeA/RepoA${i}.git`)
   for (let i = 0; i < 3; i++) makeRepo(rootB, `repo-b${i}`, `git@github.com:AcmeB/RepoB${i}.git`)
-})
+  // 2026-08-18 QC round 3 (R3-1) — six real `git init`+config+commit repos is
+  // ~30 spawnSync git calls; that blows Bun's default 5s PER-HOOK budget
+  // standalone (only "passed" before because it happened to run inside the
+  // full ~61s suite, which uses a different effective budget — standalone it
+  // failed 0 pass/1 fail every time, reported as `(unnamed)` so a genuine
+  // regression in the tests themselves would be indistinguishable from this
+  // hook timing out). Explicit hook timeout below; verified standalone.
+}, 60_000)
 
 afterAll(() => {
   try { rmSync(root, { recursive: true, force: true }) } catch {}
