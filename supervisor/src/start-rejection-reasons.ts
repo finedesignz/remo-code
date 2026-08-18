@@ -37,7 +37,15 @@
  * addition) fails that test immediately instead of silently diverging.
  */
 export const START_REJECTION_REASONS = [
-  'sandbox_escape',
+  // 2026-08-18 (repo_path placeholder investigation) — 'sandbox_escape' split
+  // into three finer reasons so a denial in supervisor/audit.jsonl is
+  // self-diagnosing without needing the live supervisor.json at that moment.
+  // See supervisor/src/sandbox.ts SandboxEscapeKind for what distinguishes
+  // them. All three are per-run rejections, same lock-step requirement as
+  // the reason they replace.
+  'sandbox_path_missing',
+  'sandbox_not_under_roots',
+  'sandbox_roots_unresolvable',
   'sandbox_check_timeout',
   'not_git_repo',
   'concurrency_cap',

@@ -63,7 +63,15 @@ export function isHostnameRequiredOnAgentAuth(
 export const SUPERVISOR_START_REJECT_REASONS: ReadonlySet<string> = new Set([
   'concurrency_cap',
   'duplicate_run',
-  'sandbox_escape',
+  // 2026-08-18 (repo_path placeholder investigation) — 'sandbox_escape' split
+  // into three finer per-run rejections (see supervisor/src/sandbox.ts
+  // SandboxEscapeKind); all three carry the exact same "per-run, not
+  // supervisor-wide 'stopped'" semantics the original single reason did, so
+  // all three MUST stay in this set for the same reason 'sandbox_escape'
+  // used to.
+  'sandbox_path_missing',
+  'sandbox_not_under_roots',
+  'sandbox_roots_unresolvable',
   // fix/session-start-freeze (2026-08-18 QC/D2) — the sandbox check (realpath
   // on the repo path / configured roots) hit its own bounded timeout instead
   // of definitively resolving. Per-run rejection, same as 'sandbox_escape' —
