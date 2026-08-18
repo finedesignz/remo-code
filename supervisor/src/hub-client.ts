@@ -8,7 +8,7 @@ import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError, Sandbox
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
 import { getHandler, nativeSupervisorCommands } from './commands/index'
-import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
+import { getConfigPath, saveConfig, type SupervisorConfig } from './config'
 import { log as obs } from './observability/logger'
 import { VERSION } from './version'
 import { pollUsage, USAGE_POLL_INTERVAL_MS, type UsagePayload } from './usage/oauth-poll'
@@ -119,7 +119,7 @@ export class SupervisorClient {
     // Watch supervisor.json for external edits (Tauri Roots panel writes here
     // when the user adds/removes roots or clicks "Rescan now").
     try {
-      const cfgPath = CONFIG_PATH
+      const cfgPath = getConfigPath()
       if (existsSync(cfgPath)) {
         this.configWatcher = fsWatch(cfgPath, { persistent: false }, () => {
           // Coalesce rapid double-fires.
@@ -470,7 +470,7 @@ export class SupervisorClient {
     // Persist to <CONFIG_DIR>/last_inventory.json so the Tauri UI can render
     // the same data via the `get_inventory` IPC command. Best-effort.
     try {
-      const dir = dirname(CONFIG_PATH)
+      const dir = dirname(getConfigPath())
       mkdirSync(dir, { recursive: true })
       writeFileSync(
         join(dir, 'last_inventory.json'),
@@ -679,7 +679,7 @@ export class SupervisorClient {
    */
   private onConfigChanged() {
     let raw: any
-    try { raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) } catch { return }
+    try { raw = JSON.parse(readFileSync(getConfigPath(), 'utf-8')) } catch { return }
     const newRoots: string[] = Array.isArray(raw.roots) ? raw.roots.map(String) : []
     const prevRoots = this.cfg.roots ?? []
     const rootsChanged = newRoots.length !== prevRoots.length ||
