@@ -1,0 +1,89 @@
+# Dependabot configuration for remo-code.
+# One entry per ecosystem + manifest directory found in the repo.
+version: 2
+updates:
+  # --- npm / bun ---------------------------------------------------------
+  # Root package.json declares workspaces ["hub", "web", "mcp"] and owns bun.lock,
+  # so this single entry covers the root plus all three workspace packages.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
+
+  # supervisor/tauri/ui/package.json + its own bun.lock (outside root workspaces)
+  - package-ecosystem: "npm"
+    directory: "/supervisor/tauri/ui"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
+
+  # mobile/tauri/ui/package.json + its own bun.lock (outside root workspaces)
+  - package-ecosystem: "npm"
+    directory: "/mobile/tauri/ui"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
+
+  # --- cargo -------------------------------------------------------------
+  # supervisor/tauri/src-tauri/Cargo.toml + Cargo.lock
+  - package-ecosystem: "cargo"
+    directory: "/supervisor/tauri/src-tauri"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
+
+  # supervisor/tauri/src-tauri/pty-spike/Cargo.toml declares its own [workspace]
+  # and has its own Cargo.lock, so it is a separate update target.
+  - package-ecosystem: "cargo"
+    directory: "/supervisor/tauri/src-tauri/pty-spike"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
+
+  # mobile/tauri/src-tauri/Cargo.toml + Cargo.lock
+  - package-ecosystem: "cargo"
+    directory: "/mobile/tauri/src-tauri"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
+
+  # --- docker ------------------------------------------------------------
+  # Root Dockerfile (only Dockerfile tracked in the repo)
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
+
+  # --- github-actions ----------------------------------------------------
+  # .github/workflows/{mobile-ios-build,release-mobile,release-supervisor}.yml
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
