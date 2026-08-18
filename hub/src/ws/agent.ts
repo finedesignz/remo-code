@@ -63,6 +63,29 @@ export function isHostnameRequiredOnAgentAuth(
 export const SUPERVISOR_START_REJECT_REASONS: ReadonlySet<string> = new Set([
   'concurrency_cap',
   'duplicate_run',
+  // 2026-08-18 (repo_path placeholder investigation) — 'sandbox_escape' split
+  // into three finer per-run rejections (see supervisor/src/sandbox.ts
+  // SandboxEscapeKind); all three carry the exact same "per-run, not
+  // supervisor-wide 'stopped'" semantics the original single reason did, so
+  // all three MUST stay in this set for the same reason 'sandbox_escape'
+  // used to.
+  'sandbox_path_missing',
+  'sandbox_not_under_roots',
+  'sandbox_roots_unresolvable',
+  // BACKWARD COMPAT — the hub serves supervisors that are already deployed
+  // and do NOT upgrade atomically with the hub. The current released
+  // supervisor (v0.14.4; v0.14.5 exists but is not yet installed fleet-wide
+  // as of this fix) still emits the literal 'sandbox_escape' — it predates
+  // the three-way split above. If this hub build drops 'sandbox_escape' from
+  // its accepted set, every rejection from a not-yet-upgraded supervisor
+  // becomes an UNRECOGNIZED reason, which `isStartRejectStateMessage` then
+  // treats as a genuine supervisor-lifecycle stop instead of a per-run
+  // rejection — persisting the whole supervisor row as `state='stopped'`.
+  // That is exactly the 2026-05-28 prod failure this set exists to prevent,
+  // now for version skew instead of a missing reason. Retained here even
+  // though the CURRENT supervisor code (start-rejection-reasons.ts) no
+  // longer emits it — remove only once no fleet supervisor older than the
+  // release carrying the three-way split can still be running.
   'sandbox_escape',
   // fix/session-start-freeze (2026-08-18 QC/D2) — the sandbox check (realpath
   // on the repo path / configured roots) hit its own bounded timeout instead

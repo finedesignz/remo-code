@@ -47,6 +47,8 @@
  * scaled to >1 replica, replace this Set with a DB advisory lock /
  * `INSERT ... ON CONFLICT` sentinel keyed by session_id.
  */
+import { isAbsolute as isAbsolutePosix } from 'node:path/posix'
+import { isAbsolute as isAbsoluteWin32 } from 'node:path/win32'
 import { getChannel } from '../ws/registry.ts'
 import { log } from '../observability/logger.ts'
 
@@ -106,6 +108,29 @@ async function resolveStartTarget(
   if (!session) return null
   const cwd = (session as any).project_dir as string | null
   if (!cwd) return null
+  // Root-cause fix (repo_path placeholder investigation): a session's
+  // project_dir is sometimes a non-filesystem sentinel rather than a real
+  // repo path — e.g. the `__web_self__` row hub/scripts/ensure-web-error-project.ts
+  // provisions purely as an FK anchor for browser-side error capture
+  // (status='offline', "this session never connects" by design). If an
+  // inbound error/feedback/revanote dispatch resolves such a session and we
+  // still forward `session.start` with that literal string as repo_path, the
+  // supervisor's `assertWithinRoots` correctly rejects it as `sandbox_escape`
+  // — but that's a false-positive security denial for a session that was
+  // never launchable, not a real sandbox-boundary violation. It also pollutes
+  // supervisor/audit.jsonl with a placeholder repo_path indistinguishable
+  // from genuine escape attempts. A session's cwd MUST be a real absolute
+  // filesystem path before we dispatch a launch for it — refuse (no target,
+  // no dispatch, no audit noise) rather than forwarding a placeholder.
+  // The hub runs on Linux (Coolify) but supervisors — and therefore
+  // project_dir values — can be Windows or POSIX machines, so check both
+  // conventions rather than the host platform's `node:path` (which would
+  // wrongly reject every legitimate Windows repo path like
+  // `C:\Users\artic\GitHub\ottolax` on a Linux hub).
+  if (!isAbsolutePosix(cwd) && !isAbsoluteWin32(cwd)) {
+    log.info('spawn_on_error.non_path_project_dir', { user_id: userId, session_id: sessionId, project_dir: cwd })
+    return null
+  }
   const sessionSkipPerms = (session as any).dangerously_skip_permissions === true
 
   return { supervisorId, cwd, sessionSkipPerms }
