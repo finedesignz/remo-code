@@ -29,8 +29,31 @@ export interface RunSpec {
   }
 }
 
+/**
+ * 2026-08-18 QC round 2 follow-up — single source of truth for
+ * `StartRejection.reason`, as a runtime array (not just a type) so
+ * `hub/test/supervisor-stopped-recovery.test.ts` can import it directly and
+ * assert `hub/src/ws/agent.ts`'s `SUPERVISOR_START_REJECT_REASONS` matches
+ * it exactly. Round-one D2 was a NEW reason (`sandbox_check_timeout`) added
+ * here without the hub-side set being updated — a hardcoded literal array in
+ * the hub test caught a hub-side deletion but not a supervisor-side
+ * addition, since nothing forced the test's literal to track this file. This
+ * makes the hub test derive from the actual source instead of a second
+ * hand-copied literal, so the next new reason added here fails the hub
+ * test's `toEqual` immediately instead of silently drifting.
+ */
+export const START_REJECTION_REASONS = [
+  'sandbox_escape',
+  'sandbox_check_timeout',
+  'not_git_repo',
+  'concurrency_cap',
+  'duplicate_run',
+  'legacy_agent_spawn_disabled',
+  'circuit_open',
+] as const
+
 export interface StartRejection {
-  reason: 'sandbox_escape' | 'sandbox_check_timeout' | 'not_git_repo' | 'concurrency_cap' | 'duplicate_run' | 'legacy_agent_spawn_disabled' | 'circuit_open'
+  reason: (typeof START_REJECTION_REASONS)[number]
   detail?: Record<string, unknown>
 }
 

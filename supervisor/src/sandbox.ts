@@ -68,12 +68,30 @@ let _realpath: typeof realpathAsync = realpathAsync
 let _access: typeof access = access
 let _timeoutMs: number = DEFAULT_SANDBOX_FS_TIMEOUT_MS
 
+// 2026-08-18 QC round 2 (D4-R2): the seam above shipped as an unconditional
+// mutable hook on a security boundary — callable from any code path in
+// production with zero guard, zero NODE_ENV check. That turns a
+// zero-mutable-state security module into one with a writable override
+// (not an escalation on its own, since it needs in-process code execution to
+// reach — but it should never have existed as a live production capability
+// at all). Hard-fail outside `NODE_ENV=test` (which `bun test` — and every
+// other JS test runner's convention — sets automatically; verified this is
+// true for `bun test` in this repo) so these can only ever be called from a
+// test process, never from the shipped supervisor binary at runtime.
+function assertTestEnv(fnName: string): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error(`${fnName} is test-only and must never be called outside NODE_ENV=test`)
+  }
+}
+
 export function __setSandboxFsImplForTests(impl: { realpath?: typeof realpathAsync; access?: typeof access } | null): void {
+  assertTestEnv('__setSandboxFsImplForTests')
   _realpath = impl?.realpath ?? realpathAsync
   _access = impl?.access ?? access
 }
 
 export function __setSandboxTimeoutMsForTests(ms: number | null): void {
+  assertTestEnv('__setSandboxTimeoutMsForTests')
   _timeoutMs = ms ?? DEFAULT_SANDBOX_FS_TIMEOUT_MS
 }
 

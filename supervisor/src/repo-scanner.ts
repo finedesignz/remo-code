@@ -16,6 +16,14 @@ const INTROSPECT_CONCURRENCY = 8
  * backstop against unbounded growth if a long-lived process scans many
  * different roots over its lifetime (scratch dirs, temp clones, etc.), not a
  * bound expected to bind in normal operation.
+ *
+ * D6-R2 (QC round 2, comment correction) — eviction below is FIFO by FIRST
+ * INSERTION, not "oldest by use": `Map.set()` on an already-present key does
+ * NOT move it in iteration order, only replaces its value, so a refreshed
+ * hot entry keeps its original position and can be evicted before a colder
+ * entry inserted later. Purely cosmetic at the scale this actually runs at
+ * (cache size never approaches this cap — see above), but the eviction
+ * policy is FIFO, not LRU; don't rely on it behaving like the latter.
  */
 const INTROSPECT_CACHE_MAX_ENTRIES = 2_000
 
@@ -98,7 +106,7 @@ async function introspectCached(path: string): Promise<GitIntrospection> {
   }
   const result = await introspect(path)
   if (introspectCache.size >= INTROSPECT_CACHE_MAX_ENTRIES && !introspectCache.has(path)) {
-    // Evict oldest (Maps preserve insertion order) to keep the cache bounded.
+    // FIFO eviction by first-insertion order — see D6-R2 note above.
     const oldest = introspectCache.keys().next().value
     if (oldest !== undefined) introspectCache.delete(oldest)
   }
@@ -349,28 +357,85 @@ function walkRoot(root: string, settings: ScanSettings, compiledGlobs: RegExp[])
  *      dropped — we don't want to flood the hub with every workspace folder.
  */
 /**
- * 2026-08-18 QC (D7) — `scanRoots()` is re-entrant now that it no longer
- * blocks: `hub-client.ts` fires `void this.sendRepoInventory()` from three
- * separate call sites (initial `auth_ok`, config-change re-emit, rescan
- * request) with no coordination between them. Before this PR, the previous
- * blocking implementation serialized overlapping calls BY ACCIDENT — one
- * scan monopolized the process, so a second couldn't even start until the
- * first returned. Now two overlapping reconnects could otherwise run two
- * full scans concurrently (16 git children instead of 8). Guard with a
- * single in-flight promise: a `scanRoots()` call that lands while one is
- * already running just awaits the SAME promise instead of starting a second
- * scan. Safe because `cfg` is process-wide in practice (the caller always
- * passes `this.cfg`); if it ever needs to support genuinely different
- * concurrent configs this would need a keyed guard instead of a single one.
+ * 2026-08-18 QC (D7, revised after D7-R2) — `scanRoots()` is re-entrant now
+ * that it no longer blocks: `hub-client.ts` fires `void this.sendRepoInventory()`
+ * from three separate call sites (initial `auth_ok`, config-change re-emit,
+ * rescan request) with no coordination between them. Before this PR, the
+ * previous blocking implementation serialized overlapping calls BY ACCIDENT
+ * — one scan monopolized the process, so a second couldn't even start until
+ * the first returned. Now two overlapping reconnects could otherwise run two
+ * full scans concurrently (16 git children instead of 8).
+ *
+ * D7-R2 (QC round 2, BLOCKER): the first version of this guard returned the
+ * SAME in-flight promise for ANY call while one was running, without
+ * comparing `cfg` — so a `set_roots` call landing mid-scan got back the
+ * FIRST caller's (stale) roots, silently. That's exactly the case this guard
+ * must not break: `set_roots`/rescan exist precisely because the cached
+ * answer is not good enough anymore. On `main` this could not happen — the
+ * blocking scan serialized overlapping calls, so a second call always ran
+ * fresh once the first returned.
+ *
+ * Fixed: the guard is now keyed on `cfg` (roots + scan settings).
+ *   - A call whose cfg matches the in-flight scan's cfg shares that promise
+ *     (the dedup this guard exists for).
+ *   - A call with a DIFFERENT cfg while a scan is running does NOT start a
+ *     second concurrent scan (that would defeat the guard's purpose) —
+ *     instead it queues behind the current one. At most one scan is queued;
+ *     a further call while one is already queued merges into it (only the
+ *     LATEST cfg is actually scanned — an intermediate cfg is moot once a
+ *     newer one has superseded it), and every caller that queued gets
+ *     settled from that one follow-up scan's result.
+ *   - The guard clears in `.finally()`, so a failed/rejected scan can never
+ *     wedge it — the queued follow-up (if any) still runs.
  */
-let scanRootsInFlight: Promise<RepoEntry[]> | null = null
+interface QueuedScanRoots {
+  cfg: { roots: string[]; scan: ScanSettings }
+  key: string
+  resolvers: Array<(p: Promise<RepoEntry[]>) => void>
+}
+
+let scanRootsInFlight: { key: string; promise: Promise<RepoEntry[]> } | null = null
+let scanRootsQueued: QueuedScanRoots | null = null
+
+function scanRootsCfgKey(cfg: { roots: string[]; scan: ScanSettings }): string {
+  return JSON.stringify({ roots: cfg.roots, scan: cfg.scan })
+}
 
 export function scanRoots(cfg: { roots: string[]; scan: ScanSettings }): Promise<RepoEntry[]> {
-  if (scanRootsInFlight) return scanRootsInFlight
+  const key = scanRootsCfgKey(cfg)
+
+  if (!scanRootsInFlight) {
+    return startScanRoots(cfg, key)
+  }
+  if (scanRootsInFlight.key === key) {
+    return scanRootsInFlight.promise
+  }
+
+  // Different cfg while a scan is running — queue exactly one follow-up
+  // (using the latest cfg), settle every queued caller from its result.
+  return new Promise<RepoEntry[]>((resolve, reject) => {
+    const resolver = (p: Promise<RepoEntry[]>) => p.then(resolve, reject)
+    if (scanRootsQueued) {
+      scanRootsQueued.cfg = cfg
+      scanRootsQueued.key = key
+      scanRootsQueued.resolvers.push(resolver)
+    } else {
+      scanRootsQueued = { cfg, key, resolvers: [resolver] }
+    }
+  })
+}
+
+function startScanRoots(cfg: { roots: string[]; scan: ScanSettings }, key: string): Promise<RepoEntry[]> {
   const p = scanRootsInner(cfg).finally(() => {
     scanRootsInFlight = null
+    if (scanRootsQueued) {
+      const next = scanRootsQueued
+      scanRootsQueued = null
+      const nextPromise = startScanRoots(next.cfg, next.key)
+      for (const resolver of next.resolvers) resolver(nextPromise)
+    }
   })
-  scanRootsInFlight = p
+  scanRootsInFlight = { key, promise: p }
   return p
 }
 

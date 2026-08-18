@@ -23,6 +23,14 @@ import {
   isStartRejectStateMessage,
   SUPERVISOR_START_REJECT_REASONS,
 } from '../src/ws/agent.ts'
+// 2026-08-18 QC round 2 follow-up — import the supervisor's actual runtime
+// source of truth instead of a second hand-copied literal array. Round-one
+// D2 was exactly this drift: a new reason added supervisor-side with no hub
+// update, and a hardcoded-literal test couldn't catch it because nothing
+// forced the literal to track the supervisor's type. This makes the
+// assertion below fail the moment the two definitions diverge in either
+// direction (a hub-side deletion OR a supervisor-side addition).
+import { START_REJECTION_REASONS } from '../../supervisor/src/process-manager.ts'
 
 describe('isStartRejectStateMessage', () => {
   test('treats concurrency_cap as start-reject (the prod symptom)', () => {
@@ -79,17 +87,14 @@ describe('isStartRejectStateMessage', () => {
   })
 
   test('reason set matches process-manager.ts StartRejection union', () => {
-    // Lock-step contract with supervisor/src/process-manager.ts:33.
-    // If the supervisor adds a new StartRejection reason, this test fails
-    // loudly so the hub mirror is updated in lock-step.
-    expect([...SUPERVISOR_START_REJECT_REASONS].sort()).toEqual([
-      'circuit_open',
-      'concurrency_cap',
-      'duplicate_run',
-      'legacy_agent_spawn_disabled',
-      'not_git_repo',
-      'sandbox_check_timeout',
-      'sandbox_escape',
-    ])
+    // Lock-step contract with supervisor/src/process-manager.ts's
+    // START_REJECTION_REASONS (the runtime source of truth for
+    // StartRejection.reason). Derived from the actual export, not a second
+    // hand-copied literal — see the import comment above. If the supervisor
+    // adds or removes a reason, this test fails loudly so the hub mirror is
+    // updated in lock-step, in EITHER direction.
+    expect([...SUPERVISOR_START_REJECT_REASONS].sort()).toEqual(
+      [...START_REJECTION_REASONS].sort(),
+    )
   })
 })

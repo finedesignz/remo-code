@@ -199,6 +199,17 @@ export function resolveGitCacheKeyPaths(cwd: string): GitCacheKeyPaths {
         if (target.includes('/.git/worktrees/') || target.includes('\\.git\\worktrees\\')) {
           // `.../<repo>/.git/worktrees/<name>` → up two levels is `.../<repo>/.git`,
           // where the shared (canonical) config lives.
+          //
+          // 2026-08-18 QC round 2 — known gap, not fixed here: git's
+          // `extensions.worktreeConfig` feature (opt-in, `git config
+          // extensions.worktreeConfig true`) lets a worktree override
+          // `remote.origin.url` (and other keys) in its OWN
+          // `.git/worktrees/<name>/config.worktree`, which this key does not
+          // stat. If that extension is enabled and a worktree overrides its
+          // remote, a change there won't invalidate the cache. Not addressed
+          // in this PR — the extension is off by default and none of the
+          // repos this scanner runs against enable it; flagging so it isn't
+          // rediscovered as a surprise later.
           const commonGitDir = dirname(dirname(target))
           return { headPath: join(target, 'HEAD'), configPath: join(commonGitDir, 'config') }
         }
