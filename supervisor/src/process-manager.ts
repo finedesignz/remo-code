@@ -1,7 +1,7 @@
 import { existsSync } from 'fs'
 import { join } from 'path'
 import type { SupervisorConfig } from './config'
-import { assertWithinRoots, SandboxEscapeError } from './sandbox'
+import { assertWithinRoots, SandboxEscapeError, SandboxCheckTimeoutError } from './sandbox'
 import { appendAudit, hashPrompt, type AuditEntry } from './audit'
 import { SessionBridge, type SessionBridgeCallbacks, type SessionBridgeOptions } from './runners/session-bridge'
 
@@ -30,7 +30,7 @@ export interface RunSpec {
 }
 
 export interface StartRejection {
-  reason: 'sandbox_escape' | 'not_git_repo' | 'concurrency_cap' | 'duplicate_run' | 'legacy_agent_spawn_disabled' | 'circuit_open'
+  reason: 'sandbox_escape' | 'sandbox_check_timeout' | 'not_git_repo' | 'concurrency_cap' | 'duplicate_run' | 'legacy_agent_spawn_disabled' | 'circuit_open'
   detail?: Record<string, unknown>
 }
 
@@ -585,8 +585,19 @@ export class ProcessManager {
     }
 
     try {
-      assertWithinRoots(spec.repoPath, this.cfg.roots)
+      await assertWithinRoots(spec.repoPath, this.cfg.roots)
     } catch (err) {
+      if (err instanceof SandboxCheckTimeoutError) {
+        const detail = { repo_path: spec.repoPath, timeout_ms: err.message }
+        this.cb.onLog('error', `[security] sandbox_check_timeout: ${spec.repoPath} — filesystem check hung, refusing start`, spec.runId)
+        this.cb.onStateChange('stopped', {
+          runId: spec.runId,
+          repoPath: spec.repoPath,
+          lastExit: { code: null, reason: 'sandbox_check_timeout' },
+        })
+        this.writeAudit(spec, false, 'sandbox_check_timeout')
+        return { reason: 'sandbox_check_timeout', detail }
+      }
       const e = err as SandboxEscapeError
       const detail = { repo_path: spec.repoPath, real_path: e.realPath, allowed_roots: e.allowedRoots }
       this.cb.onLog('error', `[security] sandbox_escape: ${spec.repoPath} not within allowed roots ${JSON.stringify(e.allowedRoots)}`, spec.runId)

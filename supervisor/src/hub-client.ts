@@ -4,7 +4,7 @@ import { writeFileSync, mkdirSync, watch as fsWatch, existsSync, readFileSync } 
 import { dirname, join } from 'path'
 import { scanAll, scanRoots } from './repo-scanner'
 import { cloneRepo, pullRepo, pullLocal, checkoutBranch, listBranches, isDirty } from './git-ops'
-import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError } from './sandbox'
+import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError, SandboxCheckTimeoutError } from './sandbox'
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
 import { getHandler, nativeSupervisorCommands } from './commands/index'
@@ -600,13 +600,18 @@ export class SupervisorClient {
    * (writing privileged dirs) even though the subsequent `session.start`
    * would be blocked. Per supervisor audit 2026-05-28.
    */
-  private rejectIfEscape(op: string, reqId: string, path: string, target: 'existing' | 'target'): boolean {
+  private async rejectIfEscape(op: string, reqId: string, path: string, target: 'existing' | 'target'): Promise<boolean> {
     try {
       const roots = this.cfg.roots ?? []
-      if (target === 'target') assertTargetWithinRoots(path, roots)
-      else assertWithinRoots(path, roots)
+      if (target === 'target') await assertTargetWithinRoots(path, roots)
+      else await assertWithinRoots(path, roots)
       return false
     } catch (err) {
+      if (err instanceof SandboxCheckTimeoutError) {
+        this.log('error', `${op}: sandbox_check_timeout: ${path}`)
+        this.send({ type: 'repo.op_result', req_id: reqId, op, ok: false, error: 'sandbox_check_timeout' })
+        return true
+      }
       if (err instanceof SandboxEscapeError) {
         this.log('warn', `${op}: sandbox_escape: ${path}`)
         this.send({ type: 'repo.op_result', req_id: reqId, op, ok: false, error: 'sandbox_escape' })
@@ -618,26 +623,26 @@ export class SupervisorClient {
   }
 
   private async onRepoClone(msg: { req_id: string; clone_url: string; target_path: string; repo_full_name: string }) {
-    if (this.rejectIfEscape('clone', msg.req_id, msg.target_path, 'target')) return
+    if (await this.rejectIfEscape('clone', msg.req_id, msg.target_path, 'target')) return
     this.send({ type: 'repo.clone_progress', req_id: msg.req_id, stage: 'cloning' })
     const res = await cloneRepo(msg.clone_url, msg.target_path)
     this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'clone', ok: res.ok, error: res.error, data: res.data })
   }
 
   private async onRepoPull(msg: { req_id: string; repo_path: string; branch: string; clone_url: string }) {
-    if (this.rejectIfEscape('pull', msg.req_id, msg.repo_path, 'existing')) return
+    if (await this.rejectIfEscape('pull', msg.req_id, msg.repo_path, 'existing')) return
     const res = await pullRepo(msg.repo_path, msg.branch, msg.clone_url)
     this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'pull', ok: res.ok, error: res.error })
   }
 
   private async onBranchCheckout(msg: { req_id: string; repo_path: string; branch: string; create: boolean }) {
-    if (this.rejectIfEscape('checkout', msg.req_id, msg.repo_path, 'existing')) return
+    if (await this.rejectIfEscape('checkout', msg.req_id, msg.repo_path, 'existing')) return
     const res = await checkoutBranch(msg.repo_path, msg.branch, msg.create)
     this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'checkout', ok: res.ok, error: res.error })
   }
 
   private async onListBranches(msg: { req_id: string; repo_path: string }) {
-    if (this.rejectIfEscape('list_branches', msg.req_id, msg.repo_path, 'existing')) return
+    if (await this.rejectIfEscape('list_branches', msg.req_id, msg.repo_path, 'existing')) return
     try {
       const data = await listBranches(msg.repo_path)
       this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'list_branches', ok: true, data })
@@ -757,8 +762,13 @@ export class SupervisorClient {
     // The folder already exists (it's an unpushed local repo), so use the
     // existing-path assertion. No git runs if this throws.
     try {
-      assertWithinRoots(msg.local_path, this.cfg.roots ?? [])
+      await assertWithinRoots(msg.local_path, this.cfg.roots ?? [])
     } catch (err) {
+      if (err instanceof SandboxCheckTimeoutError) {
+        this.log('error', `create_local_repo_and_push: sandbox_check_timeout: ${msg.local_path}`)
+        this.send({ type: 'repo_create_failed', job_id: jobId, stage: 'validating_scope', error: 'sandbox_check_timeout' })
+        return
+      }
       if (err instanceof SandboxEscapeError) {
         this.log('warn', `create_local_repo_and_push: sandbox_escape: ${msg.local_path}`)
         this.send({ type: 'repo_create_failed', job_id: jobId, stage: 'validating_scope', error: 'sandbox_escape' })
