@@ -78,17 +78,21 @@
 ; later, unrelated code that Pops expecting its own values. Every ExecToStack call in
 ; this file now Pops both values it pushes, every time, with no exceptions.
 ;
-; BOUNDED WAIT: taskkill /F sends TerminateProcess and normally returns only once the
-; process is gone, so no extra loop is needed for the common case. But TerminateProcess
-; can still race a process that is mid-cleanup (e.g. an antivirus filter driver holding
-; the handle a moment longer, or an unanticipated respawn path), so we poll for up to 5
-; seconds after the kills to confirm both are actually gone before NSIS starts copying.
-; If either reappears mid-wait, the loop re-issues both kills (tray first, same
-; reasoning as above) rather than just observing and giving up. If the timeout elapses
-; the process is still logged as unresolved and we proceed rather than hang the
-; installer — NSIS's own file-write failure (if it still occurs) is the existing,
-; visible fallback signal, which is strictly better than an installer that never
-; returns.
+; BOUNDED WAIT, THEN ABORT (NOT PROCEED): taskkill /F sends TerminateProcess and
+; normally returns only once the process is gone, so no extra loop is needed for the
+; common case. But TerminateProcess can still race a process that is mid-cleanup
+; (e.g. an antivirus filter driver holding the handle a moment longer, or an
+; unanticipated respawn path), so we poll for up to 5 seconds after the kills to
+; confirm both are actually gone before NSIS starts copying. If either reappears
+; mid-wait, the loop re-issues both kills (tray first, same reasoning as above)
+; rather than just observing and giving up. If the timeout elapses with a managed
+; process still present, the hook does NOT let the install proceed — an earlier
+; version fell through to "proceed anyway" here, which is exactly the half-applied
+; upgrade this hook exists to prevent (a still-locked file gets silently skipped by
+; NSIS with no visible error). Instead it calls `Abort`, which halts the
+; install/uninstall outright and sets the process exit code to 2 (NSIS's documented
+; "aborted by script" value), so both an interactive user and an automated/silent
+; caller get a clear, unambiguous failure instead of a silent half-apply.
 ;
 ; SHARED BETWEEN INSTALL AND UNINSTALL: the same stop-and-wait logic backs both
 ; NSIS_HOOK_PREINSTALL and NSIS_HOOK_PREUNINSTALL via the REMO_STOP_AND_WAIT macro
@@ -171,13 +175,50 @@
     Goto remo_wait_loop_${UN}
 
   remo_wait_timeout_${UN}:
-    ; Do not hang the installer waiting forever. Log clearly and proceed; if a
-    ; handle is genuinely still held, NSIS's own file-write failure surfaces next
-    ; (the pre-existing, visible signal) instead of this hook blocking silently.
-    DetailPrint "Remo Code Supervisor: a managed process did not exit within 5s; proceeding anyway."
-    IfSilent remo_wait_done_${UN} 0
-    MessageBox MB_OK|MB_ICONEXCLAMATION "Remo Code Supervisor could not confirm the running app fully stopped.$\r$\nThe installer will continue, but if it reports a file-in-use error, close Remo Code Supervisor from the system tray and run the installer again."
-    Goto remo_wait_done_${UN}
+    ; Do NOT hang the installer forever, but do NOT proceed either. A "safety
+    ; check" that gives up after 5s and lets the install continue is not a safety
+    ; check - it is a delay with a log line, and it recreates the exact
+    ; half-applied-upgrade failure this hook exists to prevent: NSIS would copy
+    ; over a file a still-running process holds locked, silently skip that one
+    ; file, and leave a mismatched tray/sidecar pair behind with no visible
+    ; error. Abort instead: with the tray-first kill order and the respawn
+    ; re-kill above, a genuine 5s timeout means something is truly wedged (a
+    ; hung process, an AV hold, a permissions problem) - the correct response is
+    ; to stop and let the user retry or reboot into a clean state, not to gamble
+    ; on NSIS's own file-write failure still catching it.
+    ;
+    ; Re-check both binaries one more time so the message below names exactly
+    ; which one is still stuck, rather than a generic "something is running".
+    !insertmacro REMO_CHECK_PRESENT "remo-supervisor-tauri.exe" $2
+    !insertmacro REMO_CHECK_PRESENT "remo-code-supervisor.exe" $3
+    StrCpy $4 ""
+    StrCmp $2 "1" 0 +2
+      StrCpy $4 "$4- Remo Code Supervisor (tray)$\r$\n"
+    StrCmp $3 "1" 0 +2
+      StrCpy $4 "$4- Remo Code Supervisor (sidecar)$\r$\n"
+
+    DetailPrint "Remo Code Supervisor: could not stop the running app within 5s - aborting rather than risk a half-applied upgrade."
+
+    ; Silent installs (/S) - the scripted/IT-deploy path where a half-apply is
+    ; most likely to go unnoticed - must fail rather than continue quietly, and
+    ; must not pop a dialog (that would defeat the point of /S and could hang an
+    ; unattended run waiting on a click nobody will give). `Abort` alone already
+    ; sets the installer's exit code to 2 ("aborted by script", NSIS's documented
+    ; behavior for any script-driven Abort, distinct from the user-cancel value
+    ; of 1) - no separate SetErrorLevel call is needed or added, so an automated
+    ; caller can detect the failure from the process exit code alone.
+    IfSilent remo_wait_abort_${UN} 0
+    MessageBox MB_OK|MB_ICONSTOP "Remo Code Supervisor could not be fully stopped, so the install cannot continue safely:$\r$\n$\r$\n$4$\r$\nClose it from the system tray (or reboot), then run the installer again."
+
+    remo_wait_abort_${UN}:
+    ; `Abort "message"` halts the Section immediately and shows the message in
+    ; the installer's own status/details display (not a second MessageBox - it
+    ; does not duplicate the dialog just shown above for the interactive case,
+    ; and is silently skipped in /S besides still halting and setting the exit
+    ; code). Valid from a Section (which is where Tauri's generated
+    ; installer.nsi inserts NSIS_HOOK_PREINSTALL / NSIS_HOOK_PREUNINSTALL) as
+    ; well as an uninstall Section, so this is safe and equivalent in both hooks.
+    Abort "Remo Code Supervisor is still running and could not be stopped."
 
   remo_wait_done_${UN}:
     DetailPrint "Remo Code Supervisor: stop check complete."
