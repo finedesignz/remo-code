@@ -12,6 +12,7 @@ import {
   _flushPendingForTest,
   _resetForTest,
   _getDayCountForTest,
+  _forceDayWindowStaleForTest,
 } from '../src/agentautofix/reporter';
 
 const { config } = (await import('../src/config')) as any;
@@ -325,5 +326,108 @@ describe('reportSelfErrorToAgentautofix noise filter', () => {
     _flushPendingForTest('fp-real');
     await new Promise((r) => setTimeout(r, 0));
     expect(calls.length).toBe(1);
+  });
+
+  // Regression for the unanchored `/\baborted\b/i.test(value)` defect: a
+  // legitimate error whose MESSAGE merely contains the word "aborted" must
+  // still be forwarded, not silently dropped as noise.
+  test('a Postgres "transaction is aborted" error is forwarded, not dropped (unanchored-match regression)', async () => {
+    await reportSelfErrorToAgentautofix({
+      fingerprint: 'fp-pg-aborted',
+      errorType: 'Error',
+      errorValue: 'current transaction is aborted, commands ignored until end of transaction block',
+      source: 'hono',
+    });
+    _flushPendingForTest('fp-pg-aborted');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.length).toBe(1);
+  });
+
+  test('a "Job aborted due to timeout" error is forwarded, not dropped (unanchored-match regression)', async () => {
+    await reportSelfErrorToAgentautofix({
+      fingerprint: 'fp-job-aborted',
+      errorType: 'Error',
+      errorValue: 'Job aborted due to timeout',
+      source: 'hono',
+    });
+    _flushPendingForTest('fp-job-aborted');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.length).toBe(1);
+  });
+
+  test('a genuine AbortError (discrete errorType) is still filtered — noise filter still works', async () => {
+    await reportSelfErrorToAgentautofix({
+      fingerprint: 'fp-genuine-abort',
+      errorType: 'AbortError',
+      errorValue: 'This operation was aborted',
+      source: 'hono',
+    });
+    _flushPendingForTest('fp-genuine-abort');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.length).toBe(0);
+  });
+
+  test('a genuine "read ECONNRESET" is still filtered — noise filter still works', async () => {
+    await reportSelfErrorToAgentautofix({
+      fingerprint: 'fp-genuine-econnreset',
+      errorType: 'Error',
+      errorValue: 'read ECONNRESET',
+      source: 'hono',
+    });
+    _flushPendingForTest('fp-genuine-econnreset');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.length).toBe(0);
+  });
+});
+
+describe('reportSelfErrorToAgentautofix day-window rollback identity (Finding 2)', () => {
+  test('a rollback after the day window rolls over does not decrement the NEW window, and dayCount never goes negative', async () => {
+    // Reservation #1: fetch hangs so we can roll the day window over while
+    // it's still in flight, then release it to a 429 (rollback path).
+    let releaseFirstFetch!: () => void;
+    const firstFetchGate = new Promise<void>((resolve) => {
+      releaseFirstFetch = resolve;
+    });
+    let fetchCallCount = 0;
+    // @ts-expect-error test stub
+    globalThis.fetch = async (_url: string, init: any) => {
+      fetchCallCount += 1;
+      if (fetchCallCount === 1) {
+        await firstFetchGate;
+        return new Response(JSON.stringify({ ok: false }), { status: 429 });
+      }
+      calls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    const fields = { fingerprint: 'fp-window-rollover', errorType: 'Error', errorValue: 'boom', source: 'hono' };
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-window-rollover'); // reserves dayCount=1 in window A, fetch hangs (in flight)
+
+    expect(_getDayCountForTest()).toBe(1);
+
+    // Roll the day window over WHILE #1 is still in flight, then make a
+    // fresh reservation that belongs to the NEW window.
+    _forceDayWindowStaleForTest();
+    const fields2 = { fingerprint: 'fp-window-rollover-2', errorType: 'Error', errorValue: 'boom2', source: 'hono' };
+    await reportSelfErrorToAgentautofix(fields2);
+    _flushPendingForTest('fp-window-rollover-2'); // resetDayWindowIfStale() fires here -> dayCount reset to 0, then reserved to 1
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(_getDayCountForTest()).toBe(1); // new window's own reservation, sent successfully
+
+    // Release #1's hung fetch — it 429s and tries to roll back. #1's
+    // reservation belongs to the OLD (now-gone) window, so this rollback
+    // must be a no-op against the NEW window's counter: it must NOT
+    // decrement the new window's legitimate count, and must never go
+    // negative.
+    releaseFirstFetch();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(_getDayCountForTest()).toBe(1); // unchanged by the stale rollback
+    expect(_getDayCountForTest()).toBeGreaterThanOrEqual(0);
   });
 });

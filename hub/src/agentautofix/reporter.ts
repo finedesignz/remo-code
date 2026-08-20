@@ -35,6 +35,13 @@ const AGGREGATION_WINDOW_MS = 45 * 1000 // coalesce a burst of the same fingerpr
 const lastSentAt = new Map<string, number>()
 let dayWindowStart = Date.now()
 let dayCount = 0
+// Monotonic identity for the current day window, bumped every time
+// `resetDayWindowIfStale()` actually rolls the window over. A rollback must
+// only apply to the window it was reserved against; comparing `dayWindowStart`
+// timestamps directly is not reliable for that (two resets landing in the
+// same coarse timer tick — observed on Windows — can produce an identical
+// `Date.now()` value for what are genuinely two different windows).
+let dayWindowGeneration = 0
 
 // Fingerprints with a send currently between "reservation taken" and
 // "fetch settled" (success/429-rollback/error-rollback). Lets a blocked
@@ -54,9 +61,26 @@ const pendingAggregates = new Map<string, PendingAggregate>()
  * Known-benign classes to drop before ever scheduling a report. This
  * forwarder is server-only (Bun/Hono hub process) — deliberately NOT the
  * browser-error noise list (no ResizeObserver/extension-origin heuristics
- * apply server-side):
- *  - AbortError / aborted fetches — a client disconnecting mid-request is
- *    expected traffic shape, not a defect.
+ * apply server-side).
+ *
+ * RULE (applies to every predicate below, no exceptions): prefer matching on
+ * the DISCRETE `errorType` field, since that's a classification the runtime
+ * already made for us and can't be fooled by a diagnostic string that merely
+ * mentions the word. Only fall back to a message-text match when the message
+ * SHAPE itself — not a substring anywhere in free text — is genuinely
+ * diagnostic of the benign class, and even then the match is anchored to the
+ * start of the (trimmed) string. An unanchored `/\bword\b/.test(fullMessage)`
+ * is never acceptable here: a real error can legitimately CONTAIN a noise
+ * keyword in its own message (e.g. Postgres's "current transaction is
+ * aborted, commands ignored until end of transaction block", or "Job aborted
+ * due to timeout") without itself being the benign class — those must reach
+ * AgentAutofix, not vanish silently.
+ *
+ *  - AbortError — a client disconnecting mid-request (fetch AbortController)
+ *    is expected traffic shape, not a defect. Matched on `errorType` only
+ *    (the discrete field Node/undici already set for us) — never on message
+ *    text, since "aborted" is a common word in unrelated real errors (see
+ *    RULE above).
  *  - ECONNRESET — the remote peer closed the socket (client nav-away,
  *    supervisor reconnect); not something a code fix addresses. Matched only
  *    when the error VALUE *is* the raw socket error (Node's own message
@@ -75,7 +99,7 @@ const pendingAggregates = new Map<string, PendingAggregate>()
 function isNoise(fields: SelfErrorForward): boolean {
   const type = fields.errorType || ''
   const value = fields.errorValue || ''
-  if (/\bAbortError\b/i.test(type) || /\baborted\b/i.test(value)) return true
+  if (/\bAbortError\b/i.test(type)) return true
   if (/^(?:read |write )?ECONNRESET\b/i.test(value.trim())) return true
   return false
 }
@@ -94,6 +118,7 @@ function resetDayWindowIfStale(): void {
   if (now - dayWindowStart > 24 * 60 * 60 * 1000) {
     dayWindowStart = now
     dayCount = 0
+    dayWindowGeneration += 1
   }
 }
 
@@ -118,7 +143,20 @@ export interface SelfErrorForward {
  */
 export async function reportSelfErrorToAgentautofix(fields: SelfErrorForward): Promise<void> {
   if (!config.agentautofix.configured) return
-  if (isNoise(fields)) return
+  if (isNoise(fields)) {
+    // Traceless-by-design, unlike the throttle-drop path: this fires on
+    // every single occurrence of a known-benign class (client disconnects,
+    // socket resets), which in steady-state traffic can be the large
+    // majority of server error events — logging each one here would itself
+    // be the noise this filter exists to eliminate. `isNoise()`'s own
+    // doc comment is the audit trail for what's excluded and why; nothing
+    // is dropped that this function doesn't already justify by name.
+    log.debug('[agentautofix] noise filter dropped occurrence', {
+      fingerprint: fields.fingerprint,
+      errorType: fields.errorType,
+    })
+    return
+  }
 
   const existing = pendingAggregates.get(fields.fingerprint)
   if (existing) {
@@ -169,6 +207,16 @@ export function _flushPendingForTest(fingerprint: string): void {
 /** Visible for tests: current daily send counter (dayCount must never go negative). */
 export function _getDayCountForTest(): number {
   return dayCount
+}
+
+/**
+ * Visible for tests only: force the NEXT `resetDayWindowIfStale()` call to
+ * see the window as stale, simulating a day-window rollover happening while
+ * a send is in flight (Finding 2 regression coverage) without depending on
+ * real wall-clock time.
+ */
+export function _forceDayWindowStaleForTest(): void {
+  dayWindowStart = Date.now() - 25 * 60 * 60 * 1000
 }
 
 /** Visible for tests: reset all in-memory throttle/aggregation state. */
@@ -228,7 +276,18 @@ async function sendAggregatedReport(fields: SelfErrorForward, occurrences: numbe
     })
     return
   }
+  // Capture which day-window this reservation belongs to. `dayCount` is a
+  // single global counter, but the window can roll over (resetDayWindowIfStale)
+  // while this fetch is still in flight — a rollback below must only apply
+  // if we're still in the SAME window that was incremented; decrementing a
+  // brand-new window's counter would undercount the new day (or drive it
+  // negative) for a reservation that belongs to a window already gone.
+  const reservedDayWindowGeneration = dayWindowGeneration
   dayCount += 1
+
+  const rollbackDayCount = () => {
+    if (dayWindowGeneration === reservedDayWindowGeneration) dayCount = Math.max(0, dayCount - 1)
+  }
 
   try {
     // Server-minted identity token — the hub process is its own "user" here,
@@ -264,7 +323,7 @@ async function sendAggregatedReport(fields: SelfErrorForward, occurrences: numbe
       // instead of being silently throttled for a full hour on a slot we
       // never actually used.
       lastSentAt.delete(fields.fingerprint)
-      dayCount -= 1
+      rollbackDayCount()
       inFlightSend.delete(fields.fingerprint)
       return
     }
@@ -283,7 +342,7 @@ async function sendAggregatedReport(fields: SelfErrorForward, occurrences: numbe
     // a real, reportable error would silently vanish into the throttle
     // window with nothing ever actually sent.
     lastSentAt.delete(fields.fingerprint)
-    dayCount -= 1
+    rollbackDayCount()
     inFlightSend.delete(fields.fingerprint)
     log.warn('[agentautofix] report failed', { error: (err as Error)?.message ?? String(err) })
   }
