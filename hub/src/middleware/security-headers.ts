@@ -10,6 +10,7 @@
 // from `scriptSrc` here — the policy is the single source of truth.
 
 import type { Context, Next } from 'hono';
+import { config } from '../config.ts';
 
 export interface CspDirectives {
   defaultSrc: string[];
@@ -55,6 +56,25 @@ export function renderCsp(d: CspDirectives): string {
   return parts.join('; ');
 }
 
+// A malformed/misconfigured AGENTAUTOFIX_HOST must never be able to inject
+// extra CSP directives via connect-src (e.g. a value containing `;` or `,`).
+// Only a bare origin-shaped host — no whitespace, no directive/list
+// separators — is accepted; anything else is dropped rather than trusted.
+const SAFE_CSP_SOURCE_RE = /^[a-z][a-z0-9+.-]*:\/\/[^\s;,]+$/i;
+
+export function agentautofixConnectSrcEntry(): string | null {
+  if (!config.agentautofix.configured) return null;
+  const host = config.agentautofix.host;
+  if (!host || !SAFE_CSP_SOURCE_RE.test(host)) return null;
+  return host;
+}
+
+function resolveDefaultCsp(): CspDirectives {
+  const extra = agentautofixConnectSrcEntry();
+  if (!extra) return DEFAULT_CSP;
+  return { ...DEFAULT_CSP, connectSrc: [...DEFAULT_CSP.connectSrc, extra] };
+}
+
 export interface SecurityHeadersOptions {
   csp?: CspDirectives;
   // HSTS max-age default 2 years per OWASP recommendation.
@@ -62,7 +82,7 @@ export interface SecurityHeadersOptions {
 }
 
 export function securityHeaders(opts: SecurityHeadersOptions = {}) {
-  const cspValue = renderCsp(opts.csp ?? DEFAULT_CSP);
+  const cspValue = renderCsp(opts.csp ?? resolveDefaultCsp());
   const hstsMaxAge = opts.hstsMaxAgeSeconds ?? 63_072_000; // 2 years
   const hstsValue = `max-age=${hstsMaxAge}; includeSubDomains; preload`;
 

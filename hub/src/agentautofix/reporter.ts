@@ -16,7 +16,13 @@
  * non-negotiables) — every control below is client-side: a per-fingerprint
  * hourly throttle and a real per-day counter, both in-memory (single
  * process; the hub runs as one Coolify service, so this is not the
- * multi-replica trap the mcp-factory pilot flagged).
+ * multi-replica trap the mcp-factory pilot flagged). ADDITIVELY, a 45s
+ * aggregation window coalesces a burst of same-fingerprint occurrences into
+ * one report (with an occurrence count) instead of firing synchronously per
+ * occurrence — the hourly throttle still applies on top, unchanged.
+ *
+ * A noise filter drops known-benign classes before anything is scheduled —
+ * see `isNoise()` for the server-side-specific rationale for each entry.
  */
 import { mintAgentautofixIdentityToken } from './identity.ts'
 import { config } from '../config.ts'
@@ -24,10 +30,79 @@ import { log } from '../observability/logger'
 
 const MAX_REPORTS_PER_DAY = 200 // well under the 2000/day app-wide cap; this is ONE class of error
 const THROTTLE_MS = 60 * 60 * 1000 // one report per fingerprint per hour
+const AGGREGATION_WINDOW_MS = 45 * 1000 // coalesce a burst of the same fingerprint into one report
 
 const lastSentAt = new Map<string, number>()
 let dayWindowStart = Date.now()
 let dayCount = 0
+// Monotonic identity for the current day window, bumped every time
+// `resetDayWindowIfStale()` actually rolls the window over. A rollback must
+// only apply to the window it was reserved against; comparing `dayWindowStart`
+// timestamps directly is not reliable for that (two resets landing in the
+// same coarse timer tick — observed on Windows — can produce an identical
+// `Date.now()` value for what are genuinely two different windows).
+let dayWindowGeneration = 0
+
+// Fingerprints with a send currently between "reservation taken" and
+// "fetch settled" (success/429-rollback/error-rollback). Lets a blocked
+// flush tell an IN-FLIGHT blocker (occurrences must be re-armed, not lost —
+// the hour may get rolled back) apart from a SETTLED one (genuine throttle
+// hit — safe to drop-with-log, the hour really was consumed).
+const inFlightSend = new Set<string>()
+
+interface PendingAggregate {
+  fields: SelfErrorForward
+  occurrences: number
+  timer: ReturnType<typeof setTimeout>
+}
+const pendingAggregates = new Map<string, PendingAggregate>()
+
+/**
+ * Known-benign classes to drop before ever scheduling a report. This
+ * forwarder is server-only (Bun/Hono hub process) — deliberately NOT the
+ * browser-error noise list (no ResizeObserver/extension-origin heuristics
+ * apply server-side).
+ *
+ * RULE (applies to every predicate below, no exceptions): prefer matching on
+ * the DISCRETE `errorType` field, since that's a classification the runtime
+ * already made for us and can't be fooled by a diagnostic string that merely
+ * mentions the word. Only fall back to a message-text match when the message
+ * SHAPE itself — not a substring anywhere in free text — is genuinely
+ * diagnostic of the benign class, and even then the match is anchored to the
+ * start of the (trimmed) string. An unanchored `/\bword\b/.test(fullMessage)`
+ * is never acceptable here: a real error can legitimately CONTAIN a noise
+ * keyword in its own message (e.g. Postgres's "current transaction is
+ * aborted, commands ignored until end of transaction block", or "Job aborted
+ * due to timeout") without itself being the benign class — those must reach
+ * AgentAutofix, not vanish silently.
+ *
+ *  - AbortError — a client disconnecting mid-request (fetch AbortController)
+ *    is expected traffic shape, not a defect. Matched on `errorType` only
+ *    (the discrete field Node/undici already set for us) — never on message
+ *    text, since "aborted" is a common word in unrelated real errors (see
+ *    RULE above).
+ *  - ECONNRESET — the remote peer closed the socket (client nav-away,
+ *    supervisor reconnect); not something a code fix addresses. Matched only
+ *    when the error VALUE *is* the raw socket error (Node's own message
+ *    shape is "read ECONNRESET" / "write ECONNRESET" with no prefix) —
+ *    anchored to the start of the string, not a substring search anywhere
+ *    in free text. This deliberately does NOT catch a wrapped rethrow like
+ *    "Failed to persist session after socket error: read ECONNRESET" —
+ *    that's a genuine application-level failure with its own message, and
+ *    dropping it would swallow a real defect. We don't have `err.code` on
+ *    this interface (only `name`/`message` survive to here), so an anchored
+ *    message match is the narrowest signal available without threading a
+ *    new field through `classify()`/`captureSelfError` for one noise class.
+ *  - Third-party-script errors have no browser-page equivalent server-side
+ *    and are intentionally NOT filtered here.
+ */
+function isNoise(fields: SelfErrorForward): boolean {
+  const type = fields.errorType || ''
+  const value = fields.errorValue || ''
+  if (/\bAbortError\b/i.test(type)) return true
+  if (/^(?:read |write )?ECONNRESET\b/i.test(value.trim())) return true
+  return false
+}
 
 /** Redacts the shapes most likely to carry a live secret in a hub stack trace or message. */
 function scrub(text: string): string {
@@ -43,6 +118,7 @@ function resetDayWindowIfStale(): void {
   if (now - dayWindowStart > 24 * 60 * 60 * 1000) {
     dayWindowStart = now
     dayCount = 0
+    dayWindowGeneration += 1
   }
 }
 
@@ -57,24 +133,170 @@ export interface SelfErrorForward {
 /**
  * Fire-and-forget report of a hub-internal exception to AgentAutofix. Never
  * throws — this must not be able to crash the process it is reporting on.
+ *
+ * Schedules into a 45s per-fingerprint aggregation window rather than
+ * sending synchronously: the first occurrence of a fingerprint arms a
+ * timer, later occurrences in the same window just bump the count, and the
+ * timer flush is what actually calls the network. The existing hourly
+ * per-fingerprint throttle is re-checked at flush time — the window is
+ * additive, not a replacement.
  */
 export async function reportSelfErrorToAgentautofix(fields: SelfErrorForward): Promise<void> {
   if (!config.agentautofix.configured) return
+  if (isNoise(fields)) {
+    // Traceless-by-design, unlike the throttle-drop path: this fires on
+    // every single occurrence of a known-benign class (client disconnects,
+    // socket resets), which in steady-state traffic can be the large
+    // majority of server error events — logging each one here would itself
+    // be the noise this filter exists to eliminate. `isNoise()`'s own
+    // doc comment is the audit trail for what's excluded and why; nothing
+    // is dropped that this function doesn't already justify by name.
+    log.debug('[agentautofix] noise filter dropped occurrence', {
+      fingerprint: fields.fingerprint,
+      errorType: fields.errorType,
+    })
+    return
+  }
 
+  const existing = pendingAggregates.get(fields.fingerprint)
+  if (existing) {
+    existing.occurrences += 1
+    return
+  }
+
+  // Not lost, only possibly double-sent: the bucket delete in the flush
+  // timer is synchronous and happens before `sendAggregatedReport` ever
+  // awaits anything, so an occurrence arriving after the delete can never be
+  // counted into a bucket that's already gone — the `existing` check above
+  // simply misses (bucket key is gone), falls through, and arms a brand-new
+  // 45s window via `armAggregationWindow`. If that new window's flush lands
+  // while the prior send for this fingerprint is still IN FLIGHT,
+  // `sendAggregatedReport` re-arms it again instead of discarding it (see
+  // `inFlightSend` above) — so it is never silently lost even across
+  // multiple overlapping windows.
+  armAggregationWindow(fields, 1)
+}
+
+/** Arm (or extend) a 45s aggregation window for a fingerprint. */
+function armAggregationWindow(fields: SelfErrorForward, occurrences: number): void {
+  const existing = pendingAggregates.get(fields.fingerprint)
+  if (existing) {
+    existing.occurrences += occurrences
+    return
+  }
+  const timer = setTimeout(() => {
+    const agg = pendingAggregates.get(fields.fingerprint)
+    pendingAggregates.delete(fields.fingerprint)
+    if (agg) void sendAggregatedReport(agg.fields, agg.occurrences)
+  }, AGGREGATION_WINDOW_MS)
+  // Never let the aggregation timer keep the process alive.
+  if (typeof (timer as any)?.unref === 'function') (timer as any).unref()
+
+  pendingAggregates.set(fields.fingerprint, { fields, occurrences, timer })
+}
+
+/** Visible for tests: flush a pending aggregate immediately, bypassing the timer. */
+export function _flushPendingForTest(fingerprint: string): void {
+  const agg = pendingAggregates.get(fingerprint)
+  if (!agg) return
+  clearTimeout(agg.timer)
+  pendingAggregates.delete(fingerprint)
+  void sendAggregatedReport(agg.fields, agg.occurrences)
+}
+
+/** Visible for tests: current daily send counter (dayCount must never go negative). */
+export function _getDayCountForTest(): number {
+  return dayCount
+}
+
+/**
+ * Visible for tests only: force the NEXT `resetDayWindowIfStale()` call to
+ * see the window as stale, simulating a day-window rollover happening while
+ * a send is in flight (Finding 2 regression coverage) without depending on
+ * real wall-clock time.
+ */
+export function _forceDayWindowStaleForTest(): void {
+  dayWindowStart = Date.now() - 25 * 60 * 60 * 1000
+}
+
+/** Visible for tests: reset all in-memory throttle/aggregation state. */
+export function _resetForTest(): void {
+  for (const agg of pendingAggregates.values()) clearTimeout(agg.timer)
+  pendingAggregates.clear()
+  lastSentAt.clear()
+  inFlightSend.clear()
+  dayWindowStart = Date.now()
+  dayCount = 0
+}
+
+/**
+ * Reserve the hourly throttle slot for a fingerprint SYNCHRONOUSLY, before any
+ * network call. This closes the double-send race described above: the old
+ * code only wrote `lastSentAt` after `await fetch(...)` resolved, so a second
+ * aggregation window flushing while the first send was still in flight (slow
+ * or hung fetch) saw an unset/stale stamp and sent a second report for the
+ * same fingerprint inside the same throttle hour. Reserving here means the
+ * second flush's throttle check sees the reservation immediately, with no
+ * await in between — no window for a racing read.
+ */
+function reserveThrottleSlot(fingerprint: string, now: number): boolean {
+  const last = lastSentAt.get(fingerprint)
+  if (last && now - last < THROTTLE_MS) return false
+  lastSentAt.set(fingerprint, now)
+  inFlightSend.add(fingerprint)
+  return true
+}
+
+async function sendAggregatedReport(fields: SelfErrorForward, occurrences: number): Promise<void> {
   resetDayWindowIfStale()
   if (dayCount >= MAX_REPORTS_PER_DAY) return
 
-  const last = lastSentAt.get(fields.fingerprint)
   const now = Date.now()
-  if (last && now - last < THROTTLE_MS) return
+
+  // A blocker for this fingerprint is still IN FLIGHT (reserved but not yet
+  // settled). Do NOT discard these occurrences: the in-flight send may still
+  // roll its reservation back (429 / network failure), in which case the
+  // hour was never actually consumed and this batch is the only record of
+  // it. Re-arm the aggregation window so it retries once the blocker settles
+  // — a rolled-back reservation lets the retry through immediately; a
+  // successful one throttles it (see the settled-throttle branch below).
+  if (inFlightSend.has(fields.fingerprint)) {
+    armAggregationWindow(fields, occurrences)
+    return
+  }
+
+  if (!reserveThrottleSlot(fields.fingerprint, now)) {
+    // Genuinely throttled by a SETTLED (successfully sent) reservation —
+    // the hour really was consumed. This is a real, policy-driven drop, so
+    // it must never be silent: log it with the occurrence count so it's
+    // visible instead of vanishing without a trace.
+    log.info('[agentautofix] report throttled, dropping occurrences', {
+      fingerprint: fields.fingerprint,
+      occurrences,
+    })
+    return
+  }
+  // Capture which day-window this reservation belongs to. `dayCount` is a
+  // single global counter, but the window can roll over (resetDayWindowIfStale)
+  // while this fetch is still in flight — a rollback below must only apply
+  // if we're still in the SAME window that was incremented; decrementing a
+  // brand-new window's counter would undercount the new day (or drive it
+  // negative) for a reservation that belongs to a window already gone.
+  const reservedDayWindowGeneration = dayWindowGeneration
+  dayCount += 1
+
+  const rollbackDayCount = () => {
+    if (dayWindowGeneration === reservedDayWindowGeneration) dayCount = Math.max(0, dayCount - 1)
+  }
 
   try {
     // Server-minted identity token — the hub process is its own "user" here,
     // so `sub` is a stable synthetic id, not a real end-user.
     const token = mintAgentautofixIdentityToken({ sub: 'hub-self-capture', role: 'system' })
 
+    const occurrenceSuffix = occurrences > 1 ? ` (x${occurrences} in ${AGGREGATION_WINDOW_MS / 1000}s)` : ''
     const comment = scrub(
-      `Hub self-capture [${fields.source}]: ${fields.errorType}: ${fields.errorValue}` +
+      `Hub self-capture [${fields.source}]: ${fields.errorType}: ${fields.errorValue}${occurrenceSuffix}` +
         (fields.stack ? `\n\n${scrub(fields.stack).split('\n').slice(0, 30).join('\n')}` : ''),
     ).slice(0, 3900)
 
@@ -91,21 +313,37 @@ export async function reportSelfErrorToAgentautofix(fields: SelfErrorForward): P
         y: 0,
         page_url: `${config.agentautofix.origin}/#/hub-self-capture`,
         element_selector: 'body',
-        element_meta: { kind: 'log_error', source: fields.source },
+        element_meta: { kind: 'log_error', source: fields.source, occurrences },
       }),
     })
 
-    // Terminal per contract — 400/401/403 must stamp the throttle so a
-    // rejected fingerprint doesn't re-POST every hour forever. Only 429
-    // means "retry later"; we simply let the next hourly tick try again.
-    if (res.status !== 429) {
-      lastSentAt.set(fields.fingerprint, now)
-      dayCount += 1
+    if (res.status === 429) {
+      // Rate-limited by the server, not a rejection of the content — roll
+      // back the reservation so a later occurrence gets a genuine retry
+      // instead of being silently throttled for a full hour on a slot we
+      // never actually used.
+      lastSentAt.delete(fields.fingerprint)
+      rollbackDayCount()
+      inFlightSend.delete(fields.fingerprint)
+      return
     }
-    if (!res.ok && res.status !== 429) {
+    if (!res.ok) {
+      // Terminal per contract — 400/401/403/5xx keep the reservation so a
+      // persistently-rejected fingerprint doesn't re-POST every window
+      // forever; log for visibility.
       log.warn('[agentautofix] report rejected', { status: res.status })
     }
+    // res.ok — reservation stands, this is the one send for this hour.
+    inFlightSend.delete(fields.fingerprint)
   } catch (err) {
+    // Network-level failure (DNS, connection refused, timeout, etc). A
+    // failed send must not permanently poison the fingerprint for a full
+    // THROTTLE_MS hour, so roll back the reservation here too — otherwise
+    // a real, reportable error would silently vanish into the throttle
+    // window with nothing ever actually sent.
+    lastSentAt.delete(fields.fingerprint)
+    rollbackDayCount()
+    inFlightSend.delete(fields.fingerprint)
     log.warn('[agentautofix] report failed', { error: (err as Error)?.message ?? String(err) })
   }
 }

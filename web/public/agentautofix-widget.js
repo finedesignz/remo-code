@@ -77,11 +77,38 @@
      identification attributes ever leaves the browser. */
   var ATTR_ALLOWLIST = ['id', 'class', 'type', 'name', 'role', 'href', 'disabled', 'required', 'placeholder'];
 
+  /* href gets the SAME origin+pathname-only treatment as page_url below —
+     query/fragment stripped outright (may carry magic-link tokens / PII),
+     `javascript:`/`data:` URIs dropped entirely (nothing diagnostic to keep,
+     and their payload IS the secret), and anything that fails to parse as a
+     URL (malformed / unrecognized scheme) is dropped rather than shipped
+     verbatim. Fails closed: no cleanly-sanitizable form -> attribute omitted. */
+  function sanitizeHref(raw) {
+    var s = String(raw == null ? '' : raw).trim();
+    if (!s) return null;
+    var scheme = s.slice(0, s.indexOf(':') > -1 ? s.indexOf(':') : 0).toLowerCase();
+    if (scheme === 'javascript' || scheme === 'data' || scheme === 'vbscript') return null;
+    var u;
+    try {
+      u = new URL(s, location.href);
+    } catch (err) {
+      return null;
+    }
+    if (u.protocol === 'javascript:' || u.protocol === 'data:' || u.protocol === 'vbscript:') return null;
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return (u.origin + u.pathname).slice(0, 200);
+  }
+
   function metaFor(el) {
     var attrs = {};
     for (var i = 0; i < el.attributes.length && i < 20; i++) {
       var a = el.attributes[i];
       if (ATTR_ALLOWLIST.indexOf(a.name) === -1) continue;
+      if (a.name === 'href') {
+        var safeHref = sanitizeHref(a.value);
+        if (safeHref !== null) attrs.href = safeHref;
+        continue;
+      }
       attrs[a.name] = String(a.value).slice(0, 200);
     }
     var rect = el.getBoundingClientRect();
@@ -94,6 +121,18 @@
       viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
       user_agent: navigator.userAgent,
     };
+  }
+
+  /* This app is 100% hash-routed (#/, #/tasks, #/settings, #/grid, ...) and
+     App.tsx force-normalizes location.pathname to `/` on every boot, so
+     origin+pathname alone is a CONSTANT for every report. Forward the hash
+     ROUTE PATH (the part before its own `?`) for real diagnostic value, but
+     strip any query string wherever it appears — the real location.search
+     AND a query embedded inside the hash both carry magic-link tokens / PII
+     and must never reach the payload. */
+  function hashRoute() {
+    var h = location.hash || '';
+    return h.split('?')[0];
   }
 
   /* ---- CONTRACT: x and y are PERCENTAGES, never pixels ------------------ */
@@ -125,7 +164,12 @@
             comment: text,
             x: c.x,
             y: c.y,
-            page_url: location.href.slice(0, (cfgResp && cfgResp.caps && cfgResp.caps.page_url_chars) || 2000),
+            // Origin + pathname + hash ROUTE (query stripped, everywhere it
+            // could appear) — strip query outright rather than "redact" it.
+            // This repo carries magic-link auth tokens (and other PII, e.g.
+            // emails in ?q=) in query params; shape-based redaction would
+            // miss ordinary PII while still leaking secrets.
+            page_url: (location.origin + location.pathname + hashRoute()).slice(0, (cfgResp && cfgResp.caps && cfgResp.caps.page_url_chars) || 2000),
             element_selector: selectorFor(el),
             element_meta: metaFor(el),
           }),
