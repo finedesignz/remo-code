@@ -95,6 +95,18 @@ describe('reportSelfErrorToAgentautofix noise filter', () => {
     expect(calls.length).toBe(0);
   });
 
+  test('a wrapped rethrow mentioning ECONNRESET mid-message is NOT dropped (defect B regression)', async () => {
+    await reportSelfErrorToAgentautofix({
+      fingerprint: 'fp-wrapped-econnreset',
+      errorType: 'Error',
+      errorValue: 'Failed to persist session after socket error: read ECONNRESET',
+      source: 'hono',
+    });
+    _flushPendingForTest('fp-wrapped-econnreset');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.length).toBe(1);
+  });
+
   test('a normal error still schedules and sends', async () => {
     await reportSelfErrorToAgentautofix({ fingerprint: 'fp-real', errorType: 'TypeError', errorValue: 'x is not a function', source: 'hono' });
     _flushPendingForTest('fp-real');

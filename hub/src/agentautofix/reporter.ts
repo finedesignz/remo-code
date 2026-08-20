@@ -51,7 +51,17 @@ const pendingAggregates = new Map<string, PendingAggregate>()
  *  - AbortError / aborted fetches — a client disconnecting mid-request is
  *    expected traffic shape, not a defect.
  *  - ECONNRESET — the remote peer closed the socket (client nav-away,
- *    supervisor reconnect); not something a code fix addresses.
+ *    supervisor reconnect); not something a code fix addresses. Matched only
+ *    when the error VALUE *is* the raw socket error (Node's own message
+ *    shape is "read ECONNRESET" / "write ECONNRESET" with no prefix) —
+ *    anchored to the start of the string, not a substring search anywhere
+ *    in free text. This deliberately does NOT catch a wrapped rethrow like
+ *    "Failed to persist session after socket error: read ECONNRESET" —
+ *    that's a genuine application-level failure with its own message, and
+ *    dropping it would swallow a real defect. We don't have `err.code` on
+ *    this interface (only `name`/`message` survive to here), so an anchored
+ *    message match is the narrowest signal available without threading a
+ *    new field through `classify()`/`captureSelfError` for one noise class.
  *  - Third-party-script errors have no browser-page equivalent server-side
  *    and are intentionally NOT filtered here.
  */
@@ -59,7 +69,7 @@ function isNoise(fields: SelfErrorForward): boolean {
   const type = fields.errorType || ''
   const value = fields.errorValue || ''
   if (/\bAbortError\b/i.test(type) || /\baborted\b/i.test(value)) return true
-  if (/\bECONNRESET\b/.test(type) || /\bECONNRESET\b/.test(value)) return true
+  if (/^(?:read |write )?ECONNRESET\b/i.test(value.trim())) return true
   return false
 }
 
