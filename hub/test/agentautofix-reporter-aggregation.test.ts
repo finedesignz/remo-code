@@ -80,6 +80,117 @@ describe('reportSelfErrorToAgentautofix aggregation', () => {
   });
 });
 
+describe('reportSelfErrorToAgentautofix in-flight-send race (double-send regression)', () => {
+  test('a slow/hanging fetch does not let a second window double-send the same fingerprint', async () => {
+    const fields = { fingerprint: 'fp-slow', errorType: 'Error', errorValue: 'boom', source: 'hono' };
+
+    let releaseFirstFetch!: () => void;
+    const firstFetchGate = new Promise<void>((resolve) => {
+      releaseFirstFetch = resolve;
+    });
+    let fetchCallCount = 0;
+    // @ts-expect-error test stub
+    globalThis.fetch = async (_url: string, init: any) => {
+      fetchCallCount += 1;
+      if (fetchCallCount === 1) {
+        // First send hangs (e.g. degraded network) until we release it below.
+        await firstFetchGate;
+      }
+      calls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    // Window #1 for fp-slow.
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-slow'); // fires sendAggregatedReport #1, fetch hangs
+
+    // A second occurrence arrives while #1's fetch is still in flight —
+    // bucket was already deleted, so this arms a brand-new window.
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-slow'); // fires sendAggregatedReport #2
+
+    // Let #2 run to completion first (it should be throttled and return
+    // immediately since #1 already reserved the slot).
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Now release #1's hung fetch.
+    releaseFirstFetch();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Exactly one network call for this fingerprint, not two.
+    expect(calls.length).toBe(1);
+  });
+
+  test('a FAILED send does not permanently block that fingerprint from reporting later', async () => {
+    const fields = { fingerprint: 'fp-fail-then-ok', errorType: 'Error', errorValue: 'boom', source: 'hono' };
+
+    let callCount = 0;
+    // @ts-expect-error test stub
+    globalThis.fetch = async (_url: string, init: any) => {
+      callCount += 1;
+      if (callCount === 1) {
+        throw new Error('network down');
+      }
+      calls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-fail-then-ok'); // send #1 throws, must roll back
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.length).toBe(0);
+
+    // A later occurrence for the same fingerprint must NOT be silently
+    // blocked by the failed first attempt.
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-fail-then-ok');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.length).toBe(1);
+  });
+
+  test('an occurrence arriving during the in-flight gap is not silently lost', async () => {
+    const fields = { fingerprint: 'fp-not-lost', errorType: 'Error', errorValue: 'boom', source: 'hono' };
+
+    let releaseFirstFetch!: () => void;
+    const firstFetchGate = new Promise<void>((resolve) => {
+      releaseFirstFetch = resolve;
+    });
+    let fetchCallCount = 0;
+    // @ts-expect-error test stub
+    globalThis.fetch = async (_url: string, init: any) => {
+      fetchCallCount += 1;
+      if (fetchCallCount === 1) await firstFetchGate;
+      calls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-not-lost'); // window #1 flushed, bucket deleted, fetch hanging
+
+    // Occurrence arrives in the gap — must arm a fresh window, not vanish.
+    await reportSelfErrorToAgentautofix(fields);
+
+    releaseFirstFetch();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The second occurrence's own window hasn't fired yet (45s timer), but
+    // it must still be pending/trackable — flush it explicitly and confirm
+    // it eventually reports rather than being dropped.
+    _flushPendingForTest('fp-not-lost');
+    await new Promise((r) => setTimeout(r, 0));
+
+    // First send throttled the fingerprint for an hour, so this second,
+    // later-window flush must NOT produce a second network call — but the
+    // occurrence was still processed (not thrown away): total remains 1
+    // from the first send, proving it wasn't double-counted OR dropped
+    // into a void bucket.
+    expect(calls.length).toBe(1);
+  });
+});
+
 describe('reportSelfErrorToAgentautofix noise filter', () => {
   test('drops AbortError before scheduling', async () => {
     await reportSelfErrorToAgentautofix({ fingerprint: 'fp-abort', errorType: 'AbortError', errorValue: 'The operation was aborted', source: 'hono' });

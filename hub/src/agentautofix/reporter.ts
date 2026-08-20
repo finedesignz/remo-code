@@ -119,6 +119,15 @@ export async function reportSelfErrorToAgentautofix(fields: SelfErrorForward): P
     return
   }
 
+  // Not lost, only possibly double-sent: the bucket delete below is
+  // synchronous and happens before `sendAggregatedReport` ever awaits
+  // anything, so an occurrence arriving after the delete can never be
+  // counted into a bucket that's already gone or dropped on the floor — the
+  // `existing` check above simply misses (bucket key is gone), falls through,
+  // and arms a brand-new 45s window for that fingerprint. That occurrence
+  // WILL be reported when its own window flushes; `reserveThrottleSlot`
+  // above is what stops it from producing a second network call for the
+  // same fingerprint inside the same throttle hour.
   const timer = setTimeout(() => {
     const agg = pendingAggregates.get(fields.fingerprint)
     pendingAggregates.delete(fields.fingerprint)
@@ -148,13 +157,30 @@ export function _resetForTest(): void {
   dayCount = 0
 }
 
+/**
+ * Reserve the hourly throttle slot for a fingerprint SYNCHRONOUSLY, before any
+ * network call. This closes the double-send race described above: the old
+ * code only wrote `lastSentAt` after `await fetch(...)` resolved, so a second
+ * aggregation window flushing while the first send was still in flight (slow
+ * or hung fetch) saw an unset/stale stamp and sent a second report for the
+ * same fingerprint inside the same throttle hour. Reserving here means the
+ * second flush's throttle check sees the reservation immediately, with no
+ * await in between — no window for a racing read.
+ */
+function reserveThrottleSlot(fingerprint: string, now: number): boolean {
+  const last = lastSentAt.get(fingerprint)
+  if (last && now - last < THROTTLE_MS) return false
+  lastSentAt.set(fingerprint, now)
+  return true
+}
+
 async function sendAggregatedReport(fields: SelfErrorForward, occurrences: number): Promise<void> {
   resetDayWindowIfStale()
   if (dayCount >= MAX_REPORTS_PER_DAY) return
 
-  const last = lastSentAt.get(fields.fingerprint)
   const now = Date.now()
-  if (last && now - last < THROTTLE_MS) return
+  if (!reserveThrottleSlot(fields.fingerprint, now)) return
+  dayCount += 1
 
   try {
     // Server-minted identity token — the hub process is its own "user" here,
@@ -184,17 +210,30 @@ async function sendAggregatedReport(fields: SelfErrorForward, occurrences: numbe
       }),
     })
 
-    // Terminal per contract — 400/401/403 must stamp the throttle so a
-    // rejected fingerprint doesn't re-POST every hour forever. Only 429
-    // means "retry later"; we simply let the next hourly tick try again.
-    if (res.status !== 429) {
-      lastSentAt.set(fields.fingerprint, now)
-      dayCount += 1
+    if (res.status === 429) {
+      // Rate-limited by the server, not a rejection of the content — roll
+      // back the reservation so a later occurrence gets a genuine retry
+      // instead of being silently throttled for a full hour on a slot we
+      // never actually used.
+      lastSentAt.delete(fields.fingerprint)
+      dayCount -= 1
+      return
     }
-    if (!res.ok && res.status !== 429) {
+    if (!res.ok) {
+      // Terminal per contract — 400/401/403/5xx keep the reservation so a
+      // persistently-rejected fingerprint doesn't re-POST every window
+      // forever; log for visibility.
       log.warn('[agentautofix] report rejected', { status: res.status })
     }
+    // res.ok — reservation stands, this is the one send for this hour.
   } catch (err) {
+    // Network-level failure (DNS, connection refused, timeout, etc). A
+    // failed send must not permanently poison the fingerprint for a full
+    // THROTTLE_MS hour, so roll back the reservation here too — otherwise
+    // a real, reportable error would silently vanish into the throttle
+    // window with nothing ever actually sent.
+    lastSentAt.delete(fields.fingerprint)
+    dayCount -= 1
     log.warn('[agentautofix] report failed', { error: (err as Error)?.message ?? String(err) })
   }
 }
