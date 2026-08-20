@@ -36,6 +36,13 @@ const lastSentAt = new Map<string, number>()
 let dayWindowStart = Date.now()
 let dayCount = 0
 
+// Fingerprints with a send currently between "reservation taken" and
+// "fetch settled" (success/429-rollback/error-rollback). Lets a blocked
+// flush tell an IN-FLIGHT blocker (occurrences must be re-armed, not lost —
+// the hour may get rolled back) apart from a SETTLED one (genuine throttle
+// hit — safe to drop-with-log, the hour really was consumed).
+const inFlightSend = new Set<string>()
+
 interface PendingAggregate {
   fields: SelfErrorForward
   occurrences: number
@@ -119,15 +126,26 @@ export async function reportSelfErrorToAgentautofix(fields: SelfErrorForward): P
     return
   }
 
-  // Not lost, only possibly double-sent: the bucket delete below is
-  // synchronous and happens before `sendAggregatedReport` ever awaits
-  // anything, so an occurrence arriving after the delete can never be
-  // counted into a bucket that's already gone or dropped on the floor — the
-  // `existing` check above simply misses (bucket key is gone), falls through,
-  // and arms a brand-new 45s window for that fingerprint. That occurrence
-  // WILL be reported when its own window flushes; `reserveThrottleSlot`
-  // above is what stops it from producing a second network call for the
-  // same fingerprint inside the same throttle hour.
+  // Not lost, only possibly double-sent: the bucket delete in the flush
+  // timer is synchronous and happens before `sendAggregatedReport` ever
+  // awaits anything, so an occurrence arriving after the delete can never be
+  // counted into a bucket that's already gone — the `existing` check above
+  // simply misses (bucket key is gone), falls through, and arms a brand-new
+  // 45s window via `armAggregationWindow`. If that new window's flush lands
+  // while the prior send for this fingerprint is still IN FLIGHT,
+  // `sendAggregatedReport` re-arms it again instead of discarding it (see
+  // `inFlightSend` above) — so it is never silently lost even across
+  // multiple overlapping windows.
+  armAggregationWindow(fields, 1)
+}
+
+/** Arm (or extend) a 45s aggregation window for a fingerprint. */
+function armAggregationWindow(fields: SelfErrorForward, occurrences: number): void {
+  const existing = pendingAggregates.get(fields.fingerprint)
+  if (existing) {
+    existing.occurrences += occurrences
+    return
+  }
   const timer = setTimeout(() => {
     const agg = pendingAggregates.get(fields.fingerprint)
     pendingAggregates.delete(fields.fingerprint)
@@ -136,7 +154,7 @@ export async function reportSelfErrorToAgentautofix(fields: SelfErrorForward): P
   // Never let the aggregation timer keep the process alive.
   if (typeof (timer as any)?.unref === 'function') (timer as any).unref()
 
-  pendingAggregates.set(fields.fingerprint, { fields, occurrences: 1, timer })
+  pendingAggregates.set(fields.fingerprint, { fields, occurrences, timer })
 }
 
 /** Visible for tests: flush a pending aggregate immediately, bypassing the timer. */
@@ -148,11 +166,17 @@ export function _flushPendingForTest(fingerprint: string): void {
   void sendAggregatedReport(agg.fields, agg.occurrences)
 }
 
+/** Visible for tests: current daily send counter (dayCount must never go negative). */
+export function _getDayCountForTest(): number {
+  return dayCount
+}
+
 /** Visible for tests: reset all in-memory throttle/aggregation state. */
 export function _resetForTest(): void {
   for (const agg of pendingAggregates.values()) clearTimeout(agg.timer)
   pendingAggregates.clear()
   lastSentAt.clear()
+  inFlightSend.clear()
   dayWindowStart = Date.now()
   dayCount = 0
 }
@@ -171,6 +195,7 @@ function reserveThrottleSlot(fingerprint: string, now: number): boolean {
   const last = lastSentAt.get(fingerprint)
   if (last && now - last < THROTTLE_MS) return false
   lastSentAt.set(fingerprint, now)
+  inFlightSend.add(fingerprint)
   return true
 }
 
@@ -179,7 +204,30 @@ async function sendAggregatedReport(fields: SelfErrorForward, occurrences: numbe
   if (dayCount >= MAX_REPORTS_PER_DAY) return
 
   const now = Date.now()
-  if (!reserveThrottleSlot(fields.fingerprint, now)) return
+
+  // A blocker for this fingerprint is still IN FLIGHT (reserved but not yet
+  // settled). Do NOT discard these occurrences: the in-flight send may still
+  // roll its reservation back (429 / network failure), in which case the
+  // hour was never actually consumed and this batch is the only record of
+  // it. Re-arm the aggregation window so it retries once the blocker settles
+  // — a rolled-back reservation lets the retry through immediately; a
+  // successful one throttles it (see the settled-throttle branch below).
+  if (inFlightSend.has(fields.fingerprint)) {
+    armAggregationWindow(fields, occurrences)
+    return
+  }
+
+  if (!reserveThrottleSlot(fields.fingerprint, now)) {
+    // Genuinely throttled by a SETTLED (successfully sent) reservation —
+    // the hour really was consumed. This is a real, policy-driven drop, so
+    // it must never be silent: log it with the occurrence count so it's
+    // visible instead of vanishing without a trace.
+    log.info('[agentautofix] report throttled, dropping occurrences', {
+      fingerprint: fields.fingerprint,
+      occurrences,
+    })
+    return
+  }
   dayCount += 1
 
   try {
@@ -217,6 +265,7 @@ async function sendAggregatedReport(fields: SelfErrorForward, occurrences: numbe
       // never actually used.
       lastSentAt.delete(fields.fingerprint)
       dayCount -= 1
+      inFlightSend.delete(fields.fingerprint)
       return
     }
     if (!res.ok) {
@@ -226,6 +275,7 @@ async function sendAggregatedReport(fields: SelfErrorForward, occurrences: numbe
       log.warn('[agentautofix] report rejected', { status: res.status })
     }
     // res.ok — reservation stands, this is the one send for this hour.
+    inFlightSend.delete(fields.fingerprint)
   } catch (err) {
     // Network-level failure (DNS, connection refused, timeout, etc). A
     // failed send must not permanently poison the fingerprint for a full
@@ -234,6 +284,7 @@ async function sendAggregatedReport(fields: SelfErrorForward, occurrences: numbe
     // window with nothing ever actually sent.
     lastSentAt.delete(fields.fingerprint)
     dayCount -= 1
+    inFlightSend.delete(fields.fingerprint)
     log.warn('[agentautofix] report failed', { error: (err as Error)?.message ?? String(err) })
   }
 }

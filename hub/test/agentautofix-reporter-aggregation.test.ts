@@ -11,6 +11,7 @@ import {
   reportSelfErrorToAgentautofix,
   _flushPendingForTest,
   _resetForTest,
+  _getDayCountForTest,
 } from '../src/agentautofix/reporter';
 
 const { config } = (await import('../src/config')) as any;
@@ -150,7 +151,7 @@ describe('reportSelfErrorToAgentautofix in-flight-send race (double-send regress
     expect(calls.length).toBe(1);
   });
 
-  test('an occurrence arriving during the in-flight gap is not silently lost', async () => {
+  test('blocker hangs then SUCCEEDS: second window is genuinely throttled, exactly one report, loss is not silent', async () => {
     const fields = { fingerprint: 'fp-not-lost', errorType: 'Error', errorValue: 'boom', source: 'hono' };
 
     let releaseFirstFetch!: () => void;
@@ -188,6 +189,107 @@ describe('reportSelfErrorToAgentautofix in-flight-send race (double-send regress
     // from the first send, proving it wasn't double-counted OR dropped
     // into a void bucket.
     expect(calls.length).toBe(1);
+  });
+
+  test('blocker hangs then resolves 429 (rollback): the second window occurrences are eventually reported, not lost', async () => {
+    const fields = { fingerprint: 'fp-hang-429', errorType: 'Error', errorValue: 'boom', source: 'hono' };
+
+    let releaseFirstFetch!: () => void;
+    const firstFetchGate = new Promise<void>((resolve) => {
+      releaseFirstFetch = resolve;
+    });
+    let fetchCallCount = 0;
+    // @ts-expect-error test stub
+    globalThis.fetch = async (_url: string, init: any) => {
+      fetchCallCount += 1;
+      if (fetchCallCount === 1) {
+        await firstFetchGate;
+        // First send is rate-limited by the server — rolls back.
+        return new Response(JSON.stringify({ ok: false }), { status: 429 });
+      }
+      calls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-hang-429'); // window #1 flushes, reserves, fetch hangs (in flight)
+
+    // A second burst of occurrences arrives while #1 is still in flight.
+    await reportSelfErrorToAgentautofix(fields);
+    await reportSelfErrorToAgentautofix(fields);
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-hang-429'); // must NOT discard these — #1 hasn't settled yet
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.length).toBe(0); // nothing sent yet — #1 still hanging, #2 must not double-send
+
+    // Release #1 — it 429s and rolls back its reservation (the hour was
+    // never actually consumed).
+    releaseFirstFetch();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The re-armed window for the 3 occurrences must still be pending and
+    // must now be able to flush successfully — proving they were never lost.
+    _flushPendingForTest('fp-hang-429');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(calls.length).toBe(1);
+    expect(calls[0].body.element_meta.occurrences).toBe(3);
+  });
+
+  test('blocker hangs then THROWS: the second window occurrences are eventually reported, not lost', async () => {
+    const fields = { fingerprint: 'fp-hang-throw', errorType: 'Error', errorValue: 'boom', source: 'hono' };
+
+    let releaseFirstFetch!: () => void;
+    const firstFetchGate = new Promise<void>((resolve) => {
+      releaseFirstFetch = resolve;
+    });
+    let fetchCallCount = 0;
+    // @ts-expect-error test stub
+    globalThis.fetch = async (_url: string, init: any) => {
+      fetchCallCount += 1;
+      if (fetchCallCount === 1) {
+        await firstFetchGate;
+        throw new Error('network down');
+      }
+      calls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-hang-throw'); // window #1 flushes, reserves, fetch hangs (in flight)
+
+    await reportSelfErrorToAgentautofix(fields);
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-hang-throw'); // must NOT discard — #1 hasn't settled yet
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls.length).toBe(0);
+
+    // Release #1 — it throws and rolls back its reservation.
+    releaseFirstFetch();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    _flushPendingForTest('fp-hang-throw');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(calls.length).toBe(1);
+    expect(calls[0].body.element_meta.occurrences).toBe(2);
+  });
+
+  test('dayCount never goes negative across repeated 429 rollbacks, and repeated 429s never burn the daily cap', async () => {
+    // @ts-expect-error test stub
+    globalThis.fetch = async () => new Response(JSON.stringify({ ok: false }), { status: 429 });
+
+    for (let i = 0; i < 10; i++) {
+      const fp = `fp-429-burn-${i}`;
+      await reportSelfErrorToAgentautofix({ fingerprint: fp, errorType: 'Error', errorValue: 'boom', source: 'hono' });
+      _flushPendingForTest(fp);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(_getDayCountForTest()).toBeGreaterThanOrEqual(0);
+    }
+
+    expect(_getDayCountForTest()).toBe(0); // every 429 rolled its reservation back — cap untouched
   });
 });
 
