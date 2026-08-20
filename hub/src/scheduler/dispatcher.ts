@@ -137,6 +137,14 @@ export async function runNow(
   const task = await getTaskById(taskId)
   if (!task) return { runIds: [] }
   if (task.user_id !== userId) return { runIds: [] }
+  // A disabled task must not dispatch via chain_task or the grace-buffer
+  // replay (neither passes isManual) — only the explicit human "Run Now"
+  // button (POST /:id/run-now → isManual: true) may override. Mirrors
+  // fire()'s `if (!task.enabled) return` guard, which this path bypassed.
+  if (!task.enabled && !opts.isManual) {
+    log.info('scheduler.dispatcher.skipped_disabled', { task_id: taskId, user_id: userId })
+    return { runIds: [] }
+  }
   // Phase 06 plan 008 — webhook-triggered triage passes per-event payload.
   if (opts.payloadOverride) {
     ;(task as any).payload = { ...(task.payload ?? {}), ...opts.payloadOverride }
