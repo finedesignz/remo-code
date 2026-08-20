@@ -125,7 +125,11 @@
             comment: text,
             x: c.x,
             y: c.y,
-            page_url: location.href.slice(0, (cfgResp && cfgResp.caps && cfgResp.caps.page_url_chars) || 2000),
+            // Origin + pathname only — strip query/hash outright rather than
+            // "redact" them. This repo carries magic-link auth tokens (and
+            // other PII, e.g. emails in ?q=) in query params; shape-based
+            // redaction would miss ordinary PII while still leaking secrets.
+            page_url: (location.origin + location.pathname).slice(0, (cfgResp && cfgResp.caps && cfgResp.caps.page_url_chars) || 2000),
             element_selector: selectorFor(el),
             element_meta: metaFor(el),
           }),
