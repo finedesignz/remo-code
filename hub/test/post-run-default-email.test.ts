@@ -90,6 +90,37 @@ describe('buildDefaultEmailActions', () => {
     const withWebhook = [{ type: 'webhook', on: 'always', config: { url: 'https://x' } }] as any
     expect(buildDefaultEmailActions(baseTask, 0, withWebhook).length).toBe(1)
   })
+
+  // fix/internal-skip-email-noise: `__internal_*` tasks (Coolify deployment
+  // metadata, triage anchor) are machine plumbing the owner never scheduled and
+  // can't opt out of via email_summary. A `skipped` run on one (e.g. the
+  // webhook's no_routable_session orphan-run finalize) is a routine no-op —
+  // must not email. A genuine failure or a user-created task's skip still does.
+  test('(i) internal task + status=skipped → suppressed', () => {
+    const internal = { ...baseTask, name: '__internal_coolify_deployment' }
+    const out = buildDefaultEmailActions(internal, 0, [], {
+      status: 'skipped',
+      output_snippet: null,
+    })
+    expect(out).toEqual([])
+  })
+
+  test('(j) user-created task + status=skipped → still notifies', () => {
+    const out = buildDefaultEmailActions(baseTask, 0, [], {
+      status: 'skipped',
+      output_snippet: null,
+    })
+    expect(out.length).toBe(1)
+  })
+
+  test('(k) internal task + status=failed → still notifies (only skipped is suppressed)', () => {
+    const internal = { ...baseTask, name: '__internal_triage' }
+    const out = buildDefaultEmailActions(internal, 0, [], {
+      status: 'failed',
+      output_snippet: null,
+    })
+    expect(out.length).toBe(1)
+  })
 })
 
 // ── Layer 2: integration through fireWithContext ────────────────────────────
