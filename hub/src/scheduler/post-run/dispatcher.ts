@@ -52,6 +52,15 @@ const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
  * `to` is omitted so executeEmail resolves it to the owner's account email. The
  * template uses only plain `{{var}}` substitutions (template.render supports no
  * conditionals/sections). Pure helper — unit-tested in isolation.
+ *
+ * Internal-plumbing exception: `__internal_*` tasks (`__internal_coolify_deployment`,
+ * `__internal_triage` — see db/dal.ts INTERNAL_DEPLOY_TASK_NAME/INTERNAL_TRIAGE_TASK_NAME)
+ * are machine-created anchors the owner never scheduled, never sees in the tasks UI,
+ * and cannot set `email_summary: false` on. A `skipped` run on one of these (e.g. the
+ * Coolify webhook's `no_routable_session` orphan-run finalize — coolify-webhook.ts) is
+ * a routine no-op, not something to email about: zero cost, zero duration, nothing
+ * happened. Only `skipped` is suppressed here — a genuine `failed` run on an internal
+ * task still emails, and this never touches user-created tasks.
  */
 export function buildDefaultEmailActions(
   task: ScheduledTask,
@@ -62,6 +71,7 @@ export function buildDefaultEmailActions(
   if (chainDepth !== 0 && !isFailedOrBlocked(outcome)) return []
   if ((task as any).email_summary === false) return []
   if (actions.some((a) => a.type === 'notify_email')) return []
+  if (outcome?.status === 'skipped' && task.name?.startsWith('__internal_')) return []
   return [
     {
       type: 'notify_email',
