@@ -34,9 +34,20 @@ steps:
     # the cargo binary stays on PATH. CARGO_TARGET_DIR caches the compiled
     # dependency tree (the real 30min pole). Cargo's own file locks serialize any
     # concurrent runs sharing the dir rather than corrupting it.
+    # BUILD PARALLELISM CAP (added 2026-08-21). The CI VM has 8 CPUs and runs 5
+    # Woodpecker agents x WOODPECKER_MAX_WORKFLOWS=2 = 10 concurrent workflow
+    # slots. Cargo defaults to -j$(nproc) = 8 and libtest to nproc threads per
+    # test binary, so every slot independently sized itself to the whole box:
+    # peak demand 10 x 8 = 80 runnable threads on 8 CPUs, with a measured load
+    # average of 25-32 sustained and 0.0 id. That contention is what killed
+    # kh-hub's rust-checks on its wall-clock timeout four times, and this
+    # pipeline shares the same box and the same defect. -j2 x 10 slots is a
+    # 20-thread peak, ~2.5x oversubscribed instead of ~10x.
     environment:
       CARGO_HOME: /cargo-cache/home
       CARGO_TARGET_DIR: /cargo-cache/target
+      CARGO_BUILD_JOBS: '2'
+      RUST_TEST_THREADS: '2'
     volumes:
       - /var/lib/woodpecker-cache/remo-code/home:/cargo-cache/home
       - /var/lib/woodpecker-cache/remo-code/target:/cargo-cache/target
