@@ -17,6 +17,9 @@ when:
 
 labels:
   platform: linux/amd64
+  # Host bind mount of /var/lib/woodpecker-cache below: only agents on the CI VM
+  # (167.233.164.91), whose cron caps that directory, may run this workflow.
+  hostcache: ci-vm
 
 steps:
   - name: cargo-check
