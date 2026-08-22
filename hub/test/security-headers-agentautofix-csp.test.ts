@@ -64,4 +64,22 @@ describe('agentautofix CSP wiring (finding 4)', () => {
     config.agentautofix = { ...originalAgentautofix, configured: true, host: '' };
     expect(agentautofixConnectSrcEntry()).toBeNull();
   });
+
+  // Deferral 2 (#413): a wildcard-shaped host must never widen connect-src.
+  const cases: Array<{ host: string; expectAllowed: boolean; label: string }> = [
+    { host: 'https://agentautofix.titaniumlabs.us', expectAllowed: true, label: 'valid concrete host' },
+    { host: 'http://localhost:9106', expectAllowed: true, label: 'valid localhost with port' },
+    { host: 'https://127.0.0.1', expectAllowed: true, label: 'valid bare IPv4 host' },
+    { host: 'https://*', expectAllowed: false, label: 'bare wildcard host' },
+    { host: 'https://*.evil.com', expectAllowed: false, label: 'leading-wildcard subdomain host' },
+    { host: 'https://evil.com*', expectAllowed: false, label: 'trailing-wildcard host' },
+  ];
+
+  for (const { host, expectAllowed, label } of cases) {
+    test(`${expectAllowed ? 'accepts' : 'rejects'} ${label} (${host})`, () => {
+      config.agentautofix = { ...originalAgentautofix, configured: true, host };
+      const result = agentautofixConnectSrcEntry();
+      expect(result).toBe(expectAllowed ? host : null);
+    });
+  }
 });

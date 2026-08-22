@@ -31,6 +31,11 @@ import { log } from '../observability/logger'
 const MAX_REPORTS_PER_DAY = 200 // well under the 2000/day app-wide cap; this is ONE class of error
 const THROTTLE_MS = 60 * 60 * 1000 // one report per fingerprint per hour
 const AGGREGATION_WINDOW_MS = 45 * 1000 // coalesce a burst of the same fingerprint into one report
+const FETCH_TIMEOUT_MS = 10 * 1000 // abort a hung upstream so its fingerprint's channel never blocks forever
+
+// Overridable only for tests, so a hung-fetch regression test doesn't have
+// to actually wait out the real 10s production timeout.
+let fetchTimeoutMs = FETCH_TIMEOUT_MS
 
 const lastSentAt = new Map<string, number>()
 let dayWindowStart = Date.now()
@@ -227,6 +232,12 @@ export function _resetForTest(): void {
   inFlightSend.clear()
   dayWindowStart = Date.now()
   dayCount = 0
+  fetchTimeoutMs = FETCH_TIMEOUT_MS
+}
+
+/** Visible for tests: override the fetch-abort timeout so a hung-fetch test doesn't wait 10s. */
+export function _setFetchTimeoutMsForTest(ms: number): void {
+  fetchTimeoutMs = ms
 }
 
 /**
@@ -300,22 +311,34 @@ async function sendAggregatedReport(fields: SelfErrorForward, occurrences: numbe
         (fields.stack ? `\n\n${scrub(fields.stack).split('\n').slice(0, 30).join('\n')}` : ''),
     ).slice(0, 3900)
 
-    const res = await fetch(`${config.agentautofix.host}/api/plugin/v1/comments`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-agentautofix-key': config.agentautofix.publicKey,
-        authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        comment,
-        x: 0,
-        y: 0,
-        page_url: `${config.agentautofix.origin}/#/hub-self-capture`,
-        element_selector: 'body',
-        element_meta: { kind: 'log_error', source: fields.source, occurrences },
-      }),
-    })
+    // Bound the request so a hung upstream can't block this fingerprint's
+    // channel forever: `inFlightSend` only clears when the fetch promise
+    // settles, and without a timeout an upstream that never responds (no
+    // connection reset, no timeout of its own) never lets us settle.
+    const abortController = new AbortController()
+    const timeoutTimer = setTimeout(() => abortController.abort(), fetchTimeoutMs)
+    let res: Response
+    try {
+      res = await fetch(`${config.agentautofix.host}/api/plugin/v1/comments`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-agentautofix-key': config.agentautofix.publicKey,
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          comment,
+          x: 0,
+          y: 0,
+          page_url: `${config.agentautofix.origin}/#/hub-self-capture`,
+          element_selector: 'body',
+          element_meta: { kind: 'log_error', source: fields.source, occurrences },
+        }),
+        signal: abortController.signal,
+      })
+    } finally {
+      clearTimeout(timeoutTimer)
+    }
 
     if (res.status === 429) {
       // Rate-limited by the server, not a rejection of the content — roll

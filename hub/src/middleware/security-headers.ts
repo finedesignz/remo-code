@@ -59,8 +59,12 @@ export function renderCsp(d: CspDirectives): string {
 // A malformed/misconfigured AGENTAUTOFIX_HOST must never be able to inject
 // extra CSP directives via connect-src (e.g. a value containing `;` or `,`).
 // Only a bare origin-shaped host — no whitespace, no directive/list
-// separators — is accepted; anything else is dropped rather than trusted.
-const SAFE_CSP_SOURCE_RE = /^[a-z][a-z0-9+.-]*:\/\/[^\s;,]+$/i;
+// separators, and no wildcard host (`https://*` / `https://*.evil.com` would
+// silently widen connect-src to allow any origin) — is accepted; anything
+// else is dropped rather than trusted. The host must start and end with an
+// alphanumeric character, with only `.`/`-` allowed between, plus an
+// optional `:port` suffix.
+const SAFE_CSP_SOURCE_RE = /^[a-z][a-z0-9+.-]*:\/\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d+)?$/i;
 
 export function agentautofixConnectSrcEntry(): string | null {
   if (!config.agentautofix.configured) return null;
