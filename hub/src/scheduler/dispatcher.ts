@@ -40,8 +40,37 @@ interface RunContext {
   triggeredByRunId?: string | null
   /** Manual ("run now") dispatch — the agent sender fails fast on offline. */
   isManual?: boolean
+  /**
+   * Per-run cost accrual (fix/run-cost-attribution). `scheduled_task_runs
+   * .cost_usd` was NULL on 100% of rows — no caller of `finalizeRun` ever
+   * supplied it. Session-targeted runs (`target.sessionId` set) DO incur LLM
+   * cost, reported by the supervisor as `usage_event` messages on the SAME
+   * agent socket while the run is in flight (`ws/agent.ts` records them into
+   * `token_usage` for the daily cap, keyed by sessionId only — no run linkage
+   * existed). `accrueRunCost` sums those events onto every in-flight run
+   * targeting that session, so `finalizeRun` can attribute the real per-turn
+   * cost without inferring it after the fact by timestamp proximity. Callers
+   * never set this — `trackRun` seeds it to 0.
+   */
+  costUsd: number
 }
+type NewRunContext = Omit<RunContext, 'costUsd'>
 const inFlightByRun = new Map<string, RunContext>()
+
+/**
+ * Attribute a supervisor-reported `usage_event` cost to every currently
+ * in-flight scheduled run targeting `sessionId`. Called from the agent ws
+ * `usage_event` handler with the SAME cost value it just persisted into
+ * `token_usage` (SDK-authoritative or pricing-fallback) — this only changes
+ * WHERE that number is also recorded, never how it's computed, so it can
+ * never double-count against the token_usage-derived cost cap.
+ */
+export function accrueRunCost(sessionId: string | null | undefined, costUsd: number): void {
+  if (!sessionId || !(costUsd > 0)) return
+  for (const ctx of inFlightByRun.values()) {
+    if (ctx.target.sessionId === sessionId) ctx.costUsd += costUsd
+  }
+}
 
 // B4: keep the queue-depth gauge in sync. Dynamic require avoids a top-of-file
 // dep tangle with the metrics module. Try/catch so a registry hiccup never
@@ -60,8 +89,8 @@ export function removeRunContext(runId: string): void {
   inFlightByRun.delete(runId)
   syncQueueDepthGauge()
 }
-export function trackRun(ctx: RunContext): void {
-  inFlightByRun.set(ctx.runId, ctx)
+export function trackRun(ctx: NewRunContext): void {
+  inFlightByRun.set(ctx.runId, { ...ctx, costUsd: 0 })
   syncQueueDepthGauge()
 }
 
@@ -249,7 +278,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       target_id: null,
       triggered_by_run_id: opts.triggeredByRunId ?? null,
     })
-    const ctx: RunContext = {
+    const ctx: NewRunContext = {
       runId: run.id,
       taskId: task.id,
       userId,
@@ -298,7 +327,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       target_id: null,
       triggered_by_run_id: opts.triggeredByRunId ?? null,
     })
-    const ctx: RunContext = {
+    const ctx: NewRunContext = {
       runId: run.id,
       taskId: task.id,
       userId,
@@ -351,7 +380,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       session_id: (task.payload?.work_session_id as string) ?? null,
       triggered_by_run_id: opts.triggeredByRunId ?? null,
     })
-    const ctx: RunContext = {
+    const ctx: NewRunContext = {
       runId: run.id,
       taskId: task.id,
       userId,
@@ -432,7 +461,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       triggered_by_run_id: opts.triggeredByRunId ?? null,
     })
 
-    const ctx: RunContext = {
+    const ctx: NewRunContext = {
       runId: run.id,
       taskId: task.id,
       userId,
@@ -578,7 +607,7 @@ function updateFireTimestamps(taskId: string, fired: Date): void {
   void setTaskFireTimestamps(taskId, fired, next)
 }
 
-export async function routeToSender(task: ScheduledTask, ctx: RunContext): Promise<void> {
+export async function routeToSender(task: ScheduledTask, ctx: NewRunContext): Promise<void> {
   // F-11: orchestrator tasks are owned by the controller due-tick
   // (scanAndEnqueueDueCycles, gated by isOrchestratorEnabled) — NOT the cron
   // sender. If such a task ever reaches the cron path (e.g. a future misconfig
@@ -663,10 +692,17 @@ export async function finalizeRun(
     ? fields.duration_ms
     : ctx ? finishedAt.getTime() - ctx.startedAt : null
 
+  // An explicit `fields.cost_usd` (none of today's callers pass one) always
+  // wins; otherwise fall back to what `accrueRunCost` accumulated from this
+  // run's own `usage_event`s while in flight. `> 0` guard: a supervisor/coolify/
+  // teab run with no CLI turn never accrues anything and stays correctly NULL
+  // rather than a misleading `0`.
+  const costUsd = fields.cost_usd ?? (ctx && ctx.costUsd > 0 ? ctx.costUsd : null)
+
   const updated = await updateRunStatus(runId, {
     status,
     error: error ?? null,
-    cost_usd: fields.cost_usd ?? null,
+    cost_usd: costUsd,
     duration_ms: dur,
     output_snippet: fields.output_snippet ?? null,
     finished_at: finishedAt,
@@ -693,7 +729,7 @@ export async function finalizeRun(
     task_id: ctx?.taskId ?? updated?.task_id ?? null,
     status,
     error: error ?? null,
-    cost_usd: fields.cost_usd ?? null,
+    cost_usd: costUsd,
     duration_ms: dur,
     output_snippet: fields.output_snippet ?? null,
   })
@@ -703,7 +739,7 @@ export async function finalizeRun(
     : updated?.task_id ? await getTaskById(updated.task_id) : null
   if (task) {
     await onRunFinalized(task, runId, status, error ?? null, {
-      cost_usd: fields.cost_usd ?? null,
+      cost_usd: costUsd,
       duration_ms: dur,
       output_snippet: fields.output_snippet ?? null,
       parentFireId: ctx?.parentFireId ?? null,

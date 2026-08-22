@@ -807,6 +807,17 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
           costSource = 'estimated'
         }
       }
+      // fix/run-cost-attribution: attribute this same cost onto any in-flight
+      // scheduled run targeting this session, so `scheduled_task_runs.cost_usd`
+      // is populated at finalize instead of staying permanently NULL. Purely
+      // additive bookkeeping on the scheduler's own in-memory run map — never
+      // written back into token_usage, so the daily cap total is unaffected.
+      try {
+        const { accrueRunCost } = await import('../scheduler/dispatcher.ts')
+        accrueRunCost(ws.data.sessionId ?? null, costUsd)
+      } catch (err: any) {
+        console.error('[agent] accrueRunCost failed', err?.message)
+      }
       await recordTokenUsage({
         userId: ws.data.userId,
         sessionId: ws.data.sessionId ?? null,
