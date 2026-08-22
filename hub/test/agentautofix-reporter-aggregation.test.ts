@@ -13,6 +13,7 @@ import {
   _resetForTest,
   _getDayCountForTest,
   _forceDayWindowStaleForTest,
+  _setFetchTimeoutMsForTest,
 } from '../src/agentautofix/reporter';
 
 const { config } = (await import('../src/config')) as any;
@@ -378,6 +379,49 @@ describe('reportSelfErrorToAgentautofix noise filter', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(calls.length).toBe(0);
   });
+});
+
+describe('reportSelfErrorToAgentautofix fetch timeout (deferral 1)', () => {
+  test('a fetch that never settles is aborted at the timeout and the fingerprint is released, not blocked forever', async () => {
+    _setFetchTimeoutMsForTest(20); // don't wait out the real 10s production timeout
+
+    const fields = { fingerprint: 'fp-hung-forever', errorType: 'Error', errorValue: 'boom', source: 'hono' };
+
+    // Simulate a genuinely hung upstream: fetch never resolves or rejects on
+    // its own, but DOES honor the AbortSignal like a real fetch would.
+    // @ts-expect-error test stub
+    globalThis.fetch = async (_url: string, init: any) => {
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => {
+          const err = new Error('The operation was aborted');
+          err.name = 'AbortError';
+          reject(err);
+        });
+      });
+    };
+
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-hung-forever');
+
+    // Without the timeout this would hang forever; with it, the abort fires
+    // shortly after the overridden timeout and the reservation rolls back.
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(calls.length).toBe(0); // aborted before ever "succeeding"
+
+    // The fingerprint must be released (not permanently blocked): a later
+    // occurrence, against a fetch that succeeds normally, must go through.
+    // @ts-expect-error test stub
+    globalThis.fetch = async (_url: string, init: any) => {
+      calls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+    await reportSelfErrorToAgentautofix(fields);
+    _flushPendingForTest('fp-hung-forever');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(calls.length).toBe(1);
+  }, 10000);
 });
 
 describe('reportSelfErrorToAgentautofix day-window rollback identity (Finding 2)', () => {
