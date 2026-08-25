@@ -9,7 +9,7 @@
  *   - The hub-initiated rescan (`supervisor.rescan_repos`) forces an emit and
  *     acks ok; a scan failure acks ok:false (no silent stale swap).
  */
-import { describe, test, expect, beforeEach } from 'bun:test'
+import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test'
 import { mkdtempSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -20,6 +20,33 @@ import {
 } from '../src/hub-client'
 
 const ROOT = mkdtempSync(join(tmpdir(), 'remo-repoinv-'))
+
+// fix/test-config-isolation-contract — this file constructs a real
+// `SupervisorClient` whose scan/save path resolves the supervisor config dir.
+// Before #406 that resolution wrote through to the REAL
+// `%APPDATA%\remo-code\supervisor.json`: THIS file's `remo-repoinv-*` temp dir
+// is the one that ended up in the live `roots`, which then made the running
+// supervisor reject genuine session launches as `sandbox_escape`. #406 added a
+// guard that makes an unisolated run throw instead of writing, so the damage is
+// already prevented — but the contract that guard's own error message states is
+// "tests must set REMO_CODE_CONFIG_DIR before touching config.ts /
+// hub-client.ts". Honor it here rather than leaning on the guard: if persistence
+// assertions are ever added to this file, they need a real (sandboxed) config
+// dir, not a swallowed throw.
+const CONFIG_SANDBOX = mkdtempSync(join(tmpdir(), 'remo-repoinv-cfg-'))
+let savedConfigDir: string | undefined
+
+beforeAll(() => {
+  savedConfigDir = process.env.REMO_CODE_CONFIG_DIR
+  process.env.REMO_CODE_CONFIG_DIR = CONFIG_SANDBOX
+})
+
+afterAll(() => {
+  // Restore rather than leave it set: a leaked override would silently isolate
+  // whatever test file runs next in this process and mask a missing one there.
+  if (savedConfigDir === undefined) delete process.env.REMO_CODE_CONFIG_DIR
+  else process.env.REMO_CODE_CONFIG_DIR = savedConfigDir
+})
 
 const baseCfg: any = {
   hubUrl: 'http://hub.local',

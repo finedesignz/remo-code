@@ -22,6 +22,14 @@ use crate::sidecar;
 // changes, both files update together.
 // ---------------------------------------------------------------------------
 
+/// NOTE (fix/test-config-isolation-contract, 2026-08-18): same caveat as
+/// `config_cmds::config_path` — the TypeScript side honors `REMO_CODE_CONFIG_DIR`
+/// and hard-throws under `NODE_ENV=test` when it is unset, so Bun tests cannot
+/// write through to the real per-user config. This Rust half deliberately does
+/// not honor that override (the tray app must resolve the real config), so any
+/// future Rust test that reads or writes through here would hit the user's real
+/// `supervisor.json` / `last_inventory.json` with no protection. Give such a test
+/// its own env override or path parameter first.
 fn config_dir() -> Result<PathBuf, String> {
     if cfg!(target_os = "windows") {
         let appdata = std::env::var_os("APPDATA")
