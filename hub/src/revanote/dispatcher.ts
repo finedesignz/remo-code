@@ -60,6 +60,7 @@ import { findSessionByProjectDir, insertMessage } from '../db/dal.ts'
 import { getChannel, broadcastRevanoteEvent, broadcastToSubscribers } from '../ws/registry.ts'
 import { renderAnnotationPrompt, storagePrefix, previewComment } from './prompt.ts'
 import { finalizeAnnotationReply } from './run-lifecycle.ts'
+import { ENVELOPE_RE } from './result-schema.ts'
 import {
   dispatch,
   type DispatchRequest,
@@ -267,6 +268,19 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
         status: 'failed', error: `agent_send: ${errMsg}`, finished_at: new Date(),
       })
     },
+    // Coding-agent turns narrate progress ("Implementer running. Waiting for
+    // build + PR result.") before the turn that actually carries the
+    // `<<JSON>>...<<END>>` envelope. Only an envelope-bearing message (or the
+    // bounded `finalizeTimeoutMs` terminal fallback in the pipeline) should
+    // consume the finalize hook — otherwise narration gets misparsed as
+    // `envelope_missing` and a real reply is silently eaten. `parseRevanoteOutput`'s
+    // fence/bare-prose fallbacks are intentionally NOT treated as "final" here:
+    // they exist so a message that DOES finalize (envelope found, or the
+    // timeout forces it) still produces a usable result, not so a random
+    // narration line prematurely ends the wait.
+    shouldFinalize(content) {
+      return ENVELOPE_RE.test(content)
+    },
   }
 
   // Captured when open() fires so onFinalize can compute duration_ms with legacy
@@ -284,6 +298,11 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
     // bound session — a rate ceiling, not just a $ / token one.
     gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate, revanoteBudgetGate(userId, tz)],
     store,
+    // Bounded terminal fallback for `store.shouldFinalize` above: a session
+    // that never emits the envelope still resolves (as an honest parse
+    // failure via `parseRevanoteOutput`'s bare-prose tolerance) instead of
+    // leaving the hook — and the annotation — hanging forever.
+    finalizeTimeoutMs: Number(process.env.REVANOTE_FINALIZE_TIMEOUT_MS ?? 20 * 60 * 1000),
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Spawn-on-error (opt-in via REMO_SPAWN_ON_ERROR): when the bound session is
     // offline, lazy-START it via the supervisor before parking, so an offline-but-

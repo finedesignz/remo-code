@@ -249,7 +249,7 @@ interface RecordingStore extends RunStore {
  * RUN id, not the request token. `opts.openReturnsNull` exercises the
  * `?? req.token` fallback (a store that has no row id of its own).
  */
-function recordingStore(opts: { openReturnsNull?: boolean } = {}): RecordingStore {
+function recordingStore(opts: { openReturnsNull?: boolean; shouldFinalize?: (content: string) => boolean } = {}): RecordingStore {
   const s: RecordingStore = {
     opened: [],
     skipped: [],
@@ -264,6 +264,7 @@ function recordingStore(opts: { openReturnsNull?: boolean } = {}): RecordingStor
     async markFailed(token, error) { s.failed.push([token, error]) },
     async markDispatched(token) { s.dispatched.push(token) },
     async onFinalize(token, content) { s.finalized.push([token, content]) },
+    ...(opts.shouldFinalize ? { shouldFinalize: opts.shouldFinalize } : {}),
   }
   return s
 }
@@ -502,5 +503,76 @@ describe('dispatch/pipeline — onSessionReply finalize + promote + redispatch',
     await onSessionReply('s1', 'r')
     expect(store.finalized).toEqual([['run:t1', 'r']])
     expect(getQueue().currentInFlight('s1')).toBe(null)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// shouldFinalize narration tolerance (revanote finalize-timing fix).
+//
+// Regression coverage for the bug: a coding-agent turn narrates progress
+// ("Implementer running. Waiting for build + PR result.") on an EARLY
+// assistant_message before the turn that actually carries the envelope. The
+// pipeline used to consume the finalize hook unconditionally on the first
+// assistant_message, so narration got misparsed as the final answer and a
+// real reply was silently eaten. `RunStore.shouldFinalize` lets a store defer
+// finalize until a message it recognizes as final arrives; `finalizeTimeoutMs`
+// bounds how long it can defer so a session that never emits one still
+// resolves instead of hanging the hook forever.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('dispatch/pipeline — shouldFinalize narration tolerance', () => {
+  beforeEach(() => resetPipeline())
+
+  const ENVELOPE_RE = /<<JSON>>([\s\S]*?)<<END>>/i
+
+  test('narration-only message does NOT consume the hook — envelope message later does', async () => {
+    const { deps: d, store } = deps({}, { shouldFinalize: (c) => ENVELOPE_RE.test(c) })
+    await dispatch(baseReq({ token: 't1' }), d)
+
+    // Narration turn — no envelope. Hook must stay armed.
+    await onSessionReply('s1', 'Implementer running. Waiting for build + PR result.')
+    expect(store.finalized).toHaveLength(0)
+    expect(store.opened).toEqual(['t1']) // still just the original open
+
+    // Real result turn — carries the envelope. Hook consumes it now.
+    const finalMsg = 'Done.\n<<JSON>>\n{"resolved":true}\n<<END>>'
+    await onSessionReply('s1', finalMsg)
+    expect(store.finalized).toEqual([['run:t1', finalMsg]])
+  })
+
+  test('a message carrying the envelope finalizes immediately (single turn, no narration)', async () => {
+    const { deps: d, store } = deps({}, { shouldFinalize: (c) => ENVELOPE_RE.test(c) })
+    await dispatch(baseReq({ token: 't1' }), d)
+    const finalMsg = '<<JSON>>\n{"resolved":true}\n<<END>>'
+    await onSessionReply('s1', finalMsg)
+    expect(store.finalized).toEqual([['run:t1', finalMsg]])
+  })
+
+  test('a session that never emits the envelope resolves honestly via the bounded timeout, not by hanging', async () => {
+    const { deps: d, store } = deps(
+      { finalizeTimeoutMs: 1000 },
+      { shouldFinalize: (c) => ENVELOPE_RE.test(c) },
+    )
+    await dispatch(baseReq({ token: 't1' }), d)
+
+    // Several narration-only turns — none finalize.
+    await onSessionReply('s1', 'still working...')
+    await onSessionReply('s1', 'almost there...')
+    expect(store.finalized).toHaveLength(0)
+
+    // Simulate the timeout having elapsed by back-dating the hook's start
+    // time is not exposed, so instead assert the documented contract directly:
+    // once finalizeTimeoutMs has elapsed, the NEXT assistant_message finalizes
+    // unconditionally even without an envelope. We approximate elapsed time by
+    // waiting past the configured timeout.
+    await new Promise((r) => setTimeout(r, 1100))
+    await onSessionReply('s1', 'giving up, no fix found')
+    expect(store.finalized).toEqual([['run:t1', 'giving up, no fix found']])
+  })
+
+  test('no shouldFinalize on the store preserves today\'s one-shot behaviour', async () => {
+    const { deps: d, store } = deps() // no shouldFinalize
+    await dispatch(baseReq({ token: 't1' }), d)
+    await onSessionReply('s1', 'anything at all')
+    expect(store.finalized).toEqual([['run:t1', 'anything at all']])
   })
 })
