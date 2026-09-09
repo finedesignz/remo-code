@@ -1,7 +1,7 @@
 import { platform, release, arch, cpus, totalmem } from 'os'
 import { resolveHostname } from '../hostname'
 import { mkdirSync, writeFileSync, existsSync, readFileSync, appendFileSync, rmSync } from 'fs'
-import { join, basename, extname } from 'path'
+import { join, basename, extname, resolve, sep } from 'path'
 import { ClaudeRunner } from './claude-runner'
 import { selectHumanPtyRunner } from './runner-factory'
 import { PtyPersistence } from './pty-persistence'
@@ -47,12 +47,38 @@ export function sanitizeAttachmentName(raw: string): string {
 }
 
 /**
+ * Strict allowlist for sessionId as used in filesystem paths: this value is
+ * joined into a directory that writeAttachmentFile() writes into and that
+ * stop() recursively rmSync's, so it must never be able to smuggle a path
+ * separator or traversal segment. Session ids are supervisor-generated
+ * (see hub `sessions.id`), so a well-formed one always matches this.
+ */
+const SAFE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
+
+/**
  * Attachments dir for a given session, under the session's real working
  * directory (not a host temp dir) so uploaded files land where the CLI's
  * own file tools resolve relative paths from.
+ *
+ * This is the single chokepoint both writeAttachmentFile() and stop()'s
+ * cleanup go through, so both are validated here: sessionId must match a
+ * strict allowlist (no path separators, no `..`, non-empty, bounded length),
+ * and the resulting absolute path is asserted to still be strictly under
+ * `<repoPath>/.remo/attachments` before it's returned. Throws on any
+ * violation — callers must not write or delete on a thrown error.
  */
 export function attachmentsDirFor(repoPath: string, sessionId: string): string {
-  return join(repoPath, '.remo', 'attachments', sessionId)
+  if (typeof sessionId !== 'string' || !SAFE_SESSION_ID.test(sessionId)) {
+    throw new Error(`attachmentsDirFor: refusing unsafe sessionId ${JSON.stringify(sessionId)}`)
+  }
+  const root = resolve(join(repoPath, '.remo', 'attachments'))
+  const dir = resolve(join(root, sessionId))
+  if (dir !== root && !dir.startsWith(root + sep)) {
+    // Belt-and-braces containment check — the regex above should already
+    // make this unreachable, but this is the actual boundary that matters.
+    throw new Error(`attachmentsDirFor: resolved path escapes attachments root for sessionId ${JSON.stringify(sessionId)}`)
+  }
+  return dir
 }
 
 /**

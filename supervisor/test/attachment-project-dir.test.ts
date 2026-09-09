@@ -95,6 +95,45 @@ describe('ensureAttachmentsGitignored', () => {
   })
 })
 
+describe('attachmentsDirFor sessionId validation (path-traversal hardening)', () => {
+  const hostile = ['..', '../..', 'a/../../b', 'a\\b', '/etc/passwd', 'C:\\Windows', '']
+
+  test('rejects hostile sessionId values — throws, nothing computed', () => {
+    const repo = makeRepo(true)
+    for (const bad of hostile) {
+      expect(() => attachmentsDirFor(repo, bad)).toThrow()
+    }
+  })
+
+  test('writeAttachmentFile refuses a hostile sessionId — nothing written outside the repo', () => {
+    const repo = makeRepo(true)
+    for (const bad of hostile) {
+      expect(() =>
+        writeAttachmentFile(repo, bad, 'evil.txt', Buffer.from('x').toString('base64')),
+      ).toThrow()
+    }
+    // Nothing should have leaked into the repo or its parent.
+    expect(existsSync(join(repo, '.remo'))).toBe(false)
+  })
+
+  test('a normal sessionId still resolves under <repoPath>/.remo/attachments (no regression)', () => {
+    const repo = makeRepo(true)
+    const dir = attachmentsDirFor(repo, 'sess-normal-123')
+    expect(dir).toBe(join(repo, '.remo', 'attachments', 'sess-normal-123'))
+    expect(existsSync(dir)).toBe(false) // dir isn't created by attachmentsDirFor itself
+  })
+
+  test('containment assert rejects a value that could slip past a naive regex check', () => {
+    const repo = makeRepo(true)
+    // Would pass a looser check like /^[^/\\]+$/ (no literal separator chars)
+    // but still needs the resolve()+startsWith() containment assert as the
+    // real boundary. The strict allowlist already blocks '.', proving the
+    // second layer is load-bearing defense-in-depth, not decorative.
+    expect(() => attachmentsDirFor(repo, '.')).toThrow()
+    expect(() => attachmentsDirFor(repo, '..')).toThrow()
+  })
+})
+
 describe('SessionBridge.stop() cleanup', () => {
   test('removes the session attachments dir best-effort', async () => {
     const repo = makeRepo(true)
@@ -113,6 +152,24 @@ describe('SessionBridge.stop() cleanup', () => {
 
     await bridge.stop()
     expect(existsSync(dir)).toBe(false)
+  })
+
+  test('stop() with a hostile sessionId deletes nothing outside the repo and does not throw', async () => {
+    const repo = makeRepo(true)
+    writeAttachmentFile(repo, 'sess-legit', 'a.txt', Buffer.from('a').toString('base64'))
+    const legitDir = attachmentsDirFor(repo, 'sess-legit')
+    expect(existsSync(legitDir)).toBe(true)
+
+    const bridge = new SessionBridge(
+      { runId: 'r-hostile', repoPath: repo, apiKey: 'k', hubUrl: 'http://example.invalid', allowDangerousSkipPermissions: false },
+      { onLog: () => {}, onExit: () => {}, onSpawned: () => {} },
+    )
+    ;(bridge as any).sessionId = '..'
+
+    await expect(bridge.stop()).resolves.toBeUndefined()
+    // Unrelated legit session dir must be untouched — the hostile id never
+    // resolved to a path stop() was allowed to rmSync.
+    expect(existsSync(legitDir)).toBe(true)
   })
 
   test('stop() never throws even if the attachments dir was never created', async () => {
