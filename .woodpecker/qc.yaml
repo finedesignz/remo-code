@@ -26,7 +26,7 @@ steps:
     when:
       - event: pull_request
         branch: main
-        evaluate: 'not contains(CI_COMMIT_SOURCE_BRANCH, "dependabot/")'
+        evaluate: 'not (CI_COMMIT_SOURCE_BRANCH contains "dependabot/")'
     environment:
       DATABASE_URL: postgres://remo:remo@postgres:5432/remo_ci
       JWT_SECRET: ci-placeholder-jwt-secret-min-32-chars-please-do-not-use-in-prod
@@ -63,7 +63,7 @@ steps:
     when:
       - event: pull_request
         branch: main
-        evaluate: 'contains(CI_COMMIT_SOURCE_BRANCH, "dependabot/")'
+        evaluate: 'CI_COMMIT_SOURCE_BRANCH contains "dependabot/"'
     environment:
       JWT_SECRET: ci-placeholder-jwt-secret-min-32-chars-please-do-not-use-in-prod
     commands:
