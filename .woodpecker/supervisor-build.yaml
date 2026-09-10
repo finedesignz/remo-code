@@ -1,0 +1,56 @@
+# PR/push CI for the Supervisor Tauri app (supervisor/tauri/ui + supervisor/tauri/src-tauri
+# + supervisor/src). Before this pipeline, neither the Vite/React/TS UI nor the Rust crate
+# was compiled by any pull-request CI -- only by the tag-triggered GitHub Actions
+# release-supervisor.yml, so a break first surfaced at release time and blocked the signed
+# MSI. Path-filtered so it only fires when the supervisor app actually changes.
+#
+# Runs on the self-hosted native Windows agent (id 6, TITANIUMTOWER, local backend) because
+# the Rust crate is Windows-only (ConPTY via portable-pty + the `windows` crate behind
+# `cfg(target_os = "windows")`) -- a linux/amd64 cross-target `cargo check` would silently
+# skip every windows-cfg'd block, which is most of the crate's actual logic (sidecar
+# management, mutex probe, legacy cleanup). This agent already builds+signs the real MSI
+# release (see archived .woodpecker/release-supervisor.yaml prior art), so cargo/bun are
+# already installed there. No secrets are used here (check-only, no signing), so unlike the
+# archived release pipeline this is safe to run on every PR.
+when:
+  - event: pull_request
+    path:
+      - "supervisor/tauri/**"
+      - "supervisor/src/**"
+      - ".woodpecker/supervisor-build.yaml"
+  - event: push
+    branch: main
+    path:
+      - "supervisor/tauri/**"
+      - "supervisor/src/**"
+      - ".woodpecker/supervisor-build.yaml"
+
+labels:
+  platform: windows/amd64
+
+steps:
+  - name: supervisor-ui-build
+    # Local backend: `image` selects the shell, not a container (see release-supervisor.yaml).
+    image: powershell
+    commands:
+      - cd supervisor/tauri/ui
+      - bun install --frozen-lockfile
+      - if ($LASTEXITCODE -ne 0) { exit 1 }
+      - bunx tsc --noEmit -p .
+      - if ($LASTEXITCODE -ne 0) { exit 1 }
+      - bun run build
+      - if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  - name: supervisor-rust-check
+    # Runs after supervisor-ui-build so ../ui/dist exists -- tauri::generate_context!
+    # resolves frontendDist ("../ui/dist", tauri.conf.json) at compile time and panics
+    # if it's absent, same constraint as mobile-shell-typecheck.yaml. The build.rs also
+    # resolves bundle.externalBin ("binaries/remo-code-supervisor") to the target-triple
+    # sidecar path and fails if it's missing, so stub that too (check-only -- never run).
+    image: powershell
+    commands:
+      - cd supervisor/tauri/src-tauri
+      - New-Item -ItemType Directory -Force -Path binaries | Out-Null
+      - Set-Content -Path binaries\remo-code-supervisor-x86_64-pc-windows-msvc.exe -Value stub
+      - cargo check
+      - if ($LASTEXITCODE -ne 0) { exit 1 }
