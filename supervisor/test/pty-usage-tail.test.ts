@@ -451,19 +451,27 @@ describe('PtyUsageEmitter — end-to-end mid-turn accounting (SC-1/SC-2/SC-3)', 
     const { restore } = makeHome()
     const emitter = new PtyUsageEmitter()
     try {
-      const projectDir = process.platform === 'win32' ? 'C:/fake/pty-usage-i' : '/fake/pty-usage-i'
+      // NOTE: this fixture name (and its sessionId) must stay distinct from
+      // every other test's — a duplicate literal here previously collided
+      // with the "scenario 1: session dir ABSENT" test below (same projectDir
+      // string, same sessionId), which under CI's slower/loaded timing let
+      // this test's async locate-poll/tail teardown race past its own
+      // makeHome()/restore() boundary and pollute the next test's snapshot.
+      // Distinct literals make that class of cross-test race structurally
+      // impossible regardless of teardown timing.
+      const projectDir = process.platform === 'win32' ? 'C:/fake/pty-usage-k' : '/fake/pty-usage-k'
       const r = resolveSessionDir(projectDir)
       if (!r.ok) throw new Error(`test setup: resolveSessionDir failed: ${r.error}`)
       mkdirSync(r.dir, { recursive: true })
       const captured: PtyUsageEventFrame[] = []
       emitter.start({
-        sessionId: 'sess-i',
+        sessionId: 'sess-k',
         projectDir,
         cliKind: 'claude',
         emit: (f) => captured.push(f),
         projectsBase: () => claudeProjectsBase(),
       })
-      const file = join(r.dir, 'sess-i.jsonl')
+      const file = join(r.dir, 'sess-k.jsonl')
       writeFileSync(
         file,
         JSON.stringify({
