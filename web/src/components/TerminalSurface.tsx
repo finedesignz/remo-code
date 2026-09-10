@@ -140,10 +140,17 @@ export function applyTextareaKeepAlive(target: KeepAliveTarget): void {
 // — outside one, `data` is a single already-committed unit and must be sent
 // as-is (that's inputEventToBytes's job).
 function diffInterimBytes(prev: string, next: string): string {
+  // Iterate by CODE POINT, not UTF-16 code unit: an astral char (e.g. an emoji,
+  // surrogate pair) counts as ONE backspace on a real terminal, not two. Using
+  // `.length`/index access here over-counts the common prefix and the
+  // backspace tail for any string containing one, e.g. retracting "ok 👍" to
+  // "ok" must send exactly 2 DEL (for the space and the emoji), not 3.
+  const prevCp = Array.from(prev)
+  const nextCp = Array.from(next)
   let i = 0
-  const max = Math.min(prev.length, next.length)
-  while (i < max && prev[i] === next[i]) i++
-  return '\x7f'.repeat(prev.length - i) + next.slice(i)
+  const max = Math.min(prevCp.length, nextCp.length)
+  while (i < max && prevCp[i] === nextCp[i]) i++
+  return '\x7f'.repeat(prevCp.length - i) + nextCp.slice(i).join('')
 }
 
 /**
@@ -169,47 +176,84 @@ function diffInterimBytes(prev: string, next: string): string {
 export class CompositionInputTracker {
   private composing = false
   private pending = ''
+  // Armed by onCompositionEnd when compositionend carries a final `data`
+  // string. Some engines fire compositionend BEFORE the beforeinput that
+  // delivers the committed text (inputType can be 'insertText', not just the
+  // 'insertCompositionText'/... family) — `composing` is already false by
+  // then, so without this flag that beforeinput would fall through to the
+  // plain forward-as-is path and resend the FULL committed string on top of
+  // what was already diffed out during composition (e.g. "hel" + "hello" ->
+  // "helhello"). Staying armed across the composing->non-composing boundary
+  // makes the fix independent of which order the two events actually fire in.
+  private awaitingFinal = false
+  private finalData = ''
 
   onCompositionStart(): void {
     this.composing = true
+    this.awaitingFinal = false
+    this.finalData = ''
     this.pending = ''
   }
 
-  onCompositionEnd(): void {
+  /** `data` is compositionend.data — the browser's authoritative final
+   * committed text for the utterance, when the engine provides it. We do not
+   * send anything here: the commit is diffed and sent from the next
+   * `handleBeforeInput` call, whichever event actually delivers it. */
+  onCompositionEnd(data: string | null = null): void {
     this.composing = false
-    this.pending = ''
+    if (data != null && data.length > 0) {
+      this.finalData = data
+      this.awaitingFinal = true
+    } else {
+      this.pending = ''
+    }
   }
 
   /** Bytes to send for this beforeinput event, or null to send nothing. */
   handleBeforeInput(inputType: string, data: string | null): string | null {
-    if (!this.composing) {
-      // No tracked composition in flight (desktop; the iOS one-shot-per-char
-      // pseudo-composition; a plain paste/newline/delete): unchanged behavior.
-      if (inputType === 'deleteContentBackward') this.pending = ''
-      return inputEventToBytes(inputType, data)
-    }
-    switch (inputType) {
-      case 'insertCompositionText':
-      case 'insertReplacementText':
-      case 'insertFromComposition': {
-        // Interim (or final, pre-compositionend) revision of the SAME
-        // utterance — diff against what we already sent, not the raw string.
-        const next = data ?? ''
-        const bytes = diffInterimBytes(this.pending, next)
-        this.pending = next
-        if (inputType === 'insertFromComposition') { this.composing = false; this.pending = '' }
-        return bytes.length > 0 ? bytes : null
+    if (this.composing || this.awaitingFinal) {
+      switch (inputType) {
+        case 'insertCompositionText':
+        case 'insertReplacementText':
+        case 'insertFromComposition':
+        case 'insertText': {
+          // Interim (or final) revision of the SAME utterance — diff against
+          // what we already sent, not the raw string. Prefer the
+          // compositionend-authoritative text when we have one armed (covers
+          // the compositionend-fires-first ordering); otherwise use this
+          // event's own `data`.
+          const wasAwaitingFinal = this.awaitingFinal
+          const next = wasAwaitingFinal ? this.finalData : (data ?? '')
+          const bytes = diffInterimBytes(this.pending, next)
+          // 'insertText'/'insertFromComposition' (or any commit already
+          // announced via compositionend) finalize the utterance — clear the
+          // hypothesis. A plain interim 'insertCompositionText'/
+          // 'insertReplacementText' revision keeps tracking `next` so the
+          // NEXT beforeinput diffs against what we actually sent.
+          const isFinal = wasAwaitingFinal || inputType === 'insertText' || inputType === 'insertFromComposition'
+          this.pending = isFinal ? '' : next
+          this.awaitingFinal = false
+          this.finalData = ''
+          if (isFinal) this.composing = false
+          return bytes.length > 0 ? bytes : null
+        }
+        case 'deleteContentBackward':
+          // A correction mid-dictation/composition: shrink our tracked hypothesis
+          // by one so the next diff doesn't re-delete a char already removed.
+          if (this.pending.length > 0) this.pending = this.pending.slice(0, -1)
+          this.awaitingFinal = false
+          return '\x7f'
+        default:
+          // insertFromPaste/insertLineBreak/deleteContentForward/etc. mid-
+          // composition: not part of the hypothesis stream, pass through.
+          this.awaitingFinal = false
+          return inputEventToBytes(inputType, data)
       }
-      case 'deleteContentBackward':
-        // A correction mid-dictation/composition: shrink our tracked hypothesis
-        // by one so the next diff doesn't re-delete a char already removed.
-        if (this.pending.length > 0) this.pending = this.pending.slice(0, -1)
-        return '\x7f'
-      default:
-        // insertText/insertFromPaste/insertLineBreak/deleteContentForward/etc.
-        // mid-composition: not part of the hypothesis stream, pass through.
-        return inputEventToBytes(inputType, data)
     }
+    // No tracked composition in flight (desktop; the iOS one-shot-per-char
+    // pseudo-composition; a plain paste/newline/delete): unchanged behavior.
+    if (inputType === 'deleteContentBackward') this.pending = ''
+    return inputEventToBytes(inputType, data)
   }
 }
 
@@ -266,6 +310,9 @@ const windowScheduler: RepeatScheduler = {
 export class KeyRepeater {
   private timeoutId: number | null = null
   private intervalId: number | null = null
+  private blurListenersBound = false
+  private readonly onBlur = () => this.stop()
+  private readonly onVisibilityChange = () => { if (document.hidden) this.stop() }
   constructor(
     private readonly fire: () => void,
     private readonly scheduler: RepeatScheduler = windowScheduler,
@@ -274,6 +321,7 @@ export class KeyRepeater {
   ) {}
   start(): void {
     this.stop()
+    this.bindBlurListeners()
     this.fire()
     this.timeoutId = this.scheduler.setTimeout(() => {
       this.timeoutId = null
@@ -283,6 +331,22 @@ export class KeyRepeater {
   stop(): void {
     if (this.timeoutId != null) { this.scheduler.clearTimeout(this.timeoutId); this.timeoutId = null }
     if (this.intervalId != null) { this.scheduler.clearInterval(this.intervalId); this.intervalId = null }
+    this.unbindBlurListeners()
+  }
+  // Alt-tab / app-switch mid-hold must never leave the 50ms interval running —
+  // there is no matching pointerup off-window, so without this the repeater
+  // fires forever into a session the user is no longer looking at.
+  private bindBlurListeners(): void {
+    if (this.blurListenersBound || typeof window === 'undefined') return
+    window.addEventListener('blur', this.onBlur)
+    document.addEventListener('visibilitychange', this.onVisibilityChange)
+    this.blurListenersBound = true
+  }
+  private unbindBlurListeners(): void {
+    if (!this.blurListenersBound) return
+    window.removeEventListener('blur', this.onBlur)
+    document.removeEventListener('visibilitychange', this.onVisibilityChange)
+    this.blurListenersBound = false
   }
 }
 
@@ -541,7 +605,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     // typing in #306/#307; onData below stays untouched).
     const inputTracker = new CompositionInputTracker()
     const onCompositionStart = () => inputTracker.onCompositionStart()
-    const onCompositionEnd = () => inputTracker.onCompositionEnd()
+    const onCompositionEnd = (e: CompositionEvent) => inputTracker.onCompositionEnd(e.data ?? null)
     const onBeforeInput = (ev: Event) => {
       const ie = ev as InputEvent
       const bytes = inputTracker.handleBeforeInput(ie.inputType, ie.data)
@@ -774,7 +838,11 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     return () => {
       disposed = true
       if (rafId) cancelAnimationFrame(rafId)
-      if (ta) ta.removeEventListener('beforeinput', onBeforeInput)
+      if (ta) {
+        ta.removeEventListener('beforeinput', onBeforeInput)
+        ta.removeEventListener('compositionstart', onCompositionStart)
+        ta.removeEventListener('compositionend', onCompositionEnd)
+      }
       try { dataDisp.dispose() } catch {}
       try { unsub() } catch {}
       try { ro.disconnect() } catch {}
