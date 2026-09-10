@@ -84,17 +84,51 @@ export function safeTrimPoint(buf: string, rawCut: number): number {
     }
   }
   if (lastEsc === -1) return rawCut // no nearby escape — already safe
-  let terminated = false
-  for (let i = lastEsc + 1; i < rawCut; i++) {
-    const c = buf.charCodeAt(i)
-    if (c === 0x07 || (c >= 0x40 && c <= 0x7e)) {
-      terminated = true // BEL (OSC) or CSI final byte — sequence closed before rawCut
-      break
+  if (isEscapeSequenceTerminatedBefore(buf, lastEsc, rawCut)) return rawCut
+  // Cut lands inside an unterminated escape sequence. Start the retained
+  // region AT the escape byte so the sequence replays whole once more data
+  // arrives — never scan forward for a later ESC / fall back to buf.length,
+  // both of which can discard the entire ring when no further ESC exists.
+  return lastEsc
+}
+
+/**
+ * Byte-accurate check of whether the escape sequence starting at `lastEsc`
+ * has already closed (has a terminator byte) strictly before `rawCut`.
+ *
+ * - CSI (`ESC [`): params/intermediates 0x20-0x3F, closed by a final byte
+ *   0x40-0x7E.
+ * - OSC (`ESC ]`) / DCS (`ESC P`) / PM (`ESC ^`) / APC (`ESC _`): closed by
+ *   BEL (0x07) or ST (`ESC \`).
+ * - Any other two-byte escape (`ESC` + 0x40-0x5F, excluding the four
+ *   introducers above): closed by the single byte immediately after ESC.
+ */
+function isEscapeSequenceTerminatedBefore(buf: string, lastEsc: number, rawCut: number): boolean {
+  const intro = lastEsc + 1 < buf.length ? buf.charCodeAt(lastEsc + 1) : -1
+  if (intro === 0x5b) {
+    // CSI
+    for (let i = lastEsc + 2; i < rawCut; i++) {
+      const c = buf.charCodeAt(i)
+      if (c >= 0x40 && c <= 0x7e) return true
     }
+    return false
   }
-  if (terminated) return rawCut
-  const nextEsc = buf.indexOf('\x1b', rawCut)
-  return nextEsc === -1 ? buf.length : nextEsc
+  if (intro === 0x5d || intro === 0x50 || intro === 0x5e || intro === 0x5f) {
+    // OSC / DCS / PM / APC — BEL or ST (ESC \)
+    for (let i = lastEsc + 2; i < rawCut; i++) {
+      const c = buf.charCodeAt(i)
+      if (c === 0x07) return true
+      if (c === 0x1b && i + 1 < rawCut && buf.charCodeAt(i + 1) === 0x5c) return true
+    }
+    return false
+  }
+  if (intro >= 0x40 && intro <= 0x5f) {
+    // Two-byte escape — terminated as soon as the second byte is consumed.
+    return rawCut >= lastEsc + 2
+  }
+  // Unknown/incomplete introducer (or ESC is the last byte in the buffer) —
+  // not yet terminated.
+  return false
 }
 
 /** A bounded byte ring-buffer keeping the last N bytes for scrollback replay. */

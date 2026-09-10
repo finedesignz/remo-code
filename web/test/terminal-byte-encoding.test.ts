@@ -11,7 +11,7 @@
  * the supervisor seam (bridge emits raw-byte latin1 string → session-bridge
  * re-base64s it unchanged) and assert the original bytes survive.
  */
-import { describe, test, expect } from 'bun:test'
+import { describe, test, expect, spyOn } from 'bun:test'
 import {
   inputToB64, b64ToBytes, inputEventToBytes, CompositionInputTracker,
   KeyRepeater, REPEATABLE_KEYS, type RepeatScheduler,
@@ -162,6 +162,68 @@ describe('mobile input — dictation composition dedup (CompositionInputTracker)
     t.onCompositionStart()
     const bytes = t.handleBeforeInput('insertCompositionText', 'second')
     expect(bytes).toBe('second') // not diffed against 'first' — starts clean
+  })
+
+  // Decode a stream of raw bytes (DEL = backspace over the previous char) into
+  // the final visible string, the way a real terminal would.
+  function replay(chunks: (string | null)[]): string {
+    let out: string[] = []
+    for (const chunk of chunks) {
+      if (!chunk) continue
+      for (const ch of chunk) {
+        if (ch === '\x7f') out.pop() // DEL removes one CODE POINT, not one UTF-16 unit
+        else out.push(ch)
+      }
+    }
+    return out.join('')
+  }
+
+  test('emoji retraction: "ok 👍" -> "ok" sends exactly 2 DEL, not 3 (code-point-aware diff)', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const grow = t.handleBeforeInput('insertCompositionText', 'ok 👍')
+    const shrink = t.handleBeforeInput('insertCompositionText', 'ok')
+    expect(shrink).toBe('\x7f\x7f') // one DEL for the emoji, one for the space
+    expect(replay([grow, shrink])).toBe('ok')
+  })
+
+  test('CJK retraction diffs by code point, not UTF-16 unit', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const grow = t.handleBeforeInput('insertCompositionText', '你好世界')
+    const shrink = t.handleBeforeInput('insertCompositionText', '你好')
+    expect(shrink).toBe('\x7f\x7f')
+    expect(replay([grow, shrink])).toBe('你好')
+  })
+
+  test('compositionend fires BEFORE the final beforeinput(insertText, "hello") — still sends "hello" exactly once', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const c1 = t.handleBeforeInput('insertCompositionText', 'hel')
+    t.onCompositionEnd('hello') // engine delivers the commit here, ahead of its beforeinput
+    const c2 = t.handleBeforeInput('insertText', 'hello') // the trailing beforeinput the engine still fires
+    expect(replay([c1, c2])).toBe('hello')
+  })
+
+  test('compositionend.data is used as the authoritative final revision when present', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const c1 = t.handleBeforeInput('insertCompositionText', 'hel')
+    t.onCompositionEnd('hello')
+    // Some engines' trailing beforeinput repeats stale interim data instead of
+    // the true commit — the tracker must still resolve to the compositionend
+    // value, not double-apply whatever this event's own `data` says.
+    const c2 = t.handleBeforeInput('insertCompositionText', 'hel')
+    expect(replay([c1, c2])).toBe('hello')
+  })
+
+  test('normal ordering (beforeinput commit before compositionend) is unaffected', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const c1 = t.handleBeforeInput('insertCompositionText', 'hel')
+    const c2 = t.handleBeforeInput('insertText', 'hello')
+    t.onCompositionEnd('hello')
+    expect(replay([c1, c2])).toBe('hello')
   })
 })
 
@@ -340,5 +402,77 @@ describe('mobile toolbar — press-and-hold auto-repeat (KeyRepeater)', () => {
     expect(REPEATABLE_KEYS.has('esc' as any)).toBe(false)
     expect(REPEATABLE_KEYS.has('enter' as any)).toBe(false)
     expect(REPEATABLE_KEYS.has('ctrlC' as any)).toBe(false)
+  })
+})
+
+/**
+ * Alt-tab / app-switch mid-hold must stop the repeater — without a window
+ * blur / visibilitychange listener the 50ms interval survives focus loss and
+ * keeps firing into a session the user is no longer looking at. bun's test
+ * runtime has no DOM globals, so these tests install a minimal fake
+ * window/document (EventTarget-backed) for the duration of the test only.
+ */
+function withFakeBrowserGlobals<T>(fn: () => T): T {
+  const realWindow = (globalThis as any).window
+  const realDocument = (globalThis as any).document
+  const fakeWindow = new EventTarget()
+  const fakeDocument = Object.assign(new EventTarget(), { hidden: false })
+  ;(globalThis as any).window = fakeWindow
+  ;(globalThis as any).document = fakeDocument
+  try {
+    return fn()
+  } finally {
+    ;(globalThis as any).window = realWindow
+    ;(globalThis as any).document = realDocument
+  }
+}
+
+describe('mobile toolbar — KeyRepeater stops on window blur / tab hide', () => {
+  test('window blur mid-hold stops the repeater — no further ticks fire', () => {
+    withFakeBrowserGlobals(() => {
+      let fireCount = 0
+      const fake = makeFakeScheduler()
+      const r = new KeyRepeater(() => { fireCount++ }, fake.scheduler)
+      r.start()
+      fake.elapseInitialDelay()
+      fake.tickInterval()
+      expect(fireCount).toBe(2)
+      ;(globalThis as any).window.dispatchEvent(new Event('blur'))
+      expect(fake.activeIntervalCount()).toBe(0)
+      expect(fake.activeTimeoutCount()).toBe(0)
+      fake.tickInterval()
+      expect(fireCount).toBe(2) // never fires again after focus loss
+    })
+  })
+
+  test('document visibilitychange to hidden mid-hold stops the repeater', () => {
+    withFakeBrowserGlobals(() => {
+      let fireCount = 0
+      const fake = makeFakeScheduler()
+      const r = new KeyRepeater(() => { fireCount++ }, fake.scheduler)
+      r.start()
+      fake.elapseInitialDelay()
+      expect(fake.activeIntervalCount()).toBe(1)
+      ;(globalThis as any).document.hidden = true
+      ;(globalThis as any).document.dispatchEvent(new Event('visibilitychange'))
+      expect(fake.activeIntervalCount()).toBe(0)
+      fake.tickInterval()
+      expect(fireCount).toBe(1) // only the immediate send before hide
+    })
+  })
+
+  test('stop() removes the blur/visibilitychange listeners (no leak across presses)', () => {
+    withFakeBrowserGlobals(() => {
+      const win = (globalThis as any).window as EventTarget
+      const doc = (globalThis as any).document as EventTarget
+      const winRemove = spyOn(win, 'removeEventListener')
+      const docRemove = spyOn(doc, 'removeEventListener')
+      const fake = makeFakeScheduler()
+      const r = new KeyRepeater(() => {}, fake.scheduler)
+      r.start()
+      r.stop()
+      expect(winRemove).toHaveBeenCalledWith('blur', expect.any(Function))
+      expect(docRemove).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
+    })
   })
 })
