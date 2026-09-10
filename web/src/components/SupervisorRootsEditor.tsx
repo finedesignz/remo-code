@@ -191,7 +191,7 @@ export function SupervisorRootsEditor({ token, supervisorId, roots, online, onSa
               onClick={toggleExpanded}
               aria-label="Collapse root folders"
               title="Collapse"
-              className="p-1 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40 transition-colors"
+              className="flex items-center justify-center w-11 h-11 -m-2.5 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40 transition-colors"
             >
               <svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" /></svg>
             </button>

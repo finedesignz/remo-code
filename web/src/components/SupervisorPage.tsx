@@ -685,16 +685,6 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 <option key={s.id} value={s.id}>{s.hostname} · {s.online ? s.state : 'offline'} · v{s.version || '?'}</option>
               ))}
             </select>
-            {activeSupervisor && (
-              <SupervisorRootsEditor
-                key={activeSupervisor.id}
-                token={token}
-                supervisorId={activeSupervisor.id}
-                roots={activeSupervisor.roots}
-                online={activeSupervisor.online}
-                onSaved={refetchSupervisors}
-              />
-            )}
             {activeSupervisor?.online && (
               confirmingUpdate ? (
                 <span className="flex items-center gap-1.5">
@@ -763,6 +753,18 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           </>
         )}
       </div>
+
+      {/* Per-supervisor root folders — collapses to an icon once >=1 root is configured */}
+      {activeSupervisor && (
+        <SupervisorRootsEditor
+          key={activeSupervisor.id}
+          token={token}
+          supervisorId={activeSupervisor.id}
+          roots={activeSupervisor.roots}
+          online={activeSupervisor.online}
+          onSaved={refetchSupervisors}
+        />
+      )}
 
       {/* Repos table */}
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl">
