@@ -68,7 +68,7 @@ function writeStoredExpanded(supervisorId: string, expanded: boolean) {
 export function SupervisorRootsEditor({ token, supervisorId, roots, online, onSaved }: Props) {
   // Local optimistic copy; re-seed when the authoritative list changes.
   const [items, setItems] = useState<string[]>(roots)
-  const rootsKey = roots.join(' ')
+  const rootsKey = roots.join('\0')
   useEffect(() => { setItems(roots) }, [rootsKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const [expanded, setExpanded] = useState<boolean>(() => {
@@ -218,7 +218,7 @@ export function SupervisorRootsEditor({ token, supervisorId, roots, online, onSa
                 disabled={busy}
                 aria-label={`Remove ${path}`}
                 title="Remove root folder"
-                className="shrink-0 p-1 rounded-md text-[var(--text-muted)] hover:text-red-400 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                className="shrink-0 flex items-center justify-center w-11 h-11 -m-2.5 rounded-md text-[var(--text-muted)] hover:text-red-400 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 <svg width="13" height="13" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" /></svg>
               </button>
