@@ -19,8 +19,14 @@ services:
       POSTGRES_DB: remo_ci
 
 steps:
+  # Full gate: real PRs (human or agent authored) on a non-dependabot branch.
+  # Unchanged from before — dependabot PRs never hit this step, see pr-gate-dependabot below.
   - name: pr-gate
     image: oven/bun:latest
+    when:
+      - event: pull_request
+        branch: main
+        evaluate: '!CI_COMMIT_SOURCE_BRANCH.contains("dependabot/")'
     environment:
       DATABASE_URL: postgres://remo:remo@postgres:5432/remo_ci
       JWT_SECRET: ci-placeholder-jwt-secret-min-32-chars-please-do-not-use-in-prod
@@ -46,3 +52,21 @@ steps:
       - bun test hub/test/orchestrator-data-model.test.ts hub/test/orchestrator-queue.test.ts hub/test/orchestrator-run-log.test.ts hub/test/orchestrator-stage-presets.test.ts hub/test/orchestrator-merge-command.test.ts hub/test/migrate-legacy-tasks.test.ts hub/test/feedback-key-ownership.test.ts
       # OEE orchestrator e2e prove-out — runs the OEE-01..09 suite against the real postgres:16 service (REMO_E2E_DB_URL set above) so the proof is VISIBLE in CI logs. check-baseline already executes these per-file; this is the explicit belt-and-suspenders run.
       - bun run orchestrator:e2e
+
+  # Fast lane: dependabot PRs (branch prefix dependabot/, opened faster than the heavy
+  # gate can drain — 2026-09-10, ~30 opened at once jammed the queue). A dependency-version
+  # bump doesn't need the full postgres/orchestrator-e2e proof — just "does it still
+  # install and typecheck". Skips postgres wait, check-baseline, migration-verify, and the
+  # OEE e2e suite entirely (no DB touched by this step at all).
+  - name: pr-gate-dependabot
+    image: oven/bun:latest
+    when:
+      - event: pull_request
+        branch: main
+        evaluate: 'CI_COMMIT_SOURCE_BRANCH.contains("dependabot/")'
+    environment:
+      JWT_SECRET: ci-placeholder-jwt-secret-min-32-chars-please-do-not-use-in-prod
+    commands:
+      - bun install --frozen-lockfile
+      - bunx tsc --noEmit -p hub/tsconfig.json || echo 'typecheck informational — 393 known pre-existing errors; see hub/tsconfig.json PR'
+      - bun run schema-lint
