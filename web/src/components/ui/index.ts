@@ -12,6 +12,8 @@ export { Field } from "./Field";
 export type { FieldProps } from "./Field";
 export { InfoTip } from "./InfoTip";
 export type { InfoTipProps } from "./InfoTip";
+export { Tooltip } from "./Tooltip";
+export type { TooltipProps } from "./Tooltip";
 export { StatusPill } from "./StatusPill";
 export type { StatusPillProps, StatusKind } from "./StatusPill";
 export { Toggle } from "./Toggle";
