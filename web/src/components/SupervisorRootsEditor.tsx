@@ -178,10 +178,10 @@ export function SupervisorRootsEditor({ token, supervisorId, roots, online, onSa
   }
 
   return (
-    <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-3 space-y-2 w-full">
+    <div className="bg-[var(--bg-secondary)]/60 rounded-xl p-3 space-y-3 w-full">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium text-[var(--text-secondary)]">Root folders</span>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           <span className="text-[10px] text-[var(--text-muted)]">
             {items.length}/{MAX_ROOTS} · scanned for repos
           </span>
@@ -204,7 +204,7 @@ export function SupervisorRootsEditor({ token, supervisorId, roots, online, onSa
           No root folders. Add an absolute path below to tell this supervisor where to look for repos.
         </p>
       ) : (
-        <ul className="space-y-1">
+        <ul className="space-y-3">
           {items.map((path) => (
             <li
               key={path}
