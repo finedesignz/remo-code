@@ -1,7 +1,7 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
 import { TermFrame, isTermFrameType, isAgentToHubTermType } from './term-protocol'
-import { verifyApiKeyWithScope, verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo, getSessionHostname, getSupervisorHostnameForApiKey, backfillSessionHostname } from '../db/dal'
+import { verifyApiKeyWithScope, verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo, getSessionHostname, getSupervisorHostnameForApiKey, backfillSessionHostname } from '../db/dal'
 import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
@@ -9,6 +9,7 @@ import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers,
 import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows, finalizeOrphanedRunsForSupervisor } from '../db/supervisor-dal'
 import { ensureSupervisorProject } from '../db/error-capture-dal'
 import { getCapacitySnapshot } from '../sessions/budget'
+import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
   updateSupervisorState, heartbeatSupervisor, getSupervisor,
@@ -828,6 +829,9 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
         cacheReadInputTokens: msg.cache_read_input_tokens,
         costUsd,
         costSource,
+        // PTYCAP Phase 1 — tag the ledger row by which runner produced it.
+        // Absent on an older supervisor build ⇒ defaults to 'stream-json'.
+        runnerType: msg.runner_type ?? 'stream-json',
       })
     } catch (err: any) {
       console.error('[agent] usage_event handler failed', err?.message)
@@ -1191,8 +1195,7 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
 
       // 3. Push a fresh session_list to the user's connected web clients.
       try {
-        const { listSessions } = await import('../db/dal')
-        const sessions = await listSessions(userId)
+        const sessions = await listSessionsForUserEnriched(userId)
         broadcastToUser(userId, { type: 'session_list', sessions })
       } catch {}
     } catch (err: any) {
@@ -1422,5 +1425,8 @@ export async function handleAgentClose(ws: ServerWebSocket<AgentWsData>) {
 }
 
 async function listSessionsForUser(userId: string) {
-  return listSessions(userId)
+  // MUST stay enriched: the web replaces its whole session list on every
+  // `session_list` frame, so a raw DAL row here strips `active` and empties the
+  // grid's Default tab. See hub/src/sessions/enrich.ts.
+  return listSessionsForUserEnriched(userId)
 }

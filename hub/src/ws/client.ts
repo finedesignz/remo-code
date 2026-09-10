@@ -5,7 +5,8 @@ import { verifyJwt } from '../auth/jwt.ts'
 import { verifyAuthSessionToken } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
-import { insertMessage, listSessions, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
+import { insertMessage, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
+import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
 import { acquire, releaseByWriter } from '../telegram/turn-lock.ts'
 import { claimTermWriter, currentTermWriter, dropTermWriter } from './term-writers.ts'
@@ -302,7 +303,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     ws.send(JSON.stringify({ type: 'auth_ok' }))
 
     // Send session list immediately
-    const sessions = await listSessions(data.userId!)
+    const sessions = await listSessionsForUserEnriched(data.userId!)
     ws.send(JSON.stringify({ type: 'session_list', sessions }))
 
     // Phase 06: send current subscription usage snapshot if any agent has
