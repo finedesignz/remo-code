@@ -15,6 +15,6 @@ name = "pty_spike"
 path = "../src/pty_spike.rs"
 
 [dependencies]
-portable-pty = "0.8"
+portable-pty = "0.9"
 
 [workspace]
