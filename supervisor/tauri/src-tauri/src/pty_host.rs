@@ -56,14 +56,18 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 /// Default bounded scrollback ring-buffer cap (bytes) for replay on reattach.
 ///
-/// 1 MiB (was 256 KiB). Keep in lockstep with `DEFAULT_SCROLLBACK_CAP_BYTES` in
-/// supervisor/src/runners/pty-persistence.ts. The ring holds RAW PTY bytes, and a
-/// TUI's escape sequences dominate that volume, so 256 KiB replayed as only a
-/// couple of readable screens. The client clears its buffer on (re)attach and
-/// re-writes ONLY this ring, so the ring is the hard ceiling on post-reconnect
-/// scroll depth. 1 MiB per live session stays bounded and well under the 10 MB WS
-/// message cap once base64-encoded.
-const SCROLLBACK_CAP_BYTES: usize = 1024 * 1024;
+/// 4 MiB (was 1 MiB, was 256 KiB before that). Keep in lockstep with
+/// `DEFAULT_SCROLLBACK_CAP_BYTES` in supervisor/src/runners/pty-persistence.ts.
+/// The ring holds RAW PTY bytes, and a TUI's escape sequences dominate that
+/// volume. The client clears its buffer on (re)attach and re-writes ONLY this
+/// ring (TerminalSurface.tsx term.clear()+write()), so the ring is the hard
+/// ceiling on post-(re)attach scroll depth — and on mobile, (re)attach is NOT
+/// rare: MobileAccordionRow fully unmounts/remounts the terminal on every panel
+/// collapse/expand, and iOS routinely reloads a backgrounded PWA/tab. 1 MiB was
+/// proven (mobile scrollback-depth investigation, 2026-09) too shallow for real
+/// session volume; 4 MiB per live session stays bounded and well under the
+/// 10 MB WS message cap once base64-encoded (~5.5 MB).
+const SCROLLBACK_CAP_BYTES: usize = 4 * 1024 * 1024;
 
 /// A single hosted interactive-`claude` PTY + its bounded scrollback ring.
 struct PtySession {
@@ -86,6 +90,46 @@ struct RingBuffer {
     cap: usize,
 }
 
+/// Bounded backward scan for an escape sequence straddling a trim point — kept
+/// small so a trim stays O(1) regardless of ring size. No real CSI/OSC sequence
+/// runs anywhere near this long.
+const ESC_SCAN_WINDOW: usize = 256;
+
+/// A raw byte-count trim (`buf.drain(0..raw_cut)`) can land INSIDE an
+/// unterminated ANSI escape sequence (CSI `ESC [ ... final-byte` or OSC
+/// `ESC ] ... BEL/ST`). Replaying a stream that *starts* mid-sequence desyncs
+/// the client's terminal parser: the orphaned tail of the sequence (e.g.
+/// `38;5;6m`) gets printed as literal garbage text, and the sequence that
+/// should have painted the next line's content gets consumed as if it were
+/// parameters — rendering as blank/garbled lines at the top of the replay
+/// (reproduced against a real xterm.js parser during the mobile
+/// scrollback-depth investigation, 2026-09; matches the reported symptom: a
+/// large blank region above replayed content). Mirrors the TS
+/// `safeTrimPoint()` in supervisor/src/runners/pty-persistence.ts.
+///
+/// If `raw_cut` sits inside an unterminated escape sequence, advance to the
+/// next complete escape sequence at/after `raw_cut` (always a safe start
+/// point) instead. If it's already safe, return it unchanged.
+fn safe_trim_point(buf: &[u8], raw_cut: usize) -> usize {
+    let start = raw_cut.saturating_sub(ESC_SCAN_WINDOW);
+    let last_esc = (start..raw_cut).rev().find(|&i| buf[i] == 0x1b);
+    let last_esc = match last_esc {
+        Some(i) => i,
+        None => return raw_cut, // no nearby escape — already safe
+    };
+    let terminated = ((last_esc + 1)..raw_cut).any(|i| {
+        let c = buf[i];
+        c == 0x07 || (0x40..=0x7e).contains(&c) // BEL (OSC) or CSI final byte
+    });
+    if terminated {
+        return raw_cut;
+    }
+    match buf[raw_cut..].iter().position(|&b| b == 0x1b) {
+        Some(off) => raw_cut + off,
+        None => buf.len(),
+    }
+}
+
 impl RingBuffer {
     fn new(cap: usize) -> Self {
         Self { buf: Vec::new(), cap }
@@ -94,11 +138,43 @@ impl RingBuffer {
         self.buf.extend_from_slice(bytes);
         if self.buf.len() > self.cap {
             let overflow = self.buf.len() - self.cap;
-            self.buf.drain(0..overflow);
+            let safe_cut = safe_trim_point(&self.buf, overflow);
+            self.buf.drain(0..safe_cut);
         }
     }
     fn snapshot(&self) -> Vec<u8> {
         self.buf.clone()
+    }
+}
+
+#[cfg(test)]
+mod ring_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_last_n_bytes_within_cap() {
+        let mut ring = RingBuffer::new(10);
+        ring.push(b"abcdef");
+        ring.push(b"ghijkl"); // total 12 -> cap 10 keeps last 10
+        assert_eq!(ring.buf.len(), 10);
+        assert_eq!(ring.snapshot(), b"cdefghijkl");
+    }
+
+    #[test]
+    fn trim_never_starts_mid_escape_sequence() {
+        // "\x1b[31mAB\x1b[0mCD" — cap chosen so the naive byte-count cut
+        // (len-cap) lands INSIDE the second escape sequence ("\x1b[0m").
+        // Proven pre-fix: the naive drain literally leaves "[0mCD" (no ESC).
+        let mut ring = RingBuffer::new(5);
+        ring.push(b"\x1b[31mAB\x1b[0mCD"); // 13 bytes; naive cut = 8 -> mid "\x1b[0m"
+        let out = ring.snapshot();
+        // Must never start with an orphaned escape-sequence tail (a byte that
+        // looks like a CSI parameter/final byte with no preceding ESC).
+        assert!(
+            out.is_empty() || out[0] == 0x1b || !(0x30..=0x7e).contains(&out[0]),
+            "trimmed buffer starts mid-escape-sequence: {:?}",
+            String::from_utf8_lossy(&out)
+        );
     }
 }
 
