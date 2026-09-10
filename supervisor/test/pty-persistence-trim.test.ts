@@ -49,6 +49,43 @@ const PARITY_FIXTURES: Array<{ label: string; buf: string; rawCut: number; expec
     rawCut: 5,
     expected: 5,
   },
+  {
+    // round-2 QC MAJOR: the formerly-fixed 256-byte scan window missed this
+    // entirely (an OSC-8 hyperlink with a >256-byte URL) and returned rawCut
+    // unchanged. Fixture matches the reported case: 440-byte OSC-8, cut at 330.
+    label: 'a >256-byte OSC-8 hyperlink (longer than the old fixed scan window) cut deep in the URL payload',
+    buf: '\x1b]8;;https://example.com/' + 'a'.repeat(400) + '\x07LINKTEXT\x1b]8;;\x07',
+    rawCut: 330,
+    expected: 0,
+  },
+  {
+    // A 70 KB DCS/sixel-shaped payload, cut well past any fixed window,
+    // still unterminated at the cut.
+    label: 'a 70 KB unterminated DCS payload cut mid-way',
+    buf: '\x1bP' + '1'.repeat(70000),
+    rawCut: 40000,
+    expected: 0,
+  },
+  {
+    // An ST-terminated OSC followed by unrelated padding, then a cut inside
+    // a LATER, separate unterminated CSI — proves the "keep scanning
+    // backward past a closed candidate" walk doesn't over-shoot past the
+    // OSC's own terminator into treating the later CSI as safe.
+    label: 'a cut inside a later CSI following an already ST-terminated OSC',
+    buf: '\x1b]0;title\x1b\\PAD\x1b[38;5;6mHELLO',
+    rawCut: 20,
+    expected: 14,
+  },
+  {
+    // round-2 QC fuzz (34/20000 cases): an "ESC M" two-byte escape embedded
+    // in a still-open, never-BEL/ST-terminated OSC. Evaluated in isolation
+    // "ESC M" looks like a closed, harmless 2-byte escape (the nearest-ESC-
+    // only bug), but the cut is still inside the OUTER unterminated OSC.
+    label: 'an embedded "ESC M" two-byte escape inside a still-open unterminated OSC is not mistaken for the whole sequence being closed',
+    buf: '\x1b]0;\x1bMtitle',
+    rawCut: 11,
+    expected: 0,
+  },
 ]
 
 describe('safeTrimPoint', () => {
