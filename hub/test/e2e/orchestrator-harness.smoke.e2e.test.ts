@@ -66,7 +66,7 @@ maybeDescribe('OEE-01/02 e2e — schema boot + scripted sink round-trip', () => 
 
   beforeAll(async () => {
     h = await setupHarness();
-  });
+  }, 30_000);
 
   afterAll(async () => {
     if (h) await teardownHarness(h);

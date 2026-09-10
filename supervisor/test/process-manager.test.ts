@@ -108,7 +108,7 @@ describe('ProcessManager security gates', () => {
     const { pm, events } = makePM(makeCfg())
     const outsidePath = TMP // outside ROOT
     const r = await pm.start(spec({ repoPath: outsidePath }))
-    expect(r?.reason).toBe('sandbox_escape')
+    expect(r?.reason).toBe('sandbox_not_under_roots')
     expect(bridges.length).toBe(0)
     expect(events.find((e) => e.state === 'stopped')).toBeTruthy()
   })
@@ -116,7 +116,25 @@ describe('ProcessManager security gates', () => {
   test('sandbox_escape: rejects C:\\Windows\\System32', async () => {
     const { pm } = makePM(makeCfg())
     const r = await pm.start(spec({ repoPath: 'C:\\Windows\\System32' }))
-    expect(r?.reason).toBe('sandbox_escape')
+    // Not asserting a specific reason — whether this resolves to
+    // `sandbox_path_missing` (Linux CI) or `sandbox_not_under_roots` (a
+    // Windows dev box, where the literal is a real dir outside ROOT) is
+    // platform-dependent. Both are correctly rejected either way.
+    expect(['sandbox_path_missing', 'sandbox_not_under_roots']).toContain(r?.reason)
+    expect(bridges.length).toBe(0)
+  })
+
+  test('sandbox_path_missing: rejects a repo path that does not exist anywhere', async () => {
+    const { pm } = makePM(makeCfg())
+    const r = await pm.start(spec({ repoPath: join(TMP, 'this-does-not-exist-anywhere') }))
+    expect(r?.reason).toBe('sandbox_path_missing')
+    expect(bridges.length).toBe(0)
+  })
+
+  test('sandbox_roots_unresolvable: every configured root is broken', async () => {
+    const { pm } = makePM(makeCfg({ roots: [join(TMP, 'bogus-1'), join(TMP, 'bogus-2')] }))
+    const r = await pm.start(spec({ repoPath: REPO_GIT }))
+    expect(r?.reason).toBe('sandbox_roots_unresolvable')
     expect(bridges.length).toBe(0)
   })
 
@@ -190,7 +208,7 @@ describe('ProcessManager security gates', () => {
     expect(parsed[1].allowed).toBe(false)
     expect(parsed[1].reason).toBe('concurrency_cap')
     expect(parsed[2].allowed).toBe(false)
-    expect(parsed[2].reason).toBe('sandbox_escape')
+    expect(parsed[2].reason).toBe('sandbox_not_under_roots')
   })
 
   test('audit log: prompt is hashed, never raw', async () => {

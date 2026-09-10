@@ -65,6 +65,19 @@ session `github_owner/github_repo`) else `project_dir` else `unknown`.
 `GET /api/usage/summary` (P1) is unchanged — subscription OAuth utilization
 windows + scheduled-task cost.
 
+## Per-run attribution (fix/run-cost-attribution)
+
+The same `hub/src/ws/agent.ts` `usage_event` handler that records each turn
+into `token_usage` also calls `accrueRunCost(sessionId, costUsd)`
+(`hub/src/scheduler/dispatcher.ts`) with the identical cost value, so a
+scheduled run's `scheduled_task_runs.cost_usd` gets populated at finalize
+instead of staying permanently NULL (verified 100% NULL across 493 historical
+rows before this fix). This is pure attribution bookkeeping on the
+dispatcher's own in-flight run map — it never writes into `token_usage`, so
+the daily cost cap total (§ Daily cost cap in
+[scheduled-tasks.md](scheduled-tasks.md)) is unaffected and nothing is
+double-counted. See [scheduled-tasks.md § Per-run cost attribution](scheduled-tasks.md#per-run-cost-attribution-scheduled_task_runscost_usd).
+
 ## Tests
 
 - `supervisor/test/usage-capture.test.ts` — `parseUsageFromResult` extraction.

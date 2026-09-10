@@ -20,6 +20,7 @@ import { sentryIntake as sentryIntakeApi } from './api/sentry-intake'
 import { errorProjectsRouter } from './api/error-projects'
 import { errorsRouter } from './api/errors'
 import { errorRunsRouter } from './api/error-runs'
+import { agentautofix as agentautofixApi } from './api/agentautofix'
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { repoGroups as repoGroupsApi } from './api/repo-groups'
 import { instructions as instructionsApi } from './api/instructions'
@@ -455,6 +456,7 @@ app.route('/api/scheduled-task-runs', scheduledTaskRunsApi)
 app.route('/api/tasks', tasksApi)
 app.route('/api/usage', usageApi)
 app.route('/api/error-projects', errorProjectsRouter)
+app.route('/api/agentautofix', agentautofixApi)
 app.route('/api/errors', errorsRouter)
 app.route('/api/error-runs', errorRunsRouter)
 app.route('/api/chat-tabs', chatTabsApi)

@@ -14,6 +14,17 @@ export interface AuditEntry {
   flags: Record<string, unknown>
   allowed: boolean
   reason?: string
+  /**
+   * Sandbox-check self-diagnosis (2026-08-18, repo_path placeholder
+   * investigation). Populated only for sandbox rejections/successes so a
+   * denial is triageable from the log line alone, without needing the live
+   * supervisor.json — a stale/renamed repo_path (`sandbox_path_missing`) and
+   * a genuinely misconfigured/corrupted roots list (`sandbox_not_under_roots`
+   * / `sandbox_roots_unresolvable`) used to be indistinguishable, both
+   * collapsing into one `sandbox_escape` line with no roots recorded.
+   */
+  allowed_roots?: string[]
+  real_repo?: string | null
 }
 
 /** SHA-256 hex hash of a prompt. Returns null when prompt is null/empty. */

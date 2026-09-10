@@ -58,6 +58,10 @@ Three packages in a Bun workspace:
   Connects to `/ws/agent` with an API key, spawns Claude/Codex CLIs on demand, relays
   stream-json events to the hub.
 
+## Git Hooks
+
+Run once per clone: `git config core.hooksPath .githooks`. Wires a `commit-msg` hook that blocks Google Antigravity IDE autosave commits (bare `sync` message, staged `node_modules/` paths, force-added gitignored files). Override for a genuinely intentional matching commit with `ALLOW_AUTOSAVE_COMMIT=1 git commit -m "..."`.
+
 ## Commands
 
 ```bash
@@ -358,7 +362,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | Mobile Tauri client | [mobile-client.md](docs/mobile-client.md) · [phase-12-pause-state.md](docs/phase-12-pause-state.md) | Phase 12 — iOS/Android WebView shell + deep-link auth. **Paused 2026-05-28.** |
 | Shared dispatch + intake | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | `hub/src/dispatch/` (gates→queue→grace→finalize) + `hub/src/webhooks/intake.ts`. All inbound subsystems ride these. |
 | Usage cost ledger | [usage-cost.md](docs/usage-cost.md) | P2 — per-turn token+cost capture (`usage_event`) → `token_usage` + `token_usage_daily` → `GET /api/usage/cost`. SDK `total_cost_usd` authoritative; `hub/src/usage/pricing.ts` is fallback only. Cost is a list-price ESTIMATE. Cap (P3) unaffected. Needs supervisor ≥0.8.0. **PTYCAP Phase 1** adds a second, supervisor-side source — the interactive PTY's own transcript JSONL, tailed by `pty-usage-emitter.ts` and tagged `token_usage.runner_type='pty-interactive'` vs `'stream-json'` for the SDK-stream path (RECORD only; gating is Phase 2). |
-| PTY terminal surface + cutover gate | [usage-cost.md](docs/usage-cost.md) · [cutover-gate-june15.md](docs/cutover-gate-june15.md) | Phases 15–19 — universal raw-terminal (PTY) human path (interactive `claude`/`codex` TUI, raw bytes, NO stream-json, NO API key). Phase-18 dual-bucket usage (interactive vs programmatic). Phase-19 fail-safe default-backend selector (`supervisor/src/runners/backend-selector.ts`), Codex/Gemini-stub fallback + shared `env-sanitize.ts`, and the June-15 cutover gate (`tools/cutover-deletion-gate.mjs`). Cutover flip + ChatSurface deletion are GATED (pending runbook + on-device attestations). |
+| PTY terminal surface + cutover gate | [usage-cost.md](docs/usage-cost.md) · [cutover-gate-june15.md](docs/cutover-gate-june15.md) | Phases 15–19 — universal raw-terminal (PTY) human path (interactive `claude`/`codex` TUI, raw bytes, NO stream-json, NO API key). Phase-18 dual-bucket usage (interactive vs programmatic). Phase-19 fail-safe default-backend selector (`supervisor/src/runners/backend-selector.ts`), Codex/Gemini-stub fallback + shared `env-sanitize.ts`, and the June-15 cutover gate (`tools/cutover-deletion-gate.mjs`). Cutover flip + ChatSurface deletion are GATED (pending runbook + on-device attestations). **Attachments** (`term.attach_file`, `supervisor/src/runners/session-bridge.ts`): an uploaded file is written into the session's real working directory at `<repoPath>/.remo/attachments/<sessionId>/<nonce>-<safeName>` (NOT a host temp dir) so the CLI's own file tools resolve it, then its absolute path is typed into the PTY. `.remo/` is auto-added to the repo's `.gitignore` when `.git` is present (skipped for rootless/orchestrator dirs with no `.git`); the dir is removed best-effort on session stop. |
 | Auto-dev orchestrator | [auto-dev-orchestrator.md](docs/auto-dev-orchestrator.md) · [.planning/architecture/auto-dev-task-prompts-SPEC.md](.planning/architecture/auto-dev-task-prompts-SPEC.md) | Phases 21–32 — session-level auto-dev: one `orchestrator` task per session + `orchestrator_rows`; global `routine_queue` + per-session lock; verify-tail. **Flag-gated OFF** (`REMO_ORCHESTRATOR_ENABLED`). **Milestone TMAC (2026-06-08): macro path is the default** — a task carries one `macro_task_type` (dev complete; maintenance/security/brainstorming stubs) resolved to ONE autonomous macro prompt (`task-macros.ts`); resume-heartbeat controller (`runMacroCycle`) reconciles `<<STATE>>`/`<<NOTIFY>>`/`<<GATE>>` sentinels (`sentinels.ts`) → `routine_run_log` + stage-gated `notify.ts` fan-out, halt on mandatory gate. Legacy micro-row wave path + its `REMO_ORCHESTRATOR_LEGACY_WAVES` rollback flag DELETED (guard test asserts they stay gone). Migrations: `hub/scripts/migrate-legacy-tasks-to-orchestrator.ts`, `migrate-orchestrator-macro-task-type.ts`. |
 | Session-Ask API | [session-ask.md](docs/session-ask.md) | Milestone ASK — external agent surface `/api/ext` (api_key + additive nullable `api_keys.scopes`: `ext:read`/`ext:ask`). FREE reads of a session's transcript tail + memory via READ-ONLY supervisor commands `session_transcript_tail`/`session_memory` (works for PTY sessions; **needs a new signed supervisor release**). PAID `POST /api/ext/sessions/:id/ask` answered by a stream-json ask-session on the target's `project_dir` — the human's PTY is NEVER written to; actor is server-inferred `external-ask`, so `humanOnlyPtyGate` rejects a PTY target. Gates: threshold → cost cap → **token cap** → human-only-PTY → `askRateGate` (`REMO_ASK_MAX_PER_HOUR`, default 10). `session_asks` + reaper (`REMO_ASK_MAX_MS`, 15min). MCP server in `mcp/`. Phase 4 (PTY-native ask) owner-gated, NOT shipped. |
 | Inbound-email work (`remo_work`) | [remo-work.md](docs/remo-work.md) | Milestone WORK — `POST /api/ext/work` (+ `GET /api/ext/work/:id`): an inbound CLIENT EMAIL → the repo's stream-json session. **THE AGENT PROPOSES, THE HUB DISPOSES**: the agent's authority ends at a pushed `work/<nonce>` branch (no deploy credentials in its env — `scrubDeployCredentials` in `supervisor/src/runners/env-sanitize.ts`; it is not even TOLD whether the site auto-publishes). The HUB then verifies the branch DIFF touches only `work_sites.site_dir` (`work_diff_scope` — this, not the prompt, is the boundary), runs the build itself (`work_build`, real exit code), probes the site over real HTTPS, and performs the merge + Coolify deploy ITSELF (`hub/src/work/publish.ts` `mayPublish` = auto_publish AND diff-scope AND build AND 2xx). `published=true` is only ever written on a hub-performed deploy. Entry gates (default-EMPTY): `work_repo_allowlist` (audit F6 ⇒ 403, no spend), `work_sites.client_emails` sender allowlist (⇒ 403 `unknown_sender`). Audit trail `work_runs` (F9: source email + FULL prompt + branch + commit SHAs + `hub_qc` evidence + deploy_status). Dispatch gates: threshold → cost cap → **token cap** → human-only-PTY (actor `external-work`) → `workRateGate` (`REMO_WORK_MAX_PER_HOUR`, 4) → `workRepoAllowlistGate`. Scope `ext:work`. Reaper `REMO_WORK_MAX_MS` (45min). **New supervisor MSI REQUIRED** (`work_diff_scope`/`work_build`/`work_publish`). MCP: `remo_work`/`remo_get_work`. |
@@ -471,6 +475,26 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   `.github/workflows/release-supervisor.yml` builds + signs the `-setup.exe` + publishes a
   Release with `latest.json` for the auto-updater. Local:
   `pwsh -File supervisor/tauri/scripts/build-and-update.ps1`. Key setup: `supervisor/tauri/UPDATER-SETUP.md`.
+- **Remote force-update (milestone remote-update-trigger):** web Settings → Connections has
+  an "Update to latest" button on the machine row (`SupervisorPage.tsx`) that forces the
+  LOCAL supervisor to check for and install the latest signed release without waiting for
+  the periodic Rust watcher. Chain: `POST /api/supervisors/:id/update` (`hub/src/api/
+  supervisors.ts`, same `authorizeSupervisor` gate as `/scan`) → hub WS command
+  `supervisor.force_update` over `/ws/agent` → sidecar (`supervisor/src/hub-client.ts`
+  `onForceUpdate`) writes a marker file `%LOCALAPPDATA%\remo-code-supervisor\force-update.json`
+  (`supervisor/src/runners/force-update-marker.ts`, reusing the same LOCALAPPDATA base dir as
+  the session-breadcrumb writer via `supervisorStateDir()`) and acks `supervisor.force_update_ack`
+  — the ack only confirms the marker was queued, not that the update finished. The Rust tray
+  (`supervisor/tauri/src-tauri/src/force_update_watcher.rs`, spawned from the same `setup` hook
+  as `auto_update::spawn_watcher`) polls that marker every ~20s; on finding a new
+  `requested_at` it DELETES the marker first (so a relaunched post-install sidecar can never
+  re-trigger off the same file) and then calls the existing `auto_update::run_check` — no new
+  download/install logic, a force just fast-paths the same check→download→install→relaunch
+  pass, and it runs even when the periodic `auto_update` pref is off (`run_check`'s own
+  `IN_PROGRESS` guard still makes a force during an active install a no-op). **A NEW SIGNED
+  SUPERVISOR MSI IS REQUIRED** for the sidecar+tray halves to reach installed hosts — the
+  hub+web halves work immediately, but an old sidecar without the `supervisor.force_update`
+  handler just times out the request (502), same compat behavior as `/scan`'s `rescan_repos`.
 
 ## CI (Woodpecker-first)
 

@@ -76,6 +76,29 @@ supervisors.post('/:id/scan', async (c) => {
   }
 })
 
+/**
+ * milestone remote-update-trigger — force the LOCAL supervisor sidecar+tray to
+ * check for and install the latest signed release now, from the web UI. The
+ * sidecar writes a marker file and acks quickly; the actual check→download→
+ * install→relaunch runs in the Rust tray on its own marker-poll cadence, so
+ * this route does not wait for the update itself — only for the sidecar's
+ * acknowledgment that it queued the request. An old sidecar without the
+ * `supervisor.force_update` handler simply times out (502), same compat
+ * behavior as /:id/scan's rescan_repos — the hub+web halves work immediately,
+ * but only take effect against a supervisor that ships this handler.
+ */
+supervisors.post('/:id/update', async (c) => {
+  const a = await authorizeSupervisor(c)
+  if ('error' in a) return a.error
+  try {
+    const res: any = await sendRequest(a.supervisorId, { type: 'supervisor.force_update', requested_by: a.userId } as any, 20_000)
+    if (!res?.ok) return c.json({ error: res?.error || 'force_update_failed' }, 500)
+    return c.json({ ok: true })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 502)
+  }
+})
+
 /** Normalize a local path for cross-shape joins: forward slashes, no trailing
  * separator, lower-cased (Windows paths are case-insensitive). */
 function normPath(p: string): string {

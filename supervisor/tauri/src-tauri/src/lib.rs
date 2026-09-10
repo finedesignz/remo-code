@@ -5,6 +5,7 @@
 mod auto_update;
 mod config_cmds;
 mod first_run;
+mod force_update_watcher;
 mod legacy_cleanup;
 mod mutex_probe;
 mod nssm;
@@ -113,6 +114,12 @@ pub fn run() {
             // This task ticks with or without a webview and is the SINGLE owner
             // of check→download→install→relaunch.
             auto_update::spawn_watcher(app.handle().clone());
+
+            // milestone remote-update-trigger — poll for a hub-initiated
+            // force-update marker (web Settings "Update to latest" button).
+            // Independent cadence from the periodic watcher above; both funnel
+            // into the same `auto_update::run_check`.
+            force_update_watcher::spawn_watcher(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

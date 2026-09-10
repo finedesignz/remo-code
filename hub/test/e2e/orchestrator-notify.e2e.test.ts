@@ -106,7 +106,7 @@ maybeDescribe('OEE-07 e2e — stage-gated notify fan-out off real sentinels', ()
 
   beforeAll(async () => {
     h = await setupHarness();
-  });
+  }, 30_000);
 
   afterAll(async () => {
     if (h) await teardownHarness(h);

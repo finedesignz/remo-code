@@ -732,6 +732,38 @@ user adjust their cap on the Settings → Account tab.
 
 ---
 
+## Per-run cost attribution (`scheduled_task_runs.cost_usd`)
+
+`scheduled_task_runs.cost_usd` is populated at finalize time via
+`accrueRunCost` (`hub/src/scheduler/dispatcher.ts`), fixing a gap where the
+column was NULL on every historical row (fix/run-cost-attribution, 2026-08):
+no `finalizeRun` caller ever supplied `fields.cost_usd`, and real per-turn
+cost was known only from the supervisor's `usage_event` WS messages, recorded
+into `token_usage` keyed by `sessionId` with no linkage back to the run row —
+so per-run spend was only reconstructable by an unreliable timestamp-proximity
+join.
+
+- Each in-flight `RunContext` (the dispatcher's own `inFlightByRun` map) now
+  carries a `costUsd` accrual, seeded to 0 by `trackRun`.
+- `hub/src/ws/agent.ts`'s `usage_event` handler calls
+  `accrueRunCost(ws.data.sessionId, costUsd)` with the SAME cost value
+  (SDK `total_cost_usd` when `cost_source='sdk'`, else the `pricing.ts`
+  estimate) it hands to `recordTokenUsage` for the `token_usage` ledger —
+  this only changes WHERE that number is also recorded, so a run's `cost_usd`
+  and the daily cap total can never drift or double-count.
+- `accrueRunCost` sums onto every in-flight run whose `target.sessionId`
+  matches, so a multi-turn/tool-use exchange (multiple `usage_event`s before
+  the final `assistant_message`) is summed correctly, and cost never leaks
+  onto a concurrent run on a different session.
+- `finalizeRun` defaults `fields.cost_usd` to the run's accrual when the
+  caller doesn't pass one explicitly (no sender does today). A run with no
+  accrual — a non-LLM sender like `coolify`/`teab`/`supervisor` command runs
+  that never produce a CLI turn — correctly finalizes with `cost_usd=null`,
+  not a misleading `0`.
+- Covered by `hub/test/run-cost-attribution.test.ts`.
+
+---
+
 ## Per-session queue (Round-2: shared dispatch pipeline)
 
 A single agent session admits at most one in-flight scheduled run plus one

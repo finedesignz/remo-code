@@ -209,6 +209,7 @@ function ApiKeyCard({ token }: { token: string }) {
       {newKey && (
         <div
           data-testid="new-key-banner"
+          data-autofix-exclude=""
           className="bg-emerald-500/10 rounded-lg ring-1 ring-emerald-500/30 p-3"
         >
           <div className="flex items-center justify-between mb-2">

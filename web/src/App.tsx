@@ -16,6 +16,7 @@ import { WebSocketProvider, useWebSocketContext } from './hooks/useWebSocket'
 import { useBrowserNotifications } from './hooks/useBrowserNotifications'
 import type { Profile } from './hooks/useProfile'
 import { onAuthEvent } from './lib/api'
+import { AgentautofixWidget } from './components/AgentautofixWidget'
 
 type Route =
   | 'home'
@@ -241,6 +242,7 @@ export default function App() {
     // (NotificationsBridge + page route + chat surfaces).
     <WebSocketProvider token={token}>
       <NotificationsBridge profile={profile} />
+      <AgentautofixWidget token={token} />
       {licenseRequired && <LicenseRequiredBanner onDismiss={() => setLicenseRequired(false)} />}
 
       {route === 'home' && (

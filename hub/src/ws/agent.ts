@@ -63,7 +63,38 @@ export function isHostnameRequiredOnAgentAuth(
 export const SUPERVISOR_START_REJECT_REASONS: ReadonlySet<string> = new Set([
   'concurrency_cap',
   'duplicate_run',
+  // 2026-08-18 (repo_path placeholder investigation) — 'sandbox_escape' split
+  // into three finer per-run rejections (see supervisor/src/sandbox.ts
+  // SandboxEscapeKind); all three carry the exact same "per-run, not
+  // supervisor-wide 'stopped'" semantics the original single reason did, so
+  // all three MUST stay in this set for the same reason 'sandbox_escape'
+  // used to.
+  'sandbox_path_missing',
+  'sandbox_not_under_roots',
+  'sandbox_roots_unresolvable',
+  // BACKWARD COMPAT — the hub serves supervisors that are already deployed
+  // and do NOT upgrade atomically with the hub. The current released
+  // supervisor (v0.14.4; v0.14.5 exists but is not yet installed fleet-wide
+  // as of this fix) still emits the literal 'sandbox_escape' — it predates
+  // the three-way split above. If this hub build drops 'sandbox_escape' from
+  // its accepted set, every rejection from a not-yet-upgraded supervisor
+  // becomes an UNRECOGNIZED reason, which `isStartRejectStateMessage` then
+  // treats as a genuine supervisor-lifecycle stop instead of a per-run
+  // rejection — persisting the whole supervisor row as `state='stopped'`.
+  // That is exactly the 2026-05-28 prod failure this set exists to prevent,
+  // now for version skew instead of a missing reason. Retained here even
+  // though the CURRENT supervisor code (start-rejection-reasons.ts) no
+  // longer emits it — remove only once no fleet supervisor older than the
+  // release carrying the three-way split can still be running.
   'sandbox_escape',
+  // fix/session-start-freeze (2026-08-18 QC/D2) — the sandbox check (realpath
+  // on the repo path / configured roots) hit its own bounded timeout instead
+  // of definitively resolving. Per-run rejection, same as 'sandbox_escape' —
+  // MUST stay in this set or a single stalled-filesystem rejection persists
+  // the whole supervisor row as `state='stopped'`, exactly the 2026-05-28 bug
+  // this set exists to prevent. Kept in lock-step with
+  // `supervisor/src/process-manager.ts` `StartRejection.reason`.
+  'sandbox_check_timeout',
   'not_git_repo',
   'legacy_agent_spawn_disabled',
   // fix/stop-the-bleed — the supervisor's spawn circuit-breaker refused THIS run
@@ -776,6 +807,17 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
           costSource = 'estimated'
         }
       }
+      // fix/run-cost-attribution: attribute this same cost onto any in-flight
+      // scheduled run targeting this session, so `scheduled_task_runs.cost_usd`
+      // is populated at finalize instead of staying permanently NULL. Purely
+      // additive bookkeeping on the scheduler's own in-memory run map — never
+      // written back into token_usage, so the daily cap total is unaffected.
+      try {
+        const { accrueRunCost } = await import('../scheduler/dispatcher.ts')
+        accrueRunCost(ws.data.sessionId ?? null, costUsd)
+      } catch (err: any) {
+        console.error('[agent] accrueRunCost failed', err?.message)
+      }
       await recordTokenUsage({
         userId: ws.data.userId,
         sessionId: ws.data.sessionId ?? null,
@@ -1067,6 +1109,18 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       resolveRequest(supervisorId, msg.req_id, msg)
     } else {
       rejectRequest(supervisorId, msg.req_id, msg.error || 'rescan_failed')
+    }
+    return
+  }
+
+  // milestone remote-update-trigger — force-update ack from supervisor →
+  // resolve the pending request the POST /api/supervisors/:id/update handler
+  // is awaiting. Mirrors the rescan_ack handling above.
+  if (msg.type === 'supervisor.force_update_ack') {
+    if (msg.ok) {
+      resolveRequest(supervisorId, msg.req_id, msg)
+    } else {
+      rejectRequest(supervisorId, msg.req_id, msg.error || 'force_update_failed')
     }
     return
   }

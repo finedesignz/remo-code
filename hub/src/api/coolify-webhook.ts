@@ -197,9 +197,19 @@ export async function dispatchTriage(
   const log_snippet = await fetchTriageLogSnippet(payload.application_uuid)
 
   const taskId = await ensureInternalTriageTask(userId)
+  // fix/disabled-task-dispatch: the internal triage task is created with
+  // enabled=false BY DESIGN (dal.ts ensureInternalTriageTask — "so cron
+  // never auto-fires it"); this call is its only legitimate dispatch path.
+  // runNow()'s disabled-task guard exists to stop chain_task/grace-replay
+  // from re-firing a task the USER disabled — it must not also block this
+  // direct, webhook-triggered dispatch of an internal task that is never
+  // meant to carry enabled=true. isManual has no other effect on the
+  // 'triage' branch of dispatcher.fireTask (it doesn't read opts.isManual),
+  // so this only opts out of the disabled guard.
   await dispatcherRunNow(taskId, userId, {
     triggeredByRunId: deploymentRunId,
     chainDepth: 0,
+    isManual: true,
     payloadOverride: {
       application_uuid: payload.application_uuid,
       deployment_uuid: payload.deployment_uuid,

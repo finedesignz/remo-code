@@ -4,14 +4,15 @@ import { writeFileSync, mkdirSync, watch as fsWatch, existsSync, readFileSync } 
 import { dirname, join } from 'path'
 import { scanAll, scanRoots } from './repo-scanner'
 import { cloneRepo, pullRepo, pullLocal, checkoutBranch, listBranches, isDirty } from './git-ops'
-import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError } from './sandbox'
+import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError, SandboxCheckTimeoutError } from './sandbox'
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
 import { getHandler, nativeSupervisorCommands } from './commands/index'
-import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
+import { getConfigPath, saveConfig, type SupervisorConfig } from './config'
 import { log as obs } from './observability/logger'
 import { VERSION } from './version'
 import { pollUsage, USAGE_POLL_INTERVAL_MS, type UsagePayload } from './usage/oauth-poll'
+import { writeForceUpdateMarker } from './runners/force-update-marker'
 
 /** Bug A — push the live runner set to the hub every 10s after auth_ok. */
 const SESSION_INVENTORY_INTERVAL_MS = 10_000
@@ -52,6 +53,8 @@ type OutboundMsg =
   | { type: 'supervisor.set_roots_ack'; req_id: string; ok: boolean; applied_roots?: string[]; error?: string }
   // fix/supervisor-periodic-repo-rescan — ack for a hub-initiated rescan.
   | { type: 'supervisor.rescan_ack'; req_id: string; ok: boolean; error?: string }
+  // milestone remote-update-trigger — ack for a hub-initiated forced update.
+  | { type: 'supervisor.force_update_ack'; req_id: string; ok: boolean; error?: string }
   // P1 usage poll — parsed, non-secret Anthropic OAuth utilization snapshot.
   // The OAuth token is read locally in usage/oauth-poll.ts and NEVER serialized
   // here; only the four utilization windows + reset times cross the wire.
@@ -116,7 +119,7 @@ export class SupervisorClient {
     // Watch supervisor.json for external edits (Tauri Roots panel writes here
     // when the user adds/removes roots or clicks "Rescan now").
     try {
-      const cfgPath = CONFIG_PATH
+      const cfgPath = getConfigPath()
       if (existsSync(cfgPath)) {
         this.configWatcher = fsWatch(cfgPath, { persistent: false }, () => {
           // Coalesce rapid double-fires.
@@ -344,6 +347,7 @@ export class SupervisorClient {
       case 'key_rotated': this.onKeyRotated(msg); break
       case 'supervisor.set_roots': await this.onSetRoots(msg); break
       case 'supervisor.rescan_repos': await this.onRescanRepos(msg); break
+      case 'supervisor.force_update': this.onForceUpdate(msg); break
       default:
         // unknown
         break
@@ -466,7 +470,7 @@ export class SupervisorClient {
     // Persist to <CONFIG_DIR>/last_inventory.json so the Tauri UI can render
     // the same data via the `get_inventory` IPC command. Best-effort.
     try {
-      const dir = dirname(CONFIG_PATH)
+      const dir = dirname(getConfigPath())
       mkdirSync(dir, { recursive: true })
       writeFileSync(
         join(dir, 'last_inventory.json'),
@@ -571,6 +575,25 @@ export class SupervisorClient {
   }
 
   /**
+   * milestone remote-update-trigger — hub-initiated forced update (web
+   * Settings "Update to latest" button). The SIDECAR has no updater — the
+   * Rust tray owns check→download→install→relaunch (auto_update.rs). This
+   * only drops a marker file the tray's own poll loop consumes; it acks as
+   * soon as the marker is written, not when the update actually completes.
+   */
+  private onForceUpdate(msg: { req_id: string; requested_by?: string }) {
+    const reqId = msg.req_id
+    const path = writeForceUpdateMarker(msg.requested_by)
+    if (path) {
+      this.log('info', `force_update requested${msg.requested_by ? ` by ${msg.requested_by}` : ''}; marker written to ${path}`)
+      this.send({ type: 'supervisor.force_update_ack', req_id: reqId, ok: true })
+    } else {
+      this.log('warn', 'force_update: marker write failed')
+      this.send({ type: 'supervisor.force_update_ack', req_id: reqId, ok: false, error: 'marker_write_failed' })
+    }
+  }
+
+  /**
    * P1 — read the local OAuth token, poll `/api/oauth/usage`, and forward the
    * parsed (non-secret) utilization windows to the hub via the existing
    * `usage_report` agent message. Never throws; missing/expired token and
@@ -656,7 +679,7 @@ export class SupervisorClient {
    */
   private onConfigChanged() {
     let raw: any
-    try { raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) } catch { return }
+    try { raw = JSON.parse(readFileSync(getConfigPath(), 'utf-8')) } catch { return }
     const newRoots: string[] = Array.isArray(raw.roots) ? raw.roots.map(String) : []
     const prevRoots = this.cfg.roots ?? []
     const rootsChanged = newRoots.length !== prevRoots.length ||
@@ -687,13 +710,18 @@ export class SupervisorClient {
    * (writing privileged dirs) even though the subsequent `session.start`
    * would be blocked. Per supervisor audit 2026-05-28.
    */
-  private rejectIfEscape(op: string, reqId: string, path: string, target: 'existing' | 'target'): boolean {
+  private async rejectIfEscape(op: string, reqId: string, path: string, target: 'existing' | 'target'): Promise<boolean> {
     try {
       const roots = this.cfg.roots ?? []
-      if (target === 'target') assertTargetWithinRoots(path, roots)
-      else assertWithinRoots(path, roots)
+      if (target === 'target') await assertTargetWithinRoots(path, roots)
+      else await assertWithinRoots(path, roots)
       return false
     } catch (err) {
+      if (err instanceof SandboxCheckTimeoutError) {
+        this.log('error', `${op}: sandbox_check_timeout: ${path}`)
+        this.send({ type: 'repo.op_result', req_id: reqId, op, ok: false, error: 'sandbox_check_timeout' })
+        return true
+      }
       if (err instanceof SandboxEscapeError) {
         this.log('warn', `${op}: sandbox_escape: ${path}`)
         this.send({ type: 'repo.op_result', req_id: reqId, op, ok: false, error: 'sandbox_escape' })
@@ -705,26 +733,26 @@ export class SupervisorClient {
   }
 
   private async onRepoClone(msg: { req_id: string; clone_url: string; target_path: string; repo_full_name: string }) {
-    if (this.rejectIfEscape('clone', msg.req_id, msg.target_path, 'target')) return
+    if (await this.rejectIfEscape('clone', msg.req_id, msg.target_path, 'target')) return
     this.send({ type: 'repo.clone_progress', req_id: msg.req_id, stage: 'cloning' })
     const res = await cloneRepo(msg.clone_url, msg.target_path)
     this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'clone', ok: res.ok, error: res.error, data: res.data })
   }
 
   private async onRepoPull(msg: { req_id: string; repo_path: string; branch: string; clone_url: string }) {
-    if (this.rejectIfEscape('pull', msg.req_id, msg.repo_path, 'existing')) return
+    if (await this.rejectIfEscape('pull', msg.req_id, msg.repo_path, 'existing')) return
     const res = await pullRepo(msg.repo_path, msg.branch, msg.clone_url)
     this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'pull', ok: res.ok, error: res.error })
   }
 
   private async onBranchCheckout(msg: { req_id: string; repo_path: string; branch: string; create: boolean }) {
-    if (this.rejectIfEscape('checkout', msg.req_id, msg.repo_path, 'existing')) return
+    if (await this.rejectIfEscape('checkout', msg.req_id, msg.repo_path, 'existing')) return
     const res = await checkoutBranch(msg.repo_path, msg.branch, msg.create)
     this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'checkout', ok: res.ok, error: res.error })
   }
 
   private async onListBranches(msg: { req_id: string; repo_path: string }) {
-    if (this.rejectIfEscape('list_branches', msg.req_id, msg.repo_path, 'existing')) return
+    if (await this.rejectIfEscape('list_branches', msg.req_id, msg.repo_path, 'existing')) return
     try {
       const data = await listBranches(msg.repo_path)
       this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'list_branches', ok: true, data })
@@ -844,8 +872,13 @@ export class SupervisorClient {
     // The folder already exists (it's an unpushed local repo), so use the
     // existing-path assertion. No git runs if this throws.
     try {
-      assertWithinRoots(msg.local_path, this.cfg.roots ?? [])
+      await assertWithinRoots(msg.local_path, this.cfg.roots ?? [])
     } catch (err) {
+      if (err instanceof SandboxCheckTimeoutError) {
+        this.log('error', `create_local_repo_and_push: sandbox_check_timeout: ${msg.local_path}`)
+        this.send({ type: 'repo_create_failed', job_id: jobId, stage: 'validating_scope', error: 'sandbox_check_timeout' })
+        return
+      }
       if (err instanceof SandboxEscapeError) {
         this.log('warn', `create_local_repo_and_push: sandbox_escape: ${msg.local_path}`)
         this.send({ type: 'repo_create_failed', job_id: jobId, stage: 'validating_scope', error: 'sandbox_escape' })

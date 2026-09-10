@@ -1,7 +1,7 @@
 import { existsSync } from 'fs'
 import { join } from 'path'
 import type { SupervisorConfig } from './config'
-import { assertWithinRoots, SandboxEscapeError } from './sandbox'
+import { assertWithinRoots, SandboxEscapeError, SandboxCheckTimeoutError } from './sandbox'
 import { appendAudit, hashPrompt, type AuditEntry } from './audit'
 import { SessionBridge, type SessionBridgeCallbacks, type SessionBridgeOptions } from './runners/session-bridge'
 
@@ -29,8 +29,17 @@ export interface RunSpec {
   }
 }
 
+// 2026-08-18 QC round 3 (R3-2) — START_REJECTION_REASONS moved to the
+// dependency-free leaf module start-rejection-reasons.ts. Re-exported here
+// so nothing else in the supervisor needs to change its import path; see
+// that file's header comment for why it moved (the hub's cross-package
+// import of this file was pulling in the whole supervisor runtime graph
+// under the hub's tsconfig).
+export { START_REJECTION_REASONS, type StartRejectionReason } from './start-rejection-reasons'
+import type { StartRejectionReason as _StartRejectionReason } from './start-rejection-reasons'
+
 export interface StartRejection {
-  reason: 'sandbox_escape' | 'not_git_repo' | 'concurrency_cap' | 'duplicate_run' | 'legacy_agent_spawn_disabled' | 'circuit_open'
+  reason: _StartRejectionReason
   detail?: Record<string, unknown>
 }
 
@@ -293,7 +302,12 @@ export class ProcessManager {
     return null
   }
 
-  private writeAudit(spec: RunSpec, allowed: boolean, reason?: string): void {
+  private writeAudit(
+    spec: RunSpec,
+    allowed: boolean,
+    reason?: string,
+    sandboxDiag?: { allowedRoots: string[]; realRepo: string | null },
+  ): void {
     const entry: AuditEntry = {
       ts: new Date().toISOString(),
       run_id: spec.runId,
@@ -307,6 +321,7 @@ export class ProcessManager {
       },
       allowed,
       ...(reason ? { reason } : {}),
+      ...(sandboxDiag ? { allowed_roots: sandboxDiag.allowedRoots, real_repo: sandboxDiag.realRepo } : {}),
     }
     appendAudit(entry, this.cfg)
   }
@@ -584,19 +599,46 @@ export class ProcessManager {
       return { reason: 'duplicate_run' }
     }
 
+    let sandboxCheck: { realRepo: string; matchedRoot: string }
     try {
-      assertWithinRoots(spec.repoPath, this.cfg.roots)
+      sandboxCheck = await assertWithinRoots(spec.repoPath, this.cfg.roots)
     } catch (err) {
+      if (err instanceof SandboxCheckTimeoutError) {
+        const detail = { repo_path: spec.repoPath, timeout_ms: err.timeoutMs, error: err.message }
+        this.cb.onLog('error', `[security] sandbox_check_timeout: ${spec.repoPath} — filesystem check hung, refusing start`, spec.runId)
+        this.cb.onStateChange('stopped', {
+          runId: spec.runId,
+          repoPath: spec.repoPath,
+          lastExit: { code: null, reason: 'sandbox_check_timeout' },
+        })
+        this.writeAudit(spec, false, 'sandbox_check_timeout')
+        return { reason: 'sandbox_check_timeout', detail }
+      }
       const e = err as SandboxEscapeError
-      const detail = { repo_path: spec.repoPath, real_path: e.realPath, allowed_roots: e.allowedRoots }
-      this.cb.onLog('error', `[security] sandbox_escape: ${spec.repoPath} not within allowed roots ${JSON.stringify(e.allowedRoots)}`, spec.runId)
+      // 2026-08-18 (repo_path placeholder investigation) — reason now
+      // reflects WHICH of the three sandbox_escape sub-cases fired (see
+      // SandboxEscapeKind), and the audit line always carries allowed_roots +
+      // the resolved real_repo (when resolvable) so a future denial is
+      // self-diagnosing without needing the live supervisor.json.
+      const reason =
+        e.kind === 'path_missing'
+          ? 'sandbox_path_missing'
+          : e.kind === 'roots_unresolvable'
+            ? 'sandbox_roots_unresolvable'
+            : 'sandbox_not_under_roots'
+      const detail = { repo_path: spec.repoPath, real_path: e.realPath, allowed_roots: e.allowedRoots, kind: e.kind }
+      this.cb.onLog(
+        'error',
+        `[security] ${reason}: ${spec.repoPath} — real_path=${e.realPath ?? 'unresolvable'} allowed_roots=${JSON.stringify(e.allowedRoots)}`,
+        spec.runId,
+      )
       this.cb.onStateChange('stopped', {
         runId: spec.runId,
         repoPath: spec.repoPath,
-        lastExit: { code: null, reason: 'sandbox_escape' },
+        lastExit: { code: null, reason },
       })
-      this.writeAudit(spec, false, 'sandbox_escape')
-      return { reason: 'sandbox_escape', detail }
+      this.writeAudit(spec, false, reason, { allowedRoots: e.allowedRoots, realRepo: e.realPath })
+      return { reason, detail }
     }
 
     if (this.cfg.requireGitRepo && !spec.orchestrator) {
@@ -701,7 +743,7 @@ export class ProcessManager {
       )
     }
 
-    this.writeAudit(spec, true)
+    this.writeAudit(spec, true, undefined, { allowedRoots: this.cfg.roots, realRepo: sandboxCheck.realRepo })
 
     const run: RunInstance = {
       spec,
