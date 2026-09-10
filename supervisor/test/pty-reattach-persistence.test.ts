@@ -14,6 +14,7 @@ import { describe, test, expect } from 'bun:test'
 import {
   PtyPersistence,
   RingBuffer,
+  safeTrimPoint,
   type PersistablePty,
 } from '../src/runners/pty-persistence'
 
@@ -28,6 +29,33 @@ describe('Phase-16 PTY persistence — ring-buffer scrollback', () => {
     ring.push('ghijkl') // total 12 → cap 10 keeps last 10
     expect(ring.size).toBe(10)
     expect(ring.snapshot()).toBe('cdefghijkl')
+  })
+
+  test('a raw byte-count trim never starts mid ANSI escape sequence (mobile scrollback-depth investigation, 2026-09)', () => {
+    // "\x1b[31mAB\x1b[0mCD" is 13 bytes; a naive `slice(len-cap)` with cap=5
+    // starts at index 8 ("[0mCD") — INSIDE the second escape sequence
+    // ("\x1b[0m"), which is exactly what desynced the client's xterm.js
+    // parser and rendered as blank/garbled leading output on (re)attach
+    // (proven pre-fix: the naive slice literally produces "[0mCD").
+    const buf = '\x1b[31mAB\x1b[0mCD'
+    const rawCut = buf.length - 5
+    const safeCut = safeTrimPoint(buf, rawCut)
+    const trimmed = buf.slice(safeCut)
+    // Must never start with an orphaned escape-sequence tail: either empty,
+    // starting with a fresh ESC, or a byte that isn't a CSI parameter/final
+    // byte (which would only make sense preceded by an ESC we dropped).
+    const first = trimmed.charCodeAt(0)
+    expect(
+      trimmed.length === 0 || first === 0x1b || first < 0x30 || first > 0x7e,
+    ).toBe(true)
+
+    // The ring itself must produce the same safe result end-to-end.
+    const ring = new RingBuffer(5)
+    ring.push(buf)
+    const first2 = ring.snapshot().charCodeAt(0)
+    expect(
+      ring.snapshot().length === 0 || first2 === 0x1b || first2 < 0x30 || first2 > 0x7e,
+    ).toBe(true)
   })
 
   test('recordOutput accumulates scrollback for replay', () => {
