@@ -4037,7 +4037,8 @@
                   "wait_ms": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 120000
+                    "maximum": 120000,
+                    "default": 0
                   },
                   "include_transcript": {
                     "type": "boolean"
@@ -4437,7 +4438,8 @@
                   "wait_ms": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 120000
+                    "maximum": 120000,
+                    "default": 0
                   }
                 },
                 "required": [

@@ -916,7 +916,7 @@ openapi.openapi(taskTemplatesRoute, (c) => {
         z.object({
           question: z.string().min(1).max(8000),
           context: z.string().max(8000).optional(),
-          wait_ms: z.number().int().min(0).max(120000).optional(),
+          wait_ms: z.number().int().min(0).max(120000).default(0).optional(),
           include_transcript: z.boolean().optional(),
           include_memory: z.boolean().optional(),
         }),
@@ -1023,7 +1023,7 @@ openapi.openapi(taskTemplatesRoute, (c) => {
             subject: z.string().max(2000).optional(),
             message_id: z.string().max(998).optional(),
           }),
-          wait_ms: z.number().int().min(0).max(120000).optional(),
+          wait_ms: z.number().int().min(0).max(120000).default(0).optional(),
         }),
       ),
     },
