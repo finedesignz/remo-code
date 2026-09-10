@@ -367,7 +367,18 @@ export class PtyUsageEmitter {
     }
 
     this.tail = tailJsonl(pinnedPath, onRecord, {
-      fromStart: false, // never replay historical records on a supervisor restart/reattach
+      // `pinnedPath` is guaranteed NEW to this session — `resolveTranscriptPath`
+      // only ever returns a file absent from the pre-spawn `preExistingNames`
+      // snapshot taken in `session-bridge.ts` before the CLI process spawns
+      // (see its doc comment). There is no reattach/resume path here: this
+      // emitter is constructed fresh in `ensurePtyRunner()` exactly once per
+      // PTY lifecycle, guarded by `if (this.ptyRunner) return this.ptyRunner`.
+      // So any record already in the file by the time the 1s locate-poll tick
+      // pins it (LOCATE_POLL_MS) is a genuine turn of THIS session that a
+      // tail-from-EOF would silently drop from the token ledger and the daily
+      // cap. Tail from the top — dedupe (via `seen`/`uuid`) already guards
+      // against double-emitting anything replayed this way.
+      fromStart: true,
       onParseError: () => {
         this.skippedLines++
       },

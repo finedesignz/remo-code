@@ -404,6 +404,105 @@ describe('PtyUsageEmitter — end-to-end mid-turn accounting (SC-1/SC-2/SC-3)', 
     }
   })
 
+  test('fix/pty-usage-tail-from-start: a transcript file created AFTER emitter start, already containing a complete usage record BEFORE the locator tick pins it, still emits exactly one frame with the right buckets (tail-from-EOF must not drop it)', async () => {
+    const { restore } = makeHome()
+    const emitter = new PtyUsageEmitter()
+    try {
+      const projectDir = process.platform === 'win32' ? 'C:/fake/pty-usage-h' : '/fake/pty-usage-h'
+      const r = resolveSessionDir(projectDir)
+      if (!r.ok) throw new Error(`test setup: resolveSessionDir failed: ${r.error}`)
+      mkdirSync(r.dir, { recursive: true })
+      const captured: PtyUsageEventFrame[] = []
+      // Start the emitter FIRST — nothing on disk yet (first-session case).
+      emitter.start({
+        sessionId: 'sess-h',
+        projectDir,
+        cliKind: 'claude',
+        emit: (f) => captured.push(f),
+        projectsBase: () => claudeProjectsBase(),
+      })
+      // Simulate the CLI spawning and writing its FIRST turn (a complete
+      // record) before the 1s locator poll tick fires and pins the file —
+      // the whole point of this scenario is that the record lands before
+      // the tailer is even attached.
+      const file = join(r.dir, 'sess-h.jsonl')
+      writeFileSync(
+        file,
+        JSON.stringify({
+          type: 'assistant',
+          uuid: 'u-pre-pin',
+          message: { model: 'claude-sonnet-5', usage: { input_tokens: 50, output_tokens: 10, cache_creation_input_tokens: 2, cache_read_input_tokens: 1 } },
+        }) + '\n',
+      )
+      // Wait past the 1s LOCATE_POLL_MS locate tick + tail settle.
+      await wait(1600)
+      expect(captured.length).toBe(1)
+      expect(captured[0].input_tokens).toBe(50)
+      expect(captured[0].output_tokens).toBe(10)
+      expect(captured[0].cache_creation_input_tokens).toBe(2)
+      expect(captured[0].cache_read_input_tokens).toBe(1)
+    } finally {
+      emitter.stop()
+      restore()
+    }
+  })
+
+  test('fix/pty-usage-tail-from-start: a record appended AFTER pin still emits exactly once (no double-emit of the first record)', async () => {
+    const { restore } = makeHome()
+    const emitter = new PtyUsageEmitter()
+    try {
+      // NOTE: this fixture name (and its sessionId) must stay distinct from
+      // every other test's — a duplicate literal here previously collided
+      // with the "scenario 1: session dir ABSENT" test below (same projectDir
+      // string, same sessionId), which under CI's slower/loaded timing let
+      // this test's async locate-poll/tail teardown race past its own
+      // makeHome()/restore() boundary and pollute the next test's snapshot.
+      // Distinct literals make that class of cross-test race structurally
+      // impossible regardless of teardown timing.
+      const projectDir = process.platform === 'win32' ? 'C:/fake/pty-usage-k' : '/fake/pty-usage-k'
+      const r = resolveSessionDir(projectDir)
+      if (!r.ok) throw new Error(`test setup: resolveSessionDir failed: ${r.error}`)
+      mkdirSync(r.dir, { recursive: true })
+      const captured: PtyUsageEventFrame[] = []
+      emitter.start({
+        sessionId: 'sess-k',
+        projectDir,
+        cliKind: 'claude',
+        emit: (f) => captured.push(f),
+        projectsBase: () => claudeProjectsBase(),
+      })
+      const file = join(r.dir, 'sess-k.jsonl')
+      writeFileSync(
+        file,
+        JSON.stringify({
+          type: 'assistant',
+          uuid: 'u-first',
+          message: { usage: { input_tokens: 11, output_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+        }) + '\n',
+      )
+      // Let it get pinned + the pre-existing record consumed.
+      await wait(1600)
+      expect(captured.length).toBe(1)
+      // Now append a SECOND record after the pin.
+      writeFileSync(
+        file,
+        JSON.stringify({
+          type: 'assistant',
+          uuid: 'u-second',
+          message: { usage: { input_tokens: 22, output_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+        }) + '\n',
+        { flag: 'a' },
+      )
+      await wait(700)
+      expect(captured.length).toBe(2)
+      expect(captured[0].input_tokens).toBe(11) // first record not re-emitted
+      expect(captured[1].input_tokens).toBe(22)
+    } finally {
+      emitter.stop()
+      restore()
+    }
+  })
+
   test('stop() is idempotent and no frame is emitted after it', async () => {
     const { restore } = makeHome()
     const freshEmitter = new PtyUsageEmitter()

@@ -159,7 +159,12 @@ describe('PtyUsageEmitter — transcript path containment (ASVS V4)', () => {
       const file = seedSessionFile(projectDir)
       const captured: PtyUsageEventFrame[] = []
       emitter.start({ sessionId: 'sess-legit', projectDir, cliKind: 'claude', emit: (f) => captured.push(f) })
-      await wait(1300) // this file already has content at attach; fromStart:false means we need a NEW append
+      // fix/pty-usage-tail-from-start: this file already has content (a
+      // legitimate record of THIS session — no other session could have
+      // written it) at attach time. The tailer now tails from offset 0 on
+      // first pin, so that pre-attach record is no longer silently dropped
+      // from the token ledger/cap — it emits alongside the later append.
+      await wait(1300)
       writeFileSync(
         file,
         JSON.stringify({
@@ -170,7 +175,7 @@ describe('PtyUsageEmitter — transcript path containment (ASVS V4)', () => {
         { flag: 'a' },
       )
       await wait(700)
-      expect(captured.length).toBe(1)
+      expect(captured.length).toBe(2)
     } finally {
       emitter.stop()
       restore()
