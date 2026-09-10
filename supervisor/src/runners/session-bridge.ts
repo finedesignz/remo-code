@@ -545,7 +545,6 @@ export class SessionBridge {
       // appends `--dangerously-skip-permissions` (its SOLE permitted argv token).
       dangerouslySkipPermissions: this.opts.allowDangerousSkipPermissions,
       onData: (bytes) => {
-        if (sessionId) { try { ptyPersistence.recordOutput(sessionId, bytes) } catch {} }
         emitTerm(bytes)
       },
       // Scrollback replay on (re)attach — Rust bridge only; sent as the same
