@@ -3,10 +3,51 @@
  * force-update chain: `supervisor.force_update` writes a marker file the Rust
  * tray watcher later consumes, and acks `supervisor.force_update_ack`.
  */
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { existsSync, readFileSync, rmSync } from 'fs'
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test'
+import { existsSync, readFileSync, mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { writeForceUpdateMarker, forceUpdateMarkerPath } from '../src/runners/force-update-marker'
 import { SupervisorClient } from '../src/hub-client'
+
+// fix/test-config-isolation-contract — two separate real-user directories are
+// in play here, and this file used to write to both:
+//
+//   1. The CONFIG dir (`%APPDATA%\remo-code`) — reached because this file
+//      constructs a real `SupervisorClient`. Covered by REMO_CODE_CONFIG_DIR,
+//      the override #406 added.
+//   2. The supervisor STATE dir (`%LOCALAPPDATA%\remo-code-supervisor`) —
+//      `forceUpdateMarkerPath()` resolves through `supervisorStateDir()`, which
+//      keys off LOCALAPPDATA and is NOT covered by REMO_CODE_CONFIG_DIR or by
+//      #406's guard. So this file was writing `force-update.json` into the live
+//      supervisor state dir, and its `afterEach` `rmSync` would delete a real
+//      pending force-update marker if one happened to exist. Same class of
+//      test/prod bleed as the config write-through, different directory.
+//
+// Both are redirected to per-run temp dirs below. Note the LOCALAPPDATA
+// redirect is win32-only by construction: on Linux/macOS `supervisorStateDir()`
+// resolves under `homedir()` instead, so the override is a no-op there (CI
+// runners have ephemeral homes, so nothing real is at risk).
+const CONFIG_SANDBOX = mkdtempSync(join(tmpdir(), 'remo-forceupd-cfg-'))
+const STATE_SANDBOX = mkdtempSync(join(tmpdir(), 'remo-forceupd-state-'))
+let savedConfigDir: string | undefined
+let savedLocalAppData: string | undefined
+
+beforeAll(() => {
+  savedConfigDir = process.env.REMO_CODE_CONFIG_DIR
+  savedLocalAppData = process.env.LOCALAPPDATA
+  process.env.REMO_CODE_CONFIG_DIR = CONFIG_SANDBOX
+  process.env.LOCALAPPDATA = STATE_SANDBOX
+})
+
+afterAll(() => {
+  // Restore both: a leaked override would silently isolate whatever test file
+  // runs next in this process and mask a missing one there.
+  if (savedConfigDir === undefined) delete process.env.REMO_CODE_CONFIG_DIR
+  else process.env.REMO_CODE_CONFIG_DIR = savedConfigDir
+  if (savedLocalAppData === undefined) delete process.env.LOCALAPPDATA
+  else process.env.LOCALAPPDATA = savedLocalAppData
+})
 
 const baseCfg: any = {
   hubUrl: 'http://hub.local',
