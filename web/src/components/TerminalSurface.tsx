@@ -23,6 +23,7 @@
  * chrome is untouched.
  */
 import { useEffect, useRef, useState, useCallback } from 'react'
+import type { CSSProperties } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -205,6 +206,62 @@ export const KEY_SEQUENCES = {
   ctrlC: '\x03',
 } as const
 
+/** Toolbar keys where holding down must auto-repeat, matching a real keyboard's
+ * typematic behavior. Esc/Enter/Ctrl-C are deliberately excluded — those must
+ * never fire more than once per press (repeating Ctrl-C or Enter would be
+ * actively dangerous/wrong). Exported so the repeat-DoD test can assert this
+ * set stays exactly {up,down,left,right,tab}. */
+export const REPEATABLE_KEYS: ReadonlySet<keyof typeof KEY_SEQUENCES> = new Set(['up', 'down', 'left', 'right', 'tab'])
+
+/**
+ * Injectable timer seam so KeyRepeater is unit-testable without real clocks —
+ * tests supply a fake scheduler and fire callbacks deterministically instead of
+ * racing real setTimeout/setInterval.
+ */
+export interface RepeatScheduler {
+  setTimeout: (fn: () => void, ms: number) => number
+  clearTimeout: (id: number) => void
+  setInterval: (fn: () => void, ms: number) => number
+  clearInterval: (id: number) => void
+}
+
+const windowScheduler: RepeatScheduler = {
+  setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+  clearTimeout: (id) => window.clearTimeout(id),
+  setInterval: (fn, ms) => window.setInterval(fn, ms),
+  clearInterval: (id) => window.clearInterval(id),
+}
+
+/**
+ * Press-and-hold auto-repeat for a toolbar key: fires once immediately on
+ * start() (a real keyboard registers the first press instantly), waits
+ * `initialMs` before repeating (so a normal tap never repeats), then fires
+ * every `intervalMs` until stop(). One instance is reused per press (a new one
+ * created per pointerdown); stop() is idempotent and cancels both timers.
+ */
+export class KeyRepeater {
+  private timeoutId: number | null = null
+  private intervalId: number | null = null
+  constructor(
+    private readonly fire: () => void,
+    private readonly scheduler: RepeatScheduler = windowScheduler,
+    private readonly initialMs = 400,
+    private readonly intervalMs = 50,
+  ) {}
+  start(): void {
+    this.stop()
+    this.fire()
+    this.timeoutId = this.scheduler.setTimeout(() => {
+      this.timeoutId = null
+      this.intervalId = this.scheduler.setInterval(() => this.fire(), this.intervalMs)
+    }, this.initialMs)
+  }
+  stop(): void {
+    if (this.timeoutId != null) { this.scheduler.clearTimeout(this.timeoutId); this.timeoutId = null }
+    if (this.intervalId != null) { this.scheduler.clearInterval(this.intervalId); this.intervalId = null }
+  }
+}
+
 // Touch-focus suppression window. After a touch gesture we swallow the SYNTHETIC
 // mousedown Safari replays (~a few hundred ms later) so it can't re-summon the iOS
 // keyboard the user just dismissed by tapping. But ONLY for this short window — a
@@ -271,6 +328,37 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     if (recentTouch()) return
     try { termRef.current?.focus() } catch {}
   }, [send, sessionId])
+
+  // Press-and-hold auto-repeat for arrows/Tab (REPEATABLE_KEYS). One KeyRepeater
+  // per active press, held in a ref so pointerup/pointercancel/pointerleave/blur
+  // can stop the SAME instance that pointerdown started (a stale closure over a
+  // fresh repeater per render would stop the wrong one). startRepeat replaces
+  // any still-running repeater first, so a stray missed pointerup from a prior
+  // press can never leave two repeaters running at once.
+  const repeaterRef = useRef<KeyRepeater | null>(null)
+  // A pointerdown already sent the first keystroke via KeyRepeater; the browser
+  // then fires a native 'click' right after for a real mouse/touch press
+  // (preventDefault() on pointerdown suppresses the SIMULATED compatibility
+  // click a touch pointer would otherwise get, but not a genuine mouse click).
+  // This flag makes onClick a no-op for that follow-on click while still
+  // sending once for a keyboard/screen-reader activation (Enter/Space), which
+  // never fires pointerdown at all.
+  const pointerHandledRef = useRef(false)
+  const startRepeat = useCallback((seq: string) => {
+    pointerHandledRef.current = true
+    repeaterRef.current?.stop()
+    const r = new KeyRepeater(() => sendKey(seq))
+    repeaterRef.current = r
+    r.start()
+  }, [sendKey])
+  const stopRepeat = useCallback(() => {
+    repeaterRef.current?.stop()
+  }, [])
+  const clickIfNotPointer = useCallback((seq: string) => {
+    if (pointerHandledRef.current) { pointerHandledRef.current = false; return }
+    sendKey(seq)
+  }, [sendKey])
+  useEffect(() => stopRepeat, [stopRepeat]) // unmount safety net
 
   // Ctrl+V / paste. Two paths, in order:
   //
@@ -684,6 +772,15 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
   const btn = 'px-2 py-1 rounded text-xs font-medium leading-none select-none ' +
     'bg-[var(--bg-secondary)] text-[var(--text-primary)] border border-[var(--border)] ' +
     'hover:bg-[var(--bg-tertiary)] active:opacity-80 min-h-[32px] min-w-[32px]'
+  // Repeatable-key buttons (arrows/Tab): keep a hold from being interpreted as
+  // iOS text-selection/magnifier instead of a repeat, and drop the platform's
+  // default 300ms touch-to-click delay that would otherwise stall the first
+  // repeat tick.
+  const repeatBtnStyle: CSSProperties = {
+    touchAction: 'manipulation',
+    WebkitUserSelect: 'none',
+    WebkitTouchCallout: 'none',
+  }
 
   // ⌨ toggle, ON state: BLUE accent (per design-preferences; the forbidden
   // purple-blue accent is never used), so "the keyboard is up" is unmistakable at a
@@ -703,11 +800,73 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
         onMouseDown={(e) => e.preventDefault()}
       >
         <button type="button" className={btn} title="Escape" onClick={() => sendKey(KEY_SEQUENCES.esc)}>Esc</button>
-        <button type="button" className={btn} title="Up" onClick={() => sendKey(KEY_SEQUENCES.up)}>↑</button>
-        <button type="button" className={btn} title="Down" onClick={() => sendKey(KEY_SEQUENCES.down)}>↓</button>
-        <button type="button" className={btn} title="Left" onClick={() => sendKey(KEY_SEQUENCES.left)}>←</button>
-        <button type="button" className={btn} title="Right" onClick={() => sendKey(KEY_SEQUENCES.right)}>→</button>
-        <button type="button" className={btn} title="Tab" onClick={() => sendKey(KEY_SEQUENCES.tab)}>Tab</button>
+        {/* Repeatable keys (arrows, Tab): pointerdown starts KeyRepeater (fires
+            once immediately, then repeats after a 400ms hold), any release/exit
+            path stops it. touch-action + -webkit-user-select/-touch-callout
+            keep a hold from triggering iOS text-selection/magnifier instead of
+            repeating. Also keep onClick so keyboard/screen-reader activation
+            (Enter/Space on a focused button, which never fires pointerdown)
+            still sends a single keystroke. */}
+        <button
+          type="button"
+          className={btn}
+          title="Up"
+          style={repeatBtnStyle}
+          onPointerDown={(e) => { e.preventDefault(); startRepeat(KEY_SEQUENCES.up) }}
+          onPointerUp={stopRepeat}
+          onPointerCancel={stopRepeat}
+          onPointerLeave={stopRepeat}
+          onBlur={stopRepeat}
+          onClick={() => clickIfNotPointer(KEY_SEQUENCES.up)}
+        >↑</button>
+        <button
+          type="button"
+          className={btn}
+          title="Down"
+          style={repeatBtnStyle}
+          onPointerDown={(e) => { e.preventDefault(); startRepeat(KEY_SEQUENCES.down) }}
+          onPointerUp={stopRepeat}
+          onPointerCancel={stopRepeat}
+          onPointerLeave={stopRepeat}
+          onBlur={stopRepeat}
+          onClick={() => clickIfNotPointer(KEY_SEQUENCES.down)}
+        >↓</button>
+        <button
+          type="button"
+          className={btn}
+          title="Left"
+          style={repeatBtnStyle}
+          onPointerDown={(e) => { e.preventDefault(); startRepeat(KEY_SEQUENCES.left) }}
+          onPointerUp={stopRepeat}
+          onPointerCancel={stopRepeat}
+          onPointerLeave={stopRepeat}
+          onBlur={stopRepeat}
+          onClick={() => clickIfNotPointer(KEY_SEQUENCES.left)}
+        >←</button>
+        <button
+          type="button"
+          className={btn}
+          title="Right"
+          style={repeatBtnStyle}
+          onPointerDown={(e) => { e.preventDefault(); startRepeat(KEY_SEQUENCES.right) }}
+          onPointerUp={stopRepeat}
+          onPointerCancel={stopRepeat}
+          onPointerLeave={stopRepeat}
+          onBlur={stopRepeat}
+          onClick={() => clickIfNotPointer(KEY_SEQUENCES.right)}
+        >→</button>
+        <button
+          type="button"
+          className={btn}
+          title="Tab"
+          style={repeatBtnStyle}
+          onPointerDown={(e) => { e.preventDefault(); startRepeat(KEY_SEQUENCES.tab) }}
+          onPointerUp={stopRepeat}
+          onPointerCancel={stopRepeat}
+          onPointerLeave={stopRepeat}
+          onBlur={stopRepeat}
+          onClick={() => clickIfNotPointer(KEY_SEQUENCES.tab)}
+        >Tab</button>
         <button type="button" className={btn} title="Enter" onClick={() => sendKey(KEY_SEQUENCES.enter)}>⏎</button>
         <button type="button" className={btn} title="Ctrl-C (interrupt)" onClick={() => sendKey(KEY_SEQUENCES.ctrlC)}>^C</button>
         <button
