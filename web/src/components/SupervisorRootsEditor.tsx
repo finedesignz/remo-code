@@ -164,19 +164,26 @@ export function SupervisorRootsEditor({ token, supervisorId, roots, online, onSa
   if (!expanded) {
     return (
       <Tooltip label={`Root folders (${items.length})`}>
+        {/* Outer button is the REAL 44x44 hit target (transparent — the visible
+            pill is the smaller inner span below); `-m-2.5` collapses its flow
+            footprint to 24px without shrinking the actual click area, same
+            technique as every other icon action in this row. */}
         <button
           type="button"
           onClick={toggleExpanded}
           aria-label={`Root folders (${items.length})`}
-          className="flex items-center justify-center w-11 h-11 rounded-lg text-[var(--text-muted)] bg-[var(--bg-tertiary)]/40 hover:bg-[var(--bg-tertiary)]/60 hover:text-[var(--text-primary)] transition-colors"
+          className="group flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg"
         >
-          {/* Badge anchors to this inner 20px box (not the 44px hit target) so it
-              stays fully inside the button bounds and never clips against a
-              sibling in the flex row — was `-top-1 -right-1` off the 44px box. */}
-          <span className="relative inline-flex items-center justify-center w-5 h-5">
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3l1.5 1.5H13.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" /></svg>
-            <span className="absolute top-0 right-0 translate-x-[6px] -translate-y-[6px] min-w-[16px] h-[16px] px-[3px] flex items-center justify-center rounded-full bg-blue-600 text-[9px] leading-none text-[var(--text-on-accent)] ring-2 ring-[var(--bg-secondary)]">
-              {items.length}
+          <span className="relative flex items-center justify-center w-9 h-9 rounded-lg text-[var(--text-muted)] bg-[var(--bg-tertiary)]/40 group-hover:bg-[var(--bg-tertiary)]/60 group-hover:text-[var(--text-primary)] transition-colors">
+            {/* Badge anchors to this inner 20px box (not the 44px hit target) so it
+                stays fully inside the visible pill bounds and never clips
+                against a sibling in the flex row — was `-top-1 -right-1` off
+                the 44px box. */}
+            <span className="relative inline-flex items-center justify-center w-5 h-5">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3l1.5 1.5H13.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" /></svg>
+              <span className="absolute top-0 right-0 translate-x-[6px] -translate-y-[6px] min-w-[16px] h-[16px] px-[3px] flex items-center justify-center rounded-full bg-blue-600 text-[9px] leading-none text-[var(--text-on-accent)] ring-2 ring-[var(--bg-secondary)]">
+                {items.length}
+              </span>
             </span>
           </span>
         </button>

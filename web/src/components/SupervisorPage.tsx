@@ -702,23 +702,29 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               </div>
             )}
           <div className="flex flex-wrap items-center gap-1.5">
-            {/* Machine pill: status dot + compact select, no label text */}
-            <span className="inline-flex items-center gap-1.5 pl-2.5 pr-1 h-8 rounded-full bg-[var(--bg-tertiary)]/60">
-              <span
-                className={`w-2 h-2 rounded-full shrink-0 ${activeSupervisor?.online ? 'bg-emerald-400' : 'bg-gray-500'}`}
-                aria-hidden="true"
-              />
-              <select
-                value={activeSupervisorId || ''}
-                onChange={(e) => setActiveSupervisorId(e.target.value)}
-                aria-label="Machine"
-                className="bg-transparent text-sm text-[var(--text-primary)] focus:outline-none max-w-[180px] truncate"
-              >
-                {supervisors.map((s) => (
-                  <option key={s.id} value={s.id}>{s.hostname} · {s.online ? s.state : 'offline'} · v{s.version || '?'}</option>
-                ))}
-              </select>
-            </span>
+            {/* Machine pill: status dot + compact select, no label text. The
+                select truncates hard on mobile (hostname only survives) — the
+                full "hostname · state · vX" detail is still one tap/hover
+                away via the wrapping Tooltip, never lost, just not spelled
+                out inline on a 390px row. */}
+            <Tooltip label={activeSupervisor ? `${activeSupervisor.hostname} · ${activeSupervisor.online ? activeSupervisor.state : 'offline'} · v${activeSupervisor.version || '?'}` : 'Machine'}>
+              <span className="inline-flex items-center gap-1.5 pl-2.5 pr-1 h-8 rounded-full bg-[var(--bg-tertiary)]/60">
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${activeSupervisor?.online ? 'bg-emerald-400' : 'bg-gray-500'}`}
+                  aria-hidden="true"
+                />
+                <select
+                  value={activeSupervisorId || ''}
+                  onChange={(e) => setActiveSupervisorId(e.target.value)}
+                  aria-label="Machine"
+                  className="bg-transparent text-sm text-[var(--text-primary)] focus:outline-none max-w-[90px] sm:max-w-[180px] truncate"
+                >
+                  {supervisors.map((s) => (
+                    <option key={s.id} value={s.id}>{s.hostname} · {s.online ? s.state : 'offline'} · v{s.version || '?'}</option>
+                  ))}
+                </select>
+              </span>
+            </Tooltip>
 
             {activeSupervisor?.online && (
               confirmingUpdate ? (
@@ -871,7 +877,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                   type="button"
                   onClick={() => setSearchOpen(true)}
                   aria-label="Search repos"
-                  className="inline-flex sm:hidden items-center justify-center min-w-[32px] min-h-[32px] rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
+                  className="inline-flex sm:hidden items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
                 >
                   <Icon.Search />
                 </button>
@@ -893,25 +899,32 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               onClick={() => { loadGitHub(); scan() }}
               disabled={refreshingGh || scanning}
               aria-label="Refresh repos"
-              className="inline-flex items-center justify-center min-w-[32px] min-h-[32px] rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-50 shrink-0"
+              className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-50 shrink-0"
             >
               <Icon.Refresh className={refreshingGh || scanning ? 'animate-spin' : ''} />
             </button>
           </Tooltip>
 
+          {/* Launch selected: outer button is the real 44x44 hit target
+              (transparent), the visible blue pill is the smaller inner span —
+              same technique as the root-folders icon, needed because this
+              button carries a persistent accent background that would
+              visually bleed into neighbors under a plain -m-2.5. */}
           <Tooltip label={launchingAll ? 'Launching…' : `Launch selected${selected.size > 0 ? ` (${selected.size})` : ''}`}>
             <button
               onClick={launchSelected}
               disabled={selected.size === 0 || launchingAll || !activeSupervisor?.online}
               aria-label={launchingAll ? 'Launching…' : `Launch selected${selected.size > 0 ? ` (${selected.size})` : ''}`}
-              className="relative inline-flex items-center justify-center min-w-[32px] min-h-[32px] rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+              className="relative inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg disabled:cursor-not-allowed shrink-0"
             >
-              {launchingAll ? <Icon.Refresh className="animate-spin" /> : <Icon.Play />}
-              {selected.size > 0 && !launchingAll && (
-                <span className="absolute top-0.5 right-0.5 min-w-[14px] h-[14px] px-[3px] flex items-center justify-center rounded-full bg-[var(--text-on-accent)] text-blue-700 text-[9px] leading-none font-semibold">
-                  {selected.size}
-                </span>
-              )}
+              <span className="relative inline-flex items-center justify-center w-9 h-9 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] disabled:opacity-40 transition-colors">
+                {launchingAll ? <Icon.Refresh className="animate-spin" /> : <Icon.Play />}
+                {selected.size > 0 && !launchingAll && (
+                  <span className="absolute top-0.5 right-0.5 min-w-[14px] h-[14px] px-[3px] flex items-center justify-center rounded-full bg-[var(--text-on-accent)] text-blue-700 text-[9px] leading-none font-semibold">
+                    {selected.size}
+                  </span>
+                )}
+              </span>
             </button>
           </Tooltip>
 
@@ -920,19 +933,24 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
             <button
               onClick={() => setShowGroupsManager(true)}
               aria-label="Manage repo groups"
-              className="inline-flex items-center justify-center min-w-[32px] min-h-[32px] rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 transition-colors shrink-0"
+              className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 transition-colors shrink-0"
             >
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><rect x="2" y="2.5" width="5" height="5" rx="1" /><rect x="9" y="2.5" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>
             </button>
           </Tooltip>
+          {/* Same outer-transparent / inner-pill technique — this toggle
+              carries a persistent ring+bg when active, which would bleed
+              into neighbors under a plain -m-2.5 on the visible element. */}
           <Tooltip label={groupsApi.groupView ? 'Switch to flat list' : 'Group repos by your groups'}>
             <button
               onClick={() => groupsApi.setGroupView(!groupsApi.groupView)}
               aria-pressed={groupsApi.groupView}
               aria-label={groupsApi.groupView ? 'Switch to flat list' : 'Group repos by your groups'}
-              className={`inline-flex items-center justify-center min-w-[32px] min-h-[32px] rounded-lg transition-colors shrink-0 ${groupsApi.groupView ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/60'}`}
+              className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg shrink-0"
             >
-              <Icon.GroupBy />
+              <span className={`inline-flex items-center justify-center w-9 h-9 rounded-lg transition-colors ${groupsApi.groupView ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/60'}`}>
+                <Icon.GroupBy />
+              </span>
             </button>
           </Tooltip>
         </div>
