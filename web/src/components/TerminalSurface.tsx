@@ -152,12 +152,6 @@ function diffInterimBytes(prev: string, next: string): string {
   while (i < max && prevCp[i] === nextCp[i]) i++
   return '\x7f'.repeat(prevCp.length - i) + nextCp.slice(i).join('')
 }
-/** How long after compositionend a beforeinput can still be the engine's own
- * delivery of the commit rather than a fresh human keystroke. Browsers dispatch
- * the trailing commit event in the same input burst as compositionend (~0ms);
- * no human types within this window of their own commit. */
-export const IME_COMMIT_WINDOW_MS = 30
-
 const COMPOSITION_INSERT_TYPES: ReadonlySet<string> = new Set([
   'insertCompositionText',
   'insertReplacementText',
@@ -195,10 +189,26 @@ const COMPOSITION_INSERT_TYPES: ReadonlySet<string> = new Set([
  * orderings, and complete on its own if no trailing event ever arrives. What
  * remains is purely a question of SUPPRESSION, decided when the next event
  * actually shows up: a beforeinput is the engine re-delivering that same commit
- * only if it lands inside the commit burst window AND carries the text we just
- * settled on (or the stale interim some engines repeat there). Anything else —
- * different text, a later timestamp, a Backspace, an Enter — is a genuine
- * keystroke and is forwarded 1:1.
+ * only if it carries the text we just settled on (or the stale interim some
+ * engines repeat there). Anything else — different text, a Backspace, an
+ * Enter — is a genuine keystroke and is forwarded 1:1.
+ *
+ * TIMING IS NOT A SIGNAL. An earlier attempt also required the trailing event
+ * inside a 30ms window. A handler-side clock measures HANDLER EXECUTION (the
+ * WebSocket send, the textarea keepalive, the React render), not dispatch, so a
+ * GC pause or a slow phone pushed the engine's own commit past the window and
+ * double-sent ("abab"). No clock is read here.
+ *
+ * That leaves ONE irreducible ambiguity: committing text T and then a human
+ * typing exactly T. Nothing in the DOM separates those. So the engine's own
+ * ordering is LEARNED, once per session: a compositionend followed by a
+ * matching event proves this engine is end-first (keep arming); a
+ * compositionend followed by a non-matching event, or by the next
+ * compositionstart, proves it is chrome-order and arming stops for good. A
+ * chrome-order engine is therefore exposed only until its first commit is
+ * observed; an end-first engine keeps the ambiguity, where suppressing is the
+ * right bet because its trailing commit is certain and a retype is a
+ * coincidence.
  *
  * A cancelled composition (compositionend with '' data) RETRACTS the interim
  * bytes already sent, one DEL per code point.
@@ -217,11 +227,13 @@ export class CompositionInputTracker {
   private finalData = ''
   /** The last interim seen before compositionend — some engines repeat it. */
   private preEnd = ''
-  private endedAt = 0
-
-  constructor(private readonly now: () => number = () => Date.now()) {}
+  /** Which ordering THIS engine uses, learned from its own behavior. */
+  private ordering: 'unknown' | 'end-first' | 'chrome' = 'unknown'
 
   onCompositionStart(): void {
+    // A new composition began with the previous commit never re-delivered: this
+    // engine does not fire a trailing commit event.
+    if (this.armed) this.ordering = 'chrome'
     this.clear()
     this.composing = true
   }
@@ -238,14 +250,15 @@ export class CompositionInputTracker {
     const cancelled = data === ''
     const final = cancelled ? '' : (data ?? this.hypothesis)
     const bytes = diffInterimBytes(this.sent, final)
-    this.endedAt = this.now()
     if (cancelled || final === '') {
       this.clear()
     } else {
       this.sent = final
       this.hypothesis = final
       this.finalData = final
-      this.armed = true
+      // A chrome-order engine never re-delivers, so once that is known there is
+      // nothing to suppress and the ambiguous case resolves for the human.
+      this.armed = this.ordering !== 'chrome'
     }
     return bytes.length > 0 ? bytes : null
   }
@@ -276,12 +289,12 @@ export class CompositionInputTracker {
     }
 
     if (this.armed) {
-      const withinBurst = this.now() - this.endedAt <= IME_COMMIT_WINDOW_MS
       const d = data ?? ''
+      // A Backspace is never the engine re-delivering a commit.
       const redelivered =
-        withinBurst &&
         COMPOSITION_INSERT_TYPES.has(inputType) &&
         (d === this.finalData || (this.preEnd !== '' && d === this.preEnd))
+      this.ordering = redelivered ? 'end-first' : 'chrome'
       this.clear()
       // compositionend already put this exact text on the line — drop the echo.
       if (redelivered) return null
