@@ -144,7 +144,9 @@ maybe('supervisor state-machine regression (DB)', () => {
     // drifts, both call sites need updating.
     const REJECTIONS = [
       'concurrency_cap',
-      'sandbox_escape',
+      'sandbox_path_missing',
+      'sandbox_not_under_roots',
+      'sandbox_roots_unresolvable',
       'not_git_repo',
       'duplicate_run',
       'legacy_agent_spawn_disabled',

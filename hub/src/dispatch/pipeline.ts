@@ -58,6 +58,18 @@ export interface RunStore {
   /** called when the agent's next assistant_message lands on this session */
   onFinalize(token: string, content: string): Promise<void>
   markFailed(token: string, error: string): Promise<void>
+  /**
+   * Optional narration filter. A subsystem's agent turn may emit MULTIPLE
+   * assistant_message events before the one that actually carries the result
+   * (e.g. revanote agents narrating progress — "Implementer running...")
+   * before the final `<<JSON>>...<<END>>` envelope. When present, `onFinalize`
+   * is deferred until this returns true for a given message's content; a
+   * `false` return leaves the hook active so a later assistant_message on the
+   * same session can still finalize it. Omit to preserve today's behaviour
+   * (finalize unconditionally on the first assistant_message — scheduler /
+   * telegram / error-capture all rely on that one-shot semantics).
+   */
+  shouldFinalize?(content: string): boolean
 }
 
 export type DispatchOutcome =
@@ -109,7 +121,20 @@ export interface PipelineDeps {
    * run row → nothing to mark). Errors are swallowed by the grace buffer.
    */
   onParkExpire?: (req: DispatchRequest) => Promise<void>
+  /**
+   * Bounded terminal fallback for `shouldFinalize`-gated stores: once the
+   * active hook has been alive this long (ms, measured from the finalize hook
+   * being armed in `dispatch()`), the NEXT assistant_message finalizes
+   * unconditionally even if `shouldFinalize` still returns false. Prevents a
+   * session that narrates forever without ever emitting the expected result
+   * from hanging the hook indefinitely — it resolves as an honest failure
+   * (the store's own `onFinalize`/parse logic decides how to report that).
+   * Ignored when `store.shouldFinalize` is absent. Defaults to 20 minutes.
+   */
+  finalizeTimeoutMs?: number
 }
+
+const DEFAULT_FINALIZE_TIMEOUT_MS = 20 * 60 * 1000
 
 // ── module-owned state ────────────────────────────────────────────────────────
 
@@ -269,6 +294,20 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
 export async function onSessionReply(sessionId: string, content: string): Promise<void> {
   const active = activeBySession.get(sessionId)
   if (!active) return
+
+  // IR-7 narration tolerance: a store may defer finalize until a message
+  // actually carries its expected result (e.g. revanote's envelope). Buffer
+  // narration-only messages — leave the hook active — unless the bounded
+  // terminal timeout has elapsed, in which case this message finalizes
+  // unconditionally so the hook can never hang forever.
+  const shouldFinalize = active.deps.store?.shouldFinalize
+  if (shouldFinalize) {
+    const timeoutMs = active.deps.finalizeTimeoutMs ?? DEFAULT_FINALIZE_TIMEOUT_MS
+    const timedOut = Date.now() - active.startedAt >= timeoutMs
+    if (!timedOut && !shouldFinalize(content)) {
+      return
+    }
+  }
   activeBySession.delete(sessionId)
 
   // Finalize the head-of-queue run.

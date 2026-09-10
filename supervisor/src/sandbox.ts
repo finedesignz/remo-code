@@ -1,16 +1,39 @@
 import { realpath as realpathAsync, access } from 'fs/promises'
 import { dirname, resolve, sep } from 'path'
 
+/**
+ * 2026-08-18 (repo_path placeholder investigation) — `sandbox_escape` used to
+ * be one undifferentiated verdict for three distinct situations that a
+ * denial can't be triaged from without live access to the supervisor's
+ * config at that moment:
+ *   - `path_missing`      — `repoPath` doesn't resolve at all (deleted,
+ *                           renamed, a stale session's project_dir, a
+ *                           placeholder sentinel). Roots are never even
+ *                           consulted — this can fire with a perfectly
+ *                           healthy `roots` config.
+ *   - `roots_unresolvable` — `repoPath` DOES resolve, but every configured
+ *                           root itself failed to realpath-resolve (missing
+ *                           drive, bad config) — a misconfiguration, not a
+ *                           sandbox violation, that degrades to the same
+ *                           "nothing matched" symptom as the next case.
+ *   - `not_under_roots`   — `repoPath` resolves, at least one root resolves,
+ *                           but the repo genuinely sits outside every one —
+ *                           the textbook case this check exists for.
+ */
+export type SandboxEscapeKind = 'path_missing' | 'roots_unresolvable' | 'not_under_roots'
+
 export class SandboxEscapeError extends Error {
   readonly repoPath: string
   readonly realPath: string | null
   readonly allowedRoots: string[]
-  constructor(repoPath: string, realPath: string | null, allowedRoots: string[]) {
-    super(`sandbox_escape: ${repoPath} is not within any allowed root`)
+  readonly kind: SandboxEscapeKind
+  constructor(repoPath: string, realPath: string | null, allowedRoots: string[], kind: SandboxEscapeKind) {
+    super(`sandbox_escape (${kind}): ${repoPath} is not within any allowed root`)
     this.name = 'SandboxEscapeError'
     this.repoPath = repoPath
     this.realPath = realPath
     this.allowedRoots = allowedRoots
+    this.kind = kind
   }
 }
 
@@ -138,16 +161,18 @@ async function pathExists(path: string): Promise<boolean> {
 export async function assertWithinRoots(repoPath: string, roots: string[]): Promise<{ realRepo: string; matchedRoot: string }> {
   const realRepo = await tryRealpath(repoPath)
   if (realRepo === null) {
-    throw new SandboxEscapeError(repoPath, null, roots)
+    throw new SandboxEscapeError(repoPath, null, roots, 'path_missing')
   }
+  let anyRootResolved = false
   for (const root of roots) {
     const realRoot = await tryRealpath(root)
     if (realRoot === null) continue
+    anyRootResolved = true
     if (realRepo === realRoot || realRepo.startsWith(realRoot + sep)) {
       return { realRepo, matchedRoot: realRoot }
     }
   }
-  throw new SandboxEscapeError(repoPath, realRepo, roots)
+  throw new SandboxEscapeError(repoPath, realRepo, roots, anyRootResolved ? 'not_under_roots' : 'roots_unresolvable')
 }
 
 /**
@@ -170,23 +195,25 @@ export async function assertTargetWithinRoots(targetPath: string, roots: string[
     cursor = parent
   }
   if (!(await pathExists(cursor))) {
-    throw new SandboxEscapeError(targetPath, null, roots)
+    throw new SandboxEscapeError(targetPath, null, roots, 'path_missing')
   }
   const realAncestor = await tryRealpath(cursor)
   if (realAncestor === null) {
-    throw new SandboxEscapeError(targetPath, null, roots)
+    throw new SandboxEscapeError(targetPath, null, roots, 'path_missing')
   }
   // The realpath-resolved tail equals realAncestor + (abs - cursor). Since
   // the tail does not exist, no symlinks can swap it; we can safely string-
   // concat.
   const tail = abs.slice(cursor.length)
   const realTarget = realAncestor + tail
+  let anyRootResolved = false
   for (const root of roots) {
     const realRoot = await tryRealpath(root)
     if (realRoot === null) continue
+    anyRootResolved = true
     if (realTarget === realRoot || realTarget.startsWith(realRoot + sep)) {
       return
     }
   }
-  throw new SandboxEscapeError(targetPath, realTarget, roots)
+  throw new SandboxEscapeError(targetPath, realTarget, roots, anyRootResolved ? 'not_under_roots' : 'roots_unresolvable')
 }

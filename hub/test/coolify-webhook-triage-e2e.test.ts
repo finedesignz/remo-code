@@ -124,12 +124,19 @@ if (!REMO_E2E_DB_URL) {
         commit_sha: 'abc123',
       })
       expect(res.status).toBe(202)
-      // Give the fire-and-forget triage a beat to land.
-      await new Promise((r) => setTimeout(r, 200))
-
-      const runs = await sql<{ id: string; status: string; task_id: string }[]>`
-        SELECT id, status, task_id FROM scheduled_task_runs WHERE user_id = ${TEST_USER_ID}
-      `
+      // Poll for the fire-and-forget triage to land instead of a fixed sleep —
+      // a one-shot 200ms wait was flaky under real-postgres CI load (the async
+      // dispatch chain can legitimately take longer than 200ms when the runner
+      // is busy), even though it always lands well within a few seconds.
+      let runs: { id: string; status: string; task_id: string }[] = []
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline) {
+        runs = await sql<{ id: string; status: string; task_id: string }[]>`
+          SELECT id, status, task_id FROM scheduled_task_runs WHERE user_id = ${TEST_USER_ID}
+        `
+        if (runs.length >= 2) break
+        await new Promise((r) => setTimeout(r, 100))
+      }
       expect(runs.length).toBeGreaterThanOrEqual(2) // metadata row + triage row
       // fix/sched-triage-routing: triage no longer goes through pickSessionTarget
       // (it preferred a supervisor, whose spawn path could never finalize). It

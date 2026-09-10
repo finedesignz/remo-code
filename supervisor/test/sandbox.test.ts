@@ -47,12 +47,38 @@ describe('assertWithinRoots', () => {
     expect(r.realRepo).toContain('repoX')
   })
 
-  test('rejects a path outside every root', async () => {
+  test('rejects a path outside every root — kind=not_under_roots', async () => {
     await expect(assertWithinRoots(OUTSIDE, [ROOT_A, ROOT_B])).rejects.toThrow(SandboxEscapeError)
+    try {
+      await assertWithinRoots(OUTSIDE, [ROOT_A, ROOT_B])
+      throw new Error('expected rejection')
+    } catch (e) {
+      expect(e).toBeInstanceOf(SandboxEscapeError)
+      expect((e as SandboxEscapeError).kind).toBe('not_under_roots')
+    }
   })
 
   test('rejects C:\\Windows\\System32 against a github root', async () => {
+    // NOT asserting `.kind` here — whether this resolves as `path_missing`
+    // (Linux CI, where the literal string is a bogus path) or
+    // `not_under_roots` (a Windows dev box, where it's a real system dir
+    // outside ROOT_A) is genuinely platform-dependent, same caveat as the
+    // 2026-08-18 QC (D4) note below about the old UNC-path test. Both are
+    // correctly rejected either way — that's what this test actually proves.
     await expect(assertWithinRoots('C:\\Windows\\System32', [ROOT_A])).rejects.toThrow(SandboxEscapeError)
+  })
+
+  // 2026-08-18 (repo_path placeholder investigation) — when every configured
+  // root is itself broken, that's a misconfiguration distinct from a repo
+  // genuinely sitting outside healthy roots, and must be tagged as such.
+  test('every configured root broken — kind=roots_unresolvable', async () => {
+    try {
+      await assertWithinRoots(INSIDE, [join(TMP, 'bogus-root-1'), join(TMP, 'bogus-root-2')])
+      throw new Error('expected rejection')
+    } catch (e) {
+      expect(e).toBeInstanceOf(SandboxEscapeError)
+      expect((e as SandboxEscapeError).kind).toBe('roots_unresolvable')
+    }
   })
 
   test('symlink escape is rejected (realpath check)', async () => {
@@ -65,8 +91,15 @@ describe('assertWithinRoots', () => {
     await expect(assertWithinRoots(SYM_TO_OUTSIDE, [ROOT_A])).rejects.toThrow(SandboxEscapeError)
   })
 
-  test('rejects a non-existent path (realpath fails)', async () => {
+  test('rejects a non-existent path (realpath fails) — kind=path_missing', async () => {
     await expect(assertWithinRoots(join(TMP, 'does-not-exist'), [ROOT_A])).rejects.toThrow(SandboxEscapeError)
+    try {
+      await assertWithinRoots(join(TMP, 'does-not-exist'), [ROOT_A])
+      throw new Error('expected rejection')
+    } catch (e) {
+      expect(e).toBeInstanceOf(SandboxEscapeError)
+      expect((e as SandboxEscapeError).kind).toBe('path_missing')
+    }
   })
 
   test('skips stale roots silently', async () => {

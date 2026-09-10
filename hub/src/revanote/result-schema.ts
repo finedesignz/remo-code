@@ -44,7 +44,7 @@ export const RevanoteResult = z.object({
 
 export type RevanoteResult = z.infer<typeof RevanoteResult>
 
-const ENVELOPE_RE = /<<JSON>>([\s\S]*?)<<END>>/i
+export const ENVELOPE_RE = /<<JSON>>([\s\S]*?)<<END>>/i
 const FENCE_RE = /```(?:json)?\s*\n?([\s\S]*?)\n?```/i
 
 export interface ParseOk {
