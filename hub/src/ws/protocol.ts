@@ -276,7 +276,11 @@ export type HubToClient =
   | { type: 'session_list'; sessions: Array<{ id: string; name: string; project_dir: string | null; status: string; last_activity: string | null; created_at: string; agent_info?: unknown;
       // Plan 05-002: surface CLI + rootless attribution so the sidebar can
       // render the right badge and group ambient sessions under their host.
-      cli_kind: 'claude' | 'codex'; is_rootless: boolean; hostname: string | null }> }
+      cli_kind: 'claude' | 'codex'; is_rootless: boolean; hostname: string | null;
+      // fix/session-list-active-flag: derived fields — MUST be present on
+      // every session_list broadcast (see hub/src/sessions/enrich.ts). Their
+      // absence here is why a raw-DAL broadcast was invisible to typecheck.
+      active: boolean; local_paths?: unknown[] }> }
   | { type: 'permission_request'; session_id: string; request_id: string; tool_name: string; tool_input: unknown }
   | { type: 'user_question'; session_id: string; request_id: string; question: string;
       options?: Array<{ label: string; description?: string }>; is_multi_select?: boolean }

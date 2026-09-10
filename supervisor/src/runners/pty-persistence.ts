@@ -34,21 +34,68 @@ import { execFileSync } from 'node:child_process'
  * Default scrollback ring cap (bytes) — MUST match the Rust host's
  * `SCROLLBACK_CAP_BYTES` (supervisor/tauri/src-tauri/src/pty_host.rs).
  *
- * 1 MiB (was 256 KiB). The ring holds RAW PTY bytes, and a TUI's cursor-motion /
- * SGR escape sequences are most of that volume — 256 KiB of raw stream decoded to
- * only a couple of screens of readable text. Since the client CLEARS its buffer on
- * every (re)attach and re-writes ONLY this ring, the ring is the hard ceiling on
- * how far a reconnected phone can scroll back. 1 MiB is ~4x the readable depth at
- * a bounded, per-session cost (base64 replay frame ≈ 1.37 MB, well under the 10 MB
- * WS message cap).
+ * 4 MiB (was 1 MiB, was 256 KiB before that). The ring holds RAW PTY bytes, and
+ * a TUI's cursor-motion / SGR escape sequences are most of that volume. Since
+ * the client CLEARS its buffer on every (re)attach and re-writes ONLY this ring
+ * (TerminalSurface.tsx term.clear()+write()), the ring is the hard ceiling on
+ * how far a reconnected/remounted client can scroll back — and on mobile,
+ * (re)attach is NOT rare: MobileAccordionRow fully unmounts/remounts
+ * TerminalSurface on every panel collapse/expand (`{expanded && <TerminalSurface
+ * .../>}`), and iOS routinely reloads a backgrounded PWA/tab. 1 MiB was proven
+ * (mobile scrollback-depth investigation, 2026-09) too shallow for real session
+ * volume: 4 MiB (~4x) at a bounded, per-session cost (base64 replay frame ≈
+ * 5.5 MB, still under the 10 MB WS message cap).
  */
-export const DEFAULT_SCROLLBACK_CAP_BYTES = 1024 * 1024
+export const DEFAULT_SCROLLBACK_CAP_BYTES = 4 * 1024 * 1024
 
 /** Default idle-reap grace (seconds) — mirrors the hub's
  *  REMO_SESSION_IDLE_GRACE_SECONDS default of 300s. 0 disables idle reaping. */
 export const DEFAULT_IDLE_GRACE_SECONDS = Number(
   process.env.REMO_SESSION_IDLE_GRACE_SECONDS ?? 300,
 )
+
+/** Bounded backward scan for an escape sequence straddling a trim point — kept
+ *  small so a trim stays O(1) regardless of ring size. No real CSI/OSC sequence
+ *  runs anywhere near this long. */
+const ESC_SCAN_WINDOW = 256
+
+/**
+ * A raw byte-count trim (`buf.slice(rawCut)`) can land INSIDE an unterminated
+ * ANSI escape sequence (CSI `ESC [ ... final-byte` or OSC `ESC ] ... BEL/ST`).
+ * Replaying a stream that *starts* mid-sequence desyncs the client's terminal
+ * parser: the orphaned tail of the sequence (e.g. `38;5;6m`) gets printed as
+ * literal garbage text, and the sequence that should have painted the next
+ * line's content gets consumed as if it were parameters — rendering as
+ * blank/garbled lines at the top of the replay (reproduced against a real
+ * xterm.js parser during the mobile scrollback-depth investigation, 2026-09;
+ * matches the reported symptom: a large blank region above replayed content).
+ *
+ * If `rawCut` sits inside an unterminated escape sequence, advance to the next
+ * complete escape sequence at/after `rawCut` (always a safe start point)
+ * instead. If it's already safe (no escape in progress), return it unchanged.
+ */
+export function safeTrimPoint(buf: string, rawCut: number): number {
+  const start = Math.max(0, rawCut - ESC_SCAN_WINDOW)
+  let lastEsc = -1
+  for (let i = rawCut - 1; i >= start; i--) {
+    if (buf.charCodeAt(i) === 0x1b) {
+      lastEsc = i
+      break
+    }
+  }
+  if (lastEsc === -1) return rawCut // no nearby escape — already safe
+  let terminated = false
+  for (let i = lastEsc + 1; i < rawCut; i++) {
+    const c = buf.charCodeAt(i)
+    if (c === 0x07 || (c >= 0x40 && c <= 0x7e)) {
+      terminated = true // BEL (OSC) or CSI final byte — sequence closed before rawCut
+      break
+    }
+  }
+  if (terminated) return rawCut
+  const nextEsc = buf.indexOf('\x1b', rawCut)
+  return nextEsc === -1 ? buf.length : nextEsc
+}
 
 /** A bounded byte ring-buffer keeping the last N bytes for scrollback replay. */
 export class RingBuffer {
@@ -57,7 +104,8 @@ export class RingBuffer {
   push(bytes: string): void {
     this.buf += bytes
     if (this.buf.length > this.capBytes) {
-      this.buf = this.buf.slice(this.buf.length - this.capBytes)
+      const rawCut = this.buf.length - this.capBytes
+      this.buf = this.buf.slice(safeTrimPoint(this.buf, rawCut))
     }
   }
   snapshot(): string {

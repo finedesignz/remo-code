@@ -191,6 +191,14 @@ export const AgentUsageEvent = z.object({
   cost_source: z.enum(['sdk', 'estimated']).default('sdk'),
   request_id: z.string().optional(),
   ts: z.string().optional(),
+  // PTYCAP Phase 1 — which runner produced this event. Omitted ⇒ 'stream-json'
+  // (every pre-existing sender). 'pty-interactive' is the new PtyUsageEmitter
+  // source (transcript-tail, no API key, no PTY write). LOAD-BEARING NAME: this
+  // key MUST be exactly `runner_type` (matching `msg.runner_type` read in the
+  // hub's usage_event handler and the supervisor's AgentToHub field) — zod
+  // strips any key it doesn't know, so a name mismatch here silently discards
+  // the tag and every PTY row lands mislabelled 'stream-json'.
+  runner_type: z.enum(['stream-json', 'pty-interactive']).optional(),
 })
 export type AgentUsageEventT = z.infer<typeof AgentUsageEvent>
 

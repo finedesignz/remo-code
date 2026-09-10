@@ -3436,7 +3436,7 @@ curl -X POST https://app.remo-code.com/api/ext/sessions/{id}/ask \
 const inputBody = '{
   "question": "string",
   "context": "string",
-  "wait_ms": 120000,
+  "wait_ms": 0,
   "include_transcript": true,
   "include_memory": true
 }';
@@ -3470,7 +3470,7 @@ Dispatches a short-lived stream-json ask-session bound to the target's project_d
 {
   "question": "string",
   "context": "string",
-  "wait_ms": 120000,
+  "wait_ms": 0,
   "include_transcript": true,
   "include_memory": true
 }
@@ -3726,7 +3726,7 @@ const inputBody = '{
     "subject": "string",
     "message_id": "string"
   },
-  "wait_ms": 120000
+  "wait_ms": 0
 }';
 const headers = {
   'Content-Type':'application/json',
@@ -3765,7 +3765,7 @@ Points an UNTRUSTED inbound client email at the repo's stream-json session. THE 
     "subject": "string",
     "message_id": "string"
   },
-  "wait_ms": 120000
+  "wait_ms": 0
 }
 ```
 

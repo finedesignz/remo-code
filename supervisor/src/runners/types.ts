@@ -199,5 +199,9 @@ export type AgentToHub =
       cost_usd: number
       cost_source: 'sdk' | 'estimated'
       ts: string
+      // PTYCAP Phase 1 — which runner produced this event. Optional with no
+      // default here; the hub owns the single default site (defaults to
+      // 'stream-json' when absent, for back-compat with older supervisors).
+      runner_type?: 'stream-json' | 'pty-interactive'
     }
   | { type: 'pong' }
