@@ -109,6 +109,85 @@ export function inputEventToBytes(inputType: string, data: string | null): strin
   }
 }
 
+// Common-prefix diff between the previously-sent interim hypothesis and the new
+// one: backspace over the divergent suffix of `prev`, then type the new suffix
+// of `next`. Used ONLY inside an active composition (see CompositionInputTracker)
+// — outside one, `data` is a single already-committed unit and must be sent
+// as-is (that's inputEventToBytes's job).
+function diffInterimBytes(prev: string, next: string): string {
+  let i = 0
+  const max = Math.min(prev.length, next.length)
+  while (i < max && prev[i] === next[i]) i++
+  return '\x7f'.repeat(prev.length - i) + next.slice(i)
+}
+
+/**
+ * Stateful companion to inputEventToBytes for the mobile-dictation case.
+ *
+ * Root cause (owner-reported live bug, distinct from the double-echo fix above):
+ * dictation (iOS/Android keyboard mic) runs ONE composition per utterance and
+ * re-fires `beforeinput`(insertCompositionText) on EVERY interim recognizer
+ * update, each time with `data` = the recognizer's FULL current hypothesis, not
+ * a delta ("also", then "also fi", then "also fix", …). inputEventToBytes was
+ * built for the single-keystroke iOS pseudo-composition (one beforeinput per
+ * char, data = that one char) and forwards `data` verbatim — correct there, but
+ * for dictation it resends the whole growing hypothesis every update, so the
+ * PTY accumulates "aalsoalso fialso fix…". A real multi-char composition
+ * (dictation, CJK IME) is distinguishable from the single-char iOS pseudo-one
+ * ONLY via compositionstart/compositionend — NOT via gating term.onData with
+ * them (that regressed desktop typing in #306/#307; onData is untouched here).
+ * This tracker uses those events purely to decide, per beforeinput, whether
+ * `data` is a fresh unit (send as-is) or the next revision of an in-flight
+ * hypothesis (diff against the last revision and send only the delta) so the
+ * committed sentence reaches the PTY exactly once.
+ */
+export class CompositionInputTracker {
+  private composing = false
+  private pending = ''
+
+  onCompositionStart(): void {
+    this.composing = true
+    this.pending = ''
+  }
+
+  onCompositionEnd(): void {
+    this.composing = false
+    this.pending = ''
+  }
+
+  /** Bytes to send for this beforeinput event, or null to send nothing. */
+  handleBeforeInput(inputType: string, data: string | null): string | null {
+    if (!this.composing) {
+      // No tracked composition in flight (desktop; the iOS one-shot-per-char
+      // pseudo-composition; a plain paste/newline/delete): unchanged behavior.
+      if (inputType === 'deleteContentBackward') this.pending = ''
+      return inputEventToBytes(inputType, data)
+    }
+    switch (inputType) {
+      case 'insertCompositionText':
+      case 'insertReplacementText':
+      case 'insertFromComposition': {
+        // Interim (or final, pre-compositionend) revision of the SAME
+        // utterance — diff against what we already sent, not the raw string.
+        const next = data ?? ''
+        const bytes = diffInterimBytes(this.pending, next)
+        this.pending = next
+        if (inputType === 'insertFromComposition') { this.composing = false; this.pending = '' }
+        return bytes.length > 0 ? bytes : null
+      }
+      case 'deleteContentBackward':
+        // A correction mid-dictation/composition: shrink our tracked hypothesis
+        // by one so the next diff doesn't re-delete a char already removed.
+        if (this.pending.length > 0) this.pending = this.pending.slice(0, -1)
+        return '\x7f'
+      default:
+        // insertText/insertFromPaste/insertLineBreak/deleteContentForward/etc.
+        // mid-composition: not part of the hypothesis stream, pass through.
+        return inputEventToBytes(inputType, data)
+    }
+  }
+}
+
 /**
  * On-screen key sequences for the toolbar. The user's Apple keyboard has no
  * arrow keys, so ↑/↓ (menu navigation) are the critical entries; Esc/Tab/Ctrl-C
@@ -319,9 +398,23 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     // onData itself, so no `beforeinput` fires for them — this handler only
     // engages on the IME/mobile path. Control keys (arrows, Esc, Tab, Ctrl-C,
     // fn-keys) on BOTH platforms still flow through keydown→onData below.
+    //
+    // DICTATION DEDUP: voice-to-text (mobile keyboard mic) runs one real
+    // composition per utterance and re-fires beforeinput(insertCompositionText)
+    // on every interim recognizer update, each time with the FULL current
+    // hypothesis (not a delta) — sending `data` verbatim on every update
+    // accumulates "aalsoalso fialso fix…". CompositionInputTracker (above)
+    // distinguishes that in-flight case from the single-keystroke iOS
+    // pseudo-composition via compositionstart/compositionend and diffs interim
+    // revisions so only the actual delta is sent. These listeners feed the
+    // tracker ONLY — they never gate term.onData (that gate regressed desktop
+    // typing in #306/#307; onData below stays untouched).
+    const inputTracker = new CompositionInputTracker()
+    const onCompositionStart = () => inputTracker.onCompositionStart()
+    const onCompositionEnd = () => inputTracker.onCompositionEnd()
     const onBeforeInput = (ev: Event) => {
       const ie = ev as InputEvent
-      const bytes = inputEventToBytes(ie.inputType, ie.data)
+      const bytes = inputTracker.handleBeforeInput(ie.inputType, ie.data)
       if (bytes == null) return // not a text/edit input we own → let xterm handle
       ev.preventDefault() // cancel local apply + the follow-on input/onData
       send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(bytes) })
@@ -329,7 +422,11 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       // composition state never accumulates and xterm can't echo it.
       try { if (ta) ta.value = '' } catch {}
     }
-    if (ta) ta.addEventListener('beforeinput', onBeforeInput)
+    if (ta) {
+      ta.addEventListener('beforeinput', onBeforeInput)
+      ta.addEventListener('compositionstart', onCompositionStart)
+      ta.addEventListener('compositionend', onCompositionEnd)
+    }
 
     // DESKTOP click-to-focus. A mouse focus opens no keyboard, so a click on the
     // terminal must still focus it (typing after a click keeps working). Guarded
