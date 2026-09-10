@@ -64,11 +64,6 @@ export const DEFAULT_IDLE_GRACE_SECONDS = Number(
   process.env.REMO_SESSION_IDLE_GRACE_SECONDS ?? 300,
 )
 
-/** Bounded backward scan for an escape sequence straddling a trim point — kept
- *  small so a trim stays O(1) regardless of ring size. No real CSI/OSC sequence
- *  runs anywhere near this long. */
-const ESC_SCAN_WINDOW = 256
-
 /**
  * A raw byte-count trim (`buf.slice(rawCut)`) can land INSIDE an unterminated
  * ANSI escape sequence (CSI `ESC [ ... final-byte` or OSC `ESC ] ... BEL/ST`).
@@ -80,26 +75,44 @@ const ESC_SCAN_WINDOW = 256
  * xterm.js parser during the mobile scrollback-depth investigation, 2026-09;
  * matches the reported symptom: a large blank region above replayed content).
  *
- * If `rawCut` sits inside an unterminated escape sequence, advance to the next
- * complete escape sequence at/after `rawCut` (always a safe start point)
- * instead. If it's already safe (no escape in progress), return it unchanged.
+ * There is deliberately NO fixed backward scan window (round-2 QC MAJOR): a
+ * fixed window (formerly 256 bytes) misses any escape sequence longer than
+ * that -- an OSC-8 hyperlink with a long URL, a long OSC-0 title, or a DCS/
+ * sixel payload -- silently returning `rawCut` unchanged (treating a
+ * genuinely mid-sequence cut as safe) once no ESC falls inside the window.
+ * The scan below is bounded only by the ring itself: walking back through
+ * every ESC in the buffer is still cheap in the overwhelmingly common case
+ * (real terminal output carries ANSI codes every few bytes), and this only
+ * runs on ring overflow.
+ *
+ * Stopping at the FIRST (nearest) ESC found is ALSO wrong (round-2 QC fuzz,
+ * 34/20000 cases): an OSC/DCS/PM/APC string sequence's content can itself
+ * contain arbitrary ESC bytes that are not BEL/ST (e.g. a literal `ESC M`
+ * two-byte escape embedded in a still-open, never-BEL/ST-terminated OSC
+ * title). Evaluated in isolation that embedded ESC looks like a closed,
+ * harmless 2-byte escape -- but `rawCut` is still inside the OUTER
+ * unterminated OSC, which a nearest-ESC-only scan never even looks at. So:
+ * walk backward through EVERY ESC candidate (nearest to farthest); the first
+ * one found to be genuinely unterminated at `rawCut` -- checked on its own
+ * terms, exactly as `isEscapeSequenceTerminatedBefore` already does -- is the
+ * answer. Only when every candidate back to the start of the buffer is
+ * terminated (or none exist) is `rawCut` itself safe.
+ *
+ * If `rawCut` sits inside an unterminated escape sequence, advance to the
+ * start of that (outermost) sequence instead. If it's already safe (no
+ * escape in progress), return it unchanged.
  */
 export function safeTrimPoint(buf: string, rawCut: number): number {
-  const start = Math.max(0, rawCut - ESC_SCAN_WINDOW)
-  let lastEsc = -1
-  for (let i = rawCut - 1; i >= start; i--) {
-    if (buf.charCodeAt(i) === 0x1b) {
-      lastEsc = i
-      break
-    }
+  for (let i = rawCut - 1; i >= 0; i--) {
+    if (buf.charCodeAt(i) !== 0x1b) continue
+    if (isEscapeSequenceTerminatedBefore(buf, i, rawCut)) continue // closed -- keep looking further back
+    // Cut lands inside an unterminated escape sequence. Start the retained
+    // region AT the escape byte so the sequence replays whole once more data
+    // arrives -- never scan forward for a later ESC / fall back to buf.length,
+    // both of which can discard the entire ring when no further ESC exists.
+    return i
   }
-  if (lastEsc === -1) return rawCut // no nearby escape — already safe
-  if (isEscapeSequenceTerminatedBefore(buf, lastEsc, rawCut)) return rawCut
-  // Cut lands inside an unterminated escape sequence. Start the retained
-  // region AT the escape byte so the sequence replays whole once more data
-  // arrives — never scan forward for a later ESC / fall back to buf.length,
-  // both of which can discard the entire ring when no further ESC exists.
-  return lastEsc
+  return rawCut // no unterminated escape sequence reaches rawCut -- already safe
 }
 
 /**

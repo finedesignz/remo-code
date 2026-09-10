@@ -90,41 +90,61 @@ struct RingBuffer {
     cap: usize,
 }
 
-/// Bounded backward scan for an escape sequence straddling a trim point — kept
-/// small so a trim stays O(1) regardless of ring size. No real CSI/OSC sequence
-/// runs anywhere near this long.
-const ESC_SCAN_WINDOW: usize = 256;
-
 /// A raw byte-count trim (`buf.drain(0..raw_cut)`) can land INSIDE an
 /// unterminated ANSI escape sequence (CSI `ESC [ ... final-byte` or OSC
 /// `ESC ] ... BEL/ST`). Replaying a stream that *starts* mid-sequence desyncs
 /// the client's terminal parser: the orphaned tail of the sequence (e.g.
 /// `38;5;6m`) gets printed as literal garbage text, and the sequence that
 /// should have painted the next line's content gets consumed as if it were
-/// parameters — rendering as blank/garbled lines at the top of the replay
+/// parameters -- rendering as blank/garbled lines at the top of the replay
 /// (reproduced against a real xterm.js parser during the mobile
 /// scrollback-depth investigation, 2026-09; matches the reported symptom: a
 /// large blank region above replayed content). Mirrors the TS
-/// `safeTrimPoint()` in supervisor/src/runners/pty-persistence.ts.
+/// `safeTrimPoint()` in supervisor/src/runners/pty-persistence.ts -- keep
+/// both in lock-step.
+///
+/// There is deliberately NO fixed backward scan window (round-2 QC MAJOR): a
+/// fixed window (formerly 256 bytes) misses any escape sequence longer than
+/// that -- an OSC-8 hyperlink with a long URL, a long OSC-0 title, or a DCS/
+/// sixel payload -- silently returning `raw_cut` unchanged (treating a
+/// genuinely mid-sequence cut as safe) once no ESC falls inside the window.
+/// The scan below is bounded only by the ring itself: walking back through
+/// every ESC in the buffer is still cheap in the overwhelmingly common case
+/// (real terminal output carries ANSI codes every few bytes), and this only
+/// runs on ring overflow.
+///
+/// Stopping at the FIRST (nearest) ESC found is ALSO wrong (round-2 QC fuzz,
+/// 34/20000 cases): an OSC/DCS/PM/APC string sequence's content can itself
+/// contain arbitrary ESC bytes that are not BEL/ST (e.g. a literal `ESC M`
+/// two-byte escape embedded in a still-open, never-BEL/ST-terminated OSC
+/// title). Evaluated in isolation that embedded ESC looks like a closed,
+/// harmless 2-byte escape -- but `raw_cut` is still inside the OUTER
+/// unterminated OSC, which a nearest-ESC-only scan never even looks at. So:
+/// walk backward through EVERY ESC candidate (nearest to farthest); the
+/// first one found to be genuinely unterminated at `raw_cut` -- checked on
+/// its own terms, exactly as `is_escape_sequence_terminated_before` already
+/// does -- is the answer. Only when every candidate back to the start of the
+/// buffer is terminated (or none exist) is `raw_cut` itself safe.
 ///
 /// If `raw_cut` sits inside an unterminated escape sequence, advance to the
-/// next complete escape sequence at/after `raw_cut` (always a safe start
-/// point) instead. If it's already safe, return it unchanged.
+/// start of that (outermost) sequence instead. If it's already safe, return
+/// it unchanged.
 fn safe_trim_point(buf: &[u8], raw_cut: usize) -> usize {
-    let start = raw_cut.saturating_sub(ESC_SCAN_WINDOW);
-    let last_esc = (start..raw_cut).rev().find(|&i| buf[i] == 0x1b);
-    let last_esc = match last_esc {
-        Some(i) => i,
-        None => return raw_cut, // no nearby escape — already safe
-    };
-    if is_escape_sequence_terminated_before(buf, last_esc, raw_cut) {
-        return raw_cut;
+    for i in (0..raw_cut).rev() {
+        if buf[i] != 0x1b {
+            continue;
+        }
+        if is_escape_sequence_terminated_before(buf, i, raw_cut) {
+            continue; // closed -- keep looking further back
+        }
+        // Cut lands inside an unterminated escape sequence. Start the
+        // retained region AT the escape byte so the sequence replays whole
+        // once more data arrives -- never scan forward for a later ESC /
+        // fall back to buf.len(), both of which can discard the entire ring
+        // when no further ESC exists.
+        return i;
     }
-    // Cut lands inside an unterminated escape sequence. Start the retained
-    // region AT the escape byte so the sequence replays whole once more data
-    // arrives — never scan forward for a later ESC / fall back to buf.len(),
-    // both of which can discard the entire ring when no further ESC exists.
-    last_esc
+    raw_cut // no unterminated escape sequence reaches raw_cut -- already safe
 }
 
 /// Byte-accurate check of whether the escape sequence starting at `last_esc`
@@ -214,36 +234,86 @@ mod ring_buffer_tests {
     /// same expected values). Keep both tables in lock-step.
     #[test]
     fn safe_trim_point_parity_fixtures() {
-        let cases: &[(&str, &[u8], usize, usize)] = &[
+        // Owned `Vec<u8>` (not `&'static [u8]`) so the long/repeated-byte
+        // fixtures below can be built at runtime — same values as the TS
+        // `PARITY_FIXTURES` table (supervisor/test/pty-persistence-trim.test.ts).
+        let cases: Vec<(&str, Vec<u8>, usize, usize)> = vec![
             (
                 "CSI introducer byte must not be mistaken for a final byte",
-                b"XXXX\x1b[38;5;6mHELLO",
+                b"XXXX\x1b[38;5;6mHELLO".to_vec(),
                 8,
                 4,
             ),
             (
                 "cut lands inside OSC content (unterminated)",
-                b"\x1b]0;title\x07REST",
+                b"\x1b]0;title\x07REST".to_vec(),
                 5,
                 0,
             ),
             (
                 "OSC already terminated by BEL before the cut",
-                b"\x1b]0;title\x07REST",
+                b"\x1b]0;title\x07REST".to_vec(),
                 10,
                 10,
             ),
             (
                 "cut lands inside ST-terminated DCS content (unterminated)",
-                b"\x1bP1$q\x1b\\REST",
+                b"\x1bP1$q\x1b\\REST".to_vec(),
                 3,
                 0,
             ),
-            ("cut lands exactly at an ESC byte", b"AB\x1b[31mCD", 2, 2),
-            ("cut lands right after a CSI final byte", b"\x1b[31mAB", 5, 5),
-            ("no escape sequence nearby", b"HELLOWORLD", 5, 5),
+            ("cut lands exactly at an ESC byte", b"AB\x1b[31mCD".to_vec(), 2, 2),
+            ("cut lands right after a CSI final byte", b"\x1b[31mAB".to_vec(), 5, 5),
+            ("no escape sequence nearby", b"HELLOWORLD".to_vec(), 5, 5),
+            (
+                // round-2 QC MAJOR: the formerly-fixed 256-byte scan window
+                // missed this entirely (an OSC-8 hyperlink with a >256-byte
+                // URL) and returned raw_cut unchanged. Matches the reported
+                // case: 440-byte OSC-8, cut at 330.
+                "a >256-byte OSC-8 hyperlink (longer than the old fixed scan window) cut deep in the URL payload",
+                {
+                    let mut v = b"\x1b]8;;https://example.com/".to_vec();
+                    v.extend(std::iter::repeat(b'a').take(400));
+                    v.extend_from_slice(b"\x07LINKTEXT\x1b]8;;\x07");
+                    v
+                },
+                330,
+                0,
+            ),
+            (
+                "a 70 KB unterminated DCS payload cut mid-way",
+                {
+                    let mut v = b"\x1bP".to_vec();
+                    v.extend(std::iter::repeat(b'1').take(70000));
+                    v
+                },
+                40000,
+                0,
+            ),
+            (
+                // An ST-terminated OSC followed by unrelated padding, then a
+                // cut inside a LATER, separate unterminated CSI — proves the
+                // "keep scanning backward past a closed candidate" walk
+                // doesn't over-shoot past the OSC's own terminator into
+                // treating the later CSI as safe.
+                "a cut inside a later CSI following an already ST-terminated OSC",
+                b"\x1b]0;title\x1b\\PAD\x1b[38;5;6mHELLO".to_vec(),
+                20,
+                14,
+            ),
+            (
+                // round-2 QC fuzz (34/20000 cases): an "ESC M" two-byte
+                // escape embedded in a still-open, never-BEL/ST-terminated
+                // OSC. Evaluated in isolation "ESC M" looks like a closed,
+                // harmless 2-byte escape (the nearest-ESC-only bug), but the
+                // cut is still inside the OUTER unterminated OSC.
+                "an embedded \"ESC M\" two-byte escape inside a still-open unterminated OSC is not mistaken for the whole sequence being closed",
+                b"\x1b]0;\x1bMtitle".to_vec(),
+                11,
+                0,
+            ),
         ];
-        for (label, buf, raw_cut, expected) in cases {
+        for (label, buf, raw_cut, expected) in &cases {
             assert_eq!(
                 safe_trim_point(buf, *raw_cut),
                 *expected,
