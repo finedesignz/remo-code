@@ -15,6 +15,7 @@ import { describe, test, expect } from 'bun:test'
 import {
   inputToB64, b64ToBytes, inputEventToBytes, CompositionInputTracker,
   KeyRepeater, REPEATABLE_KEYS, type RepeatScheduler,
+  applyTextareaKeepAlive, TA_KEEPALIVE_SENTINEL, type KeepAliveTarget,
 } from '../src/components/TerminalSurface'
 
 // Mirror of the (now-correct) supervisor output seam: raw PTY bytes → base64.
@@ -232,6 +233,54 @@ function makeFakeScheduler() {
     activeTimeoutCount: () => timeouts.size,
   }
 }
+
+/**
+ * Root cause found on deeper investigation (owner reported holding Backspace
+ * on the native iOS keyboard deletes once, contradicting a forwarding-only
+ * check): the beforeinput handler calls preventDefault() on every processed
+ * event AND used to force the hidden helper textarea's value to '' after
+ * each one. iOS WebKit's on-screen keyboard ends Backspace long-press
+ * auto-repeat once the target field stops visibly shrinking — an emptied
+ * field is indistinguishable, to the OS, from "nothing left to delete", which
+ * is exactly the observed "deletes once, then stops" symptom. These tests
+ * pin the fix (applyTextareaKeepAlive) at the unit level: the field is NEVER
+ * actually empty after processing an event, across any number of repeats.
+ * NOTE: this proves the mechanism this repo's code controls. It does NOT
+ * replace an on-device check — WebKit's own repeat-continuation heuristic is
+ * unverifiable from this session. See the PR body for the exact on-device
+ * probe.
+ */
+describe('mobile input — native held-key repeat is not cut short by an emptied textarea', () => {
+  function fakeTextarea(): KeepAliveTarget {
+    return { value: '', selectionStart: 0, selectionEnd: 0 }
+  }
+
+  test('the keepalive sentinel is non-empty', () => {
+    expect(TA_KEEPALIVE_SENTINEL.length).toBeGreaterThan(0)
+  })
+
+  test('applyTextareaKeepAlive leaves the field non-empty with the caret after the sentinel', () => {
+    const ta = fakeTextarea()
+    applyTextareaKeepAlive(ta)
+    expect(ta.value).toBe(TA_KEEPALIVE_SENTINEL)
+    expect(ta.value.length).toBeGreaterThan(0)
+    expect(ta.selectionStart).toBe(ta.value.length)
+    expect(ta.selectionEnd).toBe(ta.value.length)
+  })
+
+  test('N consecutive held-Backspace ticks (beforeinput -> reset) never leave the field empty on any tick', () => {
+    const ta = fakeTextarea()
+    applyTextareaKeepAlive(ta) // initial mount seeding
+    for (let i = 0; i < 30; i++) {
+      // Simulates one deleteContentBackward beforeinput: we preventDefault
+      // (the real DOM edit never applies) then reset to the keepalive value —
+      // mirroring exactly what onBeforeInput does after every processed event.
+      applyTextareaKeepAlive(ta)
+      expect(ta.value).not.toBe('') // the regression this fix closes
+      expect(ta.value.length).toBeGreaterThan(0)
+    }
+  })
+})
 
 describe('mobile toolbar — press-and-hold auto-repeat (KeyRepeater)', () => {
   test('start() fires immediately, then repeats only after the initial delay elapses', () => {
