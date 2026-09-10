@@ -701,14 +701,14 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 </div>
               </div>
             )}
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-nowrap items-center gap-1 min-w-0">
             {/* Machine pill: status dot + compact select, no label text. The
                 select truncates hard on mobile (hostname only survives) — the
                 full "hostname · state · vX" detail is still one tap/hover
                 away via the wrapping Tooltip, never lost, just not spelled
                 out inline on a 390px row. */}
             <Tooltip label={activeSupervisor ? `${activeSupervisor.hostname} · ${activeSupervisor.online ? activeSupervisor.state : 'offline'} · v${activeSupervisor.version || '?'}` : 'Machine'}>
-              <span className="inline-flex items-center gap-1.5 pl-2.5 pr-1 h-8 rounded-full bg-[var(--bg-tertiary)]/60">
+              <span className="inline-flex items-center gap-1 pl-2 pr-0.5 h-8 rounded-full bg-[var(--bg-tertiary)]/60 min-w-0 shrink">
                 <span
                   className={`w-2 h-2 rounded-full shrink-0 ${activeSupervisor?.online ? 'bg-emerald-400' : 'bg-gray-500'}`}
                   aria-hidden="true"
@@ -717,7 +717,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                   value={activeSupervisorId || ''}
                   onChange={(e) => setActiveSupervisorId(e.target.value)}
                   aria-label="Machine"
-                  className="bg-transparent text-sm text-[var(--text-primary)] focus:outline-none max-w-[90px] sm:max-w-[180px] truncate"
+                  className="bg-transparent text-sm text-[var(--text-primary)] focus:outline-none min-w-0 max-w-[56px] sm:max-w-[180px] truncate"
                 >
                   {supervisors.map((s) => (
                     <option key={s.id} value={s.id}>{s.hostname} · {s.online ? s.state : 'offline'} · v{s.version || '?'}</option>
@@ -772,7 +772,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                   value={String(selectedInstallationId)}
                   onChange={(e) => setSelectedInstallationId(e.target.value === 'all' ? 'all' : Number(e.target.value))}
                   aria-label="GitHub installation"
-                  className="px-2.5 h-8 text-sm bg-[var(--bg-tertiary)]/60 rounded-full text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500/50"
+                  className="px-2 h-8 text-sm bg-[var(--bg-tertiary)]/60 rounded-full text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500/50 min-w-0 max-w-[64px] sm:max-w-none truncate shrink"
                 >
                   <option value="all">All ({installations.length})</option>
                   {installations.map((i: any) => (
@@ -797,7 +797,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               <span className="text-xs text-amber-400">GitHub App not configured on hub</span>
             )}
 
-            <div className="ml-auto flex items-center gap-1.5">
+            <div className="ml-auto flex items-center gap-1 shrink-0">
               {activeRuns.length > 0 && (
                 <Tooltip label={`${activeRuns.length} running`}>
                   <span
