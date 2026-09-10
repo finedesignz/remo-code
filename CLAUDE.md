@@ -503,7 +503,10 @@ GitHub Actions is reserved for what Woodpecker's `linux/amd64` runner can't do.
 
 - **Woodpecker:** `qc.yaml` (PR-gate: typecheck + `check-baseline` + `migration-verify` +
   orchestrator Postgres-e2e), `docs-drift.yaml` (PR docs-sync drift), `post-deploy-smoke.yaml`
-  (push-to-main prod HTTPS smoke after the Coolify rollout).
+  (push-to-main prod HTTPS smoke after the Coolify rollout), `supervisor-build.yaml` (PR-gate
+  for `supervisor/tauri/**` + `supervisor/src/**`: UI `tsc`+`vite build`, then real
+  `cargo check` on the self-hosted native Windows agent — this Rust crate is Windows-only,
+  so a linux/amd64 cross-check would skip every `cfg(windows)` block).
 - **GitHub Actions (platform-locked, keep here):** `release-supervisor.yml` (windows-latest +
   signed MSI/`latest.json`, TAURI signing secrets), `release-mobile.yml` (Windows MSI/NSIS +
   Android APK), `mobile-ios-build.yml` (macOS + Apple toolchain), `mobile-shell-typecheck.yml`
