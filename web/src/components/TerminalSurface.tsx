@@ -152,115 +152,154 @@ function diffInterimBytes(prev: string, next: string): string {
   while (i < max && prevCp[i] === nextCp[i]) i++
   return '\x7f'.repeat(prevCp.length - i) + nextCp.slice(i).join('')
 }
+/** How long after compositionend a beforeinput can still be the engine's own
+ * delivery of the commit rather than a fresh human keystroke. Browsers dispatch
+ * the trailing commit event in the same input burst as compositionend (~0ms);
+ * no human types within this window of their own commit. */
+export const IME_COMMIT_WINDOW_MS = 30
+
+const COMPOSITION_INSERT_TYPES: ReadonlySet<string> = new Set([
+  'insertCompositionText',
+  'insertReplacementText',
+  'insertFromComposition',
+  'insertText',
+])
 
 /**
- * Stateful companion to inputEventToBytes for the mobile-dictation case.
+ * Stateful companion to inputEventToBytes for the mobile-dictation / IME case.
  *
  * Root cause (owner-reported live bug, distinct from the double-echo fix above):
  * dictation (iOS/Android keyboard mic) runs ONE composition per utterance and
  * re-fires `beforeinput`(insertCompositionText) on EVERY interim recognizer
  * update, each time with `data` = the recognizer's FULL current hypothesis, not
- * a delta ("also", then "also fi", then "also fix", …). inputEventToBytes was
- * built for the single-keystroke iOS pseudo-composition (one beforeinput per
- * char, data = that one char) and forwards `data` verbatim — correct there, but
- * for dictation it resends the whole growing hypothesis every update, so the
- * PTY accumulates "aalsoalso fialso fix…". A real multi-char composition
- * (dictation, CJK IME) is distinguishable from the single-char iOS pseudo-one
- * ONLY via compositionstart/compositionend — NOT via gating term.onData with
- * them (that regressed desktop typing in #306/#307; onData is untouched here).
- * This tracker uses those events purely to decide, per beforeinput, whether
- * `data` is a fresh unit (send as-is) or the next revision of an in-flight
- * hypothesis (diff against the last revision and send only the delta) so the
- * committed sentence reaches the PTY exactly once.
+ * a delta ("also", then "also fi", then "also fix", …). Forwarding `data`
+ * verbatim accumulates "aalsoalso fialso fix…", so an in-flight hypothesis must
+ * be DIFFED against what the PTY already has. A real multi-char composition is
+ * distinguishable from the single-char iOS pseudo-composition ONLY via
+ * compositionstart/compositionend — NOT by gating term.onData with them (that
+ * regressed desktop typing in #306/#307; onData is untouched here).
+ *
+ * DESIGN — disambiguate at CONSUMPTION, never at compositionend.
+ * Two engine orderings deliver the same commit:
+ *   chrome/android: beforeinput(insertCompositionText,"ab") … compositionend("ab")
+ *   ios/end-first : beforeinput(insertCompositionText,"ab") … compositionend("ab")
+ *                   … beforeinput(insertText,"ab")
+ * Up to and including compositionend these traces are BYTE-IDENTICAL, so no
+ * decision taken inside onCompositionEnd can be correct for both — that is what
+ * broke #463 (latch armed unconditionally: the chrome ordering swallowed the
+ * next plain keystroke) and #465 (latch armed only on a differing final: the
+ * ios ordering double-sent, "abab").
+ *
+ * So compositionend does ONE unconditional thing: it settles the line to the
+ * authoritative final text by emitting diff(sent, final) — correct for both
+ * orderings, and complete on its own if no trailing event ever arrives. What
+ * remains is purely a question of SUPPRESSION, decided when the next event
+ * actually shows up: a beforeinput is the engine re-delivering that same commit
+ * only if it lands inside the commit burst window AND carries the text we just
+ * settled on (or the stale interim some engines repeat there). Anything else —
+ * different text, a later timestamp, a Backspace, an Enter — is a genuine
+ * keystroke and is forwarded 1:1.
+ *
+ * A cancelled composition (compositionend with '' data) RETRACTS the interim
+ * bytes already sent, one DEL per code point.
+ *
+ * All diffs are by CODE POINT (Array.from), so an astral char costs one DEL.
  */
 export class CompositionInputTracker {
   private composing = false
-  private pending = ''
-  // Armed by onCompositionEnd when compositionend carries a final `data`
-  // string. Some engines fire compositionend BEFORE the beforeinput that
-  // delivers the committed text (inputType can be 'insertText', not just the
-  // 'insertCompositionText'/... family) — `composing` is already false by
-  // then, so without this flag that beforeinput would fall through to the
-  // plain forward-as-is path and resend the FULL committed string on top of
-  // what was already diffed out during composition (e.g. "hel" + "hello" ->
-  // "helhello"). Staying armed across the composing->non-composing boundary
-  // makes the fix independent of which order the two events actually fire in.
-  private awaitingFinal = false
+  /** Text of this composition the PTY has actually received so far. */
+  private sent = ''
+  /** The browser's latest interim hypothesis for this composition. */
+  private hypothesis = ''
+  /** True while a settled commit may still be re-delivered by a trailing event. */
+  private armed = false
+  /** The authoritative committed text, as settled at compositionend. */
   private finalData = ''
+  /** The last interim seen before compositionend — some engines repeat it. */
+  private preEnd = ''
+  private endedAt = 0
+
+  constructor(private readonly now: () => number = () => Date.now()) {}
 
   onCompositionStart(): void {
+    this.clear()
     this.composing = true
-    this.awaitingFinal = false
-    this.finalData = ''
-    this.pending = ''
   }
 
-  /** `data` is compositionend.data — the browser's authoritative final
-   * committed text for the utterance, when the engine provides it. We do not
-   * send anything here: the commit is diffed and sent from the next
-   * `handleBeforeInput` call, whichever event actually delivers it. */
-  onCompositionEnd(data: string | null = null): void {
+  /**
+   * `data` is compositionend.data: the engine's authoritative committed text,
+   * `''` for a cancelled composition, or `null` when the engine omits it (then
+   * the last interim hypothesis stands). Returns the bytes that settle the line
+   * to that text, or null if nothing is owed.
+   */
+  onCompositionEnd(data: string | null = null): string | null {
     this.composing = false
-    // Only arm the latch when the commit still has an un-sent delta (the
-    // end-first ordering: compositionend fires before the beforeinput that
-    // delivers it). On the standard chrome-order (beforeinput already sent
-    // the full text via `pending`, THEN compositionend fires with the same
-    // data), there is nothing left to reconcile — arming anyway left the
-    // latch open for the NEXT unrelated beforeinput (a plain keystroke),
-    // which then diffed itself against this stale `data` and got swallowed.
-    if (data != null && data.length > 0 && data !== this.pending) {
-      this.finalData = data
-      this.awaitingFinal = true
+    this.preEnd = this.hypothesis
+    const cancelled = data === ''
+    const final = cancelled ? '' : (data ?? this.hypothesis)
+    const bytes = diffInterimBytes(this.sent, final)
+    this.endedAt = this.now()
+    if (cancelled || final === '') {
+      this.clear()
     } else {
-      this.pending = ''
+      this.sent = final
+      this.hypothesis = final
+      this.finalData = final
+      this.armed = true
     }
+    return bytes.length > 0 ? bytes : null
   }
 
   /** Bytes to send for this beforeinput event, or null to send nothing. */
   handleBeforeInput(inputType: string, data: string | null): string | null {
-    if (this.composing || this.awaitingFinal) {
-      switch (inputType) {
-        case 'insertCompositionText':
-        case 'insertReplacementText':
-        case 'insertFromComposition':
-        case 'insertText': {
-          // Interim (or final) revision of the SAME utterance — diff against
-          // what we already sent, not the raw string. Prefer the
-          // compositionend-authoritative text when we have one armed (covers
-          // the compositionend-fires-first ordering); otherwise use this
-          // event's own `data`.
-          const wasAwaitingFinal = this.awaitingFinal
-          const next = wasAwaitingFinal ? this.finalData : (data ?? '')
-          const bytes = diffInterimBytes(this.pending, next)
-          // 'insertText'/'insertFromComposition' (or any commit already
-          // announced via compositionend) finalize the utterance — clear the
-          // hypothesis. A plain interim 'insertCompositionText'/
-          // 'insertReplacementText' revision keeps tracking `next` so the
-          // NEXT beforeinput diffs against what we actually sent.
-          const isFinal = wasAwaitingFinal || inputType === 'insertText' || inputType === 'insertFromComposition'
-          this.pending = isFinal ? '' : next
-          this.awaitingFinal = false
-          this.finalData = ''
-          if (isFinal) this.composing = false
-          return bytes.length > 0 ? bytes : null
-        }
-        case 'deleteContentBackward':
-          // A correction mid-dictation/composition: shrink our tracked hypothesis
-          // by one so the next diff doesn't re-delete a char already removed.
-          if (this.pending.length > 0) this.pending = this.pending.slice(0, -1)
-          this.awaitingFinal = false
-          return '\x7f'
-        default:
-          // insertFromPaste/insertLineBreak/deleteContentForward/etc. mid-
-          // composition: not part of the hypothesis stream, pass through.
-          this.awaitingFinal = false
-          return inputEventToBytes(inputType, data)
+    if (this.composing) {
+      if (COMPOSITION_INSERT_TYPES.has(inputType)) {
+        // Interim revision of the SAME utterance — send only the delta.
+        const next = data ?? ''
+        const bytes = diffInterimBytes(this.sent, next)
+        this.sent = next
+        this.hypothesis = next
+        return bytes.length > 0 ? bytes : null
       }
+      if (inputType === 'deleteContentBackward') {
+        // A correction mid-composition: shrink the tracked hypothesis by one
+        // code point so the next diff doesn't re-delete what's already gone.
+        const cps = Array.from(this.sent)
+        cps.pop()
+        this.sent = cps.join('')
+        this.hypothesis = this.sent
+        return '\x7f'
+      }
+      // Paste / newline / forward-delete mid-composition: not part of the
+      // hypothesis stream, pass through.
+      return inputEventToBytes(inputType, data)
     }
-    // No tracked composition in flight (desktop; the iOS one-shot-per-char
-    // pseudo-composition; a plain paste/newline/delete): unchanged behavior.
-    if (inputType === 'deleteContentBackward') this.pending = ''
+
+    if (this.armed) {
+      const withinBurst = this.now() - this.endedAt <= IME_COMMIT_WINDOW_MS
+      const d = data ?? ''
+      const redelivered =
+        withinBurst &&
+        COMPOSITION_INSERT_TYPES.has(inputType) &&
+        (d === this.finalData || (this.preEnd !== '' && d === this.preEnd))
+      this.clear()
+      // compositionend already put this exact text on the line — drop the echo.
+      if (redelivered) return null
+    }
+
+    // No composition in flight (desktop; the iOS one-shot-per-char pseudo-
+    // composition; a plain paste/newline/delete): unchanged 1:1 behavior.
+    if (inputType === 'deleteContentBackward') this.sent = ''
     return inputEventToBytes(inputType, data)
+  }
+
+  private clear(): void {
+    this.composing = false
+    this.armed = false
+    this.sent = ''
+    this.hypothesis = ''
+    this.finalData = ''
+    this.preEnd = ''
   }
 }
 
@@ -612,7 +651,17 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     // typing in #306/#307; onData below stays untouched).
     const inputTracker = new CompositionInputTracker()
     const onCompositionStart = () => inputTracker.onCompositionStart()
-    const onCompositionEnd = (e: CompositionEvent) => inputTracker.onCompositionEnd(e.data ?? null)
+    // compositionend SETTLES the line to the engine's authoritative committed
+    // text (and retracts the interim bytes on a cancel), so it emits bytes of
+    // its own — they must be sent here, not deferred to a trailing beforeinput
+    // that the chrome/android ordering never fires. See the design comment on
+    // CompositionInputTracker.
+    const onCompositionEnd = (e: CompositionEvent) => {
+      const bytes = inputTracker.onCompositionEnd(e.data ?? null)
+      if (bytes == null) return
+      send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(bytes) })
+      keepTextareaAlive()
+    }
     const onBeforeInput = (ev: Event) => {
       const ie = ev as InputEvent
       const bytes = inputTracker.handleBeforeInput(ie.inputType, ie.data)

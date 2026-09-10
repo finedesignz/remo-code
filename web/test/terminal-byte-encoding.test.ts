@@ -200,21 +200,26 @@ describe('mobile input — dictation composition dedup (CompositionInputTracker)
     const t = new CompositionInputTracker()
     t.onCompositionStart()
     const c1 = t.handleBeforeInput('insertCompositionText', 'hel')
-    t.onCompositionEnd('hello') // engine delivers the commit here, ahead of its beforeinput
-    const c2 = t.handleBeforeInput('insertText', 'hello') // the trailing beforeinput the engine still fires
-    expect(replay([c1, c2])).toBe('hello')
+    // compositionend settles the line to the committed text itself; the
+    // trailing beforeinput is the engine RE-delivering that same commit inside
+    // the burst window, so it must be suppressed.
+    const ce = t.onCompositionEnd('hello')
+    const c2 = t.handleBeforeInput('insertText', 'hello')
+    expect(c2).toBeNull()
+    expect(replay([c1, ce, c2])).toBe('hello')
   })
 
   test('compositionend.data is used as the authoritative final revision when present', () => {
     const t = new CompositionInputTracker()
     t.onCompositionStart()
     const c1 = t.handleBeforeInput('insertCompositionText', 'hel')
-    t.onCompositionEnd('hello')
+    const ce = t.onCompositionEnd('hello')
     // Some engines' trailing beforeinput repeats stale interim data instead of
     // the true commit — the tracker must still resolve to the compositionend
     // value, not double-apply whatever this event's own `data` says.
     const c2 = t.handleBeforeInput('insertCompositionText', 'hel')
-    expect(replay([c1, c2])).toBe('hello')
+    expect(c2).toBeNull()
+    expect(replay([c1, ce, c2])).toBe('hello')
   })
 
   test('normal ordering (beforeinput commit before compositionend) is unaffected', () => {
@@ -281,9 +286,9 @@ describe('mobile input — chrome-order IME commit does not swallow the next key
     const t = new CompositionInputTracker()
     t.onCompositionStart()
     const c1 = t.handleBeforeInput('insertCompositionText', 'hel')
-    t.onCompositionEnd('hello')
+    const ce = t.onCompositionEnd('hello')
     const c2 = t.handleBeforeInput('insertText', 'hello')
-    expect(replay([c1, c2])).toBe('hello')
+    expect(replay([c1, ce, c2])).toBe('hello')
   })
 
   test('chrome-order IME commit then Enter forwards "\\r"', () => {
