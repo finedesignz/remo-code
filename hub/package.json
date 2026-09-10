@@ -9,7 +9,7 @@
     "docs:openapi": "JWT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx DATABASE_URL=postgres://localhost:5432/placeholder bun run scripts/dump-openapi.ts"
   },
   "dependencies": {
-    "@hono/zod-openapi": "^0.18.4",
+    "@hono/zod-openapi": "^1.6.3",
     "@octokit/rest": "^22.0.1",
     "@scalar/hono-api-reference": "^0.10.19",
     "bcryptjs": "^3.0.3",
