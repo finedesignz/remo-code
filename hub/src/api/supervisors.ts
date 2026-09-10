@@ -9,7 +9,7 @@ import { getSessionSkipPermissionsByRepo } from '../db/dal'
 import {
   getSupervisor as getSupervisorRegistryEntry, isSupervisorOnline,
   sendRequest, sendToSupervisor, updateSupervisorState,
-  getUserInventory,
+  getUserInventory, getSupervisorCircuitBreakers, getSupervisorStatusServer,
 } from '../ws/supervisor-registry'
 import { isGitHubAppConfigured, mintTokenizedCloneUrl } from '../auth/github-app'
 import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget'
@@ -23,6 +23,15 @@ supervisors.get('/', async (c) => {
   const enriched = rows.map((r: any) => ({
     ...r,
     online: isSupervisorOnline(r.id),
+    // fix/stop-the-bleed — an OPEN spawn circuit-breaker means this supervisor is
+    // refusing to spawn CLIs for those repos (silent autonomy loss in prod
+    // 2026-07). Empty array = healthy, or a pre-fix supervisor that doesn't report.
+    circuit_breakers: getSupervisorCircuitBreakers(r.id),
+    // fix/headless-autoupdate — `{healthy:false}` means this supervisor is running
+    // WITHOUT its loopback status server (bind failed, e.g. a zombie listener on
+    // 9106): /sup/status is gone and it is retrying the bind. null = pre-fix
+    // supervisor that doesn't report.
+    status_server: getSupervisorStatusServer(r.id),
   }))
   return c.json({ supervisors: enriched })
 })
@@ -40,6 +49,18 @@ supervisors.post('/:id/scan', async (c) => {
   const a = await authorizeSupervisor(c)
   if ('error' in a) return a.error
   try {
+    // fix/supervisor-periodic-repo-rescan — force a fresh full repo_inventory
+    // FIRST so a repo cloned after the supervisor connected is reflected in the
+    // registry cache that enrichScanWithInventory (below) joins against. This
+    // makes the web "Refresh repos" button actually discover new repos rather
+    // than only re-reading the legacy scan shape. Best-effort: an older
+    // supervisor that doesn't handle rescan_repos times out; we still fall
+    // through to the legacy repo.scan so the button never regresses.
+    try {
+      await sendRequest(a.supervisorId, { type: 'supervisor.rescan_repos' } as any, 20_000)
+    } catch (rescanErr: any) {
+      console.warn(`[supervisors] rescan_repos failed (falling back to repo.scan): ${rescanErr?.message}`)
+    }
     const res: any = await sendRequest(a.supervisorId, { type: 'repo.scan' } as any, 20_000)
     // The legacy `repo.scan` shape (ScannedRepo) carries no worktree/canonical
     // introspection, so the web's worktree filter (SupervisorPage) had nothing
@@ -52,6 +73,29 @@ supervisors.post('/:id/scan', async (c) => {
     return c.json(res)
   } catch (err: any) {
     return c.json({ error: err.message }, 500)
+  }
+})
+
+/**
+ * milestone remote-update-trigger — force the LOCAL supervisor sidecar+tray to
+ * check for and install the latest signed release now, from the web UI. The
+ * sidecar writes a marker file and acks quickly; the actual check→download→
+ * install→relaunch runs in the Rust tray on its own marker-poll cadence, so
+ * this route does not wait for the update itself — only for the sidecar's
+ * acknowledgment that it queued the request. An old sidecar without the
+ * `supervisor.force_update` handler simply times out (502), same compat
+ * behavior as /:id/scan's rescan_repos — the hub+web halves work immediately,
+ * but only take effect against a supervisor that ships this handler.
+ */
+supervisors.post('/:id/update', async (c) => {
+  const a = await authorizeSupervisor(c)
+  if ('error' in a) return a.error
+  try {
+    const res: any = await sendRequest(a.supervisorId, { type: 'supervisor.force_update', requested_by: a.userId } as any, 20_000)
+    if (!res?.ok) return c.json({ error: res?.error || 'force_update_failed' }, 500)
+    return c.json({ ok: true })
+  } catch (err: any) {
+    return c.json({ error: err.message }, 502)
   }
 })
 

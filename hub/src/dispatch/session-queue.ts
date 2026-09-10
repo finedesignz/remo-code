@@ -20,6 +20,11 @@ export type EnqueueResult = 'dispatched' | 'queued' | 'dropped'
 interface Slot {
   inFlight: string | null
   waiter: string | null
+  /** Date.now() when `inFlight` last transitioned from null → non-null. Used by
+   *  the stale-lock reaper (orchestrator/stale-lock-reaper.ts) to detect a run
+   *  that never called markFinished (dead/unauthed session — the lock would
+   *  otherwise wedge forever). Null whenever `inFlight` is null. */
+  inFlightSince: number | null
 }
 
 export class SessionQueue {
@@ -28,7 +33,7 @@ export class SessionQueue {
   private getOrCreate(sessionId: string): Slot {
     let s = this.slots.get(sessionId)
     if (!s) {
-      s = { inFlight: null, waiter: null }
+      s = { inFlight: null, waiter: null, inFlightSince: null }
       this.slots.set(sessionId, s)
     }
     return s
@@ -38,6 +43,7 @@ export class SessionQueue {
     const s = this.getOrCreate(sessionId)
     if (s.inFlight === null) {
       s.inFlight = token
+      s.inFlightSince = Date.now()
       return 'dispatched'
     }
     if (s.waiter === null) {
@@ -57,11 +63,30 @@ export class SessionQueue {
       this.slots.delete(sessionId)
       return null
     }
+    s.inFlightSince = Date.now()
     return s.inFlight
   }
 
   currentInFlight(sessionId: string): string | null {
     return this.slots.get(sessionId)?.inFlight ?? null
+  }
+
+  /** Age (ms) of the current in-flight lock, or null if no lock is held. */
+  inFlightAgeMs(sessionId: string, now: number = Date.now()): number | null {
+    const s = this.slots.get(sessionId)
+    if (!s || s.inFlight === null || s.inFlightSince === null) return null
+    return now - s.inFlightSince
+  }
+
+  /** SessionIds whose in-flight lock has been held ≥ `maxAgeMs` (stale-lock reaper). */
+  staleInFlight(maxAgeMs: number, now: number = Date.now()): string[] {
+    const stale: string[] = []
+    for (const [sessionId, s] of this.slots) {
+      if (s.inFlight !== null && s.inFlightSince !== null && now - s.inFlightSince >= maxAgeMs) {
+        stale.push(sessionId)
+      }
+    }
+    return stale
   }
 
   abandon(sessionId: string): void {

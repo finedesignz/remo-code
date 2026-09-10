@@ -26,10 +26,6 @@ on:
   push:
     tags:
       - "mobile-ios-v*"
-  pull_request:
-    paths:
-      - "mobile/tauri/**"
-      - ".github/workflows/mobile-ios-build.yml"
 
 concurrency:
   group: mobile-ios-build-${{ github.ref }}

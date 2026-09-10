@@ -68,6 +68,19 @@ export function useSupervisors(token: string | null, subscribe: Subscribe, conne
   useEffect(() => {
     return subscribe((msg) => {
       if (!msg || typeof msg.type !== 'string') return
+      // roots-editor saves broadcast `supervisor.roots_changed` — patch the
+      // affected row's roots immediately, then refetch to stay authoritative.
+      if (msg.type === 'supervisor.roots_changed' && typeof msg.supervisor_id === 'string') {
+        if (Array.isArray(msg.roots)) {
+          setSupervisors((prev) =>
+            prev
+              ? prev.map((s) => (s.id === msg.supervisor_id ? { ...s, roots: msg.roots } : s))
+              : prev,
+          )
+        }
+        scheduleRefetch()
+        return
+      }
       if (msg.type === 'supervisor_update' || msg.type === 'supervisor_capacity_changed') {
         // Fast path: patch `state` / `current_run_id` directly so the row
         // visibly transitions even before the refetch lands.

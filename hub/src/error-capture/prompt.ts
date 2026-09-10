@@ -9,6 +9,7 @@
  * absent or unparseable, we just omit the frames block.
  */
 import type { ErrorProject, ErrorRow } from '../db/error-capture-dal.ts'
+import { fenceUntrusted, SCOPE_CONTRACT } from '../dispatch/untrusted.ts'
 
 interface Frame {
   filename?: string | null
@@ -55,14 +56,26 @@ export function buildErrorMessage(
   project: Pick<ErrorProject, 'name'>,
 ): string {
   const frames = extractFrames(error.stacktrace_json)
+  // SECURITY: every field below arrives on the wire from a Sentry envelope whose
+  // key is a client-side DSN (public by design). error_type / error_value / frame
+  // filenames are attacker-controllable, so the whole report is FENCED as data and
+  // the dispatch carries the scope contract (propose-only — no push, no deploy).
+  const report = [
+    `Error: ${error.error_type}: ${error.error_value}`,
+    `Release: ${error.release ?? '(unknown)'}`,
+    `Top frames:`,
+    formatFrames(frames),
+  ].join('\n')
   return [
     `An uncaught error was just reported by your deployed app **${project.name}**.`,
     ``,
-    `**Error:** \`${error.error_type}: ${error.error_value}\``,
-    `**Release:** ${error.release ?? '(unknown)'}`,
-    `**Top frames:**`,
-    formatFrames(frames),
+    SCOPE_CONTRACT,
     ``,
-    `Please investigate the root cause, implement a fix on the default branch, commit + push. Coolify will auto-deploy. If the issue is genuinely transient or external (third-party outage, etc.), explain in a brief reply and do not commit.`,
+    fenceUntrusted('untrusted_error_report', report),
+    ``,
+    `Investigate the root cause and, if it is a real defect, PROPOSE a fix as a PULL REQUEST`,
+    `on a new branch for human review. Do NOT push to the default/main branch, do NOT merge,`,
+    `and do NOT deploy. If the issue is genuinely transient or external (third-party outage,`,
+    `etc.), explain in a brief reply and change nothing.`,
   ].join('\n')
 }

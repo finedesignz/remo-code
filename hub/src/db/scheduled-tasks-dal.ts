@@ -21,7 +21,14 @@ export type TaskType =
   | 'log_pull' | 'log_classify' | 'log_triage'
   | 'qc_review' | 'qc_fix' | 'qc_verify'
   | 'triage'
+  // Milestone TEAB: Titanium Edge AutoBuilder run as a scheduled-task action.
+  | 'teab'
+  // Milestone once: an inbound external work item enqueued as a one-time task.
+  | 'work'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
+// Milestone once: 'cron' = recurring (schedule_rules/cron_expr); 'once' = fire
+// exactly once at run_at, then self-finalize (never re-arm).
+export type ScheduleKind = 'cron' | 'once'
 export type CatchupPolicy = 'skip' | 'run_once'
 export type RunStatus =
   | 'pending'
@@ -69,6 +76,20 @@ export interface ScheduledTask {
   // back to deriving a single rule from `cron_expr`). Array of
   // `{interval, unit, start_at}`.
   schedule_rules: any[] | null
+  // Milestone TEAB (additive, nullable on every non-TEAB row). `teab_repo_ident`
+  // is the target repo for `teab run --repo <X>`; `teab_last_status` mirrors the
+  // most recent supervisor `teab_status` poll result.
+  teab_repo_ident: string | null
+  teab_last_status: string | null
+  // Milestone once. `schedule_kind='once'` fires a single time at `run_at`
+  // (no cron rule evaluated) then self-finalizes; 'cron' (default) is the
+  // recurring path. `run_at` is NULL on every cron row.
+  schedule_kind: ScheduleKind
+  run_at: string | null
+  // Default-on run-summary email. When true (the default), every ROOT run of
+  // this task emails the owner a summary unless a custom notify_email action is
+  // already configured. Set false to opt out. See post-run/dispatcher.ts.
+  email_summary: boolean
   // Derived from latest finalized run via LATERAL JOIN in listTasksForUser/getTask.
   last_run_cost_usd?: number | null
   last_run_duration_ms?: number | null
@@ -189,6 +210,8 @@ function normalize(row: any): ScheduledTask {
     schedule_rules,
     last_run_cost_usd,
     last_run_duration_ms,
+    // NULL/undefined ⇒ true; only an explicit false opts out.
+    email_summary: row.email_summary !== false,
   }
 }
 
@@ -206,6 +229,31 @@ export async function listEnabledTasks(): Promise<ScheduledTask[]> {
   return rows.map(normalize)
 }
 
+/**
+ * Milestone once — the DURABLE tick source of truth for one-time tasks. Returns
+ * the ids of `schedule_kind='once'` rows that are DUE (`run_at <= now`) and still
+ * `enabled = true` (i.e. NOT yet claimed by a prior fire). The once-due sweep
+ * fires each via `dispatcher.fire`, whose atomic `claimOnceTask` makes this
+ * exactly-once even if the in-process `setTimeout(0)` latency-optimization also
+ * fires: whoever wins the `... AND enabled = true` UPDATE dispatches, the loser
+ * no-ops. This is what makes a work item SAFE across a restart / a thrown fire /
+ * a swallowed register() error — the row stays enabled until claimed, so the next
+ * tick re-arms AND re-fires it. Cheap: covered by idx_scheduled_tasks_next_fire /
+ * the user_enabled index; the id list is small (immediate items drain fast).
+ */
+export async function listDueOnceTasks(now: Date = new Date(), limit = 100): Promise<string[]> {
+  const rows = await sql<{ id: string }[]>`
+    SELECT id FROM scheduled_tasks
+     WHERE schedule_kind = 'once'
+       AND enabled = true
+       AND run_at IS NOT NULL
+       AND run_at <= ${now}
+     ORDER BY run_at ASC
+     LIMIT ${limit}
+  `
+  return rows.map((r) => r.id)
+}
+
 export async function createTaskV2(input: {
   user_id: string
   name: string
@@ -213,7 +261,9 @@ export async function createTaskV2(input: {
   target_kind: TargetKind
   target_id?: string | null
   payload?: Record<string, any>
-  cron_expr: string
+  // Optional: 'once' tasks carry no cron. When absent a '@once' sentinel is
+  // written to the NOT NULL `cron_expression` column and `cron_expr` stays NULL.
+  cron_expr?: string
   timezone: string
   catchup_policy?: CatchupPolicy
   max_concurrent?: number
@@ -228,24 +278,38 @@ export async function createTaskV2(input: {
   name_prefix?: string | null
   name_suffix?: string | null
   schedule_rules?: any[] | null
+  teab_repo_ident?: string | null
+  teab_last_status?: string | null
+  email_summary?: boolean
+  // Milestone once. Omitted ⇒ 'cron' / NULL run_at (unchanged behavior).
+  schedule_kind?: ScheduleKind
+  run_at?: Date | string | null
 }): Promise<ScheduledTask> {
+  // A one-time row carries no cron; `cron_expression` is NOT NULL in the legacy
+  // schema, so persist a sentinel ('@once') when the caller has no cron string.
+  const cronExpression = input.cron_expression ?? input.cron_expr ?? '@once'
   const rows = await sql<ScheduledTask[]>`
     INSERT INTO scheduled_tasks (
       user_id, session_id, name, cron_expression, prompt, enabled,
       task_type, target_kind, target_id, payload, cron_expr, timezone,
       catchup_policy, max_concurrent, post_run_actions,
-      name_prefix, name_suffix, schedule_rules
+      name_prefix, name_suffix, schedule_rules,
+      teab_repo_ident, teab_last_status, email_summary,
+      schedule_kind, run_at
     ) VALUES (
       ${input.user_id}, ${input.session_id}, ${input.name},
-      ${input.cron_expression ?? input.cron_expr}, ${input.prompt ?? ''},
+      ${cronExpression}, ${input.prompt ?? ''},
       ${input.enabled ?? true},
       ${input.task_type}, ${input.target_kind}, ${input.target_id ?? null},
-      ${sql.json((input.payload ?? {}) as any)}, ${input.cron_expr},
+      ${sql.json((input.payload ?? {}) as any)}, ${input.cron_expr ?? null},
       ${input.timezone}, ${input.catchup_policy ?? 'skip'},
       ${input.max_concurrent ?? 1},
       ${sql.json((input.post_run_actions ?? []) as any)},
       ${input.name_prefix ?? null}, ${input.name_suffix ?? null},
-      ${input.schedule_rules ? sql.json(input.schedule_rules as any) : null}
+      ${input.schedule_rules ? sql.json(input.schedule_rules as any) : null},
+      ${input.teab_repo_ident ?? null}, ${input.teab_last_status ?? null},
+      ${input.email_summary ?? true},
+      ${input.schedule_kind ?? 'cron'}, ${input.run_at ?? null}
     )
     RETURNING *
   `
@@ -271,6 +335,9 @@ export async function updateTaskV2(
     name_prefix: string | null
     name_suffix: string | null
     schedule_rules: any[] | null
+    teab_repo_ident: string | null
+    teab_last_status: string | null
+    email_summary: boolean
   }>,
 ): Promise<ScheduledTask | null> {
   const sets: any[] = []
@@ -299,6 +366,9 @@ export async function updateTaskV2(
   if (fields.schedule_rules !== undefined) {
     sets.push(sql`schedule_rules = ${fields.schedule_rules ? sql.json(fields.schedule_rules as any) : null}`)
   }
+  if (fields.teab_repo_ident !== undefined) sets.push(sql`teab_repo_ident = ${fields.teab_repo_ident}`)
+  if (fields.teab_last_status !== undefined) sets.push(sql`teab_last_status = ${fields.teab_last_status}`)
+  if (fields.email_summary !== undefined) sets.push(sql`email_summary = ${fields.email_summary}`)
   if (sets.length === 0) return getTask(id, userId)
   sets.push(sql`updated_at = now()`)
 
@@ -338,6 +408,36 @@ export async function disableTaskWithReason(taskId: string, reason: string): Pro
         updated_at = now()
     WHERE id = ${taskId}
   `
+}
+
+/**
+ * Milestone once. CLAIM-then-fire for a one-time task: atomically flip the row to
+ * `enabled=false` **only while it is still enabled** (`AND enabled = true`) and
+ * return true iff THIS caller won the claim. The caller must dispatch ONLY when
+ * this returns true. This closes the double-fire crash window at the source: a
+ * hub restart between dispatch and the disable commit finds the row already
+ * `enabled=false`, so `listEnabledTasks` never re-arms it; a concurrent second
+ * fire loses the claim (0 rows) and must not dispatch.
+ *
+ * Also clears the next-fire timestamps and records the stop reason under
+ * `payload.completed_reason` (mirrors `disableTaskWithReason`). The IN-FLIGHT run
+ * is unaffected — it lives in the dispatcher's inFlightByRun map and finalizes
+ * independently of `enabled`.
+ */
+export async function claimOnceTask(taskId: string, reason: string = 'once_completed'): Promise<boolean> {
+  const rows = await sql`
+    UPDATE scheduled_tasks
+    SET enabled = false,
+        next_fire_at = NULL,
+        next_run_at = NULL,
+        payload = COALESCE(payload, '{}'::jsonb)
+          || jsonb_build_object('completed_reason', ${reason}::text,
+                                'completed_at', to_jsonb(now())),
+        updated_at = now()
+    WHERE id = ${taskId} AND schedule_kind = 'once' AND enabled = true
+    RETURNING id
+  `
+  return rows.length > 0
 }
 
 export async function setTaskFireTimestamps(
@@ -404,6 +504,7 @@ export async function updateRunStatus(
     finished_at: Date | null
     started_at: Date | null
   }>,
+  opts: { onlyIfActive?: boolean } = {},
 ): Promise<ScheduledTaskRun | null> {
   const sets: any[] = []
   if (fields.status !== undefined) sets.push(sql`status = ${fields.status}`)
@@ -422,7 +523,14 @@ export async function updateRunStatus(
   for (let i = 0; i < sets.length; i++) {
     q = i === 0 ? sql`${q}${sets[i]}` : sql`${q}, ${sets[i]}`
   }
-  const rows = await sql<ScheduledTaskRun[]>`${q} WHERE id = ${runId} RETURNING *`
+  // `onlyIfActive` makes the write a claim: it only lands while the row is still
+  // non-terminal (`pending` or `in_flight`), so a second finalizer (e.g. the
+  // stale-run reaper racing the TEAB poll-to-terminal loop, which flips its row
+  // to `in_flight` at dispatch) gets `null` back and can no-op instead of
+  // clobbering an already-terminal row and re-firing its post-run chain.
+  const rows = opts.onlyIfActive
+    ? await sql<ScheduledTaskRun[]>`${q} WHERE id = ${runId} AND status IN ('pending','in_flight') RETURNING *`
+    : await sql<ScheduledTaskRun[]>`${q} WHERE id = ${runId} RETURNING *`
   return rows[0] ?? null
 }
 

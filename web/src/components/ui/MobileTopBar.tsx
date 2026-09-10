@@ -19,62 +19,7 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "../../lib/ui/cn";
 import type { AppShellNavItem, AppShellSubTab } from "./AppShell";
-
-const ICON_PROPS = {
-  width: 22,
-  height: 22,
-  viewBox: "0 0 24 24",
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 1.8,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-  "aria-hidden": true,
-};
-
-function ListIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <line x1="8" y1="6" x2="20" y2="6" />
-      <line x1="8" y1="12" x2="20" y2="12" />
-      <line x1="8" y1="18" x2="20" y2="18" />
-      <circle cx="4" cy="6" r="1" fill="currentColor" stroke="none" />
-      <circle cx="4" cy="12" r="1" fill="currentColor" stroke="none" />
-      <circle cx="4" cy="18" r="1" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
-
-function GridIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <rect x="4" y="4" width="6.5" height="6.5" rx="1" />
-      <rect x="13.5" y="4" width="6.5" height="6.5" rx="1" />
-      <rect x="4" y="13.5" width="6.5" height="6.5" rx="1" />
-      <rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1" />
-    </svg>
-  );
-}
-
-function TasksIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <path d="M4 6l2 2 3-3" />
-      <line x1="12" y1="6" x2="20" y2="6" />
-      <path d="M4 14l2 2 3-3" />
-      <line x1="12" y1="15" x2="20" y2="15" />
-    </svg>
-  );
-}
-
-function SettingsIcon() {
-  return (
-    <svg {...ICON_PROPS}>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" />
-    </svg>
-  );
-}
+import { GridIcon, ListIcon, SettingsIcon, TasksIcon } from "./NavIcons";
 
 function Chevron({ open }: { open: boolean }) {
   return (

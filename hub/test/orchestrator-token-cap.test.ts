@@ -74,13 +74,30 @@ describe('BSA-04 daily token cap gate', () => {
     expect((r as { reason: string }).reason).toBe('over_daily_token_cap:1000>=1000')
   })
 
-  test('zero / negative cap disables the ceiling (fail-open)', async () => {
-    process.env[TOKEN_KEY] = '0'
+  // fix/stop-the-bleed: this test used to pin FAIL-OPEN ('0' / '-5' disabled the
+  // ceiling). That made one typo in Coolify env silently convert the product's hard
+  // spend guarantee into an unbounded spend path — the same invisible-failure class
+  // as the 2.83B-token incident. A bad value now FAILS CLOSED (default ceiling), and
+  // only the explicit REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED flag turns it off.
+  test('zero / negative cap FAILS CLOSED — falls back to the default ceiling, still capped', async () => {
     state.tokens = 9_999_999_999
-    expect(await isOverTokenCap('u1', 'UTC')).toBe(false)
-    expect(await getTokenCapStatus('u1', 'UTC')).toEqual({ over: false, tokens: 0, cap: 0 })
-    process.env[TOKEN_KEY] = '-5'
-    expect(await isOverTokenCap('u1', 'UTC')).toBe(false)
+    for (const bad of ['0', '-5']) {
+      process.env[TOKEN_KEY] = bad
+      expect(await isOverTokenCap('u1', 'UTC')).toBe(true)
+      expect((await getTokenCapStatus('u1', 'UTC')).cap).toBe(50_000_000)
+    }
+  })
+
+  test('only the explicit DISABLED flag turns the ceiling off', async () => {
+    delete process.env[TOKEN_KEY]
+    state.tokens = 9_999_999_999
+    process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED = '1'
+    try {
+      expect(await isOverTokenCap('u1', 'UTC')).toBe(false)
+      expect(await getTokenCapStatus('u1', 'UTC')).toEqual({ over: false, tokens: 0, cap: 0 })
+    } finally {
+      delete process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED
+    }
   })
 
   test('getTokenCapStatus reports tokens + cap when capped', async () => {

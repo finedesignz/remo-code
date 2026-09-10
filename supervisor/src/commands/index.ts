@@ -9,6 +9,9 @@
 import type { ScannedCommand } from '../commands-scanner'
 import { runErrorSetupProbe } from './error-setup-probe'
 import { runErrorSetupApply } from './error-setup-apply'
+import { runTeabRun, runTeabStatus } from './teab-run'
+import { runSessionTranscriptTail, runSessionMemory } from './session-read'
+import { runWorkPushBranch, runWorkDiffScope, runWorkBuild, runWorkPublish } from './work-git'
 
 export interface CommandResult {
   exit_code: number
@@ -39,6 +42,21 @@ const HANDLERS: Record<string, CommandHandler> = {
       }),
     }
   },
+  teab_run: (args) => runTeabRun(args),
+  teab_status: (args) => runTeabStatus(args),
+  // Milestone ASK Phase 1 — READ-ONLY. Derive the CLI's own transcript/memory dir
+  // from the session's project_dir; never read an arbitrary hub-supplied path.
+  session_transcript_tail: (args) => runSessionTranscriptTail(args),
+  session_memory: (args) => runSessionMemory(args),
+  // Milestone WORK — HUB-driven verification + publish of an agent's work branch.
+  // The AGENT never invokes these: they are hub→supervisor RPCs. `work_diff_scope` is
+  // a pure read; `work_build` runs the OPERATOR's build cmd with deploy credentials
+  // scrubbed; `work_publish` is the only path that merges + runs the operator's publish
+  // cmd, and the hub calls it only after all of its own checks pass.
+  work_push_branch: (args) => runWorkPushBranch(args),
+  work_diff_scope: (args) => runWorkDiffScope(args),
+  work_build: (args) => runWorkBuild(args),
+  work_publish: (args) => runWorkPublish(args),
 }
 
 export function getHandler(name: string): CommandHandler | null {
@@ -49,6 +67,14 @@ export function getHandler(name: string): CommandHandler | null {
 const NATIVE: Array<{ name: string; description: string }> = [
   { name: 'error_setup_probe', description: 'Read project files for error-tracking SDK detection' },
   { name: 'error_setup_apply', description: 'Install error-tracking SDK files into a repo + commit + push' },
+  { name: 'teab_run', description: 'Background-spawn Titanium Edge AutoBuilder (teab run --repo <repo>) detached; returns a started run id' },
+  { name: 'teab_status', description: 'Report state + recent events tail for a teab_run run id' },
+  { name: 'session_transcript_tail', description: 'READ-ONLY: last N turns of the CLI transcript for a project_dir' },
+  { name: 'session_memory', description: 'READ-ONLY: project memory files (~/.claude/projects/<slug>/memory/*.md)' },
+  { name: 'work_push_branch', description: 'Push the agent-committed local work/<id> branch to origin (agent has no push credential)' },
+  { name: 'work_diff_scope', description: 'READ-ONLY: file list + head sha of a work/<id> branch vs the default branch' },
+  { name: 'work_build', description: 'Run the operator-configured build cmd against a work/<id> branch (deploy creds scrubbed)' },
+  { name: 'work_publish', description: 'HUB-ONLY: ff-only merge a work/<id> branch into the default branch + run the operator publish cmd' },
 ]
 
 export function nativeSupervisorCommands(): ScannedCommand[] {

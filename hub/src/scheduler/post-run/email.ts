@@ -41,7 +41,7 @@ export async function executeEmail(action: PostRunAction, ctx: EmailCtx): Promis
     const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/v1/messages/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
-      body: JSON.stringify({ inbox_id: inboxId, to, subject, html, text }),
+      body: JSON.stringify({ from_inbox_id: inboxId, to, subject, html, text }),
       signal: AbortSignal.timeout(10_000),
     })
     if (!res.ok) {

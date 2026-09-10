@@ -6,6 +6,7 @@ import type { ScheduleRule } from '../lib/schedule-rules'
 // User-pickable roots + 9 chained step kinds + internal `triage`.
 export type TaskType =
   | 'dev' | 'security' | 'log_check'
+  | 'teab'
   | 'dev_plan' | 'dev_execute' | 'dev_ship'
   | 'security_scan' | 'security_triage' | 'security_fix_or_issue'
   | 'log_pull' | 'log_classify' | 'log_triage'
@@ -53,6 +54,10 @@ export interface ScheduledTask {
   last_run_cost_usd?: number | null
   last_run_duration_ms?: number | null
   created_at?: string
+  // Milestone TEAB — only meaningful for `task_type === 'teab'`. The target repo
+  // for `teab run --repo <X>` and the most recent supervisor poll status.
+  teab_repo_ident?: string | null
+  teab_last_status?: string | null
 }
 
 export interface ScheduleCreateInput {
@@ -79,6 +84,8 @@ export interface ScheduleCreateInput {
   max_concurrent?: number
   enabled?: boolean
   post_run_actions?: PostRunAction[]
+  // Milestone TEAB — target repo for a `task_type === 'teab'` build task.
+  teab_repo_ident?: string | null
 }
 
 export type SchedulePatch = Partial<ScheduleCreateInput>

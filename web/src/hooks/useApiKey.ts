@@ -1,12 +1,30 @@
 import { useState, useEffect, useCallback } from 'react'
 import { hubFetch, HubFetchError } from '../lib/api'
 
+export type Scope = 'agent' | 'ext:read' | 'ext:ask'
+
+export const SCOPE_LABELS: Record<Scope, string> = {
+  agent: 'agent',
+  'ext:read': 'ext:read',
+  'ext:ask': 'ext:ask',
+}
+
+export const SCOPE_HELP: Record<Scope, string> = {
+  agent: 'Connect a Remo Code Supervisor / agent (can spawn CLI processes on that host).',
+  'ext:read': 'Read sessions, transcripts and state through the external API.',
+  'ext:ask': 'Ask a session a question through the external API (spends tokens).',
+}
+
 export interface ApiKey {
   id: string
   name: string
+  purpose: string
+  /** null = legacy full-access key (all scopes) */
+  scopes: Scope[] | null
+  key_prefix: string | null
   created_at: string
   last_used_at: string | null
-  revoked_at: string | null
+  revoked_at?: string | null
 }
 
 export type ApiKeyOpResult<T = unknown> =
@@ -39,12 +57,28 @@ export function useApiKey(token: string | null) {
 
   useEffect(() => { fetchKeys() }, [fetchKeys])
 
-  const generateKey = async (): Promise<ApiKeyOpResult<any>> => {
+  /** Mint a key. scopes = null ⇒ legacy full-access (supervisor) key. */
+  const createKey = async (name: string, scopes: Scope[] | null): Promise<ApiKeyOpResult<any>> => {
     if (!token) return { ok: false, code: 'unknown', message: 'not signed in' }
     try {
-      const data = await hubFetch<any>(token, '/api/api-keys', { method: 'POST' })
+      const data = await hubFetch<any>(token, '/api/api-keys', {
+        method: 'POST',
+        json: { name, scopes },
+      })
       await fetchKeys()
-      return { ok: true, data } // data = { id, name, created_at, key: "remokey_..." }
+      return { ok: true, data } // { id, name, scopes, key: "remokey_..." }
+    } catch (e) {
+      return { ok: false, ...classifyError(e) }
+    }
+  }
+
+  /** Rotate one key in place (same name + scopes, new secret). */
+  const rotateKey = async (id: string): Promise<ApiKeyOpResult<any>> => {
+    if (!token) return { ok: false, code: 'unknown', message: 'not signed in' }
+    try {
+      const data = await hubFetch<any>(token, `/api/api-keys/${id}/rotate`, { method: 'POST' })
+      await fetchKeys()
+      return { ok: true, data }
     } catch (e) {
       return { ok: false, ...classifyError(e) }
     }
@@ -62,7 +96,10 @@ export function useApiKey(token: string | null) {
     }
   }
 
+  /** Back-compat: mint a full-access (supervisor) key — what the tray-app modal wants. */
+  const generateKey = async (): Promise<ApiKeyOpResult<any>> => createKey('Supervisor', null)
+
   const activeKey = keys.find(k => !k.revoked_at) || null
 
-  return { keys, activeKey, loading, generateKey, revokeKey }
+  return { keys, activeKey, loading, fetchKeys, createKey, generateKey, rotateKey, revokeKey }
 }

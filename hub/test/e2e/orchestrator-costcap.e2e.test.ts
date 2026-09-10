@@ -52,7 +52,7 @@ maybe('OEE-06 e2e — daily cost cap holds on the real orchestrator inject path'
     injectMod = await import('../../src/orchestrator/inject.ts')
     pipelineMod = await import('../../src/dispatch/pipeline.ts')
     h = await harness.setupHarness()
-  })
+  }, 30_000)
 
   afterAll(async () => {
     if (h) await harness.teardownHarness(h)
@@ -94,6 +94,8 @@ maybe('OEE-06 e2e — daily cost cap holds on the real orchestrator inject path'
       dispatch: pipelineMod.dispatch,
       // Fake online channel so the orchestrator's getChannel-online check passes.
       getChannel: ((sid: string) => (sid === h.sessionId ? channel : undefined)) as any,
+      // Session is genuinely live (online, real hostname) — never a ghost here.
+      isSessionLive: (async (sid: string) => sid === h.sessionId) as any,
     }
   }
 

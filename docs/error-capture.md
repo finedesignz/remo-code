@@ -1,6 +1,6 @@
 # Error Capture
 
-Sentry-style error capture across the user's Coolify-hosted apps, routed back into the live Claude Code session for each repo. Deployed apps ship Sentry SDK envelopes to the hub at `POST /api/sentry/:project_id/envelope/`. The hub decodes the envelope, fingerprints the first exception, gates the row through dedupe → rate-limit → daily-cap, then ships the structured error to the Claude session bound to that project as a `user_message` over the existing `/ws/agent` path. Claude investigates and fixes in-session, commits, and pushes to the default branch — Coolify auto-deploys. v1 also auto-installs the Sentry SDK into 4 supported stacks via supervisor git-ops and patches `SENTRY_DSN` into the Coolify app's env vars.
+Sentry-style error capture across the user's Coolify-hosted apps, routed back into the live Claude Code session for each repo. Deployed apps ship Sentry SDK envelopes to the hub at `POST /api/sentry/:project_id/envelope/`. The hub decodes the envelope, fingerprints the first exception, gates the row through dedupe → rate-limit → daily-cap, then ships the structured error to the Claude session bound to that project as a `user_message` over the existing `/ws/agent` path. **The report is FENCED as untrusted data and the dispatch is PROPOSE-ONLY**: Claude investigates and, if it is a real defect, opens a PR on a new branch for human review. It does NOT push to main, merge, or deploy (the Sentry key is a client-side DSN — public by design — so every field on the wire is attacker-controllable; see "Containment" below). v1 also auto-installs the Sentry SDK into 4 supported stacks via supervisor git-ops and patches `SENTRY_DSN` into the Coolify app's env vars.
 
 > **Status:** shipped in the `error-capture` phase (PR #17). Replaces the standalone `claude-code-self-heal` service, which is decommissioned in a follow-up.
 
@@ -37,14 +37,33 @@ Sentry-style error capture across the user's Coolify-hosted apps, routed back in
               │ user_message (over existing /ws/agent)
               ▼
    ┌──────────────────────┐
-   │  Claude CLI session  │  investigates, fixes, commits, pushes
+   │  Claude CLI session  │  investigates, fixes on a BRANCH
    └──────────────────────┘
-              │ git push → default branch
+              │ gh pr create (propose-only)
               ▼
    ┌──────────────────────┐
-   │  Coolify auto-deploy │
+   │  Human reviews+merges│  → Coolify deploys on merge
    └──────────────────────┘
 ```
+
+## Containment (self-heal guards)
+
+The Sentry key is a **client-side DSN by design** — anyone who views-source can POST an
+envelope. Therefore every field on the wire (`error_type`, `error_value`, stack-frame
+filenames) is treated as hostile:
+
+- **Fenced as data.** `buildErrorMessage` wraps the whole report in
+  `<untrusted_error_report>…</untrusted_error_report>` via the shared
+  `hub/src/dispatch/untrusted.ts` (`fenceUntrusted` escapes every `<`, so a payload cannot
+  close the fence and issue instructions; truncated with an explicit `[truncated]` marker).
+- **Scope contract.** The prompt carries the shared `SCOPE_CONTRACT`: data-not-instructions,
+  minimal change, no unrelated files/deps/CI, stop rather than guess, **propose-only**.
+- **No auto-push.** The old tail ("implement a fix on the default branch, commit + push.
+  Coolify will auto-deploy") is GONE — it was an unauthenticated remote-code-to-prod chain.
+- **No skip-permissions on the machine path.** `hub/src/dispatch/spawn-on-error.ts` forces
+  `dangerously_skip_permissions: false` when it wakes a session for error-capture/feedback.
+- **Inject-rate ceiling.** `sessionInjectRateGate` is in the gate list, so an error flood
+  cannot drive N turns/hour into the bound session.
 
 ### Module map
 
@@ -57,7 +76,7 @@ Sentry-style error capture across the user's Coolify-hosted apps, routed back in
 | `hub/src/error-capture/record.ts`          | Three pre-dispatch gates (dedupe → rate-limit → daily-cap); persists row|
 | `hub/src/error-capture/notify.ts`          | `notifyThrottled` — silent-skip emails via emails4agents (TTL gated)  |
 | `hub/src/error-capture/prompt.ts`          | `buildErrorMessage` — turns an error row + project into the dispatch prompt|
-| `hub/src/error-capture/dispatcher.ts`      | **Thin adapter** over the shared `hub/src/dispatch/` pipeline: resolves project→session, builds the prompt + a `RunStore` (persists `error_runs`), sets `gates: [thresholdGate, dailyCostCapGate]`, supplies `replay`/`onParkExpire`/`send`, calls `dispatch()`, maps the `DispatchOutcome` back to error-capture WS events + `dispatch_status` |
+| `hub/src/error-capture/dispatcher.ts`      | **Thin adapter** over the shared `hub/src/dispatch/` pipeline: resolves project→session, builds the prompt + a `RunStore` (persists `error_runs`), sets `gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate]`, supplies `replay`/`onParkExpire`/`send`, calls `dispatch()`, maps the `DispatchOutcome` back to error-capture WS events + `dispatch_status` |
 | `hub/src/dispatch/pipeline.ts`             | Shared deep module (NOT error-capture-specific): gates → per-session queue → offline-grace park → agent-socket send → finalize hook. `onSessionReply` finalizes the in-flight run on `assistant_message` and promotes/re-dispatches any waiter |
 | `hub/src/dispatch/grace.ts`                | Shared 10-min offline buffer (replaces the deleted `error-capture/grace.ts`); single 60s sweep; `onParkExpire` fires the legacy `skipped(target_offline_expired)` mark on TTL lapse |
 | `hub/src/error-capture/setup/detect.ts`    | Content-driven stack detector (4 stacks); content-only, no fs walk    |
@@ -177,7 +196,7 @@ As of the Round-2 hub-deepening refactor, `dispatcher.ts` is a **thin adapter ov
 1. Re-load the `errors` row; bail if not `pending` (idempotent).
 2. Resolve the project → `session_id` + `user_id`. Build the prompt via `buildErrorMessage(error, project)` and the stored chat content `[error: <project.name> — <error_type>]\n\n<prompt>`.
 3. Construct the adapter pieces and call `dispatch(req, deps)`:
-   - **`gates: [thresholdGate, dailyCostCapGate]`** — threshold first, daily-cost-cap second (IR-2). The daily-cost-cap gate is **non-bypassable** (IR-1) and is NEW vs the legacy dispatcher (legacy gated only on the Claude usage threshold).
+   - **`gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate]`** — threshold first, daily-cost-cap second (IR-2). The cost cap and the token cap are **non-bypassable** (IR-1). `sessionInjectRateGate` (default 4 injects/session/hour) bounds the RATE, so a flood on the public DSN cannot drive N turns/hour.
    - **`RunStore`** — `open()` inserts the `error_run` (status `in_flight`) and **returns its id**. The pipeline calls `open()` exactly when it actually dispatches (after gates + queue head-claim + online check — never for a skipped / dropped / queued / parked message; a queued waiter opens only when promotion re-dispatches it) and threads the returned run id into the finalize hook, so `onFinalize(runId, content)` / `markFailed(runId, err)` receive the **real run id**. `onFinalize()` moves the run to `success` + writes `output_snippet` + broadcasts `error_run_finished` (with the real `run_id`); `markSkipped()`/`markFailed()` set `dispatch_status` + broadcast `error_skipped` + throttled emails.
    - **`isOnline(req)`** = `getChannel(sessionId) != null`.
    - **`replay`** = re-run `dispatchPendingError(errorId)` (drained from grace on reconnect).
@@ -207,7 +226,7 @@ Now the **shared `hub/src/dispatch/grace.ts`** buffer (the old `error-capture/gr
 
 ### Dispatch prompt template
 
-Built by `prompt.ts → buildErrorMessage`. Variables: `project_name`, `error_type`, `error_value`, `short_value` (truncated to 60 chars), `release_or_unknown`, `fingerprint`, `received_at_iso`, `top_frames_pretty` (first 8 normalized frames), `stacktrace_json_indented`, `cwd` (session's `project_dir`), `run_url` (`${REMO_PUBLIC_URL}/sessions/<session_id>#run-<run_id>`). Asks Claude to investigate, fix in-session, commit with message `"fix(<project>): <type> — <short_value>"`, and push to the default branch (Coolify will auto-deploy).
+Built by `prompt.ts → buildErrorMessage`. Variables: `project_name`, `error_type`, `error_value`, `short_value` (truncated to 60 chars), `release_or_unknown`, `fingerprint`, `received_at_iso`, `top_frames_pretty` (first 8 normalized frames), `stacktrace_json_indented`, `cwd` (session's `project_dir`), `run_url` (`${REMO_PUBLIC_URL}/sessions/<session_id>#run-<run_id>`). The report is wrapped in an `<untrusted_error_report>` fence (shared `hub/src/dispatch/untrusted.ts`) and prefixed with the shared `SCOPE_CONTRACT`. Asks Claude to investigate and, if it is a real defect, PROPOSE a fix as a PR on a new branch — explicitly NOT push to main, NOT merge, NOT deploy.
 
 ---
 

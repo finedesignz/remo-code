@@ -30,8 +30,9 @@ type Calls = {
 
 function makeDeps(over: Partial<InjectDeps>, calls: Calls): InjectDeps {
   return {
-    // Offline session: no channel.
+    // Offline session: no channel. isSessionLive false ⇒ routes to autospawn.
     getChannel: () => null,
+    isSessionLive: async () => false,
     // Default: both gates ON (tests flip via process.env through the real fns OR
     // override here). We override the predicates directly for determinism.
     isOrchestratorEnabled: () => true,
@@ -170,6 +171,7 @@ describe('BSA-02 autospawn inject seam', () => {
     const deps = makeDeps(
       {
         getChannel: (() => ({ ws: { send() {} } })) as any,
+        isSessionLive: async () => true,
         dispatch: (async (_req: any, d: any) => {
           calls.dispatched.push({ gates: (d.gates ?? []).map((g: any) => g.name) })
           return { kind: 'dispatched' as const }
@@ -182,5 +184,23 @@ describe('BSA-02 autospawn inject seam', () => {
     expect(calls.launched).toBe(0)
     expect(calls.dispatched[0].gates).toContain('daily_cost_cap')
     expect(calls.dispatched[0].gates).toContain('daily_token_cap')
+  })
+
+  // fix/ghost-session-reaper — a ghost (online + hostname=NULL) has a phantom
+  // channel but `isSessionLive` returns false, so it must take the AUTOSPAWN
+  // path (spawn a real build session) instead of dispatching into the void.
+  test('GHOST: channel present but not live ⇒ autospawn path, not direct dispatch', async () => {
+    const calls: Calls = { launched: 0, dispatched: [], runLogs: [] }
+    const deps = makeDeps(
+      {
+        // phantom channel present, but the liveness check says it's a ghost.
+        getChannel: (() => ({ ws: { send() {} } })) as any,
+        isSessionLive: async () => false,
+      },
+      calls,
+    )
+    const out = await injectOrchestratorPrompt(input(), deps)
+    expect(out.kind).toBe('autospawn_launched')
+    expect(calls.launched).toBe(1)
   })
 })

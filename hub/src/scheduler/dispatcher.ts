@@ -16,6 +16,7 @@ import {
   setTaskFireTimestamps,
   countFiresForTask,
   disableTaskWithReason,
+  claimOnceTask,
 } from '../db/scheduled-tasks-dal.ts'
 import { boundReason, type ScheduleRule } from './schedule-rules.ts'
 import { isOverCostCap } from '../dispatch/gates.ts'
@@ -39,8 +40,37 @@ interface RunContext {
   triggeredByRunId?: string | null
   /** Manual ("run now") dispatch — the agent sender fails fast on offline. */
   isManual?: boolean
+  /**
+   * Per-run cost accrual (fix/run-cost-attribution). `scheduled_task_runs
+   * .cost_usd` was NULL on 100% of rows — no caller of `finalizeRun` ever
+   * supplied it. Session-targeted runs (`target.sessionId` set) DO incur LLM
+   * cost, reported by the supervisor as `usage_event` messages on the SAME
+   * agent socket while the run is in flight (`ws/agent.ts` records them into
+   * `token_usage` for the daily cap, keyed by sessionId only — no run linkage
+   * existed). `accrueRunCost` sums those events onto every in-flight run
+   * targeting that session, so `finalizeRun` can attribute the real per-turn
+   * cost without inferring it after the fact by timestamp proximity. Callers
+   * never set this — `trackRun` seeds it to 0.
+   */
+  costUsd: number
 }
+type NewRunContext = Omit<RunContext, 'costUsd'>
 const inFlightByRun = new Map<string, RunContext>()
+
+/**
+ * Attribute a supervisor-reported `usage_event` cost to every currently
+ * in-flight scheduled run targeting `sessionId`. Called from the agent ws
+ * `usage_event` handler with the SAME cost value it just persisted into
+ * `token_usage` (SDK-authoritative or pricing-fallback) — this only changes
+ * WHERE that number is also recorded, never how it's computed, so it can
+ * never double-count against the token_usage-derived cost cap.
+ */
+export function accrueRunCost(sessionId: string | null | undefined, costUsd: number): void {
+  if (!sessionId || !(costUsd > 0)) return
+  for (const ctx of inFlightByRun.values()) {
+    if (ctx.target.sessionId === sessionId) ctx.costUsd += costUsd
+  }
+}
 
 // B4: keep the queue-depth gauge in sync. Dynamic require avoids a top-of-file
 // dep tangle with the metrics module. Try/catch so a registry hiccup never
@@ -59,14 +89,44 @@ export function removeRunContext(runId: string): void {
   inFlightByRun.delete(runId)
   syncQueueDepthGauge()
 }
-export function trackRun(ctx: RunContext): void {
-  inFlightByRun.set(ctx.runId, ctx)
+export function trackRun(ctx: NewRunContext): void {
+  inFlightByRun.set(ctx.runId, { ...ctx, costUsd: 0 })
   syncQueueDepthGauge()
 }
 
 export async function fire(taskId: string): Promise<void> {
   const task = await getTaskById(taskId)
   if (!task || !task.enabled) return
+
+  // Milestone once: a one-time task fires EXACTLY ONCE then self-finalizes so it
+  // never re-arms. No cron rule / bound is evaluated (there is none). It reuses
+  // the ENTIRE downstream pipeline — fireTask → sender → finalizeRun → post-run
+  // → email — unchanged; only the "don't fire again" bookkeeping differs.
+  //
+  // CLAIM-THEN-FIRE (double-fire crash-window fix): flip the row to enabled=false
+  // BEFORE dispatching, in one conditional UPDATE (`AND enabled = true`). Only
+  // dispatch if THIS caller won the claim. A hub restart AFTER the dispatch but
+  // BEFORE this commit therefore cannot re-arm the row (it is already disabled),
+  // and a concurrent second fire loses the claim and no-ops — closing the window
+  // at the source. We dispatch as MANUAL so an offline target fails fast instead
+  // of parking in the grace buffer for a replay (a replay would re-fire a
+  // run-once task).
+  if ((task as any).schedule_kind === 'once') {
+    let claimed = false
+    try { claimed = await claimOnceTask(taskId) } catch (err: any) {
+      log.error('scheduler.dispatcher.once_claim_failed', { task_id: taskId, error: err?.message })
+      // Fail closed: an errored claim must NOT dispatch (a re-arm is safer than a
+      // double client-site touch). The still-enabled row is retried on next fire.
+      return
+    }
+    try { (await import('./registry.ts')).unregister(taskId) } catch {}
+    if (!claimed) {
+      log.info('scheduler.dispatcher.once_claim_lost', { task_id: taskId })
+      return
+    }
+    await fireTask(task, { chainDepth: 0, skipCronUpdate: true, isManual: true })
+    return
+  }
   // P1 end-bounds: scheduled (cron) fires honor `until`/`max_runs`. When a
   // bound is reached we auto-disable the task (so it stops cleanly + surfaces
   // a "completed" reason) and skip this fire. Manual run-now / chained runs go
@@ -106,6 +166,14 @@ export async function runNow(
   const task = await getTaskById(taskId)
   if (!task) return { runIds: [] }
   if (task.user_id !== userId) return { runIds: [] }
+  // A disabled task must not dispatch via chain_task or the grace-buffer
+  // replay (neither passes isManual) — only the explicit human "Run Now"
+  // button (POST /:id/run-now → isManual: true) may override. Mirrors
+  // fire()'s `if (!task.enabled) return` guard, which this path bypassed.
+  if (!task.enabled && !opts.isManual) {
+    log.info('scheduler.dispatcher.skipped_disabled', { task_id: taskId, user_id: userId })
+    return { runIds: [] }
+  }
   // Phase 06 plan 008 — webhook-triggered triage passes per-event payload.
   if (opts.payloadOverride) {
     ;(task as any).payload = { ...(task.payload ?? {}), ...opts.payloadOverride }
@@ -210,7 +278,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       target_id: null,
       triggered_by_run_id: opts.triggeredByRunId ?? null,
     })
-    const ctx: RunContext = {
+    const ctx: NewRunContext = {
       runId: run.id,
       taskId: task.id,
       userId,
@@ -237,6 +305,109 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       })
     } catch (err: any) {
       void finalizeRun(run.id, 'failed', err?.message || 'triage_import_failed')
+    }
+    if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
+    runIds.push(run.id)
+    return { runIds }
+  }
+
+  // Milestone TEAB (Phase TEAB-04): a `teab` task self-resolves its target —
+  // the online supervisor that hosts `teab_repo_ident` — rather than a fixed
+  // session/supervisor target via resolveTargets (mirroring the triage branch
+  // above). It reaches here AFTER the threshold → cost-cap pre-gates, so the cap
+  // stays non-bypassable. The sender issues `run_command teab_run`; the
+  // poll-to-terminal + finalize loop lands in TEAB-05.
+  if (task.task_type === 'teab') {
+    const run = await insertRunV2({
+      task_id: task.id,
+      user_id: userId,
+      status: 'pending',
+      scheduled_for: now,
+      target_kind: 'supervisor',
+      target_id: null,
+      triggered_by_run_id: opts.triggeredByRunId ?? null,
+    })
+    const ctx: NewRunContext = {
+      runId: run.id,
+      taskId: task.id,
+      userId,
+      target: { kind: 'supervisor', online: true },
+      startedAt: now.getTime(),
+      parentFireId: null,
+      chainDepth: opts.chainDepth,
+      triggeredByRunId: opts.triggeredByRunId ?? null,
+      isManual,
+    }
+    trackRun(ctx)
+    broadcastScheduledRun(userId, {
+      type: 'scheduled_run_started',
+      run_id: run.id,
+      task_id: task.id,
+      scheduled_for: now.toISOString(),
+      target_kind: 'supervisor',
+      target_id: null,
+    })
+    try {
+      const { sendTeabTask } = await import('./senders/teab.ts')
+      void sendTeabTask(task, ctx).catch((err: any) => {
+        log.error('scheduler.dispatcher.teab_sender_failed', { run_id: run.id, task_id: task.id, error: err?.message })
+        void finalizeRun(run.id, 'failed', err?.message || 'teab_threw')
+      })
+    } catch (err: any) {
+      void finalizeRun(run.id, 'failed', err?.message || 'teab_import_failed')
+    }
+    if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
+    runIds.push(run.id)
+    return { runIds }
+  }
+
+  // Milestone once: an inbound external work item (/api/ext/work) enqueued as a
+  // one-time 'work' task. Like triage/teab it self-resolves its target (the
+  // stream-json session pinned in payload) rather than via resolveTargets. It
+  // reaches here AFTER the threshold → cost-cap pre-gates, so the caps stay
+  // non-bypassable, and the sender calls the EXISTING dispatchWork (whose own
+  // non-negotiable gate list — repo allowlist, work rate, token/cost — runs
+  // again). The scheduled_task_run records "work item ACCEPTED into the
+  // pipeline"; work_runs remains the typed TERMINAL result/audit record.
+  if (task.task_type === 'work') {
+    const run = await insertRunV2({
+      task_id: task.id,
+      user_id: userId,
+      status: 'pending',
+      scheduled_for: now,
+      target_kind: 'session',
+      target_id: (task.payload?.work_session_id as string) ?? null,
+      session_id: (task.payload?.work_session_id as string) ?? null,
+      triggered_by_run_id: opts.triggeredByRunId ?? null,
+    })
+    const ctx: NewRunContext = {
+      runId: run.id,
+      taskId: task.id,
+      userId,
+      target: { kind: 'session', sessionId: (task.payload?.work_session_id as string) ?? null, online: true },
+      startedAt: now.getTime(),
+      parentFireId: null,
+      chainDepth: opts.chainDepth,
+      triggeredByRunId: opts.triggeredByRunId ?? null,
+      isManual,
+    }
+    trackRun(ctx)
+    broadcastScheduledRun(userId, {
+      type: 'scheduled_run_started',
+      run_id: run.id,
+      task_id: task.id,
+      scheduled_for: now.toISOString(),
+      target_kind: 'session',
+      target_id: ctx.target.sessionId,
+    })
+    try {
+      const { sendWorkTask } = await import('./senders/work.ts')
+      void sendWorkTask(task, ctx).catch((err: any) => {
+        log.error('scheduler.dispatcher.work_sender_failed', { run_id: run.id, task_id: task.id, error: err?.message })
+        void finalizeRun(run.id, 'failed', err?.message || 'work_threw')
+      })
+    } catch (err: any) {
+      void finalizeRun(run.id, 'failed', err?.message || 'work_import_failed')
     }
     if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
     runIds.push(run.id)
@@ -290,7 +461,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       triggered_by_run_id: opts.triggeredByRunId ?? null,
     })
 
-    const ctx: RunContext = {
+    const ctx: NewRunContext = {
       runId: run.id,
       taskId: task.id,
       userId,
@@ -436,7 +607,7 @@ function updateFireTimestamps(taskId: string, fired: Date): void {
   void setTaskFireTimestamps(taskId, fired, next)
 }
 
-export async function routeToSender(task: ScheduledTask, ctx: RunContext): Promise<void> {
+export async function routeToSender(task: ScheduledTask, ctx: NewRunContext): Promise<void> {
   // F-11: orchestrator tasks are owned by the controller due-tick
   // (scanAndEnqueueDueCycles, gated by isOrchestratorEnabled) — NOT the cron
   // sender. If such a task ever reaches the cron path (e.g. a future misconfig
@@ -505,6 +676,14 @@ export async function finalizeRun(
     cost_usd?: number | null
     duration_ms?: number | null
     output_snippet?: string | null
+    /**
+     * Claim-then-finalize: only write while the run row is still non-terminal
+     * (`pending` or `in_flight`). Used by BOTH racers on a long-running run —
+     * the stale-run reaper and TEAB's poll-to-terminal loop — so whichever
+     * writes second gets no row back and no-ops instead of clobbering the
+     * terminal row and re-firing its post-run chain.
+     */
+    only_if_active?: boolean
   } = {},
 ): Promise<void> {
   const ctx = inFlightByRun.get(runId)
@@ -513,14 +692,28 @@ export async function finalizeRun(
     ? fields.duration_ms
     : ctx ? finishedAt.getTime() - ctx.startedAt : null
 
+  // An explicit `fields.cost_usd` (none of today's callers pass one) always
+  // wins; otherwise fall back to what `accrueRunCost` accumulated from this
+  // run's own `usage_event`s while in flight. `> 0` guard: a supervisor/coolify/
+  // teab run with no CLI turn never accrues anything and stays correctly NULL
+  // rather than a misleading `0`.
+  const costUsd = fields.cost_usd ?? (ctx && ctx.costUsd > 0 ? ctx.costUsd : null)
+
   const updated = await updateRunStatus(runId, {
     status,
     error: error ?? null,
-    cost_usd: fields.cost_usd ?? null,
+    cost_usd: costUsd,
     duration_ms: dur,
     output_snippet: fields.output_snippet ?? null,
     finished_at: finishedAt,
-  })
+  }, { onlyIfActive: fields.only_if_active === true })
+
+  // Lost the claim race — another finalizer already took this run to a terminal
+  // state. Do NOT broadcast or re-fire post-run actions.
+  if (fields.only_if_active === true && !updated) {
+    inFlightByRun.delete(runId); syncQueueDepthGauge()
+    return
+  }
 
   if (ctx) {
     // Round-2 migration: the per-session queue slot is released by the shared
@@ -536,7 +729,7 @@ export async function finalizeRun(
     task_id: ctx?.taskId ?? updated?.task_id ?? null,
     status,
     error: error ?? null,
-    cost_usd: fields.cost_usd ?? null,
+    cost_usd: costUsd,
     duration_ms: dur,
     output_snippet: fields.output_snippet ?? null,
   })
@@ -546,7 +739,7 @@ export async function finalizeRun(
     : updated?.task_id ? await getTaskById(updated.task_id) : null
   if (task) {
     await onRunFinalized(task, runId, status, error ?? null, {
-      cost_usd: fields.cost_usd ?? null,
+      cost_usd: costUsd,
       duration_ms: dur,
       output_snippet: fields.output_snippet ?? null,
       parentFireId: ctx?.parentFireId ?? null,

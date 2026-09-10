@@ -1,7 +1,134 @@
 import { readdirSync, statSync, existsSync, readFileSync } from 'fs'
 import { join, basename } from 'path'
-import { introspect } from './git-introspect'
+import { introspect, resolveGitCacheKeyPaths, type GitIntrospection } from './git-introspect'
 import type { ScanSettings } from './config'
+
+/** Cap on concurrent `introspect()` calls during a `scanRoots()` pass. Each
+ *  call spawns up to 5 git subprocesses via `execFile` (off the JS thread via
+ *  libuv), so this bounds concurrent child-process/file-handle pressure
+ *  rather than event-loop time. */
+const INTROSPECT_CONCURRENCY = 8
+
+/**
+ * 2026-08-18 QC (D6) — hard cap on cache size. Entries are only ever added
+ * for paths that produced a trustworthy (non -1) key, so the cache tracks
+ * roughly the live candidate set (a few hundred here) — this cap is a
+ * backstop against unbounded growth if a long-lived process scans many
+ * different roots over its lifetime (scratch dirs, temp clones, etc.), not a
+ * bound expected to bind in normal operation.
+ *
+ * D6-R2 (QC round 2, comment correction) — eviction below is FIFO by FIRST
+ * INSERTION, not "oldest by use": `Map.set()` on an already-present key does
+ * NOT move it in iteration order, only replaces its value, so a refreshed
+ * hot entry keeps its original position and can be evicted before a colder
+ * entry inserted later. Purely cosmetic at the scale this actually runs at
+ * (cache size never approaches this cap — see above), but the eviction
+ * policy is FIFO, not LRU; don't rely on it behaving like the latter.
+ */
+const INTROSPECT_CACHE_MAX_ENTRIES = 2_000
+
+/**
+ * 2026-08-18 (fix/session-start-freeze) — per-path introspection cache.
+ * Process-lifetime — cleared implicitly on supervisor restart, which is
+ * fine: a restart already pays a fresh scan, same as before this change.
+ *
+ * 2026-08-18 QC (D1) — the cache key USED TO BE just `mtime('.git/HEAD')`
+ * (falling back to the directory's own mtime). Proven stale two ways on live
+ * git repos:
+ *   (a) Worktrees: `.git` is a FILE there, so `stat('<path>/.git/HEAD')`
+ *       always threw ENOENT and the key silently degraded to the worktree
+ *       directory's own mtime — which a branch switch inside the worktree
+ *       does NOT change. Every worktree reported its first-scan branch for
+ *       the rest of the process's life.
+ *   (b) `git remote add` / `git remote set-url` write `.git/config`, which
+ *       touches neither `.git/HEAD` nor the directory — so `git_remote` and
+ *       `git_origin_github` (the grouping/dedup key for the whole
+ *       worktree-canonical computation below) went permanently stale too.
+ *
+ * Fixed: the key now folds in BOTH `HEAD` and `config` mtimes, resolved via
+ * `resolveGitCacheKeyPaths()` (git-introspect.ts) — the single source of
+ * truth for "which files does introspect() actually depend on", including
+ * the worktree case (own `HEAD`, but the canonical repo's SHARED `config`
+ * two levels up). When neither path can be trusted (non-repo, unreadable,
+ * unrecognized `gitdir:` shape), the key is `-1` and `introspectCached`
+ * treats that as DO-NOT-CACHE — always re-introspect, never store under `-1`
+ * (an unreadable key isn't a valid cache entry; storing it just accumulates
+ * dead weight, which was D6 the first time around).
+ */
+const introspectCache = new Map<string, { key: number; result: GitIntrospection }>()
+
+function introspectCacheKey(path: string): number {
+  const { headPath, configPath } = resolveGitCacheKeyPaths(path)
+  if (!headPath && !configPath) {
+    // No git structure recognized at all (plain non-repo candidate, or an
+    // unrecognized `.git` shape) — fall back to the directory's own mtime.
+    // Valid enough for `is_git_repo:false`: that only flips if a `.git`
+    // appears, which touches the directory.
+    try {
+      return statSync(path).mtimeMs
+    } catch {
+      return -1
+    }
+  }
+  let headMtime = -1
+  let configMtime = -1
+  if (headPath) {
+    try {
+      headMtime = statSync(headPath).mtimeMs
+    } catch {
+      headMtime = -1
+    }
+  }
+  if (configPath) {
+    try {
+      configMtime = statSync(configPath).mtimeMs
+    } catch {
+      configMtime = -1
+    }
+  }
+  if (headMtime === -1 && configMtime === -1) return -1
+  // Combine into one comparable number. These are independent timestamps —
+  // collision requires both to change by exactly offsetting amounts between
+  // scans, which is acceptable for a staleness heuristic (not a security
+  // boundary; the worst case is one extra re-introspect, not a wrong result).
+  return (headMtime === -1 ? 0 : headMtime) + (configMtime === -1 ? 0 : configMtime)
+}
+
+async function introspectCached(path: string): Promise<GitIntrospection> {
+  const key = introspectCacheKey(path)
+  if (key === -1) {
+    // No trustworthy staleness signal — never cache, always fresh. (D1/D6)
+    return introspect(path)
+  }
+  const cached = introspectCache.get(path)
+  if (cached && cached.key === key) {
+    return cached.result
+  }
+  const result = await introspect(path)
+  if (introspectCache.size >= INTROSPECT_CACHE_MAX_ENTRIES && !introspectCache.has(path)) {
+    // FIFO eviction by first-insertion order — see D6-R2 note above.
+    const oldest = introspectCache.keys().next().value
+    if (oldest !== undefined) introspectCache.delete(oldest)
+  }
+  introspectCache.set(path, { key, result })
+  return result
+}
+
+/** Bounded-concurrency `Promise.all`-style map — runs at most `limit` calls
+ *  to `fn` at once, preserving input order in the returned array. */
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let next = 0
+  async function worker() {
+    while (true) {
+      const i = next++
+      if (i >= items.length) return
+      results[i] = await fn(items[i])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
+}
 
 export interface ScannedRepo {
   path: string
@@ -229,7 +356,104 @@ function walkRoot(root: string, settings: ScanSettings, compiledGlobs: RegExp[])
  *   5. Dirs where introspection finds no `.git` AND they're not a root are
  *      dropped — we don't want to flood the hub with every workspace folder.
  */
-export async function scanRoots(cfg: {
+/**
+ * 2026-08-18 QC (D7, revised after D7-R2) — `scanRoots()` is re-entrant now
+ * that it no longer blocks: `hub-client.ts` fires `void this.sendRepoInventory()`
+ * from three separate call sites (initial `auth_ok`, config-change re-emit,
+ * rescan request) with no coordination between them. Before this PR, the
+ * previous blocking implementation serialized overlapping calls BY ACCIDENT
+ * — one scan monopolized the process, so a second couldn't even start until
+ * the first returned. Now two overlapping reconnects could otherwise run two
+ * full scans concurrently (16 git children instead of 8).
+ *
+ * D7-R2 (QC round 2, BLOCKER): the first version of this guard returned the
+ * SAME in-flight promise for ANY call while one was running, without
+ * comparing `cfg` — so a `set_roots` call landing mid-scan got back the
+ * FIRST caller's (stale) roots, silently. That's exactly the case this guard
+ * must not break: `set_roots`/rescan exist precisely because the cached
+ * answer is not good enough anymore. On `main` this could not happen — the
+ * blocking scan serialized overlapping calls, so a second call always ran
+ * fresh once the first returned.
+ *
+ * Fixed: the guard is now keyed on `cfg` (roots + scan settings).
+ *   - A call whose cfg matches the in-flight scan's cfg shares that promise
+ *     (the dedup this guard exists for).
+ *   - A call with a DIFFERENT cfg while a scan is running does NOT start a
+ *     second concurrent scan (that would defeat the guard's purpose) —
+ *     instead it queues behind the current one. At most one scan is queued;
+ *     a further call while one is already queued merges into it (only the
+ *     LATEST cfg is actually scanned — an intermediate cfg is moot once a
+ *     newer one has superseded it), and every caller that queued gets
+ *     settled from that one follow-up scan's result.
+ *   - The guard clears in `.finally()`, so a failed/rejected scan can never
+ *     wedge it — the queued follow-up (if any) still runs.
+ *
+ * CONTRACT — "latest cfg wins": when several distinct-cfg calls queue behind
+ * one in-flight scan, only the LAST one queued is actually scanned; every
+ * caller that queued (including ones whose own cfg got superseded) is
+ * settled from that single follow-up's result, not from a scan of their own
+ * specific cfg. This is correct for every current call site: all of
+ * `hub-client.ts`'s callers read off the ONE mutating `SupervisorClient`
+ * config, so "the latest cfg" and "MY cfg" are the same object by the time
+ * the follow-up runs. It would be WRONG if a second, independently-configured
+ * `SupervisorClient` (or any caller with genuinely different, still-relevant
+ * roots) ever coexisted in the same process — a superseded caller's cfg would
+ * silently never be honored. There is no such caller today; if one is ever
+ * added, this guard needs a keyed queue (one pending slot per distinct cfg),
+ * not a single one.
+ */
+interface QueuedScanRoots {
+  cfg: { roots: string[]; scan: ScanSettings }
+  key: string
+  resolvers: Array<(p: Promise<RepoEntry[]>) => void>
+}
+
+let scanRootsInFlight: { key: string; promise: Promise<RepoEntry[]> } | null = null
+let scanRootsQueued: QueuedScanRoots | null = null
+
+function scanRootsCfgKey(cfg: { roots: string[]; scan: ScanSettings }): string {
+  return JSON.stringify({ roots: cfg.roots, scan: cfg.scan })
+}
+
+export function scanRoots(cfg: { roots: string[]; scan: ScanSettings }): Promise<RepoEntry[]> {
+  const key = scanRootsCfgKey(cfg)
+
+  if (!scanRootsInFlight) {
+    return startScanRoots(cfg, key)
+  }
+  if (scanRootsInFlight.key === key) {
+    return scanRootsInFlight.promise
+  }
+
+  // Different cfg while a scan is running — queue exactly one follow-up
+  // (using the latest cfg), settle every queued caller from its result.
+  return new Promise<RepoEntry[]>((resolve, reject) => {
+    const resolver = (p: Promise<RepoEntry[]>) => p.then(resolve, reject)
+    if (scanRootsQueued) {
+      scanRootsQueued.cfg = cfg
+      scanRootsQueued.key = key
+      scanRootsQueued.resolvers.push(resolver)
+    } else {
+      scanRootsQueued = { cfg, key, resolvers: [resolver] }
+    }
+  })
+}
+
+function startScanRoots(cfg: { roots: string[]; scan: ScanSettings }, key: string): Promise<RepoEntry[]> {
+  const p = scanRootsInner(cfg).finally(() => {
+    scanRootsInFlight = null
+    if (scanRootsQueued) {
+      const next = scanRootsQueued
+      scanRootsQueued = null
+      const nextPromise = startScanRoots(next.cfg, next.key)
+      for (const resolver of next.resolvers) resolver(nextPromise)
+    }
+  })
+  scanRootsInFlight = { key, promise: p }
+  return p
+}
+
+async function scanRootsInner(cfg: {
   roots: string[]
   scan: ScanSettings
 }): Promise<RepoEntry[]> {
@@ -247,13 +471,41 @@ export async function scanRoots(cfg: {
     }
   }
 
-  // Introspect. Synchronous spawnSync per dir — fine for the scale we target
-  // (hundreds of dirs at depth≤2). We wrap in Promise.resolve to keep the API
-  // async for future I/O concurrency.
+  // 2026-08-18 (fix/session-start-freeze) — ROOT CAUSE (not a mitigation):
+  // introspect() used to run 3-5 `spawnSync` git calls per candidate
+  // directory. spawnSync blocks Bun's single main thread for the full
+  // subprocess wait; called from a plain for-loop with no `await` inside, a
+  // 303-candidate scan of a real roots tree (C:\Users\artic\GitHub) live-
+  // reproduced as 4m07s of UNINTERRUPTED blocking — the loopback status
+  // server stopped answering HTTP entirely, session_inventory's 10s push
+  // never got a chance to start, and an inbound `session.start` WS frame
+  // landing mid-scan sat unprocessed until the scan finished. This fires
+  // unconditionally on every hub reconnect (sendRepoInventory, called right
+  // after `hello`), so every reconnect froze the process.
+  //
+  // Fixed at the source in git-introspect.ts: `introspect()` now uses
+  // `execFile` (libuv thread pool) instead of blocking on every git spawn. A
+  // `setImmediate` yield between candidates was tried first but is a
+  // starvation-bound mitigation on top of the same blocking calls, not a fix
+  // — removed now that the calls themselves don't block. NOT a claim that the
+  // event loop is fully free during a scan: `walkRoot` below (readdirSync/
+  // statSync over the whole tree) plus one `statSync`-based cache-key check
+  // per candidate are still synchronous. Measured worst-case event-loop lag
+  // against the real roots tree: 596ms (vs. the pre-fix 4m07s total lockout)
+  // — the multi-minute freeze is gone; brief synchronous stat bursts remain.
+  //
+  // Also cached (see `introspectCached`/`introspectCacheKey` above), keyed by
+  // path + the mtimes of the files that actually determine `introspect()`'s
+  // output (`.git/HEAD` and `.git/config`, worktree-aware). An unchanged key
+  // means a re-scan can reuse the prior result and skip every git spawn for
+  // that path — a reconnect against an unchanged roots tree costs a couple of
+  // `stat()` calls per candidate instead of up to 5 subprocess spawns.
   const rootSet = new Set(cfg.roots.map((r) => r.replace(/\\/g, '/')))
   const entries: RepoEntry[] = []
-  for (const path of allCandidates) {
-    const gi = introspect(path)
+  const introResults = await mapWithConcurrency(allCandidates, INTROSPECT_CONCURRENCY, introspectCached)
+  for (let i = 0; i < allCandidates.length; i++) {
+    const path = allCandidates[i]
+    const gi = introResults[i]
     if (!gi.is_git_repo) {
       // Only emit non-repo entries that ARE a configured root — those become
       // pending_local_repos. Skipping every other plain workspace folder.

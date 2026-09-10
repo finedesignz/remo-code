@@ -1,314 +1,274 @@
-<!-- refreshed: 2026-05-28 -->
+<!-- refreshed: 2026-07-12 -->
 # Architecture
 
-**Analysis Date:** 2026-05-28
+**Analysis Date:** 2026-07-12
 
 ## System Overview
 
 ```text
-┌──────────────────────────────────────────────────────────────────────────┐
-│  Browser SPA (web/, React 19 + Vite + Tailwind 4, hash-router)           │
-│                                                                          │
-│  3 top-level routes (Phase 12):                                          │
-│    #/         Home     → Tabs: List | Grid                               │
-│    #/tasks    Tasks    → Tabs: Upcoming | Activity | Schedule            │
-│    #/settings Settings → Tabs: Connections | Credentials | Usage | Profile│
-│                                  (Prompts + Orchestrator removed:         │
-│                                   milestone v-settings-overhaul)          │
-│                                                                          │
-│  Mobile:  PWA + Capacitor wrapper (mobile/), MobileAccordion surface     │
-└────────────────────┬──────────────────────────────┬──────────────────────┘
-                     │ REST /api/*                  │ WS /ws/client
-                     │ (cookie session OR JWT)      │ (jwt OR session cookie)
-                     ▼                              ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│  Hub (hub/, Bun + Hono, port 3040, single process)                       │
-│  `hub/src/index.ts` — composition root                                   │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐    │
-│  │ HTTP/REST: api/*                                                  │    │
-│  │  auth, profile, account, sessions, messages, api-keys,            │    │
-│  │  scheduled-tasks, scheduled-task-runs,                            │    │
-│  │  sentry-intake (public), errors, error-projects, error-runs,      │    │
-│  │  error-setup, coolify-webhook (public), webhooks-titanium (pub),  │    │
-│  │  revanote-webhook (public), revanote-mappings, revanote-annot.,   │    │
-│  │  telegram-webhook (public), telegram, chat-tabs, instructions,    │    │
-│  │  supervisors, github, transcribe, commands, tasks, usage,         │    │
-│  │  orchestrator, plugin, setup, admin, well-known, _openapi         │    │
-│  └──────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐    │
-│  │ WebSocket:  /ws/client (browser)   /ws/agent (supervisor)         │    │
-│  │  ws/client.ts, ws/agent.ts, ws/registry.ts,                       │    │
-│  │  ws/supervisor-registry.ts, ws/send-dedupe.ts,                    │    │
-│  │  ws/idle-teardown.ts, ws/protocol.ts (Zod schemas)                │    │
-│  └──────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐    │
-│  │ Subsystems                                                        │    │
-│  │  scheduler/   — croner-driven dispatch + post-run actions         │    │
-│  │  error-capture/ — Sentry intake → fingerprint → dispatch          │    │
-│  │  revanote/    — annotations webhook → diff sandbox → CI gate      │    │
-│  │  telegram/    — bridge, link codes, dispatch, doctor              │    │
-│  │  orchestrator/ — multi-session orchestration + orphan resume      │    │
-│  │  usage/       — Anthropic quota snapshot + threshold gating       │    │
-│  │  sessions/    — budget + routing helpers                          │    │
-│  │  events/      — internal EventEmitter (assistant_message:final)   │    │
-│  │  auth/        — middleware, JWT, password (legacy), reauth, admin │    │
-│  │  license-gate.ts — Titanium license_status gate                   │    │
-│  │  titanium-client.ts — JWKS verifier + license validate            │    │
-│  └──────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐    │
-│  │ Data: PostgreSQL (Coolify-hosted)                                 │    │
-│  │  db/postgres.ts (postgres.js client), db/schema.sql,              │    │
-│  │  db/migrate.ts, db/dal.ts + per-domain DALs                       │    │
-│  └──────────────────────────────────────────────────────────────────┘    │
-└────────────────────┬───────────────────────────────┬─────────────────────┘
-                     │ WS /ws/agent                  │ outbound HTTP
-                     │ (api_key + project_dir)       │ (Titanium, Coolify,
-                     ▼                               │  GitHub gateway,
-┌─────────────────────────────────────────────┐     │  emails4agents,
-│ Supervisor (supervisor/, Tauri tray app)    │     │  Telegram, KIE)
-│  supervisor/src/index.ts — Bun runtime,     │     │
-│  compiled to sidecar binary by Tauri.       │     ▼
-│  supervisor/tauri/src-tauri/ — Rust shell.  │    External APIs
-│  supervisor/tauri/ui/ — React settings UI.  │
-│                                              │
-│  One per dev host. Connects /ws/agent,        │
-│  spawns CLIs lazily per session.              │
-└────────────────────┬─────────────────────────┘
-                     │ stdio JSON
-                     ▼
-┌─────────────────────────────────────────────┐
-│ CLIs (one persistent process per session)   │
-│  Claude Code: claude --input-format          │
-│    stream-json --output-format stream-json   │
-│    --verbose   (supervisor/src/runners/      │
-│                 claude-runner.ts)            │
-│  Codex (spike): codex app-server JSON-RPC    │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Browser SPA — `web/` (React 19 + Vite + Tailwind 4, hash router)           │
+│                                                                             │
+│  Human surface is SELECTED AT RUNTIME by `GET /api/client-config`:          │
+│    pty_interactive=true  → `TerminalSurface.tsx`  (xterm.js over raw PTY)   │
+│    pty_interactive=false → `ChatSurface.tsx`      (stream-json bubbles)     │
+│  Prod = PTY (REMO_PTY_INTERACTIVE ON since 2026-06-04). ChatSurface KEPT    │
+│  as fallback; deletion gated by `tools/cutover-deletion-gate.mjs`.          │
+│                                                                             │
+│  Routes: #/ Home (List|Grid) · #/tasks (Upcoming|Activity|Schedule|         │
+│          Orchestrator) · #/settings (Connections|Credentials|Usage|Profile) │
+└──────────┬────────────────────────┬─────────────────────────┬───────────────┘
+           │ REST /api/*            │ WS /ws/client           │ WS /ws/term
+           │ (opaque cookie)        │ (chat + activity)       │ (raw PTY bytes)
+           ▼                        ▼                         ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  HUB — `hub/` (Bun + Hono, ONE process, port 3040)                          │
+│  Composition root: `hub/src/index.ts` (716 lines: mount order + boot)       │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ INBOUND SUBSYSTEMS (each has its own intake + prompt, NO own queue)   │  │
+│  │  scheduler/ · error-capture/ · revanote/ · feedback/ · telegram/ ·    │  │
+│  │  orchestrator/ · api/messages (human chat)                            │  │
+│  └───────────────────────────┬───────────────────────────────────────────┘  │
+│                              │ ALL of them call…                            │
+│                              ▼                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ SHARED DISPATCH PIPELINE — `hub/src/dispatch/`                        │  │
+│  │   pipeline.ts  dispatch(req, deps) / onSessionReply(sessionId, text)  │  │
+│  │   gates.ts     thresholdGate → dailyCostCapGate → dailyTokenCapGate   │  │
+│  │                → sessionInjectRateGate → concurrencyGate →            │  │
+│  │                humanOnlyPtyGate → (subsystem budget gates)            │  │
+│  │   session-queue.ts  1 in-flight + 1 waiter per session_id            │  │
+│  │   grace.ts     offline supervisor → buffer, replay on reconnect       │  │
+│  │   spawn-on-error.ts  autospawn seam for offline-but-supervised repos  │  │
+│  │   → finalize: run row closed on `assistant_message:final`             │  │
+│  └───────────────────────────┬───────────────────────────────────────────┘  │
+│                              │                                              │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ BACKGROUND SWEEPS (all boot-started in index.ts, all env-disableable) │  │
+│  │   ws/ghost-reaper.ts        online+hostname-NULL phantom agent chans  │  │
+│  │   scheduler/run-reaper.ts   scheduled_task_runs stuck 'pending'       │  │
+│  │   orchestrator/stale-lock-reaper.ts  SessionQueue lock never released │  │
+│  │   ws/idle-teardown.ts       0 subscribers → shutdown after grace      │  │
+│  │   scheduler/registry.ts     croner tick · orchestrator/queue.ts drain │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                             │
+│  Data: PostgreSQL (Coolify). `db/postgres.ts` + `db/schema.sql` (re-run on  │
+│  EVERY boot — idempotent DDL only) + per-domain DALs.                       │
+└──────────┬──────────────────────────────────────────────────────────────────┘
+           │ WS /ws/agent  (api_key + project_dir + hostname)
+           ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  SUPERVISOR — `supervisor/` (Tauri tray app, one per dev host, MSI)         │
+│  Bun sidecar `supervisor/src/index.ts` (compiled) + Rust shell              │
+│  `supervisor/tauri/src-tauri/src/` (lib.rs, tray.rs, sidecar.rs, pty_host.rs)│
+│                                                                             │
+│  runners/backend-selector.ts decides per session:                           │
+│    HUMAN turn      → claude-pty | codex-pty | gemini-pty  (raw ConPTY)      │
+│    AUTOMATION turn → claude-runner.ts (stream-json, API-key-free)           │
+└──────────┬──────────────────────────────┬───────────────────────────────────┘
+           │ raw PTY bytes (Rust ConPTY)   │ stdin/stdout stream-json (Bun)
+           ▼                               ▼
+   `claude` / `codex` interactive TUI      `claude --input-format stream-json
+   (argv allowlist-of-one, NO API key)      --output-format stream-json --verbose`
 ```
 
 ## Component Responsibilities
 
 | Component | Responsibility | File |
 |-----------|----------------|------|
-| Hub HTTP root | App composition, middleware order, WS upgrades | `hub/src/index.ts` |
-| Hub WS — client | Browser session, subscribe set ≤12, broadcast routing | `hub/src/ws/client.ts` |
-| Hub WS — agent | Supervisor auth, stream-json relay, message persistence | `hub/src/ws/agent.ts` |
-| Hub WS protocols | Zod schemas for inbound/outbound messages | `hub/src/ws/protocol.ts`, `agent-protocol.ts`, `supervisor-protocol.ts` |
-| Auth middleware | Dual-auth (cookie + legacy JWT) | `hub/src/auth/middleware.ts` |
-| License gate | Per-route license_status check w/ exclusion list | `hub/src/license-gate.ts` |
-| Titanium client | JWKS-cached EdDSA verify + license validate | `hub/src/titanium-client.ts` |
-| Scheduler dispatcher | Croner trigger → cost cap → fan-out → sender | `hub/src/scheduler/dispatcher.ts` |
-| Scheduler senders | agent / supervisor / coolify / triage transports | `hub/src/scheduler/senders/*.ts` |
-| Post-run actions | email / telegram / webpush / webhook / github-issue | `hub/src/scheduler/post-run/*.ts` |
-| Error capture intake | Public Sentry envelope endpoint | `hub/src/api/sentry-intake.ts` |
-| Error capture pipeline | auth → envelope → fingerprint → record → dispatch | `hub/src/error-capture/*.ts` |
-| Revanote intake | Public annotations webhook | `hub/src/api/revanote-webhook.ts` |
-| Revanote pipeline | dispatch → sandbox → CI gate → merge gate → callback | `hub/src/revanote/*.ts` |
-| Telegram bridge | Outbound `assistant_message:final` → Telegram chat | `hub/src/telegram/bridge.ts` |
-| Coolify webhook | URL-token + legacy HMAC, triage on failure | `hub/src/api/coolify-webhook.ts` |
-| Supervisor runtime | WS to hub, spawn CLI per session, relay events | `supervisor/src/index.ts`, `hub-client.ts`, `runners/*.ts` |
-| Tauri shell | Tray icon, MSI installer, sidecar lifecycle | `supervisor/tauri/src-tauri/src/*.rs` |
-| Web app root | Hash router, auth state, page mounting | `web/src/App.tsx` |
-| AppShell | Header + nav + footer scaffold (Phase 12) | `web/src/components/ui/AppShell.tsx` |
-| Nav helpers | Active route + tab param parsing | `web/src/lib/ui/nav.ts` |
+| Hub composition root | Mount order (webhooks BEFORE auth), WS upgrades, boot sweeps | `hub/src/index.ts` |
+| Shared dispatch | The ONE inbound path: gates → queue → grace → finalize | `hub/src/dispatch/pipeline.ts` |
+| Gate library | Cost cap, token cap, inject-rate, concurrency, human-only-PTY | `hub/src/dispatch/gates.ts` |
+| Shared webhook intake | Raw-body → constant-time compare → HMAC → skew → IP allowlist | `hub/src/webhooks/intake.ts` |
+| WS — client | Browser auth, subscribe set (≤12), broadcast | `hub/src/ws/client.ts` |
+| WS — agent | Supervisor auth, stream-json relay, message coalesce+persist | `hub/src/ws/agent.ts` |
+| WS — terminal | Raw PTY byte pipe browser↔supervisor | `hub/src/ws/term-protocol.ts` |
+| Scheduler | Croner tick → targets → sender → run row | `hub/src/scheduler/dispatcher.ts`, `registry.ts` |
+| Scheduler senders | agent / supervisor / coolify / triage / **teab** | `hub/src/scheduler/senders/*.ts` |
+| Orchestrator (macro, DEFAULT) | Resolve `macro_task_type` → one autonomous prompt; reconcile sentinels; re-inject | `hub/src/orchestrator/macro-cycle.ts`, `task-macros.ts`, `sentinels.ts` |
+| Orchestrator (legacy waves) | Per-micro-command-row waves — rollback only | `hub/src/orchestrator/waves.ts`, `wave-runner.ts` |
+| Orchestrator control plane | Env gating, due-scan tick, cycle-runner registration | `hub/src/orchestrator/controller.ts` |
+| Orchestrator inject seam | Gate → dispatch OR autospawn-park | `hub/src/orchestrator/inject.ts` |
+| Routine queue | Global cross-session cycle queue + drain worker | `hub/src/orchestrator/queue.ts` |
+| Supervisor runtime | WS to hub, per-session CLI lifecycle, command registry | `supervisor/src/index.ts`, `hub-client.ts`, `process-manager.ts` |
+| Backend selector | Fail-safe human→PTY-only backend choice | `supervisor/src/runners/backend-selector.ts` |
+| PTY host (Rust) | Spawns the genuine TUI on a ConPTY; per-conn subscriber ids | `supervisor/tauri/src-tauri/src/pty_host.rs` |
+| Env sanitizer | Denylist + credential-class regex scrub of every spawn env | `supervisor/src/runners/env-sanitize.ts` |
 
 ## Pattern Overview
 
-**Overall:** layered monolith hub (Hono) + thin desktop sidecar (Tauri+Bun) + SPA (React). Hub is the only network service; supervisor and web both speak to it via WS+REST.
+**Overall:** layered monolith hub (single Bun event loop) + thin per-host desktop sidecar + SPA. The hub is the only network service; both web and supervisor speak to it.
 
 **Key Characteristics:**
-- Single-binary hub; all subsystems live in one Bun process and share a Postgres pool.
-- WebSocket-first for real-time (no polling, no SSE for hub→browser activity).
-- Public, unauthenticated webhook intakes (Sentry, Coolify, Revanote, Telegram, Titanium) are mounted OUTSIDE the `/api/*` JWT catch-all; each owns its own credential model.
-- Stream-json subprocess is the universal CLI transport; Codex spike maps JSON-RPC notifications onto the same `RunnerEvent` union as Claude.
-- Per-session in-memory state (`streamingBySession`, `session-queue`) backed by Postgres flushes.
+- **One dispatch pipeline, many intakes.** The round-2 collapse is COMPLETE — scheduler, error-capture, revanote, feedback, telegram, orchestrator, and human chat all call `dispatch()` from `hub/src/dispatch/pipeline.ts` and pass a `gates: DispatchGate[]` array. There is no per-subsystem queue/grace/finalize anymore.
+- **Two CLI transports, one supervisor.** Human turns get a *raw interactive TUI* over a Rust ConPTY (no API key, no stream-json). Automation turns get stream-json. The selector (`backend-selector.ts`) never routes a human to the stream-json runner.
+- **Everything dangerous is env-gated OFF by default** (`REMO_ORCHESTRATOR_ENABLED`, `REMO_ORCHESTRATOR_AUTOSPAWN`, `REMO_TELEGRAM_TRANSCRIPT_TAIL`, `REMO_ORCHESTRATOR_LEGACY_WAVES`).
+- **Every long-lived in-memory invariant has a reaper.** Ghost channels, pending runs, and queue locks all wedge silently; each has a boot-started sweep with its own interval/threshold/disable env.
+- WebSocket-first for realtime; no polling, no SSE.
 
 ## Layers
 
-**`web/` (presentation):**
-- Purpose: SPA delivered to browser/PWA.
-- Location: `web/src/`
-- Pages under `web/src/pages/`, primitives under `web/src/components/ui/`, feature components under `web/src/components/`, hooks under `web/src/hooks/`, helpers under `web/src/lib/`.
-- Depends on: hub REST + WS only.
+**`web/` (presentation):** `web/src/` — pages, `components/ui/` primitives, feature components, hooks, `lib/`. Talks to hub REST + WS only.
 
-**`hub/api/` (HTTP):**
-- Purpose: REST endpoints, OpenAPI surface.
-- Location: `hub/src/api/`
-- Mounted in `hub/src/index.ts`; public webhooks mounted BEFORE auth, license-gated routes mounted AFTER `requireActiveLicense`.
+**`hub/api/` (HTTP):** one file per resource. Public webhooks (`sentry-intake`, `coolify-webhook`, `revanote-webhook`, `feedback-webhook`, `telegram-webhook`, `webhooks-titanium`) mount BEFORE the `/api/*` auth catch-all; license gate mounts after auth.
 
-**`hub/ws/` (real-time):**
-- Purpose: bidirectional WS for browser and supervisor.
-- Location: `hub/src/ws/`
-- Owns subscribe set, per-conn rate limiting, broadcast registry.
+**`hub/ws/` (realtime):** `/ws/client` (browser chat+activity), `/ws/agent` (supervisor stream-json), terminal byte pipe (`term-protocol.ts`). All Zod-validated (`protocol.ts`, `agent-protocol.ts`, `supervisor-protocol.ts`).
 
-**`hub/{scheduler,error-capture,revanote,telegram,orchestrator,usage,sessions}/` (domain):**
-- Purpose: subsystem logic. Each owns its own DAL slice and prompt/template files.
-- Depends on: db, ws/registry, events, lib helpers.
+**`hub/dispatch/` + `hub/webhooks/` (shared deep modules):** the load-bearing middle. Every inbound subsystem rides them. Do NOT hand-roll a parallel queue.
 
-**`hub/{dispatch,webhooks}/` (shared deep modules — hub-deepening, 2026-05-28):**
-- Purpose: collapse the copied-N-times session-dispatch (gates → queue → grace → finalize) and public-webhook auth-gate (raw-body → secret compare → HMAC → skew → IP allowlist → audit) patterns into single deep modules: `dispatch/{pipeline,session-queue,grace,gates}.ts` (`dispatch()` / `onSessionReply()`) and `webhooks/intake.ts` (`runIntake(c, cfg)`).
-- FOUNDATION ONLY — landed + tested, not yet wired into any subsystem; round-2 migrations move scheduler/error-capture/revanote/telegram onto them and delete the per-subsystem copies. `hub/src/scheduler/session-queue.ts` is a back-compat shim over the shared `SessionQueue`. Mount order + the dispatch invariants are enforced by `hub/test/mount-order.test.ts` and `hub/test/scheduler.test.ts`.
+**`hub/{scheduler,orchestrator,error-capture,revanote,feedback,telegram,usage,sessions}/` (domain):** each owns its intake, prompt building, and DAL slice — and nothing else.
 
-**`hub/db/` (data):**
-- Purpose: Postgres access. Per-subsystem DAL files all import the shared `sql` from `db/postgres.ts`.
-- Schema: `hub/src/db/schema.sql` — idempotent `CREATE TABLE IF NOT EXISTS`, applied by `db/migrate.ts` on boot.
+**`hub/db/` (data):** postgres.js pool + `schema.sql` applied by `db/migrate.ts` on every boot.
 
-**`supervisor/` (host runtime):**
-- Purpose: spawns + relays CLIs.
-- Bun source under `supervisor/src/`, Rust+Tauri shell under `supervisor/tauri/src-tauri/`, settings UI under `supervisor/tauri/ui/`.
+**`supervisor/` (host runtime):** `supervisor/src/` Bun sidecar; `supervisor/tauri/src-tauri/` Rust shell (tray, sidecar lifecycle, ConPTY, first-run wizard); `supervisor/tauri/ui/` React settings UI.
 
 ## Data Flow
 
-### Magic-link login (Phase 07)
+### Universal inbound dispatch (the spine)
 
-1. Browser POST `/api/auth/login/request-link` with email (`hub/src/api/auth.ts`) — rate-limited 3/min/IP + 5/hr/email, silent.
-2. Hub asks Titanium for a magic-link JWT; emails the link via emails4agents.
-3. User clicks → `#/auth/callback?token=…` → SPA POST `/api/auth/callback`.
-4. Hub verifies JWT via `titanium-client.ts` (JWKS-cached EdDSA), links/promotes the user row (`dal.ts`), creates opaque session in `auth_sessions` (`session.ts`), sets cookie + CSRF pair (`csrf.ts`).
-5. SPA reloads, `useAuth` reads cookie, `useLicense` polls `/api/profile/license` every 5 min.
+1. An intake produces a `DispatchRequest` (`hub/src/dispatch/pipeline.ts:36`) — session, prompt, actor, run store.
+2. `dispatch()` runs the supplied gate array in order (`gates.ts`). Any gate rejection short-circuits and is recorded, never bypassed.
+3. Passing requests enter the per-session `SessionQueue` (`dispatch/session-queue.ts` — 1 in-flight + 1 waiter).
+4. If the target session's supervisor is OFFLINE → `grace.ts` buffers; reconnect replays (`scheduler/catchup.ts`). Orchestrator inject can instead autospawn (`dispatch/spawn-on-error.ts` + `orchestrator/inject.ts`).
+5. Prompt ships down `/ws/agent`; the supervisor runs the CLI turn.
+6. `assistant_message:final` on the internal event bus (`hub/src/events/assistant-events.ts`) → `onSessionReply()` finalizes the run row → post-run action chain fires (`scheduler/post-run/dispatcher.ts`).
 
-### Session start + message round-trip
+### Human PTY turn (prod default)
 
-1. Supervisor opens `/ws/agent`, sends `{type:'auth', api_key, project_dir, hostname, rootless_sessions, agent_info}` (`supervisor/src/hub-client.ts` → `hub/src/ws/agent.ts`).
-2. Hub verifies api_key (sha-256 hash in `api_keys`), calls `findOrCreateAgentSessionV2` / `findOrCreateRootlessSession`, sends `auth_ok` with `seed_files` (instructions sync).
-3. Browser opens `/ws/client`, authenticates via cookie or JWT, sends `subscribe` with up to 12 session_ids.
-4. Browser POSTs `/api/messages` or sends WS `send_message` (`hub/src/ws/client.ts`).
-5. Hub `insertMessage`, broadcasts to subscribers, ships `user_message` down `/ws/agent`.
-6. Supervisor writes JSON to CLI stdin; CLI emits stream-json events.
-7. Supervisor relays `thinking` / `text_delta` / `tool_use` / `tool_result` / `assistant_message` → hub → browser.
-8. Hub coalesces deltas into a single message row (`streamingBySession` + `appendToMessage`), finalizes on `assistant_message`, emits `assistant_message:final` on the internal event bus (`hub/src/events/assistant-events.ts`).
+1. SPA reads `GET /api/client-config` → `pty_interactive: true` → mounts `TerminalSurface.tsx` (`web/src/hooks/useTerminalSession.ts`, `web/src/lib/term-ws.ts`).
+2. Keystrokes → hub terminal WS → supervisor `ClaudePtyBridge` (`supervisor/src/runners/claude-pty-bridge.ts`).
+3. Rust `pty_host.rs` spawns the genuine `claude`/`codex` TUI on a ConPTY with an **argv allowlist-of-one** (only the optional operator-blessed `--dangerously-skip-permissions`). Env is scrubbed by `env-sanitize.ts`.
+4. Raw bytes stream back to xterm.js. `pty-persistence.ts` keeps the process alive across reconnects; per-conn subscriber ids prevent the doubled-keystroke leak.
 
-### Scheduled task dispatch
+### Auto-dev orchestrator (macro path — DEFAULT since TMAC)
 
-1. Croner ticker in `hub/src/scheduler/dispatcher.ts` fires from registry (`registry.ts`).
-2. `enforceCostCap` checks daily quota; `targets.ts` resolves `target_kind` (session / supervisor / coolify / all).
-3. Sender chosen: `senders/agent.ts` (CLI prompt with `Summary:` directive), `senders/supervisor.ts` (supervisor command), `senders/coolify.ts` (log_check), `senders/triage.ts` (coolify-webhook synth).
-4. Run row inserted, sent through `session-queue.ts` (1 in-flight + 1 waiter per session).
-5. On `assistant_message:final`, finalize run row; post-run dispatcher fires email / telegram / webpush / webhook / github-issue actions.
-6. Offline supervisor → `grace.ts` buffers up to 10 min, replays via `catchup.ts` on reconnect.
+1. `registerCycleRunnerIfEnabled()` (`orchestrator/controller.ts`, called once from `index.ts`) is a **no-op unless `REMO_ORCHESTRATOR_ENABLED`**. When off, nothing is registered, enqueued, or injected.
+2. Due-scan tick (`REMO_ORCHESTRATOR_TICK_INTERVAL_MS`, default 60s) reads DUE `orchestrator_rows` (`due-rows.ts`) → enqueues on the global `routine_queue` (`queue.ts`).
+3. Drain worker claims a cycle → `runMacroCycle()` (`macro-cycle.ts`):
+   - Resolve `scheduled_tasks.macro_task_type` → ONE autonomous macro prompt (`task-macros.ts`).
+   - Reconcile the PRIOR reply's `<<STATE>>` / `<<NOTIFY>>` / `<<GATE>>` sentinels (`sentinels.ts`) into `routine_run_log`; fan out stage-gated notifications (`notify.ts`).
+   - HALT if a mandatory gate for the current `lifecycle_stage` is open; else re-inject via `inject.ts`.
+4. `inject.ts` gate array is `[thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate]` — the strictest in the codebase.
+5. Verify-tail (`verify-tail.ts`) probes the deployed app when `REMO_VERIFY_*` is set.
+6. Legacy per-micro-command wave path (`waves.ts`, `wave-runner.ts`) survives ONLY behind `REMO_ORCHESTRATOR_LEGACY_WAVES=1`; a guard test enforces the macro default.
 
-### Error capture intake
+### Scheduled task run
 
-1. App SDK POSTs envelope to `/api/sentry/:project_id/envelope/` (`hub/src/api/sentry-intake.ts`) — OUTSIDE `/api/*` JWT scope.
-2. `error-capture/auth.ts` parses `X-Sentry-Auth`, looks up `error_projects.sentry_key`.
-3. `envelope.ts` gunzips multi-line JSON; `fingerprint.ts` sha-256 of project + type + value + top-3 frames.
-4. `record.ts` applies 3 gates: dedupe (60s) → rate-limit (20/hr) → daily cap (50).
-5. `notify.ts` throttled silent-skip emails (via emails4agents) when gates trip.
-6. On pass, `dispatcher.ts` claims session via `scheduler/session-queue.ts`, builds prompt (`prompt.ts`), ships to `/ws/agent`.
-7. `run-lifecycle.ts` finalizes on next `assistant_message`; offline → `grace.ts` 10-min buffer.
+1. Croner tick (`scheduler/registry.ts`) → `dispatcher.ts` → `targets.ts` resolves `target_kind`.
+2. Sender: `senders/agent.ts` (CLI prompt), `supervisor.ts` (host command), `coolify.ts` (`log_check`), `triage.ts` (deploy-failure synth), `teab.ts` (`teab run --repo …` + hub-driven poll-to-terminal).
+3. Run row → shared dispatch → finalize → post-run chain (email by default, telegram, webpush, webhook, github-issue, deploy-verify).
+4. A run whose CLI turn never completes is finalized `failed`/`run_timeout` by `scheduler/run-reaper.ts` — with `only_if_active` conditional updates so a raced run is never double-finalized.
 
-### Revanote dispatch (Phase 08)
+### Reapers
 
-1. Browser-extension annotation POSTs `/api/revanote/webhook` (`hub/src/api/revanote-webhook.ts`).
-2. `revanote/dispatcher.ts` resolves mapping (host → repo/session) via `revanote-dal.ts`, gates on per-user daily cost + per-source budget.
-3. Prompt rendered (`prompt.ts`), sandboxed if needed (`diff-sandbox.ts`, `sandbox.ts`), risk-classified (`risk-classifier.ts`).
-4. Dispatched via `session-queue.ts`; CI gate (`ci-gate.ts`) + merge gate (`merge-gate.ts`) + deploy policy (`deploy-policy.ts`) enforced.
-5. `callback.ts` POSTs result back to revanote; `notify-pr.ts` adds PR comment.
-
-### Coolify webhook triage (Phase 06)
-
-1. Coolify POSTs `/api/coolify/webhook/:user_id/:token` (or legacy HMAC route) — `hub/src/api/coolify-webhook.ts`.
-2. IP allowlist (`lib/cidr.ts`) → Zod validate → audit row in `coolify_webhook_attempts`.
-3. On `deployment.failed`, `triage` task synthesized through scheduler; result parsed by `triage-schema.ts`.
-4. `post-run/github-issue.ts` opens issue (24h idempotency via `github_issue_idempotency`), credentials from gateway pair.
-
-### Telegram chat bridge (Phase 12 W3)
-
-1. Inbound: Telegram POSTs `/api/telegram/webhook` → `telegram/commands.ts` (link, switch, status) or `telegram/dispatch.ts` (free text → session).
-2. Outbound: `telegram/bridge.ts` subscribes to `assistant_message:final`, per-chat serialized `Map<chatId, Promise>` to respect Telegram 1 msg/sec.
-3. Bridge is feature-gated on `config.telegram.botToken`; no-op when unset.
+| Reaper | Wedge it fixes | Knobs |
+|---|---|---|
+| `ws/ghost-reaper.ts` | `sessions` row `online` + `hostname IS NULL` with a phantom agent channel — fools the inject liveness check | `REMO_GHOST_GRACE_MS` (120s), `REMO_GHOST_SWEEP_INTERVAL_MS` (60s), `REMO_GHOST_REAPER_DISABLED` |
+| `scheduler/run-reaper.ts` | `scheduled_task_runs` stuck `pending` forever | `REMO_RUN_MAX_MS` (6h), `REMO_RUN_REAPER_INTERVAL_MS` (5m), `REMO_RUN_REAPER_DISABLED` |
+| `orchestrator/stale-lock-reaper.ts` | in-memory `SessionQueue` lock held forever → `"skipped (run live)"` forever | `REMO_ORCHESTRATOR_STALE_LOCK_MS` (4h), `REMO_ORCHESTRATOR_REAP_NOTIFY_COOLDOWN_MS` (1h) |
+| `ws/idle-teardown.ts` | orphan CLI processes with zero subscribers | `REMO_SESSION_IDLE_GRACE_SECONDS` (4h; `0` disables) |
 
 ## Key Abstractions
 
-**`CliRunner` (supervisor):**
-- Purpose: uniform interface over Claude Code + Codex CLIs.
-- Location: `supervisor/src/runners/types.ts`, implementations in `claude-runner.ts`, `session-bridge.ts`.
-- Emits a normalized `RunnerEvent` union consumed by the hub.
+**`DispatchGate` (hub):** `{ name, check(req) → allow | reject(reason) }`. Composable, ordered, non-bypassable. `hub/src/dispatch/pipeline.ts:47`, implementations in `gates.ts`.
 
-**`session-queue` (hub):**
-- Purpose: 1 in-flight + 1 waiter per session_id; reused by scheduler + error-capture + revanote.
-- Location: `hub/src/scheduler/session-queue.ts`.
+**`CliRunner` / `RunnerEvent` (supervisor):** uniform interface over Claude/Codex/Gemini, PTY and stream-json alike. `supervisor/src/runners/types.ts`, `runner-factory.ts`.
 
-**Internal event bus:**
-- Purpose: decouple WS finalization from downstream consumers (telegram bridge, run-lifecycle, post-run).
-- Location: `hub/src/events/assistant-events.ts` — only fires on FINAL `assistant_message`, never streaming.
+**Sentinels (orchestrator):** `<<STATE>>` / `<<NOTIFY>>` / `<<GATE>>` blocks the agent emits in its reply; parsed by `sentinels.ts`, the only channel by which an autonomous cycle reports progress and requests a halt.
 
-**AppShell + Tabs primitives:**
-- Purpose: shared frame for all 3 top-level web routes.
-- Location: `web/src/components/ui/AppShell.tsx`, `Tabs.tsx`, `HeaderRight.tsx`, `ErrorBoundary.tsx`.
+**Internal event bus:** `hub/src/events/{assistant,permission,question,session-activity}-events.ts` — decouples WS finalization from run-lifecycle, telegram, and post-run consumers. Fires only on FINAL messages, never on deltas.
 
 ## Entry Points
 
-**Hub:**
-- `hub/src/index.ts` — `Bun.serve` with Hono `app`, WS upgrade for `/ws/client` and `/ws/agent`. Runs migrations + scheduler boot + grace sweepers in same process.
-
-**Web:**
-- `web/src/main.tsx` → `web/src/App.tsx` — hash router, routes: `home | tasks | settings | privacy | terms | login | auth-callback | dev-chat-surface | dev-mobile-accordion`.
-
-**Supervisor:**
-- `supervisor/src/index.ts` — CLI with `run` / `scan` / `help` subcommands; `run` is what the Tauri sidecar invokes.
-- `supervisor/tauri/src-tauri/src/main.rs` → `lib.rs` — Tauri app, tray, sidecar lifecycle, first-run wizard.
+- **Hub:** `hub/src/index.ts` — `Bun.serve` + Hono; runs migrations, starts scheduler registry, routine-queue worker, telegram bridge, revanote callback worker, and all three reaper sweeps in-process.
+- **Web:** `web/src/main.tsx` → `web/src/App.tsx` (hash router; legacy hash redirects kept FOREVER — scheduled-task emails link to them).
+- **Supervisor:** `supervisor/src/index.ts` (`run` subcommand invoked by the Tauri sidecar) and `supervisor/tauri/src-tauri/src/main.rs` → `lib.rs`.
 
 ## Architectural Constraints
 
-- **Single Bun event loop on the hub.** All subsystems share one process — no worker threads. CPU-heavy work (fingerprint, envelope gunzip) must stay sub-millisecond per request.
-- **Hash router on web.** SPA fallback serves `index.html` for any pathname; `App.tsx` normalizes pathname to `/` on boot. Legacy hash redirects (`#/schedules`, `#/error-capture`, `#/revanote`, `#/supervisor`, `#/grid/:id`) are kept FOREVER — scheduled-task email links depend on them.
-- **Subscribe set capped at 12.** `hub/src/ws/protocol.ts` `SUBSCRIBE_MAX = 12`; violations get `subscribe_error`. Grid view enforces same cap UI-side.
-- **Cost cap is the universal fan-out gate.** All dispatch paths (scheduler, error-capture, revanote, coolify triage) flow through `scheduler/dispatcher.ts` `enforceCostCap`. No bypass paths.
-- **Webhooks live outside `/api/*`.** Public intakes mount before the JWT catch-all in `hub/src/index.ts` and read raw body BEFORE JSON parse (HMAC needs bytes).
-- **`SESSION_SECRET` is never rotated routinely.** Rotation logs out every Titanium-cookie user. D14 rotates `JWT_SECRET` instead.
-- **`/api/profile/license` is auth-gated, never license-gated** (circular dep). Same exclusion for `/api/auth/*`, `/healthz`, public webhooks, `/ws/agent`.
-- **Streaming throttle is web-side only.** Hub-side throttling would break scheduler event ordering. ChatSurface RAF-coalesces deltas.
+- **Single Bun event loop on the hub.** No worker threads. Every sweep and the croner tick share it.
+- **`schema.sql` re-runs IN FULL on every boot.** Idempotent DDL ONLY. Data backfills go in `hub/scripts/` one-shots — an inline backfill re-fires destructively on every deploy.
+- **Subscribe set capped at 12** (`hub/src/ws/protocol.ts`), matching the grid view.
+- **Exactly one orchestrator session per user** (`idx_sessions_orchestrator_unique`). Never set `orchestrator_enabled=false` without also setting `orchestrator_disabled_explicitly=true` — the boot backfill re-enables it otherwise.
+- **Supervisor capabilities are MSI-release-gated.** `teab_run`, PTY, and the OAuth usage poll only exist on installed hosts running a new enough signed MSI (PTY ≥0.9.0, usage poll ≥0.7.0, TEAB ≥ its release).
+- **Circular-dep carve-outs:** `/api/profile/license`, `/api/auth/*`, `/healthz`, public webhooks, and `/ws/agent` are auth-gated but never license-gated.
+
+## Cross-Cutting Invariants (do not violate)
+
+### The cost cap AND the token cap are non-bypassable
+
+Every inbound user→session dispatch passes `dailyCostCapGate` (`hub/src/dispatch/gates.ts:122`, real accumulated `token_usage` cost for the user's tz-day). The orchestrator inject path ADDS `dailyTokenCapGate` (default 50M tokens/day) and `sessionInjectRateGate` (default 4 injects/hr/session).
+
+**The token cap counts ALL FOUR buckets — `input + output + cache_creation + cache_read`** (`getTodayTokenTotal`, `hub/src/db/token-usage-dal.ts`). Cache-read is NOT free against a subscription rate limit: an I/O-only cap let a wedged tick loop burn 2.83B cache-read tokens in two days. The dollar cost cap alone is meaningless on a flat-rate Max subscription — that is WHY the token cap exists alongside it, not instead of it.
+
+### No provider API key on the human PTY path — EVER
+
+The interactive terminal spawns the GENUINE `claude`/`codex` TUI with an argv **allowlist-of-one** (only the optional operator-blessed `--dangerously-skip-permissions`, itself gated by supervisor config). Forbidden forever on this path: `-p`/`--print`, `--input-format`, `--output-format`, `stream-json`, and any `ANTHROPIC_API_KEY`. Every spawn env goes through `supervisor/src/runners/env-sanitize.ts`. Fallback on failure is a **backend swap** (Codex via ChatGPT sign-in), never the API. Enforced by `supervisor/test/{no-api-key-no-streamjson-pty,no-apikey-fallback-guard,default-backend-selector}.test.ts`.
+
+### Public webhooks read the raw body BEFORE JSON parse
+
+Constant-time secret compare, HMAC over `${ts}.${rawBody}`, reject >5min skew, IP allowlist, audit row. Webhooks mount BEFORE the `/api/*` auth catch-all. Enforced by `hub/test/mount-order.test.ts`. Use `hub/src/webhooks/intake.ts` — do not re-derive.
+
+### Don't hand-roll dispatch/queue/grace
+
+The per-subsystem copies are deleted. Use `hub/src/dispatch/`. A new subsystem contributes an *intake* and a *gate array*, nothing more.
+
+### Automation must not drive the human PTY
+
+`humanOnlyPtyGate` (`gates.ts:331`) rejects any `AUTOMATION_ACTORS` member targeting a PTY-backed runner. This is why the "memory before killing" breadcrumb (`supervisor/src/runners/session-breadcrumb.ts`) exists — the hub is forbidden from injecting a pre-kill agent turn.
 
 ## Anti-Patterns
 
-### Mounting a license-gated route inside the webhook exclusion list
+### Adding a subsystem-local queue or cost check
 
-**What happens:** New webhook added under `/api/*` and forgotten in the exclusion list.
-**Why it's wrong:** Third-party (Coolify, Sentry, Telegram) cannot send a cookie or JWT — license gate 402s the webhook and dispatches die silently.
-**Do this instead:** mount the webhook route OUTSIDE `/api/*` (e.g. `/api/coolify/webhook/...` is added to the gate's exclusion array in `hub/src/license-gate.ts`).
+**What happens:** a new intake calls the WS registry directly, or does its own `SELECT sum(cost)`.
+**Why it's wrong:** it silently bypasses the cost/token caps — the exact failure mode that killed the owner's subscription.
+**Do this instead:** call `dispatch()` with a `gates` array (see `hub/src/feedback/dispatcher.ts:130` for the minimal example).
 
-### Throttling stream events server-side
+### Excluding cache tokens from a token count
 
-**What happens:** Coalescing `text_delta` events in the hub to reduce browser load.
-**Why it's wrong:** Breaks scheduler `assistant_message:final` ordering and the run-lifecycle finalize.
-**Do this instead:** RAF-coalesce in `web/src/components/ChatSurface.tsx` using a ref accumulator.
+**What happens:** summing only `input + output` because cache reads "are cheap."
+**Why it's wrong:** cache-read counts fully against subscription rate limits. PR #335 made this mistake; #342 fixed it.
+**Do this instead:** `getTodayTokenTotal` in `hub/src/db/token-usage-dal.ts` — all four buckets.
 
-### Reading req.json() before HMAC verify
+### Backfilling data in `schema.sql`
 
-**What happens:** Hono `c.req.json()` consumes the body; HMAC over a re-serialized body mismatches.
-**Why it's wrong:** All signed webhooks (Coolify, Titanium, Sentry envelopes) fail signature verification.
-**Do this instead:** call `c.req.raw.text()` (or arrayBuffer) FIRST, verify, then `JSON.parse`.
+**What happens:** an `UPDATE`/`INSERT … SELECT` added next to the DDL.
+**Why it's wrong:** `schema.sql` re-runs in full on every hub boot, so the backfill re-fires on every deploy.
+**Do this instead:** a one-shot script in `hub/scripts/` (e.g. `migrate-orchestrator-macro-task-type.ts`).
 
-### New env var per third-party API
+### Coupling the Telegram tail to the PTY flag
 
-**What happens:** Adding `GITHUB_TOKEN`, `STRIPE_KEY`, etc. directly to hub env.
-**Why it's wrong:** Violates the gateway-pair architecture (global rule).
-**Do this instead:** fetch via `GATEWAY_URL` / `GATEWAY_API_KEY` (see `scheduler/post-run/github-issue.ts`).
+**What happens:** gating transcript-tail on `REMO_PTY_INTERACTIVE`.
+**Why it's wrong:** transcript-tail reads on-disk CLI transcripts that do not exist inside the hub container.
+**Do this instead:** the independent `REMO_TELEGRAM_TRANSCRIPT_TAIL` (keep OFF in prod); Telegram outbound uses the host-agnostic event bus.
+
+### Server-side throttling of stream deltas
+
+**What happens:** coalescing `text_delta` in the hub.
+**Why it's wrong:** breaks `assistant_message:final` ordering and run finalization.
+**Do this instead:** RAF-coalesce web-side (`web/src/lib/raf-batch.ts`).
 
 ## Error Handling
 
-**Strategy:** never leak internals to clients.
+**Strategy:** never leak internals; never let a side-effect fail a parent run.
 
-**Patterns:**
-- Global Hono handler in `hub/src/index.ts` returns `{error: 'internal error'}` 500.
-- Webhooks return generic 200 on dedupe/skip to avoid revealing project state.
-- Post-run action failures are log-only — never fail the parent run.
-- WS auth failures close with a generic code after 5s timeout, no detail.
+- Global Hono handler returns `{error:'internal error'}` 500 (`hub/src/index.ts`).
+- Webhooks return generic 200 on dedupe/skip so project state isn't probeable.
+- Post-run action failures are log-only.
+- WS auth failures close after a 5s timeout with a generic code.
+- Reapers are fail-open: a bad env value falls back to the default rather than disabling the sweep.
 
 ## Cross-Cutting Concerns
 
-**Logging:** `console.log` / `console.error` with bracketed tags (`[agent]`, `[scheduler]`, etc.). Supervisor tees to file with 5MB rotation (`supervisor/src/index.ts` `setupFileLogging`).
-**Validation:** Zod schemas at every boundary (WS protocols, scheduler payloads, post-run actions, triage result, revanote payload).
-**Auth:** dual-mode middleware (cookie + legacy bearer) gated by `ALLOW_LEGACY_LOGIN`; api-key middleware for `/ws/agent`.
-**Security headers:** `securityHeaders()` mounted first in `hub/src/index.ts` — HSTS 2yr+preload, CSP, COOP/CORP, Permissions-Policy.
-**Rate limits:** per-IP WS connection cap 20, per-conn message rate, per-route REST rate-limit middleware (`hub/src/middleware/rate-limit.ts`).
-**OpenAPI:** spec assembled in `hub/src/api/_openapi.ts`; CI `.github/workflows/docs-drift.yml` enforces.
+**Logging:** `hub/src/observability/logger.ts` + ALS request context (`als.ts`); metrics in `metrics.ts` / `orchestrator-metrics.ts` / `http-metrics.ts`; hub self-capture (`self-capture.ts`). Supervisor tees to a rotating file (`supervisor/src/observability/logger.ts`) and redacts via `safe-logging.ts`.
+**Validation:** Zod at every boundary — WS protocols, scheduler payloads, post-run action schema, triage/QC/controller result schemas, revanote payload.
+**Auth:** Titanium magic-link → opaque cookie sessions (`hub/src/session.ts`) + CSRF double-submit (`csrf.ts`); legacy bcrypt behind `ALLOW_LEGACY_LOGIN`; `/ws/agent` keyed by `api_keys` (SHA-256), never by user license.
+**Security headers:** `middleware/security-headers.ts` mounted first.
+**Rate limits:** 20 WS conns/IP, per-conn message rate, per-route REST limits (`middleware/rate-limit.ts`).
+**OpenAPI:** `hub/src/api/_openapi.ts` → `bun run docs:sync`; docs-drift CI fails a stale PR.
 
 ---
 
-*Architecture analysis: 2026-05-28*
+*Architecture analysis: 2026-07-12*

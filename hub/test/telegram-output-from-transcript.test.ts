@@ -43,6 +43,14 @@ mock.module("../src/telegram/client.ts", () => ({
   editMessageTextMd: async (chatId: number | string, messageId: number, text: string) => {
     state.edits.push({ chat: chatId, messageId, text });
   },
+  // The working/final messages are sent as HTML (collapsible activity blockquote).
+  sendMessageHtml: async (chatId: number | string, text: string) => {
+    state.sends.push({ chat: chatId, text });
+    return { message_id: 99 };
+  },
+  editMessageTextHtml: async (chatId: number | string, messageId: number, text: string) => {
+    state.edits.push({ chat: chatId, messageId, text });
+  },
   sendChatAction: async (chatId: number | string) => {
     state.chatActions.push(chatId);
   },

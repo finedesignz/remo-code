@@ -171,6 +171,48 @@ describe('task-macros — BRAINSTORMING always gates for approval', () => {
   })
 })
 
+describe('task-macros — DEV scopes next milestone from the predetermined roadmap', () => {
+  const p = renderMacro('dev', CTX).prompt
+  const flat = p.replace(/\s+/g, ' ')
+
+  test('next milestone is drawn ONLY from the Planned Milestones (Roadmap) section', () => {
+    expect(flat).toContain('Planned Milestones (Roadmap)')
+    expect(flat).toContain('TOP\npending entry'.replace(/\s+/g, ' '))
+  })
+
+  test('roadmap-exhausted is a mandatory STOP gate at every stage', () => {
+    expect(flat).toContain('roadmap_exhausted')
+    expect(p).toContain('<<GATE reason="roadmap_exhausted"')
+    expect(flat).toContain('regardless of')
+  })
+
+  test('no longer treats novel product direction as an auto-invent grey-area gate', () => {
+    // the old wording that let it self-scope a new product direction is gone
+    expect(p).not.toContain('Novel product-direction scope here is a grey-area gate')
+    expect(flat).toContain('may NOT invent a new product-direction milestone')
+  })
+})
+
+describe('task-macros — DEV merge/clobber discipline (anti-admin-merge, anti-clobber)', () => {
+  const p = renderMacro('dev', CTX).prompt
+  const flat = p.replace(/\s+/g, ' ')
+
+  test('forbids merging while qc is red / bypassing a failing check', () => {
+    expect(flat).toContain('NEVER merge while qc is red/failing')
+    expect(flat).toContain('to bypass a FAILING check')
+    expect(flat).toContain('If main itself is red, FIX main first')
+    // green qc is the gate; --admin is allowed ONLY once qc is green (legit Woodpecker path)
+    expect(flat).toContain('ONLY once qc is green')
+  })
+
+  test('forbids clobbering prior-milestone planning records and requires the test gate first', () => {
+    expect(flat).toContain("never overwrite or delete a prior milestone's planning records")
+    expect(flat).toContain('collision-safe procedure')
+    expect(flat).toContain('check-baseline')
+    expect(flat).toContain('fix any test that asserts on a moved/rotated path BEFORE opening a PR')
+  })
+})
+
 describe('task-macros — unknown type', () => {
   test('coerces unknown to dev (safe fully-specified routine)', () => {
     const r = renderMacro('nope', CTX)

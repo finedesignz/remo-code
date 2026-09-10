@@ -49,6 +49,20 @@ function effectiveMaxRuns(row: OrchestratorRow): number | null {
   return typeof rm === 'number' ? rm : null;
 }
 
+/** A rule's cadence interval in ms (months ≈ 30d — parity is handled by shouldSkipFire). */
+const UNIT_MS: Record<string, number> = {
+  minutes: 60_000,
+  hours: 3_600_000,
+  days: 86_400_000,
+  weeks: 604_800_000,
+  months: 2_592_000_000,
+};
+export function ruleIntervalMs(rule: ScheduleRule): number {
+  const unit = UNIT_MS[rule.unit] ?? 0;
+  const interval = Number.isFinite(rule.interval) && rule.interval > 0 ? rule.interval : 1;
+  return unit * interval;
+}
+
 /**
  * Decide whether a single row is DUE at `now` (task-local `tz`), given how many
  * times it has already run (`runCount`).
@@ -59,8 +73,17 @@ function effectiveMaxRuns(row: OrchestratorRow): number | null {
  *   3. effective max_runs reached (Once after 1 run, or rule.max_runs) ⇒ not due.
  *   4. 'Once' not yet run ⇒ DUE (and flag autoDisableAfter).
  *   5. has a schedule_rule and the rule's cadence/window says fire now
- *      (`!shouldSkipFire`) and no end-bound is hit (`boundReason === null`) ⇒ DUE.
+ *      (`!shouldSkipFire`) and no end-bound is hit (`boundReason === null`) and the
+ *      rule's INTERVAL HAS ELAPSED since `last_fired_at` ⇒ DUE.
  *   6. otherwise (no rule, no Once) ⇒ not due.
+ *
+ * (5) is the fix for the per-tick re-inject incident: `shouldSkipFire` is an
+ * ELIGIBILITY predicate (start_at / week+month parity / active_window) — for a
+ * minutes/hours/days rule it returns "fire" for *every* `now` past `start_at`. The
+ * hub scheduler pairs it with `scheduled_tasks.next_fire_at`; orchestrator rows had
+ * NO such state, so an `Every 4h` row was DUE on all 1440 daily ticks and the macro
+ * prompt was re-injected every 60s. `last_fired_at` (stamped at dispatch by
+ * `scanAndEnqueueDueCycles`) is that missing state.
  */
 export function isRowDue(
   row: OrchestratorRow,
@@ -91,6 +114,19 @@ export function isRowDue(
   if (boundReason([rule], now, runCount) !== null) {
     return { due: false, autoDisableAfter: false };
   }
+
+  // CADENCE GATE: the interval must have ELAPSED since this row last fired.
+  // FAIL-CLOSED: a NON-NULL but unparseable stamp is treated as "just fired" (NOT
+  // due) — otherwise a corrupt timestamp silently disables the gate and restores
+  // per-tick firing. Only a NULL stamp (never fired) is a cold start.
+  if (row.last_fired_at != null) {
+    const lastFired = Date.parse(row.last_fired_at);
+    if (!Number.isFinite(lastFired)) return { due: false, autoDisableAfter: false };
+    if (now.getTime() - lastFired < ruleIntervalMs(rule)) {
+      return { due: false, autoDisableAfter: false };
+    }
+  }
+
   return { due: true, autoDisableAfter: false };
 }
 

@@ -77,8 +77,44 @@ export function splitForTelegram(text: string, maxLen: number = MAX_MESSAGE_LEN)
   return out;
 }
 
+/**
+ * Escape the ONLY three chars Telegram's HTML parse_mode treats as markup.
+ * https://core.telegram.org/bots/api#html-style — far smaller (and far less
+ * treacherous) than the MarkdownV2 reserved set, which is why the collapsible
+ * activity messages are sent as HTML.
+ */
+export function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * Split ALREADY-ESCAPED HTML text into <=4096-char chunks WITHOUT ever cutting an
+ * entity (`&amp;`) in half. `splitForTelegram` prefers whitespace boundaries — and
+ * an entity contains no whitespace — but its hard-split fallback could land mid-
+ * entity, which Telegram rejects with a 400. So after splitting we push any
+ * trailing partial entity onto the next chunk.
+ *
+ * Callers must NOT pass text containing a tag that would be split (the bridge
+ * drops the <blockquote> tail on overflow rather than risk it).
+ */
+export function splitHtmlForTelegram(html: string, maxLen: number = MAX_MESSAGE_LEN): string[] {
+  const out: string[] = [];
+  let rest = html;
+  while (rest.length > maxLen) {
+    // Take the first boundary-preferring chunk, then SHRINK it back off any
+    // trailing partial entity (shrinking, never growing, so it stays <= maxLen).
+    let chunk = splitForTelegram(rest, maxLen)[0]!;
+    const partial = /&[a-zA-Z#0-9]*$/.exec(chunk);
+    if (partial && partial.index > 0) chunk = chunk.slice(0, partial.index);
+    out.push(chunk);
+    rest = rest.slice(chunk.length);
+  }
+  if (rest.length > 0) out.push(rest);
+  return out;
+}
+
 export interface SendMessageOptions {
-  parse_mode?: "MarkdownV2";
+  parse_mode?: "MarkdownV2" | "HTML";
   disable_web_page_preview?: boolean;
   /** Optional inline keyboard to attach (to the LAST chunk when text splits). */
   inline_keyboard?: InlineKeyboard;
@@ -155,6 +191,53 @@ export async function sendMessageMd(
 }
 
 /**
+ * HTML-parse_mode twin of {@link sendMessageMd}, with the same 400→plain-text
+ * fallback. Used by the collapsible activity messages: HTML gives us
+ * `<blockquote expandable>` — one unambiguous tag — instead of MarkdownV2's
+ * error-prone line-prefix blockquote syntax + 18-char reserved set.
+ *
+ * Callers escape dynamic content with {@link escapeHtml} and add only their own
+ * intentional tags.
+ */
+export async function sendMessageHtml(
+  chatId: number | string,
+  html: string,
+  inlineKeyboard?: InlineKeyboard,
+): Promise<{ message_id: number } | void> {
+  try {
+    return await sendMessageReturningId(chatId, html, { parse_mode: "HTML", inline_keyboard: inlineKeyboard });
+  } catch (err) {
+    if (err instanceof TelegramClientError && err.status === 400) {
+      return await sendMessageReturningId(chatId, html, { inline_keyboard: inlineKeyboard });
+    }
+    throw err;
+  }
+}
+
+/**
+ * HTML twin of {@link editMessageTextMd}. A "message is not modified" 400
+ * (identical text — common when a throttled edit re-sends the same body) is a
+ * benign no-op and is treated as success.
+ */
+export async function editMessageTextHtml(
+  chatId: number | string,
+  messageId: number,
+  html: string,
+  inlineKeyboard?: InlineKeyboard,
+): Promise<void> {
+  try {
+    await editMessageText(chatId, messageId, html, { parse_mode: "HTML", inline_keyboard: inlineKeyboard });
+  } catch (err) {
+    if (err instanceof TelegramClientError && err.status === 400) {
+      if (err.bodyPreview.includes("message is not modified")) return;
+      await editMessageText(chatId, messageId, html, { inline_keyboard: inlineKeyboard });
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
  * Like {@link sendMessage} but returns the message_id of the LAST chunk sent
  * (parity with sendMessageWithKeyboard's return). Internal — callers use
  * sendMessage / sendMessageMd.
@@ -166,7 +249,9 @@ async function sendMessageReturningId(
 ): Promise<{ message_id: number } | void> {
   const token = tokenOrThrow();
   const url = `${API_BASE}/bot${token}/sendMessage`;
-  const chunks = splitForTelegram(text);
+  // HTML chunks must never be cut mid-entity (`&amp;`) — Telegram 400s on that.
+  const chunks =
+    opts.parse_mode === "HTML" ? splitHtmlForTelegram(text) : splitForTelegram(text);
   let last: { message_id: number } | undefined;
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i]!;

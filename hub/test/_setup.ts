@@ -13,6 +13,16 @@
 // NOT between tests within a file (within-file `beforeAll`-set mocks survive for
 // all of that file's tests, which is what those files rely on). The result:
 // each file starts from the real, unmocked module graph → fully order-independent.
+// Secret defaults, part 2. Several src modules (e.g. src/auth/jwt.ts) hard-throw at
+// MODULE LOAD when a secret is missing/short. A test file cannot reliably guard that
+// itself: ESM hoists its static `import` of the app ABOVE any in-file `process.env`
+// assignment, so the module graph loads first and the file dies before its first test.
+// CI supplies these via the pipeline env, which is why the failure is invisible there
+// and only bites a dev box with no hub/.env. Setting them in the preload (which Bun runs
+// before ANY test module is imported) makes local == CI. Real env always wins.
+process.env.JWT_SECRET ||= "test-secret-at-least-32-chars-long-aaaaaaaa";
+process.env.SESSION_SECRET ||= "session-secret-at-least-32-chars-long-bb";
+
 import { afterAll, mock } from "bun:test";
 
 afterAll(() => {

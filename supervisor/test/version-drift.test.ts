@@ -9,13 +9,12 @@
  *   at 0.6.3), so the web UI showed 0.5.8 forever — a user restart did NOT fix
  *   it because the compiled sidecar genuinely emitted the stale string.
  *
- * The single source of truth at build time is tauri.conf.json's `version`,
- * injected into the compiled sidecar via Bun's --define (see
- * .github/workflows/release-supervisor.yml). The runtime fallback lives in
- * supervisor/src/version.ts as FALLBACK_VERSION for dev/uncompiled runs.
+ * The single source of truth is tauri.conf.json's `version`, imported directly by
+ * supervisor/src/version.ts (Bun inlines the JSON into the compiled sidecar; dev
+ * `bun run` reads the live file). No --define, no fallback constant.
  *
  * This test asserts:
- *   1. FALLBACK_VERSION === tauri.conf.json.version
+ *   1. runtime VERSION === tauri.conf.json.version
  *   2. Cargo.toml [package] version === tauri.conf.json.version
  *   3. ui/package.json version === tauri.conf.json.version
  * so the fallback and all three lockstep manifests can never silently drift.
@@ -23,7 +22,7 @@
 import { describe, test, expect } from 'bun:test'
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { FALLBACK_VERSION } from '../src/version'
+import { VERSION } from '../src/version'
 
 const TAURI_DIR = join(import.meta.dir, '..', 'tauri', 'src-tauri')
 
@@ -48,8 +47,8 @@ function uiPackageVersion(): string {
 }
 
 describe('supervisor version single-source drift guard', () => {
-  test('FALLBACK_VERSION matches tauri.conf.json version', () => {
-    expect(FALLBACK_VERSION).toBe(tauriConfVersion())
+  test('runtime VERSION matches tauri.conf.json version', () => {
+    expect(VERSION).toBe(tauriConfVersion())
   })
 
   test('Cargo.toml version matches tauri.conf.json version', () => {

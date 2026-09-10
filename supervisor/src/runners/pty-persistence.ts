@@ -30,8 +30,19 @@
  */
 import { execFileSync } from 'node:child_process'
 
-/** Default scrollback ring cap (bytes) — matches the Rust host's 256 KiB. */
-export const DEFAULT_SCROLLBACK_CAP_BYTES = 256 * 1024
+/**
+ * Default scrollback ring cap (bytes) — MUST match the Rust host's
+ * `SCROLLBACK_CAP_BYTES` (supervisor/tauri/src-tauri/src/pty_host.rs).
+ *
+ * 1 MiB (was 256 KiB). The ring holds RAW PTY bytes, and a TUI's cursor-motion /
+ * SGR escape sequences are most of that volume — 256 KiB of raw stream decoded to
+ * only a couple of screens of readable text. Since the client CLEARS its buffer on
+ * every (re)attach and re-writes ONLY this ring, the ring is the hard ceiling on
+ * how far a reconnected phone can scroll back. 1 MiB is ~4x the readable depth at
+ * a bounded, per-session cost (base64 replay frame ≈ 1.37 MB, well under the 10 MB
+ * WS message cap).
+ */
+export const DEFAULT_SCROLLBACK_CAP_BYTES = 1024 * 1024
 
 /** Default idle-reap grace (seconds) — mirrors the hub's
  *  REMO_SESSION_IDLE_GRACE_SECONDS default of 300s. 0 disables idle reaping. */

@@ -6,7 +6,10 @@
  * 9197, else skips (cannot run alongside an actual supervisor — CI is fine).
  */
 import { describe, test, expect, afterEach } from 'bun:test'
-import { startStatusServer, buildSnapshot, type StatusSnapshotProvider, type StatusServer } from '../src/status-server'
+import {
+  startStatusServer, startStatusServerSupervised, isPortInUseError, buildSnapshot,
+  type StatusSnapshotProvider, type StatusServer, type SupervisedStatusServer,
+} from '../src/status-server'
 
 function makeProvider(overrides: Partial<StatusSnapshotProvider> = {}): StatusSnapshotProvider {
   return {
@@ -57,6 +60,73 @@ describe('buildSnapshot', () => {
     const snap = buildSnapshot(makeProvider({ getRunners: () => runners, getQueueDepth: () => 1 }))
     expect(snap.runners).toEqual(runners)
     expect(snap.queue_depth).toBe(1)
+  })
+})
+
+describe('isPortInUseError (fix/headless-autoupdate)', () => {
+  test("matches Bun's ACTUAL bind-failure message", () => {
+    // THE BUG: the old guard tested only /EADDRINUSE|address already in use/i,
+    // but Bun says exactly this — so the PRIMARY failure rethrew, the FALLBACK
+    // port was never tried, and the supervisor ran status-blind forever.
+    expect(isPortInUseError(new Error('Failed to start server. Is port 9106 in use?'))).toBe(true)
+  })
+
+  test('still matches the classic POSIX shapes', () => {
+    expect(isPortInUseError(new Error('listen EADDRINUSE: address already in use 127.0.0.1:9106'))).toBe(true)
+    expect(isPortInUseError(Object.assign(new Error('boom'), { code: 'EADDRINUSE' }))).toBe(true)
+  })
+
+  test('does NOT swallow unrelated errors', () => {
+    expect(isPortInUseError(new Error('EACCES: permission denied'))).toBe(false)
+    expect(isPortInUseError(new Error('something else entirely'))).toBe(false)
+  })
+})
+
+describe('startStatusServerSupervised (fix/headless-autoupdate)', () => {
+  let sup: SupervisedStatusServer | null = null
+  afterEach(() => {
+    try { sup?.stop() } catch {}
+    sup = null
+  })
+
+  test('reports healthy + a port when it binds', () => {
+    sup = startStatusServerSupervised(makeProvider(), { log: () => {} })
+    if (!sup.isHealthy()) return // both ports held by a real supervisor — skip
+    expect(sup.getPort()).toBeGreaterThan(0)
+    expect(sup.getLastError()).toBeNull()
+  })
+
+  test('when BOTH ports are held: degraded, not crashed, and retrying', async () => {
+    // Occupy 9106 AND 9197 so the supervised server cannot bind — the zombie
+    // -listener scenario. It must report unhealthy (so the hub can SEE it),
+    // keep running, and schedule a retry rather than giving up forever.
+    let a: any = null, b: any = null
+    try {
+      a = Bun.serve({ hostname: '127.0.0.1', port: 9106, fetch: () => new Response('x') })
+      b = Bun.serve({ hostname: '127.0.0.1', port: 9197, fetch: () => new Response('x') })
+    } catch {
+      try { a?.stop(true) } catch {}
+      try { b?.stop(true) } catch {}
+      return // ports already taken by a real supervisor — can't run this test here
+    }
+
+    const logs: string[] = []
+    sup = startStatusServerSupervised(makeProvider(), {
+      log: (_l, m) => logs.push(m),
+      retryBaseMs: 50,
+      retryMaxMs: 50,
+    })
+    expect(sup.isHealthy()).toBe(false)
+    expect(sup.getPort()).toBeNull()
+    expect(sup.getLastError()).toContain('bind failed')
+    expect(logs.some((l) => /DEGRADED/.test(l) && /Retrying/.test(l))).toBe(true)
+
+    // Free the ports — the retry loop must self-heal without a reinstall.
+    a.stop(true)
+    b.stop(true)
+    await Bun.sleep(300)
+    expect(sup.isHealthy()).toBe(true)
+    expect(sup.getPort()).toBe(9106)
   })
 })
 

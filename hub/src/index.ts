@@ -20,6 +20,7 @@ import { sentryIntake as sentryIntakeApi } from './api/sentry-intake'
 import { errorProjectsRouter } from './api/error-projects'
 import { errorsRouter } from './api/errors'
 import { errorRunsRouter } from './api/error-runs'
+import { agentautofix as agentautofixApi } from './api/agentautofix'
 import { chatTabs as chatTabsApi } from './api/chat-tabs'
 import { repoGroups as repoGroupsApi } from './api/repo-groups'
 import { instructions as instructionsApi } from './api/instructions'
@@ -54,7 +55,16 @@ import { startRevanoteCallbackWorker } from './revanote/callback.ts'
 import { startTelegramBridge } from './telegram/bridge.ts'
 import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/queue.ts'
 import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchestrator/controller.ts'
+import { startGhostReaperSweep, stopGhostReaperSweep } from './ws/ghost-reaper.ts'
+import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.ts'
+import { startAskReaperSweep, stopAskReaperSweep } from './ask/reaper.ts'
+import { startWorkReaperSweep, stopWorkReaperSweep } from './work/reaper.ts'
+import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
+import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.ts'
+import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
+import { extApiKeyMiddleware } from './auth/ext-api-key-middleware'
+import { ext } from './api/ext'
 import { rateLimit, rateLimitMulti } from './middleware/rate-limit'
 import { securityHeaders } from './middleware/security-headers'
 import { csrfGuard } from './csrf'
@@ -243,6 +253,16 @@ app.use('/api/plugin/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.
 app.use('/api/plugin/*', apiKeyMiddleware)
 app.route('/api/plugin', plugin)
 
+// Milestone ASK — external agent surface (/api/ext). api_keys + the additive
+// nullable `scopes` column (ext:read / ext:ask). MUST be mounted BEFORE the JWT
+// catch-all (see MOUNT-ORDER INVARIANT (1) at top) — it authenticates with a
+// Bearer api_key, never a cookie. Abuse is bounded by (a) this rate limit,
+// (b) the per-key askRateGate, and (c) the non-bypassable daily cost + token caps
+// inside dispatch. See docs/session-ask.md.
+app.use('/api/ext/*', rateLimit({ windowMs: 60_000, max: 30, keyFn: (c) => c.req.header('authorization')?.slice(0, 24) || 'anon' }))
+app.use('/api/ext/*', extApiKeyMiddleware)
+app.route('/api/ext', ext)
+
 // Sentry-style error intake — public, sentry_key in X-Sentry-Auth IS the credential.
 // MUST be mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
 app.use('/api/sentry/*', rateLimit({ windowMs: 60_000, max: 600, keyFn: (c) => c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || 'anon' }))
@@ -293,6 +313,9 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
   if (c.req.path.startsWith('/api/feedback/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
+  // Milestone ASK: /api/ext/* authenticates with an api_key Bearer (already
+  // enforced by extApiKeyMiddleware above), never a cookie.
+  if (c.req.path.startsWith('/api/ext/')) return next()
   // Phase 07: public auth endpoints (login request-link, callback, logout, me).
   // The authRouter handles its own auth state internally where needed.
   if (c.req.path.startsWith('/api/auth/')) return next()
@@ -433,6 +456,7 @@ app.route('/api/scheduled-task-runs', scheduledTaskRunsApi)
 app.route('/api/tasks', tasksApi)
 app.route('/api/usage', usageApi)
 app.route('/api/error-projects', errorProjectsRouter)
+app.route('/api/agentautofix', agentautofixApi)
 app.route('/api/errors', errorsRouter)
 app.route('/api/error-runs', errorRunsRouter)
 app.route('/api/chat-tabs', chatTabsApi)
@@ -521,6 +545,19 @@ if (config.titaniumBypass) {
   } catch (err) {
     console.error('[self-capture] install failed; continuing:', (err as Error)?.message ?? err)
   }
+}
+
+// fix/stop-the-bleed — FAIL CLOSED on a misconfigured daily token ceiling, BEFORE the
+// port binds (so the hub never accepts a single request while its headline safety
+// guarantee is off). The hard spend cap is the product's core promise; a typo'd '0'
+// must never silently turn it into an unbounded spend path. Exits with a legible
+// startup error unless the cap is a positive number, or
+// REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 says otherwise on purpose.
+try {
+  assertTokenCapConfig()
+} catch (err: any) {
+  console.error(`[startup] FATAL: ${err?.message ?? err}`)
+  process.exit(1)
 }
 
 // Start Bun server with WebSocket upgrade handling.
@@ -680,6 +717,38 @@ runMigrations()
     // With the flag OFF (default) this is a no-op: no runner is registered (queue
     // stays dormant) and the due-scan tick never starts (nothing is enqueued).
     registerCycleRunnerIfEnabled()
+    // fix/ghost-session-reaper — periodic sweep that reaps "ghost" sessions
+    // (status='online', hostname=NULL phantom channels that survive restarts and
+    // wedge the orchestrator inject). No-op when REMO_GHOST_REAPER_DISABLED is set.
+    startGhostReaperSweep()
+    // fix/sched-qc — periodic sweep that finalizes scheduled_task_runs stuck in
+    // `pending` past REMO_RUN_MAX_MS (default 6h) as failed/run_timeout, so a
+    // dead CLI turn can't leave a task perpetually in-flight. No-op when
+    // REMO_RUN_REAPER_DISABLED is set.
+    startRunReaperSweep()
+    // Milestone ASK — periodic sweep that finalizes `session_asks` stuck
+    // queued/dispatched past REMO_ASK_MAX_MS (default 15min) as `timeout`, so an
+    // external caller never polls a dead ask forever. Conditional finalize, so a
+    // late reply can't be double-finalized. No-op when REMO_ASK_REAPER_DISABLED.
+    startAskReaperSweep()
+    // Milestone WORK — finalizes `work_runs` stuck queued/dispatched past
+    // REMO_WORK_MAX_MS (default 45min) as `timeout`. Conditional finalize, so a late
+    // reply can't be double-finalized. No-op when REMO_WORK_REAPER_DISABLED.
+    startWorkReaperSweep()
+    // fix/stop-the-bleed — LIVENESS-scoped backstop (NOT an absolute-age force-close;
+    // an age-only reaper would close live long-running builds). Closes an OPEN
+    // session_runs row only when its supervisor has pushed inventory and the row's
+    // session is absent from that live set, and the row is older than
+    // REMO_SESSION_RUN_MAX_MS (default 24h — a grace inside the liveness predicate,
+    // not a lifetime cap). Leaked open runs eat the supervisor concurrency cap and
+    // wedge every launch with `at_capacity`. No-op when REMO_SESSION_RUN_REAPER_DISABLED.
+    startStaleRunReaperSweep()
+    // Milestone once — DURABLE tick source of truth for one-time tasks. Fires any
+    // `schedule_kind='once'` row that is due (run_at<=now) and still enabled, so an
+    // immediate/one-time task dispatches even if the registry's setTimeout(0)
+    // latency-optimization is lost (restart / thrown fire / swallowed register).
+    // claimOnceTask keeps it exactly-once. No-op when REMO_ONCE_SWEEP_DISABLED.
+    startOnceDueSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -693,6 +762,12 @@ function gracefulShutdown(signal: string) {
   try { clearPostRunTimers() } catch {}
   try { stopRoutineQueueWorker() } catch {}
   try { stopDueOrchestratorTick() } catch {}
+  try { stopGhostReaperSweep() } catch {}
+  try { stopRunReaperSweep() } catch {}
+  try { stopAskReaperSweep() } catch {}
+  try { stopWorkReaperSweep() } catch {}
+  try { stopStaleRunReaperSweep() } catch {}
+  try { stopOnceDueSweep() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

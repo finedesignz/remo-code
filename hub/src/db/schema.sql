@@ -79,8 +79,12 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'comp
 
 -- Migration for existing rows (idempotent — only adds column if missing)
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS capabilities TEXT[] NOT NULL DEFAULT ARRAY['agent','supervisor'];
--- Ensure all active keys have the supervisor cap (idempotent backfill)
-UPDATE api_keys SET capabilities = ARRAY['agent','supervisor'] WHERE capabilities IS NULL OR NOT ('supervisor' = ANY(capabilities));
+-- The supervisor-cap backfill that used to live here was a privilege-escalation
+-- landmine: it re-ran on EVERY hub boot and would silently rewrite any key minted
+-- WITHOUT the 'supervisor' cap (least-privilege / multi-tenant keys) to
+-- ['agent','supervisor'] — escalating it AND stripping its extra caps. Moved to the
+-- one-shot backfill hub/scripts/backfill-api-key-capabilities.ts (2026-07-12).
+-- The column DEFAULT above already gives every NEW key ['agent','supervisor'].
 
 -- ── Supervisor feature tables ──────────────────────────────────────────────────
 
@@ -186,8 +190,10 @@ ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS task_type TEXT NOT NULL DEF
 --
 -- Step A — rewrite legacy user-pickable rows to the new triad. Prompt text is
 -- preserved verbatim in payload.prompt (no payload changes here).
+-- schema-lint: allow convergent — the CHECK constraint below forbids the legacy values, so WHERE matches 0 rows
 UPDATE scheduled_tasks SET task_type = 'dev'
   WHERE task_type IN ('prompt', 'skill', 'continue_dev');
+-- schema-lint: allow convergent — same CHECK constraint; 'security_scan' is unreachable once applied
 UPDATE scheduled_tasks SET task_type = 'security'
   WHERE task_type = 'security_scan';
 -- log_check and triage are unchanged.
@@ -212,6 +218,12 @@ ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
     -- Locked decision 3: REPLACES the many-tasks-per-session model — the
     -- orchestrator task owns per-command rows in orchestrator_rows.
     'orchestrator',
+    -- Milestone TEAB: Titanium Edge AutoBuilder run as a scheduled-task action.
+    'teab',
+    -- Milestone once (feat/once-tasks): an inbound external work item
+    -- (/api/ext/work) is enqueued as a one-time 'work' task. Its sender calls the
+    -- existing dispatchWork; work_runs remains the typed result/audit record.
+    'work',
     -- Internal: synthesized by Coolify webhook
     'triage'
   ));
@@ -243,6 +255,21 @@ ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS name_suffix TEXT;
 -- arm multiple cron registrations; fires from any rule route through the
 -- same dispatcher.fire(task.id).
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS schedule_rules JSONB;
+
+-- Milestone TEAB (additive, idempotent — no backfill). The target repo for a
+-- `teab run --repo <X>` action and the most recent supervisor `teab_status`
+-- poll result. NULL on every non-TEAB row. Canonical provisioning is the
+-- one-shot hub/scripts/migrate-teab-task-columns.ts; these IF NOT EXISTS lines
+-- keep a fresh-boot schema apply self-sufficient.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS teab_repo_ident TEXT;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS teab_last_status TEXT;
+
+-- Default-on run-summary email (feat/scheduled-default-email-summary). Every
+-- ROOT scheduled-task run (chainDepth===0) emails the task owner a summary
+-- unless this flag is false OR the task already configures its own notify_email
+-- post-run action. DEFAULT true so every existing + new task opts in; set false
+-- to opt out. Synthesized in hub/src/scheduler/post-run/dispatcher.ts.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS email_summary BOOLEAN NOT NULL DEFAULT true;
 
 -- W2/T8: drop legacy NOT NULL on session_id so fan-out tasks
 -- (all_agents/all_supervisors) and supervisor-targeted tasks can omit it.
@@ -298,6 +325,23 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- 'development'. Set true by the PATCH /api/orchestrator-tasks lifecycle_stage path.
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS lifecycle_stage_explicit BOOLEAN NOT NULL DEFAULT false;
 
+-- ── Milestone once (feat/once-tasks): one-time tasks ─────────────────────────
+-- A scheduled task fires EITHER on a recurring cron (`schedule_kind='cron'`, the
+-- default — `schedule_rules`/`cron_expr` evaluated by the croner registry) OR
+-- exactly ONCE at `run_at` (`schedule_kind='once'`). A 'once' row evaluates NO
+-- cron rule; the dispatcher fires it a single time then self-finalizes the row
+-- (enabled=false, next_fire_at cleared) so it never re-arms. Everything
+-- downstream — the shared dispatch pipeline, gates, finalizeRun, post-run
+-- actions, email summary — is UNCHANGED. Additive + idempotent + NO backfill:
+-- every existing row keeps schedule_kind='cron' (its current behavior) and
+-- run_at NULL. `run_at` is required (app-enforced) only when schedule_kind='once'.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS schedule_kind TEXT NOT NULL DEFAULT 'cron';
+DO $$ BEGIN
+  ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_schedule_kind_check
+    CHECK (schedule_kind IN ('cron','once'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS run_at TIMESTAMPTZ;
+
 -- D1/D3: per-command rows owned by an orchestrator task. Each row is one
 -- routine command with its own schedule_rule (reusing the ScheduleRule JSONB
 -- shape: cron-equivalent interval/unit/start_at + active_window + bounds).
@@ -318,6 +362,15 @@ CREATE TABLE IF NOT EXISTS orchestrator_rows (
 );
 CREATE INDEX IF NOT EXISTS idx_orchestrator_rows_task
   ON orchestrator_rows(task_id, sort_order);
+
+-- fix/orchestrator-tick-reinject: CADENCE STATE. `schedule_rule` alone is an
+-- ELIGIBILITY predicate (start_at / week-month parity / active_window) — it has no
+-- notion of "has the interval elapsed since the last fire". Without a per-row
+-- last-fire stamp, an `Every 4h` row was DUE on EVERY 60s due-scan tick, so the
+-- orchestrator re-injected its macro prompt once a minute, forever (incident:
+-- session 4090d376, ~60 turns/hour × 2 days, 2.83B cache-read tokens). This column
+-- is that stamp; `isRowDue()` now requires interval-elapsed since it.
+ALTER TABLE orchestrator_rows ADD COLUMN IF NOT EXISTS last_fired_at TIMESTAMPTZ;
 
 -- D1/D4: append-only audit of every routine command the controller runs. The
 -- controller reads the last N entries each tick to feed runtime context.
@@ -970,6 +1023,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS orchestrator_disabled_explicitly BOOL
 -- this whole file on EVERY hub boot — without the guard the UPDATE row-locks +
 -- rewrites every non-sentinel user row on every deploy (bloat/autovacuum churn).
 -- With it, the statement matches 0 rows once converged.
+-- schema-lint: allow convergent — `AND orchestrator_enabled = false` guard ⇒ WHERE matches 0 rows once converged
 UPDATE users SET orchestrator_enabled = true
   WHERE orchestrator_disabled_explicitly = false AND orchestrator_enabled = false;
 
@@ -982,16 +1036,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_orchestrator_unique
 -- Tag rows produced by the orchestrator-key mint so they don't conflict with
 -- the per-user single-supervisor api_keys uniqueness. Existing rows backfill
 -- to 'supervisor'.
+-- ADD COLUMN ... DEFAULT 'supervisor' makes Postgres fill the value for EVERY
+-- existing row at ADD time (and the column is NOT NULL, so '' cannot occur), so
+-- there is NOTHING to backfill. A prior inline `UPDATE api_keys SET purpose = ...`
+-- was REDUNDANT and forbidden here: schema.sql re-runs IN FULL every hub boot, and
+-- data-mutating statements belong in one-shot hub/scripts/, not this idempotent DDL
+-- (the UPDATE could also fight idx_api_keys_user_supervisor_active under a 2-key edge).
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'supervisor';
-UPDATE api_keys SET purpose = 'supervisor' WHERE purpose IS NULL OR purpose = '';
 
 -- The legacy partial unique index `idx_api_keys_user_active` enforces ONE
 -- active key per user — incompatible with an orchestrator-purpose key
--- coexisting with the supervisor key. Replace it with a per-(user, purpose)
--- variant so each purpose has at most one active row. Idempotent.
+-- coexisting with the supervisor key. Dropped here.
+-- Its former replacement (`idx_api_keys_user_purpose_active`, unique on
+-- (user_id, purpose)) is GONE too — milestone SKEY allows N active
+-- purpose='external' keys per user, so a (user_id, purpose) unique would
+-- unique_violation on schema apply and prevent the hub from booting. The
+-- surviving invariants (one active supervisor key, one active orchestrator key)
+-- are enforced by the purpose-specific partial uniques at the SKEY block below.
+-- schema-lint: allow idempotent DDL — IF EXISTS drop of a legacy index; no-op on every boot after the first
 DROP INDEX IF EXISTS idx_api_keys_user_active;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_purpose_active
-  ON api_keys(user_id, purpose) WHERE revoked_at IS NULL;
 
 -- ── Phase 08: Revanote annotation integration ────────────────────────────────
 -- Per-user webhook secret (UUID). NULL = unconfigured. Doubles as URL-path
@@ -1027,6 +1090,13 @@ CREATE TABLE IF NOT EXISTS revanote_app_mappings (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Self-heal containment: `deploy_strategy='direct'` and `auto_merge=true` let a
+-- WEBHOOK-DERIVED (untrusted) annotation reach main without human review. They stay
+-- possible, but only for a mapping the owner has explicitly marked trusted. Default
+-- false = propose-only (PR). Idempotent DDL — schema.sql re-runs every boot.
+ALTER TABLE revanote_app_mappings
+  ADD COLUMN IF NOT EXISTS trusted BOOLEAN NOT NULL DEFAULT false;
+
 CREATE INDEX IF NOT EXISTS idx_revanote_app_mappings_user
   ON revanote_app_mappings(user_id);
 CREATE INDEX IF NOT EXISTS idx_revanote_app_mappings_user_host
@@ -1323,3 +1393,152 @@ CREATE TABLE IF NOT EXISTS feedback_keys (
 CREATE INDEX IF NOT EXISTS idx_feedback_keys_user ON feedback_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_keys_session ON feedback_keys(session_id);
 
+
+-- ── Milestone ASK — external session-ask API (Phase 1 + 2) ───────────────────
+-- Idempotent DDL only — this file RE-RUNS IN FULL on every hub boot. No backfills.
+
+-- api_keys.scopes: ADDITIVE and NULLABLE. NULL = legacy full access (every key
+-- minted before this milestone keeps working, including /ws/agent). A key with a
+-- non-null array must carry 'ext:read' to use the /api/ext read surface and
+-- 'ext:ask' to spend tokens via POST /api/ext/sessions/:id/ask.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT[];
+
+-- session_asks: one row per external ask. `session_id` is the session ANSWERING
+-- (a stream-json ask-session bound to the target's project_dir); `target_session_id`
+-- is the session ASKED ABOUT (may be pty-interactive — we never write to it).
+CREATE TABLE IF NOT EXISTS session_asks (
+  id                TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id           TEXT NOT NULL,
+  session_id        TEXT NOT NULL,
+  target_session_id TEXT,
+  api_key_id        TEXT,
+  question          TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'queued',
+  answer            TEXT,
+  confidence        TEXT,
+  evidence          JSONB,
+  raw_reply         TEXT,
+  reason            TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  answered_at       TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_session_asks_user_created ON session_asks(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_asks_status ON session_asks(status);
+
+-- ── Milestone SKEY — named, scoped, multi API keys ───────────────────────────
+-- Idempotent DDL only — this file RE-RUNS IN FULL on every hub boot. No backfills.
+-- `scopes` is declared once, above (milestone ASK). SKEY adds 'agent' to the
+-- vocabulary: a non-null array must carry 'agent' to authenticate a
+-- supervisor/agent socket (/ws/agent, /api/plugin/*).
+
+-- Display-only prefix of the plaintext key (e.g. 'remokey_ab12…'), captured at
+-- mint time so the Credentials table can identify a row without ever storing the
+-- key. NULL on legacy rows (the plaintext is gone — UI shows an em dash).
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_prefix TEXT;
+
+-- N keys per user. The old per-(user,purpose) unique index made every key a
+-- singleton per purpose, which blocks minting several scoped 'external' keys.
+-- Keep the at-most-one-active invariant ONLY where it is load-bearing:
+-- purpose='supervisor' (the spawn credential) and purpose='orchestrator'.
+-- The superseded CREATE of idx_api_keys_user_purpose_active is DELETED (not
+-- guarded) further up — schema.sql re-runs IN FULL every boot, so leaving the
+-- stale CREATE alongside this DROP would recreate a (user_id,purpose) unique
+-- index each boot and hard-fail the apply (hub does not boot) the moment a user
+-- legitimately holds two active purpose='external' keys. Same failure mode the
+-- comment at the top of this file documents. Regression: hub/test/schema-double-apply.test.ts.
+-- schema-lint: allow idempotent DDL — IF EXISTS drop of a legacy index; no-op once no such index exists
+DROP INDEX IF EXISTS idx_api_keys_user_purpose_active;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_supervisor_active
+  ON api_keys(user_id) WHERE revoked_at IS NULL AND purpose = 'supervisor';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_orchestrator_active
+  ON api_keys(user_id) WHERE revoked_at IS NULL AND purpose = 'orchestrator';
+
+-- ── Milestone WORK (remo_work): inbound-email → repo agent → QC → gated publish ──
+-- THREAT MODEL: `work_runs.request_text` originates in a CLIENT EMAIL — the least
+-- trusted input in the system (anyone who knows the address can send one). These
+-- three tables are the containment: a repo must be ALLOWLISTED, a site must be
+-- KNOWN and its sender RECOGNISED, and publishing to production requires an
+-- explicit per-site trust flag that DEFAULTS OFF. Both allowlist tables start
+-- EMPTY, so the feature drives nothing until an operator opts a repo/site in.
+
+-- Repo allowlist (audit finding F6). EMPTY BY DEFAULT ⇒ every /api/ext/work call
+-- is rejected 403 `repo_not_allowlisted` with no dispatch and no spend.
+CREATE TABLE IF NOT EXISTS work_repo_allowlist (
+  user_id    TEXT NOT NULL,
+  repo_ident TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, repo_ident)
+);
+
+-- Per-site trust record. `auto_publish` DEFAULTS FALSE: a site without the flag
+-- gets fix + QC + preview deploy + report, and NEVER touches production.
+-- `client_emails` is the sender allowlist — an email from an unknown address
+-- never reaches a session. `site_dir` scopes the agent's write blast radius.
+-- NOTE: `build_cmd` / `publish_cmd` / `coolify_app_uuid` are OPERATOR-configured and
+-- executed BY THE HUB/SUPERVISOR, never by the agent. The agent's authority ends at a
+-- pushed branch; the hub verifies the diff scope, runs the build, probes HTTPS, and
+-- performs the publish itself.
+CREATE TABLE IF NOT EXISTS work_sites (
+  id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id       TEXT NOT NULL,
+  repo_ident    TEXT NOT NULL,
+  site_key      TEXT NOT NULL,
+  site_dir      TEXT NOT NULL,
+  client_emails TEXT[] NOT NULL DEFAULT '{}',
+  auto_publish  BOOLEAN NOT NULL DEFAULT false,
+  publish_cmd   TEXT,
+  verify_url    TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Hub-side QC + publish inputs (added after the "agent proposes, hub disposes" rewrite).
+ALTER TABLE work_sites ADD COLUMN IF NOT EXISTS build_cmd TEXT;
+ALTER TABLE work_sites ADD COLUMN IF NOT EXISTS preview_verify_url TEXT;
+ALTER TABLE work_sites ADD COLUMN IF NOT EXISTS coolify_app_uuid TEXT;
+ALTER TABLE work_sites ADD COLUMN IF NOT EXISTS default_branch TEXT NOT NULL DEFAULT 'main';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_work_sites_key ON work_sites(user_id, repo_ident, site_key);
+
+-- Audit trail (audit finding F9). One row per work item: the source email
+-- metadata, the FULL prompt that was sent, the resulting commits/files, whether it
+-- published, and the QC evidence. This is what answers "which live-site commits
+-- came from an inbound email?".
+CREATE TABLE IF NOT EXISTS work_runs (
+  id                TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id           TEXT NOT NULL,
+  session_id        TEXT NOT NULL,
+  api_key_id        TEXT,
+  repo_ident        TEXT NOT NULL,
+  site_key          TEXT NOT NULL,
+  site_id           TEXT,
+  auto_publish      BOOLEAN NOT NULL DEFAULT false,
+  source_kind       TEXT NOT NULL DEFAULT 'email',
+  source_from       TEXT,
+  source_subject    TEXT,
+  source_message_id TEXT,
+  request_text      TEXT NOT NULL,
+  prompt            TEXT NOT NULL,
+  nonce             TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'queued',
+  summary           TEXT,
+  files_changed     JSONB,
+  commit_shas       JSONB,
+  qc                JSONB,
+  diff_url          TEXT,
+  pr_url            TEXT,
+  preview_url       TEXT,
+  live_url          TEXT,
+  published         BOOLEAN NOT NULL DEFAULT false,
+  blocker           TEXT,
+  reason            TEXT,
+  raw_reply         TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at       TIMESTAMPTZ
+);
+-- The agent's authority ends at `branch` + `commit_shas`. Everything about what went
+-- live is HUB-OBSERVED: `hub_qc` holds the hub's own diff-scope check, build result and
+-- HTTPS probe; `published` is written ONLY on the publish path the HUB executed.
+ALTER TABLE work_runs ADD COLUMN IF NOT EXISTS branch TEXT;
+ALTER TABLE work_runs ADD COLUMN IF NOT EXISTS hub_qc JSONB;
+ALTER TABLE work_runs ADD COLUMN IF NOT EXISTS deploy_status TEXT;
+CREATE INDEX IF NOT EXISTS idx_work_runs_user_created ON work_runs(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_runs_status ON work_runs(status);
+CREATE INDEX IF NOT EXISTS idx_work_runs_published ON work_runs(published, created_at DESC);

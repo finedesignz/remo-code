@@ -1,0 +1,89 @@
+#!/bin/sh
+# commit-msg: block Google Antigravity IDE autosave/checkpoint commits.
+# (Must be commit-msg, not pre-commit: pre-commit runs before the message
+# exists, so it has no $1 message-file to inspect. commit-msg gets both the
+# message file AND the final staged index, so message + staged-path checks
+# both live here.)
+#
+# Antigravity periodically auto-commits the entire working tree as the
+# logged-in user with a bare "sync" (or older "chore(nightly-sync): autosave
+# <date> [skip ci]") message. It bypasses .gitignore and can resurrect
+# deliberately-deleted trees. There is no known IDE setting to disable it,
+# so this hook rejects the commit at the git layer instead.
+#
+# Override (only when a human really means it):
+#   ALLOW_AUTOSAVE_COMMIT=1 git commit -m "sync"
+
+if [ "${ALLOW_AUTOSAVE_COMMIT:-}" = "1" ]; then
+    exit 0
+fi
+
+msg_file="$1"
+msg="$(cat "$msg_file" 2>/dev/null)"
+# trim leading/trailing whitespace
+trimmed="$(printf '%s' "$msg" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+lower="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
+
+reject() {
+    reason="$1"
+    cat >&2 <<EOF
+
+------------------------------------------------------------------
+COMMIT REJECTED: looks like a Google Antigravity IDE autosave/checkpoint,
+not a real human/agent commit.
+
+Reason: $reason
+
+Antigravity periodically auto-commits the entire working tree (bypassing
+.gitignore, sometimes touching tens of thousands of files) under a bare
+"sync" message. This repo blocks that at the git hook layer.
+
+If this commit is genuinely intentional, override with:
+    ALLOW_AUTOSAVE_COMMIT=1 git commit -m "..."
+------------------------------------------------------------------
+EOF
+    exit 1
+}
+
+# 1. Message check: exact "sync" (any case/whitespace) or nightly-sync autosave pattern.
+case "$lower" in
+    sync)
+        reject "commit message is the bare Antigravity autosave message '$trimmed'"
+        ;;
+    chore\(nightly-sync\)*autosave*)
+        reject "commit message matches Antigravity legacy autosave pattern"
+        ;;
+esac
+
+# 2. Staged node_modules/ paths, or anything gitignored that got force-added.
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+file_count=0
+ignored_found=""
+if [ -n "$staged_files" ]; then
+    file_count=$(printf '%s\n' "$staged_files" | sed '/^$/d' | wc -l | tr -d ' ')
+
+    node_modules_hit="$(printf '%s\n' "$staged_files" | grep -m1 -E '(^|/)node_modules/' || true)"
+    if [ -n "$node_modules_hit" ]; then
+        reject "staged change includes a node_modules/ path ($node_modules_hit) - node_modules is supposed to be gitignored"
+    fi
+
+    # git check-ignore over the staged file list. --no-index is required:
+    # once a path is staged/tracked, plain `check-ignore` stops reporting it
+    # as ignored (git's normal semantics), which would blind this exact
+    # force-add-past-.gitignore case.
+    ignored_found="$(printf '%s\n' "$staged_files" | git check-ignore --no-index --stdin 2>/dev/null | head -n1 || true)"
+    if [ -n "$ignored_found" ]; then
+        reject "staged file '$ignored_found' is gitignored but was force-added into the commit"
+    fi
+fi
+
+# 3. Implausibly large commit + generic/empty message.
+if [ "$file_count" -gt 500 ]; then
+    case "$lower" in
+        ""|sync|update|updates|wip|autosave|checkpoint|save|snapshot)
+            reject "commit stages $file_count files with a generic/empty message ('$trimmed') - looks automated, not human-authored"
+            ;;
+    esac
+fi
+
+exit 0

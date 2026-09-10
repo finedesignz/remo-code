@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "../../lib/ui/cn";
 import { MobileTopBar } from "./MobileTopBar";
+import { HomeIcon, SettingsIcon, TasksIcon } from "./NavIcons";
 import { useVisualViewportHeight } from "../../hooks/useVisualViewportHeight";
 
 export interface AppShellSubTab {
@@ -73,8 +74,15 @@ function DesktopNavItem({ item }: { item: AppShellNavItem }) {
     };
   }, [open]);
 
+  // Icon left of the label — same glyph set the mobile bar uses, at 16px.
+  const icon =
+    item.key === "home" ? <HomeIcon size={16} />
+    : item.key === "tasks" ? <TasksIcon size={16} />
+    : item.key === "settings" ? <SettingsIcon size={16} />
+    : null;
+
   const linkClass = cn(
-    "px-3 py-1.5 rounded-lg text-sm transition-colors",
+    "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors",
     item.active
       ? "bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300"
       : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
@@ -83,6 +91,7 @@ function DesktopNavItem({ item }: { item: AppShellNavItem }) {
   if (!hasMenu) {
     return (
       <a href={item.href} className={linkClass}>
+        {icon}
         {item.label}
       </a>
     );
@@ -95,10 +104,11 @@ function DesktopNavItem({ item }: { item: AppShellNavItem }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className={cn(linkClass, "inline-flex items-center gap-1.5")}
+        className={linkClass}
         aria-expanded={open}
         aria-haspopup="true"
       >
+        {icon}
         <span>{item.label}</span>
         {activeSubLabel && (
           <span className="text-[var(--text-secondary)]/70">· {activeSubLabel}</span>

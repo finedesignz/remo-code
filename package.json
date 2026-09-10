@@ -1,7 +1,11 @@
 {
   "name": "remo-code",
   "private": true,
-  "workspaces": ["hub", "web"],
+  "workspaces": [
+    "hub",
+    "web",
+    "mcp"
+  ],
   "scripts": {
     "dev:hub": "cd hub && bun run dev",
     "dev:web": "cd web && bun run dev",
@@ -11,11 +15,14 @@
     "smoke": "bun run tools/smoke-https.ts",
     "check-baseline": "bun run tools/check-baseline.ts",
     "migration-verify": "bun run tools/migration-verify.ts",
+    "schema-lint": "bun run tools/schema-sql-lint.ts",
     "orchestrator:e2e": "bun test hub/test/e2e/*.e2e.test.ts"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "^20.10.6",
     "@tailwindcss/vite": "^4.2.2",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "playwright-core": "^1.61.1"
   },
   "dependencies": {
     "rehype-sanitize": "^6.0.0"

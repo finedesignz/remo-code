@@ -663,6 +663,69 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   return c.json({ templates: TASK_TEMPLATES }, 200);
 });
 
+// ── Orchestrator run-log (OBSRV-01 / RUNLOG-01/02) ──────────────────────────
+// Spec-only registration — the plain-Hono router in `./orchestrator.ts` serves
+// traffic. This contributes to the OpenAPI spec without duplicating handler logic.
+{
+  const RunLogItem = z.object({
+    id: z.string(),
+    session_id: z.string(),
+    repo_key: z.string().nullable(),
+    command: z.string(),
+    decision_rationale: z.string().nullable(),
+    outcome: z.string().nullable(),
+    gap_dimension: z.string().nullable(),
+    pr_url: z.string().nullable(),
+    reviewer_verdict: z.string().nullable(),
+    deploy_verify_result: z.string().nullable(),
+    created_at: z.string(),
+  });
+  const reg = openapi.openAPIRegistry;
+  reg.registerPath({
+    method: "get",
+    path: "/api/orchestrator/run-log",
+    tags: ["orchestrator"],
+    summary: "Paginated run-log for the authenticated user",
+    description:
+      "Returns routine_run_log rows scoped to the authenticated user, newest first. " +
+      "Pass `session_id` to narrow to a single session; omit for all sessions. " +
+      "Read-only — zero impact on the dispatch path, gates, or caps.",
+    security: [{ bearerAuth: [] }],
+    request: {
+      query: z.object({
+        limit: z.coerce.number().int().min(1).max(200).default(50).optional()
+          .openapi({ description: "Page size (1–200, default 50)" }),
+        offset: z.coerce.number().int().min(0).default(0).optional()
+          .openapi({ description: "Row offset for pagination (default 0)" }),
+        session_id: z.string().optional()
+          .openapi({ description: "Filter to a single session (must belong to the authenticated user)" }),
+      }),
+    },
+    responses: {
+      200: {
+        description: "Paginated run-log entries",
+        content: {
+          "application/json": {
+            schema: z.object({
+              items: z.array(RunLogItem),
+              limit: z.number(),
+              offset: z.number(),
+            }),
+          },
+        },
+      },
+      400: {
+        description: "Invalid query parameters",
+        content: { "application/json": { schema: z.object({ error: z.string() }) } },
+      },
+      401: {
+        description: "Missing or invalid session",
+        content: { "application/json": { schema: z.object({ error: z.string() }) } },
+      },
+    },
+  });
+}
+
 // ── Feedback intake (Option A) — public end-user feedback webhook ───────────
 // Spec-only registration. The plain-Hono router in `./feedback-webhook.ts`
 // serves traffic (mounted public, BEFORE the JWT catch-all); this only
@@ -700,7 +763,309 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   });
 }
 
+// ── /api/ext — external session-ask API (milestone ASK) ─────────────────────
+// Spec-only registration; `./ext.ts` (plain Hono) serves traffic. Auth is an
+// api_key Bearer (`apiKeyAuth`), NOT the cookie/JWT session. See docs/session-ask.md.
+{
+  const Err = z.object({ error: z.string(), detail: z.string().optional() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const base = { tags: ["ext"], security: [{ apiKeyAuth: [] }] } as const;
+  const SessionParam = z.object({
+    id: z.string().openapi({
+      param: { name: "id", in: "path" },
+      description: "Session id, repo_ident (github://owner/repo | path://<abs>), or repo name",
+      example: "github://finedesignz/remo-code",
+    }),
+  });
+  const Ask = z.object({
+    ask_id: z.string(),
+    status: z.enum(["queued", "dispatched", "answered", "timeout", "skipped", "failed"]),
+    answer: z.string().nullable(),
+    confidence: z.string().nullable(),
+    evidence: z.array(z.string()).nullable(),
+    reason: z.string().nullable().openapi({
+      description:
+        "Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask, session_offline, ask_timeout.",
+    }),
+    raw_reply: z.string().nullable(),
+    created_at: z.string(),
+    answered_at: z.string().nullable(),
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/sessions",
+    summary: "List the caller's sessions (FREE — zero tokens)",
+    ...base,
+    responses: {
+      200: {
+        description: "Sessions",
+        ...json(
+          z.object({
+            sessions: z.array(
+              z.object({
+                id: z.string(),
+                name: z.string(),
+                repo_ident: z.string().nullable(),
+                project_dir: z.string().nullable(),
+                runner_type: z.string(),
+                active: z.boolean(),
+                last_activity: z.string().nullable(),
+              }),
+            ),
+          }),
+        ),
+      },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: { description: "Key lacks the ext:read scope", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/sessions/{id}/transcript",
+    summary: "Tail of the session's on-disk CLI transcript (FREE — zero tokens, no PTY write)",
+    description:
+      "Proxied to the supervisor host's allowlisted READ-ONLY `session_transcript_tail` command. Works for pty-interactive sessions too. Byte-capped.",
+    ...base,
+    request: {
+      params: SessionParam,
+      query: z.object({ tail: z.coerce.number().int().min(1).max(200).optional() }),
+    },
+    responses: {
+      200: {
+        description: "Transcript tail",
+        ...json(
+          z.object({
+            session_id: z.string(),
+            turns: z.array(z.object({ role: z.string(), text: z.string() })),
+            truncated: z.boolean(),
+          }),
+        ),
+      },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such session", ...json(Err) },
+      409: { description: "Session has no project_dir", ...json(Err) },
+      502: { description: "Supervisor could not read the transcript", ...json(Err) },
+      503: { description: "No (or ambiguous) online supervisor for this user", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/sessions/{id}/memory",
+    summary: "The session project's memory files (FREE — zero tokens, no PTY write)",
+    ...base,
+    request: { params: SessionParam },
+    responses: {
+      200: {
+        description: "Memory files",
+        ...json(
+          z.object({
+            session_id: z.string(),
+            files: z.array(z.object({ name: z.string(), content: z.string() })),
+            truncated: z.boolean(),
+          }),
+        ),
+      },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such session", ...json(Err) },
+      502: { description: "Supervisor could not read memory", ...json(Err) },
+      503: { description: "No (or ambiguous) online supervisor", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/sessions/{id}/state",
+    summary: "Cheap status roll-up for a session (FREE)",
+    ...base,
+    request: { params: SessionParam },
+    responses: {
+      200: {
+        description: "State",
+        ...json(
+          z.object({
+            session_id: z.string(),
+            repo_ident: z.string().nullable(),
+            runner_type: z.string(),
+            active: z.boolean(),
+            status: z.string(),
+            last_activity: z.string().nullable(),
+            last_assistant_message_at: z.string().nullable(),
+            open_session_runs: z.number().int(),
+          }),
+        ),
+      },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such session", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "post",
+    path: "/api/ext/sessions/{id}/ask",
+    summary: "Ask the session a question (PAID — spends tokens)",
+    description:
+      "Dispatches a short-lived stream-json ask-session bound to the target's project_dir (the human's PTY is NEVER written to). Rides the non-bypassable daily cost cap + daily token cap + human-only-PTY guard + per-key ask-rate ceiling. `wait_ms` long-polls up to 120s; on expiry poll the ask endpoint.",
+    ...base,
+    request: {
+      params: SessionParam,
+      body: json(
+        z.object({
+          question: z.string().min(1).max(8000),
+          context: z.string().max(8000).optional(),
+          wait_ms: z.number().int().min(0).max(120000).optional(),
+          include_transcript: z.boolean().optional(),
+          include_memory: z.boolean().optional(),
+        }),
+      ),
+    },
+    responses: {
+      202: { description: "Ask created (answer inline when the long-poll caught it)", ...json(Ask) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: { description: "Key lacks the ext:ask scope", ...json(Err) },
+      404: { description: "No such session", ...json(Err) },
+      409: { description: "No stream-json ask session for this project_dir", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/sessions/{id}/ask/{ask_id}",
+    summary: "Poll an ask (no new tokens)",
+    ...base,
+    request: {
+      params: SessionParam.extend({
+        ask_id: z.string().openapi({ param: { name: "ask_id", in: "path" } }),
+      }),
+    },
+    responses: {
+      200: { description: "Ask", ...json(Ask) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such ask", ...json(Err) },
+    },
+  });
+
+  // ── Milestone WORK: inbound-email → repo agent → QC → gated publish ────────
+  const Work = z
+    .object({
+      work_id: z.string(),
+      session_id: z.string().optional(),
+      status: z.enum([
+        "queued",
+        "dispatched",
+        "verifying",
+        "completed",
+        "qc_failed",
+        "needs_human",
+        "timeout",
+        "skipped",
+        "failed",
+      ]),
+      summary: z.string().nullable(),
+      branch: z.string().nullable().openapi({
+        description: "The branch the agent pushed. Its authority ends here — it does not deploy, publish or merge.",
+      }),
+      files_changed: z.array(z.string()).openapi({
+        description: "HUB-OBSERVED — derived from the branch diff, not from the agent's claimed file list.",
+      }),
+      commit_shas: z.array(z.string()),
+      hub_qc: z.unknown().nullable().openapi({
+        description:
+          "HUB-OBSERVED evidence: the diff-scope check (every file under work_sites.site_dir), the real build exit code, and the hub's own HTTPS probe. This — not the agent — gates the publish.",
+      }),
+      agent_self_check: z.unknown().nullable().openapi({
+        description: "The agent's self-report. ADVISORY metadata only; never the basis of a publish decision.",
+      }),
+      deploy_status: z.string().nullable().openapi({
+        description: "not_permitted | qc_failed | branch_moved_after_qc | merge_failed | deploy_failed | live_probe_failed | published",
+      }),
+      diff_url: z.string().nullable(),
+      pr_url: z.string().nullable(),
+      preview_url: z.string().nullable(),
+      published: z.boolean().openapi({
+        description:
+          "TRUE only when the HUB ITSELF performed the deploy (site.auto_publish AND hub-verified diff-scope AND hub-verified build AND hub-verified 2xx probe). The agent cannot set it; finalizeWork also ANDs it with the site flag in SQL as a backstop.",
+      }),
+      live_url: z.string().nullable(),
+      blocker: z.string().nullable().openapi({
+        description: "e.g. suspected_injection, unparseable_reply, or why a human is needed.",
+      }),
+      reason: z.string().nullable().openapi({
+        description:
+          "Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work, session_offline, work_timeout.",
+      }),
+      auto_publish: z.boolean(),
+      repo_ident: z.string(),
+      site_key: z.string(),
+    })
+    .openapi("ExtWork");
+
+  reg.registerPath({
+    method: "post",
+    path: "/api/ext/work",
+    summary: "Inbound client request → repo agent → QC → GATED publish (PAID — writes code)",
+    description:
+      "Points an UNTRUSTED inbound client email at the repo's stream-json session. THE AGENT PROPOSES, THE HUB DISPOSES: the agent's authority ends at a pushed `work/<id>` branch (it has no deploy credentials and is not even told whether the site auto-publishes). The HUB then verifies the branch diff touches ONLY `work_sites.site_dir`, runs the build itself, probes the site over real HTTPS, and performs the merge + deploy itself — only when the site carries `auto_publish=true`. Entry containment (all default-OFF): the repo must be in `work_repo_allowlist` (403 otherwise — no dispatch, no spend); the site must exist in `work_sites`; `source.from` must match that site's `client_emails` (403 `unknown_sender`). Rides the non-bypassable daily cost + token caps, the human-only-PTY guard, and a per-user work-rate ceiling (REMO_WORK_MAX_PER_HOUR, default 4).",
+    ...base,
+    request: {
+      body: json(
+        z.object({
+          repo: z.string().min(1),
+          site: z.string().min(1),
+          request_text: z.string().min(1).max(20000),
+          source: z.object({
+            kind: z.literal("email"),
+            from: z.string().min(1).max(320),
+            subject: z.string().max(2000).optional(),
+            message_id: z.string().max(998).optional(),
+          }),
+          wait_ms: z.number().int().min(0).max(120000).optional(),
+        }),
+      ),
+    },
+    responses: {
+      202: { description: "Work item created", ...json(Work) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      403: {
+        description:
+          "Key lacks the ext:work scope, OR repo_not_allowlisted, OR unknown_site, OR unknown_sender — no dispatch, no spend.",
+        ...json(Err),
+      },
+      404: { description: "No session for that repo", ...json(Err) },
+      409: { description: "No stream-json session for this project_dir", ...json(Err) },
+    },
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/ext/work/{work_id}",
+    summary: "Poll a work item (no new tokens)",
+    ...base,
+    request: {
+      params: z.object({
+        work_id: z.string().openapi({ param: { name: "work_id", in: "path" } }),
+      }),
+    },
+    responses: {
+      200: { description: "Work item", ...json(Work) },
+      401: { description: "Missing/invalid api key", ...json(Err) },
+      404: { description: "No such work item", ...json(Err) },
+    },
+  });
+}
+
 // OpenAPI security scheme registration.
+openapi.openAPIRegistry.registerComponent("securitySchemes", "apiKeyAuth", {
+  type: "http",
+  scheme: "bearer",
+  description:
+    "A remo-code api_key (`remokey_…`) from Settings → Credentials. Optional scopes: `ext:read` (free reads) and `ext:ask` (spends tokens). A key with NULL scopes keeps legacy full access.",
+});
 openapi.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
   type: "http",
   scheme: "bearer",

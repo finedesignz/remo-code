@@ -509,6 +509,13 @@ function ScheduleRow({
                 label={statusPill.label}
               />
             )}
+            {task.task_type === "teab" && task.teab_last_status && (
+              <StatusPill
+                status={teabStatusKind(task.teab_last_status)}
+                size="sm"
+                label={`teab: ${task.teab_last_status}`}
+              />
+            )}
             {!task.enabled && (
               <StatusPill status="idle" size="sm" label="disabled" />
             )}
@@ -566,6 +573,15 @@ function ScheduleRow({
       </div>
     </div>
   );
+}
+
+// Map a raw supervisor `teab_last_status` string onto a StatusPill kind.
+function teabStatusKind(status: string): StatusKind {
+  const s = status.toLowerCase();
+  if (s === "success" || s === "exited" || s === "ok") return "success";
+  if (s.includes("fail") || s.includes("error") || s.includes("timeout")) return "error";
+  if (s === "started" || s === "running" || s === "in_flight") return "pending";
+  return "info";
 }
 
 function lastRunPill(

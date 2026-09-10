@@ -166,6 +166,30 @@ export const SupervisorSessionInventory = z.object({
     last_activity_at: z.string().nullable().optional(),
     status: z.enum(['spawning', 'running', 'idle', 'stopping']),
   })).max(64),
+  // fix/stop-the-bleed — supervisor spawn circuit-breaker state. OPTIONAL:
+  // pre-fix supervisors never send it (the hub then knows nothing, exactly as
+  // before). A non-empty array means the supervisor is REFUSING to spawn a CLI
+  // for those repos — the failure mode that silently killed autonomy for four
+  // days in 2026-07 while the hub reported healthy.
+  circuit_breakers: z.array(z.object({
+    repo_path: z.string().max(4096),
+    state: z.enum(['open', 'half_open']),
+    opened_at: z.string(),
+    failed_probes: z.number().int().nonnegative(),
+    exhausted: z.boolean(),
+    last_reason: z.string().max(512).nullable().optional(),
+  })).max(64).optional(),
+  // fix/headless-autoupdate — loopback status-server health. OPTIONAL: pre-fix
+  // supervisors never send it. `healthy:false` means the supervisor could not
+  // bind 127.0.0.1:9106 (or the 9197 fallback) — its /sup/status endpoint does
+  // not exist, so the tray and any :9106 probe are blind. Prod 2026-07: a ZOMBIE
+  // listener (dead PID still holding the socket) made this permanent for >1 day
+  // and nothing surfaced it beyond one ERROR line at boot.
+  status_server: z.object({
+    healthy: z.boolean(),
+    port: z.number().int().nullable().optional(),
+    last_error: z.string().max(512).nullable().optional(),
+  }).optional(),
 })
 export type SupervisorSessionInventoryT = z.infer<typeof SupervisorSessionInventory>
 
@@ -271,12 +295,43 @@ export const SetRootsAck = z.object({
   error: z.string().max(2000).optional(),
 })
 
+/**
+ * fix/supervisor-periodic-repo-rescan — ack for a hub-initiated rescan
+ * (`supervisor.rescan_repos`). The supervisor re-scans its roots and emits a
+ * fresh `supervisor.repo_inventory` on a separate frame; this ack lets the
+ * PATCH/POST route await the completion. `ok:false` surfaces a scan error
+ * rather than silently swapping in a stale inventory.
+ */
+export const RescanAck = z.object({
+  type: z.literal('supervisor.rescan_ack'),
+  req_id: z.string(),
+  ok: z.boolean(),
+  error: z.string().max(2000).optional(),
+})
+
+/**
+ * milestone remote-update-trigger — ack for a hub-initiated forced supervisor
+ * update (`supervisor.force_update`). Mirrors RescanAck's shape/pattern: the
+ * sidecar writes the force-update marker file and acks immediately; the Rust
+ * tray watcher picks up the marker on its own poll and performs the actual
+ * check→download→install→relaunch via the existing auto_update::run_check.
+ * `ok:false` surfaces a marker-write failure (never a silent no-op).
+ */
+export const ForceUpdateAck = z.object({
+  type: z.literal('supervisor.force_update_ack'),
+  req_id: z.string(),
+  ok: z.boolean(),
+  error: z.string().max(2000).optional(),
+})
+
 export const SupervisorInboundV2 = [
   ...SupervisorInbound,
   SessionLaunchFailed,
   RepoCreateProgress,
   RepoCreateFailed,
   SetRootsAck,
+  RescanAck,
+  ForceUpdateAck,
 ]
 
 // -- Hub -> Supervisor (constructed by hub, not validated) --
@@ -324,3 +379,14 @@ export type HubToSupervisor =
   // running supervisor. Supervisor writes supervisor.json (no BOM via
   // Bun.write/native UTF-8 writeFileSync), re-scans, then emits set_roots_ack.
   | { type: 'supervisor.set_roots'; req_id: string; roots: string[] }
+  // fix/supervisor-periodic-repo-rescan — hub asks the supervisor to re-scan
+  // its roots NOW and emit a fresh repo_inventory. Supervisor replies with
+  // supervisor.rescan_ack. Used by the web "Refresh repos" button so a repo
+  // cloned after connect appears without waiting for the periodic timer.
+  | { type: 'supervisor.rescan_repos'; req_id: string }
+  // milestone remote-update-trigger — hub asks the supervisor sidecar to force
+  // a check for the latest signed release NOW (web Settings "Update to latest"
+  // button). The sidecar writes a marker file the Rust tray watcher polls and
+  // consumes, then replies with supervisor.force_update_ack. An old sidecar
+  // without this handler simply times out — same compat behavior as rescan.
+  | { type: 'supervisor.force_update'; req_id: string; requested_by?: string }

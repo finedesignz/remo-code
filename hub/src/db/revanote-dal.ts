@@ -28,6 +28,12 @@ export interface RevanoteMapping {
   supervisor_id: string | null
   deploy_strategy: DeployStrategy
   auto_merge: boolean
+  /**
+   * Operator trust flag (default false). Only a TRUSTED mapping may act on
+   * `deploy_strategy='direct'` / `auto_merge=true`; an untrusted mapping is forced
+   * propose-only (PR) in `renderAnnotationPrompt`, whatever the payload says.
+   */
+  trusted: boolean
   enabled: boolean
   auto_created: boolean
   created_at: string
@@ -351,7 +357,13 @@ export async function insertAnnotation(opts: {
        ${opts.callback_url}, ${opts.mapping_id}, ${opts.source_ip},
        ${sql.json(opts.payload_raw)})
     ON CONFLICT (user_id, annotation_id_external) DO UPDATE
-       SET callback_url = EXCLUDED.callback_url
+       SET callback_url = EXCLUDED.callback_url,
+           payload_raw = CASE
+             WHEN EXCLUDED.payload_raw ? 'fix_contract' THEN EXCLUDED.payload_raw
+             WHEN annotations.payload_raw ? 'fix_contract'
+               THEN jsonb_set(EXCLUDED.payload_raw, '{fix_contract}', annotations.payload_raw -> 'fix_contract')
+             ELSE EXCLUDED.payload_raw
+           END
     RETURNING *
   `
   return rows[0]

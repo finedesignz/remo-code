@@ -60,6 +60,10 @@ export interface WaveSeams {
   dispatchReviewer(prUrl: string | null, unit: WaveUnit, ctx: WaveRunContext): Promise<ReviewerVerdict | null>;
   /** Phase-28: surface a propose-to-chat for high-tier (ship/milestone/tag) units. */
   proposeToChat(unit: WaveUnit, ctx: WaveRunContext): Promise<void>;
+  // (#348 added optional `runVerifyTail` / `markRowsFired` stubs here to de-flake the
+  // cycle-runner's DB-backed calls. The legacy wave path that made those calls is
+  // deleted, so the seams have no caller; the cadence-stamp stub now lives on
+  // `ResolveDeps` in controller.ts, which is what the cycle-runner still injects.)
 }
 
 /**

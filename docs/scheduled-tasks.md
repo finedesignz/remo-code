@@ -208,6 +208,27 @@ User-pickable roots (three only — see Phase 11 narrowing):
 - **log_check** — Coolify log analysis workflow
 - **qc** — periodic QC-and-fix routine (auto-dev P4): 3-lens review → fix → verify
 
+#### log_check app-uuid resolution (fix/sched-qc, 2026-07)
+
+`senders/coolify.ts` resolves the Coolify app to query in this order:
+
+1. `payload.application_uuid` / `payload.app_uuid`;
+2. otherwise the task's session → `sessions.repo_key` → the per-user
+   `coolify_app_repo` map (`getCoolifyAppByRepoKey`), the same resolution
+   `GET /api/sessions/:id/coolify-app` uses.
+
+If it's STILL unresolvable, the run finalizes **`skipped` / `no_application_uuid`**
+— not `failed`. A task that simply isn't bound to a Coolify app is not a failure
+(observed in prod: repo-bound log_check tasks reported as failing forever); this
+is the same "no work" outcome as `no_errors_detected`. A missing `COOLIFY_TOKEN`
+stays `failed` / `coolify_unconfigured` — that IS a real misconfiguration.
+
+> **`skipped` does NOT suppress failure chains.** `post-run/dispatcher.ts` matches
+> `on: 'failure'` against `failed | skipped | cancelled`, so a `skipped` run still
+> fires `on:'failure'` post-run actions (as `no_errors_detected` already did). The
+> change buys a truthful status, not chain suppression — changing the global
+> matcher would regress every other subsystem and is deliberately not done.
+
 Chained workflow step kinds (auto-created when a root is saved — PLAN.md decision #3):
 
 - `dev_controller` → `dev_plan` → `dev_execute` → `dev_ship`
@@ -258,13 +279,16 @@ Internal kind (NOT user-pickable; synthesized by Coolify webhook + classifier):
   `TriageResult` JSON (`error_type`, `severity`, `root_cause`, `suggested_fix`,
   `confidence`, `affected_files?`), and stores the validated JSON in
   `scheduled_task_runs.output_snippet`. On parse failure the run is marked
-  `status='failed', error='triage_parse_error'`. **Wire-up status:** the
+  `status='failed', error='triage_parse_error'`. **Wire-up status:** LIVE. The
   `triage` task_kind, prompt template, schema, and parse helper are shipped
-  (`hub/src/scheduler/triage-schema.ts`, `triage-prompt.ts`); the
-  webhook-to-session routing (Phase 06 plan 008) is **pending Phase 04 plan
-  008** (`pickSessionTarget` + `POST /api/sessions/heal`) being merged. Until
-  then, triage runs from the webhook persist metadata but `dispatchTriageStub`
-  is a no-op — they do not dispatch to a session.
+  (`hub/src/scheduler/triage-schema.ts`, `triage-prompt.ts`), and
+  webhook-to-session routing is real: `dispatchTriage`
+  (`hub/src/api/coolify-webhook.ts`) storm-dedupes the deploy failure, probes
+  routability, fetches the failing app's logs, and fires the `__internal_triage`
+  task, which `senders/triage.ts` dispatches to a live local-agent session
+  (repo-keyed first, else any online agent session; none ⇒ immediate
+  `failed`/`no_target_available`). `dispatchTriageStub` survives only as a
+  back-compat alias of `dispatchTriage` — it is NOT a stub.
 
 ### Target kinds
 
@@ -293,6 +317,109 @@ validated by `Intl.DateTimeFormat`. The UI offers presets via
 The "next 3 runs" preview in the editor uses the same util as the hub —
 both `hub/src/scheduler/cron.ts` and `web/src/lib/cron.ts` are kept
 API-compatible.
+
+---
+
+## One-time tasks (`schedule_kind='once'`, milestone once)
+
+A scheduled task fires **either** on a recurring cron (`schedule_kind='cron'`, the
+default — `schedule_rules`/`cron_expr` evaluated) **or exactly once** at `run_at`
+(`schedule_kind='once'`). Both are rows in the SAME `scheduled_tasks` table and
+ride the SAME dispatch pipeline, gates, `finalizeRun`, post-run actions, and email
+summary — there is **no parallel one-time queue**.
+
+**Columns** (additive, idempotent, no backfill — every existing row stays
+`schedule_kind='cron'` / `run_at` NULL):
+
+| Column          | Meaning                                                        |
+|-----------------|---------------------------------------------------------------|
+| `schedule_kind` | `'cron'` (default) or `'once'`. CHECK-constrained.            |
+| `run_at`        | The single fire time for a `once` row. NULL on every cron row. |
+
+**Lifecycle of a `once` row:**
+
+1. **Arm** — `registry.registerInternal` special-cases `schedule_kind='once'`:
+   `run_at` in the future → a croner **Date** job fires it a single time; `run_at`
+   already past → a `setTimeout(0)` fires it. **No cron rule is ever evaluated for
+   a once row.** The `setTimeout(0)` is a **latency optimization ONLY** — it is not
+   durable.
+   **Durable source of truth: the once-due sweep** (`scheduler/once-due-sweep.ts`,
+   boot-started `setInterval`, default 10s, `REMO_ONCE_SWEEP_INTERVAL_MS` /
+   `REMO_ONCE_SWEEP_DISABLED`). Every tick it selects `schedule_kind='once' AND
+   enabled=true AND run_at<=now` (`listDueOnceTasks`) and fires each via
+   `dispatcher.fire`. Because a row stays `enabled=true` until a fire **claims** it,
+   the sweep re-arms AND re-fires any due row whose `setTimeout` was lost — a
+   process death before the callback, a throw inside the fire, or a swallowed
+   `register()` error. `claimOnceTask` keeps the sweep and the `setTimeout`
+   mutually exclusive: **exactly one dispatch, ever.** This is what closes the
+   "accept-never-dispatch" silent-drop for the email→website work path.
+2. **Fire (CLAIM-then-fire)** — `dispatcher.fire()` short-circuits
+   `schedule_kind='once'`: it FIRST **claims** the row via `claimOnceTask` — a
+   single conditional `UPDATE … SET enabled=false, next_fire_at=NULL, … WHERE
+   id=$id AND schedule_kind='once' AND enabled=true RETURNING id`. It dispatches
+   (`fireTask`, MANUAL so an offline target fails fast instead of grace-replaying)
+   **only if the claim returned a row**. This closes a sub-second double-fire
+   window at the source: a hub restart AFTER a dispatch but BEFORE the disable
+   commit finds the row already `enabled=false`, so `listEnabledTasks` never
+   re-arms it; a concurrent second fire loses the claim (0 rows) and no-ops; an
+   errored claim fails closed (no dispatch). The in-flight run is untouched (it
+   lives in `inFlightByRun` and finalizes independently of `enabled`).
+   **Belt-and-braces:** `dispatchWork` is ALSO idempotent per `work_id` — if the
+   `work_runs` row has advanced past `queued` it returns
+   `skipped/already_dispatched` without re-running gates or re-sending, so a live
+   client site can never be touched twice even if a re-fire slips through. Proven
+   by `test/once-tasks.test.ts` (claim-lost dispatches nothing) +
+   `test/once-work-idempotency.test.ts`.
+3. **Downstream is UNCHANGED** — the run row, `finalizeRun`, post-run actions, and
+   the email summary are exactly what a cron task uses. `bun test
+   test/once-tasks.test.ts` proves fire-once + no-re-arm + pipeline reuse.
+
+**Create via REST:** `POST /api/scheduled-tasks` with
+`{ schedule_kind: 'once', run_at: '<ISO 8601>', … }`. `run_at` is required and
+`cron_expr`/`schedule_rules` are ignored for a once task. `withNext3` surfaces
+`run_at` as the row's only "next run".
+
+### `/api/ext` work + ask are one-time tasks (the unify)
+
+`POST /api/ext/work` (inbound-email → repo agent) now **enqueues** each item as a
+`schedule_kind='once'`, `task_type='work'` `scheduled_tasks` row — the unified
+queue entry, Tasks-list appearance, and audit anchor — created with `run_at=now`
+so it fires immediately. Its sender (`hub/src/scheduler/senders/work.ts`) is a
+THIN adapter that reconstructs the input from `work_runs` + `payload` and calls the
+**existing** `dispatchWork`; the work verify/publish machinery is untouched.
+
+- **Two-lifecycle model (deliberate):** the `scheduled_task_run` records "the work
+  item was ACCEPTED into the pipeline" (finalized on the dispatch outcome); the
+  `work_runs` row is the TYPED TERMINAL result (`branch`/`hub_qc`/`published`/…),
+  finalized by dispatchWork's poll-to-terminal flow. `GET /api/ext/work/:id` reads
+  `work_runs`, which stays the source of truth for the outcome. The synthesized
+  once row sets `email_summary=false` (work has its own result surface).
+- **Shared-gate guarantee (the back-door closer):** the once row is created **only
+  after** every trust check (`repo allowlist` → `site` → `sender`) passes at the
+  route, so a forbidden repo/site/sender still `403`s with ZERO rows and ZERO
+  spend — a one-time task can never reach a repo the allowlist forbids. At RUN
+  time, `dispatchWork`'s own non-negotiable gate list (`dailyCostCapGate` ·
+  `dailyTokenCapGate` · `humanOnlyPtyGate` · `workRateGate` ·
+  `workRepoAllowlistGate`) runs again. **No scheduling path reaches a repo/site
+  that direct dispatch couldn't.** Proven by `test/ext-work-containment.test.ts`
+  (b) + `test/ext-work-gates.test.ts` + `test/once-work-sender.test.ts`.
+- **`wait_ms` contract (async dispatch):** work now dispatches ASYNC (the once
+  task fires via the `setTimeout(0)` + the durable once-due sweep), so `wait_ms` is
+  a **best-effort latency convenience**, not a guarantee. The route polls
+  `work_runs` until terminal or the window lapses; a non-terminal return
+  (`queued`/`dispatched`/`verifying`) is a **DEFINED, POLLABLE** state — the
+  once-due sweep guarantees the item is dispatched and the work-reaper guarantees
+  it reaches terminal — so the caller simply polls `GET /api/ext/work/:work_id`
+  until `status` is terminal. It is never a silent race / dropped item.
+- **Enqueue failure is never a phantom queue entry:** if `createTaskV2` throws
+  AFTER the `work_runs` row is inserted, the route finalizes that row `failed` and
+  returns **502** (the caller retries) — never a 201/202 with a `queued` row that
+  nothing drives. A `register()` failure is non-fatal: the once row is persisted,
+  so the once-due sweep drives it on the next tick.
+- **`/api/ext/ask` is NOT yet rerouted** (TODO in `ext.ts`): ask already rides the
+  SAME shared dispatch pipeline + non-bypassable gates (`hub/src/ask/dispatch.ts`),
+  so the caps/gate unification is already satisfied; only the queue-entry/Tasks-list
+  unification remains. Work was rerouted first (higher value, higher risk).
 
 ---
 
@@ -492,6 +619,86 @@ of fires.
 
 ---
 
+## Stale-run reaper (fix/sched-qc, 2026-07)
+
+`hub/src/scheduler/run-reaper.ts` — boot-started sweep (registered in
+`hub/src/index.ts` next to the ghost reaper), mirroring
+`hub/src/ws/ghost-reaper.ts` / `hub/src/orchestrator/stale-lock-reaper.ts`.
+
+**Bug it fixes:** a run dispatched to a session whose CLI turn never completes is
+inserted `pending` and nothing ever finalizes it — prod had `scheduled_task_runs`
+rows pending since 2026-07-08, so post-run actions and the email summary never
+fired and the task looked perpetually in-flight.
+
+Every `REMO_RUN_REAPER_INTERVAL_MS` (default 5min) the sweep finalizes any run
+`status='pending'` older than `REMO_RUN_MAX_MS` (default 6h, measured from
+`started_at` falling back to `scheduled_for`) as **`failed` / `run_timeout`**
+through the shared `finalizeRun`, so post-run actions + the email summary behave
+exactly as for any other failure. `REMO_RUN_REAPER_DISABLED` (`1|true|yes|on`)
+makes it a no-op.
+
+**No double-finalize (both directions).** The reaper calls
+`finalizeRun(..., { only_if_active: true })`, which threads `onlyIfActive` into
+`updateRunStatus` → `UPDATE … WHERE id = $1 AND status IN ('pending','in_flight')`.
+The two finalizers that can complete *after* a reap pass the SAME guard —
+TEAB's poll-to-terminal loop (`senders/teab.ts` `finalizeTeabPoll`) and the agent
+sender's reply path (`senders/agent.ts` `onFinalize`, for a CLI reply landing after
+`REMO_RUN_MAX_MS`). Whoever writes second finds the row already terminal, gets no
+row back, skips the broadcast + post-run fan-out, and returns. Short-lived
+finalizers (triage, which has its own sub-minute timeout, and the sender-side
+early-exit paths) can't outlive a 6h reap window and are left first-write-wins.
+
+---
+
+## fix/sched-failures (2026-07-12) — three live prod failure modes
+
+**1. `security` root → `empty_content`.** `senders/agent.ts` `buildContent()` gave
+`dev` → the controller template and `qc` → the QC review template, but the
+`security` workflow ROOT had no fallback: with no custom prompt it fell through to
+`''` and the run failed instantly (`finalizeRun(..., 'failed', 'empty_content')`).
+A bare `security` root now renders step 1 of the security chain
+(`scheduler/prompts/security/scan.md`), exactly as `dev`/`qc` render theirs. A
+custom `payload.prompt` / `task.prompt` still wins, and the chained
+`security_scan` step keeps its `/security-review` shortcut.
+
+**2. `triage_timeout` (SUPERSEDED — the waiter is gone).** The supervisor-picked
+triage waiter was first given a longer ceiling (`REMO_TRIAGE_TIMEOUT_MS`, 15min);
+fix/sched-triage-routing then deleted the whole supervisor-spawn path, because it
+could never complete: the waiter was keyed by the SUPERVISOR RUN id while the only
+reader (`ws/agent.ts` assistant_message) looks it up by SESSION id, and the spawn
+passed `repo_path = git_repository` (a GitHub slug, not a local worktree path).
+Prod: 31/32 triage runs `failed/triage_timeout` at ~878s, `session_id` NULL on all.
+Triage is now LOCAL-AGENT ONLY (repo-keyed session first, else any online agent
+session) and finalizes `failed`/`no_target_available` immediately when none is
+online. `REMO_TRIAGE_TIMEOUT_MS` no longer exists.
+
+**3. Double run row per fire (the source of the `run_timeout` rows).** When a
+scheduled session target was OFFLINE, the agent sender launched the session and
+let `dispatch()` park the run in the grace buffer — but the parked `replay` thunk
+called `runNow(task.id)`, which fired the task afresh and **inserted a SECOND
+`scheduled_task_runs` row**. Nothing finalizes a parked row on drain (`onParkExpire`
+only fires on TTL lapse), so the ORIGINAL row sat `pending` until the 6h stale-run
+reaper marked it `failed`/`run_timeout`. Prod showed exactly this: one `pending` +
+one `success` row per fire (e.g. the Nightly GitHub sync task) plus 14
+`run_timeout` rows. The replay thunk now re-enters `sendAgentTask(task, ctx)` with
+the SAME `ctx` — `RunStore.open()` returns `ctx.runId` and inserts nothing — so one
+fire produces exactly one run row. (This mirrors what the supervisor-target grace
+branch in `dispatcher.ts` already did explicitly, which is why only the session
+path leaked.)
+
+**Ceiling coupling with TEAB.** `REMO_TEAB_MAX_RUN_MS` (default 6h) and
+`REMO_RUN_MAX_MS` (default 6h) are the same by default, so a naive sweep would
+reap a legitimately-running TEAB build out from under its own poller. The reaper
+therefore uses a **per-row ceiling**: a run whose task is `task_type='teab'` is
+only reaped once it exceeds `max(REMO_RUN_MAX_MS, REMO_TEAB_MAX_RUN_MS)` (the
+loader joins `scheduled_tasks` for `task_type`). TEAB's own deadline tick fires at
+`REMO_TEAB_MAX_RUN_MS` and finalizes `teab_run_timeout` first; the reaper is only
+the backstop if that poller is gone (e.g. hub restart). Raising
+`REMO_TEAB_MAX_RUN_MS` above `REMO_RUN_MAX_MS` automatically raises the reaper's
+teab ceiling with it — no second knob to keep in sync.
+
+---
+
 ## Daily cost cap
 
 Each user has `users.daily_cost_cap_usd` (default 10.0000). On every fire,
@@ -522,6 +729,38 @@ the dispatcher delegates to the shared `isOverCostCap(userId, timezone)` in
 
 The UI surfaces today's spend at `GET /api/profile/cost-today` and lets the
 user adjust their cap on the Settings → Account tab.
+
+---
+
+## Per-run cost attribution (`scheduled_task_runs.cost_usd`)
+
+`scheduled_task_runs.cost_usd` is populated at finalize time via
+`accrueRunCost` (`hub/src/scheduler/dispatcher.ts`), fixing a gap where the
+column was NULL on every historical row (fix/run-cost-attribution, 2026-08):
+no `finalizeRun` caller ever supplied `fields.cost_usd`, and real per-turn
+cost was known only from the supervisor's `usage_event` WS messages, recorded
+into `token_usage` keyed by `sessionId` with no linkage back to the run row —
+so per-run spend was only reconstructable by an unreliable timestamp-proximity
+join.
+
+- Each in-flight `RunContext` (the dispatcher's own `inFlightByRun` map) now
+  carries a `costUsd` accrual, seeded to 0 by `trackRun`.
+- `hub/src/ws/agent.ts`'s `usage_event` handler calls
+  `accrueRunCost(ws.data.sessionId, costUsd)` with the SAME cost value
+  (SDK `total_cost_usd` when `cost_source='sdk'`, else the `pricing.ts`
+  estimate) it hands to `recordTokenUsage` for the `token_usage` ledger —
+  this only changes WHERE that number is also recorded, so a run's `cost_usd`
+  and the daily cap total can never drift or double-count.
+- `accrueRunCost` sums onto every in-flight run whose `target.sessionId`
+  matches, so a multi-turn/tool-use exchange (multiple `usage_event`s before
+  the final `assistant_message`) is summed correctly, and cost never leaks
+  onto a concurrent run on a different session.
+- `finalizeRun` defaults `fields.cost_usd` to the run's accrual when the
+  caller doesn't pass one explicitly (no sender does today). A run with no
+  accrual — a non-LLM sender like `coolify`/`teab`/`supervisor` command runs
+  that never produce a CLI turn — correctly finalizes with `cost_usd=null`,
+  not a misleading `0`.
+- Covered by `hub/test/run-cost-attribution.test.ts`.
 
 ---
 
@@ -645,6 +884,31 @@ whose `on` condition matches. Each action has an optional `delay_seconds`
 | `webhook`           | `{ url }`                                         | POST JSON with `X-Remo-Signature: sha256=...`   |
 | `github_issue`      | `{ repo_full_name, labels?, assignees? }`         | Creates a GitHub issue from a `triage` run result; gateway-pair creds |
 
+### Default run-summary email (opt-out)
+
+Every **root** run (`chainDepth === 0`) emails the task **owner** a run summary
+by default — on success *and* failure — even when the task configures no
+post-run actions of its own. The dispatcher synthesizes an in-memory
+`notify_email` action (`buildDefaultEmailActions` in `post-run/dispatcher.ts`,
+`on: 'always'`, `to` omitted → resolves to the owner's account email) and folds
+it into the fired set before the "no actions → return" guard.
+
+Eligibility (ALL must hold):
+
+- `chainDepth === 0` — internal chain / controller / QC-fix / verify steps
+  (`chainDepth > 0`) never synthesize one.
+- `email_summary !== false` — the per-task opt-out column
+  (`scheduled_tasks.email_summary BOOLEAN NOT NULL DEFAULT true`; `PATCH
+  /api/scheduled-tasks/:id` accepts `email_summary`). Existing rows default on.
+- The task has **no** `notify_email` action of its own — a user-configured email
+  is respected and never duplicated.
+
+The fan-out aggregate path also fires through the same seam at `chainDepth 0`, so
+exactly **one** default email is sent per finalized parent fire. Other
+notification types (`notify_telegram`, `notify_web_push`, `webhook`) remain
+opt-in — only email is default-on. Actual delivery still requires the `E4A_*`
+env (`E4A_API_KEY` + `E4A_INBOX_ID`); unset → the send is logged and skipped.
+
 ### `on` conditions
 
 - `success` — run status is exactly `success`
@@ -758,8 +1022,9 @@ metadata row only (no LLM spend).
   - `git_repository TEXT`
   - `commit_sha TEXT`
 - **Event mapping:**
-  - `deployment.failed` → row inserted with metadata; triage dispatch
-    stubbed (awaits plan 008)
+  - `deployment.failed` → row inserted with metadata, then `dispatchTriage`
+    fires the `__internal_triage` task for a live agent session (storm-deduped,
+    with the app's log tail attached)
   - `deployment.succeeded` / `deployment.in_progress` → metadata-only row,
     `status='success'`, no spend
 - **Response:** `202 { ok: true, run_id }`
@@ -837,6 +1102,9 @@ The scheduler does not introduce new required env vars. Optional vars:
 | `E4A_BASE_URL`     | `post-run/email.ts`              | `https://api.emails4agents.com`  | emails4agents base URL                               |
 | `E4A_INBOX_ID`     | `post-run/email.ts`              | —                                | Inbox to send through                                |
 | `REMO_E2E_DB_URL`  | `hub/test/scheduled-tasks.e2e.test.ts` | —                          | Disposable Postgres for e2e tests (skipped if unset) |
+| `REMO_RUN_MAX_MS`  | `scheduler/run-reaper.ts`        | `21600000` (6h)                  | Max age of a `pending` run before the reaper finalizes it `failed/run_timeout` (non-positive/non-finite ⇒ default) |
+| `REMO_RUN_REAPER_INTERVAL_MS` | `scheduler/run-reaper.ts` | `300000` (5min)              | Stale-run sweep cadence                              |
+| `REMO_RUN_REAPER_DISABLED` | `scheduler/run-reaper.ts`    | unset                            | Escape hatch (`1\|true\|yes\|on`) — sweep is a no-op |
 
 Per the global rule, email notifications always default to **emails4agents**
 — never SendGrid/Postmark/Mailgun/Resend without explicit user request.

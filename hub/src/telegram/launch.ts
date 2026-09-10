@@ -133,8 +133,16 @@ export async function launchSessionForUser(args: {
     }
 
     // Concurrency gate — reserve + consume the run row atomically (one tx).
+    // Bind the run to the real session id (the SELECT above proved it exists).
+    // A null session_id makes the run un-reconcilable: the inventory reconciler
+    // (finalizeOrphanedRunsForSupervisor) only closes runs whose session_id is
+    // absent from live inventory, and SQL `NULL = ANY(...)` is NULL so a
+    // null-session row never matches — a failed/ghost launch then leaks an open
+    // run forever, refilling the supervisor concurrency cap (at_capacity). With
+    // the id bound, a real launch appears in inventory (protected) and a ghost
+    // launch drops out after the 30s grace → slot self-heals.
     const reservation = await reserveSessionSlot(args.userId, pick.supervisorId, {
-      sessionId: null,
+      sessionId: session.id,
       repoPath: session.project_dir,
       branch: null,
       pulled: false,

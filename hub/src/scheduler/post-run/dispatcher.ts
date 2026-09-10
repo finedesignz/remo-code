@@ -19,6 +19,7 @@ import { executeChain } from './chain.ts'
 import { getTaskById } from '../../db/scheduled-tasks-dal.ts'
 import { parseControllerDecision, nextStepForAction } from '../controller-schema.ts'
 import { parseQcFindings, findingHash } from '../qc-schema.ts'
+import { isTerminalSummary } from '../summary-line.ts'
 import { hasVerifiedFinding, recordVerifiedFinding } from '../../db/dal.ts'
 import { findQcReviewSnippetForRun } from '../../db/scheduled-tasks-dal.ts'
 import { executeEmail } from './email.ts'
@@ -34,6 +35,78 @@ const MAX_CHAIN_DEPTH = 5
 const RUN_URL_PREFIX = process.env.REMO_PUBLIC_URL || 'https://app.remo-code.com'
 
 const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
+
+/**
+ * feat/scheduled-default-email-summary — synthesize a default run-summary email.
+ *
+ * Every ROOT scheduled-task run (chainDepth===0) emails the task owner a summary
+ * BY DEFAULT unless: the task opted out (`email_summary === false`), OR it already
+ * configures its own `notify_email` action (respect the user's config; don't
+ * double-send). Internal chain/controller/qc steps (chainDepth>0) never synthesize.
+ *
+ * CHAINED steps (chainDepth>0) stay silent on success — one email per chain step
+ * would be spam — but a chained step that FAILED or self-reported `BLOCKED` must
+ * still reach the owner. Prod: a `dev_ship` step emitting `Summary: BLOCKED: ...`
+ * produced ZERO notification, so an unattended chain could wedge invisibly.
+ *
+ * `to` is omitted so executeEmail resolves it to the owner's account email. The
+ * template uses only plain `{{var}}` substitutions (template.render supports no
+ * conditionals/sections). Pure helper — unit-tested in isolation.
+ *
+ * Internal-plumbing exception: `__internal_*` tasks (`__internal_coolify_deployment`,
+ * `__internal_triage` — see db/dal.ts INTERNAL_DEPLOY_TASK_NAME/INTERNAL_TRIAGE_TASK_NAME)
+ * are machine-created anchors the owner never scheduled, never sees in the tasks UI,
+ * and cannot set `email_summary: false` on. A `skipped` run on one of these (e.g. the
+ * Coolify webhook's `no_routable_session` orphan-run finalize — coolify-webhook.ts) is
+ * a routine no-op, not something to email about: zero cost, zero duration, nothing
+ * happened. Only `skipped` is suppressed here — a genuine `failed` run on an internal
+ * task still emails, and this never touches user-created tasks.
+ */
+export function buildDefaultEmailActions(
+  task: ScheduledTask,
+  chainDepth: number,
+  actions: PostRunAction[],
+  outcome?: { status: RunStatus; output_snippet: string | null },
+): PostRunAction[] {
+  if (chainDepth !== 0 && !isFailedOrBlocked(outcome)) return []
+  if ((task as any).email_summary === false) return []
+  if (actions.some((a) => a.type === 'notify_email')) return []
+  if (outcome?.status === 'skipped' && task.name?.startsWith('__internal_')) return []
+  return [
+    {
+      type: 'notify_email',
+      on: 'always',
+      config: {
+        subject: 'Remo task "{{task_name}}" — {{status}}',
+        body: [
+          'Task: {{task_name}}',
+          'Status: {{status}}',
+          'Cost: ${{cost_usd}}   Duration: {{duration_ms}}ms',
+          '{{error}}',
+          '---',
+          '{{output_snippet}}',
+          '---',
+          'View run: {{run_url}}',
+        ].join('\n'),
+      },
+    } as PostRunAction,
+  ]
+}
+
+/**
+ * A run the owner must hear about even mid-chain: a hard failure, or a step whose
+ * output carries a terminal `Summary:` verdict — BLOCKED / FAILED / SKIPPED /
+ * DEPLOY UNHEALTHY (the workflow prompts' convention for "I stopped without
+ * finishing"). All of those wedge a chain identically while the run itself
+ * finalizes `success`.
+ */
+export function isFailedOrBlocked(
+  outcome?: { status: RunStatus; output_snippet: string | null },
+): boolean {
+  if (!outcome) return false
+  if (outcome.status === 'failed') return true
+  return isTerminalSummary(outcome.output_snippet)
+}
 
 export function clearPendingTimers(): void {
   for (const t of pendingTimers) clearTimeout(t)
@@ -82,7 +155,17 @@ export async function fireWithContext(args: FireCtxArgs): Promise<void> {
     )
     return
   }
-  const actions = parsed.value
+  // Default-on run-summary email: fold a synthesized notify_email into the fired
+  // set for eligible ROOT runs (chainDepth===0, not opted out, no custom email).
+  // The fan-out aggregate path also calls fireWithContext with chainDepth 0, so
+  // this yields exactly ONE default email per fired context.
+  const actions = [
+    ...parsed.value,
+    ...buildDefaultEmailActions(args.task, args.chainDepth, parsed.value, {
+      status: args.status,
+      output_snippet: args.output_snippet,
+    }),
+  ]
   if (actions.length === 0) return
 
   if (args.chainDepth >= MAX_CHAIN_DEPTH) {

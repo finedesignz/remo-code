@@ -1,6 +1,7 @@
 # Tauri Updater — One-Time Key Setup
 
-The supervisor auto-updater verifies every downloaded MSI against an Ed25519
+The supervisor auto-updater verifies every downloaded installer (per-user NSIS
+`-setup.exe`) against an Ed25519
 public key baked into the app. The matching private key signs releases in CI.
 This file documents the one-time setup the maintainer has to do **before
 shipping the first auto-updating release**.
@@ -71,8 +72,8 @@ git push origin supervisor-v0.3.1
 Watch `.github/workflows/release-supervisor.yml`. On success, the release page
 should contain at minimum:
 
-- `Remo Code Supervisor_<version>_x64_en-US.msi`
-- `Remo Code Supervisor_<version>_x64_en-US.msi.sig`
+- `Remo Code Supervisor_<version>_x64-setup.exe`
+- `Remo Code Supervisor_<version>_x64-setup.exe.sig`
 - `latest.json` — the signed manifest the in-app updater fetches
 
 ## 5. Rotating the key
@@ -84,5 +85,5 @@ If the private key is ever exposed:
 3. Replace both GitHub Actions secrets (step 3).
 4. **Critical:** every currently-installed supervisor will refuse the next
    update because its baked-in public key no longer matches. Users have to
-   reinstall the MSI manually from the release page **once**. Document this
+   reinstall the -setup.exe manually from the release page **once**. Document this
    in the release notes for the rotation release.

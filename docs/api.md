@@ -30,6 +30,8 @@ Base URLs:
 
 # Authentication
 
+- HTTP Authentication, scheme: bearer A remo-code api_key (`remokey_…`) from Settings → Credentials. Optional scopes: `ext:read` (free reads) and `ext:ask` (spends tokens). A key with NULL scopes keeps legacy full access.
+
 - HTTP Authentication, scheme: bearer 
 
 <h1 id="remo-code-hub-profile">profile</h1>
@@ -2731,6 +2733,125 @@ To perform this operation, you must be authenticated by means of one of the foll
 bearerAuth
 </aside>
 
+<h1 id="remo-code-hub-orchestrator">orchestrator</h1>
+
+## Paginated run-log for the authenticated user
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/orchestrator/run-log \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/orchestrator/run-log',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/orchestrator/run-log`
+
+Returns routine_run_log rows scoped to the authenticated user, newest first. Pass `session_id` to narrow to a single session; omit for all sessions. Read-only — zero impact on the dispatch path, gates, or caps.
+
+<h3 id="paginated-run-log-for-the-authenticated-user-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|limit|query|integer|false|none|
+|offset|query|integer|false|none|
+|session_id|query|string|false|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "items": [
+    {
+      "id": "string",
+      "session_id": "string",
+      "repo_key": "string",
+      "command": "string",
+      "decision_rationale": "string",
+      "outcome": "string",
+      "gap_dimension": "string",
+      "pr_url": "string",
+      "reviewer_verdict": "string",
+      "deploy_verify_result": "string",
+      "created_at": "string"
+    }
+  ],
+  "limit": 0,
+  "offset": 0
+}
+```
+
+<h3 id="paginated-run-log-for-the-authenticated-user-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Paginated run-log entries|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid query parameters|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid session|Inline|
+
+<h3 id="paginated-run-log-for-the-authenticated-user-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» items|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» session_id|string|true|none|none|
+|»» repo_key|string¦null|true|none|none|
+|»» command|string|true|none|none|
+|»» decision_rationale|string¦null|true|none|none|
+|»» outcome|string¦null|true|none|none|
+|»» gap_dimension|string¦null|true|none|none|
+|»» pr_url|string¦null|true|none|none|
+|»» reviewer_verdict|string¦null|true|none|none|
+|»» deploy_verify_result|string¦null|true|none|none|
+|»» created_at|string|true|none|none|
+|» limit|number|true|none|none|
+|» offset|number|true|none|none|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
 <h1 id="remo-code-hub-feedback">feedback</h1>
 
 ## Submit end-user feedback (screenshot + description) into the bound session
@@ -2862,5 +2983,1077 @@ Status Code **429**
 This operation does not require authentication
 </aside>
 
+<h1 id="remo-code-hub-ext">ext</h1>
+
+## List the caller's sessions (FREE — zero tokens)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/sessions \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/sessions`
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "sessions": [
+    {
+      "id": "string",
+      "name": "string",
+      "repo_ident": "string",
+      "project_dir": "string",
+      "runner_type": "string",
+      "active": true,
+      "last_activity": "string"
+    }
+  ]
+}
+```
+
+<h3 id="list-the-caller's-sessions-(free-—-zero-tokens)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Sessions|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the ext:read scope|Inline|
+
+<h3 id="list-the-caller's-sessions-(free-—-zero-tokens)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» sessions|[object]|true|none|none|
+|»» id|string|true|none|none|
+|»» name|string|true|none|none|
+|»» repo_ident|string¦null|true|none|none|
+|»» project_dir|string¦null|true|none|none|
+|»» runner_type|string|true|none|none|
+|»» active|boolean|true|none|none|
+|»» last_activity|string¦null|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Tail of the session's on-disk CLI transcript (FREE — zero tokens, no PTY write)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/sessions/{id}/transcript \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/transcript',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/sessions/{id}/transcript`
+
+Proxied to the supervisor host's allowlisted READ-ONLY `session_transcript_tail` command. Works for pty-interactive sessions too. Byte-capped.
+
+<h3 id="tail-of-the-session's-on-disk-cli-transcript-(free-—-zero-tokens,-no-pty-write)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|tail|query|integer|false|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "session_id": "string",
+  "turns": [
+    {
+      "role": "string",
+      "text": "string"
+    }
+  ],
+  "truncated": true
+}
+```
+
+<h3 id="tail-of-the-session's-on-disk-cli-transcript-(free-—-zero-tokens,-no-pty-write)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Transcript tail|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|Session has no project_dir|Inline|
+|502|[Bad Gateway](https://tools.ietf.org/html/rfc7231#section-6.6.3)|Supervisor could not read the transcript|Inline|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|No (or ambiguous) online supervisor for this user|Inline|
+
+<h3 id="tail-of-the-session's-on-disk-cli-transcript-(free-—-zero-tokens,-no-pty-write)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» session_id|string|true|none|none|
+|» turns|[object]|true|none|none|
+|»» role|string|true|none|none|
+|»» text|string|true|none|none|
+|» truncated|boolean|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **502**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **503**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## The session project's memory files (FREE — zero tokens, no PTY write)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/sessions/{id}/memory \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/memory',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/sessions/{id}/memory`
+
+<h3 id="the-session-project's-memory-files-(free-—-zero-tokens,-no-pty-write)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "session_id": "string",
+  "files": [
+    {
+      "name": "string",
+      "content": "string"
+    }
+  ],
+  "truncated": true
+}
+```
+
+<h3 id="the-session-project's-memory-files-(free-—-zero-tokens,-no-pty-write)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Memory files|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session|Inline|
+|502|[Bad Gateway](https://tools.ietf.org/html/rfc7231#section-6.6.3)|Supervisor could not read memory|Inline|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|No (or ambiguous) online supervisor|Inline|
+
+<h3 id="the-session-project's-memory-files-(free-—-zero-tokens,-no-pty-write)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» session_id|string|true|none|none|
+|» files|[object]|true|none|none|
+|»» name|string|true|none|none|
+|»» content|string|true|none|none|
+|» truncated|boolean|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **502**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **503**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Cheap status roll-up for a session (FREE)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/sessions/{id}/state \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/state',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/sessions/{id}/state`
+
+<h3 id="cheap-status-roll-up-for-a-session-(free)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "session_id": "string",
+  "repo_ident": "string",
+  "runner_type": "string",
+  "active": true,
+  "status": "string",
+  "last_activity": "string",
+  "last_assistant_message_at": "string",
+  "open_session_runs": 0
+}
+```
+
+<h3 id="cheap-status-roll-up-for-a-session-(free)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|State|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session|Inline|
+
+<h3 id="cheap-status-roll-up-for-a-session-(free)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» session_id|string|true|none|none|
+|» repo_ident|string¦null|true|none|none|
+|» runner_type|string|true|none|none|
+|» active|boolean|true|none|none|
+|» status|string|true|none|none|
+|» last_activity|string¦null|true|none|none|
+|» last_assistant_message_at|string¦null|true|none|none|
+|» open_session_runs|integer|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Ask the session a question (PAID — spends tokens)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/ext/sessions/{id}/ask \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "question": "string",
+  "context": "string",
+  "wait_ms": 120000,
+  "include_transcript": true,
+  "include_memory": true
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/ask',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/ext/sessions/{id}/ask`
+
+Dispatches a short-lived stream-json ask-session bound to the target's project_dir (the human's PTY is NEVER written to). Rides the non-bypassable daily cost cap + daily token cap + human-only-PTY guard + per-key ask-rate ceiling. `wait_ms` long-polls up to 120s; on expiry poll the ask endpoint.
+
+> Body parameter
+
+```json
+{
+  "question": "string",
+  "context": "string",
+  "wait_ms": 120000,
+  "include_transcript": true,
+  "include_memory": true
+}
+```
+
+<h3 id="ask-the-session-a-question-(paid-—-spends-tokens)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|body|body|object|false|none|
+|» question|body|string|true|none|
+|» context|body|string|false|none|
+|» wait_ms|body|integer|false|none|
+|» include_transcript|body|boolean|false|none|
+|» include_memory|body|boolean|false|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "ask_id": "string",
+  "status": "queued",
+  "answer": "string",
+  "confidence": "string",
+  "evidence": [
+    "string"
+  ],
+  "reason": "string",
+  "raw_reply": "string",
+  "created_at": "string",
+  "answered_at": "string"
+}
+```
+
+<h3 id="ask-the-session-a-question-(paid-—-spends-tokens)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Ask created (answer inline when the long-poll caught it)|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the ext:ask scope|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such session|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|No stream-json ask session for this project_dir|Inline|
+
+<h3 id="ask-the-session-a-question-(paid-—-spends-tokens)-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ask_id|string|true|none|none|
+|» status|string|true|none|none|
+|» answer|string¦null|true|none|none|
+|» confidence|string¦null|true|none|none|
+|» evidence|[string]¦null|true|none|none|
+|» reason|string¦null|true|none|Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask, session_offline, ask_timeout.|
+|» raw_reply|string¦null|true|none|none|
+|» created_at|string|true|none|none|
+|» answered_at|string¦null|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|status|queued|
+|status|dispatched|
+|status|answered|
+|status|timeout|
+|status|skipped|
+|status|failed|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Poll an ask (no new tokens)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/sessions/{id}/ask/{ask_id} \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/sessions/{id}/ask/{ask_id}',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/sessions/{id}/ask/{ask_id}`
+
+<h3 id="poll-an-ask-(no-new-tokens)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|id|path|string|true|none|
+|ask_id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "ask_id": "string",
+  "status": "queued",
+  "answer": "string",
+  "confidence": "string",
+  "evidence": [
+    "string"
+  ],
+  "reason": "string",
+  "raw_reply": "string",
+  "created_at": "string",
+  "answered_at": "string"
+}
+```
+
+<h3 id="poll-an-ask-(no-new-tokens)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Ask|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such ask|Inline|
+
+<h3 id="poll-an-ask-(no-new-tokens)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ask_id|string|true|none|none|
+|» status|string|true|none|none|
+|» answer|string¦null|true|none|none|
+|» confidence|string¦null|true|none|none|
+|» evidence|[string]¦null|true|none|none|
+|» reason|string¦null|true|none|Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask, session_offline, ask_timeout.|
+|» raw_reply|string¦null|true|none|none|
+|» created_at|string|true|none|none|
+|» answered_at|string¦null|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|status|queued|
+|status|dispatched|
+|status|answered|
+|status|timeout|
+|status|skipped|
+|status|failed|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Inbound client request → repo agent → QC → GATED publish (PAID — writes code)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/ext/work \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "repo": "string",
+  "site": "string",
+  "request_text": "string",
+  "source": {
+    "kind": "email",
+    "from": "string",
+    "subject": "string",
+    "message_id": "string"
+  },
+  "wait_ms": 120000
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/work',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/ext/work`
+
+Points an UNTRUSTED inbound client email at the repo's stream-json session. THE AGENT PROPOSES, THE HUB DISPOSES: the agent's authority ends at a pushed `work/<id>` branch (it has no deploy credentials and is not even told whether the site auto-publishes). The HUB then verifies the branch diff touches ONLY `work_sites.site_dir`, runs the build itself, probes the site over real HTTPS, and performs the merge + deploy itself — only when the site carries `auto_publish=true`. Entry containment (all default-OFF): the repo must be in `work_repo_allowlist` (403 otherwise — no dispatch, no spend); the site must exist in `work_sites`; `source.from` must match that site's `client_emails` (403 `unknown_sender`). Rides the non-bypassable daily cost + token caps, the human-only-PTY guard, and a per-user work-rate ceiling (REMO_WORK_MAX_PER_HOUR, default 4).
+
+> Body parameter
+
+```json
+{
+  "repo": "string",
+  "site": "string",
+  "request_text": "string",
+  "source": {
+    "kind": "email",
+    "from": "string",
+    "subject": "string",
+    "message_id": "string"
+  },
+  "wait_ms": 120000
+}
+```
+
+<h3 id="inbound-client-request-→-repo-agent-→-qc-→-gated-publish-(paid-—-writes-code)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» repo|body|string|true|none|
+|» site|body|string|true|none|
+|» request_text|body|string|true|none|
+|» source|body|object|true|none|
+|»» kind|body|string|true|none|
+|»» from|body|string|true|none|
+|»» subject|body|string|false|none|
+|»» message_id|body|string|false|none|
+|» wait_ms|body|integer|false|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|»» kind|email|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "work_id": "string",
+  "session_id": "string",
+  "status": "queued",
+  "summary": "string",
+  "branch": "string",
+  "files_changed": [
+    "string"
+  ],
+  "commit_shas": [
+    "string"
+  ],
+  "hub_qc": null,
+  "agent_self_check": null,
+  "deploy_status": "string",
+  "diff_url": "string",
+  "pr_url": "string",
+  "preview_url": "string",
+  "published": true,
+  "live_url": "string",
+  "blocker": "string",
+  "reason": "string",
+  "auto_publish": true,
+  "repo_ident": "string",
+  "site_key": "string"
+}
+```
+
+<h3 id="inbound-client-request-→-repo-agent-→-qc-→-gated-publish-(paid-—-writes-code)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Work item created|[ExtWork](#schemaextwork)|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the ext:work scope, OR repo_not_allowlisted, OR unknown_site, OR unknown_sender — no dispatch, no spend.|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No session for that repo|Inline|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|No stream-json session for this project_dir|Inline|
+
+<h3 id="inbound-client-request-→-repo-agent-→-qc-→-gated-publish-(paid-—-writes-code)-responseschema">Response Schema</h3>
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **409**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Poll a work item (no new tokens)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/ext/work/{work_id} \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/ext/work/{work_id}',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/ext/work/{work_id}`
+
+<h3 id="poll-a-work-item-(no-new-tokens)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|work_id|path|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "work_id": "string",
+  "session_id": "string",
+  "status": "queued",
+  "summary": "string",
+  "branch": "string",
+  "files_changed": [
+    "string"
+  ],
+  "commit_shas": [
+    "string"
+  ],
+  "hub_qc": null,
+  "agent_self_check": null,
+  "deploy_status": "string",
+  "diff_url": "string",
+  "pr_url": "string",
+  "preview_url": "string",
+  "published": true,
+  "live_url": "string",
+  "blocker": "string",
+  "reason": "string",
+  "auto_publish": true,
+  "repo_ident": "string",
+  "site_key": "string"
+}
+```
+
+<h3 id="poll-a-work-item-(no-new-tokens)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Work item|[ExtWork](#schemaextwork)|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/invalid api key|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No such work item|Inline|
+
+<h3 id="poll-a-work-item-(no-new-tokens)-responseschema">Response Schema</h3>
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» detail|string|false|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
 # Schemas
+
+<h2 id="tocS_ExtWork">ExtWork</h2>
+<!-- backwards compatibility -->
+<a id="schemaextwork"></a>
+<a id="schema_ExtWork"></a>
+<a id="tocSextwork"></a>
+<a id="tocsextwork"></a>
+
+```json
+{
+  "work_id": "string",
+  "session_id": "string",
+  "status": "queued",
+  "summary": "string",
+  "branch": "string",
+  "files_changed": [
+    "string"
+  ],
+  "commit_shas": [
+    "string"
+  ],
+  "hub_qc": null,
+  "agent_self_check": null,
+  "deploy_status": "string",
+  "diff_url": "string",
+  "pr_url": "string",
+  "preview_url": "string",
+  "published": true,
+  "live_url": "string",
+  "blocker": "string",
+  "reason": "string",
+  "auto_publish": true,
+  "repo_ident": "string",
+  "site_key": "string"
+}
+
+```
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|work_id|string|true|none|none|
+|session_id|string|false|none|none|
+|status|string|true|none|none|
+|summary|string¦null|true|none|none|
+|branch|string¦null|true|none|The branch the agent pushed. Its authority ends here — it does not deploy, publish or merge.|
+|files_changed|[string]|true|none|HUB-OBSERVED — derived from the branch diff, not from the agent's claimed file list.|
+|commit_shas|[string]|true|none|none|
+|hub_qc|any|false|none|HUB-OBSERVED evidence: the diff-scope check (every file under work_sites.site_dir), the real build exit code, and the hub's own HTTPS probe. This — not the agent — gates the publish.|
+|agent_self_check|any|false|none|The agent's self-report. ADVISORY metadata only; never the basis of a publish decision.|
+|deploy_status|string¦null|true|none|not_permitted | qc_failed | branch_moved_after_qc | merge_failed | deploy_failed | live_probe_failed | published|
+|diff_url|string¦null|true|none|none|
+|pr_url|string¦null|true|none|none|
+|preview_url|string¦null|true|none|none|
+|published|boolean|true|none|TRUE only when the HUB ITSELF performed the deploy (site.auto_publish AND hub-verified diff-scope AND hub-verified build AND hub-verified 2xx probe). The agent cannot set it; finalizeWork also ANDs it with the site flag in SQL as a backstop.|
+|live_url|string¦null|true|none|none|
+|blocker|string¦null|true|none|e.g. suspected_injection, unparseable_reply, or why a human is needed.|
+|reason|string¦null|true|none|Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work, session_offline, work_timeout.|
+|auto_publish|boolean|true|none|none|
+|repo_ident|string|true|none|none|
+|site_key|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|status|queued|
+|status|dispatched|
+|status|verifying|
+|status|completed|
+|status|qc_failed|
+|status|needs_human|
+|status|timeout|
+|status|skipped|
+|status|failed|
 

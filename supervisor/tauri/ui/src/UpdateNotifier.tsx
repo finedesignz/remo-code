@@ -29,8 +29,9 @@ export default function UpdateNotifier() {
     if (!force && now - lastCheckRef.current < FOCUS_THROTTLE_MS) return;
     lastCheckRef.current = now;
 
-    // If the user opted into auto-update, the background watcher in
-    // lib/autoUpdater.ts owns the install flow — don't surface a manual prompt.
+    // If the user opted into auto-update, the headless backend watcher
+    // (src-tauri/src/auto_update.rs) owns the install flow — don't surface a
+    // manual prompt, and never download in parallel with it.
     try {
       const auto = await invoke<boolean>("get_auto_update");
       if (auto) {

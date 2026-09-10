@@ -1,19 +1,36 @@
 import { hostname, platform, release } from 'os'
+import { resolveHostname } from './hostname'
 import { writeFileSync, mkdirSync, watch as fsWatch, existsSync, readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { scanAll, scanRoots } from './repo-scanner'
 import { cloneRepo, pullRepo, pullLocal, checkoutBranch, listBranches, isDirty } from './git-ops'
-import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError } from './sandbox'
+import { assertWithinRoots, assertTargetWithinRoots, SandboxEscapeError, SandboxCheckTimeoutError } from './sandbox'
 import { ProcessManager, type ProcState } from './process-manager'
 import { scanAllCommands } from './commands-scanner'
 import { getHandler, nativeSupervisorCommands } from './commands/index'
-import { CONFIG_PATH, saveConfig, type SupervisorConfig } from './config'
+import { getConfigPath, saveConfig, type SupervisorConfig } from './config'
 import { log as obs } from './observability/logger'
 import { VERSION } from './version'
 import { pollUsage, USAGE_POLL_INTERVAL_MS, type UsagePayload } from './usage/oauth-poll'
+import { writeForceUpdateMarker } from './runners/force-update-marker'
 
 /** Bug A — push the live runner set to the hub every 10s after auth_ok. */
 const SESSION_INVENTORY_INTERVAL_MS = 10_000
+
+/**
+ * fix/supervisor-periodic-repo-rescan — re-emit `supervisor.repo_inventory` on
+ * a timer so a repo cloned AFTER the supervisor connected reaches the hub
+ * without a reconnect or a hand-edit of supervisor.json. Default 5 min,
+ * overridable via `REMO_REPO_INVENTORY_INTERVAL_MS`.
+ */
+export const REPO_INVENTORY_INTERVAL_DEFAULT_MS = 300_000
+
+/** Non-positive / non-finite / unset ⇒ default (repo-wide knob convention). */
+export function resolveRepoInventoryIntervalMs(raw?: string | null): number {
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return REPO_INVENTORY_INTERVAL_DEFAULT_MS
+  return n
+}
 
 type OutboundMsg =
   | { type: 'auth'; api_key: string; project_dir: string; hostname: string; role: 'supervisor' }
@@ -25,11 +42,19 @@ type OutboundMsg =
   | { type: 'repo.clone_progress'; req_id: string; stage: string; percent?: number }
   | { type: 'supervisor.commands_sync'; commands: Array<{ kind: 'command' | 'skill'; name: string; description: string | null; source: string; path: string }> }
   | { type: 'supervisor.repo_inventory'; scanned_at: string; repos: Array<{ local_path: string; is_git_repo: boolean; is_worktree: boolean; worktree_parent_path: string | null; git_remote: string | null; git_origin_github: { owner: string; repo: string } | null; branch?: string | null; canonical?: boolean }> }
-  | { type: 'session_inventory'; sessions: Array<{ session_id: string; cli_kind: 'claude' | 'codex'; project_dir: string; pid: number | null; started_at: string; last_activity_at: string | null; status: 'spawning' | 'running' | 'idle' | 'stopping' }> }
+  // `circuit_breakers` (fix/stop-the-bleed) makes an OPEN spawn-breaker VISIBLE to
+  // the hub. Optional so an older hub simply ignores it (zod: .optional()).
+  // `status_server` (fix/headless-autoupdate) makes a supervisor that failed to
+  // bind its loopback status server VISIBLY degraded rather than silently so.
+  | { type: 'session_inventory'; sessions: Array<{ session_id: string; cli_kind: 'claude' | 'codex'; project_dir: string; pid: number | null; started_at: string; last_activity_at: string | null; status: 'spawning' | 'running' | 'idle' | 'stopping' }>; circuit_breakers?: Array<{ repo_path: string; state: 'open' | 'half_open'; opened_at: string; failed_probes: number; exhausted: boolean; last_reason: string | null }>; status_server?: StatusServerHealth }
   | { type: 'run_started'; run_id: string }
   | { type: 'run_output'; run_id: string; chunk: string }
   | { type: 'run_finished'; run_id: string; exit_code?: number | null; duration_ms?: number; snippet?: string; error?: string }
   | { type: 'supervisor.set_roots_ack'; req_id: string; ok: boolean; applied_roots?: string[]; error?: string }
+  // fix/supervisor-periodic-repo-rescan — ack for a hub-initiated rescan.
+  | { type: 'supervisor.rescan_ack'; req_id: string; ok: boolean; error?: string }
+  // milestone remote-update-trigger — ack for a hub-initiated forced update.
+  | { type: 'supervisor.force_update_ack'; req_id: string; ok: boolean; error?: string }
   // P1 usage poll — parsed, non-secret Anthropic OAuth utilization snapshot.
   // The OAuth token is read locally in usage/oauth-poll.ts and NEVER serialized
   // here; only the four utilization windows + reset times cross the wire.
@@ -39,8 +64,17 @@ type OutboundMsg =
   | { type: 'repo_create_failed'; job_id: string; stage: string; error: string }
   | { type: 'pong' }
 
+/** fix/headless-autoupdate — loopback status-server health, reported to the hub. */
+export interface StatusServerHealth {
+  healthy: boolean
+  port: number | null
+  last_error: string | null
+}
+
 export class SupervisorClient {
   private ws: WebSocket | null = null
+  /** Set by index.ts once the supervised status server is up. */
+  private statusServerHealth: (() => StatusServerHealth) | null = null
   private cfg: SupervisorConfig
   private authenticated = false
   private reconnectAttempts = 0
@@ -57,6 +91,14 @@ export class SupervisorClient {
   /** P1 — interval handle for the Anthropic OAuth usage poll; null when not
    *  auth'd. Fires once on auth_ok + every 5 min. */
   private usagePollTimer: ReturnType<typeof setInterval> | null = null
+
+  /** fix/supervisor-periodic-repo-rescan — interval handle for the periodic
+   *  repo inventory re-emit; null when not auth'd. */
+  private repoInventoryTimer: ReturnType<typeof setInterval> | null = null
+
+  /** Guards against a slow scan overlapping the next tick (or a hub-initiated
+   *  rescan racing the timer). */
+  private repoInventoryInFlight = false
 
   // ── B6: observability state ──────────────────────────────────────────────
   /** Last `auth_ok` timestamp (ms). Drives `last_reconnect_ms_ago` in
@@ -77,7 +119,7 @@ export class SupervisorClient {
     // Watch supervisor.json for external edits (Tauri Roots panel writes here
     // when the user adds/removes roots or clicks "Rescan now").
     try {
-      const cfgPath = CONFIG_PATH
+      const cfgPath = getConfigPath()
       if (existsSync(cfgPath)) {
         this.configWatcher = fsWatch(cfgPath, { persistent: false }, () => {
           // Coalesce rapid double-fires.
@@ -145,7 +187,9 @@ export class SupervisorClient {
         type: 'auth',
         api_key: this.cfg.apiKey,
         project_dir: '__supervisor__',
-        hostname: hostname(),
+        // resolveHostname(), not os.hostname(): a transient empty os.hostname()
+        // on RE-auth is what mints hostname-NULL ghost sessions on the hub.
+        hostname: resolveHostname(),
         role: 'supervisor',
       })
     }
@@ -160,6 +204,7 @@ export class SupervisorClient {
       this.authenticated = false
       this.stopSessionInventoryPush()
       this.stopUsagePoll()
+      this.stopRepoInventoryPush()
       const code = (ev as any)?.code as number | undefined
       const reason = (ev as any)?.reason as string | undefined
       this.log('warn', `WebSocket closed code=${code ?? '?'} reason=${reason || '(none)'}`)
@@ -269,9 +314,9 @@ export class SupervisorClient {
       // Phase 08 §15 — push full repo inventory to the hub. The hub upserts
       // sessions (github-keyed) + pending_local_repos (local-only). When roots
       // is empty, we emit a needs-roots log instead so the UI can prompt.
-      void this.sendRepoInventory().catch((err) => {
-        this.log('warn', `repo_inventory failed: ${err.message}`)
-      })
+      // fix/supervisor-periodic-repo-rescan — fires immediately, then every
+      // REMO_REPO_INVENTORY_INTERVAL_MS (default 5 min); cancels on disconnect.
+      this.startRepoInventoryPush()
       // Bug A — start the session_inventory push interval. Fires once
       // immediately + every 10s; cancels on disconnect.
       this.startSessionInventoryPush()
@@ -301,6 +346,8 @@ export class SupervisorClient {
       case 'create_local_repo_and_push': await this.onCreateLocalRepoAndPush(msg); break
       case 'key_rotated': this.onKeyRotated(msg); break
       case 'supervisor.set_roots': await this.onSetRoots(msg); break
+      case 'supervisor.rescan_repos': await this.onRescanRepos(msg); break
+      case 'supervisor.force_update': this.onForceUpdate(msg); break
       default:
         // unknown
         break
@@ -392,6 +439,21 @@ export class SupervisorClient {
       this.send({ type: 'supervisor.repo_inventory', scanned_at: new Date().toISOString(), repos: [] })
       return
     }
+    // A root scan can outlive the tick interval on a large tree; never let two
+    // scans run at once (the second would only duplicate work + IO).
+    if (this.repoInventoryInFlight) {
+      this.log('info', 'repo_inventory skipped: a scan is already in flight')
+      return
+    }
+    this.repoInventoryInFlight = true
+    try {
+      await this.scanAndSendInventory()
+    } finally {
+      this.repoInventoryInFlight = false
+    }
+  }
+
+  private async scanAndSendInventory(): Promise<void> {
     const entries = await scanRoots({ roots: this.cfg.roots, scan: this.cfg.scan })
     const scannedAt = new Date().toISOString()
     const repos = entries.map((e) => ({
@@ -408,7 +470,7 @@ export class SupervisorClient {
     // Persist to <CONFIG_DIR>/last_inventory.json so the Tauri UI can render
     // the same data via the `get_inventory` IPC command. Best-effort.
     try {
-      const dir = dirname(CONFIG_PATH)
+      const dir = dirname(getConfigPath())
       mkdirSync(dir, { recursive: true })
       writeFileSync(
         join(dir, 'last_inventory.json'),
@@ -468,6 +530,70 @@ export class SupervisorClient {
   }
 
   /**
+   * fix/supervisor-periodic-repo-rescan — start the periodic repo inventory
+   * re-emit loop. Idempotent (no-op if already running). The immediate first
+   * emit happens here too; subsequent ticks are on the interval. Stopped on
+   * every disconnect. Overlap is guarded inside sendRepoInventory
+   * (repoInventoryInFlight); an empty-roots tick is a cheap no-op emit.
+   */
+  private startRepoInventoryPush() {
+    if (this.repoInventoryTimer) return
+    // Immediate first scan (replaces the old one-shot auth_ok emit).
+    void this.sendRepoInventory().catch((err) => {
+      this.log('warn', `repo_inventory failed: ${err?.message ?? err}`)
+    })
+    const intervalMs = resolveRepoInventoryIntervalMs(process.env.REMO_REPO_INVENTORY_INTERVAL_MS)
+    this.repoInventoryTimer = setInterval(() => {
+      void this.sendRepoInventory().catch((err) => {
+        this.log('warn', `repo_inventory failed: ${err?.message ?? err}`)
+      })
+    }, intervalMs)
+  }
+
+  private stopRepoInventoryPush() {
+    if (!this.repoInventoryTimer) return
+    clearInterval(this.repoInventoryTimer)
+    this.repoInventoryTimer = null
+  }
+
+  /**
+   * fix/supervisor-periodic-repo-rescan — hub-initiated rescan (web "Refresh
+   * repos" button). Forces a fresh full inventory emit and acks. Overlap with
+   * the periodic timer is guarded by repoInventoryInFlight inside
+   * sendRepoInventory. A scan failure surfaces as ok:false — never a silent
+   * swap to a stale inventory.
+   */
+  private async onRescanRepos(msg: { req_id: string }) {
+    const reqId = msg.req_id
+    try {
+      await this.sendRepoInventory()
+      this.send({ type: 'supervisor.rescan_ack', req_id: reqId, ok: true })
+    } catch (err: any) {
+      this.log('warn', `rescan_repos failed: ${err?.message ?? err}`)
+      this.send({ type: 'supervisor.rescan_ack', req_id: reqId, ok: false, error: String(err?.message ?? err) })
+    }
+  }
+
+  /**
+   * milestone remote-update-trigger — hub-initiated forced update (web
+   * Settings "Update to latest" button). The SIDECAR has no updater — the
+   * Rust tray owns check→download→install→relaunch (auto_update.rs). This
+   * only drops a marker file the tray's own poll loop consumes; it acks as
+   * soon as the marker is written, not when the update actually completes.
+   */
+  private onForceUpdate(msg: { req_id: string; requested_by?: string }) {
+    const reqId = msg.req_id
+    const path = writeForceUpdateMarker(msg.requested_by)
+    if (path) {
+      this.log('info', `force_update requested${msg.requested_by ? ` by ${msg.requested_by}` : ''}; marker written to ${path}`)
+      this.send({ type: 'supervisor.force_update_ack', req_id: reqId, ok: true })
+    } else {
+      this.log('warn', 'force_update: marker write failed')
+      this.send({ type: 'supervisor.force_update_ack', req_id: reqId, ok: false, error: 'marker_write_failed' })
+    }
+  }
+
+  /**
    * P1 — read the local OAuth token, poll `/api/oauth/usage`, and forward the
    * parsed (non-secret) utilization windows to the hub via the existing
    * `usage_report` agent message. Never throws; missing/expired token and
@@ -497,6 +623,15 @@ export class SupervisorClient {
   }
 
   /**
+   * fix/headless-autoupdate — wire the supervised status server's health into the
+   * `session_inventory` push, the same way the spawn circuit-breaker state rides
+   * it. A supervisor with no status server must be VISIBLY degraded.
+   */
+  setStatusServerHealthProvider(fn: () => StatusServerHealth) {
+    this.statusServerHealth = fn
+  }
+
+  /**
    * Bug A — snapshot the ProcessManager's live runner set and send it to the
    * hub. Drops entries that haven't received a session_id from the hub yet
    * (those would be unaddressable on the hub side). Best-effort; ws.send
@@ -517,7 +652,19 @@ export class SupervisorClient {
         last_activity_at: r.lastActivityAt,
         status: r.status,
       }))
-    this.send({ type: 'session_inventory', sessions })
+    // fix/stop-the-bleed: ship the spawn circuit-breaker state alongside the
+    // inventory. A latched-open breaker used to be invisible to the hub — the
+    // supervisor spawned ZERO CLIs for four days while the hub looked healthy.
+    // Empty array in the steady state.
+    this.send({
+      type: 'session_inventory',
+      sessions,
+      circuit_breakers: this.pm.circuitBreakerSnapshot(),
+      // fix/headless-autoupdate — same idea as circuit_breakers: a supervisor
+      // whose status server never bound (zombie listener on 9106) used to be
+      // invisible to the hub. Undefined when no provider is wired (tests).
+      status_server: this.statusServerHealth?.(),
+    })
   }
 
   /**
@@ -532,7 +679,7 @@ export class SupervisorClient {
    */
   private onConfigChanged() {
     let raw: any
-    try { raw = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) } catch { return }
+    try { raw = JSON.parse(readFileSync(getConfigPath(), 'utf-8')) } catch { return }
     const newRoots: string[] = Array.isArray(raw.roots) ? raw.roots.map(String) : []
     const prevRoots = this.cfg.roots ?? []
     const rootsChanged = newRoots.length !== prevRoots.length ||
@@ -563,13 +710,18 @@ export class SupervisorClient {
    * (writing privileged dirs) even though the subsequent `session.start`
    * would be blocked. Per supervisor audit 2026-05-28.
    */
-  private rejectIfEscape(op: string, reqId: string, path: string, target: 'existing' | 'target'): boolean {
+  private async rejectIfEscape(op: string, reqId: string, path: string, target: 'existing' | 'target'): Promise<boolean> {
     try {
       const roots = this.cfg.roots ?? []
-      if (target === 'target') assertTargetWithinRoots(path, roots)
-      else assertWithinRoots(path, roots)
+      if (target === 'target') await assertTargetWithinRoots(path, roots)
+      else await assertWithinRoots(path, roots)
       return false
     } catch (err) {
+      if (err instanceof SandboxCheckTimeoutError) {
+        this.log('error', `${op}: sandbox_check_timeout: ${path}`)
+        this.send({ type: 'repo.op_result', req_id: reqId, op, ok: false, error: 'sandbox_check_timeout' })
+        return true
+      }
       if (err instanceof SandboxEscapeError) {
         this.log('warn', `${op}: sandbox_escape: ${path}`)
         this.send({ type: 'repo.op_result', req_id: reqId, op, ok: false, error: 'sandbox_escape' })
@@ -581,26 +733,26 @@ export class SupervisorClient {
   }
 
   private async onRepoClone(msg: { req_id: string; clone_url: string; target_path: string; repo_full_name: string }) {
-    if (this.rejectIfEscape('clone', msg.req_id, msg.target_path, 'target')) return
+    if (await this.rejectIfEscape('clone', msg.req_id, msg.target_path, 'target')) return
     this.send({ type: 'repo.clone_progress', req_id: msg.req_id, stage: 'cloning' })
     const res = await cloneRepo(msg.clone_url, msg.target_path)
     this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'clone', ok: res.ok, error: res.error, data: res.data })
   }
 
   private async onRepoPull(msg: { req_id: string; repo_path: string; branch: string; clone_url: string }) {
-    if (this.rejectIfEscape('pull', msg.req_id, msg.repo_path, 'existing')) return
+    if (await this.rejectIfEscape('pull', msg.req_id, msg.repo_path, 'existing')) return
     const res = await pullRepo(msg.repo_path, msg.branch, msg.clone_url)
     this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'pull', ok: res.ok, error: res.error })
   }
 
   private async onBranchCheckout(msg: { req_id: string; repo_path: string; branch: string; create: boolean }) {
-    if (this.rejectIfEscape('checkout', msg.req_id, msg.repo_path, 'existing')) return
+    if (await this.rejectIfEscape('checkout', msg.req_id, msg.repo_path, 'existing')) return
     const res = await checkoutBranch(msg.repo_path, msg.branch, msg.create)
     this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'checkout', ok: res.ok, error: res.error })
   }
 
   private async onListBranches(msg: { req_id: string; repo_path: string }) {
-    if (this.rejectIfEscape('list_branches', msg.req_id, msg.repo_path, 'existing')) return
+    if (await this.rejectIfEscape('list_branches', msg.req_id, msg.repo_path, 'existing')) return
     try {
       const data = await listBranches(msg.repo_path)
       this.send({ type: 'repo.op_result', req_id: msg.req_id, op: 'list_branches', ok: true, data })
@@ -720,8 +872,13 @@ export class SupervisorClient {
     // The folder already exists (it's an unpushed local repo), so use the
     // existing-path assertion. No git runs if this throws.
     try {
-      assertWithinRoots(msg.local_path, this.cfg.roots ?? [])
+      await assertWithinRoots(msg.local_path, this.cfg.roots ?? [])
     } catch (err) {
+      if (err instanceof SandboxCheckTimeoutError) {
+        this.log('error', `create_local_repo_and_push: sandbox_check_timeout: ${msg.local_path}`)
+        this.send({ type: 'repo_create_failed', job_id: jobId, stage: 'validating_scope', error: 'sandbox_check_timeout' })
+        return
+      }
       if (err instanceof SandboxEscapeError) {
         this.log('warn', `create_local_repo_and_push: sandbox_escape: ${msg.local_path}`)
         this.send({ type: 'repo_create_failed', job_id: jobId, stage: 'validating_scope', error: 'sandbox_escape' })

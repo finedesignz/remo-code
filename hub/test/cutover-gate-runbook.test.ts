@@ -7,18 +7,34 @@
  * gate documentation so it cannot silently drift out of existence (T-19-01).
  */
 import { describe, test, expect } from 'bun:test'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 const REPO = join(import.meta.dir, '..', '..')
 const RUNBOOK = join(REPO, 'docs', 'cutover-gate-june15.md')
-const CHECKLIST = join(
-  REPO,
-  '.planning',
-  'phases',
-  '19-cutover-gate-and-automation-fallback',
-  'cutover-gate-checklist.md',
-)
+
+// The checklist lives under a Phase-19 dir that migrates as milestones rotate
+// (e.g. `.planning/phases/19-…` → `.planning/archive/phases-pre-OBSRV/19-…`). Resolve
+// it wherever it currently sits under `.planning/` rather than pinning a brittle path.
+function findUnderPlanning(filename: string): string {
+  const root = join(REPO, '.planning')
+  const stack = [root]
+  while (stack.length) {
+    const dir = stack.pop()!
+    let entries: string[]
+    try { entries = readdirSync(dir) } catch { continue }
+    for (const name of entries) {
+      const p = join(dir, name)
+      let isDir = false
+      try { isDir = statSync(p).isDirectory() } catch { continue }
+      if (isDir) stack.push(p)
+      else if (name === filename) return p
+    }
+  }
+  return join(root, filename) // non-existent fallback → existsSync(...) === false, test fails loudly
+}
+
+const CHECKLIST = findUnderPlanning('cutover-gate-checklist.md')
 
 describe('Phase 19 — cutover-gate runbook (R-PTY-21 / T-19-01)', () => {
   test('runbook + checklist artifacts exist', () => {

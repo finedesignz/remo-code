@@ -1,161 +1,131 @@
 # Coding Conventions
 
-**Analysis Date:** 2026-05-28
+**Analysis Date:** 2026-07-12
+
+Bun workspace, three packages: `hub/` (Bun + Hono API/WS server), `web/` (React 19 + Vite + Tailwind 4 SPA), `supervisor/` (Bun TS source compiled into a Tauri sidecar). TypeScript everywhere; no JS source files.
+
+## Toolchain Reality Check
+
+**There is NO ESLint, Prettier, or Biome config in this repo.** Style is enforced socially + by guard tests (see TESTING.md), not by a formatter. Consequences:
+
+- Do NOT add a formatter/linter as a drive-by — it would reformat ~500 files and destroy blame.
+- **Match the style of the file you are editing.** Quote style and semicolons are *inconsistent across files* and that is accepted: `hub/src/api/repo-groups.ts` uses single quotes + no semicolons; `hub/src/api/_openapi.ts` uses double quotes + semicolons. Do not "fix" a file's style while making a functional change.
+- Typecheck is the real gate: `bunx tsc --noEmit -p hub/tsconfig.json` (informational in CI) and `tsc -b` inside `web/` (`bun run build:web` fails on type errors).
 
 ## Naming Patterns
 
 **Files:**
-- TS source: `kebab-case.ts` (e.g. `session-queue.ts`, `coolify-webhook.ts`, `auto-name.ts`).
-- React components: `PascalCase.tsx` (e.g. `SettingsPage.tsx`, `MessageBubble.tsx`, `ChatSurface.tsx`).
-- UI primitives live in `web/src/components/ui/` and re-export through `index.ts`.
-- Tests: `<unit>.test.ts` colocated under `hub/test/` or `supervisor/test/` (NOT next to source).
-- E2E tests: `<feature>.e2e.test.ts` (e.g. `scheduled-tasks.e2e.test.ts`, `phase-08.e2e.test.ts`).
+- Hub source: kebab-case `.ts` — `hub/src/db/token-usage-dal.ts`, `hub/src/ws/ghost-reaper.ts`, `hub/src/dispatch/gates.ts`.
+- DB access layer: **always** `hub/src/db/<domain>-dal.ts` (`repo-groups-dal.ts`, `orchestrator-rows-dal.ts`, `scheduled-tasks-dal.ts`, `feedback-dal.ts`, `token-usage-dal.ts`). The generic legacy one is `hub/src/db/dal.ts`.
+- API routers: `hub/src/api/<resource>.ts`, one file per REST resource (`sessions.ts`, `repo-groups.ts`, `usage.ts`). Underscore prefix = not a route (`hub/src/api/_openapi.ts`).
+- Web components: PascalCase `.tsx` — `web/src/pages/SettingsPage.tsx`, `web/src/components/TerminalSurface.tsx`.
+- Tests: `<subject>.test.ts` / `.test.tsx`; e2e: `<subject>.e2e.test.ts`; guards are a plain descriptive negative name (`no-indigo.test.ts`, `no-legacy-agent-spawn.test.ts`) or `<invariant>.guard.test.ts`.
 
-**Functions / vars:** `camelCase`. **Types / React components:** `PascalCase`. **Constants:** `SCREAMING_SNAKE_CASE` for env keys + module-scope literal sets (e.g. `SCAN_DIRS`, `EXCLUDE_FILE_SUFFIXES`).
+**Symbols:**
+- Functions/vars: `camelCase`. Exported Zod schemas + types: `PascalCase` (`RepoIdent`, `CreateGroupBody`, `RepoGroupWithMembers`).
+- Env vars: `REMO_*` for this app's own knobs (`REMO_ORCHESTRATOR_ENABLED`, `REMO_GHOST_GRACE_MS`, `REMO_PTY_INTERACTIVE`); third-party keeps its own prefix (`TITANIUM_*`, `E4A_*`, `COOLIFY_TOKEN`).
+- Custom errors: class ending in `Error`, `this.name` set explicitly — `class DuplicateGroupNameError extends Error` (`hub/src/db/repo-groups-dal.ts`).
 
-**Zod schemas:** `<Name>Schema` suffix (`CreateSchema`, `TaskTypeEnum`).
+## Imports
 
-## Code Style
+**Always use explicit `.ts` extensions on relative imports** (Bun resolves them; the codebase is uniform on this):
 
-**Formatting:** No prettier/eslint config committed at repo root. Style is consistent-by-convention:
-- 2-space indent.
-- Single quotes for strings.
-- No semicolons in TS (e.g. `hub/src/api/scheduled-tasks.ts`).
-- ESM imports with explicit `.ts` extension on intra-repo paths (Bun-native): `from '../db/dal.ts'`.
+```ts
+import { sql } from './postgres.ts'
+import { authMiddleware } from "../auth/middleware.ts";
+```
 
-**TypeScript:**
-- Hub has NO `tsconfig.json` and NO `typecheck` script — typing enforced at Bun runtime + `bun test`. Do NOT add `tsc --noEmit` to hub CI without first adding a tsconfig.
-- `web/` uses `tsc -b && vite build` for build-time type checking. Strict React 19 + TS 5.7.
-- Supervisor: TS source compiled to a sidecar binary via `bun build --compile`.
+No path aliases in hub/supervisor. Order in practice: node/bun builtins → third-party → local `../` → `./`.
 
-**Imports — order:**
-1. Node/Bun built-ins (`node:fs`, `bun:test`).
-2. Third-party (`hono`, `zod`, `croner`).
-3. Intra-repo relative paths (`../db/dal.ts`).
+## Zod Validation at the Boundary
 
-Use named imports. Avoid default exports except for React components and Hono sub-apps.
+**Every** untrusted input (WS frame, REST body, webhook payload) is Zod-parsed. Never hand-roll validation.
+
+- WS protocol schemas are centralized: `hub/src/ws/protocol.ts` (browser `/ws/client`) and `hub/src/ws/agent-protocol.ts` (supervisor `/ws/agent`). Adding a new frame type = add a Zod variant there, not an ad-hoc `if (msg.type === ...)` cast.
+- REST routers declare schemas at the top of the file, above the handlers, as named consts:
+
+```ts
+// hub/src/api/repo-groups.ts
+const GroupName = z.string().trim().min(1).max(64)
+const CreateGroupBody = z.object({ name: GroupName })
+const ReorderBody = z.object({ ordered_ids: z.array(z.string().uuid()).max(500) })
+```
+
+- **Always bound arrays and strings** (`.max(...)`) — unbounded arrays are a DoS vector.
+- Zod v3 (`zod@^3.24`) in hub. `@hono/zod-openapi` re-exports `z` for documented routes — import `z` from `@hono/zod-openapi` in `_openapi.ts`, from `zod` elsewhere.
+
+## Database Access — the `*-dal.ts` layer
+
+**Routers never touch `sql` directly. All SQL lives in `hub/src/db/*-dal.ts`.**
+
+Rules, as practiced in `hub/src/db/repo-groups-dal.ts`:
+1. **Every query is user-scoped.** Either `WHERE user_id = $1` directly, or ownership is verified before any write. No DAL function trusts the caller for ownership.
+2. **Cross-user access returns `null`/`false`, and the router maps that to `404` — never `403`.** 403 leaks existence.
+3. The DAL exports TypeScript interfaces for its row shapes (`RepoGroup`, `RepoGroupWithMembers`) — routers import those types rather than re-declaring.
+4. Constraint violations become typed errors thrown from the DAL (`DuplicateGroupNameError` → router returns 409).
+5. Driver is `postgres` (postgres.js) via `hub/src/db/postgres.ts` exporting `sql`. Use tagged-template parameterization; never string-concat SQL.
+
+**Schema:** `hub/src/db/schema.sql` is **idempotent DDL only and re-runs in full on every hub boot.** Data backfills MUST be one-shot scripts in `hub/scripts/`, never inline in schema.sql — an inline backfill re-fires destructively every deploy. `bun run migration-verify` (`tools/migration-verify.ts`) enforces this in CI.
+
+## Routes + OpenAPI
+
+Two coexisting styles — know which you're in:
+
+- **Plain Hono router** (the majority of `hub/src/api/*.ts`): `export const repoGroups = new Hono()`, mounted in `hub/src/index.ts`. Serves traffic.
+- **`OpenAPIHono`** in `hub/src/api/_openapi.ts`: routes re-declared with `createRoute()` + Zod schemas purely to populate `/openapi.json` and the Scalar UI at `/docs`. Currently an intentional **duplicate registration** of the plain twin (stated in the file header). When a route is *fully* migrated to `OpenAPIHono`, **delete the plain twin** so it isn't double-mounted.
+
+After ANY route change: **`bun run docs:sync`** (regenerates `docs/openapi.json` via `hub/scripts/dump-openapi.ts`, then `docs/api.md` via widdershins) and **commit both files**. `.woodpecker/docs-drift.yaml` fails the PR if they're stale.
+
+**Mount order is an invariant** (`hub/test/mount-order.test.ts` enforces): public webhooks mount BEFORE the `/api/*` auth catch-all; license gate after auth; `/ws/agent` is keyed by `api_keys`, never by user license.
 
 ## Error Handling
 
-**Patterns:**
-- Zod-validate all external boundaries: WS frames (`hub/src/ws/protocol.ts`, `agent-protocol.ts`), REST bodies (each `api/*.ts` declares its `*Schema`), webhook payloads, env config (`hub/src/config.ts`).
-- Webhook + intake endpoints: read RAW body BEFORE JSON parse for HMAC verification. Constant-time signature compare. Reject `>5 min` timestamp skew.
-- Internal errors: `try/catch` with structured `console.log`/`console.warn` prefixed by module (`[scheduler]`, `[supervisor]`, `[agent]`).
-- Post-run / side-effect failures are LOG-ONLY — never fail the parent run (see `hub/src/scheduler/post-run/github-issue.ts`).
-- Hono routes return JSON `{ error: '<code>' }` with HTTP status; never throw past the router boundary.
-
-## Logging
-
-**Framework:** `console.log` / `console.warn` / `console.error`. No structured logger lib.
-
-**Conventions:**
-- Prefix with bracket tag: `[supervisor]`, `[hub]`, `[scheduler]`, `[agent]`, `[webhook]`.
-- Log security-relevant events (auth failures, HMAC mismatches, rate-limit hits, license-gate denials) at `warn`.
-- Never log secrets, tokens, full JWTs, full webhook signatures, or env values.
+- **DAL** throws typed errors; **routers** catch and map to status codes (409 dup, 404 not-found/not-owned, 400 Zod parse failure).
+- Public webhooks: read the **raw body before JSON parse**, constant-time secret compare, HMAC over `` `${ts}.${rawBody}` ``, reject >5min clock skew.
+- Never swallow an error into a bare `catch {}` on a dispatch path — `hub/src/dispatch/` has an explicit finalize stage; failures must reach it or runs hang `pending` forever (see the stale-run reaper, `hub/src/scheduler/run-reaper.ts`).
+- Numeric env knobs parse defensively and **fail toward the documented default**: non-positive / non-finite ⇒ default (`REMO_GHOST_GRACE_MS`, `REMO_RUN_MAX_MS`, `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP`). Expected of any new knob.
 
 ## Comments
 
-**When to comment:**
-- Module-level doc block at top of every `hub/src/**` file explaining purpose + invariants (see `hub/test/scheduler.test.ts:1-22`, `hub/src/api/scheduled-tasks.ts:1-13`).
-- Inline comments for non-obvious invariants (HMAC raw-body discipline, idempotency keys, cost-cap enforcement, license-gate exclusion list).
-- `// Phase NN:` comments mark behavior pinned to a specific delivery phase (do NOT remove without phase-aware review).
+Heavy, and **expected**. House style is a **file-header block comment stating purpose, contract, and the non-obvious invariant/rationale** — see `hub/src/db/repo-groups-dal.ts` (ownership policy), `hub/test/_setup.ts` (why `mock.restore` is preloaded), `web/test/no-indigo.test.ts` (why the forbidden token is assembled at runtime). Routers list their endpoint table in the header.
 
-**JSDoc/TSDoc:** Used on exported helpers in `hub/src/scheduler/`, `hub/src/error-capture/`, and `supervisor/src/`. Plain `/** */` blocks, not full TSDoc tags.
+Inline comments explain **why**, and especially record past incidents ("Woodpecker rewrites `${...}` even inside comments — use plain literals"). Do not strip these; they are the incident record.
 
-## Function Design
+## Shared-Pipeline Rule (do not hand-roll)
 
-- Pure logic modules (`scheduler/cron.ts`, `scheduler/auto-name.ts`, `error-capture/fingerprint.ts`) export small named functions, no classes.
-- DAL functions live in `*-dal.ts` files (`hub/src/db/dal.ts`, `scheduled-tasks-dal.ts`, `supervisor-dal.ts`, `revanote-dal.ts`). One function per query. Always `WHERE user_id = $1` for user-scoped tables.
-- Hono routers exported as named `Hono` instance per file (e.g. `export const scheduledTasks = new Hono()`).
+Do NOT write per-subsystem dispatch/queue/grace/finalize logic. Every inbound path (scheduler, error-capture, revanote, feedback, telegram, orchestrator inject) rides `hub/src/dispatch/` (gates → queue → grace → finalize) and `hub/src/webhooks/intake.ts`. The old `scheduler/session-queue.ts` shim is deleted.
 
-## Module Design
+**Cost/token caps are non-bypassable.** Any new user→session dispatch must pass through the shared gate list in `hub/src/dispatch/gates.ts` (`thresholdGate`, `dailyCostCapGate`, `dailyTokenCapGate`, `sessionInjectRateGate`). Never add a dispatch path that skips them.
 
-- One Hono sub-router per concern under `hub/src/api/`, mounted in `hub/src/index.ts`.
-- OpenAPI-aware routes live in `hub/src/api/_openapi.ts` (or a sibling `OpenAPIHono`) and MUST be mounted BEFORE the plain-Hono twin or the twin must be deleted.
-- No barrel `index.ts` except for `web/src/components/ui/index.ts` (UI primitive re-exports).
+## Web: design tokens + the accent rule
 
-## Design Tokens (UI)
+- Theming via CSS custom properties (`--bg-primary`, `--text-primary`, …), Tailwind CSS 4.
+- **Accent = BLUE. Orange is CTA-only. INDIGO IS BANNED — anywhere under `web/src`, in any file type (`.ts/.tsx/.css/.html/.json/.md/.svg`).** Enforced by `web/test/no-indigo.test.ts`, which recursively scans `web/src` and fails the build with `file:line` on any occurrence (the guard assembles the forbidden token at runtime so it never matches itself). Tailwind's default palette contains the forbidden token — do not paste a snippet using it.
+- Rationale + full token set: `~/.claude/design-preferences.md`. Read it before any UI decision; do not restate it in-repo.
+- Settings UI is exactly four tabs (`web/src/pages/settings/`): Connections · Credentials · Usage · Profile. Prompts + Orchestrator tabs were deleted; both routes redirect to Connections. Do not reintroduce them.
 
-CSS custom properties on `:root` (defined in `web/src/index.css`):
-- BG: `--bg-primary` (page), `--bg-secondary` (cards/panels), `--bg-tertiary` (hover/inputs).
-- Text: `--text-primary`, `--text-secondary`, `--text-muted`, `--text-on-accent`.
-- Borders: `--border-color` (sparingly).
-- Code: `--code-bg`.
+## Supervisor: the human-PTY invariant
 
-**Aesthetic rules (per global `~/.claude/design-preferences.md` + repo CLAUDE.md):**
-- **Subtle, not bordered.** Cards = `bg-[var(--bg-secondary)]/60` over `bg-[var(--bg-primary)]`. Reserve borders for active state, modals, header separators.
-- **Radius:** `rounded-xl` cards/dialogs, `rounded-lg` inputs/buttons/list items, `rounded` chips. **NEVER** `rounded-2xl` or larger.
-- **Accent:** **blue** (migrated indigo→blue, milestone v-settings-overhaul; orange = primary-CTA only; **never indigo** — `web/test/no-indigo.test.ts` guards). Primary buttons `bg-blue-600 hover:bg-blue-500`. Active `bg-blue-600/20 ring-1 ring-blue-500/30`. Tokens in `~/.claude/design-preferences.md`.
-- **Status colors:** emerald (good), amber (warn), red (error), gray (offline). Solid icons at 400, soft bg at /20 + ring.
-- **Padding:** card `p-5`, input/button `px-3 py-2`, list item `px-3 py-2`.
-- **Spacing:** `space-y-4`/`5` between sections, `gap-2`/`3` inline.
-- **Headers:** card heading `text-sm font-semibold text-[var(--text-primary)]`. Captions `text-xs text-[var(--text-muted)]`.
-- **Forbidden:** custom hex, drop shadows beyond default, gradients, `shadow-2xl+`, `rounded-2xl+`.
+Guarded code — treat as radioactive. On the interactive human path there is **NO provider API key and NO stream-json**: the genuine `claude`/`codex` TUI is spawned with an allowlist-of-one argv (only the optionally operator-blessed `--dangerously-skip-permissions`). Forbidden tokens: `-p`, `--print`, `--input-format`, `--output-format`, `stream-json`, any API key. All spawn envs route through `supervisor/src/runners/env-sanitize.ts`. Enforced by `supervisor/test/no-api-key-no-streamjson-pty.test.ts`, `no-apikey-fallback-guard.test.ts`, `default-backend-selector.test.ts`.
 
-Canonical reference: `web/src/components/SettingsPage.tsx`.
+## Git / PR Conventions
 
-## UI Primitives
-
-All in `web/src/components/ui/` — re-exported via `index.ts`. Use these instead of bespoke markup:
-
-| Primitive | File | Use for |
-|-----------|------|---------|
-| `AppShell` | `AppShell.tsx` | Page chrome / sidebar layout |
-| `Card` | `Card.tsx` | Panel + section container |
-| `Modal` | `Modal.tsx` | Centered dialog |
-| `Drawer` | `Drawer.tsx` | Side-panel (run details, error detail) |
-| `Tabs` | `Tabs.tsx` | Settings sub-nav |
-| `Button` | `Button.tsx` | All buttons (variants: primary/secondary/ghost/danger) |
-| `Field` | `Field.tsx` | Form input wrapper (label + hint + error) |
-| `StatusPill` | `StatusPill.tsx` | Status chips (success / failure / pending / disabled) |
-| `EmptyState` | `EmptyState.tsx` | No-rows placeholder |
-| `LoadingState` | `LoadingState.tsx` | Spinner / skeleton |
-| `ErrorBoundary` | `ErrorBoundary.tsx` | Wrap pages to catch render errors |
-| `HeaderRight` | `HeaderRight.tsx` | Top-right header slot (license badge + nav) |
-
-When adding a new surface, compose primitives first; introduce a new primitive only if 3+ places need the same shape.
-
-## Git Workflow
-
-**Branch naming:**
-- `feat/<slug>` — new feature
-- `fix/<slug>` — bug fix
-- `refactor/<slug>` — non-behavioral change
-- `chore/<slug>` — deps / tooling / docs
-- `phase-<NN>-<slug>` — GSD phase work
-
-**Worktree discipline (MANDATORY — repo CLAUDE.md):**
-- Main session stays on `main` in `C:\Users\artic\GitHub\remo-code`.
-- Every feature/phase gets its own worktree: `git worktree add ../remo-code-<slug> -b <branch> origin/main`.
-- All implementation, planning docs (`.planning/phases/<NN>-<slug>/`), agent dispatches happen in the worktree — NEVER the main checkout (parallel sessions wipe untracked files).
-- After merge: `git worktree remove ../remo-code-<slug> ; git branch -D <branch>`.
-
-**Commit messages:**
-- Conventional-commit-ish: `feat(scope): summary`, `fix(scope): summary`, `chore(scope): summary`.
-- Scope examples: `scheduler`, `webhook`, `auth`, `web`, `supervisor`, `07-bypass`, `coolify-webhook`.
-- Body explains the WHY + invariants touched. Reference phase + plan IDs when applicable.
-
-**PR hygiene:**
-- One branch = one concern = one PR.
-- Run `gh pr list` periodically to surface stale branches.
-- Squash-merge with `--delete-branch`.
-
-## Docs Co-Update Rule
-
-Per repo CLAUDE.md, code changes in these areas MUST update the matching doc in the SAME commit:
-
-| Code area | Doc to update |
-|-----------|---------------|
-| `hub/src/scheduler/**`, scheduler tests | `docs/scheduled-tasks.md` |
-| `hub/src/error-capture/**`, error intake | `docs/error-capture.md` |
-| Grid / multichat (`GridPage`, `ChatSurface`, `MobileAccordion`) | `docs/grid-view.md` |
-| Codex runner / rootless / seed files | `docs/codex-and-rootless.md` |
-| Auth / license / magic-link / sessions | `docs/auth.md` |
-| Coolify webhook (`hub/src/api/coolify-webhook.ts`) | `docs/scheduled-tasks.md` + `docs/coolify-webhook-migration.md` |
-| Any `hub/src/api/**` route migrated to OpenAPI | run `bun run docs:sync`; commit `docs/openapi.json` + `docs/api.md` |
-
-CI workflow `.github/workflows/docs-drift.yml` fails PRs that change `hub/src/**` without a matching spec update.
+- **Conventional commits, scoped, PR number appended:**
+  `fix(orchestrator): count cache tokens in daily cap + per-session inject-rate ceiling (#342)`
+  `feat(scheduler): email a run summary to the task owner by default (#339)`
+  Scopes in use: `hub`, `web`, `web/terminal`, `supervisor`, `orchestrator`, `scheduler`, `email`, `docs`, `ci`.
+- **Worktrees are MANDATORY for any feature/phase/non-trivial refactor.** Never build on the primary checkout — parallel sessions branch-switch / `git clean` and will wipe uncommitted work.
+  ```bash
+  git -C C:/Users/artic/GitHub/remo-code fetch origin
+  git -C C:/Users/artic/GitHub/remo-code worktree add ../remo-code-feat-<slug> -b feat/<slug> origin/main
+  ```
+  After merge: `git worktree remove ../remo-code-feat-<slug> && git branch -D feat/<slug>`.
+  Exceptions: trivial single-file bugfix or doc edit.
+- **One branch = one concern = one PR.** Names: `feat/<slug>`, `fix/<slug>`, `refactor/<slug>`, `phase-<NN>-<slug>`.
+- Squash-merge to `main` (`gh pr merge <N> --squash --delete-branch`). Push to `main` triggers the Coolify hub deploy + post-deploy smoke.
+- **Docs update ships in the SAME commit as the behavior change.** Each subsystem has a `docs/*.md` that is source of truth (Docs map in `CLAUDE.md`); `docs/openapi.json` + `docs/api.md` are generated and committed.
+- Supervisor releases: push a `supervisor-v*.*.*` tag → `.github/workflows/release-supervisor.yml` builds + signs the MSI. Version is single-sourced from `supervisor/tauri/tauri.conf.json` via `import tauriConf` in `version.ts` — never reintroduce `--define` / `FALLBACK_VERSION`.
 
 ---
 
-*Convention analysis: 2026-05-28*
+*Convention analysis: 2026-07-12*

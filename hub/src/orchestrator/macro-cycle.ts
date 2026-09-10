@@ -27,6 +27,15 @@ import { shouldNotify, fanOutNotify, type NotifyEvent } from './notify.ts';
 import { appendRunLog } from './run-log.ts';
 import { injectOrchestratorPrompt } from './inject.ts';
 import type { LifecycleStage, MacroTaskType } from '../db/orchestrator-rows-dal.ts';
+import {
+  orchestratorCycleSkipReason,
+  orchestratorDispatchOutcome,
+  refreshOrchestratorCapGauges,
+} from '../observability/orchestrator-metrics.ts';
+import {
+  evaluateCapAlert,
+  type CapAlertDeps,
+} from '../observability/cap-alert.ts';
 
 export interface MacroCycleInput {
   userId: string;
@@ -47,7 +56,25 @@ export interface MacroCycleDeps {
   fanOut: typeof fanOutNotify;
   /** true when a run is already in flight for this session (per-session lock held). */
   isRunLive: (sessionId: string) => boolean;
+  /** OBSRV-05: cap-approach alert evaluator (injectable for tests; optional). */
+  evaluateCapAlert?: typeof evaluateCapAlert;
+  /** OBSRV-03: cap-gauge refresh (DB-backed; injectable so the cycle stays IO-free under test). */
+  refreshCapGauges?: typeof refreshOrchestratorCapGauges;
+  /** OBSRV-05: cap-status fetch (DB-backed; injectable so the cycle stays IO-free under test). */
+  getCapStatuses?: (
+    userId: string,
+    tz: string,
+  ) => Promise<{ costStatus: Parameters<typeof evaluateCapAlert>[0]['costStatus']; tokenStatus: Parameters<typeof evaluateCapAlert>[0]['tokenStatus'] }>;
 }
+
+const realCapStatuses: NonNullable<MacroCycleDeps['getCapStatuses']> = async (userId, tz) => {
+  const { getCostCapStatus, getTokenCapStatus } = await import('../dispatch/gates.ts');
+  const [costStatus, tokenStatus] = await Promise.all([
+    getCostCapStatus(userId, tz),
+    getTokenCapStatus(userId, tz),
+  ]);
+  return { costStatus, tokenStatus };
+};
 
 async function realDeps(): Promise<MacroCycleDeps> {
   const dal = await import('../db/dal.ts');
@@ -125,6 +152,7 @@ export async function runMacroCycle(
   //    so it never auto-resumes past an awaiting-approval proposal (SPEC §6).
   if (sentinels?.gate && (stageHalts(stage) || macroTaskType === 'brainstorming')) {
     result.halted = true;
+    try { orchestratorCycleSkipReason.inc({ reason: 'halted' }); } catch { /* fail-open */ }
     console.log(
       `[orchestrator.macro] session=${sessionId} HALTED on gate: ${sentinels.gate.reason ?? 'unspecified'} ` +
         `(stage=${stage}); awaiting human reply.`,
@@ -137,6 +165,7 @@ export async function runMacroCycle(
   //     heartbeat reconciles once the run finishes.
   if (d.isRunLive(sessionId)) {
     result.skipped = true;
+    try { orchestratorCycleSkipReason.inc({ reason: 'run_live' }); } catch { /* fail-open */ }
     try {
       await d.appendRunLog({
         session_id: sessionId,
@@ -165,6 +194,7 @@ export async function runMacroCycle(
     // run-log row instead of a silent dead run.
     if (!macro.complete) {
       result.stubNotReady = true;
+      try { orchestratorCycleSkipReason.inc({ reason: 'stub_not_ready' }); } catch { /* fail-open */ }
       console.log(
         `[orchestrator.macro] session=${sessionId} macro_task_type=${macroTaskType} is a STUB ` +
           `(complete=false) — skipping inject (stub_not_ready).`,
@@ -198,6 +228,39 @@ export async function runMacroCycle(
       outcome.kind === 'queued' ||
       outcome.kind === 'autospawn_launched' ||
       outcome.kind === 'autospawn_parked';
+
+    // OBSRV-03: dispatch-outcome counter + skip-reason on non-dispatch outcomes.
+    try {
+      orchestratorDispatchOutcome.inc({ kind: outcome.kind });
+      if (!result.injected) {
+        const skipReason =
+          outcome.kind === 'refused_cost_cap'
+            ? 'refused_cost_cap'
+            : outcome.kind === 'no_session'
+              ? 'no_session'
+              : outcome.kind === 'failed'
+                ? 'failed'
+                : outcome.kind === 'refused'
+                  ? ('reason' in outcome ? `refused_${(outcome as any).reason}` : 'refused')
+                  : outcome.kind;
+        orchestratorCycleSkipReason.inc({ reason: skipReason });
+      }
+    } catch { /* fail-open */ }
+
+    // OBSRV-03: refresh cap gauges (best-effort, fail-open).
+    try {
+      await (d.refreshCapGauges ?? refreshOrchestratorCapGauges)(userId, 'UTC');
+    } catch { /* fail-open */ }
+
+    // OBSRV-05: cap-approach alert (best-effort, fail-open, throttled once/day/cap).
+    try {
+      const { costStatus, tokenStatus } = await (d.getCapStatuses ?? realCapStatuses)(userId, 'UTC');
+      const capAlertFn = d.evaluateCapAlert ?? evaluateCapAlert;
+      await capAlertFn(
+        { userId, sessionId, tokenStatus, costStatus },
+        { fanOut: d.fanOut },
+      );
+    } catch { /* fail-open */ }
 
     // Observability: stamp this resume into the run-log.
     try {

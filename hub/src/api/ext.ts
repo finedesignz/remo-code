@@ -1,0 +1,588 @@
+/**
+ * /api/ext — the EXTERNAL agent surface (milestone ASK).
+ *
+ * Lets a Claude Desktop scheduled task (or any MCP/HTTP client holding an api_key)
+ *   (a) find the remo-code session for a repo,
+ *   (b) READ that session's on-disk transcript tail + project memory (FREE — zero
+ *       tokens, zero PTY writes, works for pty-interactive sessions too), and
+ *   (c) ASK it a question and get an ANSWER back (PAID — spends tokens; escalate
+ *       only when the free reads are inconclusive).
+ *
+ * Auth: `api_keys` + the additive nullable `scopes` column (ext:read / ext:ask).
+ * Mounted BEFORE the cookie/JWT catch-all — see the MOUNT-ORDER INVARIANT in
+ * hub/src/index.ts and the assertion in hub/test/mount-order.test.ts.
+ *
+ * The reads proxy to the supervisor's allowlisted READ-ONLY `run_command`s
+ * (`session_transcript_tail` / `session_memory`); the path-traversal chokepoint
+ * lives on the supervisor (supervisor/src/commands/session-read.ts).
+ */
+import { Hono } from 'hono'
+import { z } from 'zod'
+import { randomBytes } from 'node:crypto'
+import { sql } from '../db/postgres.ts'
+import {
+  findSupervisorForSession,
+  listOnlineSupervisorIdsForUser,
+} from '../ws/supervisor-registry.ts'
+import { getChannel } from '../ws/registry.ts'
+import { runSupervisorReadCommand, parseSnippet } from '../ext/supervisor-read.ts'
+import { insertAsk, getAsk, type SessionAsk } from '../db/ask-dal.ts'
+import { findAskSession, dispatchAsk } from '../ask/dispatch.ts'
+import { renderAskPrompt } from '../ask/prompt.ts'
+import {
+  isRepoWorkAllowed,
+  findWorkSite,
+  isKnownSender,
+  insertWorkRun,
+  getWorkRun,
+  finalizeWork,
+  type WorkRun,
+} from '../db/work-dal.ts'
+import { renderWorkPrompt } from '../work/prompt.ts'
+import { createTaskV2 } from '../db/scheduled-tasks-dal.ts'
+import * as scheduleRegistry from '../scheduler/registry.ts'
+
+export const ext = new Hono()
+
+const MAX_WAIT_MS = 120_000
+
+interface SessionRow {
+  id: string
+  name: string
+  project_dir: string | null
+  runner_type: string
+  status: string
+  hostname: string | null
+  repo_key: string | null
+  github_owner: string | null
+  github_repo: string | null
+  last_activity: Date | null
+}
+
+function repoIdent(s: SessionRow): string | null {
+  if (s.github_owner && s.github_repo) return `github://${s.github_owner}/${s.github_repo}`
+  if (s.project_dir) return `path://${s.project_dir}`
+  return null
+}
+
+/** Resolve `:id` — a session id, OR a repo_ident (`github://o/r` | `path://<abs>`). */
+async function resolveSession(userId: string, id: string): Promise<SessionRow | null> {
+  const rows = await sql<SessionRow[]>`
+    SELECT id, name, project_dir, runner_type, status, hostname,
+           repo_key, github_owner, github_repo, last_activity
+      FROM sessions
+     WHERE user_id = ${userId} AND deleted_at IS NULL
+     ORDER BY last_activity DESC NULLS LAST
+  `
+  const direct = rows.find((r) => r.id === id)
+  if (direct) return direct
+  const want = id.trim()
+  return (
+    rows.find((r) => repoIdent(r) === want) ??
+    rows.find((r) => r.repo_key === want) ??
+    // Convenience: bare repo name ("remo-code") matches the github repo or the
+    // last path segment — Desktop should not have to memorize UUIDs.
+    rows.find(
+      (r) =>
+        r.github_repo === want ||
+        (r.project_dir ?? '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() === want,
+    ) ??
+    null
+  )
+}
+
+/** Which supervisor host holds this session's transcript. */
+function supervisorForSession(
+  userId: string,
+  sessionId: string,
+): { id: string } | { error: string; detail: string } {
+  const live = findSupervisorForSession(sessionId)
+  if (live && live.userId === userId) return { id: live.supervisorId }
+  const online = listOnlineSupervisorIdsForUser(userId)
+  if (online.length === 1) return { id: online[0] }
+  if (online.length === 0) {
+    return {
+      error: 'supervisor_offline',
+      detail: 'No supervisor is currently online for this user to read the session host.',
+    }
+  }
+  return {
+    error: 'supervisor_ambiguous',
+    detail:
+      `${online.length} supervisors are online and none is bound to this session, so the ` +
+      'host is ambiguous. Start the session (which binds it to one host) and retry.',
+  }
+}
+
+// ── Read surface (Phase 1) — zero tokens, zero PTY writes ────────────────────
+
+ext.get('/sessions', async (c) => {
+  const userId = c.get('userId') as string
+  const rows = await sql<SessionRow[]>`
+    SELECT id, name, project_dir, runner_type, status, hostname,
+           repo_key, github_owner, github_repo, last_activity
+      FROM sessions
+     WHERE user_id = ${userId} AND deleted_at IS NULL
+     ORDER BY last_activity DESC NULLS LAST
+  `
+  return c.json({
+    sessions: rows.map((s) => ({
+      id: s.id,
+      name: s.name,
+      repo_ident: repoIdent(s),
+      project_dir: s.project_dir,
+      runner_type: s.runner_type,
+      active: getChannel(s.id) != null,
+      last_activity: s.last_activity,
+    })),
+  })
+})
+
+ext.get('/sessions/:id/transcript', async (c) => {
+  const userId = c.get('userId') as string
+  const session = await resolveSession(userId, c.req.param('id'))
+  if (!session) return c.json({ error: 'session_not_found' }, 404)
+  if (!session.project_dir) return c.json({ error: 'no_project_dir' }, 409)
+
+  const sup = supervisorForSession(userId, session.id)
+  if ('error' in sup) return c.json({ error: sup.error, detail: sup.detail }, 503)
+
+  const tailRaw = Number(c.req.query('tail'))
+  const tail = Number.isFinite(tailRaw) && tailRaw > 0 ? String(Math.floor(tailRaw)) : '30'
+
+  const res = await runSupervisorReadCommand(sup.id, userId, 'session_transcript_tail', [
+    session.project_dir,
+    tail,
+  ])
+  const payload = parseSnippet<{ turns: unknown[]; truncated: boolean }>(res)
+  if (!payload) return c.json({ error: res.error ?? 'transcript_unavailable' }, 502)
+  return c.json({ session_id: session.id, ...payload })
+})
+
+ext.get('/sessions/:id/memory', async (c) => {
+  const userId = c.get('userId') as string
+  const session = await resolveSession(userId, c.req.param('id'))
+  if (!session) return c.json({ error: 'session_not_found' }, 404)
+  if (!session.project_dir) return c.json({ error: 'no_project_dir' }, 409)
+
+  const sup = supervisorForSession(userId, session.id)
+  if ('error' in sup) return c.json({ error: sup.error, detail: sup.detail }, 503)
+
+  const res = await runSupervisorReadCommand(sup.id, userId, 'session_memory', [session.project_dir])
+  const payload = parseSnippet<{ files: unknown[]; truncated: boolean }>(res)
+  if (!payload) return c.json({ error: res.error ?? 'memory_unavailable' }, 502)
+  return c.json({ session_id: session.id, ...payload })
+})
+
+ext.get('/sessions/:id/state', async (c) => {
+  const userId = c.get('userId') as string
+  const session = await resolveSession(userId, c.req.param('id'))
+  if (!session) return c.json({ error: 'session_not_found' }, 404)
+
+  const lastAssistant = await sql<{ created_at: Date }[]>`
+    SELECT created_at FROM messages
+     WHERE session_id = ${session.id} AND role = 'assistant'
+     ORDER BY created_at DESC LIMIT 1
+  `
+  const openRuns = await sql<{ n: string }[]>`
+    SELECT COUNT(*)::text AS n FROM session_runs
+     WHERE session_id = ${session.id} AND ended_at IS NULL
+  `
+  return c.json({
+    session_id: session.id,
+    repo_ident: repoIdent(session),
+    runner_type: session.runner_type,
+    active: getChannel(session.id) != null,
+    status: session.status,
+    last_activity: session.last_activity,
+    last_assistant_message_at: lastAssistant[0]?.created_at ?? null,
+    open_session_runs: Number(openRuns[0]?.n ?? 0),
+  })
+})
+
+// ── Ask (Phase 2) — spends tokens, rides every non-bypassable gate ───────────
+
+const AskBody = z.object({
+  question: z.string().min(1).max(8_000),
+  context: z.string().max(8_000).optional(),
+  wait_ms: z.number().int().min(0).max(MAX_WAIT_MS).optional(),
+  include_transcript: z.boolean().optional(),
+  include_memory: z.boolean().optional(),
+})
+
+function askView(a: SessionAsk) {
+  return {
+    ask_id: a.id,
+    status: a.status,
+    answer: a.answer,
+    confidence: a.confidence,
+    evidence: a.evidence,
+    reason: a.reason,
+    raw_reply: a.raw_reply,
+    created_at: a.created_at,
+    answered_at: a.answered_at,
+  }
+}
+
+// TODO(milestone once): reroute /ask to enqueue a `schedule_kind='once'`
+// `task_type='ask'` scheduled task as its queue entry, mirroring /work above.
+// Deferred deliberately — ask already rides the SAME shared dispatch pipeline +
+// non-bypassable gates (dailyCostCapGate · dailyTokenCapGate · humanOnlyPtyGate ·
+// askRateGate in hub/src/ask/dispatch.ts), so the caps/gate unification the
+// owner requires is ALREADY satisfied; only the Tasks-list/queue-entry
+// unification remains. WORK was rerouted first (higher-value, higher-risk).
+ext.post('/sessions/:id/ask', async (c) => {
+  const userId = c.get('userId') as string
+  const apiKeyId = (c.get('apiKeyId') as string) ?? null
+
+  const target = await resolveSession(userId, c.req.param('id'))
+  if (!target) return c.json({ error: 'session_not_found' }, 404)
+  if (!target.project_dir) return c.json({ error: 'no_project_dir' }, 409)
+
+  let body: z.infer<typeof AskBody>
+  try {
+    body = AskBody.parse(await c.req.json())
+  } catch (err: any) {
+    return c.json({ error: 'bad_request', detail: err?.message }, 400)
+  }
+
+  // Resolve the ANSWERING session: a stream-json CLI on the same project_dir. We
+  // never write to the human's PTY (see docs/session-ask.md §invariants).
+  const askSession = await findAskSession(userId, target.project_dir)
+  if (!askSession) {
+    return c.json(
+      {
+        error: 'no_ask_session',
+        detail:
+          'No non-interactive (stream-json) session exists for this project_dir, so there is ' +
+          'nothing to answer the ask — it is never routed into a pty-interactive session. Note ' +
+          'a default prod install is PTY-interactive; the precondition is a stream-json session ' +
+          'on the target repo. Create one (or start the orchestrator) and retry.',
+      },
+      409,
+    )
+  }
+
+  // Free reads first — they become FENCED DATA in the prompt (never instructions).
+  let transcript: string | undefined
+  let memory: string | undefined
+  const sup = supervisorForSession(userId, target.id)
+  if (!('error' in sup)) {
+    if (body.include_transcript !== false) {
+      const r = await runSupervisorReadCommand(sup.id, userId, 'session_transcript_tail', [
+        target.project_dir,
+        '30',
+      ])
+      const p = parseSnippet<{ turns: Array<{ role: string; text: string }> }>(r)
+      if (p?.turns?.length) {
+        transcript = p.turns.map((t) => `[${t.role}] ${t.text}`).join('\n\n')
+      }
+    }
+    if (body.include_memory !== false) {
+      const r = await runSupervisorReadCommand(sup.id, userId, 'session_memory', [target.project_dir])
+      const p = parseSnippet<{ files: Array<{ name: string; content: string }> }>(r)
+      if (p?.files?.length) {
+        memory = p.files.map((f) => `### ${f.name}\n${f.content}`).join('\n\n')
+      }
+    }
+  }
+
+  const ask = await insertAsk({
+    userId,
+    sessionId: askSession.id,
+    targetSessionId: target.id,
+    apiKeyId,
+    question: body.question,
+  })
+
+  const prompt = renderAskPrompt({
+    askId: ask.id,
+    question: body.question,
+    context: body.context,
+    targetSessionName: target.name,
+    projectDir: target.project_dir,
+    transcript,
+    memory,
+  })
+
+  await dispatchAsk({
+    askId: ask.id,
+    userId,
+    apiKeyId,
+    askSessionId: askSession.id,
+    prompt,
+  })
+
+  // Optional long-poll so a Desktop tool call usually gets its answer in ONE call.
+  const waitMs = Math.min(body.wait_ms ?? 0, MAX_WAIT_MS)
+  const deadline = Date.now() + waitMs
+  let current = (await getAsk(ask.id, userId)) ?? ask
+  while (waitMs > 0 && Date.now() < deadline) {
+    if (current.status !== 'queued' && current.status !== 'dispatched') break
+    await new Promise((r) => setTimeout(r, 1_000))
+    current = (await getAsk(ask.id, userId)) ?? current
+  }
+
+  return c.json({ session_id: askSession.id, ...askView(current) }, 202)
+})
+
+ext.get('/sessions/:id/ask/:ask_id', async (c) => {
+  const userId = c.get('userId') as string
+  const ask = await getAsk(c.req.param('ask_id'), userId)
+  if (!ask) return c.json({ error: 'ask_not_found' }, 404)
+  // The `:id` path segment is the session the ask was ABOUT (its target). Assert it
+  // resolves to that same target so the segment is load-bearing, not decorative — a
+  // mismatched `:id` is a 404, not a silently-ignored param.
+  const target = await resolveSession(userId, c.req.param('id'))
+  if (!target || target.id !== ask.target_session_id) return c.json({ error: 'ask_not_found' }, 404)
+  return c.json({ session_id: ask.session_id, target_session_id: ask.target_session_id, ...askView(ask) })
+})
+
+// ── Work (milestone WORK) — inbound email → repo agent → QC → gated publish ──
+//
+// THREAT MODEL: `request_text` came from a CLIENT EMAIL. Nobody authenticated it.
+// This endpoint points that text at an agent with file-write powers on a repo that
+// can publish to a LIVE CLIENT WEBSITE, so the containment is the feature:
+//
+//   1. REPO ALLOWLIST (F6)  — `work_repo_allowlist` is EMPTY by default. Not on it
+//                             ⇒ 403, no row, no dispatch, no spend.
+//   2. SITE TRUST RECORD    — the site must exist in `work_sites` (403 otherwise).
+//   3. SENDER ALLOWLIST     — `source.from` must match that site's `client_emails`
+//                             ⇒ 403 `unknown_sender`. An email from an unknown
+//                             address NEVER reaches a session.
+//   4. auto_publish         — DEFAULTS FALSE. False ⇒ the prompt forbids publishing
+//                             AND `finalizeWork` refuses to record `published=true`.
+//   5. GATES                — cost cap · token cap · humanOnlyPty · work rate ·
+//                             repo allowlist (again), inside dispatchWork.
+//   6. AUDIT (F9)           — every work item persists the source email metadata,
+//                             the FULL prompt, the commits, and the QC evidence.
+
+const WorkBody = z.object({
+  repo: z.string().min(1),
+  site: z.string().min(1),
+  request_text: z.string().min(1).max(20_000),
+  source: z.object({
+    kind: z.literal('email'),
+    from: z.string().min(1).max(320),
+    subject: z.string().max(2_000).optional(),
+    message_id: z.string().max(998).optional(),
+  }),
+  wait_ms: z.number().int().min(0).max(MAX_WAIT_MS).optional(),
+})
+
+function workView(w: WorkRun) {
+  return {
+    work_id: w.id,
+    status: w.status,
+    summary: w.summary,
+    /** The branch the agent pushed. Its authority ends here. */
+    branch: w.branch,
+    /** HUB-OBSERVED (from the branch diff), not the agent's claimed file list. */
+    files_changed: w.files_changed ?? [],
+    commit_shas: w.commit_shas ?? [],
+    /** HUB-OBSERVED evidence: diff-scope check + real build exit code + real HTTPS probe. */
+    hub_qc: w.hub_qc ?? null,
+    /** The agent's self-report. ADVISORY ONLY — never the basis of a publish decision. */
+    agent_self_check: w.qc ?? null,
+    diff_url: w.diff_url,
+    pr_url: w.pr_url,
+    preview_url: w.preview_url,
+    /** TRUE only when the HUB itself performed the deploy. */
+    published: w.published,
+    deploy_status: w.deploy_status,
+    live_url: w.live_url,
+    blocker: w.blocker,
+    reason: w.reason,
+    auto_publish: w.auto_publish,
+    repo_ident: w.repo_ident,
+    site_key: w.site_key,
+    created_at: w.created_at,
+    finished_at: w.finished_at,
+  }
+}
+
+ext.post('/work', async (c) => {
+  const userId = c.get('userId') as string
+  const apiKeyId = (c.get('apiKeyId') as string) ?? null
+
+  let body: z.infer<typeof WorkBody>
+  try {
+    body = WorkBody.parse(await c.req.json())
+  } catch (err: any) {
+    return c.json({ error: 'bad_request', detail: err?.message }, 400)
+  }
+
+  const target = await resolveSession(userId, body.repo)
+  if (!target) return c.json({ error: 'session_not_found' }, 404)
+  if (!target.project_dir) return c.json({ error: 'no_project_dir' }, 409)
+
+  const ident = repoIdent(target)
+  if (!ident) return c.json({ error: 'no_repo_ident' }, 409)
+
+  // (1) REPO ALLOWLIST — checked BEFORE anything is inserted or dispatched, so a
+  // non-allowlisted repo costs exactly zero. The same check rides the gate list.
+  if (!(await isRepoWorkAllowed(userId, ident))) {
+    return c.json(
+      {
+        error: 'repo_not_allowlisted',
+        detail:
+          `Repo ${ident} is not in work_repo_allowlist. Email-driven work drives NOTHING ` +
+          'until an operator explicitly opts a repo in.',
+      },
+      403,
+    )
+  }
+
+  // (2) SITE TRUST RECORD
+  const site = await findWorkSite(userId, ident, body.site)
+  if (!site) return c.json({ error: 'unknown_site', detail: `No work_sites row for ${ident}/${body.site}` }, 403)
+
+  // (3) SENDER ALLOWLIST — an unknown sender never reaches a session.
+  if (!isKnownSender(site, body.source.from)) {
+    return c.json(
+      { error: 'unknown_sender', detail: `sender not permitted for site ${body.site}` },
+      403,
+    )
+  }
+
+  // The ANSWERING/WORKING session: a stream-json CLI on the repo's project_dir. We
+  // never write to a human's PTY.
+  const workSession = await findAskSession(userId, target.project_dir)
+  if (!workSession) {
+    return c.json(
+      {
+        error: 'no_work_session',
+        detail:
+          'No non-interactive (stream-json) session exists for this project_dir, so there is ' +
+          'nothing to run the work — it is never routed into a pty-interactive session. Note a ' +
+          'default prod install is PTY-interactive; the precondition is a stream-json session on ' +
+          'the target repo. Create one and retry.',
+      },
+      409,
+    )
+  }
+
+  // Server-generated nonce. The email author has never seen it, so a forged
+  // `<<WORK:…>>` envelope inside the body cannot be mistaken for the agent's result
+  // (and the fence escapes its `<` characters anyway).
+  const nonce = randomBytes(12).toString('hex')
+
+  // The branch the agent must push to. HUB-NAMED (derived from the nonce), so the hub
+  // knows exactly which ref to verify and the agent cannot point us at some other branch.
+  const branch = `work/${nonce}`
+
+  // NOTE what is NOT passed: `auto_publish`, `publish_cmd`, `coolify_app_uuid`. The agent
+  // is not told whether the site auto-publishes and has no publish command — publishing is
+  // the hub's alone (hub/src/work/publish.ts). What it does not know, it cannot be talked
+  // into.
+  const prompt = renderWorkPrompt({
+    nonce,
+    repoIdent: ident,
+    siteKey: site.site_key,
+    siteDir: site.site_dir,
+    branch,
+    requestText: body.request_text,
+    from: body.source.from,
+    subject: body.source.subject ?? null,
+    messageId: body.source.message_id ?? null,
+  })
+
+  // (6) AUDIT TRAIL — the FULL prompt is persisted with the row, so "which live-site
+  // commits came from an inbound email?" is answerable after the fact.
+  const work = await insertWorkRun({
+    userId,
+    sessionId: workSession.id,
+    apiKeyId,
+    repoIdent: ident,
+    siteKey: site.site_key,
+    siteId: site.id,
+    autoPublish: site.auto_publish,
+    sourceKind: body.source.kind,
+    sourceFrom: body.source.from,
+    sourceSubject: body.source.subject ?? null,
+    sourceMessageId: body.source.message_id ?? null,
+    requestText: body.request_text,
+    prompt,
+    nonce,
+  })
+
+  const workSup = supervisorForSession(userId, workSession.id)
+  const supervisorId = 'error' in workSup ? null : workSup.id
+
+  // ── UNIFY (milestone once): enqueue as a one-time scheduled task ────────────
+  // The work item becomes a `schedule_kind='once'` `task_type='work'` row — the
+  // SINGLE queue entry, Tasks-list appearance, and audit anchor. It is created
+  // ONLY AFTER every gate above (repo allowlist · site trust · sender allowlist)
+  // has passed, so a forbidden repo/site/sender still 403s with ZERO spend and
+  // ZERO rows — the back-door stays closed. The one-time task fires immediately
+  // (run_at=now); its sender (`scheduler/senders/work.ts`) calls the EXISTING
+  // `dispatchWork`, whose own non-negotiable gate list re-runs at RUN time.
+  // `work_runs` (inserted above) remains the typed TERMINAL result the GET
+  // endpoints read. email_summary=false: the work path has its own result
+  // surface, so we suppress a misleading "dispatched" summary email.
+  let onceTask
+  try {
+    onceTask = await createTaskV2({
+      user_id: userId,
+      session_id: workSession.id,
+      name: `Work · ${site.site_key} · ${ident}`,
+      task_type: 'work',
+      target_kind: 'session',
+      target_id: workSession.id,
+      timezone: 'UTC',
+      enabled: true,
+      schedule_kind: 'once',
+      run_at: new Date(),
+      email_summary: false,
+      payload: {
+        work_id: work.id,
+        work_session_id: workSession.id,
+        api_key_id: apiKeyId,
+        project_dir: target.project_dir,
+        supervisor_id: supervisorId,
+        repo_ident: ident,
+        site_key: site.site_key,
+      },
+    })
+  } catch (err: any) {
+    // Enqueue failed AFTER the work_runs row was inserted. NEVER return a phantom
+    // 'queued' row with nothing driving it (ai-review finding #2) — finalize the
+    // work run terminal so the caller sees a real failure and can retry.
+    await finalizeWork(work.id, 'failed', { reason: `enqueue_failed: ${err?.message ?? err}` }).catch(() => {})
+    return c.json({ error: 'enqueue_failed', work_id: work.id, detail: err?.message ?? String(err) }, 502)
+  }
+  try {
+    scheduleRegistry.register(onceTask)
+  } catch (err: any) {
+    // Non-fatal: the once row is PERSISTED, so the durable once-due sweep
+    // (scheduler/once-due-sweep.ts) fires it on the next tick regardless. The work
+    // item is NOT dropped — register() is only the in-process latency optimization.
+    console.error(`[ext.work] register failed (once-due sweep will drive) task=${onceTask.id}: ${err?.message ?? err}`)
+  }
+
+  // wait_ms CONTRACT (ai-review finding #1): work now dispatches ASYNC (the once
+  // task fires via registry setTimeout(0) + the durable once-due sweep). wait_ms
+  // is a best-effort latency convenience — it polls work_runs until terminal or
+  // the window lapses. A non-terminal return (`queued`/`dispatched`/`verifying`)
+  // is a DEFINED, POLLABLE state, NOT a dropped item: the once-due sweep
+  // GUARANTEES the work is dispatched and the work-reaper GUARANTEES it reaches a
+  // terminal state. The caller polls `GET /api/ext/work/:work_id` (returned as
+  // work_id) until `status` is terminal. It is never a silent race.
+  const waitMs = Math.min(body.wait_ms ?? 0, MAX_WAIT_MS)
+  const deadline = Date.now() + waitMs
+  let current = (await getWorkRun(work.id, userId)) ?? work
+  while (waitMs > 0 && Date.now() < deadline) {
+    if (!['queued', 'dispatched', 'verifying'].includes(current.status)) break
+    await new Promise((r) => setTimeout(r, 1_000))
+    current = (await getWorkRun(work.id, userId)) ?? current
+  }
+
+  return c.json({ session_id: workSession.id, ...workView(current) }, 202)
+})
+
+ext.get('/work/:work_id', async (c) => {
+  const userId = c.get('userId') as string
+  const work = await getWorkRun(c.req.param('work_id'), userId)
+  if (!work) return c.json({ error: 'work_not_found' }, 404)
+  return c.json({ session_id: work.session_id, ...workView(work) })
+})

@@ -94,6 +94,8 @@ export async function finalizeAnnotationReply(args: FinalizeArgs): Promise<void>
         deployed: result.deployed === true,
         needs_clarification: result.needs_clarification === true,
         clarification_question: result.clarification_question ?? null,
+        assumption: result.assumption ?? null,
+        clarification_reason: result.clarification_reason ?? null,
         error: parsed.ok ? null : `parse_${parsed.reason}`,
       }
 

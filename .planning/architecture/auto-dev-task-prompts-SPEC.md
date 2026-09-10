@@ -29,7 +29,7 @@ The shipped orchestrator decomposes a session's work into per-command rows (`pla
 | After milestone ships | auto-start next milestone | auto-start next milestone | auto-start next milestone |
 | Destructive DB op | needs approval (always) | needs approval (always) | needs approval (always) |
 
-Rationale: a development-stage repo (the canary) runs silently and fully autonomously — the owner is watching the live session and doesn't want to be paged. Pushes matter only once an app is in production. Auto-starting the next milestone is honored at every stage, BUT any genuinely-novel product-direction scope decision surfaced during `gsd-new-milestone` is itself a grey-area gate (specialist-resolve; human ideation of brand-new features is the separate `brainstorming` task).
+Rationale: a development-stage repo (the canary) runs silently and fully autonomously — the owner is watching the live session and doesn't want to be paged. Pushes matter only once an app is in production. Auto-starting the next milestone is honored at every stage, BUT the next milestone may ONLY be drawn from the predetermined, owner-curated "## Planned Milestones (Roadmap)" section of `.planning/PROJECT.md` — the orchestrator may NOT invent a novel product direction on its own. If that roadmap is empty (or nothing fits), auto-start is a MANDATORY STOP gate (`roadmap_exhausted`): emit `<<GATE>>` + a blocking `<<NOTIFY>>` and wait for owner direction, at EVERY stage. Human ideation of brand-new features is the separate `brainstorming` task.
 
 ## 4. The DEV task prompt (canonical)
 
@@ -56,8 +56,12 @@ with unbuilt phases → `/gsd-run finish milestone and ship` (it is resumable + 
 it discusses→plans→executes→verifies each phase just-in-time and loops the milestone, then
 completes + ships — let it run to completion, do NOT stop between phases). (5) built +
 verified but not shipped → /gsd-complete-milestone then /gsd-ship. (6) shipped + deployed
-+ verified live → auto-start the NEXT milestone: run /gsd-new-milestone and continue from
-step 4. (Novel product-direction scope here is a grey-area gate — see GATES.)
++ verified live → select the NEXT milestone ONLY from the "## Planned Milestones (Roadmap)"
+section of .planning/PROJECT.md (the predetermined, owner-curated roadmap): take the TOP
+pending entry, run /gsd-new-milestone scoped to that entry, and continue from step 4. You may
+NOT invent a new product-direction milestone on your own. If that roadmap section is empty / has
+no pending entry, OR the only sensible next work fits NO roadmap entry → this is a MANDATORY
+STOP gate (see GATES, "roadmap_exhausted"): do NOT auto-start anything.
 
 STEP 2 — PARALLEL BUILD: plan + build independent phases in PARALLEL. Every phase in its
 OWN git worktree + branch named `<MILESTONE_CODE>-<NN>-<slug>`. One branch = one phase =
@@ -68,7 +72,15 @@ STEP 3 — GATES: a grey-area decision → FIRST consult the right specialist su
 authz/secrets), briefing it with ~/.claude/architecture-preferences.md and
 ~/.claude/design-preferences.md; take its recommendation, record it in <<STATE>>, and
 CONTINUE. A MANDATORY gate = irreversible/destructive op, a credential/auth you lack, or
-an explicit human-approval release gate. Behavior depends on {lifecycle_stage}:
+an explicit human-approval release gate. ROADMAP-EXHAUSTED IS A MANDATORY GATE AT EVERY
+STAGE (overrides the "development = never stop" rule below — this is NOT a grey area):
+when the current milestone is shipped + deployed + verified live and the "## Planned
+Milestones (Roadmap)" section of .planning/PROJECT.md has no pending entry (or nothing
+sensible fits one), do NOT invent a novel product direction — instead emit
+<<GATE reason="roadmap_exhausted" detail="...">> + <<NOTIFY level=blocking channel=all
+detail="current milestone shipped; no planned milestone on the roadmap — need owner
+direction">> and STOP, regardless of {lifecycle_stage}. Otherwise behavior depends on
+{lifecycle_stage}:
   • development: only stop if PHYSICALLY blocked (missing credential). Otherwise resolve
     and continue. Do NOT push notifications. Log the gate in-session + <<STATE>>.
   • beta: emit <<NOTIFY level=blocking>> and halt on a blocking gate.
@@ -78,7 +90,11 @@ Never DROP/reset a database without explicit human approval at ANY stage.
 
 STEP 4 — RELEASE (every ship): bump version (semver) across ALL sources in lockstep per
 this repo's release rule. Open PR, wait for CI (`gh pr checks <N> --watch`), fix red CI
-and re-push until green (looping is expected, not a gate). Merge (squash, delete branch),
+and re-push until green (looping is expected, not a gate) — NEVER merge while qc is
+red/failing and NEVER use `--admin`/force-merge to bypass a FAILING check; a GREEN qc is
+the only merge gate (`--admin` is allowed ONLY because branch protection can't observe
+Woodpecker, and ONLY once qc is green). If main itself is red, FIX main first. Merge
+(squash, delete branch),
 DEPLOY, then VERIFY LIVE: poll /health until 200, smoke-test the routes you touched, tail
 deploy logs. Errors or broken route → FIX + re-deploy; loop until live with a clean log
 tail. Then clean up merged worktrees + branches. On a successful ship/deploy: if
@@ -98,8 +114,12 @@ If paused on a mandatory gate, ALSO emit <<GATE reason="..." detail="...">> and
 <<NOTIFY level=blocking channel=all detail="...">>.
 
 Hard rules: daily cost cap is non-bypassable; never DROP/reset a DB without approval;
-never merge to main without green CI; the human PTY path never carries an API key; one
-phase = one branch = one PR.
+never merge to main without green CI and never bypass a red check with `--admin`/force-merge;
+never overwrite or delete a prior milestone's planning records (.planning/REQUIREMENTS.md,
+ROADMAP.md, or phase dirs) — archive them with the collision-safe procedure, then run the
+full test gate (`bun run check-baseline`) and fix any test that asserts on a moved/rotated
+path BEFORE opening a PR; the human PTY path never carries an API key; one phase = one
+branch = one PR.
 ```
 
 ## 5. Hub-side components

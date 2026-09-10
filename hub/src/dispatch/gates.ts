@@ -19,6 +19,7 @@
  */
 import { sql } from '../db/postgres.ts'
 import { getTodayTokenCostUsd, getTodayTokenTotal } from '../db/token-usage-dal.ts'
+import { countSessionInjectsSince } from '../db/orchestrator-rows-dal.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
 import { reserveSessionSlot } from '../sessions/budget.ts'
 import { getUsage } from '../usage/store.ts'
@@ -159,25 +160,77 @@ export const dailyCostCapGate: DispatchGate = {
  */
 const DEFAULT_DAILY_TOKEN_CAP = 50_000_000
 
-function configuredDailyTokenCap(): number {
-  const raw = process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP
-  if (raw == null || raw.trim() === '') return DEFAULT_DAILY_TOKEN_CAP
+/**
+ * The ONLY way to run with no token ceiling. It is a separate, self-describing
+ * variable ON PURPOSE: the hard spend ceiling is the product's core promise, and a
+ * single-character typo (`0`, `-1`, `5O`) in the cap value must NEVER silently
+ * convert it into an unbounded spend path — that is exactly the class of invisible
+ * failure that produced the 2.83B-token incident. Disabling the fuse box has to be
+ * a deliberate act, in a variable whose name states the consequence.
+ */
+function isTokenCapExplicitlyDisabled(): boolean {
+  const raw = process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED
+  if (raw == null) return false
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase())
+}
+
+/** Parse result for the configured cap. `invalid` ⇒ the value is unusable. */
+function parseDailyTokenCap(raw: string | undefined): { ok: boolean; cap: number } {
+  if (raw == null || raw.trim() === '') return { ok: true, cap: DEFAULT_DAILY_TOKEN_CAP }
   const n = Number(raw)
-  return Number.isFinite(n) ? n : DEFAULT_DAILY_TOKEN_CAP
+  if (Number.isFinite(n) && n > 0) return { ok: true, cap: n }
+  return { ok: false, cap: DEFAULT_DAILY_TOKEN_CAP }
 }
 
 /**
- * Token-cap status: today's consumed tokens (user tz) vs the configured ceiling.
- * `over` is true when tokens >= cap. A non-positive / non-finite cap returns
- * `{ over:false, tokens:0, cap:0 }` (disabled, fail-open). Read at call-time so
- * the env knob + tests apply without a reimport.
+ * The daily token ceiling in force. FAILS CLOSED: a non-positive / unparseable
+ * `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` does NOT disable the cap — it falls back to
+ * the 50M default (and the hub refuses to boot, see {@link assertTokenCapConfig}).
+ * Only `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED` turns the ceiling off, and it
+ * returns 0 to say so.
+ */
+function configuredDailyTokenCap(): number {
+  if (isTokenCapExplicitlyDisabled()) return 0
+  return parseDailyTokenCap(process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP).cap
+}
+
+/**
+ * Boot guard (called once from hub/src/index.ts). A misconfigured cap is a
+ * SAFETY defect, not a warning: refuse to boot rather than run a product whose
+ * headline guarantee is silently off.
+ */
+export function assertTokenCapConfig(): void {
+  if (isTokenCapExplicitlyDisabled()) {
+    console.warn(
+      '[gates] ⚠ DAILY TOKEN CAP IS DISABLED (REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED). ' +
+      'Token spend is UNBOUNDED. This is only ever correct if you meant it.',
+    )
+    return
+  }
+  const raw = process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP
+  const parsed = parseDailyTokenCap(raw)
+  if (!parsed.ok) {
+    throw new Error(
+      `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP="${raw}" is not a positive integer, so the daily token ` +
+      'ceiling — the hard spend limit this product promises — would be meaningless. Refusing to boot. ' +
+      'Set it to a positive number of tokens/day, or set REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1 ' +
+      'to explicitly and deliberately run with NO ceiling.',
+    )
+  }
+}
+
+/**
+ * Token-cap status: today's consumed tokens (user tz) vs the ceiling in force.
+ * `over` is true when tokens >= cap. Returns `{ over:false, tokens:0, cap:0 }` ONLY
+ * when the cap is EXPLICITLY disabled — a bad cap value never disables it (fail
+ * CLOSED). Read at call-time so the env knob + tests apply without a reimport.
  */
 export async function getTokenCapStatus(
   userId: string,
   timezone: string,
 ): Promise<{ over: boolean; tokens: number; cap: number }> {
   const cap = configuredDailyTokenCap()
-  if (!Number.isFinite(cap) || cap <= 0) return { over: false, tokens: 0, cap: 0 }
+  if (cap <= 0) return { over: false, tokens: 0, cap: 0 } // explicitly disabled only
   const tokens = await getTodayTokenTotal(userId, timezone)
   return { over: tokens >= cap, tokens, cap }
 }
@@ -189,10 +242,15 @@ export async function isOverTokenCap(userId: string, timezone: string): Promise<
 
 /**
  * Daily TOKEN-cap gate (non-bypassable, BSA-04). ADDED ALONGSIDE
- * `dailyCostCapGate` in the orchestrator inject gate list — it never replaces the
- * cost cap. Resolves the user's tz (DispatchRequest carries none, like the cost
- * gate) then delegates to `getTokenCapStatus`. Blocks with
- * `over_daily_token_cap:<tokens>>=<cap>`.
+ * `dailyCostCapGate` — it never replaces the cost cap. Resolves the user's tz
+ * (DispatchRequest carries none, like the cost gate) then delegates to
+ * `getTokenCapStatus`. Blocks with `over_daily_token_cap:<tokens>>=<cap>`.
+ *
+ * fix/stop-the-bleed: this gate is now in EVERY dispatch gate list — orchestrator
+ * inject, scheduler agent + triage, error-capture, feedback, revanote, telegram.
+ * It previously rode ONLY the orchestrator inject path, so every other path could
+ * spend unbounded tokens behind a DOLLAR cap that is meaningless on a flat-rate
+ * Max subscription. Enforced by `hub/test/token-cap-coverage.test.ts`.
  */
 export const dailyTokenCapGate: DispatchGate = {
   name: 'daily_token_cap',
@@ -205,6 +263,147 @@ export const dailyTokenCapGate: DispatchGate = {
     }
     return { ok: true }
   },
+}
+
+// ── Per-session orchestrator INJECT-RATE ceiling ─────────────────────────────
+/**
+ * Max orchestrator injects per session per rolling hour. Default 4.
+ *
+ * The 2026-07 incident: a wedged 60s tick loop injected a macro prompt into ONE
+ * session 1,440x/day for 2 days (2,192 turns, 2.83B cache-read tokens). Nothing
+ * bounded the RATE — only the (then cache-blind) daily totals. This ceiling makes
+ * that shape impossible regardless of what the totals say: a legitimate autonomous
+ * cycle finishes a unit of work in far more than 15 minutes, so 4/hour is generous.
+ *
+ * Non-positive / non-finite ⇒ DISABLED (fail-open), mirroring the cost/token caps.
+ */
+const DEFAULT_MAX_INJECTS_PER_HOUR = 4
+
+export function maxInjectsPerHour(): number {
+  const raw = process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR
+  if (raw == null || raw.trim() === '') return DEFAULT_MAX_INJECTS_PER_HOUR
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : DEFAULT_MAX_INJECTS_PER_HOUR
+}
+
+/**
+ * Per-session inject-rate gate. Counts this session's orchestrator injects in the
+ * trailing 60 minutes (`countSessionInjectsSince` over the existing
+ * `routine_run_log` — no new table) and blocks with
+ * `over_session_inject_rate:<n>>=<cap>` once the ceiling is reached. Rows age out
+ * of the rolling window, so the gate re-opens on its own.
+ *
+ * Wired into the orchestrator inject gate list ALONGSIDE thresholdGate /
+ * dailyCostCapGate / dailyTokenCapGate — it replaces none of them.
+ */
+export const sessionInjectRateGate: DispatchGate = {
+  name: 'session_inject_rate',
+  async check(req: DispatchRequest) {
+    const cap = maxInjectsPerHour()
+    if (!Number.isFinite(cap) || cap <= 0) return { ok: true } // disabled (fail-open)
+    const injects = await countSessionInjectsSince(req.sessionId, 60)
+    if (injects >= cap) {
+      return { ok: false, reason: `over_session_inject_rate:${injects}>=${cap}` }
+    }
+    return { ok: true }
+  },
+}
+
+// ── Milestone ASK: per-api-key ask-RATE ceiling ──────────────────────────────
+/**
+ * Max external asks per api_key per rolling hour. Default 10.
+ *
+ * An ask spends tokens, and the caller is a machine (a Claude Desktop scheduled
+ * task) that could loop. The daily cost/token caps bound the DAY; this bounds the
+ * RATE, exactly like `sessionInjectRateGate` does for the orchestrator — the shape
+ * that produced the 2026-07 burn. Non-positive / non-finite ⇒ disabled (fail-open),
+ * mirroring the other rate ceilings.
+ */
+const DEFAULT_MAX_ASKS_PER_HOUR = 10
+
+export function maxAsksPerHour(): number {
+  const raw = process.env.REMO_ASK_MAX_PER_HOUR
+  if (raw == null || raw.trim() === '') return DEFAULT_MAX_ASKS_PER_HOUR
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : DEFAULT_MAX_ASKS_PER_HOUR
+}
+
+/**
+ * Per-api-key ask-rate gate. Counts this key's `session_asks` rows in the trailing
+ * 60 minutes and blocks with `over_ask_rate:<n>>=<cap>`. Rides ALONGSIDE (never
+ * instead of) `dailyCostCapGate` + `dailyTokenCapGate`.
+ */
+export function askRateGate(apiKeyId: string | null): DispatchGate {
+  return {
+    name: 'ask_rate',
+    async check(_req: DispatchRequest) {
+      const cap = maxAsksPerHour()
+      if (!Number.isFinite(cap) || cap <= 0) return { ok: true } // disabled (fail-open)
+      if (!apiKeyId) return { ok: true } // no key to attribute → nothing to rate-limit
+      const { countAsksForKeySince } = await import('../db/ask-dal.ts')
+      const asks = await countAsksForKeySince(apiKeyId, 60)
+      if (asks >= cap) return { ok: false, reason: `over_ask_rate:${asks}>=${cap}` }
+      return { ok: true }
+    },
+  }
+}
+
+// ── Milestone WORK: inbound-email work gates ─────────────────────────────────
+/**
+ * Max inbound-email work items per user per rolling hour. Default 4.
+ *
+ * A work item is far more expensive than an ask — it spends a full build/QC turn
+ * AND can touch a live site. The daily cost/token caps bound the DAY; this bounds
+ * the RATE, so a client (or an attacker) mailing the address in a loop cannot turn
+ * the inbox into a spend pump. Non-positive / non-finite ⇒ disabled (fail-open),
+ * mirroring the other rate ceilings.
+ */
+const DEFAULT_MAX_WORK_PER_HOUR = 4
+
+export function maxWorkPerHour(): number {
+  const raw = process.env.REMO_WORK_MAX_PER_HOUR
+  if (raw == null || raw.trim() === '') return DEFAULT_MAX_WORK_PER_HOUR
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : DEFAULT_MAX_WORK_PER_HOUR
+}
+
+/** Per-user work-rate gate. Blocks with `over_work_rate:<n>>=<cap>`. */
+export function workRateGate(userId: string): DispatchGate {
+  return {
+    name: 'work_rate',
+    async check(_req: DispatchRequest) {
+      const cap = maxWorkPerHour()
+      if (!Number.isFinite(cap) || cap <= 0) return { ok: true } // disabled (fail-open)
+      const { countWorkRunsForUserSince } = await import('../db/work-dal.ts')
+      const n = await countWorkRunsForUserSince(userId, 60)
+      if (n >= cap) return { ok: false, reason: `over_work_rate:${n}>=${cap}` }
+      return { ok: true }
+    },
+  }
+}
+
+/**
+ * Repo-allowlist gate (audit finding F6). The `work_repo_allowlist` table is EMPTY
+ * by default, so email-driven work drives NOTHING until an operator explicitly opts
+ * a repo in. FAILS CLOSED: a DB error blocks rather than admits.
+ *
+ * The route also rejects a non-allowlisted repo with a 403 BEFORE any row is
+ * inserted or any token is spent — this gate is the defence-in-depth copy that a
+ * future caller of `dispatchWork` cannot forget.
+ */
+export function workRepoAllowlistGate(userId: string, repoIdent: string): DispatchGate {
+  return {
+    name: 'work_repo_allowlist',
+    async check(_req: DispatchRequest) {
+      try {
+        const { isRepoWorkAllowed } = await import('../db/work-dal.ts')
+        if (await isRepoWorkAllowed(userId, repoIdent)) return { ok: true }
+      } catch (err: any) {
+        return { ok: false, reason: `work_allowlist_check_failed:${err?.message ?? err}` }
+      }
+      return { ok: false, reason: `repo_not_allowlisted:${repoIdent}` }
+    },
+  }
 }
 
 // ── BSA-04: per-day autospawn LAUNCH-count cap ───────────────────────────────

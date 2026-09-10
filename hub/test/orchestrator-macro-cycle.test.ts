@@ -43,6 +43,9 @@ function spyDeps(over: Partial<MacroCycleDeps> = {}): {
       return { delivered: [] }
     }) as any,
     isRunLive: () => false,
+    // OBSRV-03/05 cap observability is DB-backed; stub it so this stays DB-free.
+    refreshCapGauges: (async () => {}) as any,
+    getCapStatuses: (async () => ({ costStatus: null, tokenStatus: null })) as any,
     ...over,
   }
   return { deps, log }

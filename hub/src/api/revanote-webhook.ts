@@ -67,6 +67,13 @@ function hostOf(pageUrl: string): string {
   try { return new URL(pageUrl).host } catch { return '' }
 }
 
+// pg returns timestamptz as a JS Date at runtime even though the row type
+// declares `received_at: string`. The RevanoteReceived protocol schema requires
+// a string; a raw Date fails validation and the broadcast is dropped.
+function toIsoString(v: unknown): string {
+  return v instanceof Date ? v.toISOString() : String(v)
+}
+
 revanoteWebhookRoutes.post('/webhook/:user_id/:token', async (c) => {
   const userId = c.req.param('user_id')
   const token = c.req.param('token')
@@ -170,7 +177,11 @@ revanoteWebhookRoutes.post('/webhook/:user_id/:token', async (c) => {
     annotation_id_external: ann.annotation_id_external,
     page_url: ann.page_url,
     comment_preview: payload.comment_preview ?? previewComment(payload.comment),
-    received_at: ann.received_at,
+    // Coerce to an ISO string: pg returns timestamptz as a JS Date, but the
+    // RevanoteReceived protocol schema (ws/protocol.ts) is `received_at: z.string()`.
+    // An unstringified Date failed validation and the whole event was dropped in
+    // ws.registry.broadcastRevanoteEvent, so the connected session never saw it.
+    received_at: toIsoString(ann.received_at),
   })
 
   void dispatchAnnotationRow(ann).catch((err: any) =>

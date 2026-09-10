@@ -303,6 +303,59 @@ Filed as a separate GitHub issue at the end of Phase 07 with this checklist:
 
 ---
 
+## API keys — named, scoped, multi (milestone SKEY)
+
+`api_keys` is no longer one-key-per-user. A user may hold N active keys; each key is
+**named** and **scoped**.
+
+### Scope matrix
+
+| Scope | Grants | Surface |
+|---|---|---|
+| `agent` | Authenticate a Supervisor / agent socket → **spawn CLI processes on that host** | `/ws/agent` (both roles), `/api/plugin/*` |
+| `ext:read` | Read sessions / transcripts / state | `/api/ext/*` (milestone ASK) |
+| `ext:ask` | Ask a session a question (spends tokens) | `POST /api/ext/sessions/:id/ask` |
+| *(NULL / empty)* | **Legacy full access — all scopes** | everything above |
+
+**Zero migration.** `api_keys.scopes` is additive and NULLABLE. Every key minted before
+this milestone has `scopes IS NULL` and keeps working unchanged, including `/ws/agent`.
+`hasScope(null, x) === true` by definition (`hub/src/auth/scopes.ts`).
+
+**Security rationale.** The `agent` scope IS the host-spawn credential. An external
+consumer (Claude Desktop scheduled task, a script) must get an `ext:*`-only key so that
+a leak cannot spawn processes on a dev machine. A key without `agent` is rejected at
+`/ws/agent` (close `4001 missing_agent_scope`) and 403 `insufficient_scope` on
+`/api/plugin/*`.
+
+### Routes (cookie-auth ONLY)
+
+| Route | Behavior |
+|---|---|
+| `GET /api/api-keys` | List active keys: `id, name, purpose, scopes, key_prefix, created_at, last_used_at`. **Never** returns key material. |
+| `POST /api/api-keys` | Mint. Body `{ name?, scopes? }`. Returns the plaintext **once** (`key`). `scopes` omitted/null ⇒ legacy full-access key. |
+| `POST /api/api-keys/:id/rotate` | Rotate one key in place: same name/scopes/purpose, new secret, old revoked. |
+| `DELETE /api/api-keys/:id` | Revoke exactly ONE key (owner-scoped). |
+
+**An api key can never mint an api key.** This router sits behind the session-cookie
+catch-all and is never mounted behind `apiKeyMiddleware` — otherwise an `ext:*` key could
+mint itself an `agent` key. Guarded by `hub/test/api-keys-scopes.test.ts`.
+
+### Purpose / uniqueness
+
+`purpose` stays at-most-one-active-per-user for `supervisor` (the key carrying `agent` /
+legacy NULL scopes) and `orchestrator` (partial unique indexes). Keys minted with
+`ext:*`-only scopes get `purpose='external'` and are unconstrained in number — that is
+what makes N keys possible. Only a `supervisor`-purpose mint/rotate is hot-swapped into
+connected tray apps via `pushKeyRotatedToUser`.
+
+Only the SHA-256 hash is stored. `key_prefix` (first 14 chars of the plaintext) is
+captured at mint time for display; legacy rows have `key_prefix IS NULL` (UI shows `—`).
+
+UI: Settings → **Credentials** → API keys table (create with scope checkboxes, rotate,
+revoke; the plaintext is shown once with an explicit "you will not see this again").
+
+---
+
 ## Related docs
 
 - [README.md](../README.md) — quick-start including magic-link login example

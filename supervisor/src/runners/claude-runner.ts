@@ -2,6 +2,7 @@ import { type Subprocess } from 'bun'
 import { writeFileSync } from 'fs'
 import { join } from 'path'
 import type { CliEvent, CliRunner, RunnerEvent } from './types'
+import { sanitizeSpawnEnv } from './env-sanitize'
 
 export type OrchestratorRunnerOpts = {
   systemPrompt: string
@@ -142,7 +143,26 @@ export class ClaudeRunner implements CliRunner {
       cmd.push(`--${dangerFlag.slice(2)}`)
     }
 
-    const env = { ...process.env }
+    // Milestone WORK: a stream-json CLI is the session an inbound CLIENT EMAIL can drive
+    // (via /api/ext/work). It gets the SHARED scrubber WITH deploy-credential scrubbing so
+    // no COOLIFY_/VERCEL_/NETLIFY_/AWS_/deploy token reaches it — the control that makes
+    // "do not publish" TRUE rather than requested.
+    //
+    // Option (a) least-authority: GIT-PUSH credentials are ALSO scrubbed for every
+    // NON-orchestrator stream-json session. The work agent commits locally on
+    // `work/<nonce>` and NEVER pushes; the SUPERVISOR pushes the branch on the hub's
+    // command (`work_push_branch`). Stripping the push token closes the side door where
+    // the same token that pushes `work/*` could `git push origin main` and skip the hub
+    // gate on a repo that auto-deploys from main. The orchestrator session (this.orchestrator
+    // set) KEEPS its push credential — it legitimately opens PRs and self-gates.
+    // NOTE (docs §threat-model): env scrub only stops a token PASSED IN THE ENV; a host
+    // credential manager / SSH agent / creds-in-remote-URL can still authenticate. The
+    // enforceable backstop is branch protection on the client repo's default branch.
+    const isOrchestratorSession = !!this.orchestrator
+    const env = sanitizeSpawnEnv(
+      { ...process.env },
+      { scrubDeployCredentials: true, scrubGitPush: !isOrchestratorSession },
+    )
     delete (env as any).ANTHROPIC_API_KEY
 
     if (this.orchestrator) {

@@ -1,6 +1,7 @@
-import { hostname, platform, release, arch, cpus, totalmem, tmpdir } from 'os'
-import { mkdirSync, writeFileSync } from 'fs'
-import { join, basename, extname } from 'path'
+import { platform, release, arch, cpus, totalmem } from 'os'
+import { resolveHostname } from '../hostname'
+import { mkdirSync, writeFileSync, existsSync, readFileSync, appendFileSync, rmSync } from 'fs'
+import { join, basename, extname, resolve, sep } from 'path'
 import { ClaudeRunner } from './claude-runner'
 import { selectHumanPtyRunner } from './runner-factory'
 import { PtyPersistence } from './pty-persistence'
@@ -43,6 +44,85 @@ export function sanitizeAttachmentName(raw: string): string {
   const cleanExt = ext.replace(/[^A-Za-z0-9.]/g, '')
   name = (cleanStem || 'attachment') + cleanExt
   return name.slice(0, 200)
+}
+
+/**
+ * Strict allowlist for sessionId as used in filesystem paths: this value is
+ * joined into a directory that writeAttachmentFile() writes into and that
+ * stop() recursively rmSync's, so it must never be able to smuggle a path
+ * separator or traversal segment. Session ids are supervisor-generated
+ * (see hub `sessions.id`), so a well-formed one always matches this.
+ */
+const SAFE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
+
+/**
+ * Attachments dir for a given session, under the session's real working
+ * directory (not a host temp dir) so uploaded files land where the CLI's
+ * own file tools resolve relative paths from.
+ *
+ * This is the single chokepoint both writeAttachmentFile() and stop()'s
+ * cleanup go through, so both are validated here: sessionId must match a
+ * strict allowlist (no path separators, no `..`, non-empty, bounded length),
+ * and the resulting absolute path is asserted to still be strictly under
+ * `<repoPath>/.remo/attachments` before it's returned. Throws on any
+ * violation — callers must not write or delete on a thrown error.
+ */
+export function attachmentsDirFor(repoPath: string, sessionId: string): string {
+  if (typeof sessionId !== 'string' || !SAFE_SESSION_ID.test(sessionId)) {
+    throw new Error(`attachmentsDirFor: refusing unsafe sessionId ${JSON.stringify(sessionId)}`)
+  }
+  const root = resolve(join(repoPath, '.remo', 'attachments'))
+  const dir = resolve(join(root, sessionId))
+  if (dir !== root && !dir.startsWith(root + sep)) {
+    // Belt-and-braces containment check — the regex above should already
+    // make this unreachable, but this is the actual boundary that matters.
+    throw new Error(`attachmentsDirFor: resolved path escapes attachments root for sessionId ${JSON.stringify(sessionId)}`)
+  }
+  return dir
+}
+
+/**
+ * Write an uploaded attachment into `attachmentsDirFor(repoPath, sessionId)`,
+ * ensuring the dir exists (0o700) and `.gitignore` covers it, and return the
+ * absolute path written. A short nonce prefix keeps two uploads of the same
+ * filename in one session from colliding without touching
+ * `sanitizeAttachmentName()`. Exported (pure of PTY I/O) so it's directly
+ * unit-testable without spawning a real PTY runner.
+ */
+export function writeAttachmentFile(repoPath: string, sessionId: string, filenameRaw: string, dataB64: string): string {
+  const safe = sanitizeAttachmentName(filenameRaw)
+  const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  const dir = attachmentsDirFor(repoPath, sessionId)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  ensureAttachmentsGitignored(repoPath)
+  const abs = join(dir, `${nonce}-${safe}`)
+  writeFileSync(abs, Buffer.from(dataB64, 'base64'))
+  return abs
+}
+
+/**
+ * Ensure `<repoPath>/.gitignore` excludes the per-session attachments dir, so
+ * an uploaded file never lands in a commit. Idempotent (literal-string check
+ * before append) and a no-op when `repoPath` isn't a git repo (rootless /
+ * orchestrator dirs — see process-manager.ts's `requireGitRepo` skip). Best-
+ * effort: any FS error is swallowed, since this is a convenience guard, not
+ * a security boundary.
+ */
+export function ensureAttachmentsGitignored(repoPath: string): void {
+  try {
+    if (!existsSync(join(repoPath, '.git'))) return
+    const gitignorePath = join(repoPath, '.gitignore')
+    const line = '.remo/'
+    let contents = ''
+    if (existsSync(gitignorePath)) {
+      contents = readFileSync(gitignorePath, 'utf8')
+      if (contents.split(/\r?\n/).some((l) => l.trim() === line)) return
+    }
+    const needsNewline = contents.length > 0 && !contents.endsWith('\n')
+    appendFileSync(gitignorePath, (needsNewline ? '\n' : '') + line + '\n')
+  } catch {
+    // best-effort convenience guard — never block the attachment write
+  }
 }
 
 /**
@@ -176,6 +256,12 @@ export class SessionBridge {
       try { this.ptyRunner.kill() } catch {}
       this.ptyRunner = null
     }
+    // Best-effort cleanup of this session's uploaded attachments. Never throw
+    // out of stop() — a leaked attachments dir is a disk-space nit, not a
+    // correctness issue.
+    if (this.sessionId) {
+      try { rmSync(attachmentsDirFor(this.opts.repoPath, this.sessionId), { recursive: true, force: true }) } catch {}
+    }
     if (this.ws) {
       try { this.ws.close() } catch {}
       this.ws = null
@@ -205,10 +291,13 @@ export class SessionBridge {
         type: 'auth',
         api_key: this.opts.apiKey,
         project_dir: repoSlash,
-        hostname: hostname(),
+        // resolveHostname(), not os.hostname(): this frame is re-sent on EVERY
+        // reconnect, and a single empty hostname here mints a hostname-NULL
+        // ghost session on the hub (live phantom channel, no CLI behind it).
+        hostname: resolveHostname(),
         role: 'agent',
         agent_info: {
-          hostname: hostname(),
+          hostname: resolveHostname(),
           platform: platform(),
           os_release: release(),
           arch: arch(),
@@ -308,18 +397,29 @@ export class SessionBridge {
         return
       }
       if (anyMsg.type === 'term.attach_file') {
-        // Write the uploaded bytes to a per-session temp file on THIS host, then
-        // type the absolute path into the TUI so Claude/Codex can read it. The
-        // browser has no filesystem on the host; this is the path-injection seam.
+        // Write the uploaded bytes into the session's real working directory
+        // (not a host temp dir), then type the absolute path into the TUI so
+        // Claude/Codex can read it. The browser has no filesystem on the host;
+        // this is the path-injection seam. Landing the file under repoPath
+        // means a relative reference in the session's own transcript/tooling
+        // resolves, and it survives exactly as long as the project does.
         try {
           const pty = this.ensurePtyRunner()
-          const safe = sanitizeAttachmentName(String(anyMsg.filename ?? 'attachment'))
-          const dir = join(tmpdir(), 'remo-attachments', this.sessionId)
-          mkdirSync(dir, { recursive: true })
-          const abs = join(dir, safe)
+          const abs = writeAttachmentFile(
+            this.opts.repoPath,
+            this.sessionId,
+            String(anyMsg.filename ?? 'attachment'),
+            String(anyMsg.data_b64 ?? ''),
+          )
           const bytes = Buffer.from(String(anyMsg.data_b64 ?? ''), 'base64')
-          writeFileSync(abs, bytes)
           // Trailing space so the path is a complete token at the TUI cursor.
+          // NOTE: this is typed as raw PTY input bytes into the CLI's own
+          // prompt textbox (`pty_host.rs` `session_input` writes straight to
+          // the PTY master — no shell is involved), not passed through a
+          // shell command line. The CLI reads the whole line as literal
+          // prompt text, so a space in the path does not need quoting/escaping
+          // here; quoting it would instead inject literal quote characters
+          // into the prompt.
           pty?.write(abs + ' ')
           this.cb.onLog('info', `term.attach_file: wrote ${bytes.length}B → ${abs}`)
         } catch (err) {

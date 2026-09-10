@@ -35,7 +35,9 @@
  *   - no session/mapping → annotation 'failed' + reject callback ('no_target').
  *   - offline target → grace park + annotation 'pending'(skip_reason
  *     'session_offline'); TTL lapse → 'failed_offline'(target_offline_expired)
- *     (now via onParkExpire).
+ *     (now via onParkExpire). Revanote now opts into spawn-on-error via the
+ *     `ensureOnline` dep (REMO_SPAWN_ON_ERROR): an offline-but-mapped target is
+ *     lazy-STARTed through the supervisor before parking, mirroring error-capture.
  *   - queue dropped → annotation 'failed'(session_busy) + reject callback
  *     ('session_busy').
  *   - dispatched → insert annotation_run(in_flight), persist user message,
@@ -58,6 +60,7 @@ import { findSessionByProjectDir, insertMessage } from '../db/dal.ts'
 import { getChannel, broadcastRevanoteEvent, broadcastToSubscribers } from '../ws/registry.ts'
 import { renderAnnotationPrompt, storagePrefix, previewComment } from './prompt.ts'
 import { finalizeAnnotationReply } from './run-lifecycle.ts'
+import { ENVELOPE_RE } from './result-schema.ts'
 import {
   dispatch,
   type DispatchRequest,
@@ -65,7 +68,8 @@ import {
   type PipelineDeps,
   type RunStore,
 } from '../dispatch/pipeline.ts'
-import { thresholdGate, dailyCostCapGate } from '../dispatch/gates.ts'
+import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
+import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
 
 export type DispatchOutcome =
   | { status: 'dispatched'; run_id: string; session_id: string }
@@ -264,6 +268,19 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
         status: 'failed', error: `agent_send: ${errMsg}`, finished_at: new Date(),
       })
     },
+    // Coding-agent turns narrate progress ("Implementer running. Waiting for
+    // build + PR result.") before the turn that actually carries the
+    // `<<JSON>>...<<END>>` envelope. Only an envelope-bearing message (or the
+    // bounded `finalizeTimeoutMs` terminal fallback in the pipeline) should
+    // consume the finalize hook — otherwise narration gets misparsed as
+    // `envelope_missing` and a real reply is silently eaten. `parseRevanoteOutput`'s
+    // fence/bare-prose fallbacks are intentionally NOT treated as "final" here:
+    // they exist so a message that DOES finalize (envelope found, or the
+    // timeout forces it) still produces a usable result, not so a random
+    // narration line prematurely ends the wait.
+    shouldFinalize(content) {
+      return ENVELOPE_RE.test(content)
+    },
   }
 
   // Captured when open() fires so onFinalize can compute duration_ms with legacy
@@ -277,9 +294,26 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
 
   const deps: PipelineDeps = {
     // IR-1: cost-cap non-bypassable. IR-2: threshold → cost-cap → revanote-budget.
-    gates: [thresholdGate, dailyCostCapGate, revanoteBudgetGate(userId, tz)],
+    // sessionInjectRateGate: an annotation flood must not drive N turns/hour into the
+    // bound session — a rate ceiling, not just a $ / token one.
+    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate, revanoteBudgetGate(userId, tz)],
     store,
+    // Bounded terminal fallback for `store.shouldFinalize` above: a session
+    // that never emits the envelope still resolves (as an honest parse
+    // failure via `parseRevanoteOutput`'s bare-prose tolerance) instead of
+    // leaving the hook — and the annotation — hanging forever.
+    finalizeTimeoutMs: Number(process.env.REVANOTE_FINALIZE_TIMEOUT_MS ?? 20 * 60 * 1000),
     isOnline: (req) => getChannel(req.sessionId) != null,
+    // Spawn-on-error (opt-in via REMO_SPAWN_ON_ERROR): when the bound session is
+    // offline, lazy-START it via the supervisor before parking, so an offline-but-
+    // mapped target auto-wakes on an inbound annotation. Runs only after the gate
+    // list passes (cost-cap etc. stay non-bypassable); leak-safe + dormant by default.
+    // Wake with the session's OWN permission posture (bounded by the supervisor's
+    // allow_dangerous_skip_permissions ceiling) so the revived headless runner can
+    // actually apply fixes, not just reply — a stream-json runner started without
+    // skip-permissions stalls on the first prompt and edits nothing.
+    ensureOnline: (req) =>
+      ensureSessionOnline(req.userId, req.sessionId, { useSessionSkipPermissions: true }),
     // Offline replay: re-run the full dispatch for this pending annotation.
     replay: async () => {
       await dispatchPendingAnnotation(ann.id)
@@ -289,6 +323,12 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
       await updateAnnotationStatus(ann.id, 'failed_offline', {
         skip_reason: 'target_offline_expired',
       })
+      // Tell revanote the dispatch failed so its annotation reverts
+      // in_progress → todo (via how-callback resolved:false), matching the other
+      // rejection paths (no_target / session_busy / budget). Without this an
+      // offline-expired comment hangs in_progress in the revanote UI forever with
+      // no reply and can never be re-dispatched.
+      await enqueueRejectionCallback(ann, 'target_offline', 'target_offline_expired')
     },
     // Ship the user_message: persist chat history, broadcast to subscribers,
     // then forward on the socket.

@@ -3,6 +3,8 @@ import type { ScheduledTask, ScheduleCreateInput, TaskType, TargetKind, CatchupP
 import { useSessions } from '../hooks/useSessions'
 import { hubFetch, HubFetchError } from '../lib/api'
 import { nextRuns, validate as validateCron, browserTimezone } from '../lib/cron'
+import { BranchPicker } from './BranchPicker'
+import { TeabRepoPicker } from './TeabRepoPicker'
 import { PostRunActionsEditor } from './PostRunActionsEditor'
 import { ScheduleRulesBuilder } from './ScheduleRulesBuilder'
 import { type ScheduleRule, ruleToCron, defaultRule, validateRule } from '../lib/schedule-rules'
@@ -40,6 +42,7 @@ const TASK_TYPES: Array<{ value: TaskType; label: string }> = [
   { value: 'dev', label: 'Dev' },
   { value: 'security', label: 'Security scan' },
   { value: 'log_check', label: 'Log check' },
+  { value: 'teab', label: 'TEAB build' },
 ]
 
 const TARGET_KINDS: Array<{ value: TargetKind; label: string }> = [
@@ -104,6 +107,22 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
 
   const [targetKind, setTargetKind] = useState<TargetKind>(existing?.target_kind ?? 'session')
   const [targetId, setTargetId] = useState<string | null>(existing?.target_id ?? null)
+  // Branch the task should run against, mirroring the Connect/Start launch flow.
+  // Stored additively in `payload.branch` (loose JSONB — no schema change).
+  const [branch, setBranch] = useState<string>(existing?.payload?.branch ?? '')
+
+  // Milestone TEAB — target repo for a `teab` build task (`teab run --repo <X>`).
+  // Persisted on the dedicated `teab_repo_ident` column, not in payload.
+  const [teabRepoIdent, setTeabRepoIdent] = useState<string>(existing?.teab_repo_ident ?? '')
+  const isTeab = taskType === 'teab'
+  // A `teab` task self-resolves its supervisor from the repo, so the generic
+  // target picker is hidden and the target is normalized to all_supervisors
+  // (keeps the auto-name non-empty + the API target_id requirement satisfied).
+  useEffect(() => {
+    if (taskType !== 'teab') return
+    setTargetKind('all_supervisors')
+    setTargetId(null)
+  }, [taskType])
 
   // Coolify app bound to the selected target session (for the
   // `<coolify-app-slug>` / `<coolify-uuid>` placeholders). Resolved lazily from
@@ -206,10 +225,11 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
         target_id: targetKind === 'session' || targetKind === 'supervisor' ? targetId : null,
         payload,
         cron_expr: cronExpr,
+        teab_repo_ident: teabRepoIdent,
       },
       { sessions, supervisors },
     )
-  }, [taskType, targetKind, targetId, prompt, notes, cronExpr, sessions, supervisors, tpl])
+  }, [taskType, targetKind, targetId, prompt, notes, cronExpr, sessions, supervisors, tpl, teabRepoIdent])
 
   useEffect(() => {
     if (suffixHydrated) return
@@ -230,7 +250,8 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
     setError(null)
     setCycleError(null)
     if (!cronValidation.ok) { setError(cronValidation.error || 'Invalid cron expression'); return }
-    if ((targetKind === 'session' || targetKind === 'supervisor') && !targetId) {
+    if (isTeab && !teabRepoIdent.trim()) { setError('Pick a repo for the TEAB build'); return }
+    if (!isTeab && (targetKind === 'session' || targetKind === 'supervisor') && !targetId) {
       setError(`Choose a ${targetKind}`); return
     }
     if (!prefix) { setError('Pick a task type, target, and schedule first'); return }
@@ -255,6 +276,11 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
     })
 
     const payload: Record<string, any> = {}
+    // Persist the chosen branch (repo→branch picker). Only meaningful for a
+    // single-session target; additive JSONB field, ignored by older readers.
+    if (targetKind === 'session' && targetId && branch.trim()) {
+      payload.branch = branch.trim()
+    }
     if (taskType === 'dev') payload.prompt = prompt.trim()
     if (taskType === 'security' || taskType === 'log_check') {
       if (notes.trim()) payload.notes = notes.trim()
@@ -273,8 +299,10 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
     const input: ScheduleCreateInput = {
       name_suffix: nameSuffix.trim(),
       task_type: taskType,
-      target_kind: targetKind,
-      target_id: targetKind === 'session' || targetKind === 'supervisor' ? targetId : null,
+      target_kind: isTeab ? 'all_supervisors' : targetKind,
+      target_id: isTeab
+        ? null
+        : (targetKind === 'session' || targetKind === 'supervisor' ? targetId : null),
       payload,
       schedule_rules: scheduleRules,
       timezone: tz,
@@ -282,6 +310,7 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
       max_concurrent: maxConcurrent,
       enabled,
       post_run_actions: cleanedActions,
+      ...(isTeab ? { teab_repo_ident: teabRepoIdent.trim() } : {}),
     }
 
     setSaving(true)
@@ -334,24 +363,31 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
                 {TASK_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
               </select>
             </Field>
-            <Field label="Target">
-              <select
-                value={targetKind}
-                onChange={(e) => { setTargetKind(e.target.value as TargetKind); setTargetId(null) }}
-                className={selectCls}
-              >
-                {TARGET_KINDS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-              </select>
-            </Field>
+            {isTeab ? (
+              <Field label="TEAB repo">
+                <TeabRepoPicker token={token} value={teabRepoIdent} onChange={setTeabRepoIdent} />
+              </Field>
+            ) : (
+              <Field label="Target">
+                <select
+                  value={targetKind}
+                  onChange={(e) => { setTargetKind(e.target.value as TargetKind); setTargetId(null) }}
+                  className={selectCls}
+                >
+                  {TARGET_KINDS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+              </Field>
+            )}
           </div>
 
           {/* Row: Target selector + Timezone */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <Field label={targetKind === 'session' ? 'Session' : targetKind === 'supervisor' ? 'Supervisor' : 'Scope'}>
+            {!isTeab && (
+            <Field label={targetKind === 'session' ? 'Repo (session)' : targetKind === 'supervisor' ? 'Supervisor' : 'Scope'}>
               {targetKind === 'session' && (
                 <select
                   value={targetId ?? ''}
-                  onChange={(e) => setTargetId(e.target.value || null)}
+                  onChange={(e) => { setTargetId(e.target.value || null); setBranch('') }}
                   className={selectCls}
                 >
                   <option value="">Choose a session...</option>
@@ -378,6 +414,7 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
                 </div>
               )}
             </Field>
+            )}
             <Field label="Timezone">
               <div className="space-y-2">
                 <select
@@ -405,6 +442,22 @@ export function ScheduleEditor({ token, existing, allSchedules, template, userEm
               </div>
             </Field>
           </div>
+
+          {/* Branch picker — mirrors the Connect/Start launch flow. Only shown
+              for a single-session target (the session is the repo). */}
+          {targetKind === 'session' && (
+            <Field label="Branch">
+              <BranchPicker
+                token={token}
+                sessionId={targetId}
+                value={branch}
+                onChange={setBranch}
+              />
+              <p className="mt-1.5 text-xs text-[var(--text-muted)]">
+                Pick the branch this task runs against — same picker as launching a session.
+              </p>
+            </Field>
+          )}
 
           {/* Schedule + next-run preview */}
           <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 md:items-start">

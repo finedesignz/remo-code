@@ -81,12 +81,21 @@ Each user defines mappings under Settings → Revanote:
 | `hostname_pattern` | Literal (`app.example.com`) or leading-glob (`*.example.com`) or `*`. Most-specific match wins; ties broken by most-recently-updated. |
 | `repo_path` | Absolute path on the agent host. Hub uses `findSessionByProjectDir(userId, repo_path)` to resolve the bound Claude session. |
 | `supervisor_id` | Optional pin to a specific supervisor. |
-| `deploy_strategy` | `pr` (default), `direct`, or `none`. Controls the in-prompt instructions to Claude — the hub itself does NOT shell out. |
-| `auto_merge` | Only meaningful with `pr` strategy. |
+| `deploy_strategy` | `pr` (default), `direct`, or `none`. Controls the in-prompt instructions to Claude — the hub itself does NOT shell out. **Only honoured when `trusted = true`** (see below). |
+| `auto_merge` | Only meaningful with `pr` strategy. **Only honoured when `trusted = true`.** |
+| `trusted` | BOOLEAN, **default `false`**. Self-heal containment: an annotation body is webhook-derived, UNTRUSTED prose, so `deploy_strategy='direct'` (commit straight to main) and `auto_merge=true` (squash-merge without review) are inert unless the owner explicitly marks the mapping trusted. Untrusted mapping ⇒ `renderAnnotationPrompt` forces propose-only (PR, human merges) whatever the payload says. Idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` in `schema.sql`; no UI/API surface yet — flip it in the DB deliberately. |
 | `enabled` | Disable a mapping without deleting it. |
 | `auto_created` | `true` when the smart-fallback path inserted the row from a supervisor-reported repo host match (user must touch the row in Settings to confirm). |
 
 ## Agent prompt envelope
+
+**Untrusted fence + scope contract.** The reviewer's comment, replies, `element_meta`, selector
+and page URL are wrapped in an `<untrusted_annotation>…</untrusted_annotation>` fence via the
+shared `hub/src/dispatch/untrusted.ts` (`fenceUntrusted` escapes every `<`, so a hostile comment
+cannot close the fence and issue instructions), and the prompt is prefixed with the shared
+`SCOPE_CONTRACT` (data-not-instructions, minimal change, no unrelated files, stop rather than
+guess, propose-only). A `trusted` mapping additionally gets a line saying the Deploy plan
+overrides the propose-only rule.
 
 The hub renders a Markdown prompt and instructs Claude to end the reply with:
 
@@ -151,7 +160,8 @@ Session-offline is the exception: it parks in the 10-min grace buffer instead of
 
 **Round-2 migration:** revanote dispatch now runs on the **shared session-dispatch pipeline** (`hub/src/dispatch/`) — the same deep module the error-capture pilot uses. `hub/src/revanote/dispatcher.ts` is a thin adapter that builds a `RunStore` + a `gates[]` array and calls `dispatch(req, deps)`. The hand-rolled threshold/budget/queue/grace/finalize machinery is gone.
 
-- Gate chain (first block wins, IR-2): `[thresholdGate, dailyCostCapGate, revanoteBudgetGate(userId, tz)]`.
+- Gate chain (first block wins, IR-2): `[thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate, revanoteBudgetGate(userId, tz)]`.
+  - `sessionInjectRateGate` (default 4 injects/session/hour) bounds the inject RATE, so an annotation flood cannot drive N turns/hour into the bound session.
   - `thresholdGate` + `dailyCostCapGate` are the shared gates in `hub/src/dispatch/gates.ts`. The global daily cost cap is **non-bypassable** (IR-1) — the migration ADDS it (the legacy revanote dispatcher only had the Claude usage threshold + the per-source budget).
   - `revanoteBudgetGate` is a revanote-specific `DispatchGate` (defined in `dispatcher.ts`, exported for unit test) that enforces the per-source split (`users.revanote_budget_pct`, default 60% of the daily cap) **layered ON TOP of** the global cost cap, never a substitute. Over-budget → `revanote_budget_exceeded:<detail>` skip + reject callback.
 - The per-session queue (1 in-flight + 1 waiter) lives in `hub/src/dispatch/session-queue.ts` (instance owned by the pipeline). Concurrent annotations against the same session serialize through it; a queued waiter does NOT open an `annotation_run` row until promotion re-dispatches it.

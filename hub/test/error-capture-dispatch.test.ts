@@ -112,6 +112,10 @@ mock.module('../src/error-capture/notify.ts', () => ({
 mock.module('../src/dispatch/gates.ts', () => ({
   thresholdGate: { name: 'threshold', async check() { return { ok: true } } },
   dailyCostCapGate: { name: 'daily_cost_cap', async check() { return { ok: true } } },
+  // fix/stop-the-bleed: the token cap now rides EVERY dispatch gate list.
+  dailyTokenCapGate: { name: 'daily_token_cap', async check() { return { ok: true } } },
+  // fix/self-heal-guards: inject-rate ceiling now rides the self-heal gate lists.
+  sessionInjectRateGate: { name: 'session_inject_rate', async check() { return { ok: true } } },
 }))
 
 // Import AFTER mocks. Pipeline is REAL — that's the wiring under test.

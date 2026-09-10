@@ -1,0 +1,62 @@
+# Ported from .github/workflows/mobile-shell-typecheck.yml (GHA purge, 2026-07-12).
+# That workflow's push/pull_request triggers were commented out 2026-05-29 during the
+# Phase 12 mobile pause (see docs/phase-12-pause-state.md) leaving only workflow_dispatch —
+# i.e. it was dormant coverage burning zero CI minutes on GHA. Porting to Woodpecker
+# restores real push/PR coverage on the linux/amd64 runner, path-filtered so it only
+# fires when mobile/tauri actually changes.
+when:
+  - event: pull_request
+    path:
+      - "mobile/tauri/**"
+      - ".woodpecker/mobile-shell-typecheck.yaml"
+  - event: push
+    branch: main
+    path:
+      - "mobile/tauri/**"
+      - ".woodpecker/mobile-shell-typecheck.yaml"
+
+labels:
+  platform: linux/amd64
+  # Host bind mount of /var/lib/woodpecker-cache below: only agents on the CI VM
+  # (167.233.164.91), whose cron caps that directory, may run this workflow.
+  hostcache: ci-vm
+
+steps:
+  - name: cargo-check
+    image: rust:latest
+    # Persistent cargo cache (added 2026-07-21). Cold Tauri dep compiles were
+    # taking 30min+ and stalling agents; the old GHA used actions/cache for the
+    # cargo registry + target dir. Woodpecker docker backend has no cache plugin
+    # here, so we bind-mount a per-repo host dir shared across all agents on the
+    # box. Requires repo trusted.volumes=true (granted via API). CARGO_HOME is a
+    # fresh mounted path (registry + git + installed bins) — safe because the
+    # rust image's toolchain proxies live in RUSTUP_HOME=/usr/local/rustup and
+    # the cargo binary stays on PATH. CARGO_TARGET_DIR caches the compiled
+    # dependency tree (the real 30min pole). Cargo's own file locks serialize any
+    # concurrent runs sharing the dir rather than corrupting it.
+    # BUILD PARALLELISM CAP (added 2026-08-21). The CI VM has 8 CPUs and runs 5
+    # Woodpecker agents x WOODPECKER_MAX_WORKFLOWS=2 = 10 concurrent workflow
+    # slots. Cargo defaults to -j$(nproc) = 8 and libtest to nproc threads per
+    # test binary, so every slot independently sized itself to the whole box:
+    # peak demand 10 x 8 = 80 runnable threads on 8 CPUs, with a measured load
+    # average of 25-32 sustained and 0.0 id. That contention is what killed
+    # kh-hub's rust-checks on its wall-clock timeout four times, and this
+    # pipeline shares the same box and the same defect. -j2 x 10 slots is a
+    # 20-thread peak, ~2.5x oversubscribed instead of ~10x.
+    environment:
+      CARGO_HOME: /cargo-cache/home
+      CARGO_TARGET_DIR: /cargo-cache/target
+      CARGO_BUILD_JOBS: '2'
+      RUST_TEST_THREADS: '2'
+    volumes:
+      - /var/lib/woodpecker-cache/remo-code/home:/cargo-cache/home
+      - /var/lib/woodpecker-cache/remo-code/target:/cargo-cache/target
+    commands:
+      - apt-get update && apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config
+      # tauri::generate_context! resolves frontendDist ("../ui/dist") at compile
+      # time and panics if it is absent. This is a Rust-only typecheck gate (no
+      # bundling), so stub a minimal dist instead of building the vite UI.
+      - mkdir -p mobile/tauri/ui/dist
+      - echo '<!doctype html><title>remo-code mobile shell</title>' > mobile/tauri/ui/dist/index.html
+      - cargo check --manifest-path mobile/tauri/src-tauri/Cargo.toml --target x86_64-unknown-linux-gnu
+      - cargo test --manifest-path mobile/tauri/src-tauri/Cargo.toml --lib --target x86_64-unknown-linux-gnu

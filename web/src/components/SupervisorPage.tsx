@@ -11,6 +11,9 @@ import { partitionIntoGroups } from '../lib/group-partition'
 import { GroupSection } from './groups/GroupSection'
 import { RepoGroupChips } from './groups/RepoGroupChips'
 import { GroupsManager } from './groups/GroupsManager'
+import { AutoDevActivityPanel } from './AutoDevActivityPanel'
+import { SupervisorRootsEditor } from './SupervisorRootsEditor'
+import { hubFetch } from '../lib/api'
 
 type OrchestratorSnapshot = {
   enabled: boolean
@@ -192,7 +195,7 @@ function StatusDot({ status, online = true }: { status: Row['status']; online?: 
 
 export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const { subscribe, connectionId } = useWebSocketContext()
-  const { supervisors: supervisorsRaw } = useSupervisors(token, subscribe, connectionId)
+  const { supervisors: supervisorsRaw, refetch: refetchSupervisors } = useSupervisors(token, subscribe, connectionId)
   const supervisors: Supervisor[] = useMemo(
     () =>
       (supervisorsRaw || []).map((r) => ({
@@ -222,6 +225,8 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
   const [installations, setInstallations] = useState<any[]>([])
   const [selectedInstallationId, setSelectedInstallationId] = useState<number | 'all'>('all')
   const [scanning, setScanning] = useState(false)
+  const [updating, setUpdating] = useState(false)
+  const [confirmingUpdate, setConfirmingUpdate] = useState(false)
   const [filter, setFilter] = useState<FilterKey>(() => {
     try {
       const v = localStorage.getItem(FILTER_LS_KEY)
@@ -251,6 +256,35 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     }
     return m
   }, [sessions])
+  // Single-repo Start → land the user IN the session that just started.
+  // `POST /start` only returns a run_id; the hub `sessions` row appears
+  // asynchronously once the supervisor's CLI connects (matched by project_dir),
+  // so poll `/api/sessions` for a NEW row on that path and route to it.
+  const navigateToStartedSession = useCallback(async (repoPath: string): Promise<boolean> => {
+    const norm = (p: string | null | undefined) =>
+      (p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const target = norm(repoPath)
+    if (!target) return false
+    // Snapshot the ids that already existed so we never jump to an unrelated session.
+    const before = new Set((Array.isArray(sessions) ? sessions : []).map((s) => s.id))
+    const deadline = Date.now() + 45_000
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1500))
+      try {
+        const list = await hubFetch<Array<{ id: string; project_dir: string | null }>>(
+          token, '/api/sessions'
+        )
+        const hit = (Array.isArray(list) ? list : []).find(
+          (s) => !before.has(s.id) && norm(s.project_dir) === target
+        )
+        if (hit) {
+          window.location.hash = `#/?session=${encodeURIComponent(hit.id)}`
+          return true
+        }
+      } catch {}
+    }
+    return false
+  }, [token, sessions])
   const [startTarget, setStartTarget] = useState<
     | { kind: 'local'; repo: LocalRepo; githubFallback?: GitHubRepo }
     | { kind: 'github'; repo: GitHubRepo }
@@ -328,6 +362,18 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     finally { setScanning(false) }
   }, [token, activeSupervisorId])
 
+  const requestUpdate = useCallback(async () => {
+    if (!activeSupervisorId) return
+    setConfirmingUpdate(false)
+    setUpdating(true); setError(null); setInfo(null)
+    try {
+      const r = await apiFetch(token, `/api/supervisors/${activeSupervisorId}/update`, { method: 'POST' })
+      if (!r.ok) { setError((await r.json().catch(() => ({}))).error || 'update request failed'); return }
+      setInfo('Update requested — the machine will briefly disconnect and relaunch on the latest version.')
+    } catch (e: any) { setError(e.message) }
+    finally { setUpdating(false) }
+  }, [token, activeSupervisorId])
+
   const loadActiveRuns = useCallback(async () => {
     if (!activeSupervisorId) { setActiveRuns([]); return }
     const r = await apiFetch(token, `/api/supervisors/${activeSupervisorId}/active`)
@@ -344,6 +390,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     return () => window.removeEventListener('focus', onFocus)
   }, [])
   useEffect(() => { if (activeSupervisorId && activeSupervisor?.online) scan() }, [activeSupervisorId])
+  useEffect(() => { setConfirmingUpdate(false) }, [activeSupervisorId])
   useEffect(() => { loadActiveRuns() }, [loadActiveRuns])
   // supervisor list polling removed — useSupervisors() is WS-reactive.
   useEffect(() => { const t = setInterval(loadActiveRuns, 5_000); return () => clearInterval(t) }, [loadActiveRuns])
@@ -637,6 +684,42 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 <option key={s.id} value={s.id}>{s.hostname} · {s.online ? s.state : 'offline'} · v{s.version || '?'}</option>
               ))}
             </select>
+            {activeSupervisor?.online && (
+              confirmingUpdate ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="text-xs text-[var(--text-secondary)] px-1">Briefly disconnect &amp; relaunch — active sessions may be interrupted?</span>
+                  <button
+                    type="button"
+                    onClick={requestUpdate}
+                    disabled={updating}
+                    aria-label="Confirm update supervisor to the latest signed release"
+                    className="px-2.5 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {updating ? 'Updating…' : 'Confirm update'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingUpdate(false)}
+                    disabled={updating}
+                    aria-label="Cancel update"
+                    className="px-2.5 py-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                </span>
+              ) : (
+                <button
+                  onClick={() => setConfirmingUpdate(true)}
+                  disabled={updating}
+                  aria-label="Update supervisor to the latest signed release"
+                  title="Force this machine's Remo Code Supervisor to check for and install the latest signed release"
+                  className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  <Icon.Refresh className={updating ? 'animate-spin' : ''} />
+                  {updating ? 'Updating…' : 'Update to latest'}
+                </button>
+              )
+            )}
             {githubConfigured && installations.length > 0 && (
               <>
                 <span className="text-xs text-[var(--text-muted)] px-1">Install:</span>
@@ -668,6 +751,18 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           </>
         )}
       </div>
+
+      {/* Per-supervisor root folders — add custom (incl. non-GitHub) scan paths */}
+      {activeSupervisor && (
+        <SupervisorRootsEditor
+          key={activeSupervisor.id}
+          token={token}
+          supervisorId={activeSupervisor.id}
+          roots={activeSupervisor.roots}
+          online={activeSupervisor.online}
+          onSaved={refetchSupervisors}
+        />
+      )}
 
       {/* Repos table */}
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl">
@@ -765,6 +860,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
             online={!!activeSupervisor?.online}
             rootPath={orchRoot}
             hasSupervisor={supervisors.length > 0}
+            token={token}
           />
           {rows.length === 0 ? (
             <EmptyState onClear={() => { setSearch(''); setFilter('all') }} />
@@ -833,7 +929,17 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           supervisorId={activeSupervisor.id}
           target={startTarget}
           onClose={() => setStartTarget(null)}
-          onStarted={(runId) => { setStartTarget(null); setInfo(`Started run ${runId.slice(0, 8)}`); setTimeout(() => setInfo(null), 4000); loadActiveRuns() }}
+          onStarted={(runId, repoPath) => {
+            setStartTarget(null)
+            loadActiveRuns()
+            setInfo('Starting session…')
+            navigateToStartedSession(repoPath).then((found) => {
+              if (found) return
+              // Timed out waiting for the session row — fall back to the toast.
+              setInfo(`Started run ${runId.slice(0, 8)}`)
+              setTimeout(() => setInfo(null), 4000)
+            })
+          }}
           onError={(msg) => { setError(msg); setTimeout(() => setError(null), 6000) }}
         />
       )}
@@ -1010,23 +1116,37 @@ function useOrchestrator(token: string) {
   }
 }
 
-function OrchestratorRow({ orch, online, rootPath, hasSupervisor }: {
+function OrchestratorRow({ orch, online, rootPath, hasSupervisor, token }: {
   orch: ReturnType<typeof useOrchestrator>
   online: boolean
   rootPath: string | null
   hasSupervisor: boolean
+  token: string
 }) {
   const { snap, busy, error, setEnabled, start, stop } = orch
   const [showEnable, setShowEnable] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const status = snap?.status ?? 'disabled'
   const dot =
     status === 'running' ? 'bg-emerald-400' : status === 'enabled_idle' ? 'bg-blue-400' : 'bg-gray-500'
   const statusLabel =
     status === 'running' ? 'running' : status === 'enabled_idle' ? 'idle' : 'disabled'
+  const sessionId = snap?.session_id ?? null
 
   return (
-    <div className="flex items-center gap-3 px-3 py-2 bg-blue-600/5 hover:bg-blue-600/10">
-      <span className="w-3.5 shrink-0" aria-hidden />
+    <div className="bg-blue-600/5">
+    <div className="flex items-center gap-3 px-3 py-2 hover:bg-blue-600/10">
+      <button
+        type="button"
+        className="w-3.5 shrink-0 text-[var(--text-muted)] hover:text-blue-400 disabled:opacity-30"
+        aria-label={expanded ? 'Hide auto-dev activity' : 'Show auto-dev activity'}
+        aria-expanded={expanded}
+        disabled={!sessionId}
+        title={sessionId ? 'Auto-Dev activity' : 'No active orchestrator session'}
+        onClick={() => setExpanded((x) => !x)}
+      >
+        {expanded ? '▾' : '▸'}
+      </button>
       <span className="w-3 shrink-0 flex justify-center">
         <span title={statusLabel} className={`inline-block w-2.5 h-2.5 rounded-full ${dot}`} />
       </span>
@@ -1076,6 +1196,12 @@ function OrchestratorRow({ orch, online, rootPath, hasSupervisor }: {
         </p>
       </Modal>
     </div>
+    {expanded && sessionId && (
+      <div className="px-3 pb-3 pt-1">
+        <AutoDevActivityPanel token={token} sessionId={sessionId} title="Auto-Dev Activity" />
+      </div>
+    )}
+    </div>
   )
 }
 
@@ -1086,7 +1212,8 @@ interface StartDialogProps {
     | { kind: 'local'; repo: LocalRepo; githubFallback?: GitHubRepo }
     | { kind: 'github'; repo: GitHubRepo }
   onClose: () => void
-  onStarted: (runId: string) => void
+  /** `repoPath` is the resolved absolute project dir the session will report. */
+  onStarted: (runId: string, repoPath: string) => void
   onError: (msg: string) => void
 }
 
@@ -1178,7 +1305,7 @@ function StartDialog(props: StartDialogProps) {
       })
       if (!r.ok) { onError((await r.json()).error || 'start failed'); return }
       const data = await r.json()
-      onStarted(data.run_id)
+      onStarted(data.run_id, repoPath)
     } finally { setBusy(false) }
   }
 

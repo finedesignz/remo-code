@@ -87,6 +87,20 @@ describe('scheduler/log-classifier', () => {
     expectMatchOnly('JWT verification failed: token expired', 'auth_failure')
   })
 
+  test('14b. benign HTTP 401/403 access-log lines do NOT flag auth_failure', () => {
+    // Regression: uvicorn/FastAPI logs every request including unauthenticated
+    // credential probes — these flooded log_check with false "errors" for
+    // probe-heavy apps (titanium-edge-aios) so every run reported errors.
+    const accessLog = [
+      'INFO:     172.71.127.101:0 - "GET /api/credentials/service/telnyx HTTP/1.1" 401 Unauthorized',
+      'INFO:     104.23.229.45:0 - "GET /api/credentials/service/wordpress HTTP/1.1" 403 Forbidden',
+      'INFO:     141.101.97.74:0 - "POST /api/registry/clickup/heartbeat HTTP/1.1" 200 OK',
+    ].join('\n')
+    const r = classifyLogs(accessLog)
+    expect(r.hasErrors).toBe(false)
+    expect(r.matches).toHaveLength(0)
+  })
+
   test('15. out_of_disk', () => {
     expectMatchOnly('write /var/log/app.log: no space left on device', 'out_of_disk')
   })

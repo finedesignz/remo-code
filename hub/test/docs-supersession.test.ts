@@ -14,17 +14,22 @@ import { join } from 'node:path'
 const REPO = join(import.meta.dir, '..', '..')
 const REQUIREMENTS = join(REPO, '.planning', 'REQUIREMENTS.md')
 const USAGE_COST = join(REPO, 'docs', 'usage-cost.md')
+// `.planning/REQUIREMENTS.md` is milestone-scoped and rotates each milestone, so the
+// permanent home of the R-PTY-24 supersession record is the docs corpus (usage-cost.md)
+// + the PTY architecture SPEC. The record must exist SOMEWHERE in that durable corpus —
+// not pinned to the current milestone's REQUIREMENTS.md, which legitimately gets replaced.
+const PTY_SPEC = join(REPO, '.planning', 'architecture', 'interactive-pty-runner-SPEC.md')
 
 function read(p: string): string {
   return existsSync(p) ? readFileSync(p, 'utf8') : ''
 }
 
 describe('19-04 R-PTY-24 supersession (T-19-05)', () => {
-  test('REQUIREMENTS marks R-PTY-24 superseded by R-TG', () => {
-    const md = read(REQUIREMENTS)
-    expect(md.toLowerCase()).toContain('supersed')
-    expect(md).toContain('R-PTY-24')
-    expect(md).toContain('R-TG-01')
+  test('the supersession record (R-PTY-24 → R-TG) persists in the durable planning/docs corpus', () => {
+    const corpus = [REQUIREMENTS, USAGE_COST, PTY_SPEC].map(read).join('\n')
+    expect(corpus.toLowerCase()).toContain('supersed')
+    expect(corpus).toContain('R-PTY-24')
+    expect(corpus).toContain('R-TG-01')
   })
 
   test('docs/usage-cost.md carries the supersession note', () => {

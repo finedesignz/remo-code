@@ -43,6 +43,8 @@ interface Waiter {
   writerId: WriterId
   resolve: (granted: boolean) => void
   enqueuedAtMs: number
+  /** The promise handed to every acquire() call that COALESCED onto this waiter. */
+  promise: Promise<boolean>
 }
 
 interface LockState {
@@ -108,15 +110,25 @@ export function acquire(sessionId: string, writerId: WriterId): Promise<boolean>
     return Promise.resolve(true)
   }
   // Held by another writer → queue (bounded).
-  return new Promise<boolean>((resolve) => {
-    const waiter: Waiter = { writerId, resolve, enqueuedAtMs: Date.now() }
-    st.queue.push(waiter)
-    if (st.queue.length > queueBound) {
-      const dropped = st.queue.shift()!
-      console.warn(`[turn-lock] queue overflow session=${sessionId} — dropping oldest writer=${dropped.writerId}`)
-      dropped.resolve(false)
-    }
-  })
+  // COALESCE PER WRITER (fix/dup-pty-writer): a writer that ALREADY has a queued
+  // waiter must not enqueue another. A blocked xterm streams one acquire() per
+  // KEYSTROKE; enqueuing each one queued ~26 waiters for a single writer,
+  // overflowed the bound (evicting the legitimate FIFO head — including
+  // Telegram's waiter) and turned the lock into a ping-pong. One writer = at
+  // most one waiter; every keystroke of that writer awaits the same grant.
+  const queued = st.queue.find((w) => w.writerId === writerId)
+  if (queued) return queued.promise
+
+  let resolve!: (granted: boolean) => void
+  const promise = new Promise<boolean>((r) => { resolve = r })
+  const waiter: Waiter = { writerId, resolve, enqueuedAtMs: Date.now(), promise }
+  st.queue.push(waiter)
+  if (st.queue.length > queueBound) {
+    const dropped = st.queue.shift()!
+    console.warn(`[turn-lock] queue overflow session=${sessionId} — dropping oldest writer=${dropped.writerId}`)
+    dropped.resolve(false)
+  }
+  return promise
 }
 
 /**
@@ -155,20 +167,33 @@ export function release(sessionId: string): void {
 export function releaseByWriter(writerId: WriterId): void {
   // Snapshot session ids — release() mutates `locks` (may delete entries).
   for (const sessionId of Array.from(locks.keys())) {
-    const st = locks.get(sessionId)
-    if (!st) continue
-    // Drop this writer's queued waiters first (resolve false so awaiters unblock).
-    if (st.queue.length > 0) {
-      const remaining: Waiter[] = []
-      for (const w of st.queue) {
-        if (w.writerId === writerId) w.resolve(false)
-        else remaining.push(w)
-      }
-      st.queue = remaining
-    }
-    // If this writer holds the turn, release it (promotes next queued waiter).
-    if (st.holder === writerId) release(sessionId)
+    releaseWriterInSession(sessionId, writerId)
   }
+}
+
+/**
+ * `releaseByWriter` scoped to ONE session — the surgical form.
+ *
+ * Supersede (term-writers) is a PER-SESSION event: connection C losing the writer
+ * claim on session A says nothing about C's legitimate queued waiter on session B
+ * (the grid view drives up to 12 sessions from one socket). The all-sessions sweep
+ * would resolve that B waiter `false` too, silently dropping one frame there.
+ * Disconnect stays all-sessions — a dead socket owns nothing anywhere.
+ */
+export function releaseWriterInSession(sessionId: string, writerId: WriterId): void {
+  const st = locks.get(sessionId)
+  if (!st) return
+  // Drop this writer's queued waiters first (resolve false so awaiters unblock).
+  if (st.queue.length > 0) {
+    const remaining: Waiter[] = []
+    for (const w of st.queue) {
+      if (w.writerId === writerId) w.resolve(false)
+      else remaining.push(w)
+    }
+    st.queue = remaining
+  }
+  // If this writer holds the turn, release it (promotes next queued waiter).
+  if (st.holder === writerId) release(sessionId)
 }
 
 /**

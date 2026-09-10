@@ -42,12 +42,44 @@ import {
   type PipelineDeps,
   type RunStore,
 } from '../../dispatch/pipeline.ts'
-import { thresholdGate, dailyCostCapGate } from '../../dispatch/gates.ts'
+import { thresholdGate, dailyCostCapGate, dailyTokenCapGate } from '../../dispatch/gates.ts'
 import { getGraceBuffer } from '../../dispatch/grace.ts'
 import { launchSessionForUser } from '../../telegram/launch.ts'
 import { log } from '../../observability/logger'
 import { extractDecisionBlock } from '../controller-schema.ts'
 import { extractFindingsBlock } from '../qc-schema.ts'
+import { extractSummaryLine } from '../summary-line.ts'
+
+/**
+ * Build the `scheduled_task_runs.output_snippet` for a reply.
+ *
+ * auto-dev P2/P4: a controller emits a `<<DECISION ... DECISION>>` block and a
+ * qc_review emits a `<<FINDINGS ... FINDINGS>>` block at the END of its turn.
+ * The default head-truncation (first 500 chars) would drop them, so when such a
+ * block is present, snippet the block itself so the post-run router can parse it.
+ * Findings blocks can exceed 500 chars (multiple findings) — cap higher so the qc
+ * router sees the whole batch.
+ *
+ * Same problem, third marker (fix/chained-step-notify): workflow prompts close a
+ * turn with `Summary: BLOCKED|FAILED|SKIPPED|DEPLOY UNHEALTHY: ...`, and any real
+ * ship turn blows past 500 chars, so head-truncation cut the verdict off and the
+ * post-run notifier never saw it. Append the trailing `Summary:` line when
+ * truncation dropped it.
+ */
+export function buildRunSnippet(replyContent: string): string {
+  const decisionBlock = extractDecisionBlock(replyContent)
+  if (decisionBlock) {
+    return decisionBlock.length > 500 ? decisionBlock.slice(0, 500) + '...' : decisionBlock
+  }
+  const findingsBlock = extractFindingsBlock(replyContent)
+  if (findingsBlock) {
+    return findingsBlock.length > 4000 ? findingsBlock.slice(0, 4000) + '...' : findingsBlock
+  }
+  if (replyContent.length <= 500) return replyContent
+  const head = replyContent.slice(0, 500) + '...'
+  const summary = extractSummaryLine(replyContent)
+  return summary && !head.includes(summary) ? `${head}\n${summary}` : head
+}
 import { getTaskTemplate, buildTemplatePrompt } from '../task-templates.ts'
 
 interface RunCtxLike {
@@ -101,6 +133,17 @@ const QC_REVIEW_TEMPLATE = readFileSync(
   'utf8',
 )
 
+// fix/sched-failures: the `security` ROOT (Phase-11 workflow root) had no
+// fallback — a `security` task with no custom prompt fell through to `''` and
+// failed instantly with `empty_content` (observed daily in prod). Render step 1
+// of the security chain (`prompts/security/scan.md`), mirroring how a bare `dev`
+// root renders the controller template and a bare `qc` root renders the review
+// template. A custom prompt still wins.
+const SECURITY_SCAN_TEMPLATE = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'prompts', 'security', 'scan.md'),
+  'utf8',
+)
+
 export function buildContent(task: ScheduledTask): string {
   // F-01/F-02: template provenance is authoritative server-side. The web pre-bakes
   // the identical guardrail prompt, but non-web creators (Telegram/API/orchestrator)
@@ -132,6 +175,12 @@ export function buildContent(task: ScheduledTask): string {
   if (task.task_type === 'qc_review') return custom || QC_REVIEW_TEMPLATE
   if (task.task_type === 'qc') {
     return custom || QC_REVIEW_TEMPLATE
+  }
+  // A bare `security` root with no user-supplied prompt renders the scan
+  // template (step 1 of the security chain). Chained `security_triage` /
+  // `security_fix_or_issue` steps fall through to their own prompts.
+  if (task.task_type === 'security') {
+    return custom || SECURITY_SCAN_TEMPLATE
   }
   return custom || ''
 }
@@ -293,27 +342,14 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
     // with the reply snippet. `finalizeRun` fires the post-run action pipeline.
     async onFinalize(token, replyContent) {
       const duration = Date.now() - startedAt
-      // auto-dev P2/P4: a controller emits a `<<DECISION ... DECISION>>` block
-      // and a qc_review emits a `<<FINDINGS ... FINDINGS>>` block at the END of
-      // its turn. The default head-truncation (first 500 chars) would drop them,
-      // so when such a block is present, snippet the block itself so the post-run
-      // router can parse it. Findings blocks can exceed 500 chars (multiple
-      // findings) — cap higher so the qc router sees the whole batch.
-      const decisionBlock = extractDecisionBlock(replyContent)
-      const findingsBlock = decisionBlock ? null : extractFindingsBlock(replyContent)
-      let snippet: string
-      if (decisionBlock) {
-        snippet = decisionBlock.length > 500
-          ? decisionBlock.slice(0, 500) + '...'
-          : decisionBlock
-      } else if (findingsBlock) {
-        snippet = findingsBlock.length > 4000
-          ? findingsBlock.slice(0, 4000) + '...'
-          : findingsBlock
-      } else {
-        snippet = replyContent.length > 500 ? replyContent.slice(0, 500) + '...' : replyContent
-      }
-      await finalizeRun(token, 'success', null, { duration_ms: duration, output_snippet: snippet })
+      const snippet = buildRunSnippet(replyContent)
+      // `only_if_active`: a reply can land AFTER the stale-run reaper already
+      // finalized this run as run_timeout (> REMO_RUN_MAX_MS). The claim guard
+      // makes the late write a no-op instead of clobbering the row and re-firing
+      // the post-run chain a second time.
+      await finalizeRun(token, 'success', null, {
+        duration_ms: duration, output_snippet: snippet, only_if_active: true,
+      })
       removeRunContext(token)
       clearActive(sessionId, token)
     },
@@ -328,14 +364,22 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
     // gates here IS the waiter-promotion re-check the legacy `setOnPromote`
     // handler did — a user who crossed the cap while queued is skipped when the
     // pipeline re-dispatches the promoted waiter through this same gate list.
-    gates: [thresholdGate, dailyCostCapGate],
+    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
-    // Offline replay: re-run the task via runNow (fresh run row), mirroring the
-    // legacy grace drain. Manual runs never park (handled below).
+    // Offline replay on reconnect: re-send THIS run (same `scheduled_task_runs`
+    // row), not a fresh `runNow` fire.
+    //
+    // fix/sched-failures — the old `runNow` replay minted a SECOND run row and
+    // left this one `pending` forever: nothing finalizes a parked row on drain
+    // (onParkExpire only fires on TTL lapse), so the original sat pending until
+    // the 6h stale-run reaper marked it failed/run_timeout. That is the observed
+    // prod pattern (one `pending` + one `success` row per fire, and 14
+    // `run_timeout` rows). Re-entering sendAgentTask with the same ctx reuses the
+    // existing row (RunStore.open returns ctx.runId — no insert), so one fire
+    // produces exactly one run row.
     replay: async () => {
-      const { runNow } = await import('../dispatcher.ts')
-      await runNow(task.id, ctx.userId, {})
+      await sendAgentTask(task, ctx)
     },
     // Grace TTL lapse → legacy expire-mark (skipped/target_offline).
     onParkExpire: async () => {

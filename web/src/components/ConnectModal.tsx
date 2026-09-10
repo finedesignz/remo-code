@@ -56,7 +56,10 @@ export function ConnectModal({ apiKey, onGenerateKey, onClose }: Props) {
           ) : (
             <div className="mb-5">
               <p className="text-xs text-[var(--text-muted)] mb-2">Your API key (shown once — copy it now):</p>
-              <div className="relative group">
+              {/* data-autofix-exclude: this is a live secret rendered as plain
+                  DOM text — the AgentAutofix click-to-comment widget must
+                  never ship it. See hub/src/agentautofix/. */}
+              <div className="relative group" data-autofix-exclude="">
                 <code className="block bg-[var(--code-bg)] rounded-lg p-3 text-xs text-emerald-200 font-mono break-all select-all">
                   {displayKey}
                 </code>

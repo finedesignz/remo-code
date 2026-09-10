@@ -21,6 +21,36 @@ export interface SessionInventoryEntry {
   status: 'spawning' | 'running' | 'idle' | 'stopping'
 }
 
+/**
+ * fix/stop-the-bleed — supervisor spawn circuit-breaker state, pushed alongside
+ * `session_inventory`. A non-empty array means the supervisor is REFUSING to
+ * spawn CLIs for those repos. Prod 2026-07: the breaker latched open for four
+ * days with NO hub-visible signal — zero CLI spawns while the hub reported
+ * healthy. Surfacing it here (and on `GET /api/supervisors`) is what makes that
+ * failure mode observable.
+ */
+export interface CircuitBreakerEntry {
+  repo_path: string
+  state: 'open' | 'half_open'
+  opened_at: string
+  failed_probes: number
+  exhausted: boolean
+  last_reason?: string | null
+}
+
+/**
+ * fix/headless-autoupdate — loopback status-server health, pushed alongside
+ * `session_inventory`. `healthy:false` = the supervisor is running WITHOUT a
+ * /sup/status endpoint (bind failed, e.g. a zombie listener squatting on 9106),
+ * so the tray and the owner's `:9106/sup/status` probe see nothing. Undefined =
+ * pre-fix supervisor that doesn't report (treated as unknown, i.e. not degraded).
+ */
+export interface StatusServerHealth {
+  healthy: boolean
+  port?: number | null
+  last_error?: string | null
+}
+
 interface SupervisorEntry {
   ws: ServerWebSocket<any>
   supervisorId: string
@@ -35,6 +65,10 @@ interface SupervisorEntry {
    *  hasn't sent one yet (pre-0.5.7 supervisor). */
   sessionInventory: SessionInventoryEntry[]
   sessionInventoryAt: string | null
+  /** fix/stop-the-bleed — most recent circuit-breaker snapshot (empty = healthy). */
+  circuitBreakers: CircuitBreakerEntry[]
+  /** fix/headless-autoupdate — most recent status-server health (null = not reported). */
+  statusServer: StatusServerHealth | null
   pendingReqs: Map<string, { resolve: (v: any) => void; reject: (e: any) => void; timer: ReturnType<typeof setTimeout> }>
 }
 
@@ -202,6 +236,8 @@ export function registerSupervisor(args: {
     hostname: args.hostname ?? '',
     sessionInventory: [],
     sessionInventoryAt: null,
+    circuitBreakers: [],
+    statusServer: null,
     pendingReqs: new Map(),
   }
   const isReplace = supervisors.has(args.supervisorId)
@@ -379,9 +415,84 @@ export function setSupervisorSessionInventory(
 }
 
 /**
+ * fix/stop-the-bleed — record the supervisor's circuit-breaker snapshot. Returns
+ * the breakers that are NEWLY OPEN since the last push, so the caller alerts once
+ * per trip instead of every 10s.
+ *
+ * Identity is `(repo_path, state, opened_at)` — NOT repo_path alone. A breaker
+ * cycling open → half_open → open for the same repo is a RE-TRIP and must alert
+ * again; keying on repo_path alone would keep it "already seen" forever. Only
+ * `state === 'open'` entries are returned (half_open is a recovery step, not an
+ * alarm).
+ */
+export function setSupervisorCircuitBreakers(
+  supervisorId: string,
+  breakers: CircuitBreakerEntry[],
+): { newlyOpen: CircuitBreakerEntry[]; userId: string | null } {
+  const entry = supervisors.get(supervisorId)
+  if (!entry) return { newlyOpen: [], userId: null }
+  const key = (b: CircuitBreakerEntry) => `${b.repo_path}|${b.state}|${b.opened_at}`
+  const before = new Set(entry.circuitBreakers.map(key))
+  const newlyOpen = breakers.filter((b) => b.state === 'open' && !before.has(key(b)))
+  entry.circuitBreakers = breakers
+  return { newlyOpen, userId: entry.userId }
+}
+
+/** Current circuit-breaker snapshot for a supervisor (empty = healthy/unknown). */
+export function getSupervisorCircuitBreakers(supervisorId: string): CircuitBreakerEntry[] {
+  return supervisors.get(supervisorId)?.circuitBreakers ?? []
+}
+
+/**
+ * fix/headless-autoupdate — record the supervisor's status-server health.
+ * Returns `newlyDegraded:true` on the transition healthy/unknown → unhealthy, so
+ * the caller can log it ONCE per trip instead of every 10s.
+ */
+export function setSupervisorStatusServer(
+  supervisorId: string,
+  health: StatusServerHealth | undefined,
+): { newlyDegraded: boolean } {
+  const entry = supervisors.get(supervisorId)
+  if (!entry || !health) return { newlyDegraded: false }
+  const wasDegraded = entry.statusServer?.healthy === false
+  entry.statusServer = health
+  return { newlyDegraded: !health.healthy && !wasDegraded }
+}
+
+/** Current status-server health (null = pre-fix supervisor / not yet reported). */
+export function getSupervisorStatusServer(supervisorId: string): StatusServerHealth | null {
+  return supervisors.get(supervisorId)?.statusServer ?? null
+}
+
+/**
  * Set of session_ids currently reported as live by any of the user's online
  * supervisors. Used by `GET /api/sessions` to mark rows `active=true`.
  */
+/**
+ * Supervisors that are CONNECTED **and have pushed `session_inventory` at least once
+ * since this hub process booted** (`sessionInventoryAt != null`), with the live
+ * session set each one just reported.
+ *
+ * This is POSITIVE KNOWLEDGE, and it is the only basis on which the stale-run
+ * backstop (`hub/src/sessions/stale-run-reaper.ts`) may reap: for these supervisors —
+ * and ONLY these — "your session is absent from your inventory" actually proves the
+ * session is gone. A supervisor that is connected but has not yet pushed (a hub that
+ * just restarted; inventory arrives ~10s later) contributes NOTHING here, so its runs
+ * are untouchable. An empty result means the hub knows nothing yet and the sweep must
+ * be a NO-OP. Absence of evidence is not evidence of absence.
+ *
+ * Disconnected supervisors are deliberately absent: their open runs are already closed
+ * by `finalizeOpenRunsForSupervisor` on socket close.
+ */
+export function getInventoriedSupervisors(): Array<{ supervisorId: string; liveSessionIds: string[] }> {
+  const out: Array<{ supervisorId: string; liveSessionIds: string[] }> = []
+  for (const [supervisorId, e] of supervisors) {
+    if (e.sessionInventoryAt == null) continue // connected, but has never pushed → unknown
+    out.push({ supervisorId, liveSessionIds: e.sessionInventory.map((s) => s.session_id) })
+  }
+  return out
+}
+
 export function getActiveSessionIdsForUser(userId: string): Set<string> {
   const out = new Set<string>()
   for (const [, e] of supervisors) {

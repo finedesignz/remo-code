@@ -22,6 +22,17 @@ html, body, #root {
   -webkit-overflow-scrolling: touch;
 }
 
+/* .xterm-screen is the content overlay that sits ON TOP of .xterm-viewport, so a
+ * finger drag lands here — not the scroller. On iPadOS/iOS Safari its default
+ * touch-action (auto) lets Safari hijack the drag for text-selection and cancel
+ * the touch sequence, so our JS drag-to-scroll handler (TerminalSurface) never
+ * gets the touchmove. touch-action:none hands every touch to our handler, which
+ * drives the viewport scrollTop itself. (The scrollbar still drags natively —
+ * it lives on .xterm-viewport, which keeps pan-y.) */
+.xterm-screen {
+  touch-action: none;
+}
+
 /* Mobile-WebView safe areas.
  * The Tauri 2 mobile shell sets `viewport-fit=cover` so the WebView extends
  * under the notch / home indicator. We expose two utility classes consumers

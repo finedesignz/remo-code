@@ -114,6 +114,14 @@ const telegramBotUsername = process.env.TELEGRAM_BOT_USERNAME || "";
 // set TELEGRAM_SUMMARIZED_STREAMING=false to revert to a single final-blob send.
 const telegramSummarizedStreaming = process.env.TELEGRAM_SUMMARIZED_STREAMING !== "false";
 
+// Collapse the "working…" agent-activity feed (tool one-liners) into a NATIVE
+// Telegram expandable blockquote (Bot API 7.4+, MarkdownV2 `**>…**`), so progress
+// chatter renders as a one-line summary with a tap-to-expand control instead of
+// flooding the chat. Default ON; `TELEGRAM_COLLAPSE_ACTIVITY=false` restores the
+// flat inline list. NEVER applies to permission prompts / user_question prompts —
+// those are separate messages and must stay immediately visible + actionable.
+const telegramCollapseActivity = process.env.TELEGRAM_COLLAPSE_ACTIVITY !== "false";
+
 // PTY cutover flag (mirrors the supervisor's `REMO_PTY_INTERACTIVE === '1'`).
 // Drives the WEB default human surface via GET /api/client-config (TerminalSurface
 // vs the stream-json ChatSurface). It does NOT switch the Telegram outbound source
@@ -145,6 +153,21 @@ const hubIntrospectToken = requireMinLenIfSet(
   process.env.HUB_INTROSPECT_TOKEN,
   16,
 );
+
+// AgentAutofix integration (widget + hub-self-error forwarding). ALL five vars
+// optional — the whole feature is inert (no-op token route, no widget script,
+// no forwarding) unless every one of them is set. Never reuse `jwtSecret` for
+// AGENTAUTOFIX_SIGNING_SECRET — the plugin identity JWT must be forgeable only
+// with its own secret, never with the session-cookie secret.
+const agentautofixHost = parseUrlOptional("AGENTAUTOFIX_HOST", process.env.AGENTAUTOFIX_HOST);
+const agentautofixAppId = process.env.AGENTAUTOFIX_APP_ID || "";
+const agentautofixPublicKey = process.env.AGENTAUTOFIX_PUBLIC_KEY || "";
+const agentautofixSigningSecret = requireMinLenIfSet(
+  "AGENTAUTOFIX_SIGNING_SECRET",
+  process.env.AGENTAUTOFIX_SIGNING_SECRET,
+  16,
+);
+const agentautofixOrigin = parseUrlOptional("AGENTAUTOFIX_ORIGIN", process.env.AGENTAUTOFIX_ORIGIN);
 
 if ((telegramBotToken && !telegramWebhookSecret) || (!telegramBotToken && telegramWebhookSecret)) {
   console.warn(
@@ -206,6 +229,7 @@ export const config = {
     webhookSecret: telegramWebhookSecret,
     botUsername: telegramBotUsername,
     summarizedStreaming: telegramSummarizedStreaming,
+    collapseActivity: telegramCollapseActivity,
   },
 
   // PTY cutover flag. Drives the WEB terminal surface (GET /api/client-config).
@@ -216,4 +240,19 @@ export const config = {
 
   // B4: observability bearer token (gates /healthz/deep + /metrics).
   hubIntrospectToken,
+
+  // AgentAutofix (click-to-comment widget + hub-self-error forwarding).
+  // `configured` is true only when every var is present — every call site
+  // must check it before minting a token or forwarding a report.
+  agentautofix: {
+    host: agentautofixHost,
+    appId: agentautofixAppId,
+    publicKey: agentautofixPublicKey,
+    signingSecret: agentautofixSigningSecret,
+    origin: agentautofixOrigin,
+    configured: Boolean(
+      agentautofixHost && agentautofixAppId && agentautofixPublicKey &&
+        agentautofixSigningSecret && agentautofixOrigin,
+    ),
+  },
 };

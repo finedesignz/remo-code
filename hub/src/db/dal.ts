@@ -1,6 +1,7 @@
 import { sql } from "./postgres.ts";
 import { buildRepoKey, type GitOriginGithub } from "../lib/repo-key.ts";
 import { log } from "../observability/logger.ts";
+import { hasScope } from "../auth/scopes.ts";
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,18 @@ export async function listSessions(userId: string) {
 
 export async function updateSessionAgentInfo(sessionId: string, info: unknown) {
   await sql`UPDATE sessions SET agent_info = ${JSON.stringify(info)}::jsonb WHERE id = ${sessionId}`;
+}
+
+/**
+ * Backfill a session's hostname when it is currently NULL (COALESCE never
+ * downgrades an existing host). The single chokepoint that enforces the
+ * no-online-with-NULL-hostname invariant at the agent-auth online transition,
+ * independent of which findOrCreateAgentSessionV2 branch ran. No-op when
+ * hostname is falsy or the row already has one.
+ */
+export async function backfillSessionHostname(sessionId: string, hostname: string | null): Promise<void> {
+  if (!hostname || !hostname.trim()) return
+  await sql`UPDATE sessions SET hostname = COALESCE(hostname, ${hostname}) WHERE id = ${sessionId}`
 }
 
 export async function getSession(sessionId: string, userId: string) {
@@ -551,10 +564,15 @@ export async function findOrCreateAgentSessionV2(
       // Plan 08-003 T4: when tokenHash is null (supervisor inventory path)
       // preserve the existing token_hash so a previously-attached runner row
       // keeps its binding. Otherwise overwrite.
+      // Backfill hostname on reuse when the row lacks one (COALESCE never
+      // downgrades an existing host). Without this, a session whose row predates
+      // host-keying — or was created NULL — stays online+NULL-hostname forever
+      // (a ghost: unroutable, autospawn refuses supervisor_offline).
       const updated = tokenHash === null
         ? await tx`
             UPDATE sessions
                SET project_dir = ${nextProjectDir},
+                   hostname = COALESCE(hostname, ${hostname}),
                    last_activity = now()
              WHERE id = ${row.id}
              RETURNING *
@@ -563,6 +581,7 @@ export async function findOrCreateAgentSessionV2(
             UPDATE sessions
                SET token_hash = ${tokenHash},
                    project_dir = ${nextProjectDir},
+                   hostname = COALESCE(hostname, ${hostname}),
                    last_activity = now()
              WHERE id = ${row.id}
              RETURNING *
@@ -611,6 +630,7 @@ export async function findOrCreateAgentSessionV2(
                    github_owner = ${owner},
                    github_repo = ${repo},
                    project_dir = ${projectDir},
+                   hostname = COALESCE(hostname, ${hostname}),
                    last_activity = now()
              WHERE id = ${keeper.id}
              RETURNING *
@@ -622,6 +642,7 @@ export async function findOrCreateAgentSessionV2(
                    github_repo = ${repo},
                    token_hash = ${tokenHash},
                    project_dir = ${projectDir},
+                   hostname = COALESCE(hostname, ${hostname}),
                    last_activity = now()
              WHERE id = ${keeper.id}
              RETURNING *
@@ -874,23 +895,107 @@ export async function verifyApiKey(keyHash: string) {
   return rows[0].user_id as string;
 }
 
+/**
+ * Resolve the hostname of the supervisor that owns a given api_key (by hash).
+ * An agent socket authenticates with the SAME api_key as its host supervisor,
+ * so this is the authoritative fallback hostname when the agent's `auth` frame
+ * omits `hostname` — without it the session flips `online` with `hostname=NULL`
+ * (a ghost: unroutable by pickSupervisorForSession → autospawn refuses
+ * `supervisor_offline`, and the ghost-reaper's grace keeps resetting). Returns
+ * null when no supervisor row is bound to that key.
+ */
+export async function getSupervisorHostnameForApiKey(keyHash: string): Promise<string | null> {
+  const rows = await sql<{ hostname: string | null }[]>`
+    SELECT s.hostname
+      FROM supervisors s
+      JOIN api_keys k ON k.id = s.api_key_id
+     WHERE k.key_hash = ${keyHash} AND k.revoked_at IS NULL
+     ORDER BY s.last_seen_at DESC NULLS LAST
+     LIMIT 1
+  `
+  const h = rows[0]?.hostname
+  return h && h.trim() ? h : null
+}
+
+/**
+ * Milestone SKEY — full key row + scopes. Touches last_used_at.
+ * Returns null for unknown/revoked keys.
+ */
+export async function verifyApiKeyFull(
+  keyHash: string,
+): Promise<{ id: string; user_id: string; scopes: string[] | null; purpose: string } | null> {
+  const rows = await sql<{ id: string; user_id: string; scopes: string[] | null; purpose: string }[]>`
+    SELECT id, user_id, scopes, purpose FROM api_keys
+    WHERE key_hash = ${keyHash} AND revoked_at IS NULL LIMIT 1
+  `;
+  if (!rows[0]) return null;
+  await sql`UPDATE api_keys SET last_used_at = now() WHERE key_hash = ${keyHash} AND revoked_at IS NULL`;
+  return rows[0];
+}
+
+/** Scope-checked verify. NULL/empty scopes = legacy full access. */
+export async function verifyApiKeyWithScope(
+  keyHash: string,
+  scope: string,
+): Promise<{ userId: string; apiKeyId: string } | { error: 'not_found' | 'missing_scope' }> {
+  const row = await verifyApiKeyFull(keyHash);
+  if (!row) return { error: 'not_found' };
+  if (!hasScope(row.scopes, scope)) return { error: 'missing_scope' };
+  return { userId: row.user_id, apiKeyId: row.id };
+}
+
 export async function listApiKeys(userId: string) {
   return sql`
-    SELECT id, name, created_at, last_used_at FROM api_keys
+    SELECT id, name, purpose, scopes, key_prefix, created_at, last_used_at FROM api_keys
     WHERE user_id = ${userId} AND revoked_at IS NULL ORDER BY created_at DESC
   `;
 }
 
-export async function createApiKey(userId: string, keyHash: string, name: string) {
-  await sql`UPDATE api_keys SET revoked_at = now() WHERE user_id = ${userId} AND revoked_at IS NULL`;
+/**
+ * Mint a key. Milestone SKEY: N keys per user are legal — we ONLY revoke a prior
+ * active key of the SAME `purpose` (so minting an `external` key never kills the
+ * supervisor's spawn credential, and rotating the supervisor key still has
+ * rotate semantics). `purpose='supervisor'|'orchestrator'` stay at-most-one-active
+ * per user (partial unique indexes).
+ */
+export async function createApiKey(
+  userId: string,
+  keyHash: string,
+  name: string,
+  opts: { purpose?: string; scopes?: string[] | null; keyPrefix?: string | null } = {},
+) {
+  const purpose = opts.purpose ?? 'supervisor';
+  if (purpose === 'supervisor' || purpose === 'orchestrator') {
+    await sql`
+      UPDATE api_keys SET revoked_at = now()
+      WHERE user_id = ${userId} AND purpose = ${purpose} AND revoked_at IS NULL
+    `;
+  }
   const rows = await sql`
-    INSERT INTO api_keys (user_id, key_hash, name) VALUES (${userId}, ${keyHash}, ${name}) RETURNING *
+    INSERT INTO api_keys (user_id, key_hash, name, purpose, scopes, key_prefix)
+    VALUES (${userId}, ${keyHash}, ${name}, ${purpose}, ${opts.scopes ?? null}, ${opts.keyPrefix ?? null})
+    RETURNING id, name, purpose, scopes, key_prefix, created_at, last_used_at
   `;
   return rows[0];
 }
 
-export async function revokeApiKey(userId: string) {
-  await sql`UPDATE api_keys SET revoked_at = now() WHERE user_id = ${userId} AND revoked_at IS NULL`;
+/** Revoke exactly ONE key, scoped to its owner. Returns the revoked row or null. */
+export async function revokeApiKeyById(userId: string, id: string) {
+  const rows = await sql`
+    UPDATE api_keys SET revoked_at = now()
+    WHERE id = ${id} AND user_id = ${userId} AND revoked_at IS NULL
+    RETURNING id, name, purpose
+  `;
+  return rows[0] ?? null;
+}
+
+/** Fetch one active key row (owner-scoped) — used by rotate. */
+export async function getApiKeyById(userId: string, id: string) {
+  const rows = await sql<{ id: string; name: string; purpose: string; scopes: string[] | null }[]>`
+    SELECT id, name, purpose, scopes FROM api_keys
+    WHERE id = ${id} AND user_id = ${userId} AND revoked_at IS NULL LIMIT 1
+  `;
+  return rows[0] ?? null;
 }
 
 // Phase 07-G: admin force-reissue. Revokes ALL active api_keys + deletes ALL

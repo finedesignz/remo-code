@@ -54,6 +54,8 @@ const TaskTypeEnum = z.enum([
   // Phase 21 (auto-dev-orchestrator): the session-level orchestrator task.
   // Allowed by the DB CHECK constraint in schema.sql; must be accepted here too.
   'orchestrator',
+  // Milestone TEAB: Titanium Edge AutoBuilder run as a scheduled-task action.
+  'teab',
   // Internal (synthesized by Coolify webhook)
   'triage',
 ])
@@ -93,10 +95,22 @@ const CreateSchema = z.object({
     }).optional(),
   })).min(1).max(20).optional(),
   timezone: z.string().min(1).max(100),
+  // Milestone once. 'once' fires a single time at `run_at` (ISO 8601) and then
+  // self-finalizes; 'cron' (default, omitted) is the recurring path and requires
+  // cron_expr or schedule_rules. When schedule_kind='once', run_at is REQUIRED
+  // and cron_expr/schedule_rules are ignored.
+  schedule_kind: z.enum(['cron', 'once']).optional(),
+  run_at: z.string().min(1).max(40).optional(),
   catchup_policy: CatchupPolicyEnum.optional(),
   max_concurrent: z.number().int().min(1).max(10).optional(),
   enabled: z.boolean().optional(),
   post_run_actions: z.array(z.any()).optional(),
+  // Milestone TEAB — target repo (`repo_ident`) for a `task_type === 'teab'`
+  // build task. Persisted on the dedicated `teab_repo_ident` column.
+  teab_repo_ident: z.string().max(2000).nullable().optional(),
+  // Default-on run-summary email opt-out. Omitted ⇒ true (owner gets a summary
+  // per root run). Set false to suppress. See docs/scheduled-tasks.md.
+  email_summary: z.boolean().optional(),
 })
 
 const PatchSchema = CreateSchema.partial()
@@ -105,6 +119,12 @@ const PatchSchema = CreateSchema.partial()
 
 function withNext3<T extends ScheduledTask>(task: T) {
   if (!task.enabled) return { ...task, next_3_runs: [] as string[] }
+  // Milestone once: a one-time task's only "next run" is its run_at (no cron).
+  if (task.schedule_kind === 'once') {
+    const ms = task.run_at ? Date.parse(task.run_at) : NaN
+    const next = Number.isFinite(ms) && ms > Date.now() ? [new Date(ms).toISOString()] : []
+    return { ...task, next_3_runs: next }
+  }
   const tz = task.timezone || 'UTC'
   const rules = Array.isArray(task.schedule_rules) ? (task.schedule_rules as ScheduleRule[]) : []
   if (rules.length > 0) {
@@ -292,6 +312,69 @@ scheduledTasks.post('/', async (c) => {
   }
   const data = parsed.data
 
+  // ── Milestone once: one-time task branch ───────────────────────────────────
+  // A 'once' task carries no cron; it needs a valid `run_at` and reuses the
+  // whole downstream pipeline verbatim. Handled up-front so the cron/rule
+  // validation below is skipped cleanly.
+  if (data.schedule_kind === 'once') {
+    const runAtMs = data.run_at ? Date.parse(data.run_at) : NaN
+    if (!Number.isFinite(runAtMs)) {
+      return c.json({ error: 'run_at_required', detail: 'schedule_kind=once requires a valid ISO run_at' }, 400)
+    }
+    if (!isValidTimezone(data.timezone)) return c.json({ error: 'invalid_timezone' }, 400)
+    if (targetIdRequired(data.target_kind) && !data.target_id) {
+      return c.json({ error: 'target_id_required', detail: `target_id required for kind=${data.target_kind}` }, 400)
+    }
+    let onceActions: PostRunAction[] = []
+    if (data.post_run_actions !== undefined) {
+      const r = validatePostRunActions(data.post_run_actions)
+      if (!r.ok) return c.json({ error: 'invalid_post_run_actions', detail: r.errors }, 400)
+      onceActions = r.value
+    }
+    const cyc = await detectCyclesForUser(userId, '__new__', onceActions)
+    if (!cyc.ok) return c.json({ error: 'chain_cycle', path: cyc.cycle }, 400)
+
+    const sessionId = data.target_kind === 'session' && data.target_id ? data.target_id : null
+    const oncePrompt =
+      typeof data.payload?.prompt === 'string' ? data.payload.prompt
+      : typeof data.prompt === 'string' ? data.prompt : ''
+    const oncePayload = oncePrompt !== '' ? { ...(data.payload ?? {}), prompt: oncePrompt } : (data.payload ?? {})
+    const built = await buildNameForUser(userId, {
+      task_type: data.task_type,
+      target_kind: data.target_kind,
+      target_id: data.target_id ?? null,
+      payload: oncePayload,
+      cron_expr: '@once',
+    }, data.name_suffix, data.name)
+
+    const task = await createTaskV2({
+      user_id: userId,
+      name: built.name,
+      task_type: data.task_type,
+      target_kind: data.target_kind,
+      target_id: data.target_id ?? null,
+      payload: oncePayload,
+      cron_expr: '@once',
+      timezone: data.timezone,
+      catchup_policy: data.catchup_policy ?? 'skip',
+      max_concurrent: data.max_concurrent ?? 1,
+      enabled: data.enabled ?? true,
+      post_run_actions: onceActions,
+      session_id: sessionId,
+      cron_expression: '@once',
+      prompt: oncePrompt,
+      name_prefix: built.prefix || null,
+      name_suffix: built.suffix || null,
+      schedule_rules: null,
+      teab_repo_ident: data.teab_repo_ident ?? null,
+      email_summary: data.email_summary,
+      schedule_kind: 'once',
+      run_at: new Date(runAtMs),
+    })
+    registry.register(task)
+    return c.json(withNext3(task), 201)
+  }
+
   // Require either cron_expr or schedule_rules. Derive cron_expr from rule[0]
   // when only schedule_rules was sent. The legacy column stays populated.
   if (!data.cron_expr && (!data.schedule_rules || data.schedule_rules.length === 0)) {
@@ -374,6 +457,8 @@ scheduledTasks.post('/', async (c) => {
     name_prefix: built.prefix || null,
     name_suffix: built.suffix || null,
     schedule_rules: data.schedule_rules ?? null,
+    teab_repo_ident: data.teab_repo_ident ?? null,
+    email_summary: data.email_summary,
   })
 
   registry.register(task)
@@ -504,6 +589,8 @@ scheduledTasks.patch('/:id', async (c) => {
     max_concurrent: data.max_concurrent,
     post_run_actions: data.post_run_actions !== undefined ? v.actions : undefined,
     schedule_rules: data.schedule_rules !== undefined ? (data.schedule_rules as any[]) : undefined,
+    teab_repo_ident: data.teab_repo_ident !== undefined ? (data.teab_repo_ident ?? null) : undefined,
+    email_summary: data.email_summary,
   })
   if (!updated) return c.json({ error: 'not_found' }, 404)
 

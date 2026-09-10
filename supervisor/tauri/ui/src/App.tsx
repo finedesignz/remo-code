@@ -5,7 +5,6 @@ import ConnectionsPage from "./pages/ConnectionsPage";
 import SecurityPage from "./pages/SecurityPage";
 import OnboardingPage from "./pages/OnboardingPage";
 import UpdateNotifier from "./UpdateNotifier";
-import { startAutoUpdateWatcher } from "./lib/autoUpdater";
 
 interface RuntimeStatus {
   api_key_set: boolean;
@@ -36,10 +35,13 @@ export default function App() {
     }
   }, []);
 
+  // NOTE: the auto-update watcher is NOT started here any more. It lives in the
+  // Rust backend (`src-tauri/src/auto_update.rs`, spawned from the Tauri `setup`
+  // hook) because this component only mounts when the Settings WINDOW is open —
+  // and the supervisor normally runs as a tray app with no window, so the
+  // webview-hosted watcher never ran on exactly the headless hosts it was for.
   useEffect(() => {
-    const stop = startAutoUpdateWatcher();
     void checkFirstRun();
-    return () => stop();
   }, [checkFirstRun]);
 
   if (needsOnboarding === null) {

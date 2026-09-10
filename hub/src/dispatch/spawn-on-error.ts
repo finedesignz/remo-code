@@ -47,9 +47,10 @@
  * scaled to >1 replica, replace this Set with a DB advisory lock /
  * `INSERT ... ON CONFLICT` sentinel keyed by session_id.
  */
+import { isAbsolute as isAbsolutePosix } from 'node:path/posix'
+import { isAbsolute as isAbsoluteWin32 } from 'node:path/win32'
 import { getChannel } from '../ws/registry.ts'
 import { log } from '../observability/logger.ts'
-import { getSessionSkipPermissions } from '../db/dal.ts'
 
 // Heavy deps (supervisor-registry, budget, DAL) are imported LAZILY inside the
 // function below — not statically — so that merely importing this module (e.g.
@@ -92,7 +93,7 @@ export function _resetSpawnLocks(): void {
 async function resolveStartTarget(
   userId: string,
   sessionId: string,
-): Promise<{ supervisorId: string; cwd: string } | null> {
+): Promise<{ supervisorId: string; cwd: string; sessionSkipPerms: boolean } | null> {
   const { listOnlineSupervisorIdsForUser, isSupervisorOnline } = await import(
     '../ws/supervisor-registry.ts'
   )
@@ -107,8 +108,32 @@ async function resolveStartTarget(
   if (!session) return null
   const cwd = (session as any).project_dir as string | null
   if (!cwd) return null
+  // Root-cause fix (repo_path placeholder investigation): a session's
+  // project_dir is sometimes a non-filesystem sentinel rather than a real
+  // repo path — e.g. the `__web_self__` row hub/scripts/ensure-web-error-project.ts
+  // provisions purely as an FK anchor for browser-side error capture
+  // (status='offline', "this session never connects" by design). If an
+  // inbound error/feedback/revanote dispatch resolves such a session and we
+  // still forward `session.start` with that literal string as repo_path, the
+  // supervisor's `assertWithinRoots` correctly rejects it as `sandbox_escape`
+  // — but that's a false-positive security denial for a session that was
+  // never launchable, not a real sandbox-boundary violation. It also pollutes
+  // supervisor/audit.jsonl with a placeholder repo_path indistinguishable
+  // from genuine escape attempts. A session's cwd MUST be a real absolute
+  // filesystem path before we dispatch a launch for it — refuse (no target,
+  // no dispatch, no audit noise) rather than forwarding a placeholder.
+  // The hub runs on Linux (Coolify) but supervisors — and therefore
+  // project_dir values — can be Windows or POSIX machines, so check both
+  // conventions rather than the host platform's `node:path` (which would
+  // wrongly reject every legitimate Windows repo path like
+  // `C:\Users\artic\GitHub\ottolax` on a Linux hub).
+  if (!isAbsolutePosix(cwd) && !isAbsoluteWin32(cwd)) {
+    log.info('spawn_on_error.non_path_project_dir', { user_id: userId, session_id: sessionId, project_dir: cwd })
+    return null
+  }
+  const sessionSkipPerms = (session as any).dangerously_skip_permissions === true
 
-  return { supervisorId, cwd }
+  return { supervisorId, cwd, sessionSkipPerms }
 }
 
 async function waitForOnline(sessionId: string, deadline: number): Promise<boolean> {
@@ -128,7 +153,11 @@ async function waitForOnline(sessionId: string, deadline: number): Promise<boole
  * Intended to be passed as the pipeline's `ensureOnline` dep. Safe to call even
  * when the session is already online (returns true immediately).
  */
-export async function ensureSessionOnline(userId: string, sessionId: string): Promise<boolean> {
+export async function ensureSessionOnline(
+  userId: string,
+  sessionId: string,
+  opts: { useSessionSkipPermissions?: boolean } = {},
+): Promise<boolean> {
   // Fast path: already online (e.g. raced online between isOnline and here).
   if (getChannel(sessionId) != null) return true
   if (!spawnOnErrorEnabled()) return false
@@ -148,7 +177,7 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
       log.info('spawn_on_error.no_target', { user_id: userId, session_id: sessionId })
       return false
     }
-    const { supervisorId, cwd } = target
+    const { supervisorId, cwd, sessionSkipPerms } = target
 
     const { reserveSessionSlot, releaseSessionSlot } = await import('../sessions/budget.ts')
     const { endRun } = await import('../db/supervisor-dal.ts')
@@ -192,7 +221,16 @@ export async function ensureSessionOnline(userId: string, sessionId: string): Pr
     }
     const runId = reservation.run.id
 
-    const skipPerms = await getSessionSkipPermissions(sessionId, userId)
+    // Permission posture. Default OFF: error-capture / feedback intake is
+    // untrusted + anonymous-reachable, so it never runs with prompts disabled,
+    // whatever the session row's default says. A caller MAY opt in to the
+    // SESSION's own `dangerously_skip_permissions` (revanote auto-wake): a
+    // headless stream-json runner cannot answer live permission prompts, so
+    // without this the woken agent replies but never edits any files. The
+    // supervisor's `allow_dangerous_skip_permissions` config remains the hard
+    // ceiling (applied = requested && allowed), so opting in can never exceed
+    // what the operator already permitted for that host.
+    const skipPerms = opts.useSessionSkipPermissions ? sessionSkipPerms : false
     try {
       sendToSupervisor(supervisorId, {
         type: 'session.start',

@@ -185,10 +185,19 @@ export async function getTodayTokenCostUsd(userId: string, timezone: string): Pr
  * The token-count twin of {@link getTodayTokenCostUsd}: backs the non-bypassable
  * `dailyTokenCapGate` (dispatch/gates.ts) so the orchestrator has a real ceiling
  * that means something on a flat-rate Max subscription (where the dollar cost cap
- * is meaningless — issue #6). Sums ALL consumed tokens (input + output + both
- * cache buckets) from `token_usage` with the SAME tz-day boundary the cost cap +
- * GET /api/usage/cost "today" use, so all three windows agree. token_usage is the
- * single source (every usage_event over /ws/agent — interactive, telegram,
+ * is meaningless — issue #6). Counts ALL FOUR token buckets billed against the
+ * subscription: `input_tokens + output_tokens + cache_creation_input_tokens +
+ * cache_read_input_tokens`.
+ *
+ * History: PR #335 EXCLUDED the cache buckets on the theory that cache-read is
+ * "free". It is not free against a subscription RATE LIMIT. The 2026-07-09→11
+ * incident proved it: a wedged orchestrator tick loop injected a macro every 60s
+ * for 2 days (2,192 turns), each re-reading a ~1M-token context — 2.83 BILLION
+ * cache_read_input_tokens — while the I/O-only cap never came close to tripping,
+ * and the owner's Claude subscription was torched. Cache-read counts.
+ *
+ * Same tz-day boundary as the cost cap + GET /api/usage/cost "today". token_usage
+ * is the single source (every usage_event over /ws/agent — interactive, telegram,
  * webhook, scheduled), so no double-count.
  */
 export async function getTodayTokenTotal(userId: string, timezone: string): Promise<number> {

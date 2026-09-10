@@ -1,24 +1,49 @@
 import type { ServerWebSocket } from 'bun'
 import { AgentInbound } from './agent-protocol'
 import { TermFrame, isTermFrameType, isAgentToHubTermType } from './term-protocol'
-import { verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo, getSessionHostname } from '../db/dal'
+import { verifyApiKeyWithScope, verifyApiKey, findOrCreateAgentSession, findOrCreateAgentSessionV2, findOrCreateRootlessSession, updateSessionStatus as setSessionStatus, insertMessage, insertAssistantPlaceholder, appendToMessage, finalizeMessage, listSessions, getUserSystemPrompt, getUserInstructions, recentlyDisconnectedForProjectDir, updateSessionAgentInfo, getSessionHostname, getSupervisorHostnameForApiKey, backfillSessionHostname } from '../db/dal'
 import { createHash } from 'crypto'
 import { hashToken } from '../lib/crypto'
 import { generateToken } from '../utils/token'
 import { registerChannel, unregisterChannel, getChannel, broadcastToSubscribers, broadcastToUser } from './registry'
-import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows } from '../db/supervisor-dal'
+import { verifyApiKeyWithCapability, upsertSupervisor, endRun, replaceSupervisorCommands, cleanupStaleSupervisorRows, finalizeOrphanedRunsForSupervisor } from '../db/supervisor-dal'
 import { ensureSupervisorProject } from '../db/error-capture-dal'
 import { getCapacitySnapshot } from '../sessions/budget'
 import {
   registerSupervisor, unregisterSupervisor, resolveRequest, rejectRequest,
   updateSupervisorState, heartbeatSupervisor, getSupervisor,
   setSupervisorSessionInventory,
+  setSupervisorCircuitBreakers,
+  setSupervisorStatusServer,
 } from './supervisor-registry'
 import { log } from '../observability/logger'
 
 const AUTH_TIMEOUT_MS = 5_000
 const HEARTBEAT_INTERVAL_MS = 30_000
 const RATE_LIMIT = { max: 120, windowMs: 10_000 }
+
+/**
+ * fix/supervisor-hostname-required — hostname is REQUIRED on a `/ws/agent` auth
+ * frame. A hostname-less auth mints a live phantom channel behind a
+ * `status='online', hostname=NULL` row (a ghost): `getChannel() != null` so the
+ * orchestrator dispatches into the void and autospawn never fires. The
+ * ghost-reaper mops these up, but the tap keeps running.
+ *
+ * COMPAT: the supervisor ships as a signed MSI on user machines. Hard-rejecting
+ * today would lock out any installed build that doesn't send a hostname, so the
+ * default is LOG-AND-ACCEPT (after the hub's own hostname-resolution fallback
+ * chain, which is what actually prevents the ghost row). Flip
+ * `REMO_WS_REQUIRE_HOSTNAME=1` (accepts 1|true|yes|on) once every installed
+ * supervisor is known to be ≥ the release that guarantees a hostname; the hub
+ * then closes the socket with 4001 `hostname_required` instead of guessing.
+ */
+export function isHostnameRequiredOnAgentAuth(
+  env: Record<string, string | undefined> = process.env as any,
+): boolean {
+  const raw = env.REMO_WS_REQUIRE_HOSTNAME
+  if (raw == null) return false
+  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase())
+}
 
 /**
  * Set of `last_exit.reason` values that supervisor's `process-manager.ts`
@@ -38,9 +63,43 @@ const RATE_LIMIT = { max: 120, windowMs: 10_000 }
 export const SUPERVISOR_START_REJECT_REASONS: ReadonlySet<string> = new Set([
   'concurrency_cap',
   'duplicate_run',
+  // 2026-08-18 (repo_path placeholder investigation) — 'sandbox_escape' split
+  // into three finer per-run rejections (see supervisor/src/sandbox.ts
+  // SandboxEscapeKind); all three carry the exact same "per-run, not
+  // supervisor-wide 'stopped'" semantics the original single reason did, so
+  // all three MUST stay in this set for the same reason 'sandbox_escape'
+  // used to.
+  'sandbox_path_missing',
+  'sandbox_not_under_roots',
+  'sandbox_roots_unresolvable',
+  // BACKWARD COMPAT — the hub serves supervisors that are already deployed
+  // and do NOT upgrade atomically with the hub. The current released
+  // supervisor (v0.14.4; v0.14.5 exists but is not yet installed fleet-wide
+  // as of this fix) still emits the literal 'sandbox_escape' — it predates
+  // the three-way split above. If this hub build drops 'sandbox_escape' from
+  // its accepted set, every rejection from a not-yet-upgraded supervisor
+  // becomes an UNRECOGNIZED reason, which `isStartRejectStateMessage` then
+  // treats as a genuine supervisor-lifecycle stop instead of a per-run
+  // rejection — persisting the whole supervisor row as `state='stopped'`.
+  // That is exactly the 2026-05-28 prod failure this set exists to prevent,
+  // now for version skew instead of a missing reason. Retained here even
+  // though the CURRENT supervisor code (start-rejection-reasons.ts) no
+  // longer emits it — remove only once no fleet supervisor older than the
+  // release carrying the three-way split can still be running.
   'sandbox_escape',
+  // fix/session-start-freeze (2026-08-18 QC/D2) — the sandbox check (realpath
+  // on the repo path / configured roots) hit its own bounded timeout instead
+  // of definitively resolving. Per-run rejection, same as 'sandbox_escape' —
+  // MUST stay in this set or a single stalled-filesystem rejection persists
+  // the whole supervisor row as `state='stopped'`, exactly the 2026-05-28 bug
+  // this set exists to prevent. Kept in lock-step with
+  // `supervisor/src/process-manager.ts` `StartRejection.reason`.
+  'sandbox_check_timeout',
   'not_git_repo',
   'legacy_agent_spawn_disabled',
+  // fix/stop-the-bleed — the supervisor's spawn circuit-breaker refused THIS run
+  // (the repo is crash-looping). Per-run, not a supervisor-wide 'stopped'.
+  'circuit_open',
 ])
 
 /**
@@ -241,6 +300,18 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     if (ws.data.authenticated) return
     const keyHash = await hashToken(msg.api_key)
 
+    // Milestone SKEY — /ws/agent (both roles) is the HOST-SPAWN surface and
+    // requires the `agent` scope. NULL/empty scopes = legacy full access, so
+    // every pre-existing key keeps working with zero migration. A scoped
+    // external key (ext:read / ext:ask only) is rejected here by construction.
+    const scoped = await verifyApiKeyWithScope(keyHash, 'agent')
+    if ('error' in scoped && scoped.error === 'missing_scope') {
+      log.warn('agent.auth_fail', { reason: 'missing_agent_scope', hash_prefix: keyHash.slice(0, 8) })
+      ws.send(JSON.stringify({ type: 'auth_error', error: 'missing scope: agent', reason: 'missing_scope' }))
+      ws.close(4001, 'missing_agent_scope')
+      return
+    }
+
     if (msg.role === 'supervisor') {
       const verified = await verifyApiKeyWithCapability(keyHash, 'supervisor')
       if (!verified.ok) {
@@ -326,13 +397,40 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     const tokenHash = await hashToken(rawToken)
     const cliKind: 'claude' | 'codex' = (msg as any).cli_kind ?? 'claude'
     const gitInput = (msg as any).git as Parameters<typeof findOrCreateAgentSessionV2>[4]
+    // Resolve a non-null hostname for the session. An online session with a NULL
+    // hostname is a ghost: pickSupervisorForSession can't map it (autospawn
+    // refuses `supervisor_offline`) and the ghost-reaper's grace keeps resetting.
+    // Fallback chain: auth frame → agent_info → the supervisor bound to this
+    // api_key (an agent shares its host supervisor's key). Never invent one.
+    const advertisedHostname = (msg.hostname || (msg as any).agent_info?.hostname || '').toString().trim()
+    let effectiveHostname = advertisedHostname
+    if (!effectiveHostname) {
+      // Contract violation: every supported supervisor sends a hostname. Emit a
+      // metric-able warn on EVERY such frame so the compat window is
+      // observable (count → 0 means it's safe to flip REMO_WS_REQUIRE_HOSTNAME).
+      log.warn('agent.auth_hostname_missing', {
+        user_id: userId,
+        project_dir: projectDir,
+        hash_prefix: keyHash.slice(0, 8),
+        enforced: isHostnameRequiredOnAgentAuth(),
+      })
+      if (isHostnameRequiredOnAgentAuth()) {
+        ws.send(JSON.stringify({ type: 'auth_error', error: 'hostname required on /ws/agent auth', reason: 'hostname_required' }))
+        ws.close(4001, 'hostname_required')
+        return
+      }
+      try { effectiveHostname = (await getSupervisorHostnameForApiKey(keyHash)) ?? '' } catch { effectiveHostname = '' }
+      if (effectiveHostname) {
+        console.warn(`[agent] auth omitted hostname; resolved '${effectiveHostname}' from api_key supervisor to avoid a ghost session`)
+      }
+    }
     const session = await findOrCreateAgentSessionV2(
       userId,
       projectDir,
       tokenHash,
       cliKind,
       gitInput,
-      msg.hostname ?? null,
+      effectiveHostname || null,
     )
 
     if (!session.created) {
@@ -352,17 +450,23 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
 
     console.log(`[agent] authenticated session=${session.id} user=${userId} project=${projectDir} cli=${cliKind} reused=${!session.created} repo_keyed=${session.repo_keyed} migrated=${session.migrated ?? false}`)
     registerChannel(session.id, userId, ws as any)
-    await setSessionStatus(session.id, 'online')
 
-    // Persist agent host info (OS, CPU, RAM, runtime versions) for the Settings UI.
+    // Persist the resolved hostname BEFORE flipping the session online so it is
+    // never observable as online+NULL-hostname (a ghost). agent_info (when sent)
+    // carries the richer host detail for the Settings UI; either way the
+    // hostname column is backfilled from effectiveHostname.
     if ((msg as any).agent_info) {
-      const info = { ...(msg as any).agent_info, hostname: (msg as any).agent_info.hostname || msg.hostname }
+      const info = { ...(msg as any).agent_info, hostname: (msg as any).agent_info.hostname || effectiveHostname || undefined }
       try { await updateSessionAgentInfo(session.id, info) } catch (e: any) {
         console.error('[agent] failed to persist agent_info', e?.message)
       }
-    } else if (msg.hostname) {
-      try { await updateSessionAgentInfo(session.id, { hostname: msg.hostname }) } catch {}
     }
+    // Chokepoint: guarantee the row carries a hostname before it flips online,
+    // so it is never observable as a routable-but-unroutable ghost. Backfill
+    // only (COALESCE) — never clobber an existing host.
+    try { await backfillSessionHostname(session.id, effectiveHostname || null) } catch {}
+
+    await setSessionStatus(session.id, 'online')
 
     // Phase 05: handle rootless ambient-session advertisement.
     // The agent sends `rootless_sessions: ['claude','codex'?]` to opt-in to
@@ -644,19 +748,6 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
     } catch (err: any) {
       console.warn('[agent] emitAssistantMessageFinal failed', err?.message)
     }
-    // Phase 06 plan 008 — finalize a SUPERVISOR-SPAWNED triage run for this
-    // session. The supervisor-spawn triage path is NOT a per-session-queue
-    // dispatch (it spawns a fresh session via the supervisor, parallel to
-    // sendSupervisorTask), so it stays on the legacy `pending` map +
-    // onTriageAssistantMessage hook. triageActiveForSession is true only for
-    // those spawned sessions; LOCAL-AGENT triage finalizes via onSessionReply
-    // below. Telegram's outbound bridge is also unmigrated (subsystem 4).
-    try {
-      const tri = await import('../scheduler/senders/triage.ts')
-      if (tri.triageActiveForSession(sessionId)) {
-        void tri.onTriageAssistantMessage(sessionId, msg.content)
-      }
-    } catch {}
     // Round-2: scheduler (session sends + local-agent triage), error-capture, and
     // revanote ALL finalize via the shared dispatch pipeline's finalize hook
     // (RunStore.onFinalize) + waiter promotion. onSessionReply no-ops for any
@@ -715,6 +806,17 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
           })
           costSource = 'estimated'
         }
+      }
+      // fix/run-cost-attribution: attribute this same cost onto any in-flight
+      // scheduled run targeting this session, so `scheduled_task_runs.cost_usd`
+      // is populated at finalize instead of staying permanently NULL. Purely
+      // additive bookkeeping on the scheduler's own in-memory run map — never
+      // written back into token_usage, so the daily cap total is unaffected.
+      try {
+        const { accrueRunCost } = await import('../scheduler/dispatcher.ts')
+        accrueRunCost(ws.data.sessionId ?? null, costUsd)
+      } catch (err: any) {
+        console.error('[agent] accrueRunCost failed', err?.message)
       }
       await recordTokenUsage({
         userId: ws.data.userId,
@@ -997,6 +1099,29 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     return
   }
 
+  // fix/supervisor-periodic-repo-rescan — rescan ack from supervisor → resolve
+  // the pending request the POST /api/supervisors/:id/scan handler is awaiting.
+  if (msg.type === 'supervisor.rescan_ack') {
+    if (msg.ok) {
+      resolveRequest(supervisorId, msg.req_id, msg)
+    } else {
+      rejectRequest(supervisorId, msg.req_id, msg.error || 'rescan_failed')
+    }
+    return
+  }
+
+  // milestone remote-update-trigger — force-update ack from supervisor →
+  // resolve the pending request the POST /api/supervisors/:id/update handler
+  // is awaiting. Mirrors the rescan_ack handling above.
+  if (msg.type === 'supervisor.force_update_ack') {
+    if (msg.ok) {
+      resolveRequest(supervisorId, msg.req_id, msg)
+    } else {
+      rejectRequest(supervisorId, msg.req_id, msg.error || 'force_update_failed')
+    }
+    return
+  }
+
   if (msg.type === 'supervisor.repo_inventory') {
     // Phase 08 §15 (Plan 003 T4): fan inventory into sessions + pending_local_repos.
     try {
@@ -1097,6 +1222,42 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
           scanned_at: scannedAt,
         })
       }
+      // Ghost-run reconciliation: the inventory we just received is the live
+      // runner set. Close any open `session_runs` for this supervisor whose
+      // session is no longer hosted, so the Connections "running" dot stops
+      // diverging from the (inventory-driven) Sessions list. See
+      // finalizeOrphanedRunsForSupervisor for the race-grace rationale.
+      const liveIds = msg.sessions.map((s) => s.session_id)
+      const closed = await finalizeOrphanedRunsForSupervisor(supervisorId, liveIds)
+      if (closed > 0) {
+        console.log(`[supervisor] reconciled ${closed} ghost run(s) supervisor=${supervisorId}`)
+      }
+      // fix/stop-the-bleed — record the supervisor's spawn circuit-breaker state
+      // (absent on pre-fix supervisors ⇒ treated as "healthy/unknown", the old
+      // behaviour). A NEWLY-open breaker is logged loudly: prod 2026-07 the
+      // breaker latched open for FOUR DAYS with zero CLI spawns while the hub
+      // reported perfectly healthy. `GET /api/supervisors` surfaces it too.
+      const breakers = msg.circuit_breakers ?? []
+      const { newlyOpen } = setSupervisorCircuitBreakers(supervisorId, breakers)
+      for (const b of newlyOpen) {
+        console.error(
+          `[supervisor] CIRCUIT BREAKER ${b.state.toUpperCase()} supervisor=${supervisorId} repo=${b.repo_path} ` +
+          `failed_probes=${b.failed_probes} exhausted=${b.exhausted} reason=${b.last_reason ?? 'unknown'} — ` +
+          `NO CLI will spawn for this repo until it closes`,
+        )
+      }
+      // fix/headless-autoupdate — record loopback status-server health. A
+      // supervisor that could not bind 9106 has NO /sup/status: the tray and the
+      // owner's probe are blind. Log once per trip; `GET /api/supervisors`
+      // surfaces the standing state.
+      const { newlyDegraded } = setSupervisorStatusServer(supervisorId, msg.status_server)
+      if (newlyDegraded) {
+        console.error(
+          `[supervisor] STATUS SERVER DOWN supervisor=${supervisorId} ` +
+          `port=${msg.status_server?.port ?? 'none'} error=${msg.status_server?.last_error ?? 'unknown'} — ` +
+          `/sup/status is unavailable (tray + :9106 probe blind); supervisor is retrying the bind`,
+        )
+      }
     } catch (err: any) {
       console.error('[supervisor] session_inventory handler failed', err?.message)
     }
@@ -1189,6 +1350,22 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       await sup.handleSupervisorRunEvent(supervisorId, userId, msg)
     } catch (err: any) {
       console.error('[supervisor] run event handler failed', err?.message)
+    }
+    // TEAB-05: the same run lifecycle drives the hub-side TEAB poll-to-terminal
+    // loop. Each handler ignores run ids it doesn't own, so calling both is safe.
+    try {
+      const teab = await import('../scheduler/senders/teab.ts')
+      await teab.handleTeabRunEvent(supervisorId, userId, msg)
+    } catch (err: any) {
+      console.error('[supervisor] teab run event handler failed', err?.message)
+    }
+    // Milestone ASK Phase 1: the same run lifecycle carries the READ-ONLY
+    // session_transcript_tail / session_memory replies. Ignores foreign run ids.
+    try {
+      const ext = await import('../ext/supervisor-read.ts')
+      ext.handleExtRunEvent(supervisorId, userId, msg)
+    } catch (err: any) {
+      console.error('[supervisor] ext read event handler failed', err?.message)
     }
     return
   }

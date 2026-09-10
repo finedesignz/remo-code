@@ -23,6 +23,12 @@ export interface OrchestratorRow {
   sort_order: number;
   created_at: string;
   updated_at: string;
+  /**
+   * fix/orchestrator-tick-reinject: when this row last FIRED (was dispatched by the
+   * due-scan). The cadence gate in `isRowDue()` requires the rule's interval to have
+   * elapsed since this stamp; null ⇒ never fired ⇒ eligible immediately.
+   */
+  last_fired_at: string | null;
 }
 
 export interface NewOrchestratorRow {
@@ -94,6 +100,25 @@ export async function updateOrchestratorRowFields(
     RETURNING *
   `;
   return rows[0] ?? null;
+}
+
+/**
+ * fix/orchestrator-tick-reinject: stamp `last_fired_at` on the rows the due-scan
+ * just dispatched. This is what ADVANCES the cadence — without it a row stays DUE
+ * on every 60s tick and the macro prompt is re-injected once a minute forever.
+ * Best-effort no-op on an empty id list.
+ */
+export async function markOrchestratorRowsFired(
+  ids: string[],
+  firedAt: Date = new Date(),
+): Promise<number> {
+  if (ids.length === 0) return 0;
+  const rows = await sql`
+    UPDATE orchestrator_rows SET last_fired_at = ${firedAt}
+    WHERE id IN ${sql(ids)}
+    RETURNING id
+  `;
+  return rows.length;
 }
 
 // Delete a single row. Returns true when a row was removed. (Phase 31 — UI CRUD.)
@@ -313,6 +338,38 @@ export async function recentRoutineRunLog(
   `;
 }
 
+// Paginated, user-scoped run-log read (OBSRV-01 / RUNLOG-01/02).
+// Joins through sessions.user_id to enforce the security invariant that a
+// user can only read their own rows. Optional session_id filter narrows to
+// per-session view; omit for hub-wide (all sessions for this user).
+export async function listRunLogForUser(opts: {
+  userId: string;
+  sessionId?: string | null;
+  limit: number;
+  offset: number;
+}): Promise<RoutineRunLogEntry[]> {
+  const { userId, sessionId, limit, offset } = opts;
+  if (sessionId) {
+    return sql<RoutineRunLogEntry[]>`
+      SELECT r.*
+      FROM routine_run_log r
+      JOIN sessions s ON s.id = r.session_id
+      WHERE s.user_id = ${userId}::uuid
+        AND r.session_id = ${sessionId}
+      ORDER BY r.created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `;
+  }
+  return sql<RoutineRunLogEntry[]>`
+    SELECT r.*
+    FROM routine_run_log r
+    JOIN sessions s ON s.id = r.session_id
+    WHERE s.user_id = ${userId}::uuid
+    ORDER BY r.created_at DESC
+    LIMIT ${limit} OFFSET ${offset}
+  `;
+}
+
 // ── routine_queue ──────────────────────────────────────────────────────────
 
 export type RoutineQueueStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
@@ -461,6 +518,42 @@ export async function countAutospawnLaunchesToday(
     WHERE s.user_id = ${userId}
       AND r.command = ${AUTOSPAWN_LAUNCH_COMMAND}
       AND r.created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}
+  `;
+  return Number(rows[0]?.n ?? 0);
+}
+
+/**
+ * Inject-rate source: count the orchestrator prompt INJECTS for one session in the
+ * trailing `windowMinutes` (default 60). Reuses `routine_run_log` — the macro cycle
+ * already writes exactly one row per inject with `outcome = <InjectOutcome.kind>`
+ * (macro-cycle.ts), so the rows whose outcome means "a prompt actually went to the
+ * CLI" are the injects. No new table, no new column.
+ *
+ * Counted outcomes: dispatched | queued | autospawn_launched | autospawn_parked.
+ * Everything else (skipped / refused* / no_session / failed / stub_not_ready) did
+ * NOT drive a turn and must not consume the session's hourly budget.
+ *
+ * Backs `sessionInjectRateGate` (dispatch/gates.ts) — the ceiling that makes the
+ * 2026-07 wedged-tick-loop incident (1,440 injects/day into one session) impossible.
+ */
+export const INJECT_OUTCOMES = [
+  'dispatched',
+  'queued',
+  'autospawn_launched',
+  'autospawn_parked',
+] as const;
+
+export async function countSessionInjectsSince(
+  sessionId: string,
+  windowMinutes = 60,
+): Promise<number> {
+  const minutes = Number.isFinite(windowMinutes) && windowMinutes > 0 ? windowMinutes : 60;
+  const rows = await sql<{ n: string | null }[]>`
+    SELECT COUNT(*)::text AS n
+    FROM routine_run_log
+    WHERE session_id = ${sessionId}
+      AND outcome = ANY(${[...INJECT_OUTCOMES]}::text[])
+      AND created_at >= now() - make_interval(mins => ${minutes})
   `;
   return Number(rows[0]?.n ?? 0);
 }

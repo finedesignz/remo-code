@@ -21,6 +21,10 @@
 
 import { sql } from '../db/postgres.ts';
 import type { RoutineQueueEntry } from '../db/orchestrator-rows-dal.ts';
+import {
+  orchestratorCyclesEnqueued,
+  orchestratorCyclesDrained,
+} from '../observability/orchestrator-metrics.ts';
 
 // ── Priority enum (R-ADO-06) ─────────────────────────────────────────────────
 // Higher integer drains first. deploy-fix outranks build when the cap is
@@ -74,7 +78,24 @@ export async function enqueueCycle(
     VALUES (${sessionId}, ${priority}, 'pending')
     RETURNING *
   `;
+  try { orchestratorCyclesEnqueued.inc(); } catch { /* metrics must never break enqueue */ }
   return rows[0];
+}
+
+/**
+ * fix/orchestrator-tick-reinject: true when this session already has a cycle in the
+ * queue that has not settled (pending OR running). The due-scan uses this as an
+ * IN-FLIGHT GUARD: enqueueing a second cycle for a session whose macro turn is still
+ * working just stacks another inject behind it. The claim's per-session lock only
+ * excludes `running`, so pending rows could pile up unbounded.
+ */
+export async function hasActiveCycle(sessionId: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    SELECT id FROM routine_queue
+    WHERE session_id = ${sessionId} AND status IN ('pending','running')
+    LIMIT 1
+  `;
+  return rows.length > 0;
 }
 
 // ── Atomic claim (R-ADO-05 + R-ADO-07) ───────────────────────────────────────
@@ -166,6 +187,7 @@ export async function drainOnce(): Promise<RoutineQueueEntry[]> {
   draining = true;
   try {
     const claimed = await claimCycles();
+    try { orchestratorCyclesDrained.inc({}, claimed.length); } catch { /* metrics must never break drain */ }
     const runner = cycleRunner;
     await Promise.all(
       claimed.map(async (entry) => {

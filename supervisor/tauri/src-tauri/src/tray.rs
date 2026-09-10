@@ -138,8 +138,51 @@ pub fn spawn_status_poller(app: AppHandle) {
     });
 }
 
+/// True only when BOTH versions are non-empty AND differ. Empty/equal → false,
+/// so a parse failure, an unreachable sidecar, or a matched pair never triggers
+/// a restart.
+fn versions_drifted(tray: &str, sidecar: &str) -> bool {
+    !tray.is_empty() && !sidecar.is_empty() && tray != sidecar
+}
+
+/// One-shot guard so a persistent version mismatch can't cause a restart loop.
+static DRIFT_RESTART_DONE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Self-heal: if the live sidecar reports a version that differs from the tray's
+/// own build, a stale sidecar survived a manual install. Restart it ONCE so the
+/// hub sees the current version and the PTY subscriber set is rebuilt cleanly.
+fn maybe_restart_on_version_drift(app: &AppHandle, s: &runtime_cmds::SidecarStatus) {
+    // Only act on a reachable sidecar reporting a concrete version.
+    if !s.reachable {
+        return;
+    }
+    let sidecar_version = match s.version.as_deref() {
+        Some(v) => v,
+        None => return,
+    };
+    let tray_version = env!("CARGO_PKG_VERSION");
+    if !versions_drifted(tray_version, sidecar_version) {
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    // compare_exchange: fire exactly once across all ticks.
+    if DRIFT_RESTART_DONE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        log::warn!(
+            "[drift] sidecar version {sidecar_version} != tray {tray_version} — restarting sidecar once to reconcile"
+        );
+        sidecar::restart(app);
+    }
+}
+
 fn tick(app: &AppHandle) {
     let s = runtime_cmds::get_sidecar_status();
+
+    // Self-heal a stale sidecar left over from a manual MSI install.
+    maybe_restart_on_version_drift(app, &s);
     let dyn_menu = match DYN_MENU.get() {
         Some(m) => m,
         None => return,
@@ -181,5 +224,27 @@ fn tick(app: &AppHandle) {
     );
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(&tip));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::versions_drifted;
+
+    #[test]
+    fn drift_true_when_differing_nonempty() {
+        assert!(versions_drifted("0.12.0", "0.11.0"));
+    }
+
+    #[test]
+    fn drift_false_when_equal() {
+        assert!(!versions_drifted("0.12.0", "0.12.0"));
+    }
+
+    #[test]
+    fn drift_false_when_either_empty() {
+        assert!(!versions_drifted("", "0.11.0"));
+        assert!(!versions_drifted("0.12.0", ""));
+        assert!(!versions_drifted("", ""));
     }
 }

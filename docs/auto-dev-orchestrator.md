@@ -32,9 +32,28 @@ That task owns a set of **command rows** in `orchestrator_rows`.
 | `frequency_label` | `Never` (⇒ disabled), `Once` (⇒ max_runs=1, auto-disables after one run), or a cadence label |
 | `micro_prompt` | free text for a custom row, wrapped in the finish→PR→reviewer envelope |
 | `sort_order` | row ordering in the UI |
+| `last_fired_at` | when the due-scan last DISPATCHED this row — the **cadence state**. A row is due again only once `schedule_rule`'s interval has ELAPSED since this stamp |
 
 The schedule is **eligibility**, not the trigger: when the routine fires, a
 controller computes EVERY due row this tick and runs them all (decision D1).
+
+**Cadence advances when the CYCLE runs.** `shouldSkipFire()` only answers *"is this
+rule eligible at `now`"* (start_at / week+month parity / `active_window`) — for a
+minutes/hours/days rule it says "fire" for every `now` past `start_at`. The hub
+scheduler pairs it with `scheduled_tasks.next_fire_at`; orchestrator rows use
+`last_fired_at`. Without it an `Every 4h` row is DUE on all 1440 daily 60s ticks and
+the macro prompt is re-injected once a minute (the 2026-07-10 per-tick re-inject
+incident).
+
+The stamp is written by the **cycle runner** (`makeCycleRunner` →
+`markOrchestratorRowsFired`), on the rows the cycle actually selected — **not** at
+enqueue-time. A `routine_queue` entry carries only `session_id`, so the cycle
+re-selects its DUE rows when it drains; stamping at enqueue would leave that cycle
+with zero due rows (a silent autopilot no-op). Between the enqueue and the drain,
+what prevents a second cycle is the due-scan's **in-flight guard**: it skips any
+session with an unsettled (`pending`/`running`) `routine_queue` row. A non-null but
+unparseable stamp is treated as *just fired* (fail-closed), so a corrupt timestamp can
+never re-open per-tick firing.
 
 Two always-on **implicit** rows are NOT in the table: `status-check/decide` (first,
 context gathering) and `deploy+log-verify` (terminal, every tick — see
@@ -59,6 +78,25 @@ partial unique index on `(session_id) WHERE status='running'`) guarantees at mos
 one running cycle per session; a second due-tick for a running session is coalesced,
 not stacked. Priority: a `deploy-fix`/`merge-to-main` row outranks `build` work.
 
+### Stale-lock reaper (`hub/src/orchestrator/stale-lock-reaper.ts`)
+
+Separate from `routine_queue`'s DB lock (which already releases each cycle) is an
+**in-memory** per-session lock in `SessionQueue` (`hub/src/dispatch/session-queue.ts`):
+`inFlight` is set on dispatch and cleared ONLY by `markFinished(sessionId)`. If a
+session's CLI turn never completes (dead/unauthed local session), `markFinished` is
+never called and the lock is held FOREVER — `runMacroCycle`'s `isRunLive` check then
+makes every heartbeat silently `skipped "run live"` indefinitely, with no work and no
+alert (verified in prod: wedged ~2 days).
+
+`reapStaleOrchestratorLocks` runs alongside the due-scan tick (`startDueOrchestratorTick`,
+same `REMO_ORCHESTRATOR_TICK_INTERVAL_MS` cadence): for every enabled orchestrator task
+whose session's in-memory lock age is ≥ `REMO_ORCHESTRATOR_STALE_LOCK_MS` (default 4h),
+it `abandon()`s the lock so the next heartbeat can re-inject, appends a `failed`
+`routine_run_log` row, and fires a one-shot `failure` notify (cooldown-deduped by
+`REMO_ORCHESTRATOR_REAP_NOTIFY_COOLDOWN_MS`, default 1h, so a session that stays wedged
+across several ticks doesn't re-page every minute — it still reaps every tick, just
+notifies at most once per cooldown window).
+
 ## The tick / async model (controller → waves, end-to-end)
 
 This is the Phase-32 wiring that closes the Phase-25 deferral. The hub DRIVES the
@@ -79,7 +117,9 @@ blocks — those are a reconciliation read, see below).
    `routine_run_log` entries + the **DUE rows** (`computeDueRowsForTask`).
 5. `renderControllerPrompt(ctx)` is stamped as the run-log `decision_rationale`
    (context). The DUE ROWS are the authoritative command set:
-   `runWavesFromDueRows(dueRows, ctx, makeLiveSeams())`.
+   `runWavesFromDueRows(dueRows, ctx, makeLiveSeams())`. **(Legacy: the cycle-runner
+   no longer calls this — see the TMAC macro path. `REMO_ORCHESTRATOR_LEGACY_WAVES`
+   and the legacy branch are DELETED; the wave engine remains only as a library.)**
    - `planWaves` groups the due commands into dependency-aware waves (independent
      commands parallel; `plan→execute→ship` sequenced). `merge-to-main` is EXCLUDED.
    - Each row's `micro_prompt` is carried onto its `WaveUnit`.
@@ -169,8 +209,32 @@ Refusal reasons (typed `InjectOutcome`): `not_allowlisted`, `supervisor_offline`
 | Env | Default | Purpose |
 |---|---|---|
 | `REMO_ORCHESTRATOR_AUTOSPAWN` | OFF (`0`) | Arms the autospawn capability. Accepts `1\|true\|yes\|on`. Carries `REMO_ORCHESTRATOR_ENABLED` (both ON). |
-| `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` | `50_000_000` (50M) | Non-bypassable daily TOKEN ceiling. Non-positive/non-finite ⇒ disabled (fail-open). |
+| `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` | `50_000_000` (50M) | Non-bypassable daily TOKEN ceiling. Counts **all four buckets: input + output + cache_creation + cache_read** (see below). Non-positive/non-finite ⇒ disabled (fail-open). |
+| `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` | `4` | Per-session orchestrator inject-RATE ceiling (`sessionInjectRateGate`). Non-positive/non-finite ⇒ disabled (fail-open). |
 | `REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES` | `20` | Per-day autospawn launch-count cap. Non-positive/non-finite ⇒ disabled. |
+
+### 2026-07 runaway-loop incident — what the caps now enforce
+
+The orchestrator injected a macro prompt into ONE session every 60s, 24/7, for 2 days —
+**2,192 turns**, each re-reading a ~1M-token context: **2.83 BILLION `cache_read_input_tokens`**,
+which torched the owner's Claude subscription. Nothing stopped it:
+
+- **The daily token cap never tripped.** `getTodayTokenTotal` counted only `input + output`
+  (PR #335 called cache-read "free"). Cache-read is *not* free against a **subscription rate
+  limit** — only against per-token billing. **Fixed:** the cap now sums
+  `input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens`
+  (same tz-day boundary as `/api/usage/cost`).
+- **Nothing bounded the RATE.** **Fixed:** `sessionInjectRateGate`
+  (`hub/src/dispatch/gates.ts`) counts this session's injects in the trailing 60 minutes from
+  the existing `routine_run_log` (rows whose `outcome` ∈
+  `dispatched | queued | autospawn_launched | autospawn_parked` — refusals/skips don't consume
+  budget) and refuses at/over `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` (default **4**) with
+  `over_session_inject_rate:<n>>=<cap>`. Rows age out of the rolling window, so it re-opens
+  by itself. A legitimate autonomous cycle takes far longer than 15 minutes per unit of work.
+
+Both gates sit in the orchestrator inject gate list ALONGSIDE (never replacing) the threshold
+and dollar cost-cap gates: `[thresholdGate, dailyCostCapGate, dailyTokenCapGate,
+sessionInjectRateGate]` (`hub/src/orchestrator/inject.ts`, both the online and autospawn paths).
 
 **Repo allowlist.** `orchestrator_autospawn_allowlist` (per-user `repo_ident` =
 `github://owner/repo` or `path://<abs>`; idempotent additive DDL, **default EMPTY** so
@@ -268,6 +332,39 @@ Do NOT auto-run against prod — run by hand after reviewing the dry-run output.
 - Single dispatch pipeline (`hub/src/dispatch/`) — no per-subsystem queue/grace.
 - Hub injects TEXT ONLY; the agent owns gh/git/PR/reviewer inside its turn.
 - Off-hours merge is the ONLY auto-merge-to-main path.
+
+## Ghost-session reaper (fix/ghost-session-reaper)
+
+A **ghost session** is a `sessions` row stuck `status='online' AND hostname IS NULL` that has a
+registered agent WebSocket channel but no genuinely-live/productive CLI behind it. It arises when a
+SessionBridge resumes on `/ws/agent` WITHOUT a hostname: the agent-auth path
+(`hub/src/ws/agent.ts`) always `registerChannel` + `setSessionStatus('online')` but only persists
+`hostname` when the auth frame carries one, so the row is left online with a live phantom channel
+that survives hub restarts (the bridge re-auths). Because `getChannel(sessionId) != null`, the
+orchestrator inject treats the ghost as online and dispatches into the void; autospawn (which needs
+`getChannel == null`) never fires, so no real build session spawns and no PRs are produced.
+
+Two-part fix:
+
+- **Reaper** (`hub/src/ws/ghost-reaper.ts`): a boot-started sweep (`startGhostReaperSweep`, wired in
+  `hub/src/index.ts`) enumerates live channels (`listChannelSessionIds` in `ws/registry.ts`), loads
+  each session, and classifies a ghost by SHAPE (`status='online' AND hostname IS NULL`, never
+  `is_orchestrator=true`) that has held that shape continuously for `GHOST_GRACE_MS`. The grace is
+  measured against an in-memory first-seen instant (cached per channel, seeded from `last_activity` on
+  first observation), NOT against live `sessions.last_activity` — the supervisor's 10s
+  `session_inventory` upsert refreshes `last_activity` to `now()` on every push, so a
+  `last_activity`-based grace would never age a supervisor-anchored ghost past the window (verified in
+  prod 2026-07-09: reaped once at boot, then re-anchored and immortal). For each ghost it closes the phantom socket
+  (`4004 ghost_reaped`), `unregisterChannel`s it, and flips the row `offline` — after which the next
+  tick sees `getChannel == null` and autospawns a real session. Fail-open per session. Legit
+  supervisor/rootless sessions always carry a hostname, so the signature is low-false-positive.
+- **Inject guard** (`hub/src/orchestrator/inject.ts`): the raw `getChannel(sessionId) == null`
+  liveness check is replaced by an injectable `isSessionLive(sessionId)` (channel present AND NOT a
+  ghost). A ghost therefore routes to `maybeAutospawnOffline` instead of dispatching into the void.
+
+Env: `REMO_GHOST_GRACE_MS` (default 120000), `REMO_GHOST_SWEEP_INTERVAL_MS` (default 60000),
+`REMO_GHOST_REAPER_DISABLED` (`1|true|yes|on` ⇒ no-op). Tests: `hub/test/ghost-reaper.test.ts`,
+`hub/test/orchestrator-autospawn-inject.test.ts` (ghost → autospawn path).
 
 ## Key files
 

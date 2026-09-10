@@ -1,7 +1,7 @@
 import { existsSync } from 'fs'
 import { join } from 'path'
 import type { SupervisorConfig } from './config'
-import { assertWithinRoots, SandboxEscapeError } from './sandbox'
+import { assertWithinRoots, SandboxEscapeError, SandboxCheckTimeoutError } from './sandbox'
 import { appendAudit, hashPrompt, type AuditEntry } from './audit'
 import { SessionBridge, type SessionBridgeCallbacks, type SessionBridgeOptions } from './runners/session-bridge'
 
@@ -29,9 +29,49 @@ export interface RunSpec {
   }
 }
 
+// 2026-08-18 QC round 3 (R3-2) — START_REJECTION_REASONS moved to the
+// dependency-free leaf module start-rejection-reasons.ts. Re-exported here
+// so nothing else in the supervisor needs to change its import path; see
+// that file's header comment for why it moved (the hub's cross-package
+// import of this file was pulling in the whole supervisor runtime graph
+// under the hub's tsconfig).
+export { START_REJECTION_REASONS, type StartRejectionReason } from './start-rejection-reasons'
+import type { StartRejectionReason as _StartRejectionReason } from './start-rejection-reasons'
+
 export interface StartRejection {
-  reason: 'sandbox_escape' | 'not_git_repo' | 'concurrency_cap' | 'duplicate_run' | 'legacy_agent_spawn_disabled'
+  reason: _StartRejectionReason
   detail?: Record<string, unknown>
+}
+
+/** Circuit-breaker state for one repo. See {@link ProcessManager.circuitBreakerSnapshot}. */
+export type BreakerState = 'open' | 'half_open'
+
+export interface BreakerSnapshotEntry {
+  repo_path: string
+  state: BreakerState
+  /** ISO timestamp the breaker last opened. */
+  opened_at: string
+  /** Consecutive half-open probes that have failed. */
+  failed_probes: number
+  /** true once failed_probes hit the probe cap — no further self-heal attempts. */
+  exhausted: boolean
+  /** Crash reason that tripped it. */
+  last_reason: string | null
+}
+
+interface Breaker {
+  state: BreakerState
+  openedAt: number
+  failedProbes: number
+  /** Cooldown timer (open) or probe-survival timer (half_open). */
+  timer: ReturnType<typeof setTimeout> | null
+  lastReason: string | null
+  /**
+   * The runId admitted as the probe while half_open. The breaker stays half_open
+   * (i.e. an exit is still attributed to the PROBE) until this run has SURVIVED
+   * the health window — spawning is not health.
+   */
+  probeRunId: string | null
 }
 
 export interface ProcessManagerCallbacks {
@@ -42,6 +82,44 @@ export interface ProcessManagerCallbacks {
 const BACKOFF_SCHEDULE = [1000, 2000, 4000, 8000, 16000, 30000]
 const CIRCUIT_WINDOW_MS = 10 * 60_000
 const CIRCUIT_THRESHOLD = 5
+/**
+ * Circuit-breaker COOLDOWN before a half-open probe (fix/stop-the-bleed).
+ *
+ * BUG (prod 2026-07-07 → 2026-07-11): once the breaker tripped it latched OPEN
+ * with no cooldown, no probe, and no hub-visible signal. The TitaniumTower
+ * supervisor spawned ZERO CLIs for four days while the hub reported perfectly
+ * healthy — scheduled tasks, orchestrator and Telegram all silently no-opped,
+ * and recovery needed a human to notice and restart the supervisor by hand.
+ *
+ * The breaker now self-heals: after the cooldown it goes HALF-OPEN, which ADMITS
+ * the next GENUINE hub-dispatched start for that repo as the probe. It NEVER
+ * spawns synthetic work — a supervisor-manufactured probe carrying the tripped
+ * run's `initialPrompt` would replay a user/scheduler prompt with no hub dispatch
+ * and no cost/token gate (an un-gated spend path AND a loop generator). The
+ * admitted probe is gated by construction. It CLOSES the breaker if the CLI
+ * reaches `running`; it RE-OPENS it if it crashes (cooldown doubles up to the
+ * cap). After `CIRCUIT_MAX_PROBES` consecutive failed probes it stays open and is
+ * marked `exhausted` — but it is REPORTED to the hub either way
+ * (`circuitBreakerSnapshot` rides the session_inventory push), so an open breaker
+ * can never again fail silently.
+ */
+const CIRCUIT_COOLDOWN_MS = 5 * 60_000
+const CIRCUIT_MAX_COOLDOWN_MS = 30 * 60_000
+const CIRCUIT_MAX_PROBES = 5
+/**
+ * How long the admitted probe must STAY UP before the breaker closes.
+ *
+ * Closing on `onSpawned` was a second instance of the same bug: a CLI that
+ * crash-loops ON STARTUP — precisely what the breaker exists for — "succeeds" at
+ * spawning every time, so the breaker would close, the process would die a moment
+ * later, `onExit` would no longer see `half_open`, `failedProbes` would never
+ * increment, and the repo would escape the probe budget and retry forever.
+ *
+ * Health = SURVIVAL, not spawn. We reuse the file's existing liveness grace
+ * (`SLOT_STALE_GRACE_MS`, 30s — the same bound the slot reconciler already uses to
+ * decide a runner is real) rather than inventing a second notion of "healthy".
+ */
+const CIRCUIT_PROBE_HEALTHY_MS = 30_000
 /** Hard cap on restart attempts (from PR #86). After this, the run is
  *  finalized as `max_restarts_exceeded` and the supervisor stops respawning. */
 const MAX_RESTART_COUNT = 10
@@ -87,10 +165,16 @@ interface RunInstance {
  */
 export class ProcessManager {
   private runs = new Map<string, RunInstance>()
+  /** Circuit breakers, keyed by repoPath. Absent = closed (the healthy default). */
+  private breakers = new Map<string, Breaker>()
   private cb: ProcessManagerCallbacks
   private cfg: SupervisorConfig
   /** Test hook: when set, used instead of `new SessionBridge(...)`. */
   bridgeFactory: BridgeFactory | null = null
+  /** Test hook: overrides the cooldown before the half-open transition. */
+  circuitCooldownMs: number | null = null
+  /** Test hook: overrides how long an admitted probe must survive to close the breaker. */
+  circuitProbeHealthyMs: number | null = null
 
   constructor(cb: ProcessManagerCallbacks, cfg: SupervisorConfig) {
     this.cb = cb
@@ -188,7 +272,7 @@ export class ProcessManager {
       if (r.restartTimer) { clearTimeout(r.restartTimer); r.restartTimer = null }
       if (r.bridge) { void r.bridge.stop().catch(() => {}); r.bridge = null }
       this.setState(r, 'stopped', { runId, lastExit: { code: null, reason: 'reconciled_stranded_slot' } })
-      this.runs.delete(runId)
+      this.forgetRun(runId, 'reconciled_stranded_slot')
     }
   }
 
@@ -218,7 +302,12 @@ export class ProcessManager {
     return null
   }
 
-  private writeAudit(spec: RunSpec, allowed: boolean, reason?: string): void {
+  private writeAudit(
+    spec: RunSpec,
+    allowed: boolean,
+    reason?: string,
+    sandboxDiag?: { allowedRoots: string[]; realRepo: string | null },
+  ): void {
     const entry: AuditEntry = {
       ts: new Date().toISOString(),
       run_id: spec.runId,
@@ -232,6 +321,7 @@ export class ProcessManager {
       },
       allowed,
       ...(reason ? { reason } : {}),
+      ...(sandboxDiag ? { allowed_roots: sandboxDiag.allowedRoots, real_repo: sandboxDiag.realRepo } : {}),
     }
     appendAudit(entry, this.cfg)
   }
@@ -308,6 +398,181 @@ export class ProcessManager {
     return out
   }
 
+  // ── Circuit breaker (fix/stop-the-bleed) ───────────────────────────────────
+  /**
+   * Hub-visible breaker state. Rides the existing 10s `session_inventory` push
+   * (hub-client.pushSessionInventory) so an OPEN breaker is never again invisible
+   * to the hub. Empty array = all repos healthy (the steady state).
+   */
+  circuitBreakerSnapshot(): BreakerSnapshotEntry[] {
+    const out: BreakerSnapshotEntry[] = []
+    for (const [repoPath, b] of this.breakers) {
+      out.push({
+        repo_path: repoPath,
+        state: b.state,
+        opened_at: new Date(b.openedAt).toISOString(),
+        failed_probes: b.failedProbes,
+        exhausted: b.failedProbes >= CIRCUIT_MAX_PROBES,
+        last_reason: b.lastReason,
+      })
+    }
+    return out
+  }
+
+  /** Cooldown before the next half-open probe: exponential, capped. */
+  private cooldownFor(failedProbes: number): number {
+    const base = this.circuitCooldownMs ?? CIRCUIT_COOLDOWN_MS
+    return Math.min(base * Math.pow(2, failedProbes), CIRCUIT_MAX_COOLDOWN_MS)
+  }
+
+  /**
+   * Trip (or re-trip) the breaker for a repo: stop the run and — unless the probe
+   * budget is exhausted — schedule the half-open transition after the cooldown, so
+   * the supervisor self-heals without a human restart. The transition ADMITS the
+   * next genuine hub-dispatched start; it never spawns anything itself.
+   */
+  private tripBreaker(run: RunInstance, code: number | null, reason: string) {
+    const spec = run.spec
+    const prev = this.breakers.get(spec.repoPath)
+    const failedProbes = prev?.state === 'half_open' ? prev.failedProbes + 1 : (prev?.failedProbes ?? 0)
+    const breaker: Breaker = {
+      state: 'open',
+      openedAt: Date.now(),
+      failedProbes,
+      timer: null,
+      lastReason: reason,
+      probeRunId: null,
+    }
+    this.breakers.set(spec.repoPath, breaker)
+
+    if (prev?.timer) clearTimeout(prev.timer)
+    this.setState(run, 'stopped', { runId: spec.runId, lastExit: { code, reason: 'circuit_open' } })
+    this.runs.delete(spec.runId)
+
+    if (failedProbes >= CIRCUIT_MAX_PROBES) {
+      this.cb.onLog(
+        'error',
+        `circuit breaker open — probe budget exhausted after ${failedProbes} failed probes; no further auto-recovery for ${spec.repoPath} (reported to hub)`,
+        spec.runId,
+      )
+      return
+    }
+    const cooldown = this.cooldownFor(failedProbes)
+    this.cb.onLog(
+      'error',
+      `circuit breaker open — stopping; half-open in ${cooldown}ms (probe ${failedProbes + 1}/${CIRCUIT_MAX_PROBES})`,
+      spec.runId,
+    )
+    breaker.timer = setTimeout(() => this.halfOpen(spec.repoPath), cooldown)
+    ;(breaker.timer as any)?.unref?.()
+  }
+
+  /**
+   * Cooldown elapsed → go HALF-OPEN. **No synthetic spawn.**
+   *
+   * The supervisor NEVER manufactures its own run to probe with. An earlier draft
+   * re-spawned the tripped `RunSpec` (prompt and all) under a synthetic run id —
+   * which would REPLAY a user/scheduler prompt with no hub dispatch, no cost/token
+   * gate, no dedupe and no session_run row: a seventh un-gated spend path, and a
+   * loop generator (the prompt that crashed the CLI gets re-run forever). Exactly
+   * the failure class this branch exists to kill.
+   *
+   * Instead half-open simply ADMITS the next GENUINE hub-dispatched start for this
+   * repo. That start is gated by construction (it came through `dispatch()`), so
+   * the probe can never spend outside the gate chain. It closes the breaker if the
+   * CLI spawns, and re-opens it (longer cooldown, +1 failed probe) if it crashes.
+   */
+  private halfOpen(repoPath: string) {
+    const breaker = this.breakers.get(repoPath)
+    if (!breaker) return
+    breaker.timer = null
+    breaker.state = 'half_open'
+    breaker.probeRunId = null
+    // Deliberately UNBOUNDED: if no genuine start ever arrives for this repo, the
+    // breaker just sits in half_open. That is the correct resting state — nothing is
+    // being refused (the next start is admitted), nothing is running, and the state
+    // is reported to the hub every 10s. A repo nobody dispatches to needs no
+    // recovery; adding a timeout would only decide, arbitrarily, whether to forget a
+    // crash history that costs nothing to keep.
+    this.cb.onLog(
+      'warn',
+      `circuit breaker half-open for ${repoPath} — the next hub-dispatched start is admitted as the probe (no synthetic spawn, no prompt replay)`,
+    )
+  }
+
+  /**
+   * The admitted probe's CLI spawned. That is NOT yet health — a startup
+   * crash-looper spawns fine and dies a second later. Start the survival timer;
+   * the breaker stays `half_open` (so a crash before the timer fires is still
+   * attributed to the probe by `onExit` → `tripBreaker` → `failedProbes + 1`) and
+   * only CLOSES once the probe has stayed up for CIRCUIT_PROBE_HEALTHY_MS.
+   */
+  private noteProbeSpawned(repoPath: string, runId: string) {
+    const breaker = this.breakers.get(repoPath)
+    if (!breaker || breaker.state !== 'half_open') return
+    if (breaker.probeRunId !== runId) return
+    if (breaker.timer) clearTimeout(breaker.timer)
+    const healthyMs = this.circuitProbeHealthyMs ?? CIRCUIT_PROBE_HEALTHY_MS
+    breaker.timer = setTimeout(() => {
+      // Still the same probe, still half_open, still alive → genuinely healthy.
+      const b = this.breakers.get(repoPath)
+      if (!b || b.state !== 'half_open' || b.probeRunId !== runId) return
+      const run = this.runs.get(runId)
+      if (!run || (run.state !== 'running' && run.state !== 'starting')) return
+      this.closeBreaker(repoPath, `probe run ${runId} survived ${healthyMs}ms`)
+    }, healthyMs)
+    ;(breaker.timer as any)?.unref?.()
+  }
+
+  /**
+   * Remove a run, ALWAYS releasing the half-open probe slot it may have held.
+   *
+   * REGRESSION (found in QC of #346): the probe slot was documented as "released
+   * only by a probe EXIT", but five terminal paths delete a run WITHOUT any crash
+   * signal — clean exit / `hub_shutdown`, `userStop`, `stop()`, stranded-slot
+   * eviction, and `max_restarts_exceeded`. `halfOpen()` arms no timer, so a probe
+   * that ended via any of those left the breaker pinned in `half_open` pointing at
+   * a DEAD runId forever. Every later start for that repo was then refused
+   * `circuit_open`, and the hub's alert only fires on `state === 'open'` — so it
+   * was SILENT. That is the original four-day zero-spawn latch, resurrected on the
+   * recovery path, and a mundane hub redeploy or a CLI exiting 0 inside the 30s
+   * survival window was enough to trigger it.
+   *
+   * Every removal goes through here so no future terminal path can reintroduce it.
+   * A departing probe frees the slot and the breaker STAYS half_open, so the next
+   * genuine hub-dispatched start is admitted as the next probe. Crash attribution
+   * is unaffected: `onExit`'s crash path runs `tripBreaker` BEFORE the run is
+   * forgotten, so a probe that dies badly still re-opens the breaker and burns a
+   * failed-probe budget.
+   */
+  private forgetRun(runId: string, why: string) {
+    const run = this.runs.get(runId)
+    this.runs.delete(runId)
+    if (!run) return
+    const breaker = this.breakers.get(run.spec.repoPath)
+    if (breaker && breaker.probeRunId === runId) {
+      breaker.probeRunId = null
+      if (breaker.timer) {
+        clearTimeout(breaker.timer)
+        breaker.timer = null
+      }
+      this.cb.onLog(
+        'warn',
+        `circuit breaker: probe ${runId} for ${run.spec.repoPath} ended (${why}) without surviving the health window — releasing the probe slot; the next dispatched start is admitted as the next probe`,
+        runId,
+      )
+    }
+  }
+
+  /** Close + forget the breaker for a repo (probe survived the health window). */
+  private closeBreaker(repoPath: string, why: string) {
+    const breaker = this.breakers.get(repoPath)
+    if (!breaker) return
+    if (breaker.timer) clearTimeout(breaker.timer)
+    this.breakers.delete(repoPath)
+    this.cb.onLog('info', `circuit breaker closed — ${repoPath}: ${why}`)
+  }
+
   /**
    * Bug A — let the bridge report the session_id (received from the hub on
    * auth_ok) back so future inventory pushes carry it.
@@ -334,19 +599,46 @@ export class ProcessManager {
       return { reason: 'duplicate_run' }
     }
 
+    let sandboxCheck: { realRepo: string; matchedRoot: string }
     try {
-      assertWithinRoots(spec.repoPath, this.cfg.roots)
+      sandboxCheck = await assertWithinRoots(spec.repoPath, this.cfg.roots)
     } catch (err) {
+      if (err instanceof SandboxCheckTimeoutError) {
+        const detail = { repo_path: spec.repoPath, timeout_ms: err.timeoutMs, error: err.message }
+        this.cb.onLog('error', `[security] sandbox_check_timeout: ${spec.repoPath} — filesystem check hung, refusing start`, spec.runId)
+        this.cb.onStateChange('stopped', {
+          runId: spec.runId,
+          repoPath: spec.repoPath,
+          lastExit: { code: null, reason: 'sandbox_check_timeout' },
+        })
+        this.writeAudit(spec, false, 'sandbox_check_timeout')
+        return { reason: 'sandbox_check_timeout', detail }
+      }
       const e = err as SandboxEscapeError
-      const detail = { repo_path: spec.repoPath, real_path: e.realPath, allowed_roots: e.allowedRoots }
-      this.cb.onLog('error', `[security] sandbox_escape: ${spec.repoPath} not within allowed roots ${JSON.stringify(e.allowedRoots)}`, spec.runId)
+      // 2026-08-18 (repo_path placeholder investigation) — reason now
+      // reflects WHICH of the three sandbox_escape sub-cases fired (see
+      // SandboxEscapeKind), and the audit line always carries allowed_roots +
+      // the resolved real_repo (when resolvable) so a future denial is
+      // self-diagnosing without needing the live supervisor.json.
+      const reason =
+        e.kind === 'path_missing'
+          ? 'sandbox_path_missing'
+          : e.kind === 'roots_unresolvable'
+            ? 'sandbox_roots_unresolvable'
+            : 'sandbox_not_under_roots'
+      const detail = { repo_path: spec.repoPath, real_path: e.realPath, allowed_roots: e.allowedRoots, kind: e.kind }
+      this.cb.onLog(
+        'error',
+        `[security] ${reason}: ${spec.repoPath} — real_path=${e.realPath ?? 'unresolvable'} allowed_roots=${JSON.stringify(e.allowedRoots)}`,
+        spec.runId,
+      )
       this.cb.onStateChange('stopped', {
         runId: spec.runId,
         repoPath: spec.repoPath,
-        lastExit: { code: null, reason: 'sandbox_escape' },
+        lastExit: { code: null, reason },
       })
-      this.writeAudit(spec, false, 'sandbox_escape')
-      return { reason: 'sandbox_escape', detail }
+      this.writeAudit(spec, false, reason, { allowedRoots: e.allowedRoots, realRepo: e.realPath })
+      return { reason, detail }
     }
 
     if (this.cfg.requireGitRepo && !spec.orchestrator) {
@@ -362,6 +654,52 @@ export class ProcessManager {
       }
     }
 
+    // Circuit breaker: an OPEN breaker refuses the spawn (the repo is crash-
+    // looping). A HALF-OPEN breaker lets exactly this probe through. The breaker
+    // self-heals on its own cooldown timer, and its state is pushed to the hub in
+    // the session_inventory frame — it can no longer fail silently.
+    const breaker = this.breakers.get(spec.repoPath)
+    if (breaker && breaker.state === 'open') {
+      this.cb.onLog('warn', `Refusing start — circuit breaker open for ${spec.repoPath}`, spec.runId)
+      this.cb.onStateChange('stopped', {
+        runId: spec.runId,
+        repoPath: spec.repoPath,
+        lastExit: { code: null, reason: 'circuit_open' },
+      })
+      this.writeAudit(spec, false, 'circuit_open')
+      return {
+        reason: 'circuit_open',
+        detail: {
+          repo_path: spec.repoPath,
+          opened_at: new Date(breaker.openedAt).toISOString(),
+          failed_probes: breaker.failedProbes,
+          exhausted: breaker.failedProbes >= CIRCUIT_MAX_PROBES,
+        },
+      }
+    }
+    // Half-open admits EXACTLY ONE probe. While that probe is in flight the breaker
+    // itself refuses every other start for the repo — it does not lean on the
+    // duplicate-run check below to hold the invariant. Half-open means "one gated
+    // trial run, nothing else", so a second concurrent CLI can never slip through
+    // and re-enter the crash-loop/spend path the breaker exists to contain.
+    if (breaker && breaker.state === 'half_open' && breaker.probeRunId != null && breaker.probeRunId !== spec.runId) {
+      this.cb.onLog('warn', `Refusing start — circuit breaker half-open, probe ${breaker.probeRunId} already in flight for ${spec.repoPath}`, spec.runId)
+      this.cb.onStateChange('stopped', {
+        runId: spec.runId,
+        repoPath: spec.repoPath,
+        lastExit: { code: null, reason: 'circuit_open' },
+      })
+      this.writeAudit(spec, false, 'circuit_open')
+      return {
+        reason: 'circuit_open',
+        detail: {
+          repo_path: spec.repoPath,
+          opened_at: new Date(breaker.openedAt).toISOString(),
+          failed_probes: breaker.failedProbes,
+          probe_in_flight: breaker.probeRunId,
+        },
+      }
+    }
     // Don't race a crashed-pending-restart entry for the same repo — its
     // backoff timer will reclaim the slot. Treat as duplicate to keep the
     // N+1 window during backoff closed.
@@ -405,7 +743,7 @@ export class ProcessManager {
       )
     }
 
-    this.writeAudit(spec, true)
+    this.writeAudit(spec, true, undefined, { allowedRoots: this.cfg.roots, realRepo: sandboxCheck.realRepo })
 
     const run: RunInstance = {
       spec,
@@ -420,8 +758,30 @@ export class ProcessManager {
     ;(run as any).startedAt = new Date().toISOString()
     ;(run as any).lastActivityAt = null
     ;(run as any).sessionId = null
+
+    // Claim the half-open probe slot LAST — immediately before the spawn, after
+    // every rejection check has cleared, and release it if the spawn itself throws.
+    //
+    // The slot is only ever released by a probe EXIT. So a claim made before any
+    // path that can still bail out (a rejection, a throw) pins probeRunId to a run
+    // that never spawns: the breaker then sits half_open forever, every later
+    // genuine start fails the `probeRunId == null` guard and is never tracked as a
+    // probe, and the breaker can never close. Claiming here makes "claimed" and
+    // "spawned" the same instant, so no future early-return added above can leak it.
+    const claimedProbe = breaker != null && breaker.state === 'half_open' && breaker.probeRunId == null
+    if (claimedProbe) {
+      breaker!.probeRunId = spec.runId
+      this.cb.onLog('warn', `circuit breaker half-open — admitting run as the probe for ${spec.repoPath}`, spec.runId)
+    }
+
     this.runs.set(spec.runId, run)
-    this.spawn(run)
+    try {
+      this.spawn(run)
+    } catch (err) {
+      if (claimedProbe && breaker!.probeRunId === spec.runId) breaker!.probeRunId = null
+      this.runs.delete(spec.runId)
+      throw err
+    }
     return null
   }
 
@@ -443,6 +803,9 @@ export class ProcessManager {
       onSpawned: (info) => {
         run.pid = info.pid || null
         this.setState(run, 'running', { runId: spec.runId, repoPath: spec.repoPath, pid: run.pid ?? undefined })
+        // Spawning is NOT health (a startup crash-looper spawns every time). Start
+        // the probe's survival timer; the breaker only closes if it stays up.
+        this.noteProbeSpawned(spec.repoPath, spec.runId)
       },
       onSessionId: (sessionId) => this.noteSessionIdForRun(spec.runId, sessionId),
       onActivity: () => this.noteActivityForRun(spec.runId),
@@ -451,21 +814,22 @@ export class ProcessManager {
         this.cb.onLog(code === 0 ? 'info' : 'error', `bridge exited code=${code} reason=${reason}`, spec.runId)
         if (run.userStop) {
           this.setState(run, 'idle', { runId: spec.runId, lastExit: { code, reason } })
-          this.runs.delete(spec.runId)
+          this.forgetRun(spec.runId, 'user_stop')
           return
         }
         if (reason === 'hub_shutdown' || code === 0) {
           this.setState(run, 'idle', { runId: spec.runId, lastExit: { code, reason } })
-          this.runs.delete(spec.runId)
+          this.forgetRun(spec.runId, reason === 'hub_shutdown' ? 'hub_shutdown' : 'clean_exit')
           return
         }
         // Crash path — apply circuit-breaker + restart cap.
         run.recentCrashes.push(Date.now())
         run.recentCrashes = run.recentCrashes.filter((t) => Date.now() - t < CIRCUIT_WINDOW_MS)
-        if (run.recentCrashes.length >= CIRCUIT_THRESHOLD) {
-          this.cb.onLog('error', `circuit breaker open — stopping`, spec.runId)
-          this.setState(run, 'stopped', { runId: spec.runId, lastExit: { code, reason: 'circuit_open' } })
-          this.runs.delete(spec.runId)
+        // A crashing HALF-OPEN probe re-opens the breaker immediately (the whole
+        // point of the probe is one attempt), without re-earning the threshold.
+        const probing = this.breakers.get(spec.repoPath)?.state === 'half_open'
+        if (probing || run.recentCrashes.length >= CIRCUIT_THRESHOLD) {
+          this.tripBreaker(run, code, reason)
           return
         }
         this.scheduleRestart(run, code, reason)
@@ -497,7 +861,7 @@ export class ProcessManager {
         runId: run.spec.runId,
         lastExit: { code: exitCode, reason: 'max_restarts_exceeded' },
       })
-      this.runs.delete(run.spec.runId)
+      this.forgetRun(run.spec.runId, 'max_restarts_exceeded')
       return
     }
     const delay = BACKOFF_SCHEDULE[Math.min(run.restartCount, BACKOFF_SCHEDULE.length - 1)]
@@ -535,7 +899,7 @@ export class ProcessManager {
       // broken stdout pipe). Otherwise the slot leaks and eventually every
       // launch is denied `concurrency_cap`. This is the belt to logging's
       // suspenders (logging is now EPIPE-safe, but never depend on that here).
-      this.runs.delete(runId)
+      this.forgetRun(runId, 'stop')
     }
   }
 
