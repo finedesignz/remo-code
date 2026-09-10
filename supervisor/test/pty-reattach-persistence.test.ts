@@ -22,7 +22,7 @@ function fakePty(): PersistablePty & { killed: number } {
   return { killed: 0, kill() { this.killed++ } }
 }
 
-describe('Phase-16 PTY persistence — ring-buffer scrollback', () => {
+describe('Phase-16 PTY persistence — RingBuffer utility (pure, Rust-parity building block)', () => {
   test('ring-buffer keeps the last N bytes within its cap', () => {
     const ring = new RingBuffer(10)
     ring.push('abcdef')
@@ -58,35 +58,26 @@ describe('Phase-16 PTY persistence — ring-buffer scrollback', () => {
     ).toBe(true)
   })
 
-  test('recordOutput accumulates scrollback for replay', () => {
-    const p = new PtyPersistence(300)
-    const pty = fakePty()
-    p.register('s1', pty)
-    p.recordOutput('s1', 'hello ')
-    p.recordOutput('s1', 'world')
-    expect(p.scrollback('s1')).toBe('hello world')
-  })
 })
 
 describe('Phase-16 PTY persistence — detach vs kill (R-PTY-27)', () => {
-  test('client DISCONNECT detaches; PTY survives + reattach replays scrollback', () => {
+  test('client DISCONNECT detaches; PTY survives a reattach (scrollback replay is Rust-host-only)', () => {
     // idle grace 0 here so detach does NOT idle-reap — we are proving survival
     // across a mere disconnect, not the idle-reap path.
     const p = new PtyPersistence(0)
     const pty = fakePty()
     p.register('s1', pty)
     p.attach('s1') // client connects
-    p.recordOutput('s1', 'line1\nline2\n')
 
     // Client disconnects (phone drops wifi). DETACH — must NOT kill.
     p.detach('s1')
     expect(pty.killed).toBe(0)
     expect(p.isAlive('s1')).toBe(true)
 
-    // Reattach (reconnect) — scrollback replays intact, live resumes.
-    const replay = p.attach('s1')
-    expect(replay).toBe('line1\nline2\n')
+    // Reattach (reconnect) — PTY still alive, no kill triggered.
+    p.attach('s1')
     expect(pty.killed).toBe(0)
+    expect(p.subscriberCount('s1')).toBe(1)
   })
 
   test('session CLOSE kills the PTY (no orphan)', () => {

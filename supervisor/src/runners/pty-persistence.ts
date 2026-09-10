@@ -4,26 +4,36 @@
  *
  * The interactive `claude` PTY is owned by the SUPERVISOR, not by any one client
  * WS connection. A dropped phone/browser connection must NOT kill the session;
- * a reattach must restore live state with scrollback intact.
+ * a reattach must restore live state (scrollback replay is Rust-host-only, see
+ * below).
  *
  * HOSTING (Option C — 16-SPIKE-FINDINGS-rust-conpty.md): the PTY itself lives in
- * the Tauri RUST process (`pty_host.rs`), which owns the authoritative ConPTY +
- * its own scrollback ring and ties PTY lifetime to the supervisor process. This
- * Bun-side module is the SUPERVISOR-SIDE COORDINATOR over `claude-pty-bridge.ts`:
- * it tracks live sessions, applies the detach-vs-kill policy, mirrors the hub's
- * idle-teardown semantics so persistent PTYs don't leak, and keeps a bounded
- * output ring-buffer as the CROSS-PLATFORM baseline (used directly on any
- * non-Rust-host context and exercised by the reattach test). On POSIX where tmux
- * is available the same coordinator can front a detached tmux session for
- * survival across supervisor restarts (capability-gated; see `tmuxAvailable`).
+ * the Tauri RUST process (`pty_host.rs`), which owns the authoritative ConPTY,
+ * its own scrollback ring, AND replay-on-(re)attach (delivered via
+ * `onScrollback` in `claude-pty-bridge.ts`), and ties PTY lifetime to the
+ * supervisor process. This Bun-side module is the SUPERVISOR-SIDE COORDINATOR
+ * over `claude-pty-bridge.ts`: it tracks live sessions, applies the
+ * detach-vs-kill policy, and mirrors the hub's idle-teardown semantics so
+ * persistent PTYs don't leak. On POSIX where tmux is available the same
+ * coordinator can front a detached tmux session for survival across
+ * supervisor restarts (capability-gated; see `tmuxAvailable`).
  *
  * DETACH-vs-KILL POLICY (H7 / R-PTY-27):
- *   - client WS DISCONNECT          → DETACH (PTY + scrollback survive; reattach)
+ *   - client WS DISCONNECT          → DETACH (PTY survives; reattach)
  *   - session CLOSE                 → KILL
  *   - idle-reap (no subscribers)    → KILL  (mirrors hub idle-teardown grace)
  *   - supervisor SHUTDOWN (SIGINT/SIGTERM/exit) → KILL all
  * On Option C the Rust host also kills every PTY on a supervisor crash
  * (process-ownership dead-man's-switch), so even a hard crash leaves no orphan.
+ *
+ * Scrollback replay is Rust-host-only (`pty_host.rs`'s own ring, delivered via
+ * `onScrollback` in `claude-pty-bridge.ts` on (re)attach) — this Bun-side
+ * coordinator used to ALSO keep a per-session `RingBuffer` fed by every PTY
+ * byte (`recordOutput`), but nothing ever read it back: `attach()`'s replay
+ * return value and the `scrollback()` accessor had no production caller, only
+ * tests. Removed; `safeTrimPoint`/`RingBuffer` stay exported as pure utilities
+ * because the Rust-parity fixture tests (`pty-persistence-trim.test.ts`)
+ * exercise them directly.
  *
  * Raw bytes only — this module does NOT import RunnerEvent / agent-protocol /
  * session-bridge, and never reads ~/.claude/.credentials.json.
@@ -162,7 +172,6 @@ export interface PersistablePty {
 interface SessionEntry {
   sessionId: string
   pty: PersistablePty
-  ring: RingBuffer
   /** distinct live client connections currently attached. */
   subscribers: number
   /** pending idle-reap timer when subscribers hit 0. */
@@ -175,10 +184,7 @@ interface SessionEntry {
 export class PtyPersistence {
   private sessions = new Map<string, SessionEntry>()
 
-  constructor(
-    private idleGraceSeconds = DEFAULT_IDLE_GRACE_SECONDS,
-    private scrollbackCapBytes = DEFAULT_SCROLLBACK_CAP_BYTES,
-  ) {}
+  constructor(private idleGraceSeconds = DEFAULT_IDLE_GRACE_SECONDS) {}
 
   /** Register a freshly-started PTY for a session. Idempotent per session. */
   register(sessionId: string, pty: PersistablePty): SessionEntry {
@@ -187,7 +193,6 @@ export class PtyPersistence {
     entry = {
       sessionId,
       pty,
-      ring: new RingBuffer(this.scrollbackCapBytes),
       subscribers: 0,
       idleTimer: null,
     }
@@ -195,22 +200,16 @@ export class PtyPersistence {
     return entry
   }
 
-  /** Record live PTY output into the session ring (baseline scrollback). */
-  recordOutput(sessionId: string, bytes: string): void {
-    this.sessions.get(sessionId)?.ring.push(bytes)
-  }
-
-  /** A client ATTACHED — bump subscriber count, cancel any idle-reap, and
-   *  return the buffered scrollback to replay before live output resumes. */
-  attach(sessionId: string): string {
+  /** A client ATTACHED — bump subscriber count and cancel any pending
+   *  idle-reap. Scrollback replay is Rust-host-only (`onScrollback`). */
+  attach(sessionId: string): void {
     const entry = this.sessions.get(sessionId)
-    if (!entry) return ''
+    if (!entry) return
     entry.subscribers++
     if (entry.idleTimer) {
       clearTimeout(entry.idleTimer)
       entry.idleTimer = null
     }
-    return entry.ring.snapshot()
   }
 
   /**
@@ -262,9 +261,6 @@ export class PtyPersistence {
   }
   subscriberCount(sessionId: string): number {
     return this.sessions.get(sessionId)?.subscribers ?? 0
-  }
-  scrollback(sessionId: string): string {
-    return this.sessions.get(sessionId)?.ring.snapshot() ?? ''
   }
   idleReapPending(sessionId: string): boolean {
     return !!this.sessions.get(sessionId)?.idleTimer
