@@ -11,14 +11,14 @@
   "dependencies": {
     "@hono/zod-openapi": "^0.18.4",
     "@octokit/rest": "^22.0.1",
-    "@scalar/hono-api-reference": "^0.10.19",
+    "@scalar/hono-api-reference": "^0.12.1",
     "bcryptjs": "^3.0.3",
     "croner": "^10.0.1",
     "hono": "^4.7.0",
-    "ioredis": "^5.10.1",
+    "ioredis": "^6.0.0",
     "jose": "^6.2.3",
     "jsonwebtoken": "^9.0.3",
-    "nanoid": "^5.1.0",
+    "nanoid": "^6.0.1",
     "postgres": "^3.4.9",
     "zod": "^3.24.0"
   },

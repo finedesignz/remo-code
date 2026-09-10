@@ -24,41 +24,10 @@ updates:
       minor-patch:
         update-types: ["minor", "patch"]
 
-  # mobile/tauri/ui/package.json + its own bun.lock (outside root workspaces)
-  - package-ecosystem: "npm"
-    directory: "/mobile/tauri/ui"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
-    groups:
-      minor-patch:
-        update-types: ["minor", "patch"]
-
   # --- cargo -------------------------------------------------------------
   # supervisor/tauri/src-tauri/Cargo.toml + Cargo.lock
   - package-ecosystem: "cargo"
     directory: "/supervisor/tauri/src-tauri"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
-    groups:
-      minor-patch:
-        update-types: ["minor", "patch"]
-
-  # supervisor/tauri/src-tauri/pty-spike/Cargo.toml declares its own [workspace]
-  # and has its own Cargo.lock, so it is a separate update target.
-  - package-ecosystem: "cargo"
-    directory: "/supervisor/tauri/src-tauri/pty-spike"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
-    groups:
-      minor-patch:
-        update-types: ["minor", "patch"]
-
-  # mobile/tauri/src-tauri/Cargo.toml + Cargo.lock
-  - package-ecosystem: "cargo"
-    directory: "/mobile/tauri/src-tauri"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10

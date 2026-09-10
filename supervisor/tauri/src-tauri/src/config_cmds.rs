@@ -16,6 +16,20 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::path::PathBuf;
 
+/// NOTE (fix/test-config-isolation-contract, 2026-08-18): the TypeScript side
+/// (`supervisor/src/config.ts`) honors a `REMO_CODE_CONFIG_DIR` env override and
+/// hard-throws under `NODE_ENV=test` when it is unset, so a Bun test run can
+/// never write through to the real per-user `supervisor.json`. That override was
+/// added after test fixtures corrupted the live config's `roots` and caused the
+/// running supervisor to reject genuine session launches as `sandbox_escape`.
+///
+/// This Rust half DELIBERATELY does not honor it: the tray app must always
+/// resolve the real per-user config. There is no exposure today — the `#[test]`
+/// functions in this file are pure-function assertions over a `serde_json::Map`
+/// and touch no filesystem. But if you ever add a Rust test that READS OR WRITES
+/// through this function, it has none of the TypeScript side's protection and
+/// will hit the user's real `supervisor.json`. Give such a test its own env
+/// override (or a path parameter) first.
 fn config_path() -> Result<PathBuf, String> {
     let dir = if cfg!(target_os = "windows") {
         let appdata = std::env::var_os("APPDATA")
