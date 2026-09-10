@@ -202,13 +202,26 @@ const COMPOSITION_INSERT_TYPES: ReadonlySet<string> = new Set([
  * That leaves ONE irreducible ambiguity: committing text T and then a human
  * typing exactly T. Nothing in the DOM separates those. So the engine's own
  * ordering is LEARNED, once per session: a compositionend followed by a
- * matching event proves this engine is end-first (keep arming); a
- * compositionend followed by a non-matching event, or by the next
- * compositionstart, proves it is chrome-order and arming stops for good. A
+ * matching event proves this engine is end-first; a compositionend followed by
+ * a beforeinput carrying DIFFERENT text proves it is chrome-order. A
  * chrome-order engine is therefore exposed only until its first commit is
  * observed; an end-first engine keeps the ambiguity, where suppressing is the
  * right bet because its trailing commit is certain and a retype is a
  * coincidence.
+ *
+ * THE VERDICT IS NEVER ABSORBING. Observation and arming stay on permanently —
+ * only SUPPRESSION is gated on the verdict — because a single misread would
+ * otherwise double-send every remaining utterance of the session. Three
+ * misreads are real on a genuine end-first engine: an iOS autocorrect
+ * (insertReplacementText revising the settled text), an Enter that beats the
+ * trailing commit, and the next compositionstart pre-empting it. So only a
+ * beforeinput carrying different NON-autocorrect text votes chrome; events that
+ * carry no committed text (Enter) neither vote nor consume the latch, and a
+ * compositionstart just resets the utterance. Winning the verdict back the
+ * other way takes TWO CONSECUTIVE re-deliveries, so one coincidental retype
+ * cannot flip a chrome engine into suppressing. Cost at an engine switchover is
+ * bounded at two duplicated commits, and a textarea blur (the keyboard actually
+ * changing) clears the verdict outright via resetEngineOrdering().
  *
  * A cancelled composition (compositionend with '' data) RETRACTS the interim
  * bytes already sent, one DEL per code point.
@@ -229,13 +242,24 @@ export class CompositionInputTracker {
   private preEnd = ''
   /** Which ordering THIS engine uses, learned from its own behavior. */
   private ordering: 'unknown' | 'end-first' | 'chrome' = 'unknown'
+  /** Consecutive re-deliveries observed — two are needed to overturn 'chrome'. */
+  private matchStreak = 0
 
   onCompositionStart(): void {
-    // A new composition began with the previous commit never re-delivered: this
-    // engine does not fire a trailing commit event.
-    if (this.armed) this.ordering = 'chrome'
+    // A pre-empted commit is NOT evidence of ordering: a genuine end-first
+    // engine can start the next composition before delivering the last one.
     this.clear()
     this.composing = true
+  }
+
+  /**
+   * Forget which ordering this engine uses. Called on textarea blur, the point
+   * at which the user can physically swap keyboards (Gboard to iOS dictation),
+   * so a verdict learned from the old one never governs the new one.
+   */
+  resetEngineOrdering(): void {
+    this.ordering = 'unknown'
+    this.matchStreak = 0
   }
 
   /**
@@ -256,9 +280,10 @@ export class CompositionInputTracker {
       this.sent = final
       this.hypothesis = final
       this.finalData = final
-      // A chrome-order engine never re-delivers, so once that is known there is
-      // nothing to suppress and the ambiguous case resolves for the human.
-      this.armed = this.ordering !== 'chrome'
+      // Always armed: the latch is how a re-delivery is OBSERVED, and a verdict
+      // that switched observation off could never be corrected. Only
+      // suppression consults `ordering`.
+      this.armed = true
     }
     return bytes.length > 0 ? bytes : null
   }
@@ -288,17 +313,33 @@ export class CompositionInputTracker {
       return inputEventToBytes(inputType, data)
     }
 
-    if (this.armed) {
+    if (this.armed && COMPOSITION_INSERT_TYPES.has(inputType)) {
       const d = data ?? ''
-      // A Backspace is never the engine re-delivering a commit.
-      const redelivered =
-        COMPOSITION_INSERT_TYPES.has(inputType) &&
-        (d === this.finalData || (this.preEnd !== '' && d === this.preEnd))
-      this.ordering = redelivered ? 'end-first' : 'chrome'
+      const redelivered = d === this.finalData || (this.preEnd !== '' && d === this.preEnd)
+      // An autocorrect REVISION of the settled text (iOS replaces "teh" with
+      // "the" after the commit) is neither a re-delivery nor evidence of
+      // chrome ordering — it is the engine editing its own commit. It is
+      // forwarded, but it must not vote.
+      const autocorrect =
+        inputType === 'insertReplacementText' && Array.from(d).length >= Array.from(this.finalData).length
+      if (redelivered) {
+        this.matchStreak++
+        if (this.matchStreak >= 2) this.ordering = 'end-first'
+      } else if (!autocorrect) {
+        this.matchStreak = 0
+        this.ordering = 'chrome'
+      }
+      const suppress = redelivered && this.ordering !== 'chrome'
       this.clear()
       // compositionend already put this exact text on the line — drop the echo.
-      if (redelivered) return null
+      if (suppress) return null
     }
+
+    // A line break carries no committed text, so it is neither evidence nor a
+    // consumer of the latch — an Enter that beats the trailing commit must not
+    // cost the suppression of that commit. Anything else that edits the line
+    // (Backspace, forward-delete, paste) does consume it.
+    if (this.armed && inputType !== 'insertLineBreak' && inputType !== 'insertParagraph') this.clear()
 
     // No composition in flight (desktop; the iOS one-shot-per-char pseudo-
     // composition; a plain paste/newline/delete): unchanged 1:1 behavior.
@@ -686,10 +727,15 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       // short by an apparently-empty field.
       keepTextareaAlive()
     }
+    // Blur is the one moment the user can physically swap keyboards (Gboard for
+    // iOS dictation), so the learned ordering verdict is dropped here rather
+    // than governing an engine it was never observed on.
+    const onTaBlur = () => inputTracker.resetEngineOrdering()
     if (ta) {
       ta.addEventListener('beforeinput', onBeforeInput)
       ta.addEventListener('compositionstart', onCompositionStart)
       ta.addEventListener('compositionend', onCompositionEnd)
+      ta.addEventListener('blur', onTaBlur)
     }
 
     // DESKTOP click-to-focus. A mouse focus opens no keyboard, so a click on the
@@ -911,6 +957,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
         ta.removeEventListener('beforeinput', onBeforeInput)
         ta.removeEventListener('compositionstart', onCompositionStart)
         ta.removeEventListener('compositionend', onCompositionEnd)
+        ta.removeEventListener('blur', onTaBlur)
       }
       try { dataDisp.dispose() } catch {}
       try { unsub() } catch {}
