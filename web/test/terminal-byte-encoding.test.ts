@@ -228,6 +228,93 @@ describe('mobile input — dictation composition dedup (CompositionInputTracker)
 })
 
 /**
+ * Regression (PR #463 fallout): on the STANDARD Chrome/Android IME ordering
+ * — beforeinput(insertCompositionText, "ab") fully sends the commit via
+ * `pending`, THEN compositionend(data="ab") fires with no trailing
+ * beforeinput — the old code armed `awaitingFinal` unconditionally. The
+ * latch then stayed open for the NEXT, unrelated beforeinput (a plain
+ * keystroke), which got diffed against the stale composition data instead
+ * of forwarded, and was silently swallowed.
+ */
+describe('mobile input — chrome-order IME commit does not swallow the next keystroke (#463 regression)', () => {
+  function replay(chunks: (string | null)[]): string {
+    let out: string[] = []
+    for (const chunk of chunks) {
+      if (!chunk) continue
+      for (const ch of chunk) {
+        if (ch === '\x7f') out.pop()
+        else out.push(ch)
+      }
+    }
+    return out.join('')
+  }
+
+  test('chrome-order IME "ab" then plain "X" sends "abX"', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const c1 = t.handleBeforeInput('insertCompositionText', 'ab')
+    t.onCompositionEnd('ab')
+    const c2 = t.handleBeforeInput('insertText', 'X')
+    expect(replay([c1, c2])).toBe('abX')
+  })
+
+  test('chrome-order IME "ab" then two plain chars sends "abXY"', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const c1 = t.handleBeforeInput('insertCompositionText', 'ab')
+    t.onCompositionEnd('ab')
+    const c2 = t.handleBeforeInput('insertText', 'X')
+    const c3 = t.handleBeforeInput('insertText', 'Y')
+    expect(replay([c1, c2, c3])).toBe('abXY')
+  })
+
+  test('emoji interim + chrome-order end + plain "y" sends the emoji then "y"', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const c1 = t.handleBeforeInput('insertCompositionText', '\u{1F600}')
+    t.onCompositionEnd('\u{1F600}')
+    const c2 = t.handleBeforeInput('insertText', 'y')
+    expect(replay([c1, c2])).toBe('\u{1F600}y')
+  })
+
+  test('end-first order still yields exactly one "hello"', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const c1 = t.handleBeforeInput('insertCompositionText', 'hel')
+    t.onCompositionEnd('hello')
+    const c2 = t.handleBeforeInput('insertText', 'hello')
+    expect(replay([c1, c2])).toBe('hello')
+  })
+
+  test('chrome-order IME commit then Enter forwards "\\r"', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const c1 = t.handleBeforeInput('insertCompositionText', 'hi')
+    t.onCompositionEnd('hi')
+    const c2 = t.handleBeforeInput('insertLineBreak', null)
+    expect(replay([c1, c2])).toBe('hi\r')
+  })
+
+  test('chrome-order IME commit then Backspace forwards DEL', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const c1 = t.handleBeforeInput('insertCompositionText', 'ab')
+    t.onCompositionEnd('ab')
+    const c2 = t.handleBeforeInput('deleteContentBackward', null)
+    expect(replay([c1, c2])).toBe('a')
+  })
+
+  test('cancelled composition (empty compositionend data) then plain "X" sends only "X"', () => {
+    const t = new CompositionInputTracker()
+    t.onCompositionStart()
+    const c1 = t.handleBeforeInput('insertCompositionText', 'ni')
+    t.onCompositionEnd('')
+    const c2 = t.handleBeforeInput('insertText', 'X')
+    expect(replay([c1, c2])).toBe('niX')
+  })
+})
+
+/**
  * Mobile key repeat (owner-reported live bug): holding a key on the mobile
  * on-screen keyboard/toolbar deletes/moves once instead of repeating like a
  * real physical keyboard.
