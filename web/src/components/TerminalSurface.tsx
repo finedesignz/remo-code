@@ -75,6 +75,41 @@ export function bytesToB64(bytes: Uint8Array): string {
 }
 
 /**
+ * Map a textarea InputEvent (inputType, data) to the raw bytes the PTY expects.
+ * This is the EXACTLY-ONCE mobile/IME input seam: on iOS WebKit every keystroke
+ * is routed through composition (keydown keyCode 229) and never reaches xterm's
+ * keyboard handler, so xterm would otherwise both compose/echo the glyph locally
+ * AND let the PTY (claude) echo it back → doubled characters. We instead read the
+ * committed text straight off the helper <textarea>'s input events and send it
+ * once, suppressing xterm's own local render.
+ *
+ * Returns the byte string to send, or null when the event carries nothing to send
+ * (so the caller leaves xterm's onData to handle it — e.g. desktop control keys).
+ * Exported for the exactly-once regression test.
+ */
+export function inputEventToBytes(inputType: string, data: string | null): string | null {
+  switch (inputType) {
+    // Printable text — typed, composed (predictive/IME commit), autocorrect swap,
+    // dictation, or paste. `data` holds the committed string.
+    case 'insertText':
+    case 'insertCompositionText':
+    case 'insertReplacementText':
+    case 'insertFromPaste':
+    case 'insertFromComposition':
+      return data && data.length > 0 ? data : null
+    case 'insertLineBreak':
+    case 'insertParagraph':
+      return '\r'
+    case 'deleteContentBackward':
+      return '\x7f' // DEL — TUIs treat as backspace
+    case 'deleteContentForward':
+      return '\x1b[3~' // forward-delete
+    default:
+      return null
+  }
+}
+
+/**
  * On-screen key sequences for the toolbar. The user's Apple keyboard has no
  * arrow keys, so ↑/↓ (menu navigation) are the critical entries; Esc/Tab/Ctrl-C
  * round out TUI control. Each value is the exact raw byte string sent verbatim
@@ -264,13 +299,37 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
       // enterkeyhint omitted: the TUI handles Enter; "go"/"send" labels imply submit
       ta.setAttribute('inputmode', 'text')
     }
-    // NOTE: an earlier `compositionstart`/`compositionend` gate (drop onData
-    // while composing) was REVERTED — on desktop Chrome/Edge fast typing fires a
-    // brief composition whose `compositionend` lands late, so the gate DROPPED
-    // keystrokes and then dumped the buffered composed text, corrupting input
-    // (e.g. "test"→"ess", "fast"→"fass"). The mobile-IME scramble it was meant to
-    // fix needs a beforeinput-based input path instead (tracked separately); the
-    // plain 1:1 onData→term.input below is correct on desktop.
+    // EXACTLY-ONCE MOBILE/IME INPUT (the iOS double-character fix).
+    // On iOS WebKit every keystroke is routed through IME composition (keydown
+    // keyCode 229), so it never reaches xterm's keyboard handler. xterm's
+    // CompositionHelper then renders the composed glyph INLINE in the terminal
+    // buffer while the PTY (claude) ALSO echoes the committed bytes back over
+    // term.data — two glyph sources for the same character → doubling
+    // ("allsso iimm…"). The naive compositionend gate did not fix it.
+    //
+    // Fix: take deterministic control of the helper <textarea>. We read the
+    // committed text off its `beforeinput` events, send those bytes to the PTY
+    // EXACTLY ONCE, and preventDefault() so the textarea value never changes —
+    // which cancels the follow-on `input`/composition events, so xterm neither
+    // composes/echoes locally NOR fires onData for that text. The PTY's own echo
+    // is then the single glyph source. We also reset textarea.value='' so no
+    // composition state accumulates across keystrokes.
+    //
+    // Desktop is unaffected: xterm preventDefaults printable keydowns and emits
+    // onData itself, so no `beforeinput` fires for them — this handler only
+    // engages on the IME/mobile path. Control keys (arrows, Esc, Tab, Ctrl-C,
+    // fn-keys) on BOTH platforms still flow through keydown→onData below.
+    const onBeforeInput = (ev: Event) => {
+      const ie = ev as InputEvent
+      const bytes = inputEventToBytes(ie.inputType, ie.data)
+      if (bytes == null) return // not a text/edit input we own → let xterm handle
+      ev.preventDefault() // cancel local apply + the follow-on input/onData
+      send({ type: 'term.input', session_id: sessionId, bytes: inputToB64(bytes) })
+      // Belt-and-suspenders: drop any text the IME may have already applied so
+      // composition state never accumulates and xterm can't echo it.
+      try { if (ta) ta.value = '' } catch {}
+    }
+    if (ta) ta.addEventListener('beforeinput', onBeforeInput)
 
     // DESKTOP click-to-focus. A mouse focus opens no keyboard, so a click on the
     // terminal must still focus it (typing after a click keeps working). Guarded
@@ -417,11 +476,17 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     // re-clears before writing the replayed buffer.
     term.clear()
 
-    // Keystrokes → term.input (base64 raw bytes). STRICTLY 1:1 — one onData, one
-    // frame. `disposed` fences the handler: an unmounted/session-switched
-    // terminal (whose onData disposable a straggler event still holds) must
-    // NEVER write to the PTY. Two surfaces feeding one session is what doubled
-    // keystrokes and starved the hub's turn lock.
+    // Keystrokes → term.input (base64 raw bytes). This is the DESKTOP +
+    // control-key path: xterm emits onData for printable keydowns (desktop) and
+    // for control sequences (arrows/Esc/Tab/Ctrl-C/fn) on every platform. Mobile
+    // TEXT input never reaches here — it is consumed (and preventDefaulted) by
+    // the `beforeinput` handler above, so it is sent exactly once and not
+    // doubled. The two paths are disjoint by construction (beforeinput cancels
+    // the input event that would otherwise drive onData), so no guard is needed.
+    // `disposed` fences the handler: an unmounted/session-switched terminal
+    // (whose onData disposable a straggler event still holds) must NEVER write
+    // to the PTY. Two surfaces feeding one session is what doubled keystrokes
+    // and starved the hub's turn lock.
     let disposed = false
     const dataDisp = term.onData((d) => {
       if (disposed) return
@@ -481,6 +546,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     return () => {
       disposed = true
       if (rafId) cancelAnimationFrame(rafId)
+      if (ta) ta.removeEventListener('beforeinput', onBeforeInput)
       try { dataDisp.dispose() } catch {}
       try { unsub() } catch {}
       try { ro.disconnect() } catch {}
