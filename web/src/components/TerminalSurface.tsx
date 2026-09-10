@@ -201,7 +201,14 @@ export class CompositionInputTracker {
    * `handleBeforeInput` call, whichever event actually delivers it. */
   onCompositionEnd(data: string | null = null): void {
     this.composing = false
-    if (data != null && data.length > 0) {
+    // Only arm the latch when the commit still has an un-sent delta (the
+    // end-first ordering: compositionend fires before the beforeinput that
+    // delivers it). On the standard chrome-order (beforeinput already sent
+    // the full text via `pending`, THEN compositionend fires with the same
+    // data), there is nothing left to reconcile — arming anyway left the
+    // latch open for the NEXT unrelated beforeinput (a plain keystroke),
+    // which then diffed itself against this stale `data` and got swallowed.
+    if (data != null && data.length > 0 && data !== this.pending) {
       this.finalData = data
       this.awaitingFinal = true
     } else {
