@@ -674,16 +674,27 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
               </div>
             )}
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-[var(--text-muted)] px-1">Machine:</span>
             <select
               value={activeSupervisorId || ''}
               onChange={(e) => setActiveSupervisorId(e.target.value)}
+              title="Machine"
+              aria-label="Machine"
               className="px-2 py-1 text-sm bg-[var(--bg-tertiary)]/60 rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500/50"
             >
               {supervisors.map((s) => (
                 <option key={s.id} value={s.id}>{s.hostname} · {s.online ? s.state : 'offline'} · v{s.version || '?'}</option>
               ))}
             </select>
+            {activeSupervisor && (
+              <SupervisorRootsEditor
+                key={activeSupervisor.id}
+                token={token}
+                supervisorId={activeSupervisor.id}
+                roots={activeSupervisor.roots}
+                online={activeSupervisor.online}
+                onSaved={refetchSupervisors}
+              />
+            )}
             {activeSupervisor?.online && (
               confirmingUpdate ? (
                 <span className="flex items-center gap-1.5">
@@ -722,10 +733,11 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
             )}
             {githubConfigured && installations.length > 0 && (
               <>
-                <span className="text-xs text-[var(--text-muted)] px-1">Install:</span>
                 <select
                   value={String(selectedInstallationId)}
                   onChange={(e) => setSelectedInstallationId(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                  title="Install"
+                  aria-label="Install"
                   className="px-2 py-1 text-sm bg-[var(--bg-tertiary)]/60 rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500/50"
                 >
                   <option value="all">All ({installations.length})</option>
@@ -733,7 +745,7 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                     <option key={i.installation_id || i.id} value={i.installation_id || i.id}>{i.account || i.account_login || `#${i.installation_id || i.id}`}</option>
                   ))}
                 </select>
-                <button onClick={connectGitHub} className="px-2 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)]">Add installation</button>
+                <button onClick={connectGitHub} title="Add installation" className="px-2 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)]">Add installation</button>
               </>
             )}
             {githubConfigured && installations.length === 0 && (
@@ -751,18 +763,6 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
           </>
         )}
       </div>
-
-      {/* Per-supervisor root folders — add custom (incl. non-GitHub) scan paths */}
-      {activeSupervisor && (
-        <SupervisorRootsEditor
-          key={activeSupervisor.id}
-          token={token}
-          supervisorId={activeSupervisor.id}
-          roots={activeSupervisor.roots}
-          online={activeSupervisor.online}
-          onSaved={refetchSupervisors}
-        />
-      )}
 
       {/* Repos table */}
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl">
