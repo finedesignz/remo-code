@@ -117,16 +117,47 @@ fn safe_trim_point(buf: &[u8], raw_cut: usize) -> usize {
         Some(i) => i,
         None => return raw_cut, // no nearby escape — already safe
     };
-    let terminated = ((last_esc + 1)..raw_cut).any(|i| {
-        let c = buf[i];
-        c == 0x07 || (0x40..=0x7e).contains(&c) // BEL (OSC) or CSI final byte
-    });
-    if terminated {
+    if is_escape_sequence_terminated_before(buf, last_esc, raw_cut) {
         return raw_cut;
     }
-    match buf[raw_cut..].iter().position(|&b| b == 0x1b) {
-        Some(off) => raw_cut + off,
-        None => buf.len(),
+    // Cut lands inside an unterminated escape sequence. Start the retained
+    // region AT the escape byte so the sequence replays whole once more data
+    // arrives — never scan forward for a later ESC / fall back to buf.len(),
+    // both of which can discard the entire ring when no further ESC exists.
+    last_esc
+}
+
+/// Byte-accurate check of whether the escape sequence starting at `last_esc`
+/// has already closed (has a terminator byte) strictly before `raw_cut`.
+/// Mirrors `isEscapeSequenceTerminatedBefore()` in the TS
+/// `supervisor/src/runners/pty-persistence.ts` — keep both in lock-step.
+///
+/// - CSI (`ESC [`): params/intermediates 0x20-0x3F, closed by a final byte
+///   0x40-0x7E.
+/// - OSC (`ESC ]`) / DCS (`ESC P`) / PM (`ESC ^`) / APC (`ESC _`): closed by
+///   BEL (0x07) or ST (`ESC \`).
+/// - Any other two-byte escape (`ESC` + 0x40-0x5F, excluding the four
+///   introducers above): closed by the single byte immediately after ESC.
+fn is_escape_sequence_terminated_before(buf: &[u8], last_esc: usize, raw_cut: usize) -> bool {
+    let intro = buf.get(last_esc + 1).copied();
+    match intro {
+        Some(0x5b) => {
+            // CSI
+            ((last_esc + 2)..raw_cut).any(|i| (0x40..=0x7e).contains(&buf[i]))
+        }
+        Some(0x5d) | Some(0x50) | Some(0x5e) | Some(0x5f) => {
+            // OSC / DCS / PM / APC — BEL or ST (ESC \)
+            ((last_esc + 2)..raw_cut).any(|i| {
+                buf[i] == 0x07 || (buf[i] == 0x1b && i + 1 < raw_cut && buf[i + 1] == 0x5c)
+            })
+        }
+        Some(c) if (0x40..=0x5f).contains(&c) => {
+            // Two-byte escape — terminated as soon as the second byte is consumed.
+            raw_cut >= last_esc + 2
+        }
+        // Unknown/incomplete introducer (or ESC is the last byte in the
+        // buffer) — not yet terminated.
+        _ => false,
     }
 }
 
@@ -169,12 +200,68 @@ mod ring_buffer_tests {
         ring.push(b"\x1b[31mAB\x1b[0mCD"); // 13 bytes; naive cut = 8 -> mid "\x1b[0m"
         let out = ring.snapshot();
         // Must never start with an orphaned escape-sequence tail (a byte that
-        // looks like a CSI parameter/final byte with no preceding ESC).
+        // looks like a CSI parameter/final byte with no preceding ESC), and
+        // must never be wiped entirely.
         assert!(
-            out.is_empty() || out[0] == 0x1b || !(0x30..=0x7e).contains(&out[0]),
-            "trimmed buffer starts mid-escape-sequence: {:?}",
+            !out.is_empty() && (out[0] == 0x1b || !(0x30..=0x7e).contains(&out[0])),
+            "trimmed buffer starts mid-escape-sequence or was wiped: {:?}",
             String::from_utf8_lossy(&out)
         );
+    }
+
+    /// Parity fixture table — mirrors `PARITY_FIXTURES` in
+    /// `supervisor/test/pty-persistence-trim.test.ts` exactly (same inputs,
+    /// same expected values). Keep both tables in lock-step.
+    #[test]
+    fn safe_trim_point_parity_fixtures() {
+        let cases: &[(&str, &[u8], usize, usize)] = &[
+            (
+                "CSI introducer byte must not be mistaken for a final byte",
+                b"XXXX\x1b[38;5;6mHELLO",
+                8,
+                4,
+            ),
+            (
+                "cut lands inside OSC content (unterminated)",
+                b"\x1b]0;title\x07REST",
+                5,
+                0,
+            ),
+            (
+                "OSC already terminated by BEL before the cut",
+                b"\x1b]0;title\x07REST",
+                10,
+                10,
+            ),
+            (
+                "cut lands inside ST-terminated DCS content (unterminated)",
+                b"\x1bP1$q\x1b\\REST",
+                3,
+                0,
+            ),
+            ("cut lands exactly at an ESC byte", b"AB\x1b[31mCD", 2, 2),
+            ("cut lands right after a CSI final byte", b"\x1b[31mAB", 5, 5),
+            ("no escape sequence nearby", b"HELLOWORLD", 5, 5),
+        ];
+        for (label, buf, raw_cut, expected) in cases {
+            assert_eq!(
+                safe_trim_point(buf, *raw_cut),
+                *expected,
+                "fixture failed: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn unterminated_csi_at_end_of_full_ring_is_preserved_not_discarded() {
+        // Pre-fix defect: when no terminator was found and no later ESC
+        // existed, the fallback returned buf.len(), discarding the ENTIRE
+        // ring.
+        let mut ring = RingBuffer::new(2);
+        ring.push(b"AB\x1b[3"); // 5 bytes; overflow=3, cut lands inside unterminated CSI
+        let out = ring.snapshot();
+        assert!(!out.is_empty());
+        assert_eq!(out, b"\x1b[3");
     }
 }
 
