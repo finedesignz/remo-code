@@ -10,10 +10,23 @@
  * Also asserts the runner emits the CLI `control_response` wire shape when wired
  * to a fake subprocess — closing the last hop to the Claude CLI.
  */
-import { describe, test, expect } from 'bun:test'
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { SessionBridge, type SessionBridgeOptions, type SessionBridgeCallbacks } from '../src/runners/session-bridge'
 import type { CliRunner } from '../src/runners/types'
 import { ClaudeRunner } from '../src/runners/claude-runner'
+
+// This suite exercises the LEGACY stream-json permission/question return path
+// (`ensureRunner()` on `auth_ok`), which `session-bridge.ts` only takes when
+// `REMO_PTY_INTERACTIVE` is NOT '1' (PTY sessions route through `term.input`
+// keystroke injection instead — see docs/telegram-bridge.md). Prod runs with
+// this flag ON, and it is easy for it to be set in a dev shell too, so pin it
+// unset for this suite regardless of the ambient environment.
+const ORIGINAL_PTY_FLAG = process.env.REMO_PTY_INTERACTIVE
+beforeEach(() => { delete process.env.REMO_PTY_INTERACTIVE })
+afterEach(() => {
+  if (ORIGINAL_PTY_FLAG === undefined) delete process.env.REMO_PTY_INTERACTIVE
+  else process.env.REMO_PTY_INTERACTIVE = ORIGINAL_PTY_FLAG
+})
 
 // Minimal fake WebSocket the bridge will drive. We capture the handlers it sets
 // and expose `emit()` to deliver a hub frame through the real onmessage path.
