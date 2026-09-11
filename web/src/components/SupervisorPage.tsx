@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { useSessions } from '../hooks/useSessions'
 import { useSupervisors } from '../hooks/useSupervisors'
 import { useWebSocketContext } from '../hooks/useWebSocket'
-import { Modal, Button } from './ui'
+import { Modal, Button, Tooltip } from './ui'
 import { SessionActionButton } from './SessionActionButton'
 import { isWorktreeOrNonCanonicalRepo } from '../lib/session-list'
 import { repoIdent as computeRepoIdent } from '../lib/repo-ident'
@@ -179,6 +179,27 @@ const Icon = {
   Power: (p: any) => (
     <svg {...p} width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 3v6" /><path d="M5.5 5.5a6 6 0 1 0 9 0" /></svg>
   ),
+  Plus: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M10 4v12" /><path d="M4 10h12" /></svg>
+  ),
+  Check: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 10l4 4 8-9" /></svg>
+  ),
+  Asterisk: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M10 3v14" /><path d="M4 6.5l12 7" /><path d="M16 6.5l-12 7" /></svg>
+  ),
+  Moon: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M16.5 12.3a7 7 0 1 1-8.8-8.8 5.6 5.6 0 0 0 8.8 8.8z" /></svg>
+  ),
+  Branch: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2" /><circle cx="6" cy="15" r="2" /><circle cx="14" cy="10" r="2" /><path d="M6 7v6" /><path d="M6 9a5 5 0 0 0 6 1" /></svg>
+  ),
+  Search: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="9" cy="9" r="6" /><path d="M17 17l-4-4" /></svg>
+  ),
+  GroupBy: (p: any) => (
+    <svg {...p} width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="3" width="6" height="6" rx="1" /><path d="M13 4h4" /><path d="M13 6h4" /><path d="M13 14h4" /><path d="M13 16h4" /><rect x="3" y="11" width="6" height="6" rx="1" /></svg>
+  ),
 }
 
 function StatusDot({ status, online = true }: { status: Row['status']; online?: boolean }) {
@@ -242,6 +263,13 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
     return 'all'
   })
   const [search, setSearch] = useState('')
+  // Search collapses to an icon on <640px and expands on tap/focus; always
+  // expanded at sm: and above (design-prefs mobile search-collapse pattern).
+  const [searchOpen, setSearchOpen] = useState(false)
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus()
+  }, [searchOpen])
   const [sortKey, setSortKey] = useState<SortKey>('repo')
   const [sortDir, setSortDir] = useState<SortDir>('asc')
   const { sessions } = useSessions(token, subscribe, connectionId)
@@ -673,69 +701,93 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
                 </div>
               </div>
             )}
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={activeSupervisorId || ''}
-              onChange={(e) => setActiveSupervisorId(e.target.value)}
-              title="Machine"
-              aria-label="Machine"
-              className="px-2 py-1 text-sm bg-[var(--bg-tertiary)]/60 rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500/50"
-            >
-              {supervisors.map((s) => (
-                <option key={s.id} value={s.id}>{s.hostname} · {s.online ? s.state : 'offline'} · v{s.version || '?'}</option>
-              ))}
-            </select>
+          <div className="flex flex-nowrap items-center gap-1 min-w-0">
+            {/* Machine pill: status dot + compact select, no label text. The
+                select truncates hard on mobile (hostname only survives) — the
+                full "hostname · state · vX" detail is still one tap/hover
+                away via the wrapping Tooltip, never lost, just not spelled
+                out inline on a 390px row. */}
+            <Tooltip label={activeSupervisor ? `${activeSupervisor.hostname} · ${activeSupervisor.online ? activeSupervisor.state : 'offline'} · v${activeSupervisor.version || '?'}` : 'Machine'}>
+              <span className="inline-flex items-center gap-1 pl-2 pr-0.5 h-8 rounded-full bg-[var(--bg-tertiary)]/60 min-w-0 shrink">
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${activeSupervisor?.online ? 'bg-emerald-400' : 'bg-gray-500'}`}
+                  aria-hidden="true"
+                />
+                <select
+                  value={activeSupervisorId || ''}
+                  onChange={(e) => setActiveSupervisorId(e.target.value)}
+                  aria-label="Machine"
+                  className="bg-transparent text-sm text-[var(--text-primary)] focus:outline-none min-w-0 max-w-[56px] sm:max-w-[180px] truncate"
+                >
+                  {supervisors.map((s) => (
+                    <option key={s.id} value={s.id}>{s.hostname} · {s.online ? s.state : 'offline'} · v{s.version || '?'}</option>
+                  ))}
+                </select>
+              </span>
+            </Tooltip>
+
             {activeSupervisor?.online && (
               confirmingUpdate ? (
-                <span className="flex items-center gap-1.5">
-                  <span className="text-xs text-[var(--text-secondary)] px-1">Briefly disconnect &amp; relaunch — active sessions may be interrupted?</span>
-                  <button
-                    type="button"
-                    onClick={requestUpdate}
-                    disabled={updating}
-                    aria-label="Confirm update supervisor to the latest signed release"
-                    className="px-2.5 py-1 text-xs font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {updating ? 'Updating…' : 'Confirm update'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setConfirmingUpdate(false)}
-                    disabled={updating}
-                    aria-label="Cancel update"
-                    className="px-2.5 py-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-lg"
-                  >
-                    Cancel
-                  </button>
+                <span className="inline-flex items-center gap-1">
+                  <Tooltip label="Briefly disconnect & relaunch — active sessions may be interrupted">
+                    <button
+                      type="button"
+                      onClick={requestUpdate}
+                      disabled={updating}
+                      aria-label="Confirm update supervisor to the latest signed release"
+                      className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {updating ? <Icon.Refresh className="animate-spin" /> : <Icon.Check />}
+                    </button>
+                  </Tooltip>
+                  <Tooltip label="Cancel update">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingUpdate(false)}
+                      disabled={updating}
+                      aria-label="Cancel update"
+                      className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 transition-colors"
+                    >
+                      <Icon.X />
+                    </button>
+                  </Tooltip>
                 </span>
               ) : (
-                <button
-                  onClick={() => setConfirmingUpdate(true)}
-                  disabled={updating}
-                  aria-label="Update supervisor to the latest signed release"
-                  title="Force this machine's Remo Code Supervisor to check for and install the latest signed release"
-                  className="flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  <Icon.Refresh className={updating ? 'animate-spin' : ''} />
-                  {updating ? 'Updating…' : 'Update to latest'}
-                </button>
+                <Tooltip label="Update supervisor to the latest signed release">
+                  <button
+                    onClick={() => setConfirmingUpdate(true)}
+                    disabled={updating}
+                    aria-label="Update supervisor to the latest signed release"
+                    className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Icon.Refresh className={updating ? 'animate-spin' : ''} />
+                  </button>
+                </Tooltip>
               )
             )}
+
             {githubConfigured && installations.length > 0 && (
               <>
                 <select
                   value={String(selectedInstallationId)}
                   onChange={(e) => setSelectedInstallationId(e.target.value === 'all' ? 'all' : Number(e.target.value))}
-                  title="Install"
-                  aria-label="Install"
-                  className="px-2 py-1 text-sm bg-[var(--bg-tertiary)]/60 rounded-lg text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500/50"
+                  aria-label="GitHub installation"
+                  className="px-2 h-8 text-sm bg-[var(--bg-tertiary)]/60 rounded-full text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-blue-500/50 min-w-0 max-w-[64px] sm:max-w-none truncate shrink"
                 >
                   <option value="all">All ({installations.length})</option>
                   {installations.map((i: any) => (
                     <option key={i.installation_id || i.id} value={i.installation_id || i.id}>{i.account || i.account_login || `#${i.installation_id || i.id}`}</option>
                   ))}
                 </select>
-                <button onClick={connectGitHub} title="Add installation" className="px-2 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)]">Add installation</button>
+                <Tooltip label="Add installation">
+                  <button
+                    onClick={connectGitHub}
+                    aria-label="Add installation"
+                    className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 transition-colors"
+                  >
+                    <Icon.Plus />
+                  </button>
+                </Tooltip>
               </>
             )}
             {githubConfigured && installations.length === 0 && (
@@ -744,9 +796,31 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
             {!githubConfigured && (
               <span className="text-xs text-amber-400">GitHub App not configured on hub</span>
             )}
-            <div className="ml-auto flex items-center gap-2">
+
+            <div className="ml-auto flex items-center gap-1 shrink-0">
               {activeRuns.length > 0 && (
-                <span className="text-xs text-emerald-400">{activeRuns.length} running</span>
+                <Tooltip label={`${activeRuns.length} running`}>
+                  <span
+                    aria-label={`${activeRuns.length} running`}
+                    className="inline-flex items-center gap-1 px-2 h-6 rounded-full bg-emerald-500/15 ring-1 ring-emerald-500/30 text-emerald-300 text-[11px] font-medium"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" aria-hidden="true" />
+                    {activeRuns.length}
+                  </span>
+                </Tooltip>
+              )}
+              {/* Per-supervisor root folders — collapses to an icon once >=1 root
+                  is configured; sits in this same row (wraps to its own line
+                  when expanded to full-width edit panel via `w-full`). */}
+              {activeSupervisor && (
+                <SupervisorRootsEditor
+                  key={activeSupervisor.id}
+                  token={token}
+                  supervisorId={activeSupervisor.id}
+                  roots={activeSupervisor.roots}
+                  online={activeSupervisor.online}
+                  onSaved={refetchSupervisors}
+                />
               )}
             </div>
           </div>
@@ -754,83 +828,131 @@ export function SupervisorPage({ token, onBack, embedded = false }: Props) {
         )}
       </div>
 
-      {/* Per-supervisor root folders — collapses to an icon once >=1 root is configured */}
-      {activeSupervisor && (
-        <SupervisorRootsEditor
-          key={activeSupervisor.id}
-          token={token}
-          supervisorId={activeSupervisor.id}
-          roots={activeSupervisor.roots}
-          online={activeSupervisor.online}
-          onSaved={refetchSupervisors}
-        />
-      )}
-
       {/* Repos table */}
       <div className="bg-[var(--bg-secondary)]/60 rounded-xl">
-        {/* Toolbar */}
-        <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[var(--border-color)]/40">
-          <div className="flex items-center gap-1">
-            {(['all', 'running', 'idle'] as const).map((f) => (
-              <button
-                key={f}
-                onClick={() => setFilter(f)}
-                className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${filter === f ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
-              >
-                {f === 'all' ? 'All' : f === 'running' ? 'Running' : 'Idle'}
-              </button>
-            ))}
+        {/* Toolbar — icon-only controls with styled tooltips; fits one row at 390px */}
+        <div className="flex flex-wrap items-center gap-1 px-2 py-1.5 border-b border-[var(--border-color)]/40">
+          <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-[var(--bg-tertiary)]/40 shrink-0">
+            {(['all', 'running', 'idle'] as const).map((f) => {
+              const label = f === 'all' ? 'All statuses' : f === 'running' ? 'Running' : 'Idle'
+              const FilterIcon = f === 'all' ? Icon.Asterisk : f === 'running' ? Icon.Play : Icon.Moon
+              return (
+                <Tooltip key={f} label={label}>
+                  <button
+                    onClick={() => setFilter(f)}
+                    aria-label={label}
+                    aria-pressed={filter === f}
+                    className={`inline-flex items-center justify-center min-w-[28px] min-h-[28px] rounded-md transition-colors ${filter === f ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/60'}`}
+                  >
+                    <FilterIcon />
+                  </button>
+                </Tooltip>
+              )
+            })}
           </div>
-          <div className="flex items-center gap-1">
-            {(['all', 'repos', 'folders'] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => setTypeFilter(t)}
-                className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${typeFilter === t ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
-              >
-                {t === 'all' ? 'All' : t === 'repos' ? 'Repos' : 'Folders'}
-              </button>
-            ))}
+          <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-[var(--bg-tertiary)]/40 shrink-0">
+            {(['all', 'repos', 'folders'] as const).map((t) => {
+              const label = t === 'all' ? 'All types' : t === 'repos' ? 'Repos' : 'Folders'
+              const TypeIcon = t === 'all' ? Icon.Asterisk : t === 'repos' ? Icon.Branch : Icon.Folder
+              return (
+                <Tooltip key={t} label={label}>
+                  <button
+                    onClick={() => setTypeFilter(t)}
+                    aria-label={label}
+                    aria-pressed={typeFilter === t}
+                    className={`inline-flex items-center justify-center min-w-[28px] min-h-[28px] rounded-md transition-colors ${typeFilter === t ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/60'}`}
+                  >
+                    <TypeIcon />
+                  </button>
+                </Tooltip>
+              )
+            })}
           </div>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search repos…"
-            className="flex-1 min-w-[160px] px-3 py-1.5 text-sm bg-[var(--bg-tertiary)]/40 rounded-lg text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:bg-[var(--bg-tertiary)]/60 focus:ring-1 focus:ring-blue-500/50"
-          />
-          <button
-            onClick={() => { loadGitHub(); scan() }}
-            disabled={refreshingGh || scanning}
-            title="Refresh repos"
-            aria-label="Refresh repos"
-            className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-50"
-          >
-            <Icon.Refresh className={refreshingGh || scanning ? 'animate-spin' : ''} />
-          </button>
-          <button
-            onClick={launchSelected}
-            disabled={selected.size === 0 || launchingAll || !activeSupervisor?.online}
-            className="px-2.5 py-1 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            {launchingAll ? 'Launching…' : `Launch selected${selected.size > 0 ? ` (${selected.size})` : ''}`}
-          </button>
+
+          {/* Search: icon-only trigger below sm:, always-expanded input at sm: and up */}
+          <div className="flex items-center min-w-0 sm:flex-1">
+            {!searchOpen && (
+              <Tooltip label="Search repos" className="sm:hidden">
+                <button
+                  type="button"
+                  onClick={() => setSearchOpen(true)}
+                  aria-label="Search repos"
+                  className="inline-flex sm:hidden items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40"
+                >
+                  <Icon.Search />
+                </button>
+              </Tooltip>
+            )}
+            <input
+              ref={searchInputRef}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onBlur={() => { if (!search) setSearchOpen(false) }}
+              placeholder="Search repos…"
+              aria-label="Search repos"
+              className={`${searchOpen ? 'flex' : 'hidden'} sm:flex flex-1 min-w-[120px] px-3 py-1.5 text-sm bg-[var(--bg-tertiary)]/40 rounded-lg text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:bg-[var(--bg-tertiary)]/60 focus:ring-1 focus:ring-blue-500/50`}
+            />
+          </div>
+
+          <Tooltip label="Refresh repos">
+            <button
+              onClick={() => { loadGitHub(); scan() }}
+              disabled={refreshingGh || scanning}
+              aria-label="Refresh repos"
+              className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/40 disabled:opacity-50 shrink-0"
+            >
+              <Icon.Refresh className={refreshingGh || scanning ? 'animate-spin' : ''} />
+            </button>
+          </Tooltip>
+
+          {/* Launch selected: outer button is the real 44x44 hit target
+              (transparent), the visible blue pill is the smaller inner span —
+              same technique as the root-folders icon, needed because this
+              button carries a persistent accent background that would
+              visually bleed into neighbors under a plain -m-2.5. */}
+          <Tooltip label={launchingAll ? 'Launching…' : `Launch selected${selected.size > 0 ? ` (${selected.size})` : ''}`}>
+            <button
+              onClick={launchSelected}
+              disabled={selected.size === 0 || launchingAll || !activeSupervisor?.online}
+              aria-label={launchingAll ? 'Launching…' : `Launch selected${selected.size > 0 ? ` (${selected.size})` : ''}`}
+              className="relative inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg disabled:cursor-not-allowed shrink-0"
+            >
+              <span className="relative inline-flex items-center justify-center w-9 h-9 rounded-lg bg-blue-600 hover:bg-blue-500 text-[var(--text-on-accent)] disabled:opacity-40 transition-colors">
+                {launchingAll ? <Icon.Refresh className="animate-spin" /> : <Icon.Play />}
+                {selected.size > 0 && !launchingAll && (
+                  <span className="absolute top-0.5 right-0.5 min-w-[14px] h-[14px] px-[3px] flex items-center justify-center rounded-full bg-[var(--text-on-accent)] text-blue-700 text-[9px] leading-none font-semibold">
+                    {selected.size}
+                  </span>
+                )}
+              </span>
+            </button>
+          </Tooltip>
+
           {/* Repo grouping controls */}
-          <button
-            onClick={() => setShowGroupsManager(true)}
-            title="Manage repo groups"
-            className="px-2.5 py-1 text-xs rounded-lg text-[var(--text-secondary)] bg-[var(--bg-tertiary)]/60 hover:bg-[var(--bg-tertiary)] inline-flex items-center gap-1"
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><rect x="2" y="2.5" width="5" height="5" rx="1" /><rect x="9" y="2.5" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>
-            Groups
-          </button>
-          <button
-            onClick={() => groupsApi.setGroupView(!groupsApi.groupView)}
-            title={groupsApi.groupView ? 'Switch to flat list' : 'Group repos by your groups'}
-            aria-pressed={groupsApi.groupView}
-            className={`px-2.5 py-1 text-xs rounded-lg transition-colors ${groupsApi.groupView ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40'}`}
-          >
-            Group by
-          </button>
+          <Tooltip label="Manage repo groups">
+            <button
+              onClick={() => setShowGroupsManager(true)}
+              aria-label="Manage repo groups"
+              className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]/60 transition-colors shrink-0"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><rect x="2" y="2.5" width="5" height="5" rx="1" /><rect x="9" y="2.5" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>
+            </button>
+          </Tooltip>
+          {/* Same outer-transparent / inner-pill technique — this toggle
+              carries a persistent ring+bg when active, which would bleed
+              into neighbors under a plain -m-2.5 on the visible element. */}
+          <Tooltip label={groupsApi.groupView ? 'Switch to flat list' : 'Group repos by your groups'}>
+            <button
+              onClick={() => groupsApi.setGroupView(!groupsApi.groupView)}
+              aria-pressed={groupsApi.groupView}
+              aria-label={groupsApi.groupView ? 'Switch to flat list' : 'Group repos by your groups'}
+              className="inline-flex items-center justify-center min-w-[44px] min-h-[44px] -m-2.5 rounded-lg shrink-0"
+            >
+              <span className={`inline-flex items-center justify-center w-9 h-9 rounded-lg transition-colors ${groupsApi.groupView ? 'bg-blue-600/20 ring-1 ring-blue-500/30 text-blue-300' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/60'}`}>
+                <Icon.GroupBy />
+              </span>
+            </button>
+          </Tooltip>
         </div>
 
         {/* Header (single responsive renderer; sort controls only matter on wider widths) */}

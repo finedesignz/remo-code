@@ -85,10 +85,15 @@ describe('SupervisorRootsEditor — collapse/expand', () => {
 
   test('>=1 root with no stored preference renders collapsed (icon + count badge, no visible list)', async () => {
     await render({ supervisorId: 'sup-one', roots: ['C:\\Users\\artic\\GitHub'] })
-    expect(host.textContent).not.toContain('Root folders')
     const btn = host.querySelector('button[aria-label="Root folders (1)"]')
     expect(btn).not.toBeNull()
     expect(btn?.textContent).toContain('1')
+    // No "Root folders" list panel is visible — the only place that text
+    // appears is the styled Tooltip's `role="tooltip"` span (hidden via
+    // opacity until hover/focus/tap), not a rendered list heading.
+    const withoutTooltips = host.cloneNode(true) as HTMLElement
+    withoutTooltips.querySelectorAll('[role="tooltip"]').forEach((t) => t.remove())
+    expect(withoutTooltips.textContent).not.toContain('Root folders')
   })
 
   test('clicking the collapsed icon expands the panel inline', async () => {
