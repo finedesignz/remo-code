@@ -24,11 +24,16 @@ function fakePty(): PersistablePty & { killed: number } {
 
 describe('Phase-16 PTY persistence — RingBuffer utility (pure, Rust-parity building block)', () => {
   test('ring-buffer keeps the last N bytes within its cap', () => {
+    // Trimming is chunked (TRIM_CHUNK_BYTES, clamped to the ring cap) so a
+    // stream of tiny pushes does not re-copy the ring on every byte: the ring
+    // may run up to cap + chunk before it re-trims, then trims back to cap.
     const ring = new RingBuffer(10)
     ring.push('abcdef')
-    ring.push('ghijkl') // total 12 → cap 10 keeps last 10
+    ring.push('ghijkl') // total 12 — under cap+chunk (20), not yet trimmed
+    expect(ring.size).toBe(12)
+    ring.push('mnopqrst') // total 20 — reaches cap+chunk, trims back to cap
     expect(ring.size).toBe(10)
-    expect(ring.snapshot()).toBe('cdefghijkl')
+    expect(ring.snapshot()).toBe('klmnopqrst')
   })
 
   test('a raw byte-count trim never starts mid ANSI escape sequence (mobile scrollback-depth investigation, 2026-09)', () => {

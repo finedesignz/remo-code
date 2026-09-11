@@ -65,114 +65,246 @@ export const DEFAULT_IDLE_GRACE_SECONDS = Number(
 )
 
 /**
- * A raw byte-count trim (`buf.slice(rawCut)`) can land INSIDE an unterminated
- * ANSI escape sequence (CSI `ESC [ ... final-byte` or OSC `ESC ] ... BEL/ST`).
- * Replaying a stream that *starts* mid-sequence desyncs the client's terminal
- * parser: the orphaned tail of the sequence (e.g. `38;5;6m`) gets printed as
- * literal garbage text, and the sequence that should have painted the next
- * line's content gets consumed as if it were parameters — rendering as
- * blank/garbled lines at the top of the replay (reproduced against a real
- * xterm.js parser during the mobile scrollback-depth investigation, 2026-09;
- * matches the reported symptom: a large blank region above replayed content).
+ * Maximum distance `safeTrimPoint` may move a cut BACKWARD from `rawCut`
+ * (bytes). This is the availability half of the trim contract.
  *
- * There is deliberately NO fixed backward scan window (round-2 QC MAJOR): a
- * fixed window (formerly 256 bytes) misses any escape sequence longer than
- * that -- an OSC-8 hyperlink with a long URL, a long OSC-0 title, or a DCS/
- * sixel payload -- silently returning `rawCut` unchanged (treating a
- * genuinely mid-sequence cut as safe) once no ESC falls inside the window.
- * The scan below is bounded only by the ring itself: walking back through
- * every ESC in the buffer is still cheap in the overwhelmingly common case
- * (real terminal output carries ANSI codes every few bytes), and this only
- * runs on ring overflow.
+ * Holding the cut back to the start of the sequence enclosing `rawCut` is what
+ * keeps a replay from starting mid-sequence — but an enclosing sequence that
+ * never terminates would otherwise pin the ring open forever: every push would
+ * hold back to the same front byte, `drain(0..0)` would trim nothing, and the
+ * ring would grow without bound until the replay frame blew past the hub's
+ * 10 MB WS message cap and scrollback died for the session (round-4 QC MAJOR
+ * F2). So the hold-back is capped: if the enclosing sequence started more than
+ * MAX_TRIM_HOLDBACK_BYTES before `rawCut`, we cut at `rawCut` and accept ONE
+ * garbled sequence in the replay rather than losing scrollback entirely.
  *
- * Stopping at the FIRST (nearest) ESC found is ALSO wrong (round-2 QC fuzz,
- * 34/20000 cases): an OSC/DCS/PM/APC string sequence's content can itself
- * contain arbitrary ESC bytes that are not BEL/ST (e.g. a literal `ESC M`
- * two-byte escape embedded in a still-open, never-BEL/ST-terminated OSC
- * title). Evaluated in isolation that embedded ESC looks like a closed,
- * harmless 2-byte escape -- but `rawCut` is still inside the OUTER
- * unterminated OSC, which a nearest-ESC-only scan never even looks at. So:
- * walk backward through EVERY ESC candidate (nearest to farthest); the first
- * one found to be genuinely unterminated at `rawCut` -- checked on its own
- * terms, exactly as `isEscapeSequenceTerminatedBefore` already does -- is the
- * answer. Only when every candidate back to the start of the buffer is
- * terminated (or none exist) is `rawCut` itself safe.
- *
- * If `rawCut` sits inside an unterminated escape sequence, advance to the
- * start of that (outermost) sequence instead. If it's already safe (no
- * escape in progress), return it unchanged.
+ * 64 KiB is far larger than any real control sequence (a long OSC-8 hyperlink
+ * or OSC-0 title is hundreds of bytes); the only things it truncates are bulk
+ * payloads (sixel/DCS graphics) and genuinely malformed/binary output, both of
+ * which are already unreplayable as a fragment.
  */
-export function safeTrimPoint(buf: string, rawCut: number): number {
-  for (let i = rawCut - 1; i >= 0; i--) {
-    if (buf.charCodeAt(i) !== 0x1b) continue
-    if (isEscapeSequenceTerminatedBefore(buf, i, rawCut)) continue // closed -- keep looking further back
-    // Cut lands inside an unterminated escape sequence. Start the retained
-    // region AT the escape byte so the sequence replays whole once more data
-    // arrives -- never scan forward for a later ESC / fall back to buf.length,
-    // both of which can discard the entire ring when no further ESC exists.
-    return i
-  }
-  return rawCut // no unterminated escape sequence reaches rawCut -- already safe
+export const MAX_TRIM_HOLDBACK_BYTES = 64 * 1024
+
+/**
+ * Minimum overflow (bytes) that must accumulate before the ring re-slices.
+ * Trimming copies the retained region, so trimming on every 1-byte push makes
+ * `push` O(ring size); batching makes it O(1) amortized. Steady-state ring size
+ * is therefore `cap + chunk`, still well inside `cap + MAX_TRIM_HOLDBACK_BYTES`.
+ * Capped by the ring's own capacity so tiny test rings still trim.
+ */
+export const TRIM_CHUNK_BYTES = 4096
+
+/** Escape-grammar parser states (ECMA-48 / xterm). */
+const enum EscState {
+  /** Not inside any sequence — a safe cut point. */
+  Ground = 0,
+  /** ESC consumed, second byte not yet seen. */
+  Esc = 1,
+  /** nF sequence (ESC + 0x20-0x2F...) awaiting its 0x30-0x7E final byte. */
+  NfIntermediate = 2,
+  /** CSI (ESC [) collecting params/intermediates, awaiting a 0x40-0x7E final. */
+  CsiParam = 3,
+  /** String sequence (OSC/DCS/PM/APC/SOS) awaiting BEL or ST. */
+  StringPayload = 4,
+  /** ESC seen inside a string payload — only `ESC \` (ST) closes it. */
+  StringEsc = 5,
 }
 
 /**
- * Byte-accurate check of whether the escape sequence starting at `lastEsc`
- * has already closed (has a terminator byte) strictly before `rawCut`.
+ * Advance the escape-sequence parser by one byte.
  *
- * - CSI (`ESC [`): params/intermediates 0x20-0x3F, closed by a final byte
- *   0x40-0x7E.
- * - OSC (`ESC ]`) / DCS (`ESC P`) / PM (`ESC ^`) / APC (`ESC _`): closed by
- *   BEL (0x07) or ST (`ESC \`).
- * - Any other two-byte escape (`ESC` + 0x40-0x5F, excluding the four
- *   introducers above): closed by the single byte immediately after ESC.
+ * Grammar (ECMA-48 / xterm), after ESC:
+ *  - 0x20-0x2F  intermediate(s), then a final 0x30-0x7E  → nF (e.g. `ESC ( B`)
+ *  - 0x30-0x3F  Fp  → COMPLETE two-byte escape (e.g. `ESC 7`, `ESC =`)
+ *  - 0x60-0x7E  Fs  → COMPLETE two-byte escape (e.g. `ESC c`)
+ *  - 0x5B `[`   CSI → params/intermediates 0x20-0x3F, final 0x40-0x7E
+ *  - 0x5D `]` OSC, 0x50 `P` DCS, 0x5E `^` PM, 0x5F `_` APC, 0x58 `X` SOS
+ *               → string sequence, closed by BEL (0x07) or ST (`ESC \`)
+ *  - any other Fe (0x40-0x5F) → COMPLETE two-byte escape
+ *
+ * Inside a string sequence an embedded ESC that is not `ESC \` does NOT close
+ * it — it is payload (or an error) and the sequence stays open. That is the
+ * defect round-4 QC found (F1): treating `ESC 7` / `ESC =` / `ESC ( B` inside
+ * an open OSC as if it closed the OSC.
  */
-function isEscapeSequenceTerminatedBefore(buf: string, lastEsc: number, rawCut: number): boolean {
-  const intro = lastEsc + 1 < buf.length ? buf.charCodeAt(lastEsc + 1) : -1
-  if (intro === 0x5b) {
-    // CSI
-    for (let i = lastEsc + 2; i < rawCut; i++) {
-      const c = buf.charCodeAt(i)
-      if (c >= 0x40 && c <= 0x7e) return true
-    }
-    return false
+function stepEscState(state: EscState, byte: number): EscState {
+  switch (state) {
+    case EscState.Ground:
+      return byte === 0x1b ? EscState.Esc : EscState.Ground
+    case EscState.Esc:
+      if (byte >= 0x20 && byte <= 0x2f) return EscState.NfIntermediate
+      if (byte === 0x5b) return EscState.CsiParam
+      if (byte === 0x5d || byte === 0x50 || byte === 0x5e || byte === 0x5f || byte === 0x58) {
+        return EscState.StringPayload
+      }
+      // Fp / Fs / any other Fe — a complete two-byte escape. Anything else
+      // (a stray C0 byte) is malformed; treat it as consumed rather than
+      // holding the parser open on garbage.
+      return EscState.Ground
+    case EscState.NfIntermediate:
+      return byte >= 0x20 && byte <= 0x2f ? EscState.NfIntermediate : EscState.Ground
+    case EscState.CsiParam:
+      return byte >= 0x20 && byte <= 0x3f ? EscState.CsiParam : EscState.Ground
+    case EscState.StringPayload:
+      if (byte === 0x07) return EscState.Ground
+      return byte === 0x1b ? EscState.StringEsc : EscState.StringPayload
+    case EscState.StringEsc:
+      if (byte === 0x5c) return EscState.Ground // ST
+      return byte === 0x1b ? EscState.StringEsc : EscState.StringPayload
   }
-  if (intro === 0x5d || intro === 0x50 || intro === 0x5e || intro === 0x5f) {
-    // OSC / DCS / PM / APC — BEL or ST (ESC \)
-    for (let i = lastEsc + 2; i < rawCut; i++) {
-      const c = buf.charCodeAt(i)
-      if (c === 0x07) return true
-      if (c === 0x1b && i + 1 < rawCut && buf.charCodeAt(i + 1) === 0x5c) return true
-    }
-    return false
-  }
-  if (intro >= 0x40 && intro <= 0x5f) {
-    // Two-byte escape — terminated as soon as the second byte is consumed.
-    return rawCut >= lastEsc + 2
-  }
-  // Unknown/incomplete introducer (or ESC is the last byte in the buffer) —
-  // not yet terminated.
-  return false
 }
 
-/** A bounded byte ring-buffer keeping the last N bytes for scrollback replay. */
-export class RingBuffer {
-  private buf = ''
-  constructor(private capBytes = DEFAULT_SCROLLBACK_CAP_BYTES) {}
-  push(bytes: string): void {
-    this.buf += bytes
-    if (this.buf.length > this.capBytes) {
-      const rawCut = this.buf.length - this.capBytes
-      this.buf = this.buf.slice(safeTrimPoint(this.buf, rawCut))
+/**
+ * A raw byte-count trim (`buf.slice(rawCut)`) can land INSIDE an escape
+ * sequence (CSI `ESC [ ... final`, OSC `ESC ] ... BEL/ST`, DCS, nF, ...).
+ * Replaying a stream that *starts* mid-sequence desyncs the client's terminal
+ * parser: the orphaned tail (e.g. `38;5;6m`) prints as literal garbage, and the
+ * sequence that should have painted the next line gets eaten as parameters —
+ * rendering as blank/garbled lines at the top of the replay (reproduced against
+ * a real xterm.js parser, mobile scrollback-depth investigation 2026-09).
+ *
+ * This is a FORWARD parse, not a backward scan. Every prior attempt scanned
+ * backward from `rawCut` looking for an ESC and then judged that ESC "on its
+ * own terms" (#460 byte-range check, #462 windowed type-aware scan, #468
+ * unwindowed walk). All three were wrong for the same structural reason: an
+ * ESC byte in isolation carries no information about whether it is a sequence
+ * introducer or payload inside an enclosing string sequence, and a backward
+ * scan cannot tell the difference without parsing forward anyway. Round-4 QC
+ * proved it: 21,055/50,000 cases returned a cut strictly inside an open
+ * sequence (F1).
+ *
+ * `buf` index 0 is GROUND by construction — the ring only ever starts at a
+ * previous safe cut (a sequence start, or a ground position) — so parsing
+ * forward from 0 to `rawCut` yields the true parser state AT `rawCut`. The
+ * scan is O(rawCut), i.e. O(bytes pushed since the last trim), which is what
+ * makes RingBuffer.push O(1) amortized instead of O(ring size).
+ *
+ * Returns `rawCut` when it is a ground (safe) position, otherwise the start
+ * index of the sequence enclosing it — unless that start is more than
+ * MAX_TRIM_HOLDBACK_BYTES back, in which case `rawCut` is returned so the ring
+ * stays bounded (see MAX_TRIM_HOLDBACK_BYTES). The result is never > `rawCut`.
+ */
+class TrimScanner {
+  state: EscState = EscState.Ground
+  /** Start index of the sequence currently open, in CURRENT buffer coords. */
+  seqStart = -1
+  /** How many leading bytes of the current buffer have been parsed. */
+  parsed = 0
+
+  /**
+   * Parse forward to `limit`, reading bytes through `read`. Only ever moves
+   * forward — O(bytes consumed), which is what makes the ring O(1) amortized.
+   */
+  advanceTo(read: (i: number) => number, limit: number): void {
+    for (let i = this.parsed; i < limit; i++) {
+      if (this.state === EscState.Ground) this.seqStart = i
+      this.state = stepEscState(this.state, read(i))
     }
+    if (limit > this.parsed) this.parsed = limit
   }
+
+  /** The safe cut for `rawCut`, given the parser has been advanced to it. */
+  cutFor(rawCut: number, maxHoldback: number): number {
+    if (this.state === EscState.Ground) return rawCut
+    if (rawCut - this.seqStart > maxHoldback) return rawCut
+    return this.seqStart
+  }
+
+  /** Rebase after the buffer's leading `cut` bytes were dropped. */
+  shift(cut: number): void {
+    if (this.state !== EscState.Ground && this.seqStart >= cut) {
+      this.seqStart -= cut
+      this.parsed -= cut
+      return
+    }
+    // Either we were at ground, or the cut landed strictly inside the open
+    // sequence (holdback exceeded). Both leave the new front byte as the
+    // parser's fresh starting point, which is exactly what a from-scratch
+    // safeTrimPoint() assumes — so reset and let it re-derive.
+    this.state = EscState.Ground
+    this.seqStart = -1
+    this.parsed = 0
+  }
+}
+
+export function safeTrimPoint(
+  buf: string,
+  rawCut: number,
+  maxHoldback = MAX_TRIM_HOLDBACK_BYTES,
+): number {
+  if (rawCut <= 0) return 0
+  const scanner = new TrimScanner()
+  scanner.advanceTo((i) => buf.charCodeAt(i), Math.min(rawCut, buf.length))
+  return scanner.cutFor(rawCut, maxHoldback)
+}
+
+/**
+ * A bounded ring of the last N BYTES for scrollback replay.
+ *
+ * Storage is a `Uint8Array`, matching the Rust host's `Vec<u8>` ring exactly
+ * (round-4 QC F4). `push` takes a latin1 BYTE STRING — every JS char is one PTY
+ * byte (0x00-0xFF) — and `snapshot` returns one. Never push a decoded UTF-16
+ * string: it would break both the byte cap and the escape-grammar scan. Byte
+ * storage also keeps `push` genuinely O(1) amortized; a string ring re-flattens
+ * its rope on every indexed read, which measured 840 us/push at a 4 MiB cap.
+ *
+ * Trimming keeps ONE persistent escape-grammar scanner across pushes rather
+ * than re-parsing the overflow each time, so `push` is O(bytes pushed)
+ * amortized regardless of ring size (round-4 QC MAJOR F2). Size is bounded by
+ * `cap + MAX_TRIM_HOLDBACK_BYTES`.
+ */
+export class RingBuffer {
+  /** Backing store. Only `[0, len)` is live. */
+  private bytes = new Uint8Array(0)
+  private len = 0
+  private scanner = new TrimScanner()
+  constructor(private capBytes = DEFAULT_SCROLLBACK_CAP_BYTES) {}
+
+  private reserve(extra: number): void {
+    const need = this.len + extra
+    if (need <= this.bytes.length) return
+    let next = Math.max(this.bytes.length * 2, 1024)
+    while (next < need) next *= 2
+    const grown = new Uint8Array(next)
+    grown.set(this.bytes.subarray(0, this.len))
+    this.bytes = grown
+  }
+
+  push(chunk: string): void {
+    this.reserve(chunk.length)
+    for (let i = 0; i < chunk.length; i++) this.bytes[this.len + i] = chunk.charCodeAt(i) & 0xff
+    this.len += chunk.length
+    // Amortize: only trim once at least a chunk of overflow has accumulated, so
+    // a stream of 1-byte pushes does not re-copy the ring on every byte. Capped
+    // by the ring's own capacity so tiny rings still trim.
+    const chunkThreshold = Math.max(1, Math.min(TRIM_CHUNK_BYTES, this.capBytes))
+    if (this.len - this.capBytes < chunkThreshold) return
+    const rawCut = this.len - this.capBytes
+    const read = (i: number) => this.bytes[i]!
+    this.scanner.advanceTo(read, rawCut)
+    const cut = this.scanner.cutFor(rawCut, MAX_TRIM_HOLDBACK_BYTES)
+    if (cut <= 0) return
+    this.bytes.copyWithin(0, cut, this.len)
+    this.len -= cut
+    this.scanner.shift(cut)
+  }
+
   snapshot(): string {
-    return this.buf
+    let out = ''
+    const STRIDE = 8192
+    for (let i = 0; i < this.len; i += STRIDE) {
+      out += String.fromCharCode(...this.bytes.subarray(i, Math.min(i + STRIDE, this.len)))
+    }
+    return out
   }
+
   clear(): void {
-    this.buf = ''
+    this.len = 0
+    this.scanner = new TrimScanner()
   }
+
   get size(): number {
-    return this.buf.length
+    return this.len
   }
 }
 

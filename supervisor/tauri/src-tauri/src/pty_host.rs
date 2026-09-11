@@ -84,114 +84,232 @@ struct PtySession {
     pid: Option<u32>,
 }
 
-/// A simple byte ring-buffer with a hard cap — keeps the last N bytes of output.
+/// Maximum distance `safe_trim_point` may move a cut BACKWARD from `raw_cut`
+/// (bytes). Availability half of the trim contract. Mirrors
+/// `MAX_TRIM_HOLDBACK_BYTES` in supervisor/src/runners/pty-persistence.ts.
+///
+/// Holding the cut back to the start of the sequence enclosing `raw_cut` keeps
+/// a replay from starting mid-sequence -- but an enclosing sequence that never
+/// terminates would otherwise pin the ring open forever: every push would hold
+/// back to the same front byte, `drain(0..0)` would trim nothing, and the ring
+/// would grow without bound until the replay frame blew past the hub 10 MB WS
+/// message cap and scrollback died for the session (round-4 QC MAJOR F2). So
+/// the hold-back is capped: if the enclosing sequence started more than
+/// MAX_TRIM_HOLDBACK_BYTES before `raw_cut`, cut at `raw_cut` and accept ONE
+/// garbled sequence rather than losing scrollback entirely.
+const MAX_TRIM_HOLDBACK_BYTES: usize = 64 * 1024;
+
+/// Minimum overflow (bytes) that must accumulate before the ring re-drains.
+/// Draining copies the retained region, so draining on every 1-byte push makes
+/// `push` O(ring size); batching makes it O(1) amortized. Mirrors
+/// `TRIM_CHUNK_BYTES` in the TS twin.
+const TRIM_CHUNK_BYTES: usize = 4096;
+
+/// A byte ring-buffer with a hard cap -- keeps the last N bytes of output,
+/// bounded by `cap + MAX_TRIM_HOLDBACK_BYTES`.
 struct RingBuffer {
     buf: Vec<u8>,
     cap: usize,
+    scanner: TrimScanner,
 }
 
-/// A raw byte-count trim (`buf.drain(0..raw_cut)`) can land INSIDE an
-/// unterminated ANSI escape sequence (CSI `ESC [ ... final-byte` or OSC
-/// `ESC ] ... BEL/ST`). Replaying a stream that *starts* mid-sequence desyncs
-/// the client's terminal parser: the orphaned tail of the sequence (e.g.
-/// `38;5;6m`) gets printed as literal garbage text, and the sequence that
-/// should have painted the next line's content gets consumed as if it were
-/// parameters -- rendering as blank/garbled lines at the top of the replay
-/// (reproduced against a real xterm.js parser during the mobile
-/// scrollback-depth investigation, 2026-09; matches the reported symptom: a
-/// large blank region above replayed content). Mirrors the TS
-/// `safeTrimPoint()` in supervisor/src/runners/pty-persistence.ts -- keep
-/// both in lock-step.
+/// Escape-grammar parser states (ECMA-48 / xterm). Mirrors `EscState` in
+/// supervisor/src/runners/pty-persistence.ts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EscState {
+    /// Not inside any sequence -- a safe cut point.
+    Ground,
+    /// ESC consumed, second byte not yet seen.
+    Esc,
+    /// nF sequence (ESC + 0x20-0x2F...) awaiting its 0x30-0x7E final byte.
+    NfIntermediate,
+    /// CSI (ESC [) collecting params/intermediates, awaiting a 0x40-0x7E final.
+    CsiParam,
+    /// String sequence (OSC/DCS/PM/APC/SOS) awaiting BEL or ST.
+    StringPayload,
+    /// ESC seen inside a string payload -- only ST (ESC backslash) closes it.
+    StringEsc,
+}
+
+/// Advance the escape-sequence parser by one byte.
 ///
-/// There is deliberately NO fixed backward scan window (round-2 QC MAJOR): a
-/// fixed window (formerly 256 bytes) misses any escape sequence longer than
-/// that -- an OSC-8 hyperlink with a long URL, a long OSC-0 title, or a DCS/
-/// sixel payload -- silently returning `raw_cut` unchanged (treating a
-/// genuinely mid-sequence cut as safe) once no ESC falls inside the window.
-/// The scan below is bounded only by the ring itself: walking back through
-/// every ESC in the buffer is still cheap in the overwhelmingly common case
-/// (real terminal output carries ANSI codes every few bytes), and this only
-/// runs on ring overflow.
+/// Grammar (ECMA-48 / xterm), after ESC:
+///  - 0x20-0x2F  intermediate(s), then a final 0x30-0x7E  -> nF (ESC ( B)
+///  - 0x30-0x3F  Fp  -> COMPLETE two-byte escape (ESC 7, ESC =)
+///  - 0x60-0x7E  Fs  -> COMPLETE two-byte escape (ESC c)
+///  - 0x5B `[`   CSI -> params/intermediates 0x20-0x3F, final 0x40-0x7E
+///  - 0x5D `]` OSC, 0x50 `P` DCS, 0x5E `^` PM, 0x5F `_` APC, 0x58 `X` SOS
+///               -> string sequence, closed by BEL (0x07) or ST (ESC backslash)
+///  - any other Fe (0x40-0x5F) -> COMPLETE two-byte escape
 ///
-/// Stopping at the FIRST (nearest) ESC found is ALSO wrong (round-2 QC fuzz,
-/// 34/20000 cases): an OSC/DCS/PM/APC string sequence's content can itself
-/// contain arbitrary ESC bytes that are not BEL/ST (e.g. a literal `ESC M`
-/// two-byte escape embedded in a still-open, never-BEL/ST-terminated OSC
-/// title). Evaluated in isolation that embedded ESC looks like a closed,
-/// harmless 2-byte escape -- but `raw_cut` is still inside the OUTER
-/// unterminated OSC, which a nearest-ESC-only scan never even looks at. So:
-/// walk backward through EVERY ESC candidate (nearest to farthest); the
-/// first one found to be genuinely unterminated at `raw_cut` -- checked on
-/// its own terms, exactly as `is_escape_sequence_terminated_before` already
-/// does -- is the answer. Only when every candidate back to the start of the
-/// buffer is terminated (or none exist) is `raw_cut` itself safe.
+/// Inside a string sequence an embedded ESC that is not ST does NOT close it --
+/// it is payload (or an error) and the sequence stays open. That is the defect
+/// round-4 QC found (F1): treating ESC 7 / ESC = / ESC ( B inside an open OSC
+/// as if it closed the OSC.
+fn step_esc_state(state: EscState, byte: u8) -> EscState {
+    match state {
+        EscState::Ground => {
+            if byte == 0x1b {
+                EscState::Esc
+            } else {
+                EscState::Ground
+            }
+        }
+        EscState::Esc => match byte {
+            0x20..=0x2f => EscState::NfIntermediate,
+            0x5b => EscState::CsiParam,
+            0x5d | 0x50 | 0x5e | 0x5f | 0x58 => EscState::StringPayload,
+            // Fp / Fs / any other Fe -- a complete two-byte escape. Anything
+            // else (a stray C0 byte) is malformed; treat it as consumed rather
+            // than holding the parser open on garbage.
+            _ => EscState::Ground,
+        },
+        EscState::NfIntermediate => {
+            if (0x20..=0x2f).contains(&byte) {
+                EscState::NfIntermediate
+            } else {
+                EscState::Ground
+            }
+        }
+        EscState::CsiParam => {
+            if (0x20..=0x3f).contains(&byte) {
+                EscState::CsiParam
+            } else {
+                EscState::Ground
+            }
+        }
+        EscState::StringPayload => match byte {
+            0x07 => EscState::Ground,
+            0x1b => EscState::StringEsc,
+            _ => EscState::StringPayload,
+        },
+        EscState::StringEsc => match byte {
+            0x5c => EscState::Ground, // ST
+            0x1b => EscState::StringEsc,
+            _ => EscState::StringPayload,
+        },
+    }
+}
+
+/// Incremental forward escape-grammar scanner. Mirrors `TrimScanner` in the TS
+/// twin -- keep both in lock-step.
+struct TrimScanner {
+    state: EscState,
+    /// Start index of the sequence currently open, in CURRENT buffer coords.
+    seq_start: usize,
+    /// How many leading bytes of the current buffer have been parsed.
+    parsed: usize,
+}
+
+impl TrimScanner {
+    fn new() -> Self {
+        Self { state: EscState::Ground, seq_start: 0, parsed: 0 }
+    }
+
+    /// Parse forward to `limit`. Only ever moves forward -- O(bytes consumed).
+    fn advance_to(&mut self, buf: &[u8], limit: usize) {
+        let limit = limit.min(buf.len());
+        for i in self.parsed..limit {
+            if self.state == EscState::Ground {
+                self.seq_start = i;
+            }
+            self.state = step_esc_state(self.state, buf[i]);
+        }
+        if limit > self.parsed {
+            self.parsed = limit;
+        }
+    }
+
+    /// The safe cut for `raw_cut`, given the parser has been advanced to it.
+    fn cut_for(&self, raw_cut: usize, max_holdback: usize) -> usize {
+        if self.state == EscState::Ground {
+            return raw_cut;
+        }
+        if raw_cut.saturating_sub(self.seq_start) > max_holdback {
+            return raw_cut;
+        }
+        self.seq_start
+    }
+
+    /// Rebase after the buffer leading `cut` bytes were dropped.
+    fn shift(&mut self, cut: usize) {
+        if self.state != EscState::Ground && self.seq_start >= cut {
+            self.seq_start -= cut;
+            self.parsed -= cut;
+            return;
+        }
+        // Either we were at ground, or the cut landed strictly inside the open
+        // sequence (holdback exceeded). Both leave the new front byte as the
+        // parser fresh starting point, which is exactly what a from-scratch
+        // safe_trim_point() assumes -- so reset and let it re-derive.
+        self.state = EscState::Ground;
+        self.seq_start = 0;
+        self.parsed = 0;
+    }
+}
+
+/// A raw byte-count trim (`buf.drain(0..raw_cut)`) can land INSIDE an escape
+/// sequence (CSI, OSC, DCS, nF, ...). Replaying a stream that *starts*
+/// mid-sequence desyncs the client terminal parser: the orphaned tail (e.g.
+/// `38;5;6m`) prints as literal garbage, and the sequence that should have
+/// painted the next line gets eaten as parameters -- rendering as blank/garbled
+/// lines at the top of the replay (reproduced against a real xterm.js parser,
+/// mobile scrollback-depth investigation 2026-09). Mirrors `safeTrimPoint()` in
+/// supervisor/src/runners/pty-persistence.ts -- keep both in lock-step.
 ///
-/// If `raw_cut` sits inside an unterminated escape sequence, advance to the
-/// start of that (outermost) sequence instead. If it's already safe, return
-/// it unchanged.
+/// This is a FORWARD parse, not a backward scan. Every prior attempt scanned
+/// backward from `raw_cut` looking for an ESC and judged that ESC on its own
+/// terms (#460 byte-range check, #462 windowed type-aware scan, #468 unwindowed
+/// walk). All three were wrong for the same structural reason: an ESC byte in
+/// isolation carries no information about whether it is a sequence introducer
+/// or payload inside an enclosing string sequence, and a backward scan cannot
+/// tell the difference without parsing forward anyway. Round-4 QC proved it:
+/// 21,055/50,000 cases returned a cut strictly inside an open sequence (F1).
+///
+/// `buf` index 0 is GROUND by construction -- the ring only ever starts at a
+/// previous safe cut -- so parsing forward from 0 to `raw_cut` yields the true
+/// parser state AT `raw_cut`. The scan is O(raw_cut), i.e. O(bytes pushed since
+/// the last trim), which is what makes `RingBuffer::push` O(1) amortized.
+///
+/// Returns `raw_cut` when it is a ground (safe) position, otherwise the start
+/// index of the sequence enclosing it -- unless that start is more than
+/// MAX_TRIM_HOLDBACK_BYTES back, in which case `raw_cut` is returned so the
+/// ring stays bounded. The result is never > `raw_cut`.
 fn safe_trim_point(buf: &[u8], raw_cut: usize) -> usize {
-    for i in (0..raw_cut).rev() {
-        if buf[i] != 0x1b {
-            continue;
-        }
-        if is_escape_sequence_terminated_before(buf, i, raw_cut) {
-            continue; // closed -- keep looking further back
-        }
-        // Cut lands inside an unterminated escape sequence. Start the
-        // retained region AT the escape byte so the sequence replays whole
-        // once more data arrives -- never scan forward for a later ESC /
-        // fall back to buf.len(), both of which can discard the entire ring
-        // when no further ESC exists.
-        return i;
-    }
-    raw_cut // no unterminated escape sequence reaches raw_cut -- already safe
+    safe_trim_point_with_holdback(buf, raw_cut, MAX_TRIM_HOLDBACK_BYTES)
 }
 
-/// Byte-accurate check of whether the escape sequence starting at `last_esc`
-/// has already closed (has a terminator byte) strictly before `raw_cut`.
-/// Mirrors `isEscapeSequenceTerminatedBefore()` in the TS
-/// `supervisor/src/runners/pty-persistence.ts` — keep both in lock-step.
-///
-/// - CSI (`ESC [`): params/intermediates 0x20-0x3F, closed by a final byte
-///   0x40-0x7E.
-/// - OSC (`ESC ]`) / DCS (`ESC P`) / PM (`ESC ^`) / APC (`ESC _`): closed by
-///   BEL (0x07) or ST (`ESC \`).
-/// - Any other two-byte escape (`ESC` + 0x40-0x5F, excluding the four
-///   introducers above): closed by the single byte immediately after ESC.
-fn is_escape_sequence_terminated_before(buf: &[u8], last_esc: usize, raw_cut: usize) -> bool {
-    let intro = buf.get(last_esc + 1).copied();
-    match intro {
-        Some(0x5b) => {
-            // CSI
-            ((last_esc + 2)..raw_cut).any(|i| (0x40..=0x7e).contains(&buf[i]))
-        }
-        Some(0x5d) | Some(0x50) | Some(0x5e) | Some(0x5f) => {
-            // OSC / DCS / PM / APC — BEL or ST (ESC \)
-            ((last_esc + 2)..raw_cut).any(|i| {
-                buf[i] == 0x07 || (buf[i] == 0x1b && i + 1 < raw_cut && buf[i + 1] == 0x5c)
-            })
-        }
-        Some(c) if (0x40..=0x5f).contains(&c) => {
-            // Two-byte escape — terminated as soon as the second byte is consumed.
-            raw_cut >= last_esc + 2
-        }
-        // Unknown/incomplete introducer (or ESC is the last byte in the
-        // buffer) — not yet terminated.
-        _ => false,
+fn safe_trim_point_with_holdback(buf: &[u8], raw_cut: usize, max_holdback: usize) -> usize {
+    if raw_cut == 0 {
+        return 0;
     }
+    let mut scanner = TrimScanner::new();
+    scanner.advance_to(buf, raw_cut);
+    scanner.cut_for(raw_cut, max_holdback)
 }
 
 impl RingBuffer {
     fn new(cap: usize) -> Self {
-        Self { buf: Vec::new(), cap }
+        Self { buf: Vec::new(), cap, scanner: TrimScanner::new() }
     }
     fn push(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
-        if self.buf.len() > self.cap {
-            let overflow = self.buf.len() - self.cap;
-            let safe_cut = safe_trim_point(&self.buf, overflow);
-            self.buf.drain(0..safe_cut);
+        // Amortize: only trim once at least a chunk of overflow has
+        // accumulated, so a stream of 1-byte pushes does not re-copy the whole
+        // ring on every byte. Capped by the ring capacity so tiny test rings
+        // still trim.
+        let chunk = TRIM_CHUNK_BYTES.min(self.cap).max(1);
+        if self.buf.len() < self.cap + chunk {
+            return;
         }
+        let raw_cut = self.buf.len() - self.cap;
+        self.scanner.advance_to(&self.buf, raw_cut);
+        let safe_cut = self.scanner.cut_for(raw_cut, MAX_TRIM_HOLDBACK_BYTES);
+        if safe_cut == 0 {
+            return;
+        }
+        self.buf.drain(0..safe_cut);
+        self.scanner.shift(safe_cut);
     }
     fn snapshot(&self) -> Vec<u8> {
         self.buf.clone()
@@ -204,11 +322,17 @@ mod ring_buffer_tests {
 
     #[test]
     fn keeps_last_n_bytes_within_cap() {
+        // Trimming is chunked (TRIM_CHUNK_BYTES, clamped to the ring cap) so a
+        // stream of tiny pushes does not re-copy the ring on every byte: the
+        // ring is allowed to run up to cap + chunk before it re-drains, then
+        // drains back to exactly cap.
         let mut ring = RingBuffer::new(10);
         ring.push(b"abcdef");
-        ring.push(b"ghijkl"); // total 12 -> cap 10 keeps last 10
+        ring.push(b"ghijkl"); // total 12 -- under cap+chunk (20), not yet trimmed
+        assert_eq!(ring.buf.len(), 12);
+        ring.push(b"mnopqrst"); // total 20 -- reaches cap+chunk, drains to cap
         assert_eq!(ring.buf.len(), 10);
-        assert_eq!(ring.snapshot(), b"cdefghijkl");
+        assert_eq!(ring.snapshot(), b"klmnopqrst");
     }
 
     #[test]
@@ -232,6 +356,95 @@ mod ring_buffer_tests {
     /// Parity fixture table — mirrors `PARITY_FIXTURES` in
     /// `supervisor/test/pty-persistence-trim.test.ts` exactly (same inputs,
     /// same expected values). Keep both tables in lock-step.
+    /// Round-5 F1 grammar fixtures -- mirrors `F1_REPROS` in
+    /// supervisor/test/pty-persistence-trim.test.ts exactly. Keep in lock-step.
+    #[test]
+    fn safe_trim_point_escape_grammar_fixtures() {
+        let cases: Vec<(&str, Vec<u8>, usize, usize)> = vec![
+            (
+                "ESC 7 (Fp, DECSC) embedded in a still-open OSC does not close the OSC",
+                b"\x1b]0;AAAA\x1b7BBBB".to_vec(),
+                14,
+                0,
+            ),
+            (
+                "ESC 8 (Fp) embedded in a still-open OSC does not close it",
+                b"\x1b]0;AAAA\x1b8BBBB".to_vec(),
+                12,
+                0,
+            ),
+            (
+                "ESC ( B (nF) embedded in a still-open DCS does not close it",
+                b"\x1bP1$q\x1b(Bpayload".to_vec(),
+                12,
+                0,
+            ),
+            (
+                "ESC = (Fp, DECKPAM) embedded in a still-open APC does not close it",
+                b"\x1b_data\x1b=more".to_vec(),
+                9,
+                0,
+            ),
+            ("a bare Fp escape (ESC 7) is a COMPLETE two-byte sequence", b"AA\x1b7BB".to_vec(), 4, 4),
+            ("a bare Fs escape (ESC c, RIS) is a COMPLETE two-byte sequence", b"AA\x1bcBB".to_vec(), 4, 4),
+            ("a cut INSIDE an nF sequence (ESC ( B) holds back to its start", b"AA\x1b(BXX".to_vec(), 4, 2),
+            ("an nF sequence is complete once its final byte is consumed", b"AA\x1b(BXX".to_vec(), 5, 5),
+            ("SOS (ESC X) is a string sequence, not a two-byte escape", b"\x1bXpayload".to_vec(), 5, 0),
+        ];
+        for (label, buf, raw_cut, expected) in &cases {
+            assert_eq!(safe_trim_point(buf, *raw_cut), *expected, "fixture failed: {label}");
+        }
+    }
+
+    /// Round-5 F2: the hold-back is bounded, so an unterminated sequence can
+    /// never pin the ring open. Mirrors the TS `RingBuffer stays bounded`
+    /// suite.
+    #[test]
+    fn ring_stays_bounded_under_an_unterminated_sequence() {
+        let cap = 1 << 20;
+        let mut ring = RingBuffer::new(cap);
+        let mut payload = b"\x1b]0;".to_vec();
+        payload.extend(std::iter::repeat(b'A').take(4 * 1024 * 1024));
+        ring.push(&payload);
+        for _ in 0..50_000 {
+            ring.push(b"B");
+        }
+        assert!(
+            ring.buf.len() <= cap + MAX_TRIM_HOLDBACK_BYTES,
+            "ring grew unbounded: {}",
+            ring.buf.len()
+        );
+    }
+
+    #[test]
+    fn unterminated_csi_at_ring_front_is_eventually_cut() {
+        let cap = 64usize;
+        let mut ring = RingBuffer::new(cap);
+        let mut payload = b"\x1b[".to_vec();
+        payload.extend(std::iter::repeat(b'1').take(200_000));
+        ring.push(&payload);
+        assert!(ring.buf.len() <= cap + MAX_TRIM_HOLDBACK_BYTES);
+    }
+
+    #[test]
+    fn a_short_unterminated_sequence_is_still_held_back_intact() {
+        let mut ring = RingBuffer::new(4);
+        ring.push(b"ABCD\x1b]0;ti");
+        assert!(ring.snapshot().starts_with(b"\x1b]"));
+    }
+
+    /// The hold-back cap itself: a sequence starting further back than
+    /// MAX_TRIM_HOLDBACK_BYTES is cut at raw_cut, not held.
+    #[test]
+    fn holdback_cap_falls_back_to_raw_cut() {
+        let mut buf = b"\x1b]0;".to_vec();
+        buf.extend(std::iter::repeat(b'A').take(MAX_TRIM_HOLDBACK_BYTES + 100));
+        let raw_cut = MAX_TRIM_HOLDBACK_BYTES + 50;
+        assert_eq!(safe_trim_point(&buf, raw_cut), raw_cut);
+        // Just inside the cap it IS held back to the sequence start.
+        assert_eq!(safe_trim_point(&buf, MAX_TRIM_HOLDBACK_BYTES), 0);
+    }
+
     #[test]
     fn safe_trim_point_parity_fixtures() {
         // Owned `Vec<u8>` (not `&'static [u8]`) so the long/repeated-byte
