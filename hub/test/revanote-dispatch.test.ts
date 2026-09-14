@@ -79,9 +79,18 @@ const state: {
   budgetPct: number
   todayCost: number
   costCap: number
+  // sessions considered "offline" by the getChannel mock (dead/replaced ids).
+  offlineSessions: Set<string>
+  // what dal.findSessionByProjectDir resolves to (the "replacement" session).
+  resolvedSession: { id: string } | null
+  // session_id persisted on the annotation row returned by getAnnotationById.
+  annSessionId: string
 } = {
   runs: [], annStatus: [], broadcasts: [], sentFrames: [], callbacks: [],
   budgetPct: 60, todayCost: 0, costCap: 10,
+  offlineSessions: new Set(),
+  resolvedSession: { id: 'sess-1' },
+  annSessionId: 'sess-1',
 }
 
 let runSeq = 0
@@ -103,7 +112,7 @@ mock.module('../src/db/postgres.ts', () => ({
 mock.module('../src/db/revanote-dal.ts', () => ({
   ...realRevDal,
   resolveRevanoteMappingForHost: async () => MAPPING,
-  getAnnotationById: async () => makeAnnotation(),
+  getAnnotationById: async () => makeAnnotation({ session_id: state.annSessionId }),
   sumTodayAnnotationCostForUser: async () => state.todayCost,
   insertAnnotationRun: async (opts: any) => {
     runSeq++
@@ -123,12 +132,15 @@ mock.module('../src/db/revanote-dal.ts', () => ({
 
 mock.module('../src/db/dal.ts', () => ({
   ...realDal,
-  findSessionByProjectDir: async () => ({ id: 'sess-1' }),
+  findSessionByProjectDir: async () => state.resolvedSession,
   insertMessage: async () => ({ id: 'msg-1', created_at: new Date().toISOString() }),
 }))
 
 mock.module('../src/ws/registry.ts', () => ({
-  getChannel: (_sid: string) => ({ ws: { send: (f: string) => state.sentFrames.push(JSON.parse(f)) } }),
+  getChannel: (sid: string) =>
+    state.offlineSessions.has(sid)
+      ? null
+      : { ws: { send: (f: string) => state.sentFrames.push(JSON.parse(f)) } },
   broadcastRevanoteEvent: (_uid: string, ev: any) => state.broadcasts.push(ev),
   broadcastToSubscribers: () => {},
 }))
@@ -172,6 +184,9 @@ beforeEach(() => {
   state.budgetPct = 60
   state.todayCost = 0
   state.costCap = 10
+  state.offlineSessions = new Set()
+  state.resolvedSession = { id: 'sess-1' }
+  state.annSessionId = 'sess-1'
   runSeq = 0
   _reset()
 })
@@ -285,5 +300,50 @@ describe('revanote dispatch adapter — budget + cost-cap gates', () => {
     expect((out as any).skip_reason).toBe('daily_cost_cap')
     expect(state.runs).toHaveLength(0)
     expect(state.sentFrames).toHaveLength(0)
+  })
+})
+
+describe('revanote dispatch adapter — stale/orphaned session rebind (prod incident 2026-09-10)', () => {
+  afterAll(() => mock.restore())
+
+  test('bound session_id is offline (dead/replaced) → re-resolves via mapping to the live replacement session and dispatches', async () => {
+    state.annSessionId = 'sess-dead'
+    state.offlineSessions.add('sess-dead')
+    state.resolvedSession = { id: 'sess-2' }
+
+    const out = await dispatchPendingAnnotation('ann-1')
+
+    expect(out).toEqual({ status: 'dispatched', run_id: 'run-1', session_id: 'sess-2' })
+    expect(state.sentFrames).toHaveLength(1)
+    expect(state.annStatus.some((s) => s.status === 'dispatched' && s.opts.session_id === 'sess-2')).toBe(true)
+  })
+
+  test('bound session_id online → reused as-is, no re-resolution (healthy rows unaffected)', async () => {
+    state.resolvedSession = { id: 'sess-should-not-be-used' }
+
+    const out = await dispatchPendingAnnotation('ann-1')
+
+    expect(out).toEqual({ status: 'dispatched', run_id: 'run-1', session_id: 'sess-1' })
+  })
+
+  test('bound session_id offline AND no replacement session exists → non-success outcome, NOT a bare dispatch/ack; reject callback fired', async () => {
+    state.annSessionId = 'sess-dead'
+    state.offlineSessions.add('sess-dead')
+    state.resolvedSession = null
+
+    const out = await dispatchPendingAnnotation('ann-1')
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(out.status).toBe('failed')
+    expect((out as any).skip_reason).toBe('session_not_found_for_repo')
+    expect(state.runs).toHaveLength(0)
+    expect(state.sentFrames).toHaveLength(0)
+
+    expect(state.annStatus.some((s) => s.status === 'failed' && s.opts.skip_reason === 'session_not_found_for_repo')).toBe(true)
+
+    expect(state.callbacks).toHaveLength(1)
+    expect(state.callbacks[0].payload.annotation_id).toBe('ext-abc')
+    expect(state.callbacks[0].payload.resolved).toBe(false)
+    expect(state.callbacks[0].payload.action_taken).toBe('no_target')
   })
 })

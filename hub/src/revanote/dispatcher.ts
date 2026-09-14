@@ -198,7 +198,20 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
   // so we short-circuit it here before entering dispatch().
   const host = hostOf(ann.page_url)
   const mapping = await resolveRevanoteMappingForHost(userId, host)
-  const sessionId = ann.session_id || (await resolveSessionId(userId, mapping))
+  // A previously-bound session_id is only trustworthy while that session is
+  // actually online. Once a supervisor session dies and is replaced (new
+  // session_id, same project_dir -- see dal.ts session-connect-time supersede),
+  // the old id is permanently dead: getChannel() never finds it again, so a
+  // naive `ann.session_id || resolveSessionId(...)` would park/expire this
+  // annotation forever instead of ever re-resolving to the replacement. Only
+  // reuse the bound id when it's actually live; otherwise fall through to a
+  // fresh mapping->session lookup so the row self-heals onto whatever session
+  // is actually serving this project_dir today. Healthy (online) rows are
+  // unaffected -- this never re-resolves a session that's already reachable.
+  const boundSessionOnline = !!ann.session_id && getChannel(ann.session_id) != null
+  const sessionId = boundSessionOnline
+    ? ann.session_id
+    : await resolveSessionId(userId, mapping)
   if (!sessionId) {
     const reason = mapping ? 'session_not_found_for_repo' : 'no_mapping_for_host'
     await updateAnnotationStatus(ann.id, 'failed', {
