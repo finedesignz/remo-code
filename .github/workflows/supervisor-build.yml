@@ -1,0 +1,80 @@
+name: supervisor-build
+
+# PR/push CI for the Supervisor Tauri app (supervisor/tauri/ui + supervisor/tauri/src-tauri
+# + supervisor/src). Runs the Vite/React/TS UI build and a real `cargo check` of the Rust
+# crate, which is Windows-only (ConPTY via portable-pty + the `windows` crate behind
+# `cfg(target_os = "windows")`) -- a linux/amd64 cross-target check would silently skip
+# every windows-cfg'd block, which is most of the crate's actual logic (sidecar
+# management, mutex probe, legacy cleanup).
+#
+# Was `.woodpecker/supervisor-build.yaml` on the self-hosted native Windows Woodpecker
+# agent (id 6, TITANIUMTOWER). That agent was permanently removed 2026-09-15 (owner order:
+# never reinstall a Woodpecker agent on TITANIUMTOWER -- new CI capacity goes in Coolify
+# only, and Coolify runs Linux containers, which cannot host this check). With no
+# windows/amd64 Woodpecker agent anywhere in the fleet, every PR touching these paths
+# queued a `platform: windows/amd64` task that could never be scheduled. Moved here
+# because `release-supervisor.yml` already proves windows-latest builds this exact
+# UI+Rust combination; this job reuses the same toolchain setup but is check-only
+# (no signing, no artifact upload) so it's safe and cheap to run on every PR.
+#
+# Cost note: GitHub-hosted Windows runners bill at 2x Linux minutes (see
+# project_gha_cost_reduction memory). Path-filtered so it only fires when the supervisor
+# app actually changes, keeping this bounded the same way the Woodpecker version was.
+
+on:
+  pull_request:
+    paths:
+      - 'supervisor/tauri/**'
+      - 'supervisor/src/**'
+      - '.github/workflows/supervisor-build.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'supervisor/tauri/**'
+      - 'supervisor/src/**'
+      - '.github/workflows/supervisor-build.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  supervisor-build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: supervisor/tauri/src-tauri
+
+      - name: Install + typecheck + build UI
+        working-directory: supervisor/tauri/ui
+        run: |
+          bun install --frozen-lockfile
+          bunx tsc --noEmit -p .
+          bun run build
+
+      - name: Rust check (stub sidecar binary so tauri::generate_context! resolves)
+        working-directory: supervisor/tauri/src-tauri
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path binaries | Out-Null
+          Set-Content -Path binaries\remo-code-supervisor-x86_64-pc-windows-msvc.exe -Value stub
+          cargo check
