@@ -315,7 +315,7 @@ export async function finalizeOrphanedRunsForSupervisor(
   supervisorId: string,
   liveSessionIds: string[],
 ): Promise<number> {
-  const rows = await sql`
+  const rows = await sql<{ id: string }[]>`
     UPDATE session_runs
     SET ended_at = now(), exit_reason = 'orphaned_no_inventory'
     WHERE supervisor_id = ${supervisorId}
@@ -324,7 +324,47 @@ export async function finalizeOrphanedRunsForSupervisor(
       AND (session_id IS NULL OR NOT (session_id = ANY(${liveSessionIds})))
     RETURNING id
   `
+  if (rows.length > 0) {
+    await releaseSupervisorSlotIfClosed(supervisorId, rows.map((r) => r.id))
+  }
   return rows.length
+}
+
+/**
+ * Release a supervisor's in-flight slot after one of ITS runs was just closed by
+ * a reconciler (finalizeOrphanedRunsForSupervisor / finalizeUnbackedOpenRunsForSupervisor).
+ *
+ * BUG this fixes: both reconcilers only ever updated `session_runs.ended_at` /
+ * `exit_reason` — never `supervisors.state` / `current_run_id`. Normal run
+ * completion clears the slot via setSupervisorState (see the `supervisor.state`
+ * handler in ws/agent.ts), but a run that ends via the ORPHAN or UNBACKED path
+ * never goes through that handler, so the owning supervisor row stays pinned at
+ * `state='running'` with a stale `current_run_id` forever — heartbeating
+ * normally, but rejecting every future dispatch with `session_busy` against a
+ * slot nothing is using. Observed live 2026-09-18 and 2026-09-24 (the latter
+ * stranded 23 client annotations, oldest 24 days; restored by a manual row
+ * update).
+ *
+ * SAFETY: only reset a supervisor whose `current_run_id` still equals one of the
+ * run ids we just closed — never a blanket "idle after any reconcile". If a new
+ * run started on this supervisor between the close and this call, its
+ * `current_run_id` has already moved on to that new run's id (set by
+ * setSupervisorState when the new run started) and will not appear in
+ * `closedRunIds`, so the UPDATE's WHERE clause matches zero rows and the live
+ * run's slot is left alone.
+ */
+export async function releaseSupervisorSlotIfClosed(
+  supervisorId: string,
+  closedRunIds: string[],
+): Promise<boolean> {
+  if (closedRunIds.length === 0) return false
+  const rows = await sql`
+    UPDATE supervisors
+    SET state = 'idle', current_run_id = NULL, last_seen_at = now()
+    WHERE id = ${supervisorId} AND current_run_id = ANY(${closedRunIds})
+    RETURNING id
+  `
+  return rows.length > 0
 }
 
 /** Hard floor on the backstop's min-age, enforced HERE so no caller can bypass it. */
@@ -388,7 +428,11 @@ export async function finalizeUnbackedOpenRunsForSupervisor(args: {
       AND (session_id IS NULL OR NOT (session_id = ANY(${args.liveSessionIds})))
     RETURNING id
   `
-  return rows.map((r) => r.id)
+  const ids = rows.map((r) => r.id)
+  if (ids.length > 0) {
+    await releaseSupervisorSlotIfClosed(args.supervisorId, ids)
+  }
+  return ids
 }
 
 export async function listRunsForSupervisor(supervisorId: string, userId: string, limit = 50) {
