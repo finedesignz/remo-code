@@ -58,12 +58,18 @@ export function useApiKey(token: string | null) {
   useEffect(() => { fetchKeys() }, [fetchKeys])
 
   /** Mint a key. scopes = null ⇒ legacy full-access (supervisor) key. */
-  const createKey = async (name: string, scopes: Scope[] | null): Promise<ApiKeyOpResult<any>> => {
+  /** `host: true` mints an ADDITIONAL agent host key (e.g. a cloud session)
+   *  instead of replacing the tray app's supervisor key. */
+  const createKey = async (
+    name: string,
+    scopes: Scope[] | null,
+    opts: { host?: boolean } = {},
+  ): Promise<ApiKeyOpResult<any>> => {
     if (!token) return { ok: false, code: 'unknown', message: 'not signed in' }
     try {
       const data = await hubFetch<any>(token, '/api/api-keys', {
         method: 'POST',
-        json: { name, scopes },
+        json: opts.host ? { name, scopes, host: true } : { name, scopes },
       })
       await fetchKeys()
       return { ok: true, data } // { id, name, scopes, key: "remokey_..." }

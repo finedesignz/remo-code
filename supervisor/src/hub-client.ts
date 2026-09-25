@@ -1,5 +1,6 @@
 import { hostname, platform, release } from 'os'
 import { resolveHostname } from './hostname'
+import { openHubWebSocket } from './ws-proxy'
 import { writeFileSync, mkdirSync, watch as fsWatch, existsSync, readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { scanAll, scanRoots } from './repo-scanner'
@@ -173,7 +174,7 @@ export class SupervisorClient {
     this.log('info', `connecting to ${wsUrl}`)
     let ws: WebSocket
     try {
-      ws = new WebSocket(wsUrl)
+      ws = openHubWebSocket(wsUrl)
     } catch (err: any) {
       this.log('error', `WebSocket construct failed: ${err.message}`)
       this.scheduleReconnect()

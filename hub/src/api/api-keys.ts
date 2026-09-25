@@ -26,9 +26,19 @@ function ipOf(c: any): string | null {
   return c.req.header('cf-connecting-ip') || c.req.header('x-real-ip') || c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || null
 }
 
-/** Keys carrying the `agent` scope (or legacy NULL scopes) ARE the supervisor credential. */
-function purposeForScopes(scopes: string[] | null): string {
-  return hasScope(scopes, SCOPE_AGENT) ? 'supervisor' : 'external'
+/**
+ * Keys carrying the `agent` scope (or legacy NULL scopes) ARE a host-spawn
+ * credential. By default that is THE supervisor key (purpose='supervisor',
+ * at-most-one active, hot-swapped into the tray app). `host: true` mints an
+ * ADDITIONAL host key instead (purpose='host'): N per user, never revokes or
+ * replaces the tray app's key — used by a second host such as a headless
+ * supervisor in a Claude Code cloud session (docs/cloud-session-supervisor.md).
+ * `host: true` without the agent scope is meaningless → 400.
+ */
+function purposeFor(scopes: string[] | null, host: boolean): string | { error: string } {
+  const agent = hasScope(scopes, SCOPE_AGENT)
+  if (host) return agent ? 'host' : { error: 'host keys require the agent scope' }
+  return agent ? 'supervisor' : 'external'
 }
 
 function prefixOf(rawKey: string): string {
@@ -42,8 +52,9 @@ apiKeys.get('/', async (c) => {
   return c.json(keys)
 })
 
-// Mint a key. Body: { name?: string, scopes?: string[] | null }
+// Mint a key. Body: { name?: string, scopes?: string[] | null, host?: boolean }
 // scopes omitted/null ⇒ legacy full-access key (what the supervisor gets).
+// host: true ⇒ an additional agent-scoped host key (purpose='host').
 apiKeys.post('/', async (c) => {
   const userId = c.get('userId') as string
   let body: any = {}
@@ -53,9 +64,20 @@ apiKeys.post('/', async (c) => {
   if (!norm.ok) return c.json({ error: norm.error }, 400)
   const scopes = norm.scopes
 
+  const host = body?.host === true
+  const purposeOrErr = purposeFor(scopes, host)
+  if (typeof purposeOrErr !== 'string') return c.json(purposeOrErr, 400)
+  const purpose = purposeOrErr
+
   const rawName = typeof body?.name === 'string' ? body.name.trim() : ''
-  const name = (rawName || (scopes ? 'External key' : 'Supervisor')).slice(0, 64)
-  const purpose = purposeForScopes(scopes)
+  const name = (rawName || (host ? 'Cloud host' : scopes ? 'External key' : 'Supervisor')).slice(0, 64)
+
+  // Minting a new supervisor key revokes the previous one (createApiKey). Capture
+  // that key's id first so the hot-swap reaches ONLY the tray app that held it —
+  // never a purpose='host' supervisor running on its own key.
+  const priorSupervisorKeyIds = purpose === 'supervisor'
+    ? (await listApiKeys(userId)).filter((k: any) => k.purpose === 'supervisor').map((k: any) => k.id as string)
+    : []
 
   const rawKey = generateToken('remokey_')
   const keyHash = await hashToken(rawKey)
@@ -72,9 +94,10 @@ apiKeys.post('/', async (c) => {
   } catch {}
 
   // Only the supervisor credential is hot-swapped into connected tray apps —
-  // an external (ext:*) key must never be pushed to a supervisor.
+  // an external (ext:*) key must never be pushed to a supervisor, and a new
+  // host key never replaces another host's credential.
   if (purpose === 'supervisor') {
-    try { pushKeyRotatedToUser(userId, rawKey, key.id) } catch {}
+    try { pushKeyRotatedToUser(userId, rawKey, key.id, { onlyApiKeyIds: priorSupervisorKeyIds }) } catch {}
   }
 
   return c.json({ ...key, key: rawKey }, 201)
@@ -106,8 +129,10 @@ apiKeys.post('/:id/rotate', async (c) => {
     })
   } catch {}
 
-  if (existing.purpose === 'supervisor') {
-    try { pushKeyRotatedToUser(userId, rawKey, key.id) } catch {}
+  // Hot-swap the new secret into the ONE host that authenticated with the
+  // rotated key (tray app or purpose='host'), never into a sibling host.
+  if (existing.purpose === 'supervisor' || existing.purpose === 'host') {
+    try { pushKeyRotatedToUser(userId, rawKey, key.id, { onlyApiKeyIds: [id] }) } catch {}
   }
 
   return c.json({ ...key, key: rawKey }, 201)
