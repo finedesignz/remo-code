@@ -81,6 +81,8 @@ function ApiKeyCard({ token }: { token: string }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [scopes, setScopes] = useState<Scope[]>(["ext:read"]);
+  // Extra host (cloud session etc.) — only meaningful with the agent scope.
+  const [extraHost, setExtraHost] = useState(false);
 
   const copy = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -99,12 +101,14 @@ function ApiKeyCard({ token }: { token: string }) {
       setOpError("Pick at least one scope.");
       return;
     }
-    const result = await createKey(name.trim() || "New key", scopes);
+    const host = extraHost && scopes.includes("agent");
+    const result = await createKey(name.trim() || (host ? "Cloud host" : "New key"), scopes, { host });
     if (result.ok && result.data?.key) {
       setNewKey(result.data.key);
       setCreating(false);
       setName("");
       setScopes(["ext:read"]);
+      setExtraHost(false);
     } else if (!result.ok) {
       setOpError(result.message);
     }
@@ -195,6 +199,24 @@ function ApiKeyCard({ token }: { token: string }) {
               ))}
             </div>
           </Field>
+          {scopes.includes("agent") && (
+            <label className="flex items-start gap-2 text-xs text-[var(--text-secondary)] cursor-pointer">
+              <input
+                type="checkbox"
+                data-testid="key-extra-host"
+                checked={extraHost}
+                onChange={(e) => setExtraHost(e.target.checked)}
+                className="mt-0.5 accent-blue-500"
+              />
+              <span>
+                <span className="text-[var(--text-primary)]">Additional host</span>
+                <span className="block text-[11px] text-[var(--text-muted)]">
+                  For a second machine such as a Claude Code cloud session. Leaves your
+                  tray app's key alone — without this, an agent key replaces it.
+                </span>
+              </span>
+            </label>
+          )}
           <Button
             variant="primary"
             size="sm"

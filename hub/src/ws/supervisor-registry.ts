@@ -297,11 +297,24 @@ export function listOnlineSupervisorIdsForUser(userId: string): string[] {
  * the number of sockets the message was delivered to. Best-effort: per-socket
  * send errors are swallowed (offline / closing supervisors will reconnect
  * with the old key and silently fail auth → user re-pastes through the UI).
+ *
+ * `onlyApiKeyIds` (cloud-host): when given, deliver ONLY to supervisors that
+ * authenticated with one of those key ids. A user can run several hosts (the
+ * tray app + purpose='host' keys, e.g. a Claude Code cloud session); rotating
+ * one host's key must never overwrite another host's credential — two hosts on
+ * one key evict each other (registerSupervisor closes the old socket 4003).
  */
-export function pushKeyRotatedToUser(userId: string, newApiKey: string, keyId: string): number {
+export function pushKeyRotatedToUser(
+  userId: string,
+  newApiKey: string,
+  keyId: string,
+  opts: { onlyApiKeyIds?: string[] } = {},
+): number {
+  const only = opts.onlyApiKeyIds ? new Set(opts.onlyApiKeyIds) : null
   let delivered = 0
   for (const [, e] of supervisors) {
     if (e.userId !== userId) continue
+    if (only && !only.has(e.apiKeyId)) continue
     try {
       e.ws.send(JSON.stringify({ type: 'key_rotated', new_api_key: newApiKey, key_id: keyId }))
       delivered++
