@@ -51,6 +51,7 @@ import * as schedRegistry from './scheduler/registry.ts'
 import * as schedCatchup from './scheduler/catchup.ts'
 import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
 import { getGraceBuffer as getDispatchGraceBuffer } from './dispatch/grace.ts'
+import { startHookReaper } from './dispatch/pipeline.ts'
 import { startRevanoteCallbackWorker } from './revanote/callback.ts'
 import { startTelegramBridge } from './telegram/bridge.ts'
 import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/queue.ts'
@@ -726,6 +727,12 @@ runMigrations()
     // dead CLI turn can't leave a task perpetually in-flight. No-op when
     // REMO_RUN_REAPER_DISABLED is set.
     startRunReaperSweep()
+    // fix/revanote-session-busy — hard ceiling (REMO_DISPATCH_HOOK_MAX_MS,
+    // default 2h) for a shouldFinalize-gated dispatch hook (revanote) whose
+    // agent never emits the result envelope and then goes quiet. Without it the
+    // session's queue slot was held forever and every later annotation for that
+    // repo came back `session_busy`.
+    startHookReaper()
     // Milestone ASK — periodic sweep that finalizes `session_asks` stuck
     // queued/dispatched past REMO_ASK_MAX_MS (default 15min) as `timeout`, so an
     // external caller never polls a dead ask forever. Conditional finalize, so a

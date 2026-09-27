@@ -188,6 +188,11 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
 - **Optional:** `REMO_SESSION_IDLE_GRACE_SECONDS` (default 14400 = 4h; `0` disables idle teardown),
   `REMO_ORCHESTRATOR_AUTOLAUNCH` (`false` disables auto-launch), `TITANIUM_BYPASS` (currently
   `true` in prod — see docs/auth.md), `COOLIFY_TOKEN`, `E4A_*`.
+- **Dispatch queue depth + silent-hook ceiling** (`hub/src/dispatch/pipeline.ts`, fix/revanote-session-busy):
+  **`REMO_DISPATCH_MAX_WAITERS`** (default **50**) — FIFO waiters per session behind the in-flight run (was 1,
+  which dropped every Revanote comment past the second in a burst as `session_busy`); **`REMO_DISPATCH_HOOK_MAX_MS`**
+  (default **7200000** = 2h) — `startHookReaper()` finalizes a `shouldFinalize`-gated hook (revanote) that never got its
+  envelope and no further messages, then promotes the next waiter. Promoted waiters always re-run the full gate list.
 - **Ghost-session reaper** (`hub/src/ws/ghost-reaper.ts`): a boot-started sweep that reaps
   **ghost sessions** — a `sessions` row stuck `status='online' AND hostname IS NULL` with a live
   phantom agent channel but no genuinely-live CLI behind it (a hostname-less `/ws/agent` re-auth;
