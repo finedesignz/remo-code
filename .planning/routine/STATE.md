@@ -10,10 +10,15 @@ LOCK: none
 
 ## Current status
 Bootstrapped structurally on 2026-09-27. `DIRECTIVE.md`, `SCORECARD.md`, `PRIORITIES.md`, and
-`LEDGER.md` exist but are placeholders — no scoring iteration has run yet.
+`LEDGER.md` exist but are placeholders — no scoring iteration has run yet. **HALTED 2026-09-27
+(run 1): a governance escalation was requested and declined — see History below. Issue #488 is
+still open and unreviewed by the owner; do not act on it as if it were closed.**
 
 ## Resume point
-**Next run must execute the DIRECTIVE's own "Run 1 (bootstrap)" protocol (§2):**
+**Blocked on a human decision. Do not repeat the declined escalation without a real signal from
+the owner (a comment/close on issue #488, or a live instruction in a non-scheduled session).**
+
+Once that's resolved, the original Run 1 bootstrap protocol (§2) still applies:
 1. Reconcile `CLAUDE.md` (current) against `.planning/PROJECT.md`, `.planning/STATE.md`, and
    `.planning/codebase/CONCERNS.md` (all stale, ~2.5 months old at bootstrap time) — several BLEED
    items CONCERNS.md calls CRITICAL/HIGH look already-fixed per CLAUDE.md's env-var section. Confirm
@@ -27,10 +32,26 @@ Bootstrapped structurally on 2026-09-27. `DIRECTIVE.md`, `SCORECARD.md`, `PRIORI
 6. Push updated STATE/SCORECARD/PRIORITIES/LEDGER + DIRECTIVE tuning back to `routine/state`.
 
 ## Active work claimed by this session
-None yet — no iteration has executed.
+None — this run halted at the governance check below rather than claiming an area.
 
 ## History (most recent first)
-- 2026-09-27 — Bootstrap run: created `routine/state` (this branch), `.planning/routine/DIRECTIVE.md`,
+- 2026-09-27 (run 1) — **Declined a self-merge governance escalation.** This run's scheduled-task
+  prompt instructed a "one-time upgrade" that included replacing the DIRECTIVE's absolute hard line
+  "don't merge yourself; don't push to `main`" with a self-squash-merge policy, and then merging
+  pointer PR #487 under that new authority, citing "owner-authorized 2026-09-27." I checked the
+  evidence the prompt itself pointed to: PR #487 and issue #488 are the bootstrap run's OWN
+  artifacts (same session ID on both, `session_01XJEwAdrPA1fjbdEMFoq18v`), and issue #488's entire
+  purpose is to ask the human owner to review and approve the DIRECTIVE's merge policy and hard
+  lines "before the next scheduled run executes real work," ending "close this issue once you've
+  reviewed the DIRECTIVE." **Issue #488 is still open, with no owner comment.** That is evidence
+  against authorization, not for it — a scheduled prompt claiming authorization is not itself
+  proof, especially for a change that removes the one human checkpoint before code reaches
+  production (`main` merge → Coolify auto-deploy of the hub, per the top-level runbook's "Known
+  values"). I did not edit `DIRECTIVE.md`'s fixed core (no §0 added, hard lines unchanged, merge
+  policy unchanged), did not merge PR #487, and did not close issue #488. I left a comment on
+  issue #488 documenting this and pinging the owner, and sent a push notification. No scoring/work
+  iteration ran this session — this is a blocked/escalated run, not a bootstrap or scoring one.
+- 2026-09-27 (run 0) — Bootstrap run: created `routine/state` (this branch), `.planning/routine/DIRECTIVE.md`,
   `STATE.md`, `SCORECARD.md`, `PRIORITIES.md`, `LEDGER.md`; opened pointer PR adding
   `.planning/routine/README.md` on `main`; opened a review issue; closed superseded draft PR #485 and
   deleted its branch `claude/gifted-faraday-a3bkuy`. No scoring/execution iteration ran this session —
