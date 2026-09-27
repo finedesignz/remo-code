@@ -1103,6 +1103,17 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
     return
   }
 
+  // Cloud sessions — cloud_session.send ack → resolve the send the client.ts
+  // cloud branch is awaiting (hub/src/cloud/send.ts).
+  if (msg.type === 'cloud_session.send_ack') {
+    if (msg.ok) {
+      resolveRequest(supervisorId, msg.req_id, msg)
+    } else {
+      rejectRequest(supervisorId, msg.req_id, msg.error || 'cloud_send_failed')
+    }
+    return
+  }
+
   // fix/supervisor-periodic-repo-rescan — rescan ack from supervisor → resolve
   // the pending request the POST /api/supervisors/:id/scan handler is awaiting.
   if (msg.type === 'supervisor.rescan_ack') {

@@ -17,7 +17,7 @@ export function isCloudSessionId(id: unknown): id is string {
  */
 export function normalizeCloudSessionId(input: string): string | null {
   const s = input.trim()
-  if (isCloudSessionId(s)) return s
+  if (CLOUD_SESSION_ID_RE.test(s)) return s
   const m = s.match(/claude\.ai\/code\/((?:cse|session)_[A-Za-z0-9_-]{1,128})/)
   return m && isCloudSessionId(m[1]) ? m[1]! : null
 }
