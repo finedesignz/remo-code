@@ -60,6 +60,7 @@ export const LICENSE_GATE_PATH_EXCLUSIONS: ReadonlyArray<string | RegExp> = [
   '/health',
   /^\/api\/sentry\//,
   /^\/api\/coolify\/webhook\//,
+  /^\/api\/cloud-hook\//,
   /^\/webhooks\/titanium/,
 ];
 
