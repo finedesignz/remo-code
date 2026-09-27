@@ -112,7 +112,7 @@ mock.module('../src/db/postgres.ts', () => ({
 mock.module('../src/db/revanote-dal.ts', () => ({
   ...realRevDal,
   resolveRevanoteMappingForHost: async () => MAPPING,
-  getAnnotationById: async () => makeAnnotation({ session_id: state.annSessionId }),
+  getAnnotationById: async (id: string) => makeAnnotation({ id, session_id: state.annSessionId }),
   sumTodayAnnotationCostForUser: async () => state.todayCost,
   insertAnnotationRun: async (opts: any) => {
     runSeq++
@@ -242,8 +242,10 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     await dispatchPendingAnnotation('ann-1')
     expect(state.runs).toHaveLength(1)
 
-    // Second dispatch on the same session → queued, no new run row.
-    const out2 = await dispatchPendingAnnotation('ann-1')
+    // Second (different) annotation on the same session → queued, no new run
+    // row. Re-dispatching the SAME annotation while it is in flight is a no-op
+    // (queue dedupes by token = annotation id), so this uses a distinct id.
+    const out2 = await dispatchPendingAnnotation('ann-2')
     expect(out2).toEqual({ status: 'queued' })
     expect(state.runs).toHaveLength(1) // still one — queued waiter has NOT opened
 
