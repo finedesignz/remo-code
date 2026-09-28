@@ -74,6 +74,7 @@ const {
   PTY_HUMAN_TURN_GATES,
   ptyPreflightDispatchConfig,
   isPtySubmit,
+  classifyPtyInput,
   _setPtyPreflightTimeoutForTests,
   _resetPtyPreflightTimeoutForTests,
 } = await import(modUrl)
@@ -246,5 +247,51 @@ describe('PTYCAP Phase 2 — isPtySubmit', () => {
   })
   test('undecodable input fails closed (treated as a submit)', () => {
     expect(isPtySubmit('!!!not base64!!!')).toBe(true)
+  })
+})
+
+// Security panel (blocking): Enter has encodings with NO CR/LF byte. The Claude
+// CLI's key parser maps the kitty/CSI-u sequences `ESC[13u` / `ESC[57414u` to
+// "return" whether or not kitty mode was enabled — a bypass of a CR/LF-only
+// check. Anything with ESC that is not a known-safe sequence must be checked.
+describe('PTYCAP Phase 2 — classifyPtyInput (non-CR/LF encodings of Enter)', () => {
+  // UTF-8 encode, as xterm's onData → TextEncoder does, then base64.
+  const b64 = (s: string) => btoa(String.fromCharCode(...new TextEncoder().encode(s)))
+  test('kitty / CSI-u Enter encodings are submits', () => {
+    for (const seq of ['\x1b[13u', '\x1b[57414u', '\x1b[13;1u', '\x1b[13;1:1u', 'hi\x1b[13u']) {
+      expect(isPtySubmit(b64(seq))).toBe(true)
+    }
+  })
+  test('keypad Enter in application mode (ESC O M) and C1 CSI/SS3 are submits', () => {
+    expect(isPtySubmit(b64('\x1bOM'))).toBe(true)
+    expect(isPtySubmit(btoa(String.fromCharCode(0xc2, 0x9b)) )).toBe(true) // U+009B as UTF-8
+    expect(isPtySubmit(btoa(String.fromCharCode(0xc2, 0x8f)) )).toBe(true) // U+008F as UTF-8
+  })
+  test('an unknown or incomplete escape fails closed', () => {
+    expect(isPtySubmit(b64('\x1b[1'))).toBe(true)
+    expect(isPtySubmit(b64('\x1b['))).toBe(true)
+    expect(isPtySubmit(b64('\x1bO'))).toBe(true)
+    expect(isPtySubmit(b64('\x1b[<0;10;5M'))).toBe(true)
+  })
+  test('navigation, editing and cancel keys are NOT submits', () => {
+    for (const seq of [
+      '\x1b[B', '\x1b[C', '\x1b[D', '\x1b[H', '\x1b[F', '\x1b[Z', '\x1b[I', '\x1b[O',
+      '\x1b[1;5C', '\x1b[1;2A', '\x1b[3~', '\x1b[5~', '\x1b[6~', '\x1b[3;5~',
+      '\x1bOA', '\x1bOH', '\x1b\x1b', '\x7f', '\t', '\x1bb', '\x1b[200~pasted\x1b[201~', 'héllo ✓',
+    ]) {
+      expect({ seq, submit: isPtySubmit(b64(seq)) }).toEqual({ seq, submit: false })
+    }
+  })
+  test('a trailing lone Esc is carried as the tail; nothing else is', () => {
+    expect(classifyPtyInput(b64('\x1b'))).toEqual({ submit: false, tail: '\x1b' })
+    expect(classifyPtyInput(b64('abc\x1b\x1b'))).toEqual({ submit: false, tail: '\x1b' })
+    expect(classifyPtyInput(b64('\x1b[A'))).toEqual({ submit: false, tail: '' })
+  })
+  test('a sequence SPLIT across frames is judged joined with the previous tail', () => {
+    expect(classifyPtyInput(b64('[13u'), '\x1b').submit).toBe(true)
+    expect(classifyPtyInput(b64('OM'), '\x1b').submit).toBe(true)
+    expect(classifyPtyInput(b64('[A'), '\x1b')).toEqual({ submit: false, tail: '' })
+    expect(classifyPtyInput(b64('h'), '\x1b')).toEqual({ submit: false, tail: '' }) // Alt+h
+    expect(classifyPtyInput(b64('[13u')).submit).toBe(false) // without a tail it is plain text
   })
 })

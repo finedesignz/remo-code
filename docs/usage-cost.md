@@ -380,14 +380,32 @@ is built and proven now so Phase 3 has a tested seam to call into.
 
 The `term.input` relay calls `checkPtyTurnPreflight({ …, actor: 'human' })`
 (server-inferred — this relay is reachable only from an authenticated
-`/ws/client` cookie connection) on **every prompt submit**: a `term.input`
-whose decoded bytes contain CR or LF (`isPtySubmit`; undecodable input counts
-as a submit). Each submit gets its own fresh check at the moment it would be
-written; no verdict is cached or shared across frames or writers.
+`/ws/client` cookie connection) on **every frame that can submit a prompt**,
+as judged by `classifyPtyInput`. Each submit gets its own fresh check at the
+moment it would be written; no verdict is cached or shared across frames or
+writers.
 
-- **Not gated:** plain typing, Ctrl-C, Esc, arrow keys, and `term.attach_file`
-  (it types a path, it does not submit). A user over a cap can still type,
-  interrupt and cancel; only starting new model work is refused.
+- **What counts as a submit (fail closed).** CR or LF; **any escape sequence
+  not on a small known-safe allowlist** (arrows, Home/End, PgUp/PgDn,
+  Insert/Delete, Shift-Tab, focus in/out, bracketed-paste markers, lone Esc,
+  Esc-Esc, Alt+printable); C1 CSI/SS3 code points; undecodable input. Enter has
+  encodings with no CR/LF byte — the Claude CLI's key parser maps the kitty /
+  CSI-u sequences `ESC[13u` and `ESC[57414u` to "return" whether or not kitty
+  mode was ever enabled, and `ESC O M` is keypad Enter in application mode — so
+  a CR/LF-only test was bypassable by a hand-crafted client.
+- **Split sequences.** The CLI buffers an incomplete escape across writes, so
+  `ESC` then `[13u` in two frames is one Enter. The only thing a non-submit
+  frame can leave pending is a trailing lone Esc; the relay remembers it per
+  SESSION (`ptyEscTail`, not per writer — a second connection cannot complete
+  it) and classifies the next frame joined with it.
+- **Not gated:** plain typing, Backspace, Tab, Ctrl-C, Esc, navigation keys, and
+  `term.attach_file` (it types a path, it does not submit). A user over a cap
+  can still type, navigate, interrupt and cancel; only submitting is refused.
+- **Enter is refused everywhere while over a cap — not just on prompts.** The
+  hub cannot tell a prompt submit from an Enter that confirms a permission
+  prompt, a question menu, or a slash command such as `/exit`. So once over a
+  cap, a turn that was already running can stall on a permission prompt; Esc
+  (cancel) still works. Raising the cap (Settings → Usage) unblocks it.
 - **Independent of `sessions.runner_type`.** That column defaults to
   `'stream-json'` and the web client never sets it, while the supervisor writes
   every `term.input` to the PTY on its own `REMO_PTY_INTERACTIVE` env flag —
@@ -396,10 +414,15 @@ written; no verdict is cached or shared across frames or writers.
   TTL (`turn_complete` is wired only in transcript-tail mode), so a "once per
   turn" check meant once per idle gap: it refused Ctrl-C mid-turn, and a
   keystroke every <60s kept one passing check alive all day.
-- **Ordering:** frames from one writer on one session are serialized, so a
-  keystroke typed while an earlier submit is still being checked never reaches
-  the PTY ahead of it. Immediately before each write the relay re-verifies it
-  is still the session's client writer AND still holds the turn lock.
+- **Ordering:** each write frame claims its slot in a per-(session, writer)
+  chain SYNCHRONOUSLY on receipt, before any DB check, so frames from one writer
+  reach the PTY in exactly their arrival order — a keystroke never overtakes a
+  submit that is still being checked. Immediately before each write the relay
+  re-verifies it is still the session's client writer AND holds the turn lock;
+  if the lock went free meanwhile it re-takes it, and if another writer now
+  holds it the frame is dropped (a dropped submit is refused with
+  `not_current_writer`). The agent channel is resolved at send time, so a
+  supervisor reconnect mid-check is honoured.
 - **Refusal:** the frame is dropped and the sender gets
   `{ type: 'send_refused', channel: 'term', session_id, reason }`.
   `TerminalSurface` prints a red status line in the terminal
@@ -407,6 +430,15 @@ written; no verdict is cached or shared across frames or writers.
 
 ### What this does NOT do (explicitly deferred)
 
+- **The check covers each SUBMIT, not the work that follows it.** One passing
+  submit can start work that keeps going inside the TUI (a looping prompt,
+  background subagents) — those self-continuations never cross the hub, so a
+  cap crossed mid-run does not interrupt them. Interrupting a PTY session whose
+  usage events cross a cap is a follow-up.
+- **No per-connection rate limit on term frames.** Term frames short-circuit
+  before the structured-message limiter. A single writer has at most one check
+  in flight (the write chain serializes it), but many connections could each
+  drive checks. Follow-up: a per-writer submit rate limit.
 - **The stream-json `send_message` handler in `hub/src/ws/client.ts` is still
   NOT gated by `dailyCostCapGate`/`dailyTokenCapGate`** — only the Claude usage
   threshold gate runs there. This is a **pre-existing gap predating PTYCAP**,

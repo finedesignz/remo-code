@@ -2,74 +2,63 @@
 
 ## Status: Done (all 3 success criteria met)
 
-> **Authoritative addendum (post-review redesign, supersedes "What was built"
-> below where they differ).** After five AgentAutofix `ai-review` rounds each
-> found a race in the lock-keyed "once per fresh turn" design, a three-lens QC
-> panel (concurrency, security, correctness) found that design was also dead in
-> prod (gated on `sessions.runner_type`, which defaults to `'stream-json'` and
-> the web client never sets) and, once live, would refuse Ctrl-C/Esc mid-turn
-> (the turn lock only releases on a 60s idle TTL in prod) and let a keepalive
-> keep one passing check alive all day. Final design, documented in
-> `docs/usage-cost.md` §"PTYCAP Phase 2":
-> - the preflight runs on **every prompt submit** (a `term.input` containing
->   CR/LF), regardless of `runner_type`, with a fresh check per submit and no
->   shared verdicts; typing, Ctrl-C, Esc and attachments always pass;
-> - frames from one writer are serialized, and writer + lock ownership are
->   re-verified immediately before each write;
-> - fail closed on a thrown gate or a 5s timeout;
-> - human turns are exempt from the programmatic-credit halt (never from the
->   cost or token caps), via the server-set `DispatchRequest.humanInteractive`;
-> - the scanned `gates:` literal is the same array object that runs;
-> - refusals are shown in the terminal (`channel: 'term'`).
->
-> Behavior note for the owner: the human web terminal is now subject to the
-> user's daily cost cap (`users.daily_cost_cap_usd`, default $10 when unset, 0
-> disables it), token cap and usage threshold on each submit — as `CLAUDE.md`
-> already states ("Manual / interactive chat IS now capped"). Raise the cost
-> cap in Settings → Usage if it bites.
+## How the design got here
+
+The first design ran the check once per "fresh turn" (`turn-lock.holder === null`)
+and only on sessions with `runner_type = 'pty-interactive'`. Five AgentAutofix
+`ai-review` rounds each found a race in it. A three-lens QC panel (concurrency,
+security, correctness) then found it was also **dead in prod**
+(`sessions.runner_type` defaults to `'stream-json'` and the web client never sets
+it, while the supervisor writes every `term.input` to the PTY on its own env
+flag), and that once live it would refuse Ctrl-C/Esc mid-turn (the turn lock only
+releases on a 60s idle TTL in prod) and let a keepalive keystroke hold one
+passing check open all day. It was replaced with a per-SUBMIT gate; a second
+panel verified the replacement and found one more bypass (Enter encodings with
+no CR/LF byte — see below), now closed. Full design:
+`docs/usage-cost.md` §"PTYCAP Phase 2".
+
+**Owner behavior note:** the human web terminal is now subject to the user's
+daily cost cap (`users.daily_cost_cap_usd`, `NOT NULL DEFAULT 10`; 0 disables
+it), token cap and usage threshold on each submit — as `CLAUDE.md` already
+states ("Manual / interactive chat IS now capped"). PTY cost is a list-price
+estimate and the pool is shared with scheduled/orchestrator spend, so a $10 cap
+can be reached after a handful of Opus turns. Raise it (or set 0) in
+Settings → Usage if it bites; the Usage tab copy now says the terminal is capped.
 
 ## What was built
 
-**`hub/src/dispatch/pty-preflight.ts`** (new) — the single-source-of-truth PTY
-pre-flight gate chain:
+**`hub/src/dispatch/pty-preflight.ts`** (new)
+- `ptyPreflightDispatchConfig.gates = [thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]`
+  — SC-1's order, and the SAME array object as `PTY_AUTOMATION_TURN_GATES`, so
+  `token-cap-coverage.test.ts`'s literal scan reads the chain that runs (SC-2).
+- `PTY_HUMAN_TURN_GATES` — the automation chain minus `sessionInjectRateGate` (SC-3).
+- `checkPtyTurnPreflight({ userId, sessionId, actor })` — first-block-wins;
+  **fails closed** (`pty_preflight_error` on a throw, `pty_preflight_timeout`
+  after 5s). A human actor sets the server-only `DispatchRequest.humanInteractive`
+  flag, which exempts it from the programmatic-credit halt inside
+  `dailyCostCapGate` — never from the cost or token caps.
+- `classifyPtyInput(bytes, pendingTail)` — is this frame a possible submit?
+  CR/LF, any escape not on a known-safe allowlist (kitty/CSI-u `ESC[13u`,
+  `ESC[57414u`, keypad `ESC O M`, …), C1 CSI/SS3, or undecodable ⇒ yes. A
+  trailing lone Esc is returned as `tail` so a sequence split across frames is
+  judged joined.
 
-- `PTY_AUTOMATION_TURN_GATES` = `[thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]`
-  — SC-1's exact order.
-- `PTY_HUMAN_TURN_GATES` = `PTY_AUTOMATION_TURN_GATES.slice(0, -1)` — the same
-  spend ceilings, minus the inject-rate ceiling (SC-3). A strict prefix, never
-  a hand-duplicated array, so the two chains cannot silently drift apart.
-- `ptyPreflightDispatchConfig.gates` — the automation chain re-written with the
-  gate identifiers inline, so `hub/test/token-cap-coverage.test.ts`'s
-  text-based `gates: [ ... ]` scan discovers this file automatically (SC-2).
-- `checkPtyTurnPreflight({ userId, sessionId, actor })` — runs the human chain
-  for `actor === 'human'`, the full automation chain otherwise; first-block-
-  wins (matches `dispatch()`'s own IR-2 semantics).
+**`hub/src/ws/client.ts`** — the term relay (body now in `relayTermFrame`):
+- each write frame claims its per-(session, writer) `ptyWriteChain` slot
+  synchronously on receipt, so frames reach the PTY in arrival order;
+- every submit (`classifyPtyInput`, joined with the session's `ptyEscTail`) is
+  checked with `actor: 'human'`; a refusal drops the frame and sends
+  `{ type: 'send_refused', channel: 'term', session_id, reason }`;
+- right before the write, writer + lock ownership are re-verified (a lock that
+  went free is re-taken; a lock held by another writer drops the frame, and a
+  dropped submit is refused with `not_current_writer`); the agent channel is
+  resolved at send time.
 
-**`hub/src/ws/client.ts`** (modified) — the `term.input`/`term.attach_file`
-write-turn branch now calls `checkPtyTurnPreflight({ actor: 'human', userId, sessionId })`
-immediately after the existing human-only guard, but ONLY when
-`turn-lock.holder(sessionId) === null` (this write would start a fresh turn —
-not on every keystroke of an already-held turn). A failing check drops the
-frame (never forwarded, never acquires the turn lock) and sends
-`{ type: 'send_refused', session_id, reason }` back to the sender.
+**`hub/src/dispatch/{pipeline,gates}.ts`** — `humanInteractive` flag + the halt exemption.
 
-**`hub/test/token-cap-coverage.test.ts`** (modified) — the "known dispatchers"
-list now names `dispatch/pty-preflight.ts` explicitly (SC-2).
-
-**`hub/test/term-relay-auth.test.ts` / `hub/test/term-relay-human-guard.test.ts`**
-(modified) — stub `checkPtyTurnPreflight` to `{ ok: true }` so these
-pre-existing tests' own concerns (per-session authz / the human-only guard)
-don't newly require a live Postgres connection now that every pty-interactive
-`term.input` turn calls into the new module.
-
-**`docs/usage-cost.md`** (modified) — new "PTYCAP Phase 2" section documenting
-the gate chain, the call site, and what was deliberately deferred.
-
-**`.planning/ROADMAP.md`** (modified) — Phase 2 checkbox + progress table
-marked Done, with a status note pointing here.
-
-**`tools/regression-baseline.json`** (modified) — re-measured and updated; see
-"Test evidence" below.
+**Web** — `web/src/lib/termRefusal.ts` + `TerminalSurface` print refusals in the
+terminal (throttled); chat hooks ignore `channel: 'term'`; Settings → Usage
+helper text no longer says manual use is unaffected.
 
 ## Why the scope reads narrower than "gate the PTY path" sounds
 
@@ -119,68 +108,39 @@ That reframed the real work into two concrete pieces, both delivered:
   proves the chain that a future governed-automation admission will be
   required to pass; no admission path was added.
 
+- **The check covers each submit, not the work that follows it** — in-TUI
+  self-continuation (loops, background subagents) never crosses the hub.
+- **No per-writer rate limit on term submits** yet.
+- **Enter is refused everywhere while over a cap**, including on permission
+  prompts and menus the hub cannot distinguish from a prompt submit; Esc still
+  cancels.
+
 None of these are silent — each is called out here and in `docs/usage-cost.md`.
 
 ## Test evidence
 
-New tests, both fully passing, zero DB dependency:
-
-- `hub/test/pty-preflight.test.ts` — 13 tests / 21 assertions. Covers: chain
-  shape/order (SC-1), the human chain never containing `sessionInjectRateGate`
-  and being a strict prefix of the automation chain (SC-3), every gate's
-  individual block/allow behavior for both actor classes, and first-block-wins
-  ordering (a human/automation actor with BOTH the threshold gate and a later
-  gate failing gets the threshold's reason, proving order is enforced, not
-  just membership).
-- `hub/test/ws-client-pty-preflight.test.ts` — 6 tests / 13 assertions. Covers:
-  a fresh turn is checked with `actor:'human'` and the connection's own
-  `userId`/`sessionId` (never a frame-supplied value); a passing check
-  forwards unchanged; a failing check drops the frame, sends `send_refused`
-  with the gate's reason, and never grants the turn lock; the check runs
-  EXACTLY ONCE per turn (a second keystroke from the same holder does not
-  re-invoke it, and both keystrokes still forward); after the turn completes
-  (`release`), the next turn is checked again; a non-pty-interactive session
-  is never checked at all.
-
-Full-suite regression evidence (`bun run check-baseline`, bare checkout, no
-`REMO_E2E_DB_URL`, no `DATABASE_URL` — the floor configuration):
-
-```
-BEFORE (this branch, before this phase's commits): pass=2157 skip=259 fail=0 total=2416
-AFTER  (with this phase's changes):                pass=2176 skip=259 fail=0 total=2435
-```
-
-+19 passes (exactly the two new test files' counts), **zero new skips**, zero
-failures. `tools/regression-baseline.json` re-measured and updated in the same
-commit per its own documented convention (see its new
-`_skip_note_ptycap_phase2` entry, which also names the +98 pass / +4 skip of
-pre-existing undocumented drift found between the last recorded snapshot and
-this branch's starting point — none of it attributable to this phase, called
-out for an honest accounting rather than silently absorbed).
-
-Other checks run clean:
-
-- `bun run schema-lint` — OK (this phase touches no `schema.sql`).
-- `bunx tsc --noEmit -p hub/tsconfig.json` — 427 errors, all pre-existing
-  (TypeScript 5.9→7.0.2 baseline drift, unrelated to this phase); zero errors
-  in any file this phase touched or added.
-- No route changed, so `bun run docs:sync` is a no-op for this phase.
-- Re-ran the two updated pre-existing guard tests
-  (`term-relay-auth.test.ts`, `term-relay-human-guard.test.ts`) plus
-  `token-cap-coverage.test.ts` and `token-cap-gate-fires.test.ts` individually
-  — all green.
+- `hub/test/pty-preflight.test.ts` — chain shape/identity, human vs automation
+  chains, halt exemption, fail-closed on throw and timeout, and
+  `classifyPtyInput` (CR/LF, CSI-u / keypad Enter, C1, incomplete escapes,
+  safe navigation keys, split sequences).
+- `hub/test/ws-client-pty-preflight.test.ts` — relay wiring: what is checked
+  (independent of `runner_type`), refusal, Ctrl-C/Esc over the cap, CSI-u and
+  split-frame Enter, per-session escape tail, arrival order under slow DB
+  checks, supersede / lock hand-off / lock-freed mid-check, channel resolved at
+  send time, queued-then-promoted submit checked fresh. Run against the
+  pre-panel code, every new test fails.
+- `web/test/term-refusal.test.ts` — refusal copy.
+- `bun run check-baseline`, `bunx tsc --noEmit -p hub/tsconfig.json` (427, all
+  pre-existing), `bun run schema-lint`, web build — see the PR for the final run.
 
 ## Files touched
 
-- `hub/src/dispatch/pty-preflight.ts` (new)
+- `hub/src/dispatch/pty-preflight.ts` (new), `hub/src/dispatch/pipeline.ts`, `hub/src/dispatch/gates.ts`
 - `hub/src/ws/client.ts`
-- `hub/test/pty-preflight.test.ts` (new)
-- `hub/test/ws-client-pty-preflight.test.ts` (new)
-- `hub/test/token-cap-coverage.test.ts`
-- `hub/test/term-relay-auth.test.ts`
-- `hub/test/term-relay-human-guard.test.ts`
-- `docs/usage-cost.md`
-- `.planning/ROADMAP.md`
-- `tools/regression-baseline.json`
-- `.planning/phases/PTYCAP-02-pty-preflight-gate/02-01-PLAN.md` (new)
-- `.planning/phases/PTYCAP-02-pty-preflight-gate/02-01-SUMMARY.md` (new, this file)
+- `hub/test/pty-preflight.test.ts` (new), `hub/test/ws-client-pty-preflight.test.ts` (new)
+- `hub/test/token-cap-coverage.test.ts`, `hub/test/term-relay-auth.test.ts`, `hub/test/term-relay-human-guard.test.ts`
+- `web/src/lib/termRefusal.ts` (new), `web/src/components/TerminalSurface.tsx`,
+  `web/src/hooks/useChat.ts`, `web/src/hooks/useChatSurface.ts`,
+  `web/src/pages/settings/UsageTab.tsx`, `web/test/term-refusal.test.ts` (new)
+- `docs/usage-cost.md`, `.planning/ROADMAP.md`, `tools/regression-baseline.json`
+- `.planning/phases/PTYCAP-02-pty-preflight-gate/02-01-PLAN.md` (new), this file

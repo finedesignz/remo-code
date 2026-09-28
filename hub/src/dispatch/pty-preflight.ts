@@ -7,8 +7,9 @@
  * Phase 1 (PR #395) taught the hub to RECORD what an interactive PTY turn spends.
  * This module CHECKS that spend against the daily ceilings before a new turn is
  * submitted to the PTY. Call site: `hub/src/ws/client.ts`'s `term.input` relay,
- * which runs it on every PROMPT SUBMIT (a frame whose bytes contain Enter —
- * see `isPtySubmit`), never on plain keystrokes, control keys, or attachments.
+ * which runs it on every frame that can SUBMIT a prompt (Enter in any encoding —
+ * see `classifyPtyInput`), never on plain keystrokes, navigation, interrupt or
+ * cancel keys, or attachments.
  *
  * ONE SOURCE OF TRUTH: `ptyPreflightDispatchConfig.gates` is the literal array
  * `hub/test/token-cap-coverage.test.ts` scans AND the array that actually runs
@@ -22,8 +23,8 @@
  *     programmatic-credit halt inside `dailyCostCapGate` (via the server-set
  *     `humanInteractive` request flag) — never from the cost or token caps.
  *
- * FAIL CLOSED: a thrown gate or a check that does not settle within
- * `PTY_PREFLIGHT_TIMEOUT_MS` is a rejection, never a pass.
+ * FAIL CLOSED: a thrown gate or a check that does not settle within the
+ * preflight timeout (5s) is a rejection, never a pass.
  */
 import type { DispatchGate, DispatchRequest } from './pipeline.ts'
 import { thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate } from './gates.ts'
@@ -51,17 +52,69 @@ export function _setPtyPreflightTimeoutForTests(ms: number): void { timeoutMs = 
 export function _resetPtyPreflightTimeoutForTests(): void { timeoutMs = 5_000 }
 
 /**
- * True when a base64 `term.input` payload contains a carriage return or line
- * feed — i.e. it can SUBMIT a prompt (Enter, or a paste ending in a newline) and
- * so start new model work. Plain typing, Ctrl-C (0x03), Esc (0x1b) and arrow
- * keys never contain one, so a user over the cap can still type, interrupt and
- * cancel; only submitting is refused. Undecodable input counts as a submit
- * (fail closed).
+ * Escape sequences KNOWN not to submit a prompt. Anything else that starts with
+ * ESC is treated as a possible submit — e.g. the kitty/CSI-u encoding of Enter
+ * (`ESC[13u`, `ESC[57414u`), which the Claude CLI's key parser honours whether
+ * or not kitty mode was ever enabled, and which contains no CR/LF byte.
+ * Deliberately NOT listed: `ESC O M` (keypad Enter in application mode).
  */
+const SAFE_ESCAPES: RegExp[] = [
+  /^\x1b\[[A-DHFZIO]/, //           arrows, Home/End, Shift-Tab, focus in/out
+  /^\x1b\[1;\d{1,2}[A-DHF]/, //     modified arrows / Home / End
+  /^\x1b\[[1-6](?:;\d{1,2})?~/, //  Insert/Delete/Home/End/PgUp/PgDn (+ mods)
+  /^\x1b\[20[01]~/, //              bracketed-paste start/end markers
+  /^\x1bO[A-DHF]/, //               application-mode arrows / Home / End
+]
+
+export type PtyInputClass = {
+  /** The frame can submit a prompt (start model work) — run the preflight. */
+  submit: boolean
+  /** A trailing lone ESC the PTY may still join with the NEXT frame. */
+  tail: string
+}
+
+/**
+ * Classify a base64 `term.input` payload. `pendingTail` is the `tail` of the
+ * last frame forwarded to this session's PTY: the CLI buffers an incomplete
+ * escape across writes, so `ESC` + `[13u` sent as two frames is one Enter.
+ *
+ * `submit` is true when the frame (joined with `pendingTail`) contains CR/LF,
+ * an escape sequence not on `SAFE_ESCAPES`, a C1 CSI/SS3 code point, or cannot
+ * be decoded — fail closed. Plain typing, Ctrl-C (0x03), Backspace, Tab, a lone
+ * Esc, Esc-Esc, arrows/Home/End/PgUp/PgDn and Alt+printable never submit, so a
+ * user over the cap can still type, navigate, interrupt and cancel.
+ */
+export function classifyPtyInput(bytesB64: string, pendingTail = ''): PtyInputClass {
+  let text: string
+  try {
+    const bin = atob(bytesB64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    text = pendingTail + new TextDecoder().decode(bytes)
+  } catch {
+    return { submit: true, tail: '' }
+  }
+  let i = 0
+  while (i < text.length) {
+    const c = text[i]
+    if (c === '\r' || c === '\n' || c === '\u009b' || c === '\u008f') return { submit: true, tail: '' }
+    if (c !== '\x1b') { i++; continue }
+    const next = text[i + 1]
+    if (next === undefined) return { submit: false, tail: '\x1b' } // lone Esc at end
+    if (next === '\x1b') { i++; continue } //                        Esc-Esc: first is a lone Esc
+    const rest = text.slice(i)
+    const safe = SAFE_ESCAPES.map((re) => rest.match(re)).find((m) => m)
+    if (safe) { i += safe[0].length; continue }
+    // Alt+printable (ESC + a printable char that opens no CSI/SS3 sequence).
+    if (next !== '[' && next !== 'O' && next >= ' ' && next !== '\x7f') { i += 2; continue }
+    return { submit: true, tail: '' }
+  }
+  return { submit: false, tail: '' }
+}
+
+/** Convenience: does this frame, on its own, possibly submit a prompt? */
 export function isPtySubmit(bytesB64: string): boolean {
-  let raw: string
-  try { raw = atob(bytesB64) } catch { return true }
-  return raw.includes('\r') || raw.includes('\n')
+  return classifyPtyInput(bytesB64).submit
 }
 
 async function runChain(input: { userId: string; sessionId: string; actor: PtyPreflightActor }): Promise<PtyPreflightResult> {

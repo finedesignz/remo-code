@@ -24,10 +24,11 @@ const USER = 'userP'
 const SESSION = 'sessP'
 
 let runnerType = 'pty-interactive'
+let canWriteHook: (() => Promise<void>) | null = null
 const realDal = await import(`../src/db/dal.ts?real=${Date.now()}`)
 mock.module('../src/db/dal.ts', () => ({
   ...realDal,
-  canWriteTerminal: async (u: string, s: string) => u === USER && s === SESSION,
+  canWriteTerminal: async (u: string, s: string) => { if (canWriteHook) await canWriteHook(); return u === USER && s === SESSION },
   getSession: async (s: string, u: string) => (u === USER && s === SESSION ? { id: SESSION } : null),
   getSessionRunnerType: async () => runnerType,
   getSessionHostname: async () => 'hostP',
@@ -37,9 +38,11 @@ mock.module('../src/db/dal.ts', () => ({
 
 const realRegistry = await import(`../src/ws/registry.ts?real=${Date.now()}`)
 const fwd: any[] = []
+const defaultChannel = { ws: { send: (raw: string) => { fwd.push(JSON.parse(raw)) } } }
+let channelOverride: any = null
 mock.module('../src/ws/registry.ts', () => ({
   ...realRegistry,
-  getChannel: () => ({ ws: { send: (raw: string) => { fwd.push(JSON.parse(raw)) } } }),
+  getChannel: () => channelOverride ?? defaultChannel,
   broadcastToSubscribers: () => {},
   broadcastErrorEvent: () => {},
   countSubscribers: () => 1,
@@ -62,7 +65,7 @@ mock.module('../src/dispatch/pty-preflight.ts', () => ({
   },
 }))
 
-const { handleClientMessage } = await import(`../src/ws/client.ts?rt=${Date.now()}`)
+const { handleClientMessage, _resetPtyRelayStateForTests } = await import(`../src/ws/client.ts?rt=${Date.now()}`)
 
 function humanClient() {
   const sent: any[] = []
@@ -104,11 +107,14 @@ function pauseChecks() {
 beforeEach(() => {
   _resetTurnLockForTests()
   _resetTermWritersForTests()
+  _resetPtyRelayStateForTests()
   fwd.length = 0
   preflightCalls.length = 0
   preflightResult = { ok: true }
   preflightGate = null
   runnerType = 'pty-interactive'
+  channelOverride = null
+  canWriteHook = null
 })
 
 describe('PTYCAP Phase 2 — what gets checked', () => {
@@ -185,6 +191,65 @@ describe('PTYCAP Phase 2 — refusal', () => {
   })
 })
 
+describe('PTYCAP Phase 2 — Enter encodings without CR/LF (security panel)', () => {
+  test('a kitty/CSI-u Enter (ESC[13u) is checked and, over the cap, refused', async () => {
+    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
+    const { ws, sent } = humanClient()
+    await handleClientMessage(ws, input('\x1b[13u'))
+    expect(preflightCalls.length).toBe(1)
+    expect(fwd.length).toBe(0)
+    expect(refusals(sent).length).toBe(1)
+  })
+
+  test('ESC[13u split across two frames (ESC | [13u) is still checked at the second frame', async () => {
+    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
+    const { ws } = humanClient()
+    await handleClientMessage(ws, input('\x1b')) // a lone Esc passes (cancel must work)
+    await handleClientMessage(ws, input('[13u'))
+    expect(fwdText()).toEqual(['\x1b'])
+    expect(preflightCalls.length).toBe(1)
+  })
+
+  test('the lone-Esc tail is per SESSION: a second connection cannot complete the sequence unchecked', async () => {
+    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
+    const a = humanClient()
+    const b = humanClient()
+    await handleClientMessage(a.ws, input('\x1b'))
+    await handleClientMessage(b.ws, input('[13u'))
+    expect(fwdText()).toEqual(['\x1b'])
+    expect(preflightCalls.length).toBe(1)
+  })
+
+  test('after a forwarded non-Esc frame the tail is cleared (plain text is not re-checked)', async () => {
+    const { ws } = humanClient()
+    await handleClientMessage(ws, input('\x1b'))
+    await handleClientMessage(ws, input('\x1b[A'))
+    await handleClientMessage(ws, input('[13u'))
+    expect(preflightCalls.length).toBe(0)
+    expect(fwdText()).toEqual(['\x1b', '\x1b[A', '[13u'])
+  })
+})
+
+// Panels (security + correctness): ordering used to hold only from the chain
+// point on — each frame paid several DB round-trips BEFORE taking its slot, so
+// two frames could enter the chain in DB-completion order.
+describe('PTYCAP Phase 2 — arrival order is kept even when DB checks finish out of order', () => {
+  test('a submit whose ownership check is slow is not overtaken by the next keystroke', async () => {
+    let releaseSlow!: () => void
+    const slow = new Promise<void>((r) => { releaseSlow = r })
+    let calls = 0
+    canWriteHook = async () => { if (++calls === 1) await slow }
+    const { ws } = humanClient()
+    const a = handleClientMessage(ws, input('go' + ENTER))
+    const b = handleClientMessage(ws, input('n'))
+    for (let i = 0; i < 50; i++) await Promise.resolve()
+    expect(fwd.length).toBe(0)
+    releaseSlow()
+    await Promise.all([a, b])
+    expect(fwdText()).toEqual(['go' + ENTER, 'n'])
+  })
+})
+
 describe('PTYCAP Phase 2 — ordering and invariants across the check await', () => {
   test('a keystroke typed while a submit is still being checked waits behind it (order kept on pass)', async () => {
     const unblock = pauseChecks()
@@ -237,19 +302,55 @@ describe('PTYCAP Phase 2 — ordering and invariants across the check await', ()
     await pendingA
     expect(fwdText()).toEqual(['fresh' + ENTER])
     expect(preflightCalls.length).toBe(2) // B paid its own check
+    expect(refusals(a.sent).map((r) => r.reason)).toEqual(['not_current_writer'])
   })
 
   // Panel finding (concurrency): the turn lock can be released mid-check
-  // (TTL expiry, turn_complete); the frame must not forward without holding it.
-  test('a submit whose turn lock is released while its check is pending is dropped', async () => {
+  // (TTL expiry, turn_complete). If it is FREE and we are still the current
+  // writer, re-take it rather than silently eating the user's Enter.
+  test('a submit whose turn lock goes FREE while its check is pending re-takes the lock and forwards', async () => {
     const unblock = pauseChecks()
     const { ws } = humanClient()
     const p = handleClientMessage(ws, input('go' + ENTER))
     await waitUntil(() => preflightCalls.length === 1)
     release(SESSION)
+    expect(holder(SESSION)).toBe(null)
+    unblock()
+    await p
+    expect(fwdText()).toEqual(['go' + ENTER])
+    expect(holder(SESSION)).toBe(ws.data.writerId)
+  })
+
+  // ...but a lock handed to ANOTHER writer mid-check is never taken over.
+  test('a submit whose lock passes to another writer mid-check is dropped with a visible refusal', async () => {
+    const unblock = pauseChecks()
+    const { ws, sent } = humanClient()
+    const p = handleClientMessage(ws, input('go' + ENTER))
+    await waitUntil(() => preflightCalls.length === 1)
+    release(SESSION)
+    await acquire(SESSION, 'telegram')
     unblock()
     await p
     expect(fwd.length).toBe(0)
+    expect(holder(SESSION)).toBe('telegram')
+    expect(refusals(sent)).toEqual([
+      { type: 'send_refused', channel: 'term', session_id: SESSION, reason: 'not_current_writer' },
+    ])
+  })
+
+  // Panel finding (concurrency): the channel was captured before the awaits, so
+  // a supervisor reconnect mid-check sent the frame to the closed old socket.
+  test('the agent channel is resolved at send time, not before the check', async () => {
+    const unblock = pauseChecks()
+    const { ws } = humanClient()
+    const p = handleClientMessage(ws, input('go' + ENTER))
+    await waitUntil(() => preflightCalls.length === 1)
+    const newSock: any[] = []
+    channelOverride = { ws: { send: (raw: string) => { newSock.push(JSON.parse(raw)) } } }
+    unblock()
+    await p
+    expect(fwd.length).toBe(0)
+    expect(newSock.map((f) => atob(f.bytes))).toEqual(['go' + ENTER])
   })
 
   // Panel finding (correctness): the old version of this test released the

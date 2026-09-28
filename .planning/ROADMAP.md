@@ -81,13 +81,16 @@ Plans:
 and [docs/usage-cost.md](../docs/usage-cost.md) §"PTYCAP Phase 2". Built
 `hub/src/dispatch/pty-preflight.ts` (the exact SC-1 chain, plus a human variant
 without the inject-rate ceiling, SC-3), wired it into `hub/src/ws/client.ts`'s
-`term.input` relay (checked on every prompt submit, never on plain keystrokes or
-Ctrl-C/Esc, fail-closed), and extended
+`term.input` relay (checked on every frame that can submit a prompt — CR/LF or
+any escape not known to be safe, e.g. a CSI-u Enter — never on plain typing,
+navigation or Ctrl-C/Esc; fail-closed), and extended
 `token-cap-coverage.test.ts`'s known-dispatchers list (SC-2). No admission path
 yet exists for a non-human actor to reach a PTY (Phase 3 is what opens that
 door) — the automation chain is built and unit-proven now so Phase 3 has a
 tested seam rather than inventing gate wiring at the same time it relaxes the
-human-only invariant.
+human-only invariant. Note for SC-3: human submits ARE checked against the usage
+threshold, token cap and cost cap — SC-3 exempts humans only from the inject-rate
+ceiling (and the programmatic-credit halt).
 
 ### Phase 3: Governed-Automation Guard
 

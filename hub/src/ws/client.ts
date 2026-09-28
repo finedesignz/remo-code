@@ -8,7 +8,7 @@ import { config } from '../config.ts'
 import { insertMessage, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType, updateSessionStatus } from '../db/dal'
 import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
-import { checkPtyTurnPreflight, isPtySubmit } from '../dispatch/pty-preflight.ts'
+import { checkPtyTurnPreflight, classifyPtyInput, type PtyInputClass } from '../dispatch/pty-preflight.ts'
 import { acquire, holder, releaseByWriter } from '../telegram/turn-lock.ts'
 import { claimTermWriter, currentTermWriter, dropTermWriter } from './term-writers.ts'
 import { log } from '../observability/logger'
@@ -36,6 +36,17 @@ const MSG_RATE_MAX = 30 // max 30 messages per 10 seconds
 // so frames from one writer reach the PTY in arrival order even when a submit
 // is paused on its spend preflight.
 const ptyWriteChain = new Map<string, Promise<void>>()
+
+// PTYCAP Phase 2 — per session, a trailing lone ESC last forwarded to the PTY.
+// The CLI joins an incomplete escape with the next write, so the next frame is
+// classified as `tail + bytes` (`ESC` then `[13u` is one kitty-encoded Enter).
+const ptyEscTail = new Map<string, string>()
+
+/** Test-only — clear the per-writer chains and per-session escape tails. */
+export function _resetPtyRelayStateForTests(): void {
+  ptyWriteChain.clear()
+  ptyEscTail.clear()
+}
 
 interface ClientWsData {
   authenticated: boolean
@@ -170,93 +181,101 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     if (_diag) log.info('term.input.diag.rx', { session_id: frame.session_id, user_id: data.userId, writer_id: data.writerId })
     // DIRECTION ALLOWLIST (NH-2/R-PTY-33): only client→hub write frames here.
     if (!isClientToHubTermType(frame.type)) return
-    // OWNERSHIP (H2/R-PTY-29): the session must be in THIS connection's
-    // subscribed set AND owned by this user per the DB. Both checks — the
-    // subscription set is the live routing scope; canWriteTerminal is the DB
-    // ground-truth that defeats a forged session_id even if mis-subscribed.
-    const subscribed = data.clientEntry?.subscriptions?.has(frame.session_id) ?? false
-    if (!subscribed) { if (_diag) log.warn('term.input.diag.drop', { gate: 'not_subscribed', session_id: frame.session_id }); return }
-    if (!(await canWriteTerminal(data.userId, frame.session_id))) { if (_diag) log.warn('term.input.diag.drop', { gate: 'cannot_write', session_id: frame.session_id }); return }
-    const session = await getSession(frame.session_id, data.userId)
-    if (!session) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_session', session_id: frame.session_id }); return }
-    // License gate: a write turn drives a live session (a mutation).
-    if (isWriteTurn && !(await isLicenseActive(data))) {
-      log.warn('term.input.diag.drop', { gate: 'license_inactive', session_id: frame.session_id, frame: frame.type })
-      try { ws.send(JSON.stringify({ type: 'send_refused', reason: 'license_inactive' })) } catch {}
-      return
-    }
-    // HUMAN-ONLY guard on the relay (H1/R-PTY-28). Actor is SERVER-INFERRED as
-    // 'human' from this authenticated /ws/client cookie connection — never read
-    // from the frame. Applied to term.input (the write that drives the
-    // interactive entrypoint) on a pty-interactive session.
     const writerId = data.writerId ?? 'client:unknown'
-    if (isWriteTurn) {
-      const runnerType = await getSessionRunnerType(frame.session_id, data.userId)
-      if (humanOnlyRejectsActor('human', runnerType)) {
-        log.warn('term.input.diag.drop', { gate: 'human_only', session_id: frame.session_id, runner_type: runnerType })
-        // Unreachable for a human actor by construction — but keep the SAME
-        // chokepoint so there is no second, ungated write route into a PTY.
+    const userId = data.userId
+    // The relay itself: ownership, license, human-only, turn-lock and (for a
+    // submit) spend gates, then the write. Write frames run it serialized per
+    // (session, writer) — see the chain below.
+    const relayTermFrame = async (): Promise<void> => {
+      // OWNERSHIP (H2/R-PTY-29): the session must be in THIS connection's
+      // subscribed set AND owned by this user per the DB. Both checks — the
+      // subscription set is the live routing scope; canWriteTerminal is the DB
+      // ground-truth that defeats a forged session_id even if mis-subscribed.
+      const subscribed = data.clientEntry?.subscriptions?.has(frame.session_id) ?? false
+      if (!subscribed) { if (_diag) log.warn('term.input.diag.drop', { gate: 'not_subscribed', session_id: frame.session_id }); return }
+      if (!(await canWriteTerminal(userId, frame.session_id))) { if (_diag) log.warn('term.input.diag.drop', { gate: 'cannot_write', session_id: frame.session_id }); return }
+      const session = await getSession(frame.session_id, userId)
+      if (!session) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_session', session_id: frame.session_id }); return }
+      // License gate: a write turn drives a live session (a mutation).
+      if (isWriteTurn && !(await isLicenseActive(data))) {
+        log.warn('term.input.diag.drop', { gate: 'license_inactive', session_id: frame.session_id, frame: frame.type })
+        try { ws.send(JSON.stringify({ type: 'send_refused', reason: 'license_inactive' })) } catch {}
         return
       }
-    }
-    const channel = getChannel(frame.session_id)
-    if (!channel) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_channel', session_id: frame.session_id }); return }
-    const forward = () => {
-      if (_diag) log.info('term.input.diag.fwd', { session_id: frame.session_id })
-      try { channel.ws.send(JSON.stringify(frame)) } catch { if (_diag) log.warn('term.input.diag.drop', { gate: 'channel_send_threw', session_id: frame.session_id }) }
-    }
-    // resize/attach/reattach are control frames, not turns — they bypass the
-    // lock and the spend preflight.
-    if (!isWriteTurn) { forward(); return }
-    // PTY WRITE-ARBITRATION (Phase 20 / R-TG-10). A term.input from the xterm
-    // panel is a HUMAN TURN — it must hold the per-session turn lock before its
-    // bytes reach PTY stdin so it never interleaves with a Telegram-injected
-    // turn. The writerId is this connection (idempotent re-acquire while the same
-    // writer streams keystrokes within its turn).
-    //
-    // SINGLE CLIENT WRITER PER SESSION (fix/dup-pty-writer). This connection
-    // becomes THE client writer for the session; any earlier client connection
-    // (a leaked/stale socket, or the tab the user just left) is superseded and
-    // released from the turn lock. Telegram is never superseded here — it is
-    // arbitrated by the turn lock alone.
-    const superseded = claimTermWriter(frame.session_id, writerId)
-    if (superseded) {
-      log.warn('term.writer.superseded', { session_id: frame.session_id, superseded, writer_id: writerId })
-    }
-    const granted = await acquire(frame.session_id, writerId)
-    if (!granted) {
-      log.warn('term.input.diag.drop', { gate: 'lock_not_granted', session_id: frame.session_id, writer_id: writerId })
-      return
-    }
-    // PTYCAP Phase 2 — spend preflight on every PROMPT SUBMIT.
-    //
-    // Gated per SUBMIT (a term.input whose bytes contain CR/LF — see
-    // `isPtySubmit`), not per "turn", and regardless of `sessions.runner_type`:
-    //   - runner_type defaults to 'stream-json' and nothing in the web client
-    //     sets it, while the supervisor writes every term.input to the PTY on
-    //     its own env flag — keying on it left the gate dead in prod.
-    //   - the turn lock only releases on a 60s idle TTL in prod (turn_complete
-    //     is wired only in transcript-tail mode), so "once per turn" meant once
-    //     per idle gap: it refused Ctrl-C / Esc mid-turn, and a keystroke every
-    //     <60s kept one passing check alive all day.
-    // Plain typing, Ctrl-C, Esc and attachments never submit, so they always
-    // pass: a user over the cap can still type, interrupt and cancel; only new
-    // model work is refused. Each submit gets its own fresh check — no verdict
-    // is cached or shared across frames or writers.
-    //
-    // Frames from one writer on one session are SERIALIZED through
-    // `ptyWriteChain` so a keystroke typed while an earlier submit is still
-    // being checked can never reach the PTY ahead of it.
-    const chainKey = `${frame.session_id}\u0000${writerId}`
-    const prev = ptyWriteChain.get(chainKey)
-    let settle!: () => void
-    const mine = new Promise<void>((resolve) => { settle = resolve })
-    ptyWriteChain.set(chainKey, mine)
-    try {
-      if (prev) await prev
-      if (frame.type === 'term.input' && isPtySubmit(frame.bytes)) {
+      // HUMAN-ONLY guard on the relay (H1/R-PTY-28). Actor is SERVER-INFERRED as
+      // 'human' from this authenticated /ws/client cookie connection — never read
+      // from the frame. Applied to term.input (the write that drives the
+      // interactive entrypoint) on a pty-interactive session.
+      if (isWriteTurn) {
+        const runnerType = await getSessionRunnerType(frame.session_id, userId)
+        if (humanOnlyRejectsActor('human', runnerType)) {
+          log.warn('term.input.diag.drop', { gate: 'human_only', session_id: frame.session_id, runner_type: runnerType })
+          // Unreachable for a human actor by construction — but keep the SAME
+          // chokepoint so there is no second, ungated write route into a PTY.
+          return
+        }
+      }
+      if (!getChannel(frame.session_id)) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_channel', session_id: frame.session_id }); return }
+      // Resolve the channel AT SEND TIME: a write turn may await the lock and the
+      // preflight, and the supervisor can reconnect meanwhile — a channel captured
+      // before those awaits would be a closed socket.
+      const forward = () => {
+        const channel = getChannel(frame.session_id)
+        if (!channel) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_channel', session_id: frame.session_id }); return }
+        if (_diag) log.info('term.input.diag.fwd', { session_id: frame.session_id })
+        try { channel.ws.send(JSON.stringify(frame)) } catch { if (_diag) log.warn('term.input.diag.drop', { gate: 'channel_send_threw', session_id: frame.session_id }); return }
+        // Track what the PTY may still be holding: an input frame leaves its own
+        // trailing lone ESC (or none); an attachment types a path, which ends one.
+        if (frame.type === 'term.input' && inputClass?.tail) ptyEscTail.set(frame.session_id, inputClass.tail)
+        else if (isWriteTurn) ptyEscTail.delete(frame.session_id)
+      }
+      let inputClass: PtyInputClass | null = null
+      // resize/attach/reattach are control frames, not turns — they bypass the
+      // lock and the spend preflight.
+      if (!isWriteTurn) { forward(); return }
+      // PTY WRITE-ARBITRATION (Phase 20 / R-TG-10). A term.input from the xterm
+      // panel is a HUMAN TURN — it must hold the per-session turn lock before its
+      // bytes reach PTY stdin so it never interleaves with a Telegram-injected
+      // turn. The writerId is this connection (idempotent re-acquire while the same
+      // writer streams keystrokes within its turn).
+      //
+      // SINGLE CLIENT WRITER PER SESSION (fix/dup-pty-writer). This connection
+      // becomes THE client writer for the session; any earlier client connection
+      // (a leaked/stale socket, or the tab the user just left) is superseded and
+      // released from the turn lock. Telegram is never superseded here — it is
+      // arbitrated by the turn lock alone.
+      const superseded = claimTermWriter(frame.session_id, writerId)
+      if (superseded) {
+        log.warn('term.writer.superseded', { session_id: frame.session_id, superseded, writer_id: writerId })
+      }
+      const granted = await acquire(frame.session_id, writerId)
+      if (!granted) {
+        log.warn('term.input.diag.drop', { gate: 'lock_not_granted', session_id: frame.session_id, writer_id: writerId })
+        return
+      }
+      // PTYCAP Phase 2 — spend preflight on every PROMPT SUBMIT.
+      //
+      // Gated per SUBMIT (a term.input that can submit a prompt — CR/LF, or any
+      // escape sequence not known to be safe, such as the kitty-encoded Enter
+      // `ESC[13u`; see `classifyPtyInput`), not per "turn", and regardless of
+      // `sessions.runner_type`:
+      //   - runner_type defaults to 'stream-json' and nothing in the web client
+      //     sets it, while the supervisor writes every term.input to the PTY on
+      //     its own env flag — keying on it left the gate dead in prod.
+      //   - the turn lock only releases on a 60s idle TTL in prod (turn_complete
+      //     is wired only in transcript-tail mode), so "once per turn" meant once
+      //     per idle gap: it refused Ctrl-C / Esc mid-turn, and a keystroke every
+      //     <60s kept one passing check alive all day.
+      // Plain typing, arrows, Ctrl-C, Esc and attachments never submit, so they
+      // always pass: a user over the cap can still type, interrupt and cancel;
+      // only new model work is refused. Each submit gets its own fresh check — no
+      // verdict is cached or shared across frames or writers.
+      if (frame.type === 'term.input') {
+        inputClass = classifyPtyInput(frame.bytes, ptyEscTail.get(frame.session_id) ?? '')
+      }
+      if (inputClass?.submit) {
         const preflight = await checkPtyTurnPreflight({
-          userId: data.userId,
+          userId,
           sessionId: frame.session_id,
           actor: 'human',
         })
@@ -272,7 +291,14 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       // every await above (acquire, the serialization chain, the preflight):
       // another client connection may have superseded us, or the lock may have
       // been released/handed on. Drop rather than inject out-of-turn bytes.
+      // If we are still the current client writer but the lock went FREE while
+      // we awaited (a turn_complete / TTL release), re-take it — acquire() on a
+      // free lock grants synchronously — rather than silently dropping the
+      // user's input. A lock now held by ANOTHER writer is never taken over.
       const current = currentTermWriter(frame.session_id)
+      if (current === writerId && holder(frame.session_id) === null) {
+        void acquire(frame.session_id, writerId)
+      }
       const lockHolder = holder(frame.session_id)
       if (current !== writerId || lockHolder !== writerId) {
         log.warn('term.input.diag.drop', {
@@ -282,9 +308,32 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
           current_writer: current,
           lock_holder: lockHolder,
         })
+        // A dropped SUBMIT is user-visible (their Enter did nothing) — tell the
+        // terminal why. Plain keystrokes drop silently (no per-key spam).
+        if (inputClass?.submit) {
+          try {
+            ws.send(JSON.stringify({ type: 'send_refused', channel: 'term', session_id: frame.session_id, reason: 'not_current_writer' }))
+          } catch {}
+        }
         return
       }
       forward()
+    }
+    if (!isWriteTurn) { await relayTermFrame(); return }
+    // The relay may await (DB ownership/license checks, the turn lock,
+    // the spend preflight). A WRITE frame claims its place in this writer's
+    // `ptyWriteChain` SYNCHRONOUSLY, before the first await, so frames from one
+    // writer reach the PTY in exactly the order they arrived — a keystroke can
+    // never overtake a submit that is still being checked, whatever each
+    // frame's DB round-trips cost.
+    const chainKey = `${frame.session_id}\u0000${writerId}`
+    const prev = ptyWriteChain.get(chainKey)
+    let settle!: () => void
+    const mine = new Promise<void>((resolve) => { settle = resolve })
+    ptyWriteChain.set(chainKey, mine)
+    try {
+      if (prev) await prev
+      await relayTermFrame()
     } finally {
       settle()
       if (ptyWriteChain.get(chainKey) === mine) ptyWriteChain.delete(chainKey)
