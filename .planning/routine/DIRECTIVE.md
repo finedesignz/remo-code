@@ -441,6 +441,17 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
   code path is exactly the kind of thing this routine's own judgment about when to notify (vs. stay
   quiet) should treat as reportable, independent of the PR's eventual CI outcome.
 
+- **Owner preference (2026-09-28): no manual human reviews — run a QC panel and fix.** When review
+  findings cluster on one code path, the answer is a multi-lens panel (concurrency / security /
+  correctness, each told to verify by reading the code and mutating it) followed by fixes, not a
+  request for the owner to review by hand. On #493 the panel found what five single-reviewer rounds
+  missed: the gate was dead in prod. Lessons: (e) before hardening a gate, prove it RUNS in prod —
+  trace the real value of every condition it keys on (here `runner_type` was never set); (f) a
+  "per-turn" check on a lock whose release path isn't wired in prod is a per-idle-gap check — key
+  spend checks on the event that spends (a submit), not on lock state; (g) for any byte-level
+  "is this a submit?" test, check the real consumer's parser (the Claude CLI accepts CSI-u Enter)
+  and fail closed on anything not allowlisted, including sequences split across frames.
+
 ## 14. Watch list
 - Open dependabot PR `finedesignz/remo-code#481` (`@hono/zod-openapi` 0.18→0.19): watch for API
   breakage in `hub/src/api/_openapi.ts`. Still open 2026-09-28 — bundle its review with the Hono
@@ -467,3 +478,4 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
 ## 15. Changelog (date | change | why | which score drove it)
 | 2026-09-27 | Initial directive, structural bootstrap only (no live scoring yet) | This is Run 1 of the routine; `routine-prompt-builder` skill unavailable in this session, so the DIRECTIVE was built from repo discovery, using superseded draft PR #485's DIRECTIVE as input, re-objectived to this run's governance-framing prompt and PROJECT.md's Core Value, plus the merge-policy finding (no confirmed auto-merge bot; `main` has no required checks) | n/a — no scorecard run yet |
 | 2026-09-28 | §11 rewritten from "hypotheses" to confirmed findings; §14 watch list refreshed (added #490/#491, confirmed #481/#484/#486 still open, added the #488 governance-hold note); this changelog row added | Run 2 executed the Run 1 bootstrap protocol for real — see `SCORECARD.md`/`PRIORITIES.md`/`LEDGER.md` for the full evidence. Governance question from run 1 (self-merge escalation) remains unresolved; this run declined to re-raise it via the scheduled prompt's v3.6-upgrade step for the same reason run 1 declined the original ask (see `STATE.md`'s Governance note) | Reliability/Observability scored highest-confidence this run (8, 6) once BLEED was confirmed closed; Security (5, untriaged hono CVEs) and Code health (5, 427 typecheck errors) are this run's lowest-scored, tiebreak-eligible dimensions for the next iteration |
+| 2026-09-28 | §13 lessons (e)–(g) + owner no-manual-review preference | Owner instruction "use panel and fix it"; QC panel found #493's gate dead in prod and a CSI-u bypass | Security / Cost (PTYCAP) |

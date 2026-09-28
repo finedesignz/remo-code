@@ -9,25 +9,16 @@
 LOCK: none
 
 ## Current status
-Run 2 (2026-09-28) executed the Run 1 bootstrap protocol end to end: reconciled the stale planning
-docs (BLEED confirmed fully shipped — PR #492, open) and shipped PTYCAP Phase 2 (PTY pre-flight
-gate — PR #493, all 3 ROADMAP success criteria met). #493 went through **five** real review rounds
-after first going green, all from AgentAutofix's `ai-review` check — full per-round detail in
-LEDGER.md rows 2c–2h; commits `e39456d`→`19137b7`→`8746bdf`→`4ef7ec5`→`fe8ca5b`, each fixing a
-distinct, real concurrency bug the previous fix introduced or left open (receipt-vs-grant-time
-staleness, a same-writer race, a missing post-await writer re-check, and finally a shared-promise
-verdict incorrectly reused ACROSS different writers). Every fix shipped with a regression test
-proving the specific interleaving and a PR comment addressing the reviewers by name — full detail
-not repeated here each round; see LEDGER.md and the commits' own messages. **Given five rounds on one
-code path is itself unusual, sent the owner a push notification** recommending a careful manual look
-at `hub/src/ws/client.ts`'s `term.input` handler before merging, rather than silently continuing to
-iterate — this is the kind of pattern (not a single finding) worth surfacing, per the routine's own
-proactive-notification judgment, independent of whether CI eventually goes green. CI re-triggered on
-`fe8ca5b` and pending as of this write; stays subscribed, will confirm green on THIS commit and watch
-for a sixth finding without assuming the pattern has ended. **Lesson escalated a third time in
-DIRECTIVE §13.** The governance question from run 1 (self-merge escalation) is UNCHANGED: issue #488
-still open, no owner comment beyond this routine's own; did not repeat that escalation or act on the
-scheduled prompt's "v3.6" self-merge-policy proposal — see Governance note.
+Run 2 (2026-09-28) reconciled the stale planning docs (BLEED confirmed shipped — PR #492, green,
+awaiting owner merge) and shipped PTYCAP Phase 2 (PTY pre-flight gate — PR #493). #493 took five
+AgentAutofix `ai-review` rounds (LEDGER 2c–2g), then the routine recommended a manual owner review.
+**The owner declined: "No manual human reviews… use panel and fix it."** That recommendation is
+WITHDRAWN. Instead a three-lens QC panel (concurrency, security, correctness) reviewed the design and
+found it dead in prod (keyed on `sessions.runner_type`) plus two UX-blocking defects; it was
+redesigned as a per-SUBMIT gate (`ec4fe47`), then a second verification panel found one more real
+bypass (kitty/CSI-u Enter with no CR/LF byte) and ordering/ownership edge cases, all fixed in
+`58ac4d0` (LEDGER 2h). PR body rewritten; CI + `ai-review` pending on `58ac4d0`. Governance (issue
+#488, self-merge) UNCHANGED — see Governance note.
 
 ## Governance note (read before touching merge policy again)
 The standing scheduled-task prompt's step 3 ("Fixed-core upgrade, proposed not applied") asks the
@@ -50,18 +41,12 @@ self-merge proposal in the same "one-time upgrade" step and splitting them out w
 than shipping real scored work this iteration.
 
 ## Resume point
-1. **PR #493 (PTYCAP Phase 2)** — five rounds of AgentAutofix `ai-review` findings, fixed as
-   `e39456d`→`19137b7`→`8746bdf`→`4ef7ec5`→`fe8ca5b`, each with its own PR comment — see LEDGER.md.
-   **The owner was proactively notified** about this unusual review-cycle count with a recommendation
-   to look closely before merging, independent of eventual CI outcome. CI was re-triggered on
-   `fe8ca5b` and was `pending` at time of this write. **A future run (or this session, if it's still
-   live) must confirm BOTH Woodpecker checks AND the `ai-review` check are green on `fe8ca5b`
-   specifically** — "green on the prior commit ⇒ safe" has been proven wrong FOUR times this
-   iteration; verify the CURRENT head. Stays subscribed via `subscribe_pr_activity` until
-   merged/closed. If `ai-review` finds a SIXTH issue, treat it with the same rigor (trace the actual
-   concurrency, write a test that forces the specific interleaving) — but also weigh whether the
-   pattern itself now calls for pausing and asking the owner directly rather than a sixth
-   self-directed fix, given the notification already sent.
+1. **PR #493 (PTYCAP Phase 2)** — head `58ac4d0` (panel-driven per-submit redesign + verification-panel
+   fixes; LEDGER 2h). Confirm Woodpecker `qc` + `docs-drift` AND `ai-review` green on `58ac4d0`
+   specifically. Owner direction: **do not ask for manual review — use a QC panel and fix**. Any new
+   finding: trace it, force the interleaving in a test, fix, re-panel if the change is non-trivial.
+   Owner-facing behavior note is in the PR body (terminal now under the $10-default cost cap; Enter
+   refused while over a cap). Stays subscribed until merged/closed.
 2. **PR #492 (BLEED reconciliation, docs-only)** — CI green (`ci/woodpecker/pr/qc` success), no
    review comments, open, needs owner review/merge like everything else; nothing to drive.
 3. Next scoring pass should pick up PRIORITIES.md's next-ranked item — the Hono runtime-dependency
