@@ -9,6 +9,8 @@
 LOCK: none
 
 ## Current status
+**Update 2026-09-28T17:46Z: PR #493 (PTYCAP Phase 2) was MERGED by the owner at `44fd0f2`** — the notes below about #493 not being green / awaiting `ai-review` are superseded. PTYCAP Phase 3 is unblocked.
+
 Run 3 (2026-09-28, ~16:35 UTC). PR #492 (BLEED reconciliation) is merged. PR #493 (PTYCAP Phase 2)
 went through six more `ai-review` rounds since run 2's write-up (LEDGER 2i–2l, all shipped-pending-
 merge) closing a raw-C1-byte bypass, a split-escape-sequence bypass, an unbounded frame queue, and
