@@ -2,6 +2,32 @@
 
 ## Status: Done (all 3 success criteria met)
 
+> **Authoritative addendum (post-review redesign, supersedes "What was built"
+> below where they differ).** After five AgentAutofix `ai-review` rounds each
+> found a race in the lock-keyed "once per fresh turn" design, a three-lens QC
+> panel (concurrency, security, correctness) found that design was also dead in
+> prod (gated on `sessions.runner_type`, which defaults to `'stream-json'` and
+> the web client never sets) and, once live, would refuse Ctrl-C/Esc mid-turn
+> (the turn lock only releases on a 60s idle TTL in prod) and let a keepalive
+> keep one passing check alive all day. Final design, documented in
+> `docs/usage-cost.md` §"PTYCAP Phase 2":
+> - the preflight runs on **every prompt submit** (a `term.input` containing
+>   CR/LF), regardless of `runner_type`, with a fresh check per submit and no
+>   shared verdicts; typing, Ctrl-C, Esc and attachments always pass;
+> - frames from one writer are serialized, and writer + lock ownership are
+>   re-verified immediately before each write;
+> - fail closed on a thrown gate or a 5s timeout;
+> - human turns are exempt from the programmatic-credit halt (never from the
+>   cost or token caps), via the server-set `DispatchRequest.humanInteractive`;
+> - the scanned `gates:` literal is the same array object that runs;
+> - refusals are shown in the terminal (`channel: 'term'`).
+>
+> Behavior note for the owner: the human web terminal is now subject to the
+> user's daily cost cap (`users.daily_cost_cap_usd`, default $10 when unset, 0
+> disables it), token cap and usage threshold on each submit — as `CLAUDE.md`
+> already states ("Manual / interactive chat IS now capped"). Raise the cost
+> cap in Settings → Usage if it bites.
+
 ## What was built
 
 **`hub/src/dispatch/pty-preflight.ts`** (new) — the single-source-of-truth PTY

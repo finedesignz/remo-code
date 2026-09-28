@@ -27,29 +27,35 @@ const state = {
   costSpent: 0,
   tokenTotal: 0,
   injectsInWindow: 0,
+  haltBound: null as string | null,
+  creditUsed: 0,
+  thresholdMode: 'normal' as 'normal' | 'throw' | 'hang',
 }
 
 mock.module('../src/usage/threshold.ts', () => ({
-  checkUserThreshold: async () =>
-    state.thresholdAllowed
+  checkUserThreshold: async () => {
+    if (state.thresholdMode === 'throw') throw new Error('db down')
+    if (state.thresholdMode === 'hang') return new Promise(() => {})
+    return state.thresholdAllowed
       ? { allowed: true }
       : {
           allowed: false,
           reason: 'session_threshold',
           utilization_pct: 99,
           threshold_pct: 80,
-        },
+        }
+  },
 }))
 
 mock.module('../src/usage/store.ts', () => ({
-  getUsage: () => null,
+  getUsage: () => ({ usage: { programmatic_credit: { claimed: true, used_usd: state.creditUsed } } }),
 }))
 
 // gates.ts resolves tz + the dollar cap + the programmatic-halt bound via `sql`.
 // One generic row satisfies all three call sites (bound is always null here —
 // the opt-in programmatic-credit hard-halt stays OFF for these tests).
 mock.module('../src/db/postgres.ts', () => ({
-  sql: async () => [{ cap: state.cap, tz: state.tz, bound: null }],
+  sql: async () => [{ cap: state.cap, tz: state.tz, bound: state.haltBound }],
 }))
 
 mock.module('../src/db/token-usage-dal.ts', () => ({
@@ -67,6 +73,9 @@ const {
   PTY_AUTOMATION_TURN_GATES,
   PTY_HUMAN_TURN_GATES,
   ptyPreflightDispatchConfig,
+  isPtySubmit,
+  _setPtyPreflightTimeoutForTests,
+  _resetPtyPreflightTimeoutForTests,
 } = await import(modUrl)
 const { sessionInjectRateGate } = await import('../src/dispatch/gates.ts')
 
@@ -77,6 +86,10 @@ beforeEach(() => {
   state.costSpent = 0
   state.tokenTotal = 0
   state.injectsInWindow = 0
+  state.haltBound = null
+  state.creditUsed = 0
+  state.thresholdMode = 'normal'
+  _resetPtyPreflightTimeoutForTests()
 })
 
 describe('PTYCAP Phase 2 — chain shape', () => {
@@ -98,14 +111,16 @@ describe('PTYCAP Phase 2 — chain shape', () => {
     ])
   })
 
-  test('SC-2: exposed as a literal `gates: [...]` config carrying BOTH non-bypassable caps (discovered by token-cap-coverage.test.ts)', () => {
+  test('SC-2: the scanned literal `gates: [...]` IS the array that runs — not a decorative copy', () => {
     const names = ptyPreflightDispatchConfig.gates.map((g: { name: string }) => g.name)
     expect(names).toContain('daily_token_cap')
     expect(names).toContain('daily_cost_cap')
+    // Same object identity: editing the scanned literal edits the real chain.
+    expect(PTY_AUTOMATION_TURN_GATES).toBe(ptyPreflightDispatchConfig.gates)
   })
 
-  test('the human chain is a strict prefix of the automation chain (cannot drift apart)', () => {
-    expect(PTY_AUTOMATION_TURN_GATES.slice(0, PTY_HUMAN_TURN_GATES.length)).toEqual(PTY_HUMAN_TURN_GATES)
+  test('the human chain is the automation chain minus the inject-rate gate (cannot drift apart)', () => {
+    expect(PTY_HUMAN_TURN_GATES).toEqual(PTY_AUTOMATION_TURN_GATES.filter((g: unknown) => g !== sessionInjectRateGate))
   })
 })
 
@@ -149,20 +164,20 @@ describe('PTYCAP Phase 2 — non-human ("automation") turns (SC-1)', () => {
   // every automation source upstream) — these prove the chain ITSELF is
   // correct so Phase 3 has a tested seam to wire into.
   test('a non-human actor under every ceiling passes the FULL chain', async () => {
-    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'scheduler' })
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation' })
     expect(r.ok).toBe(true)
   })
 
   test('SC-1: a non-human actor over the inject-rate ceiling IS blocked (unlike a human)', async () => {
     state.injectsInWindow = 999_999
-    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'scheduler' })
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation' })
     expect(r.ok).toBe(false)
     expect((r as { reason: string }).reason).toContain('over_session_inject_rate')
   })
 
   test('a non-human actor over the daily cost cap is blocked', async () => {
     state.costSpent = 999
-    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'orchestrator-background' })
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation' })
     expect(r.ok).toBe(false)
     expect((r as { reason: string }).reason).toContain('over_daily_cost_cap')
   })
@@ -170,8 +185,66 @@ describe('PTYCAP Phase 2 — non-human ("automation") turns (SC-1)', () => {
   test('gate order — FIRST block wins: threshold fails before the inject-rate check would even run', async () => {
     state.thresholdAllowed = false
     state.injectsInWindow = 999_999 // would ALSO fail — threshold must win, being first
-    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'scheduler' })
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation' })
     expect(r.ok).toBe(false)
     expect((r as { reason: string }).reason).toContain('quota_threshold_reached')
+  })
+})
+
+describe('PTYCAP Phase 2 — programmatic-credit halt applies to automation only', () => {
+  test('a human turn is exempt from the programmatic-credit halt (gates.ts invariant)', async () => {
+    state.haltBound = '5'
+    state.creditUsed = 50
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'human' })
+    expect(r.ok).toBe(true)
+  })
+
+  test('an automation turn IS stopped by the same programmatic-credit halt', async () => {
+    state.haltBound = '5'
+    state.creditUsed = 50
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation' })
+    expect(r.ok).toBe(false)
+    expect((r as { reason: string }).reason).toContain('programmatic_credit_halt')
+  })
+
+  test('the halt exemption never exempts a human from the daily cost cap itself', async () => {
+    state.haltBound = '5'
+    state.creditUsed = 50
+    state.costSpent = 999
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'human' })
+    expect(r.ok).toBe(false)
+    expect((r as { reason: string }).reason).toContain('over_daily_cost_cap')
+  })
+})
+
+describe('PTYCAP Phase 2 — fail closed', () => {
+  test('a gate that THROWS is a rejection, never a pass', async () => {
+    state.thresholdMode = 'throw'
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'human' })
+    expect(r).toEqual({ ok: false, reason: 'pty_preflight_error' })
+  })
+
+  test('a gate that never settles times out as a rejection instead of hanging the writer', async () => {
+    state.thresholdMode = 'hang'
+    _setPtyPreflightTimeoutForTests(20)
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'human' })
+    expect(r).toEqual({ ok: false, reason: 'pty_preflight_timeout' })
+  })
+})
+
+describe('PTYCAP Phase 2 — isPtySubmit', () => {
+  const b64 = (s: string) => btoa(s)
+  test('Enter, and a paste ending in a newline, are submits', () => {
+    expect(isPtySubmit(b64('\r'))).toBe(true)
+    expect(isPtySubmit(b64('hello world\n'))).toBe(true)
+  })
+  test('plain typing, Ctrl-C, Esc and arrow keys are NOT submits', () => {
+    expect(isPtySubmit(b64('a'))).toBe(false)
+    expect(isPtySubmit(b64('\x03'))).toBe(false)
+    expect(isPtySubmit(b64('\x1b'))).toBe(false)
+    expect(isPtySubmit(b64('\x1b[A'))).toBe(false)
+  })
+  test('undecodable input fails closed (treated as a submit)', () => {
+    expect(isPtySubmit('!!!not base64!!!')).toBe(true)
   })
 })

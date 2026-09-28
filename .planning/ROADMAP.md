@@ -80,9 +80,9 @@ Plans:
 **Status**: Done. See `.planning/phases/PTYCAP-02-pty-preflight-gate/02-01-SUMMARY.md`
 and [docs/usage-cost.md](../docs/usage-cost.md) §"PTYCAP Phase 2". Built
 `hub/src/dispatch/pty-preflight.ts` (the exact SC-1 chain, plus a human variant
-that is a strict prefix of it — never the inject-rate ceiling, SC-3), wired it
-into `hub/src/ws/client.ts`'s `term.input`/`term.attach_file` relay (checked
-once per fresh pty-interactive turn, not per keystroke), and extended
+without the inject-rate ceiling, SC-3), wired it into `hub/src/ws/client.ts`'s
+`term.input` relay (checked on every prompt submit, never on plain keystrokes or
+Ctrl-C/Esc, fail-closed), and extended
 `token-cap-coverage.test.ts`'s known-dispatchers list (SC-2). No admission path
 yet exists for a non-human actor to reach a PTY (Phase 3 is what opens that
 door) — the automation chain is built and unit-proven now so Phase 3 has a

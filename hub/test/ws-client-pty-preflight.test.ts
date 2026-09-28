@@ -1,21 +1,15 @@
 /**
  * PTYCAP Phase 2 (`.planning/phases/PTYCAP-02-pty-preflight-gate/`) — wiring
- * test for `hub/src/ws/client.ts`'s `term.input` relay.
+ * test for `hub/src/ws/client.ts`'s `term.input` relay. Gate LOGIC is
+ * unit-tested in hub/test/pty-preflight.test.ts.
  *
- * Proves (integration level, gate LOGIC is unit-tested in
- * hub/test/pty-preflight.test.ts):
- *   1. A NEW pty-interactive turn (turn-lock free) is preflight-checked with
- *      actor:'human', sessionId + userId taken from the connection (never the
- *      frame) — and a failing check drops the frame + sends `send_refused`
- *      instead of forwarding to the agent channel.
- *   2. A passing check forwards the frame exactly as before this phase.
- *   3. The check runs ONCE per turn, not once per keystroke: a second
- *      term.input while the SAME connection still holds the turn does NOT
- *      re-invoke the preflight check.
- *   4. After the turn completes (turn-lock released), the NEXT turn is
- *      checked again.
- *   5. A non-pty-interactive (stream-json) session is never preflight-checked
- *      at all (unaffected — this relay's checks are pty-interactive-only).
+ * Design under test: the spend preflight runs on every PROMPT SUBMIT (a
+ * term.input containing CR/LF), regardless of `sessions.runner_type`, with a
+ * fresh check per submit and no shared verdicts. Plain typing, Ctrl-C, Esc and
+ * attachments always pass. Frames from one writer are serialized so a
+ * keystroke never overtakes a submit that is still being checked, and the
+ * single-writer + turn-lock invariants are re-verified immediately before the
+ * write.
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-chars-long-aaaaaaaa'
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://test:test@localhost:5432/test'
@@ -23,7 +17,7 @@ process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'session-secret-at-le
 process.env.MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || 'magic-link-secret-at-least-32-chars-x'
 
 import { describe, test, expect, beforeEach, mock } from 'bun:test'
-import { _resetTurnLockForTests, holder, release, acquire } from '../src/telegram/turn-lock.ts'
+import { _resetTurnLockForTests, holder, release, acquire, queueDepth } from '../src/telegram/turn-lock.ts'
 import { _resetTermWritersForTests } from '../src/ws/term-writers.ts'
 
 const USER = 'userP'
@@ -42,23 +36,25 @@ mock.module('../src/db/dal.ts', () => ({
 }))
 
 const realRegistry = await import(`../src/ws/registry.ts?real=${Date.now()}`)
-const fwd: string[] = []
+const fwd: any[] = []
 mock.module('../src/ws/registry.ts', () => ({
   ...realRegistry,
-  getChannel: () => ({ ws: { send: (raw: string) => { fwd.push(raw) } } }),
+  getChannel: () => ({ ws: { send: (raw: string) => { fwd.push(JSON.parse(raw)) } } }),
   broadcastToSubscribers: () => {},
   broadcastErrorEvent: () => {},
   countSubscribers: () => 1,
 }))
 
+// The real preflight module, with only `checkPtyTurnPreflight` replaced by a
+// controllable stub (the real `isPtySubmit` is kept, so submit detection is
+// exercised for real). `preflightGate`, when set, suspends the check until the
+// test resolves it — a deterministic way to pause mid-check.
+const realPreflight = await import(`../src/dispatch/pty-preflight.ts?real=${Date.now()}`)
 let preflightResult: { ok: true } | { ok: false; reason: string } = { ok: true }
-const preflightCalls: Array<{ userId: string; sessionId: string; actor: string }> = []
-// A test-controlled gate: when set, checkPtyTurnPreflight suspends on it before
-// resolving, so a test can deterministically pause mid-check (to prove what
-// happens to a SECOND frame that arrives before the first's DB round trip
-// settles) instead of guessing how many microtask ticks to await.
 let preflightGate: Promise<void> | null = null
+const preflightCalls: Array<{ userId: string; sessionId: string; actor: string }> = []
 mock.module('../src/dispatch/pty-preflight.ts', () => ({
+  ...realPreflight,
   checkPtyTurnPreflight: async (input: { userId: string; sessionId: string; actor: string }) => {
     preflightCalls.push(input)
     if (preflightGate) await preflightGate
@@ -89,17 +85,20 @@ function humanClient() {
   return { ws, sent }
 }
 
-function inputFrame(byte = 'y') {
-  return JSON.stringify({ type: 'term.input', session_id: SESSION, bytes: btoa(byte) })
-}
+const input = (s: string) => JSON.stringify({ type: 'term.input', session_id: SESSION, bytes: btoa(s) })
+const ENTER = '\r'
+const fwdText = () => fwd.filter((f) => f.type === 'term.input').map((f) => atob(f.bytes))
+const refusals = (sent: any[]) => sent.filter((m) => m.type === 'send_refused')
 
-// Several mocked async calls (canWriteTerminal, getSession, isLicenseActive,
-// getSessionRunnerType) precede the preflight check inside handleClientMessage,
-// each its own microtask tick — poll for the observable effect instead of
-// guessing a fixed tick count.
-async function waitUntil(cond: () => boolean, maxTicks = 50) {
+async function waitUntil(cond: () => boolean, maxTicks = 200) {
   for (let i = 0; i < maxTicks && !cond(); i++) await Promise.resolve()
   if (!cond()) throw new Error('waitUntil: condition never became true')
+}
+
+function pauseChecks() {
+  let unblock!: () => void
+  preflightGate = new Promise<void>((r) => { unblock = r })
+  return () => unblock()
 }
 
 beforeEach(() => {
@@ -112,271 +111,161 @@ beforeEach(() => {
   runnerType = 'pty-interactive'
 })
 
-describe('PTYCAP Phase 2 — ws/client.ts term.input preflight wiring', () => {
-  test('a fresh turn is preflight-checked with the server-inferred human actor', async () => {
+describe('PTYCAP Phase 2 — what gets checked', () => {
+  test('a prompt submit is checked with the SERVER-INFERRED human actor and the connection\'s own user/session', async () => {
     const { ws } = humanClient()
-    await handleClientMessage(ws, inputFrame())
+    await handleClientMessage(ws, input(ENTER))
     expect(preflightCalls).toEqual([{ userId: USER, sessionId: SESSION, actor: 'human' }])
+    expect(fwdText()).toEqual([ENTER])
   })
 
-  test('a passing preflight forwards the frame to the agent channel (unchanged behaviour)', async () => {
+  test('plain typing, Ctrl-C and Esc are never checked', async () => {
     const { ws } = humanClient()
-    preflightResult = { ok: true }
-    await handleClientMessage(ws, inputFrame())
+    for (const k of ['h', 'i', '\x03', '\x1b', '\x1b[A']) await handleClientMessage(ws, input(k))
+    expect(preflightCalls.length).toBe(0)
+    expect(fwdText()).toEqual(['h', 'i', '\x03', '\x1b', '\x1b[A'])
+  })
+
+  test('term.attach_file is never checked (it types a path, it does not submit)', async () => {
+    const { ws } = humanClient()
+    await handleClientMessage(ws, JSON.stringify({ type: 'term.attach_file', session_id: SESSION, filename: 'a.txt', data_b64: btoa('x') }))
+    expect(preflightCalls.length).toBe(0)
     expect(fwd.length).toBe(1)
   })
 
-  test('a FAILING preflight drops the frame and sends send_refused with the gate reason', async () => {
-    const { ws, sent } = humanClient()
+  // Panel finding (security, blocking): the gate used to run only when
+  // sessions.runner_type === 'pty-interactive'. That column defaults to
+  // 'stream-json' and the web client never sets it, while the supervisor writes
+  // every term.input to the PTY on its own env flag — so in prod the gate never
+  // ran. It must not depend on that column.
+  test('a submit on a session whose runner_type is the default \'stream-json\' is STILL checked', async () => {
+    runnerType = 'stream-json'
     preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
-    await handleClientMessage(ws, inputFrame())
+    const { ws } = humanClient()
+    await handleClientMessage(ws, input(ENTER))
+    expect(preflightCalls.length).toBe(1)
     expect(fwd.length).toBe(0)
-    const refused = sent.find((m) => m.type === 'send_refused')
-    expect(refused).toBeDefined()
-    expect(refused.reason).toBe('over_daily_cost_cap:$12.00>=$10.00')
-    // the failed turn must not have been granted the turn lock
-    expect(holder(SESSION)).toBeNull()
   })
 
-  test('the check runs ONCE per turn — a second keystroke from the SAME holder does not re-invoke it', async () => {
+  // Panel finding (security): with a per-turn check, a keystroke every <60s kept
+  // the turn lock (and its one passing check) alive all day. Every submit now
+  // pays its own fresh check.
+  test('EVERY submit is checked, even while the same writer still holds the turn', async () => {
     const { ws } = humanClient()
-    await handleClientMessage(ws, inputFrame('a'))
-    expect(preflightCalls.length).toBe(1)
-    await handleClientMessage(ws, inputFrame('b'))
-    expect(preflightCalls.length).toBe(1) // unchanged — still held by the same writer
-    expect(fwd.length).toBe(2) // both keystrokes still forwarded
-  })
-
-  test('after the turn completes, the NEXT turn is preflight-checked again', async () => {
-    const { ws } = humanClient()
-    await handleClientMessage(ws, inputFrame('a'))
-    expect(preflightCalls.length).toBe(1)
-    release(SESSION) // observed turn_complete
-    await handleClientMessage(ws, inputFrame('b'))
+    await handleClientMessage(ws, input('first' + ENTER))
+    await handleClientMessage(ws, input('x'))
+    await handleClientMessage(ws, input('second' + ENTER))
+    expect(holder(SESSION)).toBe(ws.data.writerId)
     expect(preflightCalls.length).toBe(2)
   })
+})
 
-  test('a non-pty-interactive (stream-json) session is never preflight-checked', async () => {
-    runnerType = 'stream-json'
-    const { ws } = humanClient()
-    await handleClientMessage(ws, inputFrame())
-    expect(preflightCalls.length).toBe(0)
-    expect(fwd.length).toBe(1) // still forwarded — unaffected by this phase
-  })
-
-  // Review-finding fix #1 (AgentAutofix ai-review on PR #493, codex reviewer
-  // "blocking"): the original `holder(...) === null` check decided whether to
-  // preflight based on the state at the moment this frame was RECEIVED. A
-  // frame received while a DIFFERENT writer (e.g. Telegram) already held the
-  // turn would see a non-null holder and skip preflight forever — including at
-  // the moment it is later promoted to holder from the turn-lock queue, which
-  // is a genuinely fresh turn for that writer that must still be gated.
-  test('a frame received while ANOTHER writer holds the turn is still preflight-checked (not just when holder is null)', async () => {
-    // Seed telegram as the current holder directly via turn-lock (bypassing
-    // client.ts — this relay never emits the 'telegram' writer id itself).
-    await acquire(SESSION, 'telegram')
-    expect(holder(SESSION)).toBe('telegram')
-
-    const { ws } = humanClient()
-    // The preflight check itself runs AFTER acquire() grants (see client.ts),
-    // so handleClientMessage suspends first, queued behind telegram's held
-    // lock, and only checks once promoted.
-    const pending = handleClientMessage(ws, inputFrame())
-    release(SESSION) // observed telegram turn_complete — promotes the queued client writer
-    await pending
-
-    expect(preflightCalls).toEqual([{ userId: USER, sessionId: SESSION, actor: 'human' }])
-    expect(fwd.length).toBe(1)
-  })
-
-  test('a frame promoted from the queue that FAILS preflight releases the turn it just took', async () => {
-    await acquire(SESSION, 'telegram')
+describe('PTYCAP Phase 2 — refusal', () => {
+  test('a refused submit is dropped and the client gets send_refused on the term channel', async () => {
     preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
-
     const { ws, sent } = humanClient()
-    const pending = handleClientMessage(ws, inputFrame())
-    release(SESSION) // promotes the queued client writer to holder
-    await pending
-
-    expect(preflightCalls.length).toBe(1)
+    await handleClientMessage(ws, input('go' + ENTER))
     expect(fwd.length).toBe(0)
-    const refused = sent.find((m: any) => m.type === 'send_refused')
-    expect(refused?.reason).toBe('over_daily_cost_cap:$12.00>=$10.00')
-    // The check now runs AFTER acquire() grants the turn (see client.ts for
-    // why), so a rejection must give the turn back — telegram already left to
-    // promote us, so the session ends up fully free, not phantom-held.
-    expect(holder(SESSION)).toBeNull()
+    expect(refusals(sent)).toEqual([
+      { type: 'send_refused', channel: 'term', session_id: SESSION, reason: 'over_daily_cost_cap:$12.00>=$10.00' },
+    ])
   })
 
-  // Review-finding fix #3 (round 3 — codex "blocking", claude concurred with a
-  // non-blocking "warning"): fix #2 checked ONCE, at the moment a fresh-turn
-  // frame was RECEIVED, using whatever spend totals looked like then. A turn
-  // that had to wait in the queue behind another writer could still be
-  // admitted on that now-STALE passing verdict even if the writer ahead of it
-  // pushed spend over a cap during the wait. Fixed by moving the check to run
-  // only once a turn is actually granted (see the round-3 comment in
-  // client.ts) — a queued frame is never checked at all until promotion, so
-  // there is no stale snapshot to go stale.
-  test('a queued turn is checked with FRESH state at the moment of promotion, not a stale snapshot from receipt time', async () => {
+  // Panel finding (correctness, blocking): Ctrl-C / Esc used to be refused
+  // mid-turn once over the cap, so the cap stopped the user from interrupting
+  // the very spend it was meant to limit.
+  test('over the cap, the user can still interrupt and cancel (Ctrl-C, Esc pass; only Enter is refused)', async () => {
+    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
+    const { ws, sent } = humanClient()
+    await handleClientMessage(ws, input('\x03'))
+    await handleClientMessage(ws, input('\x1b'))
+    await handleClientMessage(ws, input(ENTER))
+    expect(fwdText()).toEqual(['\x03', '\x1b'])
+    expect(refusals(sent).length).toBe(1)
+  })
+})
+
+describe('PTYCAP Phase 2 — ordering and invariants across the check await', () => {
+  test('a keystroke typed while a submit is still being checked waits behind it (order kept on pass)', async () => {
+    const unblock = pauseChecks()
+    const { ws } = humanClient()
+    const a = handleClientMessage(ws, input('go' + ENTER))
+    await waitUntil(() => preflightCalls.length === 1)
+    const b = handleClientMessage(ws, input('n'))
+    for (let i = 0; i < 50; i++) await Promise.resolve()
+    expect(fwd.length).toBe(0) // 'n' must not overtake the pending submit
+    unblock()
+    await Promise.all([a, b])
+    expect(fwdText()).toEqual(['go' + ENTER, 'n'])
+  })
+
+  test('if the pending submit is refused, a later plain keystroke still lands — after it, never ahead', async () => {
+    const unblock = pauseChecks()
+    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
+    const { ws } = humanClient()
+    const a = handleClientMessage(ws, input('go' + ENTER))
+    await waitUntil(() => preflightCalls.length === 1)
+    const b = handleClientMessage(ws, input('n'))
+    for (let i = 0; i < 50; i++) await Promise.resolve()
+    expect(fwd.length).toBe(0)
+    unblock()
+    await Promise.all([a, b])
+    expect(fwdText()).toEqual(['n'])
+  })
+
+  test('two submits in flight from one writer each get their OWN check (no shared verdict)', async () => {
+    const unblock = pauseChecks()
+    const { ws } = humanClient()
+    const a = handleClientMessage(ws, input('one' + ENTER))
+    const b = handleClientMessage(ws, input('two' + ENTER))
+    await waitUntil(() => preflightCalls.length === 1)
+    unblock()
+    await Promise.all([a, b])
+    expect(preflightCalls.length).toBe(2)
+    expect(fwdText()).toEqual(['one' + ENTER, 'two' + ENTER])
+  })
+
+  test('a socket superseded by a new connection while its submit is being checked does not forward', async () => {
+    const unblock = pauseChecks()
+    const a = humanClient()
+    const pendingA = handleClientMessage(a.ws, input('stale' + ENTER))
+    await waitUntil(() => preflightCalls.length === 1)
+    preflightGate = null
+    const b = humanClient()
+    await handleClientMessage(b.ws, input('fresh' + ENTER))
+    unblock()
+    await pendingA
+    expect(fwdText()).toEqual(['fresh' + ENTER])
+    expect(preflightCalls.length).toBe(2) // B paid its own check
+  })
+
+  // Panel finding (concurrency): the turn lock can be released mid-check
+  // (TTL expiry, turn_complete); the frame must not forward without holding it.
+  test('a submit whose turn lock is released while its check is pending is dropped', async () => {
+    const unblock = pauseChecks()
+    const { ws } = humanClient()
+    const p = handleClientMessage(ws, input('go' + ENTER))
+    await waitUntil(() => preflightCalls.length === 1)
+    release(SESSION)
+    unblock()
+    await p
+    expect(fwd.length).toBe(0)
+  })
+
+  // Panel finding (correctness): the old version of this test released the
+  // other writer before the frame ever reached acquire(), so it never queued
+  // and passed against the buggy code. Wait for the waiter to actually queue.
+  test('a submit queued behind another writer is checked with state FRESH at promotion', async () => {
     await acquire(SESSION, 'telegram')
     preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' } // would fail if checked now
-
     const { ws } = humanClient()
-    const pending = handleClientMessage(ws, inputFrame())
-
-    // Still queued behind telegram — nothing has been checked yet, because
-    // this design never reads spend until the turn is actually granted.
-    expect(preflightCalls.length).toBe(0)
-
-    // Spend recovers before this turn is promoted (e.g. the daily window
-    // rolled over, or telegram's own turn came in under the cap after all).
-    preflightResult = { ok: true }
-    release(SESSION) // promote the queued client writer
-    await pending
-
+    const p = handleClientMessage(ws, input('go' + ENTER))
+    await waitUntil(() => queueDepth(SESSION) === 1)
+    expect(preflightCalls.length).toBe(0) // not checked while queued
+    preflightResult = { ok: true } // spend recovers before promotion
+    release(SESSION)
+    await p
     expect(preflightCalls.length).toBe(1)
-    expect(fwd.length).toBe(1) // admitted on the FRESH verdict, not the stale one from receipt time
-  })
-
-  // Review-finding fix #2 (same PR, same reviewers, found on the FIRST fix's
-  // own commit — "blocking" from codex AND the advisory agy reviewer): moving
-  // the check to run AFTER acquire() (fix #1's implementation) opened a worse
-  // window — once the first frame of a fresh turn had acquired the lock, a
-  // SECOND frame from the SAME writer arriving while the first's preflight was
-  // still in flight would see `holder === writerId` (already granted), skip
-  // preflight, and forward immediately — reaching PTY stdin even if the first
-  // frame's preflight went on to reject. Fixed by publishing the in-flight
-  // check as a promise shared by every frame for that session (see
-  // `pendingPtyPreflight` in client.ts) and running it BEFORE acquire(), so
-  // the lock is never mutated until the shared verdict is known.
-  test('a second frame arriving while the first preflight is still resolving shares its verdict instead of skipping the check', async () => {
-    let unblock!: () => void
-    preflightGate = new Promise<void>((r) => { unblock = r })
-    preflightResult = { ok: true }
-
-    const { ws } = humanClient() // SAME connection/writerId for both frames
-    const first = handleClientMessage(ws, inputFrame('a'))
-    // Let the first frame reach and register the in-flight preflight call
-    // before the second one arrives. The check runs AFTER acquire() grants
-    // (round 3's design), so the lock IS already held by the time it starts.
-    await waitUntil(() => preflightCalls.length === 1)
-    expect(holder(SESSION)).toBe(ws.data.writerId)
-
-    const second = handleClientMessage(ws, inputFrame('b'))
-    unblock() // let the shared preflight settle
-    await Promise.all([first, second])
-
-    // Exactly ONE DB round trip for both frames of this fresh turn (the
-    // original once-per-turn intent), and both were admitted since it passed.
-    expect(preflightCalls.length).toBe(1)
-    expect(fwd.length).toBe(2)
-  })
-
-  test('a second frame arriving while the first preflight is still resolving is ALSO refused if it ultimately rejects', async () => {
-    let unblock!: () => void
-    preflightGate = new Promise<void>((r) => { unblock = r })
-    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
-
-    const { ws, sent } = humanClient()
-    const first = handleClientMessage(ws, inputFrame('a'))
-    await waitUntil(() => preflightCalls.length === 1)
-
-    const second = handleClientMessage(ws, inputFrame('b'))
-    unblock()
-    await Promise.all([first, second])
-
-    // Neither frame reached the channel — the second did not sneak through
-    // ahead of the shared rejection, and the lock was never acquired by either.
-    expect(fwd.length).toBe(0)
-    expect(holder(SESSION)).toBeNull()
-    expect(sent.filter((m: any) => m.type === 'send_refused').length).toBe(2)
-  })
-
-  test('a thrown/rejected preflight check fails CLOSED and never leaves a phantom holder', async () => {
-    let reject!: (err: unknown) => void
-    preflightGate = new Promise<void>((_, r) => { reject = r })
-
-    const { ws, sent } = humanClient()
-    const pending = handleClientMessage(ws, inputFrame())
-    await waitUntil(() => preflightCalls.length === 1)
-    reject(new Error('db unreachable'))
-    await pending
-
-    expect(fwd.length).toBe(0)
-    // Acquired (the check runs after acquire()), then released on failure —
-    // no phantom holder left wedging the next writer.
-    expect(holder(SESSION)).toBeNull()
-    const refused = sent.find((m: any) => m.type === 'send_refused')
-    expect(refused?.reason).toBe('pty_preflight_error')
-  })
-
-  // Review-finding fix #4 (round 4, codex "blocking"): the pre-existing
-  // current-writer re-check after `acquire()` (see client.ts, "ENFORCE the
-  // invariant, don't just record it") only covers the wait INSIDE acquire()
-  // itself. Round 3 added a SECOND `await` after that check (the preflight
-  // round trip) without a matching re-check — a connection that gets
-  // superseded by a new client connection (e.g. the user opens a new tab)
-  // while its own preflight is still resolving would still forward its now-
-  // stale bytes once that preflight settled, violating the single-writer
-  // invariant the acquire-side check exists to enforce.
-  test('a socket superseded by a new connection while its own preflight is still resolving does not forward stale bytes', async () => {
-    let unblock!: () => void
-    preflightGate = new Promise<void>((r) => { unblock = r })
-    preflightResult = { ok: true }
-
-    const a = humanClient()
-    const pendingA = handleClientMessage(a.ws, inputFrame('a'))
-    await waitUntil(() => preflightCalls.length === 1)
-    expect(holder(SESSION)).toBe(a.ws.data.writerId)
-
-    // A different connection takes over (e.g. a new tab) while A's own
-    // preflight round trip is still in flight. Since round 5 (below), B does
-    // NOT reuse A's promise — it starts its own, which happens to await the
-    // same test gate here, so this call also suspends until unblock().
-    const b = humanClient()
-    const pendingB = handleClientMessage(b.ws, inputFrame('b'))
-    await waitUntil(() => holder(SESSION) === b.ws.data.writerId)
-    await waitUntil(() => preflightCalls.length === 2)
-
-    unblock() // let both A's and B's (now separate) preflight checks settle
-    await Promise.all([pendingA, pendingB])
-
-    // A's stale frame must NOT have reached the channel — only B's should.
-    expect(fwd.length).toBe(1)
-  })
-
-  // Review-finding fix #5 (round 5, codex "blocking"): round 4's shared
-  // in-flight promise (`pendingPtyPreflight`) was keyed by SESSION ONLY, so a
-  // writer that superseded another mid-check reused the OTHER writer's
-  // verdict instead of getting its own — codex's exact words: "B represents
-  // a distinct fresh turn" and spend can change between A's check and B's
-  // actual admission. Fixed by scoping the shared promise to (session,
-  // originating writerId): only a frame from the SAME writer that started a
-  // check may reuse it; any other writer always starts its own.
-  test('a writer that supersedes another mid-check gets its OWN fresh preflight, never the superseded writer\'s verdict', async () => {
-    let unblockA!: () => void
-    preflightGate = new Promise<void>((r) => { unblockA = r })
-    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' } // A would fail if resolved now
-
-    const a = humanClient()
-    const pendingA = handleClientMessage(a.ws, inputFrame('a'))
-    await waitUntil(() => preflightCalls.length === 1)
-
-    // Spend recovers, and B (a different connection) supersedes A, before
-    // A's own (failing) check has resolved.
-    preflightResult = { ok: true }
-    preflightGate = null // B's own check must NOT wait on A's still-open gate
-    const b = humanClient()
-    await handleClientMessage(b.ws, inputFrame('b'))
-
-    // Two SEPARATE DB round trips — B never shared A's in-flight verdict.
-    expect(preflightCalls.length).toBe(2)
-    // B was admitted on its OWN fresh (passing) verdict.
-    expect(fwd.length).toBe(1)
-
-    unblockA() // let A's now-irrelevant check settle so it doesn't hang the process
-    await pendingA
-    // A's frame still never reaches the channel (superseded — round 4's fix).
-    expect(fwd.length).toBe(1)
+    expect(fwdText()).toEqual(['go' + ENTER])
   })
 })

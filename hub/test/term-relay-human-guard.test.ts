@@ -34,7 +34,9 @@ mock.module('../src/db/dal.ts', () => ({
 // file's concern is the human-only guard, not the pre-flight caps (covered by
 // hub/test/pty-preflight.test.ts + hub/test/ws-client-pty-preflight.test.ts),
 // so stub it to always pass.
+const realPreflight = await import(`../src/dispatch/pty-preflight.ts?real=${Date.now()}`)
 mock.module('../src/dispatch/pty-preflight.ts', () => ({
+  ...realPreflight,
   checkPtyTurnPreflight: async () => ({ ok: true }),
 }))
 

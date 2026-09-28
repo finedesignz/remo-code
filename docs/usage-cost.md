@@ -353,49 +353,57 @@ cap, no token cap, no threshold gate. Phase 2 closes that gap.
 
 ### The gate chain
 
-`hub/src/dispatch/pty-preflight.ts` exports two chains, one derived from the
-other so they cannot drift apart:
+`hub/src/dispatch/pty-preflight.ts` holds ONE literal array that both the
+coverage scan and the runtime read (not a decorative copy):
 
 ```
-PTY_AUTOMATION_TURN_GATES = [thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]
-PTY_HUMAN_TURN_GATES      = PTY_AUTOMATION_TURN_GATES.slice(0, -1)   // no inject-rate ceiling
+ptyPreflightDispatchConfig.gates = [thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]
+PTY_AUTOMATION_TURN_GATES        = ptyPreflightDispatchConfig.gates            // same object
+PTY_HUMAN_TURN_GATES             = automation chain minus sessionInjectRateGate
 ```
 
-`checkPtyTurnPreflight({ userId, sessionId, actor })` runs `PTY_HUMAN_TURN_GATES`
-for `actor === 'human'` and the full `PTY_AUTOMATION_TURN_GATES` chain for
-anything else, first-block-wins (same IR-2 semantics as `dispatch()`). The
-automation chain is also exposed as a literal `ptyPreflightDispatchConfig.gates`
-array so it is discovered automatically by
-`hub/test/token-cap-coverage.test.ts`'s source-text scan, and that test's
-"known dispatchers" list names `dispatch/pty-preflight.ts` explicitly.
+`checkPtyTurnPreflight({ userId, sessionId, actor: 'human' | 'automation' })`
+runs the matching chain, first-block-wins. A human turn is exempt from the
+programmatic-credit halt inside `dailyCostCapGate` (the server-set
+`DispatchRequest.humanInteractive` flag) — never from the cost or token caps
+themselves. It **fails closed**: a thrown gate resolves to
+`pty_preflight_error`, and a check that does not settle within 5s resolves to
+`pty_preflight_timeout`.
 
 **No admission path exists yet that lets a non-human actor reach this function
 at all** — `humanOnlyPtyGate` / `humanOnlyRejectsActor` reject every automation
 source before a write ever reaches a pty-interactive session (Phase 3's
 `governedAutomationPtyGate` is what will open that door). The automation chain
-is built and proven now precisely so Phase 3 has a tested seam to call into
-rather than inventing gate wiring at the same time it relaxes the human-only
-invariant — the ROADMAP explicitly forbids parallelizing Phase 3 ahead of
-Phase 2.
+is built and proven now so Phase 3 has a tested seam to call into.
 
-### Call site: `hub/src/ws/client.ts`
+### Call site: `hub/src/ws/client.ts` — every prompt SUBMIT
 
-The `term.input`/`term.attach_file` write-turn branch calls
-`checkPtyTurnPreflight({ userId, sessionId, actor: 'human' })` — the actor is
-hard-coded because this relay is reachable ONLY from an authenticated
-`/ws/client` connection (server-inferred, never client-asserted; the
-human-only guard immediately above already proves this for the frame) — but
-**only when the write would START a fresh turn**:
-`turn-lock.holder(sessionId) === null`. A turn already in flight already
-passed this check once and is never retroactively cut off mid-stream, and an
-actively-typing human pays ONE DB round trip per turn, never per keystroke. A
-failing check drops the frame (never reaches the agent channel, never
-acquires the turn lock) and sends `{ type: 'send_refused', session_id, reason
-}` back to the sender — the same structured-refusal shape the license gate
-and `send_message` cost gate already use.
+The `term.input` relay calls `checkPtyTurnPreflight({ …, actor: 'human' })`
+(server-inferred — this relay is reachable only from an authenticated
+`/ws/client` cookie connection) on **every prompt submit**: a `term.input`
+whose decoded bytes contain CR or LF (`isPtySubmit`; undecodable input counts
+as a submit). Each submit gets its own fresh check at the moment it would be
+written; no verdict is cached or shared across frames or writers.
 
-Scope: pty-interactive sessions only (`runnerType === 'pty-interactive'`); a
-stream-json session's `term.input` (if any ever occurred) is unaffected.
+- **Not gated:** plain typing, Ctrl-C, Esc, arrow keys, and `term.attach_file`
+  (it types a path, it does not submit). A user over a cap can still type,
+  interrupt and cancel; only starting new model work is refused.
+- **Independent of `sessions.runner_type`.** That column defaults to
+  `'stream-json'` and the web client never sets it, while the supervisor writes
+  every `term.input` to the PTY on its own `REMO_PTY_INTERACTIVE` env flag —
+  gating on the column would leave the check dead in prod.
+- **Not keyed on the turn lock.** In prod the lock releases only on its 60s idle
+  TTL (`turn_complete` is wired only in transcript-tail mode), so a "once per
+  turn" check meant once per idle gap: it refused Ctrl-C mid-turn, and a
+  keystroke every <60s kept one passing check alive all day.
+- **Ordering:** frames from one writer on one session are serialized, so a
+  keystroke typed while an earlier submit is still being checked never reaches
+  the PTY ahead of it. Immediately before each write the relay re-verifies it
+  is still the session's client writer AND still holds the turn lock.
+- **Refusal:** the frame is dropped and the sender gets
+  `{ type: 'send_refused', channel: 'term', session_id, reason }`.
+  `TerminalSurface` prints a red status line in the terminal
+  (`web/src/lib/termRefusal.ts`); chat hooks ignore `channel: 'term'`.
 
 ### What this does NOT do (explicitly deferred)
 
@@ -423,21 +431,20 @@ stream-json session's `term.input` (if any ever occurred) is unaffected.
 
 ### Tests (PTYCAP Phase 2)
 
-- `hub/test/pty-preflight.test.ts` — chain shape/order (SC-1), the human chain
-  never containing `sessionInjectRateGate` (SC-3), the human chain being a
-  strict prefix of the automation chain, first-block-wins gate ordering, and
-  every individual gate's block/allow behavior for both actor classes.
-- `hub/test/ws-client-pty-preflight.test.ts` — the `ws/client.ts` wiring: a
-  fresh turn is checked with the server-inferred `human` actor; a failing
-  check drops the frame + sends `send_refused` without granting the turn
-  lock; a passing check forwards unchanged; the check runs once per turn, not
-  per keystroke; a completed turn re-checks the next one; a non-pty-interactive
-  session is never checked.
-- `hub/test/token-cap-coverage.test.ts` — extended "known dispatchers" list
-  names `dispatch/pty-preflight.ts` (SC-2); its generic scan independently
-  confirms the file's `gates` literal carries both non-bypassable caps.
-- `hub/test/term-relay-auth.test.ts` / `hub/test/term-relay-human-guard.test.ts`
-  — updated to stub `checkPtyTurnPreflight` (`{ ok: true }`) so their
-  pre-existing, unrelated concerns (per-session authz, the human-only guard)
-  don't newly depend on a live Postgres connection now that every
-  pty-interactive `term.input` turn calls into this module.
+- `hub/test/pty-preflight.test.ts` — chain shape/order (SC-1), the scanned
+  literal being the same object that runs, the human chain excluding
+  `sessionInjectRateGate` (SC-3), human exemption from the programmatic-credit
+  halt (but not the cost cap), fail-closed on a thrown gate and on timeout, and
+  `isPtySubmit`.
+- `hub/test/ws-client-pty-preflight.test.ts` — the relay wiring: every submit is
+  checked (also on a default `stream-json` session); typing, Ctrl-C, Esc and
+  attachments never are; a refusal sends `send_refused` on the term channel;
+  ordering is kept while a submit is paused mid-check; supersede or lock
+  release mid-check drops the frame; a queued submit is checked with state
+  fresh at promotion. Nine of these fail against the previous lock-keyed
+  implementation.
+- `web/test/term-refusal.test.ts` — the user-facing refusal text.
+- `hub/test/token-cap-coverage.test.ts` — "known dispatchers" names
+  `dispatch/pty-preflight.ts` (SC-2).
+- `hub/test/term-relay-auth.test.ts` / `term-relay-human-guard.test.ts` — stub
+  `checkPtyTurnPreflight` so their unrelated concerns don't need Postgres.

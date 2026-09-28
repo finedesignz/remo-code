@@ -41,6 +41,10 @@ export interface DispatchRequest {
   prompt: string
   images?: Array<{ media_type: string; data: string }>
   attachments?: Array<{ filename: string; content: string }>
+  /** Set ONLY by the PTY preflight for a server-inferred human keystroke turn.
+   *  Exempts that turn from the programmatic-credit halt (never from the cost
+   *  or token caps). Never populated from client input. */
+  humanInteractive?: true
 }
 
 /** Pluggable pre-send gates, evaluated in order. First block wins. */

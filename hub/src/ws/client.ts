@@ -8,8 +8,8 @@ import { config } from '../config.ts'
 import { insertMessage, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType, updateSessionStatus } from '../db/dal'
 import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
-import { checkPtyTurnPreflight, type PtyPreflightResult } from '../dispatch/pty-preflight.ts'
-import { acquire, holder, releaseByWriter, releaseWriterInSession } from '../telegram/turn-lock.ts'
+import { checkPtyTurnPreflight, isPtySubmit } from '../dispatch/pty-preflight.ts'
+import { acquire, holder, releaseByWriter } from '../telegram/turn-lock.ts'
 import { claimTermWriter, currentTermWriter, dropTermWriter } from './term-writers.ts'
 import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
@@ -32,16 +32,10 @@ const AUTH_TIMEOUT_MS = 5_000
 const MSG_RATE_WINDOW_MS = 10_000
 const MSG_RATE_MAX = 30 // max 30 messages per 10 seconds
 
-// PTYCAP Phase 2 — one in-flight PTY preflight check per (session, writer),
-// shared only by frames from the SAME writer that arrive before it settles
-// (see the long comment at its call site in handleClientMessage for why this
-// exists and why it's scoped to the originating writer, not just the
-// session: it is the fix for a review-found race where a second frame could
-// skip a still-resolving preflight and reach PTY stdin ahead of a
-// rejection, tightened again after a further review found that scoping it
-// to the session alone let a DIFFERENT writer that supersedes or takes over
-// reuse another writer's verdict instead of getting its own fresh check).
-const pendingPtyPreflight = new Map<string, { writerId: string; promise: Promise<PtyPreflightResult> }>()
+// PTYCAP Phase 2 — per (session, writer) tail of in-flight term write frames,
+// so frames from one writer reach the PTY in arrival order even when a submit
+// is paused on its spend preflight.
+const ptyWriteChain = new Map<string, Promise<void>>()
 
 interface ClientWsData {
   authenticated: boolean
@@ -196,7 +190,6 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // from the frame. Applied to term.input (the write that drives the
     // interactive entrypoint) on a pty-interactive session.
     const writerId = data.writerId ?? 'client:unknown'
-    let mustCheckPtyPreflight = false
     if (isWriteTurn) {
       const runnerType = await getSessionRunnerType(frame.session_id, data.userId)
       if (humanOnlyRejectsActor('human', runnerType)) {
@@ -205,172 +198,97 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
         // chokepoint so there is no second, ungated write route into a PTY.
         return
       }
-      // PTYCAP Phase 2 (SC-1/SC-2/SC-3): gate a NEW pty-interactive turn against
-      // the same spend ceilings dispatch() already enforces on every other
-      // inbound path. `mustCheckPtyPreflight` only decides whether THIS frame
-      // is eligible to ORIGINATE a check — true exactly when it is not an
-      // idempotent same-writer re-acquire (holder is null, or held by someone
-      // else), whether the eventual grant is immediate or via queue promotion.
-      // The check itself does not run here — see the long comment at its call
-      // site below (after `acquire()`) for why, and for the two-round history
-      // of review findings that landed on this exact design.
-      mustCheckPtyPreflight = runnerType === 'pty-interactive' && holder(frame.session_id) !== writerId
     }
     const channel = getChannel(frame.session_id)
     if (!channel) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_channel', session_id: frame.session_id }); return }
+    const forward = () => {
+      if (_diag) log.info('term.input.diag.fwd', { session_id: frame.session_id })
+      try { channel.ws.send(JSON.stringify(frame)) } catch { if (_diag) log.warn('term.input.diag.drop', { gate: 'channel_send_threw', session_id: frame.session_id }) }
+    }
+    // resize/attach/reattach are control frames, not turns — they bypass the
+    // lock and the spend preflight.
+    if (!isWriteTurn) { forward(); return }
     // PTY WRITE-ARBITRATION (Phase 20 / R-TG-10). A term.input from the xterm
     // panel is a HUMAN TURN — it must hold the per-session turn lock before its
     // bytes reach PTY stdin so it never interleaves with a Telegram-injected
     // turn. The writerId is this connection (idempotent re-acquire while the same
-    // writer streams keystrokes within its turn). resize/attach/reattach are
-    // control frames, not turns — they bypass the lock. The lock releases on the
-    // observed transcript turn_complete (telegram/bridge → onTurnComplete).
-    if (isWriteTurn) {
-      // SINGLE CLIENT WRITER PER SESSION (fix/dup-pty-writer). This connection
-      // becomes THE client writer for the session; any earlier client connection
-      // (a leaked/stale socket, or the tab the user just left) is superseded and
-      // released from the turn lock. Without this, two client writers ping-pong
-      // the lock, queue-spam it and starve Telegram. Telegram is never
-      // superseded here — it is arbitrated by the turn lock alone.
-      const superseded = claimTermWriter(frame.session_id, writerId)
-      if (superseded) {
-        log.warn('term.writer.superseded', { session_id: frame.session_id, superseded, writer_id: writerId })
+    // writer streams keystrokes within its turn).
+    //
+    // SINGLE CLIENT WRITER PER SESSION (fix/dup-pty-writer). This connection
+    // becomes THE client writer for the session; any earlier client connection
+    // (a leaked/stale socket, or the tab the user just left) is superseded and
+    // released from the turn lock. Telegram is never superseded here — it is
+    // arbitrated by the turn lock alone.
+    const superseded = claimTermWriter(frame.session_id, writerId)
+    if (superseded) {
+      log.warn('term.writer.superseded', { session_id: frame.session_id, superseded, writer_id: writerId })
+    }
+    const granted = await acquire(frame.session_id, writerId)
+    if (!granted) {
+      log.warn('term.input.diag.drop', { gate: 'lock_not_granted', session_id: frame.session_id, writer_id: writerId })
+      return
+    }
+    // PTYCAP Phase 2 — spend preflight on every PROMPT SUBMIT.
+    //
+    // Gated per SUBMIT (a term.input whose bytes contain CR/LF — see
+    // `isPtySubmit`), not per "turn", and regardless of `sessions.runner_type`:
+    //   - runner_type defaults to 'stream-json' and nothing in the web client
+    //     sets it, while the supervisor writes every term.input to the PTY on
+    //     its own env flag — keying on it left the gate dead in prod.
+    //   - the turn lock only releases on a 60s idle TTL in prod (turn_complete
+    //     is wired only in transcript-tail mode), so "once per turn" meant once
+    //     per idle gap: it refused Ctrl-C / Esc mid-turn, and a keystroke every
+    //     <60s kept one passing check alive all day.
+    // Plain typing, Ctrl-C, Esc and attachments never submit, so they always
+    // pass: a user over the cap can still type, interrupt and cancel; only new
+    // model work is refused. Each submit gets its own fresh check — no verdict
+    // is cached or shared across frames or writers.
+    //
+    // Frames from one writer on one session are SERIALIZED through
+    // `ptyWriteChain` so a keystroke typed while an earlier submit is still
+    // being checked can never reach the PTY ahead of it.
+    const chainKey = `${frame.session_id}\u0000${writerId}`
+    const prev = ptyWriteChain.get(chainKey)
+    let settle!: () => void
+    const mine = new Promise<void>((resolve) => { settle = resolve })
+    ptyWriteChain.set(chainKey, mine)
+    try {
+      if (prev) await prev
+      if (frame.type === 'term.input' && isPtySubmit(frame.bytes)) {
+        const preflight = await checkPtyTurnPreflight({
+          userId: data.userId,
+          sessionId: frame.session_id,
+          actor: 'human',
+        })
+        if (!preflight.ok) {
+          log.warn('term.input.diag.drop', { gate: 'pty_preflight', session_id: frame.session_id, reason: preflight.reason })
+          try {
+            ws.send(JSON.stringify({ type: 'send_refused', channel: 'term', session_id: frame.session_id, reason: preflight.reason }))
+          } catch {}
+          return
+        }
       }
-      const granted = await acquire(frame.session_id, writerId)
-      if (!granted) {
-        log.warn('term.input.diag.drop', { gate: 'lock_not_granted', session_id: frame.session_id, writer_id: writerId })
-        // Queued waiter was dropped (overflow/reset) — drop the frame rather than
-        // inject out-of-turn bytes.
-        return
-      }
-      // ENFORCE the invariant, don't just record it. `acquire` awaits: while this
-      // frame sat in the turn-lock queue another client connection may have claimed
-      // the session and superseded us. Claiming alone would leave the loser's bytes
-      // still reaching PTY stdin — the stale socket would be unable to WEDGE the
-      // lock but would not be MUZZLED. Drop the frame when this connection is no
-      // longer the session's client writer. Logged with writer_id so a recurrence
-      // of the prod two-writer ingress is visible instead of silent.
+      // ENFORCE the single-writer invariant immediately before the write, after
+      // every await above (acquire, the serialization chain, the preflight):
+      // another client connection may have superseded us, or the lock may have
+      // been released/handed on. Drop rather than inject out-of-turn bytes.
       const current = currentTermWriter(frame.session_id)
-      if (current !== writerId) {
+      const lockHolder = holder(frame.session_id)
+      if (current !== writerId || lockHolder !== writerId) {
         log.warn('term.input.diag.drop', {
           gate: 'not_current_writer',
           session_id: frame.session_id,
           writer_id: writerId,
           current_writer: current,
+          lock_holder: lockHolder,
         })
         return
       }
-      // PTYCAP Phase 2 (SC-1/SC-2/SC-3) preflight. Landed here after FIVE
-      // AgentAutofix `ai-review` rounds on PR #493, each catching a real bug
-      // in the previous one — condensed history (full detail in past commits
-      // and the routine's LEDGER.md; the shape of each fix matters more here
-      // than the blow-by-blow):
-      //   1. Checked only when `holder(...) === null` at RECEIPT time, before
-      //      `acquire()` — a frame received while a different writer held the
-      //      turn skipped the check forever, including once later promoted.
-      //   2. Moved the check to run after `acquire()` grants — but mutated
-      //      the lock BEFORE the async verdict was known, so a second frame
-      //      from the SAME writer mid-check saw `holder === writerId`
-      //      (self-granted), skipped the check, and forwarded even if the
-      //      first frame's check went on to reject.
-      //   3. Fixed #2's staleness the wrong way at first — read a STALE spend
-      //      snapshot for a turn that had to queue, since the check ran once
-      //      at receipt time. Fixed by running the check only once a turn is
-      //      actually GRANTED (immediate or via queue promotion), never at
-      //      receipt.
-      //   4. #3 added that check as a new `await` below the pre-existing
-      //      post-`acquire()` current-writer re-check, without extending that
-      //      re-check to cover the new await — a socket superseded mid-check
-      //      could still forward stale bytes. Fixed by re-checking
-      //      `currentTermWriter` again after the preflight await too.
-      //   5. #4's shared-in-flight-promise (`pendingPtyPreflight`) was keyed
-      //      by SESSION ONLY — so a writer that superseded or otherwise took
-      //      over from another writer mid-check reused THAT OTHER WRITER'S
-      //      verdict instead of getting its own fresh one, even though it
-      //      represents a genuinely distinct turn. Fixed by scoping the map
-      //      to (session, originating writerId): only a frame from the SAME
-      //      writer that started a check may reuse it; any other writer
-      //      always starts (and is charged) its own.
-      // Net design: `mustCheckPtyPreflight` (set above, before `acquire()`)
-      // only decides whether THIS frame is ELIGIBLE to originate a check for
-      // ITS OWN writer identity. The check itself always runs after the turn
-      // is confirmed granted to us, immediately before the bytes are
-      // forwarded, so the spend it reads is fresh at admission time. Every
-      // frame reaching this point — regardless of its own flag — first looks
-      // for an in-flight promise already published for (this session, this
-      // exact writerId) and shares it instead of starting a redundant one
-      // (round 2's bug) or reusing a DIFFERENT writer's stale-by-comparison
-      // verdict (round 5's bug). A rejection releases the turn via
-      // `releaseWriterInSession` — we hold it at this point, so a cleanup
-      // path is required.
-      const pendingEntry = pendingPtyPreflight.get(frame.session_id)
-      let preflightPromise = pendingEntry && pendingEntry.writerId === writerId ? pendingEntry.promise : undefined
-      if (!preflightPromise && mustCheckPtyPreflight) {
-        preflightPromise = checkPtyTurnPreflight({
-          userId: data.userId,
-          sessionId: frame.session_id,
-          actor: 'human',
-        }).catch((err) => {
-          // Fail CLOSED: a thrown gate/DB error is a rejection, not a pass.
-          log.error('term.input.pty_preflight_error', {
-            session_id: frame.session_id,
-            error: err instanceof Error ? err.message : String(err),
-          })
-          return { ok: false, reason: 'pty_preflight_error' } as const
-        })
-        pendingPtyPreflight.set(frame.session_id, { writerId, promise: preflightPromise })
-        const originating = preflightPromise
-        void originating.finally(() => {
-          // Only clear if we're still the entry — a different writer may
-          // have already started (and published) its own, newer check.
-          const still = pendingPtyPreflight.get(frame.session_id)
-          if (still && still.promise === originating) pendingPtyPreflight.delete(frame.session_id)
-        })
-      }
-      if (preflightPromise) {
-        const preflight = await preflightPromise
-        if (!preflight.ok) {
-          log.warn('term.input.diag.drop', {
-            gate: 'pty_preflight',
-            session_id: frame.session_id,
-            reason: preflight.reason,
-          })
-          releaseWriterInSession(frame.session_id, writerId)
-          try {
-            ws.send(JSON.stringify({
-              type: 'send_refused',
-              session_id: frame.session_id,
-              reason: preflight.reason,
-            }))
-          } catch {}
-          return
-        }
-        // Review-finding fix #4 (round 4, codex "blocking"): the ONLY new
-        // `await` this phase added below the `current-writer` check above is
-        // this preflight one — and while it's pending, a DIFFERENT client
-        // connection can legitimately call `claimTermWriter` (e.g. the user
-        // opened a new tab) and supersede THIS socket, exactly the scenario
-        // the pre-existing `acquire()`-await re-check a few lines up already
-        // defends against. Without re-checking again here, a superseded
-        // socket that had already passed every earlier gate would still
-        // forward its bytes after its preflight resolved — the same
-        // single-client-writer violation the original comment above warns
-        // about, just reachable through the newer await instead of the older
-        // one. Same fix, same invariant, one more checkpoint.
-        const currentAfterPreflight = currentTermWriter(frame.session_id)
-        if (currentAfterPreflight !== writerId) {
-          log.warn('term.input.diag.drop', {
-            gate: 'not_current_writer',
-            session_id: frame.session_id,
-            writer_id: writerId,
-            current_writer: currentAfterPreflight,
-          })
-          return
-        }
-      }
+      forward()
+    } finally {
+      settle()
+      if (ptyWriteChain.get(chainKey) === mine) ptyWriteChain.delete(chainKey)
     }
-    if (_diag) log.info('term.input.diag.fwd', { session_id: frame.session_id })
-    try { channel.ws.send(JSON.stringify(frame)) } catch { if (_diag) log.warn('term.input.diag.drop', { gate: 'channel_send_threw', session_id: frame.session_id }) }
     return
   }
 
