@@ -27,6 +27,7 @@ import type { CSSProperties } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
+import { describeTermRefusal } from '../lib/termRefusal'
 
 interface Props {
   sessionId: string
@@ -905,6 +906,7 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
     send({ type: 'term.attach', session_id: sessionId })
     send({ type: 'term.reattach', session_id: sessionId })
 
+    let lastRefusalAt = 0
     // Inbound term.data (live) + term.reattach{scrollback} (replay).
     const unsub = subscribe((msg) => {
       if (!msg || msg.session_id !== sessionId) return
@@ -915,6 +917,13 @@ export function TerminalSurface({ sessionId, subscribe, send, className }: Props
         term.write(b64ToBytes(msg.scrollback))
       } else if (msg.type === 'term.data' && typeof msg.bytes === 'string') {
         term.write(b64ToBytes(msg.bytes))
+      } else if (msg.type === 'send_refused' && msg.channel === 'term') {
+        // PTYCAP Phase 2: the hub refused a prompt submit on a spend ceiling.
+        // Show it in the terminal itself (throttled) — the keystroke was dropped.
+        const now = Date.now()
+        if (now - lastRefusalAt < 3000) return
+        lastRefusalAt = now
+        term.write(`\r\n\x1b[31m[remo] ${describeTermRefusal(String(msg.reason ?? ''))}\x1b[0m\r\n`)
       }
     })
 
