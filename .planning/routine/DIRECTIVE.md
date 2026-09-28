@@ -424,15 +424,22 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
      now-stale bytes. This wasn't a fresh design flaw so much as an old, already-solved pattern
      (re-verify identity after every await between a decision and its side effect) not being applied
      to a newly-added await.
-  Generalize three ways: (a) for any "does X happen before Y resolves" fix, the regression test must
-  force that EXACT ordering, not just assert the end state after `await`ing everything to completion;
-  (b) after a security-sensitive concurrency fix lands and passes review, do not treat the NEXT review
-  round as a formality — assume it might find something else, because on this PR it did, three times
-  in a row; (c) when a change adds a new `await` into a function that ALREADY has an established
-  "revalidate identity/state after this await" pattern (like the turn-lock's own post-`acquire()`
-  check here), apply that SAME pattern to the new await as part of writing the change, not as a
-  follow-up once a reviewer finds the gap — round 4 was avoidable by generalizing round 1–3's own
-  lesson to the codebase's pre-existing conventions, not just to the new code being added.
+  A fifth round then found that a SHARED verdict (the fix's own de-duplication mechanism) could cross
+  over from one writer to a different one that superseded it mid-check — distinct from all four prior
+  bugs, on the exact same 20-line block. Generalize four ways: (a) for any "does X happen before Y
+  resolves" fix, the regression test must force that EXACT ordering, not just assert the end state
+  after `await`ing everything to completion; (b) after a security-sensitive concurrency fix lands and
+  passes review, do not treat the NEXT review round as a formality — assume it might find something
+  else, because on this PR it did, four times in a row; (c) when a change adds a new `await` into a
+  function that ALREADY has an established "revalidate identity/state after this await" pattern (like
+  the turn-lock's own post-`acquire()` check here), apply that SAME pattern to the new await as part
+  of writing the change, not as a follow-up once a reviewer finds the gap; (d) **when review findings
+  on one function reach a fifth consecutive round, that count is itself a signal, separate from
+  whether each individual fix is correct** — send the owner a proactive notification recommending a
+  manual look, rather than silently continuing to self-iterate indefinitely on a piece of
+  sensitive-path code that keeps surfacing new edge cases; a dense cluster of real findings on one
+  code path is exactly the kind of thing this routine's own judgment about when to notify (vs. stay
+  quiet) should treat as reportable, independent of the PR's eventual CI outcome.
 
 ## 14. Watch list
 - Open dependabot PR `finedesignz/remo-code#481` (`@hono/zod-openapi` 0.18→0.19): watch for API
