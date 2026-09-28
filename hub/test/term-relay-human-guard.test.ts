@@ -28,6 +28,16 @@ mock.module('../src/db/dal.ts', () => ({
   listSessions: async () => [],
 }))
 
+// PTYCAP Phase 2: term.input on a fresh pty-interactive turn now runs the PTY
+// pre-flight spend gate (hub/src/dispatch/pty-preflight.ts), which hits real
+// Postgres via db/dal.ts's un-mocked getUserClaudeThresholds otherwise. This
+// file's concern is the human-only guard, not the pre-flight caps (covered by
+// hub/test/pty-preflight.test.ts + hub/test/ws-client-pty-preflight.test.ts),
+// so stub it to always pass.
+mock.module('../src/dispatch/pty-preflight.ts', () => ({
+  checkPtyTurnPreflight: async () => ({ ok: true }),
+}))
+
 const realRegistry = await import(`../src/ws/registry.ts?real=${Date.now()}`)
 mock.module('../src/ws/registry.ts', () => ({
   ...realRegistry,

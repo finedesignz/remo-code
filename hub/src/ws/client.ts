@@ -8,7 +8,8 @@ import { config } from '../config.ts'
 import { insertMessage, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
 import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
-import { acquire, releaseByWriter } from '../telegram/turn-lock.ts'
+import { checkPtyTurnPreflight } from '../dispatch/pty-preflight.ts'
+import { acquire, holder, releaseByWriter } from '../telegram/turn-lock.ts'
 import { claimTermWriter, currentTermWriter, dropTermWriter } from './term-writers.ts'
 import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
@@ -190,6 +191,40 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
         // Unreachable for a human actor by construction — but keep the SAME
         // chokepoint so there is no second, ungated write route into a PTY.
         return
+      }
+      // PTYCAP Phase 2 (SC-1/SC-2/SC-3): gate a NEW pty-interactive turn against
+      // the same spend ceilings dispatch() already enforces on every other
+      // inbound path (docs/usage-cost.md: "gating the interactive PTY path
+      // against the daily cost/token caps is milestone PTYCAP's Phase 2").
+      // Checked ONLY when this write would START a fresh turn — turn-lock's
+      // `holder(...)` is null exactly when nobody currently owns the turn — so
+      // an actively-typing human pays ONE DB round trip per turn, never per
+      // keystroke, and a turn already in flight (already passed this check) is
+      // never retroactively cut off mid-stream. The actor is hard-coded
+      // 'human' because this relay is reachable ONLY from an authenticated
+      // /ws/client connection (server-inferred, never client-asserted) — the
+      // human-only guard just above already proves that for this frame.
+      if (runnerType === 'pty-interactive' && holder(frame.session_id) === null) {
+        const preflight = await checkPtyTurnPreflight({
+          userId: data.userId,
+          sessionId: frame.session_id,
+          actor: 'human',
+        })
+        if (!preflight.ok) {
+          log.warn('term.input.diag.drop', {
+            gate: 'pty_preflight',
+            session_id: frame.session_id,
+            reason: preflight.reason,
+          })
+          try {
+            ws.send(JSON.stringify({
+              type: 'send_refused',
+              session_id: frame.session_id,
+              reason: preflight.reason,
+            }))
+          } catch {}
+          return
+        }
       }
     }
     const channel = getChannel(frame.session_id)

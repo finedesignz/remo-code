@@ -316,7 +316,7 @@ both record correctly — the zod field itself stays `undefined` when absent (se
   available for a PTY-tagged row.
 
 This section is RECORD only, exactly like P2 above — gating the interactive PTY path
-against the daily cost/token caps is milestone PTYCAP's Phase 2, not this phase.
+against the daily cost/token caps is milestone PTYCAP's Phase 2 (below), not this phase.
 
 ### Operator smoke check (not a CI gate)
 
@@ -342,3 +342,102 @@ record the result out-of-band when performed.
 - `hub/test/no-hub-side-transcript-fs.test.ts` — the Pitfall-1 guard canary above.
 - `hub/test/pty-usage-midflight-visibility.test.ts` — proves `getTodayTokenTotal()`
   climbs mid-turn with no session-close event anywhere (REMO_E2E_DB_URL-gated).
+
+## PTYCAP Phase 2 — PTY pre-flight gate (`hub/src/dispatch/pty-preflight.ts`)
+
+Phase 1 (above) RECORDED PTY spend; nothing yet CHECKED it before a turn started.
+`hub/src/ws/client.ts`'s `term.input`/`term.attach_file` relay forwarded raw
+keystroke bytes straight to the agent channel with only a license check, the
+human-only guard, and the write-arbitration turn lock in front of it — no cost
+cap, no token cap, no threshold gate. Phase 2 closes that gap.
+
+### The gate chain
+
+`hub/src/dispatch/pty-preflight.ts` exports two chains, one derived from the
+other so they cannot drift apart:
+
+```
+PTY_AUTOMATION_TURN_GATES = [thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]
+PTY_HUMAN_TURN_GATES      = PTY_AUTOMATION_TURN_GATES.slice(0, -1)   // no inject-rate ceiling
+```
+
+`checkPtyTurnPreflight({ userId, sessionId, actor })` runs `PTY_HUMAN_TURN_GATES`
+for `actor === 'human'` and the full `PTY_AUTOMATION_TURN_GATES` chain for
+anything else, first-block-wins (same IR-2 semantics as `dispatch()`). The
+automation chain is also exposed as a literal `ptyPreflightDispatchConfig.gates`
+array so it is discovered automatically by
+`hub/test/token-cap-coverage.test.ts`'s source-text scan, and that test's
+"known dispatchers" list names `dispatch/pty-preflight.ts` explicitly.
+
+**No admission path exists yet that lets a non-human actor reach this function
+at all** — `humanOnlyPtyGate` / `humanOnlyRejectsActor` reject every automation
+source before a write ever reaches a pty-interactive session (Phase 3's
+`governedAutomationPtyGate` is what will open that door). The automation chain
+is built and proven now precisely so Phase 3 has a tested seam to call into
+rather than inventing gate wiring at the same time it relaxes the human-only
+invariant — the ROADMAP explicitly forbids parallelizing Phase 3 ahead of
+Phase 2.
+
+### Call site: `hub/src/ws/client.ts`
+
+The `term.input`/`term.attach_file` write-turn branch calls
+`checkPtyTurnPreflight({ userId, sessionId, actor: 'human' })` — the actor is
+hard-coded because this relay is reachable ONLY from an authenticated
+`/ws/client` connection (server-inferred, never client-asserted; the
+human-only guard immediately above already proves this for the frame) — but
+**only when the write would START a fresh turn**:
+`turn-lock.holder(sessionId) === null`. A turn already in flight already
+passed this check once and is never retroactively cut off mid-stream, and an
+actively-typing human pays ONE DB round trip per turn, never per keystroke. A
+failing check drops the frame (never reaches the agent channel, never
+acquires the turn lock) and sends `{ type: 'send_refused', session_id, reason
+}` back to the sender — the same structured-refusal shape the license gate
+and `send_message` cost gate already use.
+
+Scope: pty-interactive sessions only (`runnerType === 'pty-interactive'`); a
+stream-json session's `term.input` (if any ever occurred) is unaffected.
+
+### What this does NOT do (explicitly deferred)
+
+- **The stream-json `send_message` handler in `hub/src/ws/client.ts` is still
+  NOT gated by `dailyCostCapGate`/`dailyTokenCapGate`** — only the Claude usage
+  threshold gate runs there. This is a **pre-existing gap predating PTYCAP**,
+  not something Phase 2 introduced or was asked to fix (PTYCAP's whole mandate
+  is the interactive PTY path specifically — the milestone that "blocks every
+  other milestone" because the orchestrator is going to drive the PTY, not
+  ChatSurface). Tracked as follow-up, not silently left undocumented.
+- **Telegram's permission/question-response keystroke injection
+  (`injectPtyKeystroke`, `hub/src/api/telegram-webhook.ts`) is NOT preflight-
+  checked.** It answers an EXISTING pending prompt raised by an already
+  in-flight (already-gated) turn — per `turn-lock.ts`'s own documented
+  invariant, a response is exempt from turn acquisition because it completes
+  the holder's turn rather than starting a new one. It spends nothing new;
+  gating it would be gating the wrong event.
+- **Telegram's plain-text dispatch to a PTY session** (`telegram/dispatch.ts`
+  → `dispatch()`) already runs `thresholdGate`/`dailyCostCapGate`/
+  `dailyTokenCapGate` (not `sessionInjectRateGate`) via the existing pipeline
+  — it was never ungated, so Phase 2 does not touch it.
+- **Phase 3 admission** (`governedAutomationPtyGate`, letting a governed
+  automation actor actually drive a PTY) is NOT built here. This phase only
+  proves the gate chain that admission will be required to pass.
+
+### Tests (PTYCAP Phase 2)
+
+- `hub/test/pty-preflight.test.ts` — chain shape/order (SC-1), the human chain
+  never containing `sessionInjectRateGate` (SC-3), the human chain being a
+  strict prefix of the automation chain, first-block-wins gate ordering, and
+  every individual gate's block/allow behavior for both actor classes.
+- `hub/test/ws-client-pty-preflight.test.ts` — the `ws/client.ts` wiring: a
+  fresh turn is checked with the server-inferred `human` actor; a failing
+  check drops the frame + sends `send_refused` without granting the turn
+  lock; a passing check forwards unchanged; the check runs once per turn, not
+  per keystroke; a completed turn re-checks the next one; a non-pty-interactive
+  session is never checked.
+- `hub/test/token-cap-coverage.test.ts` — extended "known dispatchers" list
+  names `dispatch/pty-preflight.ts` (SC-2); its generic scan independently
+  confirms the file's `gates` literal carries both non-bypassable caps.
+- `hub/test/term-relay-auth.test.ts` / `hub/test/term-relay-human-guard.test.ts`
+  — updated to stub `checkPtyTurnPreflight` (`{ ok: true }`) so their
+  pre-existing, unrelated concerns (per-session authz, the human-only guard)
+  don't newly depend on a live Postgres connection now that every
+  pty-interactive `term.input` turn calls into this module.

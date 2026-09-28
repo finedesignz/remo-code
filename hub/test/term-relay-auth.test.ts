@@ -44,6 +44,15 @@ mock.module('../src/db/dal.ts', () => ({
   listSessions: async () => [],
 }))
 
+// PTYCAP Phase 2: a fresh pty-interactive term.input turn now runs the PTY
+// pre-flight spend gate, which otherwise hits real Postgres via db/dal.ts's
+// un-mocked getUserClaudeThresholds. This file's concern is per-session authz
+// (H2), not the pre-flight caps (covered by hub/test/pty-preflight.test.ts +
+// hub/test/ws-client-pty-preflight.test.ts), so stub it to always pass.
+mock.module('../src/dispatch/pty-preflight.ts', () => ({
+  checkPtyTurnPreflight: async () => ({ ok: true }),
+}))
+
 const realRegistry = await import(`../src/ws/registry.ts?real=${Date.now()}`)
 mock.module('../src/ws/registry.ts', () => ({
   ...realRegistry,

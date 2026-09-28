@@ -29,7 +29,7 @@
 ## Phases
 
 - [ ] **Phase 1: PTY Token Accounting** — live, mid-turn token accounting for a PTY turn (post-hoc is too late; a TUI turn can run for many minutes).
-- [ ] **Phase 2: PTY Pre-Flight Gate** — a programmatic turn cannot be written to the PTY without passing the full gate chain.
+- [x] **Phase 2: PTY Pre-Flight Gate** — a programmatic turn cannot be written to the PTY without passing the full gate chain.
 - [ ] **Phase 3: Governed-Automation Guard** — `humanOnlyPtyGate` → `governedAutomationPtyGate`, new flag, default OFF.
 - [ ] **Phase 4: Lifetime Inject Counter + Kill Switch** — rate ceilings don't stop a slow grind; add a lifetime per-task counter and a real kill switch.
 - [ ] **Phase 5: Throwaway-Repo Due→PR Proof** — prove the thing actually works, once, on a repo nobody cares about.
@@ -76,6 +76,18 @@ Plans:
   1. A programmatic write to the PTY passes `[thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]` or it does not happen.
   2. `token-cap-coverage.test.ts` is extended to cover the PTY path.
   3. Human turns are unaffected — a human at a keyboard is never gated by an inject-rate ceiling.
+
+**Status**: Done. See `.planning/phases/PTYCAP-02-pty-preflight-gate/02-01-SUMMARY.md`
+and [docs/usage-cost.md](../docs/usage-cost.md) §"PTYCAP Phase 2". Built
+`hub/src/dispatch/pty-preflight.ts` (the exact SC-1 chain, plus a human variant
+that is a strict prefix of it — never the inject-rate ceiling, SC-3), wired it
+into `hub/src/ws/client.ts`'s `term.input`/`term.attach_file` relay (checked
+once per fresh pty-interactive turn, not per keystroke), and extended
+`token-cap-coverage.test.ts`'s known-dispatchers list (SC-2). No admission path
+yet exists for a non-human actor to reach a PTY (Phase 3 is what opens that
+door) — the automation chain is built and unit-proven now so Phase 3 has a
+tested seam rather than inventing gate wiring at the same time it relaxes the
+human-only invariant.
 
 ### Phase 3: Governed-Automation Guard
 
@@ -174,7 +186,7 @@ fix the CAUSE, and escalates to the human when it cannot.
 | Phase | Status |
 |-------|--------|
 | 1. PTY Token Accounting | In Progress|
-| 2. PTY Pre-Flight Gate | Not started |
+| 2. PTY Pre-Flight Gate | Done |
 | 3. Governed-Automation Guard | Not started |
 | 4. Lifetime Counter + Kill Switch | Not started |
 | 5. Throwaway-Repo Due→PR Proof | Not started |
