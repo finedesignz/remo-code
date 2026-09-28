@@ -30,18 +30,21 @@ let AUDIT_PATH: string
 interface BridgeCall {
   opts: SessionBridgeOptions
   cb: SessionBridgeCallbacks
+  fake: FakeBridge
 }
 const bridges: BridgeCall[] = []
 
 class FakeBridge {
+  stopCalls = 0
   start() {}
-  async stop() {}
+  async stop() { this.stopCalls++ }
   isAlive() { return true }
 }
 
 function bridgeFactorySpy(opts: SessionBridgeOptions, cb: SessionBridgeCallbacks): any {
-  bridges.push({ opts, cb })
-  return new FakeBridge()
+  const fake = new FakeBridge()
+  bridges.push({ opts, cb, fake })
+  return fake
 }
 
 function makeCfg(): SupervisorConfig {
@@ -131,6 +134,12 @@ describe('ProcessManager circuit breaker', () => {
     expect(snap[0].repo_path).toBe(REPO)
     expect(snap[0].state).toBe('open')
     expect(snap[0].exhausted).toBe(false)
+
+    // The bridge (and its `/ws/agent` connection) must be stopped when the
+    // breaker trips — otherwise the hub never sees the session go offline and
+    // `ensureSessionOnline` never respawns it (see process-manager.test.ts's
+    // max_restarts_exceeded regression test for the same class of leak).
+    expect(bridges[0].fake.stopCalls).toBe(1)
 
     // While open, a fresh start for that repo is refused (no spawn).
     const before = bridgesFor('c').length
