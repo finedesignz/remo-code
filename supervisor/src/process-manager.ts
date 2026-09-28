@@ -181,6 +181,22 @@ export class ProcessManager {
     this.cfg = cfg
   }
 
+  /**
+   * Stop a run's bridge without letting a rejected `.stop()` escape as an
+   * unhandled rejection — but log the failure (instead of the old silent
+   * `.catch(() => {})`) so a close that didn't actually happen leaves a
+   * trail. A failed close reproduces the "hub never learns the session
+   * died" bug this bridge-teardown call exists to prevent.
+   */
+  private closeBridge(run: RunInstance) {
+    if (!run.bridge) return
+    const runId = run.spec.runId
+    void run.bridge.stop().catch((err) => {
+      this.cb.onLog('warn', `bridge.stop() failed during teardown: ${err instanceof Error ? err.message : String(err)}`, runId)
+    })
+    run.bridge = null
+  }
+
   /** Swap config (called by the config watcher); affects next `start()`. */
   updateConfig(cfg: SupervisorConfig) {
     this.cfg = cfg
@@ -451,7 +467,7 @@ export class ProcessManager {
     // the bridge, its `/ws/agent` connection for this session stays open, hub
     // never learns the session died, `sessions.status` never flips to
     // 'offline', and `ensureSessionOnline` never respawns it.
-    if (run.bridge) { void run.bridge.stop().catch(() => {}); run.bridge = null }
+    this.closeBridge(run)
     this.runs.delete(spec.runId)
 
     if (failedProbes >= CIRCUIT_MAX_PROBES) {
@@ -875,7 +891,7 @@ export class ProcessManager {
       // respawns. Closing the bridge closes that WS, which hub's `ws.close`
       // handler turns into `setSessionStatus(sessionId, 'offline')` — the
       // next dispatch then sees the session offline and re-spawns it for real.
-      if (run.bridge) { void run.bridge.stop().catch(() => {}); run.bridge = null }
+      this.closeBridge(run)
       this.forgetRun(run.spec.runId, 'max_restarts_exceeded')
       return
     }
@@ -887,7 +903,7 @@ export class ProcessManager {
       run.restartTimer = null
       if (!this.runs.has(run.spec.runId)) return
       // Tear down stale bridge before respawning.
-      if (run.bridge) { void run.bridge.stop().catch(() => {}); run.bridge = null }
+      this.closeBridge(run)
       this.spawn(run)
     }, delay)
   }

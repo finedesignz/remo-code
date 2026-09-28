@@ -184,7 +184,7 @@ describe('renderAnnotationPrompt', () => {
       '  "resolved": true,\n' +
       '  "action_taken": "short summary of what you did",\n' +
       '  "files_changed": ["path/one.tsx", "path/two.ts"],\n' +
-      '  "commit_sha": "the full pushed commit SHA that made this fix (required when resolved is true)",\n' +
+      '  "commit_sha": "the full commit SHA MERGED to the default branch that made this fix (required when resolved is true)",\n' +
       '  "deployed": true,\n' +
       '  "deploy_url": "the live URL you re-fetched to confirm the change, when deployed is true",\n' +
       '  "needs_clarification": false\n' +

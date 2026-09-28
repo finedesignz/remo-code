@@ -11,9 +11,10 @@
 3. Finds the Claude session bound to that repo's `project_dir`.
 4. Sends the annotation as a `user_message` (with a `[revanote: <preview>]` storage prefix so it surfaces with a violet **Annotation** pill in the chat UI).
 5. Waits for the agent reply, parses a structured `<<JSON>>{…}<<END>>` envelope.
-6. **Gates `resolved: true` on the cited commit actually existing on the GitHub remote**
-   (`commit-verify.ts` — see "Resolved requires a pushed commit" below) before persisting or
-   forwarding it; an unverifiable claim is downgraded to `resolved: false` with a reason.
+6. **Gates `resolved: true` on the cited commit actually being merged to the repo's default
+   branch** (`commit-verify.ts` — see "Resolved requires a commit merged to the default branch"
+   below) before persisting or forwarding it; an unverifiable claim is downgraded to
+   `resolved: false` with a reason.
 7. POSTs a callback to Revanote with `{ resolved, action_taken, agent_reply, files_changed, commit_sha, deployed, deploy_url, error? }` — with exponential retry on 5xx/network errors.
 
 ## Auth & secret
@@ -108,7 +109,7 @@ The hub renders a Markdown prompt and instructs Claude to end the reply with:
   "resolved": true,
   "action_taken": "short summary",
   "files_changed": ["a.tsx", "b.ts"],
-  "commit_sha": "the full pushed commit SHA that made this fix",
+  "commit_sha": "the full commit SHA merged to the default branch that made this fix",
   "deployed": true,
   "deploy_url": "the live URL re-fetched to confirm the change",
   "needs_clarification": false
@@ -124,7 +125,7 @@ The hub-side parser (`hub/src/revanote/result-schema.ts`) tolerates:
 
 The web `MessageBubble` strips the envelope (and stray ```` ```json ```` fences) from the displayed assistant text via `stripRevanoteEnvelope` so the user only sees natural language.
 
-### Resolved requires a pushed commit (commit-verify gate)
+### Resolved requires a commit MERGED to the default branch (commit-verify gate)
 
 **Incident (2026-09-14, Lakeside project):** a background subagent marked 43 annotations
 `resolved: true`, citing commit `86ad71296` on every single one. That commit was real but
@@ -134,27 +135,36 @@ revanote, so 43 real client comments were closed with zero shipped work. Root ca
 prompt *asked* for honest self-verification, but nothing in the hub *enforced* it — the prompt
 was advisory, not a gate.
 
+**Follow-up gap (found by QC):** the first version of this gate called only
+`GET /repos/{owner}/{repo}/commits/{sha}`, which returns 200 for a commit reachable from ANY
+branch — so a sha pushed to an open, unmerged PR branch also passed. Owner rule: resolved only
+once the fix is **merged to the default branch**, not merely pushed somewhere.
+
 The fix is code, not prose. `hub/src/revanote/commit-verify.ts`'s `verifyCommitOnRemote()` is
 called from `finalizeAnnotationReply` (`run-lifecycle.ts`) **before** any `resolved: true` is
 persisted or forwarded:
 
-- The agent's envelope must carry `commit_sha` (the full pushed commit hash) when it sets
-  `resolved: true`.
+- The agent's envelope must carry `commit_sha` (the full commit hash, merged to the default
+  branch) when it sets `resolved: true`.
 - The hub resolves `installation_id` + `repo_slug` from the annotation's stored dispatch
-  payload (`payload_raw`, the same fields the Phase 5/6 merge gate already uses) and calls
-  `GET /repos/{owner}/{repo}/commits/{sha}` via the existing GitHub App installation token
-  (`hub/src/auth/github-app.ts` — no new credential; this is the same auth the merge gate uses
-  to open/merge PRs).
-- **200** (commit exists on the remote) → the claim is trusted; `resolved: true` proceeds
+  payload (`payload_raw`, the same fields the Phase 5/6 merge gate already uses), fetches the
+  repo's `default_branch` via `GET /repos/{owner}/{repo}` (same pattern the merge gate uses in
+  `openPr`), then calls `GET /repos/{owner}/{repo}/compare/{default_branch}...{sha}` via the
+  existing GitHub App installation token (`hub/src/auth/github-app.ts` — no new credential;
+  this is the same auth the merge gate uses to open/merge PRs).
+- Compare `status` **`identical`** (sha IS the default-branch head) or **`behind`** (sha is an
+  ancestor of the default-branch head) → the claim is trusted; `resolved: true` proceeds
   unchanged.
 - **Anything else** — missing `commit_sha`, missing `installation_id`/`repo_slug` context, an
-  unparseable repo slug, a 404 (commit not on the remote — the exact Lakeside shape), or any
-  other API error — **fails closed**: the annotation is downgraded to `resolved: false` before
-  the run/status rows are written and before the callback is enqueued. The downgrade reason
-  (`commit_sha_missing` / `repo_context_missing` / `repo_slug_unparseable` /
-  `commit_not_on_remote` / `commit_verify_failed`) is recorded as the annotation's `skip_reason`
-  and surfaced to revanote as the callback's `error` field, so the client-visible state and the
-  reviewer both see *why* it wasn't actually closed.
+  unparseable repo slug, a default-branch lookup failure, a compare `status` of `ahead` (an
+  unmerged branch tip — the gap this fix closes) or `diverged`, a compare 404 (sha not on the
+  remote at all — the exact Lakeside shape), or any other API error — **fails closed**: the
+  annotation is downgraded to `resolved: false` before the run/status rows are written and
+  before the callback is enqueued. The downgrade reason (`commit_sha_missing` /
+  `repo_context_missing` / `repo_slug_unparseable` / `default_branch_lookup_failed` /
+  `commit_not_on_default_branch` / `commit_not_on_remote` / `commit_verify_failed`) is recorded
+  as the annotation's `skip_reason` and surfaced to revanote as the callback's `error` field, so
+  the client-visible state and the reviewer both see *why* it wasn't actually closed.
 - `resolved: false` replies (including `needs_clarification`) never touch this gate — it only
   ever narrows a `true` claim, never widens a `false` one.
 - The prompt (`hub/src/revanote/prompt.ts`) was updated to make this explicit to the agent:
