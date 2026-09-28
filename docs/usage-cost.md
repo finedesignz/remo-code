@@ -316,7 +316,7 @@ both record correctly — the zod field itself stays `undefined` when absent (se
   available for a PTY-tagged row.
 
 This section is RECORD only, exactly like P2 above — gating the interactive PTY path
-against the daily cost/token caps is milestone PTYCAP's Phase 2, not this phase.
+against the daily cost/token caps is milestone PTYCAP's Phase 2 (below), not this phase.
 
 ### Operator smoke check (not a CI gate)
 
@@ -342,3 +342,147 @@ record the result out-of-band when performed.
 - `hub/test/no-hub-side-transcript-fs.test.ts` — the Pitfall-1 guard canary above.
 - `hub/test/pty-usage-midflight-visibility.test.ts` — proves `getTodayTokenTotal()`
   climbs mid-turn with no session-close event anywhere (REMO_E2E_DB_URL-gated).
+
+## PTYCAP Phase 2 — PTY pre-flight gate (`hub/src/dispatch/pty-preflight.ts`)
+
+Phase 1 (above) RECORDED PTY spend; nothing yet CHECKED it before a turn started.
+`hub/src/ws/client.ts`'s `term.input`/`term.attach_file` relay forwarded raw
+keystroke bytes straight to the agent channel with only a license check, the
+human-only guard, and the write-arbitration turn lock in front of it — no cost
+cap, no token cap, no threshold gate. Phase 2 closes that gap.
+
+### The gate chain
+
+`hub/src/dispatch/pty-preflight.ts` holds ONE literal array that both the
+coverage scan and the runtime read (not a decorative copy):
+
+```
+ptyPreflightDispatchConfig.gates = [thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]
+PTY_AUTOMATION_TURN_GATES        = ptyPreflightDispatchConfig.gates            // same object
+PTY_HUMAN_TURN_GATES             = automation chain minus sessionInjectRateGate
+```
+
+`checkPtyTurnPreflight({ userId, sessionId, actor: 'human' | 'automation' })`
+runs the matching chain, first-block-wins. A human turn is exempt from the
+programmatic-credit halt inside `dailyCostCapGate` (the server-set
+`DispatchRequest.humanInteractive` flag) — never from the cost or token caps
+themselves. It **fails closed**: a thrown gate resolves to
+`pty_preflight_error`, and a check that does not settle within 5s resolves to
+`pty_preflight_timeout`.
+
+**No admission path exists yet that lets a non-human actor reach this function
+at all** — `humanOnlyPtyGate` / `humanOnlyRejectsActor` reject every automation
+source before a write ever reaches a pty-interactive session (Phase 3's
+`governedAutomationPtyGate` is what will open that door). The automation chain
+is built and proven now so Phase 3 has a tested seam to call into.
+
+### Call site: `hub/src/ws/client.ts` — every prompt SUBMIT
+
+The `term.input` relay calls `checkPtyTurnPreflight({ …, actor: 'human' })`
+(server-inferred — this relay is reachable only from an authenticated
+`/ws/client` cookie connection) on **every frame that can submit a prompt**,
+as judged by `classifyPtyInput`. Each submit gets its own fresh check at the
+moment it would be written; no verdict is cached or shared across frames or
+writers.
+
+- **What counts as a submit (fail closed).** CR or LF; **any escape sequence
+  not on a small known-safe allowlist** (arrows, Home/End, PgUp/PgDn,
+  Insert/Delete, Shift-Tab, focus in/out, bracketed-paste markers, lone Esc,
+  Esc-Esc, Alt+printable); C1 CSI/SS3 code points; input that is not valid
+  base64 or UTF-8 (a raw 0x9b byte is 8-bit CSI to the PTY). Enter has
+  encodings with no CR/LF byte — the Claude CLI's key parser maps the kitty /
+  CSI-u sequences `ESC[13u` and `ESC[57414u` to "return" whether or not kitty
+  mode was ever enabled, and `ESC O M` is keypad Enter in application mode — so
+  a CR/LF-only test was bypassable by a hand-crafted client.
+- **Split sequences.** The CLI buffers an incomplete escape across writes, so
+  `ESC[` then `13u` in two frames is one Enter. Any escape left OPEN at the end
+  of a forwarded frame (a lone Esc, `ESC[`, `ESC[13`, `ESC O`, …) is remembered
+  per SESSION (`ptyEscTail`, not per writer — a second connection cannot
+  complete it) and the next frame is classified joined with it. An open
+  CSI/SS3 prefix is itself a submit, so both the prefix and its completion are
+  checked — a prefix that passed under the cap cannot be completed unchecked
+  after the cap is crossed.
+- **Not gated:** plain typing, Backspace, Tab, Ctrl-C, Esc, navigation keys, and
+  `term.attach_file` (it types a path, it does not submit). A user over a cap
+  can still type, navigate, interrupt and cancel; only submitting is refused.
+- **Enter is refused everywhere while over a cap — not just on prompts.** The
+  hub cannot tell a prompt submit from an Enter that confirms a permission
+  prompt, a question menu, or a slash command such as `/exit`. So once over a
+  cap, a turn that was already running can stall on a permission prompt; Esc
+  (cancel) still works. Raising the cap (Settings → Usage) unblocks it.
+- **Independent of `sessions.runner_type`.** That column defaults to
+  `'stream-json'` and the web client never sets it, while the supervisor writes
+  every `term.input` to the PTY on its own `REMO_PTY_INTERACTIVE` env flag —
+  gating on the column would leave the check dead in prod.
+- **Not keyed on the turn lock.** In prod the lock releases only on its 60s idle
+  TTL (`turn_complete` is wired only in transcript-tail mode), so a "once per
+  turn" check meant once per idle gap: it refused Ctrl-C mid-turn, and a
+  keystroke every <60s kept one passing check alive all day.
+- **Ordering:** each write frame claims its slot in a per-(session, writer)
+  chain SYNCHRONOUSLY on receipt, before any DB check, so frames from one writer
+  reach the PTY in exactly their arrival order — a keystroke never overtakes a
+  submit that is still being checked. Immediately before each write the relay
+  re-verifies it is still the session's client writer AND holds the turn lock;
+  if the lock went free meanwhile it re-takes it, and if another writer now
+  holds it the frame is dropped (a dropped submit is refused with
+  `not_current_writer`). The agent channel is resolved at send time, so a
+  supervisor reconnect mid-check is honoured.
+- **Refusal:** the frame is dropped and the sender gets
+  `{ type: 'send_refused', channel: 'term', session_id, reason }`.
+  `TerminalSurface` prints a red status line in the terminal
+  (`web/src/lib/termRefusal.ts`); chat hooks ignore `channel: 'term'`.
+
+### What this does NOT do (explicitly deferred)
+
+- **The check covers each SUBMIT, not the work that follows it.** One passing
+  submit can start work that keeps going inside the TUI (a looping prompt,
+  background subagents) — those self-continuations never cross the hub, so a
+  cap crossed mid-run does not interrupt them. Interrupting a PTY session whose
+  usage events cross a cap is a follow-up.
+- **No per-connection rate limit on term frames.** Term frames short-circuit
+  before the structured-message limiter. Memory is bounded — each
+  (session, writer) chain holds at most `MAX_PENDING_TERM_FRAMES` (256) pending
+  frames; past that, frames are dropped with a `term_backpressure` refusal — and
+  a single writer has at most one check in flight, but many connections could
+  each drive checks. Follow-up: a per-writer submit rate limit.
+- **The stream-json `send_message` handler in `hub/src/ws/client.ts` is still
+  NOT gated by `dailyCostCapGate`/`dailyTokenCapGate`** — only the Claude usage
+  threshold gate runs there. This is a **pre-existing gap predating PTYCAP**,
+  not something Phase 2 introduced or was asked to fix (PTYCAP's whole mandate
+  is the interactive PTY path specifically — the milestone that "blocks every
+  other milestone" because the orchestrator is going to drive the PTY, not
+  ChatSurface). Tracked as follow-up, not silently left undocumented.
+- **Telegram's permission/question-response keystroke injection
+  (`injectPtyKeystroke`, `hub/src/api/telegram-webhook.ts`) is NOT preflight-
+  checked.** It answers an EXISTING pending prompt raised by an already
+  in-flight (already-gated) turn — per `turn-lock.ts`'s own documented
+  invariant, a response is exempt from turn acquisition because it completes
+  the holder's turn rather than starting a new one. It spends nothing new;
+  gating it would be gating the wrong event.
+- **Telegram's plain-text dispatch to a PTY session** (`telegram/dispatch.ts`
+  → `dispatch()`) already runs `thresholdGate`/`dailyCostCapGate`/
+  `dailyTokenCapGate` (not `sessionInjectRateGate`) via the existing pipeline
+  — it was never ungated, so Phase 2 does not touch it.
+- **Phase 3 admission** (`governedAutomationPtyGate`, letting a governed
+  automation actor actually drive a PTY) is NOT built here. This phase only
+  proves the gate chain that admission will be required to pass.
+
+### Tests (PTYCAP Phase 2)
+
+- `hub/test/pty-preflight.test.ts` — chain shape/order (SC-1), the scanned
+  literal being the same object that runs, the human chain excluding
+  `sessionInjectRateGate` (SC-3), human exemption from the programmatic-credit
+  halt (but not the cost cap), fail-closed on a thrown gate and on timeout, and
+  `isPtySubmit`.
+- `hub/test/ws-client-pty-preflight.test.ts` — the relay wiring: every submit is
+  checked (also on a default `stream-json` session); typing, Ctrl-C, Esc and
+  attachments never are; a refusal sends `send_refused` on the term channel;
+  ordering is kept while a submit is paused mid-check; supersede or lock
+  release mid-check drops the frame; a queued submit is checked with state
+  fresh at promotion. Nine of these fail against the previous lock-keyed
+  implementation.
+- `web/test/term-refusal.test.ts` — the user-facing refusal text.
+- `hub/test/token-cap-coverage.test.ts` — "known dispatchers" names
+  `dispatch/pty-preflight.ts` (SC-2).
+- `hub/test/term-relay-auth.test.ts` / `term-relay-human-guard.test.ts` — stub
+  `checkPtyTurnPreflight` so their unrelated concerns don't need Postgres.
