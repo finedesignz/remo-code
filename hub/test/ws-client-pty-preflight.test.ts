@@ -330,16 +330,53 @@ describe('PTYCAP Phase 2 — ws/client.ts term.input preflight wiring', () => {
     expect(holder(SESSION)).toBe(a.ws.data.writerId)
 
     // A different connection takes over (e.g. a new tab) while A's own
-    // preflight round trip is still in flight. B reuses A's still-pending
-    // shared promise (same session), so this call also suspends until unblock().
+    // preflight round trip is still in flight. Since round 5 (below), B does
+    // NOT reuse A's promise — it starts its own, which happens to await the
+    // same test gate here, so this call also suspends until unblock().
     const b = humanClient()
     const pendingB = handleClientMessage(b.ws, inputFrame('b'))
     await waitUntil(() => holder(SESSION) === b.ws.data.writerId)
+    await waitUntil(() => preflightCalls.length === 2)
 
-    unblock() // let both A's and B's (shared) preflight settle together
+    unblock() // let both A's and B's (now separate) preflight checks settle
     await Promise.all([pendingA, pendingB])
 
     // A's stale frame must NOT have reached the channel — only B's should.
+    expect(fwd.length).toBe(1)
+  })
+
+  // Review-finding fix #5 (round 5, codex "blocking"): round 4's shared
+  // in-flight promise (`pendingPtyPreflight`) was keyed by SESSION ONLY, so a
+  // writer that superseded another mid-check reused the OTHER writer's
+  // verdict instead of getting its own — codex's exact words: "B represents
+  // a distinct fresh turn" and spend can change between A's check and B's
+  // actual admission. Fixed by scoping the shared promise to (session,
+  // originating writerId): only a frame from the SAME writer that started a
+  // check may reuse it; any other writer always starts its own.
+  test('a writer that supersedes another mid-check gets its OWN fresh preflight, never the superseded writer\'s verdict', async () => {
+    let unblockA!: () => void
+    preflightGate = new Promise<void>((r) => { unblockA = r })
+    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' } // A would fail if resolved now
+
+    const a = humanClient()
+    const pendingA = handleClientMessage(a.ws, inputFrame('a'))
+    await waitUntil(() => preflightCalls.length === 1)
+
+    // Spend recovers, and B (a different connection) supersedes A, before
+    // A's own (failing) check has resolved.
+    preflightResult = { ok: true }
+    preflightGate = null // B's own check must NOT wait on A's still-open gate
+    const b = humanClient()
+    await handleClientMessage(b.ws, inputFrame('b'))
+
+    // Two SEPARATE DB round trips — B never shared A's in-flight verdict.
+    expect(preflightCalls.length).toBe(2)
+    // B was admitted on its OWN fresh (passing) verdict.
+    expect(fwd.length).toBe(1)
+
+    unblockA() // let A's now-irrelevant check settle so it doesn't hang the process
+    await pendingA
+    // A's frame still never reaches the channel (superseded — round 4's fix).
     expect(fwd.length).toBe(1)
   })
 })

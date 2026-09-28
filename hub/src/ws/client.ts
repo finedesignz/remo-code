@@ -32,12 +32,16 @@ const AUTH_TIMEOUT_MS = 5_000
 const MSG_RATE_WINDOW_MS = 10_000
 const MSG_RATE_MAX = 30 // max 30 messages per 10 seconds
 
-// PTYCAP Phase 2 — one in-flight PTY preflight check per session, shared by
-// every term.input frame that arrives before it settles (see the long
-// comment at its call site in handleClientMessage for why this exists: it is
-// the fix for a review-found race where a second frame could skip a
-// still-resolving preflight and reach PTY stdin ahead of a rejection).
-const pendingPtyPreflight = new Map<string, Promise<PtyPreflightResult>>()
+// PTYCAP Phase 2 — one in-flight PTY preflight check per (session, writer),
+// shared only by frames from the SAME writer that arrive before it settles
+// (see the long comment at its call site in handleClientMessage for why this
+// exists and why it's scoped to the originating writer, not just the
+// session: it is the fix for a review-found race where a second frame could
+// skip a still-resolving preflight and reach PTY stdin ahead of a
+// rejection, tightened again after a further review found that scoping it
+// to the session alone let a DIFFERENT writer that supersedes or takes over
+// reuse another writer's verdict instead of getting its own fresh check).
+const pendingPtyPreflight = new Map<string, { writerId: string; promise: Promise<PtyPreflightResult> }>()
 
 interface ClientWsData {
   authenticated: boolean
@@ -256,48 +260,51 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
         })
         return
       }
-      // PTYCAP Phase 2 (SC-1/SC-2/SC-3) preflight — the third design landed
-      // here after three AgentAutofix `ai-review` rounds on PR #493, each
-      // catching a real bug in the previous one:
-      //   Round 1: checked ONLY when `holder(...) === null` at RECEIPT time,
-      //     before `acquire()`. A frame received while a DIFFERENT writer (e.g.
-      //     Telegram) held the turn saw a non-null holder and skipped the check
-      //     FOREVER, including once later promoted to holder from the queue —
-      //     a genuinely fresh turn escaping the gate entirely.
-      //   Round 2: moved the check to run AFTER `acquire()` grants, so a
-      //     queued-then-promoted frame would still be checked. That mutated the
-      //     lock BEFORE the async verdict was known: a second frame from the
-      //     SAME writer arriving while the first's DB round trip was still in
-      //     flight saw `holder(...) === writerId` (already granted), treated
-      //     itself as an idempotent re-acquire, skipped the check, and forwarded
-      //     — reaching PTY stdin even if the first frame's check went on to
-      //     REJECT. An uncaught exception had the same phantom-holder failure
-      //     mode with no try/finally.
-      //   Round 3 (this one): codex correctly pointed out that even the fixed
-      //     round-2 design read a STALE spend snapshot for a turn that had to
-      //     QUEUE — the check ran once, at receipt time, using whatever spend
-      //     totals looked like then; if the writer ahead of it in the queue
-      //     spent enough to cross a cap during the wait, the queued turn still
-      //     got admitted on its now-stale passing verdict.
-      // Fixed by running the check here — AFTER the turn is confirmed granted
-      // to us, immediately before the bytes are forwarded — so the spend it
-      // reads is fresh at the moment of actual admission, whether that grant
-      // was immediate or via a long queue wait. `mustCheckPtyPreflight` (set
-      // above, before `acquire()`) only decides whether THIS frame is the one
-      // that originates a check; every frame reaching this point — regardless
-      // of its own flag — first looks for an in-flight promise already
-      // published in `pendingPtyPreflight` and shares its verdict instead of
-      // skipping it, which is what keeps round 2's bug from recurring here: a
-      // same-writer frame that resumes from its own `acquire()` while the
-      // just-granted turn's check is still resolving cannot race past it,
-      // because it checks the shared map unconditionally, not gated behind its
-      // own (by-then-false) `mustCheckPtyPreflight`. A rejection releases the
-      // turn via `releaseWriterInSession` — we hold it at this point, so a
-      // cleanup path is required, unlike round 2's before-acquire ordering.
-      // (No separate runnerType guard needed here: `pendingPtyPreflight` is
-      // only ever populated for a session whose `mustCheckPtyPreflight` was
-      // true, which already required `runnerType === 'pty-interactive'`.)
-      let preflightPromise = pendingPtyPreflight.get(frame.session_id)
+      // PTYCAP Phase 2 (SC-1/SC-2/SC-3) preflight. Landed here after FIVE
+      // AgentAutofix `ai-review` rounds on PR #493, each catching a real bug
+      // in the previous one — condensed history (full detail in past commits
+      // and the routine's LEDGER.md; the shape of each fix matters more here
+      // than the blow-by-blow):
+      //   1. Checked only when `holder(...) === null` at RECEIPT time, before
+      //      `acquire()` — a frame received while a different writer held the
+      //      turn skipped the check forever, including once later promoted.
+      //   2. Moved the check to run after `acquire()` grants — but mutated
+      //      the lock BEFORE the async verdict was known, so a second frame
+      //      from the SAME writer mid-check saw `holder === writerId`
+      //      (self-granted), skipped the check, and forwarded even if the
+      //      first frame's check went on to reject.
+      //   3. Fixed #2's staleness the wrong way at first — read a STALE spend
+      //      snapshot for a turn that had to queue, since the check ran once
+      //      at receipt time. Fixed by running the check only once a turn is
+      //      actually GRANTED (immediate or via queue promotion), never at
+      //      receipt.
+      //   4. #3 added that check as a new `await` below the pre-existing
+      //      post-`acquire()` current-writer re-check, without extending that
+      //      re-check to cover the new await — a socket superseded mid-check
+      //      could still forward stale bytes. Fixed by re-checking
+      //      `currentTermWriter` again after the preflight await too.
+      //   5. #4's shared-in-flight-promise (`pendingPtyPreflight`) was keyed
+      //      by SESSION ONLY — so a writer that superseded or otherwise took
+      //      over from another writer mid-check reused THAT OTHER WRITER'S
+      //      verdict instead of getting its own fresh one, even though it
+      //      represents a genuinely distinct turn. Fixed by scoping the map
+      //      to (session, originating writerId): only a frame from the SAME
+      //      writer that started a check may reuse it; any other writer
+      //      always starts (and is charged) its own.
+      // Net design: `mustCheckPtyPreflight` (set above, before `acquire()`)
+      // only decides whether THIS frame is ELIGIBLE to originate a check for
+      // ITS OWN writer identity. The check itself always runs after the turn
+      // is confirmed granted to us, immediately before the bytes are
+      // forwarded, so the spend it reads is fresh at admission time. Every
+      // frame reaching this point — regardless of its own flag — first looks
+      // for an in-flight promise already published for (this session, this
+      // exact writerId) and shares it instead of starting a redundant one
+      // (round 2's bug) or reusing a DIFFERENT writer's stale-by-comparison
+      // verdict (round 5's bug). A rejection releases the turn via
+      // `releaseWriterInSession` — we hold it at this point, so a cleanup
+      // path is required.
+      const pendingEntry = pendingPtyPreflight.get(frame.session_id)
+      let preflightPromise = pendingEntry && pendingEntry.writerId === writerId ? pendingEntry.promise : undefined
       if (!preflightPromise && mustCheckPtyPreflight) {
         preflightPromise = checkPtyTurnPreflight({
           userId: data.userId,
@@ -311,8 +318,14 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
           })
           return { ok: false, reason: 'pty_preflight_error' } as const
         })
-        pendingPtyPreflight.set(frame.session_id, preflightPromise)
-        void preflightPromise.finally(() => { pendingPtyPreflight.delete(frame.session_id) })
+        pendingPtyPreflight.set(frame.session_id, { writerId, promise: preflightPromise })
+        const originating = preflightPromise
+        void originating.finally(() => {
+          // Only clear if we're still the entry — a different writer may
+          // have already started (and published) its own, newer check.
+          const still = pendingPtyPreflight.get(frame.session_id)
+          if (still && still.promise === originating) pendingPtyPreflight.delete(frame.session_id)
+        })
       }
       if (preflightPromise) {
         const preflight = await preflightPromise
