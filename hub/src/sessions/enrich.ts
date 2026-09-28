@@ -23,14 +23,16 @@ import { getActiveSessionIdsForUser, getKnownLocalPathsForRepoKey } from '../ws/
  * supervisor is currently hosting a runner for this session_id), falling back
  * to the DB status column for pre-0.5.7 supervisors that push no inventory.
  */
-export function enrichSessionsForUser<T extends { id: string; status: string; repo_key?: string | null }>(
+export function enrichSessionsForUser<T extends { id: string; status: string; repo_key?: string | null; cloud_session_id?: string | null }>(
   userId: string,
   rows: T[],
 ) {
   const activeIds = getActiveSessionIdsForUser(userId)
   return rows.map((s) => ({
     ...s,
-    active: activeIds.has(s.id) || s.status === 'online' || s.status === 'thinking',
+    // Cloud sessions have no supervisor-hosted runner; they stay reachable
+    // (sends relay via any online supervisor), so they're always listed.
+    active: activeIds.has(s.id) || s.status === 'online' || s.status === 'thinking' || !!s.cloud_session_id,
     local_paths: s.repo_key ? getKnownLocalPathsForRepoKey(userId, s.repo_key) : [],
   }))
 }

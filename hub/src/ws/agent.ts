@@ -1057,7 +1057,7 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       await updateSupervisorState(supervisorId, msg.state, msg.run_id ?? null)
     }
     if (msg.last_exit && msg.run_id) {
-      await endRun(msg.run_id, msg.last_exit.code, msg.last_exit.reason)
+      await endRun(msg.run_id, msg.last_exit.code, msg.last_exit.reason, { releaseSlot: false })
       // Plan 04-003: a run just ended → recompute capacity + broadcast so the
       // UI re-renders without polling.
       try {
@@ -1099,6 +1099,17 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       resolveRequest(supervisorId, msg.req_id, msg)
     } else {
       rejectRequest(supervisorId, msg.req_id, msg.error || 'set_roots_failed')
+    }
+    return
+  }
+
+  // Cloud sessions — cloud_session.send ack → resolve the send the client.ts
+  // cloud branch is awaiting (hub/src/cloud/send.ts).
+  if (msg.type === 'cloud_session.send_ack') {
+    if (msg.ok) {
+      resolveRequest(supervisorId, msg.req_id, msg)
+    } else {
+      rejectRequest(supervisorId, msg.req_id, msg.error || 'cloud_send_failed')
     }
     return
   }

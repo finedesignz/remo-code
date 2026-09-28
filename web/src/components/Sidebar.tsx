@@ -26,6 +26,8 @@ interface Props {
   onDisconnectSession?: (id: string) => Promise<{ ok: boolean; error?: string }>
   onShowConnect: () => void
   onShowApiKey: () => void
+  /** Opens the "Link cloud session" modal. Optional so existing callers compile. */
+  onShowLinkCloud?: () => void
   onNavigate: (hash: string) => void
   onRefresh: () => void
   connected: boolean
@@ -51,7 +53,7 @@ interface Props {
 
 export function Sidebar({
   sessions, activeSessionId, onSelectSession,
-  onDeleteSession, onDisconnectSession, onShowConnect, onShowApiKey,
+  onDeleteSession, onDisconnectSession, onShowConnect, onShowApiKey, onShowLinkCloud,
   onNavigate, onRefresh,
   connected, user, signOut, onClose, unreadCounts = {},
   collapsed = false, onToggleCollapsed,
@@ -195,6 +197,18 @@ export function Sidebar({
             <path d="M6 10l4-4" />
           </svg>
         </button>
+        {onShowLinkCloud && (
+          <button
+            onClick={onShowLinkCloud}
+            className="p-2 text-blue-400 hover:text-blue-300 rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"
+            title="Link a claude.ai cloud session"
+            aria-label="Link a claude.ai cloud session"
+          >
+            <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4.5 12.5h7a3 3 0 0 0 .4-5.97A4 4 0 0 0 4.2 7.1 2.7 2.7 0 0 0 4.5 12.5z" />
+            </svg>
+          </button>
+        )}
         <button
           onClick={() => onNavigate('#/?tab=grid')}
           className="p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded-lg hover:bg-[var(--bg-tertiary)]/50 transition-colors"

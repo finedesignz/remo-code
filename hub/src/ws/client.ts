@@ -5,7 +5,7 @@ import { verifyJwt } from '../auth/jwt.ts'
 import { verifyAuthSessionToken } from '../session.ts'
 import { verifyCsrfPair } from '../csrf.ts'
 import { config } from '../config.ts'
-import { insertMessage, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
+import { insertMessage, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType, updateSessionStatus } from '../db/dal'
 import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
 import { checkPtyTurnPreflight, type PtyPreflightResult } from '../dispatch/pty-preflight.ts'
@@ -638,6 +638,21 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       return
     }
 
+    // Cloud sessions carry text only (`claude -p --cloud` takes one prompt string).
+    const cloudSessionId: string | null = (session as any).cloud_session_id ?? null
+    if (cloudSessionId && (msg.images?.length || msg.attachments?.length)) {
+      try {
+        ws.send(JSON.stringify({
+          type: 'send_refused',
+          client_id: msg.id,
+          session_id: msg.session_id,
+          error: 'cloud_text_only',
+          reason: 'Cloud sessions accept text only — images and attachments are not supported.',
+        }))
+      } catch {}
+      return
+    }
+
     // Embed images as markdown data URIs so they render in the chat history
     let storedContent = msg.content
     if (msg.images?.length) {
@@ -673,6 +688,30 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       session_id: msg.session_id,
       message,
     })
+
+    // Cloud session: no agent channel — relay through a supervisor's
+    // `claude -p --cloud` (hub/src/cloud/send.ts). The reply arrives later via
+    // the cloud session's Stop hook. Detached so a slow CLI never stalls this socket.
+    if (cloudSessionId) {
+      const userId = data.userId!
+      const sessionId = msg.session_id
+      const clientId = msg.id
+      broadcastToSubscribers(sessionId, { type: 'session_status', session_id: sessionId, status: 'thinking' })
+      void (async () => {
+        const { sendToCloudSession } = await import('../cloud/send.ts')
+        const r = await sendToCloudSession({ userId, sessionId, cloudSessionId, content: msg.content, token: String(message.id) })
+        if (r.ok) {
+          try { await updateSessionStatus(sessionId, 'thinking') } catch {}
+          return
+        }
+        console.log(`[client] cloud send refused session=${sessionId} error=${r.error} reason=${r.reason}`)
+        broadcastToSubscribers(sessionId, { type: 'session_status', session_id: sessionId, status: 'online' })
+        try {
+          ws.send(JSON.stringify({ type: 'send_refused', client_id: clientId, session_id: sessionId, error: r.error, reason: r.reason }))
+        } catch {}
+      })().catch((err) => console.warn('[client] cloud send crashed', err?.message ?? err))
+      return
+    }
 
     // Forward to channel or agent (Claude Code session).
     // Detect three failure modes so the UI never silently swallows a send:

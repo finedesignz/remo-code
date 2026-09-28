@@ -452,6 +452,7 @@ export async function updateAnnotationRun(
     duration_ms: number | null
     output_snippet: string | null
     finished_at: Date | null
+    commit_sha: string | null
   }>,
 ): Promise<AnnotationRunRow | null> {
   // Field-by-field whitelist updates — same pattern as updateRevanoteMapping.
@@ -478,6 +479,9 @@ export async function updateAnnotationRun(
   }
   if (patch.cost_usd !== undefined) {
     await sql`UPDATE annotation_runs SET cost_usd = ${patch.cost_usd} WHERE id = ${id}`
+  }
+  if (patch.commit_sha !== undefined) {
+    await sql`UPDATE annotation_runs SET commit_sha = ${patch.commit_sha} WHERE id = ${id}`
   }
   if (patch.duration_ms !== undefined) {
     await sql`UPDATE annotation_runs SET duration_ms = ${patch.duration_ms} WHERE id = ${id}`

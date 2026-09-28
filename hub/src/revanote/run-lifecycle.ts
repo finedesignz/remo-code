@@ -12,10 +12,12 @@
  * Finalize steps (unchanged from the legacy `onAgentReply`):
  *   1. Finalize the annotation_run row.
  *   2. Parse the agent envelope (`<<JSON>>…<<END>>`).
- *   3. Persist resolved/action_taken/files_changed/agent_reply.
- *   4. Mark the annotation row resolved/failed.
- *   5. Run the merge gate (additive — legacy single-shot annotations bypass it).
- *   6. Enqueue the outbound revanote callback (ALWAYS carries annotation_id).
+ *   3. Run the merge gate (additive — legacy single-shot annotations bypass it).
+ *   4. Verify a `resolved: true` names a commit that is actually pushed
+ *      (commit-verify.ts); otherwise downgrade to resolved:false.
+ *   5. Persist resolved/action_taken/files_changed/agent_reply/commit_sha.
+ *   6. Mark the annotation row resolved/failed.
+ *   7. Enqueue the outbound revanote callback (ALWAYS carries annotation_id).
  */
 import {
   updateAnnotationRun,
@@ -24,6 +26,13 @@ import {
 } from '../db/revanote-dal.ts'
 import { broadcastRevanoteEvent } from '../ws/registry.ts'
 import { parseRevanoteOutput } from './result-schema.ts'
+import {
+  isPushVerificationRequired,
+  loadVerifyContext,
+  realGithubGet,
+  verifyPushedCommit,
+  type VerifyResult,
+} from './commit-verify.ts'
 
 export interface FinalizeArgs {
   sessionId: string
@@ -37,55 +46,55 @@ export interface FinalizeArgs {
 }
 
 /**
+ * Verification seam for `resolved: true` (fix/revanote-verify-pushed). Tests
+ * swap it; the default checks the named commit on GitHub via the App.
+ */
+export type ResolveVerifier = (args: {
+  userId: string
+  sessionId: string
+  repoSlug: string | null
+  commitSha: string | null
+  branch: string | null
+}) => Promise<VerifyResult>
+
+const defaultVerifier: ResolveVerifier = async (args) => {
+  // No sha ⇒ nothing to look up; report the precise reason without a DB/API trip.
+  if (!(args.commitSha ?? '').trim()) return { ok: false, reason: 'commit_sha_missing' }
+  const ctx = await loadVerifyContext({
+    userId: args.userId,
+    sessionId: args.sessionId,
+    repoSlugFallback: args.repoSlug,
+  })
+  return verifyPushedCommit(
+    { owner: ctx.owner, repo: ctx.repo, commitSha: args.commitSha, branch: args.branch, installationIds: ctx.installationIds },
+    realGithubGet,
+  )
+}
+
+/**
  * Finalize an in-flight annotation run from the agent's reply. Invoked by the
  * revanote adapter's `RunStore.onFinalize` hook (wired into the shared
  * dispatch pipeline). Mirrors the legacy `onAgentReply` body verbatim minus the
  * session-registry lookup + queue promotion (the pipeline does those now).
  */
-export async function finalizeAnnotationReply(args: FinalizeArgs): Promise<void> {
+export async function finalizeAnnotationReply(
+  args: FinalizeArgs,
+  deps: { verify?: ResolveVerifier } = {},
+): Promise<void> {
   const { runId, annotationId, userId, startedAt, content } = args
 
   const duration = Date.now() - startedAt
   const parsed = parseRevanoteOutput(content)
   const result = parsed.value
   const snippet = content.length > 500 ? content.slice(content.length - 500) : content
-
-  await updateAnnotationRun(runId, {
-    status: 'success',
-    finished_at: new Date(),
-    resolved: result.resolved,
-    action_taken: result.action_taken || null,
-    agent_reply: result.agent_reply ?? parsed.preface ?? null,
-    files_changed: result.files_changed,
-    deployed: result.deployed === true,
-    duration_ms: duration,
-    output_snippet: snippet,
-    cost_usd: null,
+  const ann = await getAnnotationById(annotationId, userId).catch((err: any) => {
+    console.warn(`[revanote.lifecycle] annotation load failed: ${err?.message ?? err}`)
+    return null
   })
+  const raw = (ann?.payload_raw ?? {}) as Record<string, any>
 
-  const annStatus = result.resolved ? 'resolved' : 'failed'
-  await updateAnnotationStatus(annotationId, annStatus, {
-    resolved_at: result.resolved ? new Date() : null,
-    skip_reason: result.resolved ? null : (result.action_taken || parsed.reason || 'agent_unresolved'),
-  })
-
-  broadcastRevanoteEvent(userId, {
-    type: 'revanote_resolved',
-    annotation_id: annotationId,
-    run_id: runId,
-    resolved: result.resolved,
-    action_taken: result.action_taken ?? null,
-    files_changed: result.files_changed ?? [],
-    deployed: result.deployed === true,
-    finished_at: new Date().toISOString(),
-  })
-
-  // Queue the outbound callback (ALWAYS carries annotation_id — revanote invariant).
-  try {
-    const ann = await getAnnotationById(annotationId, userId)
-    if (ann) {
-      const { scheduleImmediateCallback } = await import('./callback.ts')
-      let basePayload: import('./callback.ts').RevanoteCallbackPayload = {
+  let basePayload: import('./callback.ts').RevanoteCallbackPayload | null = ann
+    ? {
         annotation_id: ann.annotation_id_external,
         resolved: result.resolved,
         action_taken: result.action_taken || null,
@@ -98,46 +107,126 @@ export async function finalizeAnnotationReply(args: FinalizeArgs): Promise<void>
         clarification_reason: result.clarification_reason ?? null,
         error: parsed.ok ? null : `parse_${parsed.reason}`,
       }
+    : null
 
-      // Phase 6: run the merge gate if the inbound payload carried sandbox fields.
-      // Gate is additive — legacy single-shot annotations without batch/repo
-      // metadata bypass the gate entirely.
-      try {
-        const raw = (ann.payload_raw ?? {}) as Record<string, any>
-        const batchId: string | null = typeof raw.batch_id === 'string' ? raw.batch_id : null
-        const batchSize: number | null = typeof raw.batch_size === 'number' ? raw.batch_size : null
-        const repoSlug: string | null = typeof raw.repo_slug === 'string' ? raw.repo_slug : null
-        const repoKind: 'github' | 'local_path' | null =
-          raw.repo_kind === 'github' || raw.repo_kind === 'local_path' ? raw.repo_kind : null
-        // sandbox_dir is set by the dispatcher when it preps the sandbox.
-        // Until that wiring lands we tolerate its absence; gate uses repo_slug-derived
-        // path as a best-effort, otherwise skip.
-        const sandboxDir: string | null = typeof raw.sandbox_dir === 'string' ? raw.sandbox_dir : null
+  // Phase 6: run the merge gate if the inbound payload carried sandbox fields.
+  // Gate is additive — legacy single-shot annotations without batch/repo
+  // metadata bypass the gate entirely. It runs BEFORE the pushed-commit check
+  // because the sandbox path pushes the branch inside the gate.
+  if (ann && basePayload) {
+    try {
+      const batchId: string | null = typeof raw.batch_id === 'string' ? raw.batch_id : null
+      const batchSize: number | null = typeof raw.batch_size === 'number' ? raw.batch_size : null
+      const repoSlug: string | null = typeof raw.repo_slug === 'string' ? raw.repo_slug : null
+      const repoKind: 'github' | 'local_path' | null =
+        raw.repo_kind === 'github' || raw.repo_kind === 'local_path' ? raw.repo_kind : null
+      // sandbox_dir is set by the dispatcher when it preps the sandbox.
+      // Until that wiring lands we tolerate its absence; gate uses repo_slug-derived
+      // path as a best-effort, otherwise skip.
+      const sandboxDir: string | null = typeof raw.sandbox_dir === 'string' ? raw.sandbox_dir : null
 
-        if (repoSlug && repoKind && sandboxDir) {
-          const { runMergeGate, applyGateToCallback, defaultMergeOps } = await import('./merge-gate.ts')
-          const installationId: number | undefined = typeof raw.installation_id === 'number' ? raw.installation_id : undefined
-          // Risk classification is heuristic-only. The LLM escalator (which used a
-          // raw ANTHROPIC_API_KEY Messages call) was removed — this app runs purely
-          // on the Claude subscription and never holds an Anthropic API key.
-          const outcome = await runMergeGate({
-            batchId, batchSize, annotationId: ann.id,
-            sandboxDir, repoSlug, repoKind,
-            needsClarification: result.needs_clarification === true,
-            resolved: result.resolved,
-            mergeOps: defaultMergeOps({ installationId }),
-            annotationUrl: ann.annotation_url ?? null,
-            notifyEmail: typeof raw.org_notify_email === 'string' ? raw.org_notify_email : null,
-          })
-          basePayload = applyGateToCallback(basePayload, outcome, batchId)
-        }
-      } catch (gateErr: any) {
-        console.warn(`[revanote.lifecycle] merge gate failed (non-fatal): ${gateErr?.message ?? gateErr}`)
+      if (repoSlug && repoKind && sandboxDir) {
+        const { runMergeGate, applyGateToCallback, defaultMergeOps } = await import('./merge-gate.ts')
+        const installationId: number | undefined = typeof raw.installation_id === 'number' ? raw.installation_id : undefined
+        // Risk classification is heuristic-only. The LLM escalator (which used a
+        // raw ANTHROPIC_API_KEY Messages call) was removed — this app runs purely
+        // on the Claude subscription and never holds an Anthropic API key.
+        const outcome = await runMergeGate({
+          batchId, batchSize, annotationId: ann.id,
+          sandboxDir, repoSlug, repoKind,
+          needsClarification: result.needs_clarification === true,
+          resolved: result.resolved,
+          mergeOps: defaultMergeOps({ installationId }),
+          annotationUrl: ann.annotation_url ?? null,
+          notifyEmail: typeof raw.org_notify_email === 'string' ? raw.org_notify_email : null,
+        })
+        basePayload = applyGateToCallback(basePayload, outcome, batchId)
       }
-
-      await scheduleImmediateCallback(ann, basePayload)
+    } catch (gateErr: any) {
+      console.warn(`[revanote.lifecycle] merge gate failed (non-fatal): ${gateErr?.message ?? gateErr}`)
     }
-  } catch (err: any) {
-    console.warn(`[revanote.lifecycle] callback enqueue failed: ${err?.message ?? err}`)
+  }
+
+  // fix/revanote-verify-pushed — a resolve stands only on a commit the hub can
+  // see on the remote. Self-report is advisory; a missing/unpushed commit (or a
+  // failed check) downgrades the reply to resolved:false, fail-closed.
+  let resolved = basePayload ? basePayload.resolved : result.resolved
+  let verifiedSha: string | null = null
+  let rejectReason: string | null = null
+  if (resolved && isPushVerificationRequired()) {
+    let v: VerifyResult
+    try {
+      v = await (deps.verify ?? defaultVerifier)({
+        userId,
+        sessionId: args.sessionId,
+        repoSlug: typeof raw.repo_slug === 'string' ? raw.repo_slug : null,
+        commitSha: result.commit_sha ?? null,
+        branch: result.branch ?? null,
+      })
+    } catch (err: any) {
+      v = { ok: false, reason: 'verify_error', detail: err?.message ?? String(err) }
+    }
+    if (v.ok) {
+      verifiedSha = v.sha
+    } else {
+      resolved = false
+      rejectReason = `unverified_resolve:${v.reason}`
+      console.warn(
+        `[revanote.lifecycle] rejected resolve annotation=${annotationId} run=${runId} ` +
+          `reason=${v.reason}${v.detail ? ` detail=${v.detail}` : ''}`,
+      )
+    }
+  }
+  if (basePayload) {
+    basePayload.resolved = resolved
+    basePayload.commit_sha = verifiedSha
+    if (rejectReason) {
+      basePayload.deployed = false
+      basePayload.error = rejectReason
+    }
+  }
+
+  await updateAnnotationRun(runId, {
+    status: 'success',
+    finished_at: new Date(),
+    resolved,
+    action_taken: result.action_taken || null,
+    agent_reply: result.agent_reply ?? parsed.preface ?? null,
+    files_changed: result.files_changed,
+    deployed: rejectReason ? false : result.deployed === true,
+    duration_ms: duration,
+    output_snippet: snippet,
+    cost_usd: null,
+    commit_sha: verifiedSha,
+    ...(rejectReason ? { error: rejectReason } : {}),
+  })
+
+  const annStatus = resolved ? 'resolved' : 'failed'
+  await updateAnnotationStatus(annotationId, annStatus, {
+    resolved_at: resolved ? new Date() : null,
+    skip_reason: resolved ? null : (rejectReason ?? (result.action_taken || (parsed.ok ? null : parsed.reason) || 'agent_unresolved')),
+  })
+
+  broadcastRevanoteEvent(userId, {
+    type: 'revanote_resolved',
+    annotation_id: annotationId,
+    run_id: runId,
+    resolved,
+    action_taken: result.action_taken ?? null,
+    files_changed: result.files_changed ?? [],
+    deployed: rejectReason ? false : result.deployed === true,
+    commit_sha: verifiedSha,
+    ...(rejectReason ? { error: rejectReason } : {}),
+    finished_at: new Date().toISOString(),
+  })
+
+  // Queue the outbound callback (ALWAYS carries annotation_id — revanote invariant).
+  if (ann && basePayload) {
+    try {
+      const { scheduleImmediateCallback } = await import('./callback.ts')
+      await scheduleImmediateCallback(ann, basePayload)
+    } catch (err: any) {
+      console.warn(`[revanote.lifecycle] callback enqueue failed: ${err?.message ?? err}`)
+    }
   }
 }

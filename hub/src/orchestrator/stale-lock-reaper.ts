@@ -13,7 +13,7 @@
 // the wedged lock so the next heartbeat can re-inject, appends a `failed`
 // run-log row, and fires a ONE-SHOT (cooldown-deduped) failure notify.
 
-import { getQueue } from '../dispatch/pipeline.ts';
+import { getQueue, releaseClosedRun } from '../dispatch/pipeline.ts';
 import { appendRunLog } from './run-log.ts';
 import { fanOutNotify } from './notify.ts';
 
@@ -58,6 +58,13 @@ export interface StaleLockReaperDeps {
   getQueue: typeof getQueue;
   appendRunLog: typeof appendRunLog;
   fanOut: typeof fanOutNotify;
+  /**
+   * Free a wedged session's slot. The default goes through the pipeline so the
+   * finalize hook is disarmed and queued waiters are re-dispatched; the old
+   * `queue.abandon()` deleted the slot INCLUDING its waiters and left the hook
+   * armed. Falls back to `abandon()` on a queue the pipeline doesn't own.
+   */
+  releaseSlot?: (sessionId: string, reason: string) => Promise<void>;
 }
 
 async function realDeps(): Promise<StaleLockReaperDeps> {
@@ -104,7 +111,11 @@ export async function reapStaleOrchestratorLocks(
       const age = q.inFlightAgeMs(sessionId, now);
       if (age === null || age < STALE_LOCK_MS) continue;
 
-      q.abandon(sessionId);
+      if (d.releaseSlot) {
+        await d.releaseSlot(sessionId, 'stale_lock_reaped');
+      } else if (!(await releaseClosedRun(sessionId, 'stale_lock_reaped'))) {
+        q.abandon(sessionId);
+      }
       reaped.push(sessionId);
 
       const minutes = Math.round(age / 60_000);

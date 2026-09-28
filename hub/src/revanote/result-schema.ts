@@ -40,6 +40,11 @@ export const RevanoteResult = z.object({
   // Phase 5 — best-guess-default fix contract (additive).
   assumption: z.string().optional().nullable(),
   clarification_reason: z.string().optional().nullable(),
+  // fix/revanote-verify-pushed — the pushed commit (and branch) a resolved
+  // reply stands on. The hub verifies it on the remote before accepting
+  // `resolved: true` (see commit-verify.ts); the agent's word alone is not enough.
+  commit_sha: z.string().optional().nullable(),
+  branch: z.string().optional().nullable(),
 })
 
 export type RevanoteResult = z.infer<typeof RevanoteResult>
