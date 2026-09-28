@@ -1560,3 +1560,28 @@ ALTER TABLE work_runs ADD COLUMN IF NOT EXISTS deploy_status TEXT;
 CREATE INDEX IF NOT EXISTS idx_work_runs_user_created ON work_runs(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_work_runs_status ON work_runs(status);
 CREATE INDEX IF NOT EXISTS idx_work_runs_published ON work_runs(published, created_at DESC);
+
+-- ── Cloud sessions (quick 20260927-cloud-sessions) ───────────────────────────
+-- A remo session that fronts a claude.ai cloud session (cse_…). Non-NULL
+-- cloud_session_id ⇒ sends go out via the supervisor's `claude -p --cloud <id>`
+-- and replies come back through the cloud session's Stop hook
+-- (POST /api/cloud-hook/reply). NULL for every existing row; no backfill.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cloud_session_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_cloud_unique
+  ON sessions(user_id, cloud_session_id)
+  WHERE cloud_session_id IS NOT NULL AND deleted_at IS NULL;
+-- token_usage.runner_type gains 'cloud' (usage reported by the cloud Stop hook).
+-- The original ADD CONSTRAINT above is IF-NOT-EXISTS, so widening needs an explicit
+-- drop + re-add — guarded on the current definition so it runs once, then no-ops.
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conname = 'token_usage_runner_type_check'
+       AND conrelid = 'token_usage'::regclass
+       AND pg_get_constraintdef(oid) NOT LIKE '%''cloud''%'
+  ) THEN
+    ALTER TABLE token_usage DROP CONSTRAINT token_usage_runner_type_check;
+    ALTER TABLE token_usage ADD CONSTRAINT token_usage_runner_type_check
+      CHECK (runner_type IN ('stream-json','pty-interactive','cloud'));
+  END IF;
+END $$;

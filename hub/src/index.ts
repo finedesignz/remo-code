@@ -28,6 +28,7 @@ import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { revanoteWebhookRoutes } from './api/revanote-webhook'
 import { feedbackWebhookRoutes } from './api/feedback-webhook'
+import cloudHookRoutes from './api/cloud-hook'
 import { feedbackKeys as feedbackKeysApi } from './api/feedback-keys'
 import { sourceIpFromHeaders } from './lib/cidr'
 import { telegramWebhookRoutes } from './api/telegram-webhook'
@@ -106,6 +107,7 @@ import { withHttpMetrics } from './observability/http-metrics'
 //        - /api/coolify         → coolifyWebhookRoutes      (mounted ~L170)
 //        - /api/revanote        → revanoteWebhookRoutes     (mounted ~L175)
 //        - /api/feedback        → feedbackWebhookRoutes      (mounted ~L178)
+//        - /api/cloud-hook      → cloudHookRoutes (Bearer key, explicit cloud:hook scope)
 //        - /api/telegram        → telegramWebhookRoutes     (mounted ~L181)
 //        - /webhooks/titanium   → webhooksTitanium          (mounted ~L185)
 //      The JWT/auth catch-all is `app.use('/api/*', ...)` (~L190) and its skip
@@ -295,6 +297,12 @@ app.use('/api/feedback/*', rateLimitMulti({
 }))
 app.route('/api/feedback', feedbackWebhookRoutes)
 
+// Cloud sessions: a claude.ai cloud session's Stop hook posts each finished turn
+// here. Auth is a Bearer api key with the EXPLICIT `cloud:hook` scope. MUST be
+// mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
+app.use('/api/cloud-hook/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.req.header('authorization')?.slice(0, 24) || 'anon' }))
+app.route('/api/cloud-hook', cloudHookRoutes)
+
 // Phase 12: Public Telegram inbound webhook (URL-path secret). MUST be
 // mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
 // Auth is :secret in the URL, constant-time compared to config.telegram.webhookSecret.
@@ -315,6 +323,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
   if (c.req.path.startsWith('/api/feedback/')) return next()
+  if (c.req.path.startsWith('/api/cloud-hook/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   // Milestone ASK: /api/ext/* authenticates with an api_key Bearer (already
   // enforced by extApiKeyMiddleware above), never a cookie.
@@ -342,6 +351,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
   if (c.req.path.startsWith('/api/feedback/')) return next()
+  if (c.req.path.startsWith('/api/cloud-hook/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
   if (c.req.path.startsWith('/api/setup')) return next()
