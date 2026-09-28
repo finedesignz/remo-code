@@ -350,14 +350,18 @@ describe('dispatch/pipeline — queue claim + drop', () => {
     expect(store.opened).toEqual(['t1'])
   })
 
-  test('third concurrent dispatch → dropped_busy + markSkipped(session_busy)', async () => {
+  // The pipeline's queue is deeper than the SessionQueue default (1 waiter):
+  // REMO_DISPATCH_MAX_WAITERS, default 50. A third concurrent dispatch now
+  // QUEUES; only a dispatch past the configured depth is dropped. Full
+  // burst/drop coverage lives in dispatch-queue-depth.test.ts.
+  test('third concurrent dispatch → queued (not dropped), opens no run row yet', async () => {
     const { deps: d, store } = deps()
     await dispatch(baseReq({ token: 't1' }), d)
     await dispatch(baseReq({ token: 't2' }), d)
     const out3 = await dispatch(baseReq({ token: 't3' }), d)
-    expect(out3).toEqual({ kind: 'dropped_busy' })
-    expect(store.skipped).toContainEqual(['t3', 'session_busy'])
-    // dropped message NEVER opens a run row.
+    expect(out3).toEqual({ kind: 'queued' })
+    expect(store.skipped).toEqual([])
+    // a queued message NEVER opens a run row until it is actually sent.
     expect(store.opened).toEqual(['t1'])
   })
 })

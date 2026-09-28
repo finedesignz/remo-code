@@ -26,6 +26,7 @@
 // REMO_TEAB_MAX_RUN_MS).
 
 import { finalizeRun } from './dispatcher.ts'
+import { releaseClosedRunByToken } from '../dispatch/pipeline.ts'
 
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
   if (raw == null || raw === '') return fallback
@@ -73,6 +74,12 @@ export interface StaleRunRow {
 export interface RunReaperDeps {
   loadPendingRuns: () => Promise<StaleRunRow[]>
   finalizeRun: typeof finalizeRun
+  /**
+   * Free the dispatch-pipeline slot the reaped run was holding. Finalizing the
+   * row alone left the session's in-flight slot claimed by a run nothing would
+   * ever complete, so every later dispatch to that session queued behind it.
+   */
+  releaseSlot: (runId: string) => Promise<unknown>
 }
 
 const REAL_DEPS: RunReaperDeps = {
@@ -95,6 +102,7 @@ const REAL_DEPS: RunReaperDeps = {
       }))
   },
   finalizeRun,
+  releaseSlot: (runId) => releaseClosedRunByToken(runId, 'run_timeout', { markFailed: false }),
 }
 
 /**
@@ -124,6 +132,11 @@ export async function reapStaleRuns(
     try {
       await d.finalizeRun(run.id, 'failed', 'run_timeout', { only_if_active: true })
       reaped.push(run.id)
+      try {
+        await d.releaseSlot(run.id)
+      } catch (err: any) {
+        console.warn(`[run-reaper] slot release failed run=${run.id}: ${err?.message ?? err}`)
+      }
       console.warn(
         `[run-reaper] finalized stale run=${run.id} (pending for ${Math.round(age / 60_000)}m ≥ ${ceiling}ms) as failed/run_timeout`,
       )

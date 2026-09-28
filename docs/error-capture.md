@@ -189,7 +189,7 @@ Knobs are per-project: `dedupe_window_seconds`, `rate_limit_per_hour`, `daily_di
 
 ## Dispatch into Claude session
 
-As of the Round-2 hub-deepening refactor, `dispatcher.ts` is a **thin adapter over the shared `hub/src/dispatch/` pipeline** — it no longer hand-rolls the queue, the offline grace, or the finalize hook. The pipeline (`dispatch()` in `hub/src/dispatch/pipeline.ts`) owns gate ordering, the per-session queue (1 in-flight + 1 waiter), the offline-grace park, the send, and finalize-then-promote-then-redispatch.
+As of the Round-2 hub-deepening refactor, `dispatcher.ts` is a **thin adapter over the shared `hub/src/dispatch/` pipeline** — it no longer hand-rolls the queue, the offline grace, or the finalize hook. The pipeline (`dispatch()` in `hub/src/dispatch/pipeline.ts`) owns gate ordering, the per-session queue (1 in-flight + `REMO_DISPATCH_MAX_WAITERS` waiters, default 50), the offline-grace park, the send, and finalize-then-promote-then-redispatch.
 
 `hub/src/error-capture/dispatcher.ts → dispatchPendingError(errorId)`:
 

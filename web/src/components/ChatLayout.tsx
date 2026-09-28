@@ -21,6 +21,7 @@ import { useSidebarWidth } from '../hooks/useSidebarWidth'
 import { ChatPanel } from './ChatPanel'
 import { TerminalSurface } from './TerminalSurface'
 import { ApiKeyModal } from './ApiKeyModal'
+import { LinkCloudSessionModal } from './LinkCloudSessionModal'
 import { SessionDropdown, connectedSessions, sessionLabel, shortId } from './SessionDropdown'
 import { MobileSessionControls } from './MobileSessionControls'
 import { readLastUserMessage, recordUserMessage } from '../lib/lastUserMsg'
@@ -51,6 +52,7 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
     })
   }, [])
   const [showApiKey, setShowApiKey] = useState(false)
+  const [showLinkCloud, setShowLinkCloud] = useState(false)
   // Border-drag resizable sidebar width (persisted to localStorage).
   const { width: sidebarWidth, startResize } = useSidebarWidth()
 
@@ -203,6 +205,13 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
       {showApiKey && (
         <ApiKeyModal token={token} onClose={() => setShowApiKey(false)} />
       )}
+      {showLinkCloud && (
+        <LinkCloudSessionModal
+          onLink={sessionsHook.linkCloudSession}
+          onLinked={handleSelectSession}
+          onClose={() => setShowLinkCloud(false)}
+        />
+      )}
 
       {/* Sidebar — DESKTOP ONLY (md+). On mobile there is NO sidebar; per-session
           controls live inline in the session strip (MobileSessionControls). */}
@@ -232,6 +241,7 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           onDisconnectSession={sessionsHook.disconnectSession}
           onShowConnect={handleShowConnect}
           onShowApiKey={() => setShowApiKey(true)}
+          onShowLinkCloud={() => setShowLinkCloud(true)}
           onNavigate={onNavigate}
           onRefresh={sessionsHook.refetch}
           connected={connected}
@@ -294,6 +304,16 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
             {activeSession?.project_dir && (
               <p className="text-[11px] text-[var(--text-muted)] leading-tight truncate mt-0.5">{activeSession.project_dir}</p>
             )}
+            {activeSession?.cloud_session_id && (
+              <a
+                href={`https://claude.ai/code/${activeSession.cloud_session_id}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] text-blue-400 hover:text-blue-300 leading-tight mt-0.5 inline-block"
+              >
+                Cloud session · open on claude.ai ↗
+              </a>
+            )}
           </div>
 
           {activeSession && (activeSession.status === 'online' || activeSession.status === 'thinking') ? (
@@ -309,7 +329,7 @@ export function ChatLayout({ token, user, signOut, onNavigate }: Props) {
           ) : null}
         </div>
 
-        {ptyInteractive && activeSessionId ? (
+        {ptyInteractive && activeSessionId && !activeSession?.cloud_session_id ? (
           // Phase-15 spike: PTY-interactive sessions render the raw-terminal
           // panel instead of the chat bubbles. Gated by a dev toggle
           // (localStorage `remo:pty-interactive`); full per-session selection

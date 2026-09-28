@@ -65,7 +65,9 @@ by layered controls (see the header comment in `feedback-webhook.ts`):
 4. **Disabled key** → `403`. Rotate by minting a new key + disabling the old.
 5. **No unbounded spawn** — the dispatch spawn-on-error path has a per-session
    in-flight lock + the hub-authoritative concurrency reservation; the queue
-   admits one waiter per session.
+   admits at most `REMO_DISPATCH_MAX_WAITERS` (default 50) waiters per session,
+   and every promoted waiter re-runs the full gate list (cost cap, token cap,
+   `sessionInjectRateGate`) before it is sent, so queue depth never buys turns.
 
 6. **Session ownership enforced at mint** — `createFeedbackKey` asserts the
    supplied `session_id` belongs to the authenticated user before insert; a

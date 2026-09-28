@@ -133,8 +133,8 @@ export function MobileAccordionRow({
             paddingBottom: 'env(safe-area-inset-bottom)',
           }}
         >
-          {ptyInteractive ? (
-            // PTY-interactive: raw-terminal surface. aspect-square gives the
+          {ptyInteractive && !session.cloud_session_id ? (
+            // PTY-interactive: raw-terminal surface. (Cloud sessions have no PTY.) aspect-square gives the
             // terminal a bounded box so xterm's own scrollback scrolls inside
             // the cell (toolbar stays sticky on top) rather than scrolling the
             // whole page.

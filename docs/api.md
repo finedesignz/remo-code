@@ -2983,6 +2983,269 @@ Status Code **429**
 This operation does not require authentication
 </aside>
 
+<h1 id="remo-code-hub-cloud-sessions">cloud-sessions</h1>
+
+## Post a claude.ai cloud session's finished turn into its linked remo session
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/cloud-hook/reply \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "cloud_session_id": "cse_01ABC...",
+  "text": "string",
+  "model": "string",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/cloud-hook/reply',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/cloud-hook/reply`
+
+Called by the remo Stop hook (tools/cloud-hook/remo-cloud-stop-hook.mjs) running INSIDE a claude.ai cloud session. Auth: api_key Bearer whose scopes EXPLICITLY include `cloud:hook` (a legacy NULL-scopes key is refused). An unknown cloud_session_id is auto-linked to a new remo session. The text is stored as an assistant message (data, never instructions); reported usage is recorded in token_usage (runner_type='cloud') and counts against the owner's daily cost + token caps.
+
+> Body parameter
+
+```json
+{
+  "cloud_session_id": "cse_01ABC...",
+  "text": "string",
+  "model": "string",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}
+```
+
+<h3 id="post-a-claude.ai-cloud-session's-finished-turn-into-its-linked-remo-session-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» cloud_session_id|body|string|true|none|
+|» text|body|string|true|none|
+|» model|body|string¦null|false|none|
+|» usage|body|object¦null|false|none|
+|»» input_tokens|body|integer|false|none|
+|»» output_tokens|body|integer|false|none|
+|»» cache_creation_input_tokens|body|integer|false|none|
+|»» cache_read_input_tokens|body|integer|false|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "ok": true,
+  "session_id": "string",
+  "message_id": "string",
+  "linked": true
+}
+```
+
+<h3 id="post-a-claude.ai-cloud-session's-finished-turn-into-its-linked-remo-session-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Stored and broadcast|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid JSON or body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing/unknown api key|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Key lacks the explicit cloud:hook scope|Inline|
+|413|[Payload Too Large](https://tools.ietf.org/html/rfc7231#section-6.5.11)|Body over 512KB|Inline|
+|429|[Too Many Requests](https://tools.ietf.org/html/rfc6585#section-4)|Rate limited|Inline|
+
+<h3 id="post-a-claude.ai-cloud-session's-finished-turn-into-its-linked-remo-session-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ok|boolean|true|none|none|
+|» session_id|string|true|none|none|
+|» message_id|string|true|none|none|
+|» linked|boolean|true|none|none|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» required|string|true|none|none|
+
+Status Code **413**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **429**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+apiKeyAuth
+</aside>
+
+## Link a claude.ai cloud session to a remo session
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/sessions/cloud \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "cloud_session_id": "string",
+  "name": "string"
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/sessions/cloud',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/sessions/cloud`
+
+Accepts a bare `cse_…`/`session_…` id or a claude.ai/code URL. Idempotent: re-linking returns the existing session (200). Messages sent to the linked session are queued into the cloud session via a supervisor's `claude -p --cloud <id>`.
+
+> Body parameter
+
+```json
+{
+  "cloud_session_id": "string",
+  "name": "string"
+}
+```
+
+<h3 id="link-a-claude.ai-cloud-session-to-a-remo-session-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» cloud_session_id|body|string|true|none|
+|» name|body|string|false|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "session_id": "string",
+  "name": "string",
+  "cloud_session_id": "string",
+  "created": true
+}
+```
+
+<h3 id="link-a-claude.ai-cloud-session-to-a-remo-session-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Already linked|Inline|
+|201|[Created](https://tools.ietf.org/html/rfc7231#section-6.3.2)|Linked (new session)|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid input or cloud session id|Inline|
+
+<h3 id="link-a-claude.ai-cloud-session-to-a-remo-session-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» session_id|string|true|none|none|
+|» name|string|true|none|none|
+|» cloud_session_id|string|true|none|none|
+|» created|boolean|true|none|none|
+
+Status Code **201**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» session_id|string|true|none|none|
+|» name|string|true|none|none|
+|» cloud_session_id|string|true|none|none|
+|» created|boolean|true|none|none|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
 <h1 id="remo-code-hub-ext">ext</h1>
 
 ## List the caller's sessions (FREE — zero tokens)
