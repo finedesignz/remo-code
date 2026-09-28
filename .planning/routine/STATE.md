@@ -6,17 +6,18 @@
      A run finding no LOCK, or a stale one, writes its own LOCK at the top of its work and
      clears it (removes the line, or sets it to `LOCK: none`) before pushing at the end of
      its iteration. -->
-LOCK: session_014mhWJoTs9HD7hSKNZUEVnS | 2026-09-28T00:00:00Z
+LOCK: none
 
 ## Current status
-Run 2 (2026-09-28) executed the Run 1 bootstrap protocol: reconciled the stale planning docs
-(BLEED confirmed fully shipped — PR #492, open), picked PTYCAP Phase 2 (PTY pre-flight gate) as
-the top-scored item per the roadmap, and delegated its implementation to a worktree-isolated
-subagent (still running as of this push — see Active work below). The governance question from
-run 1 (self-merge escalation) is UNCHANGED: issue #488 is still open with no owner comment beyond
-this routine's own. This run did not repeat that escalation and did not act on the current
+Run 2 (2026-09-28) executed the Run 1 bootstrap protocol end to end: reconciled the stale planning
+docs (BLEED confirmed fully shipped — PR #492, open) and shipped PTYCAP Phase 2 (PTY pre-flight
+gate — PR #493, draft, all 3 ROADMAP success criteria met, CI pending). The governance question
+from run 1 (self-merge escalation) is UNCHANGED: issue #488 is still open with no owner comment
+beyond this routine's own. This run did not repeat that escalation and did not act on the current
 scheduled prompt's "fixed-core upgrade to v3.6" step's self-merge-policy proposal — see the
-Governance note below.
+Governance note below. Both PRs are subscribed via `subscribe_pr_activity`; this session will
+continue to drive #493 to green and undraft it once CI passes, without needing another scheduled
+firing to do so (events wake it directly).
 
 ## Governance note (read before touching merge policy again)
 The standing scheduled-task prompt's step 3 ("Fixed-core upgrade, proposed not applied") asks the
@@ -39,25 +40,27 @@ self-merge proposal in the same "one-time upgrade" step and splitting them out w
 than shipping real scored work this iteration.
 
 ## Resume point
-1. Check background agent `a050b478f170801d7` / PR from branch `routine/2026-09-28-*` for PTYCAP
-   Phase 2 (pre-flight gate) — if this run's session already saw its completion notification and
-   folded the result into LEDGER.md below, this item is done; otherwise a future run should check
-   its PR status and drive CI to green per DIRECTIVE §8.
-2. Check PR #492 (BLEED reconciliation, docs-only) — merge status; it needs owner review like
-   everything else.
-3. Next scoring pass should pick up PRIORITIES.md's next-ranked item (see that file) — likely
-   continuing PTYCAP (Phase 3+) if Phase 2 lands clean, or the Hono dependency security findings
-   (`bun audit`: 12 high / 33 moderate / 2 low, hono@4.12.8 is a hub RUNTIME dependency — verify
-   which advisories actually apply to the resolved version before scoring further).
+1. **PR #493 (PTYCAP Phase 2)** — draft, CI was pending at last poll (`ci/woodpecker/pr/docs-drift`,
+   `ci/woodpecker/pr/qc`). This session subscribed to its activity and will drive it green + undraft
+   it without a new scheduled firing. If a future run finds this row unchanged and #493 still open
+   with no recent activity, check it manually — the subscription may not have survived a session
+   boundary — and drive it to green per DIRECTIVE §8.
+2. **PR #492 (BLEED reconciliation, docs-only)** — open, needs owner review/merge like everything
+   else; no CI-relevant paths touched so nothing to drive here.
+3. Next scoring pass should pick up PRIORITIES.md's next-ranked item — the Hono runtime-dependency
+   security triage (`bun audit`: 12 high / 33 moderate / 2 low, `hono@4.12.8` is a hub RUNTIME
+   dependency) is currently top-scored; PTYCAP Phase 3+ is blocked until #493 merges (don't
+   parallelize Phase 3 against Phase 2 per ROADMAP.md's own ordering rule).
 4. Re-check issue #488 for an owner response before ever touching merge policy again (see
    Governance note above).
 
 ## Active work claimed by this session
-- memlog claim: `hub/src/dispatch/`, `.planning/phases/PTYCAP-02-pty-preflight-gate/`,
-  `.planning/routine/`, `.planning/PROJECT.md`, `.planning/STATE.md`,
-  `.planning/codebase/CONCERNS.md` — session `session_014mhWJoTs9HD7hSKNZUEVnS`.
-- PTYCAP Phase 2 implementation delegated to a background worktree agent (internal id
-  `a050b478f170801d7`); not yet confirmed complete at time of this push.
+- memlog claim released at end of this run (`hub/src/dispatch/`, PTYCAP-02 phase dir, routine/
+  planning docs) — coding work is done and shipped as PR #493; nothing left that needs the
+  exclusive claim. A future run's own claim check will see no conflict.
+- PR activity subscriptions active on #492 and #493 (`subscribe_pr_activity`) — this session will
+  keep responding to their CI/review events per DIRECTIVE §8/§9 (drive to green, never merge
+  itself, never push to `main`) without waiting for the next scheduled firing.
 
 ## History (most recent first)
 - 2026-09-28 (run 2) — Executed the Run 1 bootstrap protocol. **Reconciliation:** verified all four
@@ -78,8 +81,15 @@ than shipping real scored work this iteration.
   (non-bypassable caps) while blocking every later milestone per `PROJECT.md`'s Planned Milestones
   order. Delegated implementation to an isolated worktree subagent (sensitive path: `hub/src/
   dispatch/**` + the human-only-PTY invariant) rather than doing it inline, given the effort budget
-  and the need for careful, adversarial self-review on a caps/gates change; see LEDGER.md for the
-  outcome once folded in. **Governance:** did not repeat run 1's declined self-merge escalation,
+  and the need for careful, adversarial self-review on a caps/gates change. **Outcome:** the agent
+  shipped the full phase (all 3 ROADMAP success criteria) as PR #493 — new `hub/src/dispatch/
+  pty-preflight.ts` gate chain wired into the web terminal relay, +19 tests all green, zero new
+  typecheck errors, `humanOnlyPtyGate` untouched. It closed a real pre-existing gap (the web xterm
+  path had never been checked against the daily cost/token caps at all) while correctly declining
+  to widen scope into `send_message`/Telegram or Phase 3. The PR's own body had prematurely claimed
+  "CI green" before CI had actually resolved; this session corrected that text and subscribed to
+  the PR's GitHub activity to drive it to green properly rather than taking the agent's self-report
+  as sufficient. See LEDGER.md for full evidence. **Governance:** did not repeat run 1's declined self-merge escalation,
   and deliberately did not build the current scheduled prompt's "fixed-core upgrade to v3.6"
   self-merge-policy proposal either — see the Governance note above for the reasoning and what a
   future run should do once issue #488 gets an owner response. Claimed the work area via memlog

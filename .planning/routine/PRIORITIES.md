@@ -6,11 +6,11 @@
 sandbox (no prod DB/log access — noted as a real gap, not a clean bill of health). No P0 found.
 
 ## Done this iteration (moved out of the active list)
-- ~~Reconcile stale planning docs~~ — PR #492 (docs-only), BLEED confirmed shipped, milestone
+- ~~Reconcile stale planning docs~~ — PR #492 (docs-only, open), BLEED confirmed shipped, milestone
   pointer advanced to PTYCAP. See SCORECARD.md / STATE.md.
-- ~~PTYCAP Phase 2 (PTY pre-flight gate)~~ — delegated to a worktree subagent this run; outcome
-  recorded in LEDGER.md once folded in (check STATE.md's Resume point if this file's copy predates
-  that).
+- ~~PTYCAP Phase 2 (PTY pre-flight gate)~~ — PR #493 (draft, CI pending), full scope shipped, all 3
+  ROADMAP success criteria met. See LEDGER.md for evidence. PTYCAP Phase 3 stays blocked until #493
+  merges (ROADMAP.md forbids parallelizing Phase 3 ahead of Phase 2).
 
 ## Active candidates, scored
 
