@@ -21,8 +21,14 @@ export const SCOPE_EXT_READ = 'ext:read'
 export const SCOPE_EXT_ASK = 'ext:ask'
 /** Writes code + can publish to a LIVE client site. Highest authority on /api/ext. */
 export const SCOPE_EXT_WORK = 'ext:work'
+/**
+ * Posts a claude.ai cloud session's finished turns into remo (POST /api/cloud-hook/reply).
+ * EXPLICIT-only (`hasExplicitScope`): this key lives in a cloud environment's env vars, so a
+ * legacy/NULL key must never double as it, and it can do nothing else.
+ */
+export const SCOPE_CLOUD_HOOK = 'cloud:hook'
 
-export const ALL_SCOPES = [SCOPE_AGENT, SCOPE_EXT_READ, SCOPE_EXT_ASK, SCOPE_EXT_WORK] as const
+export const ALL_SCOPES = [SCOPE_AGENT, SCOPE_EXT_READ, SCOPE_EXT_ASK, SCOPE_EXT_WORK, SCOPE_CLOUD_HOOK] as const
 export type Scope = (typeof ALL_SCOPES)[number]
 
 export function isScope(s: unknown): s is Scope {

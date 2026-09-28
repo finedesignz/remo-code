@@ -24,7 +24,7 @@ export interface TokenUsageInput {
    *  with every pre-existing caller; defaults to 'stream-json'. token_usage_daily
    *  is deliberately NOT split by runner_type — it stays a combined-bucket cache
    *  for the cost cap; the per-runner split lives in the precise ledger table. */
-  runnerType?: 'stream-json' | 'pty-interactive'
+  runnerType?: 'stream-json' | 'pty-interactive' | 'cloud'
 }
 
 /**

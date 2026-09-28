@@ -324,6 +324,19 @@ export const ForceUpdateAck = z.object({
   error: z.string().max(2000).optional(),
 })
 
+/**
+ * Cloud sessions — ack for `cloud_session.send`. The supervisor ran
+ * `claude -p <content> --cloud <id> --output-format json`; `ok` mirrors the CLI's
+ * own `{ok}` result (the message was QUEUED — the reply arrives later via the
+ * cloud session's Stop hook, POST /api/cloud-hook/reply).
+ */
+export const CloudSendAck = z.object({
+  type: z.literal('cloud_session.send_ack'),
+  req_id: z.string(),
+  ok: z.boolean(),
+  error: z.string().max(2000).optional(),
+})
+
 export const SupervisorInboundV2 = [
   ...SupervisorInbound,
   SessionLaunchFailed,
@@ -332,6 +345,7 @@ export const SupervisorInboundV2 = [
   SetRootsAck,
   RescanAck,
   ForceUpdateAck,
+  CloudSendAck,
 ]
 
 // -- Hub -> Supervisor (constructed by hub, not validated) --
@@ -390,3 +404,8 @@ export type HubToSupervisor =
   // consumes, then replies with supervisor.force_update_ack. An old sidecar
   // without this handler simply times out — same compat behavior as rescan.
   | { type: 'supervisor.force_update'; req_id: string; requested_by?: string }
+  // Cloud sessions — queue one message into a claude.ai cloud session via
+  // `claude -p <content> --cloud <cloud_session_id> --output-format json`.
+  // Supervisor replies with cloud_session.send_ack. An old supervisor without
+  // the handler times out (the send is refused, never silently dropped).
+  | { type: 'cloud_session.send'; req_id: string; cloud_session_id: string; content: string }
