@@ -447,6 +447,11 @@ export class ProcessManager {
 
     if (prev?.timer) clearTimeout(prev.timer)
     this.setState(run, 'stopped', { runId: spec.runId, lastExit: { code, reason: 'circuit_open' } })
+    // Same leak as max_restarts_exceeded (see scheduleRestart): without closing
+    // the bridge, its `/ws/agent` connection for this session stays open, hub
+    // never learns the session died, `sessions.status` never flips to
+    // 'offline', and `ensureSessionOnline` never respawns it.
+    if (run.bridge) { void run.bridge.stop().catch(() => {}); run.bridge = null }
     this.runs.delete(spec.runId)
 
     if (failedProbes >= CIRCUIT_MAX_PROBES) {
@@ -861,6 +866,16 @@ export class ProcessManager {
         runId: run.spec.runId,
         lastExit: { code: exitCode, reason: 'max_restarts_exceeded' },
       })
+      // The bridge (and the per-session `/ws/agent` connection it owns) must be
+      // torn down HERE, not left dangling. Without this, the hub's `sessions`
+      // row is never told the session died — the CLI process is gone but the
+      // WS channel stays registered, so `sessions.status` stays 'online'/
+      // 'thinking' forever and `ensureSessionOnline`'s fast path
+      // (`getChannel(sessionId) != null`) short-circuits true and never
+      // respawns. Closing the bridge closes that WS, which hub's `ws.close`
+      // handler turns into `setSessionStatus(sessionId, 'offline')` — the
+      // next dispatch then sees the session offline and re-spawns it for real.
+      if (run.bridge) { void run.bridge.stop().catch(() => {}); run.bridge = null }
       this.forgetRun(run.spec.runId, 'max_restarts_exceeded')
       return
     }

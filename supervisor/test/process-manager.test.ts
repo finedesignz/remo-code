@@ -247,4 +247,24 @@ describe('ProcessManager security gates', () => {
     // Should transition to 'crashed' and schedule a restart (we don't await the timer).
     expect(events.some((e) => e.state === 'crashed')).toBe(true)
   })
+
+  test('max_restarts_exceeded stops the bridge — so the hub sees the session go offline and can respawn it', async () => {
+    // Regression: a dead `claude` process whose restart budget is exhausted used
+    // to leave its SessionBridge (and the `/ws/agent` connection it owns) dangling
+    // forever. The hub never saw the WS close, so `sessions.status` stayed
+    // online/thinking and `ensureSessionOnline`'s fast path (`getChannel != null`)
+    // never respawned it. The fix: the bridge must be stopped on this path.
+    const { pm, events } = makePM(makeCfg({ maxConcurrent: 5 }))
+    await pm.start(spec({ runId: 'exhausted' }))
+    expect(bridges.length).toBe(1)
+    const fake = bridges[0].fake
+    bridges[0].cb.onSpawned({ pid: 1 })
+    // Fast-forward straight to "restart budget already exhausted" without
+    // waiting on real backoff timers (up to 30s/attempt x 10 attempts).
+    ;(pm as any).runs.get('exhausted').restartCount = 10
+    bridges[0].cb.onExit({ code: 1, reason: 'runner_exit' })
+
+    expect(events.some((e) => e.state === 'stopped' && e.info?.lastExit?.reason === 'max_restarts_exceeded')).toBe(true)
+    expect(fake.stopCalls).toBe(1)
+  })
 })
