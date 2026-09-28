@@ -41,8 +41,8 @@ self-merge proposal in the same "one-time upgrade" step and splitting them out w
 than shipping real scored work this iteration.
 
 ## Resume point
-1. **PR #493 (PTYCAP Phase 2)** — head `00142ee` (panel-driven per-submit redesign + verification-panel
-   fixes; LEDGER 2h–2i). Confirm Woodpecker `qc` + `docs-drift` AND `ai-review` green on `00142ee`
+1. **PR #493 (PTYCAP Phase 2)** — head `1f70b16` (panel-driven per-submit redesign + verification-panel
+   fixes; LEDGER 2h–2j). Confirm Woodpecker `qc` + `docs-drift` AND `ai-review` green on `1f70b16`
    specifically. Owner direction: **do not ask for manual review — use a QC panel and fix**. Any new
    finding: trace it, force the interleaving in a test, fix, re-panel if the change is non-trivial.
    Owner-facing behavior note is in the PR body (terminal now under the $10-default cost cap; Enter
