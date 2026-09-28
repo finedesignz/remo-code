@@ -399,6 +399,22 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
   merge; that discipline is entirely this routine's own (§8, §9).
 - There is no confirmed merge bot on this repo — assume every PR needs the human owner to merge it
   (§9), and don't let that block the next iteration.
+- This repo runs a THIRD review gate beyond Woodpecker CI and a human: AgentAutofix's `ai-review`
+  check (`agentautofix-fixer[bot]`, claude + codex + advisory `agy` reviewers). Treat a `blocking`
+  finding from it exactly like any other bot finding (DIRECTIVE §7 Review comments) — verify by
+  tracing the actual mechanism, then fix the root cause, never just the reviewer's literal wording.
+- On a concurrency fix specifically: adversarial reasoning-by-hand about JS's single-threaded
+  microtask ordering is necessary but NOT sufficient — write a test for the exact interleaving
+  scenario (a second event arriving mid-await) before pushing, not just a test for the
+  originally-reported symptom. PR #493's first review-fix (`e39456d`, moving a preflight check to
+  run after a lock acquire) was traced by hand and looked sound, but introduced a worse race that
+  the very next review round caught: a same-writer frame arriving mid-check could skip the check
+  entirely because the lock was already mutated before the verdict was known. The second fix
+  (`19137b7`) held only because it added a test that deterministically pauses mid-check (a
+  test-controlled deferred gate on the mocked async call) to exercise the interleaving directly,
+  rather than reasoning about it. Generalize: for any "does X happen before Y resolves" fix, the
+  regression test must force that exact ordering, not just assert the end state after `await`ing
+  everything to completion.
 
 ## 14. Watch list
 - Open dependabot PR `finedesignz/remo-code#481` (`@hono/zod-openapi` 0.18→0.19): watch for API
