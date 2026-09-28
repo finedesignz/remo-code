@@ -14,7 +14,11 @@ sandbox (no prod DB/log access — noted as a real gap, not a clean bill of heal
 
 ## Active candidates, scored
 
-### 1. Hono dependency security triage
+### 1. Hono dependency security triage — DELEGATED run 3, outcome pending
+Run 3 (2026-09-28) delegated this to an isolated worktree subagent rather than re-scoring it as
+still-open; check LEDGER.md row 3c (and any follow-up row) before re-picking this as the top item —
+it may already be shipped-pending-merge or blocked-with-findings by the time you read this.
+
 `bun audit`: 12 high / 33 moderate / 2 low vulnerabilities, the large majority against
 `hono@4.12.8` — **hub's actual runtime web framework** (`hub/src/index.ts` and effectively every
 route), not a dev-only or build-time dependency. Impact 8 (authenticated-only-reachable web

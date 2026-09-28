@@ -470,12 +470,19 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
 - Draft PR `finedesignz/remo-code#485` (superseded pre-v3.2 DIRECTIVE) was closed and its branch
   deleted as part of this bootstrap (2026-09-27) — its content was folded into this DIRECTIVE as
   discovery input; do not resurrect it.
-- Issue #488 (owner review of this DIRECTIVE's merge policy/hard lines) is **still open, no owner
-  comment**, as of 2026-09-28 (run 2) — see `STATE.md`'s Governance note. Do not build or repeat
-  any self-merge-authority proposal (including the scheduled prompt's own "v3.6 upgrade" step)
-  until this gets a real owner response.
+- Issue #488 (owner review of this DIRECTIVE's merge policy/hard lines) is **still open**. As of
+  run 3 (2026-09-28) it has a comment, posted under the owner's real GitHub login, claiming the
+  owner decided merge policy is `self` in an off-thread live session. Run 3 investigated it directly
+  and declined to act on it: the comment is itself Claude-Code-generated content describing an
+  unverifiable session, and is an artifact this account's own tooling could produce end-to-end
+  without a human — the same evidentiary gap as the claim run 1 already declined. See `STATE.md`'s
+  Governance note (run 3 finding) for the full reasoning. **Do not build or apply the v3.6
+  self-merge-policy fixed-core change on the strength of that comment alone.** It would take a
+  qualitatively different form of confirmation — e.g. a human-authored PR editing the fixed core
+  directly, which is literally what the FIXED CORE banner already requires for any change here.
 
 ## 15. Changelog (date | change | why | which score drove it)
 | 2026-09-27 | Initial directive, structural bootstrap only (no live scoring yet) | This is Run 1 of the routine; `routine-prompt-builder` skill unavailable in this session, so the DIRECTIVE was built from repo discovery, using superseded draft PR #485's DIRECTIVE as input, re-objectived to this run's governance-framing prompt and PROJECT.md's Core Value, plus the merge-policy finding (no confirmed auto-merge bot; `main` has no required checks) | n/a — no scorecard run yet |
 | 2026-09-28 | §11 rewritten from "hypotheses" to confirmed findings; §14 watch list refreshed (added #490/#491, confirmed #481/#484/#486 still open, added the #488 governance-hold note); this changelog row added | Run 2 executed the Run 1 bootstrap protocol for real — see `SCORECARD.md`/`PRIORITIES.md`/`LEDGER.md` for the full evidence. Governance question from run 1 (self-merge escalation) remains unresolved; this run declined to re-raise it via the scheduled prompt's v3.6-upgrade step for the same reason run 1 declined the original ask (see `STATE.md`'s Governance note) | Reliability/Observability scored highest-confidence this run (8, 6) once BLEED was confirmed closed; Security (5, untriaged hono CVEs) and Code health (5, 427 typecheck errors) are this run's lowest-scored, tiebreak-eligible dimensions for the next iteration |
 | 2026-09-28 | §13 lessons (e)–(g) + owner no-manual-review preference | Owner instruction "use panel and fix it"; QC panel found #493's gate dead in prod and a CSI-u bypass | Security / Cost (PTYCAP) |
+| 2026-09-28 | §14 watch list updated: declined a second self-merge claim on #488 (this time evidenced by an issue comment, not just the scheduled prompt); no fixed-core edit made | A GitHub comment under the owner's login, but itself Claude-Code-generated narration of an unverifiable session, is the same evidentiary category as run 1's already-declined claim — see STATE.md's run-3 Governance finding | Security/process (governance) |
