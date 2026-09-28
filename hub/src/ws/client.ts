@@ -297,7 +297,7 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       // user's input. A lock now held by ANOTHER writer is never taken over.
       const current = currentTermWriter(frame.session_id)
       if (current === writerId && holder(frame.session_id) === null) {
-        void acquire(frame.session_id, writerId)
+        acquire(frame.session_id, writerId).catch(() => {})
       }
       const lockHolder = holder(frame.session_id)
       if (current !== writerId || lockHolder !== writerId) {
