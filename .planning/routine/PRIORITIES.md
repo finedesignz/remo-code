@@ -6,11 +6,13 @@
 sandbox (no prod DB/log access — noted as a real gap, not a clean bill of health). No P0 found.
 
 ## Done this iteration (moved out of the active list)
-- ~~Reconcile stale planning docs~~ — PR #492 (docs-only, open), BLEED confirmed shipped, milestone
-  pointer advanced to PTYCAP. See SCORECARD.md / STATE.md.
-- ~~PTYCAP Phase 2 (PTY pre-flight gate)~~ — PR #493 (draft, CI pending), full scope shipped, all 3
-  ROADMAP success criteria met. See LEDGER.md for evidence. PTYCAP Phase 3 stays blocked until #493
-  merges (ROADMAP.md forbids parallelizing Phase 3 ahead of Phase 2).
+- ~~Reconcile stale planning docs~~ — PR #492, **merged** 2026-09-28, BLEED confirmed shipped,
+  milestone pointer advanced to PTYCAP. See SCORECARD.md / STATE.md.
+- ~~PTYCAP Phase 2 (PTY pre-flight gate)~~ — PR #493 (open, CI green, ai-review re-run pending), full
+  scope shipped, all 3 ROADMAP success criteria met. See LEDGER.md for evidence. PTYCAP Phase 3 stays
+  blocked until #493 merges (ROADMAP.md forbids parallelizing Phase 3 ahead of Phase 2).
+- ~~Hono dependency security triage~~ — PR #495 (open, CI running), all 30 advisories traced to real
+  GHSA fix versions, pure version bump, full verification bar green. See LEDGER.md row 3c.
 
 ## Active candidates, scored
 
@@ -75,7 +77,17 @@ manufacture a UI-touching task just to trigger the scan — fold it into the nex
 naturally touches `web/`, or force one within `ui_full_scan_every` (3) iterations if none has by
 then (this is iteration 2 of the counter; 1 to go before it's forced).
 
-### 7. Coolify/prod log visibility gap
+### 7. New, unscored: `mcp/` workspace's nested `hono@4.12.8` (from PR #495's documented residual)
+PR #495 (Hono hub-runtime bump) fixed the hub's own `hono` resolution but explicitly left a SEPARATE,
+non-deduped `hono@4.12.8` bundled inside `@modelcontextprotocol/sdk@1.29.0` (only used by `mcp/`, the
+Session-Ask MCP server workspace — never the hub's runtime). `bun audit` will keep reporting it under
+the same package-name heading. Needs its own small scoring pass next iteration: likely Impact 3–4
+(MCP server, not hub-request-path, lower Reach than the hub bump), Effort 1–2 (bump
+`@modelcontextprotocol/sdk` to 1.30.1 in `mcp/package.json`, re-audit, run `cd mcp && bun run
+typecheck`). Not yet scored with real numbers — do that before executing, don't just copy #495's
+score.
+
+### 8. Coolify/prod log visibility gap
 Not a scored item, a **capability gap**: this session had no Coolify MCP access exercised and no
 prod DB/log access, so Reliability/Cost dimension scores above are partly "no bad signal found"
 rather than "actively verified healthy." Impact of *closing this gap* (e.g. confirming Coolify MCP

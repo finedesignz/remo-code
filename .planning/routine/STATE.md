@@ -110,12 +110,15 @@ than shipping real scored work this iteration.
    merge. **Do not self-merge it even if everything is green** — see the Governance finding above; that
    authority has not been established to this session's satisfaction yet.
 2. **PR #492 (BLEED reconciliation, docs-only)** — MERGED by the owner 2026-09-28T14:40Z. Done.
-3. **Hono runtime-dependency security triage** — delegated to a worktree subagent this run (branch
-   `routine/2026-09-28-hono-security-triage` or similar). Check whether it opened a PR; if so, verify
-   its evidence trail and log the outcome in LEDGER.md (this run may already have done this in a
-   follow-up push if the agent reported back before this session ended — check LEDGER.md's tail before
-   assuming it's still pending). If it's still running or never reported, either resume/check on it or
-   re-score and re-delegate.
+3. **Hono runtime-dependency security triage** — DONE this run: subagent opened **PR #495**
+   (`routine/2026-09-28-hono-security-triage` → `main`), pure `hono` `^4.7.0`→`^4.13.10` bump, all 30
+   advisories traced to real GHSA fix versions (table in PR body), zero route/dispatch/auth code
+   touched, full verification bar green (see LEDGER 3c). Woodpecker `qc` was still `pending` as of
+   this write — **next run: confirm it went `success`**, then this PR is ready-for-owner-merge (do
+   NOT self-merge — same governance caveat as #493). Documented, not yet fixed: a separate non-deduped
+   `hono@4.12.8` nested inside `@modelcontextprotocol/sdk` (`mcp/` workspace only) will keep showing
+   in `bun audit` until `mcp/`'s SDK dependency is bumped in its own follow-up — add this to
+   `PRIORITIES.md` as a small new item next scoring pass, it wasn't scored separately this run.
 4. PTYCAP Phase 3+ stays blocked until #493 merges (ROADMAP.md's own ordering rule — don't
    parallelize).
 5. Re-check issue #488 for a form of owner confirmation this session's own tooling couldn't have
