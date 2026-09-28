@@ -105,11 +105,29 @@ The hub renders a Markdown prompt and instructs Claude to end the reply with:
   "resolved": true,
   "action_taken": "short summary",
   "files_changed": ["a.tsx", "b.ts"],
+  "commit_sha": "full SHA of the pushed commit",
+  "branch": "the branch it was pushed to",
   "deployed": true,
   "needs_clarification": false
 }
 <<END>>
 ```
+
+**A resolve must stand on a pushed commit (fix/revanote-verify-pushed).** The agent's envelope is
+self-report, and the prompt telling it to push first is not a control: in 2026-09 comments were
+reported `resolved` from commits that were never pushed. So `finalizeAnnotationReply` checks every
+`resolved: true` itself (`hub/src/revanote/commit-verify.ts`): the reply must carry a `commit_sha`
+(7–40 hex), and the hub confirms through the GitHub App (`GET /repos/{owner}/{repo}/commits/{sha}`,
+repo from `sessions.github_owner/github_repo`, falling back to the payload's `repo_slug`) that the
+commit exists on the remote — and, when a `branch` is given, that the branch contains it
+(`compare` status `identical`/`behind`). The check runs AFTER the merge gate, because the sandbox
+path pushes inside the gate. Any failure downgrades the reply to `resolved: false`,
+`deployed: false`, annotation `failed`, and the callback's `error` becomes
+`unverified_resolve:<reason>` — reasons: `commit_sha_missing`, `commit_sha_invalid`, `repo_unknown`,
+`no_github_installation`, `commit_not_pushed`, `commit_not_on_branch`, `verify_error`. Fail-closed:
+an unverifiable resolve is rejected, never trusted. The verified sha is written to
+`annotation_runs.commit_sha` and sent as the callback's `commit_sha`. Escape hatch:
+`REMO_REVANOTE_REQUIRE_PUSHED_COMMIT=0|false|no|off` (default ON).
 
 The hub-side parser (`hub/src/revanote/result-schema.ts`) tolerates:
 
@@ -136,9 +154,12 @@ Content-Type: application/json
   "deployed": true,
   "needs_clarification": false,
   "clarification_question": null,
+  "commit_sha": "3f9c…",
   "error": null
 }
 ```
+
+`commit_sha` is the hub-verified pushed commit behind a resolve (`null` when not resolved).
 
 **Retry curve (jittered ±10%):** `1m → 5m → 15m → 1h → 4h → 12h → dead-letter`. 4xx responses are terminal; 5xx and network errors retry. Each attempt writes a row to `revanote_callback_attempts`; a single worker (30 s tick, `FOR UPDATE SKIP LOCKED` claim) drives delivery.
 
@@ -156,6 +177,10 @@ The callback is also fired (immediately, with `resolved: false` + an `error` tag
 
 Session-offline is the exception: it parks in the 10-min grace buffer instead of firing an immediate failure callback.
 
+A dispatched comment whose send fails, or whose session dies mid-run and is released by the
+dead-session reaper, also gets a `resolved: false` callback with `action_taken: agent_send_failed`
+(the adapter's `markFailed`), so Revanote moves it back to todo instead of leaving it in progress.
+
 ## Cost cap, thresholds, concurrency
 
 **Round-2 migration:** revanote dispatch now runs on the **shared session-dispatch pipeline** (`hub/src/dispatch/`) — the same deep module the error-capture pilot uses. `hub/src/revanote/dispatcher.ts` is a thin adapter that builds a `RunStore` + a `gates[]` array and calls `dispatch(req, deps)`. The hand-rolled threshold/budget/queue/grace/finalize machinery is gone.
@@ -166,9 +191,39 @@ Session-offline is the exception: it parks in the 10-min grace buffer instead of
   - `revanoteBudgetGate` is a revanote-specific `DispatchGate` (defined in `dispatcher.ts`, exported for unit test) that enforces the per-source split (`users.revanote_budget_pct`, default 60% of the daily cap) **layered ON TOP of** the global cost cap, never a substitute. Over-budget → `revanote_budget_exceeded:<detail>` skip + reject callback.
 - The per-session queue (1 in-flight + `REMO_DISPATCH_MAX_WAITERS` FIFO waiters, default 50 — was 1, which dropped every annotation past the second in a burst as `session_busy`) lives in `hub/src/dispatch/session-queue.ts` (instance owned by the pipeline). Concurrent annotations against the same session serialize through it in arrival order; re-dispatching an annotation already queued/in flight is a no-op (token = annotation id); a queued waiter does NOT open an `annotation_run` row until promotion re-dispatches it. Waiters are in memory — a hub restart drops them (revanote's own stale-lease sweep re-dispatches).
 - **Silent-agent ceiling:** `finalizeTimeoutMs` (20 min) only fires when a NEW `assistant_message` arrives. An agent that replies "done" without the `<<JSON>>` envelope and then goes quiet used to hold the session slot forever. The boot-started `startHookReaper()` (`pipeline.ts` `reapTimedOutHooks`) finalizes such a hook with empty content after `REMO_DISPATCH_HOOK_MAX_MS` (default 2h) → `envelope_missing` / `resolved:false` callback, then promotes the next waiter.
+- **Closed-out runs release their slot (fix/stuck-busy-slot):** `releaseClosedRun` /
+  `releaseClosedRunByToken` (`pipeline.ts`) disarm the finalize hook of a run that was closed
+  somewhere else and re-dispatch the next waiter. Wired into the scheduler run-reaper (after it
+  finalizes a `run_timeout`), the orchestrator stale-lock reaper (which used to `abandon()` the slot
+  and DROP its waiters), and the dead-session reaper. On the supervisor side, `endRun` (hub-closed
+  runs) and `endOpenRunsForSession` (user disconnect) now also free `supervisors.current_run_id`
+  via the guarded `releaseSupervisorSlotIfClosed`.
+- **Dead sessions go offline (fix/dead-session-online):** a session whose CLI exited used to keep
+  its `/ws/agent` socket (the supervisor forgot the run but not its bridge), so it looked online,
+  swallowed every dispatch and was never restarted. The supervisor now closes the bridge whenever
+  it stops tracking a run (clean exit, restart cap, breaker trip — needs a new signed MSI). Until
+  then the hub's `startDeadSessionReaperSweep()` (`hub/src/ws/dead-session-reaper.ts`) reaps a
+  channel that is absent from its host supervisor's FRESH `session_inventory` for
+  `REMO_DEAD_SESSION_GRACE_MS` (default 2min): `shutdown` + close 4002, row `offline`, pipeline slot
+  released. No fresh inventory for the host = unknown = never reaped.
 - **Wedge fix:** when the head parks offline or its send throws, a waiter that queued behind it meanwhile is now re-dispatched. Previously it was moved into the in-flight slot with no finalize hook, so nothing ever freed the slot and every later annotation for that session came back `session_busy` until a hub restart.
 - Offline target → parked in the **shared** `getGraceBuffer()` (`hub/src/dispatch/grace.ts`) keyed by `sessionId` (10-min TTL). On agent reconnect, `ws/agent.ts` calls `getGraceBuffer().drain(sessionId)` (one drain replays both error-capture and revanote). TTL lapse → annotation `failed_offline` / `target_offline_expired` via the adapter's `onParkExpire`.
 - Finalize: the agent ws assistant_message branch calls `dispatch.onSessionReply(sessionId, content)`, which fires the adapter's `RunStore.onFinalize`. That hook delegates to `run-lifecycle.finalizeAnnotationReply` — envelope parse (`<<JSON>>…<<END>>`) → annotation resolved/failed → merge gate → outbound callback enqueue (callback ALWAYS carries `annotation_id`). There is no longer a revanote-specific `onAgentReply` call in `ws/agent.ts`.
+
+## Quiet-sites alert
+
+`hub/src/revanote/quiet-watch.ts` (boot-started, every `REMO_REVANOTE_QUIET_CHECK_INTERVAL_MS`,
+default 15min) looks at each user's whole pipeline across ALL enabled mappings and alerts via the
+shared notify fan-out (Telegram + in-app + email) when every client site has gone quiet:
+
+- **stalled** — comments are waiting (`pending`/`dispatched`/`failed_offline`, older than
+  `REMO_REVANOTE_QUIET_BACKLOG_MIN_AGE_MS`, default 1h) and not one was resolved on any site in the
+  window (`REMO_REVANOTE_QUIET_WINDOW_MS`, default 24h).
+- **silent** — nothing received and nothing resolved from any site in the window, although sites
+  sent comments in the `REMO_REVANOTE_QUIET_BASELINE_MS` (default 7d) before it — intake broke.
+
+Any resolved comment clears both. Deduped per (user, kind) for `REMO_REVANOTE_QUIET_ALERT_COOLDOWN_MS`
+(default 12h). `REMO_REVANOTE_QUIET_ALERT_DISABLED=1` turns it off.
 
 ## WS events
 

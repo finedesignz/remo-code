@@ -206,6 +206,29 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   escape hatch making the sweep a no-op. Companion inject-side guard: `injectOrchestratorPrompt`
   routes ghosts to `maybeAutospawnOffline` via an `isSessionLive` check (channel present AND NOT a
   ghost) instead of the raw `getChannel != null`.
+- **Dead-session reaper** (`hub/src/ws/dead-session-reaper.ts`, fix/dead-session-online): a session
+  whose CLI exited kept its `/ws/agent` socket (the supervisor forgot the run, not its bridge), so it
+  looked `online`, swallowed every dispatch and was never restarted. The supervisor now retires the
+  bridge with the run (`retireBridge` in `process-manager.ts` — **new signed MSI required**); the hub
+  sweep covers old supervisors: a channel absent from its host supervisor's FRESH `session_inventory`
+  for **`REMO_DEAD_SESSION_GRACE_MS`** (default **120000**) gets `shutdown` + close 4002, row
+  `offline`, and its dispatch slot released. Positive knowledge only — no fresh inventory for the host
+  (older than **`REMO_DEAD_SESSION_INVENTORY_MAX_AGE_MS`**, default 60000) ⇒ never reaped. Cadence
+  **`REMO_DEAD_SESSION_SWEEP_INTERVAL_MS`** (30000); **`REMO_DEAD_SESSION_REAPER_DISABLED`** escape hatch.
+- **Closed-out runs release their slot** (fix/stuck-busy-slot): `releaseClosedRun` /
+  `releaseClosedRunByToken` (`hub/src/dispatch/pipeline.ts`) disarm the finalize hook of a run closed
+  elsewhere and re-dispatch the next waiter — called by the scheduler run-reaper, the orchestrator
+  stale-lock reaper (no longer `abandon()`s waiters) and the dead-session reaper. `endRun` (hub-closed
+  runs) and `endOpenRunsForSession` also free `supervisors.current_run_id` via the guarded
+  `releaseSupervisorSlotIfClosed`.
+- **Revanote pushed-commit gate + quiet alert** (docs/revanote.md): a `resolved: true` reply is
+  accepted only when its `commit_sha` is verified on GitHub (`hub/src/revanote/commit-verify.ts`);
+  otherwise it becomes `resolved:false` / `unverified_resolve:<reason>`, fail-closed.
+  **`REMO_REVANOTE_REQUIRE_PUSHED_COMMIT`** (default ON; `0|false|no|off` disables). The quiet watch
+  (`hub/src/revanote/quiet-watch.ts`) alerts (Telegram + in-app + email) when every client site goes
+  quiet — backlog waiting and none resolved, or intake stopped. Knobs `REMO_REVANOTE_QUIET_*`
+  (window 24h, backlog min age 1h, baseline 7d, cooldown 12h, check 15min) and
+  **`REMO_REVANOTE_QUIET_ALERT_DISABLED`**.
 - **`REMO_ORCHESTRATOR_ENABLED`** (default **OFF** / `'0'`; accepts `1|true|yes|on`): gates the
   **auto-dev orchestrator** live cycle path (Phases 21–32). When OFF,
   `registerCycleRunnerIfEnabled()` (the ONLY caller of the Phase-22 queue `setCycleRunner`) is a

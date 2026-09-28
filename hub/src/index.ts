@@ -57,6 +57,8 @@ import { startTelegramBridge } from './telegram/bridge.ts'
 import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/queue.ts'
 import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchestrator/controller.ts'
 import { startGhostReaperSweep, stopGhostReaperSweep } from './ws/ghost-reaper.ts'
+import { startDeadSessionReaperSweep, stopDeadSessionReaperSweep } from './ws/dead-session-reaper.ts'
+import { startRevanoteQuietWatch, stopRevanoteQuietWatch } from './revanote/quiet-watch.ts'
 import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.ts'
 import { startAskReaperSweep, stopAskReaperSweep } from './ask/reaper.ts'
 import { startWorkReaperSweep, stopWorkReaperSweep } from './work/reaper.ts'
@@ -722,6 +724,13 @@ runMigrations()
     // (status='online', hostname=NULL phantom channels that survive restarts and
     // wedge the orchestrator inject). No-op when REMO_GHOST_REAPER_DISABLED is set.
     startGhostReaperSweep()
+    // fix/dead-session-online — a channel whose CLI exited (absent from its host
+    // supervisor's fresh session_inventory for REMO_DEAD_SESSION_GRACE_MS) is
+    // flipped offline so it restarts instead of swallowing dispatches.
+    startDeadSessionReaperSweep()
+    // fix/revanote-quiet-alert — alerts the owner when every client site goes
+    // quiet (no comment resolved while a backlog waits, or intake stops).
+    startRevanoteQuietWatch()
     // fix/sched-qc — periodic sweep that finalizes scheduled_task_runs stuck in
     // `pending` past REMO_RUN_MAX_MS (default 6h) as failed/run_timeout, so a
     // dead CLI turn can't leave a task perpetually in-flight. No-op when
@@ -770,6 +779,8 @@ function gracefulShutdown(signal: string) {
   try { stopRoutineQueueWorker() } catch {}
   try { stopDueOrchestratorTick() } catch {}
   try { stopGhostReaperSweep() } catch {}
+  try { stopDeadSessionReaperSweep() } catch {}
+  try { stopRevanoteQuietWatch() } catch {}
   try { stopRunReaperSweep() } catch {}
   try { stopAskReaperSweep() } catch {}
   try { stopWorkReaperSweep() } catch {}

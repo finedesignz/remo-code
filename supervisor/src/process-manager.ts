@@ -448,6 +448,7 @@ export class ProcessManager {
     if (prev?.timer) clearTimeout(prev.timer)
     this.setState(run, 'stopped', { runId: spec.runId, lastExit: { code, reason: 'circuit_open' } })
     this.runs.delete(spec.runId)
+    this.retireBridge(run)
 
     if (failedProbes >= CIRCUIT_MAX_PROBES) {
       this.cb.onLog(
@@ -545,6 +546,27 @@ export class ProcessManager {
    * forgotten, so a probe that dies badly still re-opens the breaker and burns a
    * failed-probe budget.
    */
+  /**
+   * Close the hub socket of a run this manager has stopped tracking.
+   *
+   * BUG this fixes: when the CLI exited cleanly (code 0), hit the restart cap,
+   * or tripped the circuit breaker, the run was forgotten but its SessionBridge
+   * kept its `/ws/agent` socket open. The hub therefore kept the session
+   * `online` with a live channel and no CLI behind it: dispatches were sent into
+   * a dead runner, and because the session never looked offline nothing
+   * (autospawn, spawn-on-error, grace replay) ever restarted it. Stopping the
+   * bridge closes the socket, the hub flips the session `offline`, and the next
+   * dispatch starts a fresh run through the normal path.
+   */
+  private retireBridge(run: RunInstance) {
+    const bridge = run.bridge
+    run.bridge = null
+    if (!bridge) return
+    void Promise.resolve()
+      .then(() => bridge.stop())
+      .catch(() => {})
+  }
+
   private forgetRun(runId: string, why: string) {
     const run = this.runs.get(runId)
     this.runs.delete(runId)
@@ -820,6 +842,7 @@ export class ProcessManager {
         if (reason === 'hub_shutdown' || code === 0) {
           this.setState(run, 'idle', { runId: spec.runId, lastExit: { code, reason } })
           this.forgetRun(spec.runId, reason === 'hub_shutdown' ? 'hub_shutdown' : 'clean_exit')
+          this.retireBridge(run)
           return
         }
         // Crash path — apply circuit-breaker + restart cap.
@@ -862,6 +885,7 @@ export class ProcessManager {
         lastExit: { code: exitCode, reason: 'max_restarts_exceeded' },
       })
       this.forgetRun(run.spec.runId, 'max_restarts_exceeded')
+      this.retireBridge(run)
       return
     }
     const delay = BACKOFF_SCHEDULE[Math.min(run.restartCount, BACKOFF_SCHEDULE.length - 1)]
