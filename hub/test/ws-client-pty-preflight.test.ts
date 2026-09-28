@@ -220,6 +220,19 @@ describe('PTYCAP Phase 2 — Enter encodings without CR/LF (security panel)', ()
     expect(preflightCalls.length).toBe(1)
   })
 
+  // ai-review (codex, blocking) on 8c0ca80: `ESC[` checked and forwarded while
+  // under the cap, then `13u` arriving after the cap is crossed, was plain text.
+  test('an open CSI prefix forwarded under the cap cannot be completed unchecked after it is crossed', async () => {
+    const { ws, sent } = humanClient()
+    await handleClientMessage(ws, input('\x1b['))
+    expect(fwdText()).toEqual(['\x1b['])
+    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
+    await handleClientMessage(ws, input('13u'))
+    expect(fwdText()).toEqual(['\x1b['])
+    expect(preflightCalls.length).toBe(2)
+    expect(refusals(sent).length).toBe(1)
+  })
+
   test('after a forwarded non-Esc frame the tail is cleared (plain text is not re-checked)', async () => {
     const { ws } = humanClient()
     await handleClientMessage(ws, input('\x1b'))

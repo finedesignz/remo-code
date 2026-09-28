@@ -395,10 +395,13 @@ writers.
   mode was ever enabled, and `ESC O M` is keypad Enter in application mode — so
   a CR/LF-only test was bypassable by a hand-crafted client.
 - **Split sequences.** The CLI buffers an incomplete escape across writes, so
-  `ESC` then `[13u` in two frames is one Enter. The only thing a non-submit
-  frame can leave pending is a trailing lone Esc; the relay remembers it per
-  SESSION (`ptyEscTail`, not per writer — a second connection cannot complete
-  it) and classifies the next frame joined with it.
+  `ESC[` then `13u` in two frames is one Enter. Any escape left OPEN at the end
+  of a forwarded frame (a lone Esc, `ESC[`, `ESC[13`, `ESC O`, …) is remembered
+  per SESSION (`ptyEscTail`, not per writer — a second connection cannot
+  complete it) and the next frame is classified joined with it. An open
+  CSI/SS3 prefix is itself a submit, so both the prefix and its completion are
+  checked — a prefix that passed under the cap cannot be completed unchecked
+  after the cap is crossed.
 - **Not gated:** plain typing, Backspace, Tab, Ctrl-C, Esc, navigation keys, and
   `term.attach_file` (it types a path, it does not submit). A user over a cap
   can still type, navigate, interrupt and cancel; only submitting is refused.

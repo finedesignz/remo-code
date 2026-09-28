@@ -295,6 +295,18 @@ describe('PTYCAP Phase 2 — classifyPtyInput (non-CR/LF encodings of Enter)', (
     expect(classifyPtyInput(b64('abc\x1b\x1b'))).toEqual({ submit: false, tail: '\x1b' })
     expect(classifyPtyInput(b64('\x1b[A'))).toEqual({ submit: false, tail: '' })
   })
+  // ai-review (codex, blocking) on 8c0ca80: only a lone ESC was carried, so a
+  // checked-and-passed `ESC[` could be completed later by an unchecked `13u`.
+  test('ANY open escape prefix is carried as the tail (and is itself a submit)', () => {
+    expect(classifyPtyInput(b64('\x1b['))).toEqual({ submit: true, tail: '\x1b[' })
+    expect(classifyPtyInput(b64('\x1b[13'))).toEqual({ submit: true, tail: '\x1b[13' })
+    expect(classifyPtyInput(b64('\x1bO'))).toEqual({ submit: true, tail: '\x1bO' })
+    expect(classifyPtyInput(b64('go\r\x1b['))).toEqual({ submit: true, tail: '\x1b[' }) // tail kept after a CR
+    expect(classifyPtyInput(b64('3'), '\x1b[1')).toEqual({ submit: true, tail: '\x1b[13' })
+    expect(classifyPtyInput(b64('u'), '\x1b[13').submit).toBe(true)
+    expect(classifyPtyInput(b64('A'), '\x1b[')).toEqual({ submit: false, tail: '' }) // completes to an arrow
+    expect(classifyPtyInput(b64('\x1b[' + '1'.repeat(200))).tail.length).toBe(64)
+  })
   test('a sequence SPLIT across frames is judged joined with the previous tail', () => {
     expect(classifyPtyInput(b64('[13u'), '\x1b').submit).toBe(true)
     expect(classifyPtyInput(b64('OM'), '\x1b').submit).toBe(true)

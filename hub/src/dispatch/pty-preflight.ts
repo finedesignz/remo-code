@@ -66,10 +66,18 @@ const SAFE_ESCAPES: RegExp[] = [
   /^\x1bO[A-DHF]/, //               application-mode arrows / Home / End
 ]
 
+/** ESC, or an ESC[ / ESC O prefix still waiting for its final byte. */
+const INCOMPLETE_ESCAPE = /^\x1b(?:\[[\x30-\x3f]*[\x20-\x2f]*|O)?$/
+const COMPLETE_CSI = /^\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/
+const COMPLETE_SS3 = /^\x1bO[\s\S]/
+/** Longer open sequences are truncated; any completion of one is still unsafe. */
+const MAX_TAIL = 64
+
 export type PtyInputClass = {
   /** The frame can submit a prompt (start model work) — run the preflight. */
   submit: boolean
-  /** A trailing lone ESC the PTY may still join with the NEXT frame. */
+  /** An escape left OPEN at the end of the frame (lone ESC, `ESC[13`, `ESC O`, …)
+   *  that the PTY may complete with the NEXT frame. */
   tail: string
 }
 
@@ -97,22 +105,32 @@ export function classifyPtyInput(bytesB64: string, pendingTail = ''): PtyInputCl
   } catch {
     return { submit: true, tail: '' }
   }
+  let submit = false
   let i = 0
   while (i < text.length) {
     const c = text[i]
-    if (c === '\r' || c === '\n' || c === '\u009b' || c === '\u008f') return { submit: true, tail: '' }
+    if (c === '\r' || c === '\n' || c === '\u009b' || c === '\u008f') { submit = true; i++; continue }
     if (c !== '\x1b') { i++; continue }
-    const next = text[i + 1]
-    if (next === undefined) return { submit: false, tail: '\x1b' } // lone Esc at end
-    if (next === '\x1b') { i++; continue } //                        Esc-Esc: first is a lone Esc
     const rest = text.slice(i)
+    // An escape still OPEN at the end of the frame: the PTY may complete it
+    // with the next frame, so it is carried as the tail and the next frame is
+    // judged joined with it. A lone Esc is safe on its own; an open CSI/SS3
+    // prefix is not (its completion is unknown).
+    if (INCOMPLETE_ESCAPE.test(rest)) {
+      if (rest !== '\x1b') submit = true
+      return { submit, tail: rest.slice(0, MAX_TAIL) }
+    }
+    const next = text[i + 1]
+    if (next === '\x1b') { i++; continue } // Esc-Esc: the first is a lone Esc
     const safe = SAFE_ESCAPES.map((re) => rest.match(re)).find((m) => m)
     if (safe) { i += safe[0].length; continue }
     // Alt+printable (ESC + a printable char that opens no CSI/SS3 sequence).
     if (next !== '[' && next !== 'O' && next >= ' ' && next !== '\x7f') { i += 2; continue }
-    return { submit: true, tail: '' }
+    submit = true
+    const seq = rest.match(COMPLETE_CSI) ?? rest.match(COMPLETE_SS3)
+    i += seq ? seq[0].length : 2
   }
-  return { submit: false, tail: '' }
+  return { submit, tail: '' }
 }
 
 /** Convenience: does this frame, on its own, possibly submit a prompt? */
