@@ -344,6 +344,20 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   (override the `teab` binary name/path), **`TEAB_CLAUDE_BIN`** / **`TEAB_GUARD_HOOK_PATH`** (TEAB's
   own claude-binary / D3 guard-hook knobs). The supervisor `teab_run`/`teab_status` capability ships
   ONLY with a new signed MSI (≥ the TEAB release) — release-gated.
+- **Revanote stall-alert knobs** (fix/revanote-stall-alert; see
+  [docs/revanote.md](docs/revanote.md) "Stall alert"). Owner-visible alert when revanote intake
+  silently stalls — all ~23 client sites share ONE session, so a wedged session stalls every
+  client with no signal otherwise. **`REMO_REVANOTE_STALL_PARKED_MAX_MS`** (default **3600000** =
+  1h) — age threshold for an annotation parked-offline / rejected / target-offline-expired;
+  **`REMO_REVANOTE_STALL_RUN_MAX_MS`** (default **1800000** = 30min) — age threshold for an
+  `annotation_runs` row stuck `status='in_flight'` (worse than A: the dispatcher's own 20min
+  `finalizeTimeoutMs` should have forced a finalize before this); **`REMO_REVANOTE_STALL_COOLDOWN_MS`**
+  (default **3600000** = 1h) — per-user re-alert cooldown (`revanote_stall_alerts` table), so a
+  persistent stall across dozens of annotations sends ONE alert, not one per annotation;
+  **`REMO_REVANOTE_STALL_SWEEP_INTERVAL_MS`** (default **300000** = 5min) — sweep cadence;
+  **`REMO_REVANOTE_STALL_DISABLED`** (`1|true|yes|on`) — no-op escape hatch. Fan-out reuses the
+  existing orchestrator notify channel (`orchestrator/notify.ts` `fanOutNotify` — telegram + in-app +
+  emails4agents email); no new transport.
 
 ## Docs map — subsystems & phases
 

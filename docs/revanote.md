@@ -235,6 +235,43 @@ See `.planning/phases/08-revanote-integration/08-CONTEXT.md` "Confirmed cross-si
 - The callback always includes `annotation_id` (the external one), even on pre-dispatch rejections.
 - Comment preview is sliced locally via `Intl.Segmenter` (`renderAnnotationPrompt` / `previewComment`). If Revanote pre-slices `comment_preview` we use it; otherwise we slice from `comment` (first 30 grapheme clusters).
 
+## Stall alert (owner-visible, fix/revanote-stall-alert)
+
+All ~23 revanote client sites map onto ONE remo-code session (in-flight cap 1).
+When that session wedges, every client's annotations silently pile up
+`failed`/`failed_offline`/parked-`pending` with **zero owner-visible signal** —
+the callback to revanote reports the failure, but nothing tells the owner. This
+does NOT change the one-session-per-fleet architecture (out of scope); it's the
+missing alarm.
+
+- `hub/src/revanote/stall-alert.ts` — boot-started sweep (modeled on
+  `scheduler/run-reaper.ts`), two independent stall signatures:
+  - **Parked/rejected/target-offline**: an `annotations` row sits
+    `status='pending' AND skip_reason='session_offline'` (parked offline), or
+    `status IN ('failed','failed_offline')` (rejected / grace-TTL-lapsed), older
+    than `REMO_REVANOTE_STALL_PARKED_MAX_MS` (default 1h), measured from
+    `dispatched_at` when set else `received_at`.
+  - **Stuck in-flight run**: an `annotation_runs` row sits `status='in_flight'`
+    older than `REMO_REVANOTE_STALL_RUN_MAX_MS` (default 30min) — the
+    dispatcher's own `finalizeTimeoutMs` (default 20min) should have forced a
+    finalize before this; still in_flight at 30min means even that fallback
+    never fired (a strictly worse signal — the session/process itself is stuck).
+  - Fan-out reuses the existing orchestrator notify channel
+    (`orchestrator/notify.ts` `fanOutNotify` — telegram + in-app + emails4agents
+    email, per-user channel opt-in respected). No new transport.
+  - De-dup: ONE row per user in `revanote_stall_alerts` (`last_alert_at`); at
+    most one alert per user per `REMO_REVANOTE_STALL_COOLDOWN_MS` (default 1h)
+    — never one email per annotation (there can be dozens across 23 sites at
+    once).
+  - Sweep cadence `REMO_REVANOTE_STALL_SWEEP_INTERVAL_MS` (default 5min).
+    Escape hatch `REMO_REVANOTE_STALL_DISABLED` (`1|true|yes|on`) — no-op.
+  - Wired at boot / graceful-shutdown in `hub/src/index.ts` alongside the other
+    reapers.
+- `hub/test/revanote-stall-alert.test.ts` — fires at threshold (both
+  signatures independently), does not fire below threshold, cooldown blocks a
+  repeat alert then fires again once elapsed, one user's notify failure never
+  aborts the pass for others, load failure is fail-open.
+
 ## Out of scope (deferred)
 
 - Coolify deploy-status poll → enriched callback with `live_at`.
