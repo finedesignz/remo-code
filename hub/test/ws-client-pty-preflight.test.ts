@@ -23,7 +23,7 @@ process.env.SESSION_SECRET = process.env.SESSION_SECRET || 'session-secret-at-le
 process.env.MAGIC_LINK_SECRET = process.env.MAGIC_LINK_SECRET || 'magic-link-secret-at-least-32-chars-x'
 
 import { describe, test, expect, beforeEach, mock } from 'bun:test'
-import { _resetTurnLockForTests, holder, release } from '../src/telegram/turn-lock.ts'
+import { _resetTurnLockForTests, holder, release, acquire } from '../src/telegram/turn-lock.ts'
 import { _resetTermWritersForTests } from '../src/ws/term-writers.ts'
 
 const USER = 'userP'
@@ -146,5 +146,61 @@ describe('PTYCAP Phase 2 — ws/client.ts term.input preflight wiring', () => {
     await handleClientMessage(ws, inputFrame())
     expect(preflightCalls.length).toBe(0)
     expect(fwd.length).toBe(1) // still forwarded — unaffected by this phase
+  })
+
+  // Review-finding fix (AgentAutofix ai-review on PR #493, codex reviewer
+  // "blocking"): the original `holder(...) === null` check decided whether to
+  // preflight BEFORE calling acquire(), based on the state at the moment this
+  // frame was RECEIVED. A frame received while a DIFFERENT writer (e.g.
+  // Telegram) already held the turn would see a non-null holder and skip
+  // preflight — including at the moment it is later PROMOTED to holder from the
+  // turn-lock queue, which is a genuinely fresh turn for this writer that must
+  // still be gated. The fix moves the decision to `holder(...) !== writerId`,
+  // evaluated synchronously right before `acquire()` (no `await` in between —
+  // see the comment in client.ts), and runs the actual preflight check AFTER
+  // `acquire()` grants the turn, so it fires whether the grant is immediate or
+  // via queue promotion.
+  test('a frame queued behind ANOTHER writer is still preflight-checked once promoted to holder', async () => {
+    // Seed telegram as the current holder directly via turn-lock (bypassing
+    // client.ts — this relay never emits the 'telegram' writer id itself).
+    await acquire(SESSION, 'telegram')
+    expect(holder(SESSION)).toBe('telegram')
+
+    const { ws } = humanClient()
+    // handleClientMessage's internal acquire(SESSION, <client writer>) call
+    // queues behind 'telegram' and does not resolve until promoted — do not
+    // await the call yet, or this test would hang.
+    const pending = handleClientMessage(ws, inputFrame())
+
+    // Let the synchronous prefix of handleClientMessage run (holder-snapshot,
+    // claimTermWriter, the queuing acquire() call) before asserting.
+    await Promise.resolve()
+    expect(preflightCalls.length).toBe(0) // not yet promoted — not checked yet
+
+    release(SESSION) // observed telegram turn_complete — promotes the queued client writer
+    await pending
+
+    expect(preflightCalls).toEqual([{ userId: USER, sessionId: SESSION, actor: 'human' }])
+    expect(fwd.length).toBe(1)
+  })
+
+  test('a promoted-from-queue frame that FAILS preflight releases the turn instead of leaving a phantom holder', async () => {
+    await acquire(SESSION, 'telegram')
+    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
+
+    const { ws, sent } = humanClient()
+    const pending = handleClientMessage(ws, inputFrame())
+    await Promise.resolve()
+
+    release(SESSION) // promotes the queued client writer to holder
+    await pending
+
+    expect(preflightCalls.length).toBe(1)
+    expect(fwd.length).toBe(0)
+    const refused = sent.find((m: any) => m.type === 'send_refused')
+    expect(refused?.reason).toBe('over_daily_cost_cap:$12.00>=$10.00')
+    // The rejected writer must not be left holding the turn — a phantom holder
+    // would wedge every other writer until the 60s TTL backstop fires.
+    expect(holder(SESSION)).toBeNull()
   })
 })
