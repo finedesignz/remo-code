@@ -8,6 +8,9 @@ export function describeTermRefusal(reason: string): string {
   if (reason === 'pty_preflight_timeout' || reason === 'pty_preflight_error') {
     return 'Could not verify your spend limits right now — prompt not sent. Try again in a moment.'
   }
+  if (reason === 'term_backpressure') {
+    return 'Input is arriving faster than the terminal can accept it — some keystrokes were dropped.'
+  }
   if (reason === 'not_current_writer') {
     return 'Another tab or connection took over this terminal — prompt not sent here.'
   }

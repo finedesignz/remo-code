@@ -16,6 +16,7 @@ describe('describeTermRefusal', () => {
     expect(describeTermRefusal('pty_preflight_timeout')).toContain('Could not verify')
     expect(describeTermRefusal('pty_preflight_error')).toContain('Could not verify')
     expect(describeTermRefusal('not_current_writer')).toContain('Another tab')
+    expect(describeTermRefusal('term_backpressure')).toContain('dropped')
   })
   test('an unknown reason still tells the user the prompt was not sent', () => {
     expect(describeTermRefusal('something_new')).toContain('Prompt not sent')

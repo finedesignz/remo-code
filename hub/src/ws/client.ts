@@ -36,6 +36,11 @@ const MSG_RATE_MAX = 30 // max 30 messages per 10 seconds
 // so frames from one writer reach the PTY in arrival order even when a submit
 // is paused on its spend preflight.
 const ptyWriteChain = new Map<string, Promise<void>>()
+// Frames waiting in each chain. Term frames bypass the structured-message rate
+// limiter, so the chain is BOUNDED: past this many pending frames for one
+// writer, new frames are dropped (backpressure) instead of growing memory.
+export const MAX_PENDING_TERM_FRAMES = 256
+const ptyChainDepth = new Map<string, number>()
 
 // PTYCAP Phase 2 — per session, a trailing lone ESC last forwarded to the PTY.
 // The CLI joins an incomplete escape with the next write, so the next frame is
@@ -45,6 +50,7 @@ const ptyEscTail = new Map<string, string>()
 /** Test-only — clear the per-writer chains and per-session escape tails. */
 export function _resetPtyRelayStateForTests(): void {
   ptyWriteChain.clear()
+  ptyChainDepth.clear()
   ptyEscTail.clear()
 }
 
@@ -327,6 +333,13 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // never overtake a submit that is still being checked, whatever each
     // frame's DB round-trips cost.
     const chainKey = `${frame.session_id}\u0000${writerId}`
+    const depth = ptyChainDepth.get(chainKey) ?? 0
+    if (depth >= MAX_PENDING_TERM_FRAMES) {
+      log.warn('term.input.diag.drop', { gate: 'term_backpressure', session_id: frame.session_id, writer_id: writerId, depth })
+      try { ws.send(JSON.stringify({ type: 'send_refused', channel: 'term', session_id: frame.session_id, reason: 'term_backpressure' })) } catch {}
+      return
+    }
+    ptyChainDepth.set(chainKey, depth + 1)
     const prev = ptyWriteChain.get(chainKey)
     let settle!: () => void
     const mine = new Promise<void>((resolve) => { settle = resolve })
@@ -337,6 +350,9 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     } finally {
       settle()
       if (ptyWriteChain.get(chainKey) === mine) ptyWriteChain.delete(chainKey)
+      const left = (ptyChainDepth.get(chainKey) ?? 1) - 1
+      if (left > 0) ptyChainDepth.set(chainKey, left)
+      else ptyChainDepth.delete(chainKey)
     }
     return
   }

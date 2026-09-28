@@ -440,9 +440,11 @@ writers.
   cap crossed mid-run does not interrupt them. Interrupting a PTY session whose
   usage events cross a cap is a follow-up.
 - **No per-connection rate limit on term frames.** Term frames short-circuit
-  before the structured-message limiter. A single writer has at most one check
-  in flight (the write chain serializes it), but many connections could each
-  drive checks. Follow-up: a per-writer submit rate limit.
+  before the structured-message limiter. Memory is bounded — each
+  (session, writer) chain holds at most `MAX_PENDING_TERM_FRAMES` (256) pending
+  frames; past that, frames are dropped with a `term_backpressure` refusal — and
+  a single writer has at most one check in flight, but many connections could
+  each drive checks. Follow-up: a per-writer submit rate limit.
 - **The stream-json `send_message` handler in `hub/src/ws/client.ts` is still
   NOT gated by `dailyCostCapGate`/`dailyTokenCapGate`** — only the Claude usage
   threshold gate runs there. This is a **pre-existing gap predating PTYCAP**,

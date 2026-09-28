@@ -65,7 +65,7 @@ mock.module('../src/dispatch/pty-preflight.ts', () => ({
   },
 }))
 
-const { handleClientMessage, _resetPtyRelayStateForTests } = await import(`../src/ws/client.ts?rt=${Date.now()}`)
+const { handleClientMessage, _resetPtyRelayStateForTests, MAX_PENDING_TERM_FRAMES } = await import(`../src/ws/client.ts?rt=${Date.now()}`)
 
 function humanClient() {
   const sent: any[] = []
@@ -381,5 +381,27 @@ describe('PTYCAP Phase 2 — ordering and invariants across the check await', ()
     await p
     expect(preflightCalls.length).toBe(1)
     expect(fwdText()).toEqual(['go' + ENTER])
+  })
+})
+
+// ai-review (codex, blocking) on 1f70b16: term frames bypass the message rate
+// limiter, and a frame blocked on the lock / DB / preflight let every later
+// frame from that writer pile up in an UNBOUNDED chain.
+describe('PTYCAP Phase 2 — the per-writer frame chain is bounded', () => {
+  test('past MAX_PENDING_TERM_FRAMES, new frames are dropped with a backpressure refusal', async () => {
+    const unblock = pauseChecks()
+    const { ws, sent } = humanClient()
+    const pending: Promise<unknown>[] = [handleClientMessage(ws, input('go' + ENTER))]
+    await waitUntil(() => preflightCalls.length === 1)
+    for (let i = 1; i < MAX_PENDING_TERM_FRAMES; i++) pending.push(handleClientMessage(ws, input('x')))
+    await handleClientMessage(ws, input('overflow'))
+    expect(refusals(sent).map((r) => r.reason)).toEqual(['term_backpressure'])
+    unblock()
+    await Promise.all(pending)
+    expect(fwdText().length).toBe(MAX_PENDING_TERM_FRAMES)
+    expect(fwdText()).not.toContain('overflow')
+    // Once drained, the writer can send again.
+    await handleClientMessage(ws, input('after'))
+    expect(fwdText().at(-1)).toBe('after')
   })
 })
