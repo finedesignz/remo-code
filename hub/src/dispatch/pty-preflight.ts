@@ -73,6 +73,25 @@ const COMPLETE_SS3 = /^\x1bO[\s\S]/
 /** Longer open sequences are truncated; any completion of one is still unsafe. */
 const MAX_TAIL = 64
 
+/**
+ * ESC + one of these is not "Alt+printable" — it's a recognized control
+ * sequence with submit-adjacent semantics, excluded from the catch-all so it
+ * falls through to `submit = true` (fail closed) instead of being classified
+ * as harmless Alt+key input: OSC `]`, DCS `P`, SOS `X`, PM `^`, APC `_` (C1
+ * "string" controls — open a sequence that can carry arbitrary payload,
+ * terminated by BEL/ST, not by anything the CSI/SS3 matchers recognise), and
+ * `E` (7-bit NEL — a real "next line" control some parsers treat as a
+ * terminator, distinct from an ordinary Alt+E keystroke).
+ */
+const UNSAFE_ESC_INTRODUCERS = new Set(['\x5d', '\x50', '\x58', '\x5e', '\x5f', 'E']) // ] P X ^ _ E
+/**
+ * Unicode line/paragraph separators that some line-splitting routines treat
+ * as a terminator on their own, with no ESC prefix at all: NEL (U+0085, also
+ * the 7-bit form `ESC E`), LINE SEPARATOR (U+2028), PARAGRAPH SEPARATOR
+ * (U+2029).
+ */
+const LINE_TERMINATOR_CODEPOINTS = new Set(['\u0085', ' ', ' '])
+
 export type PtyInputClass = {
   /** The frame can submit a prompt (start model work) — run the preflight. */
   submit: boolean
@@ -87,10 +106,13 @@ export type PtyInputClass = {
  * escape across writes, so `ESC` + `[13u` sent as two frames is one Enter.
  *
  * `submit` is true when the frame (joined with `pendingTail`) contains CR/LF,
- * an escape sequence not on `SAFE_ESCAPES`, a C1 CSI/SS3 code point, or is not
- * valid base64 / UTF-8 (e.g. a raw 0x9b byte) — fail closed. Plain typing, Ctrl-C (0x03), Backspace, Tab, a lone
- * Esc, Esc-Esc, arrows/Home/End/PgUp/PgDn and Alt+printable never submit, so a
- * user over the cap can still type, navigate, interrupt and cancel.
+ * a Unicode line/paragraph separator (NEL/LS/PS — see `LINE_TERMINATOR_CODEPOINTS`),
+ * an escape sequence not on `SAFE_ESCAPES` (including a C1 "string" control
+ * introducer or 7-bit NEL — see `UNSAFE_ESC_INTRODUCERS`), a C1 CSI/SS3 code
+ * point, or is not valid base64 / UTF-8 (e.g. a raw 0x9b byte) — fail closed.
+ * Plain typing, Ctrl-C (0x03), Backspace, Tab, a lone Esc, Esc-Esc,
+ * arrows/Home/End/PgUp/PgDn and Alt+printable never submit, so a user over
+ * the cap can still type, navigate, interrupt and cancel.
  */
 export function classifyPtyInput(bytesB64: string, pendingTail = ''): PtyInputClass {
   let text: string
@@ -109,7 +131,10 @@ export function classifyPtyInput(bytesB64: string, pendingTail = ''): PtyInputCl
   let i = 0
   while (i < text.length) {
     const c = text[i]
-    if (c === '\r' || c === '\n' || c === '\u009b' || c === '\u008f') { submit = true; i++; continue }
+    if (
+      c === '\r' || c === '\n' || c === '\u009b' || c === '\u008f' ||
+      LINE_TERMINATOR_CODEPOINTS.has(c)
+    ) { submit = true; i++; continue }
     if (c !== '\x1b') { i++; continue }
     const rest = text.slice(i)
     // An escape still OPEN at the end of the frame: the PTY may complete it
@@ -124,8 +149,12 @@ export function classifyPtyInput(bytesB64: string, pendingTail = ''): PtyInputCl
     if (next === '\x1b') { i++; continue } // Esc-Esc: the first is a lone Esc
     const safe = SAFE_ESCAPES.map((re) => rest.match(re)).find((m) => m)
     if (safe) { i += safe[0].length; continue }
-    // Alt+printable (ESC + a printable char that opens no CSI/SS3 sequence).
-    if (next !== '[' && next !== 'O' && next >= ' ' && next !== '\x7f') { i += 2; continue }
+    // Alt+printable (ESC + a printable char that opens no CSI/SS3 sequence,
+    // and isn't itself a control sequence — see UNSAFE_ESC_INTRODUCERS).
+    if (
+      next !== '[' && next !== 'O' && next >= ' ' && next !== '\x7f' &&
+      !UNSAFE_ESC_INTRODUCERS.has(next)
+    ) { i += 2; continue }
     submit = true
     const seq = rest.match(COMPLETE_CSI) ?? rest.match(COMPLETE_SS3)
     i += seq ? seq[0].length : 2

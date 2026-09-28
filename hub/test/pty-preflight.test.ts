@@ -314,4 +314,30 @@ describe('PTYCAP Phase 2 — classifyPtyInput (non-CR/LF encodings of Enter)', (
     expect(classifyPtyInput(b64('h'), '\x1b')).toEqual({ submit: false, tail: '' }) // Alt+h
     expect(classifyPtyInput(b64('[13u')).submit).toBe(false) // without a tail it is plain text
   })
+  // QC panel (security lens, run 3): the "Alt+printable" catch-all let ESC +
+  // a C1 string-introducer (OSC/DCS/SOS/PM/APC), and ESC + 'E' (7-bit NEL),
+  // through as harmless Alt+key input, and no ESC prefix at all was required
+  // for the Unicode NEL/LS/PS codepoints — real bypasses of the "unknown
+  // escape = possible submit" fail-closed design this module documents.
+  test('C1 string-introducer escapes (OSC/DCS/SOS/PM/APC) are submits, not Alt+printable', () => {
+    expect(isPtySubmit(b64('\x1b]0;pwned\x07'))).toBe(true) // OSC
+    expect(isPtySubmit(b64('\x1bPqDATA\x1b\\'))).toBe(true) // DCS
+    expect(isPtySubmit(b64('\x1bXsos\x1b\\'))).toBe(true) // SOS
+    expect(isPtySubmit(b64('\x1b^pm\x1b\\'))).toBe(true) // PM
+    expect(isPtySubmit(b64('\x1b_apc\x1b\\'))).toBe(true) // APC
+  })
+  test('7-bit NEL (ESC E) is a submit', () => {
+    expect(isPtySubmit(b64('\x1bE'))).toBe(true)
+  })
+  test('standalone Unicode line/paragraph separators are submits with no ESC prefix', () => {
+    expect(isPtySubmit(b64('\u0085'))).toBe(true) // NEL
+    expect(isPtySubmit(b64(' '))).toBe(true) // LINE SEPARATOR
+    expect(isPtySubmit(b64(' '))).toBe(true) // PARAGRAPH SEPARATOR
+    expect(isPtySubmit(b64('plain text\u0085more'))).toBe(true)
+  })
+  test('ordinary Alt+printable is unaffected by the narrower catch-all', () => {
+    for (const seq of ['\x1bh', '\x1ba', '\x1b1', '\x1b~']) {
+      expect({ seq, submit: isPtySubmit(b64(seq)) }).toEqual({ seq, submit: false })
+    }
+  })
 })
