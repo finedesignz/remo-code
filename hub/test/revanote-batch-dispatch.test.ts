@@ -149,7 +149,11 @@ mock.module('../src/revanote/callback.ts', () => ({
 }))
 
 mock.module('../src/auth/github-app.ts', () => ({
-  githubApiRequest: async () => ({ sha: 'realsha123' }),
+  githubApiRequest: async (_installationId: number, _method: string, path: string) => {
+    if (/\/repos\/[^/]+\/[^/]+$/.test(path)) return { default_branch: 'main' }
+    if (path.includes('/compare/')) return { status: 'identical' }
+    return { sha: 'realsha123' }
+  },
   GitHubApiError: class GitHubApiError extends Error {
     status: number
     body: string
