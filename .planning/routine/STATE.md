@@ -100,26 +100,7 @@ self-merge proposal in the same "one-time upgrade" step and splitting them out w
 than shipping real scored work this iteration.
 
 ## Resume point
-1. **PR #493 (PTYCAP Phase 2)** — head is now `44fd0f2` (a parallel run-3 session's own instance ran
-   the DIRECTIVE §9-required 3-lens QC panel — security/exploitability, correctness/regression,
-   tenancy/authz/data — against `34c7d03` as background agents; correctness and tenancy came back
-   clean, security found ONE real confirmed finding: `classifyPtyInput`'s "Alt+printable" catch-all
-   let ESC + a C1 string-introducer (OSC/DCS/SOS/PM/APC) and ESC + `E` (7-bit NEL) through as
-   harmless Alt+key input, and the Unicode NEL/LS/PS codepoints needed no ESC prefix at all — same
-   bypass class as LEDGER 2c–2l, just a different encoding. Fixed in `44fd0f2` with 4 new tests
-   (3 fail against `34c7d03`, confirmed by reverting locally), pushed to the PR branch, full panel
-   writeup posted as a PR comment. `check-baseline` 2273→2277, 0 fail; `tsc` unchanged at 427.
-   Woodpecker `docs-drift` already `success` on `44fd0f2`; `qc` was still `pending` as this pushed.
-   **Next run/check-in: confirm both Woodpecker checks are `success` on `44fd0f2` specifically (not
-   the now-superseded `34c7d03`), and post `/review` again if `ai-review` hasn't produced a real
-   (non-quota-deferred) verdict on `44fd0f2` yet — it will need a fresh run since the head moved.**
-   `subscribe_pr_activity` on #493 was attempted again this sub-run and still refused ("Could not
-   subscribe") — same as the other run-3 instance found; do not assume this PR will wake a future
-   session via events, rely on the next scheduled firing's own poll. If clean: this PR is CI-green +
-   panel-clean + reviewed — per the CURRENT (unchanged) merge policy, mark it ready-for-owner-review
-   if not already, and wait for the owner to merge. **Do not self-merge it even if everything is
-   green** — see the Governance finding above; that authority has not been established to this
-   session's satisfaction yet.
+1. **PR #493 (PTYCAP Phase 2)** — MERGED by the owner 2026-09-28T17:46Z at `44fd0f2` (Woodpecker green; final `ai-review` never ran — org review quota exhausted). Coolify auto-deploys the hub: the web terminal is now under the cost/token caps + usage threshold on each submit. PTYCAP Phase 3 is now unblocked.
 2. **PR #492 (BLEED reconciliation, docs-only)** — MERGED by the owner 2026-09-28T14:40Z. Done.
 3. **Hono runtime-dependency security triage** — DONE this run: subagent opened **PR #495**
    (`routine/2026-09-28-hono-security-triage` → `main`), pure `hono` `^4.7.0`→`^4.13.10` bump, all 30
