@@ -267,6 +267,14 @@ describe('PTYCAP Phase 2 — classifyPtyInput (non-CR/LF encodings of Enter)', (
     expect(isPtySubmit(btoa(String.fromCharCode(0xc2, 0x9b)) )).toBe(true) // U+009B as UTF-8
     expect(isPtySubmit(btoa(String.fromCharCode(0xc2, 0x8f)) )).toBe(true) // U+008F as UTF-8
   })
+  // ai-review (codex, blocking): a non-fatal decoder turned a raw C1 byte into
+  // U+FFFD, so raw `9b 31 33 75` (8-bit CSI 13u) passed as plain text — while
+  // the supervisor writes the raw bytes to the PTY.
+  test('raw (non-UTF-8) C1 bytes and any invalid UTF-8 are submits', () => {
+    expect(isPtySubmit(btoa(String.fromCharCode(0x9b, 0x31, 0x33, 0x75)))).toBe(true)
+    expect(isPtySubmit(btoa(String.fromCharCode(0x8f, 0x4d)))).toBe(true)
+    expect(isPtySubmit(btoa(String.fromCharCode(0x61, 0xff)))).toBe(true)
+  })
   test('an unknown or incomplete escape fails closed', () => {
     expect(isPtySubmit(b64('\x1b[1'))).toBe(true)
     expect(isPtySubmit(b64('\x1b['))).toBe(true)

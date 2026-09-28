@@ -388,7 +388,8 @@ writers.
 - **What counts as a submit (fail closed).** CR or LF; **any escape sequence
   not on a small known-safe allowlist** (arrows, Home/End, PgUp/PgDn,
   Insert/Delete, Shift-Tab, focus in/out, bracketed-paste markers, lone Esc,
-  Esc-Esc, Alt+printable); C1 CSI/SS3 code points; undecodable input. Enter has
+  Esc-Esc, Alt+printable); C1 CSI/SS3 code points; input that is not valid
+  base64 or UTF-8 (a raw 0x9b byte is 8-bit CSI to the PTY). Enter has
   encodings with no CR/LF byte — the Claude CLI's key parser maps the kitty /
   CSI-u sequences `ESC[13u` and `ESC[57414u` to "return" whether or not kitty
   mode was ever enabled, and `ESC O M` is keypad Enter in application mode — so

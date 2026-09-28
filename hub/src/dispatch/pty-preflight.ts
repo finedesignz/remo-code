@@ -79,8 +79,8 @@ export type PtyInputClass = {
  * escape across writes, so `ESC` + `[13u` sent as two frames is one Enter.
  *
  * `submit` is true when the frame (joined with `pendingTail`) contains CR/LF,
- * an escape sequence not on `SAFE_ESCAPES`, a C1 CSI/SS3 code point, or cannot
- * be decoded — fail closed. Plain typing, Ctrl-C (0x03), Backspace, Tab, a lone
+ * an escape sequence not on `SAFE_ESCAPES`, a C1 CSI/SS3 code point, or is not
+ * valid base64 / UTF-8 (e.g. a raw 0x9b byte) — fail closed. Plain typing, Ctrl-C (0x03), Backspace, Tab, a lone
  * Esc, Esc-Esc, arrows/Home/End/PgUp/PgDn and Alt+printable never submit, so a
  * user over the cap can still type, navigate, interrupt and cancel.
  */
@@ -90,7 +90,10 @@ export function classifyPtyInput(bytesB64: string, pendingTail = ''): PtyInputCl
     const bin = atob(bytesB64)
     const bytes = new Uint8Array(bin.length)
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-    text = pendingTail + new TextDecoder().decode(bytes)
+    // FATAL decode: the supervisor writes the RAW bytes to the PTY, so a lone
+    // C1 byte (0x9b CSI, 0x8f SS3) must not be laundered into U+FFFD here.
+    // Anything that is not valid UTF-8 is a possible submit.
+    text = pendingTail + new TextDecoder('utf-8', { fatal: true }).decode(bytes)
   } catch {
     return { submit: true, tail: '' }
   }
