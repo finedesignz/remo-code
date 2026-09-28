@@ -8,8 +8,8 @@ import { config } from '../config.ts'
 import { insertMessage, getSession, getUserLicenseFields, canWriteTerminal, getSessionRunnerType } from '../db/dal'
 import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
-import { checkPtyTurnPreflight } from '../dispatch/pty-preflight.ts'
-import { acquire, holder, releaseByWriter, releaseWriterInSession } from '../telegram/turn-lock.ts'
+import { checkPtyTurnPreflight, type PtyPreflightResult } from '../dispatch/pty-preflight.ts'
+import { acquire, holder, releaseByWriter } from '../telegram/turn-lock.ts'
 import { claimTermWriter, currentTermWriter, dropTermWriter } from './term-writers.ts'
 import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
@@ -31,6 +31,13 @@ export { broadcastErrorEvent }
 const AUTH_TIMEOUT_MS = 5_000
 const MSG_RATE_WINDOW_MS = 10_000
 const MSG_RATE_MAX = 30 // max 30 messages per 10 seconds
+
+// PTYCAP Phase 2 — one in-flight PTY preflight check per session, shared by
+// every term.input frame that arrives before it settles (see the long
+// comment at its call site in handleClientMessage for why this exists: it is
+// the fix for a review-found race where a second frame could skip a
+// still-resolving preflight and reach PTY stdin ahead of a rejection).
+const pendingPtyPreflight = new Map<string, Promise<PtyPreflightResult>>()
 
 interface ClientWsData {
   authenticated: boolean
@@ -185,7 +192,6 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
     // from the frame. Applied to term.input (the write that drives the
     // interactive entrypoint) on a pty-interactive session.
     const writerId = data.writerId ?? 'client:unknown'
-    let mustPreflight = false
     if (isWriteTurn) {
       const runnerType = await getSessionRunnerType(frame.session_id, data.userId)
       if (humanOnlyRejectsActor('human', runnerType)) {
@@ -198,31 +204,80 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       // the same spend ceilings dispatch() already enforces on every other
       // inbound path (docs/usage-cost.md: "gating the interactive PTY path
       // against the daily cost/token caps is milestone PTYCAP's Phase 2").
-      // WHETHER to preflight is decided HERE, synchronously, with no `await`
-      // between this read and the `acquire()` call below (holder() through
-      // acquire() is one synchronous JS stretch — getChannel/claimTermWriter
-      // don't await either — so no other frame's handler can interleave and
-      // invalidate this read; JS only yields at an actual `await`). That fixes
-      // two review findings on the original `holder(...) === null` version: (1)
-      // a TOCTOU window where two concurrent frames for the same fresh turn
-      // could each observe "no holder" and both pay a redundant preflight
-      // round trip before `acquire()` arbitrated between them, and (2) a queued
-      // frame — received while ANOTHER writer (e.g. Telegram) held the turn —
-      // would see a non-null holder and skip preflight FOREVER, including at
-      // the moment it is later promoted to holder from the queue, which is a
-      // genuinely fresh turn for THIS writer and must be gated. Comparing
-      // against `writerId` instead of `null` covers both: it's true exactly
-      // when this call is NOT an idempotent same-writer re-acquire (mid-turn
-      // keystroke), whether the eventual grant comes immediately or via queue
-      // promotion — so an actively-typing human still pays one DB round trip
-      // per turn, never per keystroke, and a turn already in flight is never
-      // retroactively cut off mid-stream. The actor is hard-coded 'human'
-      // because this relay is reachable ONLY from an authenticated /ws/client
-      // connection (server-inferred, never client-asserted) — the human-only
-      // guard just above already proves that for this frame. The check itself
-      // runs after `acquire()` grants the turn (see below), so a failure can
-      // release the turn we just took instead of leaving a phantom holder.
-      mustPreflight = runnerType === 'pty-interactive' && holder(frame.session_id) !== writerId
+      //
+      // Checked BEFORE `acquire()`, not after: an earlier version of this gate
+      // ran the check post-acquire so a queued-then-promoted frame (received
+      // while a DIFFERENT writer held the turn) would still get checked. That
+      // introduced a worse bug (review findings on PR #493, codex + agy both
+      // "blocking"): once the FIRST frame of a fresh turn had already acquired
+      // the lock, a SECOND frame from the SAME writer arriving while the
+      // first's preflight DB round trip was still in flight would see
+      // `holder(...) === writerId` (already granted), skip preflight entirely,
+      // and forward immediately — reaching PTY stdin even if the first frame's
+      // preflight went on to REJECT. An uncaught exception from the check had
+      // the same phantom-holder failure mode (no try/finally around a
+      // post-acquire await).
+      //
+      // Fixed by moving the check back before `acquire()` (so a failure never
+      // holds the lock in the first place — no cleanup path needed) and
+      // publishing the in-flight promise in `pendingPtyPreflight`, keyed by
+      // session, the moment a fresh-turn check starts. ANY other frame for
+      // this session that arrives before that promise settles — same writer or
+      // not — awaits the SAME promise instead of starting a redundant check
+      // (the original TOCTOU) or skipping the check because the lock looks
+      // already-held-by-me (the new one): the lock is never mutated until
+      // AFTER the shared verdict is known, so there is no state to race on. A
+      // rejected verdict refuses every frame waiting on it, not just the one
+      // that triggered it.
+      //
+      // `holder(...) !== writerId` (not `=== null`) still decides whether to
+      // START a check: true exactly when this is not an idempotent
+      // same-writer re-acquire, whether the eventual grant is immediate or via
+      // queue promotion — an actively-typing human still pays one DB round
+      // trip per turn, never per keystroke, and a turn already in flight is
+      // never retroactively cut off mid-stream. The actor is hard-coded
+      // 'human' because this relay is reachable ONLY from an authenticated
+      // /ws/client connection (server-inferred, never client-asserted) — the
+      // human-only guard just above already proves that for this frame.
+      if (runnerType === 'pty-interactive') {
+        let preflightPromise = pendingPtyPreflight.get(frame.session_id)
+        if (!preflightPromise && holder(frame.session_id) !== writerId) {
+          preflightPromise = checkPtyTurnPreflight({
+            userId: data.userId,
+            sessionId: frame.session_id,
+            actor: 'human',
+          }).catch((err) => {
+            // Fail CLOSED: a thrown gate/DB error is a rejection, not a pass,
+            // and (since this settles before acquire() ever runs) never leaves
+            // a phantom holder.
+            log.error('term.input.pty_preflight_error', {
+              session_id: frame.session_id,
+              error: err instanceof Error ? err.message : String(err),
+            })
+            return { ok: false, reason: 'pty_preflight_error' } as const
+          })
+          pendingPtyPreflight.set(frame.session_id, preflightPromise)
+          void preflightPromise.finally(() => { pendingPtyPreflight.delete(frame.session_id) })
+        }
+        if (preflightPromise) {
+          const preflight = await preflightPromise
+          if (!preflight.ok) {
+            log.warn('term.input.diag.drop', {
+              gate: 'pty_preflight',
+              session_id: frame.session_id,
+              reason: preflight.reason,
+            })
+            try {
+              ws.send(JSON.stringify({
+                type: 'send_refused',
+                session_id: frame.session_id,
+                reason: preflight.reason,
+              }))
+            } catch {}
+            return
+          }
+        }
+      }
     }
     const channel = getChannel(frame.session_id)
     if (!channel) { if (_diag) log.warn('term.input.diag.drop', { gate: 'no_channel', session_id: frame.session_id }); return }
@@ -267,34 +322,6 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
           current_writer: current,
         })
         return
-      }
-      // PTYCAP Phase 2 preflight, now that we hold the turn (see the comment
-      // above `mustPreflight`'s assignment for why it runs here, post-acquire,
-      // rather than before it). A failure must give the turn back — we already
-      // hold it — so a rejected human isn't left as a phantom holder wedging
-      // every other writer until the TTL backstop fires.
-      if (mustPreflight) {
-        const preflight = await checkPtyTurnPreflight({
-          userId: data.userId,
-          sessionId: frame.session_id,
-          actor: 'human',
-        })
-        if (!preflight.ok) {
-          log.warn('term.input.diag.drop', {
-            gate: 'pty_preflight',
-            session_id: frame.session_id,
-            reason: preflight.reason,
-          })
-          releaseWriterInSession(frame.session_id, writerId)
-          try {
-            ws.send(JSON.stringify({
-              type: 'send_refused',
-              session_id: frame.session_id,
-              reason: preflight.reason,
-            }))
-          } catch {}
-          return
-        }
       }
     }
     if (_diag) log.info('term.input.diag.fwd', { session_id: frame.session_id })
