@@ -140,7 +140,8 @@ export function useChatSurface({
 
       // Hub refused this send — surface as a transient assistant bubble so
       // the cell visibly reflects WHY the runner never replied.
-      if (msg.type === 'send_refused') {
+      // `channel: 'term'` refusals are rendered inside TerminalSurface instead.
+      if (msg.type === 'send_refused' && msg.channel !== 'term') {
         const reason = (msg.reason as string) || (msg.error as string) || 'Send refused.'
         const synthetic: ChatMessage = {
           id: `refused-${msg.client_id || Date.now()}`,

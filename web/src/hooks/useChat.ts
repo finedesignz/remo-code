@@ -174,7 +174,8 @@ export function useChat(
       // Surface as a transient assistant bubble so the user sees WHY their
       // message didn't get a response. Only render in the currently active
       // session — refusals for background sessions stay silent.
-      if (msg.type === 'send_refused' && typeof msg.session_id === 'string') {
+      // `channel: 'term'` refusals are rendered inside TerminalSurface instead.
+      if (msg.type === 'send_refused' && msg.channel !== 'term' && typeof msg.session_id === 'string') {
         const incomingSessionId = msg.session_id as string
         if (incomingSessionId !== activeSessionRef.current) return
         const reason = (msg.reason as string) || (msg.error as string) || 'Send refused.'

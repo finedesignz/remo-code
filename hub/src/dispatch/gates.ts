@@ -133,9 +133,11 @@ export const dailyCostCapGate: DispatchGate = {
     // Phase 18 (R-PTY-18): the opt-in programmatic-credit hard-halt rides the
     // SAME chokepoint as an additional predicate (no parallel gate). Default OFF
     // (null bound) => never fires. When the user-configured bound is crossed,
-    // programmatic/automation dispatch is denied with a typed reason. Human
-    // interactive PTY turns never reach this gate for this reason (the
-    // human-only guard + interactive pool keep them off the programmatic path).
+    // programmatic/automation dispatch is denied with a typed reason. A human
+    // interactive PTY turn DOES reach this gate (PTYCAP Phase 2 preflight) and
+    // pays the cost cap above, but is exempt from this programmatic-only halt —
+    // `humanInteractive` is set solely by the server-side PTY preflight.
+    if (req.humanInteractive) return { ok: true }
     const halt = await getProgrammaticHaltStatus(req.userId)
     if (halt.halt) {
       const reason = `programmatic_credit_halt:$${(halt.used_usd ?? 0).toFixed(2)}>=$${(halt.bound ?? 0).toFixed(2)}`

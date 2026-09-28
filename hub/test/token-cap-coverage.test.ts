@@ -84,6 +84,10 @@ describe('daily TOKEN cap covers every dispatch entry point', () => {
       'feedback/dispatcher.ts',
       'revanote/dispatcher.ts',
       'telegram/dispatch.ts',
+      // PTYCAP Phase 2 (SC-2): the PTY pre-flight gate chain (SC-1's exact
+      // [thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]
+      // order) lives here — see hub/src/dispatch/pty-preflight.ts.
+      'dispatch/pty-preflight.ts',
     ]) {
       expect(files.has(expected)).toBe(true)
     }

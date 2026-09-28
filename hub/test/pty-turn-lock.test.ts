@@ -14,6 +14,7 @@ import {
   holder,
   queueDepth,
   allowResponseBypass,
+  tryAcquireIfFree,
   _resetTurnLockForTests,
   _configureTurnLockForTests,
 } from "../src/telegram/turn-lock.ts";
@@ -90,5 +91,20 @@ describe("permission response exemption (T-20-12)", () => {
     expect(allowResponseBypass("s7")).toBe(true);
     // The lock is still held by A (the response didn't steal the turn).
     expect(holder("s7")).toBe("client:A");
+  });
+});
+
+describe("tryAcquireIfFree (synchronous, never queues)", () => {
+  it("grants a free lock synchronously and is idempotent for the holder", () => {
+    expect(tryAcquireIfFree("s9", "client:A")).toBe(true);
+    expect(holder("s9")).toBe("client:A");
+    expect(tryAcquireIfFree("s9", "client:A")).toBe(true);
+  });
+  it("refuses a lock held by another writer WITHOUT queueing a waiter", async () => {
+    expect(await acquire("s9", "telegram")).toBe(true);
+    expect(tryAcquireIfFree("s9", "client:A")).toBe(false);
+    expect(queueDepth("s9")).toBe(0);
+    release("s9");
+    expect(holder("s9")).toBe(null); // nothing was promoted
   });
 });
