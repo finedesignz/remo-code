@@ -14,7 +14,7 @@
     "@scalar/hono-api-reference": "^0.12.1",
     "bcryptjs": "^3.0.3",
     "croner": "^10.0.1",
-    "hono": "^4.7.0",
+    "hono": "^4.13.10",
     "ioredis": "^6.0.0",
     "jose": "^6.2.3",
     "jsonwebtoken": "^9.0.3",
