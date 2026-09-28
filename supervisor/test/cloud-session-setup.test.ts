@@ -1,7 +1,7 @@
 // tools/cloud-session helpers (docs/cloud-session-supervisor.md).
 import { describe, it, expect } from 'bun:test'
 import { buildCloudConfig } from '../../tools/cloud-session/write-config'
-import { withStartHook } from '../../tools/cloud-session/install-hook'
+import { shellQuote, withStartHook } from '../../tools/cloud-session/install-hook'
 
 describe('buildCloudConfig', () => {
   it('requires REMO_API_KEY', () => {
@@ -41,5 +41,14 @@ describe('withStartHook', () => {
   it('is idempotent', () => {
     const once = withStartHook({}, 'bash /s.sh')
     expect(withStartHook(once, 'bash /s.sh')).toEqual(once)
+  })
+})
+
+describe('shellQuote', () => {
+  it('round-trips spaces and shell metacharacters through a real shell unchanged', () => {
+    for (const p of ['/home/a b/start.sh', "/x';touch /tmp/pwned;'", '/$(id)/`id`/"q"/s.sh']) {
+      const r = Bun.spawnSync(['bash', '-c', `printf %s ${shellQuote(p)}`])
+      expect(r.stdout.toString()).toBe(p)
+    }
   })
 })

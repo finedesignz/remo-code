@@ -15,6 +15,12 @@ export function withStartHook(settings: any, command: string): any {
   return out
 }
 
+// POSIX single-quote a path so spaces or shell metacharacters in REMO_HOME
+// can't alter the persisted hook command.
+export function shellQuote(s: string): string {
+  return "'" + s.replaceAll("'", "'\\''") + "'"
+}
+
 if (import.meta.main) {
   const startScript = process.argv[2]
   if (!startScript) throw new Error('usage: install-hook.ts <start.sh>')
@@ -22,6 +28,6 @@ if (import.meta.main) {
   const path = join(dir, 'settings.json')
   mkdirSync(dir, { recursive: true })
   const current = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {}
-  writeFileSync(path, JSON.stringify(withStartHook(current, `bash ${startScript}`), null, 2) + '\n')
+  writeFileSync(path, JSON.stringify(withStartHook(current, `bash ${shellQuote(startScript)}`), null, 2) + '\n')
   console.log(`[remo-cloud] SessionStart hook registered in ${path}`)
 }

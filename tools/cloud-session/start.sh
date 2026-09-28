@@ -13,7 +13,10 @@ mkdir -p "$STATE_DIR"
 # hand a stale pidfile's pid to an unrelated process).
 if [ -f "$PIDFILE" ]; then
   pid="$(cat "$PIDFILE")"
-  if [ -n "$pid" ] && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q "src/index.ts run"; then
+  # ...and runs from THIS install's supervisor dir, so PID reuse by some other
+  # `bun src/index.ts run` can't suppress startup.
+  if [ -n "$pid" ] && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q "src/index.ts run" \
+    && [ "$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" = "$(cd "$REMO_HOME/supervisor" 2>/dev/null && pwd -P)" ]; then
     exit 0
   fi
 fi
