@@ -21,4 +21,9 @@ describe('describeTermRefusal', () => {
   test('an unknown reason still tells the user the prompt was not sent', () => {
     expect(describeTermRefusal('something_new')).toContain('Prompt not sent')
   })
+  test('control characters in a reason are stripped (no escape injection into the xterm)', () => {
+    const t = describeTermRefusal('weird\x1b[2J\x07reason')
+    expect(t).not.toMatch(/[\x00-\x1f]/)
+    expect(t).toContain('weird[2Jreason')
+  })
 })

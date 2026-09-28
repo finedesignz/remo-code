@@ -1,5 +1,9 @@
-/** Human-readable text for a hub `send_refused` on the terminal channel. */
-export function describeTermRefusal(reason: string): string {
+/** Human-readable text for a hub `send_refused` on the terminal channel.
+ *  Control characters are stripped: the text is written INTO the xterm, so a
+ *  reason must never be able to inject escape sequences. */
+export function describeTermRefusal(rawReason: string): string {
+  // eslint-disable-next-line no-control-regex
+  const reason = rawReason.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
   if (reason.startsWith('over_daily_cost_cap')) {
     return `Daily cost cap reached (${reason.split(':').slice(1).join(':')}) — prompt not sent. Raise it in Settings → Usage.`
   }

@@ -9,7 +9,7 @@ import { insertMessage, getSession, getUserLicenseFields, canWriteTerminal, getS
 import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { humanOnlyRejectsActor } from '../dispatch/gates.ts'
 import { checkPtyTurnPreflight, classifyPtyInput, type PtyInputClass } from '../dispatch/pty-preflight.ts'
-import { acquire, holder, releaseByWriter } from '../telegram/turn-lock.ts'
+import { acquire, holder, releaseByWriter, tryAcquireIfFree } from '../telegram/turn-lock.ts'
 import { claimTermWriter, currentTermWriter, dropTermWriter } from './term-writers.ts'
 import { log } from '../observability/logger'
 import { checkDuplicate, recordSend } from './send-dedupe.ts'
@@ -298,14 +298,15 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
       // another client connection may have superseded us, or the lock may have
       // been released/handed on. Drop rather than inject out-of-turn bytes.
       // If we are still the current client writer but the lock went FREE while
-      // we awaited (a turn_complete / TTL release), re-take it — acquire() on a
-      // free lock grants synchronously — rather than silently dropping the
-      // user's input. A lock now held by ANOTHER writer is never taken over.
+      // we awaited (a turn_complete / TTL release), re-take it with the
+      // SYNCHRONOUS `tryAcquireIfFree` — no await between that grant and the
+      // write below — rather than silently dropping the user's input. It never
+      // queues, so a lock now held by ANOTHER writer is never taken over and no
+      // orphaned grant is left behind.
       const current = currentTermWriter(frame.session_id)
-      if (current === writerId && holder(frame.session_id) === null) {
-        acquire(frame.session_id, writerId).catch(() => {})
-      }
-      const lockHolder = holder(frame.session_id)
+      const lockHolder = current === writerId && tryAcquireIfFree(frame.session_id, writerId)
+        ? writerId
+        : holder(frame.session_id)
       if (current !== writerId || lockHolder !== writerId) {
         log.warn('term.input.diag.drop', {
           gate: 'not_current_writer',
