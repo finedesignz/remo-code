@@ -220,10 +220,16 @@ interface BatchPromptItem {
  * EXTERNAL annotation id so the reply's `annotations[]` array can be routed
  * back unambiguously (`result-schema.ts` `RevanoteBatchResult`).
  *
- * Deploy trust/strategy is taken from the FIRST item's mapping — batch members
- * are grouped by the same resolved target session, which in practice means the
- * same repo mapping, so this mirrors `renderAnnotationPrompt`'s per-mapping
- * trust gate without re-deriving it per item.
+ * Deploy trust/strategy is taken from the FIRST item's mapping — PRECONDITION:
+ * the caller (`batch-dispatch.ts`) must sub-group by session AND by mapping
+ * before calling this, so every item in `items` shares exactly one mapping
+ * (qcfix/batch-claim, C5). Prod runs ~23 client sites, each with its own
+ * mapping/trust config, sharing ONE session, so "same session" alone does NOT
+ * imply "same mapping" — deriving trust from only one member of a
+ * mixed-mapping batch could let an untrusted site inherit another site's
+ * trusted direct/auto-merge plan. This function does not itself re-group or
+ * validate that precondition; it mirrors `renderAnnotationPrompt`'s
+ * per-mapping trust gate for whatever single mapping the caller guarantees.
  */
 export function renderBatchAnnotationPrompt(opts: { items: BatchPromptItem[] }): string {
   const { items } = opts

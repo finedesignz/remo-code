@@ -99,12 +99,21 @@ let runSeq = 0
 // revanoteBudgetGate (cap+pct), sumTodayAnnotationCostForUser is its own DAL fn.
 // We discriminate by the SQL text fragments.
 mock.module('../src/db/postgres.ts', () => ({
-  sql: async (strings: TemplateStringsArray) => {
+  sql: async (strings: TemplateStringsArray, ...values: any[]) => {
     const text = strings.join('')
     if (text.includes('user_id FROM annotations')) return [{ user_id: 'user-1' }]
     if (text.includes('AS tz')) return [{ tz: 'UTC' }]
     if (text.includes('revanote_budget_pct')) return [{ cap: String(state.costCap), pct: state.budgetPct }]
     if (text.includes('daily_cost_cap_usd::text AS cap')) return [{ cap: String(state.costCap) }]
+    // Atomic pre-send claim (qcfix/batch-claim) — this suite doesn't model
+    // annotation row state across calls (getAnnotationById below always
+    // returns a fresh synthetic 'pending' row), so every requested id is
+    // claimable; concurrent-claim races are covered in
+    // revanote-batch-dispatch.test.ts, which DOES share mutable row state.
+    if (text.includes("SET status = 'dispatching'")) {
+      const ids: string[] = values[0] ?? []
+      return ids.map((id) => ({ id }))
+    }
     return []
   },
 }))
