@@ -12,8 +12,10 @@ import {
   STALL_PARKED_MAX_MS,
   STALL_RUN_MAX_MS,
   STALL_COOLDOWN_MS,
+  runStallThresholdMs,
   type UserStallSummary,
 } from '../src/revanote/stall-alert.ts'
+import { batchRunMaxMs } from '../src/revanote/batch-dispatch.ts'
 
 const NOW = 1_800_000_000_000
 
@@ -180,5 +182,19 @@ describe('sweepRevanoteStalls', () => {
       },
     })
     expect(alerted).toEqual([])
+  })
+})
+
+describe('runStallThresholdMs (batch-vs-single alignment)', () => {
+  test('single-annotation run uses STALL_RUN_MAX_MS (default 30min)', () => {
+    expect(runStallThresholdMs(false)).toBe(STALL_RUN_MAX_MS)
+  })
+
+  test('batch-dispatched run uses the live batch ceiling, not STALL_RUN_MAX_MS', () => {
+    const threshold = runStallThresholdMs(true)
+    expect(threshold).toBe(batchRunMaxMs())
+    // The whole point of the alignment fix: a healthy 2h batch turn must NOT
+    // be flagged by the 30min single-annotation threshold.
+    expect(threshold).toBeGreaterThan(STALL_RUN_MAX_MS)
   })
 })

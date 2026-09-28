@@ -378,10 +378,17 @@ missing alarm.
     than `REMO_REVANOTE_STALL_PARKED_MAX_MS` (default 1h), measured from
     `dispatched_at` when set else `received_at`.
   - **Stuck in-flight run**: an `annotation_runs` row sits `status='in_flight'`
-    older than `REMO_REVANOTE_STALL_RUN_MAX_MS` (default 30min) — the
-    dispatcher's own `finalizeTimeoutMs` (default 20min) should have forced a
-    finalize before this; still in_flight at 30min means even that fallback
-    never fired (a strictly worse signal — the session/process itself is stuck).
+    older than its threshold — `REMO_REVANOTE_STALL_RUN_MAX_MS` (default
+    30min) for a single-annotation run, the dispatcher's own
+    `finalizeTimeoutMs` (default 20min) should have forced a finalize before
+    this; still in_flight at 30min means even that fallback never fired (a
+    strictly worse signal — the session/process itself is stuck). **A
+    batch-dispatched run is exempt from the 30min threshold** — its annotation
+    carries `payload_raw.batch_id`, and it legitimately runs up to
+    `REMO_REVANOTE_BATCH_RUN_MAX_MS` (default 2h, read live from
+    `batch-dispatch.ts` `batchRunMaxMs()` via `stall-alert.ts`
+    `runStallThresholdMs(isBatch)` — never a duplicated default), since one
+    batch turn does N comments' worth of branch/PR/CI/merge/redeploy work.
   - Fan-out reuses the existing orchestrator notify channel
     (`orchestrator/notify.ts` `fanOutNotify` — telegram + in-app + emails4agents
     email, per-user channel opt-in respected). No new transport.

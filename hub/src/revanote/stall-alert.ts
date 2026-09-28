@@ -38,6 +38,7 @@
 
 import { sql } from '../db/postgres.ts'
 import { fanOutNotify, type NotifyDeps } from '../orchestrator/notify.ts'
+import { batchRunMaxMs } from './batch-dispatch.ts'
 
 function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
   if (raw == null || raw === '') return fallback
@@ -56,11 +57,29 @@ export const STALL_PARKED_MAX_MS = parsePositiveIntEnv(
   3_600_000,
 )
 
-/** Age threshold for a stuck in_flight annotation_run. Default 30min. */
+/**
+ * Age threshold for a stuck in_flight annotation_run. Default 30min.
+ * Only applies to a SINGLE-annotation run. A batch-dispatched run (its
+ * annotation carries `payload_raw.batch_id`) legitimately runs up to the
+ * batch ceiling from `batch-dispatch.ts` `batchRunMaxMs()` (default 2h,
+ * `REMO_REVANOTE_BATCH_RUN_MAX_MS`) — reading that live knob here instead of
+ * duplicating its default avoids false-alarming on a healthy batch turn that
+ * simply takes longer than a single comment's reply.
+ */
 export const STALL_RUN_MAX_MS = parsePositiveIntEnv(
   process.env.REMO_REVANOTE_STALL_RUN_MAX_MS,
   1_800_000,
 )
+
+/**
+ * The in_flight age threshold to apply to one annotation_run, given whether
+ * its annotation carries `payload_raw.batch_id`. Single source of truth for
+ * both the SQL cutoff below and anything else that needs to reason about "is
+ * this run stuck yet" — never duplicate the batch ceiling's default here.
+ */
+export function runStallThresholdMs(isBatch: boolean): number {
+  return isBatch ? batchRunMaxMs() : STALL_RUN_MAX_MS
+}
 
 /** Sweep cadence. Default 5min. */
 export const STALL_SWEEP_INTERVAL_MS = parsePositiveIntEnv(
@@ -97,7 +116,8 @@ export interface StallAlertDeps {
 const REAL_DEPS: StallAlertDeps = {
   loadStalledPerUser: async (now: number) => {
     const parkedCutoff = new Date(now - STALL_PARKED_MAX_MS)
-    const runCutoff = new Date(now - STALL_RUN_MAX_MS)
+    const singleRunCutoff = new Date(now - runStallThresholdMs(false))
+    const batchRunCutoff = new Date(now - runStallThresholdMs(true))
 
     const parkedRows = await sql<
       { user_id: string; cnt: string; oldest: string }[]
@@ -112,13 +132,23 @@ const REAL_DEPS: StallAlertDeps = {
       GROUP BY user_id
     `
 
+    // A batch-dispatched run's annotation carries `payload_raw.batch_id` — it
+    // legitimately runs up to `batchRunCutoff` (the batch ceiling), not the
+    // single-annotation `singleRunCutoff`, so a healthy multi-hour batch turn
+    // never trips this as a false stall.
     const stuckRunRows = await sql<
       { user_id: string; cnt: string; oldest: string }[]
     >`
-      SELECT user_id, COUNT(*) AS cnt, MIN(started_at) AS oldest
-      FROM annotation_runs
-      WHERE status = 'in_flight' AND started_at < ${runCutoff}
-      GROUP BY user_id
+      SELECT ar.user_id, COUNT(*) AS cnt, MIN(ar.started_at) AS oldest
+      FROM annotation_runs ar
+      LEFT JOIN annotations a ON a.id = ar.annotation_id
+      WHERE ar.status = 'in_flight'
+      AND (
+        (a.payload_raw ? 'batch_id' AND ar.started_at < ${batchRunCutoff})
+        OR (NOT (a.payload_raw ? 'batch_id') AND ar.started_at < ${singleRunCutoff})
+        OR (a.id IS NULL AND ar.started_at < ${singleRunCutoff})
+      )
+      GROUP BY ar.user_id
     `
 
     const byUser = new Map<string, UserStallSummary>()
