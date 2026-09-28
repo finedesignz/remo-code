@@ -62,6 +62,7 @@ import { startAskReaperSweep, stopAskReaperSweep } from './ask/reaper.ts'
 import { startWorkReaperSweep, stopWorkReaperSweep } from './work/reaper.ts'
 import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
 import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.ts'
+import { startRevanoteStallSweep, stopRevanoteStallSweep } from './revanote/stall-alert.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { extApiKeyMiddleware } from './auth/ext-api-key-middleware'
@@ -756,6 +757,16 @@ runMigrations()
     // latency-optimization is lost (restart / thrown fire / swallowed register).
     // claimOnceTask keeps it exactly-once. No-op when REMO_ONCE_SWEEP_DISABLED.
     startOnceDueSweep()
+    // fix/revanote-stall-alert — owner-visible alert when revanote intake
+    // silently stalls (all ~23 client sites share ONE session; a wedged
+    // session stalls every client with no signal). Fans out (telegram+inapp+
+    // email via the shared orchestrator notify channel) at most once per user
+    // per REMO_REVANOTE_STALL_COOLDOWN_MS (default 1h) when annotations sit
+    // parked/rejected/target-offline past REMO_REVANOTE_STALL_PARKED_MAX_MS
+    // (default 1h) or an annotation_run sits in_flight past
+    // REMO_REVANOTE_STALL_RUN_MAX_MS (default 30min). No-op when
+    // REMO_REVANOTE_STALL_DISABLED is set.
+    startRevanoteStallSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -775,6 +786,7 @@ function gracefulShutdown(signal: string) {
   try { stopWorkReaperSweep() } catch {}
   try { stopStaleRunReaperSweep() } catch {}
   try { stopOnceDueSweep() } catch {}
+  try { stopRevanoteStallSweep() } catch {}
   setTimeout(() => process.exit(0), 250)
 }
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))

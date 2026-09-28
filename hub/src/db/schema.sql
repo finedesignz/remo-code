@@ -1167,6 +1167,17 @@ CREATE INDEX IF NOT EXISTS idx_annotation_runs_annotation
   ON annotation_runs(annotation_id);
 CREATE INDEX IF NOT EXISTS idx_annotation_runs_user_started
   ON annotation_runs(user_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_annotation_runs_status_started
+  ON annotation_runs(status, started_at) WHERE status = 'in_flight';
+
+-- fix/revanote-stall-alert — per-user de-dup for the revanote stall sweep
+-- (hub/src/revanote/stall-alert.ts). One row per user tracks the last time we
+-- fanned out a stall alert, so a persistent stall re-alerts at most once per
+-- REMO_REVANOTE_STALL_COOLDOWN_MS instead of once per sweep pass.
+CREATE TABLE IF NOT EXISTS revanote_stall_alerts (
+  user_id        UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  last_alert_at  TIMESTAMPTZ NOT NULL
+);
 
 -- Callback retry queue. `next_retry_at IS NULL` means terminal (delivered or
 -- dead-lettered). Worker scans the partial index for next_retry_at <= now().
