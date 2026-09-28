@@ -103,6 +103,7 @@ const WEBHOOK_PATHS: Array<{ path: string; note: string }> = [
   { path: '/api/revanote/webhook/user_test/wrong-token', note: 'revanote URL-token + HMAC' },
   { path: '/api/feedback/fb_disabled_token', note: 'feedback intake URL-token (disabled key → 403)' },
   { path: '/api/telegram/webhook/wrong-secret', note: 'telegram URL-secret' },
+  { path: '/api/cloud-hook/reply', note: 'cloud-session Stop hook (Bearer cloud:hook key; none → 401)' },
   { path: '/webhooks/titanium/license-changed', note: 'titanium license-changed HMAC' },
 ];
 

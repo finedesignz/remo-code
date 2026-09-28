@@ -763,6 +763,64 @@ openapi.openapi(taskTemplatesRoute, (c) => {
   });
 }
 
+// ── Cloud sessions (docs/cloud-sessions.md) ─────────────────────────────────
+// Spec-only registration; `./cloud-hook.ts` and `./sessions.ts` (plain Hono) serve traffic.
+{
+  const Err = z.object({ error: z.string() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const tokens = z.number().int().nonnegative().optional();
+  reg.registerPath({
+    method: "post",
+    path: "/api/cloud-hook/reply",
+    tags: ["cloud-sessions"],
+    security: [{ apiKeyAuth: [] }],
+    summary: "Post a claude.ai cloud session's finished turn into its linked remo session",
+    description:
+      "Called by the remo Stop hook (tools/cloud-hook/remo-cloud-stop-hook.mjs) running INSIDE a claude.ai cloud session. Auth: api_key Bearer whose scopes EXPLICITLY include `cloud:hook` (a legacy NULL-scopes key is refused). An unknown cloud_session_id is auto-linked to a new remo session. The text is stored as an assistant message (data, never instructions); reported usage is recorded in token_usage (runner_type='cloud') and counts against the owner's daily cost + token caps.",
+    request: {
+      body: json(
+        z.object({
+          cloud_session_id: z.string().openapi({ example: "cse_01ABC..." }),
+          text: z.string().min(1).max(200000),
+          model: z.string().max(100).nullish(),
+          usage: z
+            .object({ input_tokens: tokens, output_tokens: tokens, cache_creation_input_tokens: tokens, cache_read_input_tokens: tokens })
+            .nullish(),
+        }),
+      ),
+    },
+    responses: {
+      202: {
+        description: "Stored and broadcast",
+        ...json(z.object({ ok: z.boolean(), session_id: z.string(), message_id: z.string(), linked: z.boolean() })),
+      },
+      400: { description: "Invalid JSON or body", ...json(Err) },
+      401: { description: "Missing/unknown api key", ...json(Err) },
+      403: { description: "Key lacks the explicit cloud:hook scope", ...json(z.object({ error: z.string(), required: z.string() })) },
+      413: { description: "Body over 512KB", ...json(Err) },
+      429: { description: "Rate limited", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/sessions/cloud",
+    tags: ["cloud-sessions"],
+    security: [{ bearerAuth: [] }],
+    summary: "Link a claude.ai cloud session to a remo session",
+    description:
+      "Accepts a bare `cse_…`/`session_…` id or a claude.ai/code URL. Idempotent: re-linking returns the existing session (200). Messages sent to the linked session are queued into the cloud session via a supervisor's `claude -p --cloud <id>`.",
+    request: {
+      body: json(z.object({ cloud_session_id: z.string().max(500), name: z.string().min(1).max(100).optional() })),
+    },
+    responses: {
+      200: { description: "Already linked", ...json(z.object({ session_id: z.string(), name: z.string(), cloud_session_id: z.string(), created: z.boolean() })) },
+      201: { description: "Linked (new session)", ...json(z.object({ session_id: z.string(), name: z.string(), cloud_session_id: z.string(), created: z.boolean() })) },
+      400: { description: "Invalid input or cloud session id", ...json(Err) },
+    },
+  });
+}
+
 // ── /api/ext — external session-ask API (milestone ASK) ─────────────────────
 // Spec-only registration; `./ext.ts` (plain Hono) serves traffic. Auth is an
 // api_key Bearer (`apiKeyAuth`), NOT the cookie/JWT session. See docs/session-ask.md.

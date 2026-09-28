@@ -22,6 +22,7 @@ import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { probeGithubAppScope } from '../lib/github-scope.ts'
 import { enqueueCreateGithubRepoJob } from '../lib/github-repo-job.ts'
 import { randomUUID } from 'node:crypto'
+import { linkCloudSession, normalizeCloudSessionId } from '../db/cloud-sessions-dal.ts'
 import path from 'node:path'
 
 const CreateSessionBody = z.object({
@@ -154,6 +155,24 @@ sessions.post('/', async (c) => {
   const session = await createSession(userId, parsed.data.name, parsed.data.project_dir || null, tokenHash)
 
   return c.json({ ...session, token: rawToken }, 201)
+})
+
+// Link a claude.ai cloud session (cse_… id or claude.ai/code URL) to a remo
+// session. Idempotent: re-linking the same id returns the existing row (200).
+// See docs/cloud-sessions.md.
+const LinkCloudBody = z.object({
+  cloud_session_id: z.string().min(1).max(500),
+  name: z.string().min(1).max(100).trim().optional(),
+})
+sessions.post('/cloud', async (c) => {
+  const userId = c.get('userId') as string
+  const parsed = LinkCloudBody.safeParse(await c.req.json().catch(() => null))
+  if (!parsed.success) return c.json({ error: 'invalid input' }, 400)
+  const cloudId = normalizeCloudSessionId(parsed.data.cloud_session_id)
+  if (!cloudId) return c.json({ error: 'invalid_cloud_session_id' }, 400)
+  const name = parsed.data.name || `Cloud ${cloudId.slice(-8)}`
+  const linked = await linkCloudSession(userId, cloudId, name, await hashToken(generateToken('remo_')))
+  return c.json({ session_id: linked.id, name: linked.name, cloud_session_id: cloudId, created: linked.created }, linked.created ? 201 : 200)
 })
 
 // Disconnect / delete a session.

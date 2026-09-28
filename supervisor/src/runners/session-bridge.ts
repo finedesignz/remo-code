@@ -590,6 +590,10 @@ export class SessionBridge {
       // Runner exited; the hub bridge stays up so reconnects pick up the same
       // session, but we surface so ProcessManager can finalize the run.
       this.cb.onLog('warn', `agent-bridge: runner exited code=${e.code}`)
+      // Drop the dead runner so a later user_message spawns a fresh one via
+      // ensureRunner() instead of queueing onto a process that will never be
+      // ready again (it waited 30s, then silently discarded the prompt).
+      this.runner = null
       this.cb.onExit({ code: e.code, reason: 'runner_exit' })
       return
     }

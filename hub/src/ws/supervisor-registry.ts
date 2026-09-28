@@ -506,6 +506,34 @@ export function getInventoriedSupervisors(): Array<{ supervisorId: string; liveS
   return out
 }
 
+/**
+ * Connected supervisors for `(userId, hostname)` that have pushed
+ * `session_inventory` within `maxAgeMs`, with the live session set each
+ * reported. Same positive-knowledge rule as `getInventoriedSupervisors`: a
+ * supervisor that never pushed, or stopped pushing, contributes nothing, so an
+ * empty result means "unknown", never "nothing is alive". Used by the
+ * dead-session reaper to prove a channel's CLI is gone.
+ */
+export function getFreshInventoryForHost(
+  userId: string,
+  hostname: string,
+  maxAgeMs: number,
+  now: number = Date.now(),
+): Array<{ supervisorId: string; liveSessionIds: Set<string> }> {
+  const host = hostname.trim().toLowerCase()
+  const out: Array<{ supervisorId: string; liveSessionIds: Set<string> }> = []
+  if (!host) return out
+  for (const [supervisorId, e] of supervisors) {
+    if (e.userId !== userId) continue
+    if ((e.hostname ?? '').trim().toLowerCase() !== host) continue
+    if (e.sessionInventoryAt == null) continue
+    const at = Date.parse(e.sessionInventoryAt)
+    if (!Number.isFinite(at) || now - at > maxAgeMs) continue
+    out.push({ supervisorId, liveSessionIds: new Set(e.sessionInventory.map((s) => s.session_id)) })
+  }
+  return out
+}
+
 export function getActiveSessionIdsForUser(userId: string): Set<string> {
   const out = new Set<string>()
   for (const [, e] of supervisors) {

@@ -14,6 +14,7 @@ import { log as obs } from './observability/logger'
 import { VERSION } from './version'
 import { pollUsage, USAGE_POLL_INTERVAL_MS, type UsagePayload } from './usage/oauth-poll'
 import { writeForceUpdateMarker } from './runners/force-update-marker'
+import { runCloudSend } from './commands/cloud-send'
 
 /** Bug A — push the live runner set to the hub every 10s after auth_ok. */
 const SESSION_INVENTORY_INTERVAL_MS = 10_000
@@ -56,6 +57,8 @@ type OutboundMsg =
   | { type: 'supervisor.rescan_ack'; req_id: string; ok: boolean; error?: string }
   // milestone remote-update-trigger — ack for a hub-initiated forced update.
   | { type: 'supervisor.force_update_ack'; req_id: string; ok: boolean; error?: string }
+  // Cloud sessions — ack for `cloud_session.send` (commands/cloud-send.ts).
+  | { type: 'cloud_session.send_ack'; req_id: string; ok: boolean; error?: string }
   // P1 usage poll — parsed, non-secret Anthropic OAuth utilization snapshot.
   // The OAuth token is read locally in usage/oauth-poll.ts and NEVER serialized
   // here; only the four utilization windows + reset times cross the wire.
@@ -349,6 +352,7 @@ export class SupervisorClient {
       case 'supervisor.set_roots': await this.onSetRoots(msg); break
       case 'supervisor.rescan_repos': await this.onRescanRepos(msg); break
       case 'supervisor.force_update': this.onForceUpdate(msg); break
+      case 'cloud_session.send': void this.onCloudSend(msg); break // detached: the CLI can take seconds
       default:
         // unknown
         break
@@ -573,6 +577,19 @@ export class SupervisorClient {
       this.log('warn', `rescan_repos failed: ${err?.message ?? err}`)
       this.send({ type: 'supervisor.rescan_ack', req_id: reqId, ok: false, error: String(err?.message ?? err) })
     }
+  }
+
+  /**
+   * Cloud sessions — hub asks us to queue one message into a claude.ai cloud
+   * session (`claude -p --cloud <id>`). Always acks; a CLI rejection surfaces
+   * as ok:false with the CLI's own reason.
+   */
+  private async onCloudSend(msg: { req_id: string; cloud_session_id: string; content: string }) {
+    const r = await runCloudSend(String(msg.cloud_session_id ?? ''), String(msg.content ?? ''))
+    if (!r.ok) this.log('warn', `cloud_session.send failed: ${r.error}`)
+    this.send(r.ok
+      ? { type: 'cloud_session.send_ack', req_id: msg.req_id, ok: true }
+      : { type: 'cloud_session.send_ack', req_id: msg.req_id, ok: false, error: r.error })
   }
 
   /**
