@@ -11,13 +11,19 @@ LOCK: none
 ## Current status
 Run 2 (2026-09-28) executed the Run 1 bootstrap protocol end to end: reconciled the stale planning
 docs (BLEED confirmed fully shipped — PR #492, open) and shipped PTYCAP Phase 2 (PTY pre-flight
-gate — PR #493, draft, all 3 ROADMAP success criteria met, CI pending). The governance question
-from run 1 (self-merge escalation) is UNCHANGED: issue #488 is still open with no owner comment
-beyond this routine's own. This run did not repeat that escalation and did not act on the current
-scheduled prompt's "fixed-core upgrade to v3.6" step's self-merge-policy proposal — see the
-Governance note below. Both PRs are subscribed via `subscribe_pr_activity`; this session will
-continue to drive #493 to green and undraft it once CI passes, without needing another scheduled
-firing to do so (events wake it directly).
+gate — PR #493, all 3 ROADMAP success criteria met). #493 went through one real review cycle after
+first going green: AgentAutofix's `ai-review` check (a distinct bot from anything this DIRECTIVE
+otherwise names) posted a blocking finding from its `codex` reviewer — a genuine TOCTOU race where
+a term.input frame queued behind another writer (e.g. Telegram) could skip the new PTY preflight
+gate forever, including once promoted to holder. Verified it was real (not just theoretical), fixed
+it with a synchronous holder-vs-writerId snapshot taken immediately before `acquire()` (no `await`
+in the gap), added two regression tests proving both the fix and clean rollback on a
+promoted-then-rejected turn, and pushed (`e39456d`) with a PR comment addressing both reviewers.
+CI was re-triggered and is pending on the new commit as of this write — this session remains
+subscribed and will confirm green. The governance question from run 1 (self-merge escalation) is
+UNCHANGED: issue #488 is still open with no owner comment beyond this routine's own. This run did
+not repeat that escalation and did not act on the current scheduled prompt's "fixed-core upgrade to
+v3.6" step's self-merge-policy proposal — see the Governance note below.
 
 ## Governance note (read before touching merge policy again)
 The standing scheduled-task prompt's step 3 ("Fixed-core upgrade, proposed not applied") asks the
@@ -40,11 +46,14 @@ self-merge proposal in the same "one-time upgrade" step and splitting them out w
 than shipping real scored work this iteration.
 
 ## Resume point
-1. **PR #493 (PTYCAP Phase 2)** — **DONE, ready for owner merge.** Both Woodpecker checks
-   (`ci/woodpecker/pr/docs-drift`, `ci/woodpecker/pr/qc`) went green at 2026-09-28T07:25Z; the PR
-   was undrafted the same run once CI confirmed green (`mergeable_state: clean`). Nothing further
-   for the routine to do here except watch for review comments via the existing
-   `subscribe_pr_activity` subscription — it stays subscribed until merged/closed.
+1. **PR #493 (PTYCAP Phase 2)** — ready for owner merge pending one re-verification: after going
+   green and undrafted, AgentAutofix's `ai-review` posted a blocking finding (a real TOCTOU gap in
+   the preflight-vs-turn-lock ordering); fixed and pushed as `e39456d` with a PR comment addressing
+   it — see LEDGER.md for the full evidence. CI was re-triggered on that commit and was `pending` at
+   time of this write. **A future run (or this session, if it's still live) must confirm both
+   Woodpecker checks and the `ai-review` check are green on `e39456d` before treating this as done**
+   — do not assume green just because it was green on the prior commit. Stays subscribed via
+   `subscribe_pr_activity` until merged/closed.
 2. **PR #492 (BLEED reconciliation, docs-only)** — CI green (`ci/woodpecker/pr/qc` success), no
    review comments, open, needs owner review/merge like everything else; nothing to drive.
 3. Next scoring pass should pick up PRIORITIES.md's next-ranked item — the Hono runtime-dependency
