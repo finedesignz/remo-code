@@ -85,12 +85,17 @@ const state: {
   resolvedSession: { id: string } | null
   // session_id persisted on the annotation row returned by getAnnotationById.
   annSessionId: string
+  // every id the pre-send claim (claimAnnotationsAtSend) was invoked with,
+  // across every call — used to prove WHEN (relative to queueing) a claim
+  // happens (R2-1).
+  claimCalls: string[]
 } = {
   runs: [], annStatus: [], broadcasts: [], sentFrames: [], callbacks: [],
   budgetPct: 60, todayCost: 0, costCap: 10,
   offlineSessions: new Set(),
   resolvedSession: { id: 'sess-1' },
   annSessionId: 'sess-1',
+  claimCalls: [],
 }
 
 let runSeq = 0
@@ -110,8 +115,9 @@ mock.module('../src/db/postgres.ts', () => ({
     // returns a fresh synthetic 'pending' row), so every requested id is
     // claimable; concurrent-claim races are covered in
     // revanote-batch-dispatch.test.ts, which DOES share mutable row state.
-    if (text.includes("SET status = 'dispatching'")) {
+    if (text.includes("SET status = 'dispatched'")) {
       const ids: string[] = values[0] ?? []
+      state.claimCalls.push(...ids)
       return ids.map((id) => ({ id }))
     }
     return []
@@ -214,6 +220,7 @@ beforeEach(() => {
   state.offlineSessions = new Set()
   state.resolvedSession = { id: 'sess-1' }
   state.annSessionId = 'sess-1'
+  state.claimCalls = []
   runSeq = 0
   _reset()
 })
@@ -280,6 +287,35 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     await onSessionReply('sess-1', '<<JSON>>{"resolved":true}<<END>>')
     expect(state.runs).toHaveLength(2)
     expect(state.runs[1].id).toBe('run-2')
+  })
+
+  test('R2-1: a queued annotation is never claimed and survives a hub restart (_reset) fully dispatchable', async () => {
+    // First dispatch claims the in-flight slot for sess-1.
+    await dispatchPendingAnnotation('ann-1')
+    expect(state.runs).toHaveLength(1)
+
+    // A second, distinct annotation on the SAME session queues behind it.
+    const out2 = await dispatchPendingAnnotation('ann-2')
+    expect(out2).toEqual({ status: 'queued' })
+
+    // The queued annotation must NEVER have been claimed — the claim only
+    // happens inside deps.send(), which a merely-queued request never
+    // reaches. Pre-fix, the claim ran unconditionally BEFORE dispatch() was
+    // even called, so ann-2 would already appear in claimCalls here.
+    expect(state.claimCalls).not.toContain('ann-2')
+    expect(state.annStatus.some((s) => s.id === 'ann-2')).toBe(false)
+
+    // Simulate a hub restart: the pipeline's in-memory active-hook + waiter
+    // state is gone (this is exactly what stranded a claimed-but-unsent row
+    // forever pre-fix — nothing ever resets 'dispatching' back to 'pending').
+    _reset()
+
+    // Because ann-2 was never claimed, it is still 'pending' in the DB and a
+    // fresh dispatch attempt for it must succeed outright (not `noop:
+    // already_claimed`, not stuck) — proving restart-recoverability.
+    const redispatched = await dispatchPendingAnnotation('ann-2')
+    expect(redispatched.status).toBe('dispatched')
+    expect(state.sentFrames.some((f) => true)).toBe(true)
   })
 })
 

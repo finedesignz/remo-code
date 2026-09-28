@@ -11,7 +11,6 @@ import { sql } from './postgres.ts'
 
 export type AnnotationStatus =
   | 'pending'
-  | 'dispatching'
   | 'dispatched'
   | 'resolved'
   | 'failed'
@@ -425,28 +424,35 @@ export async function updateAnnotationStatus(
 }
 
 /**
- * Atomic pre-send claim (qcfix/batch-claim — closes F2/F4: no dispatch path
- * may send a prompt before it OWNS every annotation it's about to speak for).
+ * Send-time atomic claim (qcfix/r2-claim-at-send — supersedes the round-1
+ * qcfix/batch-claim pre-dispatch claim, which closed F2/F4 but opened a new
+ * strand class: a claim taken BEFORE `dispatch()` claimed rows that only ever
+ * got QUEUED (never sent), and a hub restart drops the in-memory queue/waiter
+ * state, permanently stranding those rows off the 'pending' sweep/retry path
+ * with no recovery (R2-1).
+ *
+ * This is now called from INSIDE the pipeline's `send()` adapter, immediately
+ * before the WS push — for a first dispatch AND for a promoted queue
+ * re-dispatch (both funnel through the same `send()`). A row that is merely
+ * QUEUED behind another in-flight send never reaches this call at all, so it
+ * stays 'pending' — exactly as restart-recoverable as before any claim
+ * existed. Only a row actually about to be sent leaves 'pending', straight to
+ * 'dispatched' (no separate claim state — see revert of 'dispatching' from
+ * the status enum/CHECK in this migration).
+ *
  * A single conditional `UPDATE ... WHERE status='pending' RETURNING id` per
  * caller — whichever caller's UPDATE commits first wins each row; every other
- * concurrent caller (a racing retry, an overlapping sweep tick, a crash-then-
- * restart re-read) sees that row filtered out of its own WHERE clause and gets
- * it back as NOT claimed. Returns only the ids actually transitioned
- * pending -> dispatching; the caller must treat any id missing from the
- * result as already owned elsewhere and skip it, never re-send for it.
- *
- * A crash after a successful claim (before the send that was supposed to
- * follow it) leaves the row parked at 'dispatching' — deliberately NOT
- * reset back to 'pending' by anything on restart, so a crash mid-flight can
- * never turn into an automatic re-send loop. `stall-alert.ts` surfaces a
- * stuck 'dispatching' row past its parked-stall threshold (same alarm as a
- * parked/rejected annotation) so it is never a silent dead end.
+ * concurrent caller (a racing retry, an overlapping sweep tick) sees that row
+ * filtered out of its own WHERE clause and gets it back as NOT claimed. The
+ * caller must treat any id missing from the result as already owned
+ * elsewhere and MUST NOT send for it (throw before building/broadcasting any
+ * prompt — see dispatcher.ts / batch-dispatch.ts `send()`).
  */
-export async function claimAnnotationsForDispatch(ids: string[]): Promise<string[]> {
+export async function claimAnnotationsAtSend(ids: string[]): Promise<string[]> {
   if (ids.length === 0) return []
   const rows = await sql<{ id: string }[]>`
     UPDATE annotations
-       SET status = 'dispatching'
+       SET status = 'dispatched'
      WHERE id = ANY(${ids})
        AND status = 'pending'
      RETURNING id

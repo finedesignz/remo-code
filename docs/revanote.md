@@ -238,18 +238,35 @@ single-annotation path below.
   (`parseRevanoteOutput`), which would otherwise happily accept a lone
   `{"resolved":true,...}` object and silently resolve every member from ONE verdict meant for
   at most one annotation (qcfix/batch-claim, F3).
-- **Atomic pre-send claim (qcfix/batch-claim, closes F2/F4)**: every dispatch path — the single
-  path (`dispatcher.ts` `dispatchAnnotationRow`, including `forceSingle` retry) and the batch path
-  (`batch-dispatch.ts` `dispatchBatch`) — calls `claimAnnotationsForDispatch` (a single conditional
-  `UPDATE annotations SET status='dispatching' WHERE id = ANY(...) AND status='pending' RETURNING
-  id`) BEFORE building any prompt or sending anything. Whichever caller's claim commits first wins
-  each row; every other concurrent caller (a `forceSingle` retry racing a sweep tick over the same
-  still-`batch_id`-carrying row, or an overlapping sweep tick) sees that row already claimed and
-  backs off instead of sending a duplicate. A crash after a successful claim (before the send that
-  was supposed to follow) leaves the row parked at `status='dispatching'` — deliberately NOT reset
-  to `pending` by anything on restart, so a crash mid-batch can never turn into an automatic
-  re-send loop; `stall-alert.ts` alarms on a `dispatching` row stuck past the parked-stall threshold
-  exactly like a parked/rejected annotation, so it is never a silent dead end.
+- **Send-time atomic claim (qcfix/r2-claim-at-send, supersedes qcfix/batch-claim's pre-dispatch
+  claim)**: the round-1 fix (F2/F4) claimed every member with a conditional
+  `UPDATE ... SET status='dispatching' WHERE status='pending'` BEFORE calling `dispatch()` at all —
+  which closed the double-send races but opened a new strand class (R2-1): an annotation that only
+  ever got QUEUED behind another in-flight send on the same session was ALREADY claimed to
+  `'dispatching'` even though nothing was ever sent for it, and a hub restart drops the in-memory
+  queue/waiter state that would have promoted and sent it — permanently stranding the row off the
+  `'pending'` sweep/retry path with no recovery. The claim now lives INSIDE the pipeline's `send()`
+  adapter (`claimAnnotationsAtSend` in `revanote-dal.ts`: a single conditional
+  `UPDATE annotations SET status='dispatched' WHERE id = ANY(...) AND status='pending' RETURNING
+  id`), immediately before the WS push, for BOTH a first dispatch and a promoted queue re-dispatch
+  (`dispatch()` calls the same `send()` either way). A merely-queued annotation/batch never reaches
+  this claim and stays `'pending'` — exactly as restart-recoverable as before any claim existed.
+  There is no longer a separate `'dispatching'` claim state: the CAS transitions straight
+  `pending -> dispatched`, so a lost claim race (`already_claimed`) never leaves the row in an
+  intermediate state for `stall-alert.ts` to have to special-case. For a batch, the claim also
+  filters the group down to only the ids actually claimed — the prompt sent covers ONLY that
+  claimed subset, never a member another caller won first.
+- **Manual retry is CAS-gated against live ownership (qcfix/r2-claim-at-send, R2-2)**: a naive
+  unconditional reset-to-`'pending'` + re-dispatch on `POST …/retry` could re-pend and re-claim an
+  annotation whose first turn was still genuinely in flight, sending it a second time while the
+  first was still running. The route now checks `status==='dispatched'` and, only then, consults
+  `pipeline.isTokenLive` (single-annotation dispatch) and `batch-dispatch.isAnnotationLiveInBatch`
+  (batch dispatch) — both read-only queries against the pipeline's in-memory active-hook/waiter
+  state and the batch coalescer's `inFlightBatches` map. Genuinely live → `409 annotation_in_flight`,
+  no reset, no re-dispatch. Not live (stranded after a restart — those maps are cleared on restart
+  exactly like the claim above) → retry proceeds as before. `pending`/`failed`/`failed_offline`/
+  `resolved` rows never consult liveness — the pipeline always releases ownership before setting any
+  of those.
 - **Batch dispatch token scoping (qcfix/batch-claim, C3)**: a batch's dispatch token (and the
   `inFlightBatches` map key) is `batch:<userId>:<sessionId>:<mappingId>:<batch_id>`, never the raw
   `batch_id` alone. One `batch_id` can legitimately split into several dispatched groups (a
@@ -279,11 +296,15 @@ Tests: `hub/test/revanote-batch-dispatch.test.ts` (coalescing, debounce reset fr
 arrival, one-prompt-per-batch, array-reply finalize with the per-item commit-verify gate, a missing
 member, an unparseable reply — including a lone single-annotation-shaped object, which must fail
 every member rather than resolve them all from one verdict — the no-batch_id single path,
-`forceSingle` retry (including a race against a sweep tick over the same row), the atomic pre-send
-claim surviving a crash mid per-member dispatched-status loop, one `batch_id` spanning 2 sessions
+`forceSingle` retry (including a race against a sweep tick over the same row), the send-time claim
+surviving a crash mid per-member dispatched-status loop, a queued batch surviving a hub restart
+still `'pending'` and re-sweeping successfully (R2-1), one `batch_id` spanning 2 sessions
 dispatching + finalizing independently, two differently-trusted mappings sharing one session and
 `batch_id` dispatching as isolated single-mapping batches, and the batch-specific finalize
-ceiling).
+ceiling). `hub/test/revanote-dispatch.test.ts` additionally covers the single-annotation R2-1
+restart-recovery case. `hub/test/revanote-retry-guard.test.ts` covers the R2-2 retry
+live-ownership CAS (refused while live, allowed once stranded) and the R2-4 `?status=` 400 on an
+unrecognized value.
 
 ## Outbound callback
 

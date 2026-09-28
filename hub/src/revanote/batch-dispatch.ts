@@ -54,7 +54,7 @@ import {
   type RevanoteMapping,
   updateAnnotationStatus,
   insertAnnotationRun,
-  claimAnnotationsForDispatch,
+  claimAnnotationsAtSend,
 } from '../db/revanote-dal.ts'
 import { getChannel, broadcastRevanoteEvent, broadcastToSubscribers } from '../ws/registry.ts'
 import { insertMessage } from '../db/dal.ts'
@@ -216,23 +216,16 @@ async function dispatchBatch(
   sessionId: string,
   group: Array<{ ann: AnnotationRow; mapping: RevanoteMapping | null; sessionId: string }>,
 ): Promise<void> {
-  // ATOMIC CLAIM (qcfix/batch-claim, closes F2): claim EVERY member with one
-  // conditional `pending -> dispatching` UPDATE BEFORE building the prompt or
-  // sending anything. A crash mid-loop used to leave members `pending` under
-  // the same batch_id, so the next sweep tick re-read them as still-pending
-  // and re-dispatched the whole group (a second run, a second prompt frame).
-  // Now a crash after this point leaves the claimed rows at 'dispatching' —
-  // never re-picked-up by this sweep's own `WHERE status='pending'` query, so
-  // a restart can never re-send for them. A row a racing `forceSingle` retry
-  // already claimed out from under this tick is filtered out here instead of
-  // being sent twice.
-  const claimedIds = new Set(await claimAnnotationsForDispatch(group.map((g) => g.ann.id)))
-  const claimedGroup = group.filter((g) => claimedIds.has(g.ann.id))
-  if (claimedGroup.length === 0) return
-  group = claimedGroup
-
-  const anns = group.map((g) => g.ann)
-  const rawBatchId = batchIdOf(anns[0])!
+  // qcfix/r2-claim-at-send (supersedes qcfix/batch-claim's pre-dispatch claim,
+  // which closed F2/F4 but opened R2-1: claiming BEFORE dispatch() admitted
+  // this group past the per-session queue stranded a merely-QUEUED batch at a
+  // claimed-but-never-sent state across a hub restart). The claim — and the
+  // prompt build, and the per-member run rows — now all happen inside `send`
+  // below, immediately before the WS push, using ONLY the ids actually
+  // claimed there. `group` here is every RESOLVED candidate, not yet owned by
+  // anyone; the token is deterministic (doesn't depend on the claim result)
+  // so it stays stable across open()/send()/finalize.
+  const rawBatchId = batchIdOf(group[0].ann)!
   // qcfix/batch-claim (C3, widened for C5): the dispatch token (and the
   // `inFlightBatches` map key) must be unique per DISPATCHED GROUP, not just
   // per (userId, sessionId, batch_id) — a raw batch_id alone collides across
@@ -247,39 +240,40 @@ async function dispatchBatch(
   const mappingId = group[0]?.mapping?.id ?? 'no-mapping'
   const batchId = `batch:${userId}:${sessionId}:${mappingId}:${rawBatchId}`
   const tz = await getUserTimezone(userId)
-  const promptBody = renderBatchAnnotationPrompt({
-    items: group.map((g) => ({ annotation: g.ann, mapping: g.mapping })),
-  })
-  const storedContent = `[revanote: batch of ${anns.length}]\n\n${promptBody}`
+
+  // Populated by `send()` once it knows which members it actually claimed —
+  // read by the post-dispatch 'dispatched' handling below (markSkipped fires
+  // BEFORE send/claim and always applies to the whole resolved `group`).
+  let claimedAnns: AnnotationRow[] = []
 
   const store: RunStore = {
+    // No DB writes here — the real claim + per-member run rows happen in
+    // send() (immediately before the WS push), so open() just hands back the
+    // deterministic token. Firing this before the claim would commit run rows
+    // for members another caller ends up owning.
     async open(_req) {
-      const members: BatchMember[] = []
-      for (const ann of anns) {
-        const run = await insertAnnotationRun({ annotation_id: ann.id, user_id: userId, session_id: sessionId })
-        members.push({
-          annotationId: ann.id,
-          externalId: ann.annotation_id_external,
-          runId: run.id,
-          startedAt: Date.now(),
-        })
-      }
-      inFlightBatches.set(batchId, { userId, sessionId, members })
       return batchId
     },
-    async markSkipped(token, reason) {
+    async markSkipped(_token, reason) {
       const isBusy = reason === 'session_busy'
-      for (const ann of anns) {
+      for (const { ann } of group) {
         await updateAnnotationStatus(ann.id, 'failed', { skip_reason: reason, session_id: sessionId })
         broadcastRevanoteEvent(userId, { type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason })
         void enqueueRejectionCallback(ann, isBusy ? 'session_busy' : 'budget_threshold', reason)
       }
-      inFlightBatches.delete(token)
     },
     async onFinalize(token, content) {
       await finalizeBatchReply(token, content)
     },
     async markFailed(token, errMsg) {
+      if (errMsg === 'already_claimed') {
+        // Every member was already claimed by another caller (a racing
+        // forceSingle retry, or an overlapping sweep tick that beat us to
+        // it) — no run rows were ever created for this attempt. That other
+        // caller owns their fate; nothing to mark here.
+        inFlightBatches.delete(token)
+        return
+      }
       const batch = inFlightBatches.get(token)
       for (const m of batch?.members ?? []) {
         await updateAnnotationStatus(m.annotationId, 'failed', { skip_reason: `agent_send_failed: ${errMsg}` })
@@ -303,14 +297,45 @@ async function dispatchBatch(
       await dispatchBatch(userId, sessionId, group)
     },
     onParkExpire: async () => {
-      for (const ann of anns) {
+      for (const { ann } of group) {
         await updateAnnotationStatus(ann.id, 'failed_offline', { skip_reason: 'target_offline_expired' })
         void enqueueRejectionCallback(ann, 'target_offline', 'target_offline_expired')
       }
     },
+    // SEND-TIME CLAIM (qcfix/r2-claim-at-send, R2-1): claim every member of
+    // `group` right here — for BOTH a first dispatch and a promoted queue
+    // re-dispatch (dispatch() calls this same fn either way), so a merely
+    // queued batch never reaches this claim and stays 'pending'. Filter down
+    // to only what THIS call actually claims (a race may already own some or
+    // all members); the prompt sent covers ONLY the claimed subset — never a
+    // member this call didn't win.
     send: async (req) => {
+      const claimedIds = new Set(await claimAnnotationsAtSend(group.map((g) => g.ann.id)))
+      const claimed = group.filter((g) => claimedIds.has(g.ann.id))
+      if (claimed.length === 0) throw new Error('already_claimed')
+
       const channel = getChannel(req.sessionId)
       if (!channel) throw new Error('session_offline')
+
+      claimedAnns = claimed.map((g) => g.ann)
+      const promptBody = renderBatchAnnotationPrompt({
+        items: claimed.map((g) => ({ annotation: g.ann, mapping: g.mapping })),
+      })
+      const storedContent = `[revanote: batch of ${claimedAnns.length}]\n\n${promptBody}`
+      req.prompt = promptBody
+
+      const members: BatchMember[] = []
+      for (const ann of claimedAnns) {
+        const run = await insertAnnotationRun({ annotation_id: ann.id, user_id: userId, session_id: sessionId })
+        members.push({
+          annotationId: ann.id,
+          externalId: ann.annotation_id_external,
+          runId: run.id,
+          startedAt: Date.now(),
+        })
+      }
+      inFlightBatches.set(batchId, { userId, sessionId, members })
+
       const msg = await insertMessage(req.sessionId, 'user', storedContent)
       broadcastToSubscribers(req.sessionId, { type: 'message', session_id: req.sessionId, message: msg })
       channel.ws.send(
@@ -319,12 +344,12 @@ async function dispatchBatch(
     },
   }
 
-  const req: DispatchRequest = { userId, sessionId, token: batchId, prompt: promptBody }
+  const req: DispatchRequest = { userId, sessionId, token: batchId, prompt: '' }
   const outcome = await dispatch(req, deps)
 
   switch (outcome.kind) {
     case 'dispatched':
-      for (const ann of anns) {
+      for (const ann of claimedAnns) {
         await updateAnnotationStatus(ann.id, 'dispatched', { session_id: sessionId, dispatched_at: new Date() })
         broadcastRevanoteEvent(userId, {
           type: 'revanote_dispatched',
@@ -336,7 +361,7 @@ async function dispatchBatch(
       }
       return
     case 'parked_offline':
-      for (const ann of anns) {
+      for (const { ann } of group) {
         await updateAnnotationStatus(ann.id, 'pending', { skip_reason: 'session_offline', session_id: sessionId })
         broadcastRevanoteEvent(userId, {
           type: 'revanote_skipped', annotation_id: ann.id, skip_reason: 'session_offline',
@@ -348,6 +373,23 @@ async function dispatchBatch(
     default:
       return
   }
+}
+
+/**
+ * Read-only (qcfix/r2-claim-at-send, R2-2): is `annotationId` a member of a
+ * currently in-flight batch turn? Returns the owning session + dispatch token
+ * so a retry endpoint can check `pipeline.isTokenLive` against it before
+ * resetting the row to 'pending'. `inFlightBatches` is in-memory and cleared
+ * on restart exactly like the pipeline's own active-hook/waiter maps, so a
+ * genuinely stranded (post-restart) row correctly reports not-live here too.
+ */
+export function isAnnotationLiveInBatch(annotationId: string): { sessionId: string; token: string } | null {
+  for (const [token, batch] of inFlightBatches) {
+    if (batch.members.some((m) => m.annotationId === annotationId)) {
+      return { sessionId: batch.sessionId, token }
+    }
+  }
+  return null
 }
 
 /**

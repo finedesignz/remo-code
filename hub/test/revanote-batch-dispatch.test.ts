@@ -127,20 +127,20 @@ mock.module('../src/db/postgres.ts', () => ({
     if (text.includes("payload_raw ? 'batch_id'")) {
       return state.pendingAnnotations.filter((a) => a.status === 'pending' && a.payload_raw?.batch_id)
     }
-    // Atomic claim: `UPDATE annotations SET status = 'dispatching' WHERE id =
+    // Atomic claim: `UPDATE annotations SET status = 'dispatched' WHERE id =
     // ANY(...) AND status = 'pending' RETURNING id` — models the real
     // conditional UPDATE against the shared in-memory row set so a race
     // between two callers (a sweep tick vs. a forceSingle retry) resolves
     // deterministically: whichever call reaches this branch first flips the
     // row and wins it; the loser sees it already non-'pending' and gets it
     // filtered out of its own result.
-    if (text.includes("SET status = 'dispatching'")) {
+    if (text.includes("SET status = 'dispatched'")) {
       const ids: string[] = values[0] ?? []
       const claimed: { id: string }[] = []
       for (const id of ids) {
         const ann = state.pendingAnnotations.find((a) => a.id === id)
         if (ann && ann.status === 'pending') {
-          ann.status = 'dispatching'
+          ann.status = 'dispatched'
           claimed.push({ id })
         }
       }
@@ -568,6 +568,53 @@ describe('revanote batch dispatch — atomic claim (F2)', () => {
     expect(resweep.dispatched).toBe(0)
     expect(state.sentFrames).toHaveLength(1)
     expect(state.runs.filter((r) => r.annotation_id === 'ann-2')).toHaveLength(1)
+  })
+
+  test('R2-1: a batch queued behind another in-flight send on the same session survives a hub restart still pending, and re-sweeps successfully', async () => {
+    const debounce = batchDebounceMs()
+    // Two single-member mapping groups sharing ONE session (the C5 shape) —
+    // the pipeline's per-session queue serializes them: the first sends
+    // immediately, the second is merely QUEUED (never claimed pre-fix would
+    // have already flipped it to 'dispatching' before it ever reached the
+    // queue).
+    state.pendingAnnotations = [
+      makeAnnotation({
+        id: 'ann-q1',
+        annotation_id_external: 'ext-q1',
+        page_url: 'https://demo.example.com/page',
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo-demo', batch_id: 'bqueue' },
+        received_at: envAgo(debounce + 1000),
+      }),
+      makeAnnotation({
+        id: 'ann-q2',
+        annotation_id_external: 'ext-q2',
+        page_url: 'https://trusted.example.com/page',
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo-trusted', batch_id: 'bqueue' },
+        received_at: envAgo(debounce + 1000),
+      }),
+    ]
+
+    const result = await sweepBatchDispatch()
+    expect(result.dispatched).toBe(2)
+    expect(state.sentFrames).toHaveLength(1) // one sent, one queued behind it
+
+    // The queued one's row must still be 'pending' — never claimed while
+    // merely queued.
+    const queuedAnn = state.pendingAnnotations.find((a) => a.status === 'pending')
+    expect(queuedAnn).toBeDefined()
+
+    // Simulate a hub restart: pipeline active-hook/waiter state AND the batch
+    // coalescer's own in-flight bookkeeping are both gone.
+    _reset()
+    _resetBatchDispatchState()
+
+    // A fresh sweep tick must now be able to dispatch the previously-queued
+    // row on its own — it was never claimed, so it's exactly as
+    // restart-recoverable as a plain 'pending' row.
+    const resweep = await sweepBatchDispatch()
+    expect(resweep.dispatched).toBe(1)
+    expect(state.sentFrames).toHaveLength(2)
+    expect(state.pendingAnnotations.every((a) => a.status === 'dispatched')).toBe(true)
   })
 })
 

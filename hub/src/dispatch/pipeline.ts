@@ -190,6 +190,20 @@ export function getQueue(): SessionQueue {
   return queue
 }
 
+/**
+ * Read-only liveness check (qcfix/r2-claim-at-send, R2-2): true iff `token`
+ * currently holds `sessionId`'s active send slot OR is a parked waiter for
+ * it. A retry endpoint resetting a 'dispatched' row back to 'pending' must
+ * refuse when this is true — the row's first turn is still genuinely live,
+ * not merely stranded by a crash/restart (which clears both maps, making
+ * this return false for anything that predates the current process).
+ */
+export function isTokenLive(sessionId: string, token: string): boolean {
+  const active = activeBySession.get(sessionId)
+  if (active && active.req.token === token) return true
+  return waiterCtx.has(waiterKey(sessionId, token))
+}
+
 // Test-only reset.
 export function _reset(): void {
   queue._reset()

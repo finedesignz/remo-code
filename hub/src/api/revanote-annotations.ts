@@ -27,6 +27,13 @@ const VALID_STATUS: Record<string, AnnotationStatus> = {
 revanoteAnnotations.get('/', async (c) => {
   const userId = c.get('userId') as string
   const statusQuery = (c.req.query('status') ?? '').toLowerCase()
+  // R2-4: an unrecognized non-empty ?status= used to silently fall through to
+  // `null` (unfiltered list) — indistinguishable from "no filter requested".
+  // Only an EMPTY query means "no filter"; anything else must be one of the
+  // valid statuses or a 400.
+  if (statusQuery && !(statusQuery in VALID_STATUS)) {
+    return c.json({ error: 'invalid_status', valid: Object.keys(VALID_STATUS) }, 400)
+  }
   const status: AnnotationStatus | null = VALID_STATUS[statusQuery] ?? null
   const limit = Math.min(200, Math.max(1, Number(c.req.query('limit')) || 50))
   const rows = await listAnnotations(userId, { status, limit })
@@ -47,6 +54,29 @@ revanoteAnnotations.post('/:id/retry', async (c) => {
   const id = c.req.param('id')
   const ann = await getAnnotationById(id, userId)
   if (!ann) return c.json({ error: 'not_found' }, 404)
+
+  // R2-2: a reset-to-pending + forceSingle re-dispatch must only ever run
+  // against a row the pipeline does NOT currently own. 'pending' / 'failed' /
+  // 'failed_offline' / 'resolved' are always safe — the pipeline always
+  // releases ownership (markFailed/markSkipped/finalize) before setting any of
+  // those. A 'dispatched' row is different: it's ambiguous between "the first
+  // turn is still genuinely live" and "stranded — the process that owned it
+  // died/restarted before finalizing". Only the second is safe to reset; the
+  // first must be refused, not silently re-pended into a second, concurrent
+  // send for the same annotation while the live turn is still running.
+  if (ann.status === 'dispatched') {
+    const { isTokenLive } = await import('../dispatch/pipeline.ts')
+    const { isAnnotationLiveInBatch } = await import('../revanote/batch-dispatch.ts')
+    const singleLive = !!ann.session_id && isTokenLive(ann.session_id, ann.id)
+    const batchLive = isAnnotationLiveInBatch(ann.id)
+    if (singleLive || batchLive) {
+      return c.json(
+        { error: 'annotation_in_flight', detail: 'a dispatch for this annotation is still live' },
+        409,
+      )
+    }
+  }
+
   // Reset to pending so the dispatcher will accept the row.
   const { updateAnnotationStatus } = await import('../db/revanote-dal.ts')
   await updateAnnotationStatus(id, 'pending', { skip_reason: 'manual_retry' })

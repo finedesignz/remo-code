@@ -53,7 +53,7 @@ import {
   updateAnnotationRun,
   resolveRevanoteMappingForHost,
   sumTodayAnnotationCostForUser,
-  claimAnnotationsForDispatch,
+  claimAnnotationsAtSend,
   type AnnotationRow,
   type RevanoteMapping,
 } from '../db/revanote-dal.ts'
@@ -278,19 +278,14 @@ export async function dispatchAnnotationRow(
     return { status: 'queued' }
   }
 
-  // ATOMIC CLAIM (qcfix/batch-claim, closes F4): a conditional
-  // `pending -> dispatching` UPDATE, before any prompt is built or sent. This
-  // is the only thing that can race a `forceSingle` retry against a sweep
-  // tick (`batch-dispatch.ts`) that grabs the same still-`batch_id`-carrying
-  // row into a batch under a DIFFERENT token — whichever claims first wins,
-  // the loser backs off instead of sending a second, duplicate dispatch.
-  const [claimedId] = await claimAnnotationsForDispatch([ann.id])
-  if (!claimedId) {
-    return { status: 'noop', skip_reason: 'already_claimed' }
-  }
-
   // Prompt + stored chat content. Built once; the RunStore's send persists the
-  // user message, broadcasts it, and forwards it on the agent socket.
+  // user message, broadcasts it, and forwards it on the agent socket. The
+  // ATOMIC CLAIM (qcfix/r2-claim-at-send, closes R2-1/R2-2) no longer happens
+  // here — a claim taken before dispatch() admitted this row past the queue
+  // stranded every merely-QUEUED annotation at a claimed-but-never-sent state
+  // across a hub restart. It now happens inside `deps.send` below, immediately
+  // before the WS push, so a queued row stays 'pending' exactly as
+  // restart-recoverable as before any claim existed.
   const promptBody = renderAnnotationPrompt({ annotation: ann, mapping })
   const storedContent = `${storagePrefix(ann.comment)}\n\n${promptBody}`
 
@@ -300,7 +295,9 @@ export async function dispatchAnnotationRow(
     // the real run id as their token arg. Fires exactly when the pipeline
     // actually dispatches (after gates + queue claim + online check), never for
     // a skipped / dropped / queued / parked annotation — matching the legacy
-    // "insert the run row when we send" rule.
+    // "insert the run row when we send" rule. A lost send-time claim race
+    // (markFailed's 'already_claimed' branch below) cancels this row rather
+    // than leaving it a dangling 'in_flight' orphan.
     async open(_req) {
       const run = await insertAnnotationRun({
         annotation_id: ann.id, user_id: userId, session_id: sessionId,
@@ -338,6 +335,17 @@ export async function dispatchAnnotationRow(
       })
     },
     async markFailed(runId, errMsg) {
+      if (errMsg === 'already_claimed') {
+        // Lost the send-time claim race (qcfix/r2-claim-at-send): another
+        // caller (a forceSingle retry, or an overlapping batch sweep tick)
+        // claimed this annotation between open() and send(). That caller
+        // owns its fate now — never mark it 'failed' out from under them.
+        // Only close out the spurious annotation_run row open() created.
+        await updateAnnotationRun(runId, {
+          status: 'cancelled', error: 'lost_claim_race', finished_at: new Date(),
+        })
+        return
+      }
       await updateAnnotationStatus(ann.id, 'failed', {
         skip_reason: `agent_send_failed: ${errMsg}`,
       })
@@ -407,9 +415,14 @@ export async function dispatchAnnotationRow(
       // no reply and can never be re-dispatched.
       await enqueueRejectionCallback(ann, 'target_offline', 'target_offline_expired')
     },
-    // Ship the user_message: persist chat history, broadcast to subscribers,
-    // then forward on the socket.
+    // Ship the user_message: SEND-TIME CLAIM (qcfix/r2-claim-at-send, R2-1),
+    // then persist chat history, broadcast to subscribers, then forward on
+    // the socket. Runs for BOTH a first dispatch and a promoted queue
+    // re-dispatch — dispatch() calls this same fn either way — so a merely
+    // queued annotation never reaches this claim at all and stays 'pending'.
     send: async (req) => {
+      const [claimedId] = await claimAnnotationsAtSend([ann.id])
+      if (!claimedId) throw new Error('already_claimed')
       const channel = getChannel(req.sessionId)
       if (!channel) throw new Error('session_offline')
       const msg = await insertMessage(req.sessionId, 'user', storedContent)
@@ -441,7 +454,10 @@ export async function dispatchAnnotationRow(
       })
       return { status: 'dispatched', run_id: outcome.runId, session_id: sessionId }
     case 'queued':
-      // Stays pending; promotion re-dispatches via onSessionReply.
+      // qcfix/r2-claim-at-send: the send-time claim lives in `deps.send`, which
+      // a merely-queued request never reaches — this row genuinely stays
+      // 'pending' (not claimed) until promotion re-dispatches it via
+      // onSessionReply, which re-enters dispatch() -> send() and claims then.
       return { status: 'queued' }
     case 'parked_offline':
       // Legacy parity: an offline target was marked 'pending'(session_offline)
