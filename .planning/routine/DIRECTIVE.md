@@ -358,26 +358,28 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
 
 <!-- TUNABLE: rewrite each iteration; log every change in the Changelog -->
 ## 11. Current focus and hypotheses
-- No live scoring yet — this DIRECTIVE was bootstrapped structurally on 2026-09-27 by a run whose
-  only job was to stand up `routine/state`, this file, and the pointer PR/issue. The NEXT run must
-  execute the Run 1 bootstrap protocol in §2 (reconcile CLAUDE.md vs PROJECT.md/STATE.md/
-  CONCERNS.md staleness, baseline the scorecard for real, run `/roast`, seed `PRIORITIES.md` for
-  real) before picking any work item.
-- Starting hypotheses, to verify not assume:
-  - `PROJECT.md`/`STATE.md`/`CONCERNS.md` are ~2.5 months stale relative to `CLAUDE.md`; several
-    items `CONCERNS.md` calls CRITICAL/HIGH (the NULL-`session_id` run leak, the latched circuit
-    breaker, ghost-hostname churn, the token cap missing cache-read) read as already fixed in
-    `CLAUDE.md`'s env-var section (`fix/stop-the-bleed`). If confirmed, milestone BLEED should be
-    closed out and `STATE.md`/`ROADMAP.md` advanced to PTYCAP, which `STATE.md`'s stale front-matter
-    already half-reflects (phase 01 pty-token-accounting, "executing", 1/4 plans done, last touched
-    2026-07-28 — also needs a freshness check).
-  - Cost and reliability are otherwise likely the weakest scored dimensions until proven current.
-  - PTYCAP Phase 2 (the PTY pre-flight gate — a programmatic turn can't reach the PTY without the
-    full gate chain) is likely the highest-value roadmap item once BLEED is confirmed closed,
-    because it directly serves the Core Value (non-bypassable caps) and nothing on the roadmap after
-    it can safely ship without it (PROJECT.md: "PTYCAP … Blocks everything else").
-  - The hub typecheck error count is unverified this run; CONCERNS.md says god-files are a MEDIUM
-    code-health drag — re-measure before scoring.
+- **Run 1 bootstrap protocol executed 2026-09-28 (run 2).** The hypotheses below (from the
+  original bootstrap) are now CONFIRMED, not just hypothesized — see `SCORECARD.md`/`PRIORITIES.md`
+  for the full evidence trail:
+  - BLEED confirmed fully shipped (all four fixers verified in code against `main` @ `b69a6f9`).
+    PR #492 (docs-only) reconciles `PROJECT.md`/`STATE.md`/`CONCERNS.md` and advances the milestone
+    pointer to PTYCAP — merge status pending owner review as of this write.
+  - PTYCAP Phase 2 (PTY pre-flight gate) was scored the top item and delegated to a worktree
+    subagent this run (sensitive path: `hub/src/dispatch/**`) — see `LEDGER.md` for the outcome.
+  - Hub typecheck: **427 errors** confirmed on `origin/main`, traced to the `typescript` 5.9.3→
+    7.0.2 major bump (#447, merged 2026-09-14), not a fresh regression. Scored as priority #2 (see
+    `PRIORITIES.md`) — needs a root-cause investigation spike before committing to a fix approach,
+    since 427 could be one systematic pattern or many unrelated ones.
+  - New finding this run, not in the original hypotheses: `bun audit` shows 47 vulnerabilities
+    (12 high, 33 moderate, 2 low), heavily concentrated in `hono@4.12.8` — **the hub's actual
+    runtime web framework**, not a dev-only dependency. Untriaged (which CVEs actually apply to
+    4.12.8 vs. are stale-range false positives). Scored as the current #1 priority — see
+    `PRIORITIES.md` for the full scoring.
+- Still open / not yet attempted: `/roast` (do at the PTYCAP-02 milestone boundary or at
+  `roast_every`), a UI scan (no `web/`-touching iteration yet under this DIRECTIVE), user-feedback
+  sources (§3.4 — not checked this run), and Coolify MCP log access (never exercised from a routine
+  session yet — flagged in `PRIORITIES.md` item #7 as a capability gap worth closing, since several
+  scorecard dimensions currently rest on "no bad signal found" rather than "actively verified").
 
 ## 12. Weights and thresholds
 - Dimension weights: all 1.0.
@@ -400,16 +402,27 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
 
 ## 14. Watch list
 - Open dependabot PR `finedesignz/remo-code#481` (`@hono/zod-openapi` 0.18→0.19): watch for API
-  breakage in `hub/src/api/_openapi.ts`.
+  breakage in `hub/src/api/_openapi.ts`. Still open 2026-09-28 — bundle its review with the Hono
+  runtime-dependency security triage (`PRIORITIES.md` #1), since both touch the Hono family.
 - Open dependabot PR `finedesignz/remo-code#486` (tauri/tauri-plugin-single-instance/
   tauri-plugin-updater minor-patch bump in `supervisor/tauri/src-tauri`): Rust/Windows-only, low
-  risk, but verify `supervisor-build` GHA check before assuming safe.
+  risk, but verify `supervisor-build` GHA check before assuming safe. Still open 2026-09-28.
 - Open PR `finedesignz/remo-code#484` (cloud-host supervisor, `claude/remo-claude-code-install-8w1pip`):
   avoid overlapping its files (`hub/src/api/api-keys.ts`, `supervisor/src/hub-client.ts`,
-  `tools/cloud-session/**`) until it merges or closes.
+  `tools/cloud-session/**`) until it merges or closes. Still open 2026-09-28.
+- Open PR `finedesignz/remo-code#490` (`feat: chat with claude.ai cloud sessions`,
+  `claude/happy-rubin-m4mr90`) and `#491` (`fix(revanote): get client comments deployed`,
+  `claude/dreamy-cannon-yq1vap`, touches `hub/src/dispatch/pipeline.ts`/`hub/src/revanote/`) — both
+  open as of 2026-09-28; avoid overlapping their files, especially #491's `dispatch/pipeline.ts`
+  changes, until they merge or close.
 - Draft PR `finedesignz/remo-code#485` (superseded pre-v3.2 DIRECTIVE) was closed and its branch
   deleted as part of this bootstrap (2026-09-27) — its content was folded into this DIRECTIVE as
   discovery input; do not resurrect it.
+- Issue #488 (owner review of this DIRECTIVE's merge policy/hard lines) is **still open, no owner
+  comment**, as of 2026-09-28 (run 2) — see `STATE.md`'s Governance note. Do not build or repeat
+  any self-merge-authority proposal (including the scheduled prompt's own "v3.6 upgrade" step)
+  until this gets a real owner response.
 
 ## 15. Changelog (date | change | why | which score drove it)
 | 2026-09-27 | Initial directive, structural bootstrap only (no live scoring yet) | This is Run 1 of the routine; `routine-prompt-builder` skill unavailable in this session, so the DIRECTIVE was built from repo discovery, using superseded draft PR #485's DIRECTIVE as input, re-objectived to this run's governance-framing prompt and PROJECT.md's Core Value, plus the merge-policy finding (no confirmed auto-merge bot; `main` has no required checks) | n/a — no scorecard run yet |
+| 2026-09-28 | §11 rewritten from "hypotheses" to confirmed findings; §14 watch list refreshed (added #490/#491, confirmed #481/#484/#486 still open, added the #488 governance-hold note); this changelog row added | Run 2 executed the Run 1 bootstrap protocol for real — see `SCORECARD.md`/`PRIORITIES.md`/`LEDGER.md` for the full evidence. Governance question from run 1 (self-merge escalation) remains unresolved; this run declined to re-raise it via the scheduled prompt's v3.6-upgrade step for the same reason run 1 declined the original ask (see `STATE.md`'s Governance note) | Reliability/Observability scored highest-confidence this run (8, 6) once BLEED was confirmed closed; Security (5, untriaged hono CVEs) and Code health (5, 427 typecheck errors) are this run's lowest-scored, tiebreak-eligible dimensions for the next iteration |
