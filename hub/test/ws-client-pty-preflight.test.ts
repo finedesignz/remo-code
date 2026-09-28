@@ -309,4 +309,37 @@ describe('PTYCAP Phase 2 — ws/client.ts term.input preflight wiring', () => {
     const refused = sent.find((m: any) => m.type === 'send_refused')
     expect(refused?.reason).toBe('pty_preflight_error')
   })
+
+  // Review-finding fix #4 (round 4, codex "blocking"): the pre-existing
+  // current-writer re-check after `acquire()` (see client.ts, "ENFORCE the
+  // invariant, don't just record it") only covers the wait INSIDE acquire()
+  // itself. Round 3 added a SECOND `await` after that check (the preflight
+  // round trip) without a matching re-check — a connection that gets
+  // superseded by a new client connection (e.g. the user opens a new tab)
+  // while its own preflight is still resolving would still forward its now-
+  // stale bytes once that preflight settled, violating the single-writer
+  // invariant the acquire-side check exists to enforce.
+  test('a socket superseded by a new connection while its own preflight is still resolving does not forward stale bytes', async () => {
+    let unblock!: () => void
+    preflightGate = new Promise<void>((r) => { unblock = r })
+    preflightResult = { ok: true }
+
+    const a = humanClient()
+    const pendingA = handleClientMessage(a.ws, inputFrame('a'))
+    await waitUntil(() => preflightCalls.length === 1)
+    expect(holder(SESSION)).toBe(a.ws.data.writerId)
+
+    // A different connection takes over (e.g. a new tab) while A's own
+    // preflight round trip is still in flight. B reuses A's still-pending
+    // shared promise (same session), so this call also suspends until unblock().
+    const b = humanClient()
+    const pendingB = handleClientMessage(b.ws, inputFrame('b'))
+    await waitUntil(() => holder(SESSION) === b.ws.data.writerId)
+
+    unblock() // let both A's and B's (shared) preflight settle together
+    await Promise.all([pendingA, pendingB])
+
+    // A's stale frame must NOT have reached the channel — only B's should.
+    expect(fwd.length).toBe(1)
+  })
 })

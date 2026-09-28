@@ -332,6 +332,28 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
           } catch {}
           return
         }
+        // Review-finding fix #4 (round 4, codex "blocking"): the ONLY new
+        // `await` this phase added below the `current-writer` check above is
+        // this preflight one — and while it's pending, a DIFFERENT client
+        // connection can legitimately call `claimTermWriter` (e.g. the user
+        // opened a new tab) and supersede THIS socket, exactly the scenario
+        // the pre-existing `acquire()`-await re-check a few lines up already
+        // defends against. Without re-checking again here, a superseded
+        // socket that had already passed every earlier gate would still
+        // forward its bytes after its preflight resolved — the same
+        // single-client-writer violation the original comment above warns
+        // about, just reachable through the newer await instead of the older
+        // one. Same fix, same invariant, one more checkpoint.
+        const currentAfterPreflight = currentTermWriter(frame.session_id)
+        if (currentAfterPreflight !== writerId) {
+          log.warn('term.input.diag.drop', {
+            gate: 'not_current_writer',
+            session_id: frame.session_id,
+            writer_id: writerId,
+            current_writer: currentAfterPreflight,
+          })
+          return
+        }
       }
     }
     if (_diag) log.info('term.input.diag.fwd', { session_id: frame.session_id })
