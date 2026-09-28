@@ -332,7 +332,7 @@ a leak cannot spawn processes on a dev machine. A key without `agent` is rejecte
 | Route | Behavior |
 |---|---|
 | `GET /api/api-keys` | List active keys: `id, name, purpose, scopes, key_prefix, created_at, last_used_at`. **Never** returns key material. |
-| `POST /api/api-keys` | Mint. Body `{ name?, scopes? }`. Returns the plaintext **once** (`key`). `scopes` omitted/null ⇒ legacy full-access key. |
+| `POST /api/api-keys` | Mint. Body `{ name?, scopes?, host? }`. Returns the plaintext **once** (`key`). `scopes` omitted/null ⇒ legacy full-access key. `host: true` (requires `agent`, else 400) ⇒ an additional host key, `purpose='host'`. |
 | `POST /api/api-keys/:id/rotate` | Rotate one key in place: same name/scopes/purpose, new secret, old revoked. |
 | `DELETE /api/api-keys/:id` | Revoke exactly ONE key (owner-scoped). |
 
@@ -345,8 +345,11 @@ mint itself an `agent` key. Guarded by `hub/test/api-keys-scopes.test.ts`.
 `purpose` stays at-most-one-active-per-user for `supervisor` (the key carrying `agent` /
 legacy NULL scopes) and `orchestrator` (partial unique indexes). Keys minted with
 `ext:*`-only scopes get `purpose='external'` and are unconstrained in number — that is
-what makes N keys possible. Only a `supervisor`-purpose mint/rotate is hot-swapped into
-connected tray apps via `pushKeyRotatedToUser`.
+what makes N keys possible. `host: true` agent keys get `purpose='host'` — also unconstrained,
+for a second host such as a Claude Code cloud session ([cloud-session-supervisor.md](cloud-session-supervisor.md)).
+Hot-swap via `pushKeyRotatedToUser` is TARGETED (`onlyApiKeyIds`): a new `supervisor` mint reaches
+only the socket on the prior supervisor key; a `supervisor`/`host` rotate reaches only the host
+that held that key. Two hosts must never share a key — they evict each other (`4003 replaced`).
 
 Only the SHA-256 hash is stored. `key_prefix` (first 14 chars of the plaintext) is
 captured at mint time for display; legacy rows have `key_prefix IS NULL` (UI shows `—`).

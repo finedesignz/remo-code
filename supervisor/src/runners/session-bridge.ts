@@ -10,6 +10,7 @@ import { writeSessionBreadcrumb } from './session-breadcrumb'
 import { getBackendSelectorConfig } from '../config'
 import { PtyUsageEmitter, snapshotPreExistingTranscripts } from '../usage/pty-usage-emitter'
 import type { AgentToHub, CliRunner, HubToAgent, PtyLike, RunnerEvent } from './types'
+import { openHubWebSocket } from '../ws-proxy'
 
 /**
  * Module-level supervisor-owned PTY persistence coordinator (R-PTY-07/27).
@@ -283,7 +284,7 @@ export class SessionBridge {
     this.cb.onLog('info', `agent-bridge: connecting to ${url}`)
     let ws: WebSocket
     try {
-      ws = this.opts.wsFactory ? this.opts.wsFactory(url) : new WebSocket(url)
+      ws = this.opts.wsFactory ? this.opts.wsFactory(url) : openHubWebSocket(url)
     } catch (err: any) {
       this.cb.onLog('error', `agent-bridge: ws construct failed: ${err?.message ?? err}`)
       this.scheduleReconnect()
