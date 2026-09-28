@@ -11,7 +11,10 @@
 3. Finds the Claude session bound to that repo's `project_dir`.
 4. Sends the annotation as a `user_message` (with a `[revanote: <preview>]` storage prefix so it surfaces with a violet **Annotation** pill in the chat UI).
 5. Waits for the agent reply, parses a structured `<<JSON>>{…}<<END>>` envelope.
-6. POSTs a callback to Revanote with `{ resolved, action_taken, agent_reply, files_changed, deployed, error? }` — with exponential retry on 5xx/network errors.
+6. **Gates `resolved: true` on the cited commit actually existing on the GitHub remote**
+   (`commit-verify.ts` — see "Resolved requires a pushed commit" below) before persisting or
+   forwarding it; an unverifiable claim is downgraded to `resolved: false` with a reason.
+7. POSTs a callback to Revanote with `{ resolved, action_taken, agent_reply, files_changed, commit_sha, deployed, deploy_url, error? }` — with exponential retry on 5xx/network errors.
 
 ## Auth & secret
 
@@ -105,7 +108,9 @@ The hub renders a Markdown prompt and instructs Claude to end the reply with:
   "resolved": true,
   "action_taken": "short summary",
   "files_changed": ["a.tsx", "b.ts"],
+  "commit_sha": "the full pushed commit SHA that made this fix",
   "deployed": true,
+  "deploy_url": "the live URL re-fetched to confirm the change",
   "needs_clarification": false
 }
 <<END>>
@@ -118,6 +123,125 @@ The hub-side parser (`hub/src/revanote/result-schema.ts`) tolerates:
 3. Bare prose (last resort — synthesizes `{ resolved: false, action_taken: "parse_failed", agent_reply: <raw> }`).
 
 The web `MessageBubble` strips the envelope (and stray ```` ```json ```` fences) from the displayed assistant text via `stripRevanoteEnvelope` so the user only sees natural language.
+
+### Resolved requires a pushed commit (commit-verify gate)
+
+**Incident (2026-09-14, Lakeside project):** a background subagent marked 43 annotations
+`resolved: true`, citing commit `86ad71296` on every single one. That commit was real but
+**dangling** — never on any branch, never pushed, never deployed — and topically unrelated to
+any of the 43 fixes. Nothing verified the citation before the hub forwarded `resolved: true` to
+revanote, so 43 real client comments were closed with zero shipped work. Root cause: the
+prompt *asked* for honest self-verification, but nothing in the hub *enforced* it — the prompt
+was advisory, not a gate.
+
+The fix is code, not prose. `hub/src/revanote/commit-verify.ts`'s `verifyCommitOnRemote()` is
+called from `finalizeAnnotationReply` (`run-lifecycle.ts`) **before** any `resolved: true` is
+persisted or forwarded:
+
+- The agent's envelope must carry `commit_sha` (the full pushed commit hash) when it sets
+  `resolved: true`.
+- The hub resolves `installation_id` + `repo_slug` from the annotation's stored dispatch
+  payload (`payload_raw`, the same fields the Phase 5/6 merge gate already uses) and calls
+  `GET /repos/{owner}/{repo}/commits/{sha}` via the existing GitHub App installation token
+  (`hub/src/auth/github-app.ts` — no new credential; this is the same auth the merge gate uses
+  to open/merge PRs).
+- **200** (commit exists on the remote) → the claim is trusted; `resolved: true` proceeds
+  unchanged.
+- **Anything else** — missing `commit_sha`, missing `installation_id`/`repo_slug` context, an
+  unparseable repo slug, a 404 (commit not on the remote — the exact Lakeside shape), or any
+  other API error — **fails closed**: the annotation is downgraded to `resolved: false` before
+  the run/status rows are written and before the callback is enqueued. The downgrade reason
+  (`commit_sha_missing` / `repo_context_missing` / `repo_slug_unparseable` /
+  `commit_not_on_remote` / `commit_verify_failed`) is recorded as the annotation's `skip_reason`
+  and surfaced to revanote as the callback's `error` field, so the client-visible state and the
+  reviewer both see *why* it wasn't actually closed.
+- `resolved: false` replies (including `needs_clarification`) never touch this gate — it only
+  ever narrows a `true` claim, never widens a `false` one.
+- The prompt (`hub/src/revanote/prompt.ts`) was updated to make this explicit to the agent:
+  `resolved: true` only after the commit is pushed, the site is redeployed, and `page_url` has
+  been re-fetched to confirm the change is live — plus the new `commit_sha`/`deploy_url`
+  envelope fields. **This prompt text is advisory only.** The code-level gate above is what
+  actually prevents a repeat of the incident; an agent that ignores the prompt and pastes a
+  fabricated hash is caught by the 404, not by good behavior.
+
+Tests: `hub/test/revanote-commit-verify.test.ts` (the gate itself, GitHub API mocked — no real
+network) and `hub/test/revanote-run-lifecycle-commit-gate.test.ts` (the finalize-lifecycle
+integration: unpushed/dangling SHA → downgraded, missing SHA → downgraded, verified SHA →
+forwarded, `resolved: false` replies bypass the gate entirely).
+
+### Batch protocol (feat/revanote-batch-dispatch): one turn, one branch/PR per review, merge+deploy before resolving
+
+A Revanote review commonly dispatches many comments at once (a prior incident was 43 on one
+review). Sequential per-annotation dispatch cannot produce "all comments of one review fixed in
+ONE PR" on its own: the shared pipeline (`hub/src/dispatch/pipeline.ts` `onSessionReply`) only
+releases the next queued token once the CURRENT one finalizes
+(`run-lifecycle.finalizeAnnotationReply`), so N comments dispatched one at a time become N
+separate agent turns / branches / PRs, relying on the agent's own cross-turn memory to avoid it —
+unsatisfiable in practice.
+
+**Coalescing is keyed ONLY on `batch_id`** (`payload_raw.batch_id`, a UUID Revanote stamps on a
+burst it fires together — sampled at only 3/88 recent prod annotations at design time, but where
+present it correctly grouped a burst; no other grouping key such as `page_url` proximity or
+arrival timing alone is used). An annotation without `batch_id` stays on the unchanged
+single-annotation path below.
+
+- **Dispatch** (`hub/src/revanote/dispatcher.ts` `dispatchAnnotationRow`): once mapping/session
+  resolution succeeds, an annotation carrying `batch_id` is NOT sent — it stays `status='pending'`
+  and the call returns without building a prompt.
+- **Coalescing sweep** (`hub/src/revanote/batch-dispatch.ts` `sweepBatchDispatch`, boot-started via
+  `startBatchSweep()` in `hub/src/index.ts`): a fully DB-state-driven poll (default every
+  `REMO_REVANOTE_BATCH_POLL_MS` = 5s, no per-batch timer state, no buffering of annotation content
+  in memory — restart-safe by construction). Each tick re-reads `pending` annotations carrying a
+  `batch_id`, groups them by `(user_id, batch_id, resolved target session)`, and dispatches a group
+  once no NEW arrival has landed for `REMO_REVANOTE_BATCH_DEBOUNCE_MS` (default 30s) measured from
+  the group's LATEST `received_at` — a fresh arrival extends the window. A late arrival AFTER a
+  group already dispatched forms a brand-new group on a later tick, never appended to an in-flight
+  turn. A member that can't resolve a mapping/session fails immediately (same
+  `no_mapping_for_host`/`session_not_found_for_repo` semantics as the single path) and never blocks
+  its siblings.
+- **One prompt, one turn** (`hub/src/revanote/prompt.ts` `renderBatchAnnotationPrompt`): every
+  member's reviewer-authored content is fenced separately (still untrusted per item), tagged with
+  its EXTERNAL annotation id. The contract: push ONE branch, open ONE PR covering every comment,
+  wait for CI, merge it, redeploy the site serving the `page_url` host(s), then re-fetch **each
+  comment's own** `page_url` to confirm THAT specific change is live before citing it as resolved.
+  Reply once with a single `<<JSON>>{"annotations":[...]}<<END>>` envelope — one object per
+  annotation id, each citing its own `commit_sha`/`deploy_url` (`result-schema.ts`
+  `RevanoteBatchResult`).
+- **A single (non-batched) annotation's contract was corrected in the same change**: it previously
+  told the agent to "batch across sequential turns using memory", which was unsatisfiable (the next
+  comment is never sent until the current one finalizes). It now reads: this comment in its own
+  branch/PR, QC + CI green, merge yourself, redeploy, re-fetch `page_url`, then resolve citing the
+  merged SHA — no reference to batching across turns.
+- **Finalize reuses `run-lifecycle.finalizeAnnotationReply` UNCHANGED**, once per batch member: the
+  array reply is parsed (`result-schema.ts` `parseRevanoteBatchOutput`), each item is rebuilt into a
+  single-annotation envelope string (`envelopeForBatchItem`) and run through the EXACT same
+  commit-verify gate, DB writes, and callback shape as a non-batched annotation. An annotation
+  id omitted from the reply's `annotations[]` array finalizes `resolved: false` /
+  `missing_from_reply`. An unparseable batch reply (no envelope, invalid JSON, or a schema
+  mismatch) falls every member back through that same function's own single-item parse fallback
+  (`envelope_missing`/`invalid_json`/`schema_invalid`) — identical failure shape to a single
+  annotation's unparseable reply.
+- **Timeouts:** a batch turn does N comments' worth of branch/PR/CI/merge/redeploy work in one
+  turn, so it needs a longer ceiling than a single annotation's default 20min
+  `REVANOTE_FINALIZE_TIMEOUT_MS`. `REMO_REVANOTE_BATCH_RUN_MAX_MS` (default 7,200,000ms = 2h) sets
+  BOTH the pipeline's `finalizeTimeoutMs` (the narration-vs-final decision — a message before this
+  ceiling that doesn't carry the envelope leaves the hook armed rather than force-finalizing) and
+  its `hookMaxMs` (the silent-hook reap ceiling) for a batch dispatch, so a long-running batch turn
+  is never mistaken for a hung single-annotation dispatch.
+- **Manual retry is unaffected**: `POST /api/revanote/annotations/:id/retry` always dispatches ONE
+  annotation immediately (`dispatchPendingAnnotation(id, { forceSingle: true })`), bypassing batch
+  coalescing even when the row carries a `batch_id` — a human explicitly retrying one comment
+  should not sit behind the debounce window.
+
+The existing Phase 5/6 merge-gate batch aggregation (`batch_size`/`sandbox_dir` in each
+annotation's `payload_raw`, `hub/src/revanote/merge-gate.ts`) is a SEPARATE, sandbox-based
+mechanism for aggregating merge/PR *decisions* once `sandbox_dir` wiring lands — it predates and is
+independent of the dispatch-time coalescing above, and is not wired into it.
+
+Tests: `hub/test/revanote-batch-dispatch.test.ts` (coalescing, debounce reset from the latest
+arrival, one-prompt-per-batch, array-reply finalize with the per-item commit-verify gate, a missing
+member, an unparseable reply, the no-batch_id single path, `forceSingle` retry, and the
+batch-specific finalize ceiling).
 
 ## Outbound callback
 
@@ -133,7 +257,9 @@ Content-Type: application/json
   "action_taken": "Updated tailwind class to fix alignment",
   "agent_reply": "Found it — the flex-direction was reversed…",
   "files_changed": ["web/src/components/MessageBubble.tsx"],
+  "commit_sha": "a1b2c3d4e5f6...",
   "deployed": true,
+  "deploy_url": "https://app.example.com/dashboard",
   "needs_clarification": false,
   "clarification_question": null,
   "error": null
@@ -277,5 +403,6 @@ missing alarm.
 - Coolify deploy-status poll → enriched callback with `live_at`.
 - Slack/Discord ping on `resolved: false`.
 - Per-mapping prompt-template override.
-- Cross-annotation batching (multiple annotations on the same page within 1 h merged into one Claude turn).
+- Cross-annotation batching WITHOUT a `batch_id` (e.g. grouping by page_url proximity or arrival
+  timing alone) — shipped only for annotations that carry `batch_id` (see "Batch protocol" above).
 - Two-way replies (agent → user → agent loop in the Revanote thread).

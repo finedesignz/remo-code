@@ -51,6 +51,9 @@ revanoteAnnotations.post('/:id/retry', async (c) => {
   const { updateAnnotationStatus } = await import('../db/revanote-dal.ts')
   await updateAnnotationStatus(id, 'pending', { skip_reason: 'manual_retry' })
   const { dispatchPendingAnnotation } = await import('../revanote/dispatcher.ts')
-  const result = await dispatchPendingAnnotation(id)
+  // forceSingle: a human explicitly retrying ONE comment dispatches it right
+  // away, even when it carries a batch_id — it never waits on the batch
+  // debounce window (see hub/src/revanote/batch-dispatch.ts).
+  const result = await dispatchPendingAnnotation(id, { forceSingle: true })
   return c.json({ result })
 })

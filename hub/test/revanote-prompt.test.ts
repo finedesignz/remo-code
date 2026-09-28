@@ -119,8 +119,10 @@ describe('renderAnnotationPrompt', () => {
   // This asserts genuine byte identity against a baseline captured from
   // `git show 617e8e5:hub/src/revanote/prompt.ts` (the commit immediately
   // before Phase 5 touched this file) rendered with the exact same fixture
-  // used above.
-  test('fix_contract absent → prompt is byte-identical to captured pre-Phase-5 baseline', () => {
+  // used above, UPDATED for the "resolved requires a pushed commit" gate
+  // (commit-verify.ts) — the prompt now demands "commit_sha"/"deploy_url"
+  // and states the hub verifies the citation independently.
+  test('fix_contract absent → prompt matches captured post-commit-gate baseline', () => {
     const out = renderAnnotationPrompt({ annotation: ann, mapping: null })
     const preSPhase5Baseline =
       'A reviewer left a Revanote annotation on a deployed page. Please address it.\n\n' +
@@ -155,6 +157,25 @@ describe('renderAnnotationPrompt', () => {
       '- Strategy: PR.\n' +
       '- Create branch `revanote/annotation-ext-1`, commit fix with a descriptive message, push, then `gh pr create` with the annotation comment in the body.\n' +
       '- Leave the PR open for human review.\n\n\n' +
+      'This is a single Revanote comment dispatched on its own (no sibling\n' +
+      'comments were batched with it). Before marking it resolved:\n' +
+      '  1. Make the fix in its own branch, commit, push, and open its own PR.\n' +
+      '  2. Wait for CI to go green.\n' +
+      '  3. Merge the PR yourself.\n' +
+      '  4. Redeploy the site that serves the page_url host.\n' +
+      "  5. Re-fetch this comment's page_url to confirm the change is actually\n" +
+      '     live.\n' +
+      'Only after all five steps is this comment eligible for "resolved": true. Cite\n' +
+      'the MERGED commit SHA on the repo\'s default branch as "commit_sha" — not\n' +
+      'your local working-tree or unmerged branch-tip SHA — and the confirmed\n' +
+      'live URL as "deploy_url". Never set "resolved": true before the merge and\n' +
+      'the deploy have both actually happened. Any comment you cannot verify this\n' +
+      'way gets "resolved": false or "needs_clarification": true with the\n' +
+      'reason — never a guess. This is advisory text — the hub independently\n' +
+      'verifies "commit_sha" against the GitHub remote before trusting\n' +
+      '"resolved": true (a merged commit on the default branch passes; an\n' +
+      'unmerged/local one does not), and downgrades to false with a reason\n' +
+      'otherwise.\n\n' +
       'When you are done (resolved OR clarification needed), end your reply with a\n' +
       'machine-readable JSON envelope so the hub can post a callback. Use exactly\n' +
       'this format on its own lines (no markdown fences inside the envelope):\n\n' +
@@ -163,7 +184,9 @@ describe('renderAnnotationPrompt', () => {
       '  "resolved": true,\n' +
       '  "action_taken": "short summary of what you did",\n' +
       '  "files_changed": ["path/one.tsx", "path/two.ts"],\n' +
+      '  "commit_sha": "the full pushed commit SHA that made this fix (required when resolved is true)",\n' +
       '  "deployed": true,\n' +
+      '  "deploy_url": "the live URL you re-fetched to confirm the change, when deployed is true",\n' +
       '  "needs_clarification": false\n' +
       '}\n' +
       '<<END>>\n\n' +

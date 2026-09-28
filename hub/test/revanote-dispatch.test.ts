@@ -47,7 +47,7 @@ function makeAnnotation(over: Partial<any> = {}) {
     status: 'pending',
     skip_reason: null,
     source_ip: null,
-    payload_raw: {},
+    payload_raw: { installation_id: 999, repo_slug: 'owner/repo' },
     received_at: new Date().toISOString(),
     dispatched_at: null,
     resolved_at: null,
@@ -153,6 +153,20 @@ mock.module('../src/revanote/callback.ts', () => ({
   stopRevanoteCallbackWorker: () => {},
 }))
 
+// commit-verify gate (fix/revanote-resolved-requires-pushed-sha): the annotation
+// fixture above carries installation_id/repo_slug, so resolved:true replies that
+// cite a commit_sha are verified against a mocked-green GitHub API here — this
+// file is testing the dispatch/pipeline wiring, not the verify gate itself
+// (covered by revanote-commit-verify.test.ts + revanote-run-lifecycle-commit-gate.test.ts).
+mock.module('../src/auth/github-app.ts', () => ({
+  githubApiRequest: async () => ({ sha: 'realsha123' }),
+  GitHubApiError: class GitHubApiError extends Error {
+    status: number
+    body: string
+    constructor(status: number, body: string, msg: string) { super(msg); this.status = status; this.body = body }
+  },
+}))
+
 // Pass-through threshold + cost-cap so the REAL budget gate is what we exercise
 // in the budget test. The budget gate itself is imported real from the adapter.
 mock.module('../src/dispatch/gates.ts', () => ({
@@ -217,7 +231,7 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     expect(state.callbacks).toHaveLength(0)
 
     // Agent replies with an envelope → onSessionReply finalizes.
-    await onSessionReply('sess-1', 'Done.\n<<JSON>>\n{"resolved":true,"action_taken":"fixed button","files_changed":["a.tsx"],"deployed":true}\n<<END>>')
+    await onSessionReply('sess-1', 'Done.\n<<JSON>>\n{"resolved":true,"action_taken":"fixed button","files_changed":["a.tsx"],"commit_sha":"realsha123","deployed":true}\n<<END>>')
 
     // run finalized success + resolved.
     expect(state.runs[0].status).toBe('success')
