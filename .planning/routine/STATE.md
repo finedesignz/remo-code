@@ -40,13 +40,13 @@ self-merge proposal in the same "one-time upgrade" step and splitting them out w
 than shipping real scored work this iteration.
 
 ## Resume point
-1. **PR #493 (PTYCAP Phase 2)** — draft, CI was pending at last poll (`ci/woodpecker/pr/docs-drift`,
-   `ci/woodpecker/pr/qc`). This session subscribed to its activity and will drive it green + undraft
-   it without a new scheduled firing. If a future run finds this row unchanged and #493 still open
-   with no recent activity, check it manually — the subscription may not have survived a session
-   boundary — and drive it to green per DIRECTIVE §8.
-2. **PR #492 (BLEED reconciliation, docs-only)** — open, needs owner review/merge like everything
-   else; no CI-relevant paths touched so nothing to drive here.
+1. **PR #493 (PTYCAP Phase 2)** — **DONE, ready for owner merge.** Both Woodpecker checks
+   (`ci/woodpecker/pr/docs-drift`, `ci/woodpecker/pr/qc`) went green at 2026-09-28T07:25Z; the PR
+   was undrafted the same run once CI confirmed green (`mergeable_state: clean`). Nothing further
+   for the routine to do here except watch for review comments via the existing
+   `subscribe_pr_activity` subscription — it stays subscribed until merged/closed.
+2. **PR #492 (BLEED reconciliation, docs-only)** — CI green (`ci/woodpecker/pr/qc` success), no
+   review comments, open, needs owner review/merge like everything else; nothing to drive.
 3. Next scoring pass should pick up PRIORITIES.md's next-ranked item — the Hono runtime-dependency
    security triage (`bun audit`: 12 high / 33 moderate / 2 low, `hono@4.12.8` is a hub RUNTIME
    dependency) is currently top-scored; PTYCAP Phase 3+ is blocked until #493 merges (don't
