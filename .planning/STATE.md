@@ -138,3 +138,9 @@ reset 2026-05-29 to unblock owner login. `jamie@theleadingpractice.com` is NOT a
 - **OBSRV-specific:** shadow mode NEVER calls `launchSessionForUser` / never dispatches; never flip
   `REMO_ORCHESTRATOR_AUTOSPAWN`, never populate `orchestrator_autospawn_allowlist`, never touch the
   no-auto-merge guard; additive idempotent DDL only.
+
+## Quick Tasks Completed
+
+| Date | Slug | Summary | Commits |
+|---|---|---|---|
+| 2026-09-27 | cloud-sessions | Chat with claude.ai cloud sessions: `claude -p --cloud` send + Stop-hook reply webhook | 4f9b35b..83abd55 |

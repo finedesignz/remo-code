@@ -242,12 +242,26 @@ export async function createRun(args: {
   return rows[0]
 }
 
-export async function endRun(runId: string, exitCode: number | null, exitReason: string) {
-  await sql`
+export async function endRun(
+  runId: string,
+  exitCode: number | null,
+  exitReason: string,
+  opts: { releaseSlot?: boolean } = {},
+) {
+  const rows = await sql<{ supervisor_id: string }[]>`
     UPDATE session_runs
     SET ended_at = now(), exit_code = ${exitCode}, exit_reason = ${exitReason}
     WHERE id = ${runId}
+    RETURNING supervisor_id
   `
+  // A run the HUB closes (dispatch_failed, spawn_on_error_timeout) must also
+  // free the supervisor slot it was holding — same guarded release the
+  // reconcilers use, so a newer run that already took the slot is untouched.
+  // The `supervisor.state` WS handler opts out: it has just written the state
+  // the supervisor itself reported (e.g. `crashed` during a restart backoff).
+  if (opts.releaseSlot !== false && rows[0]?.supervisor_id) {
+    await releaseSupervisorSlotIfClosed(rows[0].supervisor_id, [runId])
+  }
 }
 
 // User-initiated Disconnect — mark every open run bound to this session ended
@@ -260,12 +274,20 @@ export async function endOpenRunsForSession(
   userId: string,
   exitReason: string,
 ): Promise<number> {
-  const rows = await sql`
+  const rows = await sql<{ id: string; supervisor_id: string }[]>`
     UPDATE session_runs
     SET ended_at = COALESCE(ended_at, now()), exit_reason = ${exitReason}
     WHERE session_id = ${sessionId} AND user_id = ${userId} AND ended_at IS NULL
-    RETURNING id
+    RETURNING id, supervisor_id
   `
+  const bySupervisor = new Map<string, string[]>()
+  for (const r of rows) {
+    if (!r.supervisor_id) continue
+    bySupervisor.set(r.supervisor_id, [...(bySupervisor.get(r.supervisor_id) ?? []), r.id])
+  }
+  for (const [supervisorId, ids] of bySupervisor) {
+    await releaseSupervisorSlotIfClosed(supervisorId, ids)
+  }
   return rows.length
 }
 
