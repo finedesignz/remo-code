@@ -370,6 +370,66 @@ export async function reapTimedOutHooks(now: number = Date.now()): Promise<numbe
   return reaped
 }
 
+/**
+ * Release a session's in-flight slot because its run was closed out somewhere
+ * ELSE — a reaper finalized the run row, the session's CLI died, a lock was
+ * judged wedged. Without this the pipeline kept the finalize hook armed and
+ * the queue slot claimed for a run nothing would ever complete, so every later
+ * dispatch to that session just queued behind a dead token (or came back
+ * `session_busy` once the queue filled) until a hub restart.
+ *
+ * `opts.token` scopes the release to one run: when given, the slot is freed
+ * only if that token is still the one in flight (a newer run that already took
+ * the slot is left alone). `opts.markFailed` asks the store to record the run
+ * as failed with `reason` — callers that already finalized the row themselves
+ * (the scheduler run-reaper) pass false so the row is not written twice.
+ *
+ * Waiters are never dropped: the oldest one is re-dispatched through the full
+ * gate list (IR-2), exactly as after a normal reply. Returns true when a slot
+ * was released.
+ */
+export async function releaseClosedRun(
+  sessionId: string,
+  reason: string,
+  opts: { token?: string; markFailed?: boolean } = {},
+): Promise<boolean> {
+  // Only an ARMED hook is released. A slot claimed without a hook belongs to a
+  // dispatch() still awaiting isOnline/ensureOnline; freeing it here would let
+  // a promoted waiter send concurrently with that dispatch.
+  const active = activeBySession.get(sessionId)
+  if (!active) return false
+  if (opts.token !== undefined && active.token !== opts.token && active.req.token !== opts.token) return false
+  activeBySession.delete(sessionId)
+  if (opts.markFailed !== false && active.deps.store) {
+    try {
+      await active.deps.store.markFailed(active.token, reason)
+    } catch (err: any) {
+      console.error(`[dispatch] markFailed on release failed token=${active.token}: ${err?.message ?? err}`)
+    }
+  }
+  console.warn(`[dispatch] released in-flight slot session=${sessionId} token=${active.token} reason=${reason}`)
+  await releaseAndPromote(sessionId)
+  return true
+}
+
+/**
+ * `releaseClosedRun` for a caller that knows only the run id (e.g. the
+ * scheduler run-reaper, whose rows carry no session id). Finds the session
+ * whose active hook or in-flight token is `token` and releases it.
+ */
+export async function releaseClosedRunByToken(
+  token: string,
+  reason: string,
+  opts: { markFailed?: boolean } = {},
+): Promise<boolean> {
+  for (const [sessionId, active] of activeBySession) {
+    if (active.token === token || active.req.token === token) {
+      return releaseClosedRun(sessionId, reason, { ...opts, token })
+    }
+  }
+  return false
+}
+
 let hookReaperTimer: ReturnType<typeof setInterval> | null = null
 
 /** Boot-started interval driving `reapTimedOutHooks` (idempotent). */

@@ -1165,6 +1165,9 @@ CREATE TABLE IF NOT EXISTS annotation_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_annotation_runs_annotation
   ON annotation_runs(annotation_id);
+-- fix/revanote-verify-pushed — the pushed commit a "resolved" reply was
+-- verified against (NULL when the run was not resolved / not verified).
+ALTER TABLE annotation_runs ADD COLUMN IF NOT EXISTS commit_sha TEXT;
 CREATE INDEX IF NOT EXISTS idx_annotation_runs_user_started
   ON annotation_runs(user_id, started_at DESC);
 

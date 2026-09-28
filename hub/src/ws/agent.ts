@@ -1057,7 +1057,7 @@ async function handleSupervisorMessage(ws: ServerWebSocket<AgentWsData>, msg: an
       await updateSupervisorState(supervisorId, msg.state, msg.run_id ?? null)
     }
     if (msg.last_exit && msg.run_id) {
-      await endRun(msg.run_id, msg.last_exit.code, msg.last_exit.reason)
+      await endRun(msg.run_id, msg.last_exit.code, msg.last_exit.reason, { releaseSlot: false })
       // Plan 04-003: a run just ended → recompute capacity + broadcast so the
       // UI re-renders without polling.
       try {

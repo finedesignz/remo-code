@@ -130,6 +130,17 @@ mock.module('../src/db/revanote-dal.ts', () => ({
   },
 }))
 
+// fix/revanote-verify-pushed — the finalize path now checks a resolved reply's
+// commit on GitHub. Stub that lookup as "commit found" so these adapter tests
+// keep exercising the happy path; the gate itself is covered in
+// revanote-commit-verify.test.ts.
+const realCommitVerify = await import(`../src/revanote/commit-verify.ts?bust=${Date.now()}`)
+mock.module('../src/revanote/commit-verify.ts', () => ({
+  ...realCommitVerify,
+  loadVerifyContext: async () => ({ owner: 'acme', repo: 'site', installationIds: [1] }),
+  realGithubGet: async () => ({ sha: 'c0ffee'.padEnd(40, '0') }),
+}))
+
 mock.module('../src/db/dal.ts', () => ({
   ...realDal,
   findSessionByProjectDir: async () => state.resolvedSession,
@@ -217,7 +228,7 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     expect(state.callbacks).toHaveLength(0)
 
     // Agent replies with an envelope → onSessionReply finalizes.
-    await onSessionReply('sess-1', 'Done.\n<<JSON>>\n{"resolved":true,"action_taken":"fixed button","files_changed":["a.tsx"],"deployed":true}\n<<END>>')
+    await onSessionReply('sess-1', 'Done.\n<<JSON>>\n{"resolved":true,"action_taken":"fixed button","files_changed":["a.tsx"],"commit_sha":"c0ffee1","deployed":true}\n<<END>>')
 
     // run finalized success + resolved.
     expect(state.runs[0].status).toBe('success')
