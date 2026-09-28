@@ -178,9 +178,9 @@ describe('PTYCAP Phase 2 — ws/client.ts term.input preflight wiring', () => {
     expect(holder(SESSION)).toBe('telegram')
 
     const { ws } = humanClient()
-    // The preflight check itself runs BEFORE acquire() (see client.ts), so it
-    // fires immediately — handleClientMessage only suspends afterward, queued
-    // behind telegram's held lock, until it is released.
+    // The preflight check itself runs AFTER acquire() grants (see client.ts),
+    // so handleClientMessage suspends first, queued behind telegram's held
+    // lock, and only checks once promoted.
     const pending = handleClientMessage(ws, inputFrame())
     release(SESSION) // observed telegram turn_complete — promotes the queued client writer
     await pending
@@ -189,20 +189,53 @@ describe('PTYCAP Phase 2 — ws/client.ts term.input preflight wiring', () => {
     expect(fwd.length).toBe(1)
   })
 
-  test('a frame queued behind another writer that FAILS preflight is refused and never reaches acquire()', async () => {
+  test('a frame promoted from the queue that FAILS preflight releases the turn it just took', async () => {
     await acquire(SESSION, 'telegram')
     preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
 
     const { ws, sent } = humanClient()
-    await handleClientMessage(ws, inputFrame())
+    const pending = handleClientMessage(ws, inputFrame())
+    release(SESSION) // promotes the queued client writer to holder
+    await pending
 
     expect(preflightCalls.length).toBe(1)
     expect(fwd.length).toBe(0)
     const refused = sent.find((m: any) => m.type === 'send_refused')
     expect(refused?.reason).toBe('over_daily_cost_cap:$12.00>=$10.00')
-    // Preflight runs BEFORE acquire() now, so a rejection never touches the
-    // turn lock at all — telegram must still be exactly where it was.
-    expect(holder(SESSION)).toBe('telegram')
+    // The check now runs AFTER acquire() grants the turn (see client.ts for
+    // why), so a rejection must give the turn back — telegram already left to
+    // promote us, so the session ends up fully free, not phantom-held.
+    expect(holder(SESSION)).toBeNull()
+  })
+
+  // Review-finding fix #3 (round 3 — codex "blocking", claude concurred with a
+  // non-blocking "warning"): fix #2 checked ONCE, at the moment a fresh-turn
+  // frame was RECEIVED, using whatever spend totals looked like then. A turn
+  // that had to wait in the queue behind another writer could still be
+  // admitted on that now-STALE passing verdict even if the writer ahead of it
+  // pushed spend over a cap during the wait. Fixed by moving the check to run
+  // only once a turn is actually granted (see the round-3 comment in
+  // client.ts) — a queued frame is never checked at all until promotion, so
+  // there is no stale snapshot to go stale.
+  test('a queued turn is checked with FRESH state at the moment of promotion, not a stale snapshot from receipt time', async () => {
+    await acquire(SESSION, 'telegram')
+    preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' } // would fail if checked now
+
+    const { ws } = humanClient()
+    const pending = handleClientMessage(ws, inputFrame())
+
+    // Still queued behind telegram — nothing has been checked yet, because
+    // this design never reads spend until the turn is actually granted.
+    expect(preflightCalls.length).toBe(0)
+
+    // Spend recovers before this turn is promoted (e.g. the daily window
+    // rolled over, or telegram's own turn came in under the cap after all).
+    preflightResult = { ok: true }
+    release(SESSION) // promote the queued client writer
+    await pending
+
+    expect(preflightCalls.length).toBe(1)
+    expect(fwd.length).toBe(1) // admitted on the FRESH verdict, not the stale one from receipt time
   })
 
   // Review-finding fix #2 (same PR, same reviewers, found on the FIRST fix's
@@ -224,10 +257,10 @@ describe('PTYCAP Phase 2 — ws/client.ts term.input preflight wiring', () => {
     const { ws } = humanClient() // SAME connection/writerId for both frames
     const first = handleClientMessage(ws, inputFrame('a'))
     // Let the first frame reach and register the in-flight preflight call
-    // before the second one arrives.
+    // before the second one arrives. The check runs AFTER acquire() grants
+    // (round 3's design), so the lock IS already held by the time it starts.
     await waitUntil(() => preflightCalls.length === 1)
-    // The lock must NOT be held yet — preflight runs before acquire().
-    expect(holder(SESSION)).toBeNull()
+    expect(holder(SESSION)).toBe(ws.data.writerId)
 
     const second = handleClientMessage(ws, inputFrame('b'))
     unblock() // let the shared preflight settle
@@ -270,7 +303,9 @@ describe('PTYCAP Phase 2 — ws/client.ts term.input preflight wiring', () => {
     await pending
 
     expect(fwd.length).toBe(0)
-    expect(holder(SESSION)).toBeNull() // never acquired — preflight runs before acquire()
+    // Acquired (the check runs after acquire()), then released on failure —
+    // no phantom holder left wedging the next writer.
+    expect(holder(SESSION)).toBeNull()
     const refused = sent.find((m: any) => m.type === 'send_refused')
     expect(refused?.reason).toBe('pty_preflight_error')
   })
