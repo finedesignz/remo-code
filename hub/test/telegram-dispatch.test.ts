@@ -123,11 +123,11 @@ describe("dispatchToSession — pipeline (store: null)", () => {
   });
 
   test("session busy (queue full) → session_busy", async () => {
-    // Pre-occupy the in-flight slot + waiter for this session so the next
-    // enqueue is 'dropped'.
+    // Fill the in-flight slot + every waiter slot for this session (the
+    // pipeline queue depth is REMO_DISPATCH_MAX_WAITERS, default 50) so the
+    // next enqueue is 'dropped'.
     const q = getQueue();
-    q.enqueue("s", "tg:1:100");
-    q.enqueue("s", "tg:1:101");
+    for (let i = 0; q.enqueue("s", `tg:1:${100 + i}`) !== "dropped"; i++);
     const r = await dispatchToSession({
       userId: "u",
       sessionId: "s",

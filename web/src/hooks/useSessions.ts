@@ -38,6 +38,10 @@ export interface CodeSession {
   // --dangerously-skip-permissions (still ANDed with the supervisor host cap).
   dangerously_skip_permissions?: boolean | null
   hostname?: string | null
+  // Cloud sessions — non-null ⇒ this session fronts a claude.ai cloud session
+  // (cse_…): sends relay via `claude -p --cloud`, replies arrive via its Stop hook.
+  // Always rendered with the chat surface (there is no PTY to attach to).
+  cloud_session_id?: string | null
   // ── Phase 08 — GitHub-keyed session fields ────────────────────────────────
   // All nullable: legacy/local-only sessions have repo_key === null.
   repo_key?: string | null
@@ -272,10 +276,29 @@ export function useSessions(
     }
   }, [token])
 
+  // Cloud sessions — link a claude.ai cloud session (cse_… id or claude.ai/code URL).
+  const linkCloudSession = useCallback(async (
+    cloudSessionId: string,
+    name?: string,
+  ): Promise<{ ok: boolean; session_id?: string; error?: string }> => {
+    if (!token) return { ok: false, error: 'unauthorized' }
+    try {
+      const res = await hubFetch<{ session_id: string }>(token, '/api/sessions/cloud', {
+        method: 'POST',
+        json: { cloud_session_id: cloudSessionId, ...(name ? { name } : {}) },
+      })
+      await fetchSessions()
+      return { ok: true, session_id: res.session_id }
+    } catch (err: any) {
+      return { ok: false, error: (err?.body?.error as string) ?? 'unknown' }
+    }
+  }, [token, fetchSessions])
+
   return {
     sessions, setSessions, loading,
     createSession, deleteSession, disconnectSession, rotateToken, updateSessionStatus,
     refetch: fetchSessions,
     launchSession, cloneHere, createGithubRepo, setSessionAutoNudge, setSessionSkipPermissions,
+    linkCloudSession,
   }
 }

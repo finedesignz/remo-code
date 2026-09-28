@@ -44,6 +44,7 @@ const SCOPE_OPTIONS: { value: Scope; label: string }[] = [
   { value: "agent", label: SCOPE_HELP["agent"] },
   { value: "ext:read", label: SCOPE_HELP["ext:read"] },
   { value: "ext:ask", label: SCOPE_HELP["ext:ask"] },
+  { value: "cloud:hook", label: SCOPE_HELP["cloud:hook"] },
 ];
 
 function ScopePills({ scopes }: { scopes: Scope[] | null }) {

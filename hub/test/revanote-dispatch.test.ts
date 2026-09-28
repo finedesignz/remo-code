@@ -112,7 +112,7 @@ mock.module('../src/db/postgres.ts', () => ({
 mock.module('../src/db/revanote-dal.ts', () => ({
   ...realRevDal,
   resolveRevanoteMappingForHost: async () => MAPPING,
-  getAnnotationById: async () => makeAnnotation({ session_id: state.annSessionId }),
+  getAnnotationById: async (id: string) => makeAnnotation({ id, session_id: state.annSessionId }),
   sumTodayAnnotationCostForUser: async () => state.todayCost,
   insertAnnotationRun: async (opts: any) => {
     runSeq++
@@ -128,6 +128,17 @@ mock.module('../src/db/revanote-dal.ts', () => ({
   updateAnnotationStatus: async (id: string, status: string, opts: any = {}) => {
     state.annStatus.push({ id, status, opts })
   },
+}))
+
+// fix/revanote-verify-pushed — the finalize path now checks a resolved reply's
+// commit on GitHub. Stub that lookup as "commit found" so these adapter tests
+// keep exercising the happy path; the gate itself is covered in
+// revanote-commit-verify.test.ts.
+const realCommitVerify = await import(`../src/revanote/commit-verify.ts?bust=${Date.now()}`)
+mock.module('../src/revanote/commit-verify.ts', () => ({
+  ...realCommitVerify,
+  loadVerifyContext: async () => ({ owner: 'acme', repo: 'site', installationIds: [1] }),
+  realGithubGet: async () => ({ sha: 'c0ffee'.padEnd(40, '0') }),
 }))
 
 mock.module('../src/db/dal.ts', () => ({
@@ -217,7 +228,7 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     expect(state.callbacks).toHaveLength(0)
 
     // Agent replies with an envelope → onSessionReply finalizes.
-    await onSessionReply('sess-1', 'Done.\n<<JSON>>\n{"resolved":true,"action_taken":"fixed button","files_changed":["a.tsx"],"deployed":true}\n<<END>>')
+    await onSessionReply('sess-1', 'Done.\n<<JSON>>\n{"resolved":true,"action_taken":"fixed button","files_changed":["a.tsx"],"commit_sha":"c0ffee1","deployed":true}\n<<END>>')
 
     // run finalized success + resolved.
     expect(state.runs[0].status).toBe('success')
@@ -242,8 +253,10 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     await dispatchPendingAnnotation('ann-1')
     expect(state.runs).toHaveLength(1)
 
-    // Second dispatch on the same session → queued, no new run row.
-    const out2 = await dispatchPendingAnnotation('ann-1')
+    // Second (different) annotation on the same session → queued, no new run
+    // row. Re-dispatching the SAME annotation while it is in flight is a no-op
+    // (queue dedupes by token = annotation id), so this uses a distinct id.
+    const out2 = await dispatchPendingAnnotation('ann-2')
     expect(out2).toEqual({ status: 'queued' })
     expect(state.runs).toHaveLength(1) // still one — queued waiter has NOT opened
 

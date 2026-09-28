@@ -132,14 +132,41 @@ export interface PipelineDeps {
    * Ignored when `store.shouldFinalize` is absent. Defaults to 20 minutes.
    */
   finalizeTimeoutMs?: number
+  /**
+   * Hard ceiling (ms) for a `shouldFinalize`-gated hook that never sees its
+   * result AND gets no further assistant_message. `finalizeTimeoutMs` only
+   * fires when a NEW message arrives, so an agent that says "done" without
+   * the envelope and then goes quiet held the session's slot forever, and
+   * every later dispatch to that session came back `session_busy`.
+   * `reapTimedOutHooks` finalizes such a hook with empty content once it has
+   * been armed this long, then promotes the next waiter. Deliberately much
+   * longer than `finalizeTimeoutMs`: reaping a hook whose agent is still
+   * silently working lets the next prompt interleave with it. Ignored when
+   * `store.shouldFinalize` is absent. Defaults to `REMO_DISPATCH_HOOK_MAX_MS`
+   * (2h).
+   */
+  hookMaxMs?: number
 }
 
 const DEFAULT_FINALIZE_TIMEOUT_MS = 20 * 60 * 1000
 
 // ── module-owned state ────────────────────────────────────────────────────────
 
-/** The pipeline owns one queue instance — not a global functional module var. */
-const queue = new SessionQueue()
+const DEFAULT_MAX_WAITERS = 50
+const DEFAULT_HOOK_MAX_MS = 2 * 60 * 60 * 1000
+
+function positiveIntEnv(name: string, fallback: number): number {
+  const n = Number(process.env[name])
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+}
+
+/**
+ * The pipeline owns one queue instance — not a global functional module var.
+ * Depth: `REMO_DISPATCH_MAX_WAITERS` waiters per session (default 50). The old
+ * 1-waiter cap dropped every burst beyond two (a Revanote review with 22
+ * comments on one repo lost 20 of them to `session_busy` on every retry).
+ */
+const queue = new SessionQueue(positiveIntEnv('REMO_DISPATCH_MAX_WAITERS', DEFAULT_MAX_WAITERS))
 
 /** Active finalize hook per session: the next assistant_message lands here. */
 interface ActiveHook {
@@ -151,13 +178,13 @@ interface ActiveHook {
 const activeBySession = new Map<string, ActiveHook>()
 
 /**
- * Parked waiter context per session. The queue holds only the waiter TOKEN
- * (string — required by the back-compat shim's functional API); the pipeline
- * holds the full {req, deps} so promotion can re-dispatch directly, re-running
- * the gate list (IR-2). Keyed by sessionId because the queue admits exactly one
- * waiter per session. This is what kills the global `setOnPromote` seam.
+ * Parked waiter context, keyed by `sessionId\0token`. The queue holds only the
+ * waiter TOKENS (FIFO order); the pipeline holds each waiter's full
+ * {req, deps} so promotion can re-dispatch directly, re-running the gate list
+ * (IR-2). This is what kills the global `setOnPromote` seam.
  */
-const waiterBySession = new Map<string, { req: DispatchRequest; deps: PipelineDeps }>()
+const waiterCtx = new Map<string, { req: DispatchRequest; deps: PipelineDeps }>()
+const waiterKey = (sessionId: string, token: string) => `${sessionId}\0${token}`
 
 export function getQueue(): SessionQueue {
   return queue
@@ -167,7 +194,7 @@ export function getQueue(): SessionQueue {
 export function _reset(): void {
   queue._reset()
   activeBySession.clear()
-  waiterBySession.clear()
+  waiterCtx.clear()
 }
 
 // ── core ────────────────────────────────────────────────────────────────────
@@ -215,9 +242,12 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
   }
   if (claim === 'queued') {
     // Parked behind the in-flight run. The queue holds the waiter token; the
-    // pipeline stashes the full {req, deps} so onSessionReply can re-dispatch
-    // it directly through the full gate list when the head finishes (IR-2).
-    waiterBySession.set(req.sessionId, { req, deps })
+    // pipeline stashes the full {req, deps} so promotion can re-dispatch it
+    // directly through the full gate list when the head finishes (IR-2). A
+    // duplicate of the token already in flight has nothing to stash.
+    if (queue.currentInFlight(req.sessionId) !== req.token) {
+      waiterCtx.set(waiterKey(req.sessionId, req.token), { req, deps })
+    }
     return { kind: 'queued' }
   }
 
@@ -242,7 +272,11 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
     }
   }
   if (!online) {
-    queue.markFinished(req.sessionId) // release the slot we just took
+    // Release the slot we just took. A waiter may have queued behind us while
+    // we awaited isOnline/ensureOnline — promote it (never just move it into
+    // the in-flight slot: with no finalize hook armed nothing would ever free
+    // that slot again, and every later dispatch would be `session_busy`).
+    void releaseAndPromote(req.sessionId)
     const key = deps.graceKey ? deps.graceKey(req) : req.sessionId
     getGraceBuffer().register(key, () => deps.replay(req), {
       onExpire: deps.onParkExpire ? () => deps.onParkExpire!(req) : undefined,
@@ -270,13 +304,13 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
     await deps.send(req)
   } catch (err: any) {
     activeBySession.delete(req.sessionId)
-    queue.markFinished(req.sessionId)
     const msg = err?.message ?? String(err)
     if (deps.store) {
       try {
         await deps.store.markFailed(openedId, msg)
       } catch {}
     }
+    void releaseAndPromote(req.sessionId)
     return { kind: 'failed', reason: msg }
   }
 
@@ -308,6 +342,108 @@ export async function onSessionReply(sessionId: string, content: string): Promis
       return
     }
   }
+  await finalizeAndPromote(sessionId, active, content)
+}
+
+/**
+ * Hard-ceiling sweep for `shouldFinalize`-gated hooks (see
+ * `PipelineDeps.hookMaxMs`). Finalizes, with empty content, every such hook
+ * armed at least `hookMaxMs` before `now`, then promotes that session's next
+ * waiter. The store's own parse decides how to report the empty result
+ * (revanote: `envelope_missing` → resolved:false callback). Returns how many
+ * hooks were reaped. Stores without `shouldFinalize` are never touched.
+ */
+export async function reapTimedOutHooks(now: number = Date.now()): Promise<number> {
+  let reaped = 0
+  for (const [sessionId, active] of [...activeBySession]) {
+    if (!active.deps.store?.shouldFinalize) continue
+    const maxMs = active.deps.hookMaxMs ?? positiveIntEnv('REMO_DISPATCH_HOOK_MAX_MS', DEFAULT_HOOK_MAX_MS)
+    if (now - active.startedAt < maxMs) continue
+    if (activeBySession.get(sessionId) !== active) continue // finalized meanwhile
+    console.warn(
+      `[dispatch] reaping silent finalize hook session=${sessionId} token=${active.token} ` +
+        `age_ms=${now - active.startedAt} (no result envelope, no further messages)`,
+    )
+    await finalizeAndPromote(sessionId, active, '')
+    reaped++
+  }
+  return reaped
+}
+
+/**
+ * Release a session's in-flight slot because its run was closed out somewhere
+ * ELSE — a reaper finalized the run row, the session's CLI died, a lock was
+ * judged wedged. Without this the pipeline kept the finalize hook armed and
+ * the queue slot claimed for a run nothing would ever complete, so every later
+ * dispatch to that session just queued behind a dead token (or came back
+ * `session_busy` once the queue filled) until a hub restart.
+ *
+ * `opts.token` scopes the release to one run: when given, the slot is freed
+ * only if that token is still the one in flight (a newer run that already took
+ * the slot is left alone). `opts.markFailed` asks the store to record the run
+ * as failed with `reason` — callers that already finalized the row themselves
+ * (the scheduler run-reaper) pass false so the row is not written twice.
+ *
+ * Waiters are never dropped: the oldest one is re-dispatched through the full
+ * gate list (IR-2), exactly as after a normal reply. Returns true when a slot
+ * was released.
+ */
+export async function releaseClosedRun(
+  sessionId: string,
+  reason: string,
+  opts: { token?: string; markFailed?: boolean } = {},
+): Promise<boolean> {
+  // Only an ARMED hook is released. A slot claimed without a hook belongs to a
+  // dispatch() still awaiting isOnline/ensureOnline; freeing it here would let
+  // a promoted waiter send concurrently with that dispatch.
+  const active = activeBySession.get(sessionId)
+  if (!active) return false
+  if (opts.token !== undefined && active.token !== opts.token && active.req.token !== opts.token) return false
+  activeBySession.delete(sessionId)
+  if (opts.markFailed !== false && active.deps.store) {
+    try {
+      await active.deps.store.markFailed(active.token, reason)
+    } catch (err: any) {
+      console.error(`[dispatch] markFailed on release failed token=${active.token}: ${err?.message ?? err}`)
+    }
+  }
+  console.warn(`[dispatch] released in-flight slot session=${sessionId} token=${active.token} reason=${reason}`)
+  await releaseAndPromote(sessionId)
+  return true
+}
+
+/**
+ * `releaseClosedRun` for a caller that knows only the run id (e.g. the
+ * scheduler run-reaper, whose rows carry no session id). Finds the session
+ * whose active hook or in-flight token is `token` and releases it.
+ */
+export async function releaseClosedRunByToken(
+  token: string,
+  reason: string,
+  opts: { markFailed?: boolean } = {},
+): Promise<boolean> {
+  for (const [sessionId, active] of activeBySession) {
+    if (active.token === token || active.req.token === token) {
+      return releaseClosedRun(sessionId, reason, { ...opts, token })
+    }
+  }
+  return false
+}
+
+let hookReaperTimer: ReturnType<typeof setInterval> | null = null
+
+/** Boot-started interval driving `reapTimedOutHooks` (idempotent). */
+export function startHookReaper(intervalMs: number = 60_000): void {
+  if (hookReaperTimer) return
+  hookReaperTimer = setInterval(() => {
+    void reapTimedOutHooks().catch((err) =>
+      console.error(`[dispatch] hook reaper failed: ${err?.message ?? err}`),
+    )
+  }, intervalMs)
+  hookReaperTimer.unref?.()
+}
+
+async function finalizeAndPromote(sessionId: string, active: ActiveHook, content: string): Promise<void> {
   activeBySession.delete(sessionId)
 
   // Finalize the head-of-queue run.
@@ -319,41 +455,50 @@ export async function onSessionReply(sessionId: string, content: string): Promis
     }
   }
 
-  // Promote the waiter (if any). The queue advances the head slot; the pipeline
-  // holds the waiter's {req, deps} so we re-dispatch DIRECTLY — no global
-  // callback seam. The full gate list is re-evaluated (IR-2): a user who
-  // crossed the cap while queued gets {kind:'skipped'} and is never sent.
-  const promotedToken = queue.markFinished(sessionId)
-  if (!promotedToken) {
-    waiterBySession.delete(sessionId)
-    return
+  await releaseAndPromote(sessionId)
+}
+
+/**
+ * Free the session's in-flight slot and re-dispatch the oldest waiter (if any)
+ * fresh through every gate (IR-2): a user who crossed the cap while queued
+ * gets {kind:'skipped'} and is never sent. The slot is released rather than
+ * handed to the waiter because dispatch() must claim it itself — the legacy
+ * scheduler held it and re-entered enqueue() on the occupied slot, which
+ * returned 'queued' and stranded the waiter (never sent).
+ *
+ * KNOWN await-gap (best-effort ordering): between this release and the
+ * re-enqueue inside dispatch() there is an await boundary (the gate checks).
+ * A dispatch arriving from ANOTHER source in that window can claim the freed
+ * slot ahead of the promoted waiter, which then re-queues at the tail.
+ * Cross-source same-session ordering is best-effort; the cost-cap (IR-1) and
+ * queue cap invariants still hold.
+ *
+ * A waiter whose re-dispatch is skipped, parked or fails releases the slot
+ * again itself (same path), so the queue keeps draining.
+ */
+async function releaseAndPromote(sessionId: string): Promise<void> {
+  const next = queue.releaseAndTakeNext(sessionId)
+  if (!next) return
+  const key = waiterKey(sessionId, next)
+  const waiter = waiterCtx.get(key)
+  waiterCtx.delete(key)
+  if (!waiter) {
+    // No context (should not happen) — skip it rather than wedge the queue.
+    console.error(`[dispatch] promoted waiter has no context session=${sessionId} token=${next}`)
+    return releaseAndPromote(sessionId)
   }
-
-  const waiter = waiterBySession.get(sessionId)
-  waiterBySession.delete(sessionId)
-  if (!waiter) return
-
-  // markFinished already moved the promoted token into the in-flight slot, so
-  // re-running dispatch() would see the slot occupied and queue/drop. We
-  // INTENTIONALLY release the slot here, then re-dispatch the promoted waiter
-  // fresh through every gate (IR-2). Do NOT "fix" this back to keeping the slot
-  // held — the legacy scheduler held it and then re-entered enqueue() on the
-  // already-occupied slot, which returned 'queued' and stranded the waiter
-  // (never sent). The release-then-redispatch is the deliberate correction.
-  //
-  // KNOWN await-gap (best-effort ordering): between this release and the
-  // re-enqueue inside dispatch() there is an await boundary (the gate checks).
-  // A 3rd same-session dispatch arriving from ANOTHER source in that window can
-  // claim the freed slot ahead of the promoted waiter, reordering it. This is
-  // accepted: cross-source same-session ordering is best-effort, the cost-cap
-  // (IR-1) and queue cap (1 in-flight + 1 waiter) invariants still hold, and the
-  // displaced waiter simply re-queues. A strict hand-off would require an
-  // atomic promote-and-redispatch lock that the single-in-flight model doesn't
-  // warrant.
-  queue.markFinished(sessionId)
   try {
-    await dispatch(waiter.req, waiter.deps)
+    const out = await dispatch(waiter.req, waiter.deps)
+    // A skipped promotion never took the slot; keep draining.
+    if (out.kind === 'skipped') await releaseAndPromoteIfIdle(sessionId)
   } catch (err: any) {
-    console.error(`[dispatch] promoted re-dispatch failed session=${sessionId} token=${promotedToken}: ${err?.message ?? err}`)
+    console.error(`[dispatch] promoted re-dispatch failed session=${sessionId} token=${next}: ${err?.message ?? err}`)
   }
+}
+
+/** Promote the next waiter only when nothing currently holds the slot. */
+async function releaseAndPromoteIfIdle(sessionId: string): Promise<void> {
+  if (queue.currentInFlight(sessionId) !== null) return
+  if (queue.waiterCount(sessionId) === 0) return
+  await releaseAndPromote(sessionId)
 }

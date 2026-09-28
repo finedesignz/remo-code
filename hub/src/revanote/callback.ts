@@ -44,6 +44,8 @@ export interface RevanoteCallbackPayload {
   pr_url?: string | null
   diff_summary?: string | null
   diff_hash?: string | null
+  // fix/revanote-verify-pushed — the hub-verified pushed commit behind a resolve.
+  commit_sha?: string | null
 }
 
 // Retry schedule in ms. Last bucket is the dead-letter cap.
