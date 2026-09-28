@@ -78,7 +78,7 @@ export type DispatchOutcome =
   | { status: 'failed'; skip_reason: string }
   | { status: 'noop'; skip_reason: string }
 
-function hostOf(pageUrl: string): string {
+export function hostOf(pageUrl: string): string {
   try {
     return new URL(pageUrl).host
   } catch {
@@ -89,7 +89,7 @@ function hostOf(pageUrl: string): string {
 /**
  * Best-effort timezone read. Falls back to UTC on lookup failure.
  */
-async function getUserTimezone(userId: string): Promise<string> {
+export async function getUserTimezone(userId: string): Promise<string> {
   try {
     const rows = await sql<{ tz: string | null }[]>`
       SELECT COALESCE(timezone, 'UTC') AS tz FROM users WHERE id = ${userId} LIMIT 1
@@ -144,12 +144,37 @@ async function resolveSessionId(
   return sess?.id ?? null
 }
 
+export interface ResolvedTarget {
+  mapping: RevanoteMapping | null
+  sessionId: string | null
+}
+
+/**
+ * Resolve an annotation's mapping + target session (host lookup, then a
+ * still-online bound session_id, else a fresh mapping->session lookup).
+ * Extracted so the batch coalescer (`batch-dispatch.ts`) can group pending
+ * annotations by the SAME target session a solo dispatch would land on,
+ * without duplicating this logic.
+ */
+export async function resolveMappingAndSession(
+  userId: string,
+  ann: AnnotationRow,
+): Promise<ResolvedTarget> {
+  const host = hostOf(ann.page_url)
+  const mapping = await resolveRevanoteMappingForHost(userId, host)
+  const boundSessionOnline = !!ann.session_id && getChannel(ann.session_id) != null
+  const sessionId = boundSessionOnline ? ann.session_id : await resolveSessionId(userId, mapping)
+  return { mapping, sessionId: sessionId ?? null }
+}
+
 /**
  * Helper: queue an immediate callback for a pre-dispatch rejection. Loaded
  * lazily so test environments without the callback module loaded don't crash.
- * ALWAYS carries the external `annotation_id` (revanote invariant).
+ * ALWAYS carries the external `annotation_id` (revanote invariant). Exported
+ * so the batch coalescer can reuse the exact same reject-callback shape for a
+ * whole-batch gate block / offline-expiry.
  */
-async function enqueueRejectionCallback(
+export async function enqueueRejectionCallback(
   ann: AnnotationRow,
   errorTag: string,
   detail: string,
@@ -170,13 +195,26 @@ async function enqueueRejectionCallback(
   }
 }
 
-export async function dispatchPendingAnnotation(annotationId: string): Promise<DispatchOutcome> {
+export interface DispatchOpts {
+  /**
+   * Bypass batch coalescing and dispatch this ONE annotation immediately, even
+   * when it carries a `batch_id`. Used by the manual retry endpoint
+   * (`POST /api/revanote/annotations/:id/retry`) — a human explicitly retrying
+   * one comment should not sit behind the batch debounce window.
+   */
+  forceSingle?: boolean
+}
+
+export async function dispatchPendingAnnotation(
+  annotationId: string,
+  opts: DispatchOpts = {},
+): Promise<DispatchOutcome> {
   const ann = await getAnnotationById(annotationId, await peekUserIdForAnnotation(annotationId))
   if (!ann) return { status: 'noop', skip_reason: 'annotation_not_found' }
   if (ann.status !== 'pending' && ann.status !== 'failed_offline') {
     return { status: 'noop', skip_reason: `not_pending:${ann.status}` }
   }
-  return await dispatchAnnotationRow(ann)
+  return await dispatchAnnotationRow(ann, opts)
 }
 
 async function peekUserIdForAnnotation(annotationId: string): Promise<string> {
@@ -188,7 +226,10 @@ async function peekUserIdForAnnotation(annotationId: string): Promise<string> {
  * Dispatch entrypoint used by the webhook (already has the annotation row).
  * Returns the outcome but never throws — failures are recorded on the row.
  */
-export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<DispatchOutcome> {
+export async function dispatchAnnotationRow(
+  ann: AnnotationRow,
+  opts: DispatchOpts = {},
+): Promise<DispatchOutcome> {
   const userId = ann.user_id
   const tz = await getUserTimezone(userId)
 
@@ -196,8 +237,7 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
   // the pipeline has a concrete target. A missing session is NOT a pipeline gate
   // (it is a target-resolution failure with its own reject-callback semantics),
   // so we short-circuit it here before entering dispatch().
-  const host = hostOf(ann.page_url)
-  const mapping = await resolveRevanoteMappingForHost(userId, host)
+  //
   // A previously-bound session_id is only trustworthy while that session is
   // actually online. Once a supervisor session dies and is replaced (new
   // session_id, same project_dir -- see dal.ts session-connect-time supersede),
@@ -208,10 +248,7 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
   // fresh mapping->session lookup so the row self-heals onto whatever session
   // is actually serving this project_dir today. Healthy (online) rows are
   // unaffected -- this never re-resolves a session that's already reachable.
-  const boundSessionOnline = !!ann.session_id && getChannel(ann.session_id) != null
-  const sessionId = boundSessionOnline
-    ? ann.session_id
-    : await resolveSessionId(userId, mapping)
+  const { mapping, sessionId } = await resolveMappingAndSession(userId, ann)
   if (!sessionId) {
     const reason = mapping ? 'session_not_found_for_repo' : 'no_mapping_for_host'
     await updateAnnotationStatus(ann.id, 'failed', {
@@ -223,6 +260,21 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
     })
     void enqueueRejectionCallback(ann, 'no_target', reason)
     return { status: 'failed', skip_reason: reason }
+  }
+
+  // DECISION LOCKED (feat/revanote-batch-dispatch): coalescing is keyed ONLY on
+  // `batch_id` (only 3/88 sampled prod annotations carried it, but where present
+  // it correctly grouped a burst — no other grouping key is invented here). A
+  // batch-carrying annotation is NOT dispatched here: it stays 'pending' and the
+  // batch sweep (`batch-dispatch.ts`) gathers every pending annotation sharing
+  // this batch_id + user + resolved session once no new arrival lands within
+  // `REMO_REVANOTE_BATCH_DEBOUNCE_MS`, then dispatches them as ONE token. The
+  // manual retry endpoint passes `forceSingle` to bypass this and dispatch the
+  // one annotation immediately regardless of batch_id.
+  const batchId =
+    typeof (ann.payload_raw as any)?.batch_id === 'string' ? (ann.payload_raw as any).batch_id : null
+  if (batchId && !opts.forceSingle) {
+    return { status: 'queued' }
   }
 
   // Prompt + stored chat content. Built once; the RunStore's send persists the

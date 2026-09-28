@@ -169,42 +169,79 @@ network) and `hub/test/revanote-run-lifecycle-commit-gate.test.ts` (the finalize
 integration: unpushed/dangling SHA → downgraded, missing SHA → downgraded, verified SHA →
 forwarded, `resolved: false` replies bypass the gate entirely).
 
-### Batch protocol (owner directive, 2026-09-27): one branch/PR per review, merge+deploy before resolving
+### Batch protocol (feat/revanote-batch-dispatch): one turn, one branch/PR per review, merge+deploy before resolving
 
-A Revanote review commonly dispatches many comments at once (the incident above was 43 on one
-review). The prompt (`hub/src/revanote/prompt.ts`) tells the agent: when handling more than one
-comment in the same session, batch every comment onto **one branch** and open **one pull
-request** covering all of them — not a branch/PR per comment. Before marking *any* comment
-resolved, the agent must, in order: (1) push the batch branch and open the PR once, (2) wait for
-CI to go green, (3) merge the PR itself, (4) redeploy the site serving the `page_url` host, (5)
-re-fetch **each comment's own** `page_url` to confirm that specific change is live. Only then may
-it emit `resolved: true`, citing the **merged** commit SHA on the repo's default branch (never a
-local/unmerged branch-tip SHA) as `commit_sha`, and the confirmed live URL as `deploy_url`. A
-comment it cannot verify this way gets `resolved: false` or `needs_clarification: true` with a
-reason — never a guess.
+A Revanote review commonly dispatches many comments at once (a prior incident was 43 on one
+review). Sequential per-annotation dispatch cannot produce "all comments of one review fixed in
+ONE PR" on its own: the shared pipeline (`hub/src/dispatch/pipeline.ts` `onSessionReply`) only
+releases the next queued token once the CURRENT one finalizes
+(`run-lifecycle.finalizeAnnotationReply`), so N comments dispatched one at a time become N
+separate agent turns / branches / PRs, relying on the agent's own cross-turn memory to avoid it —
+unsatisfiable in practice.
 
-**This is prompt text, advisory only — same caveat as everywhere else in this doc.** The
-code-level gate (`commit-verify.ts`, above) is unchanged and is what actually enforces it: a
-merged commit on the default branch is on the remote, so `GET /repos/{owner}/{repo}/commits/{sha}`
-returns 200 and the claim passes; an agent that skips the merge and cites its local branch-tip SHA
-gets the exact same 404-driven downgrade as the original incident, regardless of what the prompt
-asked for.
+**Coalescing is keyed ONLY on `batch_id`** (`payload_raw.batch_id`, a UUID Revanote stamps on a
+burst it fires together — sampled at only 3/88 recent prod annotations at design time, but where
+present it correctly grouped a burst; no other grouping key such as `page_url` proximity or
+arrival timing alone is used). An annotation without `batch_id` stays on the unchanged
+single-annotation path below.
 
-**Per-comment dispatch is unchanged by this directive.** Investigated 2026-09-27 following
-PR #489 ("queue revanote bursts instead of dispatching them as session_busy"): a Revanote review
-of N comments does **not** reach the session as one prompt covering the whole batch. Each
-annotation is its own dispatch token (`hub/src/revanote/dispatcher.ts` → `dispatch()` in
-`hub/src/dispatch/pipeline.ts`), and the per-session `SessionQueue` admits exactly one in-flight
-token with the rest FIFO-waiting (`REMO_DISPATCH_MAX_WAITERS`, default 50) — PR #489 raised that
-waiter count so a large burst queues instead of being dropped as `session_busy`, it did not change
-the one-token-at-a-time shape. So the agent receives N **separate** `user_message` turns, one per
-comment, each finalized independently through `run-lifecycle.finalizeAnnotationReply`. The batch
-protocol above therefore relies on the agent's own session memory across those sequential turns
-(recognizing it already has a batch branch/PR open from an earlier comment in the same review) —
-it is not a single-shot batched prompt, and this fix does not restructure dispatch to make it one.
-The existing Phase 5/6 merge-gate batch aggregation (`batch_id`/`batch_size` in each annotation's
-`payload_raw`, `hub/src/revanote/merge-gate.ts`) is a separate, hub-side mechanism for aggregating
-merge/PR *decisions* across per-comment finalizes — it does not itself batch the *prompts*.
+- **Dispatch** (`hub/src/revanote/dispatcher.ts` `dispatchAnnotationRow`): once mapping/session
+  resolution succeeds, an annotation carrying `batch_id` is NOT sent — it stays `status='pending'`
+  and the call returns without building a prompt.
+- **Coalescing sweep** (`hub/src/revanote/batch-dispatch.ts` `sweepBatchDispatch`, boot-started via
+  `startBatchSweep()` in `hub/src/index.ts`): a fully DB-state-driven poll (default every
+  `REMO_REVANOTE_BATCH_POLL_MS` = 5s, no per-batch timer state, no buffering of annotation content
+  in memory — restart-safe by construction). Each tick re-reads `pending` annotations carrying a
+  `batch_id`, groups them by `(user_id, batch_id, resolved target session)`, and dispatches a group
+  once no NEW arrival has landed for `REMO_REVANOTE_BATCH_DEBOUNCE_MS` (default 30s) measured from
+  the group's LATEST `received_at` — a fresh arrival extends the window. A late arrival AFTER a
+  group already dispatched forms a brand-new group on a later tick, never appended to an in-flight
+  turn. A member that can't resolve a mapping/session fails immediately (same
+  `no_mapping_for_host`/`session_not_found_for_repo` semantics as the single path) and never blocks
+  its siblings.
+- **One prompt, one turn** (`hub/src/revanote/prompt.ts` `renderBatchAnnotationPrompt`): every
+  member's reviewer-authored content is fenced separately (still untrusted per item), tagged with
+  its EXTERNAL annotation id. The contract: push ONE branch, open ONE PR covering every comment,
+  wait for CI, merge it, redeploy the site serving the `page_url` host(s), then re-fetch **each
+  comment's own** `page_url` to confirm THAT specific change is live before citing it as resolved.
+  Reply once with a single `<<JSON>>{"annotations":[...]}<<END>>` envelope — one object per
+  annotation id, each citing its own `commit_sha`/`deploy_url` (`result-schema.ts`
+  `RevanoteBatchResult`).
+- **A single (non-batched) annotation's contract was corrected in the same change**: it previously
+  told the agent to "batch across sequential turns using memory", which was unsatisfiable (the next
+  comment is never sent until the current one finalizes). It now reads: this comment in its own
+  branch/PR, QC + CI green, merge yourself, redeploy, re-fetch `page_url`, then resolve citing the
+  merged SHA — no reference to batching across turns.
+- **Finalize reuses `run-lifecycle.finalizeAnnotationReply` UNCHANGED**, once per batch member: the
+  array reply is parsed (`result-schema.ts` `parseRevanoteBatchOutput`), each item is rebuilt into a
+  single-annotation envelope string (`envelopeForBatchItem`) and run through the EXACT same
+  commit-verify gate, DB writes, and callback shape as a non-batched annotation. An annotation
+  id omitted from the reply's `annotations[]` array finalizes `resolved: false` /
+  `missing_from_reply`. An unparseable batch reply (no envelope, invalid JSON, or a schema
+  mismatch) falls every member back through that same function's own single-item parse fallback
+  (`envelope_missing`/`invalid_json`/`schema_invalid`) — identical failure shape to a single
+  annotation's unparseable reply.
+- **Timeouts:** a batch turn does N comments' worth of branch/PR/CI/merge/redeploy work in one
+  turn, so it needs a longer ceiling than a single annotation's default 20min
+  `REVANOTE_FINALIZE_TIMEOUT_MS`. `REMO_REVANOTE_BATCH_RUN_MAX_MS` (default 7,200,000ms = 2h) sets
+  BOTH the pipeline's `finalizeTimeoutMs` (the narration-vs-final decision — a message before this
+  ceiling that doesn't carry the envelope leaves the hook armed rather than force-finalizing) and
+  its `hookMaxMs` (the silent-hook reap ceiling) for a batch dispatch, so a long-running batch turn
+  is never mistaken for a hung single-annotation dispatch.
+- **Manual retry is unaffected**: `POST /api/revanote/annotations/:id/retry` always dispatches ONE
+  annotation immediately (`dispatchPendingAnnotation(id, { forceSingle: true })`), bypassing batch
+  coalescing even when the row carries a `batch_id` — a human explicitly retrying one comment
+  should not sit behind the debounce window.
+
+The existing Phase 5/6 merge-gate batch aggregation (`batch_size`/`sandbox_dir` in each
+annotation's `payload_raw`, `hub/src/revanote/merge-gate.ts`) is a SEPARATE, sandbox-based
+mechanism for aggregating merge/PR *decisions* once `sandbox_dir` wiring lands — it predates and is
+independent of the dispatch-time coalescing above, and is not wired into it.
+
+Tests: `hub/test/revanote-batch-dispatch.test.ts` (coalescing, debounce reset from the latest
+arrival, one-prompt-per-batch, array-reply finalize with the per-item commit-verify gate, a missing
+member, an unparseable reply, the no-batch_id single path, `forceSingle` retry, and the
+batch-specific finalize ceiling).
 
 ## Outbound callback
 
@@ -329,5 +366,6 @@ See `.planning/phases/08-revanote-integration/08-CONTEXT.md` "Confirmed cross-si
 - Coolify deploy-status poll → enriched callback with `live_at`.
 - Slack/Discord ping on `resolved: false`.
 - Per-mapping prompt-template override.
-- Cross-annotation batching (multiple annotations on the same page within 1 h merged into one Claude turn).
+- Cross-annotation batching WITHOUT a `batch_id` (e.g. grouping by page_url proximity or arrival
+  timing alone) — shipped only for annotations that carry `batch_id` (see "Batch protocol" above).
 - Two-way replies (agent → user → agent loop in the Revanote thread).

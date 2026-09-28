@@ -61,6 +61,7 @@ import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.
 import { startAskReaperSweep, stopAskReaperSweep } from './ask/reaper.ts'
 import { startWorkReaperSweep, stopWorkReaperSweep } from './work/reaper.ts'
 import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
+import { startBatchSweep, stopBatchSweep } from './revanote/batch-dispatch.ts'
 import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
@@ -756,6 +757,13 @@ runMigrations()
     // latency-optimization is lost (restart / thrown fire / swallowed register).
     // claimOnceTask keeps it exactly-once. No-op when REMO_ONCE_SWEEP_DISABLED.
     startOnceDueSweep()
+    // feat/revanote-batch-dispatch — DB-state-driven poll (default every
+    // REMO_REVANOTE_BATCH_POLL_MS=5s) that gathers pending annotations sharing a
+    // batch_id + user + resolved target session and dispatches them as ONE turn
+    // once REMO_REVANOTE_BATCH_DEBOUNCE_MS (default 30s) has elapsed since the
+    // group's latest arrival, so one Revanote review lands as one branch/PR
+    // instead of one per comment. No-op when nothing pending carries a batch_id.
+    startBatchSweep()
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
@@ -770,6 +778,7 @@ function gracefulShutdown(signal: string) {
   try { stopRoutineQueueWorker() } catch {}
   try { stopDueOrchestratorTick() } catch {}
   try { stopGhostReaperSweep() } catch {}
+  try { stopBatchSweep() } catch {}
   try { stopRunReaperSweep() } catch {}
   try { stopAskReaperSweep() } catch {}
   try { stopWorkReaperSweep() } catch {}

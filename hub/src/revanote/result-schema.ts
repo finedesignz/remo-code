@@ -131,6 +131,80 @@ export function parseRevanoteOutput(raw: string): ParseOk | ParseFallback {
   }
 }
 
+// ── Batch envelope (feat/revanote-batch-dispatch) ───────────────────────────
+//
+// A batch-dispatched turn covers N annotations in one session turn, so the
+// envelope carries one entry per annotation instead of a single result. Each
+// entry is keyed by the annotation's EXTERNAL id (`annotation_id_external` —
+// the id revanote itself knows and the one every other callback path already
+// echoes back), so the reply can be routed to the right annotation without
+// leaking internal DB ids into the prompt.
+export const RevanoteBatchItem = RevanoteResult.extend({
+  annotation_id: z.string().min(1),
+})
+export type RevanoteBatchItem = z.infer<typeof RevanoteBatchItem>
+
+export const RevanoteBatchResult = z.object({
+  annotations: z.array(RevanoteBatchItem).min(1),
+})
+export type RevanoteBatchResult = z.infer<typeof RevanoteBatchResult>
+
+export interface ParseBatchOk {
+  ok: true
+  value: RevanoteBatchResult
+}
+export interface ParseBatchFallback {
+  ok: false
+  reason: 'envelope_missing' | 'invalid_json' | 'schema_invalid'
+  detail: string
+}
+
+/**
+ * Parse a batch reply's `<<JSON>>{"annotations":[...]}<<END>>` envelope.
+ * Tolerates the same envelope/fence shapes as `parseRevanoteOutput`, but does
+ * NOT synthesize a fallback value — an unparseable batch reply has no single
+ * sensible per-annotation fallback, so the caller (`batch-dispatch.ts`) falls
+ * every member back through `parseRevanoteOutput`'s own single-item fallback
+ * (`schema_invalid`/`envelope_missing`) instead, exactly mirroring what a
+ * single (non-batched) unparseable reply already does.
+ */
+export function parseRevanoteBatchOutput(raw: string): ParseBatchOk | ParseBatchFallback {
+  const text = (raw ?? '').trim()
+  if (!text) return { ok: false, reason: 'envelope_missing', detail: 'empty reply' }
+
+  const envMatch = text.match(ENVELOPE_RE)
+  let jsonText: string | null = null
+  if (envMatch) {
+    jsonText = envMatch[1].trim()
+  } else {
+    const fence = text.match(FENCE_RE)
+    if (fence) jsonText = fence[1].trim()
+  }
+  if (!jsonText) return { ok: false, reason: 'envelope_missing', detail: 'no envelope or fenced JSON found' }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(jsonText)
+  } catch (err: any) {
+    return { ok: false, reason: 'invalid_json', detail: err?.message ?? 'invalid JSON' }
+  }
+  const r = RevanoteBatchResult.safeParse(parsed)
+  if (!r.success) {
+    return { ok: false, reason: 'schema_invalid', detail: jsonText.slice(0, 200) }
+  }
+  return { ok: true, value: r.data }
+}
+
+/**
+ * Rebuild a single-annotation `<<JSON>>...<<END>>` envelope string from one
+ * batch-item result, so the existing single-annotation finalize path
+ * (`run-lifecycle.ts` `finalizeAnnotationReply`) can be reused verbatim per
+ * batch member — same commit-verify gate, same DB writes, same callback shape.
+ */
+export function envelopeForBatchItem(item: Omit<RevanoteBatchItem, 'annotation_id'>): string {
+  return `<<JSON>>\n${JSON.stringify(item)}\n<<END>>`
+}
+
 /**
  * Strip the JSON envelope (and any obvious fenced JSON block) from a piece
  * of assistant text for human display. The web client uses this for the

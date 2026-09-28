@@ -157,18 +157,15 @@ describe('renderAnnotationPrompt', () => {
       '- Strategy: PR.\n' +
       '- Create branch `revanote/annotation-ext-1`, commit fix with a descriptive message, push, then `gh pr create` with the annotation comment in the body.\n' +
       '- Leave the PR open for human review.\n\n\n' +
-      'IMPORTANT — this fix may be one of several Revanote comments dispatched to\n' +
-      'you in the same review. If you are handling more than one comment in this\n' +
-      'session, batch every comment onto ONE branch and open ONE pull request\n' +
-      'covering all of them, rather than a separate branch/PR per comment. Before\n' +
-      'marking ANY comment resolved:\n' +
-      '  1. Push the batch branch and open the PR (once, for the whole batch).\n' +
+      'This is a single Revanote comment dispatched on its own (no sibling\n' +
+      'comments were batched with it). Before marking it resolved:\n' +
+      '  1. Make the fix in its own branch, commit, push, and open its own PR.\n' +
       '  2. Wait for CI to go green.\n' +
       '  3. Merge the PR yourself.\n' +
       '  4. Redeploy the site that serves the page_url host.\n' +
-      "  5. Re-fetch EACH comment's own page_url to confirm THAT specific change\n" +
-      '     is actually live.\n' +
-      'Only after all five steps is a comment eligible for "resolved": true. Cite\n' +
+      "  5. Re-fetch this comment's page_url to confirm the change is actually\n" +
+      '     live.\n' +
+      'Only after all five steps is this comment eligible for "resolved": true. Cite\n' +
       'the MERGED commit SHA on the repo\'s default branch as "commit_sha" — not\n' +
       'your local working-tree or unmerged branch-tip SHA — and the confirmed\n' +
       'live URL as "deploy_url". Never set "resolved": true before the merge and\n' +
