@@ -315,7 +315,27 @@ Filed as a separate GitHub issue at the end of Phase 07 with this checklist:
 | `agent` | Authenticate a Supervisor / agent socket → **spawn CLI processes on that host** | `/ws/agent` (both roles), `/api/plugin/*` |
 | `ext:read` | Read sessions / transcripts / state | `/api/ext/*` (milestone ASK) |
 | `ext:ask` | Ask a session a question (spends tokens) | `POST /api/ext/sessions/:id/ask` |
+| `settings:read` | Read settings (**explicit-only**) | GET on the settings allowlist below |
+| `settings:write` | Change settings; implies `settings:read` (**explicit-only**) | the settings allowlist below |
 | *(NULL / empty)* | **Legacy full access — all scopes** | everything above |
+
+### Settings via API key (`settings:read` / `settings:write`)
+
+`authMiddleware` accepts `Authorization: Bearer remokey_…` on the normal `/api/*` routes,
+but ONLY for routes in `SETTINGS_ROUTES` (`hub/src/auth/settings-api-key.ts`) and ONLY
+for a key whose scopes EXPLICITLY list `settings:read`/`settings:write` (a legacy NULL key
+gets nothing). Any other path → 403 `api_key_not_allowed`; wrong scope → 403
+`insufficient_scope`. Allowlist: `/api/profile` (GET/PATCH), `PATCH /api/users/me/profile`,
+`PATCH /api/users/me/preferred-supervisor`, `GET /api/usage/summary`, `GET /api/account/usage`,
+`/api/account/claude-thresholds` (GET/PUT), `PUT /api/account/revanote-budget-pct`,
+`/api/account/notify-channels` (GET/PATCH), `PATCH /api/account/coolify-auto-triage`,
+`/api/account/coolify-webhook-allowed-ips` (GET/PUT), `GET /api/supervisors`,
+`PATCH /api/supervisors/:id/roots`, `/api/orchestrator` (GET/PUT),
+`PATCH /api/sessions/:id/auto-nudge`. Deliberately OUT: `/api/api-keys` (an api key must
+never mint one), webhook secrets, `/api/users/me/prompts`, skip-permissions, admin.
+`requireRecentAuth` passes an allowlisted settings request from such a key (the key was
+minted behind the same step-up). CSRF is skipped by the existing Bearer bypass.
+Guarded by `hub/test/settings-api-key.test.ts`.
 
 **Zero migration.** `api_keys.scopes` is additive and NULLABLE. Every key minted before
 this milestone has `scopes IS NULL` and keeps working unchanged, including `/ws/agent`.
