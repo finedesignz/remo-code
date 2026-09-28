@@ -11,38 +11,31 @@ LOCK: none
 ## Current status
 Run 2 (2026-09-28) executed the Run 1 bootstrap protocol end to end: reconciled the stale planning
 docs (BLEED confirmed fully shipped — PR #492, open) and shipped PTYCAP Phase 2 (PTY pre-flight
-gate — PR #493, all 3 ROADMAP success criteria met). #493 went through **three** real review rounds
-after first going green, all from AgentAutofix's `ai-review` check (a distinct bot from anything
-this DIRECTIVE otherwise names):
-1. A genuine TOCTOU race where a term.input frame queued behind another writer (e.g. Telegram)
-   could skip the new PTY preflight gate forever, including once promoted to holder. Fixed
-   (`e39456d`) by moving the check to run after `acquire()` grants the turn.
-2. That fix ITSELF introduced a worse race (codex blocking + advisory `agy` reviewer): a second
-   same-writer frame arriving while the first's preflight was still resolving would see the lock
-   already held by itself and skip the check entirely, forwarding before the first frame's rejection
-   landed. Root cause: the lock was mutated before the async verdict was known. Fixed (`19137b7`) by
-   moving the check back to run BEFORE `acquire()` and serializing every concurrent frame for a
-   session behind ONE shared in-flight promise (`pendingPtyPreflight`).
-3. THAT fix still checked at RECEIPT time (codex blocking; claude concurred as a non-blocking
-   "warning" — I treated it as blocking anyway, since this repo's own stated invariant is that the
-   caps are non-bypassable/fail-closed, not "soft"). A turn queued behind another writer could be
-   admitted on a stale passing verdict if spend crossed a cap during the wait. Fixed (`8746bdf`) by
-   moving the check to run only once a turn is actually GRANTED (immediate or via promotion), never
-   at receipt — closing the staleness window entirely rather than shrinking it — while keeping round
-   2's shared-promise protection at the new checkpoint.
-All three fixes shipped with regression tests (including one that specifically flips the mocked
-result while a frame sits queued, to prove the fresh-at-promotion property rather than just asserting
-the check fires) and PR comments addressing the reviewers by name. **This three-round sequence is
-itself the run's biggest lesson** (logged in DIRECTIVE §13): adversarial reasoning about JS
-concurrency by hand caught real bugs but also missed real bugs, twice, in a row, on the same file — a
-security-sensitive concurrency fix needs a test that forces the SPECIFIC interleaving under scrutiny
-before it should be trusted, and even then, a third-party review found something a careful trace
-still missed. CI was re-triggered on `8746bdf` and pending as of this write; this session remains
-subscribed and will confirm green (and check for a FOURTH finding, without assuming this class of
-bug is now exhausted) before treating #493 as done. The governance question from run 1 (self-merge
-escalation) is UNCHANGED: issue #488 is still open with no owner comment beyond this routine's own.
-This run did not repeat that escalation and did not act on the current scheduled prompt's "fixed-core
-upgrade to v3.6" step's self-merge-policy proposal — see the Governance note below.
+gate — PR #493, all 3 ROADMAP success criteria met). #493 went through **four** real review rounds
+after first going green, all from AgentAutofix's `ai-review` check (a distinct bot from anything else
+this DIRECTIVE names) — full per-round detail in LEDGER.md rows 2c–2g, condensed here:
+1. `e39456d` — a queued-behind-another-writer frame skipped the gate forever (fixed: check after
+   acquire()).
+2. `19137b7` — #1's fix let a same-writer frame race past a still-resolving check (fixed: check
+   before acquire(), shared in-flight promise per session).
+3. `8746bdf` — #2's fix still read spend at RECEIPT time, stale for a queued turn (codex blocking;
+   claude called it non-blocking, overridden — this repo's caps are stated as non-bypassable, not
+   soft). Fixed: check only at actual grant time, never at receipt.
+4. `4ef7ec5` — #3 added a second `await` (the check itself) below the existing post-`acquire()`
+   writer re-check, without a matching re-check after it; a socket superseded mid-check could still
+   forward stale bytes. Fixed: re-check `currentTermWriter` again after the preflight await too —
+   same invariant, second checkpoint.
+Every fix shipped with a regression test proving the SPECIFIC interleaving (not just the end state)
+and a PR comment addressing the reviewers by name. **Traced the full call path once more after round
+4** to confirm no further un-rechecked `await` remains between the write-arbitration checks and the
+final `channel.ws.send` — none found, but the last three rounds each thought that too. CI re-triggered
+on `4ef7ec5` and pending as of this write; stays subscribed, will confirm green on THIS commit and
+watch for a fifth finding without assuming the pattern has ended. **Lesson escalated again in
+DIRECTIVE §13**: four straight rounds on one file is itself the signal — treat every future
+concurrency-adjacent PR in this codebase as needing the SAME per-await revalidation audit up front,
+not discovered one round at a time. The governance question from run 1 (self-merge escalation) is
+UNCHANGED: issue #488 still open, no owner comment beyond this routine's own; did not repeat that
+escalation or act on the scheduled prompt's "v3.6" self-merge-policy proposal — see Governance note.
 
 ## Governance note (read before touching merge policy again)
 The standing scheduled-task prompt's step 3 ("Fixed-core upgrade, proposed not applied") asks the
@@ -65,17 +58,18 @@ self-merge proposal in the same "one-time upgrade" step and splitting them out w
 than shipping real scored work this iteration.
 
 ## Resume point
-1. **PR #493 (PTYCAP Phase 2)** — ready for owner merge pending one re-verification: three rounds of
-   AgentAutofix `ai-review` findings (see Current status above), fixed as `e39456d`, `19137b7`, then
-   `8746bdf`, each with its own PR comment addressing the reviewers — see LEDGER.md for full evidence.
-   CI was re-triggered on `8746bdf` and was `pending` at time of this write. **A future run (or this
+1. **PR #493 (PTYCAP Phase 2)** — ready for owner merge pending one re-verification: four rounds of
+   AgentAutofix `ai-review` findings (see Current status above), fixed as `e39456d`, `19137b7`,
+   `8746bdf`, then `4ef7ec5`, each with its own PR comment addressing the reviewers — see LEDGER.md
+   for full evidence. Branch also merged `origin/main` mid-PR (PR #490 and others) to stay current.
+   CI was re-triggered on `4ef7ec5` and was `pending` at time of this write. **A future run (or this
    session, if it's still live) must confirm BOTH Woodpecker checks AND the `ai-review` check are
-   green on `8746bdf` specifically before treating this as done** — "green on the prior commit ⇒
-   safe" has now been proven wrong TWICE this iteration; verify the CURRENT head, not a memory of an
-   earlier one. Stays subscribed via `subscribe_pr_activity` until merged/closed. If `ai-review` finds
-   a FOURTH issue, treat it with the same rigor (trace the actual concurrency, write a test that
-   forces the specific interleaving, don't just patch the reviewer's literal wording) rather than
-   assuming this class of bug is now exhausted — it has not been exhausted twice in a row already.
+   green on `4ef7ec5` specifically before treating this as done** — "green on the prior commit ⇒
+   safe" has now been proven wrong THREE times this iteration; verify the CURRENT head, not a memory
+   of an earlier one. Stays subscribed via `subscribe_pr_activity` until merged/closed. If `ai-review`
+   finds a FIFTH issue, treat it with the same rigor (trace the actual concurrency, write a test that
+   forces the specific interleaving) rather than assuming this class of bug is now exhausted — it has
+   not been exhausted three times in a row already.
 2. **PR #492 (BLEED reconciliation, docs-only)** — CI green (`ci/woodpecker/pr/qc` success), no
    review comments, open, needs owner review/merge like everything else; nothing to drive.
 3. Next scoring pass should pick up PRIORITIES.md's next-ranked item — the Hono runtime-dependency

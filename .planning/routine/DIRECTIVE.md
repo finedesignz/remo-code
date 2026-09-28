@@ -404,26 +404,35 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
   finding from it exactly like any other bot finding (DIRECTIVE §7 Review comments) — verify by
   tracing the actual mechanism, then fix the root cause, never just the reviewer's literal wording.
 - On a concurrency fix specifically: adversarial reasoning-by-hand about JS's single-threaded
-  microtask ordering is necessary but NOT sufficient, and this held true TWICE IN A ROW on the same
-  file (PR #493's PTY preflight gate) — three straight AgentAutofix `ai-review` rounds each found a
-  real, distinct bug in the immediately-preceding fix:
+  microtask ordering is necessary but NOT sufficient, and this held true FOUR ROUNDS IN A ROW on the
+  same file (PR #493's PTY preflight gate) — four straight AgentAutofix `ai-review` rounds each found
+  a real, distinct bug in (or omission from) the immediately-preceding fix:
   1. `e39456d` (check gated on `holder(...) === null` at receipt time) → a queued-then-promoted
      frame skipped the check forever.
   2. `19137b7` (moved the check to run after `acquire()`) → looked sound by hand, but mutated the
      lock before the async verdict was known, so a same-writer frame arriving mid-check could skip
-     it entirely. This one only held once a test was added that deterministically pauses mid-check
-     (a test-controlled deferred gate on the mocked async call) to exercise the exact interleaving,
+     it entirely. Only held once a test was added that deterministically pauses mid-check (a
+     test-controlled deferred gate on the mocked async call) to exercise the exact interleaving,
      rather than just reasoning about it.
   3. `8746bdf` (fixed #2, still checked once at RECEIPT time) → a turn that had to queue could be
-     admitted on a stale passing verdict if spend crossed a cap during the wait. Fixed by moving the
-     check to run only once a turn is actually granted, never at receipt — and this time the
-     regression test specifically flips the mocked result WHILE a frame sits queued, to prove the
-     fresh-at-promotion property rather than merely asserting the check fires at all.
-  Generalize two ways: (a) for any "does X happen before Y resolves" fix, the regression test must
-  force that EXACT ordering, not just assert the end state after `await`ing everything to
-  completion; (b) after a security-sensitive concurrency fix lands and passes review, do not treat
-  the NEXT review round as a formality — assume it might find something else, because on this PR it
-  did, twice in a row. Stop only when a round comes back clean, not when you feel confident.
+     admitted on a stale passing verdict if spend crossed a cap during the wait. Fixed by checking
+     only once a turn is actually granted, never at receipt — the regression test specifically flips
+     the mocked result WHILE a frame sits queued, to prove the fresh-at-promotion property rather
+     than merely asserting the check fires at all.
+  4. `4ef7ec5` (fixed #3, but added a NEW `await` without extending the PRE-EXISTING post-`acquire()`
+     writer-identity re-check to cover it) → a socket superseded mid-check could still forward its
+     now-stale bytes. This wasn't a fresh design flaw so much as an old, already-solved pattern
+     (re-verify identity after every await between a decision and its side effect) not being applied
+     to a newly-added await.
+  Generalize three ways: (a) for any "does X happen before Y resolves" fix, the regression test must
+  force that EXACT ordering, not just assert the end state after `await`ing everything to completion;
+  (b) after a security-sensitive concurrency fix lands and passes review, do not treat the NEXT review
+  round as a formality — assume it might find something else, because on this PR it did, three times
+  in a row; (c) when a change adds a new `await` into a function that ALREADY has an established
+  "revalidate identity/state after this await" pattern (like the turn-lock's own post-`acquire()`
+  check here), apply that SAME pattern to the new await as part of writing the change, not as a
+  follow-up once a reviewer finds the gap — round 4 was avoidable by generalizing round 1–3's own
+  lesson to the codebase's pre-existing conventions, not just to the new code being added.
 
 ## 14. Watch list
 - Open dependabot PR `finedesignz/remo-code#481` (`@hono/zod-openapi` 0.18→0.19): watch for API
