@@ -35,6 +35,13 @@ export const RevanoteResult = z.object({
   agent_reply: z.string().optional().nullable(),
   files_changed: z.array(z.string()).default([]),
   deployed: z.boolean().optional().nullable(),
+  // Gate for `resolved: true` (see commit-verify.ts) — the pushed commit SHA
+  // the agent claims made the fix. Required for resolved to be trusted;
+  // missing/unverifiable ⇒ finalizeAnnotationReply downgrades to resolved=false.
+  commit_sha: z.string().optional().nullable(),
+  // Advisory only (not gated) — the live URL the agent claims to have
+  // re-fetched to confirm the deploy. See prompt.ts.
+  deploy_url: z.string().optional().nullable(),
   needs_clarification: z.boolean().optional().nullable(),
   clarification_question: z.string().optional().nullable(),
   // Phase 5 — best-guess-default fix contract (additive).

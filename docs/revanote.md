@@ -11,7 +11,10 @@
 3. Finds the Claude session bound to that repo's `project_dir`.
 4. Sends the annotation as a `user_message` (with a `[revanote: <preview>]` storage prefix so it surfaces with a violet **Annotation** pill in the chat UI).
 5. Waits for the agent reply, parses a structured `<<JSON>>{…}<<END>>` envelope.
-6. POSTs a callback to Revanote with `{ resolved, action_taken, agent_reply, files_changed, deployed, error? }` — with exponential retry on 5xx/network errors.
+6. **Gates `resolved: true` on the cited commit actually existing on the GitHub remote**
+   (`commit-verify.ts` — see "Resolved requires a pushed commit" below) before persisting or
+   forwarding it; an unverifiable claim is downgraded to `resolved: false` with a reason.
+7. POSTs a callback to Revanote with `{ resolved, action_taken, agent_reply, files_changed, commit_sha, deployed, deploy_url, error? }` — with exponential retry on 5xx/network errors.
 
 ## Auth & secret
 
@@ -105,7 +108,9 @@ The hub renders a Markdown prompt and instructs Claude to end the reply with:
   "resolved": true,
   "action_taken": "short summary",
   "files_changed": ["a.tsx", "b.ts"],
+  "commit_sha": "the full pushed commit SHA that made this fix",
   "deployed": true,
+  "deploy_url": "the live URL re-fetched to confirm the change",
   "needs_clarification": false
 }
 <<END>>
@@ -118,6 +123,88 @@ The hub-side parser (`hub/src/revanote/result-schema.ts`) tolerates:
 3. Bare prose (last resort — synthesizes `{ resolved: false, action_taken: "parse_failed", agent_reply: <raw> }`).
 
 The web `MessageBubble` strips the envelope (and stray ```` ```json ```` fences) from the displayed assistant text via `stripRevanoteEnvelope` so the user only sees natural language.
+
+### Resolved requires a pushed commit (commit-verify gate)
+
+**Incident (2026-09-14, Lakeside project):** a background subagent marked 43 annotations
+`resolved: true`, citing commit `86ad71296` on every single one. That commit was real but
+**dangling** — never on any branch, never pushed, never deployed — and topically unrelated to
+any of the 43 fixes. Nothing verified the citation before the hub forwarded `resolved: true` to
+revanote, so 43 real client comments were closed with zero shipped work. Root cause: the
+prompt *asked* for honest self-verification, but nothing in the hub *enforced* it — the prompt
+was advisory, not a gate.
+
+The fix is code, not prose. `hub/src/revanote/commit-verify.ts`'s `verifyCommitOnRemote()` is
+called from `finalizeAnnotationReply` (`run-lifecycle.ts`) **before** any `resolved: true` is
+persisted or forwarded:
+
+- The agent's envelope must carry `commit_sha` (the full pushed commit hash) when it sets
+  `resolved: true`.
+- The hub resolves `installation_id` + `repo_slug` from the annotation's stored dispatch
+  payload (`payload_raw`, the same fields the Phase 5/6 merge gate already uses) and calls
+  `GET /repos/{owner}/{repo}/commits/{sha}` via the existing GitHub App installation token
+  (`hub/src/auth/github-app.ts` — no new credential; this is the same auth the merge gate uses
+  to open/merge PRs).
+- **200** (commit exists on the remote) → the claim is trusted; `resolved: true` proceeds
+  unchanged.
+- **Anything else** — missing `commit_sha`, missing `installation_id`/`repo_slug` context, an
+  unparseable repo slug, a 404 (commit not on the remote — the exact Lakeside shape), or any
+  other API error — **fails closed**: the annotation is downgraded to `resolved: false` before
+  the run/status rows are written and before the callback is enqueued. The downgrade reason
+  (`commit_sha_missing` / `repo_context_missing` / `repo_slug_unparseable` /
+  `commit_not_on_remote` / `commit_verify_failed`) is recorded as the annotation's `skip_reason`
+  and surfaced to revanote as the callback's `error` field, so the client-visible state and the
+  reviewer both see *why* it wasn't actually closed.
+- `resolved: false` replies (including `needs_clarification`) never touch this gate — it only
+  ever narrows a `true` claim, never widens a `false` one.
+- The prompt (`hub/src/revanote/prompt.ts`) was updated to make this explicit to the agent:
+  `resolved: true` only after the commit is pushed, the site is redeployed, and `page_url` has
+  been re-fetched to confirm the change is live — plus the new `commit_sha`/`deploy_url`
+  envelope fields. **This prompt text is advisory only.** The code-level gate above is what
+  actually prevents a repeat of the incident; an agent that ignores the prompt and pastes a
+  fabricated hash is caught by the 404, not by good behavior.
+
+Tests: `hub/test/revanote-commit-verify.test.ts` (the gate itself, GitHub API mocked — no real
+network) and `hub/test/revanote-run-lifecycle-commit-gate.test.ts` (the finalize-lifecycle
+integration: unpushed/dangling SHA → downgraded, missing SHA → downgraded, verified SHA →
+forwarded, `resolved: false` replies bypass the gate entirely).
+
+### Batch protocol (owner directive, 2026-09-27): one branch/PR per review, merge+deploy before resolving
+
+A Revanote review commonly dispatches many comments at once (the incident above was 43 on one
+review). The prompt (`hub/src/revanote/prompt.ts`) tells the agent: when handling more than one
+comment in the same session, batch every comment onto **one branch** and open **one pull
+request** covering all of them — not a branch/PR per comment. Before marking *any* comment
+resolved, the agent must, in order: (1) push the batch branch and open the PR once, (2) wait for
+CI to go green, (3) merge the PR itself, (4) redeploy the site serving the `page_url` host, (5)
+re-fetch **each comment's own** `page_url` to confirm that specific change is live. Only then may
+it emit `resolved: true`, citing the **merged** commit SHA on the repo's default branch (never a
+local/unmerged branch-tip SHA) as `commit_sha`, and the confirmed live URL as `deploy_url`. A
+comment it cannot verify this way gets `resolved: false` or `needs_clarification: true` with a
+reason — never a guess.
+
+**This is prompt text, advisory only — same caveat as everywhere else in this doc.** The
+code-level gate (`commit-verify.ts`, above) is unchanged and is what actually enforces it: a
+merged commit on the default branch is on the remote, so `GET /repos/{owner}/{repo}/commits/{sha}`
+returns 200 and the claim passes; an agent that skips the merge and cites its local branch-tip SHA
+gets the exact same 404-driven downgrade as the original incident, regardless of what the prompt
+asked for.
+
+**Per-comment dispatch is unchanged by this directive.** Investigated 2026-09-27 following
+PR #489 ("queue revanote bursts instead of dispatching them as session_busy"): a Revanote review
+of N comments does **not** reach the session as one prompt covering the whole batch. Each
+annotation is its own dispatch token (`hub/src/revanote/dispatcher.ts` → `dispatch()` in
+`hub/src/dispatch/pipeline.ts`), and the per-session `SessionQueue` admits exactly one in-flight
+token with the rest FIFO-waiting (`REMO_DISPATCH_MAX_WAITERS`, default 50) — PR #489 raised that
+waiter count so a large burst queues instead of being dropped as `session_busy`, it did not change
+the one-token-at-a-time shape. So the agent receives N **separate** `user_message` turns, one per
+comment, each finalized independently through `run-lifecycle.finalizeAnnotationReply`. The batch
+protocol above therefore relies on the agent's own session memory across those sequential turns
+(recognizing it already has a batch branch/PR open from an earlier comment in the same review) —
+it is not a single-shot batched prompt, and this fix does not restructure dispatch to make it one.
+The existing Phase 5/6 merge-gate batch aggregation (`batch_id`/`batch_size` in each annotation's
+`payload_raw`, `hub/src/revanote/merge-gate.ts`) is a separate, hub-side mechanism for aggregating
+merge/PR *decisions* across per-comment finalizes — it does not itself batch the *prompts*.
 
 ## Outbound callback
 
@@ -133,7 +220,9 @@ Content-Type: application/json
   "action_taken": "Updated tailwind class to fix alignment",
   "agent_reply": "Found it — the flex-direction was reversed…",
   "files_changed": ["web/src/components/MessageBubble.tsx"],
+  "commit_sha": "a1b2c3d4e5f6...",
   "deployed": true,
+  "deploy_url": "https://app.example.com/dashboard",
   "needs_clarification": false,
   "clarification_question": null,
   "error": null

@@ -24,6 +24,7 @@ import {
 } from '../db/revanote-dal.ts'
 import { broadcastRevanoteEvent } from '../ws/registry.ts'
 import { parseRevanoteOutput } from './result-schema.ts'
+import { verifyCommitOnRemote } from './commit-verify.ts'
 
 export interface FinalizeArgs {
   sessionId: string
@@ -50,11 +51,39 @@ export async function finalizeAnnotationReply(args: FinalizeArgs): Promise<void>
   const result = parsed.value
   const snippet = content.length > 500 ? content.slice(content.length - 500) : content
 
+  // Fetch the annotation early — needed both for the commit-verify gate below
+  // and for the outbound callback later. `ann` may be null (annotation gone);
+  // that's handled the same way as any other unverifiable case.
+  const ann = await getAnnotationById(annotationId, userId)
+
+  // GATE: a `resolved: true` claim is only trusted once the cited commit is
+  // proven to exist on the GitHub remote. Fails closed — missing SHA, missing
+  // repo/installation context, or a 404 all downgrade to resolved=false with
+  // a specific reason. See commit-verify.ts and docs/revanote.md.
+  let downgradeReason: string | null = null
+  if (result.resolved) {
+    const raw = (ann?.payload_raw ?? {}) as Record<string, any>
+    const installationId: number | null = typeof raw.installation_id === 'number' ? raw.installation_id : null
+    const repoSlug: string | null = typeof raw.repo_slug === 'string' ? raw.repo_slug : null
+    const verify = await verifyCommitOnRemote({
+      installationId,
+      repoSlug,
+      commitSha: result.commit_sha,
+    })
+    if (!verify.verified) {
+      downgradeReason = verify.reason ?? 'commit_verify_failed'
+      console.warn(
+        `[revanote.lifecycle] downgrading resolved=false annotation=${annotationId} reason=${downgradeReason}`,
+      )
+      result.resolved = false
+    }
+  }
+
   await updateAnnotationRun(runId, {
     status: 'success',
     finished_at: new Date(),
     resolved: result.resolved,
-    action_taken: result.action_taken || null,
+    action_taken: downgradeReason ? `${result.action_taken || ''} [${downgradeReason}]`.trim() : (result.action_taken || null),
     agent_reply: result.agent_reply ?? parsed.preface ?? null,
     files_changed: result.files_changed,
     deployed: result.deployed === true,
@@ -66,7 +95,7 @@ export async function finalizeAnnotationReply(args: FinalizeArgs): Promise<void>
   const annStatus = result.resolved ? 'resolved' : 'failed'
   await updateAnnotationStatus(annotationId, annStatus, {
     resolved_at: result.resolved ? new Date() : null,
-    skip_reason: result.resolved ? null : (result.action_taken || parsed.reason || 'agent_unresolved'),
+    skip_reason: result.resolved ? null : (downgradeReason || result.action_taken || parsed.reason || 'agent_unresolved'),
   })
 
   broadcastRevanoteEvent(userId, {
@@ -82,7 +111,6 @@ export async function finalizeAnnotationReply(args: FinalizeArgs): Promise<void>
 
   // Queue the outbound callback (ALWAYS carries annotation_id — revanote invariant).
   try {
-    const ann = await getAnnotationById(annotationId, userId)
     if (ann) {
       const { scheduleImmediateCallback } = await import('./callback.ts')
       let basePayload: import('./callback.ts').RevanoteCallbackPayload = {
@@ -91,12 +119,15 @@ export async function finalizeAnnotationReply(args: FinalizeArgs): Promise<void>
         action_taken: result.action_taken || null,
         agent_reply: result.agent_reply ?? parsed.preface ?? null,
         files_changed: result.files_changed ?? [],
+        // Only surface commit_sha on a claim that actually cleared the gate.
+        commit_sha: result.resolved ? (result.commit_sha ?? null) : null,
         deployed: result.deployed === true,
+        deploy_url: result.deploy_url ?? null,
         needs_clarification: result.needs_clarification === true,
         clarification_question: result.clarification_question ?? null,
         assumption: result.assumption ?? null,
         clarification_reason: result.clarification_reason ?? null,
-        error: parsed.ok ? null : `parse_${parsed.reason}`,
+        error: downgradeReason ?? (parsed.ok ? null : `parse_${parsed.reason}`),
       }
 
       // Phase 6: run the merge gate if the inbound payload carried sandbox fields.
