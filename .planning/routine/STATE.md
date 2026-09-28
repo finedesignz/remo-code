@@ -9,8 +9,8 @@
 LOCK: none
 
 ## Current status
-Run 2 (2026-09-28) reconciled the stale planning docs (BLEED confirmed shipped — PR #492, green,
-awaiting owner merge) and shipped PTYCAP Phase 2 (PTY pre-flight gate — PR #493). #493 took five
+Run 2 (2026-09-28) reconciled the stale planning docs (BLEED confirmed shipped — PR #492, merged
+2026-09-28) and shipped PTYCAP Phase 2 (PTY pre-flight gate — PR #493). #493 took five
 AgentAutofix `ai-review` rounds (LEDGER 2c–2g), then the routine recommended a manual owner review.
 **The owner declined: "No manual human reviews… use panel and fix it."** That recommendation is
 WITHDRAWN. Instead a three-lens QC panel (concurrency, security, correctness) reviewed the design and
@@ -47,8 +47,7 @@ than shipping real scored work this iteration.
    finding: trace it, force the interleaving in a test, fix, re-panel if the change is non-trivial.
    Owner-facing behavior note is in the PR body (terminal now under the $10-default cost cap; Enter
    refused while over a cap). Stays subscribed until merged/closed.
-2. **PR #492 (BLEED reconciliation, docs-only)** — CI green (`ci/woodpecker/pr/qc` success), no
-   review comments, open, needs owner review/merge like everything else; nothing to drive.
+2. **PR #492 (BLEED reconciliation, docs-only)** — MERGED by the owner 2026-09-28T14:40Z. Done.
 3. Next scoring pass should pick up PRIORITIES.md's next-ranked item — the Hono runtime-dependency
    security triage (`bun audit`: 12 high / 33 moderate / 2 low, `hono@4.12.8` is a hub RUNTIME
    dependency) is currently top-scored; PTYCAP Phase 3+ is blocked until #493 merges (don't
