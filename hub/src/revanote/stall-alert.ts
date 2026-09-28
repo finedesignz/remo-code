@@ -126,7 +126,7 @@ const REAL_DEPS: StallAlertDeps = {
       FROM annotations
       WHERE (
         (status = 'pending' AND skip_reason = 'session_offline')
-        OR status IN ('failed', 'failed_offline')
+        OR status IN ('failed', 'failed_offline', 'dispatching')
       )
       AND COALESCE(dispatched_at, received_at) < ${parkedCutoff}
       GROUP BY user_id

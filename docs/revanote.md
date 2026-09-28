@@ -192,13 +192,17 @@ single-annotation path below.
   `startBatchSweep()` in `hub/src/index.ts`): a fully DB-state-driven poll (default every
   `REMO_REVANOTE_BATCH_POLL_MS` = 5s, no per-batch timer state, no buffering of annotation content
   in memory — restart-safe by construction). Each tick re-reads `pending` annotations carrying a
-  `batch_id`, groups them by `(user_id, batch_id, resolved target session)`, and dispatches a group
-  once no NEW arrival has landed for `REMO_REVANOTE_BATCH_DEBOUNCE_MS` (default 30s) measured from
-  the group's LATEST `received_at` — a fresh arrival extends the window. A late arrival AFTER a
-  group already dispatched forms a brand-new group on a later tick, never appended to an in-flight
-  turn. A member that can't resolve a mapping/session fails immediately (same
+  `batch_id`, groups them by `(user_id, batch_id, resolved target session, resolved mapping)`, and
+  dispatches a group once no NEW arrival has landed for `REMO_REVANOTE_BATCH_DEBOUNCE_MS` (default
+  30s) measured from the group's LATEST `received_at` — a fresh arrival extends the window. A late
+  arrival AFTER a group already dispatched forms a brand-new group on a later tick, never appended
+  to an in-flight turn. A member that can't resolve a mapping/session fails immediately (same
   `no_mapping_for_host`/`session_not_found_for_repo` semantics as the single path) and never blocks
-  its siblings.
+  its siblings. **The mapping is part of the sub-group key (qcfix/batch-claim, C5)**: prod runs
+  ~23 client sites, each with its own mapping/trust config, sharing ONE session, so grouping by
+  session alone could put an UNTRUSTED site's annotation in the same dispatched batch as a TRUSTED
+  site's — and `renderBatchAnnotationPrompt` derives its one deploy trust/strategy from a single
+  member. Grouping by mapping too guarantees every dispatched batch is single-mapping.
 - **One prompt, one turn** (`hub/src/revanote/prompt.ts` `renderBatchAnnotationPrompt`): every
   member's reviewer-authored content is fenced separately (still untrusted per item), tagged with
   its EXTERNAL annotation id. The contract: push ONE branch, open ONE PR covering every comment,
@@ -217,10 +221,33 @@ single-annotation path below.
   single-annotation envelope string (`envelopeForBatchItem`) and run through the EXACT same
   commit-verify gate, DB writes, and callback shape as a non-batched annotation. An annotation
   id omitted from the reply's `annotations[]` array finalizes `resolved: false` /
-  `missing_from_reply`. An unparseable batch reply (no envelope, invalid JSON, or a schema
-  mismatch) falls every member back through that same function's own single-item parse fallback
-  (`envelope_missing`/`invalid_json`/`schema_invalid`) — identical failure shape to a single
-  annotation's unparseable reply.
+  `missing_from_reply`. **An unparseable batch reply (no envelope, invalid JSON, a lone
+  single-annotation-shaped object, or any other schema mismatch) finalizes every member
+  `failed`/`resolved: false` directly, carrying the batch parser's own failure reason
+  (`batch_parse_failed:<reason>`)** — it is never re-handed to the single-item parser
+  (`parseRevanoteOutput`), which would otherwise happily accept a lone
+  `{"resolved":true,...}` object and silently resolve every member from ONE verdict meant for
+  at most one annotation (qcfix/batch-claim, F3).
+- **Atomic pre-send claim (qcfix/batch-claim, closes F2/F4)**: every dispatch path — the single
+  path (`dispatcher.ts` `dispatchAnnotationRow`, including `forceSingle` retry) and the batch path
+  (`batch-dispatch.ts` `dispatchBatch`) — calls `claimAnnotationsForDispatch` (a single conditional
+  `UPDATE annotations SET status='dispatching' WHERE id = ANY(...) AND status='pending' RETURNING
+  id`) BEFORE building any prompt or sending anything. Whichever caller's claim commits first wins
+  each row; every other concurrent caller (a `forceSingle` retry racing a sweep tick over the same
+  still-`batch_id`-carrying row, or an overlapping sweep tick) sees that row already claimed and
+  backs off instead of sending a duplicate. A crash after a successful claim (before the send that
+  was supposed to follow) leaves the row parked at `status='dispatching'` — deliberately NOT reset
+  to `pending` by anything on restart, so a crash mid-batch can never turn into an automatic
+  re-send loop; `stall-alert.ts` alarms on a `dispatching` row stuck past the parked-stall threshold
+  exactly like a parked/rejected annotation, so it is never a silent dead end.
+- **Batch dispatch token scoping (qcfix/batch-claim, C3)**: a batch's dispatch token (and the
+  `inFlightBatches` map key) is `batch:<userId>:<sessionId>:<mappingId>:<batch_id>`, never the raw
+  `batch_id` alone. One `batch_id` can legitimately split into several dispatched groups (a
+  different resolved session, per C3, or — since C5 — a different resolved mapping within the SAME
+  session), and the same `batch_id` can repeat across users; a raw-`batch_id` key would collide two
+  of those groups' `inFlightBatches` entries, so a reply meant for one group's members could
+  finalize (or orphan) the other group's. The `batch:` prefix also keeps a batch token disjoint by
+  construction from a single-annotation dispatch's token (a bare annotation UUID).
 - **Timeouts:** a batch turn does N comments' worth of branch/PR/CI/merge/redeploy work in one
   turn, so it needs a longer ceiling than a single annotation's default 20min
   `REVANOTE_FINALIZE_TIMEOUT_MS`. `REMO_REVANOTE_BATCH_RUN_MAX_MS` (default 7,200,000ms = 2h) sets
@@ -240,8 +267,13 @@ independent of the dispatch-time coalescing above, and is not wired into it.
 
 Tests: `hub/test/revanote-batch-dispatch.test.ts` (coalescing, debounce reset from the latest
 arrival, one-prompt-per-batch, array-reply finalize with the per-item commit-verify gate, a missing
-member, an unparseable reply, the no-batch_id single path, `forceSingle` retry, and the
-batch-specific finalize ceiling).
+member, an unparseable reply — including a lone single-annotation-shaped object, which must fail
+every member rather than resolve them all from one verdict — the no-batch_id single path,
+`forceSingle` retry (including a race against a sweep tick over the same row), the atomic pre-send
+claim surviving a crash mid per-member dispatched-status loop, one `batch_id` spanning 2 sessions
+dispatching + finalizing independently, two differently-trusted mappings sharing one session and
+`batch_id` dispatching as isolated single-mapping batches, and the batch-specific finalize
+ceiling).
 
 ## Outbound callback
 

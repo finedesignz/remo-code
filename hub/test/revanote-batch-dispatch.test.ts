@@ -40,6 +40,25 @@ const MAPPING = {
   updated_at: new Date().toISOString(),
 }
 
+// C5 harness: a second, TRUSTED mapping for a different host, so a batch
+// whose members span both hosts (but resolve to the SAME session -- the prod
+// shape: ~23 client sites, each with its own mapping, sharing one session)
+// exercises the mapping-aware sub-group.
+const TRUSTED_MAPPING = {
+  ...MAPPING,
+  id: 'map-trusted',
+  hostname_pattern: 'trusted.example.com',
+  repo_path: '/repos/trusted',
+  deploy_strategy: 'direct' as const,
+  auto_merge: true,
+  trusted: true,
+}
+
+const MAPPINGS_BY_HOST: Record<string, typeof MAPPING> = {
+  'demo.example.com': MAPPING,
+  'trusted.example.com': TRUSTED_MAPPING,
+}
+
 function makeAnnotation(over: Partial<any> = {}) {
   const extId = over.annotation_id_external ?? 'ext-1'
   return {
@@ -77,6 +96,12 @@ const state: {
   callbacks: any[]
   offlineSessions: Set<string>
   resolvedSession: { id: string } | null
+  dispatchedCallCount: number
+  crashOnNthDispatchedCall: number | null
+  gateFirstMappingCall: boolean
+  mappingGateArmed: boolean
+  releaseMappingGate: (() => void) | null
+  sessionByRepoPath: Record<string, { id: string }> | null
 } = {
   pendingAnnotations: [],
   runs: [],
@@ -86,15 +111,40 @@ const state: {
   callbacks: [],
   offlineSessions: new Set(),
   resolvedSession: { id: 'sess-1' },
+  dispatchedCallCount: 0,
+  crashOnNthDispatchedCall: null,
+  gateFirstMappingCall: false,
+  mappingGateArmed: false,
+  releaseMappingGate: null,
+  sessionByRepoPath: null,
 }
 
 let runSeq = 0
 
 mock.module('../src/db/postgres.ts', () => ({
-  sql: async (strings: TemplateStringsArray) => {
+  sql: async (strings: TemplateStringsArray, ...values: any[]) => {
     const text = strings.join('')
     if (text.includes("payload_raw ? 'batch_id'")) {
       return state.pendingAnnotations.filter((a) => a.status === 'pending' && a.payload_raw?.batch_id)
+    }
+    // Atomic claim: `UPDATE annotations SET status = 'dispatching' WHERE id =
+    // ANY(...) AND status = 'pending' RETURNING id` — models the real
+    // conditional UPDATE against the shared in-memory row set so a race
+    // between two callers (a sweep tick vs. a forceSingle retry) resolves
+    // deterministically: whichever call reaches this branch first flips the
+    // row and wins it; the loser sees it already non-'pending' and gets it
+    // filtered out of its own result.
+    if (text.includes("SET status = 'dispatching'")) {
+      const ids: string[] = values[0] ?? []
+      const claimed: { id: string }[] = []
+      for (const id of ids) {
+        const ann = state.pendingAnnotations.find((a) => a.id === id)
+        if (ann && ann.status === 'pending') {
+          ann.status = 'dispatching'
+          claimed.push({ id })
+        }
+      }
+      return claimed
     }
     if (text.includes('user_id FROM annotations')) return [{ user_id: 'user-1' }]
     if (text.includes('AS tz')) return [{ tz: 'UTC' }]
@@ -106,7 +156,23 @@ mock.module('../src/db/postgres.ts', () => ({
 
 mock.module('../src/db/revanote-dal.ts', () => ({
   ...realRevDal,
-  resolveRevanoteMappingForHost: async () => MAPPING,
+  resolveRevanoteMappingForHost: async (_userId: string, host: string) => {
+    // F4 race harness: when armed, the FIRST caller to reach this shared
+    // lookup (retry's dispatchAnnotationRow or the sweep's per-member
+    // resolveMappingAndSession -- whichever the JS scheduler happens to
+    // reach first) is parked here until the test explicitly releases it,
+    // so the OTHER (unpaused) caller can race ahead and fully dispatch
+    // first -- deterministically reproducing "a sweep tick lands in the
+    // gap while retry is mid-flight" regardless of which one the scheduler
+    // happened to start first.
+    if (state.gateFirstMappingCall && !state.mappingGateArmed) {
+      state.mappingGateArmed = true
+      await new Promise<void>((resolve) => {
+        state.releaseMappingGate = resolve
+      })
+    }
+    return MAPPINGS_BY_HOST[host] ?? MAPPING
+  },
   getAnnotationById: async (id: string) => state.pendingAnnotations.find((a) => a.id === id) ?? null,
   sumTodayAnnotationCostForUser: async () => 0,
   insertAnnotationRun: async (opts: any) => {
@@ -121,6 +187,12 @@ mock.module('../src/db/revanote-dal.ts', () => ({
     return run ?? null
   },
   updateAnnotationStatus: async (id: string, status: string, opts: any = {}) => {
+    if (status === 'dispatched') {
+      state.dispatchedCallCount++
+      if (state.crashOnNthDispatchedCall != null && state.dispatchedCallCount === state.crashOnNthDispatchedCall) {
+        throw new Error('simulated crash mid per-member dispatched-status loop')
+      }
+    }
     state.annStatus.push({ id, status, opts })
     const ann = state.pendingAnnotations.find((a) => a.id === id)
     if (ann) ann.status = status
@@ -129,7 +201,8 @@ mock.module('../src/db/revanote-dal.ts', () => ({
 
 mock.module('../src/db/dal.ts', () => ({
   ...realDal,
-  findSessionByProjectDir: async () => state.resolvedSession,
+  findSessionByProjectDir: async (_userId: string, repoPath: string) =>
+    state.sessionByRepoPath?.[repoPath] ?? state.resolvedSession,
   insertMessage: async () => ({ id: 'msg-1', created_at: new Date().toISOString() }),
 }))
 
@@ -186,6 +259,12 @@ beforeEach(() => {
   state.callbacks = []
   state.offlineSessions = new Set()
   state.resolvedSession = { id: 'sess-1' }
+  state.dispatchedCallCount = 0
+  state.crashOnNthDispatchedCall = null
+  state.gateFirstMappingCall = false
+  state.mappingGateArmed = false
+  state.releaseMappingGate = null
+  state.sessionByRepoPath = null
   runSeq = 0
   clockOffset = 0
   Date.now = () => realNow() + clockOffset
@@ -287,6 +366,58 @@ describe('revanote batch dispatch — coalescing', () => {
     expect(forced.status).toBe('dispatched')
     expect(state.runs).toHaveLength(1)
   })
+
+  test('F4: forceSingle retry racing a sweep tick over the same batch_id row dispatches at most once', async () => {
+    const debounce = batchDebounceMs()
+    state.pendingAnnotations = [
+      makeAnnotation({
+        id: 'ann-race',
+        annotation_id_external: 'ext-race',
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo', batch_id: 'brace' },
+        received_at: envAgo(debounce + 1000),
+      }),
+    ]
+
+    // Simulate the retry endpoint's reset-to-pending + forceSingle dispatch
+    // racing a concurrent sweep tick over the SAME still-pending,
+    // batch_id-carrying row. Session-queue dedup is token-identity only
+    // (token=annotation id on one side, token=batch_id on the other), so it
+    // cannot catch this on its own -- only an atomic pre-send DB claim can.
+    //
+    // The harness arms a gate on the shared mapping lookup so whichever of
+    // the two callers the JS scheduler happens to reach FIRST is parked;
+    // the other (unpaused) caller races ahead and fully dispatches. Once it
+    // has sent its frame, the parked caller is released and allowed to
+    // finish too -- deterministically reproducing "a sweep tick lands in
+    // the gap while retry is mid-flight" (or vice versa) regardless of
+    // which one the scheduler actually started first.
+    state.gateFirstMappingCall = true
+    const p1 = dispatchPendingAnnotation('ann-race', { forceSingle: true })
+    const p2 = sweepBatchDispatch()
+
+    for (let i = 0; i < 50 && state.sentFrames.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    expect(state.sentFrames.length).toBe(1) // the unpaused (winning) caller sent first
+
+    state.releaseMappingGate?.()
+    await Promise.all([p1, p2])
+    // The loser must not have sent a SECOND frame yet -- pre-fix it is merely
+    // QUEUED behind the winner's in-flight session-queue slot (same session);
+    // post-fix its own claim already failed and it never reached the queue.
+    expect(state.sentFrames.length).toBe(1)
+
+    // Finalize the winner's in-flight turn. This is the exact moment the bug
+    // fires pre-fix: SessionQueue promotes whatever token was QUEUED behind
+    // it and the pipeline sends for that promoted request DIRECTLY, without
+    // ever re-checking the annotation's current DB status -- a second,
+    // fully redundant dispatch for the same annotation.
+    const finalizeEnvelope = ['<<JSON>>', JSON.stringify({ resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'realsha123' }), '<<END>>'].join('\n')
+    await onSessionReply('sess-1', finalizeEnvelope)
+
+    expect(state.sentFrames.length).toBe(1) // still just the one -- no promoted duplicate send
+    expect(state.runs.filter((r) => r.annotation_id === 'ann-race')).toHaveLength(1)
+  })
 })
 
 describe('revanote batch dispatch — finalize', () => {
@@ -377,5 +508,183 @@ describe('revanote batch dispatch — finalize', () => {
     // Narration-only message with no envelope must NOT force-finalize a
     // batch turn at 21 minutes -- no member should have resolved/failed yet.
     expect(state.annStatus.some((s) => s.status === 'resolved' || s.status === 'failed')).toBe(false)
+  })
+
+  test('F3: a single non-array object batch reply finalizes every member failed, never re-parsed as one verdict', async () => {
+    await dispatchBatchOf3()
+
+    // A single verdict shaped for ONE annotation, not the batch `{annotations:[...]}`
+    // envelope. `parseRevanoteBatchOutput` must reject this (missing `annotations`
+    // array), and the failure path must NEVER hand `content` to the single-item
+    // parser -- that parser happily accepts this exact shape and would resolve
+    // every member true from one verdict.
+    const singleObjectReply = '<<JSON>>\n' + JSON.stringify({ resolved: true, commit_sha: 'realsha123' }) + '\n<<END>>'
+    await onSessionReply('sess-1', singleObjectReply)
+
+    for (const id of ['ann-1', 'ann-2', 'ann-3']) {
+      const lastStatus = state.annStatus.filter((s) => s.id === id).pop()
+      expect(lastStatus?.status).toBe('failed')
+    }
+    expect(state.annStatus.some((s) => s.status === 'resolved')).toBe(false)
+  })
+})
+
+describe('revanote batch dispatch — atomic claim (F2)', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  test('F2: a crash mid per-member dispatched-status loop must not let a resweep re-dispatch the same batch', async () => {
+    const debounce = batchDebounceMs()
+    state.pendingAnnotations = ['ext-1', 'ext-2', 'ext-3'].map((extId, i) =>
+      makeAnnotation({
+        id: `ann-${i + 1}`,
+        annotation_id_external: extId,
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo', batch_id: 'bcrash' },
+        received_at: envAgo(debounce + 1000),
+      }),
+    )
+
+    // Simulate a crash right after member 1's per-member `updateAnnotationStatus
+    // (ann.id, 'dispatched')` call succeeds, before member 2's runs.
+    state.crashOnNthDispatchedCall = 2
+    await expect(sweepBatchDispatch()).rejects.toThrow('simulated crash')
+
+    // The single batch prompt frame already went out before the crash.
+    expect(state.sentFrames).toHaveLength(1)
+
+    // "Restart": a fresh sweep tick re-reads pending rows exactly like
+    // runSweepOnce does after a real process restart. With the atomic
+    // pre-send claim, ann-2/ann-3 were flipped pending -> dispatching BEFORE
+    // that first send ever happened, so this tick must find nothing pending
+    // for this batch and must NOT re-dispatch / re-send / insert a 2nd run.
+    state.crashOnNthDispatchedCall = null
+    const resweep = await sweepBatchDispatch()
+    expect(resweep.dispatched).toBe(0)
+    expect(state.sentFrames).toHaveLength(1)
+    expect(state.runs.filter((r) => r.annotation_id === 'ann-2')).toHaveLength(1)
+  })
+})
+
+describe('revanote batch dispatch — per-target isolation (C3/C5)', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  test('C3: one batch_id spanning 2 sessions produces 2 dispatches, each reply finalizing only its own members', async () => {
+    const debounce = batchDebounceMs()
+    state.sessionByRepoPath = {
+      '/repos/demo': { id: 'sess-a' },
+      '/repos/trusted': { id: 'sess-b' },
+    }
+    state.pendingAnnotations = [
+      makeAnnotation({
+        id: 'ann-a1',
+        annotation_id_external: 'ext-a1',
+        page_url: 'https://demo.example.com/page',
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo-a', batch_id: 'bsplit' },
+        received_at: envAgo(debounce + 1000),
+      }),
+      makeAnnotation({
+        id: 'ann-b1',
+        annotation_id_external: 'ext-b1',
+        page_url: 'https://trusted.example.com/page',
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo-b', batch_id: 'bsplit' },
+        received_at: envAgo(debounce + 1000),
+      }),
+    ]
+
+    const result = await sweepBatchDispatch()
+    expect(result.dispatched).toBe(2)
+    expect(state.sentFrames).toHaveLength(2)
+
+    const frameA = state.sentFrames.find((f) => f.content.includes('ext-a1'))
+    const frameB = state.sentFrames.find((f) => f.content.includes('ext-b1'))
+    expect(frameA).toBeDefined()
+    expect(frameB).toBeDefined()
+    // Each frame covers ONLY its own session's member -- the same raw
+    // batch_id must not merge them into one prompt/token.
+    expect(frameA!.content).not.toContain('ext-b1')
+    expect(frameB!.content).not.toContain('ext-a1')
+
+    // Each session's reply finalizes ONLY its own member -- proves the two
+    // dispatches hold genuinely distinct tokens (a raw-batch_id key would
+    // collide the two `inFlightBatches` entries and misroute/orphan one).
+    const envelopeFor = (extId: string) =>
+      '<<JSON>>\n' +
+      JSON.stringify({ annotations: [{ annotation_id: extId, resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'realsha123', deployed: true }] }) +
+      '\n<<END>>'
+
+    await onSessionReply('sess-a', envelopeFor('ext-a1'))
+    expect(state.annStatus.some((s) => s.id === 'ann-a1' && s.status === 'resolved')).toBe(true)
+    // ann-b1 was independently dispatched (its own status='dispatched' entry
+    // exists), but finalizing sess-a's reply must NOT touch it -- a raw
+    // batch_id key would collide the two `inFlightBatches` entries and
+    // misroute this finalize onto the wrong (or both) session's members.
+    expect(state.annStatus.some((s) => s.id === 'ann-b1' && s.status === 'resolved')).toBe(false)
+
+    await onSessionReply('sess-b', envelopeFor('ext-b1'))
+    expect(state.annStatus.some((s) => s.id === 'ann-b1' && s.status === 'resolved')).toBe(true)
+  })
+
+  test('C5: two mappings with different trust in the same session+batch_id produce 2 dispatches, untrusted gets the propose-only/pr plan', async () => {
+    const debounce = batchDebounceMs()
+    // Both resolve to the SAME session (state.resolvedSession, sessionByRepoPath
+    // left null) -- the prod shape this defect actually hits: ~23 sites, each
+    // its own mapping/trust, sharing one session.
+    state.pendingAnnotations = [
+      makeAnnotation({
+        id: 'ann-untrusted',
+        annotation_id_external: 'ext-untrusted',
+        page_url: 'https://demo.example.com/page',
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo-demo', batch_id: 'bmix' },
+        received_at: envAgo(debounce + 1000),
+      }),
+      makeAnnotation({
+        id: 'ann-trusted',
+        annotation_id_external: 'ext-trusted',
+        page_url: 'https://trusted.example.com/page',
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo-trusted', batch_id: 'bmix' },
+        received_at: envAgo(debounce + 1000),
+      }),
+    ]
+
+    const result = await sweepBatchDispatch()
+    // Both mapping groups are separately dispatched -- but they resolve to
+    // the SAME session, so the pipeline's own per-session queue legitimately
+    // serializes them to ONE immediate send; the second is QUEUED, not
+    // dropped or merged. Finalizing the first promotes and sends the second.
+    expect(result.dispatched).toBe(2)
+    expect(state.sentFrames).toHaveLength(1)
+
+    const firstIsUntrusted = state.sentFrames[0].content.includes('ext-untrusted')
+    const finalizeJson = JSON.stringify({
+      annotations: [
+        {
+          annotation_id: firstIsUntrusted ? 'ext-untrusted' : 'ext-trusted',
+          resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'realsha123', deployed: true,
+        },
+      ],
+    })
+    await onSessionReply('sess-1', ['<<JSON>>', finalizeJson, '<<END>>'].join('\n'))
+    expect(state.sentFrames).toHaveLength(2)
+
+    const untrustedFrame = state.sentFrames.find((f) => f.content.includes('ext-untrusted'))
+    const trustedFrame = state.sentFrames.find((f) => f.content.includes('ext-trusted'))
+    expect(untrustedFrame).toBeDefined()
+    expect(trustedFrame).toBeDefined()
+
+    // Each dispatched batch is single-mapping -- the untrusted member's
+    // prompt must NOT inherit the trusted mapping's direct/auto-merge plan,
+    // and vice versa.
+    expect(untrustedFrame!.content).not.toContain('ext-trusted')
+    expect(untrustedFrame!.content).toContain('Strategy: PR.')
+    expect(untrustedFrame!.content).toContain('Leave the PR open for human review.')
+    expect(untrustedFrame!.content).not.toContain('Strategy: DIRECT.')
+
+    expect(trustedFrame!.content).not.toContain('ext-untrusted')
+    expect(trustedFrame!.content).toContain('Strategy: DIRECT.')
   })
 })

@@ -1129,7 +1129,7 @@ CREATE TABLE IF NOT EXISTS annotations (
   mapping_id               UUID REFERENCES revanote_app_mappings(id) ON DELETE SET NULL,
   session_id               TEXT REFERENCES sessions(id) ON DELETE SET NULL,
   status                   TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending', 'dispatched', 'resolved', 'failed', 'failed_offline')),
+    CHECK (status IN ('pending', 'dispatching', 'dispatched', 'resolved', 'failed', 'failed_offline')),
   skip_reason              TEXT,
   source_ip                TEXT,
   payload_raw              JSONB NOT NULL,
@@ -1139,6 +1139,15 @@ CREATE TABLE IF NOT EXISTS annotations (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_annotations_user_external
   ON annotations(user_id, annotation_id_external);
+-- qcfix/batch-claim — 'dispatching' is the atomic pre-send claim state (see
+-- claimAnnotationsForDispatch in revanote-dal.ts): a single conditional
+-- `UPDATE ... WHERE status='pending' RETURNING id` flips ownership BEFORE any
+-- prompt is sent, so a crash mid-batch or a racing retry can never double-claim
+-- the same annotation. Idempotent widen of the pre-existing CHECK (re-running
+-- schema.sql must not fail on an already-widened constraint).
+ALTER TABLE annotations DROP CONSTRAINT IF EXISTS annotations_status_check;
+ALTER TABLE annotations ADD CONSTRAINT annotations_status_check
+  CHECK (status IN ('pending', 'dispatching', 'dispatched', 'resolved', 'failed', 'failed_offline'));
 CREATE INDEX IF NOT EXISTS idx_annotations_user_recv
   ON annotations(user_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_annotations_status

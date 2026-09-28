@@ -29,7 +29,11 @@
  *   - A dispatched batch sends ONE prompt (`prompt.ts`
  *     `renderBatchAnnotationPrompt`) covering every member, through the SAME
  *     shared dispatch pipeline + gate list as a single annotation, under ONE
- *     `token` (the batch_id). `inFlightBatches` is the only in-memory state —
+ *     `token` scoped `batch:<userId>:<sessionId>:<mappingId>:<batch_id>` (qcfix/batch-claim,
+ *     C3 — a raw batch_id alone collides once one batch_id splits into several
+ *     per-session/per-mapping groups, or repeats across users; the `batch:`
+ *     prefix also keeps it disjoint from a single-annotation token, which is a
+ *     bare annotation UUID). `inFlightBatches` is the only in-memory state —
  *     small per-in-flight-turn bookkeeping (member annotation/run ids), not an
  *     annotation-content buffer, and lost on restart exactly like the
  *     pipeline's own `activeBySession` hook (no dispatch path survives a hub
@@ -50,6 +54,7 @@ import {
   type RevanoteMapping,
   updateAnnotationStatus,
   insertAnnotationRun,
+  claimAnnotationsForDispatch,
 } from '../db/revanote-dal.ts'
 import { getChannel, broadcastRevanoteEvent, broadcastToSubscribers } from '../ws/registry.ts'
 import { insertMessage } from '../db/dal.ts'
@@ -178,17 +183,24 @@ async function runSweepOnce(now: number): Promise<{ dispatched: number }> {
     }
     if (resolved.length === 0) continue
 
-    // Sub-group by resolved target session — "same batch_id + user + target
-    // session" per spec. A batch whose members resolve to different sessions
-    // (different host/repo) dispatches as separate per-session batches.
-    const bySession = new Map<string, typeof resolved>()
+    // Sub-group by resolved target session AND by mapping (qcfix/batch-claim,
+    // C5) — "same batch_id + user + target session" per spec is not enough on
+    // its own: prod runs ~23 client sites, each with its OWN mapping/trust
+    // config, all sharing ONE session, so a session-only split can still put
+    // members from an UNTRUSTED site and a TRUSTED site in the same dispatched
+    // batch. `renderBatchAnnotationPrompt` derives its single deploy
+    // trust/strategy from ONE member — every member of a dispatched batch must
+    // therefore share exactly one mapping.
+    const bySessionAndMapping = new Map<string, typeof resolved>()
     for (const r of resolved) {
-      const list = bySession.get(r.sessionId) ?? []
+      const key = `${r.sessionId}\0${r.mapping?.id ?? 'no-mapping'}`
+      const list = bySessionAndMapping.get(key) ?? []
       list.push(r)
-      bySession.set(r.sessionId, list)
+      bySessionAndMapping.set(key, list)
     }
 
-    for (const [sessionId, group] of bySession) {
+    for (const group of bySessionAndMapping.values()) {
+      const sessionId = group[0].sessionId
       const latest = Math.max(...group.map((g) => new Date(g.ann.received_at as any).getTime()))
       if (now - latest < debounce) continue // still debouncing — a newer arrival extends the window
       await dispatchBatch(userId, sessionId, group)
@@ -204,8 +216,36 @@ async function dispatchBatch(
   sessionId: string,
   group: Array<{ ann: AnnotationRow; mapping: RevanoteMapping | null; sessionId: string }>,
 ): Promise<void> {
+  // ATOMIC CLAIM (qcfix/batch-claim, closes F2): claim EVERY member with one
+  // conditional `pending -> dispatching` UPDATE BEFORE building the prompt or
+  // sending anything. A crash mid-loop used to leave members `pending` under
+  // the same batch_id, so the next sweep tick re-read them as still-pending
+  // and re-dispatched the whole group (a second run, a second prompt frame).
+  // Now a crash after this point leaves the claimed rows at 'dispatching' —
+  // never re-picked-up by this sweep's own `WHERE status='pending'` query, so
+  // a restart can never re-send for them. A row a racing `forceSingle` retry
+  // already claimed out from under this tick is filtered out here instead of
+  // being sent twice.
+  const claimedIds = new Set(await claimAnnotationsForDispatch(group.map((g) => g.ann.id)))
+  const claimedGroup = group.filter((g) => claimedIds.has(g.ann.id))
+  if (claimedGroup.length === 0) return
+  group = claimedGroup
+
   const anns = group.map((g) => g.ann)
-  const batchId = batchIdOf(anns[0])!
+  const rawBatchId = batchIdOf(anns[0])!
+  // qcfix/batch-claim (C3, widened for C5): the dispatch token (and the
+  // `inFlightBatches` map key) must be unique per DISPATCHED GROUP, not just
+  // per (userId, sessionId, batch_id) — a raw batch_id alone collides across
+  // the split this sweep just performed (one batch_id can legitimately split
+  // into several per-session groups, AND — per the C5 mapping sub-group above
+  // — several per-mapping groups within the SAME session), and across
+  // different users. Including the mapping id keeps two mapping groups of the
+  // same batch_id+session from colliding the way session-only scoping still
+  // would. The `batch:` prefix also guarantees this can never collide with a
+  // single-annotation dispatch's token (an annotation's own UUID `id`, no
+  // prefix).
+  const mappingId = group[0]?.mapping?.id ?? 'no-mapping'
+  const batchId = `batch:${userId}:${sessionId}:${mappingId}:${rawBatchId}`
   const tz = await getUserTimezone(userId)
   const promptBody = renderBatchAnnotationPrompt({
     items: group.map((g) => ({ annotation: g.ann, mapping: g.mapping })),
@@ -314,9 +354,16 @@ async function dispatchBatch(
  * Finalize a batch turn's reply. Parses the `annotations[]` envelope and
  * re-runs the UNCHANGED single-annotation finalize (`finalizeAnnotationReply`)
  * once per member, by rebuilding a single-item envelope string per annotation.
- * An unparseable batch reply falls every member back through that same
- * function's own single-item parse fallback (`schema_invalid`/
- * `envelope_missing`) by handing it the raw batch content directly.
+ *
+ * qcfix/batch-claim (F3): a batch parse failure must NEVER hand the raw batch
+ * content to `finalizeAnnotationReply` — that function's own single-item
+ * parser (`parseRevanoteOutput`) happily accepts a lone
+ * `{"resolved":true,...}` object (a shape a batch turn can legitimately emit
+ * by mistake), so every member would silently inherit ONE verdict meant for
+ * (at most) one annotation. Instead every member is finalized directly as
+ * failed/resolved:false, carrying the batch parser's own failure reason, via
+ * the same `envelopeForBatchItem` shape the success path already uses — never
+ * by re-parsing `content` as a single result.
  */
 async function finalizeBatchReply(token: string, content: string): Promise<void> {
   const batch = inFlightBatches.get(token)
@@ -326,6 +373,11 @@ async function finalizeBatchReply(token: string, content: string): Promise<void>
 
   const parsed = parseRevanoteBatchOutput(content)
   if (!parsed.ok) {
+    const failureEnvelope = envelopeForBatchItem({
+      resolved: false,
+      action_taken: `batch_parse_failed:${parsed.reason}`,
+      files_changed: [],
+    })
     await Promise.all(
       members.map((m) =>
         finalizeAnnotationReply({
@@ -334,7 +386,7 @@ async function finalizeBatchReply(token: string, content: string): Promise<void>
           annotationId: m.annotationId,
           userId,
           startedAt: m.startedAt,
-          content,
+          content: failureEnvelope,
         }),
       ),
     )

@@ -11,6 +11,7 @@ import { sql } from './postgres.ts'
 
 export type AnnotationStatus =
   | 'pending'
+  | 'dispatching'
   | 'dispatched'
   | 'resolved'
   | 'failed'
@@ -421,6 +422,36 @@ export async function updateAnnotationStatus(
            resolved_at = COALESCE(${opts.resolved_at ?? null}, resolved_at)
      WHERE id = ${id}
   `
+}
+
+/**
+ * Atomic pre-send claim (qcfix/batch-claim — closes F2/F4: no dispatch path
+ * may send a prompt before it OWNS every annotation it's about to speak for).
+ * A single conditional `UPDATE ... WHERE status='pending' RETURNING id` per
+ * caller — whichever caller's UPDATE commits first wins each row; every other
+ * concurrent caller (a racing retry, an overlapping sweep tick, a crash-then-
+ * restart re-read) sees that row filtered out of its own WHERE clause and gets
+ * it back as NOT claimed. Returns only the ids actually transitioned
+ * pending -> dispatching; the caller must treat any id missing from the
+ * result as already owned elsewhere and skip it, never re-send for it.
+ *
+ * A crash after a successful claim (before the send that was supposed to
+ * follow it) leaves the row parked at 'dispatching' — deliberately NOT
+ * reset back to 'pending' by anything on restart, so a crash mid-flight can
+ * never turn into an automatic re-send loop. `stall-alert.ts` surfaces a
+ * stuck 'dispatching' row past its parked-stall threshold (same alarm as a
+ * parked/rejected annotation) so it is never a silent dead end.
+ */
+export async function claimAnnotationsForDispatch(ids: string[]): Promise<string[]> {
+  if (ids.length === 0) return []
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET status = 'dispatching'
+     WHERE id = ANY(${ids})
+       AND status = 'pending'
+     RETURNING id
+  `
+  return rows.map((r) => r.id)
 }
 
 // ── Annotation runs ──────────────────────────────────────────────────────────

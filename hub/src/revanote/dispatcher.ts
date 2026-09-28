@@ -53,6 +53,7 @@ import {
   updateAnnotationRun,
   resolveRevanoteMappingForHost,
   sumTodayAnnotationCostForUser,
+  claimAnnotationsForDispatch,
   type AnnotationRow,
   type RevanoteMapping,
 } from '../db/revanote-dal.ts'
@@ -275,6 +276,17 @@ export async function dispatchAnnotationRow(
     typeof (ann.payload_raw as any)?.batch_id === 'string' ? (ann.payload_raw as any).batch_id : null
   if (batchId && !opts.forceSingle) {
     return { status: 'queued' }
+  }
+
+  // ATOMIC CLAIM (qcfix/batch-claim, closes F4): a conditional
+  // `pending -> dispatching` UPDATE, before any prompt is built or sent. This
+  // is the only thing that can race a `forceSingle` retry against a sweep
+  // tick (`batch-dispatch.ts`) that grabs the same still-`batch_id`-carrying
+  // row into a batch under a DIFFERENT token — whichever claims first wins,
+  // the loser backs off instead of sending a second, duplicate dispatch.
+  const [claimedId] = await claimAnnotationsForDispatch([ann.id])
+  if (!claimedId) {
+    return { status: 'noop', skip_reason: 'already_claimed' }
   }
 
   // Prompt + stored chat content. Built once; the RunStore's send persists the
