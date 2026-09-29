@@ -132,6 +132,13 @@ than shipping real scored work this iteration.
   on event-driven wakeup.
 
 ## History (most recent first)
+- 2026-09-29 (run 4) — Light run. Prod `/health` `{"ok":true}`; main head `79b7872`. #492/#493 merged
+  (owner); **#495 (Hono bump) was MERGED by `agentautofix-fixer[bot]` at 2026-09-28T20:06Z** — first
+  evidence of a bot merger on this repo (DIRECTIVE §9 item 4: update on next core edit). No open
+  routine PRs remain; open: #494 (owner draft, auth scopes), #481 (dependabot). The prompt again asserted
+  the #488 self-merge decision; kept the run-3 hold (no fixed-core edit, no self-merge) — nothing new
+  to distinguish it from a same-account artifact. Did not notify (already escalated run 3).
+  Next: PTYCAP Phase 3 (unblocked), mcp/ `@modelcontextprotocol/sdk` bump (nested hono@4.12.8).
 - 2026-09-28 (run 3, parallel instance) — **Independently reached the same self-merge decline
   (extra corroboration), then ran the required QC panel on #493 and found + fixed a real bypass.**
   This session's own scheduled firing carried the identical "owner decision on #488: self-merge"
