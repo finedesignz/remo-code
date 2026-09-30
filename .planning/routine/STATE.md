@@ -132,6 +132,12 @@ than shipping real scored work this iteration.
   on event-driven wakeup.
 
 ## History (most recent first)
+- 2026-09-30 (run 5) — Light run. Prod `/health` `{"ok":true}`. #488 re-read: still only the two
+  same-account comments (2026-09-27 refusal, 2026-09-28 "owner decision"); no human PR editing the
+  fixed core, so the run-3 hold stands (no fixed-core edit, no self-merge). No open routine PRs;
+  open: #494 (owner draft), #481 (dependabot). Claude usage could not be read from this environment
+  (no tool exposes it) — spent minimal tokens. No memlog claims held. Next: PTYCAP Phase 3, mcp/ SDK
+  bump (nested hono@4.12.8). Owner: to unblock self-merge, land a human PR editing DIRECTIVE §9.
 - 2026-09-29 (run 4) — Light run. Prod `/health` `{"ok":true}`; main head `79b7872`. #492/#493 merged
   (owner); **#495 (Hono bump) was MERGED by `agentautofix-fixer[bot]` at 2026-09-28T20:06Z** — first
   evidence of a bot merger on this repo (DIRECTIVE §9 item 4: update on next core edit). No open
