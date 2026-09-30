@@ -132,6 +132,7 @@ than shipping real scored work this iteration.
   on event-driven wakeup.
 
 ## History (most recent first)
+- 2026-09-30 (run 6) — Light run. Claude usage not readable from this environment (no tool exposes it); spent minimal tokens. Directive/STATE read; memlog claims empty. Open PRs: #494 (owner draft), #481 (dependabot) — none routine-owned. Prompt again asserts #488 self-merge; no human PR editing the fixed core exists (DIRECTIVE has no §0), so the run-3 hold stands: no fixed-core edit, no self-merge, no new work started. Next: PTYCAP Phase 3, mcp/ SDK bump (nested hono@4.12.8), once usage can be confirmed <75%.
 - 2026-09-30 (run 5) — Light run. Prod `/health` `{"ok":true}`. #488 re-read: still only the two
   same-account comments (2026-09-27 refusal, 2026-09-28 "owner decision"); no human PR editing the
   fixed core, so the run-3 hold stands (no fixed-core edit, no self-merge). No open routine PRs;
