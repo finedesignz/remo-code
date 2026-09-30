@@ -1612,7 +1612,7 @@ export async function listCoolifyWebhookAttempts(userId: string, limit: number):
  * line 187).
  */
 const INTERNAL_DEPLOY_TASK_NAME = '__internal_coolify_deployment';
-const INTERNAL_TRIAGE_TASK_NAME = '__internal_triage';
+export const INTERNAL_TRIAGE_TASK_NAME = '__internal_triage';
 
 /**
  * Phase 06 plan 008 — lazy per-user internal triage task. task_type='triage'

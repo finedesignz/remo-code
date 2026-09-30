@@ -30,6 +30,8 @@ import { executeGithubIssue } from './github-issue.ts'
 import { executeDeployVerify } from './deploy-verify.ts'
 import { report as aggregatorReport } from './aggregator.ts'
 import { surfaceProposal } from './propose-notify.ts'
+import { reportSelfErrorToAgentautofix } from '../../agentautofix/reporter.ts'
+import { INTERNAL_TRIAGE_TASK_NAME } from '../../db/dal.ts'
 
 const MAX_CHAIN_DEPTH = 5
 const RUN_URL_PREFIX = process.env.REMO_PUBLIC_URL || 'https://app.remo-code.com'
@@ -56,11 +58,17 @@ const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
  * Internal-plumbing exception: `__internal_*` tasks (`__internal_coolify_deployment`,
  * `__internal_triage` — see db/dal.ts INTERNAL_DEPLOY_TASK_NAME/INTERNAL_TRIAGE_TASK_NAME)
  * are machine-created anchors the owner never scheduled, never sees in the tasks UI,
- * and cannot set `email_summary: false` on. A `skipped` run on one of these (e.g. the
- * Coolify webhook's `no_routable_session` orphan-run finalize — coolify-webhook.ts) is
- * a routine no-op, not something to email about: zero cost, zero duration, nothing
- * happened. Only `skipped` is suppressed here — a genuine `failed` run on an internal
- * task still emails, and this never touches user-created tasks.
+ * and cannot set `email_summary: false` on. They ALSO never get a default success
+ * email — success is the routine, expected outcome of a machine-scheduled internal
+ * task and mailing the owner on every run (see the `__internal_triage` Coolify-token
+ * incident, 2026-09-30 — the owner was emailed from support@remo-code.com on every
+ * run, including success) is exactly the noise this default-email feature exists to
+ * avoid for user tasks too. An internal task only emails the owner when the run
+ * genuinely failed or self-reported BLOCKED (`isFailedOrBlocked`) — `success` and
+ * `skipped` are both silent. A genuine `failed`/blocked run on an internal task
+ * still emails (belt-and-suspenders alongside the best-effort AgentAutofix forward
+ * in `forwardInternalTriageFailure` below), and none of this touches user-created
+ * tasks.
  */
 export function buildDefaultEmailActions(
   task: ScheduledTask,
@@ -71,7 +79,7 @@ export function buildDefaultEmailActions(
   if (chainDepth !== 0 && !isFailedOrBlocked(outcome)) return []
   if ((task as any).email_summary === false) return []
   if (actions.some((a) => a.type === 'notify_email')) return []
-  if (outcome?.status === 'skipped' && task.name?.startsWith('__internal_')) return []
+  if (task.name?.startsWith('__internal_') && !isFailedOrBlocked(outcome)) return []
   return [
     {
       type: 'notify_email',
@@ -146,7 +154,30 @@ interface FireCtxArgs extends AfterRunArgs {
   aggregate?: { total: number; successes: number; failures: number }
 }
 
+/**
+ * Best-effort forward of a failed `__internal_triage` run to AgentAutofix so an
+ * actionable finding (e.g. "Coolify API returned 401 Unauthenticated") reaches
+ * the in-house fixer agent instead of only landing in the owner's inbox. Reuses
+ * the existing hub-self-error forwarder (dedup/throttle/aggregation already
+ * built in) rather than a second ingest path — this task's failures ARE hub
+ * self-errors (the hub's own scheduled triage against its own Coolify config).
+ * Fire-and-forget and never throws; the run's own failure email (built above)
+ * is the guaranteed owner notification regardless of whether this send lands.
+ */
+function forwardInternalTriageFailure(args: AfterRunArgs): void {
+  if (args.chainDepth !== 0) return
+  if (args.task.name !== INTERNAL_TRIAGE_TASK_NAME) return
+  if (!isFailedOrBlocked({ status: args.status, output_snippet: args.output_snippet })) return
+  void reportSelfErrorToAgentautofix({
+    fingerprint: `internal-triage:${args.error ?? 'unknown'}`,
+    errorType: 'internal_triage_failed',
+    errorValue: args.error ?? args.output_snippet ?? 'internal triage run failed',
+    source: 'scheduler/post-run/dispatcher:__internal_triage',
+  })
+}
+
 export async function fireWithContext(args: FireCtxArgs): Promise<void> {
+  forwardInternalTriageFailure(args)
   const actionsRaw = await listActionsForTask(args.task.id)
   const parsed = validatePostRunActions(actionsRaw)
   if (!parsed.ok) {
