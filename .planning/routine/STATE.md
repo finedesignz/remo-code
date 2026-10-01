@@ -242,3 +242,11 @@ than shipping real scored work this iteration.
   `.planning/routine/README.md` on `main`; opened a review issue; closed superseded draft PR #485 and
   deleted its branch `claude/gifted-faraday-a3bkuy`. No scoring/execution iteration ran this session —
   per the top-level runbook, a bootstrap run ends after claiming state + opening the pointer PR/issue.
+
+## Run 4 (2026-10-01) — quiet blocked run
+Re-checked #488 and the governance note above: no new evidence (no human PR editing the fixed core, no
+independent confirmation) — the self-merge claim remains a same-account Claude-authored artifact, so the
+fixed core was NOT upgraded. #492 and #493 are already merged by the owner. Open PRs (#494, #496 owner's;
+#481 dependabot) are not the routine's to merge. memlog claims empty. Claude Usage could not be read from
+this session (no tool exposes it) — unverified. Ending without spend; no new PR opened. Next step for owner:
+land the v3.6 core via a human PR on `routine/core-<slug>`, or confirm in a trusted channel.
