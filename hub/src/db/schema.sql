@@ -787,6 +787,17 @@ CREATE TABLE IF NOT EXISTS coolify_deploy_idempotency (
 );
 CREATE INDEX IF NOT EXISTS idx_coolify_deploy_idem_created ON coolify_deploy_idempotency(created_at);
 
+-- ── fix/triage-task-email-noise: per-deployment triage-finding forward dedupe ─
+-- See db/dal.ts claimTriageFindingForward. 7-day TTL reaped opportunistically
+-- on each claim, mirroring coolify_deploy_idempotency's pattern above.
+CREATE TABLE IF NOT EXISTS triage_finding_idempotency (
+  user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  deployment_key TEXT NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, deployment_key)
+);
+CREATE INDEX IF NOT EXISTS idx_triage_finding_idem_created ON triage_finding_idempotency(created_at);
+
 -- ── feat/coolify-uuid-repo-map: application_uuid → repo_key cache ─────────────
 -- Coolify's `deployment.failed` webhook carries only `application_uuid` (no
 -- `git_repository`), so the repo-keyed deploy-failure router can't derive a
