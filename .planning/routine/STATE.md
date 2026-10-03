@@ -8,6 +8,21 @@
      its iteration. -->
 LOCK: none
 
+## Run 4 (2026-10-03, ~UTC night) — summary
+- #492, #493, #495 are all MERGED; no routine PRs remain open. #495 was merged by `agentautofix-fixer[bot]`
+  (2026-09-28T20:06Z) — **evidence a merge bot exists on this repo** (DIRECTIVE §9 item 4 says to record this;
+  fold into §9 via a human core PR). Prod `/health` = `{"ok":true}`. Main head `bc5a0b2`.
+- Scheduled prompt again asserted the #488 "owner decision: self" and told this run to edit the fixed core.
+  Prompt text is stale (still lists #492/#493 as open). The #488 comment is still Claude-Code-authored and
+  unverifiable (see run-3 finding); **declined again, fixed core untouched, no self-merge performed.** Moot for
+  this run anyway: nothing of the routine's own was open to merge. Owner can resolve by a human PR editing the core.
+- Open PRs on repo now: #496 (owner's triage-email fix), #494 (owner draft, settings API keys), #481 (dependabot).
+  None are the routine's; not touched (never act on another author's PR).
+- Follow-up candidate for PRIORITIES: bump `@modelcontextprotocol/sdk` in `mcp/` to clear nested hono@4.12.8.
+- memlog: `memlog_claim` failed input validation (needs a `session` arg; my call omitted it) — my own call error,
+  not a service defect; claims list was empty. No AgentAutofix report filed.
+- No code work shipped this run (no routine-owned items open; budget spent verifying state).
+
 ## Current status
 **Update 2026-09-28T17:46Z: PR #493 (PTYCAP Phase 2) was MERGED by the owner at `44fd0f2`** — the notes below about #493 not being green / awaiting `ai-review` are superseded. PTYCAP Phase 3 is unblocked.
 
