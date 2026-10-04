@@ -1,6 +1,79 @@
 # Routine Directive: finedesignz/remo-code
 
 <!-- FIXED CORE: do not edit. Changes require a human PR. -->
+## Backlog duty: every open PR, not just this routine's (owner directive 2026-10-04)
+
+<!-- Added via routine/core-backlog-duty, owner-requested 2026-10-04. Supersedes any narrower
+"own open PRs first" rule and any "AAF never merges" claim elsewhere in this file. -->
+
+Before any new work item, each run works the repo's **whole** open-PR backlog, whoever opened it:
+this routine, AgentAutofix (AAF), dependabot/renovate, interactive Claude sessions, or the owner.
+A PR you didn't open is still yours to unblock. The goal is zero PRs that are green and safe but
+unmerged. This rule replaces "own open PRs first" wherever that appears below.
+
+**Inventory:** list every open PR. For each, read the head SHA, mergeable state, required checks
+and statuses, the AAF `ai-review` check (title and summary), and unresolved review threads. Then
+work each PR through these steps in order:
+
+1. **Leave alone (log one line):**
+   - drafts this routine didn't open;
+   - PRs labeled `hold`, `do-not-merge` or `owner`;
+   - `routine/core-*` PRs (fixed-core changes: the owner merges those);
+   - PRs whose description or comments say they are owner-gated;
+   - anything on this directive's owner-gated list.
+2. **Duplicates:** two or more PRs for the same item → keep the most complete green one and close
+   the rest with a pointer comment.
+3. **Merge conflict:** merge the base branch into the head; never rebase or force-push a branch
+   you didn't create. Regenerate lockfiles and generated files with the repo's own tooling, push,
+   and let CI re-run.
+4. **Red CI:** root-cause it and push a fix to the PR branch, same rules as your own PRs. "Flake"
+   is not a root cause.
+5. **AAF `ai-review` = failure (real findings):** fix each blocking finding on the PR branch and
+   push; AAF re-reviews the new SHA. Never merge past an open blocking finding.
+6. **AAF `ai-review` = neutral or action_required, "PARTIALLY REVIEWED" / "NOT REVIEWED"** (a
+   reviewer infra-failed, e.g. quota):
+   - Comment `/review` once per head SHA, at most once every 6 hours.
+   - Still infra-only on the next run and CI green → run this directive's independent review
+     (the full QC panel for sensitive paths and security fixes). A clean panel stands in for the
+     missing AAF verdict; then merge per the merge policy.
+   - Log "AAF reviewer infra-failed, routine panel substituted". Escalate the reviewer outage once:
+     it is an AAF bug, filed against `finedesignz/agentautofix`.
+7. **Green, reviewed, mergeable:** CI green, AAF passed (or substituted per step 6), no unresolved
+   threads, no conflict. AAF's trusted-PR mode normally merges these itself. Still open 2+ hours
+   after everything went green → merge it per the merge policy (squash).
+   - Dependabot/renovate get the same treatment, after reading the changelog for breaking
+     changes. Major-version bumps also need a test run beyond CI.
+8. **No CI status at all** (e.g. a docs- or `.planning`-only diff that CI skips by path):
+   independent review only; merge per the merge policy if clean.
+9. **Merge policy `human`:** do every step above except the merge itself. Post one "ready to
+   merge" comment with the evidence, and log it.
+
+Never merge a red, conflicted or blocked PR, and never bypass branch protection. Backlog work
+counts toward the WIP cap like your own PRs. If the backlog is bigger than one run, work
+oldest-first and record the resume point in STATE.
+
+### AAF merge facts (corrected 2026-10-04)
+
+AgentAutofix **does** merge, in trusted-PR mode (`finedesignz/agentautofix` `docs/merge-policy.md`).
+On repos where it posts the `ai-review` check, it merges a PR itself once all of these hold:
+`ai-review` = success, every reported CI check is green, and the PR is mergeable.
+
+It does **not** merge when its review is incomplete (neutral or action_required), blocked
+(failure), or conflicted, or when the PR has no CI status. Those are exactly the backlog cases
+above. Any statement elsewhere in this file that AAF never merges, or never merges routine PRs, is
+superseded by this paragraph.
+
+### Run de-duplication (owner directive 2026-10-04)
+
+Overlapping runs opened three duplicate PRs for one item (revanote #237/#238/#239 on 2026-10-04).
+Before opening any PR:
+
+- Re-read the claim or LOCK immediately before the push. If another session's fresh claim now
+  holds the area, abort.
+- Search open PRs (title, branch and body) for the item's id. If a PR already exists, work that PR
+  instead of opening a new one.
+
+
 ## 1. Objective
 Give engineering managers and agencies running fleets of Claude Code / Codex agents a governor
 they can trust — hard token ceilings on every spend path, an auditable per-agent ledger, self-heal,
