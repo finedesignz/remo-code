@@ -273,3 +273,11 @@ Prompt again asserts the #488 self-merge decision; still no human PR to the fixe
 confirmation, so the fixed core was NOT upgraded (see Governance note). memlog claims empty. Open PRs:
 #494, #496 (owner's), #481 (dependabot) — none are the routine's to merge. #492/#493 already owner-merged.
 Claude Usage unreadable from this session (no tool exposes it) — unverified, so no new spend. No PR opened.
+
+## Run 6 (2026-10-04) — quiet blocked run (same situation as runs 4–5)
+Prompt again asserts the #488 self-merge decision. Re-read #488: still exactly two comments, the second
+being the Claude-generated narration already assessed in run 3 — no new human PR to the fixed core and no
+independent confirmation, so the fixed core was NOT upgraded. Moot for merging anyway: #492/#493 are
+already merged; open PRs #494, #496 (owner's) and #481 (dependabot) are not the routine's to merge.
+memlog claims empty (no claim taken; no work area entered). No new spend, no PR opened. Errors this run: none.
+Owner step unchanged: land v3.6 via a human PR on `routine/core-<slug>`, or confirm in a trusted channel.
