@@ -48,6 +48,32 @@ interface PromptOpts {
   mapping: RevanoteMapping | null
 }
 
+/** Cap on attachments rendered into one prompt. */
+const MAX_ATTACHMENTS = 20
+
+/**
+ * Render revanote's `attachments` payload field (`[{file_name, file_type,
+ * file_size, url}]`, signed R2 URLs) as one line per file. Defensive about
+ * shape: anything that isn't an object is skipped, so a malformed payload
+ * degrades to "no attachments" instead of failing the prompt.
+ */
+export function attachmentLines(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const lines: string[] = []
+  for (const item of raw.slice(0, MAX_ATTACHMENTS)) {
+    if (!item || typeof item !== 'object') continue
+    const att = item as Record<string, unknown>
+    const name = typeof att.file_name === 'string' && att.file_name ? att.file_name.slice(0, 200) : 'unnamed'
+    const type = typeof att.file_type === 'string' && att.file_type ? att.file_type.slice(0, 100) : 'unknown type'
+    const size = Number(att.file_size)
+    const sizeText = Number.isFinite(size) && size > 0 ? `, ${Math.max(1, Math.round(size / 1024))} KB` : ''
+    const url = typeof att.url === 'string' && /^https:\/\//i.test(att.url) ? att.url : null
+    lines.push(`  ${lines.length + 1}. ${name} (${type}${sizeText}) -> ${url ?? '(download link unavailable)'}`)
+  }
+  if (raw.length > MAX_ATTACHMENTS) lines.push(`  ... ${raw.length - MAX_ATTACHMENTS} more not shown`)
+  return lines
+}
+
 export function renderAnnotationPrompt(opts: PromptOpts): string {
   const { annotation: a, mapping: m } = opts
   const replies = Array.isArray(a.replies_json) ? a.replies_json : []
@@ -85,6 +111,7 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
   const elementMeta = (a.payload_raw as any)?.element_meta ?? null
   const viewport = (a.payload_raw as any)?.capture_viewport ?? null
   const fixContract = (a.payload_raw as any)?.fix_contract ?? null
+  const attachments = attachmentLines((a.payload_raw as any)?.attachments)
   const extraContext = [
     elementMeta ? `Element meta: ${JSON.stringify(elementMeta).slice(0, 800)}` : null,
     viewport ? `Capture viewport: ${JSON.stringify(viewport).slice(0, 400)}` : null,
@@ -105,6 +132,7 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
     a.x !== null && a.y !== null ? `Click position: (${a.x}, ${a.y})` : null,
     a.screenshot_url ? `Screenshot: ${a.screenshot_url}` : null,
     extraContext || null,
+    attachments.length ? `Reviewer attachments:\n${attachments.join('\n')}` : null,
     ``,
     `Reviewer's comment:`,
     a.comment,
@@ -156,6 +184,16 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
     fixContract ? `` : null,
     fenceUntrusted('untrusted_annotation', untrusted),
     ``,
+    ...(attachments.length
+      ? [
+          `The reviewer attached file(s), listed under "Reviewer attachments" above.`,
+          `When the comment refers to an attachment (e.g. "headshot attached"), download it`,
+          `with \`curl -fsSL '<url>' -o <dest>\` and use that exact file -- never a placeholder.`,
+          `The links are signed and expire about 2 hours after dispatch. If a link is`,
+          `missing or fails to download, say so in action_taken instead of inventing a substitute.`,
+          ``,
+        ]
+      : []),
     `Deploy plan:`,
     strategyInstructions,
     ``,

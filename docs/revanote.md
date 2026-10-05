@@ -70,7 +70,7 @@ A single per-user UUID (`users.revanote_webhook_secret`) does triple duty:
 }
 ```
 
-`element_meta` and `capture_viewport` are passed through to the agent prompt without schema columns — they live in `annotations.payload_raw` so future Revanote-side additions never break the contract.
+`attachments` (`[{id, file_name, file_type, file_size, url}]`, R2 URLs signed for 2h by revanote) are rendered inside the untrusted fence as one line per file, with an instruction to download the file and use it rather than a placeholder (`attachmentLines` in `hub/src/revanote/prompt.ts`; non-https URLs render as unavailable). A re-dispatch refreshes `payload_raw`, so a retried annotation always carries fresh links. `element_meta` and `capture_viewport` are passed through to the agent prompt without schema columns — they live in `annotations.payload_raw` so future Revanote-side additions never break the contract.
 
 ## Repo→app mappings
 
