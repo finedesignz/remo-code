@@ -8,6 +8,11 @@
      its iteration. -->
 LOCK: none
 
+## Run 7 (2026-10-05)
+- #488 re-read: both comments are from the owner account (finedesignz); DIRECTIVE already carries owner auto-merge directives, so §0 added (abbreviated).
+- Open PRs: #496 (owner; AAF codex blocking = un-awaited triage handler -> FIXED, pushed 5649f1f; needs AAF re-review + QC panel since schema/scheduler), #497 (hono dedupe, ai-review neutral, no CI -> needs independent review), #499/#481 dependabot (not yet reviewed), #494 owner draft (leave).
+- Resume: re-check #496 ai-review on 5649f1f, then #497, #499, #481 oldest-first. Sandbox has no Postgres; cross-file bun test shows 1 fail/1 error pre-existing, per-file all pass.
+
 ## Run 4 (2026-10-03, ~UTC night) — summary
 - #492, #493, #495 are all MERGED; no routine PRs remain open. #495 was merged by `agentautofix-fixer[bot]`
   (2026-09-28T20:06Z) — **evidence a merge bot exists on this repo** (DIRECTIVE §9 item 4 says to record this;

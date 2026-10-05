@@ -113,6 +113,14 @@ Before opening any PR:
   instead of opening a new one.
 
 
+## 0. Operating envelope (v3.6 core, applied 2026-10-05 per owner decision in #488 + 2026-10-04 directives)
+- State home: branch `routine/state`, `.planning/routine/`. Discovery order: `routine/state` DIRECTIVE, then `main` pointer README, then any open PR/branch adding it.
+- Claim order: memlog via MCP Factory (`memlog_claims`, then `memlog_claim` WITH a `session` arg, `memlog_heartbeat`); memlog unreachable -> LOCK line in STATE.md (<90 min old from another session -> end).
+- Cross-repo issues: file a memlog request against the owning repo; `autofix-report` only if no routine there or P0. Never fix other repos here.
+- Merge policy `self` (evidence: #488 owner decision; owner-merged history, no required reviews/checks on `main`): squash-merge once Woodpecker `qc` (+`docs-drift`, +`supervisor-build` when they run) is green, AAF `ai-review` has no open blocking finding, no unresolved thread, independent review passed. Sensitive paths and security fixes need a full QC panel (>=3 fresh-context reviewers: security, correctness/regression, tenancy/authz/data).
+- Loop rules: WIP caps `max_needs_routine` 2, `max_needs_human` 3; blocked runs are quiet with one escalation per situation; zero-CI-status PRs get independent review only; LEDGER tracks KPIs; memlog request inbox is scored work.
+- Capabilities: GitHub via MCP github tools (no gh); memlog/skills via MCP Factory.
+
 ## 1. Objective
 Give engineering managers and agencies running fleets of Claude Code / Codex agents a governor
 they can trust — hard token ceilings on every spend path, an auditable per-agent ledger, self-heal,
@@ -603,3 +611,4 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
 | 2026-09-28 | §11 rewritten from "hypotheses" to confirmed findings; §14 watch list refreshed (added #490/#491, confirmed #481/#484/#486 still open, added the #488 governance-hold note); this changelog row added | Run 2 executed the Run 1 bootstrap protocol for real — see `SCORECARD.md`/`PRIORITIES.md`/`LEDGER.md` for the full evidence. Governance question from run 1 (self-merge escalation) remains unresolved; this run declined to re-raise it via the scheduled prompt's v3.6-upgrade step for the same reason run 1 declined the original ask (see `STATE.md`'s Governance note) | Reliability/Observability scored highest-confidence this run (8, 6) once BLEED was confirmed closed; Security (5, untriaged hono CVEs) and Code health (5, 427 typecheck errors) are this run's lowest-scored, tiebreak-eligible dimensions for the next iteration |
 | 2026-09-28 | §13 lessons (e)–(g) + owner no-manual-review preference | Owner instruction "use panel and fix it"; QC panel found #493's gate dead in prod and a CSI-u bypass | Security / Cost (PTYCAP) |
 | 2026-09-28 | §14 watch list updated: declined a second self-merge claim on #488 (this time evidenced by an issue comment, not just the scheduled prompt); no fixed-core edit made | A GitHub comment under the owner's login, but itself Claude-Code-generated narration of an unverifiable session, is the same evidentiary category as run 1's already-declined claim — see STATE.md's run-3 Governance finding | Security/process (governance) |
+| 2026-10-05 | Added §0 operating envelope (abbreviated v3.6; full v3.6 text not available to run) | #488 owner decision (verified: both comments authored by owner account) | n/a |
