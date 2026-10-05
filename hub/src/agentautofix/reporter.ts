@@ -109,8 +109,12 @@ function isNoise(fields: SelfErrorForward): boolean {
   return false
 }
 
-/** Redacts the shapes most likely to carry a live secret in a hub stack trace or message. */
-function scrub(text: string): string {
+/**
+ * Redacts the shapes most likely to carry a live secret in a hub stack trace or message.
+ * Exported so the `__internal_triage` owner-email fallback (scheduler/post-run/dispatcher.ts)
+ * redacts its body exactly like the AgentAutofix comment it substitutes for.
+ */
+export function scrub(text: string): string {
   return text
     .replace(/postgres(?:ql)?:\/\/[^\s"']+/gi, 'postgres://[REDACTED]')
     .replace(/\b(?:sk-ant-oat01|sk-ant-api03|ghs_|ghp_|gho_|pk_live|ss_)[A-Za-z0-9_-]{10,}/g, '[REDACTED_TOKEN]')
@@ -238,6 +242,61 @@ export function _resetForTest(): void {
 /** Visible for tests: override the fetch-abort timeout so a hung-fetch test doesn't wait 10s. */
 export function _setFetchTimeoutMsForTest(ms: number): void {
   fetchTimeoutMs = ms
+}
+
+/**
+ * Immediate (non-aggregated) forward for `__internal_triage` SUCCESS findings
+ * (`scheduler/post-run/dispatcher.ts` `handleInternalTriageRun`). Unlike
+ * `reportSelfErrorToAgentautofix` above, the caller needs a synchronous
+ * success/fail verdict — a failed forward must fall back to the owner email
+ * rather than vanish into a 45s aggregation window the caller has already
+ * returned past. So this bypasses the aggregator/throttle entirely and posts
+ * directly, reusing the same identity token, scrub(), and comments endpoint.
+ * Per-deployment dedup is the caller's job (db/dal.ts claimTriageFindingForward).
+ */
+export async function reportTriageFindingToAgentautofix(fields: SelfErrorForward): Promise<boolean> {
+  if (!config.agentautofix.configured) return false
+  try {
+    const token = mintAgentautofixIdentityToken({ sub: 'hub-self-capture', role: 'system' })
+    const comment = scrub(
+      `${fields.errorType}: ${fields.errorValue}` +
+        (fields.stack ? `\n\n${scrub(fields.stack).split('\n').slice(0, 30).join('\n')}` : ''),
+    ).slice(0, 3900)
+
+    const abortController = new AbortController()
+    const timeoutTimer = setTimeout(() => abortController.abort(), fetchTimeoutMs)
+    let res: Response
+    try {
+      res = await fetch(`${config.agentautofix.host}/api/plugin/v1/comments`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-agentautofix-key': config.agentautofix.publicKey,
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          comment,
+          x: 0,
+          y: 0,
+          page_url: `${config.agentautofix.origin}/#/hub-self-capture`,
+          element_selector: 'body',
+          element_meta: { kind: 'triage_finding', source: fields.source },
+        }),
+        signal: abortController.signal,
+      })
+    } finally {
+      clearTimeout(timeoutTimer)
+    }
+
+    if (!res.ok) {
+      log.warn('[agentautofix] triage finding forward rejected', { status: res.status })
+      return false
+    }
+    return true
+  } catch (err) {
+    log.warn('[agentautofix] triage finding forward failed', { error: (err as Error)?.message ?? String(err) })
+    return false
+  }
 }
 
 /**
