@@ -109,8 +109,12 @@ function isNoise(fields: SelfErrorForward): boolean {
   return false
 }
 
-/** Redacts the shapes most likely to carry a live secret in a hub stack trace or message. */
-function scrub(text: string): string {
+/**
+ * Redacts the shapes most likely to carry a live secret in a hub stack trace or message.
+ * Exported so the `__internal_triage` owner-email fallback (scheduler/post-run/dispatcher.ts)
+ * redacts its body exactly like the AgentAutofix comment it substitutes for.
+ */
+export function scrub(text: string): string {
   return text
     .replace(/postgres(?:ql)?:\/\/[^\s"']+/gi, 'postgres://[REDACTED]')
     .replace(/\b(?:sk-ant-oat01|sk-ant-api03|ghs_|ghp_|gho_|pk_live|ss_)[A-Za-z0-9_-]{10,}/g, '[REDACTED_TOKEN]')
