@@ -254,7 +254,9 @@ export async function handleInternalTriageRun(args: AfterRunArgs): Promise<void>
 }
 
 export async function fireWithContext(args: FireCtxArgs): Promise<void> {
-  void handleInternalTriageRun(args).catch((err: any) => {
+  // Awaited (errors contained) so the AAF forward + fallback email finish inside the
+  // post-run lifecycle instead of being orphaned when the caller releases.
+  await handleInternalTriageRun(args).catch((err: any) => {
     console.error('[post-run.dispatcher] internal triage handling failed', err?.message ?? err)
   })
   const actionsRaw = await listActionsForTask(args.task.id)
