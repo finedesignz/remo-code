@@ -8,6 +8,9 @@
      its iteration. -->
 LOCK: none
 
+## Run 8b (2026-10-06T06:51Z)
+- memlog_claims showed a live ACTIVE claim `routine-run8-2026-10-06` on finedesignz/remo-code (started 06:50:57Z, 13s earlier, whole repo). Per claim rule, no work; ended to avoid duplicate PRs.
+
 ## Run 7 (2026-10-05)
 - #488 re-read: both comments are from the owner account (finedesignz); DIRECTIVE already carries owner auto-merge directives, so §0 added (abbreviated).
 - Open PRs: #496 (owner; AAF codex blocking = un-awaited triage handler -> FIXED, pushed 5649f1f; needs AAF re-review + QC panel since schema/scheduler), #497 (hono dedupe, ai-review neutral, no CI -> needs independent review), #499/#481 dependabot (not yet reviewed), #494 owner draft (leave).
