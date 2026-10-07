@@ -112,7 +112,7 @@ export function batchRunMaxMs(): number {
 
 function batchIdOf(ann: AnnotationRow): string | null {
   const v = (ann.payload_raw as any)?.batch_id
-  return typeof v === 'string' ? v : null
+  return typeof v === 'string' && v !== '' ? v : null
 }
 
 interface BatchMember {
@@ -185,7 +185,7 @@ async function redispatchStalePending(now: number): Promise<number> {
   const rows = await sql<AnnotationRow[]>`
     SELECT * FROM annotations
      WHERE status = 'pending'
-       AND NOT jsonb_exists(payload_raw, 'batch_id')
+       AND NULLIF(payload_raw->>'batch_id','') IS NULL
        AND skip_reason IS DISTINCT FROM 'session_offline'
        AND received_at < ${cutoff}
      ORDER BY received_at ASC
@@ -223,7 +223,7 @@ async function runSweepOnce(now: number): Promise<{ dispatched: number }> {
   const rows = await sql<AnnotationRow[]>`
     SELECT * FROM annotations
      WHERE status = 'pending'
-       AND payload_raw ? 'batch_id'
+       AND NULLIF(payload_raw->>'batch_id','') IS NOT NULL
      ORDER BY received_at ASC
   `
   if (rows.length === 0) return { dispatched: 0 }
@@ -254,7 +254,8 @@ async function runSweepOnce(now: number): Promise<{ dispatched: number }> {
       const { mapping, sessionId } = await resolveMappingAndSession(userId, ann)
       if (!sessionId) {
         const reason = mapping ? 'session_not_found_for_repo' : 'no_mapping_for_host'
-        await updateAnnotationStatus(ann.id, 'failed', { skip_reason: reason, mapping_id: mapping?.id ?? null })
+        // CAS on 'pending': a row another path already claimed/resolved keeps its state.
+        if (!(await failAnnotationIfPending(ann.id, reason, null))) continue
         broadcastRevanoteEvent(userId, { type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason })
         void enqueueRejectionCallback(ann, 'no_target', reason)
         continue

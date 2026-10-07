@@ -144,8 +144,8 @@ const REAL_DEPS: StallAlertDeps = {
       LEFT JOIN annotations a ON a.id = ar.annotation_id
       WHERE ar.status = 'in_flight'
       AND (
-        (a.payload_raw ? 'batch_id' AND ar.started_at < ${batchRunCutoff})
-        OR (NOT (a.payload_raw ? 'batch_id') AND ar.started_at < ${singleRunCutoff})
+        (NULLIF(a.payload_raw->>'batch_id','') IS NOT NULL AND ar.started_at < ${batchRunCutoff})
+        OR (NULLIF(a.payload_raw->>'batch_id','') IS NULL AND ar.started_at < ${singleRunCutoff})
         OR (a.id IS NULL AND ar.started_at < ${singleRunCutoff})
       )
       GROUP BY ar.user_id

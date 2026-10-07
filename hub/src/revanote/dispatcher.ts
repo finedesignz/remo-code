@@ -253,10 +253,11 @@ export async function dispatchAnnotationRow(
   const { mapping, sessionId } = await resolveMappingAndSession(userId, ann)
   if (!sessionId) {
     const reason = mapping ? 'session_not_found_for_repo' : 'no_mapping_for_host'
-    await updateAnnotationStatus(ann.id, 'failed', {
-      skip_reason: reason,
-      mapping_id: mapping?.id ?? null,
-    })
+    // CAS on 'pending': a duplicate webhook can hand us an already-resolved row
+    // whose mapping has since disappeared — never overwrite it or send a callback.
+    if (!(await failAnnotationIfPending(ann.id, reason, null))) {
+      return { status: 'noop', skip_reason: 'not_pending' }
+    }
     broadcastRevanoteEvent(userId, {
       type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason,
     })
@@ -274,7 +275,9 @@ export async function dispatchAnnotationRow(
   // manual retry endpoint passes `forceSingle` to bypass this and dispatch the
   // one annotation immediately regardless of batch_id.
   const batchId =
-    typeof (ann.payload_raw as any)?.batch_id === 'string' ? (ann.payload_raw as any).batch_id : null
+    typeof (ann.payload_raw as any)?.batch_id === 'string' && (ann.payload_raw as any).batch_id !== ''
+      ? (ann.payload_raw as any).batch_id
+      : null
   if (batchId && !opts.forceSingle) {
     return { status: 'queued' }
   }

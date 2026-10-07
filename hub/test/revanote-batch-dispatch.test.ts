@@ -150,8 +150,12 @@ let runSeq = 0
 mock.module('../src/db/postgres.ts', () => ({
   sql: async (strings: TemplateStringsArray, ...values: any[]) => {
     const text = strings.join('')
-    if (text.includes("payload_raw ? 'batch_id'")) {
-      return state.pendingAnnotations.filter((a) => a.status === 'pending' && a.payload_raw?.batch_id)
+    // Models the SQL by its TEXT: the old `? 'batch_id'` form is key-exists
+    // (true for batch_id:null); the NULLIF form is non-empty-value only.
+    const hasBatch = (a: any) =>
+      text.includes("NULLIF(payload_raw->>'batch_id'") ? !!a.payload_raw?.batch_id : 'batch_id' in (a.payload_raw ?? {})
+    if (text.includes("payload_raw ? 'batch_id'") || text.includes("NULLIF(payload_raw->>'batch_id','') IS NOT NULL")) {
+      return state.pendingAnnotations.filter((a) => a.status === 'pending' && hasBatch(a))
     }
     // Atomic claim: `UPDATE annotations SET status = 'dispatched' WHERE id =
     // ANY(...) AND status = 'pending' RETURNING id` — models the real
@@ -161,10 +165,10 @@ mock.module('../src/db/postgres.ts', () => ({
     // row and wins it; the loser sees it already non-'pending' and gets it
     // filtered out of its own result.
     // Q4 stale-pending re-dispatch query (non-batch rows older than the grace).
-    if (text.includes('jsonb_exists(payload_raw')) {
+    if (text.includes('jsonb_exists(payload_raw') || text.includes("NULLIF(payload_raw->>'batch_id','') IS NULL")) {
       const cutoff = values[0] instanceof Date ? values[0].getTime() : 0
       return state.pendingAnnotations.filter(
-        (a) => a.status === 'pending' && !a.payload_raw?.batch_id && a.skip_reason !== 'session_offline' &&
+        (a) => a.status === 'pending' && !hasBatch(a) && a.skip_reason !== 'session_offline' &&
           new Date(a.received_at).getTime() < cutoff,
       )
     }
@@ -330,7 +334,7 @@ mock.module('../src/dispatch/gates.ts', () => ({
   sessionInjectRateGate: { name: 'session_inject_rate', async check() { return { ok: true } } },
 }))
 
-const { dispatchPendingAnnotation } = await import('../src/revanote/dispatcher.ts')
+const { dispatchPendingAnnotation, dispatchAnnotationRow } = await import('../src/revanote/dispatcher.ts')
 const { onSessionReply, _reset, isTokenLive } = await import('../src/dispatch/pipeline.ts')
 const { sweepBatchDispatch, pendingRedispatchMs, batchDebounceMs, batchRunMaxMs, _resetBatchDispatchState } = await import(
   '../src/revanote/batch-dispatch.ts'
@@ -1046,5 +1050,46 @@ describe('revanote batch dispatch — poisoned stale-pending row is bounded (no 
     expect(state.pendingAnnotations[0].status).toBe('failed')
     expect(state.annStatus.some((s) => s.id === 'poison' && s.status === 'failed' && /redispatch_failed/.test(s.opts.skip_reason))).toBe(true)
     expect(state.callbacks.map((c) => c.ann_id)).toEqual(['poison'])
+  })
+})
+
+
+describe('revanote batch dispatch — batch_id:null is a NON-batch row everywhere', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  test('pending row with {"batch_id":null} after a restart is re-dispatched once by the stale-pending pass', async () => {
+    state.pendingAnnotations = [
+      makeAnnotation({
+        id: 'nullbatch',
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo', batch_id: null },
+        received_at: envAgo(pendingRedispatchMs() + 1000),
+      }),
+    ]
+    _reset() // hub restart
+    const r1 = await sweepBatchDispatch()
+    expect(r1.redispatched).toBe(1)
+    expect(state.sentFrames).toHaveLength(1)
+    const r2 = await sweepBatchDispatch()
+    expect(r2.redispatched).toBe(0)
+    expect(state.sentFrames).toHaveLength(1)
+  })
+})
+
+describe('revanote dispatch — pre-claim no_target must not clobber a resolved row', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  test('resolved row + re-dispatch hitting no_target stays resolved, no callback', async () => {
+    state.pendingAnnotations = [makeAnnotation({ id: 'done', status: 'resolved' })]
+    state.resolvedSession = null // no session -> no_target branch
+    await dispatchAnnotationRow(state.pendingAnnotations[0])
+    await new Promise((r) => setTimeout(r, 25))
+    expect(state.pendingAnnotations[0].status).toBe('resolved')
+    expect(state.callbacks).toHaveLength(0)
   })
 })
