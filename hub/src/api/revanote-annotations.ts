@@ -79,6 +79,27 @@ revanoteAnnotations.post('/:id/retry', async (c) => {
     }
   }
 
+  if (ann.status === 'dispatched') {
+    // DURABLE liveness: the in-memory maps above are empty after a hub restart
+    // while the supervisor runner may still be working the prompt. Refuse unless
+    // the latest run is terminal (or there is none), or its in_flight run has
+    // outlived its ceiling (batch runs get the batch ceiling).
+    const { listAnnotationRuns } = await import('../db/revanote-dal.ts')
+    const { singleRunMaxMs } = await import('../revanote/dispatcher.ts')
+    const { batchRunMaxMs } = await import('../revanote/batch-dispatch.ts')
+    const latest = (await listAnnotationRuns(ann.id, userId))[0]
+    if (latest && latest.status === 'in_flight') {
+      const isBatch = typeof (ann.payload_raw as any)?.batch_id === 'string' && (ann.payload_raw as any).batch_id !== ''
+      const ceiling = isBatch ? batchRunMaxMs() : singleRunMaxMs()
+      if (Date.now() - new Date(latest.started_at as any).getTime() < ceiling) {
+        return c.json(
+          { error: 'annotation_in_flight', detail: 'an in-flight run for this annotation is within its ceiling' },
+          409,
+        )
+      }
+    }
+  }
+
   // Reset to pending so the dispatcher will accept the row.
   // CAS on the status we observed: if a concurrent claim/finalize moved the
   // row since, the reset is refused (409) rather than forcing a second send.

@@ -424,6 +424,87 @@ export async function updateAnnotationStatus(
 }
 
 /**
+ * Park a row offline ONLY if it is still 'pending' (CAS). A retry/replay that
+ * claimed the row in between ('dispatched') or a finalize must not be reverted
+ * to pending/session_offline by a stale `parked_offline` outcome.
+ */
+export async function parkAnnotationOfflineIfPending(
+  id: string,
+  session_id: string | null,
+  mapping_id: string | null = null,
+): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET skip_reason = 'session_offline',
+           session_id = COALESCE(${session_id}, session_id),
+           mapping_id = COALESCE(${mapping_id}, mapping_id)
+     WHERE id = ${id}
+       AND status = 'pending'
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/**
+ * Grace-lapse expiry: 'failed_offline' ONLY while the row is still the parked
+ * row this lapse was registered for (pending + session_offline). A row that
+ * was since claimed/dispatched/resolved (e.g. the session came back) keeps its
+ * state. Returns whether this call performed the transition (callers send the
+ * rejection callback only then).
+ */
+export async function expireParkedAnnotation(id: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET status = 'failed_offline',
+           skip_reason = 'target_offline_expired'
+     WHERE id = ${id}
+       AND status = 'pending'
+       AND skip_reason = 'session_offline'
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/**
+ * Post-send bookkeeping (session/mapping/dispatched_at) ONLY while the row is
+ * still 'dispatched' -- a reply that already finalized it ('resolved'/'failed')
+ * must not be regressed to 'dispatched'.
+ */
+export async function recordDispatchIfDispatched(
+  id: string,
+  opts: { session_id: string; mapping_id?: string | null; dispatched_at: Date },
+): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET session_id = ${opts.session_id},
+           mapping_id = COALESCE(${opts.mapping_id ?? null}, mapping_id),
+           dispatched_at = ${opts.dispatched_at}
+     WHERE id = ${id}
+       AND status = 'dispatched'
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/** Fail a row ONLY if it is still 'dispatched' (send-failure after this call's own claim). */
+export async function failAnnotationIfDispatched(id: string, skip_reason: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET status = 'failed',
+           skip_reason = ${skip_reason}
+     WHERE id = ${id}
+       AND status = 'dispatched'
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/** Set ONLY mapping_id (webhook pre-resolve) -- never rewrites status from a stale snapshot. */
+export async function setAnnotationMappingId(id: string, mapping_id: string): Promise<void> {
+  await sql`UPDATE annotations SET mapping_id = ${mapping_id} WHERE id = ${id}`
+}
+
+/**
  * Fail an annotation ONLY if it is still 'pending' (gate-rejected batch members:
  * a member another path already claimed/resolved must not be clobbered).
  * Returns whether this call performed the transition.

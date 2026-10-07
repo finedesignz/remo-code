@@ -6,7 +6,7 @@
  * cooldown when annotations sit parked/rejected/target-offline past threshold,
  * or an annotation_run sits in_flight past its own (shorter) threshold.
  */
-import { describe, test, expect } from 'bun:test'
+import { describe, test, expect, mock } from 'bun:test'
 import {
   sweepRevanoteStalls,
   STALL_PARKED_MAX_MS,
@@ -196,5 +196,56 @@ describe('runStallThresholdMs (batch-vs-single alignment)', () => {
     // The whole point of the alignment fix: a healthy 2h batch turn must NOT
     // be flagged by the 30min single-annotation threshold.
     expect(threshold).toBeGreaterThan(STALL_RUN_MAX_MS)
+  })
+})
+
+// Item 7: a row left 'dispatched' with NO in_flight run (crash between the claim
+// and the run insert, or a throw in markFailed) is invisible to both sweeps.
+// The real loader's SQL is modelled here by its TEXT (no Postgres in this suite).
+describe('stall alert -- dispatched row with no in_flight run', () => {
+  const rows: any[] = []
+  const runs: any[] = []
+  mock.module('../src/db/postgres.ts', () => ({
+    sql: async (strings: TemplateStringsArray, ...values: any[]) => {
+      const text = strings.join('')
+      if (text.includes('FROM annotations') && text.includes('GROUP BY user_id') && !text.includes('annotation_runs ar')) {
+        const cutoff = (values.find((v) => v instanceof Date) as Date).getTime()
+        const considersDispatched = text.includes("status = 'dispatched'") && text.includes('NOT EXISTS')
+        const hit = rows.filter((a) =>
+          considersDispatched &&
+          a.status === 'dispatched' &&
+          new Date(a.dispatched_at ?? a.received_at).getTime() < cutoff &&
+          !runs.some((r) => r.annotation_id === a.id && r.status === 'in_flight'),
+        )
+        if (hit.length === 0) return []
+        return [{ user_id: 'u1', cnt: String(hit.length), oldest: new Date(hit[0].dispatched_at ?? hit[0].received_at).toISOString() }]
+      }
+      return []
+    },
+  }))
+
+  const alertDeps = (notifyCalls: any[]) => ({
+    getLastAlertAt: async () => null,
+    recordAlert: async () => {},
+    notify: async (input: any) => { notifyCalls.push(input); return { delivered: ['inapp'] } },
+  })
+
+  test('7: fires for a stale dispatched row with no in_flight run', async () => {
+    rows.length = 0; runs.length = 0
+    rows.push({ id: 'a1', status: 'dispatched', received_at: new Date(NOW - STALL_PARKED_MAX_MS - 60_000).toISOString(), dispatched_at: null })
+    const calls: any[] = []
+    const alerted = await sweepRevanoteStalls(NOW, alertDeps(calls))
+    expect(alerted).toEqual(['u1'])
+    expect(calls).toHaveLength(1)
+  })
+
+  test('7: does NOT fire for a stale dispatched row that has an in_flight run', async () => {
+    rows.length = 0; runs.length = 0
+    rows.push({ id: 'a1', status: 'dispatched', received_at: new Date(NOW - STALL_PARKED_MAX_MS - 60_000).toISOString(), dispatched_at: null })
+    runs.push({ annotation_id: 'a1', status: 'in_flight' })
+    const calls: any[] = []
+    const alerted = await sweepRevanoteStalls(NOW, alertDeps(calls))
+    expect(alerted).toEqual([])
+    expect(calls).toHaveLength(0)
   })
 })

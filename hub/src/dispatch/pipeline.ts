@@ -313,6 +313,7 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
     void releaseAndPromote(req.sessionId)
     const key = deps.graceKey ? deps.graceKey(req) : req.sessionId
     getGraceBuffer().register(key, () => deps.replay(req), {
+      dedupeKey: req.token,
       onExpire: deps.onParkExpire ? () => deps.onParkExpire!(req) : undefined,
     })
     return { kind: 'parked_offline' }

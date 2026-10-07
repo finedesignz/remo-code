@@ -163,6 +163,23 @@ mock.module('../src/db/revanote-dal.ts', () => ({
   updateAnnotationStatus: async (id: string, status: string, opts: any = {}) => {
     state.annStatus.push({ id, status, opts })
   },
+  // CAS helpers (real SQL: conditional UPDATEs) -- rows here are always in the expected state.
+  parkAnnotationOfflineIfPending: async (id: string, session_id: string | null) => {
+    state.annStatus.push({ id, status: 'pending', opts: { skip_reason: 'session_offline', session_id } })
+    return true
+  },
+  expireParkedAnnotation: async (id: string) => {
+    state.annStatus.push({ id, status: 'failed_offline', opts: { skip_reason: 'target_offline_expired' } })
+    return true
+  },
+  recordDispatchIfDispatched: async (id: string, opts: any) => {
+    state.annStatus.push({ id, status: 'dispatched', opts })
+    return true
+  },
+  failAnnotationIfDispatched: async (id: string, skip_reason: string) => {
+    state.annStatus.push({ id, status: 'failed', opts: { skip_reason } })
+    return true
+  },
   failAnnotationIfPending: async (id: string, skip_reason: string, session_id: string | null) => {
     if (!state.failCas) return false
     state.annStatus.push({ id, status: 'failed', opts: { skip_reason, session_id } })

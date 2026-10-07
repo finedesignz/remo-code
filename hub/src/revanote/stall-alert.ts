@@ -18,6 +18,10 @@
 //        - parked offline:  status='pending' AND skip_reason='session_offline'
 //        - rejected:        status='failed'  (session_busy / budget / no_target)
 //        - target-offline:  status='failed_offline' (grace TTL lapsed)
+//        - orphaned:        status='dispatched' with NO in_flight annotation_runs row
+//                           (crash between the send-time claim and the run insert, or a
+//                           throw in markFailed) -- invisible to both sweeps. Alert only:
+//                           never auto-resent, the prompt may already have gone out.
 //      Age is measured from `dispatched_at` when set, else `received_at`.
 //
 //   B. STUCK IN-FLIGHT RUNS — an `annotation_runs` row has sat `status='in_flight'`
@@ -127,6 +131,10 @@ const REAL_DEPS: StallAlertDeps = {
       WHERE (
         (status = 'pending' AND skip_reason = 'session_offline')
         OR status IN ('failed', 'failed_offline')
+        OR (status = 'dispatched' AND NOT EXISTS (
+          SELECT 1 FROM annotation_runs r
+           WHERE r.annotation_id = annotations.id AND r.status = 'in_flight'
+        ))
       )
       AND COALESCE(dispatched_at, received_at) < ${parkedCutoff}
       GROUP BY user_id
@@ -210,7 +218,7 @@ function formatDetail(s: UserStallSummary, now: number): string {
   const parts: string[] = []
   if (s.parked_count > 0) {
     const ageMin = s.parked_oldest_ms != null ? Math.round((now - s.parked_oldest_ms) / 60_000) : 0
-    parts.push(`${s.parked_count} revanote annotation(s) parked/rejected/target-offline (oldest ~${ageMin}m)`)
+    parts.push(`${s.parked_count} revanote annotation(s) parked/rejected/target-offline/orphaned-dispatched (oldest ~${ageMin}m)`)
   }
   if (s.stuck_run_count > 0) {
     const ageMin = s.stuck_run_oldest_ms != null ? Math.round((now - s.stuck_run_oldest_ms) / 60_000) : 0

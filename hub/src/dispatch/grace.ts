@@ -25,6 +25,7 @@ export const DEFAULT_TTL_MS = 10 * 60 * 1000
 const SWEEP_INTERVAL_MS = 60_000
 
 interface Pending {
+  dedupeKey?: string
   replay: () => Promise<void>
   onExpire?: () => Promise<void>
   expiresAt: number
@@ -44,6 +45,13 @@ export interface GraceRegisterOpts {
    * Errors are swallowed/logged — they never break the sweep loop.
    */
   onExpire?: () => Promise<void>
+  /**
+   * At most one live entry per (targetKey, dedupeKey): a second register with a
+   * dedupeKey already parked for that target is a no-op. Pipelines pass the
+   * dispatch token, so a repeated offline tick cannot accumulate N entries
+   * whose lapse would each fire a stale onExpire.
+   */
+  dedupeKey?: string
 }
 
 export interface GraceBuffer {
@@ -51,6 +59,8 @@ export interface GraceBuffer {
   register(targetKey: string, replay: () => Promise<void>, opts?: GraceRegisterOpts): void
   /** Re-run every live parked replay for `targetKey` (called on reconnect). */
   drain(targetKey: string): Promise<void>
+  /** True iff a live (unexpired, undrained) entry with `dedupeKey` is parked, under any target. */
+  has(dedupeKey: string): boolean
 }
 
 class GraceBufferImpl implements GraceBuffer {
@@ -64,8 +74,17 @@ class GraceBufferImpl implements GraceBuffer {
   register(targetKey: string, replay: () => Promise<void>, opts: GraceRegisterOpts = {}): void {
     const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS
     const list = this.byTarget.get(targetKey) ?? []
-    list.push({ replay, onExpire: opts.onExpire, expiresAt: Date.now() + ttlMs })
+    if (opts.dedupeKey !== undefined && list.some((p) => p.dedupeKey === opts.dedupeKey && p.expiresAt >= Date.now())) return
+    list.push({ dedupeKey: opts.dedupeKey, replay, onExpire: opts.onExpire, expiresAt: Date.now() + ttlMs })
     this.byTarget.set(targetKey, list)
+  }
+
+  has(dedupeKey: string): boolean {
+    const now = Date.now()
+    for (const list of this.byTarget.values()) {
+      if (list.some((p) => p.dedupeKey === dedupeKey && p.expiresAt >= now)) return true
+    }
+    return false
   }
 
   async drain(targetKey: string): Promise<void> {
@@ -99,7 +118,7 @@ class GraceBufferImpl implements GraceBuffer {
     }
   }
 
-  private sweep(): void {
+  sweep(): void {
     const now = Date.now()
     for (const [key, list] of this.byTarget) {
       const live: Pending[] = []

@@ -128,12 +128,13 @@ to an unmerged PR branch, hence the default-branch compare below). So `finalizeA
 repo from `sessions.github_owner/github_repo`, falling back to the payload's `repo_slug`) that the
 commit exists on the remote AND is MERGED to the repo's default branch (`GET /repos/{o}/{r}` ->
 `default_branch`, then `compare` default...sha must be `identical`/`behind`; a pushed-but-unmerged
-PR-branch tip is rejected `commit_not_on_default_branch`) — and, when a `branch` is given, that the
-branch contains it too. The check runs AFTER the merge gate, because the sandbox
+PR-branch tip is rejected `commit_not_on_default_branch`). Merged to the default branch is the whole
+bar: the reply's `branch` is advisory and NOT checked (a squash/merge SHA is not on the PR branch, which
+may also be deleted). The check runs AFTER the merge gate, because the sandbox
 path pushes inside the gate. Any failure downgrades the reply to `resolved: false`,
 `deployed: false`, annotation `failed`, and the callback's `error` becomes
 `unverified_resolve:<reason>` — reasons: `commit_sha_missing`, `commit_sha_invalid`, `repo_unknown`,
-`no_github_installation`, `commit_not_pushed`, `commit_not_on_default_branch`, `commit_not_on_branch`, `verify_error`. Fail-closed:
+`no_github_installation`, `commit_not_pushed`, `commit_not_on_default_branch`, `verify_error`. Fail-closed:
 an unverifiable resolve is rejected, never trusted. The verified sha is written to
 `annotation_runs.commit_sha` and sent as the callback's `commit_sha`. Escape hatch:
 `REMO_REVANOTE_REQUIRE_PUSHED_COMMIT=0|false|no|off` (default ON). The gate is the function
@@ -248,9 +249,32 @@ single-annotation path below.
   lives only in the pipeline's memory, so a hub restart used to strand it. The boot-started batch sweep
   (same timer, `REMO_REVANOTE_BATCH_POLL_MS`) now also re-dispatches `'pending'` non-batch rows older
   than `REMO_REVANOTE_PENDING_REDISPATCH_MS` (default 120000 = 2min) that no in-memory queue owns
-  (`pipeline.isTokenLiveAnywhere`). Rows parked offline (`skip_reason='session_offline'`) are
-  excluded (their own replay path). The send-time claim is a DB CAS, so a racing dispatch still cannot
-  double-send. Capped at 25 rows per tick.
+  (`pipeline.isTokenLiveAnywhere`). The send-time claim is a DB CAS, so a racing dispatch still cannot
+  double-send. Capped at 25 rows per tick. A returned `failed` outcome counts against the per-row
+  attempt cap exactly like a throw and never resets the counter.
+- **Parked-offline lifecycle and restart recovery**: an offline target parks the row
+  `pending`/`session_offline` (a CAS on `status='pending'`) and registers ONE grace entry, deduped by
+  dispatch token (`GraceRegisterOpts.dedupeKey`), so repeated sweep ticks never accumulate entries. The
+  batch sweep skips a group whose token is parked in grace while its session is still offline. On
+  reconnect `drain()` replays the entry; on TTL lapse `onParkExpire` moves the row to `failed_offline`
+  and sends the `target_offline` callback ONLY if the row is still `pending`/`session_offline`
+  (`expireParkedAnnotation`), so a row since dispatched/resolved is untouched and gets no false callback.
+  The grace buffer is in memory: after a hub restart a `session_offline` row with NO grace entry is
+  eligible again in both sweeps (batch and stale non-batch) -- online dispatches it, still offline
+  re-parks it once. A row WITH a live grace entry is left to that entry. A send-time `session_offline`
+  (channel vanished between `isOnline` and `send`) on the single path parks exactly like
+  `parked_offline`.
+- **Status writes are compare-and-set** (class fix; no write from a stale snapshot): park =
+  `WHERE status='pending'`; grace expiry = `WHERE status='pending' AND skip_reason='session_offline'`;
+  post-send session/dispatched_at = `WHERE status='dispatched'`; send-failure = `WHERE status='dispatched'`
+  (only the ids that send call claimed; batch `markFailed` also deletes the in-flight entry only if it is
+  its own); the webhook mapping pre-resolve writes only `mapping_id`. Finalize
+  (`run-lifecycle.ts`) is reached only through a live finalize hook that owns the token, and retry
+  refuses a live token, so it cannot race. Callbacks/broadcasts fire only when the CAS transitioned.
+- **Retry of a `dispatched` row uses durable state** (`POST /annotations/:id/retry`): beyond the
+  in-memory liveness maps (empty after a restart), it is refused `409 annotation_in_flight` while the
+  latest `annotation_runs` row is `in_flight` and younger than its ceiling (`REVANOTE_FINALIZE_TIMEOUT_MS`
+  for single runs, `REMO_REVANOTE_BATCH_RUN_MAX_MS` for batch members).
 - **Batch dispatch token scoping (qcfix/batch-claim, C3)**: a batch's dispatch token (and the
   `inFlightBatches` map key) is `batch:<userId>:<sessionId>:<mappingId>:<batch_id>`, never the raw
   `batch_id` alone. One `batch_id` can legitimately split into several dispatched groups (a
@@ -362,7 +386,7 @@ dead-session reaper, also gets a `resolved: false` callback with `action_taken: 
   `REMO_DEAD_SESSION_GRACE_MS` (default 2min): `shutdown` + close 4002, row `offline`, pipeline slot
   released. No fresh inventory for the host = unknown = never reaped.
 - **Wedge fix:** when the head parks offline or its send throws, a waiter that queued behind it meanwhile is now re-dispatched. Previously it was moved into the in-flight slot with no finalize hook, so nothing ever freed the slot and every later annotation for that session came back `session_busy` until a hub restart.
-- Offline target → parked in the **shared** `getGraceBuffer()` (`hub/src/dispatch/grace.ts`) keyed by `sessionId` (10-min TTL). On agent reconnect, `ws/agent.ts` calls `getGraceBuffer().drain(sessionId)` (one drain replays both error-capture and revanote). TTL lapse → annotation `failed_offline` / `target_offline_expired` via the adapter's `onParkExpire`.
+- Offline target → parked in the **shared** `getGraceBuffer()` (`hub/src/dispatch/grace.ts`) keyed by `sessionId` (10-min TTL). On agent reconnect, `ws/agent.ts` calls `getGraceBuffer().drain(sessionId)` (one drain replays both error-capture and revanote). TTL lapse → annotation `failed_offline` / `target_offline_expired` via the adapter's `onParkExpire` (CAS-guarded, see the parked-offline lifecycle above). Grace registration is deduped by dispatch token.
 - Finalize: the agent ws assistant_message branch calls `dispatch.onSessionReply(sessionId, content)`, which fires the adapter's `RunStore.onFinalize`. That hook delegates to `run-lifecycle.finalizeAnnotationReply` — envelope parse (`<<JSON>>…<<END>>`) → annotation resolved/failed → merge gate → outbound callback enqueue (callback ALWAYS carries `annotation_id`). There is no longer a revanote-specific `onAgentReply` call in `ws/agent.ts`.
 
 ## Quiet-sites alert
@@ -458,7 +482,10 @@ missing alarm.
   `scheduler/run-reaper.ts`), two independent stall signatures:
   - **Parked/rejected/target-offline**: an `annotations` row sits
     `status='pending' AND skip_reason='session_offline'` (parked offline), or
-    `status IN ('failed','failed_offline')` (rejected / grace-TTL-lapsed), older
+    `status IN ('failed','failed_offline')` (rejected / grace-TTL-lapsed), or
+    `status='dispatched'` with NO `in_flight` `annotation_runs` row (crash between the send-time claim
+    and the run insert, or a throw in `markFailed`; alert only, never auto-resent because the prompt
+    may already have gone out), older
     than `REMO_REVANOTE_STALL_PARKED_MAX_MS` (default 1h), measured from
     `dispatched_at` when set else `received_at`.
   - **Stuck in-flight run**: an `annotation_runs` row sits `status='in_flight'`

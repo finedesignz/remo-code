@@ -159,8 +159,8 @@ revanoteWebhookRoutes.post('/webhook/:user_id/:token', async (c) => {
   try {
     const m = await resolveRevanoteMappingForHost(userId, hostOf(payload.page_url))
     if (m) {
-      const { updateAnnotationStatus } = await import('../db/revanote-dal.ts')
-      await updateAnnotationStatus(ann.id, ann.status, { mapping_id: m.id })
+      const { setAnnotationMappingId } = await import('../db/revanote-dal.ts')
+      await setAnnotationMappingId(ann.id, m.id)
       ;(ann as any).mapping_id = m.id
     }
   } catch {}

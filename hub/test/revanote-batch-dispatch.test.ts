@@ -114,6 +114,9 @@ const state: {
   /** dispatchPendingAnnotation attempts made via the sweep re-dispatch (throwing-row harness). */
   throwOnSingleSend: boolean
   getCalls: number
+  onChannelLookup: (() => void) | null
+  onSend: (() => void) | null
+  claimFails: boolean
 } = {
   pendingAnnotations: [],
   runs: [],
@@ -136,6 +139,9 @@ const state: {
   insertMessageFails: false,
   throwOnSingleSend: false,
   getCalls: 0,
+  onChannelLookup: null,
+  onSend: null,
+  claimFails: false,
 }
 
 mock.module('../src/auth/middleware.ts', () => ({
@@ -168,11 +174,12 @@ mock.module('../src/db/postgres.ts', () => ({
     if (text.includes('jsonb_exists(payload_raw') || text.includes("NULLIF(payload_raw->>'batch_id','') IS NULL")) {
       const cutoff = values[0] instanceof Date ? values[0].getTime() : 0
       return state.pendingAnnotations.filter(
-        (a) => a.status === 'pending' && !hasBatch(a) && a.skip_reason !== 'session_offline' &&
+        (a) => a.status === 'pending' && !hasBatch(a) &&
           new Date(a.received_at).getTime() < cutoff,
       )
     }
     if (text.includes("SET status = 'dispatched'")) {
+      if (state.claimFails) return []
       const ids: string[] = values[0] ?? []
       const claimed: { id: string }[] = []
       for (const id of ids) {
@@ -236,6 +243,43 @@ mock.module('../src/db/revanote-dal.ts', () => ({
     ann.status = 'failed'
     return true
   },
+  // Real SQL: conditional UPDATEs (CAS) -- modelled against the shared row set.
+  parkAnnotationOfflineIfPending: async (id: string, session_id: string | null) => {
+    const ann = state.pendingAnnotations.find((a) => a.id === id)
+    if (!ann || ann.status !== 'pending') return false
+    ann.skip_reason = 'session_offline'
+    ann.session_id = session_id ?? ann.session_id
+    state.annStatus.push({ id, status: 'pending', opts: { skip_reason: 'session_offline', session_id } })
+    return true
+  },
+  expireParkedAnnotation: async (id: string) => {
+    const ann = state.pendingAnnotations.find((a) => a.id === id)
+    if (!ann || ann.status !== 'pending' || ann.skip_reason !== 'session_offline') return false
+    ann.status = 'failed_offline'
+    ann.skip_reason = 'target_offline_expired'
+    state.annStatus.push({ id, status: 'failed_offline', opts: { skip_reason: 'target_offline_expired' } })
+    return true
+  },
+  recordDispatchIfDispatched: async (id: string, opts: any) => {
+    const ann = state.pendingAnnotations.find((a) => a.id === id)
+    if (!ann || ann.status !== 'dispatched') return false
+    state.dispatchedCallCount++
+    if (state.crashOnNthDispatchedCall != null && state.dispatchedCallCount === state.crashOnNthDispatchedCall) {
+      throw new Error('simulated crash mid per-member dispatched-status loop')
+    }
+    ann.session_id = opts.session_id
+    state.annStatus.push({ id, status: 'dispatched', opts })
+    return true
+  },
+  failAnnotationIfDispatched: async (id: string, skip_reason: string) => {
+    const ann = state.pendingAnnotations.find((a) => a.id === id)
+    if (!ann || ann.status !== 'dispatched') return false
+    ann.status = 'failed'
+    ann.skip_reason = skip_reason
+    state.annStatus.push({ id, status: 'failed', opts: { skip_reason } })
+    return true
+  },
+  setAnnotationMappingId: async () => {},
   insertAnnotationRun: async (opts: any) => {
     if (state.onInsertRun) {
       const hook = state.onInsertRun
@@ -277,8 +321,13 @@ mock.module('../src/db/dal.ts', () => ({
 
 mock.module('../src/ws/registry.ts', () => ({
   getChannel: (sid: string) => {
+    if (state.onChannelLookup) {
+      const hook = state.onChannelLookup
+      state.onChannelLookup = null
+      hook()
+    }
     if (state.channelNullFromCall != null && ++state.channelCalls >= state.channelNullFromCall) return null
-    return state.offlineSessions.has(sid) ? null : { ws: { send: (f: string) => state.sentFrames.push(JSON.parse(f)) } }
+    return state.offlineSessions.has(sid) ? null : { ws: { send: (f: string) => { state.sentFrames.push(JSON.parse(f)); if (state.onSend) { const h = state.onSend; state.onSend = null; h() } } } }
   },
   broadcastRevanoteEvent: (_uid: string, ev: any) => state.broadcasts.push(ev),
   broadcastToSubscribers: () => {},
@@ -335,8 +384,9 @@ mock.module('../src/dispatch/gates.ts', () => ({
 }))
 
 const { dispatchPendingAnnotation, dispatchAnnotationRow } = await import('../src/revanote/dispatcher.ts')
+const { getGraceBuffer } = await import('../src/dispatch/grace.ts')
 const { onSessionReply, _reset, isTokenLive } = await import('../src/dispatch/pipeline.ts')
-const { sweepBatchDispatch, pendingRedispatchMs, batchDebounceMs, batchRunMaxMs, _resetBatchDispatchState } = await import(
+const { sweepBatchDispatch, pendingRedispatchMs, batchDebounceMs, batchRunMaxMs, _resetBatchDispatchState, _seedInFlightBatchForTest } = await import(
   '../src/revanote/batch-dispatch.ts'
 )
 
@@ -365,10 +415,14 @@ beforeEach(() => {
   state.insertMessageFails = false
   state.throwOnSingleSend = false
   state.getCalls = 0
+  state.onChannelLookup = null
+  state.onSend = null
+  state.claimFails = false
   runSeq = 0
   clockOffset = 0
   Date.now = () => realNow() + clockOffset
   _reset()
+  getGraceBuffer()._reset()
   _resetBatchDispatchState()
 })
 
@@ -970,14 +1024,20 @@ describe('revanote batch dispatch — Q4 stale pending (non-batch) re-dispatch a
     expect(state.pendingAnnotations[0].status).toBe('pending')
   })
 
-  test('Q4: a row parked offline (session_offline) keeps its own replay path and is NOT re-dispatched here', async () => {
-    state.pendingAnnotations = [stale('ann-1', pendingRedispatchMs() + 1000, { skip_reason: 'session_offline' })]
+  test('Q4: a row parked offline WITH a live grace entry keeps its own replay path and is NOT re-dispatched here', async () => {
+    state.pendingAnnotations = [stale('ann-1', pendingRedispatchMs() + 1000)]
+    state.offlineSessions.add('sess-1')
+    getGraceBuffer()._reset()
     _reset()
+    await dispatchPendingAnnotation('ann-1') // parks: pending + session_offline + one grace entry
+    expect(state.pendingAnnotations[0].skip_reason).toBe('session_offline')
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
 
     const r = await sweepBatchDispatch()
 
     expect(r.redispatched).toBe(0)
     expect(state.sentFrames).toHaveLength(0)
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
   })
 })
 
@@ -1091,5 +1151,190 @@ describe('revanote dispatch — pre-claim no_target must not clobber a resolved 
     await new Promise((r) => setTimeout(r, 25))
     expect(state.pendingAnnotations[0].status).toBe('resolved')
     expect(state.callbacks).toHaveLength(0)
+  })
+})
+
+// ── Class fix: no annotation status write from a stale snapshot ─────────────
+
+describe('revanote — status writes are compare-and-set (stale-snapshot class)', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  const batchRows = (n = 2, batch = 'bq') =>
+    Array.from({ length: n }, (_, i) =>
+      makeAnnotation({
+        id: `q${i}`,
+        annotation_id_external: `ext-q${i}`,
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo', batch_id: batch },
+        received_at: envAgo(batchDebounceMs() + 1000),
+      }),
+    )
+  const tick = () => new Promise((r) => setTimeout(r, 25))
+  const byId = (id: string) => state.pendingAnnotations.find((a) => a.id === id)
+
+  test('1: batch parked_offline does not revert a member a retry claimed meanwhile', async () => {
+    state.pendingAnnotations = batchRows(2)
+    state.offlineSessions.add('sess-1')
+    state.onChannelLookup = () => { byId('q0').status = 'dispatched' } // retry claims q0 mid-flight
+    await sweepBatchDispatch()
+    expect(byId('q0').status).toBe('dispatched')
+    expect(byId('q0').skip_reason).toBeNull()
+    expect(byId('q1').status).toBe('pending')
+    expect(byId('q1').skip_reason).toBe('session_offline')
+  })
+
+  test('1: single parked_offline does not revert a row claimed meanwhile', async () => {
+    state.pendingAnnotations = [makeAnnotation({ id: 's1' })]
+    state.offlineSessions.add('sess-1')
+    state.onChannelLookup = () => { byId('s1').status = 'dispatched' }
+    await dispatchPendingAnnotation('s1')
+    expect(byId('s1').status).toBe('dispatched')
+    expect(byId('s1').skip_reason).toBeNull()
+  })
+
+  test('2: stale grace expiry does not fail an already-dispatched single row nor send a callback', async () => {
+    state.pendingAnnotations = [makeAnnotation({ id: 's1' })]
+    state.offlineSessions.add('sess-1')
+    await dispatchPendingAnnotation('s1') // parked + one grace entry
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
+    byId('s1').status = 'dispatched' // session came back, row re-dispatched elsewhere
+    clockOffset += 11 * 60_000
+    getGraceBuffer()._sweepNow()
+    await tick()
+    expect(byId('s1').status).toBe('dispatched')
+    expect(state.callbacks).toHaveLength(0)
+  })
+
+  test('2: a still-parked single row DOES expire to failed_offline with the callback', async () => {
+    state.pendingAnnotations = [makeAnnotation({ id: 's1' })]
+    state.offlineSessions.add('sess-1')
+    await dispatchPendingAnnotation('s1')
+    clockOffset += 11 * 60_000
+    getGraceBuffer()._sweepNow()
+    await tick()
+    expect(byId('s1').status).toBe('failed_offline')
+    expect(state.callbacks.map((c) => c.ann_id)).toEqual(['s1'])
+  })
+
+  test('3 + round-5 probe: offline x3 sweeps -> ONE grace entry; online sweep dispatches; lapsed grace leaves dispatched members, no callback', async () => {
+    state.pendingAnnotations = batchRows(3)
+    state.offlineSessions.add('sess-1')
+    await sweepBatchDispatch()
+    await sweepBatchDispatch()
+    await sweepBatchDispatch()
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
+
+    state.offlineSessions.delete('sess-1')
+    const r = await sweepBatchDispatch()
+    expect(r.dispatched).toBe(1)
+    expect(state.sentFrames).toHaveLength(1)
+    for (const a of state.pendingAnnotations) expect(a.status).toBe('dispatched')
+
+    clockOffset += 11 * 60_000 // force the grace entries to expire
+    getGraceBuffer().sweep()
+    await tick()
+    for (const a of state.pendingAnnotations) expect(a.status).toBe('dispatched')
+    expect(state.callbacks).toHaveLength(0)
+    expect(state.annStatus.some((s) => s.status === 'failed_offline')).toBe(false)
+  })
+
+  test('3 restart: parked single row + grace wiped -> exactly one re-park while offline', async () => {
+    state.pendingAnnotations = [makeAnnotation({
+      id: 's1', received_at: envAgo(pendingRedispatchMs() + 1000), skip_reason: 'session_offline',
+    })]
+    state.offlineSessions.add('sess-1')
+    getGraceBuffer()._reset() // hub restart
+    await sweepBatchDispatch()
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
+    await sweepBatchDispatch()
+    await sweepBatchDispatch()
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
+    expect(state.sentFrames).toHaveLength(0)
+  })
+
+  test('3 restart: parked single row + grace wiped -> exactly one dispatch once online', async () => {
+    state.pendingAnnotations = [makeAnnotation({
+      id: 's1', received_at: envAgo(pendingRedispatchMs() + 1000), skip_reason: 'session_offline',
+    })]
+    getGraceBuffer()._reset()
+    await sweepBatchDispatch()
+    await sweepBatchDispatch()
+    expect(state.sentFrames).toHaveLength(1)
+    expect(byId('s1').status).toBe('dispatched')
+  })
+
+  test('3 restart: parked batch rows + grace wiped -> one re-park offline, one dispatch online', async () => {
+    state.pendingAnnotations = batchRows(2).map((a) => ({ ...a, skip_reason: 'session_offline' }))
+    state.offlineSessions.add('sess-1')
+    getGraceBuffer()._reset()
+    await sweepBatchDispatch()
+    await sweepBatchDispatch()
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
+    state.offlineSessions.delete('sess-1')
+    getGraceBuffer()._reset()
+    await sweepBatchDispatch()
+    expect(state.sentFrames).toHaveLength(1)
+    for (const a of state.pendingAnnotations) expect(a.status).toBe('dispatched')
+  })
+
+  test('4: post-send write does not regress a row the reply already finalized (single)', async () => {
+    state.pendingAnnotations = [makeAnnotation({ id: 's1' })]
+    state.onSend = () => { byId('s1').status = 'resolved' }
+    await dispatchPendingAnnotation('s1')
+    expect(byId('s1').status).toBe('resolved')
+    expect(state.broadcasts.some((b) => b.type === 'revanote_dispatched')).toBe(false)
+  })
+
+  test('4: post-send write does not regress a member the reply already finalized (batch)', async () => {
+    state.pendingAnnotations = batchRows(2)
+    state.onSend = () => { byId('q0').status = 'resolved' }
+    await sweepBatchDispatch()
+    expect(byId('q0').status).toBe('resolved')
+    expect(byId('q1').status).toBe('dispatched')
+  })
+
+  test('6: batch markFailed fails only the ids THIS send claimed and leaves another entry under the token', async () => {
+    state.pendingAnnotations = [...batchRows(2, 'b1'), makeAnnotation({ id: 'other-1', status: 'dispatched' })]
+    _seedInFlightBatchForTest('batch:user-1:sess-1:map-1:b1', {
+      userId: 'user-1', sessionId: 'sess-1', claimedIds: ['other-1'],
+    })
+    state.insertMessageFails = true
+    await sweepBatchDispatch()
+    await tick()
+    expect(byId('other-1').status).toBe('dispatched')
+    expect(byId('q0').status).toBe('failed')
+    expect(byId('q1').status).toBe('failed')
+    const { isAnnotationLiveInBatch } = await import('../src/revanote/batch-dispatch.ts')
+    expect(isAnnotationLiveInBatch('other-1')).not.toBeNull()
+  })
+
+  test('10a: channel present at isOnline but gone at send -> row parked session_offline with ONE grace entry, not re-sent', async () => {
+    state.pendingAnnotations = [makeAnnotation({ id: 's1', received_at: envAgo(pendingRedispatchMs() + 1000) })]
+    state.channelNullFromCall = 2
+    await dispatchPendingAnnotation('s1')
+    expect(byId('s1').status).toBe('pending')
+    expect(byId('s1').skip_reason).toBe('session_offline')
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
+    const runsBefore = state.runs.length
+    await sweepBatchDispatch()
+    await sweepBatchDispatch()
+    expect(state.runs).toHaveLength(runsBefore)
+    expect(state.sentFrames).toHaveLength(0)
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
+  })
+
+  test('10b: stale-pending attempt cap counts RETURNED failed outcomes and is never reset by one', async () => {
+    state.pendingAnnotations = [makeAnnotation({ id: 's1', received_at: envAgo(pendingRedispatchMs() + 1000) })]
+    state.claimFails = true // every attempt: open run -> send throws already_claimed -> outcome failed, row stays pending
+    for (let i = 0; i < 8; i++) {
+      clockOffset += 10 * 60 * 60 * 1000
+      await sweepBatchDispatch()
+    }
+    await tick()
+    expect(state.runs).toHaveLength(5)
+    expect(byId('s1').status).toBe('failed')
+    expect(state.callbacks.map((c) => c.ann_id)).toEqual(['s1'])
   })
 })

@@ -28,6 +28,7 @@ const state: {
   dispatchCalls: string[]
   /** CAS outcome the mocked DAL returns; false = a concurrent writer changed the status. */
   casResult: boolean
+  runs: any[]
 } = {
   annotation: null,
   singleLive: false,
@@ -35,12 +36,13 @@ const state: {
   updateAnnotationStatusCalls: [],
   dispatchCalls: [],
   casResult: true,
+  runs: [],
 }
 
 mock.module('../src/db/revanote-dal.ts', () => ({
   listAnnotations: async () => [],
   getAnnotationById: async (id: string) => (state.annotation?.id === id ? state.annotation : null),
-  listAnnotationRuns: async () => [],
+  listAnnotationRuns: async () => state.runs,
   updateAnnotationStatus: async (id: string, status: string, opts: any = {}) => {
     state.updateAnnotationStatusCalls.push({ id, status, opts })
   },
@@ -57,9 +59,11 @@ mock.module('../src/dispatch/pipeline.ts', () => ({
 
 mock.module('../src/revanote/batch-dispatch.ts', () => ({
   isAnnotationLiveInBatch: (_id: string) => state.batchLive,
+  batchRunMaxMs: () => 7_200_000,
 }))
 
 mock.module('../src/revanote/dispatcher.ts', () => ({
+  singleRunMaxMs: () => 1_200_000,
   dispatchPendingAnnotation: async (id: string, _opts: any) => {
     state.dispatchCalls.push(id)
     return { status: 'dispatched', run_id: 'run-x', session_id: 'sess-1' }
@@ -84,6 +88,7 @@ beforeEach(() => {
   state.updateAnnotationStatusCalls = []
   state.dispatchCalls = []
   state.casResult = true
+  state.runs = []
   state.annotation = {
     id: 'ann-1',
     user_id: USER_A,
@@ -188,5 +193,55 @@ describe('POST /api/revanote/annotations/:id/retry — R2-2 live-ownership guard
       expect(res.status).toBe(200)
       expect(state.dispatchCalls).toEqual(['ann-1'])
     }
+  })
+})
+
+describe('POST /api/revanote/annotations/:id/retry -- durable in-flight check (survives a hub restart)', () => {
+  const run = (status: string, ageMs: number) => ({
+    id: 'run-1', annotation_id: 'ann-1', status, started_at: new Date(Date.now() - ageMs).toISOString(),
+  })
+
+  test('8: dispatched + fresh in_flight run + empty memory maps -> 409, nothing sent', async () => {
+    state.annotation.status = 'dispatched'
+    state.runs = [run('in_flight', 60_000)]
+    const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res.status).toBe(409)
+    expect((await res.json()).error).toBe('annotation_in_flight')
+    expect(state.dispatchCalls).toHaveLength(0)
+    expect(state.updateAnnotationStatusCalls).toHaveLength(0)
+  })
+
+  test('8: in_flight run older than the single ceiling -> allowed, sent once', async () => {
+    state.annotation.status = 'dispatched'
+    state.runs = [run('in_flight', 1_200_000 + 60_000)]
+    const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(state.dispatchCalls).toEqual(['ann-1'])
+  })
+
+  test('8: latest run terminal -> allowed', async () => {
+    state.annotation.status = 'dispatched'
+    state.runs = [run('failed', 1_000), run('in_flight', 9_000_000)]
+    const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(state.dispatchCalls).toEqual(['ann-1'])
+  })
+
+  test('8: a batch member uses the batch ceiling (older than single, younger than batch -> 409)', async () => {
+    state.annotation.status = 'dispatched'
+    state.annotation.payload_raw = { batch_id: 'b1' }
+    state.runs = [run('in_flight', 3_600_000)]
+    const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res.status).toBe(409)
+    state.runs = [run('in_flight', 7_200_000 + 60_000)]
+    const res2 = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res2.status).toBe(200)
+  })
+
+  test('8: the in-memory check still refuses too (fresh-run check is additive)', async () => {
+    state.annotation.status = 'dispatched'
+    state.singleLive = true
+    const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res.status).toBe(409)
   })
 })

@@ -52,12 +52,16 @@ import { sql } from '../db/postgres.ts'
 import {
   type AnnotationRow,
   type RevanoteMapping,
-  updateAnnotationStatus,
+  parkAnnotationOfflineIfPending,
+  expireParkedAnnotation,
+  recordDispatchIfDispatched,
+  failAnnotationIfDispatched,
   insertAnnotationRun,
   updateAnnotationRun,
   claimAnnotationsAtSend,
   failAnnotationIfPending,
 } from '../db/revanote-dal.ts'
+import { getGraceBuffer } from '../dispatch/grace.ts'
 import { getChannel, broadcastRevanoteEvent, broadcastToSubscribers } from '../ws/registry.ts'
 import { insertMessage } from '../db/dal.ts'
 import { renderBatchAnnotationPrompt } from './prompt.ts'
@@ -108,6 +112,11 @@ export function pendingRedispatchMs(): number {
  */
 export function batchRunMaxMs(): number {
   return positiveIntEnv('REMO_REVANOTE_BATCH_RUN_MAX_MS', 7_200_000)
+}
+
+/** Dispatch token / inFlightBatches key for one batch group (see dispatchBatch). */
+function batchToken(userId: string, sessionId: string, mappingId: string | null | undefined, rawBatchId: string): string {
+  return `batch:${userId}:${sessionId}:${mappingId ?? 'no-mapping'}:${rawBatchId}`
 }
 
 function batchIdOf(ann: AnnotationRow): string | null {
@@ -186,7 +195,6 @@ async function redispatchStalePending(now: number): Promise<number> {
     SELECT * FROM annotations
      WHERE status = 'pending'
        AND NULLIF(payload_raw->>'batch_id','') IS NULL
-       AND skip_reason IS DISTINCT FROM 'session_offline'
        AND received_at < ${cutoff}
      ORDER BY received_at ASC
      LIMIT 25
@@ -195,21 +203,36 @@ async function redispatchStalePending(now: number): Promise<number> {
   for (const ann of rows) {
     if (batchIdOf(ann)) continue
     if (isTokenLiveAnywhere(ann.id)) continue
+    // A row parked offline is owned by its grace entry (replayed on reconnect).
+    // With NO grace entry (hub restart wiped the in-memory buffer) it is
+    // eligible again: online => dispatch, still offline => re-park once.
+    if (ann.skip_reason === 'session_offline' && getGraceBuffer().has(ann.id)) continue
     const fail = redispatchFailures.get(ann.id)
     if (fail && now < fail.nextAt) continue
+    // A returned `failed` outcome counts against the cap exactly like a throw
+    // (the counter is never reset by one) -- otherwise a row whose every attempt
+    // returns `failed` (send-time failure, lost claim) retries forever.
+    let failure: string | null = null
     try {
       const out = await dispatchPendingAnnotation(ann.id)
-      redispatchFailures.delete(ann.id)
-      if (out.status === 'dispatched' || out.status === 'queued') n++
+      if (out.status === 'failed') {
+        failure = `dispatch_failed: ${out.skip_reason ?? 'unknown'}`
+        console.error(`[revanote.batch] pending re-dispatch returned failed annotation=${ann.id}: ${out.skip_reason}`)
+      } else {
+        redispatchFailures.delete(ann.id)
+        if (out.status === 'dispatched' || out.status === 'queued') n++
+      }
     } catch (err: any) {
       console.error(`[revanote.batch] pending re-dispatch failed annotation=${ann.id}: ${err?.message ?? err}`)
+      failure = `redispatch_failed: ${err?.message ?? err}`
+    }
+    if (failure) {
       const attempts = (fail?.attempts ?? 0) + 1
       if (attempts >= REDISPATCH_MAX_ATTEMPTS) {
         redispatchFailures.delete(ann.id)
-        const reason = `redispatch_failed: ${err?.message ?? err}`
-        if (await failAnnotationIfPending(ann.id, reason, ann.session_id)) {
-          broadcastRevanoteEvent(ann.user_id, { type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason })
-          void enqueueRejectionCallback(ann, 'agent_send_failed', reason)
+        if (await failAnnotationIfPending(ann.id, failure, ann.session_id)) {
+          broadcastRevanoteEvent(ann.user_id, { type: 'revanote_skipped', annotation_id: ann.id, skip_reason: failure })
+          void enqueueRejectionCallback(ann, 'agent_send_failed', failure)
         }
       } else {
         redispatchFailures.set(ann.id, { attempts, nextAt: now + pendingRedispatchMs() * 2 ** (attempts - 1) })
@@ -284,6 +307,11 @@ async function runSweepOnce(now: number): Promise<{ dispatched: number }> {
       const sessionId = group[0].sessionId
       const latest = Math.max(...group.map((g) => new Date(g.ann.received_at as any).getTime()))
       if (now - latest < debounce) continue // still debouncing — a newer arrival extends the window
+      // Already parked in grace for a session that is STILL offline: re-dispatching
+      // would only re-park (and burn ensureOnline/gates) every tick. Online again
+      // => dispatch (the stale grace entry's lapse is CAS-guarded).
+      const token = batchToken(userId, sessionId, group[0].mapping?.id, batchIdOf(group[0].ann)!)
+      if (getChannel(sessionId) == null && getGraceBuffer().has(token)) continue
       await dispatchBatch(userId, sessionId, group)
       dispatched++
     }
@@ -318,14 +346,15 @@ async function dispatchBatch(
   // would. The `batch:` prefix also guarantees this can never collide with a
   // single-annotation dispatch's token (an annotation's own UUID `id`, no
   // prefix).
-  const mappingId = group[0]?.mapping?.id ?? 'no-mapping'
-  const batchId = `batch:${userId}:${sessionId}:${mappingId}:${rawBatchId}`
+  const batchId = batchToken(userId, sessionId, group[0]?.mapping?.id, rawBatchId)
   const tz = await getUserTimezone(userId)
 
   // Populated by `send()` once it knows which members it actually claimed —
   // read by the post-dispatch 'dispatched' handling below (markSkipped fires
   // BEFORE send/claim and always applies to the whole resolved `group`).
   let claimedAnns: AnnotationRow[] = []
+  // This call's own in-flight reservation (set in send()); markFailed acts on it only.
+  let mineRef = null as InFlightBatch | null
 
   const store: RunStore = {
     // No DB writes here — the real claim + per-member run rows happen in
@@ -362,9 +391,11 @@ async function dispatchBatch(
         // only its OWN reservation; the winner's entry under this token stays.)
         return
       }
-      const batch = inFlightBatches.get(token)
+      // Fail ONLY the ids THIS send() call claimed (`mineRef`), never whatever
+      // another concurrent dispatch registered under the same token.
+      const batch = mineRef
       for (const id of batch?.claimedIds ?? []) {
-        await updateAnnotationStatus(id, 'failed', { skip_reason: `agent_send_failed: ${errMsg}` })
+        if (!(await failAnnotationIfDispatched(id, `agent_send_failed: ${errMsg}`))) continue
         const member = batch?.members.find((m) => m.annotationId === id)
         if (member) {
           await updateAnnotationRun(member.runId, {
@@ -374,7 +405,7 @@ async function dispatchBatch(
         const ann = group.find((g) => g.ann.id === id)?.ann
         if (ann) await enqueueRejectionCallback(ann, 'agent_send_failed', errMsg)
       }
-      inFlightBatches.delete(token)
+      if (batch && inFlightBatches.get(token) === batch) inFlightBatches.delete(token)
     },
     shouldFinalize(content) {
       return ENVELOPE_RE.test(content)
@@ -394,7 +425,9 @@ async function dispatchBatch(
     },
     onParkExpire: async () => {
       for (const { ann } of group) {
-        await updateAnnotationStatus(ann.id, 'failed_offline', { skip_reason: 'target_offline_expired' })
+        // CAS on the parked state: a member since claimed/dispatched/resolved
+        // keeps its state and gets no (false) target_offline callback.
+        if (!(await expireParkedAnnotation(ann.id))) continue
         void enqueueRejectionCallback(ann, 'target_offline', 'target_offline_expired')
       }
     },
@@ -422,6 +455,7 @@ async function dispatchBatch(
         members: [],
         claimedIds: new Set(group.map((g) => g.ann.id)),
       }
+      mineRef = mine
       if (!inFlightBatches.has(batchId)) inFlightBatches.set(batchId, mine)
       const release = () => {
         if (inFlightBatches.get(batchId) === mine) inFlightBatches.delete(batchId)
@@ -439,7 +473,8 @@ async function dispatchBatch(
         throw new Error('already_claimed')
       }
       mine.claimedIds = new Set(claimed.map((g) => g.ann.id))
-      inFlightBatches.set(batchId, mine)
+      // Never evict another dispatch's entry registered under the same token.
+      if (!inFlightBatches.has(batchId)) inFlightBatches.set(batchId, mine)
 
       // From here on a throw leaves the reservation in place so markFailed can
       // still see (and terminalize) the claimed ids.
@@ -474,7 +509,8 @@ async function dispatchBatch(
   switch (outcome.kind) {
     case 'dispatched':
       for (const ann of claimedAnns) {
-        await updateAnnotationStatus(ann.id, 'dispatched', { session_id: sessionId, dispatched_at: new Date() })
+        // CAS on 'dispatched': a reply that already finalized the row is not regressed.
+        if (!(await recordDispatchIfDispatched(ann.id, { session_id: sessionId, dispatched_at: new Date() }))) continue
         broadcastRevanoteEvent(userId, {
           type: 'revanote_dispatched',
           annotation_id: ann.id,
@@ -486,7 +522,8 @@ async function dispatchBatch(
       return
     case 'parked_offline':
       for (const { ann } of group) {
-        await updateAnnotationStatus(ann.id, 'pending', { skip_reason: 'session_offline', session_id: sessionId })
+        // CAS on 'pending': a member a retry claimed in between is not reverted.
+        if (!(await parkAnnotationOfflineIfPending(ann.id, sessionId))) continue
         broadcastRevanoteEvent(userId, {
           type: 'revanote_skipped', annotation_id: ann.id, skip_reason: 'session_offline',
         })
@@ -600,4 +637,14 @@ export function stopBatchSweep(): void {
 export function _resetBatchDispatchState(): void {
   inFlightBatches.clear()
   redispatchFailures.clear()
+}
+
+/** Test-only: pre-register another dispatch's in-flight entry under `token`. */
+export function _seedInFlightBatchForTest(
+  token: string,
+  entry: { userId: string; sessionId: string; claimedIds: string[] },
+): void {
+  inFlightBatches.set(token, {
+    userId: entry.userId, sessionId: entry.sessionId, members: [], claimedIds: new Set(entry.claimedIds),
+  })
 }

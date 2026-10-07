@@ -8,8 +8,8 @@
 // agent's envelope is self-report; the prompt asking it to push first is not a
 // control. So the HUB checks: a resolved reply must name its `commit_sha`, and
 // the hub confirms through the GitHub App that the commit exists in the repo
-// (and, when the reply names a `branch`, that the branch contains it). Anything
-// else is downgraded to resolved:false with a reason, fail-closed.
+// AND is merged to the repo's default branch (the bar -- a squash/merge SHA is
+// not on the PR branch, which may be deleted). Anything else is downgraded to resolved:false with a reason, fail-closed.
 //
 // Escape hatch: REMO_REVANOTE_REQUIRE_PUSHED_COMMIT=0|false|no|off disables
 // the check (e.g. a user with no GitHub App installation yet). Default ON.
@@ -20,7 +20,6 @@ export type VerifyFailReason =
   | 'repo_unknown'
   | 'no_github_installation'
   | 'commit_not_pushed'
-  | 'commit_not_on_branch'
   | 'commit_not_on_default_branch'
   | 'verify_error'
 
@@ -52,8 +51,8 @@ function statusOf(err: any): number | null {
 }
 
 /**
- * Confirm `commitSha` exists in `owner/repo` on GitHub (and is contained in
- * `branch` when given). Tries each installation in order: a 404/422 from one
+ * Confirm `commitSha` exists in `owner/repo` on GitHub and is merged to the
+ * default branch (`input.branch` is advisory and not checked). Tries each installation in order: a 404/422 from one
  * installation may just mean it can't see the repo, so only "every
  * installation says not found" becomes `commit_not_pushed`.
  */
@@ -102,23 +101,6 @@ export async function verifyPushedCommit(input: VerifyInput, get: GithubGet): Pr
       return { ok: false, reason: 'verify_error', detail: err?.message ?? String(err) }
     }
 
-    const branch = (input.branch ?? '').trim()
-    if (branch && branch !== defaultBranch) {
-      try {
-        const cmp = await get(
-          inst,
-          `/repos/${owner}/${repo}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(fullSha)}`,
-        )
-        // `behind`/`identical` ⇒ the commit is an ancestor of (or equal to) the branch head.
-        if (cmp?.status !== 'identical' && cmp?.status !== 'behind') {
-          return { ok: false, reason: 'commit_not_on_branch', detail: `${branch} (${cmp?.status ?? 'unknown'})` }
-        }
-      } catch (err: any) {
-        const st = statusOf(err)
-        if (st === 404) return { ok: false, reason: 'commit_not_on_branch', detail: `${branch} not found` }
-        return { ok: false, reason: 'verify_error', detail: err?.message ?? String(err) }
-      }
-    }
     return { ok: true, sha: fullSha, repo: slug }
   }
 

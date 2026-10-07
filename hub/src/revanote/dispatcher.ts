@@ -49,8 +49,11 @@ import { sql } from '../db/postgres.ts'
 import {
   getAnnotationById,
   insertAnnotationRun,
-  updateAnnotationStatus,
   updateAnnotationRun,
+  parkAnnotationOfflineIfPending,
+  expireParkedAnnotation,
+  recordDispatchIfDispatched,
+  failAnnotationIfDispatched,
   resolveRevanoteMappingForHost,
   sumTodayAnnotationCostForUser,
   claimAnnotationsAtSend,
@@ -59,6 +62,7 @@ import {
   type RevanoteMapping,
 } from '../db/revanote-dal.ts'
 import { findSessionByProjectDir, insertMessage } from '../db/dal.ts'
+import { getGraceBuffer } from '../dispatch/grace.ts'
 import { getChannel, broadcastRevanoteEvent, broadcastToSubscribers } from '../ws/registry.ts'
 import { renderAnnotationPrompt, storagePrefix, previewComment } from './prompt.ts'
 import { finalizeAnnotationReply } from './run-lifecycle.ts'
@@ -79,6 +83,11 @@ export type DispatchOutcome =
   | { status: 'skipped'; skip_reason: string }
   | { status: 'failed'; skip_reason: string }
   | { status: 'noop'; skip_reason: string }
+
+/** Single-path finalize ceiling (also the retry endpoint's in_flight-run liveness ceiling). */
+export function singleRunMaxMs(): number {
+  return Number(process.env.REVANOTE_FINALIZE_TIMEOUT_MS ?? 20 * 60 * 1000)
+}
 
 export function hostOf(pageUrl: string): string {
   try {
@@ -356,9 +365,8 @@ export async function dispatchAnnotationRow(
         })
         return
       }
-      await updateAnnotationStatus(ann.id, 'failed', {
-        skip_reason: `agent_send_failed: ${errMsg}`,
-      })
+      // CAS on the row this call claimed ('dispatched'); a finalized row keeps its state.
+      const failedNow = await failAnnotationIfDispatched(ann.id, `agent_send_failed: ${errMsg}`)
       await updateAnnotationRun(runId, {
         status: 'failed', error: `agent_send: ${errMsg}`, finished_at: new Date(),
       })
@@ -366,7 +374,7 @@ export async function dispatchAnnotationRow(
       // whose send failed — or whose session died mid-run and was released by
       // the dead-session reaper — stayed in_progress in revanote forever and
       // was never re-sent.
-      await enqueueRejectionCallback(ann, 'agent_send_failed', errMsg)
+      if (failedNow) await enqueueRejectionCallback(ann, 'agent_send_failed', errMsg)
     },
     // Coding-agent turns narrate progress ("Implementer running. Waiting for
     // build + PR result.") before the turn that actually carries the
@@ -402,7 +410,7 @@ export async function dispatchAnnotationRow(
     // that never emits the envelope still resolves (as an honest parse
     // failure via `parseRevanoteOutput`'s bare-prose tolerance) instead of
     // leaving the hook — and the annotation — hanging forever.
-    finalizeTimeoutMs: Number(process.env.REVANOTE_FINALIZE_TIMEOUT_MS ?? 20 * 60 * 1000),
+    finalizeTimeoutMs: singleRunMaxMs(),
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Spawn-on-error (opt-in via REMO_SPAWN_ON_ERROR): when the bound session is
     // offline, lazy-START it via the supervisor before parking, so an offline-but-
@@ -420,9 +428,10 @@ export async function dispatchAnnotationRow(
     },
     // Grace TTL lapse → legacy expire-mark (failed_offline/target_offline_expired).
     onParkExpire: async () => {
-      await updateAnnotationStatus(ann.id, 'failed_offline', {
-        skip_reason: 'target_offline_expired',
-      })
+      // CAS on the parked state: a row since claimed/dispatched/resolved (session
+      // came back, retry via a replacement session) keeps its state and gets no
+      // false target_offline callback.
+      if (!(await expireParkedAnnotation(ann.id))) return
       // Tell revanote the dispatch failed so its annotation reverts
       // in_progress → todo (via how-callback resolved:false), matching the other
       // rejection paths (no_target / session_busy / budget). Without this an
@@ -455,20 +464,32 @@ export async function dispatchAnnotationRow(
   const req: DispatchRequest = { userId, sessionId, token: ann.id, prompt: promptBody }
   const outcome = await dispatch(req, deps)
 
+  // CAS on 'pending': a row a retry/replay claimed in between is not reverted.
+  const markParkedOffline = async (): Promise<DispatchOutcome> => {
+    if (await parkAnnotationOfflineIfPending(ann.id, sessionId, mapping?.id ?? null)) {
+      broadcastRevanoteEvent(userId, {
+        type: 'revanote_skipped', annotation_id: ann.id, skip_reason: 'session_offline',
+      })
+    }
+    return { status: 'skipped', skip_reason: 'session_offline' }
+  }
+
   switch (outcome.kind) {
     case 'dispatched':
       // Legacy parity: status='dispatched' + broadcast AFTER the send succeeds.
       // outcome.runId is the id open() returned (the real annotation_run id).
-      await updateAnnotationStatus(ann.id, 'dispatched', {
+      // CAS on 'dispatched': a reply that already finalized the row is not regressed.
+      if (await recordDispatchIfDispatched(ann.id, {
         session_id: sessionId, mapping_id: mapping?.id ?? null, dispatched_at: new Date(),
-      })
-      broadcastRevanoteEvent(userId, {
-        type: 'revanote_dispatched',
-        annotation_id: ann.id,
-        run_id: outcome.runId,
-        session_id: sessionId,
-        dispatched_at: new Date().toISOString(),
-      })
+      })) {
+        broadcastRevanoteEvent(userId, {
+          type: 'revanote_dispatched',
+          annotation_id: ann.id,
+          run_id: outcome.runId,
+          session_id: sessionId,
+          dispatched_at: new Date().toISOString(),
+        })
+      }
       return { status: 'dispatched', run_id: outcome.runId, session_id: sessionId }
     case 'queued':
       // qcfix/r2-claim-at-send: the send-time claim lives in `deps.send`, which
@@ -481,15 +502,7 @@ export async function dispatchAnnotationRow(
       // and parked in grace. The pipeline parks for us (TTL lapse fires
       // onParkExpire → failed_offline); we own the immediate skip-mark +
       // broadcast here so the row reflects the offline state.
-      await updateAnnotationStatus(ann.id, 'pending', {
-        skip_reason: 'session_offline',
-        session_id: sessionId,
-        mapping_id: mapping?.id ?? null,
-      })
-      broadcastRevanoteEvent(userId, {
-        type: 'revanote_skipped', annotation_id: ann.id, skip_reason: 'session_offline',
-      })
-      return { status: 'skipped', skip_reason: 'session_offline' }
+      return await markParkedOffline()
     case 'dropped_busy':
       // markSkipped(session_busy) already fired inside the pipeline.
       return { status: 'skipped', skip_reason: 'session_busy' }
@@ -497,6 +510,17 @@ export async function dispatchAnnotationRow(
       // markSkipped(reason) already fired inside the pipeline (gate block).
       return { status: 'skipped', skip_reason: outcome.reason }
     case 'failed':
+      // Send-time `session_offline` (channel vanished between the pipeline's
+      // isOnline and send()): park exactly like `parked_offline` -- single grace
+      // entry + CAS park -- instead of leaving a bare 'pending' row that the
+      // stale sweep would re-send forever.
+      if (outcome.reason === 'session_offline') {
+        getGraceBuffer().register(sessionId, () => deps.replay(req), {
+          dedupeKey: req.token,
+          onExpire: () => deps.onParkExpire!(req),
+        })
+        return await markParkedOffline()
+      }
       // markFailed already fired inside the pipeline.
       return { status: 'failed', skip_reason: 'agent_send_failed' }
   }

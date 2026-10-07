@@ -51,13 +51,15 @@ describe('verifyPushedCommit', () => {
     expect(r.ok).toBe(true)
   })
 
-  test('branch given: must contain the commit', async () => {
-    const onBranch = await verifyPushedCommit({ ...base, branch: 'feat/x' }, remote('behind', (p) =>
-      p.includes('/compare/feat') ? { status: 'behind' } : undefined))
-    expect(onBranch.ok).toBe(true)
-    const diverged = await verifyPushedCommit({ ...base, branch: 'feat/x' }, remote('behind', (p) =>
-      p.includes('/compare/feat') ? { status: 'diverged' } : undefined))
-    expect(diverged).toMatchObject({ ok: false, reason: 'commit_not_on_branch' })
+  test('merged to default => verified regardless of the PR branch (squash/merge SHA is not on it, or branch deleted)', async () => {
+    // Codex probe: default compare identical, PR-branch compare ahead.
+    const ahead = await verifyPushedCommit({ ...base, branch: 'feat/x' }, remote('identical', (p) =>
+      p.includes('/compare/feat') ? { status: 'ahead' } : undefined))
+    expect(ahead).toEqual({ ok: true, sha: SHA, repo: 'acme/site' })
+    // Branch deleted after merge: any compare against it would 404.
+    const deleted = await verifyPushedCommit({ ...base, branch: 'feat/x' }, remote('behind', (p) =>
+      p.includes('/compare/feat') ? notFound() : undefined))
+    expect(deleted.ok).toBe(true)
   })
 
   test('pushed but NOT merged to the default branch → commit_not_on_default_branch', async () => {
