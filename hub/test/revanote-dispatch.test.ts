@@ -89,6 +89,11 @@ const state: {
   // across every call — used to prove WHEN (relative to queueing) a claim
   // happens (R2-1).
   claimCalls: string[]
+  // Q3 harness: when non-null, the claim models the real conditional UPDATE
+  // (an id already in the set is NOT claimable; a successful claim adds it).
+  claimed: Set<string> | null
+  // Q3 harness: awaited inside insertAnnotationRun (between open() and send()).
+  onOpen: (() => Promise<void>) | null
 } = {
   runs: [], annStatus: [], broadcasts: [], sentFrames: [], callbacks: [],
   budgetPct: 60, todayCost: 0, costCap: 10,
@@ -96,6 +101,8 @@ const state: {
   resolvedSession: { id: 'sess-1' },
   annSessionId: 'sess-1',
   claimCalls: [],
+  claimed: null,
+  onOpen: null,
 }
 
 let runSeq = 0
@@ -118,6 +125,11 @@ mock.module('../src/db/postgres.ts', () => ({
     if (text.includes("SET status = 'dispatched'")) {
       const ids: string[] = values[0] ?? []
       state.claimCalls.push(...ids)
+      if (state.claimed) {
+        const won = ids.filter((id) => !state.claimed!.has(id))
+        for (const id of won) state.claimed.add(id)
+        return won.map((id) => ({ id }))
+      }
       return ids.map((id) => ({ id }))
     }
     return []
@@ -130,6 +142,11 @@ mock.module('../src/db/revanote-dal.ts', () => ({
   getAnnotationById: async (id: string) => makeAnnotation({ id, session_id: state.annSessionId }),
   sumTodayAnnotationCostForUser: async () => state.todayCost,
   insertAnnotationRun: async (opts: any) => {
+    if (state.onOpen) {
+      const hook = state.onOpen
+      state.onOpen = null
+      await hook()
+    }
     runSeq++
     const run = { id: `run-${runSeq}`, annotation_id: opts.annotation_id, status: 'in_flight' }
     state.runs.push(run)
@@ -236,6 +253,8 @@ beforeEach(() => {
   state.resolvedSession = { id: 'sess-1' }
   state.annSessionId = 'sess-1'
   state.claimCalls = []
+  state.claimed = null
+  state.onOpen = null
   runSeq = 0
   _reset()
 })
@@ -333,6 +352,36 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     expect(state.sentFrames.some((f) => true)).toBe(true)
   })
 })
+
+describe('revanote dispatch adapter — Q3 lost send-time claim race', () => {
+  afterAll(() => mock.restore())
+
+  test('Q3: a dispatch that loses the claim to a racing winner cancels its run row (lost_claim_race), sends nothing, never fails the annotation', async () => {
+    state.claimed = new Set()
+    let winnerSends = 0
+    // Between this dispatch's open() (run row inserted) and its send(): a racing
+    // caller (batch sweep / forceSingle retry) wins the atomic claim and sends.
+    state.onOpen = async () => {
+      const won = await claimViaSql('ann-1')
+      if (won) winnerSends++
+    }
+
+    const out = await dispatchPendingAnnotation('ann-1')
+
+    expect(winnerSends).toBe(1)
+    expect(state.sentFrames).toHaveLength(0) // loser sent nothing
+    expect(state.runs).toHaveLength(1) // the spurious open() row...
+    expect(state.runs[0]).toMatchObject({ status: 'cancelled', error: 'lost_claim_race' }) // ...is closed out
+    expect(state.annStatus.some((s) => s.id === 'ann-1' && s.status === 'failed')).toBe(false)
+    expect(out.status).not.toBe('dispatched')
+  })
+})
+
+async function claimViaSql(id: string): Promise<boolean> {
+  const { sql } = await import('../src/db/postgres.ts')
+  const rows: any[] = await (sql as any)(["UPDATE annotations SET status = 'dispatched' WHERE id = ANY(", ")"], [id])
+  return rows.length === 1
+}
 
 describe('revanote dispatch adapter — budget + cost-cap gates', () => {
   afterAll(() => mock.restore())
