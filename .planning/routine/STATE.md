@@ -8,6 +8,13 @@
      its iteration. -->
 LOCK: none
 
+## Run 9 (2026-10-07)
+- memlog claim OK (routine-run9-2026-10-07). Prod /health = {"ok":true}. DIRECTIVE already has §0; nothing to apply.
+- Backlog: #492/#493 merged earlier. Open: #500 (owner draft, left alone), #494 (owner, non-draft, auth scopes).
+- #494: full QC panel (security, correctness, tenancy) on 45cf898 = all CLEAR; qc + docs-drift green; no conflict; ai-review neutral (infra). Verdict commented on PR. NOT merged: scheduled prompt says never merge another author's PR (owner's PR). Owner decision items: step-up bypass on 3 sensitive routes, agent+settings:* mint mixing, no audit trail.
+- install-gsd.sh / GSD bootstrap NOT run; Skills_Factory MCP failed to connect (404, CLIENT_HTTP_NOT_IMPLEMENTED). Not filed to AgentAutofix this run; owner is mcp-servers, retry/report next run if it persists.
+- No new work item shipped. Resume: PTYCAP Phase 3 (full QC panel) or hub typecheck cleanup (427 errors baseline); re-check #494 merged.
+
 ## Run 8 (2026-10-06)
 - DIRECTIVE already carries §0 (v3.6 core, merge policy `self`); Governance note removed as resolved (#488).
 - memlog claim OK (session routine-run8-2026-10-06; run 8b saw it and yielded). Prod /health = {"ok":true}. Main head 008c276.
