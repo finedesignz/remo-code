@@ -352,6 +352,11 @@ export async function dispatchAnnotationRow(
       await updateAnnotationRun(runId, {
         status: 'failed', error: `agent_send: ${errMsg}`, finished_at: new Date(),
       })
+      // Tell revanote, like every other rejection path. Without it a comment
+      // whose send failed — or whose session died mid-run and was released by
+      // the dead-session reaper — stayed in_progress in revanote forever and
+      // was never re-sent.
+      await enqueueRejectionCallback(ann, 'agent_send_failed', errMsg)
     },
     // Coding-agent turns narrate progress ("Implementer running. Waiting for
     // build + PR result.") before the turn that actually carries the

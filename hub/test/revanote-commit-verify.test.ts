@@ -1,129 +1,189 @@
 /**
- * verifyCommitOnRemote — the gate proving a claimed commit SHA is actually
- * MERGED to the repo's default branch before a revanote `resolved: true` is
- * trusted. A commit merely pushed to any branch (e.g. an open, unmerged PR)
- * must NOT verify — only a sha that is the default-branch head or an
- * ancestor of it (compare status 'identical' or 'behind') counts.
- * See hub/src/revanote/commit-verify.ts and docs/revanote.md.
- *
- * githubApiRequest is mocked — no real network calls in tests.
+ * fix/revanote-verify-pushed — the hub accepts `resolved: true` only for a
+ * commit it can see on the remote. Covers the verifier (DB/network-free) and
+ * the finalize path's downgrade (DAL + callback mocked).
  */
-import { describe, test, expect, mock } from 'bun:test'
+import { describe, test, expect, mock, beforeEach } from 'bun:test'
 
-let lastCalls: Array<{ installationId: number; method: string; path: string }> = []
-let repoLookup: 'ok' | 'error' = 'ok'
-let compareResult: 'identical' | 'behind' | 'ahead' | 'diverged' | '404' | 'error' = 'identical'
+import { verifyPushedCommit, isPushVerificationRequired } from '../src/revanote/commit-verify.ts'
 
-mock.module('../src/auth/github-app.ts', () => {
-  class GitHubApiError extends Error {
-    status: number
-    body: string
-    constructor(status: number, body: string, msg: string) {
-      super(msg)
-      this.status = status
-      this.body = body
-    }
+function notFound(): never {
+  throw Object.assign(new Error('404'), { status: 404 })
+}
+
+const SHA = 'a'.repeat(40)
+/** Fake GitHub: commit exists; repo meta says default=main; compare(default...sha) → `defaultStatus`. */
+function remote(defaultStatus = 'behind', extra: (path: string) => any = () => undefined) {
+  return async (_i: number, path: string) => {
+    const e = extra(path)
+    if (e !== undefined) return e
+    if (path.includes('/compare/main...')) return { status: defaultStatus }
+    if (path.includes('/commits/')) return { sha: SHA }
+    return { default_branch: 'main' }
   }
-  return {
-    GitHubApiError,
-    githubApiRequest: async (installationId: number, method: string, path: string) => {
-      lastCalls.push({ installationId, method, path })
-      if (/\/repos\/[^/]+\/[^/]+$/.test(path)) {
-        if (repoLookup === 'error') throw new GitHubApiError(500, 'boom', 'github api 500')
-        return { default_branch: 'main' }
-      }
-      if (path.includes('/compare/')) {
-        if (compareResult === '404') throw new GitHubApiError(404, 'Not Found', 'github api 404')
-        if (compareResult === 'error') throw new GitHubApiError(500, 'boom', 'github api 500')
-        return { status: compareResult }
-      }
-      throw new Error(`unexpected path in test mock: ${path}`)
-    },
-  }
+}
+
+const base = { owner: 'acme', repo: 'site', commitSha: SHA, installationIds: [1] }
+
+describe('verifyPushedCommit', () => {
+  test('commit on the remote → ok with the full sha', async () => {
+    const r = await verifyPushedCommit(base, remote())
+    expect(r).toEqual({ ok: true, sha: SHA, repo: 'acme/site' })
+  })
+
+  test('missing / malformed sha → rejected before any API call', async () => {
+    let calls = 0
+    const get = async () => (calls++, { sha: SHA })
+    expect(await verifyPushedCommit({ ...base, commitSha: null }, get)).toMatchObject({ ok: false, reason: 'commit_sha_missing' })
+    expect(await verifyPushedCommit({ ...base, commitSha: 'HEAD' }, get)).toMatchObject({ ok: false, reason: 'commit_sha_invalid' })
+    expect(calls).toBe(0)
+  })
+
+  test('404 on every installation → commit_not_pushed', async () => {
+    const r = await verifyPushedCommit({ ...base, installationIds: [1, 2] }, async () => notFound())
+    expect(r).toMatchObject({ ok: false, reason: 'commit_not_pushed' })
+  })
+
+  test('first installation cannot see the repo, second can → ok', async () => {
+    const r = await verifyPushedCommit({ ...base, installationIds: [1, 2] }, async (inst, path) =>
+      inst === 1 ? notFound() : remote()(inst, path),
+    )
+    expect(r.ok).toBe(true)
+  })
+
+  test('branch given: must contain the commit', async () => {
+    const onBranch = await verifyPushedCommit({ ...base, branch: 'feat/x' }, remote('behind', (p) =>
+      p.includes('/compare/feat') ? { status: 'behind' } : undefined))
+    expect(onBranch.ok).toBe(true)
+    const diverged = await verifyPushedCommit({ ...base, branch: 'feat/x' }, remote('behind', (p) =>
+      p.includes('/compare/feat') ? { status: 'diverged' } : undefined))
+    expect(diverged).toMatchObject({ ok: false, reason: 'commit_not_on_branch' })
+  })
+
+  test('pushed but NOT merged to the default branch → commit_not_on_default_branch', async () => {
+    const r = await verifyPushedCommit(base, remote('ahead'))
+    expect(r).toMatchObject({ ok: false, reason: 'commit_not_on_default_branch' })
+    const d = await verifyPushedCommit({ ...base, branch: 'feat/x' }, remote('diverged'))
+    expect(d).toMatchObject({ ok: false, reason: 'commit_not_on_default_branch' })
+  })
+
+  test('no repo / no installation → fail closed', async () => {
+    const get = async () => ({ sha: SHA })
+    expect(await verifyPushedCommit({ ...base, owner: null }, get)).toMatchObject({ reason: 'repo_unknown' })
+    expect(await verifyPushedCommit({ ...base, installationIds: [] }, get)).toMatchObject({ reason: 'no_github_installation' })
+  })
+
+  test('non-404 API error → verify_error (never treated as pushed)', async () => {
+    const r = await verifyPushedCommit(base, async () => {
+      throw Object.assign(new Error('boom'), { status: 500 })
+    })
+    expect(r).toMatchObject({ ok: false, reason: 'verify_error' })
+  })
+
+  test('escape hatch parsing: default ON, explicit off values disable', () => {
+    expect(isPushVerificationRequired({})).toBe(true)
+    expect(isPushVerificationRequired({ REMO_REVANOTE_REQUIRE_PUSHED_COMMIT: '1' })).toBe(true)
+    expect(isPushVerificationRequired({ REMO_REVANOTE_REQUIRE_PUSHED_COMMIT: 'off' })).toBe(false)
+    expect(isPushVerificationRequired({ REMO_REVANOTE_REQUIRE_PUSHED_COMMIT: '0' })).toBe(false)
+  })
 })
 
-const { verifyCommitOnRemote } = await import('../src/revanote/commit-verify.ts')
+// ── finalize path ────────────────────────────────────────────────────────────
+const runUpdates: any[] = []
+const statusUpdates: any[] = []
+const callbacks: any[] = []
 
-describe('verifyCommitOnRemote', () => {
-  test('missing commit_sha fails closed', async () => {
-    const r = await verifyCommitOnRemote({ installationId: 123, repoSlug: 'owner/repo', commitSha: null })
-    expect(r.verified).toBe(false)
-    expect(r.reason).toBe('commit_sha_missing')
+mock.module('../src/db/revanote-dal.ts', () => ({
+  updateAnnotationRun: async (id: string, patch: any) => void runUpdates.push({ id, ...patch }),
+  updateAnnotationStatus: async (id: string, status: string, opts: any) => void statusUpdates.push({ id, status, ...opts }),
+  getAnnotationById: async () => ({
+    id: 'ann-1',
+    annotation_id_external: 'ext-1',
+    annotation_url: null,
+    payload_raw: {},
+  }),
+}))
+mock.module('../src/ws/registry.ts', () => ({ broadcastRevanoteEvent: () => {} }))
+mock.module('../src/revanote/callback.ts', () => ({
+  scheduleImmediateCallback: async (_ann: any, payload: any) => void callbacks.push(payload),
+}))
+
+const { finalizeAnnotationReply } = await import('../src/revanote/run-lifecycle.ts')
+
+function reply(envelope: object): string {
+  return `Done.\n<<JSON>>\n${JSON.stringify(envelope)}\n<<END>>`
+}
+
+const args = (content: string) => ({
+  sessionId: 's1',
+  runId: 'run-1',
+  annotationId: 'ann-1',
+  userId: 'u1',
+  startedAt: Date.now(),
+  content,
+})
+
+describe('finalizeAnnotationReply — pushed-commit gate', () => {
+  beforeEach(() => {
+    runUpdates.length = 0
+    statusUpdates.length = 0
+    callbacks.length = 0
+    delete process.env.REMO_REVANOTE_REQUIRE_PUSHED_COMMIT
   })
 
-  test('missing installation/repo context fails closed', async () => {
-    const r1 = await verifyCommitOnRemote({ installationId: null, repoSlug: 'owner/repo', commitSha: 'abc123' })
-    expect(r1.verified).toBe(false)
-    expect(r1.reason).toBe('repo_context_missing')
-
-    const r2 = await verifyCommitOnRemote({ installationId: 123, repoSlug: null, commitSha: 'abc123' })
-    expect(r2.verified).toBe(false)
-    expect(r2.reason).toBe('repo_context_missing')
+  test('verified commit → resolved, callback carries the real sha', async () => {
+    await finalizeAnnotationReply(
+      args(reply({ resolved: true, action_taken: 'fixed', files_changed: ['a.css'], commit_sha: SHA, deployed: true })),
+      { verify: async () => ({ ok: true, sha: SHA, repo: 'acme/site' }) },
+    )
+    expect(statusUpdates[0].status).toBe('resolved')
+    expect(callbacks[0]).toMatchObject({ resolved: true, commit_sha: SHA, deployed: true })
+    expect(runUpdates[0]).toMatchObject({ resolved: true, commit_sha: SHA })
   })
 
-  test('unparseable repo slug fails closed', async () => {
-    const r = await verifyCommitOnRemote({ installationId: 123, repoSlug: 'not a slug', commitSha: 'abc123' })
-    expect(r.verified).toBe(false)
-    expect(r.reason).toBe('repo_slug_unparseable')
+  test('unpushed commit → downgraded to failed, resolved:false, deployed:false', async () => {
+    let seen: any
+    await finalizeAnnotationReply(
+      args(reply({ resolved: true, action_taken: 'fixed', files_changed: ['a.css'], commit_sha: SHA, branch: 'main', deployed: true })),
+      {
+        verify: async (a) => {
+          seen = a
+          return { ok: false, reason: 'commit_not_pushed' }
+        },
+      },
+    )
+    expect(seen).toMatchObject({ commitSha: SHA, branch: 'main', sessionId: 's1' })
+    expect(statusUpdates[0]).toMatchObject({ status: 'failed', skip_reason: 'unverified_resolve:commit_not_pushed' })
+    expect(callbacks[0]).toMatchObject({
+      resolved: false,
+      deployed: false,
+      commit_sha: null,
+      error: 'unverified_resolve:commit_not_pushed',
+    })
   })
 
-  test('commit is the default-branch head (identical) -> verified', async () => {
-    repoLookup = 'ok'
-    compareResult = 'identical'
-    lastCalls = []
-    const r = await verifyCommitOnRemote({ installationId: 123, repoSlug: 'owner/repo', commitSha: 'abc123' })
-    expect(r.verified).toBe(true)
-    expect(r.reason).toBeNull()
-    expect(lastCalls).toEqual([
-      { installationId: 123, method: 'GET', path: '/repos/owner/repo' },
-      { installationId: 123, method: 'GET', path: '/repos/owner/repo/compare/main...abc123' },
-    ])
+  test('resolved without any commit_sha → rejected by the default verifier', async () => {
+    await finalizeAnnotationReply(args(reply({ resolved: true, action_taken: 'bulk resolved', deployed: true })))
+    expect(statusUpdates[0].status).toBe('failed')
+    expect(callbacks[0].error).toBe('unverified_resolve:commit_sha_missing')
   })
 
-  test('commit is an ancestor of default-branch head (behind) -> verified', async () => {
-    repoLookup = 'ok'
-    compareResult = 'behind'
-    const r = await verifyCommitOnRemote({ installationId: 123, repoSlug: 'owner/repo', commitSha: 'abc123' })
-    expect(r.verified).toBe(true)
-    expect(r.reason).toBeNull()
+  test('resolved:false is never sent through verification', async () => {
+    let called = false
+    await finalizeAnnotationReply(
+      args(reply({ resolved: false, needs_clarification: true, clarification_question: 'which page?' })),
+      { verify: async () => ((called = true), { ok: true, sha: SHA, repo: 'x/y' }) },
+    )
+    expect(called).toBe(false)
+    expect(callbacks[0].resolved).toBe(false)
+    expect(callbacks[0].error).toBe(null)
   })
 
-  test('unmerged PR branch tip (ahead of default) -> NOT verified', async () => {
-    repoLookup = 'ok'
-    compareResult = 'ahead'
-    const r = await verifyCommitOnRemote({ installationId: 123, repoSlug: 'owner/repo', commitSha: 'unmerged-sha' })
-    expect(r.verified).toBe(false)
-    expect(r.reason).toBe('commit_not_on_default_branch')
-  })
-
-  test('diverged from default branch -> NOT verified', async () => {
-    repoLookup = 'ok'
-    compareResult = 'diverged'
-    const r = await verifyCommitOnRemote({ installationId: 123, repoSlug: 'owner/repo', commitSha: 'diverged-sha' })
-    expect(r.verified).toBe(false)
-    expect(r.reason).toBe('commit_not_on_default_branch')
-  })
-
-  test('commit not found on remote (compare 404) -> not verified', async () => {
-    repoLookup = 'ok'
-    compareResult = '404'
-    const r = await verifyCommitOnRemote({ installationId: 123, repoSlug: 'owner/repo', commitSha: 'dangling-sha' })
-    expect(r.verified).toBe(false)
-    expect(r.reason).toBe('commit_not_on_remote')
-  })
-
-  test('compare API error -> not verified, fails closed', async () => {
-    repoLookup = 'ok'
-    compareResult = 'error'
-    const r = await verifyCommitOnRemote({ installationId: 123, repoSlug: 'owner/repo', commitSha: 'abc123' })
-    expect(r.verified).toBe(false)
-    expect(r.reason).toBe('commit_verify_failed')
-  })
-
-  test('default-branch lookup error -> not verified, fails closed', async () => {
-    repoLookup = 'error'
-    const r = await verifyCommitOnRemote({ installationId: 123, repoSlug: 'owner/repo', commitSha: 'abc123' })
-    expect(r.verified).toBe(false)
-    expect(r.reason).toBe('default_branch_lookup_failed')
+  test('escape hatch off → agent self-report passes through unchanged', async () => {
+    process.env.REMO_REVANOTE_REQUIRE_PUSHED_COMMIT = 'off'
+    await finalizeAnnotationReply(args(reply({ resolved: true, action_taken: 'fixed' })), {
+      verify: async () => ({ ok: false, reason: 'commit_not_pushed' }),
+    })
+    expect(statusUpdates[0].status).toBe('resolved')
   })
 })

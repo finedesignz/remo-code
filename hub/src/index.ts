@@ -28,6 +28,7 @@ import { errorSetup as errorSetupApi } from './api/error-setup'
 import { coolifyWebhookRoutes } from './api/coolify-webhook'
 import { revanoteWebhookRoutes } from './api/revanote-webhook'
 import { feedbackWebhookRoutes } from './api/feedback-webhook'
+import cloudHookRoutes from './api/cloud-hook'
 import { feedbackKeys as feedbackKeysApi } from './api/feedback-keys'
 import { sourceIpFromHeaders } from './lib/cidr'
 import { telegramWebhookRoutes } from './api/telegram-webhook'
@@ -57,6 +58,8 @@ import { startTelegramBridge } from './telegram/bridge.ts'
 import { startRoutineQueueWorker, stopRoutineQueueWorker } from './orchestrator/queue.ts'
 import { registerCycleRunnerIfEnabled, stopDueOrchestratorTick } from './orchestrator/controller.ts'
 import { startGhostReaperSweep, stopGhostReaperSweep } from './ws/ghost-reaper.ts'
+import { startDeadSessionReaperSweep, stopDeadSessionReaperSweep } from './ws/dead-session-reaper.ts'
+import { startRevanoteQuietWatch, stopRevanoteQuietWatch } from './revanote/quiet-watch.ts'
 import { startRunReaperSweep, stopRunReaperSweep } from './scheduler/run-reaper.ts'
 import { startAskReaperSweep, stopAskReaperSweep } from './ask/reaper.ts'
 import { startWorkReaperSweep, stopWorkReaperSweep } from './work/reaper.ts'
@@ -106,6 +109,7 @@ import { withHttpMetrics } from './observability/http-metrics'
 //        - /api/coolify         → coolifyWebhookRoutes      (mounted ~L170)
 //        - /api/revanote        → revanoteWebhookRoutes     (mounted ~L175)
 //        - /api/feedback        → feedbackWebhookRoutes      (mounted ~L178)
+//        - /api/cloud-hook      → cloudHookRoutes (Bearer key, explicit cloud:hook scope)
 //        - /api/telegram        → telegramWebhookRoutes     (mounted ~L181)
 //        - /webhooks/titanium   → webhooksTitanium          (mounted ~L185)
 //      The JWT/auth catch-all is `app.use('/api/*', ...)` (~L190) and its skip
@@ -295,6 +299,12 @@ app.use('/api/feedback/*', rateLimitMulti({
 }))
 app.route('/api/feedback', feedbackWebhookRoutes)
 
+// Cloud sessions: a claude.ai cloud session's Stop hook posts each finished turn
+// here. Auth is a Bearer api key with the EXPLICIT `cloud:hook` scope. MUST be
+// mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
+app.use('/api/cloud-hook/*', rateLimit({ windowMs: 60_000, max: 120, keyFn: (c) => c.req.header('authorization')?.slice(0, 24) || 'anon' }))
+app.route('/api/cloud-hook', cloudHookRoutes)
+
 // Phase 12: Public Telegram inbound webhook (URL-path secret). MUST be
 // mounted BEFORE the JWT catch-all (see MOUNT-ORDER INVARIANT (1) at top).
 // Auth is :secret in the URL, constant-time compared to config.telegram.webhookSecret.
@@ -315,6 +325,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
   if (c.req.path.startsWith('/api/feedback/')) return next()
+  if (c.req.path.startsWith('/api/cloud-hook/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   // Milestone ASK: /api/ext/* authenticates with an api_key Bearer (already
   // enforced by extApiKeyMiddleware above), never a cookie.
@@ -342,6 +353,7 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/coolify/webhook/')) return next()
   if (c.req.path.startsWith('/api/revanote/webhook/')) return next()
   if (c.req.path.startsWith('/api/feedback/')) return next()
+  if (c.req.path.startsWith('/api/cloud-hook/')) return next()
   if (c.req.path.startsWith('/api/telegram/webhook/')) return next()
   if (c.req.path.startsWith('/api/auth/')) return next()
   if (c.req.path.startsWith('/api/setup')) return next()
@@ -724,6 +736,13 @@ runMigrations()
     // (status='online', hostname=NULL phantom channels that survive restarts and
     // wedge the orchestrator inject). No-op when REMO_GHOST_REAPER_DISABLED is set.
     startGhostReaperSweep()
+    // fix/dead-session-online — a channel whose CLI exited (absent from its host
+    // supervisor's fresh session_inventory for REMO_DEAD_SESSION_GRACE_MS) is
+    // flipped offline so it restarts instead of swallowing dispatches.
+    startDeadSessionReaperSweep()
+    // fix/revanote-quiet-alert — alerts the owner when every client site goes
+    // quiet (no comment resolved while a backlog waits, or intake stops).
+    startRevanoteQuietWatch()
     // fix/sched-qc — periodic sweep that finalizes scheduled_task_runs stuck in
     // `pending` past REMO_RUN_MAX_MS (default 6h) as failed/run_timeout, so a
     // dead CLI turn can't leave a task perpetually in-flight. No-op when
@@ -791,6 +810,8 @@ function gracefulShutdown(signal: string) {
   try { stopDueOrchestratorTick() } catch {}
   try { stopGhostReaperSweep() } catch {}
   try { stopBatchSweep() } catch {}
+  try { stopDeadSessionReaperSweep() } catch {}
+  try { stopRevanoteQuietWatch() } catch {}
   try { stopRunReaperSweep() } catch {}
   try { stopAskReaperSweep() } catch {}
   try { stopWorkReaperSweep() } catch {}

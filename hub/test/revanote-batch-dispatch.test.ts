@@ -221,11 +221,24 @@ mock.module('../src/revanote/callback.ts', () => ({
   stopRevanoteCallbackWorker: () => {},
 }))
 
+// The finalize path verifies via commit-verify's DB-backed context + real GitHub
+// getter; pin both so this file tests dispatch wiring, not the verify gate.
+const realCommitVerify = await import(`../src/revanote/commit-verify.ts?bust=${Date.now()}`)
+mock.module('../src/revanote/commit-verify.ts', () => ({
+  ...realCommitVerify,
+  loadVerifyContext: async () => ({ owner: 'acme', repo: 'site', installationIds: [1] }),
+  realGithubGet: async (_i: number, path: string) => {
+    if (/\/repos\/[^/]+\/[^/]+$/.test(path)) return { default_branch: 'main' }
+    if (path.includes('/compare/')) return { status: 'identical' }
+    return { sha: 'c0ffee1'.padEnd(40, '0') }
+  },
+}))
+
 mock.module('../src/auth/github-app.ts', () => ({
   githubApiRequest: async (_installationId: number, _method: string, path: string) => {
     if (/\/repos\/[^/]+\/[^/]+$/.test(path)) return { default_branch: 'main' }
     if (path.includes('/compare/')) return { status: 'identical' }
-    return { sha: 'realsha123' }
+    return { sha: 'c0ffee1' }
   },
   GitHubApiError: class GitHubApiError extends Error {
     status: number
@@ -416,7 +429,7 @@ describe('revanote batch dispatch — coalescing', () => {
     // it and the pipeline sends for that promoted request DIRECTLY, without
     // ever re-checking the annotation's current DB status -- a second,
     // fully redundant dispatch for the same annotation.
-    const finalizeEnvelope = ['<<JSON>>', JSON.stringify({ resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'realsha123' }), '<<END>>'].join('\n')
+    const finalizeEnvelope = ['<<JSON>>', JSON.stringify({ resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1' }), '<<END>>'].join('\n')
     await onSessionReply('sess-1', finalizeEnvelope)
 
     expect(state.sentFrames.length).toBe(1) // still just the one -- no promoted duplicate send
@@ -450,8 +463,8 @@ describe('revanote batch dispatch — finalize', () => {
       '<<JSON>>\n' +
       JSON.stringify({
         annotations: [
-          { annotation_id: 'ext-1', resolved: true, action_taken: 'fixed', files_changed: ['a.tsx'], commit_sha: 'realsha123', deployed: true },
-          { annotation_id: 'ext-2', resolved: true, action_taken: 'fixed', files_changed: ['b.tsx'], commit_sha: 'realsha123', deployed: true },
+          { annotation_id: 'ext-1', resolved: true, action_taken: 'fixed', files_changed: ['a.tsx'], commit_sha: 'c0ffee1', deployed: true },
+          { annotation_id: 'ext-2', resolved: true, action_taken: 'fixed', files_changed: ['b.tsx'], commit_sha: 'c0ffee1', deployed: true },
           { annotation_id: 'ext-3', resolved: false, action_taken: 'could not repro', needs_clarification: true, clarification_question: 'which page?' },
         ],
       }) +
@@ -474,8 +487,8 @@ describe('revanote batch dispatch — finalize', () => {
       '<<JSON>>\n' +
       JSON.stringify({
         annotations: [
-          { annotation_id: 'ext-1', resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'realsha123', deployed: true },
-          { annotation_id: 'ext-2', resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'realsha123', deployed: true },
+          { annotation_id: 'ext-1', resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1', deployed: true },
+          { annotation_id: 'ext-2', resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1', deployed: true },
           // ext-3 omitted entirely.
         ],
       }) +
@@ -522,7 +535,7 @@ describe('revanote batch dispatch — finalize', () => {
     // array), and the failure path must NEVER hand `content` to the single-item
     // parser -- that parser happily accepts this exact shape and would resolve
     // every member true from one verdict.
-    const singleObjectReply = '<<JSON>>\n' + JSON.stringify({ resolved: true, commit_sha: 'realsha123' }) + '\n<<END>>'
+    const singleObjectReply = '<<JSON>>\n' + JSON.stringify({ resolved: true, commit_sha: 'c0ffee1' }) + '\n<<END>>'
     await onSessionReply('sess-1', singleObjectReply)
 
     for (const id of ['ann-1', 'ann-2', 'ann-3']) {
@@ -665,7 +678,7 @@ describe('revanote batch dispatch — per-target isolation (C3/C5)', () => {
     // collide the two `inFlightBatches` entries and misroute/orphan one).
     const envelopeFor = (extId: string) =>
       '<<JSON>>\n' +
-      JSON.stringify({ annotations: [{ annotation_id: extId, resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'realsha123', deployed: true }] }) +
+      JSON.stringify({ annotations: [{ annotation_id: extId, resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1', deployed: true }] }) +
       '\n<<END>>'
 
     await onSessionReply('sess-a', envelopeFor('ext-a1'))
@@ -715,7 +728,7 @@ describe('revanote batch dispatch — per-target isolation (C3/C5)', () => {
       annotations: [
         {
           annotation_id: firstIsUntrusted ? 'ext-untrusted' : 'ext-trusted',
-          resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'realsha123', deployed: true,
+          resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1', deployed: true,
         },
       ],
     })

@@ -1,90 +1,168 @@
-/**
- * Verify a claimed commit SHA is actually MERGED to the repo's default
- * branch before trusting a revanote `resolved: true` callback.
- *
- * Incident (2026-09-14, Lakeside project): a background subagent marked 43
- * annotations `resolved` citing commit `86ad71296`, which was real but
- * dangling/unreachable on any branch — never pushed, never deployed. Nothing
- * in the hub verified the citation before forwarding `resolved: true` to
- * revanote. See docs/revanote.md "Resolved requires a pushed commit".
- *
- * A GET /commits/{sha} 200 is NOT sufficient — GitHub returns 200 for a
- * commit reachable from ANY branch, so a pushed-but-unmerged PR branch tip
- * would pass. Owner rule: resolved only once the fix is MERGED to the
- * default branch. So this fetches the repo's `default_branch`, then compares
- * `{default_branch}...{sha}`: verified only when the compare `status` is
- * `identical` (sha IS the default-branch head) or `behind` (sha is an
- * ancestor of it). `ahead`/`diverged`/anything else means the sha is not on
- * the default branch.
- *
- * Fails CLOSED: any inability to prove the commit is on the default branch
- * (missing sha, missing repo/installation context, unparseable slug,
- * default-branch lookup failure, compare 404/error, or an unexpected compare
- * status) means "not verified" — the caller must downgrade the annotation to
- * `resolved: false` rather than forward the claim.
- */
-import { githubApiRequest, GitHubApiError } from '../auth/github-app.ts'
+// hub/src/revanote/commit-verify.ts
+// fix/revanote-verify-pushed — a "resolved" is only accepted for a commit that
+// is actually on the remote.
+//
+// Incident (2026-09): an agent reported client comments `resolved: true` from
+// commits that were never pushed (lost local commits). Revanote marked them
+// done, the client saw nothing change, and nobody noticed for weeks. The
+// agent's envelope is self-report; the prompt asking it to push first is not a
+// control. So the HUB checks: a resolved reply must name its `commit_sha`, and
+// the hub confirms through the GitHub App that the commit exists in the repo
+// (and, when the reply names a `branch`, that the branch contains it). Anything
+// else is downgraded to resolved:false with a reason, fail-closed.
+//
+// Escape hatch: REMO_REVANOTE_REQUIRE_PUSHED_COMMIT=0|false|no|off disables
+// the check (e.g. a user with no GitHub App installation yet). Default ON.
 
-export interface CommitVerifyResult {
-  verified: boolean
-  /** null only when verified === true. */
-  reason: string | null
-}
+export type VerifyFailReason =
+  | 'commit_sha_missing'
+  | 'commit_sha_invalid'
+  | 'repo_unknown'
+  | 'no_github_installation'
+  | 'commit_not_pushed'
+  | 'commit_not_on_branch'
+  | 'commit_not_on_default_branch'
+  | 'verify_error'
 
-function parseSlug(repoSlug: string): { owner: string; repo: string } | null {
-  const m = /^([\w.-]+)\/([\w.-]+?)(?:\.git)?$/.exec(repoSlug.trim())
-  if (!m) return null
-  return { owner: m[1], repo: m[2] }
-}
+export type VerifyResult =
+  | { ok: true; sha: string; repo: string }
+  | { ok: false; reason: VerifyFailReason; detail?: string }
 
-export async function verifyCommitOnRemote(opts: {
-  installationId: number | null | undefined
-  repoSlug: string | null | undefined
+export interface VerifyInput {
+  owner: string | null
+  repo: string | null
   commitSha: string | null | undefined
-}): Promise<CommitVerifyResult> {
-  const { installationId, repoSlug, commitSha } = opts
+  branch?: string | null
+  /** Candidate GitHub App installations for this user, best match first. */
+  installationIds: number[]
+}
 
-  if (!commitSha || typeof commitSha !== 'string' || !commitSha.trim()) {
-    return { verified: false, reason: 'commit_sha_missing' }
-  }
-  if (!installationId || !repoSlug) {
-    return { verified: false, reason: 'repo_context_missing' }
-  }
-  const parsed = parseSlug(repoSlug)
-  if (!parsed) {
-    return { verified: false, reason: 'repo_slug_unparseable' }
+export type GithubGet = (installationId: number, path: string) => Promise<any>
+
+const SHA_RE = /^[0-9a-f]{7,40}$/i
+
+export function isPushVerificationRequired(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.REMO_REVANOTE_REQUIRE_PUSHED_COMMIT
+  if (raw == null || raw.trim() === '') return true
+  return !['0', 'false', 'no', 'off'].includes(raw.trim().toLowerCase())
+}
+
+function statusOf(err: any): number | null {
+  return typeof err?.status === 'number' ? err.status : null
+}
+
+/**
+ * Confirm `commitSha` exists in `owner/repo` on GitHub (and is contained in
+ * `branch` when given). Tries each installation in order: a 404/422 from one
+ * installation may just mean it can't see the repo, so only "every
+ * installation says not found" becomes `commit_not_pushed`.
+ */
+export async function verifyPushedCommit(input: VerifyInput, get: GithubGet): Promise<VerifyResult> {
+  const sha = (input.commitSha ?? '').trim()
+  if (!sha) return { ok: false, reason: 'commit_sha_missing' }
+  if (!SHA_RE.test(sha)) return { ok: false, reason: 'commit_sha_invalid', detail: sha.slice(0, 64) }
+  if (!input.owner || !input.repo) return { ok: false, reason: 'repo_unknown' }
+  if (input.installationIds.length === 0) return { ok: false, reason: 'no_github_installation' }
+
+  const owner = encodeURIComponent(input.owner)
+  const repo = encodeURIComponent(input.repo)
+  const slug = `${input.owner}/${input.repo}`
+  let lastError: string | null = null
+
+  for (const inst of input.installationIds) {
+    let commit: any
+    try {
+      commit = await get(inst, `/repos/${owner}/${repo}/commits/${encodeURIComponent(sha)}`)
+    } catch (err: any) {
+      const st = statusOf(err)
+      if (st === 404 || st === 422) continue
+      lastError = err?.message ?? String(err)
+      continue
+    }
+    if (!commit) continue // helper returned null for 404
+    const fullSha: string = typeof commit.sha === 'string' ? commit.sha : sha
+
+    // Owner rule: resolved only once the fix is MERGED to the default branch.
+    // A commit that merely exists (pushed PR-branch tip) is not enough.
+    let defaultBranch: string
+    try {
+      const meta = await get(inst, `/repos/${owner}/${repo}`)
+      if (!meta || typeof meta.default_branch !== 'string' || !meta.default_branch) {
+        return { ok: false, reason: 'verify_error', detail: 'default_branch_lookup_failed' }
+      }
+      defaultBranch = meta.default_branch
+      const onDefault = await get(
+        inst,
+        `/repos/${owner}/${repo}/compare/${encodeURIComponent(defaultBranch)}...${encodeURIComponent(fullSha)}`,
+      )
+      if (onDefault?.status !== 'identical' && onDefault?.status !== 'behind') {
+        return { ok: false, reason: 'commit_not_on_default_branch', detail: `${defaultBranch} (${onDefault?.status ?? 'unknown'})` }
+      }
+    } catch (err: any) {
+      return { ok: false, reason: 'verify_error', detail: err?.message ?? String(err) }
+    }
+
+    const branch = (input.branch ?? '').trim()
+    if (branch && branch !== defaultBranch) {
+      try {
+        const cmp = await get(
+          inst,
+          `/repos/${owner}/${repo}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(fullSha)}`,
+        )
+        // `behind`/`identical` ⇒ the commit is an ancestor of (or equal to) the branch head.
+        if (cmp?.status !== 'identical' && cmp?.status !== 'behind') {
+          return { ok: false, reason: 'commit_not_on_branch', detail: `${branch} (${cmp?.status ?? 'unknown'})` }
+        }
+      } catch (err: any) {
+        const st = statusOf(err)
+        if (st === 404) return { ok: false, reason: 'commit_not_on_branch', detail: `${branch} not found` }
+        return { ok: false, reason: 'verify_error', detail: err?.message ?? String(err) }
+      }
+    }
+    return { ok: true, sha: fullSha, repo: slug }
   }
 
-  let defaultBranch: string
-  try {
-    const repoMeta = await githubApiRequest<{ default_branch?: string }>(
-      installationId,
-      'GET',
-      `/repos/${parsed.owner}/${parsed.repo}`,
-    )
-    if (!repoMeta || !repoMeta.default_branch) {
-      return { verified: false, reason: 'default_branch_lookup_failed' }
-    }
-    defaultBranch = repoMeta.default_branch
-  } catch {
-    return { verified: false, reason: 'default_branch_lookup_failed' }
-  }
+  if (lastError) return { ok: false, reason: 'verify_error', detail: lastError }
+  return { ok: false, reason: 'commit_not_pushed', detail: `${sha} not found in ${slug}` }
+}
 
-  try {
-    const sha = commitSha.trim()
-    const compare = await githubApiRequest<{ status?: string }>(
-      installationId,
-      'GET',
-      `/repos/${parsed.owner}/${parsed.repo}/compare/${encodeURIComponent(defaultBranch)}...${encodeURIComponent(sha)}`,
-    )
-    if (compare?.status === 'identical' || compare?.status === 'behind') {
-      return { verified: true, reason: null }
-    }
-    return { verified: false, reason: 'commit_not_on_default_branch' }
-  } catch (err: any) {
-    if (err instanceof GitHubApiError && err.status === 404) {
-      return { verified: false, reason: 'commit_not_on_remote' }
-    }
-    return { verified: false, reason: 'commit_verify_failed' }
+/** Resolve owner/repo + installations for an annotation run (real DB/GitHub). */
+export async function loadVerifyContext(args: {
+  userId: string
+  sessionId: string | null
+  repoSlugFallback: string | null
+}): Promise<{ owner: string | null; repo: string | null; installationIds: number[] }> {
+  const { sql } = await import('../db/postgres.ts')
+  let owner: string | null = null
+  let repo: string | null = null
+  if (args.sessionId) {
+    const rows = await sql<{ github_owner: string | null; github_repo: string | null }[]>`
+      SELECT github_owner, github_repo FROM sessions
+      WHERE id = ${args.sessionId} AND user_id = ${args.userId} LIMIT 1
+    `
+    owner = rows[0]?.github_owner ?? null
+    repo = rows[0]?.github_repo ?? null
   }
+  if ((!owner || !repo) && args.repoSlugFallback) {
+    const m = args.repoSlugFallback.replace(/^github:\/\//, '').match(/^([^/\s]+)\/([^/\s]+?)(?:\.git)?$/)
+    if (m) {
+      owner = m[1]
+      repo = m[2]
+    }
+  }
+  const inst = await sql<{ id: string | number; account_login: string }[]>`
+    SELECT id, account_login FROM github_installations
+    WHERE user_id = ${args.userId} AND revoked_at IS NULL
+    ORDER BY installed_at DESC
+  `
+  const lower = (owner ?? '').toLowerCase()
+  const ids = [...inst]
+    .sort((a, b) => Number(b.account_login.toLowerCase() === lower) - Number(a.account_login.toLowerCase() === lower))
+    .map((r) => Number(r.id))
+  return { owner, repo, installationIds: ids }
+}
+
+export async function realGithubGet(installationId: number, path: string): Promise<any> {
+  const { githubApiRequest } = await import('../auth/github-app.ts')
+  return githubApiRequest(installationId, 'GET', path)
 }

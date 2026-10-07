@@ -29,7 +29,7 @@ export async function listSessions(userId: string) {
     SELECT id, name, project_dir, status, token_hash, last_activity, created_at, agent_info,
            cli_kind, is_rootless, hostname, is_orchestrator,
            repo_key, github_owner, github_repo, auto_nudge,
-           dangerously_skip_permissions
+           dangerously_skip_permissions, cloud_session_id
     FROM sessions WHERE user_id = ${userId} AND deleted_at IS NULL
     ORDER BY last_activity DESC NULLS LAST
   `;
@@ -57,7 +57,7 @@ export async function getSession(sessionId: string, userId: string) {
            cli_kind, is_rootless, hostname, is_orchestrator,
            repo_key, github_owner, github_repo, auto_nudge,
            dangerously_skip_permissions,
-           runner_type, pty_backend_id, transcript_path
+           runner_type, pty_backend_id, transcript_path, cloud_session_id
     FROM sessions WHERE id = ${sessionId} AND user_id = ${userId} AND deleted_at IS NULL
   `;
   return rows[0] ?? null;
@@ -1612,7 +1612,7 @@ export async function listCoolifyWebhookAttempts(userId: string, limit: number):
  * line 187).
  */
 const INTERNAL_DEPLOY_TASK_NAME = '__internal_coolify_deployment';
-const INTERNAL_TRIAGE_TASK_NAME = '__internal_triage';
+export const INTERNAL_TRIAGE_TASK_NAME = '__internal_triage';
 
 /**
  * Phase 06 plan 008 — lazy per-user internal triage task. task_type='triage'
@@ -1879,6 +1879,38 @@ export async function claimDeployFailure(
     VALUES (${userId}, ${applicationUuid}, ${fingerprint})
     ON CONFLICT (user_id, application_uuid, fingerprint) DO NOTHING
     RETURNING fingerprint
+  `;
+  return rows.length > 0;
+}
+
+// ── fix/triage-task-email-noise: per-deployment triage-finding forward dedupe ─
+//
+// A `__internal_triage` run whose JSON finding reports status `success` must
+// still reach AgentAutofix exactly ONCE per underlying Coolify deployment, not
+// once per triage run (the same deployment can be re-triaged by a webhook
+// retry or a repeated poll). `coolify_deploy_idempotency` above is a
+// 15-minute sliding-window storm-dedupe keyed by `application_uuid` for the
+// deploy-FAILURE path (Phase 06 plan 008) — a different shape (short window,
+// bucketed fingerprint) built for a different problem. This is the minimal
+// additive table for a single-claim-per-deployment forward. Atomic claim:
+// INSERT ... ON CONFLICT DO NOTHING + RETURNING — only the first caller for a
+// given (user, deployment) wins.
+export async function claimTriageFindingForward(
+  userId: string,
+  deploymentKey: string,
+): Promise<boolean> {
+  // Opportunistic reap, same pattern as claimDeployFailure — bound the table
+  // without a background job. 7 days is long enough that a webhook-retry
+  // storm never double-forwards, short enough that a genuinely recurring
+  // problem on the same deployment id eventually re-surfaces.
+  await sql`
+    DELETE FROM triage_finding_idempotency WHERE created_at < now() - interval '7 days'
+  `;
+  const rows = await sql`
+    INSERT INTO triage_finding_idempotency (user_id, deployment_key)
+    VALUES (${userId}, ${deploymentKey})
+    ON CONFLICT (user_id, deployment_key) DO NOTHING
+    RETURNING deployment_key
   `;
   return rows.length > 0;
 }

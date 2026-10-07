@@ -113,11 +113,34 @@ describe('buildDefaultEmailActions', () => {
     expect(out.length).toBe(1)
   })
 
-  test('(k) internal task + status=failed → still notifies (only skipped is suppressed)', () => {
+  test('(k) internal task + status=failed → still notifies', () => {
     const internal = { ...baseTask, name: '__internal_triage' }
     const out = buildDefaultEmailActions(internal, 0, [], {
       status: 'failed',
       output_snippet: null,
+    })
+    expect(out.length).toBe(1)
+  })
+
+  // fix/triage-task-email-noise (2026-09-30): the __internal_triage Coolify-token
+  // incident — the owner was emailed from support@remo-code.com on every run,
+  // including plain `success`. `skipped` was already silent (test i); `success`
+  // must be too, since success is the routine expected outcome for a
+  // machine-scheduled internal task and carries nothing actionable.
+  test('(l) internal task + status=success → suppressed', () => {
+    const internal = { ...baseTask, name: '__internal_triage' }
+    const out = buildDefaultEmailActions(internal, 0, [], {
+      status: 'success',
+      output_snippet: 'triage ran cleanly',
+    })
+    expect(out).toEqual([])
+  })
+
+  test('(m) internal task + terminal BLOCKED summary → still notifies', () => {
+    const internal = { ...baseTask, name: '__internal_triage' }
+    const out = buildDefaultEmailActions(internal, 0, [], {
+      status: 'success',
+      output_snippet: 'Summary: BLOCKED: Coolify API returned HTTP 401 Unauthenticated',
     })
     expect(out.length).toBe(1)
   })

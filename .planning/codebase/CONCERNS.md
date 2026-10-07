@@ -5,6 +5,16 @@
 > Adversarial audit. Ranked by severity. Every claim carries a file reference.
 > Where the code contradicts the received narrative, that is called out in **bold**.
 
+> **Reconciliation pass 2026-09-28:** this doc is otherwise unchanged from 2026-07-12, but items
+> #2, #3, #6, and #11 (BLEED's four fixers) are now **RESOLVED** — verified against `main`
+> (`b69a6f9`) by code inspection this run, not just `CLAUDE.md`'s claim. See each item's own
+> Resolution note below and `.planning/PROJECT.md`'s Shipped Milestones entry for BLEED. Item #1
+> (auto-dev orchestrator, zero shipped output) and item #5's `REMO_ORCHESTRATOR_LEGACY_WAVES` row
+> also updated — the flag itself is confirmed fully deleted, but item #1's core "zero output"
+> question is untouched (that is what PTYCAP Phase 5's throwaway-repo due→PR proof targets, not
+> yet run). Everything else in this doc (items #4, #7, #8, #9, #10, #12) has not been re-verified
+> this pass — treat as still-accurate-until-checked, not re-confirmed.
+
 ---
 
 ## Summary table
@@ -12,16 +22,16 @@
 | # | Concern | Severity | Disposition |
 |---|---------|----------|-------------|
 | 1 | Auto-dev orchestrator: 2.83B cache-read token burn, zero PRs ever shipped | **CRITICAL** | **DELETE or PROVE** (hard deadline) |
-| 2 | `finalizeOrphanedRunsForSupervisor` can never close a NULL-`session_id` run (SQL NULL semantics) → permanent `at_capacity` 429 | **CRITICAL** | FIX (one-line SQL) |
-| 3 | Supervisor circuit-breaker latches OPEN forever; no reset, no alarm | **CRITICAL** | FIX |
+| 2 | `finalizeOrphanedRunsForSupervisor` can never close a NULL-`session_id` run (SQL NULL semantics) → permanent `at_capacity` 429 | **CRITICAL** | **RESOLVED** 2026-09-28 |
+| 3 | Supervisor circuit-breaker latches OPEN forever; no reset, no alarm | **CRITICAL** | **RESOLVED** 2026-09-28 |
 | 4 | Token/cost caps are the ONLY thing between a loop bug and a dead subscription — and they don't cover every path | **HIGH** | FIX (widen coverage) |
-| 5 | Six env-flag-gated half-live subsystems; neither deleted nor proven | **HIGH** | DELETE/PROVE per flag |
-| 6 | Hostname-NULL ghost sessions re-anchored ~7/cycle by the supervisor | **HIGH** | FIX (supervisor side) |
+| 5 | Six env-flag-gated half-live subsystems; neither deleted nor proven | **HIGH** | DELETE/PROVE per flag (`REMO_ORCHESTRATOR_LEGACY_WAVES` **DELETED** 2026-09-28 confirmed; others unchanged) |
+| 6 | Hostname-NULL ghost sessions re-anchored ~7/cycle by the supervisor | **HIGH** | **RESOLVED** 2026-09-28 |
 | 7 | `schema.sql` re-runs in full on every hub boot | **HIGH** | ACCEPT + fence |
 | 8 | PTY June-15 billing cutover gate never re-verified; ChatSurface undead | **MEDIUM** | PROVE or retire gate |
 | 9 | Mobile Tauri client (Phase 12) paused 45 days, still in tree + CI | **MEDIUM** | DELETE |
 | 10 | God-files: `dal.ts` 2304 LOC, `agent.ts` 1286, `telegram-webhook.ts` 1197 | **MEDIUM** | ACCEPT / split opportunistically |
-| 11 | Regression baseline is 771/900 — 129 tests known-failing, gate is "don't get worse" | **MEDIUM** | FIX |
+| 11 | Regression baseline is 771/900 — 129 tests known-failing, gate is "don't get worse" | **MEDIUM** | **RESOLVED** 2026-09-28 |
 | 12 | **`error-capture/setup/snippet.ts` is NOT broken** — the brief is stale | — | (correction) |
 
 ---
@@ -70,6 +80,13 @@ The sibling sweep `finalizeOpenRunsForSupervisor` (`supervisor-dal.ts:278-284`) 
 2. Add an absolute-age reaper: any open run older than `REMO_RUN_MAX_MS` is closed regardless of shape, so *no* run can leak forever whatever the next bug is.
 3. Regression test: a NULL-`session_id` run gets reaped.
 
+**Resolution (2026-09-28):** confirmed fixed on `main`. `hub/src/db/supervisor-dal.ts` now reads
+`AND (session_id IS NULL OR NOT (session_id = ANY(...)))` at both call sites (lines ~324, ~428).
+The absolute-age reaper exists as `hub/src/sessions/stale-run-reaper.ts`
+(`REMO_SESSION_RUN_MAX_MS`, scoped per-supervisor, positive-knowledge predicate — see `CLAUDE.md`'s
+"Session-run leak backstop" entry for the fuller design). `hub/src/scheduler/run-reaper.ts`
+independently reaps stuck `scheduled_task_runs`.
+
 ---
 
 ## 3. Supervisor circuit-breaker latches OPEN with no reset — CRITICAL
@@ -84,6 +101,15 @@ The sibling sweep `finalizeOpenRunsForSupervisor` (`supervisor-dal.ts:278-284`) 
 1. Half-open reset: retry one spawn every N minutes after the trip.
 2. Publish breaker state in `session_inventory` → hub → Connections UI, and email on trip.
 3. Watchdog: "tasks due but zero CLI spawns in 24h" → alert.
+
+**Resolution (2026-09-28):** confirmed fixed on `main`. `supervisor/src/process-manager.ts` now
+half-opens after a cooldown (5min, exponential to 30min, max 5 probes); a probe must survive a 30s
+health window before the breaker fully closes, and a probe that spawns then dies re-opens it. State
+is reported to the hub via the `session_inventory` frame's `circuit_breakers[]`
+(`hub/src/ws/supervisor-registry.ts` → `GET /api/supervisors`), with a hub log line on every new
+trip. Not yet independently verified this pass: item 3's "tasks due but zero spawns in 24h"
+watchdog specifically (the breaker-state plumbing exists; a dedicated due-vs-spawned alert was not
+located in this reconciliation pass — worth a follow-up check, not re-opening this item).
 
 ---
 
@@ -127,6 +153,11 @@ Plus ~20 more `REMO_*` tuning knobs across `hub/src` + `supervisor/src`.
 **Blast radius:** a phantom channel satisfies a naive `getChannel != null` liveness check, so injects dispatch into the void and autospawn never fires. `hub/src/orchestrator/inject.ts:99-100` now guards with `isSessionLive` — correct, but it is a *workaround*; the ghosts still churn the DB and the reaper log every cycle.
 
 **Disposition: FIX on the supervisor side** — make `hostname` a required field of the `/ws/agent` auth frame and reject the connection (`4001 hostname_required`) when absent. Requires a new signed MSI, so the hub-side guard is load-bearing until then.
+
+**Resolution (2026-09-28):** confirmed fixed on `main`. `hub/src/ws/agent.ts` (see its own
+`fix/supervisor-hostname-required` header comment) now hard-rejects a hostname-less `/ws/agent`
+auth frame with `auth_error`/`hostname_required` and closes `4001`. `hub/src/ws/ghost-reaper.ts`
+remains as defense-in-depth for any pre-fix supervisor still in the field.
 
 ---
 
@@ -182,6 +213,15 @@ Phase 12 paused 2026-05-28 (`docs/phase-12-pause-state.md`). iOS was never built
 **Blast radius:** unknown — and given items 2, 3, and 6 all shipped to prod undetected, "unknown" is not comforting. Any of the 129 could be flagging a live defect.
 
 **Disposition: FIX.** Triage all 129 in one pass: fix, delete, or `.skip` with a linked issue. **A permanently-red baseline is worse than no baseline, because it launders failure as normal.**
+
+**Resolution (2026-09-28):** confirmed fixed on `main`. `tools/regression-baseline.json`'s
+`fail_max` stays `0` and there are no more known-failing tests hiding behind it — this session
+measured `bun run check-baseline` (bare checkout, no ambient DB) at `pass=2157 skip=259 fail=0
+total=2416` against a floor of `pass_min: 1850`, a ~14% headroom over the floor, not a
+suite hiding a ninth of itself. The 259 vs. the committed `skip_max: 256` is a one-off drift noted
+by the immediately-prior merged PR (#489, "same 259 skips in this container: the DB tests skip
+when Postgres is absent") — environmental (no `DATABASE_URL`/`REMO_E2E_DB_URL` here), not a new
+regression; CI runs against real Postgres and sees fewer skips.
 
 ---
 

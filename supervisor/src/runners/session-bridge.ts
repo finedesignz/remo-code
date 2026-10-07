@@ -10,6 +10,7 @@ import { writeSessionBreadcrumb } from './session-breadcrumb'
 import { getBackendSelectorConfig } from '../config'
 import { PtyUsageEmitter, snapshotPreExistingTranscripts } from '../usage/pty-usage-emitter'
 import type { AgentToHub, CliRunner, HubToAgent, PtyLike, RunnerEvent } from './types'
+import { openHubWebSocket } from '../ws-proxy'
 
 /**
  * Module-level supervisor-owned PTY persistence coordinator (R-PTY-07/27).
@@ -283,7 +284,7 @@ export class SessionBridge {
     this.cb.onLog('info', `agent-bridge: connecting to ${url}`)
     let ws: WebSocket
     try {
-      ws = this.opts.wsFactory ? this.opts.wsFactory(url) : new WebSocket(url)
+      ws = this.opts.wsFactory ? this.opts.wsFactory(url) : openHubWebSocket(url)
     } catch (err: any) {
       this.cb.onLog('error', `agent-bridge: ws construct failed: ${err?.message ?? err}`)
       this.scheduleReconnect()
@@ -589,6 +590,10 @@ export class SessionBridge {
       // Runner exited; the hub bridge stays up so reconnects pick up the same
       // session, but we surface so ProcessManager can finalize the run.
       this.cb.onLog('warn', `agent-bridge: runner exited code=${e.code}`)
+      // Drop the dead runner so a later user_message spawns a fresh one via
+      // ensureRunner() instead of queueing onto a process that will never be
+      // ready again (it waited 30s, then silently discarded the prompt).
+      this.runner = null
       this.cb.onExit({ code: e.code, reason: 'runner_exit' })
       return
     }

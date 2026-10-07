@@ -258,6 +258,11 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
   // AND drives the VIRTUAL Default tab's membership (all active sessions — same
   // source List View uses). Live-updates via the shared WS `session_list`.
   const { sessions: allSessions } = useSessions(token, subscribe, connectionId)
+  // Cloud sessions have no PTY — they always render the chat surface.
+  const cloudSessionIds = useMemo(
+    () => new Map(allSessions.filter(s => s.cloud_session_id).map(s => [s.id, s.cloud_session_id as string])),
+    [allSessions],
+  )
   const orchestratorId = useMemo(
     () => allSessions.find((s) => s.is_orchestrator)?.id ?? null,
     [allSessions],
@@ -635,7 +640,7 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
                   wsConnected={connected}
                   seedMessages={seedByTab[activeTabId!]?.[s.session_id]}
                   unreadCount={unreadBySession[s.session_id] ?? 0}
-                  ptyInteractive={ptyInteractive}
+                  ptyInteractive={ptyInteractive && !cloudSessionIds.has(s.session_id)}
                 />
               ))}
             </div>
@@ -651,6 +656,7 @@ export function GridPage({ token, tabId: tabIdFromUrl }: Props) {
                 status: s.status,
                 last_activity: null,
                 created_at: '',
+                cloud_session_id: cloudSessionIds.get(s.session_id) ?? null,
               }))}
               subscribe={subscribe}
               send={send}

@@ -1,20 +1,30 @@
 ---
 gsd_state_version: 1.0
 milestone: PTYCAP
-milestone_name: Milestone **GOV**
-current_phase: 01
-current_phase_name: pty-token-accounting
+milestone_name: Milestone PTYCAP (Token-Gate the Interactive PTY Path)
+current_phase: 02
+current_phase_name: pty-preflight-gate
 status: executing
-last_updated: "2026-07-28T10:23:42.313Z"
-last_activity: 2026-07-28
-last_activity_desc: Phase PTYCAP-01 execution started
+last_updated: "2026-09-28T00:00:00.000Z"
+last_activity: 2026-09-28
+last_activity_desc: BLEED milestone reconciled CLOSED (all four fixers verified shipped on main); milestone pointer advanced to PTYCAP; Phase 1 confirmed shipped (#395); Phase 2 execution started
 progress:
-  total_phases: 6
-  completed_phases: 0
+  total_phases: 9
+  completed_phases: 1
   total_plans: 4
-  completed_plans: 1
-  percent: 0
+  completed_plans: 4
+  percent: 11
 ---
+
+> **BLEED milestone reconciled CLOSED 2026-09-28.** This file and `.planning/PROJECT.md` had
+> drifted ~2.5 months stale (last touched 2026-07-28) relative to `CLAUDE.md`, which already
+> documented all four BLEED fixers as shipped. Verified against `main` by code inspection this
+> run, not just doc claims — see `.planning/PROJECT.md`'s Shipped Milestones entry for the
+> specific evidence per fixer. Milestone pointer advanced to **PTYCAP** per
+> `.planning/PROJECT.md`'s Planned Milestones order (never self-scoped). PTYCAP Phase 1 (PTY token
+> accounting) was already fully shipped (#395, 4/4 plans) — this file's stale front-matter said
+> "1 of 4 plans, 0% complete" when in fact all 4 were done; Phase 2 (PTY pre-flight gate) is now
+> the active phase.
 
 <!-- updated: 2026-06-27 -->
 
@@ -79,10 +89,9 @@ connection is the Tauri Supervisor MSI.
 
 ## Current position
 
-Phase: PTYCAP-01 (pty-token-accounting) — EXECUTING
-Plan: 1 of 4
-Status: Executing Phase PTYCAP-01
-Last activity: 2026-07-28 — Phase PTYCAP-01 execution started
+Phase: PTYCAP-02 (pty-preflight-gate) — EXECUTING
+Status: Executing Phase PTYCAP-02 (Phase 1, pty-token-accounting, shipped complete via #395)
+Last activity: 2026-09-28 — BLEED reconciled closed; PTYCAP-02 execution started
 
 ### OBSRV phase ledger (`.planning/phases/`)
 
@@ -129,3 +138,9 @@ reset 2026-05-29 to unblock owner login. `jamie@theleadingpractice.com` is NOT a
 - **OBSRV-specific:** shadow mode NEVER calls `launchSessionForUser` / never dispatches; never flip
   `REMO_ORCHESTRATOR_AUTOSPAWN`, never populate `orchestrator_autospawn_allowlist`, never touch the
   no-auto-merge guard; additive idempotent DDL only.
+
+## Quick Tasks Completed
+
+| Date | Slug | Summary | Commits |
+|---|---|---|---|
+| 2026-09-27 | cloud-sessions | Chat with claude.ai cloud sessions: `claude -p --cloud` send + Stop-hook reply webhook | 4f9b35b..83abd55 |

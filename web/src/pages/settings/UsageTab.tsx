@@ -498,7 +498,7 @@ function ControlsCard({
           <h3 className="text-sm font-semibold text-[var(--text-primary)]">
             Claude Usage and Cost Controls
           </h3>
-          <InfoTip content="Set a daily spend ceiling and the utilization thresholds at which scheduled tasks pause. Changes save automatically." />
+          <InfoTip content="Set a daily spend ceiling and the utilization thresholds at which scheduled tasks pause and new terminal prompts are refused. Changes save automatically." />
         </div>
         {saved && <StatusPill status="success" size="sm" label="Saved" />}
       </div>
@@ -506,7 +506,7 @@ function ControlsCard({
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
         <Field
           label="Daily cost cap (USD)"
-          helper="Scheduled tasks won't fire if today's spend would exceed this. Manual chat is not affected."
+          helper="Once today's spend reaches this, scheduled tasks stop firing and prompts you submit in the terminal are refused. Set 0 to disable."
         >
           <div className="flex items-center gap-2">
             <span className="text-[var(--text-muted)] text-sm">$</span>
@@ -524,7 +524,7 @@ function ControlsCard({
 
         <Field
           label={`5-hour session — ${session}%`}
-          helper="When the 5-hour Anthropic window crosses this utilization, scheduled tasks pause."
+          helper="When the 5-hour Anthropic window crosses this utilization, scheduled tasks pause and new terminal prompts are refused."
         >
           <input
             type="range"
@@ -541,7 +541,7 @@ function ControlsCard({
 
         <Field
           label={`7-day window — ${week}%`}
-          helper="When the 7-day Anthropic window crosses this utilization, scheduled tasks pause."
+          helper="When the 7-day Anthropic window crosses this utilization, scheduled tasks pause and new terminal prompts are refused."
         >
           <input
             type="range"

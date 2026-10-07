@@ -132,6 +132,30 @@ export function acquire(sessionId: string, writerId: WriterId): Promise<boolean>
 }
 
 /**
+ * SYNCHRONOUS, never-queuing acquire: take the turn for `writerId` only if the
+ * lock is FREE (or already held by `writerId`, which re-arms the TTL). Returns
+ * whether `writerId` holds the turn on return. Never enqueues a waiter, so a
+ * `false` leaves no orphaned grant behind. For callers that must decide to
+ * write or drop in the same tick, with no await between the grant and the
+ * write (the `/ws/client` term relay's post-preflight re-check).
+ */
+export function tryAcquireIfFree(sessionId: string, writerId: WriterId): boolean {
+  const st = locks.get(sessionId)
+  if (!st) {
+    const fresh: LockState = { holder: writerId, acquiredAtMs: Date.now(), queue: [], ttlTimer: null }
+    locks.set(sessionId, fresh)
+    armTtl(sessionId, fresh)
+    return true
+  }
+  if (st.holder === writerId) {
+    st.acquiredAtMs = Date.now()
+    armTtl(sessionId, st)
+    return true
+  }
+  return false
+}
+
+/**
  * Release the turn for `sessionId`. Promotes the next queued waiter (if any) to
  * holder and grants it. Idempotent / safe when no lock exists.
  */

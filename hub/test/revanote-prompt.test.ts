@@ -119,10 +119,10 @@ describe('renderAnnotationPrompt', () => {
   // This asserts genuine byte identity against a baseline captured from
   // `git show 617e8e5:hub/src/revanote/prompt.ts` (the commit immediately
   // before Phase 5 touched this file) rendered with the exact same fixture
-  // used above, UPDATED for the "resolved requires a pushed commit" gate
-  // (commit-verify.ts) — the prompt now demands "commit_sha"/"deploy_url"
-  // and states the hub verifies the citation independently.
-  test('fix_contract absent → prompt matches captured post-commit-gate baseline', () => {
+  // used above. fix/revanote-verify-pushed intentionally extends the envelope
+  // with `commit_sha` / `branch` and the pushed-commit rule; the baseline
+  // carries those lines and still pins every other byte.
+  test('fix_contract absent → prompt is byte-identical to captured pre-Phase-5 baseline', () => {
     const out = renderAnnotationPrompt({ annotation: ann, mapping: null })
     const preSPhase5Baseline =
       'A reviewer left a Revanote annotation on a deployed page. Please address it.\n\n' +
@@ -185,11 +185,15 @@ describe('renderAnnotationPrompt', () => {
       '  "action_taken": "short summary of what you did",\n' +
       '  "files_changed": ["path/one.tsx", "path/two.ts"],\n' +
       '  "commit_sha": "the full commit SHA MERGED to the default branch that made this fix (required when resolved is true)",\n' +
+      '  "branch": "the branch you pushed it to",\n' +
       '  "deployed": true,\n' +
       '  "deploy_url": "the live URL you re-fetched to confirm the change, when deployed is true",\n' +
       '  "needs_clarification": false\n' +
       '}\n' +
       '<<END>>\n\n' +
+      '"resolved": true is accepted ONLY with the "commit_sha" of a commit already pushed\n' +
+      'to the remote; the hub checks it on GitHub and rejects a resolve it cannot find.\n' +
+      'Push first, then report. Never report resolved for local-only or uncommitted work.\n\n' +
       'If you cannot fix it autonomously, set "resolved": false, "needs_clarification": true,\n' +
       'and put a single question in "clarification_question".'
     expect(out).toBe(preSPhase5Baseline)

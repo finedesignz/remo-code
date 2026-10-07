@@ -267,4 +267,28 @@ describe('ProcessManager security gates', () => {
     expect(events.some((e) => e.state === 'stopped' && e.info?.lastExit?.reason === 'max_restarts_exceeded')).toBe(true)
     expect(fake.stopCalls).toBe(1)
   })
+
+  // fix/dead-session-online — a run the manager stops tracking must close its
+  // bridge's hub socket, or the hub keeps the session `online` with no CLI
+  // behind it and never restarts it.
+  test('clean CLI exit retires the bridge (hub socket closed)', async () => {
+    const { pm } = makePM(makeCfg({ maxConcurrent: 5 }))
+    await pm.start(spec({ runId: 'clean' }))
+    bridges[0].cb.onSpawned({ pid: 1 })
+    bridges[0].cb.onExit({ code: 0, reason: 'runner_exit' })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(bridges[0].fake.stopCalls).toBe(1)
+    expect(pm.inventorySnapshot().find((r) => r.runId === 'clean')).toBeUndefined()
+  })
+
+  test('crash path keeps the bridge until the restart tears it down', async () => {
+    const { pm } = makePM(makeCfg({ maxConcurrent: 5 }))
+    await pm.start(spec({ runId: 'crash-keep' }))
+    bridges[0].cb.onSpawned({ pid: 1 })
+    bridges[0].cb.onExit({ code: 137, reason: 'runner_exit' })
+    await Promise.resolve()
+    expect(bridges[0].fake.stopCalls).toBe(0)
+    await pm.stop('crash-keep', 'test_cleanup')
+  })
 })

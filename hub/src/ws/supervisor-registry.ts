@@ -297,11 +297,24 @@ export function listOnlineSupervisorIdsForUser(userId: string): string[] {
  * the number of sockets the message was delivered to. Best-effort: per-socket
  * send errors are swallowed (offline / closing supervisors will reconnect
  * with the old key and silently fail auth → user re-pastes through the UI).
+ *
+ * `onlyApiKeyIds` (cloud-host): when given, deliver ONLY to supervisors that
+ * authenticated with one of those key ids. A user can run several hosts (the
+ * tray app + purpose='host' keys, e.g. a Claude Code cloud session); rotating
+ * one host's key must never overwrite another host's credential — two hosts on
+ * one key evict each other (registerSupervisor closes the old socket 4003).
  */
-export function pushKeyRotatedToUser(userId: string, newApiKey: string, keyId: string): number {
+export function pushKeyRotatedToUser(
+  userId: string,
+  newApiKey: string,
+  keyId: string,
+  opts: { onlyApiKeyIds?: string[] } = {},
+): number {
+  const only = opts.onlyApiKeyIds ? new Set(opts.onlyApiKeyIds) : null
   let delivered = 0
   for (const [, e] of supervisors) {
     if (e.userId !== userId) continue
+    if (only && !only.has(e.apiKeyId)) continue
     try {
       e.ws.send(JSON.stringify({ type: 'key_rotated', new_api_key: newApiKey, key_id: keyId }))
       delivered++
@@ -489,6 +502,34 @@ export function getInventoriedSupervisors(): Array<{ supervisorId: string; liveS
   for (const [supervisorId, e] of supervisors) {
     if (e.sessionInventoryAt == null) continue // connected, but has never pushed → unknown
     out.push({ supervisorId, liveSessionIds: e.sessionInventory.map((s) => s.session_id) })
+  }
+  return out
+}
+
+/**
+ * Connected supervisors for `(userId, hostname)` that have pushed
+ * `session_inventory` within `maxAgeMs`, with the live session set each
+ * reported. Same positive-knowledge rule as `getInventoriedSupervisors`: a
+ * supervisor that never pushed, or stopped pushing, contributes nothing, so an
+ * empty result means "unknown", never "nothing is alive". Used by the
+ * dead-session reaper to prove a channel's CLI is gone.
+ */
+export function getFreshInventoryForHost(
+  userId: string,
+  hostname: string,
+  maxAgeMs: number,
+  now: number = Date.now(),
+): Array<{ supervisorId: string; liveSessionIds: Set<string> }> {
+  const host = hostname.trim().toLowerCase()
+  const out: Array<{ supervisorId: string; liveSessionIds: Set<string> }> = []
+  if (!host) return out
+  for (const [supervisorId, e] of supervisors) {
+    if (e.userId !== userId) continue
+    if ((e.hostname ?? '').trim().toLowerCase() !== host) continue
+    if (e.sessionInventoryAt == null) continue
+    const at = Date.parse(e.sessionInventoryAt)
+    if (!Number.isFinite(at) || now - at > maxAgeMs) continue
+    out.push({ supervisorId, liveSessionIds: new Set(e.sessionInventory.map((s) => s.session_id)) })
   }
   return out
 }

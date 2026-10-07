@@ -1,4 +1,4 @@
-<!-- updated: 2026-07-12 -->
+<!-- updated: 2026-09-28 -->
 # Project — remo-code
 
 ## What This Is
@@ -73,6 +73,20 @@ is ever metered at API rates we re-price the team tier — we do not rearchitect
 - **v1.0** (Phases 01–14) — shipped + archived 2026-06-02.
 - **m-interactive-pty-runner** (Phases 15–20) — interactive PTY is the default human surface, 2026-06-04.
 - **TMAC** (Phases TMAC-01..06) — macro-prompt orchestrator cycle-runner, 2026-06-08.
+- **BLEED** (four independent fixers) — confirmed shipped, reconciled 2026-09-28 (this doc and
+  `.planning/STATE.md` had drifted ~2.5 months stale relative to `CLAUDE.md`, which already
+  documented these as done). All four fixers verified against `main` (`b69a6f9`) by code
+  inspection, not just doc claims: NULL-`session_id` run leak fixed
+  (`hub/src/db/supervisor-dal.ts` — `session_id IS NULL OR NOT (session_id = ANY(...))`) plus an
+  absolute-age reaper (`hub/src/sessions/stale-run-reaper.ts`); supervisor circuit breaker now
+  half-opens with a cooldown instead of latching (`supervisor/src/process-manager.ts`) and reports
+  state to the hub; `dailyTokenCapGate` covers all seven dispatch paths and is proven to fire
+  against real Postgres (`hub/test/token-cap-coverage.test.ts`, `token-cap-gate-fires.test.ts`);
+  `schema.sql` is CI-fenced against mutating statements; `REMO_ORCHESTRATOR_LEGACY_WAVES` is fully
+  deleted (zero references in `hub/src`); ghost-hostname churn fixed at the source
+  (`hub/src/ws/agent.ts` rejects a hostname-less `/ws/agent` auth with `4001 hostname_required`);
+  the regression baseline is no longer a 129-test ratchet — current floor is `pass_min: 1850` vs.
+  measured `pass=2157 fail=0` (this session, bare checkout, no ambient DB).
 
 ## Cancelled
 
@@ -88,8 +102,9 @@ is ever metered at API rates we re-price the team tier — we do not rearchitect
 Owner-curated. **The autonomous orchestrator may draw its next milestone ONLY from this list.** It
 may never self-scope a product direction; when this list empties, it STOPS and asks.
 
-1. **BLEED** — close the three CRITICALs + prove the caps. *(in flight)*
-2. **PTYCAP** — token-gate the interactive PTY path. **Blocks everything else.**
+1. ~~**BLEED** — close the three CRITICALs + prove the caps.~~ **Shipped — see Shipped Milestones.**
+2. **PTYCAP** — token-gate the interactive PTY path. **Blocks everything else.** *(in flight — Phase
+   1 of 9 shipped, Phase 2 in progress; see Current Milestone below.)*
 3. **MSESS** — multiple sessions per repo / worktree / branch: N independent CLI sessions on one repo, like N terminal tabs. *(spend amplifier — multiplies concurrent PTYs; gated on PTYCAP. Scope: `.planning/milestones/MSESS-REQUIREMENTS.md`)*
 4. **GOV** — the governance surface: org spend ledger, policy caps, audit, kill switch, receipts page.
 5. **TENANT** — real multi-tenancy: retire `TITANIUM_BYPASS`, working magic-link, per-user supervisor pairing, prove isolation.
@@ -98,23 +113,20 @@ may never self-scope a product direction; when this list empties, it STOPS and a
 8. **AUTO** — governed PTY autonomy + the 30-night public receipts log. **Monetized only after the log is green.**
 9. **DEBT** — retire the half-live flags (legacy waves, ChatSurface/cutover gate, TEAB MSI, mobile).
 
-## Current Milestone: BLEED — Stop the Bleeding
+## Current Milestone: PTYCAP — Token-Gate the Interactive PTY Path
 
-**Goal:** the app cannot silently wedge, and the spend ceiling is proven — not asserted.
+**Goal:** no programmatic turn can reach the interactive PTY without passing the full
+non-bypassable gate chain — this blocks every later milestone (`.planning/ROADMAP.md`).
 
-Four independent fixers in flight:
-- **#346** — NULL-`session_id` run leak (permanent `at_capacity` lockout); circuit breaker latched
-  open 5 days with no alarm; `dailyTokenCapGate` extended to all seven dispatch paths + proven to
-  fire against real Postgres.
-- **safety-fences** — CI lint fencing `schema.sql` (it re-runs in full every boot); delete the
-  `REMO_ORCHESTRATOR_LEGACY_WAVES` dead rollback path; snippet↔envelope contract test.
-- **baseline-triage** — the 129 known-failing tests. A green suite that hides a ninth of itself is
-  how all three CRITICALs shipped undetected. One test literally pinned the run-leak bug as
-  *intended behavior*.
-- **ghost-hostname** — stop hostname-NULL ghost-session churn at the supervisor source.
+- **Phase 1 (PTY Token Accounting)** — shipped, PR #395: live mid-turn token accounting for a PTY
+  turn, interactive/programmatic bucket split.
+- **Phase 2 (PTY Pre-Flight Gate)** — in progress as of 2026-09-28: prove/enforce that a
+  programmatic write can only reach the PTY through `[thresholdGate, dailyTokenCapGate,
+  dailyCostCapGate, sessionInjectRateGate]`, with `token-cap-coverage.test.ts` extended to cover
+  the PTY path, and human turns unaffected by the inject-rate ceiling.
+- **Phases 3–9** — specified in `.planning/ROADMAP.md`, not yet started.
 
-**Definition of Done:** zero known-failing tests; every dispatch path provably gated; no run can
-leak; the breaker self-heals and is visible; `schema.sql` cannot carry a mutating statement.
+**Definition of Done (Phase 2):** see `.planning/ROADMAP.md`'s Phase 2 success criteria.
 
 ## Untested Assumption (the biggest open risk)
 

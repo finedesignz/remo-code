@@ -21,7 +21,7 @@ import { parseControllerDecision, nextStepForAction } from '../controller-schema
 import { parseQcFindings, findingHash } from '../qc-schema.ts'
 import { isTerminalSummary } from '../summary-line.ts'
 import { hasVerifiedFinding, recordVerifiedFinding } from '../../db/dal.ts'
-import { findQcReviewSnippetForRun } from '../../db/scheduled-tasks-dal.ts'
+import { findQcReviewSnippetForRun, getRun } from '../../db/scheduled-tasks-dal.ts'
 import { executeEmail } from './email.ts'
 import { executeTelegram } from './telegram.ts'
 import { executeWebPush } from './webpush.ts'
@@ -30,6 +30,9 @@ import { executeGithubIssue } from './github-issue.ts'
 import { executeDeployVerify } from './deploy-verify.ts'
 import { report as aggregatorReport } from './aggregator.ts'
 import { surfaceProposal } from './propose-notify.ts'
+import { reportSelfErrorToAgentautofix, reportTriageFindingToAgentautofix, scrub } from '../../agentautofix/reporter.ts'
+import { INTERNAL_TRIAGE_TASK_NAME, claimTriageFindingForward } from '../../db/dal.ts'
+import { parseTriageOutput, type TriageResult } from '../triage-schema.ts'
 
 const MAX_CHAIN_DEPTH = 5
 const RUN_URL_PREFIX = process.env.REMO_PUBLIC_URL || 'https://app.remo-code.com'
@@ -56,11 +59,23 @@ const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
  * Internal-plumbing exception: `__internal_*` tasks (`__internal_coolify_deployment`,
  * `__internal_triage` — see db/dal.ts INTERNAL_DEPLOY_TASK_NAME/INTERNAL_TRIAGE_TASK_NAME)
  * are machine-created anchors the owner never scheduled, never sees in the tasks UI,
- * and cannot set `email_summary: false` on. A `skipped` run on one of these (e.g. the
- * Coolify webhook's `no_routable_session` orphan-run finalize — coolify-webhook.ts) is
- * a routine no-op, not something to email about: zero cost, zero duration, nothing
- * happened. Only `skipped` is suppressed here — a genuine `failed` run on an internal
- * task still emails, and this never touches user-created tasks.
+ * and cannot set `email_summary: false` on. They ALSO never get a default success
+ * email — success is the routine, expected outcome of a machine-scheduled internal
+ * task and mailing the owner on every run (see the `__internal_triage` Coolify-token
+ * incident, 2026-09-30 — the owner was emailed from support@remo-code.com on every
+ * run, including success) is exactly the noise this default-email feature exists to
+ * avoid for user tasks too. An internal task only emails the owner when the run
+ * genuinely failed or self-reported BLOCKED (`isFailedOrBlocked`) — `success` and
+ * `skipped` are both silent BY DEFAULT. A genuine `failed`/blocked run on an
+ * internal task still emails (belt-and-suspenders alongside the best-effort
+ * AgentAutofix forward in `handleInternalTriageRun` below), and none of this
+ * touches user-created tasks. A `success` triage run carrying an actionable
+ * finding is forwarded to AgentAutofix by `handleInternalTriageRun`. A `success`
+ * internal-task run still reaches the owner's inbox in exactly two cases: the
+ * triage finding is `high`/`critical` (`isHighSeverityTriageFinding` — it is about
+ * the owner's own failing app, and the AAF forward lands in the hub's self-capture
+ * inbox, not the user's repo), or a low/medium finding's AAF forward itself fails
+ * (see `handleInternalTriageRun`).
  */
 export function buildDefaultEmailActions(
   task: ScheduledTask,
@@ -71,7 +86,11 @@ export function buildDefaultEmailActions(
   if (chainDepth !== 0 && !isFailedOrBlocked(outcome)) return []
   if ((task as any).email_summary === false) return []
   if (actions.some((a) => a.type === 'notify_email')) return []
-  if (outcome?.status === 'skipped' && task.name?.startsWith('__internal_')) return []
+  if (
+    task.name?.startsWith('__internal_') &&
+    !isFailedOrBlocked(outcome) &&
+    !isHighSeverityTriageFinding(task, outcome)
+  ) return []
   return [
     {
       type: 'notify_email',
@@ -91,6 +110,23 @@ export function buildDefaultEmailActions(
       },
     } as PostRunAction,
   ]
+}
+
+/**
+ * A `__internal_triage` run that finalized `success` but whose JSON finding is
+ * `high`/`critical`. That finding is about the OWNER'S own failing deployment, and
+ * the AgentAutofix forward in `handleInternalTriageRun` lands in the hub's own
+ * (remo-code) self-capture inbox, not the user's repo — so a serious finding must
+ * still reach the owner by email. low/medium stay silent (noise reduction).
+ */
+export function isHighSeverityTriageFinding(
+  task: ScheduledTask,
+  outcome?: { status: RunStatus; output_snippet: string | null },
+): boolean {
+  if (task.name !== INTERNAL_TRIAGE_TASK_NAME) return false
+  if (outcome?.status !== 'success') return false
+  const parsed = parseTriageOutput(outcome.output_snippet ?? '')
+  return parsed.ok && (parsed.value.severity === 'high' || parsed.value.severity === 'critical')
 }
 
 /**
@@ -146,7 +182,126 @@ interface FireCtxArgs extends AfterRunArgs {
   aggregate?: { total: number; successes: number; failures: number }
 }
 
+/**
+ * Resolve the REAL Coolify `deployment_uuid` a `__internal_triage` run was
+ * dispatched for. The webhook (api/coolify-webhook.ts) dispatches triage with
+ * `triggeredByRunId` = the deployment metadata run, which `insertDeploymentRun`
+ * stamps with `deployment_uuid`; the triage run row itself normally carries none.
+ * (The per-event `payloadOverride` lives only on the in-memory task and is gone
+ * by finalize — `finalizeRun` reloads the task from the DB.) Returns null when no
+ * uuid is recoverable; the caller then skips dedup and delivers. Never derived
+ * from model prose: a regex over free text matches ordinary words and would
+ * collide unrelated deployments, silently suppressing findings for 7 days.
+ */
+export async function resolveTriageDeploymentUuid(runId: string, userId: string): Promise<string | null> {
+  try {
+    const run: any = await getRun(runId, userId)
+    if (!run) return null
+    if (typeof run.deployment_uuid === 'string' && run.deployment_uuid) return run.deployment_uuid
+    if (!run.triggered_by_run_id) return null
+    const parent: any = await getRun(run.triggered_by_run_id, userId)
+    if (typeof parent?.deployment_uuid === 'string' && parent.deployment_uuid) return parent.deployment_uuid
+    return null
+  } catch (err: any) {
+    console.warn('[post-run.dispatcher] triage deployment_uuid lookup failed', err?.message ?? err)
+    return null
+  }
+}
+
+/**
+ * `__internal_triage` run handling (fix/triage-task-email-noise). The FINDING
+ * must reach AgentAutofix regardless of run status (low/medium never the owner's inbox)
+ * — a triage run that finalizes `success` can still describe a real failed
+ * deployment (the model's own JSON `error_type`/`severity` is independent of
+ * the scheduler's run status), and the previous cut (PR #496) only forwarded
+ * on run FAILURE, silently dropping every such success-status finding.
+ *
+ * FAILURE/BLOCKED: unchanged from the prior cut — best-effort forward through
+ * the hub's existing aggregated self-error reporter (dedup/throttle/aggregation
+ * built in; this task's failures ARE hub self-errors — the hub's own scheduled
+ * triage against its own Coolify config) plus the owner email `buildDefaultEmailActions`
+ * still fires for a failed/blocked internal task.
+ *
+ * SUCCESS with a parseable finding: forward it to AAF, deduped per REAL
+ * Coolify `deployment_uuid` (`resolveTriageDeploymentUuid` → `claimTriageFindingForward`).
+ * When no uuid is recoverable there is no dedup — the finding is delivered.
+ * A low-severity finding is tagged in the title so it's visibly deprioritized
+ * without being dropped. low/medium findings get NO owner email
+ * (`buildDefaultEmailActions` suppresses them); high/critical findings ARE
+ * emailed by `buildDefaultEmailActions` (`isHighSeverityTriageFinding`), so this
+ * function never double-sends them. Only a FAILED AAF forward of a low/medium
+ * finding falls back to a (scrubbed) owner email, once per deployment — the
+ * dedup claim is consumed up front, so a repeat after a failed forward does not
+ * retry the email; this is a best-effort escape hatch, not the primary path.
+ */
+export async function handleInternalTriageRun(args: AfterRunArgs): Promise<void> {
+  if (args.chainDepth !== 0) return
+  if (args.task.name !== INTERNAL_TRIAGE_TASK_NAME) return
+
+  if (isFailedOrBlocked({ status: args.status, output_snippet: args.output_snippet })) {
+    void reportSelfErrorToAgentautofix({
+      fingerprint: `internal-triage:${args.error ?? 'unknown'}`,
+      errorType: 'internal_triage_failed',
+      errorValue: args.error ?? args.output_snippet ?? 'internal triage run failed',
+      source: 'scheduler/post-run/dispatcher:__internal_triage',
+    })
+    return
+  }
+
+  if (args.status !== 'success') return
+  const parsed = parseTriageOutput(args.output_snippet ?? '')
+  if (!parsed.ok) return // no actionable JSON finding to forward
+
+  const finding = parsed.value
+  const deploymentUuid = await resolveTriageDeploymentUuid(args.runId, args.task.user_id)
+  if (deploymentUuid) {
+    const claimed = await claimTriageFindingForward(args.task.user_id, deploymentUuid)
+    if (!claimed) return // already forwarded (or emailed) for this deployment
+  }
+  // No uuid → no dedup: deliver rather than risk suppressing a distinct finding.
+  const deploymentKey = deploymentUuid ?? `run:${args.runId}`
+
+  const severityTag = finding.severity === 'low' ? '[triage low] ' : ''
+  const runUrl = `${RUN_URL_PREFIX}/schedules/runs/${args.runId}`
+  const body =
+    `${severityTag}${finding.error_type}: ${finding.root_cause}\n\n` +
+    `Suggested fix: ${finding.suggested_fix}\n` +
+    `Severity: ${finding.severity}   Confidence: ${finding.confidence}\n` +
+    `Deployment: ${deploymentUuid ?? '(unknown)'}\n` +
+    `Run: ${runUrl}`
+
+  const sent = await reportTriageFindingToAgentautofix({
+    fingerprint: `internal-triage-finding:${deploymentKey}`,
+    errorType: `triage_finding:${finding.error_type}`,
+    errorValue: body,
+    source: 'scheduler/post-run/dispatcher:__internal_triage',
+  })
+  if (sent) return
+  // high/critical already reached the owner via the default email
+  // (buildDefaultEmailActions → isHighSeverityTriageFinding); don't double-send.
+  if (finding.severity === 'high' || finding.severity === 'critical') return
+
+  // AAF forward failed — never drop the finding silently. Scrubbed exactly like
+  // the AAF comment it substitutes for (model output can echo tokens/DSNs).
+  await executeEmail(
+    {
+      type: 'notify_email',
+      on: 'always',
+      config: {
+        subject: scrub(`Remo internal triage finding [AAF forward failed] - ${severityTag}${finding.error_type}`).slice(0, 200),
+        body: scrub(body),
+      },
+    } as PostRunAction,
+    { userId: args.task.user_id, templateVars: {} },
+  )
+}
+
 export async function fireWithContext(args: FireCtxArgs): Promise<void> {
+  // Awaited (errors contained) so the AAF forward + fallback email finish inside the
+  // post-run lifecycle instead of being orphaned when the caller releases.
+  await handleInternalTriageRun(args).catch((err: any) => {
+    console.error('[post-run.dispatcher] internal triage handling failed', err?.message ?? err)
+  })
   const actionsRaw = await listActionsForTask(args.task.id)
   const parsed = validatePostRunActions(actionsRaw)
   if (!parsed.ok) {
