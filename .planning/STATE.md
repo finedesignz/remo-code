@@ -5,8 +5,8 @@ milestone_name: Milestone PTYCAP (Token-Gate the Interactive PTY Path)
 current_phase: 03
 current_phase_name: governed-automation-guard
 status: executing
-stopped_at: Completed PTYCAP-03-01-PLAN.md
-last_updated: "2026-10-07T23:32:22.494Z"
+stopped_at: Completed PTYCAP-03-02-PLAN.md
+last_updated: "2026-10-07T23:40:00.000Z"
 last_activity: 2026-09-28
 last_activity_desc: "BLEED milestone reconciled CLOSED (all four fixers verified shipped on main); milestone pointer advanced to PTYCAP; Phase 1 confirmed shipped (#395); Phase 2 execution started"
 state_head: a745ab9efb8e26c340e87a1f56cc55d3b2f35497
@@ -91,9 +91,9 @@ connection is the Tauri Supervisor MSI.
 
 ## Current position
 
-Phase: PTYCAP-03 (governed-automation-guard) — EXECUTING (plan 01 of 4 complete)
-Status: Executing Phase PTYCAP-03 (Phase 2, pty-preflight-gate, shipped; plan 03-01 done, next 03-02)
-Last activity: 2026-10-07 — PTYCAP-03-01 complete (governedAutomationPtyGate + governors)
+Phase: PTYCAP-03 (governed-automation-guard) — EXECUTING (plan 02 of 4 complete)
+Status: Executing Phase PTYCAP-03 (Phase 2, pty-preflight-gate, shipped; plans 03-01 and 03-02 done, next 03-03)
+Last activity: 2026-10-07 — PTYCAP-03-02 complete (governed automation branch in the PTY preflight)
 
 ### OBSRV phase ledger (`.planning/phases/`)
 
