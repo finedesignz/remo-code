@@ -102,6 +102,8 @@ const state: {
   mappingGateArmed: boolean
   releaseMappingGate: (() => void) | null
   sessionByRepoPath: Record<string, { id: string }> | null
+  /** Q1 harness: awaited inside insertAnnotationRun (between claim and in-flight registration). */
+  onInsertRun: (() => Promise<void>) | null
 } = {
   pendingAnnotations: [],
   runs: [],
@@ -117,7 +119,15 @@ const state: {
   mappingGateArmed: false,
   releaseMappingGate: null,
   sessionByRepoPath: null,
+  onInsertRun: null,
 }
+
+mock.module('../src/auth/middleware.ts', () => ({
+  authMiddleware: (c: any, next: () => Promise<void>) => {
+    c.set('userId', 'user-1')
+    return next()
+  },
+}))
 
 let runSeq = 0
 
@@ -175,7 +185,20 @@ mock.module('../src/db/revanote-dal.ts', () => ({
   },
   getAnnotationById: async (id: string) => state.pendingAnnotations.find((a) => a.id === id) ?? null,
   sumTodayAnnotationCostForUser: async () => 0,
+  // Real SQL is a conditional UPDATE ... WHERE status = $expected RETURNING.
+  resetAnnotationToPendingIfStatus: async (id: string, expected: string, skip_reason: string) => {
+    const ann = state.pendingAnnotations.find((a) => a.id === id)
+    if (!ann || ann.status !== expected) return false
+    ann.status = 'pending'
+    ann.skip_reason = skip_reason
+    return true
+  },
   insertAnnotationRun: async (opts: any) => {
+    if (state.onInsertRun) {
+      const hook = state.onInsertRun
+      state.onInsertRun = null // fire once, at the first member's run insert
+      await hook()
+    }
     runSeq++
     const run = { id: `run-${runSeq}`, annotation_id: opts.annotation_id, status: 'in_flight' }
     state.runs.push(run)
@@ -282,6 +305,7 @@ beforeEach(() => {
   state.mappingGateArmed = false
   state.releaseMappingGate = null
   state.sessionByRepoPath = null
+  state.onInsertRun = null
   runSeq = 0
   clockOffset = 0
   Date.now = () => realNow() + clockOffset
@@ -750,5 +774,43 @@ describe('revanote batch dispatch — per-target isolation (C3/C5)', () => {
 
     expect(trustedFrame!.content).not.toContain('ext-untrusted')
     expect(trustedFrame!.content).toContain('Strategy: DIRECT.')
+  })
+})
+
+
+describe('revanote batch dispatch — Q1 retry vs batch send race', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  test('Q1: a retry landing between the claim commit and the run inserts is refused; exactly one send', async () => {
+    const debounce = batchDebounceMs()
+    state.pendingAnnotations = ['ext-1', 'ext-2'].map((extId, i) =>
+      makeAnnotation({
+        id: `ann-${i + 1}`,
+        annotation_id_external: extId,
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo', batch_id: 'b1' },
+        received_at: envAgo(debounce + 1000),
+      }),
+    )
+    let retryStatus = 0
+    let statusDuringGap = ''
+    state.onInsertRun = async () => {
+      // The claim has committed: rows read 'dispatched', in-flight map not yet filled by the old code.
+      statusDuringGap = state.pendingAnnotations[0].status
+      const { revanoteAnnotations } = await import('../src/api/revanote-annotations.ts')
+      const { Hono } = await import('hono')
+      const app = new Hono()
+      app.route('/api/revanote/annotations', revanoteAnnotations)
+      const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+      retryStatus = res.status
+    }
+
+    await sweepBatchDispatch()
+
+    expect(statusDuringGap).toBe('dispatched')
+    expect(retryStatus).toBe(409)
+    expect(state.sentFrames).toHaveLength(1)
   })
 })

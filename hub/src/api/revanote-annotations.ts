@@ -78,8 +78,16 @@ revanoteAnnotations.post('/:id/retry', async (c) => {
   }
 
   // Reset to pending so the dispatcher will accept the row.
-  const { updateAnnotationStatus } = await import('../db/revanote-dal.ts')
-  await updateAnnotationStatus(id, 'pending', { skip_reason: 'manual_retry' })
+  // CAS on the status we observed: if a concurrent claim/finalize moved the
+  // row since, the reset is refused (409) rather than forcing a second send.
+  const { resetAnnotationToPendingIfStatus } = await import('../db/revanote-dal.ts')
+  const reset = await resetAnnotationToPendingIfStatus(id, ann.status, 'manual_retry')
+  if (!reset) {
+    return c.json(
+      { error: 'annotation_in_flight', detail: 'annotation status changed concurrently; retry refused' },
+      409,
+    )
+  }
   const { dispatchPendingAnnotation } = await import('../revanote/dispatcher.ts')
   // forceSingle: a human explicitly retrying ONE comment dispatches it right
   // away, even when it carries a batch_id — it never waits on the batch

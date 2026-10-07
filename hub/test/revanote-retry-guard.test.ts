@@ -26,12 +26,15 @@ const state: {
   batchLive: { sessionId: string; token: string } | null
   updateAnnotationStatusCalls: Array<{ id: string; status: string; opts: any }>
   dispatchCalls: string[]
+  /** CAS outcome the mocked DAL returns; false = a concurrent writer changed the status. */
+  casResult: boolean
 } = {
   annotation: null,
   singleLive: false,
   batchLive: null,
   updateAnnotationStatusCalls: [],
   dispatchCalls: [],
+  casResult: true,
 }
 
 mock.module('../src/db/revanote-dal.ts', () => ({
@@ -40,6 +43,10 @@ mock.module('../src/db/revanote-dal.ts', () => ({
   listAnnotationRuns: async () => [],
   updateAnnotationStatus: async (id: string, status: string, opts: any = {}) => {
     state.updateAnnotationStatusCalls.push({ id, status, opts })
+  },
+  resetAnnotationToPendingIfStatus: async (id: string, expected: string, skip_reason: string) => {
+    state.updateAnnotationStatusCalls.push({ id, status: 'pending', opts: { cas_expected: expected, skip_reason } })
+    return state.casResult
   },
 }))
 
@@ -75,6 +82,7 @@ beforeEach(() => {
   state.batchLive = null
   state.updateAnnotationStatusCalls = []
   state.dispatchCalls = []
+  state.casResult = true
   state.annotation = {
     id: 'ann-1',
     user_id: USER_A,
@@ -142,6 +150,16 @@ describe('POST /api/revanote/annotations/:id/retry — R2-2 live-ownership guard
     expect(res.status).toBe(200)
     expect(state.updateAnnotationStatusCalls).toHaveLength(1)
     expect(state.dispatchCalls).toEqual(['ann-1'])
+  })
+
+  test('Q1b: the reset is a CAS on the observed status; a concurrent status change refuses the retry with 409', async () => {
+    state.annotation.status = 'dispatched'
+    state.casResult = false // a concurrent claim/finalize moved the row after our read
+
+    const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res.status).toBe(409)
+    expect(state.updateAnnotationStatusCalls[0].opts.cas_expected).toBe('dispatched')
+    expect(state.dispatchCalls).toHaveLength(0)
   })
 
   test('resolved / failed / failed_offline rows never consult liveness — retry always proceeds', async () => {

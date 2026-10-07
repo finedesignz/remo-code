@@ -424,6 +424,28 @@ export async function updateAnnotationStatus(
 }
 
 /**
+ * Compare-and-set reset to 'pending' for the manual-retry path: the row moves
+ * only if it is STILL in the status the caller observed (`expected`). A
+ * concurrent claim/finalize that changed the status in between makes this a
+ * no-op (returns false) so the retry is refused instead of double-sending.
+ */
+export async function resetAnnotationToPendingIfStatus(
+  id: string,
+  expected: AnnotationStatus,
+  skip_reason: string,
+): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET status = 'pending',
+           skip_reason = ${skip_reason}
+     WHERE id = ${id}
+       AND status = ${expected}
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/**
  * Send-time atomic claim (qcfix/r2-claim-at-send — supersedes the round-1
  * qcfix/batch-claim pre-dispatch claim, which closed F2/F4 but opened a new
  * strand class: a claim taken BEFORE `dispatch()` claimed rows that only ever

@@ -114,6 +114,13 @@ interface InFlightBatch {
   userId: string
   sessionId: string
   members: BatchMember[]
+  /**
+   * Every annotation id this turn owns (or, while the send is still claiming,
+   * is ABOUT to own). Registered BEFORE the claim UPDATE so a retry that
+   * observes the committed 'dispatched' status can already see the batch as
+   * live — `members` is only filled after the per-member run inserts.
+   */
+  claimedIds: Set<string>
 }
 
 /**
@@ -270,13 +277,13 @@ async function dispatchBatch(
         // Every member was already claimed by another caller (a racing
         // forceSingle retry, or an overlapping sweep tick that beat us to
         // it) — no run rows were ever created for this attempt. That other
-        // caller owns their fate; nothing to mark here.
-        inFlightBatches.delete(token)
+        // caller owns their fate; nothing to mark here. (send() already dropped
+        // only its OWN reservation; the winner's entry under this token stays.)
         return
       }
       const batch = inFlightBatches.get(token)
-      for (const m of batch?.members ?? []) {
-        await updateAnnotationStatus(m.annotationId, 'failed', { skip_reason: `agent_send_failed: ${errMsg}` })
+      for (const id of batch?.claimedIds ?? []) {
+        await updateAnnotationStatus(id, 'failed', { skip_reason: `agent_send_failed: ${errMsg}` })
       }
       inFlightBatches.delete(token)
     },
@@ -310,12 +317,41 @@ async function dispatchBatch(
     // all members); the prompt sent covers ONLY the claimed subset — never a
     // member this call didn't win.
     send: async (req) => {
-      const claimedIds = new Set(await claimAnnotationsAtSend(group.map((g) => g.ann.id)))
+      // Liveness must be visible BEFORE the claim commits: once the UPDATE
+      // lands the rows read 'dispatched', and a retry in the gap before the
+      // run inserts finish would otherwise see no live owner and double-send.
+      // Reserve under the batch token first (never clobber an existing entry);
+      // `release` only drops OUR reservation.
+      const mine: InFlightBatch = {
+        userId,
+        sessionId,
+        members: [],
+        claimedIds: new Set(group.map((g) => g.ann.id)),
+      }
+      if (!inFlightBatches.has(batchId)) inFlightBatches.set(batchId, mine)
+      const release = () => {
+        if (inFlightBatches.get(batchId) === mine) inFlightBatches.delete(batchId)
+      }
+      let claimedIds: Set<string>
+      try {
+        claimedIds = new Set(await claimAnnotationsAtSend(group.map((g) => g.ann.id)))
+      } catch (err) {
+        release()
+        throw err
+      }
       const claimed = group.filter((g) => claimedIds.has(g.ann.id))
-      if (claimed.length === 0) throw new Error('already_claimed')
+      if (claimed.length === 0) {
+        release()
+        throw new Error('already_claimed')
+      }
+      mine.claimedIds = new Set(claimed.map((g) => g.ann.id))
+      inFlightBatches.set(batchId, mine)
 
       const channel = getChannel(req.sessionId)
-      if (!channel) throw new Error('session_offline')
+      if (!channel) {
+        release()
+        throw new Error('session_offline')
+      }
 
       claimedAnns = claimed.map((g) => g.ann)
       const promptBody = renderBatchAnnotationPrompt({
@@ -324,17 +360,15 @@ async function dispatchBatch(
       const storedContent = `[revanote: batch of ${claimedAnns.length}]\n\n${promptBody}`
       req.prompt = promptBody
 
-      const members: BatchMember[] = []
       for (const ann of claimedAnns) {
         const run = await insertAnnotationRun({ annotation_id: ann.id, user_id: userId, session_id: sessionId })
-        members.push({
+        mine.members.push({
           annotationId: ann.id,
           externalId: ann.annotation_id_external,
           runId: run.id,
           startedAt: Date.now(),
         })
       }
-      inFlightBatches.set(batchId, { userId, sessionId, members })
 
       const msg = await insertMessage(req.sessionId, 'user', storedContent)
       broadcastToSubscribers(req.sessionId, { type: 'message', session_id: req.sessionId, message: msg })
@@ -385,7 +419,7 @@ async function dispatchBatch(
  */
 export function isAnnotationLiveInBatch(annotationId: string): { sessionId: string; token: string } | null {
   for (const [token, batch] of inFlightBatches) {
-    if (batch.members.some((m) => m.annotationId === annotationId)) {
+    if (batch.claimedIds.has(annotationId)) {
       return { sessionId: batch.sessionId, token }
     }
   }
