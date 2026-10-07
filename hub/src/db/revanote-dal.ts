@@ -424,6 +424,28 @@ export async function updateAnnotationStatus(
 }
 
 /**
+ * Fail an annotation ONLY if it is still 'pending' (gate-rejected batch members:
+ * a member another path already claimed/resolved must not be clobbered).
+ * Returns whether this call performed the transition.
+ */
+export async function failAnnotationIfPending(
+  id: string,
+  skip_reason: string,
+  session_id: string | null,
+): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE annotations
+       SET status = 'failed',
+           skip_reason = ${skip_reason},
+           session_id = COALESCE(${session_id}, session_id)
+     WHERE id = ${id}
+       AND status = 'pending'
+     RETURNING id
+  `
+  return rows.length > 0
+}
+
+/**
  * Compare-and-set reset to 'pending' for the manual-retry path: the row moves
  * only if it is STILL in the status the caller observed (`expected`). A
  * concurrent claim/finalize that changed the status in between makes this a

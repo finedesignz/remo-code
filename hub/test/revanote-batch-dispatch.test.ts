@@ -104,6 +104,8 @@ const state: {
   sessionByRepoPath: Record<string, { id: string }> | null
   /** Q1 harness: awaited inside insertAnnotationRun (between claim and in-flight registration). */
   onInsertRun: (() => Promise<void>) | null
+  /** Q2 harness: when set, the threshold gate runs this then rejects with the returned reason. */
+  gateReject: (() => string) | null
 } = {
   pendingAnnotations: [],
   runs: [],
@@ -120,6 +122,7 @@ const state: {
   releaseMappingGate: null,
   sessionByRepoPath: null,
   onInsertRun: null,
+  gateReject: null,
 }
 
 mock.module('../src/auth/middleware.ts', () => ({
@@ -191,6 +194,14 @@ mock.module('../src/db/revanote-dal.ts', () => ({
     if (!ann || ann.status !== expected) return false
     ann.status = 'pending'
     ann.skip_reason = skip_reason
+    return true
+  },
+  // Real SQL is a conditional UPDATE ... WHERE status = 'pending' RETURNING id.
+  failAnnotationIfPending: async (id: string, skip_reason: string, session_id: string | null) => {
+    const ann = state.pendingAnnotations.find((a) => a.id === id)
+    if (!ann || ann.status !== 'pending') return false
+    state.annStatus.push({ id, status: 'failed', opts: { skip_reason, session_id } })
+    ann.status = 'failed'
     return true
   },
   insertAnnotationRun: async (opts: any) => {
@@ -275,7 +286,12 @@ mock.module('../src/auth/github-app.ts', () => ({
 }))
 
 mock.module('../src/dispatch/gates.ts', () => ({
-  thresholdGate: { name: 'threshold', async check() { return { ok: true } } },
+  thresholdGate: {
+    name: 'threshold',
+    async check() {
+      return state.gateReject ? { ok: false as const, reason: state.gateReject() } : { ok: true as const }
+    },
+  },
   dailyCostCapGate: { name: 'daily_cost_cap', async check() { return { ok: true } } },
   dailyTokenCapGate: { name: 'daily_token_cap', async check() { return { ok: true } } },
   sessionInjectRateGate: { name: 'session_inject_rate', async check() { return { ok: true } } },
@@ -306,6 +322,7 @@ beforeEach(() => {
   state.releaseMappingGate = null
   state.sessionByRepoPath = null
   state.onInsertRun = null
+  state.gateReject = null
   runSeq = 0
   clockOffset = 0
   Date.now = () => realNow() + clockOffset
@@ -812,5 +829,39 @@ describe('revanote batch dispatch — Q1 retry vs batch send race', () => {
     expect(statusDuringGap).toBe('dispatched')
     expect(retryStatus).toBe(409)
     expect(state.sentFrames).toHaveLength(1)
+  })
+})
+
+
+describe('revanote batch dispatch — Q2 gate rejection must not clobber a member another path resolved', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  test('Q2: member resolved by a winning single dispatch stays resolved; no rejection callback for it', async () => {
+    const debounce = batchDebounceMs()
+    state.pendingAnnotations = ['ext-1', 'ext-2'].map((extId, i) =>
+      makeAnnotation({
+        id: `ann-${i + 1}`,
+        annotation_id_external: extId,
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo', batch_id: 'b1' },
+        received_at: envAgo(debounce + 1000),
+      }),
+    )
+    // The gate check is the await point where a concurrent single dispatch wins ann-2.
+    state.gateReject = () => {
+      state.pendingAnnotations[1].status = 'resolved'
+      return 'over_threshold'
+    }
+
+    await sweepBatchDispatch()
+    await new Promise((r) => setTimeout(r, 25)) // rejection callbacks are fire-and-forget
+
+    expect(state.pendingAnnotations[1].status).toBe('resolved')
+    expect(state.pendingAnnotations[0].status).toBe('failed')
+    expect(state.annStatus.filter((s) => s.id === 'ann-2')).toHaveLength(0)
+    expect(state.callbacks.map((c) => c.ann_id)).toEqual(['ann-1'])
+    expect(state.broadcasts.filter((b) => b.type === 'revanote_skipped').map((b) => b.annotation_id)).toEqual(['ann-1'])
   })
 })

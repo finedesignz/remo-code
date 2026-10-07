@@ -55,6 +55,7 @@ import {
   updateAnnotationStatus,
   insertAnnotationRun,
   claimAnnotationsAtSend,
+  failAnnotationIfPending,
 } from '../db/revanote-dal.ts'
 import { getChannel, broadcastRevanoteEvent, broadcastToSubscribers } from '../ws/registry.ts'
 import { insertMessage } from '../db/dal.ts'
@@ -264,7 +265,9 @@ async function dispatchBatch(
     async markSkipped(_token, reason) {
       const isBusy = reason === 'session_busy'
       for (const { ann } of group) {
-        await updateAnnotationStatus(ann.id, 'failed', { skip_reason: reason, session_id: sessionId })
+        // CAS on 'pending': a member a winning single dispatch already
+        // claimed/resolved must keep its state, and gets no rejection callback.
+        if (!(await failAnnotationIfPending(ann.id, reason, sessionId))) continue
         broadcastRevanoteEvent(userId, { type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason })
         void enqueueRejectionCallback(ann, isBusy ? 'session_busy' : 'budget_threshold', reason)
       }
