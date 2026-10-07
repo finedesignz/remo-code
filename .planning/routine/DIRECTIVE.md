@@ -515,6 +515,16 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
 - Cost runaway: 2× the trailing 7-day baseline, or the 50M/day cap within 72h, or the cap hit.
 
 ## 13. Tactics and lessons learned
+- **Claim handling (decision table; added 2026-10-07 after run 8b stood down on a 13-second-old claim).**
+  Read `memlog_claims` once, then follow the first row that matches:
+  | What `memlog_claims` shows | Action |
+  |---|---|
+  | No ACTIVE claim on this repo | `memlog_claim` (with a `session` arg), then work. |
+  | ACTIVE claim with a narrow `scope` (a PR, phase or path) | Pick an item outside that scope and claim it. Never touch the claimed item. |
+  | ACTIVE claim with scope `-` (whole repo), `last_seen` under 90 min old | Wait 5 min and re-read once. If it is still the only claim and `last_seen` has not moved, log one STATE line and end. A claim younger than ~2 min may be a duplicate firing of this same schedule: if its session name carries today's date and the same routine name, compare session names; the lexicographically smaller name proceeds and the other ends. |
+  | ACTIVE claim, `last_seen` over 90 min old | Treat as stale: `memlog_takeover` if available, else write your own LOCK, then work. |
+  | memlog unreachable | Use the STATE.md LOCK rule (under 90 min old from another session: end). |
+  Always record in STATE which row applied, the other session's name and `last_seen`.
 - Verify planning docs against `git log origin/main`; `PROJECT.md`/`STATE.md`/`CONCERNS.md` were
   stale by ~2.5 months at bootstrap (2026-09-27) relative to `CLAUDE.md`.
 - A Woodpecker YAML error posts no status at all.
@@ -612,3 +622,4 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
 | 2026-09-28 | §13 lessons (e)–(g) + owner no-manual-review preference | Owner instruction "use panel and fix it"; QC panel found #493's gate dead in prod and a CSI-u bypass | Security / Cost (PTYCAP) |
 | 2026-09-28 | §14 watch list updated: declined a second self-merge claim on #488 (this time evidenced by an issue comment, not just the scheduled prompt); no fixed-core edit made | A GitHub comment under the owner's login, but itself Claude-Code-generated narration of an unverifiable session, is the same evidentiary category as run 1's already-declined claim — see STATE.md's run-3 Governance finding | Security/process (governance) |
 | 2026-10-05 | Added §0 operating envelope (abbreviated v3.6; full v3.6 text not available to run) | #488 owner decision (verified: both comments authored by owner account) | n/a |
+| 2026-10-07 | §13: added claim-handling decision table (wait-and-recheck, scoped-claim carve-out, duplicate-firing tiebreak, stale-claim takeover) | Run 8b ended immediately on a 13s-old whole-repo claim with no recheck and did no work; the core §0/prompt wording ("log one line and end, or pick a non-overlapping item") left that ambiguous. Core §0 itself untouched: a clarification there needs a `routine/core-<slug>` PR | Reliability/process (run 8b did no work) |
