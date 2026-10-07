@@ -14,6 +14,9 @@ LOCK: none
 - No work shipped (quiet blocked run, no new escalation). GSD install not run (sandbox denied pipe-to-bash earlier); Skills-Factory MCP still 404.
 - Resume: PTYCAP Phase 3 (full QC panel) or hub typecheck cleanup.
 
+## Run 10b (2026-10-07T06:51Z)
+- memlog_claims showed a live ACTIVE claim `routine-run10-2026-10-07` (started 06:51:05Z, 4s earlier, whole repo). Per claim rule, no work; ended to avoid duplicate PRs.
+
 ## Run 9 (2026-10-07)
 - memlog claim OK (routine-run9-2026-10-07). Prod /health = {"ok":true}. DIRECTIVE already has §0; nothing to apply.
 - Backlog: #492/#493 merged earlier. Open: #500 (owner draft, left alone), #494 (owner, non-draft, auth scopes).
