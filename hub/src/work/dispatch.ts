@@ -4,11 +4,12 @@
  *
  * Like the ask, the prompt goes to a STREAM-JSON session bound to the repo's
  * `project_dir` — never to a human's PTY. The actor is SERVER-INFERRED
- * (`external-work`), never client-assertable, so `humanOnlyPtyGate` cannot be
- * talked out of rejecting a pty-interactive row.
+ * (`external-work`), never client-assertable, so `governedAutomationPtyGate` cannot
+ * be talked out of rejecting a pty-interactive row (an external actor is never
+ * PTY-eligible, even with the governed-automation flag on, D-06).
  *
  * GATE LIST (non-negotiable — see the cross-cutting invariant in CLAUDE.md):
- *   thresholdGate · dailyCostCapGate · dailyTokenCapGate · humanOnlyPtyGate ·
+ *   thresholdGate · dailyCostCapGate · dailyTokenCapGate · governedAutomationPtyGate ·
  *   workRateGate · workRepoAllowlistGate
  *
  * `dailyCostCapGate` + `dailyTokenCapGate` are scanned by
@@ -30,10 +31,10 @@ import {
   thresholdGate,
   dailyCostCapGate,
   dailyTokenCapGate,
-  humanOnlyPtyGate,
   workRateGate,
   workRepoAllowlistGate,
 } from '../dispatch/gates.ts'
+import { governedAutomationPtyGate } from '../dispatch/governed-pty.ts'
 import { EXT_WORK_ACTOR } from '../auth/ext-api-key-middleware.ts'
 import { finalizeWork, markWorkDispatched, markWorkVerifying, getWorkRun, type WorkSite } from '../db/work-dal.ts'
 import { runHubQc } from './verify.ts'
@@ -294,7 +295,7 @@ export async function dispatchWork(input: DispatchWorkInput): Promise<WorkDispat
       thresholdGate,
       dailyCostCapGate,
       dailyTokenCapGate,
-      humanOnlyPtyGate(async (req) => {
+      governedAutomationPtyGate(async (req) => {
         const rows = await sql<{ runner_type: string }[]>`
           SELECT runner_type FROM sessions WHERE id = ${req.sessionId} LIMIT 1
         `
