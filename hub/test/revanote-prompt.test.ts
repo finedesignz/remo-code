@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { previewComment, storagePrefix, renderAnnotationPrompt } from '../src/revanote/prompt'
+import { previewComment, storagePrefix, renderAnnotationPrompt, renderBatchAnnotationPrompt } from '../src/revanote/prompt'
 
 describe('previewComment', () => {
   test('short comment unchanged', () => {
@@ -49,6 +49,7 @@ describe('renderAnnotationPrompt', () => {
   test('PR strategy with auto_merge', () => {
     const out = renderAnnotationPrompt({
       annotation: ann,
+      dispatchId: 'run-1',
       mapping: {
         id: 'm1', user_id: 'u', hostname_pattern: 'app.example.com',
         repo_path: 'C:/code/app', supervisor_id: null,
@@ -68,6 +69,7 @@ describe('renderAnnotationPrompt', () => {
   test('direct strategy', () => {
     const out = renderAnnotationPrompt({
       annotation: ann,
+      dispatchId: 'run-1',
       mapping: {
         id: 'm1', user_id: 'u', hostname_pattern: '*.example.com',
         repo_path: 'C:/code/app', supervisor_id: null,
@@ -79,7 +81,7 @@ describe('renderAnnotationPrompt', () => {
   })
 
   test('no mapping → fallback text', () => {
-    const out = renderAnnotationPrompt({ annotation: ann, mapping: null })
+    const out = renderAnnotationPrompt({ annotation: ann, mapping: null, dispatchId: 'run-1' })
     expect(out).toContain('no mapping configured')
   })
 
@@ -96,7 +98,7 @@ describe('renderAnnotationPrompt', () => {
         },
       },
     }
-    const out = renderAnnotationPrompt({ annotation: annWithContract, mapping: null })
+    const out = renderAnnotationPrompt({ annotation: annWithContract, mapping: null, dispatchId: 'run-1' })
     expect(out).toContain('best-guess')
     expect(out).toContain('ambiguous_intent')
     expect(out).toContain('conflicting_instruction')
@@ -107,7 +109,7 @@ describe('renderAnnotationPrompt', () => {
   })
 
   test('fix_contract absent → no fix-contract text, envelope byte-identical to pre-Phase-5', () => {
-    const out = renderAnnotationPrompt({ annotation: ann, mapping: null })
+    const out = renderAnnotationPrompt({ annotation: ann, mapping: null, dispatchId: 'run-1' })
     expect(out).not.toContain('ambiguous_intent')
     expect(out).not.toContain('"assumption":')
     expect(out).not.toContain('"clarification_reason":')
@@ -123,7 +125,7 @@ describe('renderAnnotationPrompt', () => {
   // with `commit_sha` / `branch` and the pushed-commit rule; the baseline
   // carries those lines and still pins every other byte.
   test('fix_contract absent → prompt is byte-identical to captured pre-Phase-5 baseline', () => {
-    const out = renderAnnotationPrompt({ annotation: ann, mapping: null })
+    const out = renderAnnotationPrompt({ annotation: ann, mapping: null, dispatchId: 'run-1' })
     const preSPhase5Baseline =
       'A reviewer left a Revanote annotation on a deployed page. Please address it.\n\n' +
       'Repo: (no mapping configured for this host — fix in-tree only)\n\n' +
@@ -178,9 +180,12 @@ describe('renderAnnotationPrompt', () => {
       'otherwise.\n\n' +
       'When you are done (resolved OR clarification needed), end your reply with a\n' +
       'machine-readable JSON envelope so the hub can post a callback. Use exactly\n' +
-      'this format on its own lines (no markdown fences inside the envelope):\n\n' +
+      'this format on its own lines (no markdown fences inside the envelope).\n' +
+      '"dispatch_id" is REQUIRED and must be copied EXACTLY as shown (it identifies\n' +
+      'this dispatch; a reply without it, or with a different one, is discarded):\n\n' +
       '<<JSON>>\n' +
       '{\n' +
+      '  "dispatch_id": "run-1",\n' +
       '  "resolved": true,\n' +
       '  "action_taken": "short summary of what you did",\n' +
       '  "files_changed": ["path/one.tsx", "path/two.ts"],\n' +
@@ -198,5 +203,24 @@ describe('renderAnnotationPrompt', () => {
       'If you cannot fix it autonomously, set "resolved": false, "needs_clarification": true,\n' +
       'and put a single question in "clarification_question".'
     expect(out).toBe(preSPhase5Baseline)
+  })
+})
+
+describe('dispatch_id in the reply envelope template', () => {
+  const ann: any = {
+    id: 'a1', annotation_id_external: 'ext-1', page_url: 'https://app.example.com/x', annotation_url: null,
+    screenshot_url: null, x: null, y: null, element_selector: null, comment: 'c', replies_json: [], payload_raw: {},
+  }
+  test('single prompt states the dispatch id and requires it', () => {
+    const out = renderAnnotationPrompt({ annotation: ann, mapping: null, dispatchId: 'run-42' })
+    expect(out).toContain('"dispatch_id": "run-42"')
+    expect(out).toContain('"dispatch_id" is REQUIRED')
+  })
+
+  test('batch prompt carries ONE top-level dispatch id', () => {
+    const out = renderBatchAnnotationPrompt({ items: [{ annotation: ann, mapping: null }], dispatchId: 'batch-gen-7' })
+    expect(out.match(/"dispatch_id": "batch-gen-7"/g)).toHaveLength(1)
+    expect(out.indexOf('"dispatch_id"')).toBeLessThan(out.indexOf('"annotations": ['))
+    expect(out).toContain('"dispatch_id" is REQUIRED')
   })
 })

@@ -66,7 +66,7 @@ import { getGraceBuffer } from '../dispatch/grace.ts'
 import { getChannel, broadcastRevanoteEvent, broadcastToSubscribers } from '../ws/registry.ts'
 import { renderAnnotationPrompt, storagePrefix, previewComment } from './prompt.ts'
 import { finalizeAnnotationReply } from './run-lifecycle.ts'
-import { ENVELOPE_RE } from './result-schema.ts'
+import { ENVELOPE_RE, extractDispatchId } from './result-schema.ts'
 import {
   dispatch,
   type DispatchRequest,
@@ -84,7 +84,12 @@ export type DispatchOutcome =
   | { status: 'failed'; skip_reason: string }
   | { status: 'noop'; skip_reason: string }
 
-/** Single-path finalize ceiling (also the retry endpoint's in_flight-run liveness ceiling). */
+/**
+ * Single-path NARRATION timeout (the pipeline's `finalizeTimeoutMs`): after this,
+ * the next message finalizes unconditionally. NOT the run's liveness ceiling --
+ * the hook itself lives until REMO_DISPATCH_HOOK_MAX_MS (`hookMaxMsFromEnv`),
+ * which is what the retry endpoint uses.
+ */
 export function singleRunMaxMs(): number {
   return Number(process.env.REVANOTE_FINALIZE_TIMEOUT_MS ?? 20 * 60 * 1000)
 }
@@ -299,8 +304,11 @@ export async function dispatchAnnotationRow(
   // across a hub restart. It now happens inside `deps.send` below, immediately
   // before the WS push, so a queued row stays 'pending' exactly as
   // restart-recoverable as before any claim existed.
-  const promptBody = renderAnnotationPrompt({ annotation: ann, mapping })
-  const storedContent = `${storagePrefix(ann.comment)}\n\n${promptBody}`
+  //
+  // The prompt must state this dispatch's GENERATION id (the annotation_runs id
+  // open() creates) so the reply can echo it; it is therefore rendered in
+  // `deps.send` once `openedRunId` exists, not here.
+  let openedRunId = ''
 
   const store: RunStore = {
     // Insert the annotation_run row (in_flight) and RETURN its id — the pipeline
@@ -315,6 +323,7 @@ export async function dispatchAnnotationRow(
       const run = await insertAnnotationRun({
         annotation_id: ann.id, user_id: userId, session_id: sessionId,
       })
+      openedRunId = run.id
       return run.id
     },
     // Gate / queue rejections. The pipeline passes the gate reason or
@@ -386,8 +395,21 @@ export async function dispatchAnnotationRow(
     // they exist so a message that DOES finalize (envelope found, or the
     // timeout forces it) still produces a usable result, not so a random
     // narration line prematurely ends the wait.
+    //
+    // Generation binding: the envelope must ALSO echo THIS dispatch's id. A reply
+    // is correlated by session only, so a late reply from a previous dispatch on
+    // the same session (hub restart + redispatch, retry) would otherwise finalize
+    // this one. A missing or different id means "not mine": the hook stays armed
+    // and the reply is dropped here, never applied.
     shouldFinalize(content) {
-      return ENVELOPE_RE.test(content)
+      if (!ENVELOPE_RE.test(content)) return false
+      const echoed = extractDispatchId(content)
+      if (echoed === openedRunId) return true
+      console.warn(
+        `[revanote.dispatcher] reply dropped: dispatch_id ${echoed ? `"${echoed}"` : '(missing)'} ` +
+          `is not run=${openedRunId} annotation=${ann.id} session=${sessionId}`,
+      )
+      return false
     },
   }
 
@@ -449,8 +471,13 @@ export async function dispatchAnnotationRow(
       // lookup after the claim would strand the row 'dispatched'.
       const channel = getChannel(req.sessionId)
       if (!channel) throw new Error('session_offline')
-      const [claimedId] = await claimAnnotationsAtSend([ann.id])
+      // Generation binding: the claim records this dispatch's run id as the row's
+      // current_run_id, and the prompt tells the agent to echo it.
+      const [claimedId] = await claimAnnotationsAtSend([ann.id], { [ann.id]: openedRunId })
       if (!claimedId) throw new Error('already_claimed')
+      const promptBody = renderAnnotationPrompt({ annotation: ann, mapping, dispatchId: openedRunId })
+      const storedContent = `${storagePrefix(ann.comment)}\n\n${promptBody}`
+      req.prompt = promptBody
       const msg = await insertMessage(req.sessionId, 'user', storedContent)
       broadcastToSubscribers(req.sessionId, {
         type: 'message', session_id: req.sessionId, message: msg,
@@ -461,7 +488,7 @@ export async function dispatchAnnotationRow(
     },
   }
 
-  const req: DispatchRequest = { userId, sessionId, token: ann.id, prompt: promptBody }
+  const req: DispatchRequest = { userId, sessionId, token: ann.id, prompt: '' }
   const outcome = await dispatch(req, deps)
 
   // CAS on 'pending': a row a retry/replay claimed in between is not reverted.

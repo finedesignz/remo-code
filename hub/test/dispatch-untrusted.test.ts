@@ -101,6 +101,7 @@ describe('revanote prompt trust flag', () => {
     const { renderAnnotationPrompt } = await import('../src/revanote/prompt.ts')
     const out = renderAnnotationPrompt({
       annotation,
+      dispatchId: 'run-1',
       mapping: { repo_path: '/r', deploy_strategy: 'direct', auto_merge: true, trusted: false } as any,
     })
     expect(out).toContain('Strategy: PR')
@@ -115,6 +116,7 @@ describe('revanote prompt trust flag', () => {
     const { renderAnnotationPrompt } = await import('../src/revanote/prompt.ts')
     const out = renderAnnotationPrompt({
       annotation,
+      dispatchId: 'run-1',
       mapping: { repo_path: '/r', deploy_strategy: 'direct', auto_merge: true, trusted: true } as any,
     })
     expect(out).toContain('Strategy: DIRECT')

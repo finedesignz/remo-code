@@ -21,6 +21,7 @@ export type VerifyFailReason =
   | 'no_github_installation'
   | 'commit_not_pushed'
   | 'commit_not_on_default_branch'
+  | 'commit_predates_dispatch'
   | 'verify_error'
 
 export type VerifyResult =
@@ -34,7 +35,16 @@ export interface VerifyInput {
   branch?: string | null
   /** Candidate GitHub App installations for this user, best match first. */
   installationIds: number[]
+  /**
+   * When the dispatch was sent. When set, the commit's committer date must be
+   * >= this minus `DISPATCH_CLOCK_SKEW_MS`, otherwise an ancestor of the default
+   * branch that merely predates the request (months old) would verify.
+   */
+  dispatchedAt?: Date | string | null
 }
+
+/** Tolerated clock skew between the hub and GitHub's committer timestamps. */
+export const DISPATCH_CLOCK_SKEW_MS = 5 * 60 * 1000
 
 export type GithubGet = (installationId: number, path: string) => Promise<any>
 
@@ -80,6 +90,21 @@ export async function verifyPushedCommit(input: VerifyInput, get: GithubGet): Pr
     }
     if (!commit) continue // helper returned null for 404
     const fullSha: string = typeof commit.sha === 'string' ? commit.sha : sha
+
+    // The commit must have been made for THIS dispatch, not merely be reachable
+    // from the default branch (any old ancestor satisfies the compare below).
+    if (input.dispatchedAt) {
+      const since = new Date(input.dispatchedAt).getTime()
+      const when = Date.parse(commit?.commit?.committer?.date ?? '')
+      if (!Number.isFinite(when)) return { ok: false, reason: 'verify_error', detail: 'commit_date_unreadable' }
+      if (when < since - DISPATCH_CLOCK_SKEW_MS) {
+        return {
+          ok: false,
+          reason: 'commit_predates_dispatch',
+          detail: `committed ${new Date(when).toISOString()} < dispatched ${new Date(since).toISOString()}`,
+        }
+      }
+    }
 
     // Owner rule: resolved only once the fix is MERGED to the default branch.
     // A commit that merely exists (pushed PR-branch tip) is not enough.

@@ -165,6 +165,16 @@ function positiveIntEnv(name: string, fallback: number): number {
 }
 
 /**
+ * Silent-hook reap ceiling for a `shouldFinalize` store that sets no
+ * `hookMaxMs` (`REMO_DISPATCH_HOOK_MAX_MS`, default 2h). Exported so a caller
+ * judging "can this run still be live?" (revanote's durable retry guard) uses
+ * the SAME number the reaper does instead of a shorter narration timeout.
+ */
+export function hookMaxMsFromEnv(): number {
+  return positiveIntEnv('REMO_DISPATCH_HOOK_MAX_MS', DEFAULT_HOOK_MAX_MS)
+}
+
+/**
  * The pipeline owns one queue instance — not a global functional module var.
  * Depth: `REMO_DISPATCH_MAX_WAITERS` waiters per session (default 50). The old
  * 1-waiter cap dropped every burst beyond two (a Revanote review with 22
@@ -392,7 +402,7 @@ export async function reapTimedOutHooks(now: number = Date.now()): Promise<numbe
   let reaped = 0
   for (const [sessionId, active] of [...activeBySession]) {
     if (!active.deps.store?.shouldFinalize) continue
-    const maxMs = active.deps.hookMaxMs ?? positiveIntEnv('REMO_DISPATCH_HOOK_MAX_MS', DEFAULT_HOOK_MAX_MS)
+    const maxMs = active.deps.hookMaxMs ?? hookMaxMsFromEnv()
     if (now - active.startedAt < maxMs) continue
     if (activeBySession.get(sessionId) !== active) continue // finalized meanwhile
     console.warn(

@@ -48,6 +48,7 @@
  *     members are no longer `pending`) — a fresh dispatch, never appended to
  *     an in-flight turn.
  */
+import { randomUUID } from 'node:crypto'
 import { sql } from '../db/postgres.ts'
 import {
   type AnnotationRow,
@@ -59,13 +60,14 @@ import {
   insertAnnotationRun,
   updateAnnotationRun,
   claimAnnotationsAtSend,
+  bindAnnotationRun,
   failAnnotationIfPending,
 } from '../db/revanote-dal.ts'
 import { getGraceBuffer } from '../dispatch/grace.ts'
 import { getChannel, broadcastRevanoteEvent, broadcastToSubscribers } from '../ws/registry.ts'
 import { insertMessage } from '../db/dal.ts'
 import { renderBatchAnnotationPrompt } from './prompt.ts'
-import { parseRevanoteBatchOutput, envelopeForBatchItem, ENVELOPE_RE } from './result-schema.ts'
+import { parseRevanoteBatchOutput, envelopeForBatchItem, ENVELOPE_RE, extractDispatchId } from './result-schema.ts'
 import { finalizeAnnotationReply } from './run-lifecycle.ts'
 import { dispatch, isTokenLiveAnywhere, type DispatchRequest, type PipelineDeps, type RunStore } from '../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
@@ -134,6 +136,12 @@ interface BatchMember {
 interface InFlightBatch {
   userId: string
   sessionId: string
+  /**
+   * This turn's generation id: stated in the prompt and echoed by the reply
+   * envelope. A reply carrying any other id is not this turn's. Empty until
+   * `send()` mints it (a seeded/test entry that never sent has none).
+   */
+  dispatchId: string
   members: BatchMember[]
   /**
    * Every annotation id this turn owns (or, while the send is still claiming,
@@ -320,6 +328,36 @@ async function runSweepOnce(now: number): Promise<{ dispatched: number }> {
   return { dispatched }
 }
 
+/**
+ * The CURRENT pending members of one dispatch group -- same (user, session,
+ * mapping, batch_id) the sweep groups by -- read from the DB at call time.
+ * Used by the grace replay so a member that arrived after the group was parked
+ * is included in the replayed turn.
+ */
+async function gatherPendingBatchGroup(
+  userId: string,
+  sessionId: string,
+  mappingId: string | null | undefined,
+  rawBatchId: string,
+): Promise<Array<{ ann: AnnotationRow; mapping: RevanoteMapping | null; sessionId: string }>> {
+  const rows = await sql<AnnotationRow[]>`
+    SELECT * FROM annotations
+     WHERE status = 'pending'
+       AND user_id = ${userId}
+       AND NULLIF(payload_raw->>'batch_id','') IS NOT NULL
+       AND payload_raw->>'batch_id' = ${rawBatchId}
+     ORDER BY received_at ASC
+  `
+  const out: Array<{ ann: AnnotationRow; mapping: RevanoteMapping | null; sessionId: string }> = []
+  for (const ann of rows) {
+    if (batchIdOf(ann) !== rawBatchId) continue
+    const { mapping, sessionId: sid } = await resolveMappingAndSession(userId, ann)
+    if (sid !== sessionId || (mapping?.id ?? null) !== (mappingId ?? null)) continue
+    out.push({ ann, mapping, sessionId: sid })
+  }
+  return out
+}
+
 async function dispatchBatch(
   userId: string,
   sessionId: string,
@@ -407,8 +445,19 @@ async function dispatchBatch(
       }
       if (batch && inFlightBatches.get(token) === batch) inFlightBatches.delete(token)
     },
+    // Generation binding (see dispatcher.ts): the envelope must echo THIS
+    // turn's dispatch id; a missing/different one is "not mine" -- the hook
+    // stays armed and the reply is dropped, never applied to these members.
     shouldFinalize(content) {
-      return ENVELOPE_RE.test(content)
+      if (!ENVELOPE_RE.test(content)) return false
+      const echoed = extractDispatchId(content)
+      const mine = mineRef?.dispatchId
+      if (mine && echoed === mine) return true
+      console.warn(
+        `[revanote.batch] reply dropped: dispatch_id ${echoed ? `"${echoed}"` : '(missing)'} is not batch=${mine ?? '(unsent)'} ` +
+          `session=${sessionId}`,
+      )
+      return false
     },
   }
 
@@ -420,8 +469,14 @@ async function dispatchBatch(
     hookMaxMs: ceilingMs,
     isOnline: (req) => getChannel(req.sessionId) != null,
     ensureOnline: (req) => ensureSessionOnline(req.userId, req.sessionId, { useSessionSkipPermissions: true }),
+    // Re-gather the batch's CURRENT pending members: the captured `group` is
+    // frozen at park time, and the grace dedupe (one entry per token) drops any
+    // later arrival of the same batch_id -- replaying the captured list would
+    // send Q1 alone and ship Q2 later as a second turn / second PR.
     replay: async () => {
-      await dispatchBatch(userId, sessionId, group)
+      const current = await gatherPendingBatchGroup(userId, sessionId, group[0].mapping?.id, rawBatchId)
+      if (current.length === 0) return
+      await dispatchBatch(userId, sessionId, current)
     },
     onParkExpire: async () => {
       for (const { ann } of group) {
@@ -452,6 +507,7 @@ async function dispatchBatch(
       const mine: InFlightBatch = {
         userId,
         sessionId,
+        dispatchId: randomUUID(),
         members: [],
         claimedIds: new Set(group.map((g) => g.ann.id)),
       }
@@ -481,12 +537,15 @@ async function dispatchBatch(
       claimedAnns = claimed.map((g) => g.ann)
       const promptBody = renderBatchAnnotationPrompt({
         items: claimed.map((g) => ({ annotation: g.ann, mapping: g.mapping })),
+        dispatchId: mine.dispatchId,
       })
       const storedContent = `[revanote: batch of ${claimedAnns.length}]\n\n${promptBody}`
       req.prompt = promptBody
 
       for (const ann of claimedAnns) {
         const run = await insertAnnotationRun({ annotation_id: ann.id, user_id: userId, session_id: sessionId })
+        // Generation binding: the member's finalize CAS keys on this run id.
+        await bindAnnotationRun(ann.id, run.id)
         mine.members.push({
           annotationId: ann.id,
           externalId: ann.annotation_id_external,
@@ -574,13 +633,15 @@ async function finalizeBatchReply(token: string, content: string): Promise<void>
   if (!batch) return
   const { userId, sessionId, members } = batch
 
-  const parsed = parseRevanoteBatchOutput(content)
+  const parsedRaw = parseRevanoteBatchOutput(content)
+  // Defence in depth behind shouldFinalize (the terminal-timeout path finalizes
+  // regardless): a reply echoing another turn's id is never applied to these
+  // members -- it finalizes them as an honest failure.
+  const foreign = parsedRaw.ok && parsedRaw.value.dispatch_id !== batch.dispatchId
+  const parsed = foreign
+    ? ({ ok: false, reason: 'dispatch_id_mismatch', detail: 'dispatch_id_mismatch' } as const)
+    : parsedRaw
   if (!parsed.ok) {
-    const failureEnvelope = envelopeForBatchItem({
-      resolved: false,
-      action_taken: `batch_parse_failed:${parsed.reason}`,
-      files_changed: [],
-    })
     await Promise.all(
       members.map((m) =>
         finalizeAnnotationReply({
@@ -589,7 +650,10 @@ async function finalizeBatchReply(token: string, content: string): Promise<void>
           annotationId: m.annotationId,
           userId,
           startedAt: m.startedAt,
-          content: failureEnvelope,
+          content: envelopeForBatchItem(
+            { resolved: false, action_taken: `batch_parse_failed:${parsed.reason}`, files_changed: [] },
+            m.runId,
+          ),
         }),
       ),
     )
@@ -602,6 +666,7 @@ async function finalizeBatchReply(token: string, content: string): Promise<void>
       const item = byExternalId.get(m.externalId)
       const envelope = envelopeForBatchItem(
         item ?? { resolved: false, action_taken: 'missing_from_reply', files_changed: [] },
+        m.runId,
       )
       return finalizeAnnotationReply({
         sessionId,
@@ -645,6 +710,6 @@ export function _seedInFlightBatchForTest(
   entry: { userId: string; sessionId: string; claimedIds: string[] },
 ): void {
   inFlightBatches.set(token, {
-    userId: entry.userId, sessionId: entry.sessionId, members: [], claimedIds: new Set(entry.claimedIds),
+    userId: entry.userId, sessionId: entry.sessionId, dispatchId: '', members: [], claimedIds: new Set(entry.claimedIds),
   })
 }

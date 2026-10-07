@@ -29,6 +29,7 @@ const state: {
   /** CAS outcome the mocked DAL returns; false = a concurrent writer changed the status. */
   casResult: boolean
   runs: any[]
+  cancelCalls: Array<{ id: string; reason: string }>
 } = {
   annotation: null,
   singleLive: false,
@@ -37,6 +38,7 @@ const state: {
   dispatchCalls: [],
   casResult: true,
   runs: [],
+  cancelCalls: [],
 }
 
 mock.module('../src/db/revanote-dal.ts', () => ({
@@ -45,6 +47,9 @@ mock.module('../src/db/revanote-dal.ts', () => ({
   listAnnotationRuns: async () => state.runs,
   updateAnnotationStatus: async (id: string, status: string, opts: any = {}) => {
     state.updateAnnotationStatusCalls.push({ id, status, opts })
+  },
+  cancelInFlightRunsForAnnotation: async (id: string, reason: string) => {
+    state.cancelCalls.push({ id, reason })
   },
   resetAnnotationToPendingIfStatus: async (id: string, expected: string, skip_reason: string) => {
     state.updateAnnotationStatusCalls.push({ id, status: 'pending', opts: { cas_expected: expected, skip_reason } })
@@ -55,6 +60,8 @@ mock.module('../src/db/revanote-dal.ts', () => ({
 mock.module('../src/dispatch/pipeline.ts', () => ({
   isTokenLive: (sessionId: string, _token: string) => state.singleLive && !!sessionId,
   isTokenLiveAnywhere: (_token: string) => state.singleLive,
+  // The real single-run hook ceiling (REMO_DISPATCH_HOOK_MAX_MS, default 2h).
+  hookMaxMsFromEnv: () => 7_200_000,
 }))
 
 mock.module('../src/revanote/batch-dispatch.ts', () => ({
@@ -89,6 +96,7 @@ beforeEach(() => {
   state.dispatchCalls = []
   state.casResult = true
   state.runs = []
+  state.cancelCalls = []
   state.annotation = {
     id: 'ann-1',
     user_id: USER_A,
@@ -211,12 +219,36 @@ describe('POST /api/revanote/annotations/:id/retry -- durable in-flight check (s
     expect(state.updateAnnotationStatusCalls).toHaveLength(0)
   })
 
-  test('8: in_flight run older than the single ceiling -> allowed, sent once', async () => {
+  test('8: in_flight run older than the single hook ceiling (2h) -> allowed, sent once', async () => {
     state.annotation.status = 'dispatched'
-    state.runs = [run('in_flight', 1_200_000 + 60_000)]
+    state.runs = [run('in_flight', 7_200_000 + 60_000)]
     const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
     expect(res.status).toBe(200)
     expect(state.dispatchCalls).toEqual(['ann-1'])
+  })
+
+  test('3: a 21-minute-old single in_flight run after a restart (empty maps) is still within the hook ceiling -> 409', async () => {
+    state.annotation.status = 'dispatched'
+    state.runs = [run('in_flight', 21 * 60_000)]
+    const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res.status).toBe(409)
+    expect(state.dispatchCalls).toHaveLength(0)
+    expect(state.cancelCalls).toHaveLength(0)
+  })
+
+  test('2: retry that resets a dispatched row closes the superseded in_flight run (superseded_by_retry)', async () => {
+    state.annotation.status = 'dispatched'
+    state.runs = [run('in_flight', 7_200_000 + 60_000)]
+    const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res.status).toBe(200)
+    expect(state.cancelCalls).toEqual([{ id: 'ann-1', reason: 'superseded_by_retry' }])
+  })
+
+  test('2: a refused retry (CAS lost) cancels nothing', async () => {
+    state.annotation.status = 'dispatched'
+    state.casResult = false
+    await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(state.cancelCalls).toHaveLength(0)
   })
 
   test('8: latest run terminal -> allowed', async () => {

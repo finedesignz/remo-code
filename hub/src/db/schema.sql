@@ -1176,6 +1176,12 @@ CREATE TABLE IF NOT EXISTS annotation_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_annotation_runs_annotation
   ON annotation_runs(annotation_id);
+-- fix/revanote-reliability -- dispatch-generation binding: the annotation_runs id
+-- of the dispatch that currently OWNS the row (set at send-time claim). The
+-- finalize write is a CAS on it, so a superseded dispatch (restart + retry) can
+-- never overwrite the newer one. Additive, idempotent; no backfill (NULL = no
+-- live owner).
+ALTER TABLE annotations ADD COLUMN IF NOT EXISTS current_run_id UUID;
 -- fix/revanote-verify-pushed — the pushed commit a "resolved" reply was
 -- verified against (NULL when the run was not resolved / not verified).
 ALTER TABLE annotation_runs ADD COLUMN IF NOT EXISTS commit_sha TEXT;

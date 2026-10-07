@@ -106,6 +106,7 @@ The hub renders a Markdown prompt and instructs Claude to end the reply with:
 ```
 <<JSON>>
 {
+  "dispatch_id": "<the dispatch id stated in the prompt, copied exactly>",
   "resolved": true,
   "action_taken": "short summary",
   "files_changed": ["a.tsx", "b.ts"],
@@ -117,6 +118,39 @@ The hub renders a Markdown prompt and instructs Claude to end the reply with:
 }
 <<END>>
 ```
+
+**Replies are bound to their dispatch generation (fix/revanote-reliability).** A reply used to be
+correlated only by session, so a late reply from an earlier dispatch (hub restart, then a retry or a
+redispatch of another annotation on the same session) finalized whatever hook was armed, and the old
+run's merged SHA could pass the NEW run's repo-level commit check. Now every dispatch has a
+GENERATION id and nothing is applied without it:
+
+- **Where it lives.** Single path: the `annotation_runs.id` that `open()` creates IS the dispatch id.
+  The prompt is rendered inside `deps.send` (after `open()`) so it can state it, and the claim
+  records it as `annotations.current_run_id` (additive `ADD COLUMN IF NOT EXISTS`, set by
+  `claimAnnotationsAtSend(ids, {annotationId: runId})`). Batch path: one fresh UUID per batch turn
+  (`InFlightBatch.dispatchId`, one top-level `dispatch_id` in the batch envelope); each member's run
+  row is bound with `bindAnnotationRun` right after its insert, and the member finalize uses the
+  member run id.
+- **Envelope.** `dispatch_id` is REQUIRED in `RevanoteResult` and `RevanoteBatchResult`
+  (`result-schema.ts`); the single and batch prompts state it and require it echoed. A reply without it
+  is `schema_invalid` if it ever reaches the parser.
+- **Mismatch handling.** The revanote `RunStore.shouldFinalize` hooks (single: `dispatcher.ts`; batch:
+  `batch-dispatch.ts`) require the envelope AND `extractDispatchId(content) === this dispatch's id`.
+  A missing or different id means "not mine": the hook stays ARMED, the reply is logged
+  (`reply dropped: dispatch_id ...`) and dropped, nothing is finalized. The shared pipeline is
+  unchanged (the existing `shouldFinalize` seam expresses this); its only touch is exporting
+  `hookMaxMsFromEnv()`. Defence in depth: the pipeline's terminal-timeout path finalizes regardless of
+  `shouldFinalize`, so `finalizeAnnotationReply` / `finalizeBatchReply` also refuse an envelope echoing
+  another generation (it finalizes as an honest failure, `dispatch_id_mismatch` /
+  `batch_parse_failed:dispatch_id_mismatch`, never adopting the foreign verdict).
+- **Finalize write is a CAS.** `updateAnnotationStatus(id, status, {if_run_id})` writes only
+  `WHERE status='dispatched' AND current_run_id = <this run>`. The annotation is written FIRST; a lost
+  CAS (a retry reset + re-claimed the row under a newer generation) writes nothing else: no run
+  `success`, no broadcast, no callback; the stale run is just closed `cancelled`. Retry of a
+  `dispatched` row also closes the superseded `in_flight` run (`cancelled`, `error='superseded_by_retry'`,
+  `cancelInFlightRunsForAnnotation`). Tests: `revanote-dispatch.test.ts`, `revanote-batch-dispatch.test.ts`,
+  `revanote-retry-guard.test.ts`, `revanote-result-schema.test.ts`, `revanote-prompt.test.ts`.
 
 **A resolve must stand on a pushed commit (fix/revanote-verify-pushed).** The agent's envelope is
 self-report, and the prompt telling it to push first is not a control: in 2026-09 comments were
@@ -134,7 +168,11 @@ may also be deleted). The check runs AFTER the merge gate, because the sandbox
 path pushes inside the gate. Any failure downgrades the reply to `resolved: false`,
 `deployed: false`, annotation `failed`, and the callback's `error` becomes
 `unverified_resolve:<reason>` — reasons: `commit_sha_missing`, `commit_sha_invalid`, `repo_unknown`,
-`no_github_installation`, `commit_not_pushed`, `commit_not_on_default_branch`, `verify_error`. Fail-closed:
+`no_github_installation`, `commit_not_pushed`, `commit_not_on_default_branch`, `commit_predates_dispatch`,
+`verify_error`. `commit_predates_dispatch`: any ancestor of the default branch passes the compare, so the
+commit's committer date (from the `GET commits/{sha}` response already fetched) must also be >= the
+annotation's `dispatched_at` (run `started_at` if that is not yet written) minus a 5-minute skew
+(`DISPATCH_CLOCK_SKEW_MS`); an unreadable date with a dispatch time set is `verify_error`. Fail-closed:
 an unverifiable resolve is rejected, never trusted. The verified sha is written to
 `annotation_runs.commit_sha` and sent as the callback's `commit_sha`. Escape hatch:
 `REMO_REVANOTE_REQUIRE_PUSHED_COMMIT=0|false|no|off` (default ON). The gate is the function
@@ -273,8 +311,16 @@ single-annotation path below.
   refuses a live token, so it cannot race. Callbacks/broadcasts fire only when the CAS transitioned.
 - **Retry of a `dispatched` row uses durable state** (`POST /annotations/:id/retry`): beyond the
   in-memory liveness maps (empty after a restart), it is refused `409 annotation_in_flight` while the
-  latest `annotation_runs` row is `in_flight` and younger than its ceiling (`REVANOTE_FINALIZE_TIMEOUT_MS`
-  for single runs, `REMO_REVANOTE_BATCH_RUN_MAX_MS` for batch members).
+  latest `annotation_runs` row is `in_flight` and younger than the REAL hook lifetime: for single runs
+  `REMO_DISPATCH_HOOK_MAX_MS` (default 2h, `hookMaxMsFromEnv()`; NOT the 20min narration timeout
+  `REVANOTE_FINALIZE_TIMEOUT_MS`, which only decides when the next message force-finalizes), for batch
+  members `REMO_REVANOTE_BATCH_RUN_MAX_MS`. After a successful reset the superseded `in_flight` run is
+  closed (`superseded_by_retry`).
+- **Offline grace replay re-gathers the batch.** A batch parked offline is registered once per token, so a
+  later arrival with the same `batch_id` is deduped away. The replay therefore no longer re-sends the
+  captured member list: it re-reads the CURRENT pending members of that (user, session, mapping,
+  batch_id) group from the DB at reconnect time (`gatherPendingBatchGroup`), so Q1 + Q2 ship as ONE
+  prompt, not as two turns/PRs.
 - **Batch dispatch token scoping (qcfix/batch-claim, C3)**: a batch's dispatch token (and the
   `inFlightBatches` map key) is `batch:<userId>:<sessionId>:<mappingId>:<batch_id>`, never the raw
   `batch_id` alone. One `batch_id` can legitimately split into several dispatched groups (a
@@ -421,7 +467,7 @@ Lifecycle events broadcast to all clients of the user (use `subscribe` from `use
 | `users.revanote_webhook_secret` | Single UUID — URL token + HMAC key + outbound Bearer. |
 | `users.revanote_budget_pct` | Per-source daily-cap fraction (1..100, default 60). |
 | `revanote_app_mappings` | Hostname pattern → repo_path + deploy strategy. |
-| `annotations` | Durable record of every inbound annotation. UNIQUE `(user_id, annotation_id_external)`. |
+| `annotations` | Durable record of every inbound annotation. UNIQUE `(user_id, annotation_id_external)`. `current_run_id` = the dispatch generation that owns the row (finalize CAS key). |
 | `annotation_runs` | One row per Claude turn that processed an annotation. |
 | `revanote_callback_attempts` | Retry queue. `next_retry_at IS NULL` = terminal (delivered or dead). |
 | `revanote_webhook_attempts` | Audit log (capped 100/user). |

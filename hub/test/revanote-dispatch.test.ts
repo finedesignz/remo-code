@@ -96,6 +96,8 @@ const state: {
   onOpen: (() => Promise<void>) | null
   // single-path markSkipped CAS outcome (false = a concurrent dispatch already resolved the row).
   failCas: boolean
+  // Generation binding: annotation id -> current_run_id the send-time claim recorded.
+  currentRun: Record<string, string>
 } = {
   runs: [], annStatus: [], broadcasts: [], sentFrames: [], callbacks: [],
   budgetPct: 60, todayCost: 0, costCap: 10,
@@ -106,6 +108,7 @@ const state: {
   claimed: null,
   onOpen: null,
   failCas: true,
+  currentRun: {},
 }
 
 let runSeq = 0
@@ -128,6 +131,8 @@ mock.module('../src/db/postgres.ts', () => ({
     if (text.includes("SET status = 'dispatched'")) {
       const ids: string[] = values[0] ?? []
       state.claimCalls.push(...ids)
+      // Generation binding: values[1] is the {annotation id -> run id} JSON map.
+      if (typeof values[1] === 'string') Object.assign(state.currentRun, JSON.parse(values[1]))
       if (state.claimed) {
         const won = ids.filter((id) => !state.claimed!.has(id))
         for (const id of won) state.claimed.add(id)
@@ -160,8 +165,11 @@ mock.module('../src/db/revanote-dal.ts', () => ({
     if (run) Object.assign(run, patch)
     return run ?? null
   },
+  // Models the finalize CAS: `if_run_id` only wins while it is the row's current generation.
   updateAnnotationStatus: async (id: string, status: string, opts: any = {}) => {
+    if (opts.if_run_id && state.currentRun[id] !== opts.if_run_id) return false
     state.annStatus.push({ id, status, opts })
+    return true
   },
   // CAS helpers (real SQL: conditional UPDATEs) -- rows here are always in the expected state.
   parkAnnotationOfflineIfPending: async (id: string, session_id: string | null) => {
@@ -198,7 +206,7 @@ mock.module('../src/revanote/commit-verify.ts', () => ({
   realGithubGet: async (_i: number, path: string) => {
     if (/\/repos\/[^/]+\/[^/]+$/.test(path)) return { default_branch: 'main' }
     if (path.includes('/compare/')) return { status: 'identical' }
-    return { sha: 'c0ffee'.padEnd(40, '0') }
+    return { sha: 'c0ffee'.padEnd(40, '0'), commit: { committer: { date: new Date(Date.now() + 1000).toISOString() } } }
   },
 }))
 
@@ -234,7 +242,7 @@ mock.module('../src/auth/github-app.ts', () => ({
   githubApiRequest: async (_installationId: number, _method: string, path: string) => {
     if (/\/repos\/[^/]+\/[^/]+$/.test(path)) return { default_branch: 'main' }
     if (path.includes('/compare/')) return { status: 'identical' }
-    return { sha: 'realsha123' }
+    return { sha: 'realsha123', commit: { committer: { date: new Date(Date.now() + 1000).toISOString() } } }
   },
   GitHubApiError: class GitHubApiError extends Error {
     status: number
@@ -281,6 +289,7 @@ beforeEach(() => {
   state.claimed = null
   state.onOpen = null
   state.failCas = true
+  state.currentRun = {}
   runSeq = 0
   _reset()
 })
@@ -311,7 +320,7 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     expect(state.callbacks).toHaveLength(0)
 
     // Agent replies with an envelope → onSessionReply finalizes.
-    await onSessionReply('sess-1', 'Done.\n<<JSON>>\n{"resolved":true,"action_taken":"fixed button","files_changed":["a.tsx"],"commit_sha":"c0ffee1","deployed":true}\n<<END>>')
+    await onSessionReply('sess-1', 'Done.\n<<JSON>>\n{"dispatch_id":"run-1","resolved":true,"action_taken":"fixed button","files_changed":["a.tsx"],"commit_sha":"c0ffee1","deployed":true}\n<<END>>')
 
     // run finalized success + resolved.
     expect(state.runs[0].status).toBe('success')
@@ -344,7 +353,7 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
     expect(state.runs).toHaveLength(1) // still one — queued waiter has NOT opened
 
     // First reply finalizes head + promotes waiter → re-dispatch opens run #2.
-    await onSessionReply('sess-1', '<<JSON>>{"resolved":true}<<END>>')
+    await onSessionReply('sess-1', '<<JSON>>{"dispatch_id":"run-1","resolved":true}<<END>>')
     expect(state.runs).toHaveLength(2)
     expect(state.runs[1].id).toBe('run-2')
   })
@@ -400,6 +409,67 @@ describe('revanote dispatch adapter — Q3 lost send-time claim race', () => {
     expect(state.runs[0]).toMatchObject({ status: 'cancelled', error: 'lost_claim_race' }) // ...is closed out
     expect(state.annStatus.some((s) => s.id === 'ann-1' && s.status === 'failed')).toBe(false)
     expect(out.status).not.toBe('dispatched')
+  })
+})
+
+const env = (runId: string, extra: Record<string, unknown> = {}) =>
+  `<<JSON>>
+${JSON.stringify({ dispatch_id: runId, resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1', ...extra })}
+<<END>>`
+
+describe('revanote dispatch adapter -- reply bound to its dispatch generation (late reply must not finalize a newer dispatch)', () => {
+  afterAll(() => mock.restore())
+
+  test('A dispatched, hub restart (_reset), B dispatched on the same session: a late reply for A does NOT finalize B; the reply for B does', async () => {
+    await dispatchPendingAnnotation('ann-1') // run-1
+    _reset() // restart: A's hook is gone, B can take the session
+    await dispatchPendingAnnotation('ann-2') // run-2
+    expect(state.runs.map((r) => r.id)).toEqual(['run-1', 'run-2'])
+
+    await onSessionReply('sess-1', env('run-1'))
+    expect(state.annStatus.some((s) => s.id === 'ann-2' && s.status === 'resolved')).toBe(false)
+    expect(state.runs[1].status).toBe('in_flight')
+    expect(state.callbacks).toHaveLength(0)
+
+    await onSessionReply('sess-1', env('run-2'))
+    expect(state.annStatus.some((s) => s.id === 'ann-2' && s.status === 'resolved')).toBe(true)
+    expect(state.runs[1].status).toBe('success')
+  })
+
+  test('an envelope with no dispatch_id is "not mine": the hook stays armed', async () => {
+    await dispatchPendingAnnotation('ann-1')
+    await onSessionReply('sess-1', '<<JSON>>{"resolved":true,"commit_sha":"c0ffee1"}<<END>>')
+    expect(state.runs[0].status).toBe('in_flight')
+    expect(state.callbacks).toHaveLength(0)
+    await onSessionReply('sess-1', env('run-1'))
+    expect(state.runs[0].status).toBe('success')
+  })
+
+  test('terminal-timeout path: a FOREIGN-id envelope is never applied -- run finalizes failed, annotation not resolved', async () => {
+    process.env.REVANOTE_FINALIZE_TIMEOUT_MS = '1'
+    try {
+      await dispatchPendingAnnotation('ann-1')
+      await new Promise((r) => setTimeout(r, 15))
+      await onSessionReply('sess-1', env('some-other-run'))
+    } finally {
+      delete process.env.REVANOTE_FINALIZE_TIMEOUT_MS
+    }
+    expect(state.annStatus.some((s) => s.status === 'resolved')).toBe(false)
+    expect(state.callbacks[0]?.payload.resolved).toBe(false)
+  })
+
+  test('the claim records the dispatch generation (current_run_id) for the claimed annotation', async () => {
+    await dispatchPendingAnnotation('ann-1')
+    expect(state.currentRun['ann-1']).toBe('run-1')
+  })
+
+  test('finalize write is a CAS on the generation: a retry that took the row over (new current_run_id) makes the OLD finalize a no-op (no annotation write, no callback, no broadcast)', async () => {
+    await dispatchPendingAnnotation('ann-1') // run-1
+    state.currentRun['ann-1'] = 'run-2' // retry reset + re-claimed under a newer generation
+    await onSessionReply('sess-1', env('run-1'))
+    expect(state.annStatus.some((s) => s.id === 'ann-1' && (s.status === 'resolved' || s.status === 'failed'))).toBe(false)
+    expect(state.callbacks).toHaveLength(0)
+    expect(state.broadcasts.some((b) => b.type === 'revanote_resolved')).toBe(false)
   })
 })
 

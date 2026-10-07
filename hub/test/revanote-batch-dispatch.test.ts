@@ -280,6 +280,11 @@ mock.module('../src/db/revanote-dal.ts', () => ({
     return true
   },
   setAnnotationMappingId: async () => {},
+  // Real SQL: UPDATE ... SET current_run_id WHERE status = 'dispatched'.
+  bindAnnotationRun: async (id: string, runId: string) => {
+    const ann = state.pendingAnnotations.find((a) => a.id === id)
+    if (ann && ann.status === 'dispatched') ann.current_run_id = runId
+  },
   insertAnnotationRun: async (opts: any) => {
     if (state.onInsertRun) {
       const hook = state.onInsertRun
@@ -297,6 +302,11 @@ mock.module('../src/db/revanote-dal.ts', () => ({
     return run ?? null
   },
   updateAnnotationStatus: async (id: string, status: string, opts: any = {}) => {
+    // Finalize CAS: only the row's current generation, still 'dispatched', may write.
+    if (opts.if_run_id) {
+      const cur = state.pendingAnnotations.find((a) => a.id === id)
+      if (cur && (cur.status !== 'dispatched' || (cur.current_run_id ?? opts.if_run_id) !== opts.if_run_id)) return false
+    }
     if (status === 'dispatched') {
       state.dispatchedCallCount++
       if (state.crashOnNthDispatchedCall != null && state.dispatchedCallCount === state.crashOnNthDispatchedCall) {
@@ -306,6 +316,7 @@ mock.module('../src/db/revanote-dal.ts', () => ({
     state.annStatus.push({ id, status, opts })
     const ann = state.pendingAnnotations.find((a) => a.id === id)
     if (ann) ann.status = status
+    return true
   },
 }))
 
@@ -350,7 +361,7 @@ mock.module('../src/revanote/commit-verify.ts', () => ({
   realGithubGet: async (_i: number, path: string) => {
     if (/\/repos\/[^/]+\/[^/]+$/.test(path)) return { default_branch: 'main' }
     if (path.includes('/compare/')) return { status: 'identical' }
-    return { sha: 'c0ffee1'.padEnd(40, '0') }
+    return { sha: 'c0ffee1'.padEnd(40, '0'), commit: { committer: { date: new Date(Date.now() + 1000).toISOString() } } }
   },
 }))
 
@@ -358,7 +369,7 @@ mock.module('../src/auth/github-app.ts', () => ({
   githubApiRequest: async (_installationId: number, _method: string, path: string) => {
     if (/\/repos\/[^/]+\/[^/]+$/.test(path)) return { default_branch: 'main' }
     if (path.includes('/compare/')) return { status: 'identical' }
-    return { sha: 'c0ffee1' }
+    return { sha: 'c0ffee1', commit: { committer: { date: new Date(Date.now() + 1000).toISOString() } } }
   },
   GitHubApiError: class GitHubApiError extends Error {
     status: number
@@ -429,6 +440,9 @@ beforeEach(() => {
 function envAgo(ms: number): string {
   return new Date(Date.now() - ms).toISOString()
 }
+
+/** The dispatch id the hub told the agent (in frame `i`) to echo in its reply envelope. */
+const frameDispatchId = (i = 0): string => /"dispatch_id": "([^"]+)"/.exec(state.sentFrames[i].content)![1]
 
 describe('revanote batch dispatch — coalescing', () => {
   afterAll(() => {
@@ -566,7 +580,7 @@ describe('revanote batch dispatch — coalescing', () => {
     // it and the pipeline sends for that promoted request DIRECTLY, without
     // ever re-checking the annotation's current DB status -- a second,
     // fully redundant dispatch for the same annotation.
-    const finalizeEnvelope = ['<<JSON>>', JSON.stringify({ resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1' }), '<<END>>'].join('\n')
+    const finalizeEnvelope = ['<<JSON>>', JSON.stringify({ dispatch_id: frameDispatchId(), resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1' }), '<<END>>'].join('\n')
     await onSessionReply('sess-1', finalizeEnvelope)
 
     expect(state.sentFrames.length).toBe(1) // still just the one -- no promoted duplicate send
@@ -599,6 +613,7 @@ describe('revanote batch dispatch — finalize', () => {
     const envelope =
       '<<JSON>>\n' +
       JSON.stringify({
+        dispatch_id: frameDispatchId(),
         annotations: [
           { annotation_id: 'ext-1', resolved: true, action_taken: 'fixed', files_changed: ['a.tsx'], commit_sha: 'c0ffee1', deployed: true },
           { annotation_id: 'ext-2', resolved: true, action_taken: 'fixed', files_changed: ['b.tsx'], commit_sha: 'c0ffee1', deployed: true },
@@ -623,6 +638,7 @@ describe('revanote batch dispatch — finalize', () => {
     const envelope =
       '<<JSON>>\n' +
       JSON.stringify({
+        dispatch_id: frameDispatchId(),
         annotations: [
           { annotation_id: 'ext-1', resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1', deployed: true },
           { annotation_id: 'ext-2', resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1', deployed: true },
@@ -643,7 +659,7 @@ describe('revanote batch dispatch — finalize', () => {
     // Envelope markers present (so the pipeline's shouldFinalize gate actually
     // finalizes this turn) but the JSON body is garbage -- mirrors the single
     // path's `invalid_json` fallback.
-    await onSessionReply('sess-1', '<<JSON>>\nthis is not valid json at all\n<<END>>')
+    await onSessionReply('sess-1', `<<JSON>>\n{"dispatch_id": "${frameDispatchId()}", this is not valid json at all\n<<END>>`)
 
     for (const id of ['ann-1', 'ann-2', 'ann-3']) {
       expect(state.annStatus.some((s) => s.id === id && s.status === 'failed')).toBe(true)
@@ -672,7 +688,7 @@ describe('revanote batch dispatch — finalize', () => {
     // array), and the failure path must NEVER hand `content` to the single-item
     // parser -- that parser happily accepts this exact shape and would resolve
     // every member true from one verdict.
-    const singleObjectReply = '<<JSON>>\n' + JSON.stringify({ resolved: true, commit_sha: 'c0ffee1' }) + '\n<<END>>'
+    const singleObjectReply = '<<JSON>>\n' + JSON.stringify({ dispatch_id: frameDispatchId(), resolved: true, commit_sha: 'c0ffee1' }) + '\n<<END>>'
     await onSessionReply('sess-1', singleObjectReply)
 
     for (const id of ['ann-1', 'ann-2', 'ann-3']) {
@@ -815,7 +831,7 @@ describe('revanote batch dispatch — per-target isolation (C3/C5)', () => {
     // collide the two `inFlightBatches` entries and misroute/orphan one).
     const envelopeFor = (extId: string) =>
       '<<JSON>>\n' +
-      JSON.stringify({ annotations: [{ annotation_id: extId, resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1', deployed: true }] }) +
+      JSON.stringify({ dispatch_id: frameDispatchId(state.sentFrames.findIndex((f) => f.content.includes(extId))), annotations: [{ annotation_id: extId, resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1', deployed: true }] }) +
       '\n<<END>>'
 
     await onSessionReply('sess-a', envelopeFor('ext-a1'))
@@ -862,6 +878,7 @@ describe('revanote batch dispatch — per-target isolation (C3/C5)', () => {
 
     const firstIsUntrusted = state.sentFrames[0].content.includes('ext-untrusted')
     const finalizeJson = JSON.stringify({
+      dispatch_id: frameDispatchId(),
       annotations: [
         {
           annotation_id: firstIsUntrusted ? 'ext-untrusted' : 'ext-trusted',
@@ -890,6 +907,85 @@ describe('revanote batch dispatch — per-target isolation (C3/C5)', () => {
   })
 })
 
+
+describe('revanote batch dispatch -- reply bound to its dispatch generation', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  const batchRows2 = (n: number, batch = 'bg') =>
+    Array.from({ length: n }, (_, i) =>
+      makeAnnotation({
+        id: `g${i}`,
+        annotation_id_external: `ext-g${i}`,
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo', batch_id: batch },
+        received_at: envAgo(batchDebounceMs() + 1000),
+      }),
+    )
+  const byId = (id: string) => state.pendingAnnotations.find((a) => a.id === id)
+  const itemFor = (extId: string) => ({ annotation_id: extId, resolved: true, action_taken: 'fixed', files_changed: [], commit_sha: 'c0ffee1' })
+
+  test('a batch reply echoing a FOREIGN dispatch_id (or none) is not mine: members stay dispatched, hook stays armed; the right id finalizes', async () => {
+    state.pendingAnnotations = batchRows2(2)
+    await sweepBatchDispatch()
+    const mine = frameDispatchId()
+    const reply = (id: string | undefined) =>
+      '<<JSON>>\n' + JSON.stringify({ ...(id ? { dispatch_id: id } : {}), annotations: [itemFor('ext-g0'), itemFor('ext-g1')] }) + '\n<<END>>'
+
+    await onSessionReply('sess-1', reply('some-other-generation'))
+    await onSessionReply('sess-1', reply(undefined))
+    expect(state.annStatus.some((s) => s.status === 'resolved' || s.status === 'failed')).toBe(false)
+    expect(state.callbacks).toHaveLength(0)
+
+    await onSessionReply('sess-1', reply(mine))
+    expect(state.annStatus.filter((s) => s.status === 'resolved').map((s) => s.id).sort()).toEqual(['g0', 'g1'])
+  })
+
+  test('member finalize is a CAS on the member generation: a retry-reclaimed member (new current_run_id) is not overwritten by the old batch reply', async () => {
+    state.pendingAnnotations = batchRows2(2)
+    await sweepBatchDispatch()
+    byId('g0').current_run_id = 'run-from-a-newer-dispatch'
+    await onSessionReply('sess-1', '<<JSON>>\n' + JSON.stringify({ dispatch_id: frameDispatchId(), annotations: [itemFor('ext-g0'), itemFor('ext-g1')] }) + '\n<<END>>')
+    expect(state.annStatus.some((s) => s.id === 'g0' && s.status === 'resolved')).toBe(false)
+    expect(state.annStatus.some((s) => s.id === 'g1' && s.status === 'resolved')).toBe(true)
+    expect(state.callbacks.map((c) => c.ann_id)).toEqual(['g1'])
+  })
+})
+
+describe('revanote batch dispatch -- grace replay re-gathers the CURRENT batch members', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  test('Q1 parks offline, Q2 (same batch_id) joins while parked, reconnect: ONE prompt containing [Q1, Q2]', async () => {
+    const mk = (n: number) =>
+      makeAnnotation({
+        id: `q${n}`,
+        annotation_id_external: `ext-q${n}`,
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo', batch_id: 'bjoin' },
+        received_at: envAgo(batchDebounceMs() + 1000),
+      })
+    state.pendingAnnotations = [mk(1)]
+    state.offlineSessions.add('sess-1')
+    await sweepBatchDispatch() // parks [Q1]
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(1)
+
+    state.pendingAnnotations.push(mk(2)) // Q2 arrives while the session is offline
+    await sweepBatchDispatch() // still offline: grace entry already holds the token -> skipped
+    expect(state.sentFrames).toHaveLength(0)
+
+    state.offlineSessions.delete('sess-1') // reconnect
+    await getGraceBuffer().drain('sess-1')
+
+    expect(state.sentFrames).toHaveLength(1)
+    expect(state.sentFrames[0].content).toContain('ext-q1')
+    expect(state.sentFrames[0].content).toContain('ext-q2')
+    for (const id of ['q1', 'q2']) expect(state.pendingAnnotations.find((a) => a.id === id)!.status).toBe('dispatched')
+    expect(state.runs).toHaveLength(2)
+  })
+})
 
 describe('revanote batch dispatch — Q1 retry vs batch send race', () => {
   afterAll(() => {

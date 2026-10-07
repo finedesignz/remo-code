@@ -62,6 +62,8 @@ export interface AnnotationRow {
   received_at: string
   dispatched_at: string | null
   resolved_at: string | null
+  /** annotation_runs id of the dispatch that currently owns this row (generation binding). */
+  current_run_id?: string | null
 }
 
 export interface AnnotationRunRow {
@@ -409,18 +411,40 @@ export async function updateAnnotationStatus(
     mapping_id?: string | null
     dispatched_at?: Date | null
     resolved_at?: Date | null
+    /**
+     * Generation CAS (finalize): write ONLY while the row is still 'dispatched'
+     * AND `current_run_id` is this run -- a retry that reset + re-claimed the row
+     * owns a newer generation and this write must lose.
+     */
+    if_run_id?: string | null
   } = {},
-): Promise<void> {
-  await sql`
-    UPDATE annotations
-       SET status = ${status},
-           skip_reason = COALESCE(${opts.skip_reason ?? null}, skip_reason),
-           session_id = COALESCE(${opts.session_id ?? null}, session_id),
-           mapping_id = COALESCE(${opts.mapping_id ?? null}, mapping_id),
-           dispatched_at = COALESCE(${opts.dispatched_at ?? null}, dispatched_at),
-           resolved_at = COALESCE(${opts.resolved_at ?? null}, resolved_at)
-     WHERE id = ${id}
-  `
+): Promise<boolean> {
+  const rows = opts.if_run_id
+    ? await sql<{ id: string }[]>`
+        UPDATE annotations
+           SET status = ${status},
+               skip_reason = COALESCE(${opts.skip_reason ?? null}, skip_reason),
+               session_id = COALESCE(${opts.session_id ?? null}, session_id),
+               mapping_id = COALESCE(${opts.mapping_id ?? null}, mapping_id),
+               dispatched_at = COALESCE(${opts.dispatched_at ?? null}, dispatched_at),
+               resolved_at = COALESCE(${opts.resolved_at ?? null}, resolved_at)
+         WHERE id = ${id}
+           AND status = 'dispatched'
+           AND current_run_id = ${opts.if_run_id}
+        RETURNING id
+      `
+    : await sql<{ id: string }[]>`
+        UPDATE annotations
+           SET status = ${status},
+               skip_reason = COALESCE(${opts.skip_reason ?? null}, skip_reason),
+               session_id = COALESCE(${opts.session_id ?? null}, session_id),
+               mapping_id = COALESCE(${opts.mapping_id ?? null}, mapping_id),
+               dispatched_at = COALESCE(${opts.dispatched_at ?? null}, dispatched_at),
+               resolved_at = COALESCE(${opts.resolved_at ?? null}, resolved_at)
+         WHERE id = ${id}
+        RETURNING id
+      `
+  return rows.length > 0
 }
 
 /**
@@ -573,16 +597,42 @@ export async function resetAnnotationToPendingIfStatus(
  * elsewhere and MUST NOT send for it (throw before building/broadcasting any
  * prompt — see dispatcher.ts / batch-dispatch.ts `send()`).
  */
-export async function claimAnnotationsAtSend(ids: string[]): Promise<string[]> {
+export async function claimAnnotationsAtSend(
+  ids: string[],
+  /** annotation id -> annotation_runs id of THIS dispatch; recorded as `current_run_id` (generation binding). */
+  runIds: Record<string, string> = {},
+): Promise<string[]> {
   if (ids.length === 0) return []
   const rows = await sql<{ id: string }[]>`
     UPDATE annotations
-       SET status = 'dispatched'
-     WHERE id = ANY(${ids})
-       AND status = 'pending'
-     RETURNING id
+       SET status = 'dispatched',
+           current_run_id = (x.m ->> annotations.id::text)::uuid
+      FROM (SELECT ${ids}::uuid[] AS ids, ${JSON.stringify(runIds)}::text::jsonb AS m) x
+     WHERE annotations.id = ANY(x.ids)
+       AND annotations.status = 'pending'
+     RETURNING annotations.id
   `
   return rows.map((r) => r.id)
+}
+
+/**
+ * Bind a claimed row to its dispatch generation (batch path: the member run row
+ * is inserted AFTER the claim). Only while the row is still 'dispatched'.
+ */
+export async function bindAnnotationRun(id: string, runId: string): Promise<void> {
+  await sql`UPDATE annotations SET current_run_id = ${runId} WHERE id = ${id} AND status = 'dispatched'`
+}
+
+/**
+ * Retry: close the superseded dispatch's still-open run(s) so a stale in_flight
+ * run is never mistaken for a live owner.
+ */
+export async function cancelInFlightRunsForAnnotation(annotationId: string, reason: string): Promise<void> {
+  await sql`
+    UPDATE annotation_runs
+       SET status = 'cancelled', error = ${reason}, finished_at = now()
+     WHERE annotation_id = ${annotationId} AND status = 'in_flight'
+  `
 }
 
 // ── Annotation runs ──────────────────────────────────────────────────────────

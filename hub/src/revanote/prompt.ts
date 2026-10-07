@@ -46,10 +46,12 @@ export function storagePrefix(comment: string): string {
 interface PromptOpts {
   annotation: AnnotationRow
   mapping: RevanoteMapping | null
+  /** This dispatch's generation id (its annotation_runs id); the reply envelope must echo it. */
+  dispatchId: string
 }
 
 export function renderAnnotationPrompt(opts: PromptOpts): string {
-  const { annotation: a, mapping: m } = opts
+  const { annotation: a, mapping: m, dispatchId } = opts
   const replies = Array.isArray(a.replies_json) ? a.replies_json : []
   const repliesText = replies.length
     ? replies
@@ -181,10 +183,13 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
     ``,
     `When you are done (resolved OR clarification needed), end your reply with a`,
     `machine-readable JSON envelope so the hub can post a callback. Use exactly`,
-    `this format on its own lines (no markdown fences inside the envelope):`,
+    `this format on its own lines (no markdown fences inside the envelope).`,
+    `"dispatch_id" is REQUIRED and must be copied EXACTLY as shown (it identifies`,
+    `this dispatch; a reply without it, or with a different one, is discarded):`,
     ``,
     `<<JSON>>`,
     `{`,
+    `  "dispatch_id": "${dispatchId}",`,
     `  "resolved": true,`,
     `  "action_taken": "short summary of what you did",`,
     ...assumptionEnvelopeLine,
@@ -237,8 +242,8 @@ interface BatchPromptItem {
  * validate that precondition; it mirrors `renderAnnotationPrompt`'s
  * per-mapping trust gate for whatever single mapping the caller guarantees.
  */
-export function renderBatchAnnotationPrompt(opts: { items: BatchPromptItem[] }): string {
-  const { items } = opts
+export function renderBatchAnnotationPrompt(opts: { items: BatchPromptItem[]; dispatchId: string }): string {
+  const { items, dispatchId } = opts
   const first = items[0]
   const trusted = first?.mapping?.trusted === true
   const deployStrategy = trusted ? (first?.mapping?.deploy_strategy ?? 'pr') : 'pr'
@@ -328,10 +333,13 @@ export function renderBatchAnnotationPrompt(opts: { items: BatchPromptItem[] }):
     `When you are done with ALL comments above (each resolved OR needing`,
     `clarification), end your reply with ONE machine-readable JSON envelope`,
     `covering every annotation id, on its own lines (no markdown fences inside`,
-    `the envelope):`,
+    `the envelope). The top-level "dispatch_id" is REQUIRED and must be copied`,
+    `EXACTLY as shown (it identifies this dispatch; a reply without it, or with a`,
+    `different one, is discarded):`,
     ``,
     `<<JSON>>`,
     `{`,
+    `  "dispatch_id": "${dispatchId}",`,
     `  "annotations": [`,
     `    {`,
     `      "annotation_id": "<the Annotation id from above>",`,

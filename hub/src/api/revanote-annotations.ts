@@ -83,14 +83,16 @@ revanoteAnnotations.post('/:id/retry', async (c) => {
     // DURABLE liveness: the in-memory maps above are empty after a hub restart
     // while the supervisor runner may still be working the prompt. Refuse unless
     // the latest run is terminal (or there is none), or its in_flight run has
-    // outlived its ceiling (batch runs get the batch ceiling).
+    // outlived its ceiling. The ceiling is the REAL hook lifetime: a single
+    // run's finalize hook lives until REMO_DISPATCH_HOOK_MAX_MS (not the 20min
+    // narration timeout), a batch run's until REMO_REVANOTE_BATCH_RUN_MAX_MS.
     const { listAnnotationRuns } = await import('../db/revanote-dal.ts')
-    const { singleRunMaxMs } = await import('../revanote/dispatcher.ts')
+    const { hookMaxMsFromEnv } = await import('../dispatch/pipeline.ts')
     const { batchRunMaxMs } = await import('../revanote/batch-dispatch.ts')
     const latest = (await listAnnotationRuns(ann.id, userId))[0]
     if (latest && latest.status === 'in_flight') {
       const isBatch = typeof (ann.payload_raw as any)?.batch_id === 'string' && (ann.payload_raw as any).batch_id !== ''
-      const ceiling = isBatch ? batchRunMaxMs() : singleRunMaxMs()
+      const ceiling = isBatch ? batchRunMaxMs() : hookMaxMsFromEnv()
       if (Date.now() - new Date(latest.started_at as any).getTime() < ceiling) {
         return c.json(
           { error: 'annotation_in_flight', detail: 'an in-flight run for this annotation is within its ceiling' },
@@ -103,7 +105,7 @@ revanoteAnnotations.post('/:id/retry', async (c) => {
   // Reset to pending so the dispatcher will accept the row.
   // CAS on the status we observed: if a concurrent claim/finalize moved the
   // row since, the reset is refused (409) rather than forcing a second send.
-  const { resetAnnotationToPendingIfStatus } = await import('../db/revanote-dal.ts')
+  const { resetAnnotationToPendingIfStatus, cancelInFlightRunsForAnnotation } = await import('../db/revanote-dal.ts')
   const reset = await resetAnnotationToPendingIfStatus(id, ann.status, 'manual_retry')
   if (!reset) {
     return c.json(
@@ -111,6 +113,10 @@ revanoteAnnotations.post('/:id/retry', async (c) => {
       409,
     )
   }
+  // The reset superseded the previous dispatch: close its still-open run so it
+  // is never mistaken for a live owner (its late finalize also loses the
+  // generation CAS on the annotation row).
+  if (ann.status === 'dispatched') await cancelInFlightRunsForAnnotation(id, 'superseded_by_retry')
   const { dispatchPendingAnnotation } = await import('../revanote/dispatcher.ts')
   // forceSingle: a human explicitly retrying ONE comment dispatches it right
   // away, even when it carries a batch_id — it never waits on the batch

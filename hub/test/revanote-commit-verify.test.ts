@@ -90,6 +90,38 @@ describe('verifyPushedCommit', () => {
   })
 })
 
+describe('verifyPushedCommit -- commit must not predate the dispatch (commit_predates_dispatch)', () => {
+  const DISPATCHED = new Date('2026-10-01T12:00:00Z')
+  const withCommitDate = (iso: string | undefined) =>
+    remote('behind', (p) =>
+      p.includes('/commits/') ? { sha: SHA, commit: { committer: iso ? { date: iso } : {} } } : undefined)
+
+  test('an ancestor of main that landed months before the dispatch is rejected', async () => {
+    const r = await verifyPushedCommit({ ...base, dispatchedAt: DISPATCHED }, withCommitDate('2026-06-01T09:00:00Z'))
+    expect(r).toMatchObject({ ok: false, reason: 'commit_predates_dispatch' })
+  })
+
+  test('a commit made after the dispatch passes', async () => {
+    const r = await verifyPushedCommit({ ...base, dispatchedAt: DISPATCHED }, withCommitDate('2026-10-01T12:30:00Z'))
+    expect(r.ok).toBe(true)
+  })
+
+  test('within the 5-minute clock skew still passes; beyond it is rejected', async () => {
+    expect((await verifyPushedCommit({ ...base, dispatchedAt: DISPATCHED }, withCommitDate('2026-10-01T11:56:00Z'))).ok).toBe(true)
+    expect(await verifyPushedCommit({ ...base, dispatchedAt: DISPATCHED }, withCommitDate('2026-10-01T11:54:00Z')))
+      .toMatchObject({ ok: false, reason: 'commit_predates_dispatch' })
+  })
+
+  test('dispatchedAt given but the commit date is unreadable -> fail closed (verify_error)', async () => {
+    const r = await verifyPushedCommit({ ...base, dispatchedAt: DISPATCHED }, withCommitDate(undefined))
+    expect(r).toMatchObject({ ok: false, reason: 'verify_error' })
+  })
+
+  test('no dispatchedAt -> the date check is skipped (unchanged behavior)', async () => {
+    expect((await verifyPushedCommit(base, withCommitDate('2020-01-01T00:00:00Z'))).ok).toBe(true)
+  })
+})
+
 // ── finalize path ────────────────────────────────────────────────────────────
 const runUpdates: any[] = []
 const statusUpdates: any[] = []
@@ -97,12 +129,13 @@ const callbacks: any[] = []
 
 mock.module('../src/db/revanote-dal.ts', () => ({
   updateAnnotationRun: async (id: string, patch: any) => void runUpdates.push({ id, ...patch }),
-  updateAnnotationStatus: async (id: string, status: string, opts: any) => void statusUpdates.push({ id, status, ...opts }),
+  updateAnnotationStatus: async (id: string, status: string, opts: any) => (statusUpdates.push({ id, status, ...opts }), true),
   getAnnotationById: async () => ({
     id: 'ann-1',
     annotation_id_external: 'ext-1',
     annotation_url: null,
     payload_raw: {},
+    dispatched_at: new Date('2026-10-01T12:00:00Z'),
   }),
 }))
 mock.module('../src/ws/registry.ts', () => ({ broadcastRevanoteEvent: () => {} }))
@@ -113,7 +146,7 @@ mock.module('../src/revanote/callback.ts', () => ({
 const { finalizeAnnotationReply } = await import('../src/revanote/run-lifecycle.ts')
 
 function reply(envelope: object): string {
-  return `Done.\n<<JSON>>\n${JSON.stringify(envelope)}\n<<END>>`
+  return `Done.\n<<JSON>>\n${JSON.stringify({ dispatch_id: 'run-1', ...envelope })}\n<<END>>`
 }
 
 const args = (content: string) => ({
@@ -155,6 +188,8 @@ describe('finalizeAnnotationReply — pushed-commit gate', () => {
       },
     )
     expect(seen).toMatchObject({ commitSha: SHA, branch: 'main', sessionId: 's1' })
+    // The dispatch time is threaded to the verifier (commit_predates_dispatch gate).
+    expect(seen.dispatchedAt).toEqual(new Date('2026-10-01T12:00:00Z'))
     expect(statusUpdates[0]).toMatchObject({ status: 'failed', skip_reason: 'unverified_resolve:commit_not_pushed' })
     expect(callbacks[0]).toMatchObject({
       resolved: false,
