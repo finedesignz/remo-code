@@ -94,6 +94,8 @@ const state: {
   claimed: Set<string> | null
   // Q3 harness: awaited inside insertAnnotationRun (between open() and send()).
   onOpen: (() => Promise<void>) | null
+  // single-path markSkipped CAS outcome (false = a concurrent dispatch already resolved the row).
+  failCas: boolean
 } = {
   runs: [], annStatus: [], broadcasts: [], sentFrames: [], callbacks: [],
   budgetPct: 60, todayCost: 0, costCap: 10,
@@ -103,6 +105,7 @@ const state: {
   claimCalls: [],
   claimed: null,
   onOpen: null,
+  failCas: true,
 }
 
 let runSeq = 0
@@ -160,6 +163,11 @@ mock.module('../src/db/revanote-dal.ts', () => ({
   updateAnnotationStatus: async (id: string, status: string, opts: any = {}) => {
     state.annStatus.push({ id, status, opts })
   },
+  failAnnotationIfPending: async (id: string, skip_reason: string, session_id: string | null) => {
+    if (!state.failCas) return false
+    state.annStatus.push({ id, status: 'failed', opts: { skip_reason, session_id } })
+    return true
+  },
 }))
 
 // fix/revanote-verify-pushed — the finalize path now checks a resolved reply's
@@ -204,7 +212,7 @@ mock.module('../src/revanote/callback.ts', () => ({
 // fixture above carries installation_id/repo_slug, so resolved:true replies that
 // cite a commit_sha are verified against a mocked-green GitHub API here — this
 // file is testing the dispatch/pipeline wiring, not the verify gate itself
-// (covered by revanote-commit-verify.test.ts + revanote-run-lifecycle-commit-gate.test.ts).
+// (covered by revanote-commit-verify.test.ts).
 mock.module('../src/auth/github-app.ts', () => ({
   githubApiRequest: async (_installationId: number, _method: string, path: string) => {
     if (/\/repos\/[^/]+\/[^/]+$/.test(path)) return { default_branch: 'main' }
@@ -255,6 +263,7 @@ beforeEach(() => {
   state.claimCalls = []
   state.claimed = null
   state.onOpen = null
+  state.failCas = true
   runSeq = 0
   _reset()
 })
@@ -408,6 +417,20 @@ describe('revanote dispatch adapter — budget + cost-cap gates', () => {
     expect(state.callbacks).toHaveLength(1)
     expect(state.callbacks[0].payload.annotation_id).toBe('ext-abc')
     expect(state.callbacks[0].payload.resolved).toBe(false)
+  })
+
+  test('markSkipped is a CAS on pending: a row a concurrent dispatch already resolved gets NO failed write, broadcast or callback', async () => {
+    state.costCap = 10
+    state.budgetPct = 60
+    state.todayCost = 6
+    state.failCas = false
+
+    await dispatchPendingAnnotation('ann-1')
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(state.annStatus.some((s) => s.status === 'failed')).toBe(false)
+    expect(state.callbacks).toHaveLength(0)
+    expect(state.broadcasts.filter((b) => b.type === 'revanote_skipped')).toHaveLength(0)
   })
 
   test('under budget → dispatches (budget gate passes)', async () => {

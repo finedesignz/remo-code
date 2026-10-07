@@ -191,9 +191,10 @@ describe('renderAnnotationPrompt', () => {
       '  "needs_clarification": false\n' +
       '}\n' +
       '<<END>>\n\n' +
-      '"resolved": true is accepted ONLY with the "commit_sha" of a commit already pushed\n' +
-      'to the remote; the hub checks it on GitHub and rejects a resolve it cannot find.\n' +
-      'Push first, then report. Never report resolved for local-only or uncommitted work.\n\n' +
+      '"resolved": true is accepted ONLY with the "commit_sha" of a commit already MERGED\n' +
+      "to the repo's default branch; the hub checks it on GitHub and rejects a resolve it\n" +
+      'cannot find there. Merge first, then report. Never report resolved for local-only,\n' +
+      'uncommitted, or unmerged-branch work.\n\n' +
       'If you cannot fix it autonomously, set "resolved": false, "needs_clarification": true,\n' +
       'and put a single question in "clarification_question".'
     expect(out).toBe(preSPhase5Baseline)

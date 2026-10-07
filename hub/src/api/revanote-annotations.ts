@@ -65,9 +65,11 @@ revanoteAnnotations.post('/:id/retry', async (c) => {
   // first must be refused, not silently re-pended into a second, concurrent
   // send for the same annotation while the live turn is still running.
   if (ann.status === 'dispatched') {
-    const { isTokenLive } = await import('../dispatch/pipeline.ts')
+    const { isTokenLiveAnywhere } = await import('../dispatch/pipeline.ts')
     const { isAnnotationLiveInBatch } = await import('../revanote/batch-dispatch.ts')
-    const singleLive = !!ann.session_id && isTokenLive(ann.session_id, ann.id)
+    // session_id is NULL between the single-path claim and the post-dispatch
+    // status update, so liveness is keyed on the token alone.
+    const singleLive = isTokenLiveAnywhere(ann.id)
     const batchLive = isAnnotationLiveInBatch(ann.id)
     if (singleLive || batchLive) {
       return c.json(

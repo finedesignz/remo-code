@@ -54,6 +54,7 @@ import {
   type RevanoteMapping,
   updateAnnotationStatus,
   insertAnnotationRun,
+  updateAnnotationRun,
   claimAnnotationsAtSend,
   failAnnotationIfPending,
 } from '../db/revanote-dal.ts'
@@ -170,6 +171,15 @@ export async function sweepBatchDispatch(
  * keep their own replay path and are excluded. The send-time claim is a DB CAS,
  * so even a racing dispatch can never double-send.
  */
+/**
+ * Per-row failure bookkeeping for the stale-pending sweep (in-memory, small:
+ * ids + counters). A row that throws every tick used to sit in the 25-row
+ * window forever (head-of-line); now it backs off exponentially and, after
+ * `REDISPATCH_MAX_ATTEMPTS` throws, is failed with a callback so it is visible.
+ */
+const REDISPATCH_MAX_ATTEMPTS = 5
+const redispatchFailures = new Map<string, { attempts: number; nextAt: number }>()
+
 async function redispatchStalePending(now: number): Promise<number> {
   const cutoff = new Date(now - pendingRedispatchMs())
   const rows = await sql<AnnotationRow[]>`
@@ -185,11 +195,25 @@ async function redispatchStalePending(now: number): Promise<number> {
   for (const ann of rows) {
     if (batchIdOf(ann)) continue
     if (isTokenLiveAnywhere(ann.id)) continue
+    const fail = redispatchFailures.get(ann.id)
+    if (fail && now < fail.nextAt) continue
     try {
       const out = await dispatchPendingAnnotation(ann.id)
+      redispatchFailures.delete(ann.id)
       if (out.status === 'dispatched' || out.status === 'queued') n++
     } catch (err: any) {
       console.error(`[revanote.batch] pending re-dispatch failed annotation=${ann.id}: ${err?.message ?? err}`)
+      const attempts = (fail?.attempts ?? 0) + 1
+      if (attempts >= REDISPATCH_MAX_ATTEMPTS) {
+        redispatchFailures.delete(ann.id)
+        const reason = `redispatch_failed: ${err?.message ?? err}`
+        if (await failAnnotationIfPending(ann.id, reason, ann.session_id)) {
+          broadcastRevanoteEvent(ann.user_id, { type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason })
+          void enqueueRejectionCallback(ann, 'agent_send_failed', reason)
+        }
+      } else {
+        redispatchFailures.set(ann.id, { attempts, nextAt: now + pendingRedispatchMs() * 2 ** (attempts - 1) })
+      }
     }
   }
   return n
@@ -324,6 +348,11 @@ async function dispatchBatch(
       await finalizeBatchReply(token, content)
     },
     async markFailed(token, errMsg) {
+      if (errMsg === 'session_offline') {
+        // Offline detected BEFORE the claim: nothing was claimed, rows are
+        // still 'pending' (the sweep / offline replay re-dispatches them).
+        return
+      }
       if (errMsg === 'already_claimed') {
         // Every member was already claimed by another caller (a racing
         // forceSingle retry, or an overlapping sweep tick that beat us to
@@ -335,6 +364,14 @@ async function dispatchBatch(
       const batch = inFlightBatches.get(token)
       for (const id of batch?.claimedIds ?? []) {
         await updateAnnotationStatus(id, 'failed', { skip_reason: `agent_send_failed: ${errMsg}` })
+        const member = batch?.members.find((m) => m.annotationId === id)
+        if (member) {
+          await updateAnnotationRun(member.runId, {
+            status: 'failed', error: `agent_send: ${errMsg}`, finished_at: new Date(),
+          })
+        }
+        const ann = group.find((g) => g.ann.id === id)?.ann
+        if (ann) await enqueueRejectionCallback(ann, 'agent_send_failed', errMsg)
       }
       inFlightBatches.delete(token)
     },
@@ -368,6 +405,11 @@ async function dispatchBatch(
     // all members); the prompt sent covers ONLY the claimed subset — never a
     // member this call didn't win.
     send: async (req) => {
+      // Channel BEFORE the claim: a null lookup after the claim would strand the
+      // members 'dispatched' with no run. Offline here => nothing claimed, rows
+      // stay 'pending' and the existing session_offline path handles them.
+      const channel = getChannel(req.sessionId)
+      if (!channel) throw new Error('session_offline')
       // Liveness must be visible BEFORE the claim commits: once the UPDATE
       // lands the rows read 'dispatched', and a retry in the gap before the
       // run inserts finish would otherwise see no live owner and double-send.
@@ -398,12 +440,8 @@ async function dispatchBatch(
       mine.claimedIds = new Set(claimed.map((g) => g.ann.id))
       inFlightBatches.set(batchId, mine)
 
-      const channel = getChannel(req.sessionId)
-      if (!channel) {
-        release()
-        throw new Error('session_offline')
-      }
-
+      // From here on a throw leaves the reservation in place so markFailed can
+      // still see (and terminalize) the claimed ids.
       claimedAnns = claimed.map((g) => g.ann)
       const promptBody = renderBatchAnnotationPrompt({
         items: claimed.map((g) => ({ annotation: g.ann, mapping: g.mapping })),
@@ -560,4 +598,5 @@ export function stopBatchSweep(): void {
 /** Test-only reset. */
 export function _resetBatchDispatchState(): void {
   inFlightBatches.clear()
+  redispatchFailures.clear()
 }

@@ -120,7 +120,9 @@ The hub renders a Markdown prompt and instructs Claude to end the reply with:
 
 **A resolve must stand on a pushed commit (fix/revanote-verify-pushed).** The agent's envelope is
 self-report, and the prompt telling it to push first is not a control: in 2026-09 comments were
-reported `resolved` from commits that were never pushed. So `finalizeAnnotationReply` checks every
+reported `resolved` from commits that were never pushed (incident 2026-09-14, Lakeside: 43 annotations
+closed citing one real but dangling commit; a first version of this gate also accepted a sha pushed
+to an unmerged PR branch, hence the default-branch compare below). So `finalizeAnnotationReply` checks every
 `resolved: true` itself (`hub/src/revanote/commit-verify.ts`): the reply must carry a `commit_sha`
 (7–40 hex), and the hub confirms through the GitHub App (`GET /repos/{owner}/{repo}/commits/{sha}`,
 repo from `sessions.github_owner/github_repo`, falling back to the payload's `repo_slug`) that the
@@ -134,7 +136,8 @@ path pushes inside the gate. Any failure downgrades the reply to `resolved: fals
 `no_github_installation`, `commit_not_pushed`, `commit_not_on_default_branch`, `commit_not_on_branch`, `verify_error`. Fail-closed:
 an unverifiable resolve is rejected, never trusted. The verified sha is written to
 `annotation_runs.commit_sha` and sent as the callback's `commit_sha`. Escape hatch:
-`REMO_REVANOTE_REQUIRE_PUSHED_COMMIT=0|false|no|off` (default ON).
+`REMO_REVANOTE_REQUIRE_PUSHED_COMMIT=0|false|no|off` (default ON). The gate is the function
+`verifyPushedCommit`; the prompt text is advisory only. Tests: `hub/test/revanote-commit-verify.test.ts`.
 
 The hub-side parser (`hub/src/revanote/result-schema.ts`) tolerates:
 
@@ -143,60 +146,6 @@ The hub-side parser (`hub/src/revanote/result-schema.ts`) tolerates:
 3. Bare prose (last resort — synthesizes `{ resolved: false, action_taken: "parse_failed", agent_reply: <raw> }`).
 
 The web `MessageBubble` strips the envelope (and stray ```` ```json ```` fences) from the displayed assistant text via `stripRevanoteEnvelope` so the user only sees natural language.
-
-### Resolved requires a commit MERGED to the default branch (commit-verify gate)
-
-**Incident (2026-09-14, Lakeside project):** a background subagent marked 43 annotations
-`resolved: true`, citing commit `86ad71296` on every single one. That commit was real but
-**dangling** — never on any branch, never pushed, never deployed — and topically unrelated to
-any of the 43 fixes. Nothing verified the citation before the hub forwarded `resolved: true` to
-revanote, so 43 real client comments were closed with zero shipped work. Root cause: the
-prompt *asked* for honest self-verification, but nothing in the hub *enforced* it — the prompt
-was advisory, not a gate.
-
-**Follow-up gap (found by QC):** the first version of this gate called only
-`GET /repos/{owner}/{repo}/commits/{sha}`, which returns 200 for a commit reachable from ANY
-branch — so a sha pushed to an open, unmerged PR branch also passed. Owner rule: resolved only
-once the fix is **merged to the default branch**, not merely pushed somewhere.
-
-The fix is code, not prose. `hub/src/revanote/commit-verify.ts`'s `verifyCommitOnRemote()` is
-called from `finalizeAnnotationReply` (`run-lifecycle.ts`) **before** any `resolved: true` is
-persisted or forwarded:
-
-- The agent's envelope must carry `commit_sha` (the full commit hash, merged to the default
-  branch) when it sets `resolved: true`.
-- The hub resolves `installation_id` + `repo_slug` from the annotation's stored dispatch
-  payload (`payload_raw`, the same fields the Phase 5/6 merge gate already uses), fetches the
-  repo's `default_branch` via `GET /repos/{owner}/{repo}` (same pattern the merge gate uses in
-  `openPr`), then calls `GET /repos/{owner}/{repo}/compare/{default_branch}...{sha}` via the
-  existing GitHub App installation token (`hub/src/auth/github-app.ts` — no new credential;
-  this is the same auth the merge gate uses to open/merge PRs).
-- Compare `status` **`identical`** (sha IS the default-branch head) or **`behind`** (sha is an
-  ancestor of the default-branch head) → the claim is trusted; `resolved: true` proceeds
-  unchanged.
-- **Anything else** — missing `commit_sha`, missing `installation_id`/`repo_slug` context, an
-  unparseable repo slug, a default-branch lookup failure, a compare `status` of `ahead` (an
-  unmerged branch tip — the gap this fix closes) or `diverged`, a compare 404 (sha not on the
-  remote at all — the exact Lakeside shape), or any other API error — **fails closed**: the
-  annotation is downgraded to `resolved: false` before the run/status rows are written and
-  before the callback is enqueued. The downgrade reason (`commit_sha_missing` /
-  `repo_context_missing` / `repo_slug_unparseable` / `default_branch_lookup_failed` /
-  `commit_not_on_default_branch` / `commit_not_on_remote` / `commit_verify_failed`) is recorded
-  as the annotation's `skip_reason` and surfaced to revanote as the callback's `error` field, so
-  the client-visible state and the reviewer both see *why* it wasn't actually closed.
-- `resolved: false` replies (including `needs_clarification`) never touch this gate — it only
-  ever narrows a `true` claim, never widens a `false` one.
-- The prompt (`hub/src/revanote/prompt.ts`) was updated to make this explicit to the agent:
-  `resolved: true` only after the commit is pushed, the site is redeployed, and `page_url` has
-  been re-fetched to confirm the change is live — plus the new `commit_sha`/`deploy_url`
-  envelope fields. **This prompt text is advisory only.** The code-level gate above is what
-  actually prevents a repeat of the incident; an agent that ignores the prompt and pastes a
-  fabricated hash is caught by the 404, not by good behavior.
-
-Tests: `hub/test/revanote-commit-verify.test.ts` (the gate itself, GitHub API mocked — no real
-network) and `hub/test/revanote-run-lifecycle-commit-gate.test.ts` (the finalize-lifecycle
-integration: unpushed/dangling SHA → downgraded, missing SHA → downgraded, verified SHA →
-forwarded, `resolved: false` replies bypass the gate entirely).
 
 ### Batch protocol (feat/revanote-batch-dispatch): one turn, one branch/PR per review, merge+deploy before resolving
 
@@ -395,7 +344,7 @@ dead-session reaper, also gets a `resolved: false` callback with `action_taken: 
   - `sessionInjectRateGate` (default 4 injects/session/hour) bounds the inject RATE, so an annotation flood cannot drive N turns/hour into the bound session.
   - `thresholdGate` + `dailyCostCapGate` are the shared gates in `hub/src/dispatch/gates.ts`. The global daily cost cap is **non-bypassable** (IR-1) — the migration ADDS it (the legacy revanote dispatcher only had the Claude usage threshold + the per-source budget).
   - `revanoteBudgetGate` is a revanote-specific `DispatchGate` (defined in `dispatcher.ts`, exported for unit test) that enforces the per-source split (`users.revanote_budget_pct`, default 60% of the daily cap) **layered ON TOP of** the global cost cap, never a substitute. Over-budget → `revanote_budget_exceeded:<detail>` skip + reject callback.
-- The per-session queue (1 in-flight + `REMO_DISPATCH_MAX_WAITERS` FIFO waiters, default 50 — was 1, which dropped every annotation past the second in a burst as `session_busy`) lives in `hub/src/dispatch/session-queue.ts` (instance owned by the pipeline). Concurrent annotations against the same session serialize through it in arrival order; re-dispatching an annotation already queued/in flight is a no-op (token = annotation id); a queued waiter does NOT open an `annotation_run` row until promotion re-dispatches it. Waiters are in memory — a hub restart drops them; the row stays `pending` and the batch sweep's stale-pending pass (`redispatchStalePending`, `REMO_REVANOTE_PENDING_REDISPATCH_MS`, default 2min) re-dispatches it.
+- The per-session queue (1 in-flight + `REMO_DISPATCH_MAX_WAITERS` FIFO waiters, default 50 — was 1, which dropped every annotation past the second in a burst as `session_busy`) lives in `hub/src/dispatch/session-queue.ts` (instance owned by the pipeline). Concurrent annotations against the same session serialize through it in arrival order; re-dispatching an annotation already queued/in flight is a no-op (token = annotation id); a queued waiter does NOT open an `annotation_run` row until promotion re-dispatches it. Waiters are in memory — a hub restart drops them; the row stays `pending` and the batch sweep's stale-pending pass (`redispatchStalePending`, `REMO_REVANOTE_PENDING_REDISPATCH_MS`, default 2min) re-dispatches it. A row whose re-dispatch THROWS backs off exponentially (`REMO_REVANOTE_PENDING_REDISPATCH_MS` x 2^(attempts-1), in memory) and after 5 failed attempts is failed (`redispatch_failed: <err>`, CAS on `pending`) with a rejection callback, so a poisoned row cannot hold the 25-row window forever.
 - **Silent-agent ceiling:** `finalizeTimeoutMs` (20 min) only fires when a NEW `assistant_message` arrives. An agent that replies "done" without the `<<JSON>>` envelope and then goes quiet used to hold the session slot forever. The boot-started `startHookReaper()` (`pipeline.ts` `reapTimedOutHooks`) finalizes such a hook with empty content after `REMO_DISPATCH_HOOK_MAX_MS` (default 2h) → `envelope_missing` / `resolved:false` callback, then promotes the next waiter.
 - **Closed-out runs release their slot (fix/stuck-busy-slot):** `releaseClosedRun` /
   `releaseClosedRunByToken` (`pipeline.ts`) disarm the finalize hook of a run that was closed

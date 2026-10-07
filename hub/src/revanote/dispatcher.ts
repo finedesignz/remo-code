@@ -54,6 +54,7 @@ import {
   resolveRevanoteMappingForHost,
   sumTodayAnnotationCostForUser,
   claimAnnotationsAtSend,
+  failAnnotationIfPending,
   type AnnotationRow,
   type RevanoteMapping,
 } from '../db/revanote-dal.ts'
@@ -311,11 +312,9 @@ export async function dispatchAnnotationRow(
       // session_busy comes from the queue drop; everything else is a gate block
       // (quota_threshold_reached / daily_cost_cap / revanote_budget_exceeded).
       const isBusy = reason === 'session_busy'
-      await updateAnnotationStatus(ann.id, 'failed', {
-        skip_reason: reason,
-        session_id: sessionId,
-        mapping_id: mapping?.id ?? null,
-      })
+      // CAS on 'pending' (same as the batch path): a row a concurrent dispatch
+      // already claimed/resolved keeps its state and gets no rejection callback.
+      if (!(await failAnnotationIfPending(ann.id, reason, sessionId))) return
       broadcastRevanoteEvent(userId, {
         type: 'revanote_skipped', annotation_id: ann.id, skip_reason: reason,
       })
@@ -335,6 +334,14 @@ export async function dispatchAnnotationRow(
       })
     },
     async markFailed(runId, errMsg) {
+      if (errMsg === 'session_offline') {
+        // Offline detected BEFORE the claim: the row is still 'pending' and the
+        // stale-pending sweep re-dispatches it. Only close the spurious run.
+        await updateAnnotationRun(runId, {
+          status: 'cancelled', error: 'session_offline', finished_at: new Date(),
+        })
+        return
+      }
       if (errMsg === 'already_claimed') {
         // Lost the send-time claim race (qcfix/r2-claim-at-send): another
         // caller (a forceSingle retry, or an overlapping batch sweep tick)
@@ -426,10 +433,12 @@ export async function dispatchAnnotationRow(
     // re-dispatch — dispatch() calls this same fn either way — so a merely
     // queued annotation never reaches this claim at all and stays 'pending'.
     send: async (req) => {
-      const [claimedId] = await claimAnnotationsAtSend([ann.id])
-      if (!claimedId) throw new Error('already_claimed')
+      // Channel BEFORE the claim (same ordering as the batch path): a null
+      // lookup after the claim would strand the row 'dispatched'.
       const channel = getChannel(req.sessionId)
       if (!channel) throw new Error('session_offline')
+      const [claimedId] = await claimAnnotationsAtSend([ann.id])
+      if (!claimedId) throw new Error('already_claimed')
       const msg = await insertMessage(req.sessionId, 'user', storedContent)
       broadcastToSubscribers(req.sessionId, {
         type: 'message', session_id: req.sessionId, message: msg,

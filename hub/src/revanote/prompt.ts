@@ -198,9 +198,10 @@ export function renderAnnotationPrompt(opts: PromptOpts): string {
     `}`,
     `<<END>>`,
     ``,
-    `"resolved": true is accepted ONLY with the "commit_sha" of a commit already pushed`,
-    `to the remote; the hub checks it on GitHub and rejects a resolve it cannot find.`,
-    `Push first, then report. Never report resolved for local-only or uncommitted work.`,
+    `"resolved": true is accepted ONLY with the "commit_sha" of a commit already MERGED`,
+    `to the repo's default branch; the hub checks it on GitHub and rejects a resolve it`,
+    `cannot find there. Merge first, then report. Never report resolved for local-only,`,
+    `uncommitted, or unmerged-branch work.`,
     ``,
     `If you cannot fix it autonomously, set "resolved": false, "needs_clarification": true,`,
     fixContract

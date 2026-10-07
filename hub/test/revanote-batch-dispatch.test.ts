@@ -106,6 +106,14 @@ const state: {
   onInsertRun: (() => Promise<void>) | null
   /** Q2 harness: when set, the threshold gate runs this then rejects with the returned reason. */
   gateReject: (() => string) | null
+  /** getChannel returns null from its Nth call on (1-based); counts only while armed. */
+  channelNullFromCall: number | null
+  channelCalls: number
+  /** insertMessage throws (post-claim send failure). */
+  insertMessageFails: boolean
+  /** dispatchPendingAnnotation attempts made via the sweep re-dispatch (throwing-row harness). */
+  throwOnSingleSend: boolean
+  getCalls: number
 } = {
   pendingAnnotations: [],
   runs: [],
@@ -123,6 +131,11 @@ const state: {
   sessionByRepoPath: null,
   onInsertRun: null,
   gateReject: null,
+  channelNullFromCall: null,
+  channelCalls: 0,
+  insertMessageFails: false,
+  throwOnSingleSend: false,
+  getCalls: 0,
 }
 
 mock.module('../src/auth/middleware.ts', () => ({
@@ -194,7 +207,14 @@ mock.module('../src/db/revanote-dal.ts', () => ({
     }
     return MAPPINGS_BY_HOST[host] ?? MAPPING
   },
-  getAnnotationById: async (id: string) => state.pendingAnnotations.find((a) => a.id === id) ?? null,
+  getAnnotationById: async (id: string) => {
+    if (state.throwOnSingleSend) {
+      state.getCalls++
+      throw new Error('poison_row')
+    }
+    return state.pendingAnnotations.find((a) => a.id === id) ?? null
+  },
+
   sumTodayAnnotationCostForUser: async () => 0,
   // Real SQL is a conditional UPDATE ... WHERE status = $expected RETURNING.
   resetAnnotationToPendingIfStatus: async (id: string, expected: string, skip_reason: string) => {
@@ -245,12 +265,17 @@ mock.module('../src/db/dal.ts', () => ({
   ...realDal,
   findSessionByProjectDir: async (_userId: string, repoPath: string) =>
     state.sessionByRepoPath?.[repoPath] ?? state.resolvedSession,
-  insertMessage: async () => ({ id: 'msg-1', created_at: new Date().toISOString() }),
+  insertMessage: async () => {
+    if (state.insertMessageFails) throw new Error('db_down')
+    return { id: 'msg-1', created_at: new Date().toISOString() }
+  },
 }))
 
 mock.module('../src/ws/registry.ts', () => ({
-  getChannel: (sid: string) =>
-    state.offlineSessions.has(sid) ? null : { ws: { send: (f: string) => state.sentFrames.push(JSON.parse(f)) } },
+  getChannel: (sid: string) => {
+    if (state.channelNullFromCall != null && ++state.channelCalls >= state.channelNullFromCall) return null
+    return state.offlineSessions.has(sid) ? null : { ws: { send: (f: string) => state.sentFrames.push(JSON.parse(f)) } }
+  },
   broadcastRevanoteEvent: (_uid: string, ev: any) => state.broadcasts.push(ev),
   broadcastToSubscribers: () => {},
 }))
@@ -331,6 +356,11 @@ beforeEach(() => {
   state.sessionByRepoPath = null
   state.onInsertRun = null
   state.gateReject = null
+  state.channelNullFromCall = null
+  state.channelCalls = 0
+  state.insertMessageFails = false
+  state.throwOnSingleSend = false
+  state.getCalls = 0
   runSeq = 0
   clockOffset = 0
   Date.now = () => realNow() + clockOffset
@@ -944,5 +974,77 @@ describe('revanote batch dispatch — Q4 stale pending (non-batch) re-dispatch a
 
     expect(r.redispatched).toBe(0)
     expect(state.sentFrames).toHaveLength(0)
+  })
+})
+
+
+describe('revanote batch dispatch — channel lookup before claim (no stranded dispatched rows)', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  const batchRows = () =>
+    ['ext-1', 'ext-2'].map((extId, i) =>
+      makeAnnotation({
+        id: `b${i}`,
+        annotation_id_external: extId,
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo', batch_id: 'b1' },
+        received_at: envAgo(batchDebounceMs() + 1000),
+      }),
+    )
+
+  test('channel null at send time (online check passed) -> members NOT stranded dispatched with 0 runs', async () => {
+    state.pendingAnnotations = batchRows()
+    state.channelNullFromCall = 2 // call 1 = isOnline passes, call 2 = send-time lookup
+    await sweepBatchDispatch()
+    await new Promise((r) => setTimeout(r, 25))
+    for (const a of state.pendingAnnotations) expect(a.status).not.toBe('dispatched')
+    expect(state.runs).toHaveLength(0)
+    expect(state.sentFrames).toHaveLength(0)
+  })
+
+  test('failure AFTER a successful claim fails every claimed member with a callback', async () => {
+    state.pendingAnnotations = batchRows()
+    state.insertMessageFails = true
+    await sweepBatchDispatch()
+    await new Promise((r) => setTimeout(r, 25))
+    for (const a of state.pendingAnnotations) expect(a.status).toBe('failed')
+    expect(state.callbacks.map((c) => c.ann_id).sort()).toEqual(['b0', 'b1'])
+  })
+})
+
+
+describe('revanote batch dispatch — poisoned stale-pending row is bounded (no head-of-line starvation)', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  test('a row that throws every tick is retried with backoff, then failed with a callback after the attempt cap', async () => {
+    state.pendingAnnotations = [
+      makeAnnotation({
+        id: 'poison',
+        payload_raw: { installation_id: 999, repo_slug: 'owner/repo' },
+        received_at: envAgo(pendingRedispatchMs() + 1000),
+      }),
+    ]
+    state.throwOnSingleSend = true
+
+    await sweepBatchDispatch()
+    expect(state.getCalls).toBe(1)
+    await sweepBatchDispatch() // immediate next tick: inside backoff -> not retried
+    expect(state.getCalls).toBe(1)
+
+    for (let i = 0; i < 6; i++) {
+      clockOffset += 10 * 60 * 60 * 1000 // far past any backoff
+      await sweepBatchDispatch()
+    }
+    await new Promise((r) => setTimeout(r, 25))
+
+    expect(state.getCalls).toBe(5) // capped, not retried forever
+    expect(state.pendingAnnotations[0].status).toBe('failed')
+    expect(state.annStatus.some((s) => s.id === 'poison' && s.status === 'failed' && /redispatch_failed/.test(s.opts.skip_reason))).toBe(true)
+    expect(state.callbacks.map((c) => c.ann_id)).toEqual(['poison'])
   })
 })

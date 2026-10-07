@@ -51,7 +51,8 @@ mock.module('../src/db/revanote-dal.ts', () => ({
 }))
 
 mock.module('../src/dispatch/pipeline.ts', () => ({
-  isTokenLive: (_sessionId: string, _token: string) => state.singleLive,
+  isTokenLive: (sessionId: string, _token: string) => state.singleLive && !!sessionId,
+  isTokenLiveAnywhere: (_token: string) => state.singleLive,
 }))
 
 mock.module('../src/revanote/batch-dispatch.ts', () => ({
@@ -127,6 +128,17 @@ describe('POST /api/revanote/annotations/:id/retry — R2-2 live-ownership guard
     expect(res.status).toBe(409)
     const body = await res.json()
     expect(body.error).toBe('annotation_in_flight')
+    expect(state.updateAnnotationStatusCalls).toHaveLength(0)
+    expect(state.dispatchCalls).toHaveLength(0)
+  })
+
+  test('single-path claim window: session_id still NULL but the pipeline owns the token -> 409', async () => {
+    state.annotation.status = 'dispatched'
+    state.annotation.session_id = null
+    state.singleLive = true
+
+    const res = await app.request('/api/revanote/annotations/ann-1/retry', { method: 'POST' })
+    expect(res.status).toBe(409)
     expect(state.updateAnnotationStatusCalls).toHaveLength(0)
     expect(state.dispatchCalls).toHaveLength(0)
   })
