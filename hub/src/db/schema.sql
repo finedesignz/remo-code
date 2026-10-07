@@ -1150,24 +1150,6 @@ CREATE TABLE IF NOT EXISTS annotations (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_annotations_user_external
   ON annotations(user_id, annotation_id_external);
--- qcfix/r2-claim-at-send — 'dispatching' (round-1 qcfix/batch-claim's pre-send
--- claim state) is REMOVED: claiming pending->dispatching BEFORE dispatch()
--- (before the row was actually admitted past the per-session queue) stranded
--- a merely-queued row at 'dispatching' forever across a hub restart (R2-1),
--- since nothing ever resets it and the sweep/retry paths only pick up
--- 'pending'. The claim now happens atomically inside the pipeline's `send()`
--- step (claimAnnotationsAtSend in revanote-dal.ts), a single conditional
--- `UPDATE ... WHERE status='pending' RETURNING id` straight to 'dispatched' —
--- immediately before the WS push, never before a row is merely queued. A
--- queued-but-not-yet-sent row now stays 'pending', exactly as
--- restart-recoverable as before any claim existed. Idempotent re-narrow of
--- the CHECK (re-running schema.sql must not fail on an already-narrowed
--- constraint; a prod DB carrying a leftover 'dispatching' row from before
--- this migration ships must have that row manually resolved first — see
--- docs/revanote.md).
-ALTER TABLE annotations DROP CONSTRAINT IF EXISTS annotations_status_check;
-ALTER TABLE annotations ADD CONSTRAINT annotations_status_check
-  CHECK (status IN ('pending', 'dispatched', 'resolved', 'failed', 'failed_offline'));
 CREATE INDEX IF NOT EXISTS idx_annotations_user_recv
   ON annotations(user_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_annotations_status

@@ -147,6 +147,14 @@ mock.module('../src/db/postgres.ts', () => ({
     // deterministically: whichever call reaches this branch first flips the
     // row and wins it; the loser sees it already non-'pending' and gets it
     // filtered out of its own result.
+    // Q4 stale-pending re-dispatch query (non-batch rows older than the grace).
+    if (text.includes('jsonb_exists(payload_raw')) {
+      const cutoff = values[0] instanceof Date ? values[0].getTime() : 0
+      return state.pendingAnnotations.filter(
+        (a) => a.status === 'pending' && !a.payload_raw?.batch_id && a.skip_reason !== 'session_offline' &&
+          new Date(a.received_at).getTime() < cutoff,
+      )
+    }
     if (text.includes("SET status = 'dispatched'")) {
       const ids: string[] = values[0] ?? []
       const claimed: { id: string }[] = []
@@ -298,8 +306,8 @@ mock.module('../src/dispatch/gates.ts', () => ({
 }))
 
 const { dispatchPendingAnnotation } = await import('../src/revanote/dispatcher.ts')
-const { onSessionReply, _reset } = await import('../src/dispatch/pipeline.ts')
-const { sweepBatchDispatch, batchDebounceMs, batchRunMaxMs, _resetBatchDispatchState } = await import(
+const { onSessionReply, _reset, isTokenLive } = await import('../src/dispatch/pipeline.ts')
+const { sweepBatchDispatch, pendingRedispatchMs, batchDebounceMs, batchRunMaxMs, _resetBatchDispatchState } = await import(
   '../src/revanote/batch-dispatch.ts'
 )
 
@@ -863,5 +871,78 @@ describe('revanote batch dispatch — Q2 gate rejection must not clobber a membe
     expect(state.annStatus.filter((s) => s.id === 'ann-2')).toHaveLength(0)
     expect(state.callbacks.map((c) => c.ann_id)).toEqual(['ann-1'])
     expect(state.broadcasts.filter((b) => b.type === 'revanote_skipped').map((b) => b.annotation_id)).toEqual(['ann-1'])
+  })
+})
+
+
+describe('revanote batch dispatch — Q4 stale pending (non-batch) re-dispatch after restart', () => {
+  afterAll(() => {
+    mock.restore()
+    Date.now = realNow
+  })
+
+  const stale = (id: string, ageMs: number, over: Partial<any> = {}) =>
+    makeAnnotation({
+      id,
+      annotation_id_external: `ext-${id}`,
+      payload_raw: { installation_id: 999, repo_slug: 'owner/repo' },
+      received_at: envAgo(ageMs),
+      ...over,
+    })
+
+  test('Q4: pending non-batch row + lost in-memory queue (restart) -> sweep after grace dispatches it exactly once', async () => {
+    state.pendingAnnotations = [stale('ann-1', pendingRedispatchMs() + 1000)]
+    _reset() // hub restart: the in-memory waiter/active maps are gone
+
+    const r1 = await sweepBatchDispatch()
+    expect(r1.redispatched).toBe(1)
+    expect(state.sentFrames).toHaveLength(1)
+    expect(state.runs).toHaveLength(1)
+    expect(state.pendingAnnotations[0].status).toBe('dispatched')
+
+    // Next tick: no longer pending -> untouched, still exactly one send.
+    const r2 = await sweepBatchDispatch()
+    expect(r2.redispatched).toBe(0)
+    expect(state.sentFrames).toHaveLength(1)
+  })
+
+  test('Q4: a row still live in the in-memory queue is NOT touched by the sweep', async () => {
+    state.pendingAnnotations = [
+      stale('ann-1', pendingRedispatchMs() + 2000),
+      stale('ann-2', pendingRedispatchMs() + 1000),
+    ]
+    await dispatchPendingAnnotation('ann-1') // takes the session slot
+    await dispatchPendingAnnotation('ann-2') // queued behind it, stays 'pending'
+    expect(state.pendingAnnotations[1].status).toBe('pending')
+    expect(isTokenLive('sess-1', 'ann-2')).toBe(true)
+    const framesBefore = state.sentFrames.length
+    const runsBefore = state.runs.length
+
+    const r = await sweepBatchDispatch()
+
+    expect(r.redispatched).toBe(0)
+    expect(state.sentFrames).toHaveLength(framesBefore)
+    expect(state.runs).toHaveLength(runsBefore)
+  })
+
+  test('Q4: a pending row still inside the grace window is NOT touched', async () => {
+    state.pendingAnnotations = [stale('ann-1', 1000)]
+    _reset()
+
+    const r = await sweepBatchDispatch()
+
+    expect(r.redispatched).toBe(0)
+    expect(state.sentFrames).toHaveLength(0)
+    expect(state.pendingAnnotations[0].status).toBe('pending')
+  })
+
+  test('Q4: a row parked offline (session_offline) keeps its own replay path and is NOT re-dispatched here', async () => {
+    state.pendingAnnotations = [stale('ann-1', pendingRedispatchMs() + 1000, { skip_reason: 'session_offline' })]
+    _reset()
+
+    const r = await sweepBatchDispatch()
+
+    expect(r.redispatched).toBe(0)
+    expect(state.sentFrames).toHaveLength(0)
   })
 })

@@ -62,7 +62,7 @@ import { insertMessage } from '../db/dal.ts'
 import { renderBatchAnnotationPrompt } from './prompt.ts'
 import { parseRevanoteBatchOutput, envelopeForBatchItem, ENVELOPE_RE } from './result-schema.ts'
 import { finalizeAnnotationReply } from './run-lifecycle.ts'
-import { dispatch, type DispatchRequest, type PipelineDeps, type RunStore } from '../dispatch/pipeline.ts'
+import { dispatch, isTokenLiveAnywhere, type DispatchRequest, type PipelineDeps, type RunStore } from '../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
 import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
 import {
@@ -70,6 +70,7 @@ import {
   revanoteBudgetGate,
   getUserTimezone,
   enqueueRejectionCallback,
+  dispatchPendingAnnotation,
 } from './dispatcher.ts'
 
 function positiveIntEnv(name: string, fallback: number): number {
@@ -85,6 +86,15 @@ export function batchDebounceMs(): number {
 /** Sweep cadence. Default 5s (well under the debounce window). */
 export function batchPollMs(): number {
   return positiveIntEnv('REMO_REVANOTE_BATCH_POLL_MS', 5_000)
+}
+
+/**
+ * Grace before a 'pending' NON-batch annotation that nothing in memory owns is
+ * re-dispatched by the sweep. Default 2min (a fresh annotation is dispatched by
+ * the webhook immediately; this only has to outlast that hand-off).
+ */
+export function pendingRedispatchMs(): number {
+  return positiveIntEnv('REMO_REVANOTE_PENDING_REDISPATCH_MS', 120_000)
 }
 
 /**
@@ -137,14 +147,52 @@ let sweeping = false
  * comment. Re-entrancy-guarded so an overlapping tick (a slow prior sweep) is
  * a no-op rather than a duplicate dispatch.
  */
-export async function sweepBatchDispatch(now: number = Date.now()): Promise<{ dispatched: number }> {
-  if (sweeping) return { dispatched: 0 }
+export async function sweepBatchDispatch(
+  now: number = Date.now(),
+): Promise<{ dispatched: number; redispatched: number }> {
+  if (sweeping) return { dispatched: 0, redispatched: 0 }
   sweeping = true
   try {
-    return await runSweepOnce(now)
+    const { dispatched } = await runSweepOnce(now)
+    const redispatched = await redispatchStalePending(now)
+    return { dispatched, redispatched }
   } finally {
     sweeping = false
   }
+}
+
+/**
+ * DB-driven recovery for a queued NON-batch annotation. Its waiter lives only in
+ * the pipeline's memory and the row stays 'pending', so a hub restart (or any
+ * path that drops the waiter) strands it forever. Every tick, re-dispatch
+ * 'pending' non-batch rows older than the grace that NOTHING in memory owns
+ * (`isTokenLiveAnywhere`). Rows parked offline (`skip_reason='session_offline'`)
+ * keep their own replay path and are excluded. The send-time claim is a DB CAS,
+ * so even a racing dispatch can never double-send.
+ */
+async function redispatchStalePending(now: number): Promise<number> {
+  const cutoff = new Date(now - pendingRedispatchMs())
+  const rows = await sql<AnnotationRow[]>`
+    SELECT * FROM annotations
+     WHERE status = 'pending'
+       AND NOT jsonb_exists(payload_raw, 'batch_id')
+       AND skip_reason IS DISTINCT FROM 'session_offline'
+       AND received_at < ${cutoff}
+     ORDER BY received_at ASC
+     LIMIT 25
+  `
+  let n = 0
+  for (const ann of rows) {
+    if (batchIdOf(ann)) continue
+    if (isTokenLiveAnywhere(ann.id)) continue
+    try {
+      const out = await dispatchPendingAnnotation(ann.id)
+      if (out.status === 'dispatched' || out.status === 'queued') n++
+    } catch (err: any) {
+      console.error(`[revanote.batch] pending re-dispatch failed annotation=${ann.id}: ${err?.message ?? err}`)
+    }
+  }
+  return n
 }
 
 async function runSweepOnce(now: number): Promise<{ dispatched: number }> {

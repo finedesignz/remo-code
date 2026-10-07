@@ -208,6 +208,22 @@ export function isTokenLive(sessionId: string, token: string): boolean {
   return waiterCtx.has(waiterKey(sessionId, token))
 }
 
+/**
+ * Like `isTokenLive` but session-agnostic: true iff `token` is the active send
+ * or a parked waiter for ANY session. Used by the DB-driven pending re-dispatch
+ * sweep, which has not resolved the row's target session yet and must not touch
+ * something the in-memory queue still owns.
+ */
+export function isTokenLiveAnywhere(token: string): boolean {
+  for (const active of activeBySession.values()) {
+    if (active.req.token === token) return true
+  }
+  for (const key of waiterCtx.keys()) {
+    if (key.endsWith(`\0${token}`)) return true
+  }
+  return false
+}
+
 // Test-only reset.
 export function _reset(): void {
   queue._reset()

@@ -286,6 +286,22 @@ single-annotation path below.
   exactly like the claim above) → retry proceeds as before. `pending`/`failed`/`failed_offline`/
   `resolved` rows never consult liveness — the pipeline always releases ownership before setting any
   of those.
+- **Retry vs batch send race (Q1)**: the batch `send()` registers its `inFlightBatches` entry
+  (`claimedIds`) BEFORE the claim UPDATE and drops only its own reservation on a zero-claim /
+  offline / claim error, so `isAnnotationLiveInBatch` is true for the whole send — including the gap
+  between the committed claim and the per-member run inserts. The retry route's reset is itself a DB
+  compare-and-set (`resetAnnotationToPendingIfStatus`: `UPDATE ... SET status='pending' WHERE
+  status=<observed> RETURNING`); a concurrent status change makes the retry `409`, never a second send.
+- **Gate rejection never clobbers a resolved member (Q2)**: a gate-rejected (or promoted-then-rejected)
+  batch fails only members still `'pending'` (`failAnnotationIfPending`, `WHERE status='pending'`)
+  and sends the rejection callback only for rows it actually transitioned.
+- **Stale-pending re-dispatch (Q4)**: a queued NON-batch annotation stays `'pending'` and its waiter
+  lives only in the pipeline's memory, so a hub restart used to strand it. The boot-started batch sweep
+  (same timer, `REMO_REVANOTE_BATCH_POLL_MS`) now also re-dispatches `'pending'` non-batch rows older
+  than `REMO_REVANOTE_PENDING_REDISPATCH_MS` (default 120000 = 2min) that no in-memory queue owns
+  (`pipeline.isTokenLiveAnywhere`). Rows parked offline (`skip_reason='session_offline'`) are
+  excluded (their own replay path). The send-time claim is a DB CAS, so a racing dispatch still cannot
+  double-send. Capped at 25 rows per tick.
 - **Batch dispatch token scoping (qcfix/batch-claim, C3)**: a batch's dispatch token (and the
   `inFlightBatches` map key) is `batch:<userId>:<sessionId>:<mappingId>:<batch_id>`, never the raw
   `batch_id` alone. One `batch_id` can legitimately split into several dispatched groups (a
@@ -379,7 +395,7 @@ dead-session reaper, also gets a `resolved: false` callback with `action_taken: 
   - `sessionInjectRateGate` (default 4 injects/session/hour) bounds the inject RATE, so an annotation flood cannot drive N turns/hour into the bound session.
   - `thresholdGate` + `dailyCostCapGate` are the shared gates in `hub/src/dispatch/gates.ts`. The global daily cost cap is **non-bypassable** (IR-1) — the migration ADDS it (the legacy revanote dispatcher only had the Claude usage threshold + the per-source budget).
   - `revanoteBudgetGate` is a revanote-specific `DispatchGate` (defined in `dispatcher.ts`, exported for unit test) that enforces the per-source split (`users.revanote_budget_pct`, default 60% of the daily cap) **layered ON TOP of** the global cost cap, never a substitute. Over-budget → `revanote_budget_exceeded:<detail>` skip + reject callback.
-- The per-session queue (1 in-flight + `REMO_DISPATCH_MAX_WAITERS` FIFO waiters, default 50 — was 1, which dropped every annotation past the second in a burst as `session_busy`) lives in `hub/src/dispatch/session-queue.ts` (instance owned by the pipeline). Concurrent annotations against the same session serialize through it in arrival order; re-dispatching an annotation already queued/in flight is a no-op (token = annotation id); a queued waiter does NOT open an `annotation_run` row until promotion re-dispatches it. Waiters are in memory — a hub restart drops them (revanote's own stale-lease sweep re-dispatches).
+- The per-session queue (1 in-flight + `REMO_DISPATCH_MAX_WAITERS` FIFO waiters, default 50 — was 1, which dropped every annotation past the second in a burst as `session_busy`) lives in `hub/src/dispatch/session-queue.ts` (instance owned by the pipeline). Concurrent annotations against the same session serialize through it in arrival order; re-dispatching an annotation already queued/in flight is a no-op (token = annotation id); a queued waiter does NOT open an `annotation_run` row until promotion re-dispatches it. Waiters are in memory — a hub restart drops them; the row stays `pending` and the batch sweep's stale-pending pass (`redispatchStalePending`, `REMO_REVANOTE_PENDING_REDISPATCH_MS`, default 2min) re-dispatches it.
 - **Silent-agent ceiling:** `finalizeTimeoutMs` (20 min) only fires when a NEW `assistant_message` arrives. An agent that replies "done" without the `<<JSON>>` envelope and then goes quiet used to hold the session slot forever. The boot-started `startHookReaper()` (`pipeline.ts` `reapTimedOutHooks`) finalizes such a hook with empty content after `REMO_DISPATCH_HOOK_MAX_MS` (default 2h) → `envelope_missing` / `resolved:false` callback, then promotes the next waiter.
 - **Closed-out runs release their slot (fix/stuck-busy-slot):** `releaseClosedRun` /
   `releaseClosedRunByToken` (`pipeline.ts`) disarm the finalize hook of a run that was closed
