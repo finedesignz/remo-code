@@ -7,7 +7,7 @@
  * by the guard and injects nothing. NEGATIVE assertion: the dangerous path
  * produces nothing.
  */
-import { describe, test, expect, beforeEach, mock } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 
 const inserted: Array<{ sessionId: string; content: string }> = [];
 const sent: Array<any> = [];
@@ -95,5 +95,44 @@ describe("human-only PTY guard on Telegram dispatch", () => {
     });
     // stream-json sessions are unaffected by the human-only PTY guard.
     expect(r.kind).toBe("dispatched");
+  });
+});
+
+describe("governed-automation flag ON (PTYCAP Phase 3)", () => {
+  const FLAG = "REMO_GOVERNED_AUTOMATION_PTY";
+  afterEach(() => {
+    delete process.env[FLAG];
+  });
+
+  test("flag ON: a scheduler-sourced dispatch is refused by the fail-closed kill_switch slot (nothing sent, nothing inserted)", async () => {
+    process.env[FLAG] = "1";
+    const r = await dispatchToSession({
+      userId: "u",
+      sessionId: "s",
+      chatId: 1,
+      updateId: 5,
+      text: "auto nudge",
+      source: "scheduler",
+    });
+    expect(r.kind).toBe("automation_blocked");
+    if (r.kind === "automation_blocked") {
+      expect(r.reason).toBe("automation_blocked_on_pty:scheduler:governor_not_implemented:kill_switch");
+    }
+    expect(sent.length).toBe(0);
+    expect(inserted.length).toBe(0);
+  });
+
+  test("flag ON: a human-sourced dispatch is still dispatched", async () => {
+    process.env[FLAG] = "1";
+    const r = await dispatchToSession({
+      userId: "u",
+      sessionId: "s",
+      chatId: 1,
+      updateId: 6,
+      text: "hello",
+      source: "human",
+    });
+    expect(r.kind).toBe("dispatched");
+    expect(sent.length).toBe(1);
   });
 });

@@ -176,6 +176,15 @@ function isTokenCapExplicitlyDisabled(): boolean {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase())
 }
 
+/**
+ * True when the daily token ceiling is in force (i.e. NOT explicitly disabled).
+ * Read at call time. The governed-automation token_cap governor (dispatch/governed-pty.ts)
+ * uses it for its "enabled" rule; the "over the limit" check stays with dailyTokenCapGate.
+ */
+export function isDailyTokenCapEnforced(): boolean {
+  return !isTokenCapExplicitlyDisabled()
+}
+
 /** Parse result for the configured cap. `invalid` ⇒ the value is unusable. */
 function parseDailyTokenCap(raw: string | undefined): { ok: boolean; cap: number } {
   if (raw == null || raw.trim() === '') return { ok: true, cap: DEFAULT_DAILY_TOKEN_CAP }
@@ -454,6 +463,10 @@ export function isOverAutospawnDailyLaunchCap(launchesToday: number): boolean {
  *
  * It composes WITH (never replaces) `dailyCostCapGate` — the PTY path introduces
  * no uncapped dispatch route.
+ *
+ * AUTOMATION_ACTORS is now also consulted by the eligible-actor rule in
+ * dispatch/governed-pty.ts (PTYCAP Phase 3, D-06): only these actors can ever be
+ * admitted under the governed-automation flag.
  */
 export const AUTOMATION_ACTORS: ReadonlySet<string> = new Set([
   'scheduler',
