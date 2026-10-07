@@ -8,6 +8,12 @@
      its iteration. -->
 LOCK: none
 
+## Run 10 (2026-10-07)
+- memlog claim OK (routine-run10-2026-10-07). Prod /health = {"ok":true}; main head 008c276 unchanged since run 9.
+- Backlog unchanged: #500 (owner draft, left alone), #494 (owner PR, panel CLEAR on 45cf898, awaiting owner decision on 3 items; not merged, prompt forbids merging another author's PR). No new comments/pushes since run 9.
+- No work shipped (quiet blocked run, no new escalation). GSD install not run (sandbox denied pipe-to-bash earlier); Skills-Factory MCP still 404.
+- Resume: PTYCAP Phase 3 (full QC panel) or hub typecheck cleanup.
+
 ## Run 9 (2026-10-07)
 - memlog claim OK (routine-run9-2026-10-07). Prod /health = {"ok":true}. DIRECTIVE already has §0; nothing to apply.
 - Backlog: #492/#493 merged earlier. Open: #500 (owner draft, left alone), #494 (owner, non-draft, auth scopes).
