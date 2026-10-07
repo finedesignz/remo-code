@@ -370,6 +370,46 @@ describe('PTYCAP Phase 3 -- governed automation branch', () => {
   })
 })
 
+describe('PTYCAP Phase 3 -- the human chain never runs a governor (D-07)', () => {
+  const human = { userId: 'u1', sessionId: 's1', actor: 'human' } as const
+
+  test('no governor is a member of either chain constant, and the human chain names are unchanged', () => {
+    for (const g of PRODUCTION_GOVERNORS) {
+      expect(PTY_HUMAN_TURN_GATES).not.toContain(g)
+      expect(PTY_AUTOMATION_TURN_GATES).not.toContain(g)
+    }
+    expect(PTY_HUMAN_TURN_GATES.map((g: { name: string }) => g.name)).toEqual([
+      'threshold',
+      'daily_token_cap',
+      'daily_cost_cap',
+    ])
+  })
+
+  test('flag ON + fail-closed production governors: a human turn under every ceiling still passes', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(PRODUCTION_GOVERNORS)
+    const r = await checkPtyTurnPreflight(human)
+    expect(r.ok).toBe(true)
+  })
+
+  test('flag ON + spy governors: a human turn passes and zero governor checks run', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    const spies = makeSpies()
+    _setGovernorsForTests(spies.governors)
+    const r = await checkPtyTurnPreflight(human)
+    expect(r.ok).toBe(true)
+    expect(spies.calls).toEqual([])
+  })
+
+  test('flag ON: a human turn is never blocked by the inject-rate ceiling (Phase-2 SC-3 preserved)', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(PRODUCTION_GOVERNORS)
+    state.injectsInWindow = 999_999
+    const r = await checkPtyTurnPreflight(human)
+    expect(r.ok).toBe(true)
+  })
+})
+
 describe('PTYCAP Phase 2 — isPtySubmit', () => {
   const b64 = (s: string) => btoa(s)
   test('Enter, and a paste ending in a newline, are submits', () => {
