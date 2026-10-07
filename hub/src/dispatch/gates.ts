@@ -451,8 +451,10 @@ export function isOverAutospawnDailyLaunchCap(launchesToday: number): boolean {
  * The SHARED chokepoint that rejects AUTOMATION sources from ever driving a
  * `pty-interactive` session — the flagged "robot pressing enter via the
  * interactive entrypoint" / ToS-risk move. It is composed into BOTH:
- *   (a) the dispatch pipeline (this DispatchGate form), and
- *   (b) the raw `term.input` relay ingress (the `rejectsActor` helper below),
+ *   (a) the dispatch pipeline (the DispatchGate form now lives in
+ *       dispatch/governed-pty.ts as `governedAutomationPtyGate`, PTYCAP Phase 3;
+ *       `humanOnlyRejectsActor` below remains the shared legacy decision), and
+ *   (b) the raw `term.input` relay ingress (the `humanOnlyRejectsActor` predicate),
  * so there is NO second, ungated write route into a PTY session.
  *
  * The ACTOR is SERVER-INFERRED from the connection, never a client-asserted
@@ -483,33 +485,6 @@ export const AUTOMATION_ACTORS: ReadonlySet<string> = new Set([
 export function humanOnlyRejectsActor(actor: string, runnerType: string): boolean {
   if (runnerType !== 'pty-interactive') return false
   return actor !== 'human' // any non-human actor (incl. all AUTOMATION_ACTORS) is rejected
-}
-
-/**
- * DispatchGate form for the pipeline. Reads the dispatch source + the target
- * session's runner_type. A pty-interactive session driven by an automation
- * source is blocked with `automation_blocked_on_pty:<actor>`. Stream-json
- * sessions are unaffected (still cost-capped by dailyCostCapGate).
- *
- * The source + runner_type are read off the DispatchRequest (the dispatch
- * context already carries the source; runner_type is resolved via the DAL). To
- * keep `DispatchRequest` unchanged we accept them on an optional augmentation
- * the caller threads through — the pipeline composes this gate only for PTY-
- * capable dispatches.
- */
-export function humanOnlyPtyGate(
-  resolveActorAndRunnerType: (req: DispatchRequest) => Promise<{ actor: string; runnerType: string }>,
-): DispatchGate {
-  return {
-    name: 'human_only_pty',
-    async check(req: DispatchRequest) {
-      const { actor, runnerType } = await resolveActorAndRunnerType(req)
-      if (humanOnlyRejectsActor(actor, runnerType)) {
-        return { ok: false, reason: `automation_blocked_on_pty:${actor}` }
-      }
-      return { ok: true }
-    },
-  }
 }
 
 /**

@@ -18,10 +18,20 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import {
   governedAutomationEnabled,
   governedAutomationPtyGate,
+  killSwitchGovernor,
+  tokenCapGovernor,
+  injectRateGovernor,
+  lifetimeCounterGovernor,
+  PRODUCTION_GOVERNORS,
+  GOVERNOR_ORDER,
+  activeGovernors,
   _setGovernorsForTests,
   _resetGovernorsForTests,
   type GovernorGate,
 } from '../src/dispatch/governed-pty.ts'
+import * as governedNs from '../src/dispatch/governed-pty.ts'
+import * as gatesNs from '../src/dispatch/gates.ts'
+import { AUTOMATION_ACTORS, isDailyTokenCapEnforced } from '../src/dispatch/gates.ts'
 
 type Decision = { ok: true } | { ok: false; reason: string }
 
@@ -156,5 +166,160 @@ describe('PTYCAP Phase 3 -- production governors with the flag ON (D-02, D-06)',
       })
     }
     expect(calls).toEqual([])
+  })
+})
+
+const sched = (runnerType = 'pty-interactive') =>
+  governedAutomationPtyGate(async () => ({ actor: 'scheduler', runnerType }))
+
+describe('PTYCAP Phase 3 -- governor order and first-block-wins (D-02)', () => {
+  test('flag ON + four all-pass governors: ok, evaluated in the fixed order', async () => {
+    process.env[FLAG] = '1'
+    const calls: string[] = []
+    _setGovernorsForTests(allPass(calls))
+    expect(await sched().check(baseReq as any)).toEqual({ ok: true })
+    expect(calls).toEqual(['kill_switch', 'token_cap', 'inject_rate', 'lifetime_counter'])
+  })
+
+  test('the first blocking governor wins and later governors are not invoked', async () => {
+    process.env[FLAG] = '1'
+    const calls: string[] = []
+    _setGovernorsForTests([
+      spy('kill_switch', calls),
+      spy('token_cap', calls, { block: 'x' }),
+      spy('inject_rate', calls),
+      spy('lifetime_counter', calls),
+    ])
+    expect(await sched().check(baseReq as any)).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:scheduler:x',
+    })
+    expect(calls).toEqual(['kill_switch', 'token_cap'])
+  })
+
+  test('PRODUCTION_GOVERNORS names equal GOVERNOR_ORDER; the dollar cost cap is not a governor', () => {
+    const names = PRODUCTION_GOVERNORS.map((g) => g.name)
+    expect(names).toEqual([...GOVERNOR_ORDER])
+    expect(names).toEqual(['kill_switch', 'token_cap', 'inject_rate', 'lifetime_counter'])
+    expect(names).not.toContain('daily_cost_cap' as any)
+  })
+
+  test('every AUTOMATION_ACTORS member is admitted with the flag ON and four all-pass governors (admit path exists under DI)', async () => {
+    process.env[FLAG] = '1'
+    _setGovernorsForTests(allPass([]))
+    expect(AUTOMATION_ACTORS.size).toBeGreaterThan(0)
+    for (const actor of AUTOMATION_ACTORS) {
+      const gate = governedAutomationPtyGate(async () => ({ actor, runnerType: 'pty-interactive' }))
+      expect(await gate.check(baseReq as any)).toEqual({ ok: true })
+    }
+  })
+})
+
+describe('PTYCAP Phase 3 -- enabled rule (D-03)', () => {
+  const enabledChain = (calls: string[]): GovernorGate[] => [
+    spy('kill_switch', calls),
+    tokenCapGovernor,
+    injectRateGovernor,
+    spy('lifetime_counter', calls),
+  ]
+
+  test('default env: token_cap and inject_rate are enabled, chain admits', async () => {
+    process.env[FLAG] = '1'
+    _setGovernorsForTests(enabledChain([]))
+    expect(await sched().check(baseReq as any)).toEqual({ ok: true })
+  })
+
+  test('token cap explicitly disabled (1|true|yes|on) blocks governor_unconfigured:token_cap', async () => {
+    process.env[FLAG] = '1'
+    _setGovernorsForTests(enabledChain([]))
+    for (const v of ['1', 'true', 'yes', 'on']) {
+      process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED = v
+      const r = await sched().check(baseReq as any)
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.reason.endsWith(':governor_unconfigured:token_cap')).toBe(true)
+    }
+  })
+
+  test('inject-rate ceiling 0 or negative blocks governor_unconfigured:inject_rate', async () => {
+    process.env[FLAG] = '1'
+    _setGovernorsForTests(enabledChain([]))
+    for (const v of ['0', '-1']) {
+      process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR = v
+      const r = await sched().check(baseReq as any)
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.reason.endsWith(':governor_unconfigured:inject_rate')).toBe(true)
+    }
+  })
+
+  test('isDailyTokenCapEnforced: unset true; 1|TRUE|" on " false; 0 and garbage true', () => {
+    expect(isDailyTokenCapEnforced()).toBe(true)
+    for (const v of ['1', 'TRUE', ' on ']) {
+      process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED = v
+      expect(isDailyTokenCapEnforced()).toBe(false)
+    }
+    for (const v of ['0', 'garbage']) {
+      process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED = v
+      expect(isDailyTokenCapEnforced()).toBe(true)
+    }
+  })
+})
+
+describe('PTYCAP Phase 3 -- fail-closed slots, throw, non-PTY, DI-only, no alias', () => {
+  test('lifetime_counter slot fails closed even when every other governor passes', async () => {
+    process.env[FLAG] = '1'
+    _setGovernorsForTests([spy('kill_switch', []), tokenCapGovernor, injectRateGovernor, lifetimeCounterGovernor])
+    expect(await sched().check(baseReq as any)).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:scheduler:governor_not_implemented:lifetime_counter',
+    })
+  })
+
+  test('the production kill_switch and lifetime_counter bodies always block with governor_not_implemented', async () => {
+    expect(await killSwitchGovernor.check(baseReq as any)).toEqual({
+      ok: false,
+      reason: 'governor_not_implemented:kill_switch',
+    })
+    expect(await lifetimeCounterGovernor.check(baseReq as any)).toEqual({
+      ok: false,
+      reason: 'governor_not_implemented:lifetime_counter',
+    })
+  })
+
+  test('a governor that throws yields a typed governor_error denial, never a pass (D-14)', async () => {
+    process.env[FLAG] = '1'
+    const calls: string[] = []
+    _setGovernorsForTests([
+      spy('kill_switch', calls, 'throw'),
+      spy('token_cap', calls),
+      spy('inject_rate', calls),
+      spy('lifetime_counter', calls),
+    ])
+    expect(await sched().check(baseReq as any)).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:scheduler:governor_error:kill_switch',
+    })
+    expect(calls).toEqual(['kill_switch'])
+  })
+
+  test('a non-PTY runner type is ok without consulting any governor, flag ON (D-17)', async () => {
+    process.env[FLAG] = '1'
+    const calls: string[] = []
+    _setGovernorsForTests(allPass(calls))
+    expect(await sched('stream-json').check(baseReq as any)).toEqual({ ok: true })
+    expect(calls).toEqual([])
+  })
+
+  test('governors are injectable only through the test setter; reset restores PRODUCTION_GOVERNORS; the gate takes exactly one parameter (D-02)', () => {
+    _setGovernorsForTests(allPass([]))
+    expect(activeGovernors()).not.toBe(PRODUCTION_GOVERNORS)
+    _resetGovernorsForTests()
+    expect(activeGovernors()).toBe(PRODUCTION_GOVERNORS)
+    expect(governedAutomationPtyGate.length).toBe(1)
+  })
+
+  test('hard rename (D-05): no humanOnlyPtyGate key in gates.ts or governed-pty.ts; the gate name is governed_automation_pty', () => {
+    expect(Object.keys(gatesNs)).not.toContain('humanOnlyPtyGate')
+    expect(Object.keys(governedNs)).not.toContain('humanOnlyPtyGate')
+    expect(sched().name).toBe('governed_automation_pty')
   })
 })
