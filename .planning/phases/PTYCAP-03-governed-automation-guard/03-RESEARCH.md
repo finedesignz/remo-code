@@ -293,3 +293,14 @@ Contradictions / drift to flag:
 12. Fail-direction: 09-SPEC:172-173 sets the rule "spawn ceilings fail CLOSED"; the lifetime counter/kill switch are spawn ceilings (unlike sessionInjectRateGate, which fails open at gates.ts:305).
 13. Supervisor side needs no change for admission (it trusts hub term.* frames; isHuman hard-coded at session-bridge.ts:518); no-API-key/argv tests are independent of hub gate code and must stay untouched (ROADMAP Phase 3 SC-4).
 14. P3 (Telegram permission keystrokes) and P2 (term.attach_file) are un-preflighted exemptions; Phase 3 plan must either record them as explicit exemptions or route them (02-VERIFICATION MINOR-3).
+
+---------------------------------------------------------------------------------------------------
+## Validation Architecture
+---------------------------------------------------------------------------------------------------
+- Framework: Bun test (bun 1.3.14). Hub unit tests are DB-free (leaf-module mocks, `?t=${Date.now()}` cache-busting imports); config `hub/bunfig.toml` preload `./test/_setup.ts`.
+- Quick run (per touched file, one process per file because Bun `mock.module` is process-global): `cd hub; bun test test/<name>.test.ts`.
+- Full suite: `bun run check-baseline` (every hub test file in its own process vs `tools/regression-baseline.json`: fail must be 0, skip <= 260). Also `bun run schema-lint` (any DDL), `bun run docs:sync` (any OpenAPI/route/reason-string change), `bun run migration-verify` (any schema.sql change).
+- Supervisor guards (SC-4, must stay green UNCHANGED, not in qc.yaml): from repo root `bun test supervisor/test/no-api-key-no-streamjson-pty.test.ts`, `no-apikey-fallback-guard.test.ts`, `default-backend-selector.test.ts`, `pty-spawn-interception.test.ts`, `no-legacy-agent-spawn.test.ts`.
+- Local-only caveat: `hub/test/human-interactive-flag-guard.test.ts` fails on a Windows CRLF checkout until its `split('\n')` becomes `split(/\r?\n/)` (Phase 3 fold-in).
+- Phase 3 requirement -> test map: SC-1 governors/eligibility/order/enabled-ceiling/DI setter -> new `hub/test/governed-pty-gate.test.ts`; automation chain extension and "human chain has no governor" -> `hub/test/pty-preflight.test.ts`; SC-2 spoof/static pins -> `hub/test/term-relay-human-guard.test.ts` (+ new client-socket strip case) and new `hub/test/pty-door-guard.test.ts`; SC-3 OFF == legacy differential matrix -> `governed-pty-gate.test.ts`; SC-4 -> the supervisor guard files above (run, never edit).
+- Wave 0: none. Bun is installed; every new test file is created inside the task that introduces its subject.
