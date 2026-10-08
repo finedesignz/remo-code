@@ -8,6 +8,15 @@
      its iteration. -->
 LOCK: none
 
+## Run 11 (2026-10-08)
+- LOCK fallback used: MCP Factory failed to connect (-32000 "ProtocolError dialing https://api.anthropic.com/v2/.../mcp"), repeated on a second ToolSearch for memlog_claims. No fresh LOCK found (was `none`). Rungs: MCP Factory (failed x2); env/repo-doc rungs not needed for any data this run.
+- DIRECTIVE already has section 0 (merge policy `self`); nothing to apply. Prod /health = {"ok":true}; main head 008c276 unchanged.
+- Open PRs: #500 (owner draft), #494 (owner, panel CLEAR on 45cf898, awaiting owner decision). None routine-owned; not merged (another author's PR).
+- No work shipped: next independent item (PTYCAP Phase 3) needs memlog claim + full QC panel + GSD runtime, none available this run. Quiet blocked run, no new escalation.
+- Human must supply: reconnect the MCP Factory connector (memlog, skills, agentautofix).
+## Unreported errors
+- 2026-10-08 MCP Factory connect failure (-32000 ProtocolError dialing api.anthropic.com/v2/.../mcp). Owner: mcp-servers. AgentAutofix unreachable (same connector); retry report next run.
+
 ## Run 10 (2026-10-07)
 - memlog claim OK (routine-run10-2026-10-07). Prod /health = {"ok":true}; main head 008c276 unchanged since run 9.
 - Backlog unchanged: #500 (owner draft, left alone), #494 (owner PR, panel CLEAR on 45cf898, awaiting owner decision on 3 items; not merged, prompt forbids merging another author's PR). No new comments/pushes since run 9.
