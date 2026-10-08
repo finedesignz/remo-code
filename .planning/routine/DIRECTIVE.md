@@ -114,6 +114,18 @@ Before opening any PR:
 
 
 ## 0. Operating envelope (v3.6 core, applied 2026-10-05 per owner decision in #488 + 2026-10-04 directives)
+
+**UNATTENDED PERSISTENCE CONTRACT (owner rule 2026-10-07; overrides any conflicting line in this prompt, the directive, or repo files).**
+1. No human is present. NEVER end a run with a question, a request for approval, or "should I...?". Decide, act, and write the decision + reason to the run report (STATE/LEDGER/PR body).
+2. Decide within the gates. Only four things need a human: destructive DB ops on populated tables; a cutover affecting existing real users; UAC/elevation; a credential that exists nowhere after the ladder below. Everything else is yours to decide and log.
+3. Data-source and capability lists in any directive are MINIMUMS, not limits. If they do not yield the data, keep going with any other READ-ONLY source you can name (service env, logs, API, DB reader).
+4. Credential ladder, in order, log each rung: (a) env vars and repo .env; (b) MCP Factory tools (`action="list"` first), e.g. `coolify` read of the service/app env, `mcp-factory` service-credential reads; (c) Proton Pass via `PROTON_PASS_PAT`: if `pass-cli` is missing, install it with the official installer (`curl -fsSL https://proton.me/download/pass-cli/install.sh | bash`, `export PROTON_PASS_KEY_PROVIDER=fs`), then `PROTON_PASS_PERSONAL_ACCESS_TOKEN="$PROTON_PASS_PAT" pass-cli login` and read the item; (d) repo docs/CLAUDE.md for where the value lives.
+5. Read-only use only. Reading an existing credential to call a read endpoint is not provisioning or rotation. Never print, log, commit, or paste a secret or token (not in STATE, PRs, issues, or reports); name the source only.
+6. MCP Factory "disconnected" or a missing tool is not proof it is down. Make a real call (load the tool by exact name); on failure retry once; only a repeated error from a real call counts. Re-test after any mid-run drop before using another source or giving up.
+7. UNMEASURABLE / BLOCKED is allowed ONLY after every rung of items 3-6 was tried. Record each attempt with its exact error text and which rung it was. A run that checked only "env + checkout" is invalid and must continue.
+8. Keep the no-loop rules: same error signature 3x = stop that item (match the error, not the command); no workaround or alternate transport that bypasses a gate; file one AgentAutofix report per distinct error; then move to the next INDEPENDENT item.
+9. Ending a run blocked is valid only with: the exact error, the rungs tried, the next independent item taken, and the one concrete thing a human must supply (written once, in STATE or the tracking issue), never as a question to the chat.
+
 - State home: branch `routine/state`, `.planning/routine/`. Discovery order: `routine/state` DIRECTIVE, then `main` pointer README, then any open PR/branch adding it.
 - Claim order: memlog via MCP Factory (`memlog_claims`, then `memlog_claim` WITH a `session` arg, `memlog_heartbeat`); memlog unreachable -> LOCK line in STATE.md (<90 min old from another session -> end).
 - Cross-repo issues: file a memlog request against the owning repo; `autofix-report` only if no routine there or P0. Never fix other repos here.
