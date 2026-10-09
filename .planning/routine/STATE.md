@@ -8,6 +8,12 @@
      its iteration. -->
 LOCK: none
 
+## Run 12 (2026-10-09)
+- memlog via MCP Factory OK (claims empty; claimed routine-2026-10-09). DIRECTIVE already has section 0 (merge policy `self`); nothing to apply. Prod /health = {"ok":true}; main head 008c276 unchanged.
+- Open PRs: #500 (owner draft, left alone), #494 (owner PR; panel CLEAR on 45cf898, no new activity since 2026-10-07; not merged: scheduled prompt forbids merging another author's PR; owner decision items listed in the PR comment).
+- install-gsd.sh not run (earlier sandbox denial of pipe-to-bash). No work shipped; quiet blocked run, no new escalation. No errors this run, nothing reported to AgentAutofix. Run 11 unreported MCP connect error not reproduced (connector worked); no refile.
+- Resume: PTYCAP Phase 3 (full QC panel) or hub typecheck cleanup.
+
 ## Run 11 (2026-10-08)
 - LOCK fallback used: MCP Factory failed to connect (-32000 "ProtocolError dialing https://api.anthropic.com/v2/.../mcp"), repeated on a second ToolSearch for memlog_claims. No fresh LOCK found (was `none`). Rungs: MCP Factory (failed x2); env/repo-doc rungs not needed for any data this run.
 - DIRECTIVE already has section 0 (merge policy `self`); nothing to apply. Prod /health = {"ok":true}; main head 008c276 unchanged.
