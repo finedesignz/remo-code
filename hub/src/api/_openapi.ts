@@ -1122,7 +1122,7 @@ openapi.openAPIRegistry.registerComponent("securitySchemes", "apiKeyAuth", {
   type: "http",
   scheme: "bearer",
   description:
-    "A remo-code api_key (`remokey_…`) from Settings → Credentials. Optional scopes: `ext:read` (free reads) and `ext:ask` (spends tokens). A key with NULL scopes keeps legacy full access.",
+    "A remo-code api_key (`remokey_…`) from Settings → Credentials. Optional scopes: `ext:read` (free reads) and `ext:ask` (spends tokens); `settings:read` / `settings:write` (explicit-only) reach the Settings routes listed in docs/auth.md. A key with NULL scopes keeps legacy full access.",
 });
 openapi.openAPIRegistry.registerComponent("securitySchemes", "bearerAuth", {
   type: "http",
