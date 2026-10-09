@@ -34,7 +34,10 @@ describe('humanInteractive trust boundary', () => {
 
   test('pty-preflight.ts sets it only for the server-inferred human actor', () => {
     const src = readFileSync(join(SRC, 'dispatch/pty-preflight.ts'), 'utf8')
-    const sets = src.split('\n').filter((l) => /humanInteractive\s*:/.test(l))
+    const sets = src
+      .split('\n')
+      .map((l) => l.replace(/\r$/, ''))
+      .filter((l) => /humanInteractive\s*:/.test(l))
     expect(sets).toEqual(["    ...(human ? { humanInteractive: true as const } : {}),"])
   })
 })
