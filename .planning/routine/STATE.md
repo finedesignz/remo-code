@@ -8,6 +8,12 @@
      its iteration. -->
 LOCK: none
 
+## Run 13 (2026-10-09)
+- memlog via MCP Factory OK (claims empty; claimed routine-run13-2026-10-09). DIRECTIVE already has section 0; nothing to apply. main head 008c276.
+- Open PRs: #501 (AAF bot, test-only CRLF fix in human-interactive-flag-guard.test.ts; Woodpecker qc green on 14dd2c9, ai-review neutral/infra) -> posted `/review` once; if still infra-only next run, substitute routine independent review then merge. #500 (owner draft, left alone). #494 (owner PR, panel CLEAR on 45cf898, not merged: prompt forbids merging another author's PR).
+- install-gsd.sh not run (earlier sandbox denial). No code shipped; no errors this run, nothing reported to AgentAutofix.
+- Resume: #501 verdict, then PTYCAP Phase 3 (full QC panel) or hub typecheck cleanup.
+
 ## Run 12 (2026-10-09)
 - memlog via MCP Factory OK (claims empty; claimed routine-2026-10-09). DIRECTIVE already has section 0 (merge policy `self`); nothing to apply. Prod /health = {"ok":true}; main head 008c276 unchanged.
 - Open PRs: #500 (owner draft, left alone), #494 (owner PR; panel CLEAR on 45cf898, no new activity since 2026-10-07; not merged: scheduled prompt forbids merging another author's PR; owner decision items listed in the PR comment).
