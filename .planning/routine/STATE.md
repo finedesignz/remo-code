@@ -8,6 +8,12 @@
      its iteration. -->
 LOCK: none
 
+## Run 14 (2026-10-10)
+- memlog claim OK (routine-run14-2026-10-10). Prod /health = {"ok":true}. #501 no longer open. Open: #494 (owner PR, panel CLEAR earlier, not merged: other author), #502 (AAF, rotate-api-key CLI; ai-review failure on codex blocking finding).
+- Shipped: pushed fix to #502 branch (atomic revoke+insert in one transaction; default-name bug; merged main). Awaiting AAF re-review. Not merged: credential-minting tool, owner-account comment requests sign-off; needs QC panel (hub/scripts sensitive).
+- install-gsd.sh not run (earlier sandbox denial). No errors this run to report.
+- Resume: #502 ai-review on new SHA, then QC panel; PTYCAP Phase 3.
+
 ## Run 13 (2026-10-09)
 - memlog via MCP Factory OK (claims empty; claimed routine-run13-2026-10-09). DIRECTIVE already has section 0; nothing to apply. main head 008c276.
 - Open PRs: #501 (AAF bot, test-only CRLF fix in human-interactive-flag-guard.test.ts; Woodpecker qc green on 14dd2c9, ai-review neutral/infra) -> posted `/review` once; if still infra-only next run, substitute routine independent review then merge. #500 (owner draft, left alone). #494 (owner PR, panel CLEAR on 45cf898, not merged: prompt forbids merging another author's PR).
