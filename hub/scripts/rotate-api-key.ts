@@ -101,11 +101,22 @@ async function main(): Promise<number> {
     // same name/purpose/scopes.
     const rawKey = generateToken('remokey_')
     const keyHash = await hashToken(rawKey)
-    await dal.revokeApiKeyById(userId, keyId!)
-    const key = await dal.createApiKey(userId, keyHash, existing.name, {
-      purpose: existing.purpose,
-      scopes: existing.scopes,
-      keyPrefix: prefixOf(rawKey),
+    // Revoke + insert in ONE transaction: if the insert fails the old key stays
+    // valid, so a rotation can never leave the user with no usable credential.
+    const { sql } = await import('../src/db/postgres.ts')
+    const key = await sql.begin(async (tx) => {
+      const revoked = await tx`
+        UPDATE api_keys SET revoked_at = now()
+        WHERE id = ${keyId!} AND user_id = ${userId} AND revoked_at IS NULL
+        RETURNING id
+      `
+      if (revoked.length !== 1) throw new Error('key no longer active')
+      const rows = await tx`
+        INSERT INTO api_keys (user_id, key_hash, name, purpose, scopes, key_prefix)
+        VALUES (${userId}, ${keyHash}, ${existing.name}, ${existing.purpose}, ${existing.scopes ?? null}, ${prefixOf(rawKey)})
+        RETURNING id
+      `
+      return rows[0]
     })
     try {
       await dal.recordAuthEvent({
@@ -140,7 +151,7 @@ async function main(): Promise<number> {
     return 1
   }
   const purpose = host ? 'host' : agent ? 'supervisor' : 'external'
-  const name = (arg('name') || (host ? 'Cloud host' : scopes ? 'External key' : 'Supervisor')).slice(0, 64)
+  const name = (arg('name') || (host ? 'Cloud host' : purpose === 'supervisor' ? 'Supervisor' : 'External key')).slice(0, 64)
 
   const rawKey = generateToken('remokey_')
   const keyHash = await hashToken(rawKey)
