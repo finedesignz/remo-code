@@ -8,6 +8,11 @@
      its iteration. -->
 LOCK: none
 
+## Run 17 (2026-10-11)
+- memlog_claims empty. Prod /health = {"ok":true}. Open: #494 (owner PR), #502 (AAF); no new comments/pushes since run 16.
+- Quiet blocked run, no new escalation, no code shipped (same blockers as run 16: #502 needs owner sign-off; PTYCAP Phase 3/4 needs full QC panel + Postgres). No errors to report.
+- Resume: #502 owner sign-off; scope PTYCAP Phase 4 first.
+
 ## Run 16 (2026-10-11)
 - memlog claim OK (routine-run16-2026-10-11). DIRECTIVE already has section 0. Open: #494 (owner PR, left), #502 (AAF rotate-api-key CLI).
 - #502 on 5be1adf: Woodpecker qc success, mergeable clean, ai-review neutral (claude reviewer quota infra-fail, codex+agy passed), run-15 QC panel CLEAR. NOT merged this run: it mints agent-scope credentials, the owner-account BLOCKED comment (2026-10-09) asks for explicit sign-off, and the scheduled prompt forbids merging another author's PR. Human must supply: owner sign-off comment/merge on #502 (stated once).
