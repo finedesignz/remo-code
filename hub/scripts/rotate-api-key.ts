@@ -21,7 +21,7 @@
  * Usage:
  *   bun run hub/scripts/rotate-api-key.ts rotate --user <email> --key-id <uuid>
  *   bun run hub/scripts/rotate-api-key.ts rotate --user <email> --prefix <remokey_…first-14-chars>
- *   bun run hub/scripts/rotate-api-key.ts mint   --user <email> [--name <n>] [--scopes a,b] [--host]
+ *   bun run hub/scripts/rotate-api-key.ts mint   --user <email> (--scopes a,b | --legacy-full-access) [--name <n>] [--host]
  *   bun run hub/scripts/rotate-api-key.ts list   --user <email>
  *
  * The plaintext key is printed ONCE to stdout and never stored.
@@ -43,7 +43,7 @@ function usage(): never {
   console.error(
     `${TAG} usage:\n` +
       `  rotate --user <email> (--key-id <uuid> | --prefix <key_prefix>)\n` +
-      `  mint   --user <email> [--name <name>] [--scopes agent,ext:read,...] [--host]\n` +
+      `  mint   --user <email> [--name <name>] (--scopes agent,ext:read,... | --legacy-full-access) [--host]\n` +
       `  list   --user <email>`,
   )
   process.exit(2)
@@ -58,6 +58,10 @@ async function main(): Promise<number> {
   const email = arg('user')
   if (!cmd || !email || !['rotate', 'mint', 'list'].includes(cmd)) usage()
 
+  if (!process.env.DATABASE_URL) {
+    console.error(`${TAG} DATABASE_URL is required (refusing to fall back to the localhost default)`)
+    return 2
+  }
   const dal = await import('../src/db/dal.ts')
   const { hashToken } = await import('../src/lib/crypto.ts')
   const { generateToken } = await import('../src/utils/token.ts')
@@ -126,7 +130,7 @@ async function main(): Promise<number> {
         userAgent: 'cli:rotate-api-key',
         metadata: { key_id: key.id, rotated_from: keyId, purpose: existing.purpose, via: 'cli' },
       })
-    } catch {}
+    } catch (e) { console.error(`${TAG} WARNING: audit event not recorded:`, (e as Error)?.message ?? e) }
 
     console.log(`${TAG} rotated ${keyId} -> ${key.id} (purpose=${existing.purpose})`)
     if (existing.purpose === 'supervisor' || existing.purpose === 'host') {
@@ -138,7 +142,19 @@ async function main(): Promise<number> {
   }
 
   // mint — mirrors POST /api/api-keys purpose rules.
-  const norm = normalizeScopes(arg('scopes') ? arg('scopes')!.split(',').map((s) => s.trim()).filter(Boolean) : null)
+  // A present-but-empty/missing --scopes value must NOT fall through to null scopes
+  // (= legacy full access); a typo like `--scopes --host` would otherwise mint a
+  // full-access supervisor key. Null scopes need the explicit --legacy-full-access.
+  const scopesList = arg('scopes') ? arg('scopes')!.split(',').map((s) => s.trim()).filter(Boolean) : []
+  if (flag('scopes') && scopesList.length === 0) {
+    console.error(`${TAG} --scopes needs a non-empty comma-separated value`)
+    return 1
+  }
+  if (!flag('scopes') && !flag('legacy-full-access')) {
+    console.error(`${TAG} mint needs --scopes a,b or the explicit --legacy-full-access`)
+    return 1
+  }
+  const norm = normalizeScopes(scopesList.length ? scopesList : null)
   if (!norm.ok) {
     console.error(`${TAG} ${norm.error}`)
     return 1
@@ -164,7 +180,7 @@ async function main(): Promise<number> {
       userAgent: 'cli:rotate-api-key',
       metadata: { key_id: key.id, name, purpose, scopes, via: 'cli' },
     })
-  } catch {}
+  } catch (e) { console.error(`${TAG} WARNING: audit event not recorded:`, (e as Error)?.message ?? e) }
 
   console.log(`${TAG} minted ${key.id} (purpose=${purpose}, scopes=${JSON.stringify(scopes)})`)
   if (purpose === 'supervisor') {

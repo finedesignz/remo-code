@@ -343,7 +343,7 @@ mint itself an `agent` key. Guarded by `hub/test/api-keys-scopes.test.ts`.
 **Non-browser mint / rotate (operator only).** Because the HTTP surface is deliberately
 cookie-only, the headless path is a one-shot script on the hub host (needs `DATABASE_URL`):
 `bun run hub/scripts/rotate-api-key.ts rotate --user <email> --key-id <id>` (or `--prefix`),
-`… mint --user <email> [--name …] [--scopes …] [--host]`, `… list --user <email>`. It uses the
+`… mint --user <email> (--scopes … | --legacy-full-access) [--name …] [--host]`, `… list --user <email>`. It uses the
 same DAL/hash helpers as the router and writes the same `token_create` audit event. The
 in-process hot-swap does **not** run from the CLI — install the printed key on the affected host.
 
