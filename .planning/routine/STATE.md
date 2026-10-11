@@ -8,6 +8,12 @@
      its iteration. -->
 LOCK: none
 
+## Run 15 (2026-10-11)
+- memlog claim OK (routine-run15-2026-10-11). Prod /health = {"ok":true}. Open: #494 (owner PR, left), #502 (AAF).
+- #502: full QC panel (security/correctness/tenancy) on cba87f4: no exploitable findings; 2 reviewers found `mint --scopes --host` => NULL-scope full-access key. Pushed 5be1adf (explicit --scopes/--legacy-full-access, DATABASE_URL required, audit-fail warning, mode-change revert). Panel verdict commented. NOT merged yet: needs qc green + ai-review on 5be1adf.
+- install-gsd.sh not run (earlier sandbox denial). No errors to report.
+- Resume: merge #502 when qc green and ai-review has no blocking finding (if ai-review infra-neutral again, the panel above stands in); then PTYCAP Phase 3.
+
 ## Run 14 (2026-10-10)
 - memlog claim OK (routine-run14-2026-10-10). Prod /health = {"ok":true}. #501 no longer open. Open: #494 (owner PR, panel CLEAR earlier, not merged: other author), #502 (AAF, rotate-api-key CLI; ai-review failure on codex blocking finding).
 - Shipped: pushed fix to #502 branch (atomic revoke+insert in one transaction; default-name bug; merged main). Awaiting AAF re-review. Not merged: credential-minting tool, owner-account comment requests sign-off; needs QC panel (hub/scripts sensitive).
