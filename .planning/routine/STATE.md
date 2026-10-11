@@ -8,6 +8,13 @@
      its iteration. -->
 LOCK: none
 
+## Run 16 (2026-10-11)
+- memlog claim OK (routine-run16-2026-10-11). DIRECTIVE already has section 0. Open: #494 (owner PR, left), #502 (AAF rotate-api-key CLI).
+- #502 on 5be1adf: Woodpecker qc success, mergeable clean, ai-review neutral (claude reviewer quota infra-fail, codex+agy passed), run-15 QC panel CLEAR. NOT merged this run: it mints agent-scope credentials, the owner-account BLOCKED comment (2026-10-09) asks for explicit sign-off, and the scheduled prompt forbids merging another author's PR. Human must supply: owner sign-off comment/merge on #502 (stated once).
+- No new code shipped: next item PTYCAP Phase 3 is circular with Phase 4 (guard needs lifetime counter + kill switch), arms automation on a spend path, needs full QC panel + real Postgres, none available in this budget. Quiet blocked run, no new escalation.
+- install-gsd.sh not run (earlier sandbox denial). No errors to report.
+- Resume: #502 owner sign-off; then scope Phase 4 (kill switch + 60% alarm) before Phase 3.
+
 ## Run 15 (2026-10-11)
 - memlog claim OK (routine-run15-2026-10-11). Prod /health = {"ok":true}. Open: #494 (owner PR, left), #502 (AAF).
 - #502: full QC panel (security/correctness/tenancy) on cba87f4: no exploitable findings; 2 reviewers found `mint --scopes --host` => NULL-scope full-access key. Pushed 5be1adf (explicit --scopes/--legacy-full-access, DATABASE_URL required, audit-fail warning, mode-change revert). Panel verdict commented. NOT merged yet: needs qc green + ai-review on 5be1adf.
