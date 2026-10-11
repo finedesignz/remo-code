@@ -8,6 +8,11 @@
      its iteration. -->
 LOCK: none
 
+## Run 19 (2026-10-11)
+- memlog_claims empty (no claim taken). Prod /health = {"ok":true}. Open: #494 (owner PR), #502 (AAF, head 5be1adf); #494 updated_at/head unchanged, #502 unchanged since run 18.
+- Quiet blocked run, no new escalation, nothing shipped. Blockers unchanged: #502 needs owner sign-off (agent-scope key minting); PTYCAP Phase 3/4 needs full QC panel + Postgres. No errors to report.
+- Resume: #502 owner sign-off; scope PTYCAP Phase 4 first.
+
 ## Run 18 (2026-10-11)
 - memlog_claims empty (no claim taken; no work to claim). Prod /health = {"ok":true}. DIRECTIVE has section 0. Open: #494 (owner PR), #502 (AAF); no new comments/pushes since run 17.
 - Quiet blocked run, no new escalation, nothing shipped. Blockers unchanged: #502 needs owner sign-off (the owner-account BLOCKED comment) and the scheduled prompt forbids merging another author's PR; PTYCAP Phase 3/4 needs a full QC panel + Postgres. No errors to report.
