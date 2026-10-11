@@ -475,7 +475,7 @@ merge a green PR. Combined with §9's hard line ("don't merge yourself; don't pu
    PR's merge status.
 4. If a future run discovers AgentAutofix (or anything else) DID merge a prior PR unattended, update
    this section with that evidence (§14 changelog) rather than assuming it going forward.
-5. Never merge your own PR, never push to `main` directly, and never re-request a stalled PR's merge
+5. Merge your own PR once it is green (CI + QC + verifier PASS), never `--admin` past failing/pending CI, never push to `main` directly, and never re-request a stalled PR's merge
    more than once per calendar day (comment, don't nag).
 
 ## 10. Hard lines (the few that are absolute)
