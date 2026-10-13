@@ -1895,6 +1895,151 @@ To perform this operation, you must be authenticated by means of one of the foll
 bearerAuth
 </aside>
 
+<h1 id="remo-code-hub-sessions">sessions</h1>
+
+## Launch a fresh session for the external self-heal service (machine surface)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/sessions/heal \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "repo": "string",
+  "branch": "string",
+  "prompt": "string",
+  "model": "string",
+  "exclude_supervisor_ids": [
+    "string"
+  ]
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/sessions/heal',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/sessions/heal`
+
+> Body parameter
+
+```json
+{
+  "repo": "string",
+  "branch": "string",
+  "prompt": "string",
+  "model": "string",
+  "exclude_supervisor_ids": [
+    "string"
+  ]
+}
+```
+
+<h3 id="launch-a-fresh-session-for-the-external-self-heal-service-(machine-surface)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» repo|body|string|true|none|
+|» branch|body|string|true|none|
+|» prompt|body|string|true|none|
+|» model|body|string|false|none|
+|» exclude_supervisor_ids|body|[string]|false|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "session_id": "string",
+  "target_kind": "supervisor",
+  "supervisor_id": "string",
+  "url": "string"
+}
+```
+
+<h3 id="launch-a-fresh-session-for-the-external-self-heal-service-(machine-surface)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Session start dispatched|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Run row could not be inserted|Inline|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|Not started. automation_halted: a kill-switch row (or the env break-glass) covers the caller. lifetime_inject_exhausted: the heal:<repo> lifetime budget is spent (owner reset needed). quota_threshold_reached and no_target_available are the pre-existing refusals.|Inline|
+
+<h3 id="launch-a-fresh-session-for-the-external-self-heal-service-(machine-surface)-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» session_id|string|true|none|none|
+|» target_kind|string|true|none|none|
+|» supervisor_id|string|false|none|none|
+|» url|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|target_kind|supervisor|
+|target_kind|local_agent|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **500**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|error|automation_halted|
+|error|lifetime_inject_exhausted|
+|error|quota_threshold_reached|
+|error|no_target_available|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
 <h1 id="remo-code-hub-orchestrator-tasks">orchestrator-tasks</h1>
 
 ## Get a session's orchestrator task + its rows (task null if none)

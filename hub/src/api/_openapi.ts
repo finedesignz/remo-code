@@ -506,6 +506,70 @@ openapi.openapi(dismissLocalRoute, async (c) => {
     },
   });
 }
+// ── Self-heal launch (PTYCAP-04-07) ─────────────────────────────────────────
+// Spec-only registration; the plain-Hono router in `./sessions.ts` serves traffic. The route
+// is a MACHINE surface: the kill switch is checked first and one lifetime reservation
+// (counter key heal:<repo>) is taken before any session.start is sent.
+{
+  const Err = z.object({ error: z.string() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const register = (r: any) => reg.registerPath(r);
+  register({
+    method: "post",
+    path: "/api/sessions/heal",
+    summary: "Launch a fresh session for the external self-heal service (machine surface)",
+    tags: ["sessions"],
+    security: [{ bearerAuth: [] }],
+    request: {
+      body: json(
+        z.object({
+          repo: z.string().min(1).max(500),
+          branch: z.string().min(1).max(200),
+          prompt: z.string().min(1).max(20000),
+          model: z.string().max(120).optional(),
+          exclude_supervisor_ids: z.array(z.string()).max(20).optional(),
+        }),
+      ),
+    },
+    responses: {
+      202: {
+        description: "Session start dispatched",
+        ...json(
+          z.object({
+            session_id: z.string(),
+            target_kind: z.enum(["supervisor", "local_agent"]),
+            supervisor_id: z.string().optional(),
+            url: z.string(),
+          }),
+        ),
+      },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      500: { description: "Run row could not be inserted", ...json(Err) },
+      503: {
+        description:
+          "Not started. automation_halted: a kill-switch row (or the env break-glass) covers the caller. " +
+          "lifetime_inject_exhausted: the heal:<repo> lifetime budget is spent (owner reset needed). " +
+          "quota_threshold_reached and no_target_available are the pre-existing refusals.",
+        ...json(
+          z.union([
+            z.object({ error: z.literal("automation_halted"), reason: z.string() }),
+            z.object({ error: z.literal("lifetime_inject_exhausted"), reason: z.string() }),
+            z.object({
+              error: z.literal("quota_threshold_reached"),
+              reason: z.string(),
+              utilization_pct: z.number().optional(),
+              threshold_pct: z.number().optional(),
+              resets_at: z.string().nullable().optional(),
+            }),
+            z.object({ error: z.literal("no_target_available"), reason: z.string().optional() }),
+          ]),
+        ),
+      },
+    },
+  });
+}
 // ── Auto-dev orchestrator task config (Phase 31) ────────────────────────────
 // Spec-only registration. The plain-Hono router in `./orchestrator-tasks.ts`
 // serves traffic; these declarations only contribute to the OpenAPI spec.
