@@ -22,6 +22,7 @@ import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { probeGithubAppScope } from '../lib/github-scope.ts'
 import { enqueueCreateGithubRepoJob } from '../lib/github-repo-job.ts'
 import { randomUUID } from 'node:crypto'
+import { isAutomationHalted, reserveInject, releaseInject } from '../dispatch/automation-controls.ts'
 import { linkCloudSession, normalizeCloudSessionId } from '../db/cloud-sessions-dal.ts'
 import path from 'node:path'
 
@@ -394,6 +395,32 @@ sessions.post('/heal', async (c) => {
   }
   const { repo, branch, prompt, model } = parsed.data
 
+  // PTYCAP-04-07 (panel F-2): the external self-heal service is a MACHINE surface that emits
+  // session.start outside the guarded launch primitives. (1) Kill switch FIRST, before
+  // pickSessionTarget consumes a concurrency slot and a run row. (2) ONE lifetime reservation
+  // per request (not per hop) under counter key heal:<repo> with a fresh per-call token and no
+  // rate enforcement (heal-specific counter policy is Phase 7). (3) The reservation is
+  // released on every exit that does not start a session. Pinned by
+  // test/session-start-senders-guard.test.ts and test/sessions-heal-halt.test.ts.
+  const halt = await isAutomationHalted({ userId })
+  if (halt.halted) {
+    return c.json({ error: 'automation_halted', reason: `automation_halted:${halt.scope}` }, 503)
+  }
+  const healCounterKey = `heal:${repo}`
+  const healToken = `heal:${randomUUID()}`
+  const healReservation = await reserveInject({
+    userId,
+    sessionId: healCounterKey,
+    token: healToken,
+    counterKey: healCounterKey,
+    actor: 'self-heal',
+  })
+  if (!healReservation.ok) {
+    return c.json({ error: 'lifetime_inject_exhausted', reason: healReservation.reason }, 503)
+  }
+  let healStarted = false
+  try {
+
   // Build a mutable exclude list so we can extend it on WS dispatch failure
   // and re-route to the next supervisor (up to HEAL_MAX_HOPS attempts).
   const exclude = new Set<string>(parsed.data.exclude_supervisor_ids ?? [])
@@ -462,6 +489,7 @@ sessions.post('/heal', async (c) => {
 
       try { await updateSupervisorState(pick.supervisor_id, 'starting', run.id) } catch {}
 
+      healStarted = true
       return c.json({
         session_id: run.id,
         target_kind: 'supervisor' as const,
@@ -471,6 +499,7 @@ sessions.post('/heal', async (c) => {
     }
 
     // pick.kind === 'local_agent'
+    healStarted = true
     return c.json({
       session_id: pick.agent_session_id,
       target_kind: 'local_agent' as const,
@@ -480,6 +509,11 @@ sessions.post('/heal', async (c) => {
 
   // Exhausted hop budget — every supervisor we tried failed to dispatch.
   return c.json({ error: 'no_target_available', reason: 'all_dispatches_failed' }, 503)
+  } finally {
+    // Every exit that did not start a session (quota_blocked, no_target_available,
+    // run_insert_failed, all hops failed, a throw) gives the lifetime slot back.
+    if (!healStarted) await releaseInject({ counterKey: healCounterKey, token: healToken })
+  }
 })
 
 // ── Phase 08 §16 — POST /api/sessions/:id/launch ─────────────────────────────

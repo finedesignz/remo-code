@@ -54,9 +54,13 @@ function callArguments(text: string, needle: string): string[] {
 }
 
 describe('PTYCAP-04-04 -- reserveInject( callers (T-04-15, T-04-18)', () => {
-  const ALLOWED = new Set(['dispatch/automation-controls.ts', 'dispatch/pty-preflight.ts'])
+  const ALLOWED = new Set([
+    'dispatch/automation-controls.ts',
+    'dispatch/pty-preflight.ts',
+    'api/sessions.ts', // POST /heal: external self-heal MACHINE surface, one reservation per request (04-07, panel F-2)
+  ])
 
-  test('reserveInject( appears only in the controls module and the PTY door', () => {
+  test('reserveInject( appears only in the controls module, the PTY door and the self-heal route', () => {
     const hits = filesIncluding('reserveInject(')
     expect(hits.filter((f) => !ALLOWED.has(f))).toEqual([])
   })

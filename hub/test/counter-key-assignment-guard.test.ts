@@ -18,6 +18,7 @@ const ALLOWED = new Set([
   'orchestrator/inject.ts', //          orchestrator task key
   'scheduler/senders/agent.ts', //      task:<scheduled_tasks.id>
   'scheduler/senders/triage.ts', //     triage:<application_uuid>
+  'api/sessions.ts', //                 POST /heal reserves heal:<repo> (04-07, panel F-2); server-set from the validated repo, never a DispatchRequest
 ])
 
 // property (`counterKey: x`, `counterKey?: x`), shorthand (`{ counterKey }`), member (`.counterKey = x`)

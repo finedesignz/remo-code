@@ -90,3 +90,28 @@ describe('session.start sender classification', () => {
     }
   })
 })
+
+describe('self-heal route handler (MACHINE, panel F-2)', () => {
+  const src = readFileSync(join(SRC, 'api/sessions.ts'), 'utf8')
+  const start = src.indexOf("sessions.post('/heal'")
+  const end = src.indexOf("sessions.post('/:id/launch'", start)
+  const slice = src.slice(start, end > start ? end : undefined)
+
+  test('the handler slice is located', () => {
+    expect(start).toBeGreaterThan(0)
+    expect(slice).toContain("type: 'session.start'")
+  })
+
+  test('halt check and lifetime reservation both precede pickSessionTarget and session.start', () => {
+    const halt = slice.indexOf('isAutomationHalted(')
+    const reserve = slice.indexOf('reserveInject(')
+    const pick = slice.indexOf('pickSessionTarget(')
+    const send = slice.indexOf("type: 'session.start'")
+    expect(halt).toBeGreaterThan(-1)
+    expect(reserve).toBeGreaterThan(halt)
+    expect(pick).toBeGreaterThan(reserve)
+    expect(send).toBeGreaterThan(pick)
+    expect(slice).toContain('releaseInject(')
+    expect(slice).toContain('heal:')
+  })
+})
