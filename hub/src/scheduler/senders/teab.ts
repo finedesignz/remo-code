@@ -23,7 +23,7 @@
  * TEAB-05 and hooks the clearly-marked seam at the end of `sendTeabTask`.
  */
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
-import { updateRunStatus } from '../../db/scheduled-tasks-dal.ts'
+import { updateRunStatus, rearmOnceTask } from '../../db/scheduled-tasks-dal.ts'
 import { sql } from '../../db/postgres.ts'
 import {
   getSupervisor,
@@ -118,6 +118,14 @@ export async function sendTeabTask(task: ScheduledTask, ctx: RunCtxLike): Promis
   const pre = await haltBeforeMachineSend({ userId: ctx.userId })
   if (!pre.ok) {
     try { await sql`UPDATE scheduled_tasks SET teab_last_status = 'skipped' WHERE id = ${task.id}` } catch {}
+    // R3: a CLAIMED one-time task must not be burned by the refusal; restore the claim so
+    // the once-due sweep re-fires it after release. The skipped run below is the visible
+    // record of this attempt even if the re-arm itself fails.
+    if (task.schedule_kind === 'once') {
+      try { await rearmOnceTask(task.id) } catch (err: any) {
+        log.error('scheduler.teab.once_rearm_failed', { task_id: task.id, error: err?.message })
+      }
+    }
     await finalizeRun(ctx.runId, 'skipped', pre.reason)
     return
   }

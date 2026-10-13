@@ -10,6 +10,7 @@
  */
 import type { ServerWebSocket } from 'bun'
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
+import { rearmOnceTask } from '../../db/scheduled-tasks-dal.ts'
 import { sql } from '../../db/postgres.ts'
 import { broadcastToUser } from '../../ws/registry.ts'
 import { finalizeRun } from '../dispatcher.ts'
@@ -62,6 +63,14 @@ export async function sendSupervisorTask(task: ScheduledTask, ctx: RunCtxLike): 
   // kill switch fresh immediately before the transmission and finalize the run skipped.
   const pre = await haltBeforeMachineSend({ userId: ctx.userId })
   if (!pre.ok) {
+    // R3: a CLAIMED one-time task must not be burned by the refusal; restore the claim so
+    // the once-due sweep re-fires it after release. The skipped run below is the visible
+    // record of this attempt even if the re-arm itself fails.
+    if (task.schedule_kind === 'once') {
+      try { await rearmOnceTask(task.id) } catch (err: any) {
+        console.error(`[scheduler.supervisor] once re-arm failed task=${task.id}: ${err?.message ?? err}`)
+      }
+    }
     await finalizeRun(ctx.runId, 'skipped', pre.reason)
     return
   }

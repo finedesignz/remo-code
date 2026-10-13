@@ -14,6 +14,9 @@ const st = {
   engageOnCmd: true,
   finalized: [] as Array<{ runId: string; status: string; error: string | null }>,
   frames: [] as any[],
+  rearmed: [] as string[],
+  rearmThrows: false,
+  order: [] as string[],
 }
 
 mock.module('../src/db/postgres.ts', () => ({
@@ -29,8 +32,17 @@ mock.module('../src/db/postgres.ts', () => ({
   },
 }))
 mock.module('../src/ws/registry.ts', () => ({ broadcastToUser: () => {} }))
+mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
+  rearmOnceTask: async (id: string) => {
+    st.order.push('rearm')
+    st.rearmed.push(id)
+    if (st.rearmThrows) throw new Error('rearm db down')
+    return true
+  },
+}))
 mock.module('../src/scheduler/dispatcher.ts', () => ({
   finalizeRun: async (runId: string, status: string, error: string | null) => {
+    st.order.push('finalize')
     st.finalized.push({ runId, status, error })
   },
 }))
@@ -50,6 +62,9 @@ beforeEach(() => {
   st.engageOnCmd = true
   st.finalized = []
   st.frames = []
+  st.rearmed = []
+  st.rearmThrows = false
+  st.order = []
   delete process.env.REMO_AUTOMATION_KILL_SWITCH
 })
 afterAll(() => mock.restore())
@@ -74,5 +89,26 @@ describe('sendSupervisorTask pre-send halt', () => {
     expect(st.frames).toHaveLength(1)
     expect(st.frames[0].type).toBe('run_command')
     expect(st.finalized).toHaveLength(0)
+  })
+
+  test('QC R3: a halted CLAIMED one-time task is re-armed before its run is finalized skipped', async () => {
+    await sendSupervisorTask({ ...task, schedule_kind: 'once' }, ctx())
+    expect(st.frames).toHaveLength(0)
+    expect(st.rearmed).toEqual(['task-1'])
+    expect(st.order).toEqual(['rearm', 'finalize'])
+    expect(st.finalized).toEqual([{ runId: 'run-1', status: 'skipped', error: 'automation_halted:user' }])
+  })
+
+  test('QC R3: a failing re-arm still leaves the visible skipped run (nothing silently lost)', async () => {
+    st.rearmThrows = true
+    await sendSupervisorTask({ ...task, schedule_kind: 'once' }, ctx())
+    expect(st.frames).toHaveLength(0)
+    expect(st.finalized).toEqual([{ runId: 'run-1', status: 'skipped', error: 'automation_halted:user' }])
+  })
+
+  test('QC R3: a recurring (cron) task is never re-armed', async () => {
+    await sendSupervisorTask({ ...task, schedule_kind: 'cron' }, ctx())
+    expect(st.rearmed).toHaveLength(0)
+    expect(st.finalized).toHaveLength(1)
   })
 })
