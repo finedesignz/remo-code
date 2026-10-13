@@ -580,8 +580,10 @@ DB-free structural source scans with non-vacuous scanner self-checks:
   actor `human` only in `ws/client.ts`; `checkPtyTurnPreflight(` is called only
   from `pty-preflight.ts`, `ws/client.ts` or `orchestrator/`;
   `injectPtyKeystroke(` only in `pty-inject.ts` and `telegram-webhook.ts`;
-  `dispatchToSession(` only in `telegram/dispatch.ts` and
-  `telegram-webhook.ts`.
+  `dispatchToSession` is imported only by `telegram-webhook.ts` and
+  `telegram/doctor.ts` (alias-aware scan; doctor takes it as an injected
+  `dispatch` param for the buffered replay of an authenticated-webhook message,
+  and its call object is pinned to `source: 'human'`).
 - The flag and DI literals live only in `dispatch/governed-pty.ts`.
 - The actor is server-inferred: nothing under `hub/src/dispatch/` reads a
   request source or actor field, and `DispatchRequest` declares none.

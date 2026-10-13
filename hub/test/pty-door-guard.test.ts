@@ -143,11 +143,29 @@ describe('PTYCAP Phase 3 -- privileged caller pins (D-01c, D-12, D-16)', () => {
     expect(hits.filter((f) => !allowed.has(f))).toEqual([])
   })
 
-  test('dispatchToSession( appears only in telegram/dispatch.ts and telegram-webhook.ts', () => {
-    const allowed = new Set(['telegram/dispatch.ts', 'api/telegram-webhook.ts'])
+  test('dispatchToSession is imported only by telegram/dispatch.ts consumers: webhook and doctor replay (alias-aware)', () => {
+    // doctor.ts takes it as an injected `dispatch` param (aliased), so a bare
+    // `dispatchToSession(` needle misses it. Any importer is a privileged caller.
+    const IMPORTS_DISPATCH = /import\s*\{[^}]*\bdispatchToSession\b[^}]*\}\s*from/
+    expect(IMPORTS_DISPATCH.test("import { a, dispatchToSession } from './dispatch.ts'")).toBe(true)
+    expect(IMPORTS_DISPATCH.test("import { other } from './dispatch.ts'")).toBe(false)
+    const allowed = new Set(['api/telegram-webhook.ts', 'telegram/doctor.ts'])
+    const importers = filesMatching(IMPORTS_DISPATCH)
+    for (const a of allowed) expect(importers).toContain(a)
+    expect(importers.filter((f) => !allowed.has(f))).toEqual([])
+    // The definition site plus the two importers are the only files naming a call.
+    const callers = new Set([...allowed, 'telegram/dispatch.ts'])
     const hits = filesIncluding('dispatchToSession(')
-    for (const a of allowed) expect(hits).toContain(a)
-    expect(hits.filter((f) => !allowed.has(f))).toEqual([])
+    expect(hits).toContain('telegram/dispatch.ts')
+    expect(hits.filter((f) => !callers.has(f))).toEqual([])
+  })
+
+  test('doctor.ts replay of the buffered webhook message passes source: "human" (alias-aware)', () => {
+    const src = read('telegram/doctor.ts')
+    expect(src).toMatch(/opts\.dispatchImpl\s*\?\?\s*dispatchToSession/)
+    const m = src.match(/await dispatch\(\{([\s\S]*?)\n\s*\}\)/)
+    expect(m).not.toBeNull()
+    expect(m![1]).toMatch(/source:\s*['"]human['"]/)
   })
 })
 
