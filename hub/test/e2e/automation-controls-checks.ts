@@ -56,7 +56,7 @@ export async function runAutomationControlsChecks(a: AutomationChecksArgs): Prom
   const newSession = async (): Promise<string> => {
     const rows = await sql<{ id: string }[]>`
       INSERT INTO sessions (user_id, name, project_dir, token_hash)
-      VALUES (${userId}, ${P}, '/tmp/e2e-automation', ${'th-' + randomUUID()})
+      VALUES (${userId}, ${P}, ${`/tmp/e2e-automation-${randomUUID()}`}, ${'th-' + randomUUID()})
       RETURNING id
     `
     createdSessions.push(rows[0].id)
