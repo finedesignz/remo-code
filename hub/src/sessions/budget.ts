@@ -29,6 +29,7 @@
  *
  * See .planning/phases/04-coolify-dev-supervisor/ARCHITECTURE-REVIEW.md §3.
  */
+import path from 'node:path'
 import { sql } from '../db/postgres.ts'
 
 /**
@@ -50,6 +51,20 @@ export type ReserveResult =
   | { ok: true; running: number; cap: number; run: { id: string } | null }
   | { ok: false; reason: 'at_capacity'; running: number; cap: number }
   | { ok: false; reason: 'supervisor_not_found' }
+  | { ok: false; reason: 'orchestrator_session'; sessionId: string }
+
+/**
+ * Canonical form of a path for equality. Resolves `.`/`..`/repeated separators.
+ * Windows-style paths (drive letter or backslashes) are case-folded; POSIX
+ * paths stay case-SENSITIVE (`/srv/Code` != `/srv/code`).
+ */
+function normPath(p: string): string {
+  if (!p) return ''
+  if (/^[a-zA-Z]:/.test(p) || p.includes('\\')) {
+    return path.win32.normalize(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  }
+  return path.posix.normalize(p).replace(/(.)\/+$/, '$1')
+}
 
 /**
  * Atomically reserve a session slot against the supervisor's effective cap and,
@@ -67,6 +82,14 @@ export async function reserveSessionSlot(
   runFields?: ReserveRunFields,
 ): Promise<ReserveResult> {
   return sql.begin(async (tx) => {
+    // Run-consuming reservations take the SAME per-user advisory lock that
+    // `launchOrchestrator` holds for its whole critical section, and take it
+    // BEFORE the supervisor row lock (launchOrchestrator's order too — no
+    // deadlock). This makes the orchestrator-guard check below race-free
+    // against a first-launch whose session row is still uncommitted.
+    if (runFields) {
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${'orchestrator:' + userId})::bigint)`
+    }
     const supRows = await tx<{
       concurrency_budget: number
       concurrency_override: number | null
@@ -98,6 +121,43 @@ export async function reserveSessionSlot(
 
     if (running >= cap) {
       return { ok: false, reason: 'at_capacity', running, cap } as const
+    }
+
+    // ORCHESTRATOR GUARD (the lowest common seam for every run-consuming start
+    // path). The orchestrator session has exactly ONE launcher —
+    // `launchOrchestrator` — which holds a per-user advisory lock and re-checks
+    // for an open run before inserting. It does NOT go through this function
+    // (it replicates the cap math on its own tx). So any run-consuming
+    // reservation that targets the orchestrator session — by session id OR by a
+    // repo_path that resolves to its project_dir (spawn-on-error, supervisor
+    // /start, POST /sessions, orphan replay all pass sessionId:null + a path) —
+    // could open a SECOND concurrent orchestrator run (2x cost, key churn).
+    // Refuse it here; the caller must delegate to `launchOrchestrator`.
+    if (runFields) {
+      const orchRows = await tx<{ id: string; project_dir: string | null }[]>`
+        SELECT id, project_dir FROM sessions
+        WHERE user_id = ${userId} AND is_orchestrator = true AND deleted_at IS NULL
+      `
+      // launchOrchestrator reuses the session row but runs at the CHOSEN
+      // supervisor's cwd without updating project_dir, so also match every cwd
+      // an orchestrator run has actually used.
+      const usedRows = orchRows.length
+        ? await tx<{ repo_path: string }[]>`
+            SELECT DISTINCT repo_path FROM session_runs
+            WHERE user_id = ${userId} AND session_id = ANY(${orchRows.map((o) => o.id)})
+          `
+        : []
+      const target = normPath(runFields.repoPath ?? '')
+      const usedPaths = new Set(usedRows.map((r) => normPath(r.repo_path)))
+      const hit = orchRows.find(
+        (o) =>
+          (runFields.sessionId != null && o.id === runFields.sessionId) ||
+          (target !== '' &&
+            ((!!o.project_dir && normPath(o.project_dir) === target) || usedPaths.has(target))),
+      )
+      if (hit) {
+        return { ok: false, reason: 'orchestrator_session', sessionId: hit.id } as const
+      }
     }
 
     // Consume the slot inside the locked window so the reservation is reflected

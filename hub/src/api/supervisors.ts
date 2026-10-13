@@ -204,6 +204,9 @@ supervisors.post('/:id/start', async (c) => {
     if (reservation.reason === 'supervisor_not_found') {
       return c.json({ error: 'not found' }, 404)
     }
+    if (reservation.reason === 'orchestrator_session') {
+      return c.json({ error: 'use_orchestrator_start', session_id: reservation.sessionId }, 409)
+    }
     return c.json({
       error: 'at_capacity',
       running: reservation.running,
