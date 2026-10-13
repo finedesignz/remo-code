@@ -114,7 +114,11 @@ ceiling (and the programmatic-credit halt).
   3. Alarm emails the owner at 60% of the daily token ceiling.
   4. Default daily token cap lowered from 50M to a survivable figure (~20M).
 
-**Hand-off from Phase 3**: Phase 4 replaces the fail-closed `kill_switch` and `lifetime_counter` governor bodies in `hub/src/dispatch/governed-pty.ts` (today they block `governor_not_implemented:<name>`). Entry criteria: an admitted automation PTY turn must be COUNTED (durable ledger) before the governed chain is trusted; Phase-3 governors are non-consuming checks -- atomic reserve-before-send consumption is Phase 4's design.
+**Hand-off from Phase 3**: DELIVERED in Phase 4. The fail-closed `kill_switch` and `lifetime_counter` governor bodies in `hub/src/dispatch/governed-pty.ts` are now real; an admitted automation PTY turn is COUNTED in a durable append-only ledger (`automation_inject_ledger`) by an atomic reserve-before-send. See [docs/usage-cost.md](../docs/usage-cost.md) "PTYCAP Phase 4".
+
+**Delivery notes (Phase 4)**: the lifetime cap is LITERAL (default 1000 per counter key, env-raisable, owner reset, one-shot warning page at 80 percent and an exhaustion page); `POST /api/sessions/heal` is classified a machine surface; with `REMO_GOVERNED_AUTOMATION_PTY` ON the ask, work and telegram governed lists carry no counter key, so the `lifetime_counter` governor refuses `lifetime_counter_key_missing` until Phase 5/7 supply keys (fail closed, flag default OFF). The 20M default token cap applies only where `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` is unset.
+
+**Deferred to Milestone GOV (from Phase 4)**: a Telegram or UI kill-switch trigger; opt-in `stop_running` cancellation of active runs once automation ownership is tracked; a counter policy for QC keys (Phases 7/8) beyond the heal key; the cap-hit QC kind (Phase 9).
 
 ### Phase 5: Throwaway-Repo Due→PR Proof
 

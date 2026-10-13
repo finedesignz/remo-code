@@ -501,7 +501,7 @@ Phase 2 built the automation preflight chain but nothing could call it. Phase 3
 adds the admission decision a non-human actor must pass before it may drive a
 `pty-interactive` session, behind a flag that is OFF by default, and pins the
 door structurally so a new producer cannot bypass it. With the flag ON, Phase 3
-production still admits NOTHING, by design (see Governors).
+production still admits NOTHING, by design (see Governors; Phase 4 replaced the two fail-closed slots, see "PTYCAP Phase 4" below).
 
 ### Flag
 
@@ -542,16 +542,17 @@ governor. A thrown governor is a typed denial
 
 | Order | Governor | Phase-3 body | Block reason |
 |---|---|---|---|
-| 1 | `kill_switch` | fail-closed slot, always blocks | `governor_not_implemented:kill_switch` |
+| 1 | `kill_switch` | real (Phase 4): the same function as the dispatcher-list gate, fresh read, fail closed | `automation_halted:<scope>` |
 | 2 | `token_cap` | blocks when `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED` is truthy | `governor_unconfigured:token_cap` |
-| 3 | `inject_rate` | blocks when `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` is set to an invalid value (garbage, NaN, Infinity, <= 0); unset/blank uses the default 4 | `governor_unconfigured:inject_rate` |
-| 4 | `lifetime_counter` | fail-closed slot, always blocks | `governor_not_implemented:lifetime_counter` |
+| 3 | `inject_rate` | still blocks an invalid `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` (unset/blank uses the default 4); Phase 4 also COUNTS the de-duplicated trailing-hour union | `governor_unconfigured:inject_rate` or `over_session_inject_rate:<n>>=<cap>` |
+| 4 | `lifetime_counter` | real (Phase 4): non-consuming lifetime check, needs a counter key | `lifetime_counter_key_missing` or `lifetime_inject_exhausted:<n>>=<cap>` |
 
-The "over the limit" evaluation stays with `dailyTokenCapGate` and the
-preflight chain's `sessionInjectRateGate`; the governors only refuse an
-unconfigured or disabled ceiling. Because `kill_switch` and `lifetime_counter`
-always block until Phase 4 replaces them, the flag ON admits nothing in
-production. The admit path is proven only under test dependency injection
+The token "over the limit" evaluation stays with `dailyTokenCapGate`; the
+`token_cap` governor only refuses a disabled ceiling. Since Phase 4 the
+`kill_switch` and `lifetime_counter` governors are real (the same function
+references the dispatcher-list gates run, no wrapper). With the flag ON the door
+still admits nothing in production until a Phase 5 producer supplies a counter
+key and a per-turn token: it refuses `lifetime_counter_key_missing`. The admit path is proven only under test dependency injection
 (`_setGovernorsForTests` / `_resetGovernorsForTests`); there is deliberately no
 public governors parameter, which would be a bypass handle.
 
@@ -621,10 +622,10 @@ with no file under `supervisor/` changed.
   typing. A future bearer-automation lane must use `/ws/agent` or an ext key,
   never a cookie, so it cannot be mistaken for the human relay.
 - **D-12, count before trust:** an admitted automation PTY turn must be COUNTED
-  (durable ledger) before the governed chain is trusted. This is a Phase 4/5
-  entry criterion.
+  (durable ledger) before the governed chain is trusted. Delivered in Phase 4
+  (the door reserves before the send).
 - **D-14, reserve-before-send:** Phase-3 governors are non-consuming checks;
-  atomic reserve-before-send consumption is Phase 4's design.
+  atomic reserve-before-send consumption was delivered in Phase 4.
 - **D-11:** the Phase-2 mechanism claims above were corrected here (structural
   `user_message` routing, not the `runner_type` gate; Telegram plain text goes
   via `user_message`).
@@ -639,3 +640,131 @@ with no file under `supervisor/` changed.
 - `hub/test/ws-client-pty-preflight.test.ts` -- the ws-client strip case (a
   client-supplied actor is ignored; the relay actor stays `human`).
 - `hub/test/telegram-human-only-guard.test.ts` -- the missing-source case.
+
+## PTYCAP Phase 4 -- lifetime inject counter, kill switch, 60% alarm
+
+Phase 3 left two fail-closed governor slots. Phase 4 fills them and puts the same
+controls on every machine dispatch path. Code: `hub/src/dispatch/automation-controls.ts`
+(neutral module; imports no gate or governor module), `hub/src/api/automation.ts`,
+`hub/src/observability/token-cap-alarm.ts`.
+
+### Ledger and atomic reserve
+
+`automation_inject_ledger` is append-only (no deletes; `released_at`, reset markers and
+page rows are compensation rows). `reserveInject` runs ONE reservation inside a
+per-counter-key advisory lock (plus a fixed-order per-session lock when the rate check
+runs): lifetime count first, then the trailing-60-minute rate over the de-duplicated set
+union of the session's `routine_run_log` inject rows (joined by `inject_token`) and ledger
+reserve rows. It is idempotent per `(counter_key, token)`. The reserve happens BEFORE the
+send; a refusal or a send failure releases it and frees the queue slot. Requests that are
+parked, queued or dropped before a send never count. `dispatch()` runs `preSendGuard` before
+`store.open` and a SEPARATE final halt check immediately before `deps.send`.
+
+### Counter keys
+
+| Key | Assigned by |
+|---|---|
+| `task:<scheduled_tasks.id>` | scheduler agent sender and every orchestrator inject (online and autospawn) through the resolver: one budget per orchestrator |
+| `triage:<application_uuid>` | scheduler triage sender (one budget per Coolify application) |
+| `heal:<repo>` | `POST /api/sessions/heal` |
+| `session:<id>` | where no task exists |
+
+Only server code assigns keys (`counter-key-assignment-guard.test.ts`); a request body can
+never carry one.
+
+### Coverage matrix
+
+| Path | Kill switch | Lifetime counter | Reason |
+|---|---|---|---|
+| orchestrator inject (online + autospawn), scheduler agent, triage | first | last | counted, keyed |
+| error-capture, feedback, revanote | first | exempt | event stream with no task identity; bounded by their own rate limits and the spend caps |
+| ask, work | first | exempt | key-less external requests; bounded by `askRateGate` / `workRateGate`, the repo allowlist and the spend caps |
+| Telegram dispatch, cloud send | never | never | HUMAN surfaces: a halt must not lock the owner out of their own sessions |
+| PTY door (automation) | governor 1 | governor 4 + reserve | human actor never reserved |
+| scheduler `fireTask` / one-time `fire()` / orchestrator due-scan / auto-launch / orphan resume | halt check | n/a | every run path, not keyed on `isManual` |
+| `POST /api/sessions/heal` | halt check first | one `heal:<repo>` reserve | MACHINE surface (panel F-2): the external self-heal service emits `session.start` outside the guarded launch primitives |
+| `POST /api/sessions/:id/launch`, `POST /api/supervisors/:id/start` | never | never | HUMAN web Connect/Start |
+
+`kill-switch-coverage.test.ts` is default-deny: a new machine gate list must be counted or
+carry an exemption reason. `launch-callers-guard` and `session-start-senders-guard`
+enumerate the launch primitives (the predicate runs only when a caller passes `machine: true`)
+and every `session.start` sender. Refusal reasons: `automation_halted:<scope>` and
+`lifetime_inject_exhausted:<n>>=<cap>`; the heal route's 503 bodies use the same codes
+(`automation_halted`, `lifetime_inject_exhausted`).
+
+### The literal lifetime cap (read this)
+
+The lifetime cap is a COUNT, never a rate: default **1000** per counter key, raisable with
+`REMO_AUTOMATION_LIFETIME_INJECT_CAP` (invalid value refuses boot), reset only by the owner.
+A key that fires every 15 minutes uses 1000 injects in about ten days, so recurring
+automation continues indefinitely only through owner resets or a raised cap. The owner is
+paged once at **80 percent** of the cap (`ceil(0.8 * cap)`, the 80% lifetime warning) and
+once at exhaustion, each per counter key and reset epoch (page rows in the same ledger;
+every count query filters to reserve rows only). Panel F-5a resolved this from the ROADMAP
+SC-1 text itself.
+
+### Kill switch and owner emergency paths
+
+Scopes: global (admin role), user (always the caller), session (owned by the caller, 404
+otherwise). State is a row in `automation_kill_switch` (three partial unique indexes) read
+fresh on every check and fail closed; `REMO_AUTOMATION_KILL_SWITCH` is the call-time
+break-glass that engages global regardless of the database (a restart is needed to change it).
+
+| Route | Auth | Notes |
+|---|---|---|
+| `GET /api/automation/kill-switch` | session | env flag, global row, caller's user row, session rows |
+| `POST /api/automation/kill-switch/engage` | session, NO step-up, ACTIVE license | row only; never stops a running session or cancels an in-flight turn |
+| `POST /api/automation/kill-switch/release` | session + login under 15 min old | fires the event-driven resume of deferred work for that scope |
+| `POST /api/automation/lifetime/reset` | session + login under 15 min old | appends a reset marker; answers `{ok, counter_key}`; 404 with no ledger rows |
+
+Emergency paths with no UI: the API engage; the env break-glass plus restart (the path for
+an owner in expired-license grace); recovery from a stale login is a fresh login.
+
+### Alarm (60 percent)
+
+A token-usage listener (fire-and-forget) feeds `token-cap-alarm.ts`, which coalesces per
+user (5 s quiet, 30 s max wait), reads the ceiling through `getTokenCapStatus` (cap disabled
+means silent), claims `(user_id, local_date)` atomically in `token_cap_alarms` and emails
+`users.email` once per local day when usage first crosses `REMO_TOKEN_CAP_ALARM_PCT`
+(default 60). The delivered flag flips only on a successful send; an undelivered claim
+retries on later usage events (5 attempts, 300 s cooldown). In-app and Telegram fan-out run
+only after the email was delivered.
+
+### Door contract for the Phase 5 producer
+
+The door reserves after the governors with `{counterKey, turnToken}` supplied only from
+`hub/src/orchestrator/`. The token is PER TURN (never the constant per-session
+`pty-preflight:` token); a missing token refuses `pty_turn_token_missing`, a missing key
+`lifetime_counter_key_missing`; the door owns consumption. Blocked results compose as
+`automation_blocked_on_pty:<actor>:<reason>`. `reserveInject(` callers are pinned
+(`reserve-caller-guard.test.ts`: the controls module, the door, the heal route).
+
+### Residuals
+
+- In-flight turns are not cancelled by an engage; only the next send is refused.
+- Deleting and recreating a task or session re-mints its counter key (a fresh budget).
+- Per-key 1000 lifetime: a 15 minute cron needs an owner reset about every ten days.
+- A halt detected after a once-task claim RE-ARMS the task (no burned client work); the
+  once-work sender re-arms and finalizes that attempt as skipped. The once-due sweep
+  cadence is unchanged.
+- Releasing ANY scope resumes the deferred orchestrator orphans in that scope.
+- With the PTY flag ON, the ask, work and Telegram governed lists carry no counter key, so
+  the `lifetime_counter` governor refuses `lifetime_counter_key_missing` until Phase 5/7
+  supply keys: fail closed, flag default OFF.
+- G-1 (supervisor): the PTY usage emitter now dedupes on `message.id` (supervisor 0.15.1),
+  but a signed supervisor MSI must reach hosts before it takes effect; until then the
+  recorded PTY consumption (and so the effective ceiling) is roughly 2.5x too low.
+- The real-Postgres proof of the SQL is CI-only (`hub/test/e2e/automation-controls-checks.ts`,
+  called from an existing DB-gated e2e test body; zero new skips).
+- Deferred to Milestone GOV: Telegram or UI kill-switch trigger; opt-in cancellation of
+  active runs; counter policy for QC keys (Phases 7-9).
+
+### Tests (PTYCAP Phase 4)
+
+`automation-schema`, `automation-controls-core`, `automation-controls-config`,
+`dispatch-final-halt`, `dispatch-reserve`, `automation-tracer`, `automation-api`,
+`automation-boot-order`, `token-usage-listener`, `token-cap-alarm`,
+`kill-switch-coverage`, `scheduler-halt`, `once-rearm`, `orchestrator-tick-halt`,
+`sessions-heal-halt`, `launch-machine-guard`, `launch-callers-guard`,
+`session-start-senders-guard`, `reserve-caller-guard`, `counter-key-assignment-guard`,
+`replay-reentry-guard`, and supervisor `pty-usage-tail` (dedupe).
