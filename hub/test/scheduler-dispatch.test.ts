@@ -245,7 +245,7 @@ describe('scheduler dispatch adapter — open→send→finalize lifecycle', () =
     await sendAgentTask(TASK, ctx({ runId: 'run-1' }))
 
     // Launch fired exactly once for this session.
-    expect(state.launchCalls).toEqual([{ userId: 'user-1', sessionId: 'sess-1' }])
+    expect(state.launchCalls).toEqual([{ userId: 'user-1', sessionId: 'sess-1', machine: true }])
     // Nothing sent yet (session still offline) and the run is NOT finalized as
     // target_offline — it's parked in grace awaiting the launched runner.
     expect(state.sentFrames).toHaveLength(0)
@@ -282,6 +282,19 @@ describe('scheduler dispatch adapter — open→send→finalize lifecycle', () =
     const fin = state.finalized.find((f) => f.runId === 'run-1')
     expect(fin!.status).toBe('skipped')
     expect(fin!.error).toBe('at_capacity')
+  })
+
+  test('PTYCAP-04-07: offline session + halted machine launch -> skipped automation_halted:<scope>, no park', async () => {
+    state.online = new Set()
+    state.launchResult = { ok: false, reason: 'automation_halted:global' }
+
+    await sendAgentTask(TASK, ctx({ runId: 'run-1' }))
+
+    expect(state.sentFrames).toHaveLength(0)
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(0)
+    const fin = state.finalized.find((f) => f.runId === 'run-1')
+    expect(fin!.status).toBe('skipped')
+    expect(fin!.error).toBe('automation_halted:global')
   })
 
   test('offline session + offline supervisor (scheduled) → still parks in grace (unchanged)', async () => {

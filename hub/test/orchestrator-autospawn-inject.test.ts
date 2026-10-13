@@ -24,6 +24,7 @@ afterEach(() => {
 
 type Calls = {
   launched: number
+  launchArgs?: any[]
   dispatched: Array<{ gates: string[] }>
   runLogs: string[]
 }
@@ -46,8 +47,9 @@ function makeDeps(over: Partial<InjectDeps>, calls: Calls): InjectDeps {
       calls.runLogs.push(e.command)
       return {} as any
     }) as any,
-    launchSessionForUser: (async () => {
+    launchSessionForUser: (async (a: any) => {
       calls.launched++
+      ;(calls.launchArgs ??= []).push(a)
       return { ok: true, runId: 'run-1', supervisorId: 'sup-1', hostname: 'h', repoPath: '/srv/demo' }
     }) as any,
     dispatch: (async (_req: any, deps: any) => {
@@ -145,12 +147,26 @@ describe('BSA-02 autospawn inject seam', () => {
     expect(calls.launched).toBe(0)
   })
 
+  test('HALTED: a refused machine launch surfaces autospawn_launch_automation_halted:<scope>, no park', async () => {
+    const calls: Calls = { launched: 0, dispatched: [], runLogs: [] }
+    const deps = makeDeps(
+      { launchSessionForUser: (async () => ({ ok: false, reason: 'automation_halted:global' })) as any },
+      calls,
+    )
+    const out = await injectOrchestratorPrompt(input(), deps)
+    expect(out).toEqual({ kind: 'refused', reason: 'autospawn_launch_automation_halted:global' })
+    expect(calls.dispatched.length).toBe(0)
+    expect(calls.runLogs).toHaveLength(0)
+  })
+
   test('LAUNCH: full chain satisfied ⇒ spawns, parks, autospawn_launched + ledger row', async () => {
     const calls: Calls = { launched: 0, dispatched: [], runLogs: [] }
     const deps = makeDeps({}, calls)
     const out = await injectOrchestratorPrompt(input(), deps)
     expect(out.kind).toBe('autospawn_launched')
     expect(calls.launched).toBe(1)
+    // PTYCAP-04-07 (D-09b): the autospawn launch is machine-origin.
+    expect(calls.launchArgs?.[0]).toEqual({ userId: 'u1', sessionId: 's1', machine: true })
     expect(calls.dispatched.length).toBe(1)
     // BSA-04: the daily TOKEN gate is in the dispatch gate list ALONGSIDE the cost cap.
     expect(calls.dispatched[0].gates).toContain('daily_cost_cap')

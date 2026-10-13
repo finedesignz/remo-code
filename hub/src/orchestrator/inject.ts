@@ -403,7 +403,7 @@ async function maybeAutospawnOffline(
 
   let launch: LaunchResult
   try {
-    launch = await deps.launchSessionForUser({ userId, sessionId })
+    launch = await deps.launchSessionForUser({ userId, sessionId, machine: true })
   } catch (err: any) {
     return { kind: 'failed', reason: `autospawn_launch_threw: ${err?.message ?? String(err)}` }
   }

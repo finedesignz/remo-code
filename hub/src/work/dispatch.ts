@@ -314,7 +314,8 @@ export async function dispatchWork(input: DispatchWorkInput): Promise<WorkDispat
     ensureOnline: async (req) => {
       try {
         const { launchSessionForUser } = await import('../telegram/launch.ts')
-        const res = await launchSessionForUser({ userId: req.userId, sessionId: req.sessionId })
+        // machine: true (PTYCAP-04-07): inbound-email work is automation; a halt returns false so the pipeline parks.
+        const res = await launchSessionForUser({ userId: req.userId, sessionId: req.sessionId, machine: true })
         if (!res.ok) return false
         const deadline = Date.now() + 25_000
         while (Date.now() < deadline) {

@@ -238,7 +238,10 @@ async function maybeLaunchOfflineSession(args: {
     return 'launch_pending'
   }
 
-  const res = await launchSessionForUser({ userId: args.userId, sessionId: args.sessionId })
+  // machine: true (PTYCAP-04-07): a scheduled lazy launch is automation, so a halt refuses
+  // it. The default branch below maps `automation_halted:<scope>` to { skip } and the
+  // run finalizes skipped, not failed.
+  const res = await launchSessionForUser({ userId: args.userId, sessionId: args.sessionId, machine: true })
   if (res.ok) {
     log.info('scheduler.agent.session_launched', {
       session_id: args.sessionId, supervisor_id: res.supervisorId, run_id: res.runId,
