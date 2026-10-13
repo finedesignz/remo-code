@@ -169,7 +169,7 @@ describe('POST /api/sessions/heal kill switch + lifetime reservation', () => {
     st.pickQueue = [supPick(), supPick(), supPick()]
     const res = await heal()
     expect(res.status).toBe(503)
-    expect((await res.json()).reason).toBe('all_dispatches_failed')
+    expect(((await res.json()) as any).reason).toBe('all_dispatches_failed')
     expect(st.releases).toHaveLength(3)
     expect(st.sends).toHaveLength(0)
   })

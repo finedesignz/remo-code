@@ -37,7 +37,7 @@ const state: {
   online: Set<string>
   capExceeded: boolean
   launchResult: any
-  launchCalls: Array<{ userId: string; sessionId: string }>
+  launchCalls: Array<{ userId: string; sessionId: string; machine?: true }>
 } = {
   finalized: [],
   removed: [],
