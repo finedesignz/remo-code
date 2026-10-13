@@ -75,9 +75,11 @@ export interface DispatchInput {
   text: string;
   /** base64 data URIs, matches web-client `send_message` shape. */
   images?: string[];
-  /** Source actor (default 'human'). Automation sources are guard-rejected on a
-   *  pty-interactive session. */
-  source?: TelegramDispatchSource;
+  /** Source actor. REQUIRED and server-asserted by the caller at an authenticated
+   *  boundary: the Telegram webhook passes the literal 'human'. There is no
+   *  default -- a missing source is never treated as human (PTYCAP Phase 3,
+   *  D-09). Automation sources are guard-rejected on a pty-interactive session. */
+  source: TelegramDispatchSource;
 }
 
 /** Next UTC midnight as an ISO string — used for the throttle reply text. */
@@ -159,7 +161,7 @@ export async function dispatchToSession(input: DispatchInput): Promise<DispatchO
     );
   };
 
-  const source: TelegramDispatchSource = input.source ?? "human";
+  const source: TelegramDispatchSource = input.source;
 
   // R-TG-11: governedAutomationPtyGate (flag-gated; with the flag OFF it is the
   // legacy Phase-16 human-only decision, byte-identical). A pty-interactive session

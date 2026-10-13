@@ -62,9 +62,11 @@ describe("human-only PTY guard on Telegram dispatch", () => {
     expect(sent.length).toBe(1);
   });
 
-  test("default source is human (no source field ⇒ allowed)", async () => {
-    const r = await dispatchToSession({ userId: "u", sessionId: "s", chatId: 1, updateId: 2, text: "hi" });
-    expect(r.kind).toBe("dispatched");
+  test("a missing source is NOT treated as human -- fail closed (PTYCAP Phase 3, D-09)", async () => {
+    const r = await dispatchToSession({ userId: "u", sessionId: "s", chatId: 1, updateId: 2, text: "hi" } as any);
+    expect(r.kind).toBe("automation_blocked");
+    expect(sent.length).toBe(0);
+    expect(inserted.length).toBe(0);
   });
 
   test("an automation-sourced dispatch is REJECTED on a pty-interactive session (nothing injected)", async () => {
