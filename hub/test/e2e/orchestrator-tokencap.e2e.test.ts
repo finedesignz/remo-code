@@ -164,7 +164,22 @@ maybe('fix/stop-the-bleed e2e — the daily TOKEN cap fires on the real inject p
     expect(outcome.kind).toBe('dispatched')
     expect(sent.length).toBe(1)
     expect(await messageCount()).toBe(before + 1)
-  })
+
+    // PTYCAP-04: the real-Postgres proof of the automation controls SQL (advisory-lock
+    // reservation under concurrency, partial unique indexes, ON CONFLICT claims,
+    // count-after-reset, text/uuid casts, rate-union de-duplication) runs HERE, in the
+    // body of this existing test, so it executes in Woodpecker (postgres:16) with zero
+    // new tests and zero new skips. See ./automation-controls-checks.ts.
+    const { runAutomationControlsChecks } = await import('./automation-controls-checks.ts')
+    await runAutomationControlsChecks({
+      sql: h.sql,
+      userId: h.userId,
+      sessionId: h.sessionId,
+      controls: await import('../../src/dispatch/automation-controls.ts'),
+      inject: injectMod,
+      pipeline: pipelineMod,
+    })
+  }, 120_000)
 
   test('the pre-#342 accounting (input+output only) would NOT have fired — regression pin', async () => {
     await clearTokens()
