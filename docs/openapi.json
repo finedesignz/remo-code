@@ -1395,6 +1395,673 @@
         }
       }
     },
+    "/api/automation/kill-switch": {
+      "get": {
+        "summary": "Read the automation kill-switch state visible to the caller",
+        "tags": [
+          "automation"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Env flag, the global row, the caller's user row and session rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "env": {
+                      "type": "boolean"
+                    },
+                    "global": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "scope": {
+                          "type": "string",
+                          "enum": [
+                            "global",
+                            "user",
+                            "session"
+                          ]
+                        },
+                        "user_id": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "session_id": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "engaged": {
+                          "type": "boolean"
+                        },
+                        "reason": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "engaged_by": {
+                          "type": "string"
+                        },
+                        "engaged_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "scope",
+                        "user_id",
+                        "session_id",
+                        "engaged",
+                        "reason",
+                        "engaged_by",
+                        "engaged_at"
+                      ]
+                    },
+                    "user": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "scope": {
+                          "type": "string",
+                          "enum": [
+                            "global",
+                            "user",
+                            "session"
+                          ]
+                        },
+                        "user_id": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "session_id": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "engaged": {
+                          "type": "boolean"
+                        },
+                        "reason": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "engaged_by": {
+                          "type": "string"
+                        },
+                        "engaged_at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "scope",
+                        "user_id",
+                        "session_id",
+                        "engaged",
+                        "reason",
+                        "engaged_by",
+                        "engaged_at"
+                      ]
+                    },
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "scope": {
+                            "type": "string",
+                            "enum": [
+                              "global",
+                              "user",
+                              "session"
+                            ]
+                          },
+                          "user_id": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "session_id": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "engaged": {
+                            "type": "boolean"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "engaged_by": {
+                            "type": "string"
+                          },
+                          "engaged_at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "scope",
+                          "user_id",
+                          "session_id",
+                          "engaged",
+                          "reason",
+                          "engaged_by",
+                          "engaged_at"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "env",
+                    "global",
+                    "user",
+                    "sessions"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/automation/kill-switch/engage": {
+      "post": {
+        "summary": "Engage the kill switch (writes a row only; never stops a running session)",
+        "tags": [
+          "automation"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "global",
+                      "user",
+                      "session"
+                    ],
+                    "description": "global requires the admin role; user is always the caller; session must be owned by the caller"
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "description": "Required for session scope"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "scope"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Engaged (idempotent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "engaged": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "alreadyEngaged": {
+                      "type": "boolean"
+                    },
+                    "scope": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "engaged",
+                    "alreadyEngaged",
+                    "scope"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Global scope requires the admin role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "admin_required"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "reason"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found or not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/automation/kill-switch/release": {
+      "post": {
+        "summary": "Release the kill switch (requires a login under 15 minutes old)",
+        "tags": [
+          "automation"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "global",
+                      "user",
+                      "session"
+                    ],
+                    "description": "global requires the admin role; user is always the caller; session must be owned by the caller"
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "description": "Required for session scope"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "scope"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Released flag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "released": {
+                      "type": "boolean"
+                    },
+                    "scope": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "released",
+                    "scope"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT, or re_auth_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "error"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "re_auth_required"
+                          ]
+                        },
+                        "max_age_seconds": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "max_age_seconds"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Global scope requires the admin role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "admin_required"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "reason"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found or not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/automation/lifetime/reset": {
+      "post": {
+        "summary": "Append a lifetime-counter reset marker (requires a login under 15 minutes old)",
+        "tags": [
+          "automation"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "counter_key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  }
+                },
+                "required": [
+                  "counter_key"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "counter_key": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "counter_key"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT, or re_auth_required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "error"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "re_auth_required"
+                          ]
+                        },
+                        "max_age_seconds": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "max_age_seconds"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No ledger rows for this counter key and caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/orchestrator-tasks/{sessionId}": {
       "get": {
         "summary": "Get a session's orchestrator task + its rows (task null if none)",

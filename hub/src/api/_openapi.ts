@@ -409,6 +409,100 @@ openapi.openapi(dismissLocalRoute, async (c) => {
     },
   });
 }
+// ── Automation controls (PTYCAP-04-05) ──────────────────────────────────────
+// Spec-only registration. The plain-Hono router in `./automation.ts` serves
+// traffic. Engage has NO step-up (emergency stop); release and lifetime reset
+// require a login under 15 minutes old (re_auth_required).
+{
+  const Err = z.object({ error: z.string() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const base = { tags: ["automation"], security: [{ bearerAuth: [] }] } as const;
+  const Forbidden = z.object({ error: z.literal("forbidden"), reason: z.literal("admin_required") });
+  const ReAuth = z.object({ error: z.literal("re_auth_required"), max_age_seconds: z.number().int() });
+  const KillRow = z.object({
+    id: z.string().uuid(),
+    scope: z.enum(["global", "user", "session"]),
+    user_id: z.string().nullable(),
+    session_id: z.string().nullable(),
+    engaged: z.boolean(),
+    reason: z.string().nullable(),
+    engaged_by: z.string(),
+    engaged_at: z.string(),
+  });
+  const ScopeBody = z.object({
+    scope: z.enum(["global", "user", "session"]).openapi({
+      description: "global requires the admin role; user is always the caller; session must be owned by the caller",
+    }),
+    session_id: z.string().optional().openapi({ description: "Required for session scope" }),
+    reason: z.string().max(500).optional(),
+  });
+
+  reg.registerPath({
+    method: "get",
+    path: "/api/automation/kill-switch",
+    summary: "Read the automation kill-switch state visible to the caller",
+    ...base,
+    responses: {
+      200: {
+        description: "Env flag, the global row, the caller's user row and session rows",
+        ...json(
+          z.object({
+            env: z.boolean(),
+            global: KillRow.nullable(),
+            user: KillRow.nullable(),
+            sessions: z.array(KillRow),
+          }),
+        ),
+      },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/automation/kill-switch/engage",
+    summary: "Engage the kill switch (writes a row only; never stops a running session)",
+    ...base,
+    request: { body: json(ScopeBody) },
+    responses: {
+      200: {
+        description: "Engaged (idempotent)",
+        ...json(z.object({ engaged: z.literal(true), alreadyEngaged: z.boolean(), scope: z.string() })),
+      },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      403: { description: "Global scope requires the admin role", ...json(Forbidden) },
+      404: { description: "Session not found or not owned by the caller", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/automation/kill-switch/release",
+    summary: "Release the kill switch (requires a login under 15 minutes old)",
+    ...base,
+    request: { body: json(ScopeBody) },
+    responses: {
+      200: { description: "Released flag", ...json(z.object({ released: z.boolean(), scope: z.string() })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT, or re_auth_required", ...json(z.union([Err, ReAuth])) },
+      403: { description: "Global scope requires the admin role", ...json(Forbidden) },
+      404: { description: "Session not found or not owned by the caller", ...json(Err) },
+    },
+  });
+  reg.registerPath({
+    method: "post",
+    path: "/api/automation/lifetime/reset",
+    summary: "Append a lifetime-counter reset marker (requires a login under 15 minutes old)",
+    ...base,
+    request: { body: json(z.object({ counter_key: z.string().min(1).max(300) })) },
+    responses: {
+      200: { description: "Reset", ...json(z.object({ ok: z.literal(true), counter_key: z.string() })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT, or re_auth_required", ...json(z.union([Err, ReAuth])) },
+      404: { description: "No ledger rows for this counter key and caller", ...json(Err) },
+    },
+  });
+}
 // ── Auto-dev orchestrator task config (Phase 31) ────────────────────────────
 // Spec-only registration. The plain-Hono router in `./orchestrator-tasks.ts`
 // serves traffic; these declarations only contribute to the OpenAPI spec.
