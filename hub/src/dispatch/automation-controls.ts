@@ -158,6 +158,25 @@ export async function killSwitchCheck(
   return { ok: true }
 }
 
+/**
+ * QC B1: the LAST kill-switch read, called immediately before a MACHINE
+ * `session.start` / spawn / run_command transmission. An early check at the top of a
+ * launch primitive is not enough - DB writes, supervisor resolution and key minting
+ * sit between it and the send, so an engage that lands in that window must still stop
+ * the send. Fresh read every call (never cached), fail closed (a DB error reports
+ * halted, scope 'error'). Call it ONLY on machine-origin paths: a human launch must
+ * never consult the switch. The caller owns the unwind (release the reservation / end
+ * the run / re-arm the task) on a refusal.
+ */
+export async function haltBeforeMachineSend(args: {
+  userId: string
+  sessionId?: string
+}): Promise<{ ok: true } | { ok: false; reason: string; scope: string }> {
+  const h = await isAutomationHalted({ userId: args.userId, sessionId: args.sessionId })
+  if (h.halted) return { ok: false, reason: `automation_halted:${h.scope}`, scope: h.scope }
+  return { ok: true }
+}
+
 /** Non-consuming kill-switch gate. The Phase 3 governor slot delegates to the same function. */
 export const automationKillSwitchGate: DispatchGate = {
   name: AUTOMATION_KILL_SWITCH_GATE_NAME,

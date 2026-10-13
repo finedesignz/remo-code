@@ -658,7 +658,12 @@ union of the session's `routine_run_log` inject rows (joined by `inject_token`) 
 reserve rows. It is idempotent per `(counter_key, token)`. The reserve happens BEFORE the
 send; a refusal or a send failure releases it and frees the queue slot. Requests that are
 parked, queued or dropped before a send never count. `dispatch()` runs `preSendGuard` before
-`store.open` and a SEPARATE final halt check immediately before `deps.send`.
+`store.open` and a SEPARATE final halt check immediately before `deps.send`. Machine paths that emit a
+`session.start` / `run_command` OUTSIDE `deps.send` (the launch primitives, spawn-on-error, the heal route,
+the scheduler supervisor and TEAB senders) re-read the kill switch through `haltBeforeMachineSend`
+(`dispatch/automation-controls.ts`) immediately before the transmission, fresh and fail closed; a halt closes
+the run row / reservation the path opened. `dispatch()` also re-reads it before handing control to a machine
+request's `ensureOnline`.
 
 ### Counter keys
 
@@ -666,7 +671,7 @@ parked, queued or dropped before a send never count. `dispatch()` runs `preSendG
 |---|---|
 | `task:<scheduled_tasks.id>` | scheduler agent sender and every orchestrator inject (online and autospawn) through the resolver: one budget per orchestrator |
 | `triage:<application_uuid>` | scheduler triage sender (one budget per Coolify application) |
-| `heal:<repo>` | `POST /api/sessions/heal` |
+| `heal:<userId>:<repo>` | `POST /api/sessions/heal` |
 | `session:<id>` | where no task exists |
 
 Only server code assigns keys (`counter-key-assignment-guard.test.ts`); a request body can
@@ -682,7 +687,7 @@ never carry one.
 | Telegram dispatch, cloud send | never | never | HUMAN surfaces: a halt must not lock the owner out of their own sessions |
 | PTY door (automation) | governor 1 | governor 4 + reserve | human actor never reserved |
 | scheduler `fireTask` / one-time `fire()` / orchestrator due-scan / auto-launch / orphan resume | halt check | n/a | every run path, not keyed on `isManual` |
-| `POST /api/sessions/heal` | halt check first | one `heal:<repo>` reserve | MACHINE surface (panel F-2): the external self-heal service emits `session.start` outside the guarded launch primitives |
+| `POST /api/sessions/heal` | halt check first | one `heal:<userId>:<repo>` reserve | MACHINE surface (panel F-2): the external self-heal service emits `session.start` outside the guarded launch primitives |
 | `POST /api/sessions/:id/launch`, `POST /api/supervisors/:id/start` | never | never | HUMAN web Connect/Start |
 
 `kill-switch-coverage.test.ts` is default-deny: a new machine gate list must be counted or

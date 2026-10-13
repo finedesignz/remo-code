@@ -23,7 +23,7 @@ import {
 } from '../db/supervisor-dal.ts'
 import { reserveSessionSlot } from '../sessions/budget.ts'
 import { getSessionSkipPermissions } from '../db/dal.ts'
-import { isAutomationHalted } from '../dispatch/automation-controls.ts'
+import { isAutomationHalted, haltBeforeMachineSend } from '../dispatch/automation-controls.ts'
 import {
   isSupervisorOnline,
   sendToSupervisor,
@@ -188,6 +188,21 @@ export async function launchSessionForUser(args: {
     await updateSupervisorState(pick.supervisorId, 'starting', run.id)
 
     const skipPerms = await getSessionSkipPermissions(session.id, args.userId)
+    // QC B1: fresh kill-switch read immediately before the machine session.start. The check
+    // at the top of this function predates the session lookup, supervisor pick and slot
+    // reservation. A halt closes the run row the reservation just opened (frees the slot).
+    if (args.machine) {
+      const pre = await haltBeforeMachineSend({ userId: args.userId, sessionId: args.sessionId })
+      if (!pre.ok) {
+        try {
+          const { endRun } = await import('../db/supervisor-dal.ts')
+          await endRun(run.id, null, pre.reason)
+        } catch (err: any) {
+          console.error(`[telegram-launch] halt unwind endRun failed run=${run.id}: ${err?.message ?? err}`)
+        }
+        return { ok: false, reason: `automation_halted:${pre.scope}` }
+      }
+    }
     try {
       sendToSupervisor(pick.supervisorId, {
         type: 'session.start',

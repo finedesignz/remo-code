@@ -484,13 +484,13 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   failure releases it (stamps `released_at`, never deletes). Counter keys are assigned only by server code
   (allowlist pinned by `hub/test/counter-key-assignment-guard.test.ts`): `task:<scheduled_tasks.id>`
   (scheduler agent and EVERY orchestrator inject, via the resolver), `triage:<application_uuid>`,
-  `heal:<repo>`, `session:<id>` where no task exists. Everything fails closed. Refusal reasons:
+  `heal:<userId>:<repo>`, `session:<id>` where no task exists. Everything fails closed. Refusal reasons:
   `automation_halted:<scope>` and `lifetime_inject_exhausted:<n>>=<cap>`. The kill-switch gate is FIRST on
-  every machine gate list and a separate halt check runs immediately before `deps.send`. HUMAN surfaces
+  every machine gate list and a separate halt check runs immediately before `deps.send`; every machine `session.start`/`run_command` emitted outside `deps.send` re-reads the switch via `haltBeforeMachineSend` immediately before transmitting. HUMAN surfaces
   (Telegram dispatch, cloud send, web/relay Enter, web Connect/Start) are never gated. Coverage is
   default-deny and pinned (`kill-switch-coverage`, `launch-callers-guard`, `session-start-senders-guard`,
   `reserve-caller-guard`). `POST /api/sessions/heal` (the external self-heal service) is classified a MACHINE
-  surface: halt check, then one `heal:<repo>` reservation, released on any exit that starts no session.
+  surface: halt check, then one `heal:<userId>:<repo>` reservation, released on any exit that starts no session.
   A halt detected after a one-time task was claimed RE-ARMS the task (client work is not burned), and
   releasing ANY scope resumes the deferred work in that scope (event-driven, no polling).
   With `REMO_GOVERNED_AUTOMATION_PTY` ON the ask, work and telegram governed lists carry no counter key, so

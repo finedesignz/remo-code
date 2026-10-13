@@ -276,8 +276,41 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
   // 3. Offline park. If the agent isn't online, OPTIONALLY try to lazy-start
   //    the session (spawn-on-error, opt-in via ensureOnline), then re-check;
   //    if still offline, release the slot and park the replay thunk in grace.
+  // PTYCAP-04: a list that contains the kill-switch gate is a MACHINE list (see
+  // KILL_SWITCH_GATE_NAME). Hoisted so the lazy-start below can honour it.
+  const machine = deps.gates.some((g) => g.name === KILL_SWITCH_GATE_NAME)
+  const enforceRate = deps.gates.some((g) => g.name === SESSION_INJECT_RATE_GATE_NAME)
+  let controls: typeof import('./automation-controls.ts') | null = null
+  let reserved = false
+
   let online = await deps.isOnline(req)
   if (!online && deps.ensureOnline) {
+    // QC B1: ensureOnline can itself emit a `session.start` (spawn-on-error, the launch
+    // primitive). For a MACHINE request, re-read the kill switch fresh BEFORE handing
+    // control to it, so an engage since the gate list stops the lazy start entirely
+    // (the adapters also re-read immediately before their own send). Fail closed.
+    if (machine) {
+      let refusal: string | null = null
+      try {
+        controls = await import('./automation-controls.ts')
+        const pre = await controls.finalHaltCheck(req)
+        if (!pre.ok) refusal = pre.reason
+      } catch (err: any) {
+        console.error(`[dispatch] pre-ensureOnline halt check failed (fail closed) token=${req.token}: ${err?.message ?? err}`)
+        refusal = 'automation_guard_error'
+      }
+      if (refusal) {
+        void releaseAndPromote(req.sessionId)
+        if (deps.store) {
+          try {
+            await deps.store.markSkipped(req.token, refusal)
+          } catch (err: any) {
+            console.error(`[dispatch] markSkipped failed token=${req.token}: ${err?.message ?? err}`)
+          }
+        }
+        return { kind: 'skipped', reason: refusal }
+      }
+    }
     // Spawn-on-error runs strictly AFTER the gate list above (IR-1: cost-cap /
     // dedupe / rate-limit already passed — we never spawn for a gated repair).
     // It owns its own leak-safe reserve→create→send→release sequence and a
@@ -309,10 +342,6 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
   //    kill switch is re-read and the lifetime (+ rate) counter is consumed by ONE
   //    atomic reservation BEFORE the run row opens. A refusal frees the in-flight
   //    slot we hold. Requests with neither never import the module.
-  const machine = deps.gates.some((g) => g.name === KILL_SWITCH_GATE_NAME)
-  const enforceRate = deps.gates.some((g) => g.name === SESSION_INJECT_RATE_GATE_NAME)
-  let controls: typeof import('./automation-controls.ts') | null = null
-  let reserved = false
   if (machine || req.counterKey) {
     let refusal: string | null = null
     try {
@@ -346,7 +375,19 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
   //    The store returns the run id (or null → fall back to req.token); this id
   //    is the finalize key threaded through activeBySession so onSessionReply
   //    calls store.onFinalize(<runId>, content) with the real id.
-  const openedId = (await deps.store?.open?.(req)) ?? req.token
+  //    QC m3: a throw from open() happens AFTER the lifetime reservation was taken and
+  //    BEFORE any send, so it must give the reservation (and the in-flight slot) back
+  //    exactly like a refused or failed send; the error still propagates to the caller.
+  let openedId: string
+  try {
+    openedId = (await deps.store?.open?.(req)) ?? req.token
+  } catch (err) {
+    if (reserved && controls && req.counterKey) {
+      await controls.releaseInject({ counterKey: req.counterKey, token: req.token })
+    }
+    void releaseAndPromote(req.sessionId)
+    throw err
+  }
 
   // 5. Send the user_message on the agent socket + register the finalize hook
   //    BEFORE the reply can race back. IR-7: the hook only fires via

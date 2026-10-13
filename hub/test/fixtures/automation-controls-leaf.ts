@@ -18,6 +18,7 @@ export function automationControlsLeaf(): Record<string, unknown> {
     automationKillSwitchGate: { name: 'automation_kill_switch', async check() { return { ok: true } } },
     automationLifetimeCounterGate: { name: 'lifetime_counter', async check() { return { ok: true } } },
     isAutomationHalted: async () => ({ halted: false }),
+    haltBeforeMachineSend: async () => ({ ok: true }),
     preSendGuard: async () => ({ ok: true, reserved: false }),
     finalHaltCheck: async () => ({ ok: true }),
     releaseInject: async () => {},

@@ -22,7 +22,7 @@ import { listSessionsForUserEnriched } from '../sessions/enrich.ts'
 import { probeGithubAppScope } from '../lib/github-scope.ts'
 import { enqueueCreateGithubRepoJob } from '../lib/github-repo-job.ts'
 import { randomUUID } from 'node:crypto'
-import { isAutomationHalted, reserveInject, releaseInject } from '../dispatch/automation-controls.ts'
+import { isAutomationHalted, haltBeforeMachineSend, reserveInject, releaseInject } from '../dispatch/automation-controls.ts'
 import { linkCloudSession, normalizeCloudSessionId } from '../db/cloud-sessions-dal.ts'
 import path from 'node:path'
 
@@ -398,7 +398,7 @@ sessions.post('/heal', async (c) => {
   // PTYCAP-04-07 (panel F-2): the external self-heal service is a MACHINE surface that emits
   // session.start outside the guarded launch primitives. (1) Kill switch FIRST, before
   // pickSessionTarget consumes a concurrency slot and a run row. (2) ONE lifetime reservation
-  // per request (not per hop) under counter key heal:<repo> with a fresh per-call token and no
+  // per request (not per hop) under counter key heal:<userId>:<repo> with a fresh per-call token and no
   // rate enforcement (heal-specific counter policy is Phase 7). (3) The reservation is
   // released on every exit that does not start a session. Pinned by
   // test/session-start-senders-guard.test.ts and test/sessions-heal-halt.test.ts.
@@ -406,7 +406,8 @@ sessions.post('/heal', async (c) => {
   if (halt.halted) {
     return c.json({ error: 'automation_halted', reason: `automation_halted:${halt.scope}` }, 503)
   }
-  const healCounterKey = `heal:${repo}`
+  // QC M2: scoped by user - `repo` is caller-supplied and two users must never share (or exhaust) one budget.
+  const healCounterKey = `heal:${userId}:${repo}`
   const healToken = `heal:${randomUUID()}`
   const healReservation = await reserveInject({
     userId,
@@ -461,6 +462,19 @@ sessions.post('/heal', async (c) => {
       const run = pick.run
 
       const skipPerms = await getSessionSkipPermissionsByRepo(userId, repo)
+      // QC B1: the halt check at the top of the handler predates pickSessionTarget (which
+      // consumed a slot and a run row) and the awaits since. Fresh read immediately before
+      // the machine session.start; a halt closes the run, frees the slot and answers 503
+      // (the finally below releases the lifetime reservation).
+      const preSend = await haltBeforeMachineSend({ userId })
+      if (!preSend.ok) {
+        try {
+          const { endRun } = await import('../db/supervisor-dal.ts')
+          await endRun(run.id, null, preSend.reason)
+        } catch {}
+        await releaseSessionSlot(userId, pick.supervisor_id)
+        return c.json({ error: 'automation_halted', reason: preSend.reason }, 503)
+      }
       try {
         sendToSupervisor(pick.supervisor_id, {
           type: 'session.start',

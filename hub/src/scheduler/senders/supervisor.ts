@@ -13,6 +13,7 @@ import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
 import { sql } from '../../db/postgres.ts'
 import { broadcastToUser } from '../../ws/registry.ts'
 import { finalizeRun } from '../dispatcher.ts'
+import { haltBeforeMachineSend } from '../../dispatch/automation-controls.ts'
 
 interface PendingRun {
   runId: string
@@ -53,6 +54,15 @@ export async function sendSupervisorTask(task: ScheduledTask, ctx: RunCtxLike): 
 
   if (!(await commandExists(supervisorId, command))) {
     await finalizeRun(ctx.runId, 'failed', 'command_not_available')
+    return
+  }
+
+  // QC B1: the dispatcher's halt check predates the pre-gates, the target resolution and
+  // commandExists. A scheduled run_command is machine-initiated automation, so re-read the
+  // kill switch fresh immediately before the transmission and finalize the run skipped.
+  const pre = await haltBeforeMachineSend({ userId: ctx.userId })
+  if (!pre.ok) {
+    await finalizeRun(ctx.runId, 'skipped', pre.reason)
     return
   }
 

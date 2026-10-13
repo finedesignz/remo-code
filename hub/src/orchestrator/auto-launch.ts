@@ -41,7 +41,7 @@ import {
 import { listSupervisorsForUser } from '../db/supervisor-dal.ts';
 import { markOrchestratorSession } from '../ws/idle-teardown.ts';
 import { getSessionSkipPermissions } from '../db/dal.ts';
-import { isAutomationHalted } from '../dispatch/automation-controls.ts';
+import { isAutomationHalted, haltBeforeMachineSend } from '../dispatch/automation-controls.ts';
 
 function publicHubUrl(): string {
   return (process.env.REMO_PUBLIC_URL || 'https://app.remo-code.com').replace(/\/+$/, '');
@@ -273,6 +273,23 @@ export async function launchOrchestrator(args: {
     await updateSupervisorState(target.supervisorId, 'starting', runId);
 
     const skipPerms = await getSessionSkipPermissions(sessionId, args.userId);
+    // QC B1: the early halt check above sits before the target lookup, the locked
+    // transaction, key minting and the awaits since - an engage that landed meanwhile
+    // must still stop THIS send. Fresh read immediately before transmission (machine
+    // callers only; the human REST /start never consults the switch). On a halt the run
+    // row opened in the transaction is closed (frees the supervisor slot) so nothing leaks.
+    if (args.machine) {
+      const pre = await haltBeforeMachineSend({ userId: args.userId });
+      if (!pre.ok) {
+        try {
+          const { endRun } = await import('../db/supervisor-dal.ts');
+          await endRun(runId, null, pre.reason);
+        } catch (err: any) {
+          console.error(`[orchestrator] halt unwind endRun failed run=${runId}: ${err?.message ?? err}`);
+        }
+        return { ok: false, reason: 'automation_halted' };
+      }
+    }
     try {
       sendToSupervisor(target.supervisorId, {
         type: 'session.start',

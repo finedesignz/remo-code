@@ -185,3 +185,83 @@ describe('dispatch automation wiring', () => {
     expect(calls).not.toContain('final') // final halt check is machine-only
   })
 })
+
+describe('QC B1: no machine lazy-start without a fresh halt read', () => {
+  test('machine request, session offline, halt engaged: ensureOnline is NEVER called, request skipped, slot freed', async () => {
+    const { deps, skipped } = makeDeps({ gates: [gate(KILL_SWITCH_GATE_NAME)] })
+    let ensureCalls = 0
+    deps.isOnline = () => false
+    deps.ensureOnline = async () => {
+      ensureCalls++
+      return true
+    }
+    finalResult = { ok: false, reason: 'automation_halted:global' }
+    const out = await dispatch(R('i1', 's-ens'), deps)
+    expect(out).toEqual({ kind: 'skipped', reason: 'automation_halted:global' })
+    expect(ensureCalls).toBe(0)
+    expect(skipped).toEqual([['i1', 'automation_halted:global']])
+    expect(calls).not.toContain('guard')
+    expect(calls).not.toContain('send')
+    // slot freed: the same session can dispatch again
+    finalResult = { ok: true }
+    deps.isOnline = () => true
+    const next = await dispatch(R('i2', 's-ens'), deps)
+    expect(next.kind).toBe('dispatched')
+  })
+
+  test('machine request, offline, not halted: ensureOnline runs once and the send proceeds', async () => {
+    const { deps, sent } = makeDeps({ gates: [gate(KILL_SWITCH_GATE_NAME)] })
+    let online = false
+    let ensureCalls = 0
+    deps.isOnline = () => online
+    deps.ensureOnline = async () => {
+      ensureCalls++
+      online = true
+      return true
+    }
+    guardResult = { ok: true, reserved: false }
+    const out = await dispatch(R('i3', 's-ens2'), deps)
+    expect(out.kind).toBe('dispatched')
+    expect(ensureCalls).toBe(1)
+    expect(sent).toEqual(['i3'])
+  })
+
+  test('a NON-machine request never reads the switch before ensureOnline', async () => {
+    const { deps } = makeDeps({ gates: [gate('threshold')] })
+    let online = false
+    deps.isOnline = () => online
+    deps.ensureOnline = async () => {
+      online = true
+      return true
+    }
+    finalResult = { ok: false, reason: 'automation_halted:global' }
+    const out = await dispatch(R('i4', 's-ens3'), deps)
+    expect(out.kind).toBe('dispatched')
+    expect(calls).not.toContain('final')
+  })
+})
+
+describe('QC m3: a store.open() throw after the reservation gives it back', () => {
+  test('releaseInject runs once, the slot is freed, and the error propagates', async () => {
+    const { deps } = makeDeps({ gates: [gate(KILL_SWITCH_GATE_NAME)] })
+    deps.store.open = async () => {
+      throw new Error('open_boom')
+    }
+    await expect(dispatch(R('j1', 's-open', { counterKey: 'task:T' }), deps)).rejects.toThrow('open_boom')
+    expect(released).toEqual([{ counterKey: 'task:T', token: 'j1' }])
+    const ok = makeDeps({ gates: [gate(KILL_SWITCH_GATE_NAME)] })
+    const next = await dispatch(R('j2', 's-open', { counterKey: 'task:T' }), ok.deps)
+    expect(next.kind).toBe('dispatched') // not session_busy
+  })
+
+  test('no reservation held -> nothing to release', async () => {
+    const { deps } = makeDeps({ gates: [gate(KILL_SWITCH_GATE_NAME)] })
+    guardResult = { ok: true, reserved: false }
+    deps.store.open = async () => {
+      throw new Error('open_boom')
+    }
+    await expect(dispatch(R('j3', 's-open2'), deps)).rejects.toThrow('open_boom')
+    expect(released.length).toBe(0)
+  })
+})
+

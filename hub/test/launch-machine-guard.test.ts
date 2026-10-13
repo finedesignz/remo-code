@@ -13,6 +13,9 @@ process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost:543
 
 const s = {
   halted: null as null | { scope: string },
+  lateHalted: null as null | { scope: string },
+  lateCalls: 0,
+  ended: [] as any[],
   haltCalls: [] as Array<{ userId: string; sessionId?: string }>,
   sqlCalls: 0,
   sessionRow: null as any,
@@ -26,17 +29,25 @@ mock.module('../src/dispatch/automation-controls.ts', () => ({
     s.haltCalls.push(a)
     return s.halted ? { halted: true, scope: s.halted.scope } : { halted: false }
   },
-}))
-mock.module('../src/db/postgres.ts', () => ({
-  sql: async () => {
-    s.sqlCalls++
-    return s.sessionRow ? [s.sessionRow] : []
+  // QC B1: the fresh read immediately before session.start (only machine callers reach it).
+  haltBeforeMachineSend: async () => {
+    s.lateCalls++
+    return s.lateHalted
+      ? { ok: false, reason: `automation_halted:${s.lateHalted.scope}`, scope: s.lateHalted.scope }
+      : { ok: true }
   },
 }))
 mock.module('../src/db/supervisor-dal.ts', () => ({
   listSupervisorsForUser: async () => {
     s.supervisorsListed++
     return [{ id: 'sup-1', hostname: 'devbox' }]
+  },
+  endRun: async (...a: any[]) => { s.ended.push(a) },
+}))
+mock.module('../src/db/postgres.ts', () => ({
+  sql: async () => {
+    s.sqlCalls++
+    return s.sessionRow ? [s.sessionRow] : []
   },
 }))
 mock.module('../src/ws/supervisor-registry.ts', () => ({
@@ -61,6 +72,9 @@ const { launchSessionForUser } = await import('../src/telegram/launch.ts')
 
 beforeEach(() => {
   s.halted = null
+  s.lateHalted = null
+  s.lateCalls = 0
+  s.ended = []
   s.haltCalls = []
   s.sqlCalls = 0
   s.sends = []
@@ -102,5 +116,24 @@ describe('launchSessionForUser machine option', () => {
     expect(s.orchestratorArgs[0].machine).toBe(true)
     await launchSessionForUser({ userId: 'u1', sessionId: 'sess-o' })
     expect(s.orchestratorArgs[1].machine).toBeUndefined()
+  })
+
+  test('QC B1: an engage landing after the early check (session found, slot reserved) stops the send and closes the run', async () => {
+    s.lateHalted = { scope: 'global' }
+    const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1', machine: true })
+    expect(res).toEqual({ ok: false, reason: 'automation_halted:global' })
+    expect(s.haltCalls).toHaveLength(1) // the early check passed
+    expect(s.lateCalls).toBe(1)
+    expect(s.sends).toHaveLength(0)
+    expect(s.ended).toHaveLength(1)
+    expect(s.ended[0][0]).toBe('run-1')
+  })
+
+  test('QC B1: the HUMAN path never reads the switch before its send', async () => {
+    s.lateHalted = { scope: 'global' }
+    const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1' })
+    expect(res.ok).toBe(true)
+    expect(s.lateCalls).toBe(0)
+    expect(s.sends).toHaveLength(1)
   })
 })

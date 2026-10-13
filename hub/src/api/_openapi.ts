@@ -509,7 +509,7 @@ openapi.openapi(dismissLocalRoute, async (c) => {
 // ── Self-heal launch (PTYCAP-04-07) ─────────────────────────────────────────
 // Spec-only registration; the plain-Hono router in `./sessions.ts` serves traffic. The route
 // is a MACHINE surface: the kill switch is checked first and one lifetime reservation
-// (counter key heal:<repo>) is taken before any session.start is sent.
+// (counter key heal:<userId>:<repo>) is taken before any session.start is sent.
 {
   const Err = z.object({ error: z.string() });
   const json = (schema: any) => ({ content: { "application/json": { schema } } });
@@ -550,7 +550,7 @@ openapi.openapi(dismissLocalRoute, async (c) => {
       503: {
         description:
           "Not started. automation_halted: a kill-switch row (or the env break-glass) covers the caller. " +
-          "lifetime_inject_exhausted: the heal:<repo> lifetime budget is spent (owner reset needed). " +
+          "lifetime_inject_exhausted: the heal:<userId>:<repo> lifetime budget is spent (owner reset needed). " +
           "quota_threshold_reached and no_target_available are the pre-existing refusals.",
         ...json(
           z.union([

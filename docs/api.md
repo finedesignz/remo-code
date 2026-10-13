@@ -1988,7 +1988,7 @@ fetch('https://app.remo-code.com/api/sessions/heal',
 |400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
 |401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
 |500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Run row could not be inserted|Inline|
-|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|Not started. automation_halted: a kill-switch row (or the env break-glass) covers the caller. lifetime_inject_exhausted: the heal:<repo> lifetime budget is spent (owner reset needed). quota_threshold_reached and no_target_available are the pre-existing refusals.|Inline|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|Not started. automation_halted: a kill-switch row (or the env break-glass) covers the caller. lifetime_inject_exhausted: the heal:<userId>:<repo> lifetime budget is spent (owner reset needed). quota_threshold_reached and no_target_available are the pre-existing refusals.|Inline|
 
 <h3 id="launch-a-fresh-session-for-the-external-self-heal-service-(machine-surface)-responseschema">Response Schema</h3>
 

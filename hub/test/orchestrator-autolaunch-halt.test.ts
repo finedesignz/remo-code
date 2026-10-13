@@ -13,6 +13,11 @@ process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost:543
 
 const s = {
   halted: false,
+  lateHalted: false,
+  lateCalls: 0,
+  launchable: false,
+  sends: [] as any[],
+  ended: [] as any[],
   existing: true,
   haltCalls: 0,
   getStateCalls: 0,
@@ -25,6 +30,11 @@ mock.module('../src/dispatch/automation-controls.ts', () => ({
     s.haltCalls++
     return s.halted ? { halted: true, scope: 'global' } : { halted: false }
   },
+  // QC B1: fresh read immediately before session.start (machine launches only)
+  haltBeforeMachineSend: async () => {
+    s.lateCalls++
+    return s.lateHalted ? { ok: false, reason: 'automation_halted:global', scope: 'global' } : { ok: true }
+  },
 }))
 mock.module('../src/db/orchestrator-dal.ts', () => ({
   getOrchestratorState: async () => {
@@ -36,14 +46,25 @@ mock.module('../src/db/orchestrator-dal.ts', () => ({
 }))
 mock.module('../src/db/postgres.ts', () => ({
   sql: Object.assign(async () => { s.dbTouched++; return [] }, {
-    begin: async () => { s.dbTouched++; return { kind: 'no_supervisor' } },
+    begin: async () => {
+      s.dbTouched++
+      return s.launchable
+        ? { kind: 'launched', sessionId: 'sess-o', runId: 'run-o', createdRow: false }
+        : { kind: 'no_supervisor' }
+    },
   }),
 }))
-mock.module('../src/db/supervisor-dal.ts', () => ({ listSupervisorsForUser: async () => { s.dbTouched++; return [] } }))
+mock.module('../src/db/supervisor-dal.ts', () => ({
+  listSupervisorsForUser: async () => {
+    s.dbTouched++
+    return s.launchable ? [{ id: 'sup-1', hostname: 'h', roots: ['/r'] }] : []
+  },
+  endRun: async (...a: any[]) => { s.ended.push(a) },
+}))
 mock.module('../src/ws/supervisor-registry.ts', () => ({
   getSupervisor: () => undefined,
-  isSupervisorOnline: () => false,
-  sendToSupervisor: () => {},
+  isSupervisorOnline: () => s.launchable,
+  sendToSupervisor: (id: string, msg: any) => { s.sends.push({ id, msg }) },
   updateSupervisorState: async () => {},
 }))
 mock.module('../src/ws/idle-teardown.ts', () => ({ markOrchestratorSession: () => {} }))
@@ -53,6 +74,11 @@ const mod = await import('../src/orchestrator/auto-launch.ts')
 
 beforeEach(() => {
   s.halted = false
+  s.lateHalted = false
+  s.lateCalls = 0
+  s.launchable = false
+  s.sends = []
+  s.ended = []
   s.existing = true
   s.haltCalls = 0
   s.getStateCalls = 0
@@ -109,5 +135,34 @@ describe('launchOrchestrator machine option', () => {
     const r = await mod.launchOrchestrator({ userId: 'u1' })
     expect(s.haltCalls).toBe(0)
     expect(r.ok === false && r.reason === 'automation_halted').toBe(false)
+  })
+
+  test('QC B1: an engage landing after the early check and the locked transaction stops the send and closes the run', async () => {
+    s.launchable = true
+    s.existing = false
+    s.lateHalted = true
+    const r = await mod.launchOrchestrator({ userId: 'u1', machine: true })
+    expect(r).toEqual({ ok: false, reason: 'automation_halted' })
+    expect(s.haltCalls).toBe(1) // the early check passed
+    expect(s.lateCalls).toBe(1)
+    expect(s.sends).toHaveLength(0)
+    expect(s.ended).toHaveLength(1)
+    expect(s.ended[0][0]).toBe('run-o')
+  })
+
+  test('QC B1 control: not halted -> session.start is sent; the human path never reads the switch', async () => {
+    s.launchable = true
+    s.existing = false
+    const m = await mod.launchOrchestrator({ userId: 'u1', machine: true })
+    expect(m.ok).toBe(true)
+    expect(s.sends).toHaveLength(1)
+    expect(s.lateCalls).toBe(1)
+    s.sends = []
+    s.lateCalls = 0
+    s.lateHalted = true
+    const h = await mod.launchOrchestrator({ userId: 'u1' })
+    expect(h.ok).toBe(true)
+    expect(s.lateCalls).toBe(0)
+    expect(s.sends).toHaveLength(1)
   })
 })

@@ -17,10 +17,10 @@ interface Expected { cls: Cls; count: number; why: string; mustContain?: string[
 
 // Non-route files: one sender each.
 const FILES: Record<string, Expected> = {
-  'dispatch/spawn-on-error.ts': { cls: 'MACHINE', count: 1, why: 'post-gate spawn; covered by the gate lists plus the pipeline final check' },
-  'orchestrator/auto-launch.ts': { cls: 'MACHINE', count: 1, why: 'launchOrchestrator machine option', mustContain: ['isAutomationHalted', 'args.machine'] },
+  'dispatch/spawn-on-error.ts': { cls: 'MACHINE', count: 1, why: 'post-gate spawn; covered by the gate lists plus the pre-send haltBeforeMachineSend (QC B1)', mustContain: ['haltBeforeMachineSend'] },
+  'orchestrator/auto-launch.ts': { cls: 'MACHINE', count: 1, why: 'launchOrchestrator machine option', mustContain: ['isAutomationHalted', 'haltBeforeMachineSend', 'args.machine'] },
   'orchestrator/orphan-resume.ts': { cls: 'MACHINE', count: 1, why: 'orchestrator orphans deferred on a halt', mustContain: ['isAutomationHalted', 'skipped_halted'] },
-  'telegram/launch.ts': { cls: 'MACHINE_FLAGGED', count: 1, why: 'machine option; callers pinned by launch-callers-guard', mustContain: ['isAutomationHalted', 'args.machine'] },
+  'telegram/launch.ts': { cls: 'MACHINE_FLAGGED', count: 1, why: 'machine option; callers pinned by launch-callers-guard', mustContain: ['isAutomationHalted', 'haltBeforeMachineSend', 'args.machine'] },
 }
 // api files: classified per enclosing route handler.
 const ROUTES: Record<string, { cls: Cls; why: string }> = {
@@ -83,6 +83,16 @@ describe('session.start sender classification', () => {
     for (const k of Object.keys(ROUTES)) expect([k, counts.get(k) ?? 0]).toEqual([k, 1])
   })
 
+  test('QC B1: every MACHINE file reads the switch fresh BEFORE its session.start (not only at function entry)', () => {
+    for (const k of ['orchestrator/auto-launch.ts', 'telegram/launch.ts', 'dispatch/spawn-on-error.ts']) {
+      const src = readFileSync(join(SRC, k), 'utf8')
+      const lines = src.split(/\r?\n/)
+      const startLine = lines.findIndex((l) => !isComment(l) && /['"`]session\.start['"`]/.test(l))
+      const code = lines.slice(0, startLine).filter((l) => !isComment(l)).join('\n')
+      expect([k, code.includes('haltBeforeMachineSend(')]).toEqual([k, true])
+    }
+  })
+
   test('MACHINE files carry their halt handling', () => {
     for (const [k, e] of Object.entries(FILES)) {
       const src = readFileSync(join(SRC, k), 'utf8')
@@ -111,6 +121,10 @@ describe('self-heal route handler (MACHINE, panel F-2)', () => {
     expect(reserve).toBeGreaterThan(halt)
     expect(pick).toBeGreaterThan(reserve)
     expect(send).toBeGreaterThan(pick)
+    // QC B1: a SECOND, fresh read sits between pickSessionTarget and the send.
+    const late = slice.indexOf('haltBeforeMachineSend(')
+    expect(late).toBeGreaterThan(pick)
+    expect(late).toBeLessThan(send)
     expect(slice).toContain('releaseInject(')
     expect(slice).toContain('heal:')
   })

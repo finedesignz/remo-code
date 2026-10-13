@@ -2204,7 +2204,7 @@
             }
           },
           "503": {
-            "description": "Not started. automation_halted: a kill-switch row (or the env break-glass) covers the caller. lifetime_inject_exhausted: the heal:<repo> lifetime budget is spent (owner reset needed). quota_threshold_reached and no_target_available are the pre-existing refusals.",
+            "description": "Not started. automation_halted: a kill-switch row (or the env break-glass) covers the caller. lifetime_inject_exhausted: the heal:<userId>:<repo> lifetime budget is spent (owner reset needed). quota_threshold_reached and no_target_available are the pre-existing refusals.",
             "content": {
               "application/json": {
                 "schema": {
