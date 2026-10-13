@@ -41,6 +41,7 @@ import {
 import { runMacroCycle } from './macro-cycle.ts';
 import { detectLifecycleStage } from './stage-detect.ts';
 import { reapStaleOrchestratorLocks } from './stale-lock-reaper.ts';
+import { isAutomationHalted } from '../dispatch/automation-controls.ts';
 
 // ── BSA-01: autospawn gate (default OFF) ─────────────────────────────────────
 /**
@@ -609,6 +610,18 @@ export function makeCycleRunner(resolveDeps: ResolveDeps = REAL_RESOLVE_DEPS): C
     const { sessionId, userId, repoKey, controllerContext } = resolved;
     const dueRows = controllerContext.dueRows;
 
+    // PTYCAP-04-06 (D-09b): the kill switch idles the cycle BEFORE the cadence stamp.
+    // Stamping while halted would advance the rows, then burst-dispatch on release;
+    // returning here leaves them due, so the first post-release tick resumes cleanly.
+    // Fail closed: isAutomationHalted reports halted on any error.
+    const cycleHalt = await isAutomationHalted({ userId, sessionId });
+    if (cycleHalt.halted) {
+      console.log(
+        `[orchestrator] cycle idle session=${sessionId} — automation halted (${cycleHalt.scope}); no cadence stamp, no macro cycle.`,
+      );
+      return;
+    }
+
     // ADVANCE THE CADENCE (fix/orchestrator-tick-reinject) — here, NOT at enqueue.
     // The cycle has now SELECTED its rows (the macro path resumes the task these
     // rows made due). Stamping them fired is what stops the next 60s due-scan from
@@ -679,11 +692,11 @@ export const DUE_TICK_INTERVAL_MS = parsePositiveIntEnv(
  */
 export async function scanAndEnqueueDueCycles(now: Date = new Date()): Promise<string[]> {
   const enqueued: string[] = [];
-  let tasks: { id: string; session_id: string | null; timezone: string | null }[] = [];
+  let tasks: { id: string; user_id: string; session_id: string | null; timezone: string | null }[] = [];
   try {
     const { sql } = await import('../db/postgres.ts');
-    tasks = await sql<{ id: string; session_id: string | null; timezone: string | null }[]>`
-      SELECT id, session_id, timezone FROM scheduled_tasks
+    tasks = await sql<{ id: string; user_id: string; session_id: string | null; timezone: string | null }[]>`
+      SELECT id, user_id, session_id, timezone FROM scheduled_tasks
       WHERE task_type = 'orchestrator' AND enabled = true AND session_id IS NOT NULL
     `;
   } catch (err: any) {
@@ -694,6 +707,10 @@ export async function scanAndEnqueueDueCycles(now: Date = new Date()): Promise<s
   for (const task of tasks) {
     if (!task.session_id) continue;
     try {
+      // PTYCAP-04-06 (D-09b): a halted user/session/global scope enqueues nothing. The
+      // rows stay due, so the first tick after release resumes. Evaluated per task with
+      // the task's own user + session (a session-scoped halt must not idle other sessions).
+      if ((await isAutomationHalted({ userId: task.user_id, sessionId: task.session_id })).halted) continue;
       // IN-FLIGHT GUARD (fix/orchestrator-tick-reinject): a session whose previous
       // cycle has not settled (pending OR running) must NOT get another one — that
       // just stacks a duplicate macro inject behind the turn still in flight. The

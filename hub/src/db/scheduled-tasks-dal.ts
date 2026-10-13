@@ -440,6 +440,33 @@ export async function claimOnceTask(taskId: string, reason: string = 'once_compl
   return rows.length > 0
 }
 
+/**
+ * PTYCAP-04-06 (panel F-4): the inverse of `claimOnceTask`. A one-time task whose
+ * dispatch was refused by the automation kill switch AFTER the claim must not be
+ * burned (client work would be lost): restore the claim so the durable once-due
+ * sweep re-fires it, through the atomic claim, once the halt is released.
+ *
+ * Guarded to a `schedule_kind='once'` row that is currently DISABLED with the once
+ * completed reason (i.e. exactly what `claimOnceTask` wrote); anything else is
+ * untouched. Returns whether a row changed.
+ */
+export async function rearmOnceTask(taskId: string, reason: string = 'once_completed'): Promise<boolean> {
+  const rows = await sql`
+    UPDATE scheduled_tasks
+    SET enabled = true,
+        next_fire_at = run_at,
+        next_run_at = run_at,
+        payload = COALESCE(payload, '{}'::jsonb) - 'completed_reason' - 'completed_at',
+        updated_at = now()
+    WHERE id = ${taskId}
+      AND schedule_kind = 'once'
+      AND enabled = false
+      AND payload->>'completed_reason' = ${reason}::text
+    RETURNING id
+  `
+  return rows.length > 0
+}
+
 export async function setTaskFireTimestamps(
   id: string,
   last: Date | null,
