@@ -130,6 +130,19 @@ ceiling (and the programmatic-credit halt).
   2. It produces a reviewable PR with a green CI check, or it cleanly does nothing and says why.
   3. This has **never once happened**. Until it does, the orchestrator is unproven and unsellable.
 
+**Plans:** 9 plans (the live proof is OWNER-GATED; these plans build, test and document the machinery and the arming runbook, they arm nothing)
+
+Plans:
+- [ ] 05-01-PLAN.md -- tracer (armed run to terminal outcome through every layer, flag OFF a true no-op) + orchestrator_proof_runs state layer + ProofGithub contract and fake (wave 1)
+- [ ] 05-02-PLAN.md -- read-only GitHub adapter + protection assertion/freeze/drift (ruleset shape, zero bypass, permission probe) (wave 2)
+- [ ] 05-03-PLAN.md -- hub verifier: default-branch advance via compare, PR scope, CI/green decision (wave 2)
+- [ ] 05-04-PLAN.md -- read-only GET /api/orchestrator/proof + OpenAPI + docs:sync (wave 2)
+- [ ] 05-05-PLAN.md -- proofBudgetGate + proofProtectionGate in both orchestrator gate lists, coverage scans, merge-routing refusal (wave 3)
+- [ ] 05-06-PLAN.md -- ordered evaluators, tick-side budget termination, inject-outcome mapping, counter-key pin (wave 3)
+- [ ] 05-07-PLAN.md -- arm/disarm/enable cores + operator CLI (exactly-one allowlist, frozen budget and protection) (wave 3)
+- [ ] 05-08-PLAN.md -- flag-OFF differential matrix, real-Postgres proof helper (CI only), baseline (wave 4)
+- [ ] 05-09-PLAN.md -- owner runbook (permissions, repo + ruleset, ordered rollback), CLAUDE.md/docs, runbook pin test (wave 4)
+
 ### Phase 6: Hardening + Docs + Release
 
 **Goal**: Shipped, documented, verified live.
