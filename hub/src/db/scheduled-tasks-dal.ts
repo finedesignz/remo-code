@@ -25,6 +25,8 @@ export type TaskType =
   | 'teab'
   // Milestone once: an inbound external work item enqueued as a one-time task.
   | 'work'
+  // PTYCAP-08: per-user task-quality auditor (seeded, never user-created).
+  | 'task_qc'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
 // Milestone once: 'cron' = recurring (schedule_rules/cron_expr); 'once' = fire
 // exactly once at run_at, then self-finalize (never re-arm).

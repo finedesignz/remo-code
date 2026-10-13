@@ -58,6 +58,8 @@ const TaskTypeEnum = z.enum([
   'teab',
   // Internal (synthesized by Coolify webhook)
   'triage',
+  // PTYCAP-08: task-quality auditor. Seeded at boot; the create route rejects it.
+  'task_qc',
 ])
 const TargetKindEnum = z.enum(['session', 'supervisor', 'all_agents', 'all_supervisors'])
 const CatchupPolicyEnum = z.enum(['skip', 'run_once'])
