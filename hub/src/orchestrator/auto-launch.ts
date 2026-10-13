@@ -279,7 +279,7 @@ export async function launchOrchestrator(args: {
     // callers only; the human REST /start never consults the switch). On a halt the run
     // row opened in the transaction is closed (frees the supervisor slot) so nothing leaks.
     if (args.machine) {
-      const pre = await haltBeforeMachineSend({ userId: args.userId });
+      const pre = await haltBeforeMachineSend({ userId: args.userId, sessionId });
       if (!pre.ok) {
         try {
           const { endRun } = await import('../db/supervisor-dal.ts');

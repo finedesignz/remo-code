@@ -15,6 +15,8 @@ const s = {
   halted: false,
   lateHalted: false,
   lateCalls: 0,
+  lateSessionScope: null as null | string,
+  lateArgs: [] as Array<{ userId: string; sessionId?: string }>,
   launchable: false,
   sends: [] as any[],
   ended: [] as any[],
@@ -31,8 +33,13 @@ mock.module('../src/dispatch/automation-controls.ts', () => ({
     return s.halted ? { halted: true, scope: 'global' } : { halted: false }
   },
   // QC B1: fresh read immediately before session.start (machine launches only)
-  haltBeforeMachineSend: async () => {
+  haltBeforeMachineSend: async (a: { userId: string; sessionId?: string }) => {
     s.lateCalls++
+    s.lateArgs.push(a)
+    // a SESSION-scoped engage only halts a read that names that session (as the real predicate does)
+    if (s.lateSessionScope !== null && a.sessionId === s.lateSessionScope) {
+      return { ok: false, reason: 'automation_halted:session', scope: 'session' }
+    }
     return s.lateHalted ? { ok: false, reason: 'automation_halted:global', scope: 'global' } : { ok: true }
   },
 }))
@@ -76,6 +83,8 @@ beforeEach(() => {
   s.halted = false
   s.lateHalted = false
   s.lateCalls = 0
+  s.lateSessionScope = null
+  s.lateArgs = []
   s.launchable = false
   s.sends = []
   s.ended = []
@@ -145,6 +154,18 @@ describe('launchOrchestrator machine option', () => {
     expect(r).toEqual({ ok: false, reason: 'automation_halted' })
     expect(s.haltCalls).toBe(1) // the early check passed
     expect(s.lateCalls).toBe(1)
+    expect(s.sends).toHaveLength(0)
+    expect(s.ended).toHaveLength(1)
+    expect(s.ended[0][0]).toBe('run-o')
+  })
+
+  test('QC R1: a SESSION-scoped engage landing late stops the send (the final read carries the resolved session id)', async () => {
+    s.launchable = true
+    s.existing = false
+    s.lateSessionScope = 'sess-o'
+    const r = await mod.launchOrchestrator({ userId: 'u1', machine: true })
+    expect(r).toEqual({ ok: false, reason: 'automation_halted' })
+    expect(s.lateArgs).toEqual([{ userId: 'u1', sessionId: 'sess-o' }])
     expect(s.sends).toHaveLength(0)
     expect(s.ended).toHaveLength(1)
     expect(s.ended[0][0]).toBe('run-o')
