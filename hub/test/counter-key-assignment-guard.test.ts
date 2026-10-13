@@ -13,6 +13,7 @@ const SRC = join(import.meta.dir, '..', 'src')
 const ALLOWED = new Set([
   'dispatch/pipeline.ts', //            the type declaration + release args
   'dispatch/automation-controls.ts', // the reservation / ledger arguments
+  'api/automation.ts', //               reset route: passes a key the caller already owns ledger rows for (04-05); never a DispatchRequest
   'dispatch/pty-preflight.ts', //       the PTY door (plan 04-05)
   'orchestrator/inject.ts', //          orchestrator task key
   'scheduler/senders/agent.ts', //      task:<scheduled_tasks.id>
