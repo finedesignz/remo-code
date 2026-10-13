@@ -152,7 +152,11 @@ export async function reserveSessionSlot(
       const hit = orchRows.find(
         (o) =>
           (runFields.sessionId != null && o.id === runFields.sessionId) ||
-          (target !== '' &&
+          // A reservation bound to a KNOWN session id is decided by id alone: a
+          // distinct non-orchestrator session may legitimately sit at a cwd an
+          // orchestrator run once used. Path arms catch the sessionId:null routes.
+          (runFields.sessionId == null &&
+            target !== '' &&
             ((!!o.project_dir && normPath(o.project_dir) === target) || usedPaths.has(target))),
       )
       if (hit) {

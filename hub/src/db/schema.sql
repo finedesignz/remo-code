@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS session_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_runs_user ON session_runs(user_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_supervisor ON session_runs(supervisor_id);
+CREATE INDEX IF NOT EXISTS idx_runs_session_path ON session_runs(session_id, repo_path);
 
 CREATE TABLE IF NOT EXISTS supervisor_commands (
   id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,

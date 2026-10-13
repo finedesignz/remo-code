@@ -114,6 +114,12 @@ describe('reserveSessionSlot orchestrator guard', () => {
     expect(inserts.length).toBe(1)
   })
 
+  test('a known non-orchestrator sessionId at the orchestrator project_dir is allowed (id decides)', async () => {
+    orchestrators = [{ id: 'orch-1', project_dir: '/root' }]
+    const r: any = await reserveSessionSlot('u1', 'sup1', run({ sessionId: 's2', repoPath: '/root' }))
+    expect(r.ok).toBe(true)
+  })
+
   test('allows when the user has no orchestrator session', async () => {
     orchestrators = []
     const r: any = await reserveSessionSlot('u1', 'sup1', run())
