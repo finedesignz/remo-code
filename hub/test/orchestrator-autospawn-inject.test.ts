@@ -172,6 +172,8 @@ describe('BSA-02 autospawn inject seam', () => {
       {
         getChannel: (() => ({ ws: { send() {} } })) as any,
         isSessionLive: async () => true,
+        // PTYCAP-04: the online path resolves a counter key; this unit test has no DB.
+        resolveCounterKey: async () => 'task:T1',
         dispatch: (async (_req: any, d: any) => {
           calls.dispatched.push({ gates: (d.gates ?? []).map((g: any) => g.name) })
           return { kind: 'dispatched' as const }

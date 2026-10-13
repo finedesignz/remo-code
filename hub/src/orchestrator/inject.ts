@@ -33,6 +33,11 @@ import {
   sessionInjectRateGate,
   isOverAutospawnDailyLaunchCap,
 } from '../dispatch/gates.ts'
+import {
+  automationKillSwitchGate,
+  automationLifetimeCounterGate,
+  resolveOrchestratorCounterKey,
+} from '../dispatch/automation-controls.ts'
 import { isOrchestratorEnabled, isAutospawnEnabled } from './controller.ts'
 import {
   isRepoAutospawnAllowed,
@@ -87,6 +92,12 @@ export interface InjectInput {
   prompt: string
   /** BSA-02: when present + gated ON, an offline build session is autospawned. */
   autospawn?: AutospawnContext
+  /**
+   * PTYCAP-04: the orchestrator task id behind this inject (macro-cycle supplies it).
+   * Absent => the counter key is resolved from the session's 1:1 orchestrator task.
+   * Server-side only; it becomes `DispatchRequest.counterKey`.
+   */
+  taskId?: string
 }
 
 /** Injectable seam for tests: lets the seam swap the real `dispatch()` for a spy. */
@@ -108,6 +119,8 @@ export interface InjectDeps {
   launchSessionForUser: typeof launchSessionForUser
   appendRunLog: typeof appendRunLog
   graceParkPending: (sessionId: string) => boolean
+  /** PTYCAP-04 counter-key resolver. Optional so existing dep objects keep compiling. */
+  resolveCounterKey?: typeof resolveOrchestratorCounterKey
 }
 
 /** Is at least one supervisor that could host this user's sessions online? */
@@ -259,7 +272,17 @@ export async function injectOrchestratorPrompt(
     // IR-1: cost-cap non-bypassable. BSA-04: the token cap is ADDED ALONGSIDE it
     // (never replacing). The per-session inject-RATE ceiling is added last (2026-07
     // wedged-tick-loop incident). Order: threshold → cost-cap → token-cap → rate.
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
+    // PTYCAP-04: the kill switch is FIRST (cheapest, fresh-read, fail closed) and the
+    // lifetime counter LAST (non-consuming check; the atomic reservation happens in
+    // dispatch() before the send, keyed by req.counterKey).
+    gates: [
+      automationKillSwitchGate,
+      thresholdGate,
+      dailyCostCapGate,
+      dailyTokenCapGate,
+      sessionInjectRateGate,
+      automationLifetimeCounterGate,
+    ],
     store,
     isOnline: (req) => deps.getChannel(req.sessionId) != null,
     // Online path: park is unexpected (we gated on getChannel above) — no-op.
@@ -267,7 +290,17 @@ export async function injectOrchestratorPrompt(
     send,
   }
 
-  const req: DispatchRequest = { userId, sessionId, token, prompt }
+  // PTYCAP-04: the budget identity, computed ONCE per inject. A resolver failure
+  // fails CLOSED - an unkeyed inject would silently bypass the lifetime ceiling.
+  let counterKey: string
+  try {
+    const resolve = deps.resolveCounterKey ?? resolveOrchestratorCounterKey
+    counterKey = await resolve({ userId, sessionId, taskId: input.taskId })
+  } catch (err: any) {
+    return { kind: 'failed', reason: `counter_key_unresolved:${err?.message ?? err}` }
+  }
+
+  const req: DispatchRequest = { userId, sessionId, token, prompt, counterKey }
   const outcome = await deps.dispatch(req, deployDeps)
   return mapDispatchOutcome(outcome)
 }

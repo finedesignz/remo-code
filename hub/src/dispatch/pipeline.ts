@@ -45,6 +45,11 @@ export interface DispatchRequest {
    *  Exempts that turn from the programmatic-credit halt (never from the cost
    *  or token caps). Never populated from client input. */
   humanInteractive?: true
+  /** Budget identity for the lifetime inject counter (PTYCAP-04). Set ONLY by a
+   *  server-side dispatcher (task:<scheduled_tasks.id> or session:<id>) - never
+   *  populated from client input. dispatch() reserves against it atomically
+   *  before the send when present. */
+  counterKey?: string
 }
 
 /** Pluggable pre-send gates, evaluated in order. First block wins. */
@@ -153,6 +158,17 @@ export interface PipelineDeps {
 }
 
 const DEFAULT_FINALIZE_TIMEOUT_MS = 20 * 60 * 1000
+
+/**
+ * Gate names dispatch() keys on (PTYCAP-04). A list that contains the kill-switch
+ * gate is a MACHINE list: dispatch() re-checks the switch before the run row opens
+ * and again immediately before the send. A list that contains the session
+ * inject-rate gate makes the atomic reservation also enforce the rate ceiling.
+ * Plain constants here so pipeline.ts needs no DB import; held equal to the
+ * automation-controls / gates.ts names by hub/test/automation-controls-config.test.ts.
+ */
+export const KILL_SWITCH_GATE_NAME = 'automation_kill_switch'
+export const SESSION_INJECT_RATE_GATE_NAME = 'session_inject_rate'
 
 // ── module-owned state ────────────────────────────────────────────────────────
 
@@ -288,6 +304,39 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
     return { kind: 'parked_offline' }
   }
 
+  // 3b. PTYCAP-04 pre-send guard. A machine list (kill-switch gate present) and/or a
+  //    request carrying a counterKey go through the neutral controls module: the
+  //    kill switch is re-read and the lifetime (+ rate) counter is consumed by ONE
+  //    atomic reservation BEFORE the run row opens. A refusal frees the in-flight
+  //    slot we hold. Requests with neither never import the module.
+  const machine = deps.gates.some((g) => g.name === KILL_SWITCH_GATE_NAME)
+  const enforceRate = deps.gates.some((g) => g.name === SESSION_INJECT_RATE_GATE_NAME)
+  let controls: typeof import('./automation-controls.ts') | null = null
+  let reserved = false
+  if (machine || req.counterKey) {
+    let refusal: string | null = null
+    try {
+      controls = await import('./automation-controls.ts')
+      const guard = await controls.preSendGuard(req, { machine, enforceRate })
+      if (guard.ok) reserved = guard.reserved
+      else refusal = guard.reason
+    } catch (err: any) {
+      console.error(`[dispatch] automation guard failed (fail closed) token=${req.token}: ${err?.message ?? err}`)
+      refusal = 'automation_guard_error'
+    }
+    if (refusal) {
+      void releaseAndPromote(req.sessionId)
+      if (deps.store) {
+        try {
+          await deps.store.markSkipped(req.token, refusal)
+        } catch (err: any) {
+          console.error(`[dispatch] markSkipped failed token=${req.token}: ${err?.message ?? err}`)
+        }
+      }
+      return { kind: 'skipped', reason: refusal }
+    }
+  }
+
   // 4. Open the run row. Fires EXACTLY when we're truly dispatching — after
   //    gates pass, after the queue head-slot claim, and after the offline park
   //    check — never for a skipped / dropped / queued / parked message. A
@@ -305,9 +354,30 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
   activeBySession.set(req.sessionId, { token: openedId, req, deps, startedAt: Date.now() })
   try {
     if (deps.store?.markDispatched) await deps.store.markDispatched(openedId)
+    // FINAL halt check (D-09c): the kill switch is re-read immediately before the
+    // send, AFTER the awaits above, so an engage that landed in between still stops
+    // this turn. A halt releases the reservation, marks the opened run skipped and
+    // frees the slot.
+    if (machine && controls) {
+      const fh = await controls.finalHaltCheck(req)
+      if (!fh.ok) {
+        activeBySession.delete(req.sessionId)
+        if (reserved && req.counterKey) await controls.releaseInject({ counterKey: req.counterKey, token: req.token })
+        if (deps.store) {
+          try {
+            await deps.store.markSkipped(openedId, fh.reason)
+          } catch {}
+        }
+        void releaseAndPromote(req.sessionId)
+        return { kind: 'skipped', reason: fh.reason }
+      }
+    }
     await deps.send(req)
   } catch (err: any) {
     activeBySession.delete(req.sessionId)
+    if (reserved && controls && req.counterKey) {
+      await controls.releaseInject({ counterKey: req.counterKey, token: req.token })
+    }
     const msg = err?.message ?? String(err)
     if (deps.store) {
       try {
