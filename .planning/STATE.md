@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: PTYCAP
 milestone_name: Milestone PTYCAP (Token-Gate the Interactive PTY Path)
-current_phase: 03
-current_phase_name: governed-automation-guard
+current_phase: 04
+current_phase_name: lifetime-inject-counter-kill-switch
 status: executing
-stopped_at: Completed PTYCAP-03-02-PLAN.md
-last_updated: "2026-10-07T23:40:00.000Z"
+stopped_at: PTYCAP-03 complete (PR #505 open, verified SHIP-WITH-NOTES); PTYCAP-04 planning
+last_updated: "2026-10-13T18:00:00.000Z"
 last_activity: 2026-09-28
 last_activity_desc: "BLEED milestone reconciled CLOSED (all four fixers verified shipped on main); milestone pointer advanced to PTYCAP; Phase 1 confirmed shipped (#395); Phase 2 execution started"
 state_head: a745ab9efb8e26c340e87a1f56cc55d3b2f35497
 progress:
   total_phases: 9
-  completed_phases: 1
+  completed_phases: 3
   total_plans: 9
-  completed_plans: 6
-  percent: 11
+  completed_plans: 8
+  percent: 33
 ---
 
 > **BLEED milestone reconciled CLOSED 2026-09-28.** This file and `.planning/PROJECT.md` had
@@ -91,9 +91,9 @@ connection is the Tauri Supervisor MSI.
 
 ## Current position
 
-Phase: PTYCAP-03 (governed-automation-guard) — EXECUTING (plan 02 of 4 complete)
-Status: Executing Phase PTYCAP-03 (Phase 2, pty-preflight-gate, shipped; plans 03-01 and 03-02 done, next 03-03)
-Last activity: 2026-10-07 — PTYCAP-03-02 complete (governed automation branch in the PTY preflight)
+Phase: PTYCAP-04 (lifetime-inject-counter-kill-switch) - PLANNING (stacked on PTYCAP-03 branch)
+Status: PTYCAP-03 complete: 4/4 plans, /qc PASS (Codex round-1 2 MINORs fixed, re-QC PASS), verifier SHIP-WITH-NOTES, PR #505 open (not merged)
+Last activity: 2026-10-13 - PTYCAP-03 closed out; PTYCAP-04 context/research locked, planning in progress on branch phase-ptycap-04-lifetime-counter-kill-switch
 
 ### OBSRV phase ledger (`.planning/phases/`)
 
