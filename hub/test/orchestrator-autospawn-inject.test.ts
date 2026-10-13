@@ -55,6 +55,8 @@ function makeDeps(over: Partial<InjectDeps>, calls: Calls): InjectDeps {
       // Simulate offline → pipeline parks in grace.
       return { kind: 'parked_offline' as const }
     }) as any,
+    // PTYCAP-04: BOTH paths resolve a counter key; these unit tests have no DB.
+    resolveCounterKey: async () => 'task:T1',
     ...over,
   }
 }
@@ -155,6 +157,27 @@ describe('BSA-02 autospawn inject seam', () => {
     expect(calls.dispatched[0].gates).toContain('daily_token_cap')
     // Ledger row written for the launch-count cap.
     expect(calls.runLogs).toContain('autospawn-launch')
+  })
+
+  test('PTYCAP-04 REPLAY: the parked thunk re-enters dispatch (gated), never the raw send', async () => {
+    const calls: Calls = { launched: 0, dispatched: [], runLogs: [] }
+    const seen: Array<{ req: any; d: any }> = []
+    const deps = makeDeps(
+      {
+        dispatch: (async (req: any, d: any) => {
+          seen.push({ req, d })
+          calls.dispatched.push({ gates: (d.gates ?? []).map((g: any) => g.name) })
+          return { kind: 'parked_offline' as const }
+        }) as any,
+      },
+      calls,
+    )
+    await injectOrchestratorPrompt(input(), deps)
+    expect(seen).toHaveLength(1)
+    await seen[0].d.replay(seen[0].req)
+    expect(seen).toHaveLength(2)
+    expect(seen[1].req.token).toBe(seen[0].req.token)
+    expect(seen[1].req.counterKey).toBe('task:T1')
   })
 
   test('DEDUP: a live grace entry ⇒ autospawn_parked, no duplicate launch', async () => {

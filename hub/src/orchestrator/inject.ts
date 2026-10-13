@@ -177,6 +177,18 @@ const REAL_DEPS: InjectDeps = {
   },
 }
 
+/**
+ * PTYCAP-04 (D-01, F-5c): ONE budget per orchestrator. A caller-supplied taskId is
+ * authoritative (`task:<id>`, resolver not consulted); otherwise the resolver maps the
+ * session to its orchestrator task. Called exactly once per inject, by whichever of the
+ * online / autospawn paths runs. Throws on failure (callers fail closed).
+ */
+async function resolveInjectCounterKey(input: InjectInput, deps: InjectDeps): Promise<string> {
+  if (input.taskId) return `task:${input.taskId}`
+  const resolve = deps.resolveCounterKey ?? resolveOrchestratorCounterKey
+  return await resolve({ userId: input.userId, sessionId: input.sessionId, taskId: undefined })
+}
+
 /** Build the prompt-delivery `send` closure (shared by the live + park paths). */
 function buildSend(prompt: string, token: string, deps: InjectDeps): PipelineDeps['send'] {
   return async (req) => {
@@ -294,8 +306,7 @@ export async function injectOrchestratorPrompt(
   // fails CLOSED - an unkeyed inject would silently bypass the lifetime ceiling.
   let counterKey: string
   try {
-    const resolve = deps.resolveCounterKey ?? resolveOrchestratorCounterKey
-    counterKey = await resolve({ userId, sessionId, taskId: input.taskId })
+    counterKey = await resolveInjectCounterKey(input, deps)
   } catch (err: any) {
     return { kind: 'failed', reason: `counter_key_unresolved:${err?.message ?? err}` }
   }
@@ -372,6 +383,16 @@ async function maybeAutospawnOffline(
   }
   if (isOverAutospawnDailyLaunchCap(launchesToday)) return { kind: 'refused', reason: 'launch_cap' }
 
+  // PTYCAP-04: the budget identity, resolved ONCE for this inject (the online path
+  // never reaches here) and BEFORE the launch so a resolver failure fails CLOSED
+  // without spawning a session.
+  let counterKey: string
+  try {
+    counterKey = await resolveInjectCounterKey(input, deps)
+  } catch (err: any) {
+    return { kind: 'failed', reason: `counter_key_unresolved:${err?.message ?? err}` }
+  }
+
   // ── Launch + park ────────────────────────────────────────────────────────────
   // Dedup: a live grace entry means a launch is already in flight for this session
   // (one spawn per grace window) — don't fire a duplicate session.start; the
@@ -419,15 +440,27 @@ async function maybeAutospawnOffline(
     async markFailed() {},
   }
   const send = buildSend(prompt, token, deps)
+  const req: DispatchRequest = { userId, sessionId, token, prompt, counterKey }
   const deployDeps: PipelineDeps = {
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
+    // PTYCAP-04: same composition as the online path - kill switch first, lifetime
+    // counter last, the original four unchanged between.
+    gates: [
+      automationKillSwitchGate,
+      thresholdGate,
+      dailyCostCapGate,
+      dailyTokenCapGate,
+      sessionInjectRateGate,
+      automationLifetimeCounterGate,
+    ],
     store,
-    isOnline: (req) => deps.getChannel(req.sessionId) != null,
-    // Grace drain (on the launched runner's reconnect) re-runs this: deliver the
-    // parked macro prompt to the now-online session.
-    replay: async () => {
+    isOnline: (r) => deps.getChannel(r.sessionId) != null,
+    // Grace drain (on the launched runner's reconnect) RE-ENTERS dispatch(): the
+    // parked prompt is up to 10 minutes stale, so it must pass the full gate list,
+    // the kill switch and the reservation again (a replayed token counts once, a
+    // parked request was never counted). It NEVER calls the raw send (T-04-10).
+    replay: async (r) => {
       try {
-        await send({ userId, sessionId, token, prompt })
+        await deps.dispatch(r ?? req, deployDeps)
       } catch (err: any) {
         console.warn(`[orchestrator.inject] autospawn replay failed session=${sessionId}: ${err?.message ?? err}`)
       }
@@ -435,7 +468,6 @@ async function maybeAutospawnOffline(
     send,
   }
 
-  const req: DispatchRequest = { userId, sessionId, token, prompt }
   const outcome = await deps.dispatch(req, deployDeps)
 
   switch (outcome.kind) {
