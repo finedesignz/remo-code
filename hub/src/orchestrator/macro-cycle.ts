@@ -27,6 +27,10 @@ import { shouldNotify, fanOutNotify, type NotifyEvent } from './notify.ts';
 import { appendRunLog } from './run-log.ts';
 import { injectOrchestratorPrompt } from './inject.ts';
 import type { LifecycleStage, MacroTaskType } from '../db/orchestrator-rows-dal.ts';
+// PTYCAP-05: types + the flag predicate ONLY. The guard/DAL/prompt are loaded by
+// dynamic import() strictly when isProofEnabled() (flag OFF = true no-op, D-03).
+import { isProofEnabled } from './proof-types.ts';
+import type { ProofCycleHooks, ProofDecisionKind, ProofRun } from './proof-types.ts';
 import {
   orchestratorCycleSkipReason,
   orchestratorDispatchOutcome,
@@ -65,6 +69,8 @@ export interface MacroCycleDeps {
     userId: string,
     tz: string,
   ) => Promise<{ costStatus: Parameters<typeof evaluateCapAlert>[0]['costStatus']; tokenStatus: Parameters<typeof evaluateCapAlert>[0]['tokenStatus'] }>;
+  /** PTYCAP-05: proof hooks (injectable for tests). Only consulted when isProofEnabled(). */
+  proof?: ProofCycleHooks;
 }
 
 const realCapStatuses: NonNullable<MacroCycleDeps['getCapStatuses']> = async (userId, tz) => {
@@ -111,6 +117,8 @@ export interface MacroCycleResult {
   stubNotReady: boolean;
   /** the parsed sentinels from the prior reply (for tests/observability). */
   sentinels: ParsedSentinels | null;
+  /** PTYCAP-05: the proof guard's decision; undefined whenever the proof flag stack is OFF. */
+  proofDecision?: ProofDecisionKind;
 }
 
 /**
@@ -145,6 +153,38 @@ export async function runMacroCycle(
     }
   } catch (err: any) {
     console.warn('[orchestrator.macro] reconcile threw (ignored):', err?.message ?? err);
+  }
+
+  // 1b. PTYCAP-05 proof guard (flag stack ON only). FAILS CLOSED: any throw here means
+  //     NO inject and never the dev macro prompt (verdict F3). OFF = none of this runs.
+  let proofRun: ProofRun | null = null;
+  let proofHooks: ProofCycleHooks | null = null;
+  let proofGuardInput: import('./proof-types.ts').ProofGuardInput | null = null;
+  if (isProofEnabled()) {
+    try {
+      proofHooks = d.proof ?? (await (await import('./proof-guard.ts')).realProofHooks());
+      proofGuardInput = {
+        userId,
+        sessionId,
+        taskId: input.taskId,
+        repoIdent: input.repoIdent,
+        repoKey,
+        sentinels,
+        runLive: d.isRunLive(sessionId),
+      };
+      const decision = await proofHooks.guard(proofGuardInput);
+      result.proofDecision = decision.kind;
+      if (decision.kind === 'proceed') {
+        proofRun = decision.run;
+      } else if (decision.kind !== 'pass_through') {
+        console.log(`[orchestrator.macro] session=${sessionId} proof guard: ${decision.kind}; not injecting.`);
+        return result;
+      }
+    } catch (err: any) {
+      result.proofDecision = 'blocked';
+      console.error('[orchestrator.macro] proof guard threw (fail closed, no inject):', err?.message ?? err);
+      return result;
+    }
   }
 
   // 2. HALT check — an open GATE stops the resume at a halting stage. Brainstorming
@@ -187,7 +227,19 @@ export async function runMacroCycle(
       repo_ident: input.repoIdent,
       lifecycle_stage: stage,
     };
-    const macro = renderMacro(macroTaskType, ctx);
+    let macro = renderMacro(macroTaskType, ctx);
+    if (proofRun && proofHooks && proofGuardInput) {
+      // PTYCAP-05: the proof prompt, rendered from the CLAIMED snapshot, REPLACES the
+      // dev macro. A render throw ends the run and injects nothing (never the dev macro).
+      try {
+        macro = { ...macro, prompt: proofHooks.render(proofRun), complete: true };
+      } catch (err: any) {
+        result.proofDecision = 'terminal';
+        console.error('[orchestrator.macro] proof render threw (no inject):', err?.message ?? err);
+        await proofHooks.abort(proofRun, 'guard_error', `render threw: ${err?.message ?? String(err)}`, proofGuardInput);
+        return result;
+      }
+    }
 
     // F-12: never inject a half-authored stub prompt on an unattended run. A
     // stub (complete=false) finalizes the tick cleanly with a recognizable
@@ -213,7 +265,9 @@ export async function runMacroCycle(
       return result;
     }
 
-    const token = `orch:${sessionId}:macro:${macroTaskType}:${Date.now()}`;
+    const token = proofRun
+      ? `orch:${sessionId}:proof:${proofRun.id}:${Date.now()}`
+      : `orch:${sessionId}:macro:${macroTaskType}:${Date.now()}`;
     // BSA-02: thread the autospawn decision for a BUILD (dev) macro. The inject
     // seam only acts on it when fully gated ON (REMO_ORCHESTRATOR_AUTOSPAWN +
     // allowlist + caps); for any other task_type the field is omitted, so the seam
@@ -236,6 +290,11 @@ export async function runMacroCycle(
       outcome.kind === 'queued' ||
       outcome.kind === 'autospawn_launched' ||
       outcome.kind === 'autospawn_parked';
+
+    // PTYCAP-05: record what the proof inject did (best-effort; the hook never throws).
+    if (proofRun && proofHooks) {
+      try { await proofHooks.observeInject(proofRun, outcome.kind); } catch { /* best-effort */ }
+    }
 
     // OBSRV-03: dispatch-outcome counter + skip-reason on non-dispatch outcomes.
     try {
@@ -309,14 +368,16 @@ export async function runMacroCycle(
         outcome.kind === 'refused' &&
         typeof reason === 'string' &&
         (reason.startsWith('automation_halted:') || reason.startsWith('lifetime_inject_exhausted:'));
-      if (outcome.kind !== 'no_session' && !benignAutospawnRefusal && !benignAutomationControl) {
+      // PTYCAP-05: while a proof snapshot is in play the proof terminalizer is the ONLY
+      // reporter, so a refused/failed proof tick never pages from here.
+      if (!proofRun && outcome.kind !== 'no_session' && !benignAutospawnRefusal && !benignAutomationControl) {
         await emitFailure(d, input, `resume inject ${outcome.kind}: ${reason}`);
       }
     }
   } catch (err: any) {
     console.warn('[orchestrator.macro] inject threw (ignored):', err?.message ?? err);
-    // F-10: a thrown resume is a failure — surface it.
-    await emitFailure(d, input, `resume inject threw: ${err?.message ?? String(err)}`);
+    // F-10: a thrown resume is a failure — surface it (proof ticks: the proof path reports).
+    if (!proofRun) await emitFailure(d, input, `resume inject threw: ${err?.message ?? String(err)}`);
   }
 
   return result;

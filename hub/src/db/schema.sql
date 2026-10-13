@@ -1661,3 +1661,82 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_token_cap_alarms_user_date
 -- Dedupe key shared by the rate union (routine_run_log inject rows vs ledger
 -- reserve rows): nullable, written by the inject path, never backfilled.
 ALTER TABLE routine_run_log ADD COLUMN IF NOT EXISTS inject_token TEXT;
+
+-- ── PTYCAP-05 (throwaway-repo due->PR proof): orchestrator_proof_runs ────────
+-- One row per owner-armed proof run. Additive + idempotent only (this file
+-- re-runs in full on every hub boot): CREATE ... IF NOT EXISTS, guarded named
+-- CHECKs and partial unique indexes. NO backfill. session_id/task_id are plain
+-- TEXT with no foreign key so history and token attribution survive deletion of
+-- the session or task (same pattern as the Phase 4 tables above).
+CREATE TABLE IF NOT EXISTS orchestrator_proof_runs (
+  id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  task_id             TEXT NOT NULL,
+  session_id          TEXT NOT NULL,
+  repo_ident          TEXT NOT NULL,
+  counter_key         TEXT NOT NULL,
+  branch              TEXT NOT NULL,
+  installation_id     BIGINT NOT NULL,
+  repo_owner          TEXT NOT NULL,
+  repo_name           TEXT NOT NULL,
+  default_branch      TEXT NOT NULL,
+  base_sha            TEXT NOT NULL,
+  ruleset_ids         BIGINT[] NOT NULL DEFAULT '{}',
+  ruleset_digest      TEXT NOT NULL,
+  ruleset_updated_at  TIMESTAMPTZ,
+  protection_shape    TEXT NOT NULL,
+  required_contexts   TEXT[] NOT NULL DEFAULT '{}',
+  arm_preconditions   JSONB NOT NULL DEFAULT '{}',
+  max_injects         INTEGER NOT NULL,
+  max_tokens          BIGINT NOT NULL,
+  max_wall_ms         BIGINT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'armed',
+  outcome             TEXT,
+  outcome_detail      TEXT,
+  pr_url              TEXT,
+  pr_number           INTEGER,
+  last_ci_state       TEXT,
+  last_inject_outcome TEXT,
+  tokens_hwm          BIGINT NOT NULL DEFAULT 0,
+  armed_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at          TIMESTAMPTZ,
+  terminal_at         TIMESTAMPTZ
+);
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_status_check
+    CHECK (status IN ('armed','running','succeeded','nothing','terminated','disarmed'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_injects_check
+    CHECK (max_injects > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_tokens_check
+    CHECK (max_tokens > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_wall_ms_check
+    CHECK (max_wall_ms > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_tokens_hwm_check
+    CHECK (tokens_hwm >= 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_terminal_at_check
+    CHECK ((status IN ('armed','running')) = (terminal_at IS NULL));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Single-flight: at most one non-terminal proof per user, per repo, per task.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_active_user
+  ON orchestrator_proof_runs(user_id) WHERE status IN ('armed','running');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_active_repo
+  ON orchestrator_proof_runs(repo_ident) WHERE status IN ('armed','running');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_active_task
+  ON orchestrator_proof_runs(task_id) WHERE status IN ('armed','running');
+CREATE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_task
+  ON orchestrator_proof_runs(task_id, armed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_counter_key
+  ON orchestrator_proof_runs(counter_key);
+CREATE INDEX IF NOT EXISTS idx_orchestrator_proof_runs_session
+  ON orchestrator_proof_runs(session_id);
