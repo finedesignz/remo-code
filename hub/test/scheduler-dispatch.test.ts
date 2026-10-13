@@ -25,6 +25,7 @@
  * cache-bust real modules, afterAll(mock.restore).
  */
 import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
+import { automationControlsLeaf } from './fixtures/automation-controls-leaf.ts'
 
 const realCtx = await import(`../src/scheduler/context/runtime-context.ts?bust=${Date.now()}`)
 
@@ -109,6 +110,10 @@ mock.module('../src/dispatch/gates.ts', () => ({
   // fix/stop-the-bleed: the token cap now rides EVERY dispatch gate list.
   dailyTokenCapGate: { name: 'daily_token_cap', async check() { return { ok: true } } },
 }))
+
+// PTYCAP-04: the sender now also imports automation-controls (kill switch + lifetime
+// counter); leaf-mock it so this file stays about the scheduler lifecycle (no DB).
+mock.module('../src/dispatch/automation-controls.ts', () => automationControlsLeaf())
 
 // Import AFTER mocks. Pipeline + adapter are REAL.
 const { sendAgentTask, isScheduledRunActive } = await import('../src/scheduler/senders/agent.ts')

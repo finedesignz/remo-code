@@ -43,6 +43,10 @@ import {
   type RunStore,
 } from '../../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate } from '../../dispatch/gates.ts'
+import {
+  automationKillSwitchGate,
+  automationLifetimeCounterGate,
+} from '../../dispatch/automation-controls.ts'
 import { getGraceBuffer } from '../../dispatch/grace.ts'
 import { launchSessionForUser } from '../../telegram/launch.ts'
 import { log } from '../../observability/logger'
@@ -364,7 +368,16 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
     // gates here IS the waiter-promotion re-check the legacy `setOnPromote`
     // handler did — a user who crossed the cap while queued is skipped when the
     // pipeline re-dispatches the promoted waiter through this same gate list.
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate],
+    // PTYCAP-04: kill switch FIRST (cheapest, fresh-read, fail closed), lifetime counter
+    // LAST (non-consuming check; the atomic reservation is in dispatch(), keyed by
+    // req.counterKey). The three existing gates keep their order.
+    gates: [
+      automationKillSwitchGate,
+      thresholdGate,
+      dailyCostCapGate,
+      dailyTokenCapGate,
+      automationLifetimeCounterGate,
+    ],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Offline replay on reconnect: re-send THIS run (same `scheduled_task_runs`
@@ -402,7 +415,15 @@ export async function sendAgentTask(task: ScheduledTask, ctx: RunCtxLike): Promi
     },
   }
 
-  const req: DispatchRequest = { userId: ctx.userId, sessionId, token: ctx.runId, prompt: sentContent }
+  // PTYCAP-04 (D-01, D-05): one lifetime budget per scheduled task. Cron fires and manual
+  // Run Now both come through here, so both carry the key. Server-set from the task row.
+  const req: DispatchRequest = {
+    userId: ctx.userId,
+    sessionId,
+    token: ctx.runId,
+    prompt: sentContent,
+    counterKey: `task:${task.id}`,
+  }
   const outcome = await dispatch(req, deps)
 
   switch (outcome.kind) {
