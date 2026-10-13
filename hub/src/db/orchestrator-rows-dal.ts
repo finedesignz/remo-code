@@ -301,13 +301,18 @@ export interface NewRoutineRunLogEntry {
   pr_url?: string | null;
   reviewer_verdict?: string | null;
   deploy_verify_result?: string | null;
+  /**
+   * PTYCAP-04: the inject token of the dispatch this row records (rate-union dedupe key
+   * shared with automation_inject_ledger.token). Omitted/NULL for non-inject rows.
+   */
+  inject_token?: string | null;
 }
 
 export async function insertRoutineRunLog(e: NewRoutineRunLogEntry): Promise<RoutineRunLogEntry> {
   const rows = await sql<RoutineRunLogEntry[]>`
     INSERT INTO routine_run_log (
       session_id, repo_key, command, decision_rationale, outcome,
-      gap_dimension, pr_url, reviewer_verdict, deploy_verify_result
+      gap_dimension, pr_url, reviewer_verdict, deploy_verify_result, inject_token
     ) VALUES (
       ${e.session_id},
       ${e.repo_key ?? null},
@@ -317,7 +322,8 @@ export async function insertRoutineRunLog(e: NewRoutineRunLogEntry): Promise<Rou
       ${e.gap_dimension ?? null},
       ${e.pr_url ?? null},
       ${e.reviewer_verdict ?? null},
-      ${e.deploy_verify_result ?? null}
+      ${e.deploy_verify_result ?? null},
+      ${e.inject_token ?? null}
     )
     RETURNING *
   `;

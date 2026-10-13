@@ -278,6 +278,9 @@ export async function runMacroCycle(
         command: `macro:${macroTaskType}`,
         decision_rationale: `resume-heartbeat inject (stage=${stage}); outcome=${outcome.kind}`,
         outcome: outcome.kind,
+        // PTYCAP-04 (F-6): the rate union de-duplicates this row against the ledger row
+        // by token. Only inject outcomes (dispatched|queued|autospawn_*) carry it.
+        inject_token: result.injected ? token : null,
       });
     } catch {
       /* best-effort */
