@@ -395,4 +395,36 @@ describe.skipIf(!HAS_TEST_DB)('schema.sql double-apply (boot idempotency)', () =
       await sql.unsafe(`DROP SCHEMA IF EXISTS ${decoyNs} CASCADE`)
     }
   }, 45_000)
+
+  // PTYCAP-07 plan 02: the heal_events ledger + scheduled_tasks.is_internal are
+  // additive DDL. Re-applying the full schema must converge and the table must
+  // accept a row (indexes + FK to users in place).
+  it('heal_events + scheduled_tasks.is_internal converge on re-apply and accept a row', async () => {
+    await applySchemaStrict(sql)
+    await applySchemaStrict(sql)
+    const email = `heal-${randomUUID()}@invalid.local`
+    const [user] = await sql<{ id: string }[]>`
+      INSERT INTO users (email, password_hash, role) VALUES (${email}, 'x', 'user') RETURNING id
+    `
+    const [row] = await sql<{ id: string; notification_claimed_at: string | null }[]>`
+      INSERT INTO heal_events (user_id, source, dedupe_key, window_bucket, trigger_run_id)
+      VALUES (${user.id}, 'test', 'k', 1, 'run-1') RETURNING id, notification_claimed_at
+    `
+    expect(row.id).toBeTruthy()
+    expect(row.notification_claimed_at).toBeNull()
+    const [{ is_internal }] = await sql<{ is_internal: boolean }[]>`
+      SELECT column_default AS is_internal FROM information_schema.columns
+      WHERE table_name = 'scheduled_tasks' AND column_name = 'is_internal' AND table_schema = ${NS}
+    `
+    expect(String(is_internal)).toBe('false')
+    // The partial unique index blocks a second event for the same run.
+    let dup = false
+    try {
+      await sql`
+        INSERT INTO heal_events (user_id, source, dedupe_key, window_bucket, trigger_run_id)
+        VALUES (${user.id}, 'test', 'other', 2, 'run-1')
+      `
+    } catch { dup = true }
+    expect(dup).toBe(true)
+  }, 45_000)
 })

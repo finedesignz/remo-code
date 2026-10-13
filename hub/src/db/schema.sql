@@ -1661,3 +1661,42 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_token_cap_alarms_user_date
 -- Dedupe key shared by the rate union (routine_run_log inject rows vs ledger
 -- reserve rows): nullable, written by the inject path, never backfilled.
 ALTER TABLE routine_run_log ADD COLUMN IF NOT EXISTS inject_token TEXT;
+
+-- PTYCAP-07 self-heal event ledger. One row per heal claim; the atomic claim
+-- (tx advisory lock + real time-window check) lives in heal-events-dal.ts, the
+-- unique indexes below are only the backstop. No FK on the run id columns: runs
+-- are reaped independently and a heal row must outlive them. Additive DDL only.
+CREATE TABLE IF NOT EXISTS heal_events (
+  id                      TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id                 UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  source                  TEXT NOT NULL,
+  repo_ident              TEXT,
+  dedupe_key              TEXT NOT NULL,
+  window_bucket           BIGINT NOT NULL,
+  trigger_run_id          TEXT,
+  dispatch_run_id         TEXT,
+  metadata_run_id         TEXT,
+  session_id              TEXT,
+  outcome                 TEXT,
+  notification_claimed_at TIMESTAMPTZ,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_heal_events_bucket
+  ON heal_events(user_id, source, dedupe_key, window_bucket);
+-- A run can trigger at most one heal event, ever.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_heal_events_trigger
+  ON heal_events(source, trigger_run_id) WHERE trigger_run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_heal_events_user_key_created
+  ON heal_events(user_id, dedupe_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_heal_events_dispatch_run
+  ON heal_events(dispatch_run_id);
+CREATE INDEX IF NOT EXISTS idx_heal_events_metadata_run
+  ON heal_events(metadata_run_id);
+CREATE INDEX IF NOT EXISTS idx_heal_events_user_repo_created
+  ON heal_events(user_id, repo_ident, created_at DESC);
+
+-- Durable internal-task marker (PTYCAP-07 AM-F5-3). Never backfilled: rows that
+-- predate this column stay recognised by the __internal_ name-prefix half of
+-- isInternalScheduledTask (hub/src/heal/internal-task.ts).
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT false;
