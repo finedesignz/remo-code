@@ -49,7 +49,7 @@ mock.module('../src/observability/logger', () => ({
 
 const { sendTeabTask, _resetTeabPolls } = await import('../src/scheduler/senders/teab.ts')
 
-const ctx = () => ({ runId: 'run-1', taskId: 'task-1', userId: 'u1', target: { supervisorId: 'sup-1' } })
+const ctx = () => ({ runId: 'run-1', taskId: 'task-1', userId: 'u1', onceClaimed: true, target: { supervisorId: 'sup-1' } })
 const task: any = { id: 'task-1', user_id: 'u1', task_type: 'teab', teab_repo_ident: 'github://o/r', payload: {} }
 
 beforeEach(() => {
@@ -79,6 +79,12 @@ describe('sendTeabTask late halt', () => {
     st.rearmThrows = true
     await sendTeabTask({ ...task, schedule_kind: 'once' }, ctx())
     expect(st.frames).toHaveLength(0)
+    expect(st.finalized).toEqual([{ runId: 'run-1', status: 'skipped', error: 'automation_halted:user' }])
+  })
+
+  test('QC R4: a halted once-task this run did NOT claim (manual Run Now) is never re-armed', async () => {
+    await sendTeabTask({ ...task, schedule_kind: 'once' }, { ...ctx(), onceClaimed: false })
+    expect(st.rearmed).toHaveLength(0)
     expect(st.finalized).toEqual([{ runId: 'run-1', status: 'skipped', error: 'automation_halted:user' }])
   })
 

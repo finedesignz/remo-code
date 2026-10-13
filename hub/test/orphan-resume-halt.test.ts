@@ -22,10 +22,14 @@ const s = {
   launchThrows: false,
   openReplacement: false,
   sent: [] as any[],
+  lockHeldBy: null as string | null,
+  lockWaiters: [] as Array<() => void>,
+  lockLog: [] as string[],
 }
 
 function fakeSql(strings: TemplateStringsArray, ...vals: any[]): Promise<any[]> {
   const text = strings.join('?')
+  if (/pg_advisory_xact_lock/.test(text)) { s.lockLog.push(`lock:${vals[0]}`); return Promise.resolve([]) }
   if (/UPDATE session_runs/.test(text) && /ended_at = NULL/.test(text)) {
     // R2: the reopen carries `AND NOT EXISTS (open replacement run)`; model that predicate.
     if (/NOT EXISTS/.test(text) && s.openReplacement) return Promise.resolve([])
@@ -44,6 +48,22 @@ function fakeSql(strings: TemplateStringsArray, ...vals: any[]): Promise<any[]> 
   return Promise.resolve([])
 }
 
+// QC R4: the reopen must run inside sql.begin AFTER taking the per-user advisory lock.
+// Model the lock as a mutex keyed by the lock statement: a tx that issues it waits while
+// another tx holds it and releases it when its begin() callback settles.
+;(fakeSql as any).begin = async (fn: (tx: any) => Promise<any>) => {
+  let held = false
+  const tx = async (strings: TemplateStringsArray, ...vals: any[]) => {
+    if (/pg_advisory_xact_lock/.test(strings.join('?')) && !held) {
+      while (s.lockHeldBy) await new Promise<void>((r) => s.lockWaiters.push(r))
+      s.lockHeldBy = String(vals[0]); held = true
+    }
+    return fakeSql(strings, ...vals)
+  }
+  try { return await fn(tx) } finally {
+    if (held) { s.lockHeldBy = null; s.lockWaiters.splice(0).forEach((r) => r()) }
+  }
+}
 mock.module('../src/db/postgres.ts', () => ({ sql: fakeSql }))
 mock.module('../src/dispatch/automation-controls.ts', () => ({
   isAutomationHalted: async (a: { userId: string; sessionId?: string }) => {
@@ -96,6 +116,9 @@ beforeEach(() => {
   s.launchResult = null
   s.launchThrows = false
   s.openReplacement = false
+  s.lockHeldBy = null
+  s.lockWaiters = []
+  s.lockLog = []
   s.sent = []
 })
 
@@ -244,3 +267,30 @@ describe('QC M1: the original orchestrator orphan is not consumed when no replac
   })
 })
 
+describe('QC R4: orphan reopen serializes with launchOrchestrator on the per-user advisory lock', () => {
+  test('a concurrent launch holding the lock: reopen waits, then sees the replacement and leaves ONE open run', async () => {
+    s.orphans = [orphan('run-o', 'sess-o', true)]
+    s.launchResult = { ok: false, reason: 'internal_error', error: 'x' }
+    s.lockHeldBy = 'orchestrator:u1' // a concurrent launchOrchestrator tx is mid-flight
+    const pending = resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
+    await new Promise((r) => setTimeout(r, 20))
+    // Reopen is blocked on the lock: no reopen UPDATE has run yet.
+    expect(s.updates.filter((u) => u.startsWith('restored:'))).toHaveLength(0)
+    // The launch commits its replacement row, then releases the lock.
+    s.openReplacement = true
+    s.lockHeldBy = null
+    s.lockWaiters.splice(0).forEach((r) => r())
+    await pending
+    // Reopen ran under the lock, saw the replacement, and did NOT reopen the orphan.
+    expect(s.lockLog).toEqual(['lock:orchestrator:u1'])
+    expect(s.updates.filter((u) => u.startsWith('restored:'))).toHaveLength(0)
+  })
+
+  test('uncontended: lock taken for the same per-user key, then the orphan is reopened', async () => {
+    s.orphans = [orphan('run-o', 'sess-o', true)]
+    s.launchResult = { ok: false, reason: 'at_capacity', running: 1, cap: 1 }
+    await resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
+    expect(s.lockLog).toEqual(['lock:orchestrator:u1'])
+    expect(s.updates.filter((u) => u.startsWith('restored:'))).toEqual(['restored:run-o'])
+  })
+})

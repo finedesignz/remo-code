@@ -42,6 +42,8 @@ interface RunContext {
   triggeredByRunId?: string | null
   /** Manual ("run now") dispatch — the agent sender fails fast on offline. */
   isManual?: boolean
+  /** True only when THIS fire won claimOnceTask; senders re-arm a halted once-task only then. */
+  onceClaimed?: boolean
   /**
    * Per-run cost accrual (fix/run-cost-attribution). `scheduled_task_runs
    * .cost_usd` was NULL on 100% of rows — no caller of `finalizeRun` ever
@@ -401,6 +403,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       chainDepth: opts.chainDepth,
       triggeredByRunId: opts.triggeredByRunId ?? null,
       isManual,
+      onceClaimed: opts.onceClaimed === true,
     }
     trackRun(ctx)
     broadcastScheduledRun(userId, {
@@ -454,6 +457,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       chainDepth: opts.chainDepth,
       triggeredByRunId: opts.triggeredByRunId ?? null,
       isManual,
+      onceClaimed: opts.onceClaimed === true,
     }
     trackRun(ctx)
     broadcastScheduledRun(userId, {
@@ -535,6 +539,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       chainDepth: opts.chainDepth,
       triggeredByRunId: opts.triggeredByRunId ?? null,
       isManual,
+      onceClaimed: opts.onceClaimed === true,
     }
     trackRun(ctx)
     runIds.push(run.id)

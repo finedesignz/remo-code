@@ -234,8 +234,15 @@ describe('one-time tasks are never burned by a halt (panel F-4)', () => {
 
   test('the once-work sender re-arms when dispatchWork reports a halt skip, and records the run as skipped (not completed work)', async () => {
     state.task = baseTask({ schedule_kind: 'once', task_type: 'work', payload: { work_id: 'w1' } })
-    await sendWorkTask(state.task, { runId: 'run-9', userId: 'user-1' })
+    await sendWorkTask(state.task, { runId: 'run-9', userId: 'user-1', onceClaimed: true })
     expect(state.rearmCalls).toEqual(['task-1'])
+    expect(state.finalized).toEqual([{ status: 'skipped', error: 'automation_halted:global' }])
+  })
+
+  test('QC R4: the once-work sender does NOT re-arm a halt skip when this run did not claim the task', async () => {
+    state.task = baseTask({ schedule_kind: 'once', task_type: 'work', payload: { work_id: 'w1' } })
+    await sendWorkTask(state.task, { runId: 'run-9', userId: 'user-1' })
+    expect(state.rearmCalls).toEqual([])
     expect(state.finalized).toEqual([{ status: 'skipped', error: 'automation_halted:global' }])
   })
 

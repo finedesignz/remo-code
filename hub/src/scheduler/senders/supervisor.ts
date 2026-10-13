@@ -31,6 +31,7 @@ interface RunCtxLike {
   taskId: string
   userId: string
   target: { supervisorId?: string | null; supervisorSocket?: ServerWebSocket<any> | null }
+  onceClaimed?: boolean
 }
 
 async function commandExists(supervisorId: string, command: string): Promise<boolean> {
@@ -66,7 +67,7 @@ export async function sendSupervisorTask(task: ScheduledTask, ctx: RunCtxLike): 
     // R3: a CLAIMED one-time task must not be burned by the refusal; restore the claim so
     // the once-due sweep re-fires it after release. The skipped run below is the visible
     // record of this attempt even if the re-arm itself fails.
-    if (task.schedule_kind === 'once') {
+    if (task.schedule_kind === 'once' && ctx.onceClaimed === true) {
       try { await rearmOnceTask(task.id) } catch (err: any) {
         console.error(`[scheduler.supervisor] once re-arm failed task=${task.id}: ${err?.message ?? err}`)
       }

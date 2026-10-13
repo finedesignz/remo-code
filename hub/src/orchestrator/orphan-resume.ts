@@ -217,7 +217,7 @@ async function resumeOrphansInner(args: {
             res.reason === 'supervisor_has_no_roots' ||
             res.reason === 'internal_error')
         ) {
-          await reopenOrphanIfNoReplacement(sql, o.id, o.session_id)
+          await reopenOrphanIfNoReplacement(sql, o.id, o.session_id, userId)
         }
         if (!res.ok && res.reason === 'automation_halted') {
           result.skipped_halted.push(o.id)
@@ -234,7 +234,7 @@ async function resumeOrphansInner(args: {
         console.error('[orphan-resume] orchestrator relaunch failed run=' + o.id, err?.message)
         // R2: a throw may precede the replacement run row; do not leave the orphan consumed.
         try {
-          await reopenOrphanIfNoReplacement(sql, o.id, o.session_id)
+          await reopenOrphanIfNoReplacement(sql, o.id, o.session_id, userId)
         } catch (reopenErr: any) {
           console.error('[orphan-resume] orphan reopen failed run=' + o.id, reopenErr?.message)
         }
@@ -300,15 +300,22 @@ async function resumeOrphansInner(args: {
  * consumed (two open runs would double-resume); otherwise it is restored so the release-time
  * sweep or the next reconnect resumes it.
  */
-async function reopenOrphanIfNoReplacement(sql: any, orphanId: string, sessionId: string | null): Promise<void> {
-  await sql`
-    UPDATE session_runs SET ended_at = NULL, exit_reason = NULL
-    WHERE id = ${orphanId} AND exit_reason = 'reboot'
-      AND NOT EXISTS (
-        SELECT 1 FROM session_runs r2
-        WHERE r2.session_id = ${sessionId} AND r2.ended_at IS NULL AND r2.id <> ${orphanId}
-      )
-  `
+async function reopenOrphanIfNoReplacement(sql: any, orphanId: string, sessionId: string | null, userId: string): Promise<void> {
+  // QC R4: take the SAME per-user advisory lock launchOrchestrator holds across its
+  // find-or-create -> reserve -> createRun transaction. Without it, the NOT EXISTS below can
+  // read before a concurrent launch commits its replacement row, and the reopen then lands
+  // beside it (two open runs). Under the lock the check and the reopen see a settled state.
+  await sql.begin(async (tx: any) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${'orchestrator:' + userId})::bigint)`
+    await tx`
+      UPDATE session_runs SET ended_at = NULL, exit_reason = NULL
+      WHERE id = ${orphanId} AND exit_reason = 'reboot'
+        AND NOT EXISTS (
+          SELECT 1 FROM session_runs r2
+          WHERE r2.session_id = ${sessionId} AND r2.ended_at IS NULL AND r2.id <> ${orphanId}
+        )
+    `
+  })
 }
 
 /**
