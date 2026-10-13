@@ -279,6 +279,23 @@ export async function runAutomationControlsChecks(a: AutomationChecksArgs): Prom
     expect(await alarmMod.claimTokenCapAlarm(alarmArgs, sql)).toBeNull() // cooling down
     await sql`UPDATE token_cap_alarms SET delivered = true WHERE id = ${winners[0] as string}`
     expect(await alarmMod.claimTokenCapAlarm({ ...alarmArgs, cooldownSeconds: 0 }, sql)).toBeNull() // delivered
+
+    // (13) QC m2: the REAL countFiresForTask SQL. Kill-switch skips (skipped +
+    // automation_halted:<scope>) do not count toward max_runs; a success and every other
+    // skip (cost cap) still do. Rows hang off the scheduled task of (10) and cascade away
+    // with it in the cleanup below.
+    const dalMod = await import('../../src/db/scheduled-tasks-dal.ts')
+    const runStatuses: Array<[string, string | null]> = [
+      ['success', null],
+      ['skipped', 'daily_cost_cap'],
+      ['skipped', 'automation_halted:global'],
+      ['skipped', 'automation_halted:user'],
+      ['failed', 'automation_halted:user'], // only SKIPPED halts are excluded
+    ]
+    for (const [status, error] of runStatuses) {
+      await sql`INSERT INTO scheduled_task_runs (task_id, user_id, status, error) VALUES (${task[0].id}, ${userId}, ${status}, ${error})`
+    }
+    expect(await dalMod.countFiresForTask(task[0].id)).toBe(3)
   } finally {
     for (const k of ENV_KEYS) {
       if (saved[k] === undefined) delete process.env[k]

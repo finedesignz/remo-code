@@ -385,10 +385,18 @@ export async function updateTaskV2(
  * `max_runs` end-bound (counts ALL fires regardless of status — a fire that
  * was skipped/quota-capped still consumes a run slot, matching the documented
  * "total fires" semantics). Cheap: indexed by task_id.
+ *
+ * QC m2: a run the KILL SWITCH refused (`status='skipped'`, `error` starting with
+ * `automation_halted:` - recorded by the dispatcher and the senders' pre-send check)
+ * is NOT a fire: nothing was attempted. Counting it would let a halt exhaust a bounded
+ * task's `max_runs` and auto-disable it for good. Every other skip (quota, cost cap,
+ * offline) still counts, as documented.
  */
 export async function countFiresForTask(taskId: string): Promise<number> {
   const rows = await sql<{ n: string }[]>`
-    SELECT COUNT(*)::text AS n FROM scheduled_task_runs WHERE task_id = ${taskId}
+    SELECT COUNT(*)::text AS n FROM scheduled_task_runs
+    WHERE task_id = ${taskId}
+      AND NOT (status = 'skipped' AND starts_with(COALESCE(error, ''), 'automation_halted:'))
   `
   return Number(rows[0]?.n ?? 0)
 }
