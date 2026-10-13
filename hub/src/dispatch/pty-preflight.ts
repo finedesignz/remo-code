@@ -18,9 +18,18 @@
  *   - Automation chain (SC-1): threshold → daily token cap → daily cost cap →
  *     per-session inject-rate ceiling. The automation branch is gated by the
  *     governed-automation flag (governed-pty.ts, default OFF = refuse before any
- *     DB gate) and, when ON, runs this spend chain and THEN the governors from
- *     governed-pty.ts. The governors are never members of a chain constant, and
- *     the human chain never runs one.
+ *     DB gate) and, when ON, runs: flag, then this spend chain, then the
+ *     governors from governed-pty.ts, then ONE atomic lifetime reservation
+ *     (PTYCAP Phase 4: lifetime count and trailing-hour rate checked together
+ *     under the per-key advisory lock), so an admitted automation turn is always
+ *     counted in the durable ledger. The reservation needs a server-supplied
+ *     counter key and a PER-TURN token (the Phase 5 producer supplies both);
+ *     the constant per-session token below must never be used for a reserve (the
+ *     second turn would be an idempotent no-op and count once per session ever).
+ *     The reserve can over-count when the preflight timeout fires after it
+ *     inserted (the turn is refused but counted) - the safe direction for a
+ *     ceiling. The governors are never members of a chain constant, and the
+ *     human chain never runs one and never reserves.
  *   - Human chain: the same spend ceilings MINUS the inject-rate ceiling (SC-3:
  *     a human is never rate-limited like a loop), and exempt from the
  *     programmatic-credit halt inside `dailyCostCapGate` (via the server-set
@@ -33,6 +42,7 @@ import type { DispatchGate, DispatchRequest } from './pipeline.ts'
 import { thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate } from './gates.ts'
 import { log } from '../observability/logger'
 import { governedAutomationEnabled, activeGovernors, automationBlockedReason } from './governed-pty.ts'
+import { reserveInject } from './automation-controls.ts'
 
 export const ptyPreflightDispatchConfig: { gates: DispatchGate[] } = {
   gates: [thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate],
@@ -171,7 +181,17 @@ export function isPtySubmit(bytesB64: string): boolean {
   return classifyPtyInput(bytesB64).submit
 }
 
-async function runChain(input: { userId: string; sessionId: string; actor: PtyPreflightActor }): Promise<PtyPreflightResult> {
+interface PtyPreflightInput {
+  userId: string
+  sessionId: string
+  actor: PtyPreflightActor
+  /** Server-supplied by the automation producer (hub/src/orchestrator/); never client-asserted. */
+  counterKey?: string
+  /** Server-supplied PER-TURN token for the lifetime reservation; never client-asserted. */
+  turnToken?: string
+}
+
+async function runChain(input: PtyPreflightInput): Promise<PtyPreflightResult> {
   const human = input.actor === 'human'
   // Governed automation (PTYCAP Phase 3): flag FIRST, before any DB-backed gate,
   // so OFF admits nothing to a PTY and costs nothing.
@@ -181,9 +201,10 @@ async function runChain(input: { userId: string; sessionId: string; actor: PtyPr
   const req: DispatchRequest = {
     userId: input.userId,
     sessionId: input.sessionId,
-    token: `pty-preflight:${input.sessionId}`,
+    token: !human && input.turnToken ? input.turnToken : `pty-preflight:${input.sessionId}`,
     prompt: '',
     ...(human ? { humanInteractive: true as const } : {}),
+    ...(!human && input.counterKey ? { counterKey: input.counterKey } : {}),
   }
   for (const gate of human ? PTY_HUMAN_TURN_GATES : PTY_AUTOMATION_TURN_GATES) {
     const result = await gate.check(req)
@@ -197,6 +218,20 @@ async function runChain(input: { userId: string; sessionId: string; actor: PtyPr
       const result = await governor.check(req)
       if (!result.ok) return { ok: false, reason: automationBlockedReason(input.actor, result.reason) }
     }
+    // The door COUNTS the turn: one atomic reservation (lifetime + trailing-hour
+    // rate under the advisory lock) after every governor passed. No try/catch for
+    // the same reason: a throw is pty_preflight_error, a hang pty_preflight_timeout.
+    if (!input.turnToken) return { ok: false, reason: automationBlockedReason(input.actor, 'pty_turn_token_missing') }
+    if (!input.counterKey) return { ok: false, reason: automationBlockedReason(input.actor, 'lifetime_counter_key_missing') }
+    const reserved = await reserveInject({
+      userId: input.userId,
+      sessionId: input.sessionId,
+      token: input.turnToken,
+      counterKey: input.counterKey,
+      actor: input.actor,
+      enforceRate: true,
+    })
+    if (!reserved.ok) return { ok: false, reason: automationBlockedReason(input.actor, reserved.reason) }
   }
   return { ok: true }
 }
@@ -206,11 +241,7 @@ async function runChain(input: { userId: string; sessionId: string; actor: PtyPr
  * server-inferred by the caller, never client-asserted. First blocking gate
  * wins. Never throws: errors and timeouts resolve to a rejection.
  */
-export async function checkPtyTurnPreflight(input: {
-  userId: string
-  sessionId: string
-  actor: PtyPreflightActor
-}): Promise<PtyPreflightResult> {
+export async function checkPtyTurnPreflight(input: PtyPreflightInput): Promise<PtyPreflightResult> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<PtyPreflightResult>((resolve) => {
     timer = setTimeout(() => resolve({ ok: false, reason: 'pty_preflight_timeout' }), timeoutMs)
