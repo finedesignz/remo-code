@@ -86,3 +86,15 @@ Both are edge-case races/overrides in halt-recovery paths, not violations of SC-
 ---
 _Verified: 2026-10-13_
 _Verifier: Claude (gsd-verifier); covered_digest omitted (fingerprint verb not run within scope cap)_
+
+## QC round 3 (post-BLOCKED fix)
+
+Fix commit: `0d13b21` fix(ptycap-04): serialize orphan reopen with launch lock; re-arm halted once-task only when this run claimed it.
+
+- Finding (a), orphan reopen race: `hub/src/orchestrator/orphan-resume.ts` now takes `pg_advisory_xact_lock(hashtext('orchestrator:'+userId))` before reopening. Regression: `hub/test/orphan-resume-halt.test.ts`.
+- Finding (b), once-task re-arm: `dispatcher.ts` passes `ctx.onceClaimed` to senders; `senders/supervisor.ts`, `teab.ts`, `work.ts` re-arm only when true. Regressions: `once-work-sender.test.ts`, `scheduler-halt.test.ts`, `scheduler-supervisor-sender-halt.test.ts`, `scheduler-teab-sender-halt.test.ts`.
+- Codex re-QC (read-only) confirmed both fixes clean. Its only new finding: `POST /api/sessions/:id/launch` can open a second run for an offline orchestrator session.
+
+That new finding is PRE-EXISTING on origin/main and not introduced by Phase 4. Evidence: `git show origin/main:hub/src/api/sessions.ts` lines 556-710 - the `/:id/launch` handler checks only `status === 'online'` (line ~567) and then calls `reserveSessionSlot` (~line 645) with no `is_orchestrator` check, no per-user advisory lock, and no open-run check. Phase 4 does not touch this file. It is handled as its own PR (`fix/orchestrator-launch-route-guard`), not a Phase 4 blocker.
+
+Verdict after round 3: SC-1..SC-4 hold; both round-2 findings fixed with regression tests; no remaining Phase-4-introduced findings. Ready for review.
