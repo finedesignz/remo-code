@@ -282,6 +282,29 @@ export async function resumeOrphansForSupervisor(args: {
   return resumeOrphansInner({ sql, userId: args.userId, supervisorId: args.supervisorId })
 }
 
+/**
+ * PTYCAP-04-07 (panel F-4): which online supervisors to sweep after a kill-switch RELEASE.
+ * Global release sweeps every online supervisor (each with its own owner's user id, read from
+ * the in-memory registry record); user and session release sweep the releasing owner's
+ * supervisors. Event-driven (called by the release route only) - never polled. The registry
+ * is imported late so modules that merely import this file do not need the full surface.
+ */
+export async function listOnlineSupervisorsForRelease(args: {
+  scope: 'global' | 'user' | 'session'
+  userId: string
+}): Promise<Array<{ supervisorId: string; userId: string }>> {
+  const reg = await import('../ws/supervisor-registry')
+  if (args.scope !== 'global') {
+    return reg.listOnlineSupervisorIdsForUser(args.userId).map((supervisorId) => ({ supervisorId, userId: args.userId }))
+  }
+  const out: Array<{ supervisorId: string; userId: string }> = []
+  for (const { id } of reg.listSupervisors()) {
+    const entry = reg.getSupervisor(id)
+    if (entry) out.push({ supervisorId: id, userId: entry.userId })
+  }
+  return out
+}
+
 // ── Rate-limit: at most one client-driven resume sweep per (userId, 60s). ────
 const recentClientResumeAt = new Map<string, number>()
 const CLIENT_RESUME_WINDOW_MS = 60_000

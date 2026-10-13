@@ -40,6 +40,25 @@ mock.module('../src/dispatch/automation-controls.ts', () => ({
   },
 }))
 
+// PTYCAP-04-07: release-time resume. The orphan-resume module is leaf-mocked: a lister for the
+// releasing scope and the supervisor-scoped sweep, both recorded.
+let resumeSups: Array<{ supervisorId: string; userId: string }> = []
+let resumeThrows = false
+let listerRejects = false
+mock.module('../src/orchestrator/orphan-resume', () => ({
+  listOnlineSupervisorsForRelease: async (a: any) => {
+    calls.push({ fn: 'lister', args: a })
+    if (listerRejects) throw new Error('registry boom')
+    return resumeSups
+  },
+  resumeOrphansForSupervisor: async (a: any) => {
+    calls.push({ fn: 'resume', args: a })
+    if (resumeThrows) throw new Error('resume boom')
+    return {}
+  },
+}))
+const flush = () => new Promise((r) => setTimeout(r, 0))
+
 const { automationApi } = await import('../src/api/automation.ts')
 
 function appAs(userId: string, role: string): Hono<any> {
@@ -66,6 +85,9 @@ beforeEach(() => {
   resetResult = { ok: true }
   engageAlready = false
   releaseResult = true
+  resumeSups = []
+  resumeThrows = false
+  listerRejects = false
 })
 
 describe('GET /kill-switch', () => {
@@ -168,6 +190,62 @@ describe('POST /kill-switch/release', () => {
   })
 })
 
+describe('PTYCAP-04-07 release triggers an event-driven orphan resume (panel F-4)', () => {
+  test('user release sweeps each online supervisor of the releasing owner (supervisor-scoped function)', async () => {
+    resumeSups = [{ supervisorId: 'sup-a', userId: 'u1' }, { supervisorId: 'sup-b', userId: 'u1' }]
+    const res = await post(appAs('u1', 'user'), '/kill-switch/release', { scope: 'user' })
+    expect(res.status).toBe(200)
+    await flush()
+    expect(last('lister')!.args).toEqual({ scope: 'user', userId: 'u1' })
+    expect(calls.filter((c) => c.fn === 'resume').map((c) => c.args)).toEqual([
+      { userId: 'u1', supervisorId: 'sup-a' },
+      { userId: 'u1', supervisorId: 'sup-b' },
+    ])
+  })
+
+  test('session release sweeps the owner supervisors; global release sweeps every user supervisor with its own user id', async () => {
+    resumeSups = [{ supervisorId: 'sup-a', userId: 'u1' }]
+    await post(appAs('u1', 'user'), '/kill-switch/release', { scope: 'session', session_id: 's-own' })
+    await flush()
+    expect(last('lister')!.args).toEqual({ scope: 'session', userId: 'u1' })
+    expect(calls.filter((c) => c.fn === 'resume')).toHaveLength(1)
+
+    calls.length = 0
+    resumeSups = [{ supervisorId: 'sup-a', userId: 'u1' }, { supervisorId: 'sup-z', userId: 'u9' }]
+    const g = await post(appAs('admin1', 'admin'), '/kill-switch/release', { scope: 'global' })
+    expect(g.status).toBe(200)
+    await flush()
+    expect(last('lister')!.args).toEqual({ scope: 'global', userId: 'admin1' })
+    expect(calls.filter((c) => c.fn === 'resume').map((c) => c.args)).toEqual([
+      { userId: 'u1', supervisorId: 'sup-a' },
+      { userId: 'u9', supervisorId: 'sup-z' },
+    ])
+  })
+
+  test('engage never triggers a resume; a release that released nothing triggers none', async () => {
+    resumeSups = [{ supervisorId: 'sup-a', userId: 'u1' }]
+    await post(appAs('u1', 'user'), '/kill-switch/engage', { scope: 'user' })
+    releaseResult = false
+    await post(appAs('u1', 'user'), '/kill-switch/release', { scope: 'user' })
+    await flush()
+    expect(calls.filter((c) => c.fn === 'lister' || c.fn === 'resume')).toHaveLength(0)
+  })
+
+  test('a rejected resume (or lister) still returns 200 with the released state', async () => {
+    resumeSups = [{ supervisorId: 'sup-a', userId: 'u1' }]
+    resumeThrows = true
+    const a = await post(appAs('u1', 'user'), '/kill-switch/release', { scope: 'user' })
+    expect(a.status).toBe(200)
+    expect(((await a.json()) as any).released).toBe(true)
+    await flush()
+    listerRejects = true
+    const b = await post(appAs('u1', 'user'), '/kill-switch/release', { scope: 'user' })
+    expect(b.status).toBe(200)
+    expect(((await b.json()) as any).released).toBe(true)
+    await flush()
+  })
+})
+
 describe('POST /lifetime/reset', () => {
   test('known key -> 200, actor is the caller', async () => {
     const res = await post(appAs('u1', 'user'), '/lifetime/reset', { counter_key: 'task:abc' })
@@ -198,5 +276,11 @@ describe('D-07 static pin', () => {
     expect(code).not.toContain('session.stop')
     expect(code).not.toContain('sendToSupervisor')
     expect(code).not.toContain('supervisor-registry')
+  })
+
+  test('automation.ts uses the supervisor-scoped sweep, never the rate-limited user-scoped one (04-07)', () => {
+    const src = readFileSync(join(import.meta.dir, '..', 'src', 'api', 'automation.ts'), 'utf8')
+    expect(src).toContain('resumeOrphansForSupervisor')
+    expect(src).not.toContain('resumeOrphanSessionsForUser')
   })
 })

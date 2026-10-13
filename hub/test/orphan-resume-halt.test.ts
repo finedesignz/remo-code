@@ -49,7 +49,8 @@ mock.module('../src/sessions/budget.ts', () => ({
 }))
 mock.module('../src/ws/supervisor-registry.ts', () => ({
   listOnlineSupervisorIdsForUser: () => ['sup-1'],
-  getSupervisor: () => ({ ws: { send: (m: string) => s.sent.push(JSON.parse(m)) } }),
+  getSupervisor: (id: string) => ({ userId: id === 'sup-z' ? 'u9' : 'u1', ws: { send: (m: string) => s.sent.push(JSON.parse(m)) } }),
+  listSupervisors: () => [{ id: 'sup-1' }, { id: 'sup-z' }],
 }))
 mock.module('../src/db/dal.ts', () => ({ getSessionSkipPermissionsByRepo: async () => false }))
 mock.module('../src/orchestrator/auto-launch.ts', () => ({
@@ -59,7 +60,7 @@ mock.module('../src/orchestrator/auto-launch.ts', () => ({
   },
 }))
 
-const { resumeOrphansForSupervisor } = await import('../src/orchestrator/orphan-resume.ts')
+const { resumeOrphansForSupervisor, listOnlineSupervisorsForRelease } = await import('../src/orchestrator/orphan-resume.ts')
 
 function orphan(id: string, sessionId: string, isOrch: boolean, restartCount = 0) {
   return {
@@ -147,5 +148,20 @@ describe('orphan-resume halt deferral', () => {
     ])
     expect(s.updates).toContain('reboot:run-2')
     expect(s.updates).not.toContain('reboot:run-1')
+  })
+})
+
+describe('listOnlineSupervisorsForRelease (release-time sweep targets)', () => {
+  test('global enumerates every online supervisor with its own owner id', async () => {
+    expect(await listOnlineSupervisorsForRelease({ scope: 'global', userId: 'admin' })).toEqual([
+      { supervisorId: 'sup-1', userId: 'u1' },
+      { supervisorId: 'sup-z', userId: 'u9' },
+    ])
+  })
+
+  test('user and session scopes sweep only the releasing owner supervisors', async () => {
+    for (const scope of ['user', 'session'] as const) {
+      expect(await listOnlineSupervisorsForRelease({ scope, userId: 'u1' })).toEqual([{ supervisorId: 'sup-1', userId: 'u1' }])
+    }
   })
 })

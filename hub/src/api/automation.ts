@@ -41,6 +41,31 @@ function audit(actor: string, action: string, target: string): void {
   console.log(`[automation-api] audit actor=${actor} action=${action} target=${target}`)
 }
 
+/**
+ * PTYCAP-04-07 (panel F-4): a release brings deferred work back WITHOUT waiting for a reconnect.
+ * Best-effort and event-driven: it runs only on a release that actually released a row, never
+ * on engage, never polled. The supervisor-scoped sweep is used (the user-scoped one is rate
+ * limited to once a minute). Each swept orphan is re-evaluated against its own user and session
+ * halt scope, so work still halted by another scope stays deferred. Every error is swallowed and
+ * logged; the caller does not await it, so it can never change the 200 or the released state.
+ * Late dynamic import keeps the router light and keeps this file free of the registry (D-07).
+ */
+async function resumeDeferredWork(scope: KillScope, userId: string): Promise<void> {
+  try {
+    const m = await import('../orchestrator/orphan-resume')
+    const sups = await m.listOnlineSupervisorsForRelease({ scope, userId })
+    for (const s of sups) {
+      try {
+        await m.resumeOrphansForSupervisor({ userId: s.userId, supervisorId: s.supervisorId })
+      } catch (err: any) {
+        console.warn(`[automation-api] release resume failed supervisor=${s.supervisorId}: ${err?.message ?? err}`)
+      }
+    }
+  } catch (err: any) {
+    console.warn(`[automation-api] release resume sweep failed: ${err?.message ?? err}`)
+  }
+}
+
 async function ownsSession(userId: string, sessionId: string): Promise<boolean> {
   const rows = await sql<{ id: string }[]>`
     SELECT id FROM sessions
@@ -111,6 +136,7 @@ automationApi.post('/kill-switch/release', async (c) => {
     releasedBy: userId,
   })
   audit(userId, 'kill_switch_release', r.scope === 'session' ? `session:${r.sessionId}` : r.scope)
+  if (out.released) void resumeDeferredWork(r.scope, userId)
   return c.json({ released: out.released, scope: r.scope })
 })
 
