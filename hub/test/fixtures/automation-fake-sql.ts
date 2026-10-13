@@ -45,6 +45,8 @@ export interface FakeState {
   tables: { ledger: boolean; kill_switch: boolean; alarms: boolean }
   /** throw when this predicate matches the statement text (error injection) */
   failOn: ((text: string) => boolean) | null
+  /** called AFTER each statement ran (lets a test flip state between two steps) */
+  hook: ((text: string) => void) | null
   statements: string[]
   unknown: string[]
   beginCalls: number
@@ -60,6 +62,7 @@ export function createFakeSql() {
     tasks: [],
     tables: { ledger: true, kill_switch: true, alarms: true },
     failOn: null,
+    hook: null,
     statements: [],
     unknown: [],
     beginCalls: 0,
@@ -72,6 +75,12 @@ export function createFakeSql() {
     Math.max(0, ...state.ledger.filter((r) => r.counter_key === key && r.kind === 'reset').map((r) => r.seq))
 
   function run(strings: TemplateStringsArray, values: any[]): any[] {
+    const out = exec(strings, values)
+    if (state.hook) state.hook(strings.join('?').replace(/\s+/g, ' '))
+    return out
+  }
+
+  function exec(strings: TemplateStringsArray, values: any[]): any[] {
     const text = strings.join('?').replace(/\s+/g, ' ')
     state.statements.push(text)
     if (state.failOn && state.failOn(text)) throw new Error('fake_sql_failure')
@@ -114,10 +123,13 @@ export function createFakeSql() {
       return [{ id: row.id }]
     }
     if (text.includes('UPDATE automation_kill_switch')) {
-      const [releasedBy, scope, userId, sessionId] = values
+      const [releasedBy, target] = values
+      const scope = text.includes("scope = 'global'") ? 'global' : text.includes("scope = 'user'") ? 'user' : 'session'
       const out: any[] = []
       for (const k of state.kill) {
-        if (k.engaged && k.scope === scope && k.user_id === userId && k.session_id === sessionId) {
+        const hit =
+          scope === 'global' ? true : scope === 'user' ? k.user_id === target : k.session_id === target
+        if (k.engaged && k.scope === scope && hit) {
           k.engaged = false
           k.released_by = releasedBy
           k.released_at = Date.now()

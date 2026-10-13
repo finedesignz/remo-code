@@ -163,6 +163,7 @@ function spyInject(outcomeKind: string) {
   const deps: InjectDeps = {
     getChannel: () => ({ ws: { send: () => {} } }) as any, // session "online"
     isSessionLive: async () => true, // live, non-ghost
+    resolveCounterKey: async () => 'task:T1', // PTYCAP-04: the online path keys the lifetime counter; no DB here
     dispatch: (async (req: any, pdeps: any) => {
       calls.push({ req, gateNames: pdeps.gates.map((g: any) => g.name) })
       return { kind: outcomeKind, runId: req.token }
@@ -194,6 +195,7 @@ describe('makeLiveSeams.executeCommand — rides the dispatch pipeline', () => {
     const deps: InjectDeps = {
       getChannel: () => ({ ws: { send: () => {} } }) as any,
       isSessionLive: async () => true,
+      resolveCounterKey: async () => 'task:T1', // PTYCAP-04: no DB in this unit test
       dispatch: (async () => ({ kind: 'skipped', reason: 'over_daily_cost_cap:$10.42>=$10.00' })) as any,
     }
     const seams = makeLiveSeams(deps)

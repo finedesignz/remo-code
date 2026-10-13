@@ -125,6 +125,16 @@ describe('kill switch', () => {
     expect(await C.releaseKillSwitch({ scope: 'global', releasedBy: 'a' })).toEqual({ released: false })
     expect(state.kill.length).toBe(3) // history rows stay
   })
+
+  test('user and session scoped release match only their own target (a session row also records its user)', async () => {
+    await C.engageKillSwitch({ scope: 'user', userId: 'u1', engagedBy: 'a' })
+    await C.engageKillSwitch({ scope: 'session', userId: 'u1', sessionId: 's1', engagedBy: 'a' })
+    expect(await C.releaseKillSwitch({ scope: 'user', userId: 'u2', releasedBy: 'a' })).toEqual({ released: false })
+    expect(await C.releaseKillSwitch({ scope: 'session', sessionId: 'sX', releasedBy: 'a' })).toEqual({ released: false })
+    expect(await C.releaseKillSwitch({ scope: 'session', sessionId: 's1', releasedBy: 'a' })).toEqual({ released: true })
+    expect(await C.releaseKillSwitch({ scope: 'user', userId: 'u1', releasedBy: 'a' })).toEqual({ released: true })
+    expect(await C.isAutomationHalted({ userId: 'u1', sessionId: 's1' })).toEqual({ halted: false })
+  })
 })
 
 describe('lifetime counter gate', () => {
@@ -297,6 +307,22 @@ describe('pages and reset', () => {
     expect(notifications[1].detail).toContain('EXHAUSTED')
     await reserve({ token: 'g' }) // exhausted again, same epoch
     expect(notifications.length).toBe(2)
+  })
+
+  test('the lifetime GATE claims the exhaustion page once per epoch (the normal place a spent budget is first seen)', async () => {
+    process.env.REMO_AUTOMATION_LIFETIME_INJECT_CAP = '1'
+    await reserve({ token: 'a' })
+    notifications.length = 0
+    expect((await C.lifetimeCounterCheck(req())).ok).toBe(false)
+    expect(notifications.length).toBe(1)
+    expect(notifications[0].detail).toContain('EXHAUSTED')
+    expect((await C.lifetimeCounterCheck(req())).ok).toBe(false)
+    expect(notifications.length).toBe(1)
+    await C.resetLifetimeCounter({ userId: 'u1', counterKey: 'task:T1' })
+    await reserve({ token: 'b' })
+    notifications.length = 0
+    expect((await C.lifetimeCounterCheck(req())).ok).toBe(false)
+    expect(notifications.length).toBe(1) // new epoch pages again
   })
 
   test('notify errors never change the reserve result', async () => {

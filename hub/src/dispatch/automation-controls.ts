@@ -203,17 +203,31 @@ export async function releaseKillSwitch(args: {
   sessionId?: string | null
   releasedBy: string
 }): Promise<{ released: boolean }> {
-  const userId = args.scope === 'global' ? null : (args.userId ?? null)
-  const sessionId = args.scope === 'session' ? (args.sessionId ?? null) : null
-  const rows = await sql<{ id: string }[]>`
-    UPDATE automation_kill_switch
-       SET engaged = false, released_by = ${args.releasedBy}, released_at = now()
-     WHERE engaged = true
-       AND scope = ${args.scope}
-       AND user_id IS NOT DISTINCT FROM ${userId}::text
-       AND session_id IS NOT DISTINCT FROM ${sessionId}::text
-    RETURNING id
-  `
+  // One statement per scope: a session-scope row also records its user_id for
+  // audit, so the target match must be the scope's own key only.
+  let rows: { id: string }[]
+  if (args.scope === 'global') {
+    rows = await sql<{ id: string }[]>`
+      UPDATE automation_kill_switch
+         SET engaged = false, released_by = ${args.releasedBy}, released_at = now()
+       WHERE engaged = true AND scope = 'global'
+      RETURNING id
+    `
+  } else if (args.scope === 'user') {
+    rows = await sql<{ id: string }[]>`
+      UPDATE automation_kill_switch
+         SET engaged = false, released_by = ${args.releasedBy}, released_at = now()
+       WHERE engaged = true AND scope = 'user' AND user_id = ${args.userId ?? ''}
+      RETURNING id
+    `
+  } else {
+    rows = await sql<{ id: string }[]>`
+      UPDATE automation_kill_switch
+         SET engaged = false, released_by = ${args.releasedBy}, released_at = now()
+       WHERE engaged = true AND scope = 'session' AND session_id = ${args.sessionId ?? ''}
+      RETURNING id
+    `
+  }
   return { released: rows.length > 0 }
 }
 
@@ -261,7 +275,17 @@ export async function lifetimeCounterCheck(
   try {
     const n = await countLifetime(sql, req.counterKey)
     const cap = lifetimeInjectCap()
-    if (n >= cap) return { ok: false, reason: `lifetime_inject_exhausted:${n}>=${cap}` }
+    if (n >= cap) {
+      // The gate is the normal place a spent budget is first seen (the in-lock
+      // reserve only refuses on a race), so the once-per-epoch exhaustion page
+      // is claimed here too. Best-effort: never changes the gate result.
+      try {
+        await pageLifetime({ userId: req.userId, sessionId: req.sessionId, counterKey: req.counterKey }, 'exhausted', n, cap)
+      } catch (err: any) {
+        console.warn(`[automation-controls] lifetime page failed: ${err?.message ?? err}`)
+      }
+      return { ok: false, reason: `lifetime_inject_exhausted:${n}>=${cap}` }
+    }
     return { ok: true }
   } catch (err: any) {
     console.error(`[automation-controls] lifetime count failed (fail closed): ${err?.message ?? err}`)
@@ -417,7 +441,12 @@ export async function claimLifetimePage(args: {
   return { claimed: rows.length > 0 }
 }
 
-async function pageLifetime(args: ReserveArgs, kind: 'warn' | 'exhausted', n: number, cap: number): Promise<void> {
+async function pageLifetime(
+  args: { userId: string; sessionId: string; counterKey: string },
+  kind: 'warn' | 'exhausted',
+  n: number,
+  cap: number,
+): Promise<void> {
   const claim = await claimLifetimePage({
     userId: args.userId,
     sessionId: args.sessionId,
