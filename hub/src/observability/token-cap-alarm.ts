@@ -27,6 +27,28 @@ export const ALARM_RETRY_COOLDOWN_SECONDS = 300
 export const ALARM_QUIET_MS = 5_000
 export const ALARM_MAX_WAIT_MS = 30_000
 
+// ── timezone ─────────────────────────────────────────────────────────────────
+const warnedBadTimezones = new Set<string>()
+
+/**
+ * A user's stored timezone, or 'UTC' when it is blank or not a valid IANA zone. The bad
+ * value is logged once per process (per distinct value), never per usage event.
+ */
+export function safeTimezone(tz: string | null | undefined): string {
+  const t = (tz ?? '').trim()
+  if (!t) return 'UTC'
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: t })
+    return t
+  } catch {
+    if (!warnedBadTimezones.has(t)) {
+      warnedBadTimezones.add(t)
+      console.warn(`[token-cap-alarm] invalid stored timezone "${t}"; falling back to UTC for the alarm day`)
+    }
+    return 'UTC'
+  }
+}
+
 // ── claim ────────────────────────────────────────────────────────────────────
 export interface ClaimArgs {
   userId: string
@@ -44,11 +66,15 @@ export interface ClaimArgs {
  * undelivered one; null when the day is already delivered / exhausted / cooling down.
  */
 export async function claimTokenCapAlarm(args: ClaimArgs, q: any = sql): Promise<string | null> {
+  // QC m4: an invalid stored timezone makes `AT TIME ZONE` throw inside Postgres, which
+  // would lose the alarm for that user forever. Normalize here too (defence in depth for
+  // direct callers); evaluateTokenCapAlarm normalizes before any lookup.
+  const timezone = safeTimezone(args.timezone)
   const maxAttempts = args.maxAttempts ?? ALARM_MAX_ATTEMPTS
   const cooldown = args.cooldownSeconds ?? ALARM_RETRY_COOLDOWN_SECONDS
   const won = await q`
     INSERT INTO token_cap_alarms (user_id, local_date, pct, tokens, cap, attempts, last_attempt_at)
-    VALUES (${args.userId}::text, (now() AT TIME ZONE ${args.timezone}::text)::date,
+    VALUES (${args.userId}::text, (now() AT TIME ZONE ${timezone}::text)::date,
             ${Math.round(args.pct)}::int, ${Math.round(args.tokens)}::bigint, ${Math.round(args.cap)}::bigint, 1, now())
     ON CONFLICT (user_id, local_date) DO NOTHING
     RETURNING id
@@ -58,7 +84,7 @@ export async function claimTokenCapAlarm(args: ClaimArgs, q: any = sql): Promise
     UPDATE token_cap_alarms
        SET attempts = attempts + 1, last_attempt_at = now(), tokens = ${Math.round(args.tokens)}::bigint
      WHERE user_id = ${args.userId}::text
-       AND local_date = (now() AT TIME ZONE ${args.timezone}::text)::date
+       AND local_date = (now() AT TIME ZONE ${timezone}::text)::date
        AND delivered = false
        AND attempts < ${maxAttempts}::int
        AND (last_attempt_at IS NULL OR last_attempt_at < now() - make_interval(secs => ${cooldown}::int))
@@ -142,7 +168,7 @@ export async function evaluateTokenCapAlarm(
   const d = deps ?? (await defaultDeps())
   const user = await d.getUser(userId)
   if (!user) return { fired: false }
-  const tz = user.timezone || 'UTC'
+  const tz = safeTimezone(user.timezone)
   const status = await d.getStatus(userId, tz)
   if (!status || status.cap <= 0) return { fired: false } // cap explicitly disabled: silent
   const pct = d.pct()

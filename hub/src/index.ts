@@ -595,6 +595,14 @@ try {
   process.exit(1)
 }
 
+// PTYCAP-04-05 / QC M4: usage events schedule the daily-token-ceiling alarm. Registering the
+// listener is purely in-memory (no DB, no timer), so it happens BEFORE Bun.serve accepts
+// traffic: a usage event recorded in the boot window must not be lost. The DB claim runs
+// later, on the listener's trailing-edge timer (5s quiet window); if the tables are not
+// migrated yet that evaluation fails, is logged ("evaluation failed") and the next usage
+// event re-arms it - it never throws into the recorder. Event-driven; no timer here.
+registerTokenCapAlarm()
+
 // Start Bun server with WebSocket upgrade handling.
 //
 // REVIEW BL-06: idleTimeout — Bun's default is 10s, which kills any HTTP
@@ -733,8 +741,6 @@ runMigrations()
     console.error(`[startup] FATAL: ${err?.message ?? err}`)
     process.exit(1)
   }))
-  // PTYCAP-04-05: usage events schedule the daily-token-ceiling alarm (event-driven; no timer here).
-  .then(() => registerTokenCapAlarm())
   .then(() => setOfflineStaleAgentSessions())
   .then(() => markStreamingMessagesAsInterrupted())
   .then(() => markOrphanedRunsInterrupted())

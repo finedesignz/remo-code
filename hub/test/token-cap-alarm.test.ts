@@ -15,6 +15,7 @@ const mod = await import('../src/observability/token-cap-alarm.ts')
 const {
   evaluateTokenCapAlarm,
   claimTokenCapAlarm,
+  safeTimezone,
   scheduleTokenCapAlarm,
   resetTokenCapAlarmScheduler,
   buildAlarmMessage,
@@ -263,6 +264,37 @@ describe('claimTokenCapAlarm', () => {
     expect(await claimTokenCapAlarm(a, f.q)).toBe('row-1') // attempt 3
     f.advance(61_000)
     expect(await claimTokenCapAlarm(a, f.q)).toBeNull() // exhausted
+  })
+
+  test('QC m4: an invalid stored timezone falls back to UTC (no throw), warned once per value', async () => {
+    const warns: string[] = []
+    const origWarn = console.warn
+    console.warn = (...a: unknown[]) => { warns.push(a.join(' ')) }
+    try {
+      const f = fakeClaimSql()
+      const bad = { ...base, timezone: 'Not/AZone' }
+      expect(await claimTokenCapAlarm(bad, f.q)).toBe('row-1')
+      expect(f.calls[0]!.values).toContain('UTC')
+      expect(f.calls[0]!.values).not.toContain('Not/AZone')
+      await claimTokenCapAlarm(bad, f.q)
+      expect(warns.filter((w) => w.includes('Not/AZone'))).toHaveLength(1)
+      expect(safeTimezone('')).toBe('UTC')
+      expect(safeTimezone(null)).toBe('UTC')
+      expect(safeTimezone('Europe/Paris')).toBe('Europe/Paris')
+    } finally {
+      console.warn = origWarn
+    }
+  })
+
+  test('QC m4: evaluateTokenCapAlarm with an invalid user timezone still evaluates (in UTC) instead of throwing', async () => {
+    const { deps, log } = makeDeps({ tokens: 700, cap: 1000, tz: 'Not/AZone' })
+    const seen: string[] = []
+    const base2 = deps.getStatus
+    deps.getStatus = async (u, tz) => { seen.push(tz); return base2(u, tz) }
+    const r = await evaluateTokenCapAlarm('u1', 's1', deps)
+    expect(r).toEqual({ fired: true })
+    expect(seen).toEqual(['UTC'])
+    expect(log.claims[0].timezone).toBe('UTC')
   })
 
   test('a delivered claim is never retried', async () => {

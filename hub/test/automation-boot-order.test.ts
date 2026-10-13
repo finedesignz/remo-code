@@ -20,10 +20,11 @@ const MIGRATE = idx(/^runMigrations\(\)\s*$/)
 const TABLES = idx(/^\s*\.then\(\(\) => assertAutomationControlsTables\(\)/)
 const OFFLINE = idx(/^\s*\.then\(\(\) => setOfflineStaleAgentSessions\(\)\)/)
 const TOKEN_CAP = idx(/^\s*assertTokenCapConfig\(\)\s*$/)
+const ALARM_REG = idx(/^registerTokenCapAlarm\(\)\s*$/)
 
 describe('automation boot order (static pin over index.ts)', () => {
   test('self-check: every anchor is found', () => {
-    for (const [name, v] of Object.entries({ ENV_CALL, SERVE, MIGRATE, TABLES, OFFLINE, TOKEN_CAP })) {
+    for (const [name, v] of Object.entries({ ENV_CALL, SERVE, MIGRATE, TABLES, OFFLINE, TOKEN_CAP, ALARM_REG })) {
       expect(v, `anchor ${name} not found in hub/src/index.ts`).toBeGreaterThanOrEqual(0)
     }
   })
@@ -55,6 +56,16 @@ describe('automation boot order (static pin over index.ts)', () => {
     expect(block).toContain('.catch(')
     expect(block).toContain('[startup] FATAL:')
     expect(block).toContain('process.exit(1)')
+  })
+
+  test('QC M4: the token-cap alarm listener is registered BEFORE Bun.serve accepts traffic, once, outside the migration chain', () => {
+    expect(ALARM_REG).toBeGreaterThan(ENV_CALL)
+    expect(ALARM_REG).toBeLessThan(SERVE)
+    const calls = lines.filter((l) => !l.trim().startsWith('//') && l.includes('registerTokenCapAlarm()') && !l.includes('import'))
+    expect(calls).toHaveLength(1)
+    // not inside the post-migration .then chain
+    const chain = lines.slice(MIGRATE).join('\n')
+    expect(chain).not.toContain('registerTokenCapAlarm')
   })
 
   test('the table assertion is never called before runMigrations()', () => {
