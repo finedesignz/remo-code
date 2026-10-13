@@ -262,8 +262,8 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   supervisor-hosted session (reusing the scheduler `launchSessionForUser` primitive) and parks the macro
   prompt in grace, so the orchestrator can take an allowlisted repo due→PR. `isAutospawnEnabled()`
   (`hub/src/orchestrator/controller.ts`) carries `REMO_ORCHESTRATOR_ENABLED` (BOTH must be ON). True no-op
-  when OFF / empty allowlist. Companions: **`REMO_ORCHESTRATOR_DAILY_TOKEN_CAP`** (default **50_000_000**
-  = 50M tokens/day; non-positive/non-finite ⇒ falls back to the default AND the hub refuses to boot; only `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1` disables it) — the **non-bypassable daily TOKEN
+  when OFF / empty allowlist. Companions: **`REMO_ORCHESTRATOR_DAILY_TOKEN_CAP`** (default **20_000_000**
+  = 20M tokens/day; non-positive/non-finite ⇒ falls back to the default AND the hub refuses to boot; only `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1` disables it) — the **non-bypassable daily TOKEN
   ceiling** (`dailyTokenCapGate`, `hub/src/dispatch/gates.ts`), added ALONGSIDE the dollar cost cap because
   the cost cap is meaningless on a flat-rate Max subscription. **The token cap counts ALL FOUR buckets —
   `input + output + cache_creation + cache_read`** (`getTodayTokenTotal`, `hub/src/db/token-usage-dal.ts`).
@@ -443,7 +443,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   via `getTodayTokenCostUsd` (same tz-day boundary as `/api/usage/cost`). **Manual / interactive
   chat IS now capped** — not just scheduled runs. `token_usage` is the single source (it records
   every `usage_event`, including scheduled runs), so scheduled-run cost is not double-counted.
-  **The companion non-bypassable daily TOKEN cap** (`dailyTokenCapGate`, default 50M tokens/day) rides
+  **The companion non-bypassable daily TOKEN cap** (`dailyTokenCapGate`, default 20M tokens/day) rides
   ALONGSIDE the cost cap on **EVERY** dispatch gate list — orchestrator inject, scheduler agent +
   triage, error-capture, feedback, revanote, telegram (fix/stop-the-bleed; it previously rode ONLY the
   inject path, leaving every other path bounded solely by a dollar cap that is meaningless on a
@@ -452,7 +452,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   unparseable list hard-fails CI); proven to actually FIRE by `hub/test/token-cap-gate-fires.test.ts` +
   `hub/test/e2e/orchestrator-tokencap.e2e.test.ts` (cache-read alone trips it — the 2026-07 incident
   shape). **The token cap FAILS CLOSED**: a non-positive / unparseable
-  `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` no longer disables the ceiling — it falls back to the 50M default
+  `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` no longer disables the ceiling — it falls back to the 20M default
   AND the hub **refuses to boot** (`assertTokenCapConfig()` in `hub/src/index.ts`). The ONLY way to run
   with no ceiling is the explicit **`REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1`** (boots with a loud
   warning). A typo'd `0` must never silently become an unbounded spend path.
@@ -513,6 +513,15 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 - **Daily token ceiling alarm (60%).** When today's tokens first cross `REMO_TOKEN_CAP_ALARM_PCT` percent of the
   daily ceiling the owner is emailed once per user per local day (durable claim in `token_cap_alarms`, delivered
   flag, trailing-edge coalescing; in-app and Telegram fan-out only after the email was delivered).
+- **DEFAULT DAILY TOKEN CAP IS NOW 20M (PTYCAP Phase 4; was 50M).** `DEFAULT_DAILY_TOKEN_CAP` in
+  `hub/src/dispatch/gates.ts` is 20_000_000 tokens/day. It applies ONLY where
+  `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` is unset; a deployment that sets that variable is unchanged. HUMAN PTY
+  usage counts against it (all four buckets, from the PTY transcript tail) and the human preflight checks it
+  on every Enter, so a lowered cap can lock the owner's own terminal out for the rest of the day: recovery is
+  raising `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` plus a redeploy. THE OWNER MUST CHECK THE PROD ENV VALUE BEFORE
+  DEPLOY (this change touched no prod env or flag). The corrected PTY usage emitter (dedupe on `message.id`,
+  supervisor 0.15.1) needs a SIGNED supervisor MSI on the hosts (tag `supervisor-v*`); until hosts update, PTY
+  consumption is recorded about 2.5x too low (hub-versus-MSI ordering window).
 - **Don't hand-roll per-subsystem dispatch/queue/grace.** Round-2 collapse is complete — use
   `hub/src/dispatch/` (the old `scheduler/session-queue.ts` shim is deleted).
 - **One-time tasks are `scheduled_tasks`, not a parallel queue (milestone once).** A

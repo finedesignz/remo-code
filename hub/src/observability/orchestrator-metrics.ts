@@ -68,7 +68,7 @@ export const orchestratorDailyTokensTotal = gauge(
   "Today's accumulated orchestrator token total (read from token_usage).",
 );
 
-/** Configured daily token ceiling (REMO_ORCHESTRATOR_DAILY_TOKEN_CAP, default 50M). */
+/** Configured daily token ceiling (REMO_ORCHESTRATOR_DAILY_TOKEN_CAP, default 20M). */
 export const orchestratorDailyTokenCap = gauge(
   'remo_orchestrator_daily_token_cap',
   'Configured daily orchestrator token ceiling.',
