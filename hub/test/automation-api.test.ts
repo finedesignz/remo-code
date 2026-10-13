@@ -42,8 +42,8 @@ mock.module('../src/dispatch/automation-controls.ts', () => ({
 
 const { automationApi } = await import('../src/api/automation.ts')
 
-function appAs(userId: string, role: string) {
-  const app = new Hono()
+function appAs(userId: string, role: string): Hono<any> {
+  const app = new Hono<{ Variables: { userId: string; userRole: string } }>()
   app.use('*', async (c, next) => {
     c.set('userId', userId)
     c.set('userRole', role)
@@ -52,7 +52,7 @@ function appAs(userId: string, role: string) {
   app.route('/api/automation', automationApi)
   return app
 }
-const post = (app: Hono, path: string, body: unknown) =>
+const post = (app: Hono<any>, path: string, body: unknown) =>
   app.request(`/api/automation${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -129,7 +129,7 @@ describe('POST /kill-switch/engage', () => {
     engageAlready = true
     const res = await post(appAs('u1', 'user'), '/kill-switch/engage', { scope: 'user' })
     expect(res.status).toBe(200)
-    expect((await res.json()).alreadyEngaged).toBe(true)
+    expect(((await res.json()) as any).alreadyEngaged).toBe(true)
   })
 
   test('invalid scope, missing session_id and malformed body -> 400', async () => {
@@ -151,7 +151,7 @@ describe('POST /kill-switch/release', () => {
   test('user scope releases the caller only and reports released', async () => {
     const res = await post(appAs('u1', 'user'), '/kill-switch/release', { scope: 'user', user_id: 'victim' })
     expect(res.status).toBe(200)
-    expect((await res.json()).released).toBe(true)
+    expect(((await res.json()) as any).released).toBe(true)
     const a = last('release')!.args
     expect(a.userId).toBe('u1')
     expect(a.releasedBy).toBe('u1')
@@ -164,7 +164,7 @@ describe('POST /kill-switch/release', () => {
     releaseResult = false
     const mine = await post(appAs('u1', 'user'), '/kill-switch/release', { scope: 'session', session_id: 's-own' })
     expect(mine.status).toBe(200)
-    expect((await mine.json()).released).toBe(false)
+    expect(((await mine.json()) as any).released).toBe(false)
   })
 })
 
@@ -172,7 +172,7 @@ describe('POST /lifetime/reset', () => {
   test('known key -> 200, actor is the caller', async () => {
     const res = await post(appAs('u1', 'user'), '/lifetime/reset', { counter_key: 'task:abc' })
     expect(res.status).toBe(200)
-    expect((await res.json()).counter_key).toBe('task:abc')
+    expect(((await res.json()) as any).counter_key).toBe('task:abc')
     expect(last('reset')!.args).toEqual({ userId: 'u1', counterKey: 'task:abc', actor: 'u1' })
   })
 

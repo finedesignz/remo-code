@@ -417,6 +417,9 @@ openapi.openapi(dismissLocalRoute, async (c) => {
   const Err = z.object({ error: z.string() });
   const json = (schema: any) => ({ content: { "application/json": { schema } } });
   const reg = openapi.openAPIRegistry;
+  // Loosely typed like the zod-to-openapi registry calls elsewhere in this file: the strict
+  // overload rejects the shared `base`/`json` helper shapes (pre-existing typing gap).
+  const register = (r: any) => reg.registerPath(r);
   const base = { tags: ["automation"], security: [{ bearerAuth: [] }] } as const;
   const Forbidden = z.object({ error: z.literal("forbidden"), reason: z.literal("admin_required") });
   const ReAuth = z.object({ error: z.literal("re_auth_required"), max_age_seconds: z.number().int() });
@@ -438,7 +441,7 @@ openapi.openapi(dismissLocalRoute, async (c) => {
     reason: z.string().max(500).optional(),
   });
 
-  reg.registerPath({
+  register({
     method: "get",
     path: "/api/automation/kill-switch",
     summary: "Read the automation kill-switch state visible to the caller",
@@ -458,7 +461,7 @@ openapi.openapi(dismissLocalRoute, async (c) => {
       401: { description: "Missing or invalid JWT", ...json(Err) },
     },
   });
-  reg.registerPath({
+  register({
     method: "post",
     path: "/api/automation/kill-switch/engage",
     summary: "Engage the kill switch (writes a row only; never stops a running session)",
@@ -475,7 +478,7 @@ openapi.openapi(dismissLocalRoute, async (c) => {
       404: { description: "Session not found or not owned by the caller", ...json(Err) },
     },
   });
-  reg.registerPath({
+  register({
     method: "post",
     path: "/api/automation/kill-switch/release",
     summary: "Release the kill switch (requires a login under 15 minutes old)",
@@ -489,7 +492,7 @@ openapi.openapi(dismissLocalRoute, async (c) => {
       404: { description: "Session not found or not owned by the caller", ...json(Err) },
     },
   });
-  reg.registerPath({
+  register({
     method: "post",
     path: "/api/automation/lifetime/reset",
     summary: "Append a lifetime-counter reset marker (requires a login under 15 minutes old)",

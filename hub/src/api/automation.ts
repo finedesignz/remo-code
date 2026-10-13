@@ -23,7 +23,9 @@ import {
   type KillScope,
 } from '../dispatch/automation-controls'
 
-export const automationApi = new Hono()
+type Env = { Variables: { userId: string; userRole?: string } }
+
+export const automationApi = new Hono<Env>()
 
 const ScopeBody = z.object({
   scope: z.enum(['global', 'user', 'session']),
