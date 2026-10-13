@@ -201,23 +201,23 @@ async function resumeOrphansInner(args: {
           skipIfRunning: false,
           machine: true, // final halt re-check inside the primitive (PTYCAP-04-07)
         })
-        // QC M1: the original was closed above only so launchOrchestrator can reserve its
-        // slot (an open run blocks the replacement). If NO replacement run was created -
-        // a halt that landed between the two statements, no capacity, no online supervisor -
-        // the orphan must not be consumed: reopen it so the release-time sweep (or the next
-        // reconnect) resumes it. send_failed / internal_error are NOT restored: the
-        // replacement run row may already exist, and two open runs would double-resume.
-        const noReplacementCreated =
+        // QC M1/R2: the original was closed above only so launchOrchestrator can reserve its
+        // slot (an open run blocks the replacement). launchOrchestrator may fail BEFORE it
+        // creates the replacement run row (a halt landing between the two statements, no
+        // capacity, no online supervisor, or an internal_error thrown ahead of the
+        // transaction), so the orphan is reopened exactly when no open replacement run
+        // exists for the session (checked atomically in the UPDATE). send_failed /
+        // already_running / disabled are not reopened: send_failed happens after the
+        // replacement row exists, and the other two never need the orphan back.
+        if (
           !res.ok &&
           (res.reason === 'automation_halted' ||
             res.reason === 'at_capacity' ||
             res.reason === 'no_online_supervisor' ||
-            res.reason === 'supervisor_has_no_roots')
-        if (noReplacementCreated) {
-          await sql`
-            UPDATE session_runs SET ended_at = NULL, exit_reason = NULL
-            WHERE id = ${o.id} AND exit_reason = 'reboot'
-          `
+            res.reason === 'supervisor_has_no_roots' ||
+            res.reason === 'internal_error')
+        ) {
+          await reopenOrphanIfNoReplacement(sql, o.id, o.session_id)
         }
         if (!res.ok && res.reason === 'automation_halted') {
           result.skipped_halted.push(o.id)
@@ -232,6 +232,12 @@ async function resumeOrphansInner(args: {
         else result.skipped_no_supervisor.push(o.id)
       } catch (err: any) {
         console.error('[orphan-resume] orchestrator relaunch failed run=' + o.id, err?.message)
+        // R2: a throw may precede the replacement run row; do not leave the orphan consumed.
+        try {
+          await reopenOrphanIfNoReplacement(sql, o.id, o.session_id)
+        } catch (reopenErr: any) {
+          console.error('[orphan-resume] orphan reopen failed run=' + o.id, reopenErr?.message)
+        }
         result.skipped_no_supervisor.push(o.id)
       }
       continue
@@ -285,6 +291,24 @@ async function resumeOrphansInner(args: {
   }
 
   return result
+}
+
+/**
+ * R2: undo the 'reboot' close of an orchestrator orphan iff NO open replacement run exists
+ * for its session. The NOT EXISTS is evaluated inside the UPDATE so it is atomic with the
+ * reopen: if launchOrchestrator created the replacement row before failing, the orphan stays
+ * consumed (two open runs would double-resume); otherwise it is restored so the release-time
+ * sweep or the next reconnect resumes it.
+ */
+async function reopenOrphanIfNoReplacement(sql: any, orphanId: string, sessionId: string | null): Promise<void> {
+  await sql`
+    UPDATE session_runs SET ended_at = NULL, exit_reason = NULL
+    WHERE id = ${orphanId} AND exit_reason = 'reboot'
+      AND NOT EXISTS (
+        SELECT 1 FROM session_runs r2
+        WHERE r2.session_id = ${sessionId} AND r2.ended_at IS NULL AND r2.id <> ${orphanId}
+      )
+  `
 }
 
 /**

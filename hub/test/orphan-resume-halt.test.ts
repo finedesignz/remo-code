@@ -19,12 +19,16 @@ const s = {
   haltCalls: [] as Array<{ userId: string; sessionId?: string }>,
   orchestratorCalls: [] as any[],
   launchResult: null as any,
+  launchThrows: false,
+  openReplacement: false,
   sent: [] as any[],
 }
 
 function fakeSql(strings: TemplateStringsArray, ...vals: any[]): Promise<any[]> {
   const text = strings.join('?')
   if (/UPDATE session_runs/.test(text) && /ended_at = NULL/.test(text)) {
+    // R2: the reopen carries `AND NOT EXISTS (open replacement run)`; model that predicate.
+    if (/NOT EXISTS/.test(text) && s.openReplacement) return Promise.resolve([])
     s.updates.push(`restored:${vals[vals.length - 1]}`)
     return Promise.resolve([])
   }
@@ -61,6 +65,7 @@ mock.module('../src/db/dal.ts', () => ({ getSessionSkipPermissionsByRepo: async 
 mock.module('../src/orchestrator/auto-launch.ts', () => ({
   launchOrchestrator: async (a: any) => {
     s.orchestratorCalls.push(a)
+    if (s.launchThrows) throw new Error('boom before create')
     if (s.launchResult) return s.launchResult
     return { ok: true, sessionId: 'sess-o', runId: 'orch-run', supervisorId: 'sup-1', cwd: '/r', reused: true }
   },
@@ -89,6 +94,8 @@ beforeEach(() => {
   s.haltCalls = []
   s.orchestratorCalls = []
   s.launchResult = null
+  s.launchThrows = false
+  s.openReplacement = false
   s.sent = []
 })
 
@@ -190,9 +197,41 @@ describe('QC M1: the original orchestrator orphan is not consumed when no replac
     expect(s.updates.filter((u) => !u.startsWith('stale:'))).toEqual(['reboot:run-o', 'restored:run-o'])
   })
 
-  test.each(['send_failed', 'internal_error', 'already_running', 'disabled'])('%s: stays consumed (a replacement row may exist / user disabled)', async (reason) => {
+  test.each(['send_failed', 'already_running', 'disabled'])('%s: stays consumed (a replacement row exists / user disabled)', async (reason) => {
     s.orphans = [orphan('run-o', 'sess-o', true)]
     s.launchResult = { ok: false, reason, error: 'x', sessionId: 'sess-o' }
+    await resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
+    expect(s.updates.filter((u) => !u.startsWith('stale:'))).toEqual(['reboot:run-o'])
+  })
+
+  test('QC R2: internal_error BEFORE the replacement run row was created -> orphan reopened', async () => {
+    s.orphans = [orphan('run-o', 'sess-o', true)]
+    s.launchResult = { ok: false, reason: 'internal_error', error: 'x' }
+    s.openReplacement = false
+    await resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
+    expect(s.updates.filter((u) => !u.startsWith('stale:'))).toEqual(['reboot:run-o', 'restored:run-o'])
+  })
+
+  test('QC R2: internal_error AFTER an open replacement run exists -> orphan stays consumed (no double resume)', async () => {
+    s.orphans = [orphan('run-o', 'sess-o', true)]
+    s.launchResult = { ok: false, reason: 'internal_error', error: 'x' }
+    s.openReplacement = true
+    await resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
+    expect(s.updates.filter((u) => !u.startsWith('stale:'))).toEqual(['reboot:run-o'])
+  })
+
+  test('QC R2: launchOrchestrator THROWS before creating a replacement -> orphan reopened', async () => {
+    s.orphans = [orphan('run-o', 'sess-o', true)]
+    s.launchThrows = true
+    const r = await resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
+    expect(s.updates.filter((u) => !u.startsWith('stale:'))).toEqual(['reboot:run-o', 'restored:run-o'])
+    expect(r.resumed).toHaveLength(0)
+  })
+
+  test('QC R2: launchOrchestrator throws AFTER an open replacement exists -> orphan stays consumed', async () => {
+    s.orphans = [orphan('run-o', 'sess-o', true)]
+    s.launchThrows = true
+    s.openReplacement = true
     await resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
     expect(s.updates.filter((u) => !u.startsWith('stale:'))).toEqual(['reboot:run-o'])
   })
