@@ -106,19 +106,42 @@ describe("governed-automation flag ON (PTYCAP Phase 3)", () => {
     delete process.env[FLAG];
   });
 
-  test("flag ON: a scheduler-sourced dispatch is refused by the fail-closed kill_switch slot (nothing sent, nothing inserted)", async () => {
+  test("flag ON: a scheduler-sourced dispatch with the kill switch engaged is refused with the real reason (nothing sent, nothing inserted)", async () => {
+    process.env[FLAG] = "1";
+    process.env.REMO_AUTOMATION_KILL_SWITCH = "1";
+    try {
+      const r = await dispatchToSession({
+        userId: "u",
+        sessionId: "s",
+        chatId: 1,
+        updateId: 5,
+        text: "auto nudge",
+        source: "scheduler",
+      });
+      expect(r.kind).toBe("automation_blocked");
+      if (r.kind === "automation_blocked") {
+        expect(r.reason).toBe("automation_blocked_on_pty:scheduler:automation_halted:env");
+      }
+      expect(sent.length).toBe(0);
+      expect(inserted.length).toBe(0);
+    } finally {
+      delete process.env.REMO_AUTOMATION_KILL_SWITCH;
+    }
+  });
+
+  test("flag ON: a scheduler-sourced dispatch with the kill switch clear and no counter key is refused lifetime_counter_key_missing (fail closed)", async () => {
     process.env[FLAG] = "1";
     const r = await dispatchToSession({
       userId: "u",
       sessionId: "s",
       chatId: 1,
-      updateId: 5,
+      updateId: 7,
       text: "auto nudge",
       source: "scheduler",
     });
     expect(r.kind).toBe("automation_blocked");
     if (r.kind === "automation_blocked") {
-      expect(r.reason).toBe("automation_blocked_on_pty:scheduler:governor_not_implemented:kill_switch");
+      expect(r.reason).toBe("automation_blocked_on_pty:scheduler:lifetime_counter_key_missing");
     }
     expect(sent.length).toBe(0);
     expect(inserted.length).toBe(0);
