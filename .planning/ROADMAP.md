@@ -114,6 +114,8 @@ ceiling (and the programmatic-credit halt).
   3. Alarm emails the owner at 60% of the daily token ceiling.
   4. Default daily token cap lowered from 50M to a survivable figure (~20M).
 
+**Hand-off from Phase 3**: Phase 4 replaces the fail-closed `kill_switch` and `lifetime_counter` governor bodies in `hub/src/dispatch/governed-pty.ts` (today they block `governor_not_implemented:<name>`). Entry criteria: an admitted automation PTY turn must be COUNTED (durable ledger) before the governed chain is trusted; Phase-3 governors are non-consuming checks -- atomic reserve-before-send consumption is Phase 4's design.
+
 ### Phase 5: Throwaway-Repo Due→PR Proof
 
 **Goal**: The orchestrator produces one reviewable PR, unattended, on a repo nobody cares about.

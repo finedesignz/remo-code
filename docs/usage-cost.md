@@ -370,11 +370,18 @@ themselves. It **fails closed**: a thrown gate resolves to
 `pty_preflight_error`, and a check that does not settle within 5s resolves to
 `pty_preflight_timeout`.
 
-**No admission path exists yet that lets a non-human actor reach this function
-at all** — `humanOnlyPtyGate` / `humanOnlyRejectsActor` reject every automation
-source before a write ever reaches a pty-interactive session (Phase 3's
-`governedAutomationPtyGate` is what will open that door). The automation chain
-is built and proven now so Phase 3 has a tested seam to call into.
+**No automation path reaches the PTY today, and the reason is structural, not
+the `runner_type` gate.** Every automation dispatch adapter (ask, work,
+Telegram plain text, scheduler, orchestrator) sends a `user_message` frame,
+which the supervisor routes to the stream-json runner
+(`supervisor/src/runners/session-bridge.ts`). The PTY accepts only `term.*`
+frames, and the only hub writers of those are the web `term.input` relay and
+the Telegram permission keystrokes. Keying on `sessions.runner_type` is dead
+in prod (see the "Independent of `sessions.runner_type`" bullet below and the
+`client.ts` comment), so it is NOT the door. The automation chain is built
+and proven here, and Phase 3 (section "PTYCAP Phase 3" below) adds the
+flag-gated automation branch and the structural pins that keep the door
+closed.
 
 ### Call site: `hub/src/ws/client.ts` — every prompt SUBMIT
 
@@ -459,13 +466,14 @@ writers.
   invariant, a response is exempt from turn acquisition because it completes
   the holder's turn rather than starting a new one. It spends nothing new;
   gating it would be gating the wrong event.
-- **Telegram's plain-text dispatch to a PTY session** (`telegram/dispatch.ts`
-  → `dispatch()`) already runs `thresholdGate`/`dailyCostCapGate`/
-  `dailyTokenCapGate` (not `sessionInjectRateGate`) via the existing pipeline
-  — it was never ungated, so Phase 2 does not touch it.
+- **Telegram's plain-text dispatch** (`telegram/dispatch.ts` -> `dispatch()`)
+  sends a `user_message`, which the supervisor routes to the stream-json
+  runner, NOT the PTY. It runs the threshold/cost/token caps plus
+  `governedAutomationPtyGate` via the existing pipeline -- it was never
+  ungated, so Phase 2 does not touch it.
 - **Phase 3 admission** (`governedAutomationPtyGate`, letting a governed
-  automation actor actually drive a PTY) is NOT built here. This phase only
-  proves the gate chain that admission will be required to pass.
+  automation actor drive a PTY) is documented in the "PTYCAP Phase 3" section
+  below. Phase 2 only proved the gate chain that admission must pass.
 
 ### Tests (PTYCAP Phase 2)
 
@@ -486,3 +494,146 @@ writers.
   `dispatch/pty-preflight.ts` (SC-2).
 - `hub/test/term-relay-auth.test.ts` / `term-relay-human-guard.test.ts` — stub
   `checkPtyTurnPreflight` so their unrelated concerns don't need Postgres.
+
+## PTYCAP Phase 3 -- governed-automation guard (hub/src/dispatch/governed-pty.ts)
+
+Phase 2 built the automation preflight chain but nothing could call it. Phase 3
+adds the admission decision a non-human actor must pass before it may drive a
+`pty-interactive` session, behind a flag that is OFF by default, and pins the
+door structurally so a new producer cannot bypass it. With the flag ON, Phase 3
+production still admits NOTHING, by design (see Governors).
+
+### Flag
+
+`REMO_GOVERNED_AUTOMATION_PTY` -- read at call time by
+`governedAutomationEnabled()` (never cached). True only for `1|true|yes|on`
+after trim and lowercase; anything else, including garbage, is OFF. Default
+OFF is a TRUE no-op: with the flag off the gate returns exactly the legacy
+decision and reason string for every (actor x runnerType) pair, calls its
+resolver once and invokes zero governors. This is proven by the OFF == legacy
+differential in `hub/test/governed-pty-gate.test.ts` (one test per OFF value).
+Flipping it in prod is an owner-only live cutover and is not documented here
+with a production value.
+
+### The gate
+
+`governedAutomationPtyGate(resolver)` (gate name `governed_automation_pty`;
+formerly `humanOnlyPtyGate`, hard rename with no alias) is composed into the
+ask, work and Telegram dispatch gate lists. Decision order:
+
+1. Resolve `{ actor, runnerType }` (once).
+2. Non-PTY runner, or the exact `human` actor: ok.
+3. Flag OFF: block `automation_blocked_on_pty:<actor>` (the legacy reason).
+4. Actor not in `AUTOMATION_ACTORS`: block with the same legacy reason.
+5. Governors in fixed order, first block wins.
+
+Eligible actors are `AUTOMATION_ACTORS` members only. `external-ask`,
+`external-work`, the empty string and unknown strings are always denied, flag
+ON and every governor passing included. The actor is server-inferred (the ask
+and work resolvers return compile-time constants; nothing in a request body can
+claim `human` or `automation`).
+
+### Governors
+
+Fixed order, cheapest and most authoritative first. Governors are
+NON-CONSUMING checks (no writes, no counters). The dollar cost cap is NOT a
+governor. A thrown governor is a typed denial
+`automation_blocked_on_pty:<actor>:governor_error:<name>`, never a pass.
+
+| Order | Governor | Phase-3 body | Block reason |
+|---|---|---|---|
+| 1 | `kill_switch` | fail-closed slot, always blocks | `governor_not_implemented:kill_switch` |
+| 2 | `token_cap` | blocks when `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED` is truthy | `governor_unconfigured:token_cap` |
+| 3 | `inject_rate` | blocks when `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` is non-finite or <= 0 | `governor_unconfigured:inject_rate` |
+| 4 | `lifetime_counter` | fail-closed slot, always blocks | `governor_not_implemented:lifetime_counter` |
+
+The "over the limit" evaluation stays with `dailyTokenCapGate` and the
+preflight chain's `sessionInjectRateGate`; the governors only refuse an
+unconfigured or disabled ceiling. Because `kill_switch` and `lifetime_counter`
+always block until Phase 4 replaces them, the flag ON admits nothing in
+production. The admit path is proven only under test dependency injection
+(`_setGovernorsForTests` / `_resetGovernorsForTests`); there is deliberately no
+public governors parameter, which would be a bypass handle.
+
+### The door (`checkPtyTurnPreflight` automation branch)
+
+For a non-`human` actor `checkPtyTurnPreflight` checks the flag FIRST (before
+any DB-backed gate), then runs the automation spend chain, then the governors.
+Block reasons are `automation_blocked_on_pty:<actor>` or
+`automation_blocked_on_pty:<actor>:<governor_reason>`. A throwing gate or
+governor resolves to `pty_preflight_error`; a check that does not settle in 5s
+resolves to `pty_preflight_timeout`. The human chain (`PTY_HUMAN_TURN_GATES`)
+NEVER runs a governor, and a human turn passes with the fail-closed production
+governors and the flag ON (pinned in `hub/test/pty-preflight.test.ts`).
+
+### Door pins (`hub/test/pty-door-guard.test.ts`)
+
+DB-free structural source scans with non-vacuous scanner self-checks:
+
+- Exactly two hub modules emit `term.*` frames to the agent (the web relay and
+  the Telegram keystroke injector); the frame-type set is derived from
+  `CLIENT_TO_HUB_TERM_TYPES`.
+- Supervisor canary: the `user_message` and `permission_response` branches of
+  `supervisor/src/runners/session-bridge.ts` reference no PTY runner or PTY
+  write.
+- Caller pins: actor `automation` is assigned only under `hub/src/orchestrator/`;
+  actor `human` only in `ws/client.ts`; `checkPtyTurnPreflight(` is called only
+  from `pty-preflight.ts`, `ws/client.ts` or `orchestrator/`;
+  `injectPtyKeystroke(` only in `pty-inject.ts` and `telegram-webhook.ts`;
+  `dispatchToSession(` only in `telegram/dispatch.ts` and
+  `telegram-webhook.ts`.
+- The flag and DI literals live only in `dispatch/governed-pty.ts`.
+- The actor is server-inferred: nothing under `hub/src/dispatch/` reads a
+  request source or actor field, and `DispatchRequest` declares none.
+- The Telegram dispatch `source` is a REQUIRED parameter with no `human`
+  default; the webhook passes `'human'` at the authenticated boundary.
+- A new hub emitter of `term.*` frames or a new privileged caller fails this
+  test.
+
+### Exemptions (pinned, with justification)
+
+Exactly two preflight exemptions, each with a one-line justification:
+
+- **Telegram permission-answer keystrokes** (`injectPtyKeystroke`): answers an
+  EXISTING pending prompt of an already-gated turn; it spends nothing new.
+- **`term.attach_file`**: types a path into the terminal, it does not submit.
+
+Documented non-hole inconsistency (D-10): the web relay refuses an Enter that
+confirms a permission prompt while over a cap, but the Telegram permission-answer
+keystroke is not preflighted, so Telegram can answer the same prompt over cap.
+Both only complete the holder's already-admitted turn; neither starts new spend.
+
+### Honest scope
+
+The three call-site gates (ask, work, Telegram) are NOT the door onto a PTY:
+all of them send `user_message`, which the supervisor routes to the stream-json
+runner. The door is the PTY turn preflight plus the structural pins above.
+SC-1 ("no automation actor reaches a PTY without passing the governors") is
+therefore met structurally, and the admit path is proven only under test DI.
+SC-4 holds: the five supervisor no-API-key and argv-allowlist guard tests pass
+with no file under `supervisor/` changed.
+
+### Residuals and hand-offs
+
+- **D-15, cookie / legacy-JWT:** `human` is a credential identity, not proof of
+  typing. A future bearer-automation lane must use `/ws/agent` or an ext key,
+  never a cookie, so it cannot be mistaken for the human relay.
+- **D-12, count before trust:** an admitted automation PTY turn must be COUNTED
+  (durable ledger) before the governed chain is trusted. This is a Phase 4/5
+  entry criterion.
+- **D-14, reserve-before-send:** Phase-3 governors are non-consuming checks;
+  atomic reserve-before-send consumption is Phase 4's design.
+- **D-11:** the Phase-2 mechanism claims above were corrected here (structural
+  `user_message` routing, not the `runner_type` gate; Telegram plain text goes
+  via `user_message`).
+
+### Tests (PTYCAP Phase 3)
+
+- `hub/test/governed-pty-gate.test.ts` (28) -- flag OFF differential, flag
+  parsing, eligible actors, governor order and reasons, thrown governor, DI.
+- `hub/test/pty-preflight.test.ts` additions -- the governed automation branch
+  (9) and the human chain never running a governor (4).
+- `hub/test/pty-door-guard.test.ts` (21) -- the door pins above.
+- `hub/test/ws-client-pty-preflight.test.ts` -- the ws-client strip case (a
+  client-supplied actor is ignored; the relay actor stays `human`).
+- `hub/test/telegram-human-only-guard.test.ts` -- the missing-source case.
