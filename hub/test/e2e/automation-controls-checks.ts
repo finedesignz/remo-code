@@ -51,6 +51,7 @@ export async function runAutomationControlsChecks(a: AutomationChecksArgs): Prom
   const K2 = `${P}:k2`
   const createdSessions: string[] = []
   const extraCounterKeys: string[] = []
+  const alarmClaimIds: string[] = []
 
   const newSession = async (): Promise<string> => {
     const rows = await sql<{ id: string }[]>`
@@ -254,6 +255,30 @@ export async function runAutomationControlsChecks(a: AutomationChecksArgs): Prom
     expect(sent.length).toBe(1)
     expect(await injectCount(taskKey)).toBe(1)
     a.pipeline._reset()
+
+    // (12) PTYCAP-04-05: the REAL claimTokenCapAlarm SQL. Two concurrent claims for the
+    // same user and local day -> exactly one winner and exactly one row; an immediate
+    // third claim (undelivered, inside the cooldown) wins nothing; after delivered=true
+    // nothing is ever claimable. Same helper, same existing test body: zero new tests/skips.
+    const alarmMod = await import('../../src/observability/token-cap-alarm.ts')
+    const alarmArgs = { userId, timezone: 'UTC', pct: 60, tokens: 600, cap: 1000 }
+    await sql`DELETE FROM token_cap_alarms WHERE user_id = ${userId} AND local_date = (now() AT TIME ZONE 'UTC')::date`
+    const alarmClaims = await Promise.all([
+      alarmMod.claimTokenCapAlarm(alarmArgs, sql),
+      alarmMod.claimTokenCapAlarm(alarmArgs, sql),
+    ])
+    const winners = alarmClaims.filter((c) => c !== null)
+    expect(winners.length).toBe(1)
+    alarmClaimIds.push(winners[0] as string)
+    const alarmRows = await sql<{ n: string; delivered: boolean; attempts: number }[]>`
+      SELECT COUNT(*)::text AS n, bool_or(delivered) AS delivered, max(attempts) AS attempts
+      FROM token_cap_alarms
+      WHERE user_id = ${userId} AND local_date = (now() AT TIME ZONE 'UTC')::date`
+    expect(Number(alarmRows[0].n)).toBe(1)
+    expect(alarmRows[0].delivered).toBe(false)
+    expect(await alarmMod.claimTokenCapAlarm(alarmArgs, sql)).toBeNull() // cooling down
+    await sql`UPDATE token_cap_alarms SET delivered = true WHERE id = ${winners[0] as string}`
+    expect(await alarmMod.claimTokenCapAlarm({ ...alarmArgs, cooldownSeconds: 0 }, sql)).toBeNull() // delivered
   } finally {
     for (const k of ENV_KEYS) {
       if (saved[k] === undefined) delete process.env[k]
@@ -263,6 +288,9 @@ export async function runAutomationControlsChecks(a: AutomationChecksArgs): Prom
     await sql`DELETE FROM automation_inject_ledger WHERE counter_key LIKE ${P + '%'} OR counter_key = ANY(${extraCounterKeys}::text[])`
     await sql`DELETE FROM automation_kill_switch WHERE engaged_by = ${P}`
     await sql`DELETE FROM token_cap_alarms WHERE user_id = ${userId} AND local_date = '2099-01-01'`
+    if (alarmClaimIds.length > 0) {
+      await sql`DELETE FROM token_cap_alarms WHERE id = ANY(${alarmClaimIds}::text[])`
+    }
     if (createdSessions.length > 0) {
       await sql`DELETE FROM scheduled_tasks WHERE session_id = ANY(${createdSessions}::text[])`
       await sql`DELETE FROM sessions WHERE id = ANY(${createdSessions}::text[])`

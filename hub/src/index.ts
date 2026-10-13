@@ -68,6 +68,7 @@ import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/st
 import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { assertAutomationControlsEnv, assertAutomationControlsTables } from './dispatch/automation-controls.ts'
+import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { extApiKeyMiddleware } from './auth/ext-api-key-middleware'
 import { ext } from './api/ext'
@@ -732,6 +733,8 @@ runMigrations()
     console.error(`[startup] FATAL: ${err?.message ?? err}`)
     process.exit(1)
   }))
+  // PTYCAP-04-05: usage events schedule the daily-token-ceiling alarm (event-driven; no timer here).
+  .then(() => registerTokenCapAlarm())
   .then(() => setOfflineStaleAgentSessions())
   .then(() => markStreamingMessagesAsInterrupted())
   .then(() => markOrphanedRunsInterrupted())
