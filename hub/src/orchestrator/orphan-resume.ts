@@ -201,6 +201,24 @@ async function resumeOrphansInner(args: {
           skipIfRunning: false,
           machine: true, // final halt re-check inside the primitive (PTYCAP-04-07)
         })
+        // QC M1: the original was closed above only so launchOrchestrator can reserve its
+        // slot (an open run blocks the replacement). If NO replacement run was created -
+        // a halt that landed between the two statements, no capacity, no online supervisor -
+        // the orphan must not be consumed: reopen it so the release-time sweep (or the next
+        // reconnect) resumes it. send_failed / internal_error are NOT restored: the
+        // replacement run row may already exist, and two open runs would double-resume.
+        const noReplacementCreated =
+          !res.ok &&
+          (res.reason === 'automation_halted' ||
+            res.reason === 'at_capacity' ||
+            res.reason === 'no_online_supervisor' ||
+            res.reason === 'supervisor_has_no_roots')
+        if (noReplacementCreated) {
+          await sql`
+            UPDATE session_runs SET ended_at = NULL, exit_reason = NULL
+            WHERE id = ${o.id} AND exit_reason = 'reboot'
+          `
+        }
         if (!res.ok && res.reason === 'automation_halted') {
           result.skipped_halted.push(o.id)
           continue

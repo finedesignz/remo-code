@@ -18,11 +18,16 @@ const s = {
   haltedSessions: null as null | Set<string> | 'all',
   haltCalls: [] as Array<{ userId: string; sessionId?: string }>,
   orchestratorCalls: [] as any[],
+  launchResult: null as any,
   sent: [] as any[],
 }
 
 function fakeSql(strings: TemplateStringsArray, ...vals: any[]): Promise<any[]> {
   const text = strings.join('?')
+  if (/UPDATE session_runs/.test(text) && /ended_at = NULL/.test(text)) {
+    s.updates.push(`restored:${vals[vals.length - 1]}`)
+    return Promise.resolve([])
+  }
   if (/UPDATE session_runs/.test(text)) {
     const reason = /exit_reason = '(\w+)'/.exec(text)?.[1] ?? 'unknown'
     s.updates.push(`${reason}:${vals[vals.length - 1]}`)
@@ -56,6 +61,7 @@ mock.module('../src/db/dal.ts', () => ({ getSessionSkipPermissionsByRepo: async 
 mock.module('../src/orchestrator/auto-launch.ts', () => ({
   launchOrchestrator: async (a: any) => {
     s.orchestratorCalls.push(a)
+    if (s.launchResult) return s.launchResult
     return { ok: true, sessionId: 'sess-o', runId: 'orch-run', supervisorId: 'sup-1', cwd: '/r', reused: true }
   },
 }))
@@ -82,6 +88,7 @@ beforeEach(() => {
   s.haltedSessions = null
   s.haltCalls = []
   s.orchestratorCalls = []
+  s.launchResult = null
   s.sent = []
 })
 
@@ -165,3 +172,36 @@ describe('listOnlineSupervisorsForRelease (release-time sweep targets)', () => {
     }
   })
 })
+
+describe('QC M1: the original orchestrator orphan is not consumed when no replacement is created', () => {
+  test('a halt landing between the reboot UPDATE and the launch: the orphan is reopened and deferred', async () => {
+    s.orphans = [orphan('run-o', 'sess-o', true)]
+    s.launchResult = { ok: false, reason: 'automation_halted' }
+    const r = await resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
+    expect(s.updates.filter((u) => !u.startsWith('stale:'))).toEqual(['reboot:run-o', 'restored:run-o'])
+    expect(r.skipped_halted).toEqual(['run-o'])
+    expect(r.resumed).toHaveLength(0)
+  })
+
+  test.each(['at_capacity', 'no_online_supervisor', 'supervisor_has_no_roots'])('%s: no replacement run exists -> orphan reopened', async (reason) => {
+    s.orphans = [orphan('run-o', 'sess-o', true)]
+    s.launchResult = { ok: false, reason, running: 1, cap: 1 }
+    await resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
+    expect(s.updates.filter((u) => !u.startsWith('stale:'))).toEqual(['reboot:run-o', 'restored:run-o'])
+  })
+
+  test.each(['send_failed', 'internal_error', 'already_running', 'disabled'])('%s: stays consumed (a replacement row may exist / user disabled)', async (reason) => {
+    s.orphans = [orphan('run-o', 'sess-o', true)]
+    s.launchResult = { ok: false, reason, error: 'x', sessionId: 'sess-o' }
+    await resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
+    expect(s.updates.filter((u) => !u.startsWith('stale:'))).toEqual(['reboot:run-o'])
+  })
+
+  test('success: consumed, never reopened', async () => {
+    s.orphans = [orphan('run-o', 'sess-o', true)]
+    const r = await resumeOrphansForSupervisor({ userId: 'u1', supervisorId: 'sup-1' })
+    expect(s.updates.filter((u) => !u.startsWith('stale:'))).toEqual(['reboot:run-o'])
+    expect(r.resumed).toEqual(['orch-run'])
+  })
+})
+
