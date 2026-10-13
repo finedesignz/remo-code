@@ -5,7 +5,7 @@ milestone_name: Milestone PTYCAP (Token-Gate the Interactive PTY Path)
 current_phase: 04
 current_phase_name: lifetime-inject-counter-kill-switch
 status: executing
-stopped_at: PTYCAP-03 complete (PR #505 open, verified SHIP-WITH-NOTES); PTYCAP-04 planning
+stopped_at: PTYCAP-04 executed 8/8 plans; QC BLOCKED after 2 fix rounds (2 open HIGH races); draft PR #506
 last_updated: "2026-10-13T18:00:00.000Z"
 last_activity: 2026-09-28
 last_activity_desc: "BLEED milestone reconciled CLOSED (all four fixers verified shipped on main); milestone pointer advanced to PTYCAP; Phase 1 confirmed shipped (#395); Phase 2 execution started"
@@ -13,8 +13,8 @@ state_head: a745ab9efb8e26c340e87a1f56cc55d3b2f35497
 progress:
   total_phases: 9
   completed_phases: 3
-  total_plans: 9
-  completed_plans: 8
+  total_plans: 17
+  completed_plans: 16
   percent: 33
 ---
 
@@ -91,9 +91,9 @@ connection is the Tauri Supervisor MSI.
 
 ## Current position
 
-Phase: PTYCAP-04 (lifetime-inject-counter-kill-switch) - PLANNING (stacked on PTYCAP-03 branch)
-Status: PTYCAP-03 complete: 4/4 plans, /qc PASS (Codex round-1 2 MINORs fixed, re-QC PASS), verifier SHIP-WITH-NOTES, PR #505 open (not merged)
-Last activity: 2026-10-13 - PTYCAP-03 closed out; PTYCAP-04 context/research locked, planning in progress on branch phase-ptycap-04-lifetime-counter-kill-switch
+Phase: PTYCAP-04 (lifetime-inject-counter-kill-switch) - EXECUTED, QC BLOCKED (stacked on PTYCAP-03 / PR #505)
+Status: 8/8 plans executed (branch phase-ptycap-04-lifetime-counter-kill-switch, draft PR #506 base main for Woodpecker postgres). /qc: 2 fix rounds done (B1+5 MAJOR+4 minor, then R1-R3); Codex still OPEN on 2 HIGH races: (a) orphan-resume reopen UPDATE...NOT EXISTS needs the per-user advisory lock launchOrchestrator holds; (b) supervisor/teab/work senders rearm once tasks on schedule_kind alone, must gate on onceClaimed. Verifier NO-SHIP at 8447cdf (CI red: 2 e2e fixture defects, fixed in bf3f51d, CI re-run pending).
+Last activity: 2026-10-13 - PTYCAP-04 executed + QC'd; BLOCKED on findings (a)(b) per the 2-round QC cap
 
 ### OBSRV phase ledger (`.planning/phases/`)
 
