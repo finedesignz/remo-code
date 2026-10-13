@@ -35,6 +35,7 @@ const state = {
 
 mock.module('../src/usage/threshold.ts', () => ({
   checkUserThreshold: async () => {
+    ctl.full.push('threshold')
     if (state.thresholdMode === 'throw') throw new Error('db down')
     if (state.thresholdMode === 'hang') return new Promise(() => {})
     return state.thresholdAllowed
@@ -60,12 +61,21 @@ mock.module('../src/db/postgres.ts', () => ({
 }))
 
 mock.module('../src/db/token-usage-dal.ts', () => ({
-  getTodayTokenCostUsd: async () => state.costSpent,
-  getTodayTokenTotal: async () => state.tokenTotal,
+  getTodayTokenCostUsd: async () => {
+    ctl.full.push('cost_cap')
+    return state.costSpent
+  },
+  getTodayTokenTotal: async () => {
+    ctl.full.push('token_cap_gate')
+    return state.tokenTotal
+  },
 }))
 
 mock.module('../src/db/orchestrator-rows-dal.ts', () => ({
-  countSessionInjectsSince: async () => state.injectsInWindow,
+  countSessionInjectsSince: async () => {
+    ctl.full.push('rate_gate')
+    return state.injectsInWindow
+  },
 }))
 
 // PTYCAP-04-04: governed-pty.ts and pty-preflight.ts delegate to the controls
@@ -74,9 +84,12 @@ mock.module('../src/db/orchestrator-rows-dal.ts', () => ({
 const ctl = {
   haltScope: null as string | null,
   rateCount: 0,
-  reserveMode: 'ok' as 'ok' | 'exhausted' | 'rate' | 'throw' | 'hang',
+  reserveMode: 'ok' as 'ok' | 'exhausted' | 'rate' | 'throw' | 'hang' | 'late',
+  releases: [] as Array<Record<string, unknown>>,
   reserveCalls: [] as Array<Record<string, unknown>>,
   order: [] as string[],
+  // QC M3: ONE timeline across the spend gates, the governors and the reserve.
+  full: [] as string[],
   ledger: new Set<string>(),
 }
 async function fakeKillSwitchCheck() {
@@ -96,11 +109,22 @@ mock.module('../src/dispatch/automation-controls.ts', () => ({
   automationKillSwitchGate: { name: 'automation_kill_switch', check: fakeKillSwitchCheck },
   automationLifetimeCounterGate: { name: 'lifetime_counter', check: fakeLifetimeCounterCheck },
   countRateUnion: async () => ctl.rateCount,
+  releaseInject: async (args: Record<string, unknown>) => {
+    ctl.releases.push(args)
+    ctl.ledger.delete(`${args.counterKey}|${args.token}`)
+  },
   reserveInject: async (args: Record<string, unknown>) => {
     ctl.order.push('reserve')
+    ctl.full.push('reserve')
     ctl.reserveCalls.push(args)
     if (ctl.reserveMode === 'throw') throw new Error('reserve boom')
     if (ctl.reserveMode === 'hang') return new Promise(() => {})
+    if (ctl.reserveMode === 'late') {
+      // commits AFTER the preflight timeout has already refused the turn (QC M5)
+      await new Promise((r) => setTimeout(r, 60))
+      ctl.ledger.add(`${args.counterKey}|${args.token}`)
+      return { ok: true }
+    }
     if (ctl.reserveMode === 'exhausted') return { ok: false, reason: 'lifetime_inject_exhausted:1000>=1000' }
     if (ctl.reserveMode === 'rate') return { ok: false, reason: 'over_session_inject_rate:4>=4' }
     ctl.ledger.add(`${args.counterKey}|${args.token}`)
@@ -142,6 +166,7 @@ function makeSpies(overrides: Partial<Record<SpyName, () => Promise<{ ok: true }
     async check() {
       calls.push(name)
       ctl.order.push(name)
+      ctl.full.push(`gov:${name}`)
       return overrides[name] ? overrides[name]!() : { ok: true as const }
     },
   }))
@@ -158,7 +183,9 @@ beforeEach(() => {
   ctl.rateCount = 0
   ctl.reserveMode = 'ok'
   ctl.reserveCalls.length = 0
+  ctl.releases.length = 0
   ctl.order.length = 0
+  ctl.full.length = 0
   ctl.ledger.clear()
   state.thresholdAllowed = true
   state.cap = '10.00'
@@ -388,7 +415,38 @@ describe('PTYCAP Phase 3 -- governed automation branch', () => {
     expect(r.ok).toBe(false)
     expect((r as { reason: string }).reason).toContain('over_session_inject_rate')
     expect((r as { reason: string }).reason.startsWith('automation_blocked_on_pty')).toBe(false)
-    expect(spies.calls).toEqual([])
+    // QC M3: only the kill-switch governor (which now runs FIRST) has been consulted; the
+    // remaining governors never run behind a spend-gate block.
+    expect(spies.calls).toEqual(['kill_switch'])
+  })
+
+  test('QC M3: the kill switch runs FIRST - full invocation order is kill, threshold, token, cost, rate, governors, reserve', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    const spies = makeSpies()
+    _setGovernorsForTests(spies.governors)
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: true })
+    expect(ctl.full).toEqual([
+      'gov:kill_switch',
+      'threshold',
+      'token_cap_gate',
+      'cost_cap',
+      'rate_gate',
+      'gov:token_cap',
+      'gov:inject_rate',
+      'gov:lifetime_counter',
+      'reserve',
+    ])
+  })
+
+  test('QC M3: an engaged kill switch refuses with the HALT reason even when a spend gate would also block, and no spend gate runs', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(PRODUCTION_GOVERNORS)
+    ctl.haltScope = 'global'
+    state.thresholdAllowed = false
+    state.injectsInWindow = 999_999
+    const r = await checkPtyTurnPreflight({ ...automation, counterKey: 'task:T' })
+    expect(r).toEqual({ ok: false, reason: 'automation_blocked_on_pty:automation:automation_halted:global' })
+    expect(ctl.full).toEqual([])
   })
 
   test('flag ON: inject-rate cap 0 is refused by the inject_rate governor (the spend gate is fail-open at 0)', async () => {
@@ -494,6 +552,34 @@ describe('PTYCAP Phase 4 -- the door counts the turn', () => {
     ctl.reserveMode = 'hang'
     _setPtyPreflightTimeoutForTests(20)
     expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: false, reason: 'pty_preflight_timeout' })
+  })
+
+  test('QC M5: a reservation that commits AFTER the timeout won is released by turn token', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    ctl.reserveMode = 'late'
+    _setPtyPreflightTimeoutForTests(20)
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: false, reason: 'pty_preflight_timeout' })
+    expect(ctl.releases).toEqual([]) // the reserve has not landed yet
+    await new Promise((r) => setTimeout(r, 150)) // reserve commits at ~60ms
+    expect(ctl.releases).toEqual([{ counterKey: keyed.counterKey, token: keyed.turnToken }])
+    expect(ctl.ledger.size).toBe(0) // the refused turn does not stay counted
+  })
+
+  test('QC M5: an on-time result never releases (nothing to compensate)', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: true })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(ctl.releases).toEqual([])
+    expect(ctl.ledger.size).toBe(1)
+  })
+
+  test('QC M5: a HUMAN turn never reserves or releases', async () => {
+    _setPtyPreflightTimeoutForTests(20)
+    state.thresholdMode = 'hang'
+    expect((await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'human' })).ok).toBe(false)
+    state.thresholdMode = 'normal'
+    await new Promise((r) => setTimeout(r, 30))
+    expect(ctl.releases).toEqual([])
   })
 
   test('the same turnToken twice: one ledger row (idempotent), both calls ok; a distinct token counts again', async () => {

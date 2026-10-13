@@ -559,11 +559,13 @@ public governors parameter, which would be a bypass handle.
 ### The door (`checkPtyTurnPreflight` automation branch)
 
 For a non-`human` actor `checkPtyTurnPreflight` checks the flag FIRST (before
-any DB-backed gate), then runs the automation spend chain, then the governors.
+any DB-backed gate), then the `kill_switch` governor FIRST (a halted turn is refused with the halt
+reason before any spend gate runs), then the automation spend chain, then the remaining governors.
 Block reasons are `automation_blocked_on_pty:<actor>` or
 `automation_blocked_on_pty:<actor>:<governor_reason>`. A throwing gate or
 governor resolves to `pty_preflight_error`; a check that does not settle in 5s
-resolves to `pty_preflight_timeout`. The human chain (`PTY_HUMAN_TURN_GATES`)
+resolves to `pty_preflight_timeout`; if the atomic reservation commits AFTER the timeout refused the
+turn, it is released by turn token once the chain settles. The human chain (`PTY_HUMAN_TURN_GATES`)
 NEVER runs a governor, and a human turn passes with the fail-closed production
 governors and the flag ON (pinned in `hub/test/pty-preflight.test.ts`).
 
