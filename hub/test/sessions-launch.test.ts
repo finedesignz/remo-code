@@ -453,6 +453,19 @@ describe('POST /api/sessions/:id/launch', () => {
     expect(((await res.json()) as any).error).toBe('already_online')
   })
 
+  test('orchestrator session → 409 use_orchestrator_start, no run reserved, no dispatch', async () => {
+    state.session.is_orchestrator = true
+    state.session.status = 'offline'
+    const res = await app.request(`/api/sessions/${TEST_SESSION_ID}/launch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    expect(res.status).toBe(409)
+    expect(((await res.json()) as any).error).toBe('use_orchestrator_start')
+    expect(state.sentMessages).toHaveLength(0)
+  })
+
   test('session not found (or not owned) → 404', async () => {
     const res = await app.request(`/api/sessions/sess_nope/launch`, {
       method: 'POST',

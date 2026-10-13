@@ -563,6 +563,17 @@ sessions.post('/:id/launch', async (c) => {
   const session = await getSession(sessionId, userId)
   if (!session) return c.json({ error: 'not_found' }, 404)
 
+  // The orchestrator session has exactly ONE launcher: launchOrchestrator
+  // (POST /api/orchestrator/start), which holds the per-user advisory lock and
+  // re-checks for an open run inside it. This route has neither, so launching
+  // an offline orchestrator here could open a SECOND run on the same session.
+  if ((session as any).is_orchestrator === true) {
+    return c.json({
+      error: 'use_orchestrator_start',
+      detail: 'orchestrator sessions are launched via POST /api/orchestrator/start',
+    }, 409)
+  }
+
   // Already online? Refuse — caller should disconnect first.
   if ((session as any).status === 'online') {
     return c.json({ error: 'already_online' }, 409)
