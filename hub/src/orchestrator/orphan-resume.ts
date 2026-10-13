@@ -28,6 +28,7 @@
 import { reserveSessionSlot } from '../sessions/budget'
 import { listOnlineSupervisorIdsForUser, getSupervisor } from '../ws/supervisor-registry'
 import { getSessionSkipPermissionsByRepo } from '../db/dal'
+import { isAutomationHalted } from '../dispatch/automation-controls'
 
 const MAX_RESTART_COUNT = 10
 
@@ -47,6 +48,8 @@ export interface ResumeResult {
   skipped_capacity: string[]
   skipped_max_restarts: string[]
   finalized_stale: string[]
+  /** PTYCAP-04-07: orchestrator orphans deferred (row untouched) because automation is halted. */
+  skipped_halted: string[]
 }
 
 function emptyResult(): ResumeResult {
@@ -57,6 +60,7 @@ function emptyResult(): ResumeResult {
     skipped_capacity: [],
     skipped_max_restarts: [],
     finalized_stale: [],
+    skipped_halted: [],
   }
 }
 
@@ -162,6 +166,22 @@ async function resumeOrphansInner(args: {
       continue
     }
 
+    // (b.1) PTYCAP-04-07 kill-switch deferral (D-09b, panel F-4/S4). ONLY orchestrator
+    //       orphans are machine-driven; non-orchestrator orphans are human or machine
+    //       and indistinguishable, so they are NEVER deferred (human recovery must not
+    //       be blocked). Defer BEFORE the reboot UPDATE below and leave the row OPEN, so
+    //       the release-time sweep (api/automation.ts) or the next reconnect resumes it.
+    //       Evaluated per orphan with THAT orphan's user and session id, so a
+    //       session-scope halt defers only that session. A deferred row younger than 24h
+    //       is picked up after release; the 24h stale sweep above still finalizes older ones.
+    if (o.is_orchestrator) {
+      const halt = await isAutomationHalted({ userId, sessionId: o.session_id ?? undefined })
+      if (halt.halted) {
+        result.skipped_halted.push(o.id)
+        continue
+      }
+    }
+
     // (c) End the orphan FIRST so it doesn't count against the cap when we
     //     reserve a slot for its replacement.
     await sql`UPDATE session_runs SET ended_at = now(), exit_reason = 'reboot' WHERE id = ${o.id}`
@@ -179,7 +199,12 @@ async function resumeOrphansInner(args: {
           preferSupervisorId: supervisorId,
           requireEnabled: true, // honour the explicit-disable sentinel + enabled flag
           skipIfRunning: false,
+          machine: true, // final halt re-check inside the primitive (PTYCAP-04-07)
         })
+        if (!res.ok && res.reason === 'automation_halted') {
+          result.skipped_halted.push(o.id)
+          continue
+        }
         if (!res.ok && res.reason === 'disabled') {
           result.skipped_user_stopped.push(o.session_id ?? o.id)
           continue
@@ -301,6 +326,7 @@ export async function resumeOrphanSessionsForUser(userId: string): Promise<Resum
       result.skipped_capacity.push(...r.skipped_capacity)
       result.skipped_max_restarts.push(...r.skipped_max_restarts)
       result.finalized_stale.push(...r.finalized_stale)
+      result.skipped_halted.push(...r.skipped_halted)
     } catch (err: any) {
       console.error(`[orphan-resume] sweep failed supervisor=${supervisorId}`, err?.message)
     }

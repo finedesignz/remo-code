@@ -41,6 +41,7 @@ import {
 import { listSupervisorsForUser } from '../db/supervisor-dal.ts';
 import { markOrchestratorSession } from '../ws/idle-teardown.ts';
 import { getSessionSkipPermissions } from '../db/dal.ts';
+import { isAutomationHalted } from '../dispatch/automation-controls.ts';
 
 function publicHubUrl(): string {
   return (process.env.REMO_PUBLIC_URL || 'https://app.remo-code.com').replace(/\/+$/, '');
@@ -49,6 +50,7 @@ function publicHubUrl(): string {
 export type LaunchOrchestratorResult =
   | { ok: true; sessionId: string; runId: string; supervisorId: string; cwd: string; reused: boolean }
   | { ok: false; reason: 'disabled' }
+  | { ok: false; reason: 'automation_halted' }
   | { ok: false; reason: 'no_online_supervisor' }
   | { ok: false; reason: 'supervisor_has_no_roots' }
   | { ok: false; reason: 'already_running'; sessionId: string }
@@ -116,11 +118,22 @@ export async function launchOrchestrator(args: {
   preferSupervisorId?: string;
   requireEnabled?: boolean;
   skipIfRunning?: boolean;
+  /**
+   * PTYCAP-04-07 (D-09b): machine-origin marker. Passed ONLY by machine callers
+   * (maybeAutoLaunchOrchestrator, orphan-resume relaunch, launchSessionForUser with
+   * machine). When set, the kill switch is checked before any DB write. The human
+   * REST `POST /api/orchestrator/start` omits it and is never blocked.
+   */
+  machine?: true;
 }): Promise<LaunchOrchestratorResult> {
   const requireEnabled = args.requireEnabled ?? true;
   const skipIfRunning = args.skipIfRunning ?? true;
 
   try {
+    if (args.machine) {
+      const halt = await isAutomationHalted({ userId: args.userId });
+      if (halt.halted) return { ok: false, reason: 'automation_halted' };
+    }
     const prefs = await getOrchestratorState(args.userId);
     if (requireEnabled && (!prefs.orchestrator_enabled || prefs.orchestrator_disabled_explicitly)) {
       return { ok: false, reason: 'disabled' };
@@ -330,6 +343,14 @@ export async function maybeAutoLaunchOrchestrator(args: {
   if (process.env.REMO_ORCHESTRATOR_AUTOLAUNCH === 'false') {
     return { launched: false, reason: 'feature_flag_off' };
   }
+  // PTYCAP-04-07: halt check BEFORE the debounce stamp, so a halted attempt does not
+  // latch the 5s debounce and delay the post-release relaunch.
+  try {
+    const halt = await isAutomationHalted({ userId: args.userId });
+    if (halt.halted) return { launched: false, reason: 'automation_halted' };
+  } catch {
+    return { launched: false, reason: 'error' };
+  }
   const now = Date.now();
   const prevAt = lastAutoLaunchAttemptAt.get(args.userId);
   if (prevAt !== undefined && now - prevAt < AUTOLAUNCH_DEBOUNCE_MS) {
@@ -350,6 +371,7 @@ export async function maybeAutoLaunchOrchestrator(args: {
       preferSupervisorId: args.supervisorId,
       requireEnabled: true,
       skipIfRunning: true,
+      machine: true,
     });
     if (res.ok) {
       console.log(`[orchestrator] auto-launched session=${res.sessionId} run=${res.runId} supervisor=${res.supervisorId}`);
