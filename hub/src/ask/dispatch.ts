@@ -33,6 +33,7 @@ import {
   askRateGate,
 } from '../dispatch/gates.ts'
 import { governedAutomationPtyGate } from '../dispatch/governed-pty.ts'
+import { automationKillSwitchGate } from '../dispatch/automation-controls.ts'
 import { EXT_ACTOR } from '../auth/ext-api-key-middleware.ts'
 import { finalizeAsk, markAskDispatched } from '../db/ask-dal.ts'
 import { parseAskOutput } from './result-schema.ts'
@@ -131,6 +132,9 @@ export async function dispatchAsk(input: {
     // external actor is never eligible, flag on or off). askRateGate bounds a
     // looping external caller.
     gates: [
+      // PTYCAP-04 D-08: the kill switch is FIRST (halts before any spend gate runs).
+      // Key-less adapter: no lifetime counter (exempt in kill-switch-coverage.test.ts).
+      automationKillSwitchGate,
       thresholdGate,
       dailyCostCapGate,
       dailyTokenCapGate,

@@ -35,6 +35,7 @@ import {
   workRepoAllowlistGate,
 } from '../dispatch/gates.ts'
 import { governedAutomationPtyGate } from '../dispatch/governed-pty.ts'
+import { automationKillSwitchGate } from '../dispatch/automation-controls.ts'
 import { EXT_WORK_ACTOR } from '../auth/ext-api-key-middleware.ts'
 import { finalizeWork, markWorkDispatched, markWorkVerifying, getWorkRun, type WorkSite } from '../db/work-dal.ts'
 import { runHubQc } from './verify.ts'
@@ -292,6 +293,9 @@ export async function dispatchWork(input: DispatchWorkInput): Promise<WorkDispat
     // NON-NEGOTIABLE. dailyCostCapGate + dailyTokenCapGate are non-bypassable
     // (IR-1 / BSA-04; scanned by hub/test/token-cap-coverage.test.ts).
     gates: [
+      // PTYCAP-04 D-08: the kill switch is FIRST (halts before any spend gate runs).
+      // Key-less adapter: no lifetime counter (exempt in kill-switch-coverage.test.ts).
+      automationKillSwitchGate,
       thresholdGate,
       dailyCostCapGate,
       dailyTokenCapGate,
