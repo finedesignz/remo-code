@@ -298,6 +298,20 @@ export function maxInjectsPerHour(): number {
 }
 
 /**
+ * True when the inject-rate ceiling is validly configured: unset/blank (the
+ * default applies) or a finite value > 0. A garbage / NaN / Infinity / <= 0
+ * value is INVALID. `maxInjectsPerHour()` quietly coerces non-finite input to
+ * the default, so the governed-PTY governor (PTYCAP Phase 3) uses this to see
+ * the raw validity; the legacy `sessionInjectRateGate` does not call it.
+ */
+export function isInjectRateConfigured(): boolean {
+  const raw = process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR
+  if (raw == null || raw.trim() === '') return true
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0
+}
+
+/**
  * Per-session inject-rate gate. Counts this session's orchestrator injects in the
  * trailing 60 minutes (`countSessionInjectsSince` over the existing
  * `routine_run_log` — no new table) and blocks with

@@ -544,7 +544,7 @@ governor. A thrown governor is a typed denial
 |---|---|---|---|
 | 1 | `kill_switch` | fail-closed slot, always blocks | `governor_not_implemented:kill_switch` |
 | 2 | `token_cap` | blocks when `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED` is truthy | `governor_unconfigured:token_cap` |
-| 3 | `inject_rate` | blocks when `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` is non-finite or <= 0 | `governor_unconfigured:inject_rate` |
+| 3 | `inject_rate` | blocks when `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` is set to an invalid value (garbage, NaN, Infinity, <= 0); unset/blank uses the default 4 | `governor_unconfigured:inject_rate` |
 | 4 | `lifetime_counter` | fail-closed slot, always blocks | `governor_not_implemented:lifetime_counter` |
 
 The "over the limit" evaluation stays with `dailyTokenCapGate` and the

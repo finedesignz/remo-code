@@ -240,10 +240,10 @@ describe('PTYCAP Phase 3 -- enabled rule (D-03)', () => {
     }
   })
 
-  test('inject-rate ceiling 0 or negative blocks governor_unconfigured:inject_rate', async () => {
+  test('inject-rate ceiling 0, negative, garbage, NaN or Infinity blocks governor_unconfigured:inject_rate', async () => {
     process.env[FLAG] = '1'
     _setGovernorsForTests(enabledChain([]))
-    for (const v of ['0', '-1']) {
+    for (const v of ['0', '-1', 'garbage', 'NaN', 'Infinity', '-Infinity']) {
       process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR = v
       const r = await sched().check(baseReq as any)
       expect(r.ok).toBe(false)

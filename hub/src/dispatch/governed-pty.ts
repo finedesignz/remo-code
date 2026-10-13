@@ -34,7 +34,7 @@
  * deliberately NO optional public governors parameter: a public parameter would
  * be a bypass handle.
  */
-import { AUTOMATION_ACTORS, humanOnlyRejectsActor, isDailyTokenCapEnforced, maxInjectsPerHour } from './gates.ts'
+import { AUTOMATION_ACTORS, humanOnlyRejectsActor, isDailyTokenCapEnforced, isInjectRateConfigured, maxInjectsPerHour } from './gates.ts'
 import type { DispatchGate, DispatchRequest } from './pipeline.ts'
 
 /** The ONLY hub source file allowed to contain this literal (pinned by plan 03-03). */
@@ -84,6 +84,7 @@ export const tokenCapGovernor: GovernorGate = {
 export const injectRateGovernor: GovernorGate = {
   name: 'inject_rate',
   async check() {
+    if (!isInjectRateConfigured()) return { ok: false, reason: 'governor_unconfigured:inject_rate' }
     const cap = maxInjectsPerHour()
     if (!Number.isFinite(cap) || cap <= 0) return { ok: false, reason: 'governor_unconfigured:inject_rate' }
     return { ok: true }
