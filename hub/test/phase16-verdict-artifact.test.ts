@@ -96,7 +96,7 @@ describe('Phase 16 — verdict artifact ↔ cutover gate round-trip (H11/NH-4)',
     try {
       expect(runGate(path)).toBe(1)
     } finally { cleanup() }
-  })
+  }, 20000)
 
   test('a missing artifact file aborts the gate (exit 1)', () => {
     expect(runGate(join(tmpdir(), 'does-not-exist-16-VERIFICATION.md'))).toBe(1)

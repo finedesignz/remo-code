@@ -70,7 +70,7 @@ A single per-user UUID (`users.revanote_webhook_secret`) does triple duty:
 }
 ```
 
-`element_meta` and `capture_viewport` are passed through to the agent prompt without schema columns — they live in `annotations.payload_raw` so future Revanote-side additions never break the contract.
+`attachments` (`[{id, file_name, file_type, file_size, url}]`, R2 URLs signed for 2h by revanote) are rendered inside the untrusted fence as one line per file, with an instruction to download the file and use it rather than a placeholder (`attachmentLines` in `hub/src/revanote/prompt.ts`). Only URLs on `*.r2.cloudflarestorage.com` (plus exact hosts in `REMO_REVANOTE_ATTACHMENT_HOSTS`, comma-separated) are offered for download; anything else -- another host, credentials in the URL, a quote that could break the shell argument -- renders as unavailable. The agent is told to fetch with `curl --proto =https --max-redirs 0 --max-filesize 25MB`, check the bytes match the listed type, and treat the file as data. A re-dispatch refreshes `payload_raw`, so a retried annotation always carries fresh links. `element_meta` and `capture_viewport` are passed through to the agent prompt without schema columns — they live in `annotations.payload_raw` so future Revanote-side additions never break the contract.
 
 ## Repo→app mappings
 
