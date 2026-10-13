@@ -719,7 +719,7 @@ break-glass that engages global regardless of the database (a restart is needed 
 
 | Route | Auth | Notes |
 |---|---|---|
-| `GET /api/automation/kill-switch` | session | env flag, global row, caller's user row, session rows |
+| `GET /api/automation/kill-switch` | session | env flag, global row (a non-admin sees only `{engaged: true}`), caller's user row, session rows |
 | `POST /api/automation/kill-switch/engage` | session, NO step-up, ACTIVE license | row only; never stops a running session or cancels an in-flight turn |
 | `POST /api/automation/kill-switch/release` | session + login under 15 min old | fires the event-driven resume of deferred work for that scope |
 | `POST /api/automation/lifetime/reset` | session + login under 15 min old | appends a reset marker; answers `{ok, counter_key}`; 404 with no ledger rows |

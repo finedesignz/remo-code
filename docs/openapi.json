@@ -1408,7 +1408,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Env flag, the global row, the caller's user row and session rows",
+            "description": "Env flag, the global row, the caller's user row and session rows. A non-admin sees the global row reduced to {engaged: true} (no engaged_by, reason or id).",
             "content": {
               "application/json": {
                 "schema": {
@@ -1418,52 +1418,72 @@
                       "type": "boolean"
                     },
                     "global": {
-                      "type": "object",
-                      "nullable": true,
-                      "properties": {
-                        "id": {
-                          "type": "string",
-                          "format": "uuid"
-                        },
-                        "scope": {
-                          "type": "string",
-                          "enum": [
-                            "global",
-                            "user",
-                            "session"
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "format": "uuid"
+                            },
+                            "scope": {
+                              "type": "string",
+                              "enum": [
+                                "global",
+                                "user",
+                                "session"
+                              ]
+                            },
+                            "user_id": {
+                              "type": "string",
+                              "nullable": true
+                            },
+                            "session_id": {
+                              "type": "string",
+                              "nullable": true
+                            },
+                            "engaged": {
+                              "type": "boolean"
+                            },
+                            "reason": {
+                              "type": "string",
+                              "nullable": true
+                            },
+                            "engaged_by": {
+                              "type": "string"
+                            },
+                            "engaged_at": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "scope",
+                            "user_id",
+                            "session_id",
+                            "engaged",
+                            "reason",
+                            "engaged_by",
+                            "engaged_at"
                           ]
                         },
-                        "user_id": {
-                          "type": "string",
+                        {
+                          "type": "object",
+                          "properties": {
+                            "engaged": {
+                              "type": "boolean",
+                              "enum": [
+                                true
+                              ]
+                            }
+                          },
+                          "required": [
+                            "engaged"
+                          ]
+                        },
+                        {
                           "nullable": true
-                        },
-                        "session_id": {
-                          "type": "string",
-                          "nullable": true
-                        },
-                        "engaged": {
-                          "type": "boolean"
-                        },
-                        "reason": {
-                          "type": "string",
-                          "nullable": true
-                        },
-                        "engaged_by": {
-                          "type": "string"
-                        },
-                        "engaged_at": {
-                          "type": "string"
                         }
-                      },
-                      "required": [
-                        "id",
-                        "scope",
-                        "user_id",
-                        "session_id",
-                        "engaged",
-                        "reason",
-                        "engaged_by",
-                        "engaged_at"
                       ]
                     },
                     "user": {

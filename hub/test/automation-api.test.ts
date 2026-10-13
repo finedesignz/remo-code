@@ -32,7 +32,7 @@ mock.module('../src/dispatch/automation-controls.ts', () => ({
   },
   getKillSwitchState: async (a: any) => {
     calls.push({ fn: 'state', args: a })
-    return { env: false, global: null, user: null, sessions: [] }
+    return stateOverride ?? { env: false, global: null, user: null, sessions: [] }
   },
   resetLifetimeCounter: async (a: any) => {
     calls.push({ fn: 'reset', args: a })
@@ -57,6 +57,7 @@ mock.module('../src/orchestrator/orphan-resume', () => ({
     return {}
   },
 }))
+let stateOverride: any = null
 const flush = () => new Promise((r) => setTimeout(r, 0))
 
 const { automationApi } = await import('../src/api/automation.ts')
@@ -88,9 +89,33 @@ beforeEach(() => {
   resumeSups = []
   resumeThrows = false
   listerRejects = false
+  stateOverride = null
 })
 
+const GLOBAL_ROW = {
+  id: '11111111-1111-4111-8111-111111111111', scope: 'global', user_id: null, session_id: null,
+  engaged: true, reason: 'incident INC-7', engaged_by: 'admin1', engaged_at: '2026-10-13T00:00:00Z',
+}
 describe('GET /kill-switch', () => {
+  test('QC m1: a non-admin sees only {engaged:true} for the global row (no engaged_by / reason / id)', async () => {
+    stateOverride = { env: false, global: GLOBAL_ROW, user: null, sessions: [] }
+    const res = await appAs('u1', 'user').request('/api/automation/kill-switch')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as any
+    expect(body.global).toEqual({ engaged: true })
+    expect(JSON.stringify(body)).not.toContain('admin1')
+    expect(JSON.stringify(body)).not.toContain('INC-7')
+  })
+
+  test('QC m1: an admin still sees the full global row; the own user row stays full for a non-admin', async () => {
+    const userRow = { ...GLOBAL_ROW, scope: 'user', user_id: 'u1', reason: 'mine', engaged_by: 'u1' }
+    stateOverride = { env: false, global: GLOBAL_ROW, user: userRow, sessions: [] }
+    expect(((await (await appAs('admin1', 'admin').request('/api/automation/kill-switch')).json()) as any).global).toEqual(GLOBAL_ROW)
+    const body = (await (await appAs('u1', 'user').request('/api/automation/kill-switch')).json()) as any
+    expect(body.user).toEqual(userRow)
+    expect(body.global).toEqual({ engaged: true })
+  })
+
   test('returns state scoped to the caller', async () => {
     const res = await appAs('u1', 'user').request('/api/automation/kill-switch')
     expect(res.status).toBe(200)

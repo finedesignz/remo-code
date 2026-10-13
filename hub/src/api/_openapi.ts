@@ -448,11 +448,13 @@ openapi.openapi(dismissLocalRoute, async (c) => {
     ...base,
     responses: {
       200: {
-        description: "Env flag, the global row, the caller's user row and session rows",
+        description:
+          "Env flag, the global row, the caller's user row and session rows. A non-admin sees the global row " +
+          "reduced to {engaged: true} (no engaged_by, reason or id).",
         ...json(
           z.object({
             env: z.boolean(),
-            global: KillRow.nullable(),
+            global: z.union([KillRow, z.object({ engaged: z.literal(true) })]).nullable(),
             user: KillRow.nullable(),
             sessions: z.array(KillRow),
           }),

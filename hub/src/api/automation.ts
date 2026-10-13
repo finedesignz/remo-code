@@ -107,7 +107,13 @@ async function resolveScope(c: any): Promise<Resolved> {
 
 automationApi.get('/kill-switch', async (c) => {
   const userId = c.get('userId') as string
-  return c.json(await getKillSwitchState({ userId }))
+  const state = await getKillSwitchState({ userId })
+  // QC m1: the global row is an operator record (who engaged it and why). A non-admin
+  // learns only THAT automation is globally halted, never engaged_by / reason / ids.
+  if ((c.get('userRole') as string | undefined) !== 'admin' && state.global) {
+    return c.json({ ...state, global: { engaged: true as const } })
+  }
+  return c.json(state)
 })
 
 automationApi.post('/kill-switch/engage', async (c) => {

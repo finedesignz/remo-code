@@ -1442,7 +1442,7 @@ fetch('https://app.remo-code.com/api/automation/kill-switch',
 
 |Status|Meaning|Description|Schema|
 |---|---|---|---|
-|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Env flag, the global row, the caller's user row and session rows|Inline|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Env flag, the global row, the caller's user row and session rows. A non-admin sees the global row reduced to {engaged: true} (no engaged_by, reason or id).|Inline|
 |401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
 
 <h3 id="read-the-automation-kill-switch-state-visible-to-the-caller-responseschema">Response Schema</h3>
@@ -1452,15 +1452,39 @@ Status Code **200**
 |Name|Type|Required|Restrictions|Description|
 |---|---|---|---|---|
 |» env|boolean|true|none|none|
-|» global|object¦null|true|none|none|
-|»» id|string(uuid)|true|none|none|
-|»» scope|string|true|none|none|
-|»» user_id|string¦null|true|none|none|
-|»» session_id|string¦null|true|none|none|
-|»» engaged|boolean|true|none|none|
-|»» reason|string¦null|true|none|none|
-|»» engaged_by|string|true|none|none|
-|»» engaged_at|string|true|none|none|
+|» global|any|true|none|none|
+
+*anyOf*
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|»» *anonymous*|object|false|none|none|
+|»»» id|string(uuid)|true|none|none|
+|»»» scope|string|true|none|none|
+|»»» user_id|string¦null|true|none|none|
+|»»» session_id|string¦null|true|none|none|
+|»»» engaged|boolean|true|none|none|
+|»»» reason|string¦null|true|none|none|
+|»»» engaged_by|string|true|none|none|
+|»»» engaged_at|string|true|none|none|
+
+*or*
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|»» *anonymous*|object|false|none|none|
+|»»» engaged|boolean|true|none|none|
+
+*or*
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|»» *anonymous*|any|false|none|none|
+
+*continued*
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
 |» user|object¦null|true|none|none|
 |»» id|string(uuid)|true|none|none|
 |»» scope|string|true|none|none|
@@ -1487,6 +1511,7 @@ Status Code **200**
 |scope|global|
 |scope|user|
 |scope|session|
+|engaged|true|
 |scope|global|
 |scope|user|
 |scope|session|
