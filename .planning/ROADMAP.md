@@ -159,6 +159,19 @@ is armed) **and PR #346** (which owns `triage.ts`, `gates.ts`, `supervisor-dal.t
   4. No heal run can sit `pending` until the 6h `run_timeout` reaper — replayed by the incident
      fixtures (runs `8a6e0534`, `fa377e27`; task `0e16bf38`).
   5. Flag-gated; default OFF is a true no-op reproducing today's behaviour exactly.
+**Plans:** 11 plans (validation map: `.planning/phases/PTYCAP-07-self-heal-routing/07-VALIDATION.md`)
+Plans:
+- [ ] 07-01-PLAN.md - heal types, flag/knob config, canonical repo ident, shared counter-key builder (wave 1)
+- [ ] 07-02-PLAN.md - heal_events ledger DDL + atomic-claim DAL + durable internal-task marker (wave 1)
+- [ ] 07-03-PLAN.md - flag-OFF characterization traces recorded on unmodified code (wave 1)
+- [ ] 07-04-PLAN.md - governed launch adapter, shared liveness, launch-primitive run-leak fix (wave 1)
+- [ ] 07-05-PLAN.md - target resolution + routeHeal live path (tracer) + guards and terminal wrapper (wave 2)
+- [ ] 07-06-PLAN.md - single-attempt notification, governed autospawn branch, spawn deadline, boot sweep (wave 3)
+- [ ] 07-07-PLAN.md - per-source sinks (coolify, scheduled-task, error-capture, feedback) (wave 3)
+- [ ] 07-08-PLAN.md - Coolify + scheduled-task failure sources, incident V1/V2 at source level (wave 4)
+- [ ] 07-09-PLAN.md - error-capture + feedback sources (wave 4)
+- [ ] 07-10-PLAN.md - single-seam guard, extended guards, final flag-OFF proof, incident e2e on Postgres (wave 5)
+- [ ] 07-11-PLAN.md - docs, CLAUDE.md env/map/invariant, docs:sync check, baseline re-measure (wave 6)
 
 ### Phase 8: Periodic Task QC + Optimization
 **Goal**: A recurring, bounded meta-task audits every `scheduled_tasks` row for failing / silently
