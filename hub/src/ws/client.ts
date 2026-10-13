@@ -168,8 +168,9 @@ export async function handleClientMessage(ws: ServerWebSocket<ClientWsData>, raw
   //     hijack).
   //   - HUMAN-ONLY (H1): the actor is SERVER-INFERRED as `human` from this
   //     authenticated cookie connection (NEVER a payload field); the shared
-  //     humanOnlyPtyGate decision is applied to term.input on a pty-interactive
-  //     session. (A human connection always passes; this is the spoof-proof seam
+  //     humanOnlyRejectsActor decision (the legacy rule governedAutomationPtyGate
+  //     applies when its flag is OFF) is applied to term.input on a pty-interactive
+  //     session; the relay actor is always the server-inferred human. (A human connection always passes; this is the spoof-proof seam
   //     that also covers the relay path, not just dispatch/pipeline.ts.)
   if (isTermFrameType(parsed)) {
     if (!data.authenticated || !data.userId) return
