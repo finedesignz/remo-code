@@ -99,6 +99,14 @@ export function createProofFakeSql() {
     if (text.includes('SELECT id FROM orchestrator_proof_runs WHERE user_id')) {
       return state.runs.filter((r) => r.user_id === values[0] && isActive(r)).slice(0, 1).map((r) => ({ id: r.id }))
     }
+    if (text.includes('SELECT count(*) AS n FROM scheduled_tasks')) {
+      const enabledOrch = state.tasks.filter((t) => t.task_type === 'orchestrator' && t.enabled)
+      if (text.includes('NOT (user_id =')) {
+        const [userId, sessionId] = values // dry-run read
+        return [{ n: String(enabledOrch.filter((t) => !(t.user_id === userId && t.session_id === sessionId)).length) }]
+      }
+      return [{ n: String(enabledOrch.filter((t) => t.id !== values[0]).length) }] // in-tx check
+    }
     if (text.includes('SELECT id FROM scheduled_tasks')) {
       const [userId, sessionId] = values
       return state.tasks

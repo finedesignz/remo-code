@@ -79,7 +79,9 @@ export function makeProofBudgetGate(deps?: ProofGateDeps): DispatchGate {
       try {
         const d = deps ?? (await realDeps());
         const run = await d.findRun({ requestKey: req.counterKey ?? null, sessionId: req.sessionId });
-        if (!run) return { ok: true };
+        // QC round 1: proof mode is EXCLUSIVE - an orchestrator dispatch that matches no proof run
+        // (some other task) is refused while the flag stack is ON.
+        if (!run) return { ok: false, reason: 'proof_mode_non_proof_task' };
 
         // D-02 pin: a proof task may only dispatch with its own task:<id> counter key.
         if (req.counterKey !== run.counter_key || run.counter_key !== `task:${run.task_id}`) {

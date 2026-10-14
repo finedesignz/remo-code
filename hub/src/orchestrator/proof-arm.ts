@@ -24,6 +24,7 @@ export type ArmRefusalCode =
   | 'proof_protection_insufficient'
   | 'agent_credential_is_admin'
   | 'other_repo_allowlisted'
+  | 'other_orchestrator_task_enabled'
   | 'proof_already_active';
 
 export const DEFAULT_MAX_INJECTS = 6;
@@ -39,6 +40,8 @@ export interface ProofArmDeps {
   listInstallationRepos(installationId: number): Promise<Array<{ full_name: string; default_branch: string }>>;
   getSession(sessionId: string): Promise<{ user_id: string; repo_key: string | null } | null>;
   listAllowlist(userId: string): Promise<string[]>;
+  /** Enabled orchestrator tasks (ANY user) other than the one arm will create/reuse for this session. */
+  countOtherEnabledOrchestratorTasks(args: { userId: string; sessionId: string }): Promise<number>;
   armTx(args: ArmProofRunArgs): Promise<{ run: ProofRun; taskId: string }>;
   /** The caller's environment, passed in. Only REMO_PROOF_MAX_* are read, and only at arm time. */
   env: Record<string, string | undefined>;
@@ -213,6 +216,13 @@ export async function armProof(args: ArmProofArgs, deps: ProofArmDeps): Promise<
     return refuse('other_repo_allowlisted', `the autospawn allowlist already holds another repo (${allowlist.filter((r) => r !== args.repoIdent).length}); it must be empty or exactly the target`);
   }
 
+  // 11. Exclusivity (QC round 1): the hub flags are global, so any OTHER enabled orchestrator
+  //     task would receive the ordinary dev macro once proof mode is on. Re-checked in the arm tx.
+  const otherTasks = await deps.countOtherEnabledOrchestratorTasks({ userId: args.userId, sessionId: args.sessionId });
+  if (otherTasks > 0) {
+    return refuse('other_orchestrator_task_enabled', `${otherTasks} other orchestrator task(s) are enabled (any user); proof mode is hub-global and exclusive - disable them first`);
+  }
+
   const summary: ArmSummary = {
     repoIdent: args.repoIdent,
     installationId: args.installationId,
@@ -266,7 +276,7 @@ export async function armProof(args: ArmProofArgs, deps: ProofArmDeps): Promise<
     return { ok: true, dryRun: false, summary: { ...summary, taskId, runId: run.id, branch: run.branch } };
   } catch (err) {
     const code = stateErrorCode(err);
-    if (code === 'other_repo_allowlisted' || code === 'proof_already_active') return refuse(code, `refused inside the arm transaction: ${code}`);
+    if (code === 'other_repo_allowlisted' || code === 'proof_already_active' || code === 'other_orchestrator_task_enabled') return refuse(code, `refused inside the arm transaction: ${code}`);
     throw err;
   }
 }
@@ -325,7 +335,7 @@ export interface ProofEnableDeps {
 
 export type EnableProofResult =
   | { ok: true; run: ProofRun; message: string }
-  | { ok: false; code: 'proof_not_armed'; detail: string };
+  | { ok: false; code: 'proof_not_armed' | 'other_orchestrator_task_enabled'; detail: string };
 
 export async function enableProof(args: { userId: string }, deps: ProofEnableDeps): Promise<EnableProofResult> {
   try {
@@ -337,7 +347,11 @@ export async function enableProof(args: { userId: string }, deps: ProofEnableDep
         'task enabled: the first tick spawns the build session for the armed repo. Watch the proof status endpoint; --disarm stops it.',
     };
   } catch (err) {
-    if (stateErrorCode(err) === 'proof_not_armed') return { ok: false, code: 'proof_not_armed', detail: 'no armed proof run to enable' };
+    const code = stateErrorCode(err);
+    if (code === 'proof_not_armed') return { ok: false, code: 'proof_not_armed', detail: 'no armed proof run to enable' };
+    if (code === 'other_orchestrator_task_enabled') {
+      return { ok: false, code: 'other_orchestrator_task_enabled', detail: 'another orchestrator task is enabled (any user); proof mode is exclusive - disable it first' };
+    }
     throw err;
   }
 }

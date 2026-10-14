@@ -71,7 +71,14 @@
    (`GET /repos/<owner>/<repo>/collaborators/<login>/permission`) and pass `--agent-login <login>` so
    the dry run records it. If you omit it, arm records `agent_permission = unverified` with a warning:
    the hub cannot read the agent credential, so this check is then the only control.
-7. **A supervisor online and a session bound to the repo** (the session's `repo_key` equals
+7. **Proof mode is hub-EXCLUSIVE: disable every other orchestrator task first.** The
+   `REMO_ORCHESTRATOR_*` flags are hub-global, so any other enabled orchestrator task (yours or
+   any other user's) would tick under them. `--dry-run`, arm and `--enable` all refuse with
+   `other_orchestrator_task_enabled` while any other enabled orchestrator task exists, and at
+   runtime the hub refuses every orchestrator dispatch that is not the claimed proof task
+   (`proof_mode_non_proof_task`). Verify before the dry run: zero enabled orchestrator tasks other
+   than the proof session's own.
+8. **A supervisor online and a session bound to the repo** (the session's `repo_key` equals
    `github://<owner>/<repo>`). The autospawn allowlist must be empty or hold exactly this repo.
 
 ## 4. The steps
@@ -110,6 +117,7 @@ a hosting provider.
    | `proof_protection_insufficient` | ruleset is not an accepted shape, or has a bypass actor | fix the ruleset, section 3 item 5 |
    | `agent_credential_is_admin` | the agent login is a repo admin and could edit the ruleset | section 3 item 6 |
    | `other_repo_allowlisted` | the autospawn allowlist holds another repo | empty it or target that repo |
+   | `other_orchestrator_task_enabled` | another orchestrator task (any user) is enabled; proof mode is hub-exclusive | disable it, section 3 item 7 |
    | `proof_already_active` | an armed or running proof already exists for this user | disarm it first |
 
 3. **Arm (data only).** Re-run the same command without `--dry-run`. In one transaction it creates
@@ -122,7 +130,7 @@ a hosting provider.
    This is an owner step; nothing in this repo performs it. Then redeploy the hub.
 
 5. **Verify idle safety.** `GET /api/orchestrator/proof` shows the run `armed`, no session spawned,
-   the task disabled. If anything differs, stop and roll back (section 5).
+   the task disabled, and zero enabled orchestrator tasks other than the proof task. If anything differs, stop and roll back (section 5).
 
 6. **GO.** The `--enable` command is the owner's final act:
 
