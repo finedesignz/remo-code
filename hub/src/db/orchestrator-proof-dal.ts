@@ -118,7 +118,23 @@ export interface ArmProofRunArgs extends ProofFrozenFields {
   scheduleRule: { interval: number; unit: string; start_at: string };
 }
 
-const proofLockKey = (userId: string) => 'proof-arm:' + userId;
+/**
+ * QC round 2 (codex new #1 / #2,#3): ONE hub-global transaction advisory lock for every proof
+ * state change (arm, disarm, enable) AND for the wire-send boundary (`withProofLock`). The REMO_*
+ * flags are hub-global, so exclusivity ("no other enabled orchestrator task") must be decided
+ * under a lock every user's arm/enable shares, and a send must not interleave with an arm/disarm
+ * commit. A per-user key let two users both observe zero enabled tasks and both enable.
+ */
+export const PROOF_LOCK_KEY = 'proof-lock:global';
+const takeProofLock = (tx: any) => tx`SELECT pg_advisory_xact_lock(hashtext(${PROOF_LOCK_KEY})::bigint)`;
+
+/** Run `fn` while holding the proof lock (held until `fn` settles; arm/disarm/enable wait). */
+export async function withProofLock<T>(fn: () => Promise<T>): Promise<T> {
+  return (sql as any).begin(async (tx: any) => {
+    await takeProofLock(tx);
+    return fn();
+  });
+}
 
 /**
  * QC round 1 (codex #1 / adversary MAJOR 1): the REMO_ORCHESTRATOR_* flags are hub-global, so
@@ -157,7 +173,7 @@ export async function armProofRunTx(rawArgs: ArmProofRunArgs): Promise<{ run: Pr
   const args: ArmProofRunArgs = { ...rawArgs, repoIdent };
   try {
     return await (sql as any).begin(async (tx: any) => {
-      await tx`SELECT pg_advisory_xact_lock(hashtext(${proofLockKey(args.userId)})::bigint)`;
+      await takeProofLock(tx);
 
       const allow = (await tx`
         SELECT repo_ident FROM orchestrator_autospawn_allowlist WHERE user_id = ${args.userId}
@@ -258,7 +274,7 @@ export async function disarmProofRunTx(args: { userId: string; detail?: string |
   { disarmed: false } | { disarmed: true; run: ProofRun }
 > {
   return (sql as any).begin(async (tx: any) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtext(${proofLockKey(args.userId)})::bigint)`;
+    await takeProofLock(tx);
     // QC round 1 (codex #3): the session kill switch is engaged BEFORE the terminal transition,
     // in the SAME transaction, so there is no committed state where the run is terminal but the
     // session can still be dispatched to (and a failure rolls both back).
@@ -291,7 +307,7 @@ export async function disarmProofRunTx(args: { userId: string; detail?: string |
 /** Enable: only an 'armed' run may have its task switched on (the owner's go). */
 export async function enableProofTaskTx(args: { userId: string }): Promise<{ run: ProofRun }> {
   return (sql as any).begin(async (tx: any) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtext(${proofLockKey(args.userId)})::bigint)`;
+    await takeProofLock(tx);
     const armed = (await tx`
       SELECT * FROM orchestrator_proof_runs WHERE user_id = ${args.userId} AND status = 'armed' LIMIT 1
     `) as ProofRun[];
