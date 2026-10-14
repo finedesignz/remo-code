@@ -154,6 +154,23 @@ describe('lifetime counter gate', () => {
     expect(await C.lifetimeCounterCheck(req())).toEqual({ ok: false, reason: 'lifetime_inject_exhausted:2>=2' })
   })
 
+  // PTYCAP-07 QC r1 (codex #2): a pre-launch reservation that took the cap-th slot must not
+  // block its OWN post-spawn dispatch. Same token + unreleased row = idempotent pass; a different
+  // token, or a released reservation, is still blocked at the cap.
+  test('at the cap, a request whose OWN token already holds an active reservation passes', async () => {
+    process.env.REMO_AUTOMATION_LIFETIME_INJECT_CAP = '2'
+    await reserve({ token: 'a' })
+    await reserve({ token: 'mine' }) // the cap-th reservation
+    expect(await C.lifetimeCounterCheck(req({ token: 'mine' }))).toEqual({ ok: true })
+    expect(await C.lifetimeCounterCheck(req({ token: 'other' }))).toEqual({
+      ok: false,
+      reason: 'lifetime_inject_exhausted:2>=2',
+    })
+    await C.releaseInject({ counterKey: 'task:T1', token: 'mine' })
+    await reserve({ token: 'b' })
+    expect((await C.lifetimeCounterCheck(req({ token: 'mine' }))).ok).toBe(false) // released: not honoured
+  })
+
   test('counts ONLY unreleased inject rows after the latest reset; page and reset rows never count', async () => {
     process.env.REMO_AUTOMATION_LIFETIME_INJECT_CAP = '3'
     await reserve({ token: 'a' })
