@@ -215,7 +215,7 @@ fix the CAUSE, and escalates to the human when it cannot.
 | 5. Throwaway-Repo Due→PR Proof | Not started |
 | 6. Hardening + Docs + Release | Not started |
 | 7. Unified Self-Heal Routing | Specced, not started (blocked on #346 + Phase 4) |
-| 8. Periodic Task QC + Optimization | Executed (10/10 plans) - PR pending QC |
+| 8. Periodic Task QC + Optimization | Executed (10/10 plans) - QC BLOCKED (1 open MAJOR), draft PR |
 | 9. Cap-Hit → QC Trigger | Specced, not started (blocked on Phases 4 + 8) |
 
 ## Dependency graph
