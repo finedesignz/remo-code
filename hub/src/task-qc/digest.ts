@@ -140,8 +140,10 @@ function renderProposal(f: Finding, baseUrl: string): Rendered {
       return {
         sentence,
         notes,
+        // detection reads target_id ?? session_id, so the stale id can sit in either column: rewrite
+        // whichever holds it (as the safe-fix writer does) and no-op if neither still does
         command: [
-          `UPDATE scheduled_tasks SET session_id = ${live}, target_id = ${live} WHERE id = ${idLit} AND session_id IS NOT DISTINCT FROM ${staleLit}`,
+          `UPDATE scheduled_tasks SET session_id = CASE WHEN session_id = ${staleLit} THEN ${live} ELSE session_id END, target_id = CASE WHEN target_id = ${staleLit} THEN ${live} ELSE target_id END WHERE id = ${idLit} AND (session_id = ${staleLit} OR target_id = ${staleLit})`,
         ],
       }
     }
