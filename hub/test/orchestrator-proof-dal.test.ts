@@ -20,6 +20,8 @@ beforeEach(() => {
   state.tasks = []
   state.rows = []
   state.allow = []
+  state.kill = []
+  state.queue = []
   state.ledger = []
   state.tokenUsage = []
   state.sessions = new Set()
@@ -174,6 +176,28 @@ describe('disarmProofRunTx', () => {
     await D.armProofRunTx(armArgs())
     await D.disarmProofRunTx({ userId: 'u1' })
     expect(await D.disarmProofRunTx({ userId: 'u1' })).toEqual({ disarmed: false })
+  })
+})
+
+describe('QC r1 arm halts the session and cancels pending cycles; enable releases the halt', () => {
+  test('arm engages the session kill switch and cancels ONLY pending routine cycles of that session', async () => {
+    state.queue.push({ session_id: 's1', status: 'pending' }, { session_id: 's1', status: 'running' }, { session_id: 'other', status: 'pending' })
+    await D.armProofRunTx(armArgs())
+    expect(state.kill).toEqual([expect.objectContaining({ scope: 'session', session_id: 's1', engaged: true })])
+    expect(state.queue.map((q) => q.status)).toEqual(['cancelled', 'running', 'pending'])
+  })
+
+  test('a refused arm engages nothing (rolled back)', async () => {
+    state.tasks.push({ id: 'foreign', user_id: 'x', session_id: 'sx', task_type: 'orchestrator', enabled: true, macro_task_type: 'dev' })
+    await expect(D.armProofRunTx(armArgs())).rejects.toMatchObject({ code: 'other_orchestrator_task_enabled' })
+    expect(state.kill).toEqual([])
+  })
+
+  test('enable releases the session halt of the armed run', async () => {
+    await D.armProofRunTx(armArgs())
+    expect(state.kill[0].engaged).toBe(true)
+    await D.enableProofTaskTx({ userId: 'u1' })
+    expect(state.kill[0].engaged).toBe(false)
   })
 })
 

@@ -22,6 +22,7 @@
 import { randomUUID } from 'node:crypto'
 import { sql } from '../db/postgres.ts'
 import type { DispatchGate, DispatchRequest } from './pipeline.ts'
+import { isProofEnabled } from '../orchestrator/proof-types.ts'
 
 // ── constants ────────────────────────────────────────────────────────────────
 export const AUTOMATION_KILL_SWITCH_GATE_NAME = 'automation_kill_switch'
@@ -551,9 +552,18 @@ export async function preSendGuard(
 /** Last halt check, immediately before deps.send (linearization, D-09c). */
 export async function finalHaltCheck(
   req: DispatchRequest,
+  opts: { proof?: boolean } = {},
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   const h = await isAutomationHalted({ userId: req.userId, sessionId: req.sessionId })
   if (h.halted) return { ok: false, reason: `automation_halted:${h.scope}` }
+  // PTYCAP-05 (QC r1): a proof gate list re-checks the ACTIVE proof-run identity here, so a
+  // disarm/terminal that committed after the gates ran, or a stale prompt replayed after an
+  // arm, never reaches send. Flag stack OFF = no import, no work.
+  if (opts.proof && isProofEnabled()) {
+    const { proofFinalCheck } = await import('../orchestrator/proof-gates.ts')
+    const p = await proofFinalCheck(req)
+    if (!p.ok) return p
+  }
   return { ok: true }
 }
 

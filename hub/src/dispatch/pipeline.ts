@@ -50,6 +50,10 @@ export interface DispatchRequest {
    *  populated from client input. dispatch() reserves against it atomically
    *  before the send when present. */
   counterKey?: string
+  /** PTYCAP-05 (QC r1): the proof run this dispatch was built for. Set ONLY by the server-side
+   *  orchestrator inject for a claimed proof run - never from client input. The proof gates and
+   *  the final pre-send check require an exact match with the ACTIVE run. */
+  proofRunId?: string
 }
 
 /** Pluggable pre-send gates, evaluated in order. First block wins. */
@@ -168,6 +172,8 @@ const DEFAULT_FINALIZE_TIMEOUT_MS = 20 * 60 * 1000
  * automation-controls / gates.ts names by hub/test/automation-controls-config.test.ts.
  */
 export const KILL_SWITCH_GATE_NAME = 'automation_kill_switch'
+/** Same literal as proof-gates PROOF_BUDGET_GATE_NAME (pinned by test): marks a proof gate list. */
+export const PROOF_BUDGET_GATE_LIST_NAME = 'proof_budget'
 export const SESSION_INJECT_RATE_GATE_NAME = 'session_inject_rate'
 
 // ── module-owned state ────────────────────────────────────────────────────────
@@ -280,6 +286,8 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
   // KILL_SWITCH_GATE_NAME). Hoisted so the lazy-start below can honour it.
   const machine = deps.gates.some((g) => g.name === KILL_SWITCH_GATE_NAME)
   const enforceRate = deps.gates.some((g) => g.name === SESSION_INJECT_RATE_GATE_NAME)
+  // QC r1: a list carrying the proof budget gate also re-checks proof-run identity right before send.
+  const proofGated = deps.gates.some((g) => g.name === PROOF_BUDGET_GATE_LIST_NAME)
   let controls: typeof import('./automation-controls.ts') | null = null
   let reserved = false
 
@@ -293,7 +301,7 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
       let refusal: string | null = null
       try {
         controls = await import('./automation-controls.ts')
-        const pre = await controls.finalHaltCheck(req)
+        const pre = await controls.finalHaltCheck(req, { proof: proofGated })
         if (!pre.ok) refusal = pre.reason
       } catch (err: any) {
         console.error(`[dispatch] pre-ensureOnline halt check failed (fail closed) token=${req.token}: ${err?.message ?? err}`)
@@ -400,7 +408,7 @@ export async function dispatch(req: DispatchRequest, deps: PipelineDeps): Promis
     // this turn. A halt releases the reservation, marks the opened run skipped and
     // frees the slot.
     if (machine && controls) {
-      const fh = await controls.finalHaltCheck(req)
+      const fh = await controls.finalHaltCheck(req, { proof: proofGated })
       if (!fh.ok) {
         activeBySession.delete(req.sessionId)
         if (reserved && req.counterKey) await controls.releaseInject({ counterKey: req.counterKey, token: req.token })

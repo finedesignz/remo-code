@@ -46,6 +46,10 @@ export interface ProofFakeState {
   ledger: FakeLedger[]
   tokenUsage: FakeTokenRow[]
   sessions: Set<string>
+  /** automation_kill_switch rows touched by arm / enable / disarm */
+  kill: Array<{ scope: string; user_id: string | null; session_id: string; reason: string; engaged: boolean }>
+  /** routine_queue rows (session_id, status) */
+  queue: Array<{ session_id: string; status: string }>
   /** throw when this predicate matches the statement text (error injection) */
   failOn: ((text: string) => boolean) | null
   statements: string[]
@@ -71,6 +75,8 @@ export function createProofFakeSql() {
     ledger: [],
     tokenUsage: [],
     sessions: new Set(),
+    kill: [],
+    queue: [],
     failOn: null,
     statements: [],
     unknown: [],
@@ -89,6 +95,23 @@ export function createProofFakeSql() {
 
     if (text.includes('pg_advisory_xact_lock')) {
       state.lockCalls++
+      return []
+    }
+
+    // ── halt / cancel (arm), release (enable) ──
+    if (text.includes('INSERT INTO automation_kill_switch')) {
+      const [userId, sessionId, reason] = values
+      if (!state.kill.some((k) => k.engaged && k.scope === 'session' && k.session_id === sessionId)) {
+        state.kill.push({ scope: 'session', user_id: userId, session_id: sessionId, reason, engaged: true })
+      }
+      return []
+    }
+    if (text.includes("UPDATE routine_queue SET status = 'cancelled'")) {
+      for (const q of state.queue) if (q.session_id === values[0] && q.status === 'pending') q.status = 'cancelled'
+      return []
+    }
+    if (text.includes('UPDATE automation_kill_switch SET engaged = false')) {
+      for (const k of state.kill) if (k.engaged && k.scope === 'session' && k.session_id === values[0]) k.engaged = false
       return []
     }
 
@@ -274,7 +297,7 @@ export function createProofFakeSql() {
   sql.json = (v: unknown) => v
   sql.begin = async (fn: (tx: any) => Promise<any>) => {
     state.beginCalls++
-    const snap = structuredClone({ runs: state.runs, tasks: state.tasks, rows: state.rows, allow: state.allow })
+    const snap = structuredClone({ runs: state.runs, tasks: state.tasks, rows: state.rows, allow: state.allow, kill: state.kill, queue: state.queue })
     try {
       const tx: any = tag
       tx.json = sql.json
@@ -284,6 +307,8 @@ export function createProofFakeSql() {
       state.tasks = snap.tasks
       state.rows = snap.rows
       state.allow = snap.allow
+      state.kill = snap.kill
+      state.queue = snap.queue
       throw err
     }
   }

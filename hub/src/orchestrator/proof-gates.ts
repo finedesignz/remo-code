@@ -71,6 +71,44 @@ function frozenOf(run: ProofRun): FrozenProtection {
   };
 }
 
+/**
+ * QC round 1 (codex #2): THE run-identity verdict, shared by the budget gate and the final
+ * pre-send check. A proof dispatch is authentic only when its SERVER-ONLY `proofRunId` equals the
+ * id of the ACTIVE run for the request. A prompt queued or parked before the arm (an ordinary dev
+ * prompt that carries the reusable `task:<id>` counter key) has no `proofRunId`, so it can never
+ * be authorized as proof traffic. Pure; null = authentic.
+ */
+export function proofIdentityRefusal(run: ProofRun | null, req: DispatchRequest): string | null {
+  // Exclusive proof mode: a dispatch that matches no proof run is some other task.
+  if (!run) return 'proof_mode_non_proof_task';
+  // D-02 pin: a proof task may only dispatch with its own task:<id> counter key.
+  if (req.counterKey !== run.counter_key || run.counter_key !== `task:${run.task_id}`) {
+    return 'lifetime_counter_key_missing';
+  }
+  // A parked/replayed send must not outlive the run.
+  if (!isActive(run)) return `proof_run_terminal:${run.outcome ?? run.status}`;
+  if (req.proofRunId !== run.id) return 'proof_run_mismatch';
+  return null;
+}
+
+/**
+ * The LAST proof check, called by finalHaltCheck immediately before deps.send (and before a
+ * lazy start): re-reads the run and re-applies the identity verdict, so a disarm / terminal that
+ * committed after the gate list ran still stops the send. Fail closed; flag stack OFF = ok.
+ */
+export async function proofFinalCheck(req: DispatchRequest, deps?: ProofGateDeps): Promise<GateResult> {
+  if (!isProofEnabled()) return { ok: true };
+  try {
+    const d = deps ?? (await realDeps());
+    const run = await d.findRun({ requestKey: req.counterKey ?? null, sessionId: req.sessionId });
+    const refusal = proofIdentityRefusal(run, req);
+    return refusal ? { ok: false, reason: refusal } : { ok: true };
+  } catch (err) {
+    console.error(`[proof-gates] final identity check failed (fail closed): ${(err as Error)?.message ?? err}`);
+    return { ok: false, reason: 'proof_budget_unverifiable' };
+  }
+}
+
 export function makeProofBudgetGate(deps?: ProofGateDeps): DispatchGate {
   return {
     name: PROOF_BUDGET_GATE_NAME,
@@ -79,16 +117,9 @@ export function makeProofBudgetGate(deps?: ProofGateDeps): DispatchGate {
       try {
         const d = deps ?? (await realDeps());
         const run = await d.findRun({ requestKey: req.counterKey ?? null, sessionId: req.sessionId });
-        // QC round 1: proof mode is EXCLUSIVE - an orchestrator dispatch that matches no proof run
-        // (some other task) is refused while the flag stack is ON.
-        if (!run) return { ok: false, reason: 'proof_mode_non_proof_task' };
-
-        // D-02 pin: a proof task may only dispatch with its own task:<id> counter key.
-        if (req.counterKey !== run.counter_key || run.counter_key !== `task:${run.task_id}`) {
-          return { ok: false, reason: 'lifetime_counter_key_missing' };
-        }
-        // A parked/replayed send must not outlive the run.
-        if (!isActive(run)) return { ok: false, reason: `proof_run_terminal:${run.outcome ?? run.status}` };
+        const refusal = proofIdentityRefusal(run, req);
+        if (refusal) return { ok: false, reason: refusal };
+        if (!run) return { ok: false, reason: 'proof_mode_non_proof_task' }; // narrows the type
 
         const now = d.now();
         const since = run.started_at ?? run.armed_at;
