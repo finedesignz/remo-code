@@ -7,10 +7,15 @@
 //
 // Never referenced from here: the capacity picker, the supervisor frame sender, the
 // online-agent-session lister, the launch function, the orchestrator-enabled predicate.
-// Autospawn, notifications and sources are later plans (07-06, 07-07).
+// 07-06 adds the owner notification (notify.ts) and the governed autospawn branch for an offline
+// candidate (governedLaunch with the heal pre-launch governor, one deadline timer, no polling).
+// Sources are a later plan (07-07).
 
 import { dispatch, type DispatchRequest, type DispatchOutcome, type PipelineDeps } from '../dispatch/pipeline.ts';
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts';
+import { governedLaunch } from '../dispatch/governed-launch.ts';
+import { REAL_AUTOSPAWN, type AutospawnDeps } from './autospawn-deps.ts';
+import { AUTOSPAWN_LAUNCH_COMMAND } from '../db/orchestrator-rows-dal.ts';
 import { automationKillSwitchGate, automationLifetimeCounterGate } from '../dispatch/automation-controls.ts';
 import { getChannel } from '../ws/registry.ts';
 import {
@@ -19,6 +24,7 @@ import {
   healMaxClaimsPerUserHour,
   healRetentionHours,
   healMaxPerRepoHour,
+  healSpawnTimeoutMs,
 } from './config.ts';
 import { buildHealKey } from './counter-key.ts';
 import { isCanonicalRepoIdent } from './repo-ident.ts';
@@ -28,6 +34,10 @@ import { parseHealEvent, outcomeToString, type HealEvent, type HealOutcome } fro
 import type { HealSink, HealTerminalOutcome, SinkFactory } from './sinks/types.ts';
 import type { ClaimHealArgs, ClaimHealResult, HealOutcomeExtra } from '../db/heal-events-dal.ts';
 import { notifyOnce, REAL_NOTIFY_DEPS, type NotifyDeps } from './notify.ts';
+
+export { REAL_AUTOSPAWN, type AutospawnDeps };
+
+const HEAL_ACTOR = 'self-heal';
 
 export interface HealDeps {
   now(): number;
@@ -41,6 +51,8 @@ export interface HealDeps {
   isChannelOnline(sessionId: string): boolean;
   /** Owner-notification seam (07-06). Defaults to the real claim + email sender. */
   notify?: NotifyDeps;
+  /** Governed autospawn collaborators (07-06). Defaults to REAL_AUTOSPAWN. */
+  autospawn?: AutospawnDeps;
 }
 
 /** Real collaborators. DB-touching ones are lazy so importing this module never loads the DB. */
@@ -90,7 +102,11 @@ async function persist(
 }
 
 /** The single pipeline builder. Exactly one gates literal exists under hub/src/heal. */
-function buildPipelineDeps(sink: HealSink, deps: HealDeps): PipelineDeps {
+function buildPipelineDeps(
+  sink: HealSink,
+  deps: HealDeps,
+  hooks?: Pick<PipelineDeps, 'replay' | 'onParkExpire'>,
+): PipelineDeps {
   return {
     // D-07: kill switch, threshold, cost cap, token cap, session inject rate, lifetime counter.
     gates: [
@@ -103,9 +119,10 @@ function buildPipelineDeps(sink: HealSink, deps: HealDeps): PipelineDeps {
     ],
     store: sink,
     isOnline: (req) => deps.isChannelOnline(req.sessionId),
-    // A heal turn carries per-event payload that would be stale later: it is never replayed.
-    replay: async (req) => sink.onParkExpire(req),
-    onParkExpire: (req) => sink.onParkExpire(req),
+    // A live-path heal turn carries per-event payload that would be stale later: it is never replayed.
+    // The autospawn branch supplies its own hooks (replay re-enters dispatch, expiry releases).
+    replay: hooks?.replay ?? (async (req) => sink.onParkExpire(req)),
+    onParkExpire: hooks?.onParkExpire ?? ((req) => sink.onParkExpire(req)),
     send: (req) => sink.send(req),
   };
 }
@@ -131,9 +148,10 @@ async function finalizeNonLive(
   sink: HealSink | null,
   outcome: HealOutcome,
   extra: HealOutcomeExtra = {},
+  sinkOutcome?: HealTerminalOutcome,
 ): Promise<HealOutcome> {
   await persist(deps, eventId, outcome, extra);
-  await terminalize(sink, outcome as HealTerminalOutcome);
+  await terminalize(sink, sinkOutcome ?? (outcome as HealTerminalOutcome));
   const notified = await notifyOnce(eventId, event, outcomeReason(outcome), deps.notify ?? REAL_NOTIFY_DEPS);
   return outcome.kind === 'no_routable_session' ? { ...outcome, notified } : outcome;
 }
@@ -144,6 +162,194 @@ async function isHealDerived(event: HealEvent, deps: HealDeps): Promise<boolean>
     if (runId && (await deps.isHealGenerated(runId))) return true;
   }
   return false;
+}
+
+/** The dispatch request for a resolved target. The ONLY place the lifetime key is attached (AM-F4-3). */
+function buildRequest(event: HealEvent, target: { sessionId: string; repoIdent: string }, eventId: string): DispatchRequest {
+  return {
+    userId: event.user_id,
+    sessionId: target.sessionId,
+    token: `heal:${eventId}`,
+    prompt: withScopeContract(asciiPunctuation(event.prompt)),
+    images: event.images,
+    counterKey: buildHealKey(event.user_id, target.repoIdent),
+  };
+}
+
+/**
+ * Stamp the lifetime reservation for a heal event released. The only exported place that names
+ * the lifetime key, so the boot sweep can free a reservation stranded by a restart.
+ */
+export async function releaseHealReservation(
+  userId: string,
+  repoIdent: string,
+  eventId: string,
+  autospawn: Pick<AutospawnDeps, 'release'> = REAL_AUTOSPAWN,
+): Promise<void> {
+  await autospawn.release({ counterKey: buildHealKey(userId, repoIdent), token: `heal:${eventId}` });
+}
+
+/** Map a pipeline outcome for a request delivered after a spawn into a non-live outcome. */
+function mapAfterSpawn(result: DispatchOutcome): HealOutcome {
+  switch (result.kind) {
+    case 'dropped_busy':
+      return { kind: 'refused', reason: 'session_busy' };
+    case 'skipped':
+      return { kind: 'refused', reason: result.reason };
+    case 'failed':
+      return { kind: 'failed', reason: result.reason };
+    default:
+      return { kind: 'failed', reason: 'reconnect_not_online' };
+  }
+}
+
+/**
+ * SH-04: heal an OFFLINE candidate through the shared governed adapter. Gates, the atomic lifetime
+ * reservation and the ledger row all run BEFORE the spawn. After a launch the request is parked
+ * through the single dispatch pipeline; ONE deadline timer bounds the wait, and the reservation is
+ * released on every failure path. Process-local state only: the boot sweep covers a restart.
+ */
+async function autospawnHeal(
+  deps: HealDeps,
+  event: HealEvent,
+  target: { sessionId: string; repoIdent: string },
+  eventId: string,
+  sink: HealSink,
+): Promise<HealOutcome> {
+  const a = deps.autospawn ?? REAL_AUTOSPAWN;
+  const req = buildRequest(event, target, eventId);
+  const extra = { sessionId: target.sessionId, repoIdent: target.repoIdent };
+  const release = async () => {
+    try {
+      await releaseHealReservation(event.user_id, target.repoIdent, eventId, a);
+    } catch (err) {
+      log(`reservation release failed id=${eventId}: ${errMsg(err)}`);
+    }
+  };
+
+  let settled = false;
+  let timer: unknown = null;
+  const disarm = () => {
+    if (timer != null) a.clearTimer(timer);
+    timer = null;
+  };
+  const expire = async (ledgerReason: string, sinkReason: string) => {
+    if (settled) return;
+    settled = true;
+    disarm();
+    await release();
+    await finalizeNonLive(
+      deps,
+      event,
+      eventId,
+      sink,
+      { kind: 'failed', reason: ledgerReason },
+      extra,
+      { kind: 'failed', reason: sinkReason },
+    );
+  };
+  /** Outcome of a request that was actually dispatched after the spawn; null = delivered. */
+  const afterDispatch = async (result: DispatchOutcome): Promise<HealOutcome | null> => {
+    if (result.kind === 'dispatched' || result.kind === 'queued') {
+      try {
+        await deps.setOutcome(eventId, 'dispatched_after_spawn', {
+          ...extra,
+          dispatchRunId: result.kind === 'dispatched' ? result.runId : null,
+        });
+      } catch (err) {
+        log(`setOutcome failed id=${eventId}: ${errMsg(err)}`); // the turn was delivered; never fail it
+      }
+      return null;
+    }
+    await release();
+    return finalizeNonLive(deps, event, eventId, sink, mapAfterSpawn(result), extra);
+  };
+
+  const pdeps: PipelineDeps = buildPipelineDeps(sink, deps, {
+    // The parked turn can be minutes stale: it re-enters dispatch() and is fully re-gated. A replay
+    // after the deadline (settled) delivers nothing.
+    replay: async (r) => {
+      if (settled) return;
+      settled = true;
+      disarm();
+      try {
+        await afterDispatch(await deps.dispatch(r ?? req, pdeps));
+      } catch (err) {
+        log(`replay failed id=${eventId}: ${errMsg(err)}`);
+        await release();
+        await finalizeNonLive(deps, event, eventId, sink, { kind: 'failed', reason: `heal_replay_error: ${errMsg(err)}` }, extra);
+      }
+    },
+    onParkExpire: () => expire('grace_expired', 'heal_grace_expired'),
+  });
+
+  const launched = await governedLaunch(
+    {
+      userId: event.user_id,
+      sessionId: target.sessionId,
+      repoIdent: target.repoIdent,
+      tz: await a.tzForUser(event.user_id),
+      armed: a.armed(),
+      ledger: {
+        repoKey: target.repoIdent,
+        command: AUTOSPAWN_LAUNCH_COMMAND,
+        rationale: () => `self-heal event ${eventId}`,
+      },
+      preLaunch: {
+        checkGates: () => a.checkGates(req, pdeps.gates),
+        reserve: () =>
+          a.reserve({
+            userId: event.user_id,
+            sessionId: target.sessionId,
+            token: req.token,
+            counterKey: req.counterKey as string,
+            actor: HEAL_ACTOR,
+            enforceRate: true,
+          }),
+        release,
+      },
+    },
+    a,
+  );
+
+  let kind: 'autospawn_launched' | 'autospawn_parked';
+  switch (launched.kind) {
+    case 'refused': {
+      const outcome: HealOutcome =
+        launched.reason === 'disabled'
+          ? { kind: 'no_routable_session', reason: 'autospawn_not_armed', notified: false }
+          : launched.reason === 'not_allowlisted' || launched.reason === 'supervisor_offline'
+            ? { kind: 'no_routable_session', reason: launched.reason, notified: false }
+            : { kind: 'refused', reason: launched.reason };
+      return finalizeNonLive(deps, event, eventId, sink, outcome, extra);
+    }
+    case 'failed':
+      return finalizeNonLive(deps, event, eventId, sink, { kind: 'failed', reason: launched.reason }, extra);
+    case 'in_flight':
+      kind = 'autospawn_parked';
+      break;
+    case 'launched':
+      kind = 'autospawn_launched';
+      break;
+  }
+
+  // Launched (or already in flight): the ledger outcome first so a crash is recoverable by the
+  // boot sweep, then ONE deadline timer, then park through the single pipeline.
+  await persist(deps, eventId, { kind }, extra);
+  timer = a.setTimer(() => void expire('spawn_timeout', 'heal_spawn_timeout'), healSpawnTimeoutMs());
+  let result: DispatchOutcome;
+  try {
+    result = await deps.dispatch(req, pdeps);
+  } catch (err) {
+    settled = true;
+    disarm();
+    await release();
+    throw err; // D-06: the outer handler terminalizes as failed and notifies once
+  }
+  if (result.kind === 'parked_offline') return { kind };
+  settled = true;
+  disarm();
+  return (await afterDispatch(result)) ?? { kind };
 }
 
 export async function routeHeal(input: unknown, deps: HealDeps = REAL_DEPS): Promise<HealOutcome> {
@@ -207,16 +413,9 @@ export async function routeHeal(input: unknown, deps: HealDeps = REAL_DEPS): Pro
     eventId = claim.id;
     const sink = await sinkFor(eventId);
 
-    if (target.kind !== 'routable_live') {
-      const outcome: HealOutcome = {
-        kind: 'no_routable_session',
-        reason: target.kind === 'none' ? target.reason : 'session_offline',
-        notified: false,
-      };
-      return finalizeNonLive(deps, event, eventId, sink, outcome, {
-        repoIdent,
-        sessionId: target.kind === 'none' ? null : target.sessionId,
-      });
+    if (target.kind === 'none') {
+      const outcome: HealOutcome = { kind: 'no_routable_session', reason: target.reason, notified: false };
+      return finalizeNonLive(deps, event, eventId, sink, outcome, { repoIdent, sessionId: null });
     }
 
     // Per-repo hourly bound (AM-F4-4): a fresh session cannot be seen by the session-keyed rate gate.
@@ -228,15 +427,10 @@ export async function routeHeal(input: unknown, deps: HealDeps = REAL_DEPS): Pro
       });
     }
 
-    const req: DispatchRequest = {
-      userId: event.user_id,
-      sessionId: target.sessionId,
-      token: `heal:${eventId}`,
-      prompt: withScopeContract(asciiPunctuation(event.prompt)),
-      images: event.images,
-      // AM-F4-3: the ONLY place the lifetime key is attached; derived from the owned session.
-      counterKey: buildHealKey(event.user_id, target.repoIdent),
-    };
+    // SH-04: an offline candidate goes through the governed autospawn branch, never a live dispatch.
+    if (target.kind === 'offline_candidate') return await autospawnHeal(deps, event, target, eventId, sink);
+
+    const req = buildRequest(event, target, eventId);
     const result = await deps.dispatch(req, buildPipelineDeps(sink, deps));
 
     let outcome: HealOutcome;

@@ -237,7 +237,9 @@ describe('structure', () => {
     for (const f of files) {
       const src = readFileSync(f, 'utf8')
       literals += (src.match(/gates:/g) ?? []).length
-      expect(src).not.toMatch(/pickSessionTarget|sendToSupervisor|launchSessionForUser|listOnlineAgentSessionsForUser|isOrchestratorEnabled|resolveRepoKeyedAgentSession/)
+      // autospawn-deps.ts (07-06) holds the one launch pass-through handed to governedLaunch
+      const launchName = f.endsWith("autospawn-deps.ts") ? "" : "launchSessionForUser|"
+      expect(src).not.toMatch(new RegExp(`pickSessionTarget|sendToSupervisor|${launchName}listOnlineAgentSessionsForUser|isOrchestratorEnabled|resolveRepoKeyedAgentSession`))
     }
     expect(literals).toBe(1)
     expect(readFileSync(join(root, 'route.ts'), 'utf8')).toContain('gates:')
