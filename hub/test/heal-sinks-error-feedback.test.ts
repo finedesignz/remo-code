@@ -90,12 +90,35 @@ function fakeSend() {
   }
 }
 
-async function ecSink(send = fakeSend()) {
-  const sink = await buildErrorCaptureSink(ecEvent, { eventId: 'ev1' }, {
+/** A once-per-event claim, the way the heal_events conditional UPDATE behaves. */
+function fakeNotify() {
+  const claimed = new Set<string>()
+  const out = { sends: [] as any[], claims: [] as string[] }
+  return {
+    out,
+    deps: {
+      claim: async (id: string) => {
+        out.claims.push(id)
+        if (claimed.has(id)) return false
+        claimed.add(id)
+        return true
+      },
+      resolveOwnerEmail: async () => 'o@x.com',
+      send: async (m: any) => {
+        out.sends.push(m)
+        return true
+      },
+    },
+  }
+}
+
+async function ecSink(send = fakeSend(), notify = fakeNotify(), eventId: string | null = 'ev1') {
+  const sink = await buildErrorCaptureSink(ecEvent, { eventId }, {
     load: async () => ({ project: PROJECT, error: { error_type: 'TypeError', error_value: 'boom' } }),
     send: send.deps,
+    notify: notify.deps,
   })
-  return { sink, send }
+  return { sink, send, notify }
 }
 
 beforeEach(() => {
@@ -167,6 +190,36 @@ describe('error-capture sink', () => {
     const id = await sink.open!(REQ as any)
     await sink.markFailed(id!, 'socket gone')
     expect(state.notified).toEqual([])
+  })
+
+  test('QC r2: a DEFERRED send failure (queued turn promoted later) notifies the owner exactly once via the heal claim', async () => {
+    const { sink, notify } = await ecSink()
+    const id = await sink.open!(REQ as any)
+    await sink.markFailed(id!, 'socket gone')
+    expect(notify.out.claims).toEqual(['ev1'])
+    expect(notify.out.sends).toHaveLength(1)
+    expect(notify.out.sends[0].text).toContain('agent_send: socket gone')
+    // routeHeal reporting the same failure afterwards loses the claim: still one notification
+    const { notifyOnceDetailed } = await import('../src/heal/notify.ts')
+    await notifyOnceDetailed('ev1', ecEvent, 'socket gone', notify.deps)
+    expect(notify.out.sends).toHaveLength(1)
+    expect(state.notified).toEqual([]) // the legacy throttled notifier stays off
+  })
+
+  test('QC r2: a deferred skip (session_busy at promotion) notifies once; a repeat does not', async () => {
+    const { sink, notify } = await ecSink()
+    await sink.markSkipped('heal:ev1', 'session_busy')
+    await sink.markSkipped('heal:ev1', 'session_busy')
+    expect(notify.out.sends).toHaveLength(1)
+    expect(notify.out.sends[0].text).toContain('session_busy')
+  })
+
+  test('QC r2: no ledger event id (no claim possible) sends nothing and does not throw', async () => {
+    const { sink, notify } = await ecSink(fakeSend(), fakeNotify(), null)
+    const id = await sink.open!(REQ as any)
+    await sink.markFailed(id!, 'boom')
+    expect(notify.out.claims).toEqual([])
+    expect(notify.out.sends).toEqual([])
   })
 
   test('the LEGACY store (flag OFF dispatcher, notify default) still sends both throttled notices; notify:false silences both', async () => {
