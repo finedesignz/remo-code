@@ -15,7 +15,7 @@
 import { isValidTimezone } from '../scheduler/cron.ts'
 import { isAuditable } from './detectors.ts'
 import { randomUUID } from 'node:crypto'
-import { evidenceSig, insertFinding, type QueryRunner } from './findings.ts'
+import { evidenceSig, insertFinding, type DeadlineArmer, type QueryRunner } from './findings.ts'
 import type { AuditTaskInput, Finding, Proposal, SafeFixKind } from './types.ts'
 
 // ---------------------------------------------------------------------------
@@ -66,6 +66,8 @@ export interface ApplyContext {
   /** YYYY-MM-DD in the owner's timezone (findings.userDay) */
   day: string
   finding: Finding
+  /** arms the remaining pass time as the transaction's statement_timeout (F1-A3); the engine always passes it */
+  armTimeout?: DeadlineArmer
 }
 
 /** The database client: a query runner that can open a transaction. */
@@ -178,10 +180,16 @@ async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promis
   const kind = fix.kind
   assertFixArguments(fix)
   return db.begin(async (tx) => {
-    // 1. row lock, scoped by id AND owner; serialises every writer for this task
+    // 0. the database cancels a statement blocked past the pass deadline (before any lock wait)
+    if (ctx.armTimeout) await ctx.armTimeout(tx)
+    // 1. row lock, scoped by id AND owner; serialises every writer for this task.
+    // FOR NO KEY UPDATE (not FOR UPDATE): it still conflicts with every other writer of the row,
+    // but not with the FOR KEY SHARE an FK check takes when a run for this task is inserted, so
+    // the lock order below (row, then session) cannot deadlock against the run-insert trigger
+    // (session lock, then FK check on the task row).
     const rows = await tx`
       SELECT id, user_id, name, task_type, enabled, schedule_kind, timezone, payload, session_id, target_kind, target_id
-      FROM scheduled_tasks WHERE id = ${ctx.taskId} AND user_id = ${ctx.userId} FOR UPDATE`
+      FROM scheduled_tasks WHERE id = ${ctx.taskId} AND user_id = ${ctx.userId} FOR NO KEY UPDATE`
     const row = rows[0]
     // 2. write-time audit-set re-check (F2-B7): never trust the finding
     if (!row || !isAuditable(row as AuditTaskInput)) return { status: 'refused_not_auditable', fixKind: kind, rowsWritten: 0 }
@@ -189,6 +197,11 @@ async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promis
     if (!preconditionHolds(fix, row)) return { status: 'noop_changed', fixKind: kind, rowsWritten: 0 }
     // 4. in-flight refusal (D-16): database truth only
     const sid: string | null = row.target_id ?? row.session_id ?? null
+    // The probe below is only atomic with the write if run creation for that session is serialised
+    // against it: scheduled_task_runs has a BEFORE INSERT trigger taking the same transaction-level
+    // advisory lock (key 'taskqc-session:' || session_id), so a run for ANY task on this session
+    // either committed before the probe (and is seen) or waits until this transaction ends.
+    if (sid != null) await tx`SELECT pg_advisory_xact_lock(hashtext(${'taskqc-session:' + sid})::bigint)`
     const own = await tx`
       SELECT 1 AS open FROM scheduled_task_runs
       WHERE task_id = ${ctx.taskId} AND status IN ('running','pending','in_flight') AND finished_at IS NULL AND completed_at IS NULL

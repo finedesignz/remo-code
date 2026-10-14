@@ -76,7 +76,7 @@ beforeEach(() => {
   fake.onSelect(/FROM users/, () => [{ timezone: 'America/Los_Angeles' }])
   fake.onSelect(/FROM scheduled_tasks t/, () => siblings)
   // writer
-  fake.onSelect(/FROM scheduled_tasks WHERE id = \? AND user_id = \? FOR UPDATE/, (v) => (store[v[0]] ? [store[v[0]]] : []))
+  fake.onSelect(/FROM scheduled_tasks WHERE id = \? AND user_id = \? FOR NO KEY UPDATE/, (v) => (store[v[0]] ? [store[v[0]]] : []))
   fake.onSelect(/FROM scheduled_task_runs WHERE task_id = \? AND status IN/, (v) => (openRuns.has(v[0]) ? [{ open: 1 }] : []))
   fake.onSelect(/FROM scheduled_task_runs WHERE session_id = \? AND status IN/, () => [])
   fake.on(/^UPDATE scheduled_tasks SET timezone/, (v) => [{ timezone: v[0] }])
@@ -184,7 +184,9 @@ describe('auto-fix on', () => {
     // the timezone fix targets the owner's profile timezone
     expect(taskUpdates().find((u) => /SET timezone/.test(u.text))!.values[0]).toBe('America/Los_Angeles')
     expect(fake.state.statements.filter((s) => s.kind === 'insert' && s.values.includes('auto_fixed'))).toHaveLength(3)
-    expect(fake.state.lockCalls).toBe(1) // the detection read takes the per-user lock when writes can follow
+    // the detection read takes the per-user lock when writes can follow, and each of the 3 fixes the per-session lock
+    expect(fake.state.statements.filter((s) => s.kind === 'lock' && s.values[0] === `taskqc:${USER}`)).toHaveLength(1)
+    expect(fake.state.lockCalls).toBe(4)
     fake.assertNoUnknown()
   })
 

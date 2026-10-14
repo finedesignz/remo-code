@@ -14,7 +14,7 @@ export interface Recorded {
   text: string
   kind: StatementKind
   values: any[]
-  /** the statement contains FOR UPDATE */
+  /** the statement contains FOR UPDATE / FOR NO KEY UPDATE */
   forUpdate: boolean
   /** which transaction (0 = top level, n = nth begin()) */
   tx: number
@@ -77,7 +77,7 @@ export function createTaskQcFakeSql() {
   function run(strings: TemplateStringsArray, values: any[]): any[] {
     const text = strings.join('?').replace(/\s+/g, ' ').trim()
     const kind = classify(text)
-    state.statements.push({ text, kind, values, forUpdate: /\bFOR\s+UPDATE\b/i.test(text), tx: currentTx })
+    state.statements.push({ text, kind, values, forUpdate: /\bFOR\s+(NO\s+KEY\s+)?UPDATE\b/i.test(text), tx: currentTx })
     if (kind === 'lock') state.lockCalls++
     if (kind === 'set_local') state.setLocalCalls++
     const fail = failures.find((f) => matches(f.pattern, text))
