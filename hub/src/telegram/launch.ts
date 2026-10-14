@@ -93,6 +93,20 @@ export async function launchSessionForUser(args: {
    */
   machine?: true
 }): Promise<LaunchResult> {
+  // AM-F1-4: the supervisor run reserved below; closed on EVERY non-launch exit after the
+  // reservation (send_failed, halt unwind, any throw) so a failed spawn cannot leak a slot.
+  let reservedRunId: string | null = null
+  const closeReservedRun = async (reason: string): Promise<void> => {
+    const id = reservedRunId
+    if (!id) return
+    reservedRunId = null
+    try {
+      const { endRun } = await import('../db/supervisor-dal.ts')
+      await endRun(id, null, reason)
+    } catch (e: any) {
+      console.error(`[telegram-launch] endRun failed run=${id}: ${e?.message ?? e}`)
+    }
+  }
   try {
     if (args.machine) {
       const halt = await isAutomationHalted({ userId: args.userId, sessionId: args.sessionId })
@@ -185,6 +199,7 @@ export async function launchSessionForUser(args: {
     }
 
     const run = reservation.run
+    reservedRunId = run.id
     await updateSupervisorState(pick.supervisorId, 'starting', run.id)
 
     const skipPerms = await getSessionSkipPermissions(session.id, args.userId)
@@ -194,12 +209,7 @@ export async function launchSessionForUser(args: {
     if (args.machine) {
       const pre = await haltBeforeMachineSend({ userId: args.userId, sessionId: args.sessionId })
       if (!pre.ok) {
-        try {
-          const { endRun } = await import('../db/supervisor-dal.ts')
-          await endRun(run.id, null, pre.reason)
-        } catch (err: any) {
-          console.error(`[telegram-launch] halt unwind endRun failed run=${run.id}: ${err?.message ?? err}`)
-        }
+        await closeReservedRun(pre.reason)
         return { ok: false, reason: `automation_halted:${pre.scope}` }
       }
     }
@@ -217,6 +227,7 @@ export async function launchSessionForUser(args: {
         dangerously_skip_permissions: skipPerms,
       } as any)
     } catch (err: any) {
+      await closeReservedRun('send_failed')
       return { ok: false, reason: 'send_failed', error: err?.message ?? String(err) }
     }
 
@@ -228,6 +239,7 @@ export async function launchSessionForUser(args: {
       repoPath: session.project_dir,
     }
   } catch (err: any) {
+    await closeReservedRun('internal_error')
     return { ok: false, reason: 'internal_error', error: err?.message ?? String(err) }
   }
 }
