@@ -75,7 +75,7 @@ function run(over: Partial<ProofRun> = {}): ProofRun {
 }
 
 const req = (over: Partial<DispatchRequest> = {}): DispatchRequest =>
-  ({ userId: 'u1', sessionId: 's1', token: 'tok', prompt: 'p', counterKey: 'task:t1', ...over }) as DispatchRequest
+  ({ userId: 'u1', sessionId: 's1', token: 'tok', prompt: 'p', counterKey: 'task:t1', proofRunId: 'r1', ...over }) as DispatchRequest
 
 interface Spy extends ProofGateDeps {
   calls: string[]

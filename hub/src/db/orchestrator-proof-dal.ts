@@ -193,6 +193,19 @@ export async function armProofRunTx(args: ArmProofRunArgs): Promise<{ run: Proof
       // orchestrator task left is a DIFFERENT one that the global flags would also tick.
       await assertNoOtherEnabledOrchestratorTask(tx, taskId);
 
+      // QC round 1 (codex #2): HALT the session and invalidate pending work BEFORE the reused
+      // task is ever proof-owned. The session kill switch makes every in-flight / parked / queued
+      // dispatch for it fail the kill-switch gate and the final pre-send halt check; --enable
+      // releases it. Pending routine cycles for the session are cancelled. (A queued or grace
+      // request in the hub's memory cannot be reached from this process: it is invalidated by
+      // the exact proofRunId match, which an ordinary dev prompt can never satisfy.)
+      await tx`
+        INSERT INTO automation_kill_switch (scope, user_id, session_id, reason, engaged_by)
+        VALUES ('session', ${args.userId}, ${args.sessionId}, 'proof armed: session halted until --enable', 'arm-orchestrator-proof')
+        ON CONFLICT DO NOTHING
+      `;
+      await tx`UPDATE routine_queue SET status = 'cancelled' WHERE session_id = ${args.sessionId} AND status = 'pending'`;
+
       await tx`
         INSERT INTO orchestrator_rows (task_id, command, enabled, schedule_rule, sort_order)
         VALUES (${taskId}, 'proof', true, ${tx.json(args.scheduleRule as any)}, 0)
@@ -268,6 +281,12 @@ export async function enableProofTaskTx(args: { userId: string }): Promise<{ run
     `) as ProofRun[];
     if (armed.length === 0) throw new ProofStateError('proof_not_armed');
     await assertNoOtherEnabledOrchestratorTask(tx, armed[0].task_id);
+    // Release the session halt the arm engaged (and any stale one a prior terminal left).
+    await tx`
+      UPDATE automation_kill_switch
+         SET engaged = false, released_by = 'arm-orchestrator-proof', released_at = now()
+       WHERE engaged = true AND scope = 'session' AND session_id = ${armed[0].session_id}
+    `;
     await tx`UPDATE scheduled_tasks SET enabled = true WHERE id = ${armed[0].task_id} AND user_id = ${args.userId}`;
     return { run: armed[0] };
   });
