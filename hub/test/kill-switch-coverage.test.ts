@@ -153,6 +153,20 @@ describe('kill switch covers every machine-initiated dispatch list', () => {
     expect(offenders).toEqual([])
   })
 
+  // PTYCAP-05 (D-15): the proof budget + protection gates ride BOTH orchestrator lists,
+  // immediately after the kill switch (index 1 and 2), counter still last.
+  test('PTYCAP-05: both orchestrator/inject.ts lists carry proofBudgetGate at index 1 and proofProtectionGate at index 2', () => {
+    const inject = gateLists().lists.filter((g) => g.file === 'orchestrator/inject.ts')
+    // non-vacuous self-check: fewer than two lists means the scanner lost the target
+    expect(inject).toHaveLength(2)
+    for (const g of inject) {
+      expect(headName(g.elements[1] ?? ''), `index 1 of ${g.list.trim()}`).toBe('proofBudgetGate')
+      expect(headName(g.elements[2] ?? ''), `index 2 of ${g.list.trim()}`).toBe('proofProtectionGate')
+      expect(headName(g.elements[0] ?? '')).toBe(KILL)
+      expect(headName(g.elements[g.elements.length - 1] ?? '')).toBe(COUNTER)
+    }
+  })
+
   test('HUMAN lists exist and carry NO kill-switch (humans keep working during a halt)', () => {
     const { lists } = gateLists()
     for (const file of Object.keys(HUMAN)) {

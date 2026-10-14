@@ -17,6 +17,9 @@ afterEach(() => {
 
 const EXPECTED_GATES = [
   'automation_kill_switch',
+  // PTYCAP-05 (D-15): the proof gates sit directly after the kill switch.
+  'proof_budget',
+  'proof_protection',
   'threshold',
   'daily_cost_cap',
   'daily_token_cap',
