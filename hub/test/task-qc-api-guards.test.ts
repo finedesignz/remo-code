@@ -297,6 +297,36 @@ describe('PATCH: only enabled, a validated cadence and a valid timezone', () => 
     expect(((stubUpdate.mock.calls[0] as any[])[2]).cron_expr).toBe('30 3 * * *')
   })
 
+  describe('PATCH cannot convert another task into task_qc (QC round 1 MAJOR, all three seats)', () => {
+    const attempts: Array<[string, Record<string, unknown>]> = [
+      ['plain type flip', { task_type: 'task_qc' }],
+      ['with a sub-hour cadence (cadence floor bypass)', { task_type: 'task_qc', cron_expr: '* * * * *' }],
+      ['with a once schedule', { task_type: 'task_qc', schedule_kind: 'once', run_at: '2030-01-01T00:00:00Z' }],
+      ['with other free fields', { task_type: 'task_qc', name: 'x', prompt: 'p', enabled: true }],
+    ]
+    for (const [label, body] of attempts) {
+      test(`${label}: 400 task_qc_machine_seeded, no update, no re-arm`, async () => {
+        const res = await call('PATCH', '/dev-1', body)
+        expect(res.status).toBe(400)
+        expect(((await res.json()) as any).error).toBe('task_qc_machine_seeded')
+        expect(stubUpdate).not.toHaveBeenCalled()
+        expect(regReplace).not.toHaveBeenCalled()
+        expect(regRegister).not.toHaveBeenCalled()
+      })
+    }
+
+    test('re-sending task_qc on the real task_qc row is not the conversion (still the locked-field path)', async () => {
+      const res = await call('PATCH', '/qc-1', { task_type: 'task_qc', enabled: false })
+      expect(res.status).toBe(200)
+      expect(stubUpdate).toHaveBeenCalledTimes(1)
+    })
+
+    test('ordinary type changes between non-qc types are untouched', async () => {
+      const res = await call('PATCH', '/dev-1', { task_type: 'dev' })
+      expect(res.status).toBe(200)
+    })
+  })
+
   test('non-task_qc rows keep the generic PATCH behavior (rename recompute, free fields)', async () => {
     const res = await call('PATCH', '/dev-1', { payload: { prompt: 'new' }, cron_expr: '*/5 * * * *' })
     expect(res.status).toBe(200)
