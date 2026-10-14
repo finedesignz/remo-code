@@ -1682,6 +1682,9 @@ CREATE TABLE IF NOT EXISTS heal_events (
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- PTYCAP-07 QC r1: minimal validated source context (e.g. error_id/project_id) so the stale-launch
+-- sweep can rebuild the per-event sink. Additive, nullable, never backfilled.
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS recovery_ctx JSONB;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_heal_events_bucket
   ON heal_events(user_id, source, dedupe_key, window_bucket);
 -- A run can trigger at most one heal event, ever.

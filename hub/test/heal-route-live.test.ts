@@ -95,7 +95,6 @@ function mkDeps(over: Partial<HealDeps> = {}) {
       rec.outcomes.push([id, outcome, extra])
     },
     isHealGenerated: async () => false,
-    countRepoDispatches: async () => 0,
     makeSink: () => fakeSink(rec),
     dispatch: async (req, pdeps) => {
       rec.dispatchCalls.push({ req, pdeps })

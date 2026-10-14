@@ -66,7 +66,6 @@ function mkDeps(over: Partial<HealDeps> = {}) {
       rec.outcomes.push(o)
     },
     isHealGenerated: async () => false,
-    countRepoDispatches: async () => 0,
     makeSink: () => {
       let done = false
       const sink: HealSink = {
@@ -155,7 +154,7 @@ describe('fail-fast terminal path (SH-05)', () => {
   test('refused (repo rate bound) and failed (route error) outcomes with a ledger row notify once each', async () => {
     const a = mkDeps({
       resolve: async () => ({ kind: 'routable_live', sessionId: 's1', repoIdent: REPO }),
-      countRepoDispatches: async () => 99,
+      claim: async () => ({ ok: true, id: 'ev1', repoRateBound: true }),
     })
     expect((await routeHeal(event(), a.deps)).kind).toBe('refused')
     expect(a.rec.sends.length).toBe(1)

@@ -203,7 +203,6 @@ function harness(opts: { sessions?: Sess[]; armed?: boolean; allowlisted?: boole
       rec.outcomes.push(o)
     },
     isHealGenerated: async () => false,
-    countRepoDispatches: async () => 0,
     makeSink: (event, ctx) =>
       sinkFor(event, ctx, {
         errorCapture: {

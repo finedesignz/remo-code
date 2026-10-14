@@ -6,6 +6,10 @@
  *   cannot split a storm - the flaw in claimDeployFailure's prev-bucket SELECT),
  *   enforces the per-user hourly claim cap, then INSERTs. The unique indexes in
  *   schema.sql are only the backstop. Any throw propagates: callers fail closed.
+ * - The per-repository hourly and per-task daily ceilings are enforced INSIDE the claim
+ *   transaction, after the per-user advisory lock: every claim of one user is serialized from
+ *   that lock to commit, so the count and the INSERT are atomic with respect to each other even
+ *   for distinct dedupe keys (QC r1: they were check-then-insert in the router/source).
  * - claimHealNotification is a conditional UPDATE ... WHERE notification_claimed_at
  *   IS NULL RETURNING. It yields exactly ONE SEND ATTEMPT per event, not
  *   exactly-once delivery (a crash after the claim and before the send loses it).
@@ -43,13 +47,29 @@ export interface ClaimHealArgs {
   windowMs: number
   maxClaimsPerUserHour: number
   retentionHours: number
+  /**
+   * Per-repository hourly ceiling. Omit (undefined) to skip it. When the repo is at the ceiling
+   * the row is still inserted, already carrying outcome refused:repo_rate_bound, and the result
+   * has repoRateBound: true (the router then terminalizes and notifies as it always has).
+   */
+  maxPerRepoHour?: number
+  /**
+   * Per-task daily ceiling for `task:<taskId>:<sig>` dedupe keys. Omit to skip it. At the ceiling
+   * the claim is refused task_day_cap (no row).
+   */
+  maxPerTaskDay?: number
+  /** Minimal validated source context a boot/follow-up sweep needs to terminalize the event. */
+  recoveryCtx?: Record<string, unknown> | null
   /** Injectable clock (tests); defaults to Date.now(). */
   nowMs?: number
 }
 
 export type ClaimHealResult =
-  | { ok: true; id: string }
-  | { ok: false; reason: 'duplicate' | 'user_claim_cap' }
+  | { ok: true; id: string; repoRateBound?: true }
+  | { ok: false; reason: 'duplicate' | 'user_claim_cap' | 'task_day_cap' }
+
+/** Outcome stamped on a claim that hit the per-repo ceiling (the router's persisted string). */
+export const REPO_RATE_BOUND_OUTCOME = 'refused:repo_rate_bound'
 
 export interface HealEventRow {
   id: string
@@ -64,6 +84,7 @@ export interface HealEventRow {
   session_id: string | null
   outcome: string | null
   notification_claimed_at: string | Date | null
+  recovery_ctx?: Record<string, unknown> | null
   created_at: string | Date
   updated_at: string | Date
 }
@@ -81,6 +102,12 @@ export async function pruneHealEvents(
       SELECT id FROM heal_events WHERE created_at < ${cutoff} ORDER BY created_at LIMIT 100
     )
   `
+}
+
+/** The task id of a `task:<id>:<signature>` dedupe key, else null. */
+function taskIdOf(dedupeKey: string): string | null {
+  const m = /^task:([^:]+):/.exec(dedupeKey)
+  return m ? m[1]! : null
 }
 
 export async function claimHealEvent(args: ClaimHealArgs, exec: HealExec = sql): Promise<ClaimHealResult> {
@@ -132,16 +159,45 @@ export async function claimHealEvent(args: ClaimHealArgs, exec: HealExec = sql):
     `
     if (Number(counted[0]?.n ?? 0) >= args.maxClaimsPerUserHour) return { ok: false, reason: 'user_claim_cap' }
 
+    // (c2) per-task daily ceiling, counted under the per-user lock taken above.
+    const taskId = args.maxPerTaskDay != null ? taskIdOf(args.dedupeKey) : null
+    if (taskId) {
+      const tc = await tx`
+        SELECT count(*)::text AS n FROM heal_events
+        WHERE user_id = ${args.userId} AND starts_with(dedupe_key, ${'task:' + taskId + ':'})
+          AND created_at > ${new Date(now - 24 * HOUR_MS)}
+      `
+      if (Number(tc[0]?.n ?? 0) >= (args.maxPerTaskDay as number)) return { ok: false, reason: 'task_day_cap' }
+    }
+
+    // (c3) per-repository hourly ceiling, same lock. In-flight rows (NULL outcome) count, so
+    // concurrent claims on distinct dedupe keys see each other. At the ceiling the row is still
+    // recorded, already refused, so the router terminalizes and notifies exactly as before.
+    let preOutcome: string | null = null
+    if (args.maxPerRepoHour != null && args.repoIdent) {
+      const rc = await tx`
+        SELECT count(*)::text AS n FROM heal_events
+        WHERE user_id = ${args.userId} AND repo_ident = ${args.repoIdent}
+          AND created_at > ${hourStart}
+          AND (outcome IS NULL OR outcome IN ('dispatched_live', 'dispatched_after_spawn',
+                                              'autospawn_starting', 'autospawn_launched', 'autospawn_parked'))
+      `
+      if (Number(rc[0]?.n ?? 0) >= args.maxPerRepoHour) preOutcome = REPO_RATE_BOUND_OUTCOME
+    }
+
     // (d) INSERT; the unique indexes are the backstop - an empty return means duplicate.
     const inserted = await tx`
-      INSERT INTO heal_events (user_id, source, repo_ident, dedupe_key, window_bucket, trigger_run_id, created_at, updated_at)
+      INSERT INTO heal_events (user_id, source, repo_ident, dedupe_key, window_bucket, trigger_run_id, outcome, recovery_ctx, created_at, updated_at)
       VALUES (${args.userId}, ${args.source}, ${args.repoIdent ?? null}, ${args.dedupeKey}, ${bucket},
-              ${args.triggerRunId ?? null}, ${createdAt}, ${createdAt})
+              ${args.triggerRunId ?? null}, ${preOutcome}, ${args.recoveryCtx ? JSON.stringify(args.recoveryCtx) : null}::jsonb,
+              ${createdAt}, ${createdAt})
       ON CONFLICT DO NOTHING
       RETURNING id
     `
     if (inserted.length === 0) return { ok: false, reason: 'duplicate' }
-    return { ok: true, id: inserted[0].id as string }
+    return preOutcome
+      ? { ok: true, id: inserted[0].id as string, repoRateBound: true }
+      : { ok: true, id: inserted[0].id as string }
   })
 }
 
@@ -207,22 +263,6 @@ export async function isHealGenerated(runId: string, exec: HealExec = sql): Prom
   return rows.length > 0
 }
 
-export async function countRepoDispatchesLastHour(
-  userId: string,
-  repoIdent: string,
-  exec: HealExec = sql,
-  nowMs: number = Date.now(),
-): Promise<number> {
-  const since = new Date(nowMs - HOUR_MS)
-  const rows = await exec`
-    SELECT count(*)::text AS n FROM heal_events
-    WHERE user_id = ${userId} AND repo_ident = ${repoIdent}
-      AND outcome IN ('dispatched_live', 'dispatched_after_spawn', 'autospawn_launched', 'autospawn_parked')
-      AND created_at > ${since}
-  `
-  return Number(rows[0]?.n ?? 0)
-}
-
 export async function countTaskClaimsToday(
   userId: string,
   taskId: string,
@@ -238,6 +278,11 @@ export async function countTaskClaimsToday(
   return Number(rows[0]?.n ?? 0)
 }
 
+/**
+ * Heal events whose autospawn never reached a terminal outcome: starting (claimed + about to
+ * reserve/launch), launched or parked, untouched for olderThanMs. A restart or crash strands
+ * exactly these (the spawn deadline timer is process-local).
+ */
 export async function listStaleLaunchingHealEvents(
   olderThanMs: number,
   exec: HealExec = sql,
@@ -246,7 +291,7 @@ export async function listStaleLaunchingHealEvents(
   const cutoff = new Date(nowMs - olderThanMs)
   const rows = await exec`
     SELECT * FROM heal_events
-    WHERE outcome IN ('autospawn_launched', 'autospawn_parked') AND updated_at < ${cutoff}
+    WHERE outcome IN ('autospawn_starting', 'autospawn_launched', 'autospawn_parked') AND updated_at < ${cutoff}
     ORDER BY updated_at
     LIMIT 50
   `

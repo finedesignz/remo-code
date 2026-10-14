@@ -103,3 +103,20 @@ export function outcomeToString(o: HealOutcome): string {
       return o.kind;
   }
 }
+
+/**
+ * Outcome persisted before an autospawn reserves its lifetime slot or spawns anything. Not a
+ * HealOutcome kind (it is never returned to a source): it exists so the stale-launch sweep can
+ * recover a reservation stranded by a crash between the reservation and the launched outcome.
+ */
+export const OUTCOME_AUTOSPAWN_STARTING = 'autospawn_starting';
+
+/**
+ * The minimal validated source context the sweep needs to rebuild a per-event sink after a restart.
+ * Only error_capture needs any (its sink loads the error and project rows by id); the ledger-only
+ * and Coolify sinks run from the identity and run ids the ledger already stores. Never free text.
+ */
+export function recoveryCtxFor(event: HealEvent): Record<string, string> | null {
+  if (event.source !== 'error_capture') return null;
+  return { error_id: event.ctx.error_id, project_id: event.ctx.project_id };
+}

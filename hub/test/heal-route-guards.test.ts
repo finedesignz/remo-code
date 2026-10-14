@@ -60,7 +60,6 @@ function mkDeps(over: Partial<HealDeps> = {}) {
       rec.provenanceChecks.push(runId)
       return false
     },
-    countRepoDispatches: async () => 0,
     makeSink: (_e, ctx) => {
       rec.sinkCtx.push(ctx.eventId)
       let done = false
@@ -150,7 +149,7 @@ describe('dedupe and caps', () => {
   })
 
   test('per-repo hourly bound: at the limit => refused repo_rate_bound, row set, no dispatch', async () => {
-    const { deps, rec } = mkDeps({ countRepoDispatches: async () => 4 })
+    const { deps, rec } = mkDeps({ claim: async () => ({ ok: true, id: 'ev1', repoRateBound: true }) })
     const out = await routeHeal(coolify(), deps)
     expect(out).toEqual({ kind: 'refused', reason: 'repo_rate_bound', notifyClaimed: false })
     expect(rec.dispatches).toBe(0)
@@ -159,9 +158,12 @@ describe('dedupe and caps', () => {
   })
 
   test('per-repo bound: below the limit dispatches', async () => {
-    const { deps, rec } = mkDeps({ countRepoDispatches: async () => 3 })
+    const { deps, rec } = mkDeps()
     expect((await routeHeal(coolify(), deps)).kind).toBe('dispatched_live')
     expect(rec.dispatches).toBe(1)
+    // the ceiling is enforced atomically inside the claim: the router passes it, never pre-counts
+    expect(rec.claims[0].maxPerRepoHour).toBe(4)
+    expect(rec.claims[0].maxPerTaskDay).toBeUndefined() // not a scheduled_task event
   })
 })
 

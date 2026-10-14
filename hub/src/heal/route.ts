@@ -25,13 +25,21 @@ import {
   healMaxClaimsPerUserHour,
   healRetentionHours,
   healMaxPerRepoHour,
+  healMaxPerTaskDay,
   healSpawnTimeoutMs,
 } from './config.ts';
 import { buildHealKey } from './counter-key.ts';
 import { isCanonicalRepoIdent } from './repo-ident.ts';
 import { withScopeContract, asciiPunctuation } from './prompt.ts';
 import { resolveHealTarget, type HealTarget } from './resolve.ts';
-import { parseHealEvent, outcomeToString, type HealEvent, type HealOutcome } from './types.ts';
+import {
+  parseHealEvent,
+  outcomeToString,
+  recoveryCtxFor,
+  OUTCOME_AUTOSPAWN_STARTING,
+  type HealEvent,
+  type HealOutcome,
+} from './types.ts';
 import type { HealSink, HealTerminalOutcome, SinkFactory } from './sinks/types.ts';
 import type { ClaimHealArgs, ClaimHealResult, HealOutcomeExtra } from '../db/heal-events-dal.ts';
 import { notifyOnceDetailed, REAL_NOTIFY_DEPS, type NotifyDeps } from './notify.ts';
@@ -46,7 +54,6 @@ export interface HealDeps {
   claim(args: ClaimHealArgs): Promise<ClaimHealResult>;
   setOutcome(id: string, outcome: string, extra: HealOutcomeExtra): Promise<void>;
   isHealGenerated(runId: string): Promise<boolean>;
-  countRepoDispatches(userId: string, repoIdent: string): Promise<number>;
   makeSink: SinkFactory;
   dispatch(req: DispatchRequest, deps: PipelineDeps): Promise<DispatchOutcome>;
   isChannelOnline(sessionId: string): boolean;
@@ -65,8 +72,6 @@ export const REAL_DEPS: HealDeps = {
   claim: async (args) => (await import('../db/heal-events-dal.ts')).claimHealEvent(args),
   setOutcome: async (id, outcome, extra) => (await import('../db/heal-events-dal.ts')).setHealOutcome(id, outcome, extra),
   isHealGenerated: async (runId) => (await import('../db/heal-events-dal.ts')).isHealGenerated(runId),
-  countRepoDispatches: async (userId, repoIdent) =>
-    (await import('../db/heal-events-dal.ts')).countRepoDispatchesLastHour(userId, repoIdent),
   // Plan 07-07 creates the sinks index; resolved at call time so this module has no hard edge to it.
   makeSink: async (event, ctx) => {
     const spec = './sinks/index.ts';
@@ -300,6 +305,12 @@ async function autospawnHeal(
     onParkExpire: () => expire('grace_expired', 'heal_grace_expired'),
   });
 
+  // Recoverable BEFORE any reservation or spawn: a crash between the lifetime reservation and the
+  // 'launched' outcome would otherwise leave a NULL-outcome row the sweep never selects, stranding
+  // the reservation forever. Deliberately NOT swallowed: if the ledger cannot record the intent,
+  // nothing is reserved or spawned (the outer handler terminalizes as failed).
+  await deps.setOutcome(eventId, OUTCOME_AUTOSPAWN_STARTING, extra);
+
   const launched = await governedLaunch(
     {
       userId: event.user_id,
@@ -428,6 +439,11 @@ export async function routeHeal(input: unknown, deps: HealDeps = REAL_DEPS): Pro
       windowMs: healDedupeWindowMs(),
       maxClaimsPerUserHour: healMaxClaimsPerUserHour(),
       retentionHours: healRetentionHours(),
+      // Atomic ceilings (QC r1): counted and inserted in the claim transaction. The repo bound is
+      // only meaningful for a routable target (a `none` target dispatches nothing).
+      ...(target.kind !== 'none' ? { maxPerRepoHour: healMaxPerRepoHour() } : {}),
+      ...(event.source === 'scheduled_task' ? { maxPerTaskDay: healMaxPerTaskDay() } : {}),
+      recoveryCtx: recoveryCtxFor(event),
       nowMs: deps.now(),
     });
     if (!claim.ok) {
@@ -446,7 +462,8 @@ export async function routeHeal(input: unknown, deps: HealDeps = REAL_DEPS): Pro
     }
 
     // Per-repo hourly bound (AM-F4-4): a fresh session cannot be seen by the session-keyed rate gate.
-    if ((await deps.countRepoDispatches(event.user_id, target.repoIdent)) >= healMaxPerRepoHour()) {
+    // Decided atomically by the claim (claimHealEvent); the row is already refused:repo_rate_bound.
+    if (claim.repoRateBound) {
       const outcome: HealOutcome = { kind: 'refused', reason: 'repo_rate_bound' };
       return finalizeNonLive(deps, event, eventId, sink, outcome, {
         repoIdent: target.repoIdent,
