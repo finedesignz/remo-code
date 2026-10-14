@@ -123,11 +123,14 @@ a hosting provider.
    | `agent_permission_unverified` | `--agent-login` missing, or the App cannot read that login's permission | pass `--agent-login`, section 3 item 6 |
    | `other_repo_allowlisted` | the autospawn allowlist holds another repo | empty it or target that repo |
    | `other_orchestrator_task_enabled` | another orchestrator task (any user) is enabled; proof mode is hub-exclusive | disable it, section 3 item 7 |
+   | `session_halt_engaged` | someone else (not the proof tooling) already holds a session kill switch on the proof session; arm never adopts or releases it | release it yourself (`POST /api/automation/kill-switch/release`) if intended, then re-arm |
    | `proof_already_active` | an armed or running proof already exists for this user | disarm it first |
 
 3. **Arm (data only).** Re-run the same command without `--dry-run`. In one transaction it creates
    the single allowlist entry, the DISABLED proof task, its due-scan row and the frozen proof run. The
-   task is disabled, so nothing runs yet.
+   task is disabled, so nothing runs yet. Arm also engages a session kill switch on the proof session and
+   records that exact row on the run; `--enable` releases only that row. A halt engaged by anyone else
+   (before arm: arm refuses; after arm: it survives `--enable`) is never touched.
 
 4. **Set the hub flags** `REMO_ORCHESTRATOR_PROOF=1`, `REMO_ORCHESTRATOR_ENABLED=1`,
    `REMO_ORCHESTRATOR_AUTOSPAWN=1` in the hub's environment through the hosting console, and review the

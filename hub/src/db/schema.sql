@@ -1708,6 +1708,8 @@ CREATE TABLE IF NOT EXISTS orchestrator_proof_runs (
   started_at          TIMESTAMPTZ,
   terminal_at         TIMESTAMPTZ
 );
+-- QC round 2: the exact automation_kill_switch row this run's arm engaged (--enable releases only it).
+ALTER TABLE orchestrator_proof_runs ADD COLUMN IF NOT EXISTS kill_switch_id TEXT;
 DO $$ BEGIN
   ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_status_check
     CHECK (status IN ('armed','running','succeeded','nothing','terminated','disarmed'));

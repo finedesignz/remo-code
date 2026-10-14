@@ -128,6 +128,8 @@ export interface ProofRun {
   updated_at: string | Date;
   started_at: string | Date | null;
   terminal_at: string | Date | null;
+  /** automation_kill_switch.id of the session halt this run's arm engaged (released by --enable). */
+  kill_switch_id?: string | null;
 }
 
 // ── Guard / hook seam ────────────────────────────────────────────────────────

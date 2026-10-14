@@ -74,7 +74,8 @@ describe('orchestrator_proof_runs DDL', () => {
       .split('\n')
       .filter((l) => !l.trim().startsWith('--'))
       .join('\n')
+    expect(code).toContain('ADD COLUMN IF NOT EXISTS kill_switch_id TEXT') // QC r2: the proof-owned kill row id
     expect(code).not.toMatch(/^\s*(UPDATE|INSERT|DELETE|DROP|TRUNCATE)\b/im)
-    expect(code).not.toMatch(/\bALTER TABLE (?!orchestrator_proof_runs ADD CONSTRAINT)/)
+    expect(code).not.toMatch(/\bALTER TABLE (?!orchestrator_proof_runs ADD (?:CONSTRAINT|COLUMN IF NOT EXISTS kill_switch_id TEXT;))/)
   })
 })

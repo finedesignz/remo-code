@@ -48,7 +48,7 @@ export interface ProofFakeState {
   tokenUsage: FakeTokenRow[]
   sessions: Set<string>
   /** automation_kill_switch rows touched by arm / enable / disarm */
-  kill: Array<{ scope: string; user_id: string | null; session_id: string; reason: string; engaged: boolean }>
+  kill: Array<{ id?: string; engaged_by?: string; scope: string; user_id: string | null; session_id: string; reason: string; engaged: boolean }>
   /** routine_queue rows (session_id, status) */
   queue: Array<{ session_id: string; status: string }>
   /** throw when this predicate matches the statement text (error injection) */
@@ -66,7 +66,7 @@ const INSERT_COLS = [
   'id', 'user_id', 'task_id', 'session_id', 'repo_ident', 'counter_key', 'branch', 'installation_id',
   'repo_owner', 'repo_name', 'default_branch', 'base_sha', 'ruleset_ids', 'ruleset_digest',
   'ruleset_updated_at', 'protection_shape', 'required_contexts', 'arm_preconditions',
-  'max_injects', 'max_tokens', 'max_wall_ms',
+  'max_injects', 'max_tokens', 'max_wall_ms', 'kill_switch_id',
 ] as const
 
 export function createProofFakeSql() {
@@ -107,24 +107,30 @@ export function createProofFakeSql() {
       // disarm: engage for the user's ACTIVE run sessions (evaluated against the store BEFORE the run update)
       for (const r of state.runs) {
         if (r.user_id === values[0] && isActive(r) && !state.kill.some((k) => k.engaged && k.scope === 'session' && k.session_id === r.session_id)) {
-          state.kill.push({ scope: 'session', user_id: r.user_id, session_id: r.session_id, reason: 'proof disarmed', engaged: true })
+          state.kill.push({ id: nid('kill_'), engaged_by: 'arm-orchestrator-proof', scope: 'session', user_id: r.user_id, session_id: r.session_id, reason: 'proof disarmed', engaged: true })
         }
       }
       return []
     }
+    if (text.includes('SELECT id, engaged_by FROM automation_kill_switch')) {
+      return state.kill
+        .filter((k) => k.engaged && k.scope === 'session' && k.session_id === values[0])
+        .map((k) => ({ id: k.id, engaged_by: k.engaged_by ?? 'unknown' }))
+    }
     if (text.includes('INSERT INTO automation_kill_switch')) {
-      const [userId, sessionId, reason] = values
-      if (!state.kill.some((k) => k.engaged && k.scope === 'session' && k.session_id === sessionId)) {
-        state.kill.push({ scope: 'session', user_id: userId, session_id: sessionId, reason, engaged: true })
-      }
-      return []
+      const [userId, sessionId, engagedBy] = values
+      if (state.kill.some((k) => k.engaged && k.scope === 'session' && k.session_id === sessionId)) return [] // ON CONFLICT DO NOTHING
+      const row = { id: nid('kill_'), engaged_by: engagedBy, scope: 'session', user_id: userId, session_id: sessionId, reason: 'proof armed', engaged: true }
+      state.kill.push(row)
+      return [{ id: row.id }]
     }
     if (text.includes("UPDATE routine_queue SET status = 'cancelled'")) {
       for (const q of state.queue) if (q.session_id === values[0] && q.status === 'pending') q.status = 'cancelled'
       return []
     }
-    if (text.includes('UPDATE automation_kill_switch SET engaged = false')) {
-      for (const k of state.kill) if (k.engaged && k.scope === 'session' && k.session_id === values[0]) k.engaged = false
+    if (text.includes('UPDATE automation_kill_switch SET engaged = false') && text.includes('WHERE id =')) {
+      const id = values[values.length - 1] // arm releases a stale proof halt by id; enable releases ITS row by id
+      for (const k of state.kill) if (k.engaged && k.id === id) k.engaged = false
       return []
     }
 
@@ -219,12 +225,13 @@ export function createProofFakeSql() {
       return []
     }
     if (text.includes('DELETE FROM orchestrator_autospawn_allowlist')) {
-      if (!(text.includes('user_id =') && text.includes('repo_ident ='))) {
+      if (!(text.includes('user_id =') && (text.includes('repo_ident =') || text.includes('lower(repo_ident) =')))) {
         state.unknown.push(text) // a bare / partially keyed DELETE is a rule-6 violation
         return []
       }
       const [userId, repoIdent] = values
-      state.allow = state.allow.filter((a) => !(a.user_id === userId && a.repo_ident === repoIdent))
+      const ci = text.includes('lower(repo_ident) =') // canonical compare: also removes a mixed-case twin
+      state.allow = state.allow.filter((a) => !(a.user_id === userId && (ci ? a.repo_ident.toLowerCase() === repoIdent : a.repo_ident === repoIdent)))
       return []
     }
     if (text.includes("SELECT * FROM orchestrator_proof_runs WHERE user_id = ? AND status = 'armed'")) {
