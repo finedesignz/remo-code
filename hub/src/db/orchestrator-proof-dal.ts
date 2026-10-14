@@ -247,10 +247,10 @@ export async function enableProofTaskTx(args: { userId: string }): Promise<{ run
 // ── Reads / counters ─────────────────────────────────────────────────────────
 
 /** The run whose counter_key matches (any status) or, failing that, the ACTIVE run for the session. */
-export async function findProofRunForRequest(args: { counterKey?: string | null; sessionId?: string | null }): Promise<ProofRun | null> {
-  if (args.counterKey) {
+export async function findProofRunForRequest(args: { requestKey?: string | null; sessionId?: string | null }): Promise<ProofRun | null> {
+  if (args.requestKey) {
     const byKey = await sql<ProofRun[]>`
-      SELECT * FROM orchestrator_proof_runs WHERE counter_key = ${args.counterKey}
+      SELECT * FROM orchestrator_proof_runs WHERE counter_key = ${args.requestKey}
       ORDER BY armed_at DESC LIMIT 1
     `;
     if (byKey[0]) return byKey[0];
@@ -276,10 +276,10 @@ export async function findActiveProofRunForRepo(repoIdent: string): Promise<Proo
 }
 
 /** Live injects for a counter key since `since`: the Phase 4 ledger is the only counter (D-06). */
-export async function countProofInjects(counterKey: string, since: Date | string): Promise<number> {
+export async function countProofInjects(key: string, since: Date | string): Promise<number> {
   const rows = await sql<{ n: string | number }[]>`
     SELECT COUNT(*) AS n FROM automation_inject_ledger
-    WHERE counter_key = ${counterKey} AND kind = 'inject' AND released_at IS NULL AND created_at >= ${since}
+    WHERE counter_key = ${key} AND kind = 'inject' AND released_at IS NULL AND created_at >= ${since}
   `;
   return Number(rows[0]?.n ?? 0);
 }
