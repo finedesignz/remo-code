@@ -27,6 +27,7 @@ import type {
   Timestamp,
 } from './types.ts'
 import { safeText } from './types.ts'
+import { createHash } from 'node:crypto'
 import { isValidTimezone, nextRuns, validate } from '../scheduler/cron.ts'
 
 const DEFAULT_WINDOW = 50
@@ -296,4 +297,167 @@ export function detectDeadSession(
     proposal: { kind: 'rebind_session', params: { taskId: task.id, staleSessionId: safeText(sid, 64) } },
     fixCandidate: 'rebind_dead_session',
   }
+}
+
+// ---------------------------------------------------------------------------
+// OPTIMIZE (D-13, A-04): proposal-only, severity info, never a fixCandidate.
+// ---------------------------------------------------------------------------
+
+const HOT_INTERVAL_MS = 15 * 60_000
+const HOT_MIN_RUNS = 20
+const PROMPT_MIN_CHARS = 4000
+const PROMPT_MIN_TASKS = 10
+
+function promptOf(task: AuditTaskInput): string {
+  const direct = typeof task.prompt === 'string' ? task.prompt : ''
+  if (direct !== '') return direct
+  const p = task.payload?.prompt
+  return typeof p === 'string' ? p : ''
+}
+
+function stableJson(v: unknown): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null'
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`
+  const o = v as Record<string, unknown>
+  return `{${Object.keys(o)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableJson(o[k])}`)
+    .join(',')}}`
+}
+
+function cmp(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+export function detectOptimize(inputs: DetectorInputs, config: DetectorConfig): Finding[] {
+  const audited = inputs.tasks.filter(isAuditable)
+  const out: Finding[] = []
+
+  // (a) cadence too hot
+  for (const task of audited) {
+    const interval = fireIntervalMs(task, inputs.now)
+    if (interval == null || interval > HOT_INTERVAL_MS) continue
+    const window = countedWindow(inputs.runsByTask[task.id] ?? [], config)
+    if (window.length < HOT_MIN_RUNS) continue
+    const hot = window.filter((r) =>
+      r.status === 'success'
+        ? (r.output_snippet ?? '').trim() === ''
+        : (r.status === 'skipped' || r.status === 'skipped_quota') && isBenignSkipReason(r.error),
+    ).length
+    if (hot * 10 < window.length * 9) continue
+    out.push({
+      ...base(task, 'OPTIMIZE', 'info'),
+      evidence: {
+        arm: 'cadence_hot',
+        intervalMinutes: Math.round(interval / 60_000),
+        windowRuns: window.length,
+        idleRuns: hot,
+      },
+      proposal: { kind: 'review_cadence', params: { taskId: task.id } },
+    })
+  }
+
+  // (b) prompt cost: top decile per user, only with enough tasks and a length floor
+  const byUser = new Map<string, AuditTaskInput[]>()
+  for (const t of audited) byUser.set(t.user_id, [...(byUser.get(t.user_id) ?? []), t])
+  for (const list of byUser.values()) {
+    if (list.length < PROMPT_MIN_TASKS) continue
+    const ranked = list
+      .map((t) => ({ t, len: promptOf(t).length }))
+      .sort((a, b) => b.len - a.len || cmp(a.t.id, b.t.id))
+    for (const { t, len } of ranked.slice(0, Math.max(1, Math.floor(list.length / 10)))) {
+      if (len < PROMPT_MIN_CHARS) continue
+      out.push({
+        ...base(t, 'OPTIMIZE', 'info'),
+        evidence: { arm: 'prompt_cost', promptChars: len, auditedTasks: list.length },
+        proposal: { kind: 'review_prompt_size', params: { taskId: t.id } },
+      })
+    }
+  }
+
+  // (c) duplicates: one finding per group, anchored on the lowest id
+  const groups = new Map<string, AuditTaskInput[]>()
+  for (const t of audited) {
+    const key = [
+      t.user_id,
+      t.task_type,
+      t.target_kind ?? '',
+      t.target_id ?? t.session_id ?? '',
+      createHash('sha256').update(promptOf(t)).digest('hex'),
+      stableJson(t.payload ?? {}),
+    ].join('|')
+    groups.set(key, [...(groups.get(key) ?? []), t])
+  }
+  for (const members of groups.values()) {
+    if (members.length < 2) continue
+    const sorted = [...members].sort((a, b) => cmp(a.id, b.id))
+    const anchor = sorted[0]!
+    out.push({
+      ...base(anchor, 'OPTIMIZE', 'info'),
+      evidence: { arm: 'duplicate', memberIds: sorted.map((m) => safeText(m.id, 64)), memberCount: sorted.length },
+      proposal: { kind: 'merge_duplicates', params: { taskId: anchor.id } },
+    })
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// Aggregator
+// ---------------------------------------------------------------------------
+
+const SEVERITY_RANK: Record<Severity, number> = { high: 0, warn: 1, info: 2 }
+
+/**
+ * Runs every detector over the audited tasks only (optionally narrowed by scope).
+ * MISCONFIGURED suppresses SKIP_FOREVER for the same task (one finding per root
+ * cause) and absorbs its skip counts. Output order is deterministic.
+ */
+export function runDetectors(inputs: DetectorInputs, config: DetectorConfig, scope?: TaskQcScope): Finding[] {
+  const want = (d: DetectorName) => !scope?.detectors || scope.detectors.includes(d)
+  const ids = scope?.taskIds ? new Set(scope.taskIds) : null
+  const audited = inputs.tasks.filter(isAuditable)
+  const findings: Finding[] = []
+
+  for (const task of audited) {
+    if (ids && !ids.has(task.id)) continue
+    const runs = inputs.runsByTask[task.id] ?? []
+    const misconf = want('MISCONFIGURED') ? detectMisconfigured(task, runs) : null
+    const skip = want('SKIP_FOREVER') || misconf ? detectSkipForever(task, runs, config) : null
+
+    if (want('FAILING')) {
+      const f = detectFailing(task, runs, config)
+      if (f) findings.push(f)
+    }
+    if (misconf) {
+      findings.push(
+        skip
+          ? {
+              ...misconf,
+              evidence: { ...misconf.evidence, skipRuns: skip.evidence.skipRuns ?? 0, skipReason: skip.evidence.reason ?? '' },
+            }
+          : misconf,
+      )
+    } else if (skip && want('SKIP_FOREVER')) {
+      findings.push(skip)
+    }
+    if (want('NEVER_FIRED')) {
+      const f = detectNeverFired(task, runs, inputs.now)
+      if (f) findings.push(f)
+    }
+    if (want('DEAD_SESSION')) {
+      const f = detectDeadSession(task, inputs.sessionsById, inputs.now)
+      if (f) findings.push(f)
+    }
+  }
+  if (want('OPTIMIZE')) {
+    for (const f of detectOptimize(inputs, config)) if (!ids || ids.has(f.taskId)) findings.push(f)
+  }
+
+  return findings.sort(
+    (a, b) =>
+      SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] ||
+      cmp(a.detector, b.detector) ||
+      cmp(a.taskId, b.taskId) ||
+      cmp(String(a.evidence.arm ?? ''), String(b.evidence.arm ?? '')),
+  )
 }

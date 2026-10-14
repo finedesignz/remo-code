@@ -5,11 +5,13 @@ import {
   detectFailing,
   detectMisconfigured,
   detectNeverFired,
+  detectOptimize,
   detectSkipForever,
   isAuditable,
+  runDetectors,
 } from '../src/task-qc/detectors.ts'
 import { safeText } from '../src/task-qc/types.ts'
-import type { AuditTaskInput, RunInput, SessionInput } from '../src/task-qc/types.ts'
+import type { AuditTaskInput, DetectorInputs, RunInput, SessionInput } from '../src/task-qc/types.ts'
 
 const NOW = new Date('2026-10-13T12:00:00.000Z')
 const CFG = { failStreak: 3 }
@@ -298,5 +300,163 @@ describe('DEAD_SESSION (D-12)', () => {
   test('supervisor-kind and session-less tasks never fire', () => {
     expect(detectDeadSession(task({ target_kind: 'supervisor', target_id: 'x' }), {}, NOW)).toBeNull()
     expect(detectDeadSession(task({ target_id: null, session_id: null }), {}, NOW)).toBeNull()
+  })
+})
+
+function inputs(tasks: AuditTaskInput[], runsByTask: Record<string, RunInput[]> = {}, sessions: Record<string, SessionInput | null> = {}): DetectorInputs {
+  return { tasks, runsByTask, sessionsById: sessions, now: NOW }
+}
+const ONLINE: SessionInput = { id: 's1', status: 'online', deleted_at: null, last_activity: ago(1000), created_at: ago(30 * DAY) }
+const hot = (n: number, total: number): RunInput[] =>
+  runs([...Array(n).fill('skipped'), ...Array(total - n).fill('failed')], (i) => (i < n ? 'no_errors_detected' : 'boom'))
+const noFail = { failStreak: 99 }
+
+describe('OPTIMIZE (D-13, A-04)', () => {
+  const HOT_CRON = { cron_expr: '*/10 * * * *' }
+  test('cadence: 20 runs at 90 percent benign skips on a 10 minute cron fires', () => {
+    const fs = detectOptimize(inputs([task(HOT_CRON)], { t1: hot(18, 20) }), noFail)
+    expect(fs.length).toBe(1)
+    expect(fs[0]!.evidence.arm).toBe('cadence_hot')
+    expect(fs[0]!.severity).toBe('info')
+    expect(fs[0]!.proposal.kind).toBe('review_cadence')
+    expect(fs[0]!.fixCandidate).toBeUndefined()
+  })
+  test('cadence: 19 runs does not fire', () => {
+    expect(detectOptimize(inputs([task(HOT_CRON)], { t1: hot(19, 19) }), noFail)).toEqual([])
+  })
+  test('cadence: 17 of 20 (85 percent) and 89 of 100 do not fire', () => {
+    expect(detectOptimize(inputs([task(HOT_CRON)], { t1: hot(17, 20) }), noFail)).toEqual([])
+    expect(detectOptimize(inputs([task(HOT_CRON)], { t1: hot(89, 100) }), { failStreak: 99, windowSize: 100 })).toEqual([])
+    expect(detectOptimize(inputs([task(HOT_CRON)], { t1: hot(90, 100) }), { failStreak: 99, windowSize: 100 })).toHaveLength(1)
+  })
+  test('cadence: a 20 minute interval does not fire; success with empty snippet counts as hot', () => {
+    expect(detectOptimize(inputs([task({ cron_expr: '*/20 * * * *' })], { t1: hot(20, 20) }), noFail)).toEqual([])
+    expect(detectOptimize(inputs([task(HOT_CRON)], { t1: runs(Array(20).fill('success')) }), noFail)).toHaveLength(1)
+    const withOutput = runs(Array(20).fill('success')).map((r) => ({ ...r, output_snippet: 'did real work' }))
+    expect(detectOptimize(inputs([task(HOT_CRON)], { t1: withOutput }), noFail)).toEqual([])
+  })
+
+  const many = (n: number, lens: Record<string, number> = {}): AuditTaskInput[] =>
+    Array.from({ length: n }, (_, i) => task({ id: `a${i}`, name: `t${i}`, prompt: 'p'.repeat(lens[`a${i}`] ?? 100) + String(i).padStart(2, '0') }))
+  test('prompt cost: top decile of 10 audited tasks at 4000 chars fires, anchored on that task', () => {
+    const fs = detectOptimize(inputs(many(10, { a3: 4000 })), noFail)
+    expect(fs).toHaveLength(1)
+    expect(fs[0]!.taskId).toBe('a3')
+    expect(fs[0]!.evidence.arm).toBe('prompt_cost')
+    expect(fs[0]!.proposal.kind).toBe('review_prompt_size')
+  })
+  test('prompt cost: 9 tasks or 3999 chars does not fire', () => {
+    expect(detectOptimize(inputs(many(9, { a3: 5000 })), noFail)).toEqual([])
+    expect(detectOptimize(inputs(many(10, { a3: 3980 })), noFail)).toEqual([])
+  })
+  test('prompt cost: only the first floor(n/10) after a stable sort (ties by id)', () => {
+    const lens: Record<string, number> = {}
+    for (let i = 0; i < 20; i++) lens[`a${i}`] = 4200
+    const fs = detectOptimize(inputs(many(20, lens)), noFail)
+    expect(fs.map((f) => f.taskId)).toEqual(['a0', 'a1'])
+  })
+  test('prompt cost: falls back to payload.prompt', () => {
+    const ts = many(10)
+    ts[4] = task({ id: 'a4', prompt: '', payload: { prompt: 'q'.repeat(4100) } })
+    expect(detectOptimize(inputs(ts), noFail).map((f) => f.taskId)).toEqual(['a4'])
+  })
+
+  test('duplicates: identical key groups into one finding anchored on the lowest id', () => {
+    const ts = [task({ id: 'b2' }), task({ id: 'b1' }), task({ id: 'b3', prompt: 'other' })]
+    const fs = detectOptimize(inputs(ts), noFail)
+    expect(fs).toHaveLength(1)
+    expect(fs[0]!.taskId).toBe('b1')
+    expect(fs[0]!.evidence.arm).toBe('duplicate')
+    expect(fs[0]!.evidence.memberIds).toEqual(['b1', 'b2'])
+    expect(fs[0]!.proposal.kind).toBe('merge_duplicates')
+  })
+  test('duplicates: differing payload, other user or other target does not group; key order is irrelevant', () => {
+    expect(detectOptimize(inputs([task({ id: 'b1', payload: { a: 1 } }), task({ id: 'b2', payload: { a: 2 } })]), noFail)).toEqual([])
+    expect(detectOptimize(inputs([task({ id: 'b1' }), task({ id: 'b2', user_id: 'u2' })]), noFail)).toEqual([])
+    expect(detectOptimize(inputs([task({ id: 'b1' }), task({ id: 'b2', target_id: 's2' })]), noFail)).toEqual([])
+    expect(
+      detectOptimize(inputs([task({ id: 'b1', payload: { a: 1, b: { y: 1, x: 2 } } }), task({ id: 'b2', payload: { b: { x: 2, y: 1 }, a: 1 } })]), noFail),
+    ).toHaveLength(1)
+  })
+  test('no cost figure appears in any evidence', () => {
+    const fs = detectOptimize(inputs([task({ id: 'b1', ...HOT_CRON }), task({ id: 'b2', ...HOT_CRON })], { b1: hot(20, 20) }), noFail)
+    expect(fs.length).toBeGreaterThan(0)
+    for (const f of fs) expect(Object.keys(f.evidence).some((k) => /cost|usd/i.test(k))).toBe(false)
+  })
+})
+
+describe('runDetectors (D-09 de-dup, D-13)', () => {
+  const failing = (id: string) => task({ id, name: `n-${id}`, prompt: `prompt-${id}` })
+  test('audited tasks only: internal anchors, task_qc, once and disabled yield nothing', () => {
+    const ts = [
+      task({ id: 'x1', name: '__internal_a', enabled: false }),
+      task({ id: 'x2', task_type: 'task_qc' }),
+      task({ id: 'x3', schedule_kind: 'once' }),
+      task({ id: 'x4', enabled: false }),
+    ]
+    const rbt = Object.fromEntries(ts.map((t) => [t.id, runs(['failed', 'failed', 'failed'], 'boom', t.id)]))
+    expect(runDetectors(inputs(ts, rbt, { s1: ONLINE }), CFG)).toEqual([])
+  })
+  test('sorted high first, then detector name, then task id; deterministic across input order', () => {
+    const ts = [failing('c'), failing('b'), failing('a')]
+    const rbt: Record<string, RunInput[]> = {
+      a: runs(['failed', 'failed', 'failed'], 'e', 'a'),
+      b: runs(Array(40).fill('failed'), 'e', 'b'),
+      c: runs(['skipped', 'skipped', 'skipped'], 'no_application_uuid', 'c'),
+    }
+    const out = runDetectors(inputs(ts, rbt, { s1: ONLINE }), CFG)
+    expect(out.map((f) => `${f.severity}:${f.detector}:${f.taskId}`)).toEqual([
+      'high:FAILING:b',
+      'warn:FAILING:a',
+      'warn:SKIP_FOREVER:c',
+    ])
+    const again = runDetectors(inputs([...ts].reverse(), rbt, { s1: ONLINE }), CFG)
+    expect(again).toEqual(out)
+  })
+  test('MISCONFIGURED suppresses SKIP_FOREVER for the same task and folds the skip evidence', () => {
+    const t = task({ id: 'm1', task_type: 'log_check', resolvedAppUuid: null })
+    const out = runDetectors(inputs([t], { m1: runs(['skipped', 'skipped', 'skipped'], 'no_application_uuid', 'm1') }, { s1: ONLINE }), CFG)
+    expect(out).toHaveLength(1)
+    expect(out[0]!.detector).toBe('MISCONFIGURED')
+    expect(out[0]!.evidence.skipEvidence).toBe(3)
+    expect(out[0]!.evidence.skipRuns).toBe(3)
+    expect(out[0]!.evidence.skipReason).toBe('no_application_uuid')
+  })
+  test('scope narrows by detectors and task ids', () => {
+    const ts = [failing('a'), failing('b')]
+    const rbt = { a: runs(['failed', 'failed', 'failed'], 'e', 'a'), b: runs(['failed', 'failed', 'failed'], 'e', 'b') }
+    expect(runDetectors(inputs(ts, rbt, { s1: ONLINE }), CFG, { taskIds: ['b'] }).map((f) => f.taskId)).toEqual(['b'])
+    expect(runDetectors(inputs(ts, rbt, { s1: ONLINE }), CFG, { detectors: ['SKIP_FOREVER'] })).toEqual([])
+    // MISCONFIGURED not in scope: SKIP_FOREVER is not suppressed
+    const t = task({ id: 'm1', task_type: 'log_check', resolvedAppUuid: null })
+    const sk = runDetectors(inputs([t], { m1: runs(['skipped', 'skipped', 'skipped'], 'no_application_uuid', 'm1') }, { s1: ONLINE }), CFG, { detectors: ['SKIP_FOREVER'] })
+    expect(sk.map((f) => f.detector)).toEqual(['SKIP_FOREVER'])
+  })
+  test('every fixture finding: fixCandidate in the 3 safe kinds, proposal kind never an enable/disable write', () => {
+    const ts = [
+      task({ id: 'f1' }),
+      task({ id: 'f2', timezone: 'Mars/X' }),
+      task({ id: 'f3', task_type: 'log_check', resolvedAppUuid: null }),
+      task({ id: 'f4', target_id: 'gone' }),
+      task({ id: 'f5', created_at: ago(9 * DAY), next_fire_at: null }),
+      task({ id: 'f6', cron_expr: '*/10 * * * *' }),
+      task({ id: 'f7' }),
+    ]
+    const rbt: Record<string, RunInput[]> = {
+      f1: runs(Array(40).fill('failed'), 'e', 'f1'),
+      f6: hot(20, 20).map((r) => ({ ...r, task_id: 'f6' })),
+    }
+    const out = runDetectors(inputs(ts, rbt, { s1: ONLINE }), CFG)
+    expect(new Set(out.map((f) => f.detector))).toEqual(
+      new Set(['FAILING', 'NEVER_FIRED', 'MISCONFIGURED', 'DEAD_SESSION', 'OPTIMIZE']),
+    )
+    const safe = new Set(['normalize_timezone', 'backfill_payload_from_sibling', 'rebind_dead_session'])
+    const kinds = new Set(['propose_disable', 'reregister_job', 'fix_cron', 'fix_timezone', 'fix_payload', 'set_teab_repo', 'rebind_session', 'review_cadence', 'review_prompt_size', 'merge_duplicates'])
+    for (const f of out) {
+      if (f.fixCandidate !== undefined) expect(safe.has(f.fixCandidate)).toBe(true)
+      expect(kinds.has(f.proposal.kind)).toBe(true)
+      expect(/^(enable|disable|set_enabled)/.test(f.proposal.kind)).toBe(false)
+      if (f.detector === 'FAILING') expect(f.fixCandidate).toBeUndefined()
+    }
   })
 })
