@@ -1158,7 +1158,10 @@ written per run, 60 s wall-clock); `clampBounds()` can only lower
 them. The wall-clock is a HARD bound: every QC transaction (the read, each fix, each proposal write,
 each lookup) arms the time left as `SET LOCAL statement_timeout` before any lock wait, the database
 cancelling a statement (57014 / 55P03) ends the pass `truncated` with an unpersisted `deadline` proposal
-(a cancelled fix transaction rolls back whole), and the app-uuid resolver is raced against the deadline. One run holds at most one open `task_qc` run per user (per-user advisory lock claim). Each run
+(a cancelled fix transaction rolls back whole), a fix re-arms before EVERY statement (PostgreSQL applies the timeout per
+statement), the wait for a pooled connection, the kill-switch check and the app-uuid resolver are raced against the
+deadline, and the digest send and delivery mark share the run's deadline (nothing starts past it; the rows are
+reported again next run). One run holds at most one open `task_qc` run per user (per-user advisory lock claim). Each run
 reserves one slot of the Phase 4 lifetime inject counter under key `taskqc:<userId>`
 ([usage-cost.md](usage-cost.md) "PTYCAP Phase 4"); exhausted means the run finalizes `skipped` with
 `lifetime_inject_exhausted:*`. The slot is released if the engine throws.
@@ -1192,11 +1195,14 @@ A `task_qc` run never fires a post-run chain or another `task_qc`.
 
 ### Concurrency and delivery notes
 
-The safe-fix writer holds the task row `FOR NO KEY UPDATE` and a transaction-level advisory lock
-`taskqc-session:<session_id>` while it probes for in-flight runs and writes. `scheduled_task_runs` has a
-`BEFORE INSERT` trigger taking the same lock, so a run for ANY task on that session either commits before
-the probe or waits for the writer. Proposal rows carry `digest_sent_at`: a finding is re-reported on a
-same-day re-run until a digest containing it was delivered, and only a successful send marks it. An applied
+The safe-fix writer locks the task row `FOR UPDATE` (the FK key-share of any run insert for that task,
+session-bound or not, conflicts with it) and the target `sessions` row `FOR UPDATE` (`scheduled_task_runs.session_id`
+references it, so a run for ANY task on that session conflicts too) before it probes for in-flight runs and
+writes: a run either commits before the probe or waits for the writer. Run insertion itself is unchanged
+(no trigger, no advisory lock, nothing added with Task QC off); a round-1 trigger that did this is dropped at
+boot if present. Proposal rows carry `digest_sent_at`: a finding is re-reported on a
+same-day re-run until a digest containing it was delivered; only a successful send marks it, and only the
+findings the digest actually rendered (a size or count cut leaves the rest to be reported again). An applied
 `normalize_timezone` corrects the stored column only; the cron job is re-armed at the next hub restart or
 task edit (the digest says so). `SKIP_FOREVER` treats `target_offline`, `no_online_supervisor`,
 `launch_pending` and the daily cost cap reasons as benign.
