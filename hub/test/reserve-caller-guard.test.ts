@@ -58,6 +58,7 @@ describe('PTYCAP-04-04 -- reserveInject( callers (T-04-15, T-04-18)', () => {
     'dispatch/automation-controls.ts',
     'dispatch/pty-preflight.ts',
     'api/sessions.ts', // POST /heal: external self-heal MACHINE surface, one reservation per request (04-07, panel F-2)
+    'scheduler/senders/task-qc.ts', // task quality auditor: ONE lifetime slot per run under taskqc:<userId>, token = run id (08-07, D-22); shape pinned below
   ])
 
   test('reserveInject( appears only in the controls module, the PTY door and the self-heal route', () => {
@@ -106,3 +107,32 @@ describe('PTYCAP-04-04 -- counterKey / turnToken suppliers of the PTY door (T-04
     expect(args).toEqual(['{ a: f(1), b: 2 }'])
   })
 })
+
+describe('PTYCAP-08-07 -- task_qc sender reservation shape (D-22, T-08-36)', () => {
+  const sender = () => FILES.find((f) => f.rel === 'scheduler/senders/task-qc.ts')!
+
+  test('exactly one reserveInject( call, keyed taskqc:<userId> for both counterKey and sessionId', () => {
+    const calls = callArguments(sender().text, 'await reserveInject(')
+    expect(calls).toHaveLength(1)
+    expect(sender().text).toContain('const counterKey = `taskqc:${ctx.userId}`')
+    expect(calls[0]).toMatch(/sessionId:\s*counterKey\b/)
+    expect(calls[0]).toMatch(/(^|[\s,{])counterKey,/)
+  })
+
+  test('the token is the run id, the actor is task-qc, and no rate is enforced', () => {
+    const [args] = callArguments(sender().text, 'await reserveInject(')
+    expect(args).toMatch(/token:\s*ctx\.runId/)
+    expect(args).toMatch(/actor:\s*'task-qc'/)
+    expect(args).not.toMatch(/enforceRate/)
+    // never a constant per-session token and never another key family
+    expect(args).not.toMatch(/token:\s*['"`]/)
+    expect(args).not.toMatch(/task:|triage:|heal:|pty-preflight:/)
+  })
+
+  test('a thrown pass releases the SAME key and token', () => {
+    const [args] = callArguments(sender().text, 'await releaseInject(')
+    expect(args).toMatch(/counterKey/)
+    expect(args).toMatch(/token:\s*ctx\.runId/)
+  })
+})
+

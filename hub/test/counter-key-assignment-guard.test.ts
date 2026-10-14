@@ -19,6 +19,7 @@ const ALLOWED = new Set([
   'scheduler/senders/agent.ts', //      task:<scheduled_tasks.id>
   'scheduler/senders/triage.ts', //     triage:<application_uuid>
   'api/sessions.ts', //                 POST /heal reserves heal:<userId>:<repo> (04-07, panel F-2); server-set from the validated repo, never a DispatchRequest
+  'scheduler/senders/task-qc.ts', //    taskqc:<userId> (08-07, D-22); server-set from the run's user id, never a DispatchRequest
 ])
 
 // property (`counterKey: x`, `counterKey?: x`), shorthand (`{ counterKey }`), member (`.counterKey = x`)
@@ -62,3 +63,25 @@ describe('counterKey assignment trust boundary', () => {
     expect(triage).toContain('counterKey: `triage:${payload.application_uuid}`')
   })
 })
+
+describe('taskqc: counter key family (PTYCAP-08-07, D-22)', () => {
+  const textOf = (rel: string) => readFileSync(join(SRC, rel), 'utf8')
+  // files that spell a `taskqc:` string: the ledger key producer, plus the per-user advisory-lock NAME
+  // in run-claim.ts and load.ts (a lock identity hashed by pg_advisory_xact_lock, never a ledger
+  // counter key). Any other file fails.
+  const KEY_FAMILY_FILES = new Set(['scheduler/senders/task-qc.ts', 'task-qc/run-claim.ts', 'task-qc/load.ts'])
+
+  test('only the QC sender and the two advisory-lock names spell a taskqc: string', () => {
+    const hits = walk(SRC)
+      .map((f) => relative(SRC, f).split('\\').join('/'))
+      .filter((rel) => /['"`]taskqc:/.test(textOf(rel)))
+    expect(hits.filter((h) => !KEY_FAMILY_FILES.has(h))).toEqual([])
+    expect(hits.sort()).toEqual([...KEY_FAMILY_FILES].sort()) // self-check: both are found
+  })
+
+  test('the sender derives the key from the run user id only, and the lock-name files never mention a counterKey', () => {
+    expect(textOf('scheduler/senders/task-qc.ts')).toContain('const counterKey = `taskqc:${ctx.userId}`')
+    for (const rel of ['task-qc/run-claim.ts', 'task-qc/load.ts']) expect(/counterKey/.test(textOf(rel))).toBe(false)
+  })
+})
+
