@@ -138,14 +138,29 @@ export async function verifyProof(github: ProofGithub, run: ProofRun): Promise<P
   // (2) PR scope (D-10 iii).
   let pulls: PullSummary[];
   try {
-    pulls = await github.listPullsWithHeadPrefix(run.repo_owner, run.repo_name, PROOF_BRANCH_PREFIX);
+    pulls = await github.listPulls(run.repo_owner, run.repo_name);
   } catch {
     return pending('ci_unverifiable', 'pulls_unreadable');
+  }
+  // QC round 1 (codex #5): a PR the run did not make, opened after arming from any head that is not
+  // under proof/, is out of scope (D-10 iii). Older PRs predate the run and are not the agent's.
+  const armedAt = Date.parse(String(run.armed_at instanceof Date ? run.armed_at.toISOString() : run.armed_at));
+  const offPrefix = pulls.find((p) => {
+    if (p.headRef.startsWith(PROOF_BRANCH_PREFIX)) return false;
+    const created = p.createdAt ? Date.parse(p.createdAt) : NaN;
+    return !Number.isFinite(created) || !Number.isFinite(armedAt) || created >= armedAt;
+  });
+  if (offPrefix) {
+    return terminal('terminated:pr_scope_violation', `off_prefix_head ${offPrefix.headRef} by ${offPrefix.authorLogin ?? 'unknown'}`, offPrefix);
   }
   const foreign = pulls.find((p) => p.headRef.startsWith(PROOF_BRANCH_PREFIX) && p.headRef !== run.branch);
   if (foreign) return terminal('terminated:pr_scope_violation', `foreign_head ${foreign.headRef}`, foreign);
 
   const mine = pulls.filter((p) => p.headRef === run.branch);
+  // The success PR must come from the armed repository itself; a fork can reuse the branch name.
+  const armedFull = `${run.repo_owner}/${run.repo_name}`.toLowerCase();
+  const fork = mine.find((p) => (p.headRepoFullName ?? '').toLowerCase() !== armedFull);
+  if (fork) return terminal('terminated:pr_scope_violation', `foreign_head_repo ${fork.headRepoFullName ?? 'deleted'}`, fork);
   const wrongBase = mine.find((p) => p.baseRef !== run.default_branch);
   if (wrongBase) return terminal('terminated:pr_scope_violation', `wrong_base ${wrongBase.baseRef}`, wrongBase);
   const merged = mine.find((p) => p.merged || p.mergedAt);

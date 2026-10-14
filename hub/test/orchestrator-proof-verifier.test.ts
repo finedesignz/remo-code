@@ -62,6 +62,9 @@ const pr = (over: Partial<FakeGithubScenario['pulls'][number]> = {}): FakeGithub
   headSha: PR_HEAD_SHA,
   baseRef: 'main',
   draft: false,
+  headRepoFullName: 'acme/proof',
+  authorLogin: 'proof-agent',
+  createdAt: '2026-10-02T00:00:00Z',
   ...over,
 })
 
@@ -132,6 +135,39 @@ describe('verifyProof: default-branch advance (F1-3)', () => {
 })
 
 describe('verifyProof: PR scope', () => {
+  test('a fork PR reusing the exact run branch name is pr_scope_violation, never pr_open_green (codex #5)', async () => {
+    const gh = makeFakeProofGithub(greenPr({ headRepoFullName: 'attacker/proof' }))
+    const t = terminal(await verifyProof(gh, run()))
+    expect(t.outcome).toBe('terminated:pr_scope_violation')
+    expect(t.detail).toContain('attacker/proof')
+  })
+
+  test('a deleted head repository (null) is foreign; head repo comparison is case-insensitive', async () => {
+    const del = terminal(await verifyProof(makeFakeProofGithub(greenPr({ headRepoFullName: null })), run()))
+    expect(del.outcome).toBe('terminated:pr_scope_violation')
+    const ok = await verifyProof(makeFakeProofGithub(greenPr({ headRepoFullName: 'ACME/Proof' })), run())
+    expect(ok.kind === 'terminal' ? ok.outcome : 'pending').toBe('pr_open_green')
+  })
+
+  test('a NEW off-prefix PR is pr_scope_violation even with a green proof PR present (codex #5)', async () => {
+    const gh = makeFakeProofGithub({
+      ...greenPr(),
+      pulls: [pr(), pr({ number: 9, headRef: 'feature/x', htmlUrl: 'https://x/9', authorLogin: 'agent-bot' })],
+    })
+    const t = terminal(await verifyProof(gh, run()))
+    expect(t.outcome).toBe('terminated:pr_scope_violation')
+    expect(t.detail).toContain('off_prefix_head feature/x by agent-bot')
+    expect(t.prNumber).toBe(9)
+  })
+
+  test('an off-prefix PR created BEFORE arming is not the agent: ignored; one with no created_at fails closed', async () => {
+    const old = pr({ number: 9, headRef: 'feature/old', createdAt: '2026-09-01T00:00:00Z' })
+    const okRun = await verifyProof(makeFakeProofGithub({ ...greenPr(), pulls: [pr(), old] }), run())
+    expect(okRun.kind === 'terminal' ? okRun.outcome : 'pending').toBe('pr_open_green')
+    const undated = terminal(await verifyProof(makeFakeProofGithub({ pulls: [pr({ number: 9, headRef: 'feature/z', createdAt: null })] }), run()))
+    expect(undated.outcome).toBe('terminated:pr_scope_violation')
+  })
+
   test('a proof/ PR from a different head is pr_scope_violation', async () => {
     const gh = makeFakeProofGithub({ pulls: [pr({ headRef: 'proof/other', number: 7, htmlUrl: 'https://x/7' })] })
     const t = terminal(await verifyProof(gh, run()))
@@ -183,7 +219,7 @@ describe('verifyProof: PR scope', () => {
   })
 
   test('pulls unreadable is pending ci_unverifiable, never green', async () => {
-    const gh = makeFakeProofGithub({ fail: { listPullsWithHeadPrefix: new ProofGithubError('forbidden', 403) } })
+    const gh = makeFakeProofGithub({ fail: { listPulls: new ProofGithubError('forbidden', 403) } })
     const o = pending(await verifyProof(gh, run()))
     expect(o.state).toBe('ci_unverifiable')
     expect(o.detail).toBe('pulls_unreadable')
@@ -192,7 +228,7 @@ describe('verifyProof: PR scope', () => {
   test('the verifier is read-only: only contract read methods are called', async () => {
     const gh = makeFakeProofGithub(greenPr())
     await verifyProof(gh, run())
-    const allowed = new Set(['compare', 'listPullsWithHeadPrefix', 'getCheckState'])
+    const allowed = new Set(['compare', 'listPulls', 'getCheckState'])
     for (const c of gh.calls) expect(allowed.has(c.method)).toBe(true)
   })
 })

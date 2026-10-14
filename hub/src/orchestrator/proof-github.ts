@@ -118,14 +118,13 @@ export function makeProofGithub(opts: { installationId: number | string }, deps:
       return { status: s, aheadBy: r.ahead_by, behindBy: r.behind_by };
     },
 
-    async listPullsWithHeadPrefix(owner, repo, headPrefix): Promise<PullSummary[]> {
+    async listPulls(owner, repo): Promise<PullSummary[]> {
       const r = await get(`${base(owner, repo)}/pulls?state=all&sort=created&direction=desc&per_page=50`);
       if (!Array.isArray(r)) throw malformed('pulls');
       const out: PullSummary[] = [];
       for (const p of r) {
         if (!isObj(p)) throw malformed('pull');
         const headRef = str(p.head?.ref, 'pull.head.ref');
-        if (!headRef.startsWith(headPrefix)) continue;
         const mergedAt = typeof p.merged_at === 'string' && p.merged_at ? p.merged_at : null;
         out.push({
           number: p.number,
@@ -137,6 +136,10 @@ export function makeProofGithub(opts: { installationId: number | string }, deps:
           headSha: str(p.head?.sha, 'pull.head.sha'),
           baseRef: str(p.base?.ref, 'pull.base.ref'),
           draft: p.draft === true,
+          // head.repo is null when the fork was deleted; the verifier treats null as foreign.
+          headRepoFullName: typeof p.head?.repo?.full_name === 'string' ? p.head.repo.full_name : null,
+          authorLogin: typeof p.user?.login === 'string' ? p.user.login : null,
+          createdAt: typeof p.created_at === 'string' ? p.created_at : null,
         });
       }
       return out;
