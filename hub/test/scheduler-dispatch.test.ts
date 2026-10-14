@@ -25,6 +25,7 @@
  * cache-bust real modules, afterAll(mock.restore).
  */
 import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
+import { automationControlsLeaf } from './fixtures/automation-controls-leaf.ts'
 
 const realCtx = await import(`../src/scheduler/context/runtime-context.ts?bust=${Date.now()}`)
 
@@ -36,7 +37,7 @@ const state: {
   online: Set<string>
   capExceeded: boolean
   launchResult: any
-  launchCalls: Array<{ userId: string; sessionId: string }>
+  launchCalls: Array<{ userId: string; sessionId: string; machine?: true }>
 } = {
   finalized: [],
   removed: [],
@@ -109,6 +110,10 @@ mock.module('../src/dispatch/gates.ts', () => ({
   // fix/stop-the-bleed: the token cap now rides EVERY dispatch gate list.
   dailyTokenCapGate: { name: 'daily_token_cap', async check() { return { ok: true } } },
 }))
+
+// PTYCAP-04: the sender now also imports automation-controls (kill switch + lifetime
+// counter); leaf-mock it so this file stays about the scheduler lifecycle (no DB).
+mock.module('../src/dispatch/automation-controls.ts', () => automationControlsLeaf())
 
 // Import AFTER mocks. Pipeline + adapter are REAL.
 const { sendAgentTask, isScheduledRunActive } = await import('../src/scheduler/senders/agent.ts')
@@ -240,7 +245,7 @@ describe('scheduler dispatch adapter — open→send→finalize lifecycle', () =
     await sendAgentTask(TASK, ctx({ runId: 'run-1' }))
 
     // Launch fired exactly once for this session.
-    expect(state.launchCalls).toEqual([{ userId: 'user-1', sessionId: 'sess-1' }])
+    expect(state.launchCalls).toEqual([{ userId: 'user-1', sessionId: 'sess-1', machine: true }])
     // Nothing sent yet (session still offline) and the run is NOT finalized as
     // target_offline — it's parked in grace awaiting the launched runner.
     expect(state.sentFrames).toHaveLength(0)
@@ -277,6 +282,19 @@ describe('scheduler dispatch adapter — open→send→finalize lifecycle', () =
     const fin = state.finalized.find((f) => f.runId === 'run-1')
     expect(fin!.status).toBe('skipped')
     expect(fin!.error).toBe('at_capacity')
+  })
+
+  test('PTYCAP-04-07: offline session + halted machine launch -> skipped automation_halted:<scope>, no park', async () => {
+    state.online = new Set()
+    state.launchResult = { ok: false, reason: 'automation_halted:global' }
+
+    await sendAgentTask(TASK, ctx({ runId: 'run-1' }))
+
+    expect(state.sentFrames).toHaveLength(0)
+    expect(getGraceBuffer()._pendingCount('sess-1')).toBe(0)
+    const fin = state.finalized.find((f) => f.runId === 'run-1')
+    expect(fin!.status).toBe('skipped')
+    expect(fin!.error).toBe('automation_halted:global')
   })
 
   test('offline session + offline supervisor (scheduled) → still parks in grace (unchanged)', async () => {

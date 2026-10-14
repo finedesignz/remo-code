@@ -29,7 +29,8 @@ const LOCATE_TIMEOUT_MS = 60_000
 /** A candidate file must have mtimeMs >= spawnedAt - this slack to qualify as
  *  "the file this session's CLI just touched" (P1-D-B capture-once locator). */
 const LOCATE_MTIME_SLACK_MS = 2000
-/** Bound the uuid dedupe set so a very long-running session can't leak memory. */
+/** Bound the dedupe map (keyed by message.id, fallback record uuid) so a very
+ *  long-running session can't leak memory. FIFO eviction of the oldest key. */
 const SEEN_UUID_CAP = 5000
 
 export interface TranscriptUsageRecord {
@@ -232,8 +233,9 @@ export class PtyUsageEmitter {
   private locateTimer: ReturnType<typeof setInterval> | null = null
   private tail: JsonlTail | null = null
   private stopped = false
-  private seen = new Set<string>()
-  private seenOrder: string[] = []
+  /** Insertion-ordered dedupe map: key (message.id, fallback uuid) -> the
+   *  per-bucket maxima already counted for that assistant message. */
+  private seen = new Map<string, { input: number; output: number; cacheCreation: number; cacheRead: number }>()
   private skippedLines = 0
 
   start(opts: PtyUsageEmitterOpts): void {
@@ -337,24 +339,51 @@ export class PtyUsageEmitter {
         ) {
           return // no noise rows
         }
-        const uuid = typeof (record as any)?.uuid === 'string' ? ((record as any).uuid as string) : null
-        if (uuid) {
-          if (this.seen.has(uuid)) return
-          this.seen.add(uuid)
-          this.seenOrder.push(uuid)
-          if (this.seenOrder.length > SEEN_UUID_CAP) {
-            const oldest = this.seenOrder.shift()
+        // The CLI writes several `assistant` records per assistant message; they
+        // share one `message.id` and carry CUMULATIVE usage. Dedupe on
+        // message.id (fallback: the record uuid), keep per-bucket maxima and
+        // emit only the positive per-bucket delta (G-1 / D-15). A key-less
+        // record (neither id nor uuid) emits its full usage, as before.
+        const rawId = (record as any)?.message?.id
+        const msgId = typeof rawId === 'string' ? rawId.trim() : ''
+        const rawUuid = (record as any)?.uuid
+        const key = msgId !== '' ? msgId : typeof rawUuid === 'string' && rawUuid !== '' ? rawUuid : null
+        let delta = {
+          input: usage.inputTokens,
+          output: usage.outputTokens,
+          cacheCreation: usage.cacheCreationInputTokens,
+          cacheRead: usage.cacheReadInputTokens,
+        }
+        if (key !== null) {
+          const prev = this.seen.get(key) ?? { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 }
+          const cur = delta
+          delta = {
+            input: Math.max(0, cur.input - prev.input),
+            output: Math.max(0, cur.output - prev.output),
+            cacheCreation: Math.max(0, cur.cacheCreation - prev.cacheCreation),
+            cacheRead: Math.max(0, cur.cacheRead - prev.cacheRead),
+          }
+          const isNew = !this.seen.has(key)
+          this.seen.set(key, {
+            input: Math.max(prev.input, cur.input),
+            output: Math.max(prev.output, cur.output),
+            cacheCreation: Math.max(prev.cacheCreation, cur.cacheCreation),
+            cacheRead: Math.max(prev.cacheRead, cur.cacheRead),
+          })
+          if (isNew && this.seen.size > SEEN_UUID_CAP) {
+            const oldest = this.seen.keys().next().value
             if (oldest !== undefined) this.seen.delete(oldest)
           }
+          if (delta.input === 0 && delta.output === 0 && delta.cacheCreation === 0 && delta.cacheRead === 0) return
         }
         opts.emit({
           type: 'usage_event',
           session_id: opts.sessionId,
           model: usage.model,
-          input_tokens: usage.inputTokens,
-          output_tokens: usage.outputTokens,
-          cache_creation_input_tokens: usage.cacheCreationInputTokens,
-          cache_read_input_tokens: usage.cacheReadInputTokens,
+          input_tokens: delta.input,
+          output_tokens: delta.output,
+          cache_creation_input_tokens: delta.cacheCreation,
+          cache_read_input_tokens: delta.cacheRead,
           cost_usd: 0,
           cost_source: 'estimated',
           ts: new Date().toISOString(),
@@ -376,7 +405,7 @@ export class PtyUsageEmitter {
       // So any record already in the file by the time the 1s locate-poll tick
       // pins it (LOCATE_POLL_MS) is a genuine turn of THIS session that a
       // tail-from-EOF would silently drop from the token ledger and the daily
-      // cap. Tail from the top — dedupe (via `seen`/`uuid`) already guards
+      // cap. Tail from the top — dedupe (via `seen`, keyed by message.id/uuid, positive deltas only) already guards
       // against double-emitting anything replayed this way.
       fromStart: true,
       onParseError: () => {

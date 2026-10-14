@@ -50,7 +50,9 @@ import {
   type RunStore,
 } from '../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
+import { automationKillSwitchGate } from '../dispatch/automation-controls.ts'
 import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
+import { healUnifiedEnabled } from '../heal/flag.ts'
 
 export type DispatchOutcome =
   | { status: 'dispatched'; run_id: string }
@@ -64,35 +66,27 @@ async function loadErrorRow(errorId: string): Promise<ErrorRow | null> {
   return rows[0] ?? null
 }
 
-export async function dispatchPendingError(errorId: string): Promise<DispatchOutcome> {
-  const error = await loadErrorRow(errorId)
-  if (!error) return { status: 'noop', skip_reason: 'error_not_found' }
-  if (error.dispatch_status !== 'pending') {
-    return { status: 'noop', skip_reason: `not_pending:${error.dispatch_status}` }
-  }
-
-  // Project resolution — owner is on the project row (unscoped lookup; the
-  // errorId already authorizes us, the intake set project_id from the key).
-  const projRows = await sql<ErrorProject[]>`
-    SELECT * FROM error_projects WHERE id = ${error.project_id} LIMIT 1
-  `
-  const project = projRows[0]
-  if (!project) {
-    await updateErrorDispatchStatus(errorId, 'failed', 'project_missing')
-    return { status: 'failed', skip_reason: 'project_missing' }
-  }
-
-  const sessionId = project.session_id
-  const userId = project.user_id
-
-  // Prompt + stored chat content. Built once; the RunStore's send persists the
-  // user message and forwards it on the agent socket.
-  const content = buildErrorMessage(error, project)
-  const storedContent = `[error: ${project.name} — ${error.error_type}]\n\n${content}`
-
-  const notifyCtx = { error_type: error.error_type, error_value: error.error_value }
-
-  const store: RunStore = {
+/**
+ * The error-capture run store (error_runs lifecycle + throttled notifications + broadcasts).
+ * Extracted verbatim from dispatchPendingError so the legacy path and the heal sink
+ * (heal/sinks/error-capture.ts) share one implementation.
+ */
+export function buildErrorCaptureRunStore(args: {
+  errorId: string
+  project: ErrorProject
+  sessionId: string
+  userId: string
+  notifyCtx: { error_type: string; error_value: string }
+  /**
+   * Legacy owner notifications (throttled). The unified heal sink passes false: routeHeal is then
+   * the SOLE notification owner for the event (one claim per ledger row), so a refused / failed
+   * heal never produces a second, independently-throttled notice. Default true = legacy unchanged.
+   */
+  notify?: boolean
+}): RunStore {
+  const { errorId, project, sessionId, userId, notifyCtx } = args
+  const notify = args.notify !== false
+  return {
     // Insert the run row (in_flight) and RETURN its id — the pipeline threads
     // this id into the finalize hook, so onFinalize / markFailed receive the
     // real run id as their token arg. Fires exactly when the pipeline actually
@@ -108,7 +102,7 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
     // 'session_busy'. We translate to the error_capture skip vocabulary.
     async markSkipped(_token, reason) {
       await updateErrorDispatchStatus(errorId, 'skipped', reason)
-      if (reason === 'session_busy') {
+      if (reason === 'session_busy' && notify) {
         void notifyThrottled('dispatch_failed', `${project.id}:${sessionId}:busy`, 900, project, {
           ...notifyCtx,
           detail: 'session_busy',
@@ -153,18 +147,111 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
         error: `agent_send: ${errMsg}`,
         finished_at: new Date(),
       })
-      void notifyThrottled('dispatch_failed', `${project.id}:${sessionId}:send`, 900, project, {
-        ...notifyCtx,
-        detail: errMsg,
-      }).catch(() => {})
+      if (notify) {
+        void notifyThrottled('dispatch_failed', `${project.id}:${sessionId}:send`, 900, project, {
+          ...notifyCtx,
+          detail: errMsg,
+        }).catch(() => {})
+      }
     },
   }
+}
+
+/**
+ * PTYCAP-07-09 (SH-01, D-01, D-06): the flag switch. REMO_HEAL_UNIFIED OFF (unset or any
+ * unrecognized value) runs the legacy body below unchanged and loads nothing from the heal tree
+ * beyond the flag reader. ON hands the event to routeHeal: no PipelineDeps and no ensure-online
+ * hook are built here (AM-F1-5), and there is no fall back to the legacy body on error (routeHeal
+ * terminalizes every failure itself).
+ */
+export interface DispatchPendingHealOptions {
+  /** Forwarded to routeHeal so tests can inject collaborators. Production passes nothing. */
+  routeDeps?: import('../heal/route.ts').HealDeps
+  /** Replace the error / project row loaders (tests). */
+  loadError?: (errorId: string) => Promise<ErrorRow | null>
+  loadProject?: (projectId: string) => Promise<ErrorProject | null>
+}
+
+export async function dispatchPendingError(
+  errorId: string,
+  healOpts?: DispatchPendingHealOptions,
+): Promise<DispatchOutcome> {
+  if (!healUnifiedEnabled()) return dispatchPendingErrorLegacy(errorId)
+  return dispatchPendingErrorViaHeal(errorId, healOpts)
+}
+
+async function dispatchPendingErrorViaHeal(
+  errorId: string,
+  opts: DispatchPendingHealOptions = {},
+): Promise<DispatchOutcome> {
+  const error = await (opts.loadError ?? loadErrorRow)(errorId)
+  if (!error) return { status: 'noop', skip_reason: 'error_not_found' }
+  if (error.dispatch_status !== 'pending') {
+    return { status: 'noop', skip_reason: `not_pending:${error.dispatch_status}` }
+  }
+  const project = await (opts.loadProject ??
+    (async (projectId: string) => {
+      const rows = await sql<ErrorProject[]>`SELECT * FROM error_projects WHERE id = ${projectId} LIMIT 1`
+      return rows[0] ?? null
+    }))(error.project_id)
+  if (!project) {
+    await updateErrorDispatchStatus(errorId, 'failed', 'project_missing')
+    return { status: 'failed', skip_reason: 'project_missing' }
+  }
+  // Hub self-capture rows have no bound session: they keep the legacy handling.
+  if (!project.session_id) return dispatchPendingErrorLegacy(errorId)
+
+  const content = buildErrorMessage(error, project)
+  const storedContent = `[error: ${project.name} — ${error.error_type}]
+
+${content}`
+  const { buildErrorCaptureHealEvent, healOutcomeToErrorOutcome } = await import('../heal/sources/error-capture.ts')
+  const { routeHeal } = await import('../heal/route.ts')
+  const event = buildErrorCaptureHealEvent(
+    error,
+    { id: project.id, user_id: project.user_id, name: project.name, session_id: project.session_id },
+    content,
+    storedContent,
+  )
+  return healOutcomeToErrorOutcome(await routeHeal(event, opts.routeDeps))
+}
+
+// heal-legacy-path:begin dispatchPendingErrorLegacy
+async function dispatchPendingErrorLegacy(errorId: string): Promise<DispatchOutcome> {
+  const error = await loadErrorRow(errorId)
+  if (!error) return { status: 'noop', skip_reason: 'error_not_found' }
+  if (error.dispatch_status !== 'pending') {
+    return { status: 'noop', skip_reason: `not_pending:${error.dispatch_status}` }
+  }
+
+  // Project resolution — owner is on the project row (unscoped lookup; the
+  // errorId already authorizes us, the intake set project_id from the key).
+  const projRows = await sql<ErrorProject[]>`
+    SELECT * FROM error_projects WHERE id = ${error.project_id} LIMIT 1
+  `
+  const project = projRows[0]
+  if (!project) {
+    await updateErrorDispatchStatus(errorId, 'failed', 'project_missing')
+    return { status: 'failed', skip_reason: 'project_missing' }
+  }
+
+  const sessionId = project.session_id
+  const userId = project.user_id
+
+  // Prompt + stored chat content. Built once; the RunStore's send persists the
+  // user message and forwards it on the agent socket.
+  const content = buildErrorMessage(error, project)
+  const storedContent = `[error: ${project.name} — ${error.error_type}]\n\n${content}`
+
+  const notifyCtx = { error_type: error.error_type, error_value: error.error_value }
+
+  const store = buildErrorCaptureRunStore({ errorId, project, sessionId, userId, notifyCtx })
 
   const deps: PipelineDeps = {
     // IR-1: cost-cap is non-bypassable. IR-2: threshold first, then cost-cap.
     // sessionInjectRateGate: an error flood (the sentry key is a public DSN) must not
     // drive N turns/hour into the bound session — a rate ceiling, not just a $ / token one.
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
+    gates: [automationKillSwitchGate, thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Spawn-on-error (opt-in via REMO_SPAWN_ON_ERROR): when the bound session
@@ -239,3 +326,4 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
       return { status: 'failed', skip_reason: 'agent_send_failed' }
   }
 }
+// heal-legacy-path:end dispatchPendingErrorLegacy

@@ -39,6 +39,8 @@ const state: {
   endRunCalls: Array<[string, number | null, string]>
   releaseCalls: number
   sessionProjectDir: string | null
+  haltScope: string | null
+  haltCalls: number
 } = {
   online: false,
   supervisors: ['sup-1'],
@@ -51,6 +53,8 @@ const state: {
   endRunCalls: [],
   releaseCalls: 0,
   sessionProjectDir: '/repo/app',
+  haltScope: null,
+  haltCalls: 0,
 }
 
 function resetState() {
@@ -65,6 +69,8 @@ function resetState() {
   state.endRunCalls = []
   state.releaseCalls = 0
   state.sessionProjectDir = '/repo/app'
+  state.haltScope = null
+  state.haltCalls = 0
 }
 
 mock.module('../src/ws/registry.ts', () => ({
@@ -120,6 +126,16 @@ mock.module('../src/db/dal.ts', () => ({
   getSessionSkipPermissions: async () => true,
 }))
 
+// QC B1: ensureSessionOnline re-reads the kill switch immediately before its session.start.
+mock.module('../src/dispatch/automation-controls.ts', () => ({
+  haltBeforeMachineSend: async () => {
+    state.haltCalls++
+    return state.haltScope
+      ? { ok: false, reason: `automation_halted:${state.haltScope}`, scope: state.haltScope }
+      : { ok: true }
+  },
+}))
+
 mock.module('../src/observability/logger.ts', () => ({
   log: { info: () => {}, error: () => {}, warn: () => {}, debug: () => {} },
 }))
@@ -146,6 +162,17 @@ afterEach(() => {
 })
 
 describe('spawn-on-error: ensureSessionOnline', () => {
+  test('QC B1: kill switch engaged after the slot reservation -> NO session.start, run ended, slot freed, false', async () => {
+    state.haltScope = 'global'
+    const ok = await ensureSessionOnline('u1', 's1')
+    expect(ok).toBe(false)
+    expect(state.haltCalls).toBe(1)
+    expect(state.createRunCalls).toBe(1) // the reservation had been taken (the late window)
+    expect(state.sentMessages.length).toBe(0)
+    expect(state.endRunCalls).toEqual([['run-1', null, 'automation_halted:global']])
+    expect(state.releaseCalls).toBe(1)
+  })
+
   test('flag OFF → no spawn, returns false', async () => {
     delete process.env.REMO_SPAWN_ON_ERROR
     expect(spawnOnErrorEnabled()).toBe(false)

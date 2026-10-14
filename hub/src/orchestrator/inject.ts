@@ -33,6 +33,11 @@ import {
   sessionInjectRateGate,
   isOverAutospawnDailyLaunchCap,
 } from '../dispatch/gates.ts'
+import {
+  automationKillSwitchGate,
+  automationLifetimeCounterGate,
+  resolveOrchestratorCounterKey,
+} from '../dispatch/automation-controls.ts'
 import { isOrchestratorEnabled, isAutospawnEnabled } from './controller.ts'
 import {
   isRepoAutospawnAllowed,
@@ -40,11 +45,13 @@ import {
   AUTOSPAWN_LAUNCH_COMMAND,
 } from '../db/orchestrator-rows-dal.ts'
 import { getTokenCapStatus } from '../dispatch/gates.ts'
-import { launchSessionForUser, type LaunchResult } from '../telegram/launch.ts'
+import { launchSessionForUser } from '../telegram/launch.ts'
 import { isSupervisorOnline } from '../ws/supervisor-registry.ts'
 import { listSupervisorsForUser } from '../db/supervisor-dal.ts'
 import { appendRunLog } from './run-log.ts'
 import { getGraceBuffer } from '../dispatch/grace.ts'
+import { isSessionLive } from '../sessions/liveness.ts'
+import { governedLaunch } from '../dispatch/governed-launch.ts'
 
 export type InjectOutcome =
   | { kind: 'dispatched' }
@@ -87,6 +94,12 @@ export interface InjectInput {
   prompt: string
   /** BSA-02: when present + gated ON, an offline build session is autospawned. */
   autospawn?: AutospawnContext
+  /**
+   * PTYCAP-04: the orchestrator task id behind this inject (macro-cycle supplies it).
+   * Absent => the counter key is resolved from the session's 1:1 orchestrator task.
+   * Server-side only; it becomes `DispatchRequest.counterKey`.
+   */
+  taskId?: string
 }
 
 /** Injectable seam for tests: lets the seam swap the real `dispatch()` for a spy. */
@@ -108,6 +121,8 @@ export interface InjectDeps {
   launchSessionForUser: typeof launchSessionForUser
   appendRunLog: typeof appendRunLog
   graceParkPending: (sessionId: string) => boolean
+  /** PTYCAP-04 counter-key resolver. Optional so existing dep objects keep compiling. */
+  resolveCounterKey?: typeof resolveOrchestratorCounterKey
 }
 
 /** Is at least one supervisor that could host this user's sessions online? */
@@ -120,33 +135,10 @@ async function defaultSupervisorOnlineForUser(userId: string): Promise<boolean> 
   }
 }
 
-/**
- * Default liveness check: a session is live only if it has a live agent channel
- * AND is not a ghost. A ghost is `status='online' AND hostname IS NULL` (a
- * phantom channel from a hostname-less re-auth). On any DB error we fail OPEN to
- * "live" (channel present ⇒ preserve the legacy dispatch behaviour for genuine
- * sessions rather than mis-route them to autospawn on a transient read error).
- */
-async function defaultIsSessionLive(sessionId: string): Promise<boolean> {
-  if (getChannel(sessionId) == null) return false
-  try {
-    const { sql } = await import('../db/postgres.ts')
-    const rows = await sql<{ status: string | null; hostname: string | null }[]>`
-      SELECT status, hostname FROM sessions WHERE id = ${sessionId} AND deleted_at IS NULL LIMIT 1
-    `
-    const row = rows[0]
-    if (!row) return true // channel present but no row — treat as live (best-effort)
-    const isGhost = row.status === 'online' && row.hostname == null
-    return !isGhost
-  } catch {
-    return true // fail-open to live — never mis-route a genuine session on a read error
-  }
-}
-
 const REAL_DEPS: InjectDeps = {
   dispatch,
   getChannel,
-  isSessionLive: defaultIsSessionLive,
+  isSessionLive,
   isOrchestratorEnabled,
   isAutospawnEnabled,
   isRepoAutospawnAllowed,
@@ -162,6 +154,18 @@ const REAL_DEPS: InjectDeps = {
       return false
     }
   },
+}
+
+/**
+ * PTYCAP-04 (D-01, F-5c): ONE budget per orchestrator. A caller-supplied taskId is
+ * authoritative (`task:<id>`, resolver not consulted); otherwise the resolver maps the
+ * session to its orchestrator task. Called exactly once per inject, by whichever of the
+ * online / autospawn paths runs. Throws on failure (callers fail closed).
+ */
+async function resolveInjectCounterKey(input: InjectInput, deps: InjectDeps): Promise<string> {
+  if (input.taskId) return `task:${input.taskId}`
+  const resolve = deps.resolveCounterKey ?? resolveOrchestratorCounterKey
+  return await resolve({ userId: input.userId, sessionId: input.sessionId, taskId: undefined })
 }
 
 /** Build the prompt-delivery `send` closure (shared by the live + park paths). */
@@ -259,7 +263,17 @@ export async function injectOrchestratorPrompt(
     // IR-1: cost-cap non-bypassable. BSA-04: the token cap is ADDED ALONGSIDE it
     // (never replacing). The per-session inject-RATE ceiling is added last (2026-07
     // wedged-tick-loop incident). Order: threshold → cost-cap → token-cap → rate.
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
+    // PTYCAP-04: the kill switch is FIRST (cheapest, fresh-read, fail closed) and the
+    // lifetime counter LAST (non-consuming check; the atomic reservation happens in
+    // dispatch() before the send, keyed by req.counterKey).
+    gates: [
+      automationKillSwitchGate,
+      thresholdGate,
+      dailyCostCapGate,
+      dailyTokenCapGate,
+      sessionInjectRateGate,
+      automationLifetimeCounterGate,
+    ],
     store,
     isOnline: (req) => deps.getChannel(req.sessionId) != null,
     // Online path: park is unexpected (we gated on getChannel above) — no-op.
@@ -267,7 +281,16 @@ export async function injectOrchestratorPrompt(
     send,
   }
 
-  const req: DispatchRequest = { userId, sessionId, token, prompt }
+  // PTYCAP-04: the budget identity, computed ONCE per inject. A resolver failure
+  // fails CLOSED - an unkeyed inject would silently bypass the lifetime ceiling.
+  let counterKey: string
+  try {
+    counterKey = await resolveInjectCounterKey(input, deps)
+  } catch (err: any) {
+    return { kind: 'failed', reason: `counter_key_unresolved:${err?.message ?? err}` }
+  }
+
+  const req: DispatchRequest = { userId, sessionId, token, prompt, counterKey }
   const outcome = await deps.dispatch(req, deployDeps)
   return mapDispatchOutcome(outcome)
 }
@@ -314,65 +337,59 @@ async function maybeAutospawnOffline(
   if (!autospawn || !autospawn.isBuild) return { kind: 'no_session' }
   if (!deps.isOrchestratorEnabled() || !deps.isAutospawnEnabled()) return { kind: 'no_session' }
 
-  const tz = autospawn.tz || 'UTC'
-
-  // Allowlist (fail-closed: empty allowlist ⇒ false ⇒ refused:not_allowlisted).
-  const allowed = await deps.isRepoAutospawnAllowed(userId, autospawn.repoIdent)
-  if (!allowed) return { kind: 'refused', reason: 'not_allowlisted' }
-
-  // Supervisor must be online to host the spawned session.
-  const supOnline = await deps.supervisorOnlineForUser(userId, sessionId)
-  if (!supOnline) return { kind: 'refused', reason: 'supervisor_offline' }
-
-  // BSA-04 token ceiling (non-bypassable, ALONGSIDE cost cap). Pre-launch check so
-  // we never SPAWN over the ceiling; the dispatch gate list re-checks per turn.
-  const tokenStatus = await deps.getTokenCapStatus(userId, tz)
-  if (tokenStatus.over) return { kind: 'refused', reason: 'over_token_cap' }
-
-  // BSA-04 per-day launch-count cap (each spawn is a cost/risk event regardless of
-  // tokens). Source: count today's `autospawn-launch` run-log rows (tz-day).
-  let launchesToday = 0
-  try {
-    launchesToday = await deps.countAutospawnLaunchesToday(userId, tz)
-  } catch {
-    /* best-effort; treat as 0 so a transient read error does not over-block */
-  }
-  if (isOverAutospawnDailyLaunchCap(launchesToday)) return { kind: 'refused', reason: 'launch_cap' }
-
-  // ── Launch + park ────────────────────────────────────────────────────────────
-  // Dedup: a live grace entry means a launch is already in flight for this session
-  // (one spawn per grace window) — don't fire a duplicate session.start; the
-  // earlier parked prompt already covers delivery on reconnect.
-  if (deps.graceParkPending(sessionId)) {
-    return { kind: 'autospawn_parked' }
-  }
-
-  let launch: LaunchResult
-  try {
-    launch = await deps.launchSessionForUser({ userId, sessionId })
-  } catch (err: any) {
-    return { kind: 'failed', reason: `autospawn_launch_threw: ${err?.message ?? String(err)}` }
-  }
-
-  if (!launch.ok) {
-    // no_online_supervisor (raced offline) maps to supervisor_offline; capacity /
-    // other definitive reasons surface as a typed refusal.
-    if (launch.reason === 'no_online_supervisor') return { kind: 'refused', reason: 'supervisor_offline' }
-    return { kind: 'refused', reason: `autospawn_launch_${launch.reason}` }
-  }
-
-  // Ledger row: one `autospawn-launch` run-log entry per real spawn — this is the
-  // BSA-04 launch-count cap's source (counted above). Best-effort.
-  try {
-    await deps.appendRunLog({
-      session_id: sessionId,
-      repo_key: autospawn.repoIdent,
-      command: AUTOSPAWN_LAUNCH_COMMAND,
-      decision_rationale: `autospawn build session (run=${launch.runId}, sup=${launch.supervisorId})`,
-      outcome: 'launched',
-    })
-  } catch {
-    /* best-effort — the cap is conservative; a missed ledger row only under-counts */
+  // PTYCAP-07-04 (D-03/D-04): the post-flag chain (allowlist, supervisor, token cap,
+  // launch-count cap, in-flight dedupe, launch, ledger) lives in the shared governed
+  // adapter. Legacy policy = no pre-launch governor: the original order, strings and
+  // best-effort post-launch ledger. The arming flags stay evaluated here.
+  //
+  // PTYCAP-04: the budget identity, resolved ONCE for this inject (the online path never
+  // reaches here) inside the adapter's preflight, i.e. BEFORE the launch so a resolver
+  // failure fails CLOSED without spawning a session.
+  let counterKey = ''
+  const launched = await governedLaunch(
+    {
+      userId,
+      sessionId,
+      repoIdent: autospawn.repoIdent,
+      tz: autospawn.tz || 'UTC',
+      armed: true,
+      preflight: async () => {
+        try {
+          counterKey = await resolveInjectCounterKey(input, deps)
+          return { ok: true as const }
+        } catch (err: any) {
+          return {
+            ok: false as const,
+            result: { kind: 'failed' as const, reason: `counter_key_unresolved:${err?.message ?? err}` },
+          }
+        }
+      },
+      ledger: {
+        repoKey: autospawn.repoIdent,
+        command: AUTOSPAWN_LAUNCH_COMMAND,
+        rationale: (l) => `autospawn build session (run=${l?.runId}, sup=${l?.supervisorId})`,
+      },
+    },
+    {
+      isRepoAutospawnAllowed: deps.isRepoAutospawnAllowed,
+      supervisorOnlineForUser: deps.supervisorOnlineForUser,
+      getTokenCapStatus: deps.getTokenCapStatus,
+      countAutospawnLaunchesToday: deps.countAutospawnLaunchesToday,
+      isOverAutospawnDailyLaunchCap,
+      graceParkPending: deps.graceParkPending,
+      launchSessionForUser: deps.launchSessionForUser,
+      appendRunLog: deps.appendRunLog,
+    },
+  )
+  switch (launched.kind) {
+    case 'in_flight':
+      return { kind: 'autospawn_parked' }
+    case 'refused':
+      return { kind: 'refused', reason: launched.reason }
+    case 'failed':
+      return { kind: 'failed', reason: launched.reason }
+    case 'launched':
+      break
   }
 
   // Park the macro prompt in grace so the freshly-launched runner receives it on
@@ -386,15 +403,27 @@ async function maybeAutospawnOffline(
     async markFailed() {},
   }
   const send = buildSend(prompt, token, deps)
+  const req: DispatchRequest = { userId, sessionId, token, prompt, counterKey }
   const deployDeps: PipelineDeps = {
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
+    // PTYCAP-04: same composition as the online path - kill switch first, lifetime
+    // counter last, the original four unchanged between.
+    gates: [
+      automationKillSwitchGate,
+      thresholdGate,
+      dailyCostCapGate,
+      dailyTokenCapGate,
+      sessionInjectRateGate,
+      automationLifetimeCounterGate,
+    ],
     store,
-    isOnline: (req) => deps.getChannel(req.sessionId) != null,
-    // Grace drain (on the launched runner's reconnect) re-runs this: deliver the
-    // parked macro prompt to the now-online session.
-    replay: async () => {
+    isOnline: (r) => deps.getChannel(r.sessionId) != null,
+    // Grace drain (on the launched runner's reconnect) RE-ENTERS dispatch(): the
+    // parked prompt is up to 10 minutes stale, so it must pass the full gate list,
+    // the kill switch and the reservation again (a replayed token counts once, a
+    // parked request was never counted). It NEVER calls the raw send (T-04-10).
+    replay: async (r) => {
       try {
-        await send({ userId, sessionId, token, prompt })
+        await deps.dispatch(r ?? req, deployDeps)
       } catch (err: any) {
         console.warn(`[orchestrator.inject] autospawn replay failed session=${sessionId}: ${err?.message ?? err}`)
       }
@@ -402,7 +431,6 @@ async function maybeAutospawnOffline(
     send,
   }
 
-  const req: DispatchRequest = { userId, sessionId, token, prompt }
   const outcome = await deps.dispatch(req, deployDeps)
 
   switch (outcome.kind) {

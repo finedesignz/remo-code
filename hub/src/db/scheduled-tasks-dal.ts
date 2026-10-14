@@ -90,6 +90,8 @@ export interface ScheduledTask {
   // this task emails the owner a summary unless a custom notify_email action is
   // already configured. Set false to opt out. See post-run/dispatcher.ts.
   email_summary: boolean
+  // PTYCAP-07: durable internal-task marker (see hub/src/heal/internal-task.ts).
+  is_internal?: boolean
   // Derived from latest finalized run via LATERAL JOIN in listTasksForUser/getTask.
   last_run_cost_usd?: number | null
   last_run_duration_ms?: number | null
@@ -385,10 +387,18 @@ export async function updateTaskV2(
  * `max_runs` end-bound (counts ALL fires regardless of status — a fire that
  * was skipped/quota-capped still consumes a run slot, matching the documented
  * "total fires" semantics). Cheap: indexed by task_id.
+ *
+ * QC m2: a run the KILL SWITCH refused (`status='skipped'`, `error` starting with
+ * `automation_halted:` - recorded by the dispatcher and the senders' pre-send check)
+ * is NOT a fire: nothing was attempted. Counting it would let a halt exhaust a bounded
+ * task's `max_runs` and auto-disable it for good. Every other skip (quota, cost cap,
+ * offline) still counts, as documented.
  */
 export async function countFiresForTask(taskId: string): Promise<number> {
   const rows = await sql<{ n: string }[]>`
-    SELECT COUNT(*)::text AS n FROM scheduled_task_runs WHERE task_id = ${taskId}
+    SELECT COUNT(*)::text AS n FROM scheduled_task_runs
+    WHERE task_id = ${taskId}
+      AND NOT (status = 'skipped' AND starts_with(COALESCE(error, ''), 'automation_halted:'))
   `
   return Number(rows[0]?.n ?? 0)
 }
@@ -435,6 +445,33 @@ export async function claimOnceTask(taskId: string, reason: string = 'once_compl
                                 'completed_at', to_jsonb(now())),
         updated_at = now()
     WHERE id = ${taskId} AND schedule_kind = 'once' AND enabled = true
+    RETURNING id
+  `
+  return rows.length > 0
+}
+
+/**
+ * PTYCAP-04-06 (panel F-4): the inverse of `claimOnceTask`. A one-time task whose
+ * dispatch was refused by the automation kill switch AFTER the claim must not be
+ * burned (client work would be lost): restore the claim so the durable once-due
+ * sweep re-fires it, through the atomic claim, once the halt is released.
+ *
+ * Guarded to a `schedule_kind='once'` row that is currently DISABLED with the once
+ * completed reason (i.e. exactly what `claimOnceTask` wrote); anything else is
+ * untouched. Returns whether a row changed.
+ */
+export async function rearmOnceTask(taskId: string, reason: string = 'once_completed'): Promise<boolean> {
+  const rows = await sql`
+    UPDATE scheduled_tasks
+    SET enabled = true,
+        next_fire_at = run_at,
+        next_run_at = run_at,
+        payload = COALESCE(payload, '{}'::jsonb) - 'completed_reason' - 'completed_at',
+        updated_at = now()
+    WHERE id = ${taskId}
+      AND schedule_kind = 'once'
+      AND enabled = false
+      AND payload->>'completed_reason' = ${reason}::text
     RETURNING id
   `
   return rows.length > 0

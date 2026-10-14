@@ -399,7 +399,7 @@ THIN adapter that reconstructs the input from `work_runs` + `payload` and calls 
   route, so a forbidden repo/site/sender still `403`s with ZERO rows and ZERO
   spend — a one-time task can never reach a repo the allowlist forbids. At RUN
   time, `dispatchWork`'s own non-negotiable gate list (`dailyCostCapGate` ·
-  `dailyTokenCapGate` · `humanOnlyPtyGate` · `workRateGate` ·
+  `dailyTokenCapGate` · `governedAutomationPtyGate` (formerly humanOnlyPtyGate; flag REMO_GOVERNED_AUTOMATION_PTY, default OFF; external-ask/external-work are never PTY-eligible) · `workRateGate` ·
   `workRepoAllowlistGate`) runs again. **No scheduling path reaches a repo/site
   that direct dispatch couldn't.** Proven by `test/ext-work-containment.test.ts`
   (b) + `test/ext-work-gates.test.ts` + `test/once-work-sender.test.ts`.
@@ -473,7 +473,9 @@ Bounds stop a task cleanly and **auto-disable** it:
 - `until` — stop at/after an absolute instant.
 - `max_runs` — stop after N **total** fires (any status: a skipped/quota-capped
   fire still consumes a slot; counted via `countFiresForTask` = `COUNT(*)` of
-  `scheduled_task_runs` for the task).
+  `scheduled_task_runs` for the task), EXCEPT runs the kill switch refused
+  (`status='skipped'`, `error` starting `automation_halted:`): nothing was attempted,
+  so a halt can never exhaust a bounded task (PTYCAP-04).
 - `for: {count, unit}` — convenience, **normalized to `until = start_at +
   count*unit` at save time** (`normalizeRulesForStorage` in the API create/patch
   handlers). Storage only ever carries `until`; the editor re-derives the
@@ -993,6 +995,33 @@ ALTER, re-runs every boot). DAL helpers: `setPendingProposal`,
 Tests: `hub/test/propose-notify.test.ts` (parse/format/resolve, throttle/dedupe,
 capture), `hub/test/dev-controller-routing.test.ts` (propose → surface, no chain;
 non-propose → no surface).
+
+---
+
+## Scheduled-task failure heal source (flag `REMO_HEAL_UNIFIED`)
+
+With `REMO_HEAL_UNIFIED` ON (default OFF), a failed scheduled-task run can be routed to the session
+bound to the task's repo through `routeHeal` (`docs/self-heal-routing.md`). The hook is in
+`finalizeRun` (`hub/src/scheduler/dispatcher.ts`), for `failed` outcomes only, between the task load
+and the post-run (notification) processing; an error in the hook resolves to "hook off" and the
+legacy path continues. `healFailedScheduledRun` (`hub/src/heal/sources/scheduled-task.ts`) builds an
+event only when ALL hold:
+
+- the transition is a real `failed` (not `skipped`, `skipped_quota`, `cancelled`, and not an
+  `only_if_active` no-op) and the failure is not `run_timeout` (reaper-finalized runs are excluded);
+- the task is non-internal: the `scheduled_tasks.is_internal` column (additive, set true by the
+  `ensureInternal*Task` inserts, never backfilled) or the legacy `__internal_` name prefix marks it
+  internal, and a missing task row counts as internal (fail closed). `__internal_*` rows stay
+  `enabled=false` by design;
+- neither the trigger nor the metadata run is heal-derived (provenance probe against `heal_events`;
+  a probe error means no event), so a failed child heal run cannot create another heal event;
+- the task's session resolves to a non-rootless canonical repo;
+- the per-task daily count is below `REMO_HEAL_MAX_PER_TASK_DAY` (default 3).
+
+Notification owner: when the heal path claims the owner notification (`no_routable_session`), the
+default failure email is suppressed for that run (`suppressDefaultFailureEmail`) so exactly one
+notice goes out. A `refused` or `failed` heal outcome sends the heal notice and still lets the
+default email go. With the flag OFF, `finalizeRun` and the default failure email behave as before.
 
 ---
 

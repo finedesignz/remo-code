@@ -18,7 +18,8 @@
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-chars-long-aaaaaaaa'
 
-import { describe, test, expect, mock, beforeEach } from 'bun:test'
+import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test'
+import { automationControlsLeaf } from './fixtures/automation-controls-leaf.ts'
 
 const state = {
   thresholdAllowed: true,
@@ -34,6 +35,7 @@ const state = {
 
 mock.module('../src/usage/threshold.ts', () => ({
   checkUserThreshold: async () => {
+    ctl.full.push('threshold')
     if (state.thresholdMode === 'throw') throw new Error('db down')
     if (state.thresholdMode === 'hang') return new Promise(() => {})
     return state.thresholdAllowed
@@ -59,12 +61,75 @@ mock.module('../src/db/postgres.ts', () => ({
 }))
 
 mock.module('../src/db/token-usage-dal.ts', () => ({
-  getTodayTokenCostUsd: async () => state.costSpent,
-  getTodayTokenTotal: async () => state.tokenTotal,
+  getTodayTokenCostUsd: async () => {
+    ctl.full.push('cost_cap')
+    return state.costSpent
+  },
+  getTodayTokenTotal: async () => {
+    ctl.full.push('token_cap_gate')
+    return state.tokenTotal
+  },
 }))
 
 mock.module('../src/db/orchestrator-rows-dal.ts', () => ({
-  countSessionInjectsSince: async () => state.injectsInWindow,
+  countSessionInjectsSince: async () => {
+    ctl.full.push('rate_gate')
+    return state.injectsInWindow
+  },
+}))
+
+// PTYCAP-04-04: governed-pty.ts and pty-preflight.ts delegate to the controls
+// module. Leaf-mock it with controllable fakes (DB-free); the SQL is proven in
+// the automation-controls tests and the CI-only real-Postgres checks.
+const ctl = {
+  haltScope: null as string | null,
+  rateCount: 0,
+  reserveMode: 'ok' as 'ok' | 'exhausted' | 'rate' | 'throw' | 'hang' | 'late',
+  releases: [] as Array<Record<string, unknown>>,
+  reserveCalls: [] as Array<Record<string, unknown>>,
+  order: [] as string[],
+  // QC M3: ONE timeline across the spend gates, the governors and the reserve.
+  full: [] as string[],
+  ledger: new Set<string>(),
+}
+async function fakeKillSwitchCheck() {
+  ctl.order.push('kill_switch')
+  if (ctl.haltScope) return { ok: false as const, reason: `automation_halted:${ctl.haltScope}` }
+  return { ok: true as const }
+}
+async function fakeLifetimeCounterCheck(req: any) {
+  ctl.order.push('lifetime_counter')
+  if (!req.counterKey) return { ok: false as const, reason: 'lifetime_counter_key_missing' }
+  return { ok: true as const }
+}
+mock.module('../src/dispatch/automation-controls.ts', () => ({
+  ...automationControlsLeaf(),
+  killSwitchCheck: fakeKillSwitchCheck,
+  lifetimeCounterCheck: fakeLifetimeCounterCheck,
+  automationKillSwitchGate: { name: 'automation_kill_switch', check: fakeKillSwitchCheck },
+  automationLifetimeCounterGate: { name: 'lifetime_counter', check: fakeLifetimeCounterCheck },
+  countRateUnion: async () => ctl.rateCount,
+  releaseInject: async (args: Record<string, unknown>) => {
+    ctl.releases.push(args)
+    ctl.ledger.delete(`${args.counterKey}|${args.token}`)
+  },
+  reserveInject: async (args: Record<string, unknown>) => {
+    ctl.order.push('reserve')
+    ctl.full.push('reserve')
+    ctl.reserveCalls.push(args)
+    if (ctl.reserveMode === 'throw') throw new Error('reserve boom')
+    if (ctl.reserveMode === 'hang') return new Promise(() => {})
+    if (ctl.reserveMode === 'late') {
+      // commits AFTER the preflight timeout has already refused the turn (QC M5)
+      await new Promise((r) => setTimeout(r, 60))
+      ctl.ledger.add(`${args.counterKey}|${args.token}`)
+      return { ok: true }
+    }
+    if (ctl.reserveMode === 'exhausted') return { ok: false, reason: 'lifetime_inject_exhausted:1000>=1000' }
+    if (ctl.reserveMode === 'rate') return { ok: false, reason: 'over_session_inject_rate:4>=4' }
+    ctl.ledger.add(`${args.counterKey}|${args.token}`)
+    return { ok: true }
+  },
 }))
 
 const modUrl = `../src/dispatch/pty-preflight.ts?t=${Date.now()}${Math.random()}`
@@ -79,8 +144,49 @@ const {
   _resetPtyPreflightTimeoutForTests,
 } = await import(modUrl)
 const { sessionInjectRateGate } = await import('../src/dispatch/gates.ts')
+const {
+  _setGovernorsForTests,
+  _resetGovernorsForTests,
+  PRODUCTION_GOVERNORS,
+  tokenCapGovernor,
+  injectRateGovernor,
+} = await import('../src/dispatch/governed-pty.ts')
+
+const GOVERNED_ENV = ['REMO_GOVERNED_AUTOMATION_PTY', 'REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR', 'REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED'] as const
+const savedEnv: Record<string, string | undefined> = {}
+
+type SpyName = 'kill_switch' | 'token_cap' | 'inject_rate' | 'lifetime_counter'
+const SPY_ORDER: SpyName[] = ['kill_switch', 'token_cap', 'inject_rate', 'lifetime_counter']
+
+/** Four all-pass governors that record the order they were checked in. */
+function makeSpies(overrides: Partial<Record<SpyName, () => Promise<{ ok: true } | { ok: false; reason: string }>>> = {}) {
+  const calls: string[] = []
+  const governors = SPY_ORDER.map((name) => ({
+    name,
+    async check() {
+      calls.push(name)
+      ctl.order.push(name)
+      ctl.full.push(`gov:${name}`)
+      return overrides[name] ? overrides[name]!() : { ok: true as const }
+    },
+  }))
+  return { calls, governors }
+}
 
 beforeEach(() => {
+  for (const k of GOVERNED_ENV) {
+    savedEnv[k] = process.env[k]
+    delete process.env[k]
+  }
+  _resetGovernorsForTests()
+  ctl.haltScope = null
+  ctl.rateCount = 0
+  ctl.reserveMode = 'ok'
+  ctl.reserveCalls.length = 0
+  ctl.releases.length = 0
+  ctl.order.length = 0
+  ctl.full.length = 0
+  ctl.ledger.clear()
   state.thresholdAllowed = true
   state.cap = '10.00'
   state.tz = 'UTC'
@@ -91,6 +197,14 @@ beforeEach(() => {
   state.creditUsed = 0
   state.thresholdMode = 'normal'
   _resetPtyPreflightTimeoutForTests()
+})
+
+afterEach(() => {
+  for (const k of GOVERNED_ENV) {
+    if (savedEnv[k] === undefined) delete process.env[k]
+    else process.env[k] = savedEnv[k]
+  }
+  _resetGovernorsForTests()
 })
 
 describe('PTYCAP Phase 2 — chain shape', () => {
@@ -159,13 +273,21 @@ describe('PTYCAP Phase 2 — human turns (SC-3)', () => {
   })
 })
 
+const keyed = { counterKey: 'task:T1', turnToken: 'turn-1' } as const
+
 describe('PTYCAP Phase 2 — non-human ("automation") turns (SC-1)', () => {
-  // No admission path exists yet that lets a non-human actor reach this
-  // function in production (humanOnlyPtyGate / humanOnlyRejectsActor reject
-  // every automation source upstream) — these prove the chain ITSELF is
-  // correct so Phase 3 has a tested seam to wire into.
+  // The automation branch is gated by the governed-automation flag (default OFF)
+  // and, when ON, runs the spend chain and then the governors. governedAutomationPtyGate
+  // rejects every non-eligible source upstream and plan 03-03's caller pin keeps
+  // the 'automation' actor inside hub/src/orchestrator/ - these prove the chain
+  // ITSELF is correct, with the flag ON and four all-pass spy governors installed.
+  beforeEach(() => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(makeSpies().governors)
+  })
+
   test('a non-human actor under every ceiling passes the FULL chain', async () => {
-    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation' })
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation', ...keyed })
     expect(r.ok).toBe(true)
   })
 
@@ -201,6 +323,8 @@ describe('PTYCAP Phase 2 — programmatic-credit halt applies to automation only
   })
 
   test('an automation turn IS stopped by the same programmatic-credit halt', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(makeSpies().governors)
     state.haltBound = '5'
     state.creditUsed = 50
     const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation' })
@@ -230,6 +354,305 @@ describe('PTYCAP Phase 2 — fail closed', () => {
     _setPtyPreflightTimeoutForTests(20)
     const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'human' })
     expect(r).toEqual({ ok: false, reason: 'pty_preflight_timeout' })
+  })
+})
+
+describe('PTYCAP Phase 3 -- governed automation branch', () => {
+  const automation = { userId: 'u1', sessionId: 's1', actor: 'automation', ...keyed } as const
+
+  test('flag OFF: the block precedes every DB gate (a throwing threshold gate does not change the result)', async () => {
+    state.thresholdMode = 'throw'
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({ ok: false, reason: 'automation_blocked_on_pty:automation' })
+  })
+
+  test('flag OFF: with every ceiling passing, automation is still refused (OFF admits nothing)', async () => {
+    const spies = makeSpies()
+    _setGovernorsForTests(spies.governors)
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({ ok: false, reason: 'automation_blocked_on_pty:automation' })
+    expect(spies.calls).toEqual([])
+  })
+
+  test('flag ON + production governors: kill switch engaged is refused with the real reason', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(PRODUCTION_GOVERNORS)
+    ctl.haltScope = 'global'
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:automation:automation_halted:global',
+    })
+    expect(ctl.reserveCalls).toEqual([])
+  })
+
+  test('flag ON + production governors: no counter key is refused lifetime_counter_key_missing, nothing reserved', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(PRODUCTION_GOVERNORS)
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation', turnToken: 'turn-1' })
+    expect(r).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:automation:lifetime_counter_key_missing',
+    })
+    expect(ctl.reserveCalls).toEqual([])
+  })
+
+  test('flag ON + four all-pass governors: admitted, governors ran in the fixed order', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    const spies = makeSpies()
+    _setGovernorsForTests(spies.governors)
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({ ok: true })
+    expect(spies.calls).toEqual(['kill_switch', 'token_cap', 'inject_rate', 'lifetime_counter'])
+  })
+
+  test('flag ON: the spend gates run BEFORE the governors (inject-rate block leaves zero governor calls)', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    const spies = makeSpies()
+    _setGovernorsForTests(spies.governors)
+    state.injectsInWindow = 999_999
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r.ok).toBe(false)
+    expect((r as { reason: string }).reason).toContain('over_session_inject_rate')
+    expect((r as { reason: string }).reason.startsWith('automation_blocked_on_pty')).toBe(false)
+    // QC M3: only the kill-switch governor (which now runs FIRST) has been consulted; the
+    // remaining governors never run behind a spend-gate block.
+    expect(spies.calls).toEqual(['kill_switch'])
+  })
+
+  test('QC M3: the kill switch runs FIRST - full invocation order is kill, threshold, token, cost, rate, governors, reserve', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    const spies = makeSpies()
+    _setGovernorsForTests(spies.governors)
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: true })
+    expect(ctl.full).toEqual([
+      'gov:kill_switch',
+      'threshold',
+      'token_cap_gate',
+      'cost_cap',
+      'rate_gate',
+      'gov:token_cap',
+      'gov:inject_rate',
+      'gov:lifetime_counter',
+      'reserve',
+    ])
+  })
+
+  test('QC M3: an engaged kill switch refuses with the HALT reason even when a spend gate would also block, and no spend gate runs', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(PRODUCTION_GOVERNORS)
+    ctl.haltScope = 'global'
+    state.thresholdAllowed = false
+    state.injectsInWindow = 999_999
+    const r = await checkPtyTurnPreflight({ ...automation, counterKey: 'task:T' })
+    expect(r).toEqual({ ok: false, reason: 'automation_blocked_on_pty:automation:automation_halted:global' })
+    expect(ctl.full).toEqual([])
+  })
+
+  test('flag ON: inject-rate cap 0 is refused by the inject_rate governor (the spend gate is fail-open at 0)', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR = '0'
+    const passKill = { name: 'kill_switch' as const, check: async () => ({ ok: true as const }) }
+    const passLife = { name: 'lifetime_counter' as const, check: async () => ({ ok: true as const }) }
+    _setGovernorsForTests([passKill, tokenCapGovernor, injectRateGovernor, passLife])
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:automation:governor_unconfigured:inject_rate',
+    })
+  })
+
+  test('flag ON: an explicitly disabled daily token cap is refused by the token_cap governor', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED = '1'
+    const passKill = { name: 'kill_switch' as const, check: async () => ({ ok: true as const }) }
+    const passLife = { name: 'lifetime_counter' as const, check: async () => ({ ok: true as const }) }
+    _setGovernorsForTests([passKill, tokenCapGovernor, injectRateGovernor, passLife])
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:automation:governor_unconfigured:token_cap',
+    })
+  })
+
+  test('flag ON: a governor that THROWS is pty_preflight_error, never a pass', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(makeSpies({ kill_switch: async () => { throw new Error('governor down') } }).governors)
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({ ok: false, reason: 'pty_preflight_error' })
+  })
+
+  test('flag ON: a governor that never settles is pty_preflight_timeout', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(makeSpies({ kill_switch: () => new Promise(() => {}) }).governors)
+    _setPtyPreflightTimeoutForTests(20)
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({ ok: false, reason: 'pty_preflight_timeout' })
+  })
+})
+
+describe('PTYCAP Phase 4 -- the door counts the turn', () => {
+  const automation = { userId: 'u1', sessionId: 's1', actor: 'automation', ...keyed } as const
+  beforeEach(() => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+  })
+
+  test('all gates and governors pass: reserve called exactly once AFTER the last governor, with the per-turn token, counter key and enforceRate', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({ ok: true })
+    expect(ctl.reserveCalls).toEqual([
+      { userId: 'u1', sessionId: 's1', token: 'turn-1', counterKey: 'task:T1', actor: 'automation', enforceRate: true },
+    ])
+    expect(ctl.order).toEqual(['kill_switch', 'token_cap', 'inject_rate', 'lifetime_counter', 'reserve'])
+  })
+
+  test('missing turnToken: pty_turn_token_missing, reserve not called', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation', counterKey: 'task:T1' })
+    expect(r).toEqual({ ok: false, reason: 'automation_blocked_on_pty:automation:pty_turn_token_missing' })
+    expect(ctl.reserveCalls).toEqual([])
+  })
+
+  test('missing counterKey: lifetime_counter_key_missing, reserve not called', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'automation', turnToken: 'turn-1' })
+    expect(r).toEqual({ ok: false, reason: 'automation_blocked_on_pty:automation:lifetime_counter_key_missing' })
+    expect(ctl.reserveCalls).toEqual([])
+  })
+
+  test('reserve returns exhausted: lifetime_inject_exhausted surfaces under the composed prefix', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    ctl.reserveMode = 'exhausted'
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:automation:lifetime_inject_exhausted:1000>=1000',
+    })
+  })
+
+  test('reserve returns the rate reason: over_session_inject_rate surfaces under the composed prefix', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    ctl.reserveMode = 'rate'
+    const r = await checkPtyTurnPreflight(automation)
+    expect(r).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:automation:over_session_inject_rate:4>=4',
+    })
+  })
+
+  test('reserve throws: pty_preflight_error, never a pass', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    ctl.reserveMode = 'throw'
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: false, reason: 'pty_preflight_error' })
+  })
+
+  test('reserve never settles: pty_preflight_timeout', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    ctl.reserveMode = 'hang'
+    _setPtyPreflightTimeoutForTests(20)
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: false, reason: 'pty_preflight_timeout' })
+  })
+
+  test('QC M5: a reservation that commits AFTER the timeout won is released by turn token', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    ctl.reserveMode = 'late'
+    _setPtyPreflightTimeoutForTests(20)
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: false, reason: 'pty_preflight_timeout' })
+    expect(ctl.releases).toEqual([]) // the reserve has not landed yet
+    await new Promise((r) => setTimeout(r, 150)) // reserve commits at ~60ms
+    expect(ctl.releases).toEqual([{ counterKey: keyed.counterKey, token: keyed.turnToken }])
+    expect(ctl.ledger.size).toBe(0) // the refused turn does not stay counted
+  })
+
+  test('QC M5: an on-time result never releases (nothing to compensate)', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: true })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(ctl.releases).toEqual([])
+    expect(ctl.ledger.size).toBe(1)
+  })
+
+  test('QC M5: a HUMAN turn never reserves or releases', async () => {
+    _setPtyPreflightTimeoutForTests(20)
+    state.thresholdMode = 'hang'
+    expect((await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'human' })).ok).toBe(false)
+    state.thresholdMode = 'normal'
+    await new Promise((r) => setTimeout(r, 30))
+    expect(ctl.releases).toEqual([])
+  })
+
+  test('the same turnToken twice: one ledger row (idempotent), both calls ok; a distinct token counts again', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: true })
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: true })
+    expect(ctl.ledger.size).toBe(1)
+    expect(await checkPtyTurnPreflight({ ...automation, turnToken: 'turn-2' })).toEqual({ ok: true })
+    expect(ctl.ledger.size).toBe(2)
+  })
+
+  test('a spend gate or governor block never reserves', async () => {
+    _setGovernorsForTests(makeSpies({ inject_rate: async () => ({ ok: false, reason: 'over_session_inject_rate:4>=4' }) }).governors)
+    expect((await checkPtyTurnPreflight(automation)).ok).toBe(false)
+    state.costSpent = 999
+    expect((await checkPtyTurnPreflight(automation)).ok).toBe(false)
+    expect(ctl.reserveCalls).toEqual([])
+  })
+
+  test('flag OFF: refused before any gate, governor or reserve', async () => {
+    delete process.env.REMO_GOVERNED_AUTOMATION_PTY
+    _setGovernorsForTests(makeSpies().governors)
+    expect(await checkPtyTurnPreflight(automation)).toEqual({ ok: false, reason: 'automation_blocked_on_pty:automation' })
+    expect(ctl.reserveCalls).toEqual([])
+    expect(ctl.order).toEqual([])
+  })
+
+  test('human turns never reserve and never run a governor, even when handed a key and token', async () => {
+    _setGovernorsForTests(makeSpies().governors)
+    const r = await checkPtyTurnPreflight({ userId: 'u1', sessionId: 's1', actor: 'human', ...keyed })
+    expect(r.ok).toBe(true)
+    expect(ctl.reserveCalls).toEqual([])
+    expect(ctl.order).toEqual([])
+  })
+})
+
+describe('PTYCAP Phase 3 -- the human chain never runs a governor (D-07)', () => {
+  const human = { userId: 'u1', sessionId: 's1', actor: 'human' } as const
+
+  test('no governor is a member of either chain constant, and the human chain names are unchanged', () => {
+    for (const g of PRODUCTION_GOVERNORS) {
+      expect(PTY_HUMAN_TURN_GATES).not.toContain(g)
+      expect(PTY_AUTOMATION_TURN_GATES).not.toContain(g)
+    }
+    expect(PTY_HUMAN_TURN_GATES.map((g: { name: string }) => g.name)).toEqual([
+      'threshold',
+      'daily_token_cap',
+      'daily_cost_cap',
+    ])
+  })
+
+  test('flag ON + fail-closed production governors: a human turn under every ceiling still passes', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(PRODUCTION_GOVERNORS)
+    const r = await checkPtyTurnPreflight(human)
+    expect(r.ok).toBe(true)
+  })
+
+  test('flag ON + spy governors: a human turn passes and zero governor checks run', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    const spies = makeSpies()
+    _setGovernorsForTests(spies.governors)
+    const r = await checkPtyTurnPreflight(human)
+    expect(r.ok).toBe(true)
+    expect(spies.calls).toEqual([])
+  })
+
+  test('flag ON: a human turn is never blocked by the inject-rate ceiling (Phase-2 SC-3 preserved)', async () => {
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    _setGovernorsForTests(PRODUCTION_GOVERNORS)
+    state.injectsInWindow = 999_999
+    const r = await checkPtyTurnPreflight(human)
+    expect(r.ok).toBe(true)
   })
 })
 

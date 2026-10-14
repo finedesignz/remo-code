@@ -285,3 +285,45 @@ describe('runMacroCycle — robustness', () => {
     expect(r).toBeDefined()
   })
 })
+
+describe('runMacroCycle - PTYCAP-04 taskId threading and benign refusal classes', () => {
+  test('passes input.taskId into inject (one budget per orchestrator task)', async () => {
+    const seen: any[] = []
+    const { deps } = spyDeps({
+      inject: (async (i: any) => {
+        seen.push(i)
+        return { kind: 'dispatched' as const }
+      }) as any,
+    })
+    await runMacroCycle(baseInput({ taskId: 'task-77' }), deps)
+    expect(seen).toHaveLength(1)
+    expect(seen[0].taskId).toBe('task-77')
+  })
+
+  for (const reason of ['automation_halted:global', 'lifetime_inject_exhausted:1000>=1000']) {
+    test(`refused ${reason} is benign: no failure fan-out`, async () => {
+      const { deps, log } = spyDeps({
+        inject: (async () => ({ kind: 'refused' as const, reason })) as any,
+      })
+      const r = await runMacroCycle(baseInput(), deps)
+      expect(r.injected).toBe(false)
+      expect(log.notifies).toHaveLength(0)
+    })
+  }
+
+  test('a refused cost cap still pages (not benign)', async () => {
+    const { deps, log } = spyDeps({
+      inject: (async () => ({ kind: 'refused_cost_cap' as const, reason: 'over_daily_cost_cap' })) as any,
+    })
+    await runMacroCycle(baseInput(), deps)
+    expect(log.notifies.some((n) => n.event === 'failure')).toBe(true)
+  })
+
+  test('a failed outcome still pages', async () => {
+    const { deps, log } = spyDeps({
+      inject: (async () => ({ kind: 'failed' as const, reason: 'boom' })) as any,
+    })
+    await runMacroCycle(baseInput(), deps)
+    expect(log.notifies.some((n) => n.event === 'failure')).toBe(true)
+  })
+})

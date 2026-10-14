@@ -189,6 +189,14 @@ drains the parked prompt on reconnect. The autospawn seam writes ONE
 `routine_run_log` row with `command = 'autospawn-launch'` per real spawn (also the
 source for the per-day launch cap).
 
+**Shared governed launch (PTYCAP Phase 7).** The post-flag part of this chain was extracted out
+of `maybeAutospawnOffline` into `governedLaunch` (`hub/src/dispatch/governed-launch.ts`), shared
+with the self-heal seam (`docs/self-heal-routing.md`). The orchestrator uses its legacy policy:
+unchanged check order, reason strings and best-effort ledger row (same e2e suites, unmodified). The
+ghost-aware liveness predicate moved to `hub/src/sessions/liveness.ts` (`isSessionLive`) and is
+shared by both callers. `launchSessionForUser` now closes its reserved run on every non-launch exit.
+The heal flag is separate from `REMO_ORCHESTRATOR_ENABLED`.
+
 **The full gate AND-chain** (ANY miss ⇒ the legacy `no_session`, i.e. a strict no-op):
 
 ```
@@ -209,7 +217,7 @@ Refusal reasons (typed `InjectOutcome`): `not_allowlisted`, `supervisor_offline`
 | Env | Default | Purpose |
 |---|---|---|
 | `REMO_ORCHESTRATOR_AUTOSPAWN` | OFF (`0`) | Arms the autospawn capability. Accepts `1\|true\|yes\|on`. Carries `REMO_ORCHESTRATOR_ENABLED` (both ON). |
-| `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` | `50_000_000` (50M) | Non-bypassable daily TOKEN ceiling. Counts **all four buckets: input + output + cache_creation + cache_read** (see below). Non-positive/non-finite ⇒ disabled (fail-open). |
+| `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` | `20_000_000` (20M; applies only where the env is unset) | Non-bypassable daily TOKEN ceiling. Counts **all four buckets: input + output + cache_creation + cache_read** (see below). Non-positive/non-finite ⇒ falls back to the default AND the hub refuses to boot (fail-closed); only `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1` disables it. |
 | `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` | `4` | Per-session orchestrator inject-RATE ceiling (`sessionInjectRateGate`). Non-positive/non-finite ⇒ disabled (fail-open). |
 | `REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES` | `20` | Per-day autospawn launch-count cap. Non-positive/non-finite ⇒ disabled. |
 

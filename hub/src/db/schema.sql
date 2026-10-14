@@ -1596,3 +1596,118 @@ DO $$ BEGIN
       CHECK (runner_type IN ('stream-json','pty-interactive','cloud'));
   END IF;
 END $$;
+
+-- ── PTYCAP-04: lifetime inject ledger + automation kill switch + token-cap alarm ──
+-- All three tables are ADDITIVE and carry NO foreign keys (plain TEXT ids): the
+-- ledger is append-only history that must survive deletion of a task or session
+-- (the counter is a budget, not a relation). Corrections are append-only (a
+-- 'reset' marker row, released_at stamped on a failed send) - never a delete.
+CREATE TABLE IF NOT EXISTS automation_inject_ledger (
+  seq         BIGSERIAL,
+  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id     TEXT NOT NULL,
+  session_id  TEXT,
+  counter_key TEXT NOT NULL,
+  actor       TEXT NOT NULL DEFAULT '',
+  token       TEXT NOT NULL,
+  kind        TEXT NOT NULL DEFAULT 'inject' CHECK (kind IN ('inject','reset','page')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  released_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_inject_ledger_key_token
+  ON automation_inject_ledger(counter_key, token);
+CREATE INDEX IF NOT EXISTS idx_automation_inject_ledger_key_seq
+  ON automation_inject_ledger(counter_key, seq DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_inject_ledger_session_created
+  ON automation_inject_ledger(session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS automation_kill_switch (
+  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  scope       TEXT NOT NULL CHECK (scope IN ('global','user','session')),
+  user_id     TEXT,
+  session_id  TEXT,
+  engaged     BOOLEAN NOT NULL DEFAULT true,
+  reason      TEXT,
+  engaged_by  TEXT NOT NULL,
+  engaged_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  released_by TEXT,
+  released_at TIMESTAMPTZ
+);
+-- At most ONE engaged row per target (engage is idempotent; history rows stay).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_global
+  ON automation_kill_switch(scope) WHERE scope = 'global' AND engaged;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_user
+  ON automation_kill_switch(user_id) WHERE scope = 'user' AND engaged;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_session
+  ON automation_kill_switch(session_id) WHERE scope = 'session' AND engaged;
+
+-- Daily token-ceiling alarm claim: one row per (user, local day). `delivered`
+-- flips only when the email was really sent, so a failed send is retried.
+CREATE TABLE IF NOT EXISTS token_cap_alarms (
+  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id         TEXT NOT NULL,
+  local_date      DATE NOT NULL,
+  pct             INTEGER NOT NULL,
+  tokens          BIGINT,
+  cap             BIGINT,
+  delivered       BOOLEAN NOT NULL DEFAULT false,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_token_cap_alarms_user_date
+  ON token_cap_alarms(user_id, local_date);
+
+-- Dedupe key shared by the rate union (routine_run_log inject rows vs ledger
+-- reserve rows): nullable, written by the inject path, never backfilled.
+ALTER TABLE routine_run_log ADD COLUMN IF NOT EXISTS inject_token TEXT;
+
+-- PTYCAP-07 self-heal event ledger. One row per heal claim; the atomic claim
+-- (tx advisory lock + real time-window check) lives in heal-events-dal.ts, the
+-- unique indexes below are only the backstop. No FK on the run id columns: runs
+-- are reaped independently and a heal row must outlive them. Additive DDL only.
+CREATE TABLE IF NOT EXISTS heal_events (
+  id                      TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id                 UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  source                  TEXT NOT NULL,
+  repo_ident              TEXT,
+  dedupe_key              TEXT NOT NULL,
+  window_bucket           BIGINT NOT NULL,
+  trigger_run_id          TEXT,
+  dispatch_run_id         TEXT,
+  metadata_run_id         TEXT,
+  session_id              TEXT,
+  outcome                 TEXT,
+  notification_claimed_at TIMESTAMPTZ,
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- PTYCAP-07 QC r1: minimal validated source context (e.g. error_id/project_id) so the stale-launch
+-- sweep can rebuild the per-event sink. Additive, nullable, never backfilled.
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS recovery_ctx JSONB;
+-- PTYCAP-07 repair: durable default owner-email obligation (scheduled_task only), written in the
+-- claim transaction; delivered once via a lease CAS, terminal flag owner_email_delivered_at.
+-- Additive, nullable, never backfilled.
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS owner_email JSONB;
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS owner_email_claimed_at TIMESTAMPTZ;
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS owner_email_delivered_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_heal_events_owner_email_pending
+  ON heal_events(created_at) WHERE owner_email IS NOT NULL AND owner_email_delivered_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_heal_events_bucket
+  ON heal_events(user_id, source, dedupe_key, window_bucket);
+-- A run can trigger at most one heal event, ever.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_heal_events_trigger
+  ON heal_events(source, trigger_run_id) WHERE trigger_run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_heal_events_user_key_created
+  ON heal_events(user_id, dedupe_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_heal_events_dispatch_run
+  ON heal_events(dispatch_run_id);
+CREATE INDEX IF NOT EXISTS idx_heal_events_metadata_run
+  ON heal_events(metadata_run_id);
+CREATE INDEX IF NOT EXISTS idx_heal_events_user_repo_created
+  ON heal_events(user_id, repo_ident, created_at DESC);
+
+-- Durable internal-task marker (PTYCAP-07 AM-F5-3). Never backfilled: rows that
+-- predate this column stay recognised by the __internal_ name-prefix half of
+-- isInternalScheduledTask (hub/src/heal/internal-task.ts).
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS is_internal BOOLEAN NOT NULL DEFAULT false;

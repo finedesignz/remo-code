@@ -1,0 +1,413 @@
+/**
+ * PTYCAP-07 heal-events DAL: the self-heal event ledger (heal_events).
+ *
+ * - claimHealEvent is ATOMIC: one transaction takes a tx-scoped advisory lock on
+ *   (user, source, dedupe_key), checks the REAL elapsed window (a bucket boundary
+ *   cannot split a storm - the flaw in claimDeployFailure's prev-bucket SELECT),
+ *   enforces the per-user hourly claim cap, then INSERTs. The unique indexes in
+ *   schema.sql are only the backstop. Any throw propagates: callers fail closed.
+ * - The per-repository hourly and per-task daily ceilings are enforced INSIDE the claim
+ *   transaction, after the per-user advisory lock: every claim of one user is serialized from
+ *   that lock to commit, so the count and the INSERT are atomic with respect to each other even
+ *   for distinct dedupe keys (QC r1: they were check-then-insert in the router/source).
+ * - claimHealNotification is a conditional UPDATE ... WHERE notification_claimed_at
+ *   IS NULL RETURNING. It yields exactly ONE SEND ATTEMPT per event, not
+ *   exactly-once delivery (a crash after the claim and before the send loses it).
+ * - isHealGenerated is the recursion guard: it throws on DB error so callers fail
+ *   closed.
+ * - Retention is bounded-delete only and never below 24h.
+ *
+ * Every function takes a trailing executor (default: the shared sql client) so
+ * unit tests can inject a fake - the automation-controls reserveInject precedent.
+ * Window / cap / retention values are ARGUMENTS; this module never reads env.
+ */
+import { sql } from './postgres.ts'
+
+/** postgres.js client or transaction (tagged template; the client also has .begin). */
+export type HealExec = any
+
+const HOUR_MS = 3_600_000
+const MIN_RETENTION_HOURS = 24
+const PRUNE_BATCH = 100
+const STALE_BATCH = 50
+
+export function windowBucket(nowMs: number, windowMs: number): number {
+  if (!Number.isFinite(windowMs) || windowMs <= 0) {
+    throw new RangeError(`heal window must be a positive finite number of ms, got ${windowMs}`)
+  }
+  return Math.floor(nowMs / windowMs)
+}
+
+export interface ClaimHealArgs {
+  userId: string
+  source: string
+  dedupeKey: string
+  repoIdent?: string | null
+  triggerRunId?: string | null
+  windowMs: number
+  maxClaimsPerUserHour: number
+  retentionHours: number
+  /**
+   * Per-repository hourly ceiling. Omit (undefined) to skip it. When the repo is at the ceiling
+   * the row is still inserted, already carrying outcome refused:repo_rate_bound, and the result
+   * has repoRateBound: true (the router then terminalizes and notifies as it always has).
+   */
+  maxPerRepoHour?: number
+  /**
+   * Per-task daily ceiling for `task:<taskId>:<sig>` dedupe keys. Omit to skip it. At the ceiling
+   * the claim is refused task_day_cap (no row).
+   */
+  maxPerTaskDay?: number
+  /** Minimal validated source context a boot/follow-up sweep needs to terminalize the event. */
+  recoveryCtx?: Record<string, unknown> | null
+  /**
+   * Pending default owner-email obligation (scheduled_task only), persisted in the SAME transaction
+   * as the claim so a crash after the claim can never lose it. Delivered once via the lease CAS below.
+   */
+  ownerEmail?: OwnerEmailPayload | null
+  /** Injectable clock (tests); defaults to Date.now(). */
+  nowMs?: number
+}
+
+export interface OwnerEmailPayload {
+  subject: string
+  text: string
+  html: string
+}
+
+export type ClaimHealResult =
+  | { ok: true; id: string; repoRateBound?: true }
+  | { ok: false; reason: 'duplicate' | 'user_claim_cap' | 'task_day_cap' }
+
+/** Outcome stamped on a claim that hit the per-repo ceiling (the router's persisted string). */
+export const REPO_RATE_BOUND_OUTCOME = 'refused:repo_rate_bound'
+
+export interface HealEventRow {
+  id: string
+  user_id: string
+  source: string
+  repo_ident: string | null
+  dedupe_key: string
+  window_bucket: string | number
+  trigger_run_id: string | null
+  dispatch_run_id: string | null
+  metadata_run_id: string | null
+  session_id: string | null
+  outcome: string | null
+  notification_claimed_at: string | Date | null
+  recovery_ctx?: Record<string, unknown> | null
+  owner_email?: OwnerEmailPayload | null
+  owner_email_claimed_at?: string | Date | null
+  owner_email_delivered_at?: string | Date | null
+  created_at: string | Date
+  updated_at: string | Date
+}
+
+/** Delete at most 100 rows older than max(retentionHours, 24h). Never younger than 24h. */
+export async function pruneHealEvents(
+  retentionHours: number,
+  exec: HealExec = sql,
+  nowMs: number = Date.now(),
+): Promise<void> {
+  const hours = Number.isFinite(retentionHours) ? Math.max(retentionHours, MIN_RETENTION_HOURS) : MIN_RETENTION_HOURS
+  const cutoff = new Date(nowMs - hours * HOUR_MS)
+  await exec`
+    DELETE FROM heal_events WHERE id IN (
+      SELECT id FROM heal_events WHERE created_at < ${cutoff} ORDER BY created_at LIMIT 100
+    )
+  `
+}
+
+/** The task id of a `task:<id>:<signature>` dedupe key, else null. */
+function taskIdOf(dedupeKey: string): string | null {
+  const m = /^task:([^:]+):/.exec(dedupeKey)
+  return m ? m[1]! : null
+}
+
+export async function claimHealEvent(args: ClaimHealArgs, exec: HealExec = sql): Promise<ClaimHealResult> {
+  const now = args.nowMs ?? Date.now()
+  const bucket = windowBucket(now, args.windowMs) // throws RangeError on a bad window
+  if (!Number.isFinite(args.maxClaimsPerUserHour) || args.maxClaimsPerUserHour <= 0) {
+    throw new RangeError(`maxClaimsPerUserHour must be a positive finite number, got ${args.maxClaimsPerUserHour}`)
+  }
+
+  // Opportunistic bounded reap, outside the lock. A reap failure must not block a claim.
+  try {
+    await pruneHealEvents(args.retentionHours, exec, now)
+  } catch (err: any) {
+    console.warn(`[heal-events] opportunistic prune failed: ${err?.message ?? err}`)
+  }
+
+  const windowStart = new Date(now - args.windowMs)
+  const hourStart = new Date(now - HOUR_MS)
+  const createdAt = new Date(now)
+
+  return exec.begin(async (tx: HealExec): Promise<ClaimHealResult> => {
+    // (a) per-(user, source, key) lock FIRST, then (c) per-user lock: fixed order, no deadlock.
+    await tx`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${'heal:' + args.userId + ':' + args.source + ':' + args.dedupeKey})::bigint
+      )
+    `
+    if (args.triggerRunId) {
+      const seen = await tx`
+        SELECT 1 AS one FROM heal_events
+        WHERE source = ${args.source} AND trigger_run_id = ${args.triggerRunId}
+        LIMIT 1
+      `
+      if (seen.length > 0) return { ok: false, reason: 'duplicate' }
+    }
+    // (b) REAL elapsed window, not just the bucket.
+    const inWindow = await tx`
+      SELECT 1 AS one FROM heal_events
+      WHERE user_id = ${args.userId} AND source = ${args.source} AND dedupe_key = ${args.dedupeKey}
+        AND created_at > ${windowStart}
+      LIMIT 1
+    `
+    if (inWindow.length > 0) return { ok: false, reason: 'duplicate' }
+
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${'heal-user:' + args.userId})::bigint)`
+    const counted = await tx`
+      SELECT count(*)::text AS n FROM heal_events
+      WHERE user_id = ${args.userId} AND created_at > ${hourStart}
+    `
+    if (Number(counted[0]?.n ?? 0) >= args.maxClaimsPerUserHour) return { ok: false, reason: 'user_claim_cap' }
+
+    // (c2) per-task daily ceiling, counted under the per-user lock taken above.
+    const taskId = args.maxPerTaskDay != null ? taskIdOf(args.dedupeKey) : null
+    if (taskId) {
+      const tc = await tx`
+        SELECT count(*)::text AS n FROM heal_events
+        WHERE user_id = ${args.userId} AND starts_with(dedupe_key, ${'task:' + taskId + ':'})
+          AND created_at > ${new Date(now - 24 * HOUR_MS)}
+      `
+      if (Number(tc[0]?.n ?? 0) >= (args.maxPerTaskDay as number)) return { ok: false, reason: 'task_day_cap' }
+    }
+
+    // (c3) per-repository hourly ceiling, same lock. In-flight rows (NULL outcome) count, so
+    // concurrent claims on distinct dedupe keys see each other. At the ceiling the row is still
+    // recorded, already refused, so the router terminalizes and notifies exactly as before.
+    let preOutcome: string | null = null
+    if (args.maxPerRepoHour != null && args.repoIdent) {
+      const rc = await tx`
+        SELECT count(*)::text AS n FROM heal_events
+        WHERE user_id = ${args.userId} AND repo_ident = ${args.repoIdent}
+          AND created_at > ${hourStart}
+          AND (outcome IS NULL OR outcome IN ('dispatched_live', 'dispatched_after_spawn',
+                                              'autospawn_starting', 'autospawn_launched', 'autospawn_parked'))
+      `
+      if (Number(rc[0]?.n ?? 0) >= args.maxPerRepoHour) preOutcome = REPO_RATE_BOUND_OUTCOME
+    }
+
+    // (d) INSERT; the unique indexes are the backstop - an empty return means duplicate.
+    const inserted = await tx`
+      INSERT INTO heal_events (user_id, source, repo_ident, dedupe_key, window_bucket, trigger_run_id, outcome, recovery_ctx, owner_email, created_at, updated_at)
+      VALUES (${args.userId}, ${args.source}, ${args.repoIdent ?? null}, ${args.dedupeKey}, ${bucket},
+              ${args.triggerRunId ?? null}, ${preOutcome}, ${args.recoveryCtx ? JSON.stringify(args.recoveryCtx) : null}::jsonb,
+              ${args.ownerEmail ? JSON.stringify(args.ownerEmail) : null}::jsonb, ${createdAt}, ${createdAt})
+      ON CONFLICT DO NOTHING
+      RETURNING id
+    `
+    if (inserted.length === 0) return { ok: false, reason: 'duplicate' }
+    return preOutcome
+      ? { ok: true, id: inserted[0].id as string, repoRateBound: true }
+      : { ok: true, id: inserted[0].id as string }
+  })
+}
+
+/** True exactly once per id: the caller that wins owns the single send attempt. */
+export async function claimHealNotification(id: string, exec: HealExec = sql): Promise<boolean> {
+  const rows = await exec`
+    UPDATE heal_events SET notification_claimed_at = now(), updated_at = now()
+    WHERE id = ${id} AND notification_claimed_at IS NULL
+    RETURNING id
+  `
+  return rows.length > 0
+}
+
+export interface HealOutcomeExtra {
+  dispatchRunId?: string | null
+  metadataRunId?: string | null
+  sessionId?: string | null
+  repoIdent?: string | null
+}
+
+export async function setHealOutcome(
+  id: string,
+  outcome: string,
+  extra: HealOutcomeExtra = {},
+  exec: HealExec = sql,
+): Promise<void> {
+  await exec`
+    UPDATE heal_events SET
+      outcome = ${outcome},
+      dispatch_run_id = COALESCE(${extra.dispatchRunId ?? null}, dispatch_run_id),
+      metadata_run_id = COALESCE(${extra.metadataRunId ?? null}, metadata_run_id),
+      session_id = COALESCE(${extra.sessionId ?? null}, session_id),
+      repo_ident = COALESCE(${extra.repoIdent ?? null}, repo_ident),
+      updated_at = now()
+    WHERE id = ${id}
+  `
+}
+
+export async function getHealEvent(id: string, exec: HealExec = sql): Promise<HealEventRow | null> {
+  const rows = await exec`SELECT * FROM heal_events WHERE id = ${id} LIMIT 1`
+  return (rows[0] as HealEventRow | undefined) ?? null
+}
+
+/**
+ * True when the run, or any triggered_by_run_id ancestor (depth <= 5), appears as
+ * trigger/dispatch/metadata run of a heal event. THROWS on DB error: fail closed.
+ */
+export async function isHealGenerated(runId: string, exec: HealExec = sql): Promise<boolean> {
+  const rows = await exec`
+    WITH RECURSIVE chain(id, depth) AS (
+      SELECT ${runId}::text, 0
+      UNION ALL
+      SELECT r.triggered_by_run_id, c.depth + 1
+      FROM chain c JOIN scheduled_task_runs r ON r.id = c.id
+      WHERE r.triggered_by_run_id IS NOT NULL AND c.depth < 5
+    )
+    SELECT 1 AS one FROM heal_events h
+    WHERE h.trigger_run_id IN (SELECT id FROM chain)
+       OR h.dispatch_run_id IN (SELECT id FROM chain)
+       OR h.metadata_run_id IN (SELECT id FROM chain)
+    LIMIT 1
+  `
+  return rows.length > 0
+}
+
+export async function countTaskClaimsToday(
+  userId: string,
+  taskId: string,
+  exec: HealExec = sql,
+  nowMs: number = Date.now(),
+): Promise<number> {
+  const since = new Date(nowMs - 24 * HOUR_MS)
+  const rows = await exec`
+    SELECT count(*)::text AS n FROM heal_events
+    WHERE user_id = ${userId} AND starts_with(dedupe_key, ${'task:' + taskId + ':'})
+      AND created_at > ${since}
+  `
+  return Number(rows[0]?.n ?? 0)
+}
+
+/**
+ * Heal events whose autospawn never reached a terminal outcome: starting (claimed + about to
+ * reserve/launch), launched or parked, untouched for olderThanMs. A restart or crash strands
+ * exactly these (the spawn deadline timer is process-local).
+ */
+export async function listStaleLaunchingHealEvents(
+  olderThanMs: number,
+  exec: HealExec = sql,
+  nowMs: number = Date.now(),
+): Promise<HealEventRow[]> {
+  const cutoff = new Date(nowMs - olderThanMs)
+  const rows = await exec`
+    SELECT * FROM heal_events
+    WHERE outcome IN ('autospawn_starting', 'autospawn_launched', 'autospawn_parked') AND updated_at < ${cutoff}
+    ORDER BY updated_at
+    LIMIT 50
+  `
+  return rows as HealEventRow[]
+}
+
+// --- Owner-email outbox (PTYCAP-07 repair round) ---------------------------------------------
+// The obligation (owner_email) is written in the claim transaction. Delivery is a LEASE CAS:
+// owner_email_claimed_at is stamped by the one caller that may send (a stale lease, i.e. a crash
+// mid-send, can be re-taken), owner_email_delivered_at is the terminal flag stamped after the send.
+// At-least-once across a crash in the narrow send->mark window, never zero, never concurrent.
+
+export const OWNER_EMAIL_LEASE_MS = 5 * 60_000
+
+export interface OwnerEmailClaim {
+  id: string
+  user_id: string
+  owner_email: OwnerEmailPayload
+}
+
+/** True when this run's heal event carries an undelivered-or-delivered obligation (a row exists). */
+export async function hasOwnerEmailObligation(runId: string, exec: HealExec = sql): Promise<boolean> {
+  const rows = await exec`
+    SELECT 1 AS one FROM heal_events
+    WHERE source = 'scheduled_task' AND trigger_run_id = ${runId} AND owner_email IS NOT NULL
+    LIMIT 1
+  `
+  return rows.length > 0
+}
+
+/** Lease CAS by event id. Yields the payload to the ONE caller allowed to send, else null. */
+export async function claimOwnerEmailDelivery(
+  id: string,
+  leaseMs: number = OWNER_EMAIL_LEASE_MS,
+  exec: HealExec = sql,
+  nowMs: number = Date.now(),
+): Promise<OwnerEmailClaim | null> {
+  const staleBefore = new Date(nowMs - leaseMs)
+  const rows = await exec`
+    UPDATE heal_events SET owner_email_claimed_at = ${new Date(nowMs)}
+    WHERE id = ${id} AND owner_email IS NOT NULL AND owner_email_delivered_at IS NULL
+      AND (owner_email_claimed_at IS NULL OR owner_email_claimed_at < ${staleBefore})
+    RETURNING id, user_id, owner_email
+  `
+  return rows.length > 0 ? (rows[0] as OwnerEmailClaim) : null
+}
+
+export async function claimOwnerEmailDeliveryByRun(
+  runId: string,
+  leaseMs: number = OWNER_EMAIL_LEASE_MS,
+  exec: HealExec = sql,
+  nowMs: number = Date.now(),
+): Promise<OwnerEmailClaim | null> {
+  const found = await exec`
+    SELECT id FROM heal_events WHERE source = 'scheduled_task' AND trigger_run_id = ${runId} LIMIT 1
+  `
+  if (found.length === 0) return null
+  return claimOwnerEmailDelivery(found[0].id as string, leaseMs, exec, nowMs)
+}
+
+/** Terminal flag. Idempotent. */
+export async function markOwnerEmailDelivered(id: string, exec: HealExec = sql): Promise<void> {
+  await exec`
+    UPDATE heal_events SET owner_email_delivered_at = now(), updated_at = now()
+    WHERE id = ${id} AND owner_email_delivered_at IS NULL
+  `
+}
+
+/** Failed send: drop the lease so the next sweep retries without waiting out the lease. */
+export async function releaseOwnerEmailClaim(id: string, exec: HealExec = sql): Promise<void> {
+  await exec`
+    UPDATE heal_events SET owner_email_claimed_at = NULL
+    WHERE id = ${id} AND owner_email_delivered_at IS NULL
+  `
+}
+
+/** Best-effort: add the heal outcome reason to a still-undelivered obligation. */
+export async function appendOwnerEmailReason(id: string, reason: string, exec: HealExec = sql): Promise<void> {
+  const line = `Self-heal outcome: ${reason}`.replace(/[^ -~]/g, '?').slice(0, 200)
+  await exec`
+    UPDATE heal_events SET owner_email = jsonb_set(
+      jsonb_set(owner_email, '{text}', to_jsonb((owner_email->>'text') || E'
+' || ${line}::text)),
+      '{html}', to_jsonb((owner_email->>'html') || '<p>' || replace(replace(${line}::text, '&', '&amp;'), '<', '&lt;') || '</p>'))
+    WHERE id = ${id} AND owner_email IS NOT NULL AND owner_email_delivered_at IS NULL
+  `
+}
+
+/** Undelivered obligations older than the guard whose lease is free or stale. Bounded. */
+export async function listPendingOwnerEmails(
+  olderThanMs: number,
+  exec: HealExec = sql,
+  nowMs: number = Date.now(),
+  leaseMs: number = OWNER_EMAIL_LEASE_MS,
+): Promise<OwnerEmailClaim[]> {
+  const rows = await exec`
+    SELECT id, user_id, owner_email FROM heal_events
+    WHERE owner_email IS NOT NULL AND owner_email_delivered_at IS NULL
+      AND created_at < ${new Date(nowMs - olderThanMs)}
+      AND (owner_email_claimed_at IS NULL OR owner_email_claimed_at < ${new Date(nowMs - leaseMs)})
+    ORDER BY created_at
+    LIMIT 50
+  `
+  return rows as OwnerEmailClaim[]
+}

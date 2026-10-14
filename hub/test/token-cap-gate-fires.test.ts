@@ -32,7 +32,7 @@ const gatesUrl = `../src/dispatch/gates.ts?t=${Date.now()}${Math.random()}`
 const { dailyTokenCapGate, getTokenCapStatus, isOverTokenCap, assertTokenCapConfig } = await import(gatesUrl)
 
 const req = { userId: 'u1', sessionId: 's1', token: 't1', prompt: 'hi' }
-const DEFAULT_CAP = 50_000_000
+const DEFAULT_CAP = 20_000_000
 
 beforeEach(() => {
   state.tz = 'UTC'
@@ -45,7 +45,7 @@ afterEach(() => {
 })
 
 describe('dailyTokenCapGate fires', () => {
-  test('ships a 50M default ceiling', async () => {
+  test('ships a 20M default ceiling', async () => {
     state.tokens = 1
     expect((await getTokenCapStatus('u1', 'UTC')).cap).toBe(DEFAULT_CAP)
   })
@@ -62,7 +62,7 @@ describe('dailyTokenCapGate fires', () => {
     expect((r as { reason: string }).reason).toBe(`over_daily_token_cap:${DEFAULT_CAP}>=${DEFAULT_CAP}`)
   })
 
-  test('BLOCKS the incident shape: 1.4B tokens/day, 28x the ceiling', async () => {
+  test('BLOCKS the incident shape: 1.4B tokens/day, 70x the ceiling', async () => {
     state.tokens = 1_400_000_000
     const r = await dailyTokenCapGate.check(req)
     expect(r.ok).toBe(false)
@@ -101,7 +101,7 @@ describe('dailyTokenCapGate fires', () => {
     process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP = '1000'
     expect(() => assertTokenCapConfig()).not.toThrow()
     delete process.env.REMO_ORCHESTRATOR_DAILY_TOKEN_CAP
-    expect(() => assertTokenCapConfig()).not.toThrow() // unset ⇒ 50M default
+    expect(() => assertTokenCapConfig()).not.toThrow() // unset ⇒ 20M default
   })
 
   test('the ONLY way to disable the ceiling is the explicit, self-describing flag', async () => {

@@ -49,6 +49,7 @@ import { hasActiveSessionForRepo, resolveRepoKeyedAgentSession } from '../sessio
 import { listOnlineAgentSessionsForUser } from '../ws/registry.ts'
 import { ipAllowed, sourceIpFromHeaders } from '../lib/cidr.ts'
 import { coolifyConfigFromEnv, fetchAppLogs } from '../lib/coolify-client.ts'
+import { healUnifiedEnabled } from '../heal/config.ts'
 
 export const coolifyWebhookRoutes = new Hono()
 
@@ -118,7 +119,50 @@ const CoolifyWebhookPayload = z
 
 export type CoolifyWebhookPayload = z.infer<typeof CoolifyWebhookPayload>
 
+/**
+ * PTYCAP-07-08 (SH-01, D-01, D-06): the flag switch. REMO_HEAL_UNIFIED OFF (unset or any
+ * unrecognized value) runs the legacy body below unchanged and loads nothing from the heal tree
+ * beyond the flag reader. ON hands the whole event to routeHeal and does nothing else: no
+ * storm-claim, no routability probe, no run-now, and NO fall back to the legacy body on error
+ * (routeHeal terminalizes every failure itself).
+ */
+export interface DispatchTriageHealOptions {
+  /** Forwarded to routeHeal so tests can inject collaborators. Production passes nothing. */
+  routeDeps?: import('../heal/route.ts').HealDeps
+  /** Replaces the log fetch (tests). */
+  fetchLogSnippet?: (applicationUuid: string) => Promise<string>
+  /** Replaces the application-uuid repo resolver (tests). */
+  resolveRepoKeyFromAppUuid?: (appUuid: string, userId: string) => Promise<string | null>
+}
+
 export async function dispatchTriage(
+  userId: string,
+  deploymentRunId: string,
+  payload: CoolifyWebhookPayload,
+  healOpts?: DispatchTriageHealOptions,
+): Promise<void> {
+  if (!healUnifiedEnabled()) return dispatchTriageLegacy(userId, deploymentRunId, payload)
+  return dispatchTriageViaHeal(userId, deploymentRunId, payload, healOpts)
+}
+
+async function dispatchTriageViaHeal(
+  userId: string,
+  deploymentRunId: string,
+  payload: CoolifyWebhookPayload,
+  opts: DispatchTriageHealOptions = {},
+): Promise<void> {
+  const logSnippet = await (opts.fetchLogSnippet ?? fetchTriageLogSnippet)(payload.application_uuid)
+  const { buildCoolifyHealEvent } = await import('../heal/sources/coolify.ts')
+  const { routeHeal } = await import('../heal/route.ts')
+  const event = await buildCoolifyHealEvent(userId, deploymentRunId, payload, {
+    logSnippet,
+    resolveRepoKeyFromAppUuid: opts.resolveRepoKeyFromAppUuid,
+  })
+  await routeHeal(event, opts.routeDeps)
+}
+
+// heal-legacy-path:begin dispatchTriageLegacy
+async function dispatchTriageLegacy(
   userId: string,
   deploymentRunId: string,
   payload: CoolifyWebhookPayload,
@@ -219,6 +263,7 @@ export async function dispatchTriage(
     },
   })
 }
+// heal-legacy-path:end dispatchTriageLegacy
 
 /** Max bytes of deployment log text handed to the triage prompt (tail-biased). */
 export const TRIAGE_LOG_SNIPPET_MAX = 8192
@@ -374,9 +419,14 @@ async function handleAuthenticated(opts: {
       // Fail-open: the try/catch below catches any lookup error and leaves
       // `suppress=false`, so a lookup failure dispatches triage anyway (never
       // silently drops it).
+      // PTYCAP-07 QC r1: with REMO_HEAL_UNIFIED ON the live session is routeHeal's FIRST choice
+      // (live-session-first routing), so suppression must not fire: it would skip routeHeal and
+      // strand the metadata run `pending`. Suppression is legacy-only.
       let suppress = false
       try {
-        suppress = await hasActiveSessionForRepo(userId, payload.git_repository)
+        if (!healUnifiedEnabled()) {
+          suppress = await hasActiveSessionForRepo(userId, payload.git_repository)
+        }
       } catch (err: any) {
         console.warn(
           `[coolify-webhook] active-session lookup errored (fail-open, dispatching): ${err?.message}`,
