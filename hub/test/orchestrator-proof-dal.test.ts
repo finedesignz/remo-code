@@ -93,6 +93,29 @@ describe('armProofRunTx', () => {
     expect(state.allow).toHaveLength(1)
   })
 
+  test('QC r1 exclusivity: ANY other enabled orchestrator task (any user) refuses arm and rolls back', async () => {
+    state.tasks.push({ id: 'foreign', user_id: 'someone-else', session_id: 'sx', task_type: 'orchestrator', enabled: true, macro_task_type: 'dev' })
+    await expect(D.armProofRunTx(armArgs())).rejects.toMatchObject({ code: 'other_orchestrator_task_enabled' })
+    expect(state.runs).toHaveLength(0)
+    expect(state.rows).toHaveLength(0)
+    expect(state.allow).toHaveLength(0)
+    expect(state.tasks).toHaveLength(1) // only the foreign one; the created proof task rolled back
+  })
+
+  test('QC r1 exclusivity: the reused session task itself does not count; a disabled other task does not count', async () => {
+    state.tasks.push({ id: 'old', user_id: 'u1', session_id: 's1', task_type: 'orchestrator', enabled: true, macro_task_type: 'dev' })
+    state.tasks.push({ id: 'off', user_id: 'u2', session_id: 's9', task_type: 'orchestrator', enabled: false, macro_task_type: 'dev' })
+    const { taskId } = await D.armProofRunTx(armArgs())
+    expect(taskId).toBe('old')
+  })
+
+  test('QC r1 exclusivity: countOtherEnabledOrchestratorTasks (dry-run read) matches the in-tx rule', async () => {
+    state.tasks.push({ id: 'old', user_id: 'u1', session_id: 's1', task_type: 'orchestrator', enabled: true, macro_task_type: 'dev' })
+    expect(await D.countOtherEnabledOrchestratorTasks({ userId: 'u1', sessionId: 's1' })).toBe(0)
+    state.tasks.push({ id: 'f', user_id: 'u2', session_id: 's2', task_type: 'orchestrator', enabled: true, macro_task_type: 'dev' })
+    expect(await D.countOtherEnabledOrchestratorTasks({ userId: 'u1', sessionId: 's1' })).toBe(1)
+  })
+
   test('the target repo already allowlisted is fine (exactly the target)', async () => {
     state.allow.push({ user_id: 'u1', repo_ident: REPO })
     await D.armProofRunTx(armArgs())
@@ -162,6 +185,13 @@ describe('enableProofTaskTx', () => {
     expect(state.beginCalls).toBe(1)
     expect(r.run.id).toBeTruthy()
     expect(state.tasks.find((t) => t.id === taskId)?.enabled).toBe(true)
+  })
+
+  test('QC r1 exclusivity: enable refuses while any other orchestrator task is enabled', async () => {
+    const { taskId } = await D.armProofRunTx(armArgs())
+    state.tasks.push({ id: 'late', user_id: 'u3', session_id: 's7', task_type: 'orchestrator', enabled: true, macro_task_type: 'dev' })
+    await expect(D.enableProofTaskTx({ userId: 'u1' })).rejects.toMatchObject({ code: 'other_orchestrator_task_enabled' })
+    expect(state.tasks.find((t) => t.id === taskId)?.enabled).toBe(false)
   })
 
   test('refuses unless the run is armed (proof_not_armed)', async () => {

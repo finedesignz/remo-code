@@ -60,6 +60,7 @@ function harness(over: Partial<ProofArmDeps> = {}, github: FakeProofGithub = gre
     listInstallationRepos: async () => [{ full_name: 'Acme/Proof', default_branch: 'main' }],
     getSession: async () => ({ user_id: USER, repo_key: REPO_IDENT }),
     listAllowlist: async () => [],
+    countOtherEnabledOrchestratorTasks: async () => 0,
     armTx: async (args) => {
       armCalls.push(args)
       return { run: { id: 'run-1', branch: 'proof/run-1' } as any, taskId: 'task-1' }
@@ -183,8 +184,29 @@ describe('armProof refusals: first failure returns its code with NO write', () =
     expect(r.code).toBe('other_repo_allowlisted')
   })
 
+  test('QC r1: other_orchestrator_task_enabled when any other orchestrator task is enabled (dry run too), zero writes', async () => {
+    const r = await refused({ countOtherEnabledOrchestratorTasks: async () => 2 })
+    expect(r.code).toBe('other_orchestrator_task_enabled')
+    const h = harness({ countOtherEnabledOrchestratorTasks: async () => 1 })
+    expect(await armProof(baseArgs({ dryRun: true }), h.deps)).toMatchObject({ ok: false, code: 'other_orchestrator_task_enabled' })
+    expect(h.armCalls).toHaveLength(0)
+  })
+
+  test('QC r1: enableProof surfaces the in-tx exclusivity refusal as a typed result', async () => {
+    const { enableProof } = await import('../src/orchestrator/proof-arm.ts')
+    const r = await enableProof({ userId: USER }, {
+      enableTx: async () => {
+        const e: any = new Error('x')
+        e.name = 'ProofStateError'
+        e.code = 'other_orchestrator_task_enabled'
+        throw e
+      },
+    })
+    expect(r).toMatchObject({ ok: false, code: 'other_orchestrator_task_enabled' })
+  })
+
   test('tx-thrown other_repo_allowlisted / proof_already_active surface as the same code', async () => {
-    for (const code of ['other_repo_allowlisted', 'proof_already_active'] as const) {
+    for (const code of ['other_repo_allowlisted', 'proof_already_active', 'other_orchestrator_task_enabled'] as const) {
       const h = harness({
         armTx: async () => {
           const e: any = new Error(code)

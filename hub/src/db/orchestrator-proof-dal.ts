@@ -86,7 +86,7 @@ export async function disableProofTask(userId: string, taskId: string): Promise<
 // ── Arm / disarm / enable: each ONE transaction under a per-user advisory lock (F2-1) ──
 
 export class ProofStateError extends Error {
-  constructor(public code: 'other_repo_allowlisted' | 'proof_already_active' | 'proof_not_armed', message?: string) {
+  constructor(public code: 'other_repo_allowlisted' | 'proof_already_active' | 'proof_not_armed' | 'other_orchestrator_task_enabled', message?: string) {
     super(message ?? code);
     this.name = 'ProofStateError';
   }
@@ -118,6 +118,30 @@ export interface ArmProofRunArgs extends ProofFrozenFields {
 }
 
 const proofLockKey = (userId: string) => 'proof-arm:' + userId;
+
+/**
+ * QC round 1 (codex #1 / adversary MAJOR 1): the REMO_ORCHESTRATOR_* flags are hub-global, so
+ * proof mode is exclusive across ALL users. Counts enabled orchestrator tasks other than the one
+ * identified by (userId, sessionId) - the task arm will create or reuse. Read-only; used by the
+ * arm dry run. The authoritative checks run inside the arm / enable transactions.
+ */
+export async function countOtherEnabledOrchestratorTasks(args: { userId: string; sessionId: string }): Promise<number> {
+  const rows = await sql<{ n: string | number }[]>`
+    SELECT count(*) AS n FROM scheduled_tasks
+    WHERE task_type = 'orchestrator' AND enabled = true
+      AND NOT (user_id = ${args.userId} AND session_id = ${args.sessionId})
+  `;
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** In-tx exclusivity check: any enabled orchestrator task (any user) other than `taskId`. */
+async function assertNoOtherEnabledOrchestratorTask(tx: any, taskId: string): Promise<void> {
+  const others = (await tx`
+    SELECT count(*) AS n FROM scheduled_tasks
+    WHERE task_type = 'orchestrator' AND enabled = true AND id <> ${taskId}
+  `) as Array<{ n: string | number }>;
+  if (Number(others[0]?.n ?? 0) > 0) throw new ProofStateError('other_orchestrator_task_enabled');
+}
 
 /**
  * Arm: create the DISABLED proof task, its one due row, the exact allowlist row and the
@@ -164,6 +188,10 @@ export async function armProofRunTx(args: ArmProofRunArgs): Promise<{ run: Proof
         `) as Array<{ id: string }>;
         taskId = created[0].id;
       }
+
+      // Exclusivity: the arm tx has already disabled the reused task, so every enabled
+      // orchestrator task left is a DIFFERENT one that the global flags would also tick.
+      await assertNoOtherEnabledOrchestratorTask(tx, taskId);
 
       await tx`
         INSERT INTO orchestrator_rows (task_id, command, enabled, schedule_rule, sort_order)
@@ -239,6 +267,7 @@ export async function enableProofTaskTx(args: { userId: string }): Promise<{ run
       SELECT * FROM orchestrator_proof_runs WHERE user_id = ${args.userId} AND status = 'armed' LIMIT 1
     `) as ProofRun[];
     if (armed.length === 0) throw new ProofStateError('proof_not_armed');
+    await assertNoOtherEnabledOrchestratorTask(tx, armed[0].task_id);
     await tx`UPDATE scheduled_tasks SET enabled = true WHERE id = ${armed[0].task_id} AND user_id = ${args.userId}`;
     return { run: armed[0] };
   });

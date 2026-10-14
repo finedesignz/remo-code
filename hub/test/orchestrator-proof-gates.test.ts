@@ -128,8 +128,8 @@ describe('flag OFF is a true no-op (D-03)', () => {
 describe('proofBudgetGate (flag ON)', () => {
   beforeEach(flagsOn)
 
-  test('no run for the request passes', async () => {
-    expect(await makeProofBudgetGate(deps({ run: null })).check(req())).toEqual({ ok: true })
+  test('QC r1: no run for the request is REFUSED while proof mode is on (exclusive)', async () => {
+    expect(await makeProofBudgetGate(deps({ run: null })).check(req())).toEqual({ ok: false, reason: 'proof_mode_non_proof_task' })
   })
 
   test('under every cap passes and counts nothing extra', async () => {
