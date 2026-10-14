@@ -21,6 +21,7 @@ import type {
 } from './proof-types.ts';
 import { isProofEnabled, PROOF_SUCCESS_OUTCOME } from './proof-types.ts';
 import { renderProofPrompt } from './proof-prompt.ts';
+import type { ProofObservation } from './proof-verifier.ts';
 import type { NotifyInput } from './notify.ts';
 import type { NewRoutineRunLogEntry } from '../db/orchestrator-rows-dal.ts';
 
@@ -36,6 +37,8 @@ export interface ProofEvaluatorCtx {
   run: ProofRun;
   input: ProofGuardInput;
   now: number;
+  /** Set by the verifier evaluator for the later ones (agentDeclined, budget). */
+  observation?: ProofObservation;
 }
 
 export type ProofEvaluator = (ctx: ProofEvaluatorCtx) => Promise<ProofEvaluatorVerdict> | ProofEvaluatorVerdict;
@@ -179,8 +182,10 @@ export async function proofGuard(deps: ProofGuardDeps, input: ProofGuardInput): 
 
   // Evaluate in order; the first non-continue verdict wins.
   try {
+    const ctx: ProofEvaluatorCtx = { run, input, now: deps.now() };
     for (const evaluate of deps.evaluators) {
-      const v = await evaluate({ run, input, now: deps.now() });
+      ctx.now = deps.now();
+      const v = await evaluate(ctx);
       if (v.kind === 'continue') continue;
       if (v.kind === 'wait') return { kind: 'wait', run };
       if (v.kind === 'blocked') return { kind: 'blocked', reason: v.reason };
