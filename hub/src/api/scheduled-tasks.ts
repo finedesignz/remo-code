@@ -34,6 +34,7 @@ import {
 import { buildTaskName, type TaskType, type TargetKind } from '../scheduler/auto-name.ts'
 import { listSessions } from '../db/dal.ts'
 import { listSupervisorsForUser } from '../db/supervisor-dal.ts'
+import { validateTaskQcCadence } from '../task-qc/flags.ts'
 
 export const scheduledTasks = new Hono()
 
@@ -116,6 +117,24 @@ const CreateSchema = z.object({
 })
 
 const PatchSchema = CreateSchema.partial()
+
+/** The only keys a user may PATCH on the system-owned task_qc row. */
+const TASK_QC_PATCHABLE = new Set(['enabled', 'cron_expr', 'timezone'])
+
+/** Key-order-independent JSON; undefined and null compare equal. */
+function stableJson(v: unknown): string {
+  const norm = (x: unknown): unknown => {
+    if (x === undefined) return null
+    if (Array.isArray(x)) return x.map(norm)
+    if (x && typeof x === 'object') {
+      return Object.fromEntries(
+        Object.entries(x as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, val]) => [k, norm(val)]),
+      )
+    }
+    return x
+  }
+  return JSON.stringify(norm(v))
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -479,11 +498,50 @@ scheduledTasks.patch('/:id', async (c) => {
   if (!existing) return c.json({ error: 'not_found' }, 404)
 
   const body = await c.req.json().catch(() => null)
+  // task_qc: a re-sent null that equals a stored null is a no-op, but several
+  // optional schema keys (run_at, schedule_rules) reject null, so drop them first.
+  if (existing.task_type === 'task_qc' && body && typeof body === 'object' && !Array.isArray(body)) {
+    for (const k of Object.keys(body)) {
+      if ((body as Record<string, unknown>)[k] === null && ((existing as Record<string, unknown>)[k] ?? null) === null) {
+        delete (body as Record<string, unknown>)[k]
+      }
+    }
+  }
   const parsed = PatchSchema.safeParse(body)
   if (!parsed.success) {
     return c.json({ error: 'invalid_body', issues: parsed.error.issues }, 400)
   }
   const data = parsed.data
+
+  // PTYCAP-08 F2-B5: the auditor row is system-owned. Only enabled, a validated
+  // cron_expr and a valid timezone may change; any other key must equal the
+  // stored value (ignored) or the request is rejected. The name is never rebuilt.
+  if (existing.task_type === 'task_qc') {
+    const offending = Object.keys(data).filter((k) => {
+      if (TASK_QC_PATCHABLE.has(k)) return false
+      const v = (data as Record<string, unknown>)[k]
+      if (v === undefined) return false
+      return stableJson(v) !== stableJson((existing as Record<string, unknown>)[k])
+    })
+    if (offending.length > 0) {
+      return c.json({ error: 'task_qc_field_immutable', fields: offending }, 400)
+    }
+    if (data.cron_expr !== undefined || data.timezone !== undefined) {
+      const cadence = validateTaskQcCadence(
+        data.cron_expr ?? existing.cron_expr ?? existing.cron_expression,
+        data.timezone ?? existing.timezone,
+      )
+      if (!cadence.ok) return c.json({ error: 'task_qc_cadence_invalid', reason: cadence.reason }, 400)
+    }
+    const updatedQc = await updateTaskV2(id, userId, {
+      enabled: data.enabled,
+      cron_expr: data.cron_expr,
+      timezone: data.timezone,
+    })
+    if (!updatedQc) return c.json({ error: 'not_found' }, 404)
+    await registry.replace(updatedQc.id)
+    return c.json(withNext3(updatedQc))
+  }
 
   if (data.schedule_rules) {
     const rv = validateRules(data.schedule_rules)
