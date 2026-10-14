@@ -126,6 +126,8 @@ export function setupFireHarness() {
     /** lifetime-counter reservations the sender made, and what reserveInject answers */
     reservations: [] as any[],
     reserveResult: { ok: true, count: 1 } as any,
+    /** rows listEnabledTasks yields (registry loadAll / catchup suites, PTYCAP-08-08) */
+    enabledTasks: [] as any[],
   }
 
   const reset = () => {
@@ -153,6 +155,7 @@ export function setupFireHarness() {
     h.engineGate = null
     h.reservations = []
     h.reserveResult = { ok: true, count: 1 }
+    h.enabledTasks = []
 
     fake.onSelect('FROM users', [{ email: OWNER_EMAIL }])
     fake.onSelect(/FROM scheduled_tasks WHERE user_id/, (async () => {
@@ -182,6 +185,7 @@ export function setupFireHarness() {
       h.halt.halted ? { ok: false, reason: `automation_halted:${h.halt.scope ?? 'global'}`, scope: h.halt.scope ?? 'global' } : { ok: true },
   }))
   mock.module('../../src/db/scheduled-tasks-dal.ts', () => ({
+    listEnabledTasks: async () => h.enabledTasks,
     getTaskById: async (id: string) => { h.getTaskCalls.push(id); return h.tasks[id] ?? null },
     listActionsForTask: async () => { h.listActionsCalls++; return h.actionRows },
     getRun: async () => null,
