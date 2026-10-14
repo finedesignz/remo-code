@@ -253,6 +253,16 @@ export async function disarmProofRunTx(args: { userId: string; detail?: string |
 > {
   return (sql as any).begin(async (tx: any) => {
     await tx`SELECT pg_advisory_xact_lock(hashtext(${proofLockKey(args.userId)})::bigint)`;
+    // QC round 1 (codex #3): the session kill switch is engaged BEFORE the terminal transition,
+    // in the SAME transaction, so there is no committed state where the run is terminal but the
+    // session can still be dispatched to (and a failure rolls both back).
+    await tx`
+      INSERT INTO automation_kill_switch (scope, user_id, session_id, reason, engaged_by)
+      SELECT 'session', user_id, session_id, 'proof disarmed', 'arm-orchestrator-proof'
+        FROM orchestrator_proof_runs
+       WHERE user_id = ${args.userId} AND status IN ('armed','running')
+      ON CONFLICT DO NOTHING
+    `;
     const ended = (await tx`
       UPDATE orchestrator_proof_runs
       SET status = 'disarmed', outcome = NULL, outcome_detail = ${args.detail ?? 'disarmed by owner'},

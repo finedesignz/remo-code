@@ -97,15 +97,13 @@ async function main(): Promise<number> {
   if (mode[0] === 'disarm') {
     const { disarmProof } = await import('../src/orchestrator/proof-arm.ts');
     const { disarmProofRunTx } = await import('../src/db/orchestrator-proof-dal.ts');
-    const { engageKillSwitch } = await import('../src/dispatch/automation-controls.ts');
-    const r = await disarmProof({ userId: userId!, detail: 'disarmed by owner via arm-orchestrator-proof' }, { disarmTx: disarmProofRunTx, engageKillSwitch });
+    const r = await disarmProof({ userId: userId!, detail: 'disarmed by owner via arm-orchestrator-proof' }, { disarmTx: disarmProofRunTx });
     if (!r.disarmed) {
       console.log(`${TAG} nothing to disarm (no armed or running proof for this user).`);
       return 0;
     }
     console.log(`${TAG} disarmed run ${r.run.id} (${r.run.repo_ident}): task + proof row disabled, allowlist entry removed.`);
-    if (r.killSwitch.engaged) console.log(`${TAG} session kill switch engaged for session ${r.run.session_id}.`);
-    else console.error(`${TAG} WARNING: the disarm stands but the session kill switch FAILED: ${r.killSwitch.error}. Engage it by hand.`);
+    console.log(`${TAG} session kill switch engaged for session ${r.run.session_id} (in the same transaction, before the run went terminal).`);
     console.log('Remaining OWNER step (not done here): unset the hub flags named in the PTYCAP-05 runbook, then redeploy the hub.');
     return 0;
   }
