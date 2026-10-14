@@ -204,7 +204,7 @@ describe('disarmProofRunTx', () => {
     await D.armProofRunTx(armArgs())
     await D.disarmProofRunTx({ userId: 'u1' })
     const del = state.statements.find((s) => s.includes('DELETE FROM orchestrator_autospawn_allowlist'))!
-    expect(del).toMatch(/WHERE user_id = \? AND repo_ident = \?/)
+    expect(del).toMatch(/WHERE user_id = \? AND lower\(repo_ident\) = \?/)
   })
 
   test('idempotent when nothing is active', async () => {
@@ -234,6 +234,53 @@ describe('QC r1 arm halts the session and cancels pending cycles; enable release
     expect(state.kill[0].engaged).toBe(true)
     await D.enableProofTaskTx({ userId: 'u1' })
     expect(state.kill[0].engaged).toBe(false)
+  })
+})
+
+describe('QC r2 kill-switch ownership (codex new #2, sonnet MINOR 1)', () => {
+  const foreign = (over: Record<string, unknown> = {}): any => ({ id: 'k-manual', engaged_by: 'owner-user', scope: 'session', user_id: 'u1', session_id: 's1', reason: 'manual stop', engaged: true, ...over })
+
+  test('arm refuses a foreign engaged session halt and leaves it engaged', async () => {
+    state.kill.push(foreign())
+    await expect(D.armProofRunTx(armArgs())).rejects.toMatchObject({ code: 'session_halt_engaged' })
+    expect(state.kill).toEqual([expect.objectContaining({ id: 'k-manual', engaged: true })])
+    expect(state.runs).toEqual([])
+  })
+
+  test('arm records the exact kill row id it engaged on the run', async () => {
+    const { run } = await D.armProofRunTx(armArgs())
+    const engaged = state.kill.filter((k) => k.engaged)
+    expect(engaged).toHaveLength(1)
+    expect(run.kill_switch_id).toBe(engaged[0].id)
+    expect(engaged[0].engaged_by).toBe('arm-orchestrator-proof')
+  })
+
+  test('enable releases ONLY the proof-owned row: a halt engaged after arm by someone else survives', async () => {
+    const { run } = await D.armProofRunTx(armArgs())
+    // the owner releases the proof halt and engages their own emergency stop on the same session
+    for (const k of state.kill) k.engaged = false
+    state.kill.push(foreign({ id: 'k-late' }))
+    await D.enableProofTaskTx({ userId: 'u1' })
+    expect(state.kill.find((k) => k.id === 'k-late')?.engaged).toBe(true)
+    expect(state.kill.find((k) => k.id === run.kill_switch_id)?.engaged).toBe(false)
+  })
+
+  test('a stale halt the proof tooling left on the session is released at arm and replaced by the run own row', async () => {
+    state.kill.push(foreign({ id: 'k-stale', engaged_by: 'proof-guard' }))
+    const { run } = await D.armProofRunTx(armArgs())
+    expect(state.kill.find((k) => k.id === 'k-stale')?.engaged).toBe(false)
+    expect(state.kill.find((k) => k.id === run.kill_switch_id)?.engaged).toBe(true)
+  })
+})
+
+describe('QC r2 disarm removes the canonical allowlist row and any case-variant twin (sonnet MINOR 3)', () => {
+  test('mixed-case twin of the armed repo does not survive disarm; another repo row is untouched', async () => {
+    state.allow.push({ user_id: 'u1', repo_ident: 'github://Acme/Proof' })
+    await D.armProofRunTx(armArgs())
+    expect(state.allow.map((a) => a.repo_ident).sort()).toEqual(['github://Acme/Proof', 'github://acme/proof'])
+    state.allow.push({ user_id: 'u1', repo_ident: 'github://acme/other' })
+    await D.disarmProofRunTx({ userId: 'u1' })
+    expect(state.allow.map((a) => a.repo_ident)).toEqual(['github://acme/other'])
   })
 })
 

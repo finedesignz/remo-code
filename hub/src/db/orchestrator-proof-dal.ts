@@ -87,7 +87,7 @@ export async function disableProofTask(userId: string, taskId: string): Promise<
 // ── Arm / disarm / enable: each ONE transaction under a per-user advisory lock (F2-1) ──
 
 export class ProofStateError extends Error {
-  constructor(public code: 'other_repo_allowlisted' | 'proof_already_active' | 'proof_not_armed' | 'other_orchestrator_task_enabled', message?: string) {
+  constructor(public code: 'other_repo_allowlisted' | 'proof_already_active' | 'proof_not_armed' | 'other_orchestrator_task_enabled' | 'session_halt_engaged', message?: string) {
     super(message ?? code);
     this.name = 'ProofStateError';
   }
@@ -125,6 +125,10 @@ export interface ArmProofRunArgs extends ProofFrozenFields {
  * under a lock every user's arm/enable shares, and a send must not interleave with an arm/disarm
  * commit. A per-user key let two users both observe zero enabled tasks and both enable.
  */
+/** engaged_by of the session halts the proof tooling itself engages (arm / disarm). */
+const PROOF_KILL_ENGAGER = 'arm-orchestrator-proof';
+/** Halts the proof tooling owns: arm's own, disarm's, and the runtime guard's terminal halt. */
+const PROOF_KILL_ENGAGERS = [PROOF_KILL_ENGAGER, 'proof-guard'];
 export const PROOF_LOCK_KEY = 'proof-lock:global';
 const takeProofLock = (tx: any) => tx`SELECT pg_advisory_xact_lock(hashtext(${PROOF_LOCK_KEY})::bigint)`;
 
@@ -221,11 +225,28 @@ export async function armProofRunTx(rawArgs: ArmProofRunArgs): Promise<{ run: Pr
       // releases it. Pending routine cycles for the session are cancelled. (A queued or grace
       // request in the hub's memory cannot be reached from this process: it is invalidated by
       // the exact proofRunId match, which an ordinary dev prompt can never satisfy.)
-      await tx`
+      // QC round 2 (codex new #2): the halt is OWNED. A session halt someone else engaged (the
+      // owner's emergency stop, an automation halt) is never adopted or released: arm refuses. A
+      // stale halt a previous proof run left (engaged by the proof tooling itself) is released
+      // here and replaced by this run's own row; `--enable` releases exactly that row by id.
+      const halts = (await tx`
+        SELECT id, engaged_by FROM automation_kill_switch
+        WHERE engaged = true AND scope = 'session' AND session_id = ${args.sessionId}
+      `) as Array<{ id: string; engaged_by: string }>;
+      if (halts.some((h) => !PROOF_KILL_ENGAGERS.includes(h.engaged_by))) throw new ProofStateError('session_halt_engaged');
+      for (const h of halts) {
+        await tx`
+          UPDATE automation_kill_switch
+             SET engaged = false, released_by = 'arm-orchestrator-proof', released_at = now()
+           WHERE id = ${h.id} AND engaged = true
+        `;
+      }
+      const killRows = (await tx`
         INSERT INTO automation_kill_switch (scope, user_id, session_id, reason, engaged_by)
-        VALUES ('session', ${args.userId}, ${args.sessionId}, 'proof armed: session halted until --enable', 'arm-orchestrator-proof')
-        ON CONFLICT DO NOTHING
-      `;
+        VALUES ('session', ${args.userId}, ${args.sessionId}, 'proof armed: session halted until --enable', ${PROOF_KILL_ENGAGER})
+        RETURNING id
+      `) as Array<{ id: string }>;
+      const killSwitchId = killRows[0].id;
       await tx`UPDATE routine_queue SET status = 'cancelled' WHERE session_id = ${args.sessionId} AND status = 'pending'`;
 
       await tx`
@@ -244,7 +265,7 @@ export async function armProofRunTx(rawArgs: ArmProofRunArgs): Promise<{ run: Pr
           id, user_id, task_id, session_id, repo_ident, counter_key, branch, installation_id,
           repo_owner, repo_name, default_branch, base_sha, ruleset_ids, ruleset_digest,
           ruleset_updated_at, protection_shape, required_contexts, arm_preconditions,
-          max_injects, max_tokens, max_wall_ms
+          max_injects, max_tokens, max_wall_ms, kill_switch_id
         ) VALUES (
           ${runId}, ${args.userId}, ${taskId}, ${args.sessionId}, ${args.repoIdent},
           ${'task:' + taskId}, ${PROOF_BRANCH_PREFIX + runId}, ${args.installationId},
@@ -252,7 +273,7 @@ export async function armProofRunTx(rawArgs: ArmProofRunArgs): Promise<{ run: Pr
           ${args.rulesetIds}::bigint[], ${args.rulesetDigest},
           ${args.rulesetUpdatedAt}, ${args.protectionShape}, ${args.requiredContexts}::text[],
           ${tx.json(args.armPreconditions as any)},
-          ${args.maxInjects}, ${args.maxTokens}, ${args.maxWallMs}
+          ${args.maxInjects}, ${args.maxTokens}, ${args.maxWallMs}, ${killSwitchId}
         )
         RETURNING *
       `) as ProofRun[];
@@ -298,7 +319,7 @@ export async function disarmProofRunTx(args: { userId: string; detail?: string |
     await tx`UPDATE orchestrator_rows SET enabled = false WHERE task_id = ${run.task_id} AND command = 'proof'`;
     await tx`
       DELETE FROM orchestrator_autospawn_allowlist
-      WHERE user_id = ${args.userId} AND repo_ident = ${run.repo_ident}
+      WHERE user_id = ${args.userId} AND lower(repo_ident) = ${run.repo_ident}
     `;
     return { disarmed: true as const, run };
   });
@@ -313,12 +334,15 @@ export async function enableProofTaskTx(args: { userId: string }): Promise<{ run
     `) as ProofRun[];
     if (armed.length === 0) throw new ProofStateError('proof_not_armed');
     await assertNoOtherEnabledOrchestratorTask(tx, armed[0].task_id);
-    // Release the session halt the arm engaged (and any stale one a prior terminal left).
-    await tx`
-      UPDATE automation_kill_switch
-         SET engaged = false, released_by = 'arm-orchestrator-proof', released_at = now()
-       WHERE engaged = true AND scope = 'session' AND session_id = ${armed[0].session_id}
-    `;
+    // QC round 2 (codex new #2): release ONLY the halt row this run's arm engaged (by id). Any
+    // other engaged session halt (an owner emergency stop engaged after arm, a guard halt) stays.
+    if (armed[0].kill_switch_id) {
+      await tx`
+        UPDATE automation_kill_switch
+           SET engaged = false, released_by = ${PROOF_KILL_ENGAGER}, released_at = now()
+         WHERE id = ${armed[0].kill_switch_id} AND engaged = true
+      `;
+    }
     await tx`UPDATE scheduled_tasks SET enabled = true WHERE id = ${armed[0].task_id} AND user_id = ${args.userId}`;
     return { run: armed[0] };
   });

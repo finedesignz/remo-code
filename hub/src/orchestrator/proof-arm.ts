@@ -27,6 +27,7 @@ export type ArmRefusalCode =
   | 'agent_permission_unverified'
   | 'other_repo_allowlisted'
   | 'other_orchestrator_task_enabled'
+  | 'session_halt_engaged'
   | 'proof_already_active';
 
 export const DEFAULT_MAX_INJECTS = 6;
@@ -298,7 +299,7 @@ export async function armProof(rawArgs: ArmProofArgs, deps: ProofArmDeps): Promi
     return { ok: true, dryRun: false, summary: { ...summary, taskId, runId: run.id, branch: run.branch } };
   } catch (err) {
     const code = stateErrorCode(err);
-    if (code === 'other_repo_allowlisted' || code === 'proof_already_active' || code === 'other_orchestrator_task_enabled') return refuse(code, `refused inside the arm transaction: ${code}`);
+    if (code === 'other_repo_allowlisted' || code === 'proof_already_active' || code === 'other_orchestrator_task_enabled' || code === 'session_halt_engaged') return refuse(code, `refused inside the arm transaction: ${code}`);
     throw err;
   }
 }
