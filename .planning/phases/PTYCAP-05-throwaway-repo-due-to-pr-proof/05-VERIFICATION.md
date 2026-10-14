@@ -103,3 +103,7 @@ Owner decisions: which throwaway repo; budget numbers if defaults are wrong; the
 ## Ship verdict
 
 **SHIP-AFTER-OWNER-GO.** SC-1 and all F1/F2/F3 amendments are implemented and tested; flag-OFF is a proven no-op. Merge of the machinery PR is safe (everything defaults OFF). SC-2 and SC-3 stay BLOCKED-owner until the live run; Phase 5 must stay unchecked in ROADMAP until a real `pr_open_green` is recorded. Before the owner uses arming, fix or explicitly accept open QC MAJORs 1 and 2 and correct the runbook sentence (item 3). If the owner will not accept those two residuals, treat the verdict as NEEDS-WORK for arming only.
+
+## Repair round (post-BLOCKED)
+
+Commit 932c71b fixes both BLOCKED MAJORs (per-turn usage correlation via `turn_id`; owner-tagged session halts so `--enable` cannot release a manual engage). Evidence: touched tests pass individually, `bun run check-baseline` OK (pass 3173, fail 0). Codex re-QC: fixes clean; one NEW MAJOR recorded, not fixed (120s grace keyed on `messages.created_at` can yield a fail-closed false positive `budget_attribution_lost` for turns longer than 120s; see QC/VERDICT.md). Final status: SC-1 PASS; SC-2/SC-3 BLOCKED-owner (unchanged); PR remains draft pending the grace-timestamp fix. SHIP-AFTER-OWNER-GO unchanged.
