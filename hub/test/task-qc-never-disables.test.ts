@@ -127,7 +127,7 @@ describe('TQC-04 static guard', () => {
   test('safe-fixes.ts imports no registry, dispatcher, dispatch pipeline or sender', () => {
     const src = files.find((x) => x.f === 'safe-fixes.ts')!.src
     const imports = [...src.matchAll(/^import[^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]!).sort()
-    expect(imports).toEqual(['../scheduler/cron.ts', './detectors.ts', './findings.ts', './types.ts'])
+    expect(imports).toEqual(['../scheduler/cron.ts', './detectors.ts', './findings.ts', './types.ts', 'node:crypto'])
     const code = extractLiterals(src).join('\n')
     expect(code).not.toMatch(/registry|dispatch\(|injectOrchestratorPrompt/)
   })
