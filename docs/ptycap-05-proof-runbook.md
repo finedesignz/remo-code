@@ -198,11 +198,16 @@ let the ordinary dev macro run unguarded on that repo. Stop the driver first, th
   parse a PR url). The proof reads GitHub directly; the PR url in `GET /api/orchestrator/proof`
   comes from that read.
 - The `term.input` automation producer is deferred (D-01).
-- Token-budget attribution: a `usage_event` the hub received but could not persist marks the session
-  in hub process memory, and the proof then ends `terminated:budget_attribution_lost` (fail closed)
-  instead of trusting an under-counted sum. A hub restart forgets the mark, and a usage event that
-  never reaches the hub at all is not observable.
-- PR scope: any PR created after arming from a head not under `proof/`, and a run-branch PR whose head
+- Token-budget attribution: the hard token budget fails closed (`terminated:budget_attribution_lost`)
+  when the ledger is provably short. Two detectors: (1) a `usage_event` the hub received but could not
+  persist marks the session in hub process memory (forgotten on a restart); (2) database-derived and
+  durable: every completed assistant turn of the proof session since arming (older than 2 minutes, so
+  an in-flight usage event is not a false alarm) must have its own `token_usage` row, else the sum is
+  under-counted. A usage event that never reaches the hub at all, for a turn that also left no
+  assistant message, is not observable. A turn that completes without any usage event (for example a
+  cancelled turn) reads as a loss and ends the proof; that is the intended fail-closed direction.
+- PR scope: the hub lists PRs newest-first page by page until it reaches PRs older than the arm (an
+  incomplete scan stays pending, never green). Any PR created after arming from a head not under `proof/`, and a run-branch PR whose head
   repository is not the armed repo (a fork), ends `terminated:pr_scope_violation`.
 
 ## 7. Owner decisions in this runbook, and only these

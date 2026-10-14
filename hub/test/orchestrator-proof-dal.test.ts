@@ -24,6 +24,7 @@ beforeEach(() => {
   state.queue = []
   state.ledger = []
   state.tokenUsage = []
+  state.messages = []
   state.sessions = new Set()
   state.failOn = null
   state.statements.length = 0
@@ -415,6 +416,39 @@ describe('sumSessionTokensSince (F2-3 attribution)', () => {
     state.sessions.add('s1')
     state.tokenUsage.push({ session_id: 's1', tokens: 100, created_at: 2000 }, { session_id: 's1', tokens: 5, created_at: 10 }, { session_id: 's2', tokens: 7, created_at: 2000 })
     expect(await T.sumSessionTokensSince('s1', new Date(1000))).toEqual({ tokens: 100, sessionExists: true })
+  })
+
+  describe('QC r2 durable attribution: completed turns vs ledger rows (codex #4)', () => {
+    const OLD = 2000 // created_at well before now - 120s
+    const turn = (over: Record<string, unknown> = {}) => ({ session_id: 's1', role: 'assistant', status: 'complete', created_at: OLD, ...over })
+
+    test('a completed turn with no token_usage row is attribution lost, with NO in-process mark (survives restart/eviction)', async () => {
+      const L = await import('../src/usage/attribution-loss.ts')
+      L.resetUsageAttributionLoss() // a restarted hub: nothing remembered
+      state.sessions.add('s1')
+      state.messages.push(turn(), turn({ created_at: OLD + 1 }))
+      state.tokenUsage.push({ session_id: 's1', tokens: 10, created_at: OLD }) // 2 turns, 1 ledger row
+      expect(await T.sumSessionTokensSince('s1', new Date(1000))).toEqual({ tokens: 10, sessionExists: true, attributionLost: true })
+    })
+
+    test('every completed turn has a ledger row: not lost', async () => {
+      state.sessions.add('s1')
+      state.messages.push(turn(), turn({ created_at: OLD + 1 }))
+      state.tokenUsage.push({ session_id: 's1', tokens: 10, created_at: OLD }, { session_id: 's1', tokens: 10, created_at: OLD + 1 })
+      expect(await T.sumSessionTokensSince('s1', new Date(1000))).toEqual({ tokens: 20, sessionExists: true })
+    })
+
+    test('a turn still inside the grace window, a streaming placeholder, a user message, another session and a pre-arm turn are not losses', async () => {
+      state.sessions.add('s1')
+      state.messages.push(
+        turn({ created_at: Date.now() }), // in flight, inside grace
+        turn({ status: 'streaming' }),
+        turn({ role: 'user' }),
+        turn({ session_id: 's2' }),
+        turn({ created_at: 10 }), // before the arm
+      )
+      expect(await T.sumSessionTokensSince('s1', new Date(1000))).toEqual({ tokens: 0, sessionExists: true })
+    })
   })
 
   test('a deleted session reports sessionExists=false so callers fail closed', async () => {

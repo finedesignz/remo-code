@@ -269,6 +269,23 @@ export async function sumSessionTokensSince(
   // QC round 1 (codex #4): a usage_event that failed to persist leaves the sum UNDER-counted while
   // the session row still exists - the caller must treat that exactly like a deleted session.
   if (usageAttributionLostSince(sessionId, since)) out.attributionLost = true
+  // QC round 2 (codex #4): the in-process mark above is forgotten on restart and evicted past 1000
+  // sessions, so attribution is ALSO derived from the database, which survives both. Every
+  // completed assistant turn persisted for the session in [since, now - grace) must have its own
+  // token_usage row (one usage_event per turn). Fewer ledger rows than completed turns means a
+  // turn's usage was never persisted, so the sum is under-counted: fail closed. The grace window
+  // keeps a usage_event that is merely in flight right behind its assistant_message from reading
+  // as a loss. Rows and turns are counted over the SAME window.
+  const gap = await sql<{ completed_turns: string | null; usage_rows: string | null }[]>`
+    SELECT
+      (SELECT COUNT(*) FROM messages
+        WHERE session_id = ${sessionId} AND role = 'assistant' AND status = 'complete'
+          AND created_at >= ${since} AND created_at < now() - interval '120 seconds')::text AS completed_turns,
+      (SELECT COUNT(*) FROM token_usage
+        WHERE session_id = ${sessionId}
+          AND created_at >= ${since} AND created_at < now() - interval '120 seconds')::text AS usage_rows
+  `
+  if (Number(gap[0]?.usage_rows ?? 0) < Number(gap[0]?.completed_turns ?? 0)) out.attributionLost = true
   return out
 }
 
