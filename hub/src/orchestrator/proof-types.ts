@@ -261,7 +261,8 @@ export interface ProofGithub {
   getRuleset(owner: string, repo: string, rulesetId: number): Promise<RulesetDetail>;
   compare(owner: string, repo: string, base: string, head: string): Promise<CompareResult>;
   /** QC round 1 (codex #5): ALL recent PRs (any head, any head repository), so scope is judged by the verifier. */
-  listPulls(owner: string, repo: string): Promise<PullSummary[]>;
+  /** QC round 2: paginated until every PR created since `since` (ISO or Date) has been returned; incomplete => throws. */
+  listPulls(owner: string, repo: string, since?: string | Date): Promise<PullSummary[]>;
   getCheckState(owner: string, repo: string, sha: string): Promise<CheckState>;
   listWorkflowFiles(owner: string, repo: string, ref: string): Promise<string[]>;
   getCollaboratorPermission(owner: string, repo: string, username: string): Promise<string>;

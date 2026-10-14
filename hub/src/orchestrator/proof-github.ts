@@ -25,6 +25,9 @@ export interface ProofGithubDeps {
 }
 
 const enc = encodeURIComponent;
+const PULL_PAGE_SIZE = 50;
+/** 50 x 40 = 2000 PRs: a throwaway repo never needs more; beyond it the scan is declared incomplete. */
+const PULL_PAGE_CAP = 40;
 
 function malformed(what: string): ProofGithubError {
   return new ProofGithubError('unavailable', null, `github response malformed: ${what}`);
@@ -118,31 +121,44 @@ export function makeProofGithub(opts: { installationId: number | string }, deps:
       return { status: s, aheadBy: r.ahead_by, behindBy: r.behind_by };
     },
 
-    async listPulls(owner, repo): Promise<PullSummary[]> {
-      const r = await get(`${base(owner, repo)}/pulls?state=all&sort=created&direction=desc&per_page=50`);
-      if (!Array.isArray(r)) throw malformed('pulls');
+    async listPulls(owner, repo, since): Promise<PullSummary[]> {
+      // QC round 2 (codex #5): PAGINATE. Newest-first, so every PR created since `since` is on a
+      // prefix of the pages: stop at the first page that is short (the list is exhausted) or whose
+      // last PR predates `since` (everything after it is older). Hitting the page cap without either
+      // is an incomplete scan and FAILS CLOSED (throws; the verifier then stays pending, never green).
+      const sinceMs = since == null ? NaN : (since instanceof Date ? since.getTime() : Date.parse(since));
       const out: PullSummary[] = [];
-      for (const p of r) {
-        if (!isObj(p)) throw malformed('pull');
-        const headRef = str(p.head?.ref, 'pull.head.ref');
-        const mergedAt = typeof p.merged_at === 'string' && p.merged_at ? p.merged_at : null;
-        out.push({
-          number: p.number,
-          htmlUrl: str(p.html_url, 'pull.html_url'),
-          state: str(p.state, 'pull.state'),
-          merged: mergedAt !== null,
-          mergedAt,
-          headRef,
-          headSha: str(p.head?.sha, 'pull.head.sha'),
-          baseRef: str(p.base?.ref, 'pull.base.ref'),
-          draft: p.draft === true,
-          // head.repo is null when the fork was deleted; the verifier treats null as foreign.
-          headRepoFullName: typeof p.head?.repo?.full_name === 'string' ? p.head.repo.full_name : null,
-          authorLogin: typeof p.user?.login === 'string' ? p.user.login : null,
-          createdAt: typeof p.created_at === 'string' ? p.created_at : null,
-        });
+      for (let page = 1; ; page++) {
+        if (page > PULL_PAGE_CAP) throw malformed('pulls pagination incomplete');
+        const r = await get(
+          `${base(owner, repo)}/pulls?state=all&sort=created&direction=desc&per_page=${PULL_PAGE_SIZE}${page > 1 ? `&page=${page}` : ''}`,
+        );
+        if (!Array.isArray(r)) throw malformed('pulls');
+        let lastCreated = NaN;
+        for (const p of r) {
+          if (!isObj(p)) throw malformed('pull');
+          const headRef = str(p.head?.ref, 'pull.head.ref');
+          const mergedAt = typeof p.merged_at === 'string' && p.merged_at ? p.merged_at : null;
+          out.push({
+            number: p.number,
+            htmlUrl: str(p.html_url, 'pull.html_url'),
+            state: str(p.state, 'pull.state'),
+            merged: mergedAt !== null,
+            mergedAt,
+            headRef,
+            headSha: str(p.head?.sha, 'pull.head.sha'),
+            baseRef: str(p.base?.ref, 'pull.base.ref'),
+            draft: p.draft === true,
+            // head.repo is null when the fork was deleted; the verifier treats null as foreign.
+            headRepoFullName: typeof p.head?.repo?.full_name === 'string' ? p.head.repo.full_name : null,
+            authorLogin: typeof p.user?.login === 'string' ? p.user.login : null,
+            createdAt: typeof p.created_at === 'string' ? p.created_at : null,
+          });
+          lastCreated = typeof p.created_at === 'string' ? Date.parse(p.created_at) : NaN;
+        }
+        if (r.length < PULL_PAGE_SIZE) return out; // exhausted
+        if (Number.isFinite(sinceMs) && Number.isFinite(lastCreated) && lastCreated < sinceMs) return out; // reached pre-arm PRs
       }
-      return out;
     },
 
     async getCheckState(owner, repo, sha): Promise<CheckState> {
