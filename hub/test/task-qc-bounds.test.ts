@@ -93,8 +93,10 @@ describe('bounds (each enforced, not documented)', () => {
 
   test('passTimeoutMs: a deadline passing between phases stops cleanly, truncated, no partial fix', async () => {
     seedBadTz(5)
-    // the clock jumps past the deadline once two fix UPDATEs have been issued
-    const clock = () => (updates().length >= 2 ? NOW.getTime() + 10 * TASK_QC_BOUNDS.passTimeoutMs : NOW.getTime())
+    // the clock jumps past the deadline once two fixes are fully audited (every statement is re-armed,
+    // so a jump between a fix's UPDATE and its audit insert would roll that fix back instead)
+    const audited = () => fake.state.statements.filter((s) => s.kind === 'insert' && s.values.includes('auto_fixed')).length
+    const clock = () => (audited() >= 2 ? NOW.getTime() + 10 * TASK_QC_BOUNDS.passTimeoutMs : NOW.getTime())
     const res = await run({ autofix: true, haltCheck: haltOk, clock })
     expect(res.truncated).toBe(true)
     expect(res.applied).toHaveLength(2)

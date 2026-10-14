@@ -15,7 +15,17 @@
  */
 import { sql } from '../db/postgres.ts'
 import { runDetectors } from './detectors.ts'
-import { evidenceSig, insertFinding, isDeadlineError, makeDeadlineArmer, userDay, type QueryRunner } from './findings.ts'
+import {
+  boundedBegin,
+  evidenceSig,
+  insertFinding,
+  isDeadlineError,
+  makeDeadlineArmer,
+  raceDeadline,
+  TaskQcDeadlineError,
+  userDay,
+  type QueryRunner,
+} from './findings.ts'
 import { clampBounds, isTaskQcAutofixEnabled, taskQcFailStreak, type TaskQcBounds } from './flags.ts'
 import { loadAuditInputs, loadLiveSessionCandidates, loadSiblingUuids, type ReadDb } from './load.ts'
 import { planFix, type PlanContext, type PlanResult } from './fix-plans.ts'
@@ -46,6 +56,8 @@ export interface TaskQcDeps {
   /** consulted immediately before the first write; REQUIRED when auto-fix is on (D-21) */
   haltCheck?: () => Promise<{ halted: boolean }>
   clock?: () => number
+  /** absolute deadline (clock() ms) shared with the caller; the pass never runs later than this or its own bound */
+  deadline?: number
   resolveAppUuid?: (task: AuditTaskInput, userId: string) => Promise<string | null>
 }
 
@@ -75,15 +87,20 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
   const now = deps.now ?? new Date()
   const clock = deps.clock ?? Date.now
   const bounds = clampBounds(deps.bounds)
-  const deadline = clock() + bounds.passTimeoutMs
+  const deadline = Math.min(clock() + bounds.passTimeoutMs, deps.deadline ?? Infinity)
   // every QC transaction arms the time LEFT as its statement_timeout, so the database cancels a
   // statement blocked past the deadline (F1-A3); a cancellation is treated as the deadline passing
   const arm = makeDeadlineArmer(deadline, clock)
+  // the wait for a pooled connection is bounded by the same deadline (boundedBegin)
   const inTx = <T>(fn: (tx: QueryRunner) => Promise<T>): Promise<T> =>
-    q.begin(async (tx: QueryRunner) => {
-      await arm(tx)
-      return fn(tx)
-    })
+    boundedBegin<T>(
+      (cb) => q.begin(cb),
+      arm,
+      async (tx: QueryRunner) => {
+        await arm(tx)
+        return fn(tx)
+      },
+    )
 
   // Scope can only narrow: read exactly two keys, ignore everything else.
   const requested = args.scope?.detectors
@@ -153,12 +170,25 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
   let fixAttempts = 0
   let halted = false
   let haltChecked = false
+  let haltTimedOut = false
 
   /** null = writes allowed; else the reason this finding stays a proposal. */
   const gate = async (): Promise<'halted_read_only' | 'deadline' | null> => {
     if (!haltChecked) {
       haltChecked = true
-      if (deps.haltCheck) halted = (await deps.haltCheck()).halted === true
+      if (deps.haltCheck) {
+        try {
+          // a read: racing it is safe (nothing to roll back); an unanswered check is NOT "not halted"
+          halted = (await raceDeadline(deps.haltCheck(), deadline, clock)).halted === true
+        } catch (err) {
+          if (!(err instanceof TaskQcDeadlineError)) throw err
+          haltTimedOut = true
+        }
+      }
+    }
+    if (haltTimedOut) {
+      truncated = true
+      return 'deadline'
     }
     if (halted) return 'halted_read_only'
     if (clock() >= deadline) {

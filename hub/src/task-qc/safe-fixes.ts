@@ -15,7 +15,7 @@
 import { isValidTimezone } from '../scheduler/cron.ts'
 import { isAuditable } from './detectors.ts'
 import { randomUUID } from 'node:crypto'
-import { evidenceSig, insertFinding, type DeadlineArmer, type QueryRunner } from './findings.ts'
+import { boundedBegin, evidenceSig, insertFinding, type DeadlineArmer, type QueryRunner } from './findings.ts'
 import type { AuditTaskInput, Finding, Proposal, SafeFixKind } from './types.ts'
 
 // ---------------------------------------------------------------------------
@@ -179,9 +179,15 @@ export async function applyFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promi
 async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promise<ApplyResult> {
   const kind = fix.kind
   assertFixArguments(fix)
-  return db.begin(async (tx) => {
-    // 0. the database cancels a statement blocked past the pass deadline (before any lock wait)
-    if (ctx.armTimeout) await ctx.armTimeout(tx)
+  const body = async (tx: QueryRunner): Promise<ApplyResult> => {
+    // PostgreSQL applies statement_timeout to each statement separately, so the time LEFT is re-armed
+    // before EVERY statement: the database then cancels whichever statement (or lock wait) is running
+    // when the pass deadline passes, and the transaction rolls back whole.
+    const arm = async (): Promise<void> => {
+      if (ctx.armTimeout) await ctx.armTimeout(tx)
+    }
+    // 0. before any lock wait
+    await arm()
     // 1. row lock, scoped by id AND owner; serialises every writer for this task. FOR UPDATE (not
     // FOR NO KEY UPDATE) on purpose: the FK check of a run insert for this task takes FOR KEY SHARE
     // on this row, which only FOR UPDATE conflicts with. So a run for THIS task (session-bound or
@@ -202,11 +208,16 @@ async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promis
     // sessions(id), so that insert's FK check takes FOR KEY SHARE on the sessions row; locking the
     // row FOR UPDATE here makes it either commit before the probe (and be seen) or wait until this
     // transaction ends. A session row that no longer exists cannot be referenced by a new run.
-    if (sid != null) await tx`SELECT id FROM sessions WHERE id = ${sid} FOR UPDATE`
+    if (sid != null) {
+      await arm()
+      await tx`SELECT id FROM sessions WHERE id = ${sid} FOR UPDATE`
+    }
+    await arm()
     const own = await tx`
       SELECT 1 AS open FROM scheduled_task_runs
       WHERE task_id = ${ctx.taskId} AND status IN ('running','pending','in_flight') AND finished_at IS NULL AND completed_at IS NULL
       LIMIT 1`
+    if (own.length === 0 && sid != null) await arm()
     const shared =
       own.length === 0 && sid != null
         ? await tx`
@@ -217,6 +228,7 @@ async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promis
     if (own.length > 0 || shared.length > 0) {
       const scope = own.length > 0 ? 'own_run' : 'shared_session'
       const evidence = { ...ctx.finding.evidence, in_flight: scope }
+      await arm()
       await insertFinding(tx, {
         userId: ctx.userId,
         taskId: ctx.taskId,
@@ -239,6 +251,7 @@ async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promis
     let before: Record<string, unknown>
     let after: Record<string, unknown>
     let ret: any
+    await arm()
     if (fix.kind === 'normalize_timezone') {
       ret = (await updateTimezone(tx, ctx.taskId, ctx.userId, fix.timezone))[0]
       before = { timezone: row.timezone }
@@ -255,6 +268,7 @@ async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promis
     }
     if (!ret) throw new Error('task_qc: fix UPDATE matched no row')
     const rollbackSql = buildRollbackSql(kind, ctx.taskId, before, after)
+    await arm()
     const audit = await insertFinding(tx, {
       userId: ctx.userId,
       taskId: ctx.taskId,
@@ -272,7 +286,9 @@ async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promis
     })
     if (!audit.inserted) throw new Error('task_qc: audit row not inserted; fix rolled back')
     return { status: 'applied', fixKind: kind, rowsWritten: 2, before, after, rollbackSql }
-  })
+  }
+  // with an armer, connection acquisition is bounded by the same deadline (no armer: a bare transaction)
+  return ctx.armTimeout ? boundedBegin((cb) => db.begin(cb), ctx.armTimeout, body) : db.begin(body)
 }
 
 /** Argument shape checks that need no database; run before the transaction opens. */

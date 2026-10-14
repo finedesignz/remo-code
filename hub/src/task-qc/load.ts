@@ -11,7 +11,7 @@
  * is imported lazily, only when a log task is audited, exactly as the
  * dispatcher itself loads that sender.
  */
-import { isDeadlineError, makeDeadlineArmer, raceDeadline, type QueryRunner } from './findings.ts'
+import { boundedBegin, isDeadlineError, makeDeadlineArmer, raceDeadline, type QueryRunner } from './findings.ts'
 import { TASK_QC_BOUNDS, type TaskQcBounds } from './flags.ts'
 import type { AuditTaskInput, RunInput, SessionInput, TaskQcScope } from './types.ts'
 
@@ -73,10 +73,11 @@ async function loadAuditInputsBounded(args: LoadArgs): Promise<LoadedAudit> {
   const remaining = args.deadline - clock()
   if (remaining <= 0) return empty(true)
 
-  const out = await runner.begin('read only', async (tx): Promise<LoadedAudit> => {
-    // statement_timeout is re-armed with the time LEFT before EVERY statement (the lock first: a
-    // blocked advisory-lock wait is cancelled by the database at the deadline, F1-A3).
-    const arm = makeDeadlineArmer(args.deadline, clock)
+  // statement_timeout is re-armed with the time LEFT before EVERY statement (the lock first: a
+  // blocked advisory-lock wait is cancelled by the database at the deadline, F1-A3), and the wait
+  // for a pooled connection is bounded by the same deadline.
+  const arm = makeDeadlineArmer(args.deadline, clock)
+  const out = await boundedBegin<LoadedAudit>((cb) => runner.begin('read only', cb), arm, async (tx): Promise<LoadedAudit> => {
     await arm(tx)
     if (args.lock) await tx`SELECT pg_advisory_xact_lock(hashtext(${'taskqc:' + userId})::bigint)`
     await arm(tx)
