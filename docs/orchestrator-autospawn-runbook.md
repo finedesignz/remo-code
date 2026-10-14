@@ -102,6 +102,56 @@ FROM routine_run_log r JOIN sessions s ON s.id = r.session_id
 WHERE s.user_id = '<id>' ORDER BY created_at DESC LIMIT 20;
 ```
 
+## Arming unified self-heal (flag `REMO_HEAL_UNIFIED`)
+
+The self-heal seam (`docs/self-heal-routing.md`) reuses this autospawn capability to wake an
+OFFLINE session bound to a failing repo. Shipping it changes nothing until the owner arms it.
+
+What heal needs, and what it does not:
+
+- **Shared allowlist.** Heal reads the same `orchestrator_autospawn_allowlist` as the orchestrator
+  (Step 1). It is EMPTY by default, so a default configuration spawns nothing: live dispatch and
+  fail-fast routing still work with the flag ON, autospawn is a no-op.
+- **Two flags, not three.** Heal autospawn is armed when `REMO_HEAL_UNIFIED` AND
+  `REMO_ORCHESTRATOR_AUTOSPAWN` are ON. It does NOT require `REMO_ORCHESTRATOR_ENABLED`; arming heal
+  does not turn the orchestrator live path on, and the orchestrator flag does not arm heal.
+- **Order of checks** (governed launch, heal policy): the full gate chain and the atomic lifetime
+  reservation (key `heal:<userId>:<repo_ident>`) first, then allowlist and supervisor-online, then
+  the `autospawn-launch` ledger row (fail-closed), and the spawn LAST. Any refusal releases the
+  reservation, so a refused heal never consumes a supervisor slot. The token cap, launch cap
+  (Step 3) and `REMO_HEAL_MAX_PER_REPO_HOUR` / `REMO_HEAL_MAX_PER_TASK_DAY` all bound it.
+
+Flip order (OWNER decision, after Steps 1-3 above):
+
+1. Set `REMO_ORCHESTRATOR_AUTOSPAWN=1` (Step 4) if it is not already on.
+2. Set `REMO_HEAL_UNIFIED=1` on the hub app and redeploy. Optional knobs: `REMO_HEAL_DEDUPE_WINDOW_MS`,
+   `REMO_HEAL_SPAWN_TIMEOUT_MS`, `REMO_HEAL_MAX_CLAIMS_PER_USER_HOUR`, `REMO_HEAL_MAX_PER_REPO_HOUR`,
+   `REMO_HEAL_MAX_PER_TASK_DAY`, `REMO_HEAL_RETENTION_HOURS` (defaults in `docs/self-heal-routing.md`;
+   a bad value falls back to the default, it never disables a bound).
+3. Add the first repo to the allowlist only when you want an offline-session heal for it (Step 1).
+
+Verify:
+
+```sql
+-- every heal decision and its outcome
+SELECT created_at, source, repo_ident, outcome, trigger_run_id, dispatch_run_id
+FROM heal_events WHERE user_id = '<id>' ORDER BY created_at DESC LIMIT 20;
+
+-- the spawn ledger (same table as Step 5)
+SELECT created_at, command, outcome FROM routine_run_log r
+JOIN sessions s ON s.id = r.session_id
+WHERE s.user_id = '<id>' AND command = 'autospawn-launch' ORDER BY created_at DESC LIMIT 20;
+```
+
+Expect `dispatched_live` for repos with a live session, `autospawn_launched` / `autospawn_parked`
+(then `dispatched_after_spawn`) only for allowlisted repos, and `no_routable_session` plus one owner
+email for the rest. No scheduled-task run should be left `pending` with a NULL `session_id`.
+
+Disarm: unset `REMO_HEAL_UNIFIED` and redeploy. Every source returns to its previous path
+byte for byte (the boot sweep also stops). Narrower: empty the allowlist, or set
+`REMO_ORCHESTRATOR_AUTOSPAWN=0`, which turns heal autospawn into `no_routable_session` while
+leaving live routing on. A heal never merges or deploys.
+
 ## Rollback
 
 - **Instant disable:** set `REMO_ORCHESTRATOR_AUTOSPAWN=0` (or unset) and redeploy. The
