@@ -43,7 +43,8 @@ const ROW = {
 
 function setup(opts: { own?: boolean; shared?: boolean; row?: any }) {
   const fake = createTaskQcFakeSql()
-  fake.on('FOR NO KEY UPDATE', [opts.row ?? ROW])
+  fake.on(/FROM scheduled_tasks WHERE id/, [opts.row ?? ROW])
+  fake.on(/FROM sessions WHERE id = \? FOR UPDATE/, [{ id: 's1' }])
   fake.on(/FROM scheduled_task_runs WHERE task_id/, opts.own ? [{ open: 1 }] : [])
   fake.on(/FROM scheduled_task_runs WHERE session_id/, opts.shared ? [{ open: 1 }] : [])
   fake.on(/UPDATE scheduled_tasks SET timezone/, [{ timezone: 'UTC' }])
@@ -77,32 +78,41 @@ describe('in-flight refusal (TQC-06)', () => {
     expect(probe.values).toEqual(['s1'])
   })
 
-  test('codex MAJOR 3: the per-session advisory lock is taken after the row lock and BEFORE the in-flight probes and the write', async () => {
+  test('round 2: no advisory lock and no trigger; the task row (FOR UPDATE) then the session row (FOR UPDATE) are locked before the probes and the write', async () => {
     const fake = setup({})
     await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
     const st = fake.state.statements
-    const lockAt = st.findIndex((x) => x.kind === 'lock')
-    expect(lockAt).toBeGreaterThan(-1)
-    expect(st[lockAt]!.values).toEqual(['taskqc-session:s1'])
-    expect(st.findIndex((x) => x.forUpdate)).toBeLessThan(lockAt)
-    const firstProbe = st.findIndex((x) => /FROM scheduled_task_runs/.test(x.text))
-    expect(lockAt).toBeLessThan(firstProbe)
-    expect(lockAt).toBeLessThan(st.findIndex((x) => x.kind === 'update'))
-    // one transaction: the lock is transaction-scoped, so check and write share it
+    expect(fake.state.lockCalls).toBe(0)
+    const taskLock = st.findIndex((x) => /FROM scheduled_tasks WHERE id/.test(x.text))
+    // FOR UPDATE, not FOR NO KEY UPDATE: only FOR UPDATE conflicts with the FOR KEY SHARE a run insert's FK check takes
+    expect(st[taskLock]!.text).toMatch(/FOR UPDATE$/)
+    expect(st[taskLock]!.text).not.toMatch(/NO KEY/)
+    const sessLock = st.findIndex((x) => /FROM sessions WHERE id = \? FOR UPDATE/.test(x.text))
+    expect(sessLock).toBeGreaterThan(taskLock)
+    expect(st[sessLock]!.values).toEqual(['s1'])
+    expect(sessLock).toBeLessThan(st.findIndex((x) => /FROM scheduled_task_runs/.test(x.text)))
+    expect(sessLock).toBeLessThan(st.findIndex((x) => x.kind === 'update'))
+    // one transaction: row locks are held until commit, so check and write share them
     expect(st.every((x) => x.tx === 1)).toBe(true)
   })
 
-  test('the session lock is also held when the write is refused for a shared-session run', async () => {
+  test('round 2 (codex new MAJOR 2): a null-session task is serialised against its own run inserts by the task row FOR UPDATE alone', async () => {
+    const fake = setup({ row: { ...ROW, session_id: null, target_id: null, target_kind: 'agent' } })
+    await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
+    const st = fake.state.statements
+    const taskLock = st.findIndex((x) => /FROM scheduled_tasks WHERE id/.test(x.text))
+    expect(st[taskLock]!.text).toMatch(/FOR UPDATE$/)
+    expect(st[taskLock]!.text).not.toMatch(/NO KEY/)
+    expect(taskLock).toBeLessThan(st.findIndex((x) => /FROM scheduled_task_runs WHERE task_id/.test(x.text)))
+    expect(st.some((x) => /FROM sessions/.test(x.text))).toBe(false)
+    expect(fake.state.lockCalls).toBe(0)
+  })
+
+  test('the row locks are also held when the write is refused for a shared-session run', async () => {
     const fake = setup({ shared: true })
     const r: any = await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
     expect(r.status).toBe('skipped_in_flight')
-    expect(fake.state.lockCalls).toBe(1)
-  })
-
-  test('a task with no session takes no session lock', async () => {
-    const fake = setup({ row: { ...ROW, session_id: null, target_id: null, target_kind: 'agent' } })
-    await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
-    expect(fake.state.lockCalls).toBe(0)
+    expect(fake.state.statements.some((x) => /FROM sessions WHERE id = \? FOR UPDATE/.test(x.text))).toBe(true)
   })
 
   test('the open-run definition is the D-07 one, in SQL', async () => {
