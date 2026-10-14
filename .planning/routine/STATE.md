@@ -8,6 +8,14 @@
      its iteration. -->
 LOCK: none
 
+## Run 20 (2026-10-14)
+- memlog claim OK (routine-run-2026-10-14). Merged #505 (PTYCAP-03; qc+docs-drift+ai-review green, 3-seat QC earlier) -> main 66bf504.
+- #506 (PTYCAP-04): was stacked on #505 -> re-applied cleanly on main (ec8908f), retargeted to main, fixed codex-blocking releaseInject (retry + parked queue + test). Full 3-seat QC panel: no blocking (verdict commented on PR; lifetime cap on scheduler keys is locked design D-05). Woodpecker qc/docs-drift pending at end of run -> MERGE NEXT RUN if green and ai-review has no blocking finding.
+- #509: fixed codex-blocking UNC-path normalization (521d477) + test; awaiting CI/ai-review re-run, then merge.
+- Not touched: #504 (revanote), #502 (AAF), #503 (dependabot cargo), #494, drafts #511-513 (QC BLOCKED, owner/previous routine drafts).
+- install-gsd.sh not run. No tool errors to report.
+- Resume: merge #506, #509; then #504, #503; then PTYCAP-05+.
+
 ## Run 19 (2026-10-11)
 - memlog_claims empty (no claim taken). Prod /health = {"ok":true}. Open: #494 (owner PR), #502 (AAF, head 5be1adf); #494 updated_at/head unchanged, #502 unchanged since run 18.
 - Quiet blocked run, no new escalation, nothing shipped. Blockers unchanged: #502 needs owner sign-off (agent-scope key minting); PTYCAP Phase 3/4 needs full QC panel + Postgres. No errors to report.
