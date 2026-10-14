@@ -7,9 +7,10 @@
  * statement bounded per task, and nothing here writes.
  *
  * The one cross-module dependency is the sender's own app-uuid resolver
- * (exported, not re-implemented) used to fill resolvedAppUuid for log tasks.
+ * (exported, not re-implemented) used to fill resolvedAppUuid for log tasks. It
+ * is imported lazily, only when a log task is audited, exactly as the
+ * dispatcher itself loads that sender.
  */
-import { resolveAppUuid as senderResolveAppUuid } from '../scheduler/senders/coolify.ts'
 import type { QueryRunner } from './findings.ts'
 import { TASK_QC_BOUNDS, type TaskQcBounds } from './flags.ts'
 import type { AuditTaskInput, RunInput, SessionInput, TaskQcScope } from './types.ts'
@@ -111,12 +112,15 @@ export async function loadAuditInputs(args: LoadArgs): Promise<LoadedAudit> {
 
   // The sender's resolver reads through its own DAL (outside this transaction).
   if (out.tasks.length > 0 && want('MISCONFIGURED')) {
-    const resolve = args.resolveAppUuid ?? ((t, u) => senderResolveAppUuid(t as never, u))
-    for (const t of out.tasks) {
-      if (t.task_type === 'log_check' || t.task_type === 'log_pull') {
-        if (clock() >= args.deadline) return { ...out, tasks: [], runsByTask: {}, sessionsById: {}, truncated: true }
-        t.resolvedAppUuid = (await resolve(t, userId)) ?? null
-      }
+    const logTasks = out.tasks.filter((t) => t.task_type === 'log_check' || t.task_type === 'log_pull')
+    let resolve = args.resolveAppUuid
+    if (!resolve && logTasks.length > 0) {
+      const { resolveAppUuid } = await import('../scheduler/senders/coolify.ts')
+      resolve = (t, u) => resolveAppUuid(t as never, u)
+    }
+    for (const t of logTasks) {
+      if (clock() >= args.deadline) return { ...out, tasks: [], runsByTask: {}, sessionsById: {}, truncated: true }
+      t.resolvedAppUuid = (await resolve!(t, userId)) ?? null
     }
   }
   return out
