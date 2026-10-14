@@ -165,7 +165,7 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
   const findings: Finding[] = []
   const applied: Applied[] = []
   const proposals: Finding[] = []
-  const recordedIds: string[] = []
+  const recorded: Array<{ finding: Finding; id: string }> = []
   let rowsWritten = 0
   let fixAttempts = 0
   let halted = false
@@ -231,8 +231,9 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
     }
     rowsWritten++
     if (res.inserted) {
-      recordedIds.push(res.id)
-      proposals.push(reason ? withParams(f, { reason }) : f)
+      const reported = reason ? withParams(f, { reason }) : f
+      recorded.push({ finding: reported, id: res.id })
+      proposals.push(reported)
     }
   }
 
@@ -288,5 +289,5 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
     }
   }
 
-  return { findings, applied, proposals, truncated, recordedIds }
+  return { findings, applied, proposals, truncated, recorded }
 }

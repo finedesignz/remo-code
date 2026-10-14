@@ -17,7 +17,7 @@ const { SAFE_FIXES } = await import('../src/task-qc/safe-fixes.ts')
 beforeEach(reset)
 
 const run = (scope?: any, origin: 'schedule' | 'run_now' = 'run_now', over: Record<string, unknown> = {}) =>
-  runTaskQcPass({ userId: USER, origin, scope, deps: baseDeps(fake, over) as any }).then(({ recordedIds: _ids, ...rest }) => rest) // row ids come from the fake's counter
+  runTaskQcPass({ userId: USER, origin, scope, deps: baseDeps(fake, over) as any }).then(({ recorded: _ids, ...rest }) => rest) // row ids come from the fake's counter
 
 function seed() {
   world.store['own1'] = mk('own1')

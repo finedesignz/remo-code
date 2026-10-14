@@ -134,8 +134,8 @@ export interface TaskQcResult {
   }>
   proposals: Finding[]
   truncated: boolean
-  /** ids of the proposal rows this pass reported; the sender marks them delivered after a successful digest */
-  recordedIds?: string[]
+  /** the proposal rows this pass reported, by the finding object that appears in `proposals`; the sender marks exactly the ones a delivered digest RENDERED */
+  recorded?: Array<{ finding: Finding; id: string }>
 }
 
 /**

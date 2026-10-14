@@ -8,7 +8,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-chars-long-aaaaaaaa'
 
 import { describe, test, expect, beforeEach, afterEach, afterAll, mock } from 'bun:test'
-import { setupFireHarness, flush, QC_ID, USER, AUDITED_ID, OWNER_EMAIL, failedRuns } from './fixtures/task-qc-fire-harness.ts'
+import { setupFireHarness, flush, QC_ID, USER, AUDITED_ID, OWNER_EMAIL, failedRuns, auditedTaskRow } from './fixtures/task-qc-fire-harness.ts'
 
 const { h, reset } = setupFireHarness()
 mock.module('../src/scheduler/post-run/dispatcher.ts', () => ({
@@ -182,10 +182,39 @@ describe('round 2: the digest send and the delivery mark share the run deadline'
   })
 })
 
+describe('round 2 (codex new MAJOR 3): only findings the digest RENDERED are marked delivered', () => {
+  test('a size-cut digest marks the shown rows and leaves the cut ones to be reported again', async () => {
+    const TOTAL = 150
+    // long run-id lists make each block big enough that the 100k body cap cuts the digest
+    h.auditedTasks = Array.from({ length: TOTAL }, (_, i) =>
+      auditedTaskRow({ id: `task-${i}`, name: `long-${i}-` + 'x'.repeat(400), target_id: null, session_id: null, target_kind: 'agent' }),
+    )
+    h.auditedRuns = h.auditedTasks.flatMap((t: any) => failedRuns(t.id, 40).map((r) => ({ ...r, id: `${r.id}-` + 'z'.repeat(40) })))
+    let n = 0
+    h.findingRowsFn = () => [{ id: `f-${++n}` }]
+    await fire(QC_ID)
+    await flush()
+    expect(h.emails).toHaveLength(1)
+    const text: string = h.emails[0].text
+    expect(text).toContain('digest truncated')
+    const rendered = (text.match(/^#\d+ FAILING/gm) ?? []).length
+    expect(rendered).toBeGreaterThan(0)
+    expect(rendered).toBeLessThan(TOTAL)
+    expect(n).toBeGreaterThanOrEqual(TOTAL) // every finding was recorded (a row each)
+    const marks = h.fake.state.updatesTo('task_qc_findings')
+    expect(marks).toHaveLength(1)
+    const ids: string[] = marks[0]!.values.find((v: any) => Array.isArray(v))
+    // exactly as many rows are marked as blocks were rendered; the cut findings stay unmarked
+    expect(ids).toHaveLength(rendered)
+    expect(ids.length).toBeLessThan(n)
+    expect(new Set(ids).size).toBe(rendered)
+  })
+})
+
 describe('runTaskQcPass final signature', () => {
   test('returns { findings, applied, proposals, truncated } with applied empty; scope narrows only', async () => {
     const res = await runTaskQcPass({ userId: USER, origin: 'schedule' })
-    expect(Object.keys(res).sort()).toEqual(['applied', 'findings', 'proposals', 'recordedIds', 'truncated'])
+    expect(Object.keys(res).sort()).toEqual(['applied', 'findings', 'proposals', 'recorded', 'truncated'])
     expect(res.applied).toEqual([])
     expect(res.findings).toHaveLength(1)
     expect(res.proposals).toHaveLength(1)

@@ -15,6 +15,8 @@ export interface TaskQcDigest {
   subject: string
   text: string
   html: string
+  /** the findings whose blocks are in `text`/`html` (a size or count cut leaves the rest out); applied fixes are not listed */
+  shown: Finding[]
 }
 
 export interface DigestInput {
@@ -261,16 +263,30 @@ export function buildDigest(result: DigestInput, opts: DigestOptions = {}): Task
   }
   const text = [...textHead, textParts.join('\n\n'), ...(tail.length ? ['', ...tail] : [])].join('\n') + '\n'
   const html = htmlHead.join('') + htmlParts.join('') + tail.map((l) => `<p>${esc(l)}</p>`).join('')
-  return { subject, text, html }
+  return { subject, text, html, shown: open.slice(0, shown) }
 }
 
-/** One email per call; a null digest (zero findings) sends nothing. Returns the helper's boolean. */
+/**
+ * One email per call; a null digest (zero findings) sends nothing. `shown` is what the email
+ * actually contained, so a caller marks only those findings delivered (an over-long digest cuts
+ * the rest, which must be reported again).
+ */
+export async function deliverDigest(
+  result: DigestInput,
+  user: { email: string; name?: string },
+  opts: Omit<DigestOptions, 'userName'> = {},
+): Promise<{ delivered: boolean; shown: Finding[] }> {
+  const digest = buildDigest(result, { ...opts, userName: user.name })
+  if (!digest) return { delivered: false, shown: [] }
+  const delivered = await sendEmail({ to: user.email, subject: digest.subject, html: digest.html, text: digest.text, timeoutMs: opts.sendTimeoutMs })
+  return { delivered, shown: digest.shown }
+}
+
+/** deliverDigest, reduced to the helper's boolean. */
 export async function sendDigest(
   result: DigestInput,
   user: { email: string; name?: string },
   opts: Omit<DigestOptions, 'userName'> = {},
 ): Promise<boolean> {
-  const digest = buildDigest(result, { ...opts, userName: user.name })
-  if (!digest) return false
-  return sendEmail({ to: user.email, subject: digest.subject, html: digest.html, text: digest.text, timeoutMs: opts.sendTimeoutMs })
+  return (await deliverDigest(result, user, opts)).delivered
 }
