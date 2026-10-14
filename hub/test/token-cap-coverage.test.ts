@@ -88,6 +88,8 @@ describe('daily TOKEN cap covers every dispatch entry point', () => {
       // [thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate]
       // order) lives here — see hub/src/dispatch/pty-preflight.ts.
       'dispatch/pty-preflight.ts',
+      // PTYCAP Phase 7 (SC3): the single self-heal seam's pipeline builder.
+      'heal/route.ts',
     ]) {
       expect(files.has(expected)).toBe(true)
     }
@@ -98,5 +100,29 @@ describe('daily TOKEN cap covers every dispatch entry point', () => {
       .filter((g) => !g.list.includes('dailyTokenCapGate') || !g.list.includes('dailyCostCapGate'))
       .map((g) => `${g.file}: gates: [${g.list.trim()}]`)
     expect(offenders).toEqual([])
+  })
+})
+
+describe('PTYCAP-07-10 (SC3, SH-06): the heal gate list is discovered and ordered', () => {
+  const heal = () => gateLists().lists.filter((g) => g.file.startsWith('heal/'))
+
+  test('heal/route.ts holds the ONLY gate list under hub/src/heal', () => {
+    expect(heal().map((g) => g.file)).toEqual(['heal/route.ts'])
+  })
+
+  test('the heal gate list holds the six gates in the locked order (D-07)', () => {
+    const order = [
+      'automationKillSwitchGate',
+      'thresholdGate',
+      'dailyCostCapGate',
+      'dailyTokenCapGate',
+      'sessionInjectRateGate',
+      'automationLifetimeCounterGate',
+    ]
+    const list = heal()[0]!.list
+    const idx = order.map((g) => list.indexOf(g))
+    for (const [i, g] of order.entries()) expect([g, idx[i]! > -1]).toEqual([g, true])
+    expect(idx).toEqual([...idx].sort((a, b) => a - b))
+    expect((list.match(/Gate\b/g) ?? []).length).toBe(6) // no seventh gate, no duplicate
   })
 })

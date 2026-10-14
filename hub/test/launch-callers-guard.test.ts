@@ -89,3 +89,27 @@ describe('launchSessionForUser caller classification', () => {
     }
   })
 })
+
+describe('PTYCAP-07-10: heal reaches launch only through the governed adapter', () => {
+  const healFiles = () => walk(join(SRC, 'heal')).map((f) => relative(SRC, f).split('\\').join('/'))
+
+  test('self-check: the heal tree is found', () => {
+    expect(healFiles().length).toBeGreaterThanOrEqual(10)
+  })
+
+  test('hub/src/heal contains no launchSessionForUser call', () => {
+    const callers = healFiles().filter((f) => codeLines(join(SRC, f)).some((l) => /\blaunchSessionForUser\s*\(/.test(l)))
+    expect(callers).toEqual([])
+  })
+
+  test('route.ts imports and calls governedLaunch', () => {
+    const src = codeLines(join(SRC, 'heal/route.ts')).join('\n')
+    expect(src).toMatch(/import \{ governedLaunch \} from '\.\.\/dispatch\/governed-launch\.ts'/)
+    expect(src).toMatch(/\bgovernedLaunch\(/)
+  })
+
+  test('governed-launch.ts is classified MACHINE and is a scanned call site', () => {
+    expect(MACHINE.has('dispatch/governed-launch.ts')).toBe(true)
+    expect(sites().some((s) => s.file === 'dispatch/governed-launch.ts')).toBe(true)
+  })
+})

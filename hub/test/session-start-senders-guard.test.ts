@@ -129,3 +129,27 @@ describe('self-heal route handler (MACHINE, panel F-2)', () => {
     expect(slice).toContain('heal:')
   })
 })
+
+describe('PTYCAP-07-10: the heal seam and the governed-launch adapter send no session.start', () => {
+  const stripped = (f: string) => readFileSync(join(SRC, f), 'utf8').split(/\r?\n/).filter((l) => !isComment(l)).join('\n')
+
+  test('self-check: the scanner sees both subjects', () => {
+    expect(walk(join(SRC, 'heal')).length).toBeGreaterThanOrEqual(10)
+    expect(readFileSync(join(SRC, 'dispatch/governed-launch.ts'), 'utf8').length).toBeGreaterThan(0)
+  })
+
+  test('no file under hub/src/heal holds a session-start literal', () => {
+    const hits = walk(join(SRC, 'heal'))
+      .map((f) => relative(SRC, f).split('\\').join('/'))
+      .filter((f) => /['"`]session\.start['"`]/.test(stripped(f)))
+    expect(hits).toEqual([])
+  })
+
+  test('dispatch/governed-launch.ts holds no session-start literal (the launch primitive owns it)', () => {
+    expect(/['"`]session\.start['"`]/.test(stripped('dispatch/governed-launch.ts'))).toBe(false)
+  })
+
+  test('PROOF: the literal pattern trips on a violating line', () => {
+    expect(/['"`]session\.start['"`]/.test("send({ type: 'session.start' })")).toBe(true)
+  })
+})

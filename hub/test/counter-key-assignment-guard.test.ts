@@ -63,3 +63,24 @@ describe('counterKey assignment trust boundary', () => {
     expect(triage).toContain('counterKey: `triage:${payload.application_uuid}`')
   })
 })
+
+describe('PTYCAP-07-10 (AM-F4-3): the heal lifetime key', () => {
+  test('self-check: the scanner finds the heal seam site', () => {
+    expect(sitesByFile().has('heal/route.ts')).toBe(true)
+  })
+
+  test('within hub/src/heal only route.ts assigns the key', () => {
+    const healFiles = [...sitesByFile().keys()].filter((f) => f.startsWith('heal/'))
+    expect(healFiles).toEqual(['heal/route.ts'])
+  })
+
+  test('every heal assignment takes its value from the shared builder (or the request already carrying it)', () => {
+    const lines = readFileSync(join(SRC, 'heal/route.ts'), 'utf8')
+      .split(/\r?\n/)
+      .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+      .filter((l) => ASSIGNMENT.some((re) => re.test(l)))
+    expect(lines.length).toBeGreaterThanOrEqual(2)
+    for (const l of lines) expect([l.trim(), /buildHealKey\(|req\.counterKey/.test(l)]).toEqual([l.trim(), true])
+    expect(readFileSync(join(SRC, 'heal/counter-key.ts'), 'utf8')).toContain('export function buildHealKey')
+  })
+})
