@@ -178,6 +178,15 @@ describe('spawn-on-error: ensureSessionOnline', () => {
     expect(state.sentMessages.length).toBe(0)
   })
 
+  test('orchestrator session refused by the reserve seam → no createRun, no session.start, false', async () => {
+    state.reserveOk = false
+    state.reserveReason = 'orchestrator_session'
+    const ok = await ensureSessionOnline('u1', 's1')
+    expect(ok).toBe(false)
+    expect(state.createRunCalls).toBe(0)
+    expect(state.sentMessages.length).toBe(0)
+  })
+
   test('offline + supervisor + headroom → sends session.start, true once online', async () => {
     // Flip online shortly after the start fires (simulate supervisor connecting).
     setTimeout(() => {
