@@ -242,7 +242,7 @@ describe('single notification owner across the autospawn lifecycle', () => {
 describe('autospawn_starting: a crash between the reservation and the launched outcome is recoverable', () => {
   test('autospawn_starting is persisted BEFORE gates, reserve, ledger and launch', async () => {
     let recRef: any = null
-    let orderAtStarting: string[] | null = null
+    let orderAtStarting = null as string[] | null
     const { deps, rec } = mk({
       heal: {
         setOutcome: async (_id: string, o: string) => {
