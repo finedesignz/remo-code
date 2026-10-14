@@ -52,6 +52,7 @@ import {
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
 import { automationKillSwitchGate } from '../dispatch/automation-controls.ts'
 import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
+import { healUnifiedEnabled } from '../heal/flag.ts'
 
 export type DispatchOutcome =
   | { status: 'dispatched'; run_id: string }
@@ -147,7 +148,67 @@ export function buildErrorCaptureRunStore(args: {
   }
 }
 
-export async function dispatchPendingError(errorId: string): Promise<DispatchOutcome> {
+/**
+ * PTYCAP-07-09 (SH-01, D-01, D-06): the flag switch. REMO_HEAL_UNIFIED OFF (unset or any
+ * unrecognized value) runs the legacy body below unchanged and loads nothing from the heal tree
+ * beyond the flag reader. ON hands the event to routeHeal: no PipelineDeps and no ensure-online
+ * hook are built here (AM-F1-5), and there is no fall back to the legacy body on error (routeHeal
+ * terminalizes every failure itself).
+ */
+export interface DispatchPendingHealOptions {
+  /** Forwarded to routeHeal so tests can inject collaborators. Production passes nothing. */
+  routeDeps?: import('../heal/route.ts').HealDeps
+  /** Replace the error / project row loaders (tests). */
+  loadError?: (errorId: string) => Promise<ErrorRow | null>
+  loadProject?: (projectId: string) => Promise<ErrorProject | null>
+}
+
+export async function dispatchPendingError(
+  errorId: string,
+  healOpts?: DispatchPendingHealOptions,
+): Promise<DispatchOutcome> {
+  if (!healUnifiedEnabled()) return dispatchPendingErrorLegacy(errorId)
+  return dispatchPendingErrorViaHeal(errorId, healOpts)
+}
+
+async function dispatchPendingErrorViaHeal(
+  errorId: string,
+  opts: DispatchPendingHealOptions = {},
+): Promise<DispatchOutcome> {
+  const error = await (opts.loadError ?? loadErrorRow)(errorId)
+  if (!error) return { status: 'noop', skip_reason: 'error_not_found' }
+  if (error.dispatch_status !== 'pending') {
+    return { status: 'noop', skip_reason: `not_pending:${error.dispatch_status}` }
+  }
+  const project = await (opts.loadProject ??
+    (async (projectId: string) => {
+      const rows = await sql<ErrorProject[]>`SELECT * FROM error_projects WHERE id = ${projectId} LIMIT 1`
+      return rows[0] ?? null
+    }))(error.project_id)
+  if (!project) {
+    await updateErrorDispatchStatus(errorId, 'failed', 'project_missing')
+    return { status: 'failed', skip_reason: 'project_missing' }
+  }
+  // Hub self-capture rows have no bound session: they keep the legacy handling.
+  if (!project.session_id) return dispatchPendingErrorLegacy(errorId)
+
+  const content = buildErrorMessage(error, project)
+  const storedContent = `[error: ${project.name} — ${error.error_type}]
+
+${content}`
+  const { buildErrorCaptureHealEvent, healOutcomeToErrorOutcome } = await import('../heal/sources/error-capture.ts')
+  const { routeHeal } = await import('../heal/route.ts')
+  const event = buildErrorCaptureHealEvent(
+    error,
+    { id: project.id, user_id: project.user_id, name: project.name, session_id: project.session_id },
+    content,
+    storedContent,
+  )
+  return healOutcomeToErrorOutcome(await routeHeal(event, opts.routeDeps))
+}
+
+// heal-legacy-path:begin dispatchPendingErrorLegacy
+async function dispatchPendingErrorLegacy(errorId: string): Promise<DispatchOutcome> {
   const error = await loadErrorRow(errorId)
   if (!error) return { status: 'noop', skip_reason: 'error_not_found' }
   if (error.dispatch_status !== 'pending') {
@@ -256,3 +317,4 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
       return { status: 'failed', skip_reason: 'agent_send_failed' }
   }
 }
+// heal-legacy-path:end dispatchPendingErrorLegacy

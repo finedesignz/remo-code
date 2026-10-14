@@ -7,12 +7,10 @@
 // "no dedupe" or "no ceiling".
 
 import { isAutospawnEnabled } from '../orchestrator/controller.ts';
+import { healUnifiedEnabled } from './flag.ts';
 
-/** REMO_HEAL_UNIFIED: master flag. Unset / empty / anything unrecognized = OFF. */
-export function healUnifiedEnabled(): boolean {
-  const raw = (process.env.REMO_HEAL_UNIFIED ?? '').trim().toLowerCase();
-  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
-}
+/** REMO_HEAL_UNIFIED: master flag. Defined in the dependency-free leaf flag.ts (PTYCAP-07-09). */
+export { healUnifiedEnabled };
 
 /** Positive finite number from env, else the default. */
 function positiveKnob(envName: string, def: number): number {
