@@ -50,6 +50,7 @@ import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
 // V2 scheduler.
 import * as schedRegistry from './scheduler/registry.ts'
+import { seedTaskQcTasks } from './task-qc/seed.ts'
 import * as schedCatchup from './scheduler/catchup.ts'
 import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
 import { getGraceBuffer as getDispatchGraceBuffer } from './dispatch/grace.ts'
@@ -748,6 +749,11 @@ runMigrations()
     // V2 scheduler: load enabled tasks, run catch-up. Waiter promotion lives in
     // the shared dispatch pipeline (onSessionReply → queue.markFinished →
     // re-dispatch); there is no dispatcher init step to wire anymore.
+    // PTYCAP-08 (F2-B3): seed the per-user task_qc row BEFORE the registry load and catchup so the
+    // normal loader arms it. Flag OFF = no database call. A failure logs and boot continues.
+    try { await seedTaskQcTasks() } catch (err: any) {
+      console.error(`[startup] task_qc seed failed: ${err?.message ?? err}`)
+    }
     await schedRegistry.loadAll()
     await schedCatchup.runOnce()
     // Round-2 migration: error-capture grace now lives in the shared dispatch
