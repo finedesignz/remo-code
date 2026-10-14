@@ -19,6 +19,7 @@ const GATE_ORDER = [
   'threshold',
   'daily_cost_cap',
   'daily_token_cap',
+  'governed_automation_pty',
   'session_inject_rate',
   'lifetime_counter',
 ]
@@ -152,6 +153,7 @@ function mk(over: { heal?: Partial<HealDeps>; auto?: Partial<AutospawnDeps> } = 
       rec.dispatches.push({ req, pdeps })
       return { kind: 'parked_offline' }
     },
+    runnerTypeOf: async () => 'stream-json',
     isChannelOnline: () => false,
     notify: {
       claim: async () => true,
@@ -238,12 +240,12 @@ describe('single notification owner across the autospawn lifecycle', () => {
 })
 
 describe('governed autospawn: happy path', () => {
-  test('exactly one launch (machine true); gates, reserve, ledger all BEFORE launch; park with the same token and six gates', async () => {
+  test('exactly one launch (machine true); gates, reserve, ledger all BEFORE launch; park with the same token and seven gates', async () => {
     const { deps, rec } = mk()
     const out = await routeHeal(event(), deps)
     expect(out).toEqual({ kind: 'autospawn_launched' })
     expect(rec.order).toEqual(['gates', 'reserve', 'ledger', 'launch'])
-    expect(rec.launches).toEqual([{ userId: 'u1', sessionId: 's1', machine: true }])
+    expect(rec.launches).toEqual([{ userId: 'u1', sessionId: 's1', machine: true, skipPermissions: false }])
     expect(rec.gateChecks[0]).toEqual(GATE_ORDER)
     expect(rec.reserves[0]).toMatchObject({
       userId: 'u1',

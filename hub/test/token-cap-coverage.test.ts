@@ -110,12 +110,13 @@ describe('PTYCAP-07-10 (SC3, SH-06): the heal gate list is discovered and ordere
     expect(heal().map((g) => g.file)).toEqual(['heal/route.ts'])
   })
 
-  test('the heal gate list holds the six gates in the locked order (D-07)', () => {
+  test('the heal gate list holds the locked D-07 gates plus the PTY denial, in order', () => {
     const order = [
       'automationKillSwitchGate',
       'thresholdGate',
       'dailyCostCapGate',
       'dailyTokenCapGate',
+      'governedAutomationPtyGate',
       'sessionInjectRateGate',
       'automationLifetimeCounterGate',
     ]
@@ -123,6 +124,6 @@ describe('PTYCAP-07-10 (SC3, SH-06): the heal gate list is discovered and ordere
     const idx = order.map((g) => list.indexOf(g))
     for (const [i, g] of order.entries()) expect([g, idx[i]! > -1]).toEqual([g, true])
     expect(idx).toEqual([...idx].sort((a, b) => a - b))
-    expect((list.match(/Gate\b/g) ?? []).length).toBe(6) // no seventh gate, no duplicate
+    expect((list.match(/Gate\b/g) ?? []).length).toBe(7) // no eighth gate, no duplicate
   })
 })
