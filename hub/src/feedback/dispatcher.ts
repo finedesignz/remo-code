@@ -34,6 +34,7 @@ import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGa
 import { automationKillSwitchGate } from '../dispatch/automation-controls.ts'
 import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
 import { fenceUntrusted, SCOPE_CONTRACT } from '../dispatch/untrusted.ts'
+import { healUnifiedEnabled } from '../heal/flag.ts'
 
 export interface FeedbackSubmission {
   /** opaque dedupe/finalize token for this submission (a random id). */
@@ -100,7 +101,48 @@ export function buildFeedbackPrompt(sub: FeedbackSubmission): string {
   return lines.join('\n')
 }
 
+/**
+ * PTYCAP-07-09 (SH-01, D-01, D-06): the flag switch. REMO_HEAL_UNIFIED OFF (unset or any
+ * unrecognized value) runs the legacy body below unchanged and loads nothing from the heal tree
+ * beyond the flag reader. ON hands the submission to routeHeal: no PipelineDeps and no
+ * ensure-online hook are built here (AM-F1-5), and there is no fall back to the legacy body on
+ * error (routeHeal terminalizes every failure itself).
+ */
+export interface DispatchFeedbackHealOptions {
+  /** Forwarded to routeHeal so tests can inject collaborators. Production passes nothing. */
+  routeDeps?: import('../heal/route.ts').HealDeps
+}
+
 export async function dispatchFeedback(
+  sub: FeedbackSubmission,
+  healOpts?: DispatchFeedbackHealOptions,
+): Promise<FeedbackDispatchOutcome> {
+  if (!healUnifiedEnabled()) return dispatchFeedbackLegacy(sub)
+  return dispatchFeedbackViaHeal(sub, healOpts)
+}
+
+async function dispatchFeedbackViaHeal(
+  sub: FeedbackSubmission,
+  opts: DispatchFeedbackHealOptions = {},
+): Promise<FeedbackDispatchOutcome> {
+  const prompt = buildFeedbackPrompt(sub)
+  const labelTag = sub.label ? `${sub.label} — ` : ''
+  let storedContent = `[feedback: ${labelTag}in-app report]
+
+${prompt}`
+  if (sub.screenshot) {
+    storedContent += `
+
+![screenshot](data:${sub.screenshot.media_type};base64,${sub.screenshot.data})`
+  }
+  const { buildFeedbackHealEvent, healOutcomeToFeedbackOutcome } = await import('../heal/sources/feedback.ts')
+  const { routeHeal } = await import('../heal/route.ts')
+  const event = buildFeedbackHealEvent(sub, prompt, storedContent)
+  return healOutcomeToFeedbackOutcome(await routeHeal(event, opts.routeDeps))
+}
+
+// heal-legacy-path:begin dispatchFeedbackLegacy
+async function dispatchFeedbackLegacy(
   sub: FeedbackSubmission,
 ): Promise<FeedbackDispatchOutcome> {
   const { userId, sessionId } = sub
@@ -179,3 +221,4 @@ export async function dispatchFeedback(
       return { status: 'failed', skip_reason: 'agent_send_failed' }
   }
 }
+// heal-legacy-path:end dispatchFeedbackLegacy
