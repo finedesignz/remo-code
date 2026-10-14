@@ -42,6 +42,8 @@ const scheduledTask = z
     source: z.literal('scheduled_task'),
     dedupe_key: z.string().startsWith('task:'),
     bound_session_id: nonEmpty,
+    /** Pending default owner email, persisted with the claim (outbox). Absent = heal sends its own. */
+    owner_email: z.object({ subject: nonEmpty, text: nonEmpty, html: nonEmpty }).optional(),
     ctx: z.object({ task_id: nonEmpty, task_name: z.string(), error_signature: z.string() }),
   })
   .strict();

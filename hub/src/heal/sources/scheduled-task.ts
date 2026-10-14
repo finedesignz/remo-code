@@ -20,6 +20,7 @@ import { healMaxPerTaskDay } from '../config.ts';
 import { isInternalScheduledTask } from '../internal-task.ts';
 import { canonicalRepoIdent, type RepoIdentSession } from '../repo-ident.ts';
 import type { HealOutcome } from '../types.ts';
+import { buildNotification } from '../notify.ts';
 
 export interface HealableTask {
   id: string;
@@ -34,6 +35,11 @@ export interface FailedRunInput {
   status: string;
   error: string | null | undefined;
   task: HealableTask;
+  /**
+   * True when the scheduler's default failure email applies to this run. The pending email is then
+   * persisted with the heal claim (outbox) so it survives a crash before the scheduler sends it.
+   */
+  persistOwnerEmail?: boolean;
 }
 
 export interface ScheduledSourceDeps {
@@ -111,6 +117,19 @@ export async function healFailedScheduledRun(
     fenceUntrusted('untrusted_task_failure', [`Task: ${name}`, `Run: ${runId}`, `Error: ${error ?? '(none)'}`].join('\n'), 4000),
   ].join('\n');
 
+  const ownerEmail = input.persistOwnerEmail
+    ? buildNotification(
+        {
+          user_id: task.user_id,
+          source: 'scheduled_task',
+          dedupe_key: `task:${task.id}`,
+          repo_ident: repoIdent,
+          notify_summary: `Task "${name}" run ${runId} failed: ${oneLine(error, 300)}`,
+        },
+        'scheduled task failed',
+      )
+    : null;
+
   const outcome = await deps.routeHeal({
     source: 'scheduled_task',
     user_id: task.user_id,
@@ -121,6 +140,7 @@ export async function healFailedScheduledRun(
     trigger_run_id: runId,
     dedupe_key: `task:${task.id}:${signature}`,
     bound_session_id: task.session_id,
+    ...(ownerEmail ? { owner_email: ownerEmail } : {}),
     notify_summary: `Task "${name}" run ${runId} failed: ${oneLine(error, 300)}`.slice(0, 500),
     ctx: { task_id: task.id, task_name: name, error_signature: normalized },
   });

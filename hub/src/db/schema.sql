@@ -1685,6 +1685,14 @@ CREATE TABLE IF NOT EXISTS heal_events (
 -- PTYCAP-07 QC r1: minimal validated source context (e.g. error_id/project_id) so the stale-launch
 -- sweep can rebuild the per-event sink. Additive, nullable, never backfilled.
 ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS recovery_ctx JSONB;
+-- PTYCAP-07 repair: durable default owner-email obligation (scheduled_task only), written in the
+-- claim transaction; delivered once via a lease CAS, terminal flag owner_email_delivered_at.
+-- Additive, nullable, never backfilled.
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS owner_email JSONB;
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS owner_email_claimed_at TIMESTAMPTZ;
+ALTER TABLE heal_events ADD COLUMN IF NOT EXISTS owner_email_delivered_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_heal_events_owner_email_pending
+  ON heal_events(created_at) WHERE owner_email IS NOT NULL AND owner_email_delivered_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_heal_events_bucket
   ON heal_events(user_id, source, dedupe_key, window_bucket);
 -- A run can trigger at most one heal event, ever.
