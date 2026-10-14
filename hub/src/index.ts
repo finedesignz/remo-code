@@ -815,10 +815,10 @@ runMigrations()
     startOnceDueSweep()
     // PTYCAP-07-06 — boot-time sweep: terminalizes heal autospawn launches stranded by a
     // restart (the spawn-deadline timer is process-local) so the 6h reaper is never their
-    // backstop. Event-driven (once, no interval); flag-OFF boot loads nothing of it.
+    // backstop. Event-driven (once at boot plus one follow-up at the deadline, no interval); flag-OFF boot loads nothing of it.
     if (healUnifiedEnabled()) {
       void import('./heal/sweep.ts')
-        .then((m) => m.sweepStaleHealLaunches())
+        .then((m) => m.bootSweepHealLaunches())
         .catch((err) => console.error('[startup] heal boot sweep failed:', err?.message ?? err))
     }
     console.log('[startup] reset sessions/messages/runs; scheduler ready')

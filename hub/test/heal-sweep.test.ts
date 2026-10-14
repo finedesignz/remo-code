@@ -5,7 +5,14 @@
 import { describe, test, expect, beforeEach, afterAll } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { sweepStaleHealLaunches, SWEEP_BATCH, type SweepDeps } from '../src/heal/sweep.ts'
+import {
+  sweepStaleHealLaunches,
+  bootSweepHealLaunches,
+  followUpDelayMs,
+  SWEEP_BATCH,
+  type SweepDeps,
+} from '../src/heal/sweep.ts'
+import { OUTCOME_AUTOSPAWN_STARTING } from '../src/heal/types.ts'
 import type { HealEventRow } from '../src/db/heal-events-dal.ts'
 import type { HealTerminalOutcome } from '../src/heal/sinks/types.ts'
 
@@ -127,7 +134,7 @@ describe('sweepStaleHealLaunches', () => {
     expect(rec.released.length).toBe(1)
   })
 
-  test('one failing row does not stop the remaining rows', async () => {
+  test('a sink failure counts as failed but the reservation and ledger outcome are still reconciled; other rows continue', async () => {
     const { deps, rec } = mk([row('a'), row('b'), row('c')])
     const base = deps.makeSink
     deps.makeSink = (e, ctx) => {
@@ -136,7 +143,64 @@ describe('sweepStaleHealLaunches', () => {
     }
     expect(await sweepStaleHealLaunches(deps)).toEqual({ swept: 2, skipped: 0, failed: 1 })
     expect(rec.terminal.map((t) => t[0])).toEqual(['a', 'c'])
-    expect(rec.outcomes.map((o) => o[0])).toEqual(['a', 'c']) // b stays launched: retried next boot
+    // b's slot is freed and its row closed (no re-failing on every boot)
+    expect(rec.released.map((r) => r[2])).toEqual(['a', 'b', 'c'])
+    expect(rec.outcomes.map((o) => o[0])).toEqual(['a', 'b', 'c'])
+  })
+
+  test('a release failure leaves the row for the next sweep (the slot is still stranded)', async () => {
+    const { deps, rec } = mk([row('a'), row('b')], {
+      release: async (_u, _r, e) => {
+        if (e === 'a') throw new Error('db down')
+      },
+    })
+    expect(await sweepStaleHealLaunches(deps)).toEqual({ swept: 1, skipped: 0, failed: 1 })
+    expect(rec.outcomes.map((o) => o[0])).toEqual(['b']) // a stays stranded: retried
+  })
+
+  test('autospawn_starting rows (crash between claim and launched) are swept and their reservation released', async () => {
+    const { deps, rec } = mk([row('a', { outcome: OUTCOME_AUTOSPAWN_STARTING })])
+    expect((await sweepStaleHealLaunches(deps)).swept).toBe(1)
+    expect(rec.released).toEqual([['u1', 'github://acme/web', 'a']])
+    expect(rec.outcomes).toEqual([['a', 'failed:spawn_timeout']])
+  })
+
+  test('error_capture rows are rebuilt with recovery_ctx and the bound session id, so the sink can be constructed', async () => {
+    const seen: any[] = []
+    const { deps, rec } = mk(
+      [
+        row('e1', {
+          source: 'error_capture',
+          dedupe_key: 'err:p1:fp',
+          session_id: 's-bound',
+          recovery_ctx: { error_id: 'err1', project_id: 'p1' },
+        }),
+      ],
+      {
+        makeSink: (event, ctx) => {
+          seen.push(event)
+          // mirrors buildErrorCaptureSink's precondition
+          if (!('bound_session_id' in event) || !(event as any).ctx.error_id) throw new Error('error_capture_context_missing')
+          return {
+            open: async () => null,
+            markSkipped: async () => {},
+            markDispatched: async () => {},
+            onFinalize: async () => {},
+            markFailed: async () => {},
+            send: async () => {},
+            finalizeTerminal: async (o) => {
+              rec.terminal.push([ctx.eventId as string, o])
+            },
+            onParkExpire: async () => {},
+          }
+        },
+      },
+    )
+    expect(await sweepStaleHealLaunches(deps)).toEqual({ swept: 1, skipped: 0, failed: 0 })
+    expect(seen[0].bound_session_id).toBe('s-bound')
+    expect(seen[0].ctx).toEqual({ error_id: 'err1', project_id: 'p1' })
+    expect(rec.terminal).toEqual([['e1', { kind: 'failed', reason: 'heal_spawn_timeout' }]])
+    expect(rec.released).toEqual([['u1', 'github://acme/web', 'e1']])
   })
 
   test('a thrown list query is swallowed', async () => {
@@ -168,6 +232,58 @@ describe('sweepStaleHealLaunches', () => {
   })
 })
 
+describe('follow-up sweep at the deadline (SC4: no heal run stays pending past deadline + margin)', () => {
+  /** A fake clock + a DAL-faithful list(): rows older than the guard, at the CURRENT fake time. */
+  function clockDb(rows: HealEventRow[], bootAt: number) {
+    let now = bootAt
+    const timers: Array<{ fn: () => void; ms: number }> = []
+    const swept: string[] = []
+    const { deps } = mk(rows, {
+      list: async (olderThanMs) => rows.filter((r) => r.outcome && new Date(r.updated_at).getTime() < now - olderThanMs),
+      setOutcome: async (id) => {
+        swept.push(id)
+        const r = rows.find((x) => x.id === id)!
+        r.outcome = 'failed:spawn_timeout'
+      },
+      setTimer: (fn, ms) => {
+        timers.push({ fn, ms })
+        return timers.length
+      },
+    })
+    return { deps, timers, swept, advance: (ms: number) => (now += ms) }
+  }
+
+  test('a row stranded 20s before boot (younger than the 50s guard) is missed at boot and swept by the one follow-up', async () => {
+    const boot = 1_000_000
+    const stranded = row('quick', { updated_at: new Date(boot - 20_000) })
+    const { deps, timers, swept, advance } = clockDb([stranded], boot)
+
+    await bootSweepHealLaunches(deps)
+    expect(swept).toEqual([]) // boot sweep: row is only 20s old
+    expect(timers.length).toBe(1) // exactly ONE follow-up, not an interval
+
+    expect(timers[0]!.ms).toBe(followUpDelayMs())
+    expect(timers[0]!.ms).toBeGreaterThan(2 * 25_000) // strictly past the staleness guard
+    advance(timers[0]!.ms)
+    timers[0]!.fn()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(swept).toEqual(['quick'])
+    expect(timers.length).toBe(1) // the follow-up does not re-arm
+  })
+
+  test('the delay tracks REMO_HEAL_SPAWN_TIMEOUT_MS', () => {
+    process.env.REMO_HEAL_SPAWN_TIMEOUT_MS = '4000'
+    expect(followUpDelayMs()).toBe(9000)
+  })
+
+  test('flag OFF: no sweep and no timer is armed', async () => {
+    process.env.REMO_HEAL_UNIFIED = '0'
+    const { deps, timers } = clockDb([row('a')], 0)
+    await bootSweepHealLaunches(deps)
+    expect(timers.length).toBe(0)
+  })
+})
+
 describe('flag OFF (behavioural)', () => {
   test('with the heal flag OFF the sweep reads nothing and touches nothing', async () => {
     for (const v of [undefined, '', '0', 'false', 'maybe']) {
@@ -185,8 +301,8 @@ describe('flag OFF (behavioural)', () => {
 describe('boot wiring pin (source text)', () => {
   const src = readFileSync(join(import.meta.dir, '..', 'src', 'index.ts'), 'utf8')
 
-  test('hub/src/index.ts calls sweepStaleHealLaunches only inside a heal-enabled guard', () => {
-    const at = src.indexOf('sweepStaleHealLaunches')
+  test('hub/src/index.ts calls bootSweepHealLaunches only inside a heal-enabled guard', () => {
+    const at = src.indexOf('bootSweepHealLaunches')
     expect(at).toBeGreaterThan(-1)
     const guard = src.lastIndexOf('if (healUnifiedEnabled())', at)
     expect(guard).toBeGreaterThan(-1)
