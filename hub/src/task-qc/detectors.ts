@@ -62,7 +62,16 @@ export function isBenignSkipReason(reason: string | null | undefined): boolean {
  * without it the spec'd skipped_quota arm of SKIP_FOREVER would be unreachable).
  */
 export function reasonSignature(error: string | null | undefined): string {
-  return safeText(error ?? '').replace(/\d+/g, '#')
+  return safeText(fullSignature(error))
+}
+
+/**
+ * The signature compared for equality: the WHOLE reason with digit runs collapsed. Truncation
+ * (reasonSignature, evidence) is for rendering only; two long reasons that differ after the
+ * rendering cap are different reasons and must not group.
+ */
+function fullSignature(error: string | null | undefined): string {
+  return safeText(error ?? '', Number.MAX_SAFE_INTEGER).replace(/\d+/g, '#')
 }
 
 function toMs(v: Timestamp | undefined): number | null {
@@ -84,10 +93,9 @@ function newestFirst(runs: RunInput[]): RunInput[] {
   })
 }
 
-/** Newest window of runs that are terminal AND counted (cancelled/non-terminal dropped). */
+/** Newest window of runs that are terminal AND counted: ignored runs (cancelled, non-terminal) never use up the window. */
 function countedWindow(runs: RunInput[], config: DetectorConfig): RunInput[] {
-  const window = newestFirst(runs).slice(0, config.windowSize ?? DEFAULT_WINDOW)
-  return window.filter((r) => COUNTED.has(r.status))
+  return newestFirst(runs.filter((r) => COUNTED.has(r.status))).slice(0, config.windowSize ?? DEFAULT_WINDOW)
 }
 
 function base(task: AuditTaskInput, detector: DetectorName, severity: Severity) {
@@ -153,21 +161,21 @@ export function detectSkipForever(task: AuditTaskInput, runs: RunInput[], config
   if (n < 1 || window.length < n) return null
   const head = window.slice(0, n)
   if (!head.every((r) => r.status === 'skipped' || r.status === 'skipped_quota')) return null
-  const sig = reasonSignature(head[0]!.error)
-  if (!head.every((r) => reasonSignature(r.error) === sig)) return null
+  const sig = fullSignature(head[0]!.error)
+  if (!head.every((r) => fullSignature(r.error) === sig)) return null
   if (head.some((r) => isBenignSkipReason(r.error))) return null
   let skipRuns = 0
   while (
     skipRuns < window.length &&
     (window[skipRuns]!.status === 'skipped' || window[skipRuns]!.status === 'skipped_quota') &&
-    reasonSignature(window[skipRuns]!.error) === sig
+    fullSignature(window[skipRuns]!.error) === sig
   ) {
     skipRuns++
   }
   const evidence: Record<string, EvidencePrimitive | EvidencePrimitive[]> = {
     skipRuns,
     reason: safeText(head[0]!.error ?? ''),
-    reasonSignature: sig,
+    reasonSignature: safeText(sig),
     runIds: head.slice(0, 5).map((r) => safeText(r.id, 64)),
   }
   return {
