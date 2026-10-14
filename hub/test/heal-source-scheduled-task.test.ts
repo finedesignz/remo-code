@@ -203,13 +203,23 @@ describe('healFailedScheduledRun event + ownership', () => {
     expect(normalizeError('Z'.repeat(500)).length).toBe(200)
   })
 
-  test('ownsNotification is true only when the outcome notified is true', async () => {
+  // PTYCAP-07 QC r1 (codex #3, correctness MAJOR 1): ownership is the notification CLAIM, not the
+  // delivery. A refused/failed/no_routable_session heal that won the claim owns the one owner
+  // notification even when its send failed, so the default failure email is suppressed for it.
+  test('ownership is true exactly when the heal path won the notification claim', async () => {
     const cases: Array<[HealOutcome, boolean]> = [
-      [{ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: true }, true],
-      [{ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: false }, false],
+      [{ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: true, notifyClaimed: true }, true],
+      [{ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: false, notifyClaimed: true }, true], // claimed, send failed
+      [{ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: false, notifyClaimed: false }, false],
+      [{ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: true }, true], // legacy shape
       [{ kind: 'dispatched_live' }, false],
+      [{ kind: 'autospawn_launched' }, false],
+      [{ kind: 'autospawn_parked' }, false],
       [{ kind: 'deduped' }, false],
+      [{ kind: 'refused', reason: 'repo_rate_bound', notifyClaimed: true }, true],
+      [{ kind: 'refused', reason: 'repo_rate_bound', notifyClaimed: false }, false],
       [{ kind: 'refused', reason: 'repo_rate_bound' }, false],
+      [{ kind: 'failed', reason: 'heal_route_error: x', notifyClaimed: true }, true],
       [{ kind: 'failed', reason: 'heal_route_error: x' }, false],
     ]
     for (const [outcome, expected] of cases) {
@@ -316,6 +326,36 @@ describe('finalizeRun heal hook', () => {
     expect(trace).toEqual(['routeHeal', 'afterRun'])
     expect('suppressDefaultFailureEmail' in afterRunCalls[0]).toBe(false)
   })
+
+  // QC r1: the scheduler default failure email is suppressed whenever the heal path WON the claim,
+  // for every non-live outcome kind, regardless of whether its one send succeeded.
+  for (const outcome of [
+    { kind: 'refused', reason: 'repo_rate_bound', notifyClaimed: true },
+    { kind: 'failed', reason: 'heal_route_error: x', notifyClaimed: true },
+    { kind: 'failed', reason: 'grace_expired', notifyClaimed: true },
+    { kind: 'no_routable_session', reason: 'r', notified: false, notifyClaimed: true },
+  ] as HealOutcome[]) {
+    test(`flag ON, ${outcome.kind} that won the notification claim: default failure email suppressed`, async () => {
+      process.env.REMO_HEAL_UNIFIED = '1'
+      sc.routeOutcome = outcome
+      await finalizeRun('run-1', 'failed', 'boom')
+      expect(afterRunCalls[0].suppressDefaultFailureEmail).toBe(true)
+    })
+  }
+
+  for (const outcome of [
+    { kind: 'dispatched_live' },
+    { kind: 'autospawn_parked' },
+    { kind: 'autospawn_launched' },
+    { kind: 'refused', reason: 'x', notifyClaimed: false },
+  ] as HealOutcome[]) {
+    test(`flag ON, ${outcome.kind} without a won claim: default failure email proceeds`, async () => {
+      process.env.REMO_HEAL_UNIFIED = '1'
+      sc.routeOutcome = outcome
+      await finalizeRun('run-1', 'failed', 'boom')
+      expect('suppressDefaultFailureEmail' in afterRunCalls[0]).toBe(false)
+    })
+  }
 
   test('flag ON, hook throws: logged, onRunFinalized still runs, no suppression', async () => {
     process.env.REMO_HEAL_UNIFIED = '1'

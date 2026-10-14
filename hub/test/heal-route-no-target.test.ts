@@ -103,7 +103,7 @@ describe('fail-fast terminal path (SH-05)', () => {
     const t0 = Date.now()
     const out = await routeHeal(event(), deps)
     expect(Date.now() - t0).toBeLessThan(5000)
-    expect(out).toEqual({ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: true })
+    expect(out).toEqual({ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: true, notifyClaimed: true })
     expect(rec.terminal).toEqual([{ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: false }])
     expect(rec.dispatches.length).toBe(0) // the unrelated session received nothing
     expect(rec.claimed).toEqual(['ev-1'])
@@ -133,7 +133,7 @@ describe('fail-fast terminal path (SH-05)', () => {
       },
     })
     const out = await routeHeal(event(), deps)
-    expect(out).toEqual({ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: false })
+    expect(out).toEqual({ kind: 'no_routable_session', reason: 'no_session_for_repo', notified: false, notifyClaimed: true })
     expect(sends.length).toBe(1)
   })
 

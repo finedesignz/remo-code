@@ -209,7 +209,7 @@ describe('capped user never reaches send (SH-06, real dispatch + real gate objec
       gate.check = async () => ({ ok: false as const, reason })
       const { deps, rec } = mkDeps({ dispatch: pipeline.dispatch })
       const out = await routeHeal(event(), deps)
-      expect(out).toEqual({ kind: 'refused', reason })
+      expect(out).toEqual({ kind: 'refused', reason, notifyClaimed: false })
       expect(rec.sends.length).toBe(0)
       expect(rec.skipped).toEqual([['heal:ev1', reason]])
       expect(rec.terminal.length).toBe(1) // idempotent sink: still one terminal write
