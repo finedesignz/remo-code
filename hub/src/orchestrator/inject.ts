@@ -39,6 +39,8 @@ import {
   resolveOrchestratorCounterKey,
 } from '../dispatch/automation-controls.ts'
 import { isOrchestratorEnabled, isAutospawnEnabled } from './controller.ts'
+// PTYCAP-05: flag-gated (OFF = pass-through, zero db/network); real deps load lazily.
+import { proofBudgetGate, proofProtectionGate } from './proof-gates.ts'
 import {
   isRepoAutospawnAllowed,
   countAutospawnLaunchesToday,
@@ -289,6 +291,8 @@ export async function injectOrchestratorPrompt(
     // dispatch() before the send, keyed by req.counterKey).
     gates: [
       automationKillSwitchGate,
+      proofBudgetGate,
+      proofProtectionGate,
       thresholdGate,
       dailyCostCapGate,
       dailyTokenCapGate,
@@ -446,6 +450,8 @@ async function maybeAutospawnOffline(
     // counter last, the original four unchanged between.
     gates: [
       automationKillSwitchGate,
+      proofBudgetGate,
+      proofProtectionGate,
       thresholdGate,
       dailyCostCapGate,
       dailyTokenCapGate,
