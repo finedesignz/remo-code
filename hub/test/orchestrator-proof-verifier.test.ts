@@ -4,7 +4,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { verifyProof, type ProofObservation } from '../src/orchestrator/proof-verifier.ts'
-import { ProofGithubError, type ProofRun } from '../src/orchestrator/proof-types.ts'
+import { ProofGithubError, type CheckState, type ProofGithub, type ProofRun } from '../src/orchestrator/proof-types.ts'
 import {
   BASE_SHA,
   PR_HEAD_SHA,
@@ -194,5 +194,176 @@ describe('verifyProof: PR scope', () => {
     await verifyProof(gh, run())
     const allowed = new Set(['compare', 'listPullsWithHeadPrefix', 'getCheckState'])
     for (const c of gh.calls) expect(allowed.has(c.method)).toBe(true)
+  })
+})
+
+// CI evaluation and the pr_open_green decision (D-13)
+
+const withChecks = (cs: Partial<CheckState>, runOver: Partial<ProofRun> = {}) => ({
+  gh: makeFakeProofGithub({
+    pulls: [pr()],
+    checks: { [PR_HEAD_SHA]: { checkRuns: [], statuses: [], truncated: false, ...cs } },
+  }),
+  r: run(runOver),
+})
+const cr = (name: string, status: string, conclusion: string | null) => ({ name, status, conclusion })
+
+describe('verifyProof: CI matrix', () => {
+  test('green: required context succeeded -> pr_open_green with PR ref', async () => {
+    const gh = makeFakeProofGithub(greenPr())
+    const t = terminal(await verifyProof(gh, run()))
+    expect(t.outcome).toBe('pr_open_green')
+    expect(t.prNumber).toBe(1)
+    expect(t.prUrl).toBe('https://github.com/acme/proof/pull/1')
+  })
+
+  test('checks are requested for the exact head sha the PR read returned', async () => {
+    const gh = makeFakeProofGithub(greenPr())
+    await verifyProof(gh, run())
+    const call = gh.calls.find((c) => c.method === 'getCheckState')
+    expect(call?.args).toEqual(['acme', 'proof', PR_HEAD_SHA])
+  })
+
+  for (const status of ['queued', 'in_progress']) {
+    test(`pending check-run (${status}) -> ci_pending`, async () => {
+      const { gh, r } = withChecks({ checkRuns: [cr('ci', status, null)] })
+      expect(pending(await verifyProof(gh, r)).state).toBe('ci_pending')
+    })
+  }
+
+  test('pending commit status -> ci_pending', async () => {
+    const { gh, r } = withChecks({ checkRuns: [cr('ci', 'completed', 'success')], statuses: [{ context: 'x', state: 'pending' }] })
+    expect(pending(await verifyProof(gh, r)).state).toBe('ci_pending')
+  })
+
+  for (const conclusion of ['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']) {
+    test(`red conclusion (${conclusion}) -> ci_red`, async () => {
+      const { gh, r } = withChecks({ checkRuns: [cr('ci', 'completed', conclusion)] })
+      const o = pending(await verifyProof(gh, r))
+      expect(o.state).toBe('ci_red')
+      expect(o.prNumber).toBe(1)
+    })
+  }
+
+  for (const state of ['failure', 'error']) {
+    test(`red commit status (${state}) -> ci_red`, async () => {
+      const { gh, r } = withChecks({ checkRuns: [cr('ci', 'completed', 'success')], statuses: [{ context: 'x', state }] })
+      expect(pending(await verifyProof(gh, r)).state).toBe('ci_red')
+    })
+  }
+
+  test('red wins over a sibling still pending', async () => {
+    const { gh, r } = withChecks({ checkRuns: [cr('ci', 'completed', 'failure'), cr('lint', 'in_progress', null)] })
+    expect(pending(await verifyProof(gh, r)).state).toBe('ci_red')
+  })
+
+  test('no checks at all is never green', async () => {
+    const { gh, r } = withChecks({})
+    const o = await verifyProof(gh, r)
+    expect(o.kind).toBe('pending')
+    expect(pending(o).state).toBe('ci_pending')
+  })
+
+  test('no checks at all with empty required_contexts is never green', async () => {
+    const { gh, r } = withChecks({}, { required_contexts: [] })
+    expect(pending(await verifyProof(gh, r)).state).toBe('ci_pending')
+  })
+
+  test('required context missing (other check green) is ci_pending, never green', async () => {
+    const { gh, r } = withChecks({ checkRuns: [cr('lint', 'completed', 'success')] })
+    const o = pending(await verifyProof(gh, r))
+    expect(o.state).toBe('ci_pending')
+    expect(o.detail).toContain('ci')
+  })
+
+  test('skipped required context is ci_pending, never green', async () => {
+    const { gh, r } = withChecks({ checkRuns: [cr('ci', 'completed', 'skipped')] })
+    expect(pending(await verifyProof(gh, r)).state).toBe('ci_pending')
+  })
+
+  test('neutral required context is not success evidence', async () => {
+    const { gh, r } = withChecks({ checkRuns: [cr('ci', 'completed', 'neutral')] })
+    expect(pending(await verifyProof(gh, r)).state).toBe('ci_pending')
+  })
+
+  test('a skipped non-required check does not block green', async () => {
+    const { gh, r } = withChecks({ checkRuns: [cr('ci', 'completed', 'success'), cr('optional', 'completed', 'skipped')] })
+    expect(terminal(await verifyProof(gh, r)).outcome).toBe('pr_open_green')
+  })
+
+  test('truncated check list is ci_unverifiable even when everything listed is green', async () => {
+    const { gh, r } = withChecks({ checkRuns: [cr('ci', 'completed', 'success')], truncated: true })
+    expect(pending(await verifyProof(gh, r)).state).toBe('ci_unverifiable')
+  })
+
+  test('forbidden checks read is ci_unverifiable', async () => {
+    const gh = makeFakeProofGithub({ ...greenPr(), fail: { getCheckState: new ProofGithubError('forbidden', 403) } })
+    expect(pending(await verifyProof(gh, run())).state).toBe('ci_unverifiable')
+  })
+
+  test('unavailable and not_found checks reads are ci_unverifiable', async () => {
+    for (const e of [new ProofGithubError('unavailable', 502), new ProofGithubError('not_found', 404)]) {
+      const gh = makeFakeProofGithub({ ...greenPr(), fail: { getCheckState: e } })
+      expect(pending(await verifyProof(gh, run())).state).toBe('ci_unverifiable')
+    }
+  })
+
+  test('empty headSha is ci_unverifiable and the checks are never requested', async () => {
+    const gh = makeFakeProofGithub({ pulls: [pr({ headSha: '' })] })
+    expect(pending(await verifyProof(gh, run())).state).toBe('ci_unverifiable')
+    expect(gh.calls.some((c) => c.method === 'getCheckState')).toBe(false)
+  })
+
+  test('mixed check-runs and statuses: required contexts satisfied across both', async () => {
+    const { gh, r } = withChecks(
+      { checkRuns: [cr('ci', 'completed', 'success')], statuses: [{ context: 'legacy/ci', state: 'success' }] },
+      { required_contexts: ['ci', 'legacy/ci'] },
+    )
+    expect(terminal(await verifyProof(gh, r)).outcome).toBe('pr_open_green')
+  })
+
+  test('mixed: required status context still pending is not green', async () => {
+    const { gh, r } = withChecks(
+      { checkRuns: [cr('ci', 'completed', 'success')], statuses: [{ context: 'legacy/ci', state: 'pending' }] },
+      { required_contexts: ['ci', 'legacy/ci'] },
+    )
+    expect(pending(await verifyProof(gh, r)).state).toBe('ci_pending')
+  })
+
+  test('empty required_contexts still requires at least one passing check', async () => {
+    const skippedOnly = withChecks({ checkRuns: [cr('x', 'completed', 'skipped')] }, { required_contexts: [] })
+    expect(pending(await verifyProof(skippedOnly.gh, skippedOnly.r)).state).toBe('ci_pending')
+    const passing = withChecks({ checkRuns: [cr('x', 'completed', 'success')] }, { required_contexts: [] })
+    expect(terminal(await verifyProof(passing.gh, passing.r)).outcome).toBe('pr_open_green')
+  })
+
+  test('re-compare race: main advances after the first read and before green -> main_advanced', async () => {
+    const fake = makeFakeProofGithub(greenPr())
+    let n = 0
+    const racy: ProofGithub = Object.create(fake)
+    racy.compare = async (...a) => {
+      n++
+      return n === 1 ? fake.compare(...a) : { status: 'ahead', aheadBy: 1, behindBy: 0 }
+    }
+    const t = terminal(await verifyProof(racy, run()))
+    expect(t.outcome).toBe('terminated:main_advanced')
+    expect(t.prNumber).toBe(1)
+    expect(n).toBe(2)
+  })
+
+  test('re-compare unreadable at the end is ci_unverifiable, never green', async () => {
+    const fake = makeFakeProofGithub(greenPr())
+    let n = 0
+    const racy: ProofGithub = Object.create(fake)
+    racy.compare = async (...a) => {
+      n++
+      if (n === 1) return fake.compare(...a)
+      throw new ProofGithubError('unavailable', 503)
+    }
+    expect(pending(await verifyProof(racy, run())).state).toBe('ci_unverifiable')
+  })
+
+  test('the verifier signature takes only github and the run (no agent-supplied text input)', () => {
+    expect(verifyProof.length).toBe(2)
   })
 })
