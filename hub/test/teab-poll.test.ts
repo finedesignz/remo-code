@@ -50,6 +50,7 @@ mock.module('../src/db/postgres.ts', () => ({
 
 mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
   updateRunStatus: async () => ({}),
+  rearmOnceTask: async () => true, // imported by senders/teab.ts (PTYCAP-04 R3)
 }))
 
 mock.module('../src/ws/supervisor-registry.ts', () => ({

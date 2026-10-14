@@ -23,7 +23,7 @@
  * TEAB-05 and hooks the clearly-marked seam at the end of `sendTeabTask`.
  */
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
-import { updateRunStatus } from '../../db/scheduled-tasks-dal.ts'
+import { updateRunStatus, rearmOnceTask } from '../../db/scheduled-tasks-dal.ts'
 import { sql } from '../../db/postgres.ts'
 import {
   getSupervisor,
@@ -32,6 +32,7 @@ import {
   type UserInventory,
 } from '../../ws/supervisor-registry.ts'
 import { finalizeRun } from '../dispatcher.ts'
+import { haltBeforeMachineSend } from '../../dispatch/automation-controls.ts'
 import { log } from '../../observability/logger'
 
 interface RunCtxLike {
@@ -40,6 +41,7 @@ interface RunCtxLike {
   userId: string
   target?: { supervisorId?: string | null }
   isManual?: boolean
+  onceClaimed?: boolean
 }
 
 /**
@@ -110,6 +112,24 @@ export async function sendTeabTask(task: ScheduledTask, ctx: RunCtxLike): Promis
   try {
     await sql`UPDATE scheduled_tasks SET teab_last_status = 'started' WHERE id = ${task.id}`
   } catch {}
+
+  // QC B1: fresh kill-switch read immediately before the machine transmission (the
+  // dispatcher's check predates the pre-gates and the awaits above). A halt finalizes the
+  // run skipped and flips the mirrored task status; nothing is sent, no poll starts.
+  const pre = await haltBeforeMachineSend({ userId: ctx.userId })
+  if (!pre.ok) {
+    try { await sql`UPDATE scheduled_tasks SET teab_last_status = 'skipped' WHERE id = ${task.id}` } catch {}
+    // R3: a CLAIMED one-time task must not be burned by the refusal; restore the claim so
+    // the once-due sweep re-fires it after release. The skipped run below is the visible
+    // record of this attempt even if the re-arm itself fails.
+    if (task.schedule_kind === 'once' && ctx.onceClaimed === true) {
+      try { await rearmOnceTask(task.id) } catch (err: any) {
+        log.error('scheduler.teab.once_rearm_failed', { task_id: task.id, error: err?.message })
+      }
+    }
+    await finalizeRun(ctx.runId, 'skipped', pre.reason)
+    return
+  }
 
   // Issue the allowlisted run_command. Wire contract (TEAB-01): the supervisor
   // replies `run_started {run_id}` then `run_finished {run_id, exit_code,

@@ -17,9 +17,11 @@ import {
   countFiresForTask,
   disableTaskWithReason,
   claimOnceTask,
+  rearmOnceTask,
 } from '../db/scheduled-tasks-dal.ts'
 import { boundReason, type ScheduleRule } from './schedule-rules.ts'
 import { isOverCostCap } from '../dispatch/gates.ts'
+import { isAutomationHalted } from '../dispatch/automation-controls.ts'
 import { resolveTargets, type ResolvedTarget } from './targets.ts'
 import * as registry from './registry.ts'
 import { broadcastScheduledRun, broadcastToUser } from '../ws/registry.ts'
@@ -40,6 +42,8 @@ interface RunContext {
   triggeredByRunId?: string | null
   /** Manual ("run now") dispatch — the agent sender fails fast on offline. */
   isManual?: boolean
+  /** True only when THIS fire won claimOnceTask; senders re-arm a halted once-task only then. */
+  onceClaimed?: boolean
   /**
    * Per-run cost accrual (fix/run-cost-attribution). `scheduled_task_runs
    * .cost_usd` was NULL on 100% of rows — no caller of `finalizeRun` ever
@@ -94,6 +98,17 @@ export function trackRun(ctx: NewRunContext): void {
   syncQueueDepthGauge()
 }
 
+/**
+ * The session a task is pinned to, for session-scoped kill-switch rows. Undefined
+ * when the task has no session (user/global scopes still apply).
+ */
+function taskSessionId(task: ScheduledTask): string | undefined {
+  if (task.target_kind === 'session' && task.target_id) return task.target_id
+  const ws = task.payload?.work_session_id
+  if (typeof ws === 'string' && ws) return ws
+  return task.session_id ?? undefined
+}
+
 export async function fire(taskId: string): Promise<void> {
   const task = await getTaskById(taskId)
   if (!task || !task.enabled) return
@@ -112,6 +127,14 @@ export async function fire(taskId: string): Promise<void> {
   // of parking in the grace buffer for a replay (a replay would re-fire a
   // run-once task).
   if ((task as any).schedule_kind === 'once') {
+    // PTYCAP-04-06 (D-09a, panel F-4): check the kill switch BEFORE the claim. A task
+    // claimed and then refused would be burned (the claim disables the row for good);
+    // an unclaimed one stays enabled+due, so the once-due sweep fires it after release.
+    const preHalt = await isAutomationHalted({ userId: task.user_id, sessionId: taskSessionId(task) })
+    if (preHalt.halted) {
+      log.warn('scheduler.dispatcher.once_not_claimed_halted', { task_id: taskId, scope: preHalt.scope })
+      return
+    }
     let claimed = false
     try { claimed = await claimOnceTask(taskId) } catch (err: any) {
       log.error('scheduler.dispatcher.once_claim_failed', { task_id: taskId, error: err?.message })
@@ -124,7 +147,7 @@ export async function fire(taskId: string): Promise<void> {
       log.info('scheduler.dispatcher.once_claim_lost', { task_id: taskId })
       return
     }
-    await fireTask(task, { chainDepth: 0, skipCronUpdate: true, isManual: true })
+    await fireTask(task, { chainDepth: 0, skipCronUpdate: true, isManual: true, onceClaimed: true })
     return
   }
   // P1 end-bounds: scheduled (cron) fires honor `until`/`max_runs`. When a
@@ -205,6 +228,8 @@ interface FireOpts {
   triggeredByRunId?: string | null
   skipCronUpdate?: boolean
   isManual?: boolean
+  /** Set by fire() after a successful claimOnceTask: a halt seen now re-arms instead of burning (F-4). */
+  onceClaimed?: boolean
 }
 
 async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: string[] }> {
@@ -212,6 +237,47 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
   const userId = task.user_id
   const runIds: string[] = []
   const isManual = opts.isManual === true
+
+  // PTYCAP-04-06 (D-09a): kill switch BEFORE every task_type branch and before the spend
+  // pre-gates. Deliberately NOT keyed on isManual: Run Now, chain_task, webhook triage
+  // and one-time email work (which dispatches as manual) are all machine-initiated
+  // automation. Fail closed: isAutomationHalted never throws, it reports halted on error.
+  const halt = await isAutomationHalted({ userId, sessionId: taskSessionId(task) })
+  if (halt.halted) {
+    const haltErr = `automation_halted:${halt.scope}`
+    log.warn('scheduler.dispatcher.skipped_halted', { task_id: task.id, user_id: userId, scope: halt.scope })
+    if (opts.onceClaimed) {
+      // Halt landed between the claim and the dispatch (a race): restore the claim so
+      // client work is never burned; the once-due sweep re-fires it after release.
+      let rearmed = false
+      try { rearmed = await rearmOnceTask(task.id) } catch (err: any) {
+        log.error('scheduler.dispatcher.once_rearm_failed', { task_id: task.id, error: err?.message })
+      }
+      if (rearmed) {
+        log.warn('scheduler.dispatcher.once_rearmed_halted', { task_id: task.id, scope: halt.scope })
+        return { runIds }
+      }
+      // Re-arm failed: fall through to a visible skipped run rather than losing it silently.
+    }
+    const haltRun = await insertRunV2({
+      task_id: task.id,
+      user_id: userId,
+      status: 'skipped',
+      scheduled_for: now,
+      target_kind: task.target_kind,
+      target_id: task.target_id,
+      triggered_by_run_id: opts.triggeredByRunId ?? null,
+      error: haltErr,
+    })
+    broadcastScheduledRun(userId, {
+      type: 'scheduled_run_finished',
+      run_id: haltRun.id, task_id: task.id, status: 'skipped', error: haltErr,
+    })
+    void onRunFinalized(task, haltRun.id, 'skipped', haltErr)
+    if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
+    runIds.push(haltRun.id)
+    return { runIds }
+  }
 
   // Claude usage threshold gate — sits in front of the cost-cap gate.
   // Same shape, distinct status ('skipped_quota'). Persisting the run row
@@ -337,6 +403,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       chainDepth: opts.chainDepth,
       triggeredByRunId: opts.triggeredByRunId ?? null,
       isManual,
+      onceClaimed: opts.onceClaimed === true,
     }
     trackRun(ctx)
     broadcastScheduledRun(userId, {
@@ -390,6 +457,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       chainDepth: opts.chainDepth,
       triggeredByRunId: opts.triggeredByRunId ?? null,
       isManual,
+      onceClaimed: opts.onceClaimed === true,
     }
     trackRun(ctx)
     broadcastScheduledRun(userId, {
@@ -471,6 +539,7 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
       chainDepth: opts.chainDepth,
       triggeredByRunId: opts.triggeredByRunId ?? null,
       isManual,
+      onceClaimed: opts.onceClaimed === true,
     }
     trackRun(ctx)
     runIds.push(run.id)

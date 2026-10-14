@@ -24,6 +24,7 @@ afterEach(() => {
 
 type Calls = {
   launched: number
+  launchArgs?: any[]
   dispatched: Array<{ gates: string[] }>
   runLogs: string[]
 }
@@ -46,8 +47,9 @@ function makeDeps(over: Partial<InjectDeps>, calls: Calls): InjectDeps {
       calls.runLogs.push(e.command)
       return {} as any
     }) as any,
-    launchSessionForUser: (async () => {
+    launchSessionForUser: (async (a: any) => {
       calls.launched++
+      ;(calls.launchArgs ??= []).push(a)
       return { ok: true, runId: 'run-1', supervisorId: 'sup-1', hostname: 'h', repoPath: '/srv/demo' }
     }) as any,
     dispatch: (async (_req: any, deps: any) => {
@@ -55,6 +57,8 @@ function makeDeps(over: Partial<InjectDeps>, calls: Calls): InjectDeps {
       // Simulate offline → pipeline parks in grace.
       return { kind: 'parked_offline' as const }
     }) as any,
+    // PTYCAP-04: BOTH paths resolve a counter key; these unit tests have no DB.
+    resolveCounterKey: async () => 'task:T1',
     ...over,
   }
 }
@@ -143,18 +147,53 @@ describe('BSA-02 autospawn inject seam', () => {
     expect(calls.launched).toBe(0)
   })
 
+  test('HALTED: a refused machine launch surfaces autospawn_launch_automation_halted:<scope>, no park', async () => {
+    const calls: Calls = { launched: 0, dispatched: [], runLogs: [] }
+    const deps = makeDeps(
+      { launchSessionForUser: (async () => ({ ok: false, reason: 'automation_halted:global' })) as any },
+      calls,
+    )
+    const out = await injectOrchestratorPrompt(input(), deps)
+    expect(out).toEqual({ kind: 'refused', reason: 'autospawn_launch_automation_halted:global' })
+    expect(calls.dispatched.length).toBe(0)
+    expect(calls.runLogs).toHaveLength(0)
+  })
+
   test('LAUNCH: full chain satisfied ⇒ spawns, parks, autospawn_launched + ledger row', async () => {
     const calls: Calls = { launched: 0, dispatched: [], runLogs: [] }
     const deps = makeDeps({}, calls)
     const out = await injectOrchestratorPrompt(input(), deps)
     expect(out.kind).toBe('autospawn_launched')
     expect(calls.launched).toBe(1)
+    // PTYCAP-04-07 (D-09b): the autospawn launch is machine-origin.
+    expect(calls.launchArgs?.[0]).toEqual({ userId: 'u1', sessionId: 's1', machine: true })
     expect(calls.dispatched.length).toBe(1)
     // BSA-04: the daily TOKEN gate is in the dispatch gate list ALONGSIDE the cost cap.
     expect(calls.dispatched[0].gates).toContain('daily_cost_cap')
     expect(calls.dispatched[0].gates).toContain('daily_token_cap')
     // Ledger row written for the launch-count cap.
     expect(calls.runLogs).toContain('autospawn-launch')
+  })
+
+  test('PTYCAP-04 REPLAY: the parked thunk re-enters dispatch (gated), never the raw send', async () => {
+    const calls: Calls = { launched: 0, dispatched: [], runLogs: [] }
+    const seen: Array<{ req: any; d: any }> = []
+    const deps = makeDeps(
+      {
+        dispatch: (async (req: any, d: any) => {
+          seen.push({ req, d })
+          calls.dispatched.push({ gates: (d.gates ?? []).map((g: any) => g.name) })
+          return { kind: 'parked_offline' as const }
+        }) as any,
+      },
+      calls,
+    )
+    await injectOrchestratorPrompt(input(), deps)
+    expect(seen).toHaveLength(1)
+    await seen[0].d.replay(seen[0].req)
+    expect(seen).toHaveLength(2)
+    expect(seen[1].req.token).toBe(seen[0].req.token)
+    expect(seen[1].req.counterKey).toBe('task:T1')
   })
 
   test('DEDUP: a live grace entry ⇒ autospawn_parked, no duplicate launch', async () => {
@@ -172,6 +211,8 @@ describe('BSA-02 autospawn inject seam', () => {
       {
         getChannel: (() => ({ ws: { send() {} } })) as any,
         isSessionLive: async () => true,
+        // PTYCAP-04: the online path resolves a counter key; this unit test has no DB.
+        resolveCounterKey: async () => 'task:T1',
         dispatch: (async (_req: any, d: any) => {
           calls.dispatched.push({ gates: (d.gates ?? []).map((g: any) => g.name) })
           return { kind: 'dispatched' as const }

@@ -18,13 +18,19 @@
  *
  * Governors (fixed order, first block wins, cheapest/most authoritative first):
  *   kill_switch, token_cap, inject_rate, lifetime_counter.
- * kill_switch and lifetime_counter are FAIL-CLOSED slots in Phase 3: their bodies
- * always block with `governor_not_implemented:<name>`; Phase 4 replaces them. So
- * with the flag ON in Phase 3 production nothing is admitted -- by design.
- * token_cap / inject_rate block with `governor_unconfigured:<name>` unless they
- * are ENABLED (the "over the limit" evaluation stays with dailyTokenCapGate and
- * the preflight chain's inject-rate gate). The dollar cost cap is advisory and is
- * NOT a governor. Governors are NON-CONSUMING checks: no writes, no counters.
+ * PTYCAP Phase 4: kill_switch and lifetime_counter are REAL. Each governor's
+ * `check` IS the function the dispatcher-list gate uses (killSwitchCheck /
+ * lifetimeCounterCheck from automation-controls.ts), so the two surfaces cannot
+ * drift. The lifetime_counter slot refuses with `lifetime_counter_key_missing`
+ * until the request carries a server-set counter key. token_cap blocks with
+ * `governor_unconfigured:token_cap` when the daily token cap is explicitly
+ * disabled. inject_rate COUNTS: it refuses with `over_session_inject_rate:<n>>=<cap>`
+ * when the de-duplicated union of the session's inject records over the trailing
+ * hour has reached the ceiling (and `governor_unconfigured:inject_rate` when the
+ * ceiling is not a positive finite number), so a governed path is rate-bounded
+ * even when its host gate list has no inject-rate gate. The dollar cost cap is
+ * advisory and is NOT a governor. Governors are NON-CONSUMING checks: no writes,
+ * no counters; the counting happens in the PTY door's atomic reservation.
  *
  * Only actors in AUTOMATION_ACTORS can ever be admitted. external-ask,
  * external-work, the empty string and unknown strings keep the unconditional
@@ -35,6 +41,7 @@
  * be a bypass handle.
  */
 import { AUTOMATION_ACTORS, humanOnlyRejectsActor, isDailyTokenCapEnforced, isInjectRateConfigured, maxInjectsPerHour } from './gates.ts'
+import { killSwitchCheck, lifetimeCounterCheck, countRateUnion } from './automation-controls.ts'
 import type { DispatchGate, DispatchRequest } from './pipeline.ts'
 
 /** The ONLY hub source file allowed to contain this literal (pinned by plan 03-03). */
@@ -63,12 +70,10 @@ export interface GovernorGate extends DispatchGate {
   name: GovernorName
 }
 
-/** Fail-closed slot: Phase 4 replaces the body with the real kill switch. */
+/** Real kill switch: the SAME function reference the dispatcher-list gate runs. */
 export const killSwitchGovernor: GovernorGate = {
   name: 'kill_switch',
-  async check() {
-    return { ok: false, reason: 'governor_not_implemented:kill_switch' }
-  },
+  check: killSwitchCheck,
 }
 
 /** Enabled rule only: blocks when the daily token cap is explicitly disabled. */
@@ -80,23 +85,28 @@ export const tokenCapGovernor: GovernorGate = {
   },
 }
 
-/** Enabled rule only: blocks when the inject-rate ceiling is non-finite or <= 0. */
+/**
+ * Counting rate governor: the ceiling must be a positive finite number and the
+ * session's trailing-hour union count (run-log inject rows U unreleased ledger
+ * rows, never a max) must be under it. A count error propagates (the gate maps it
+ * to governor_error:inject_rate; the door maps it to pty_preflight_error).
+ */
 export const injectRateGovernor: GovernorGate = {
   name: 'inject_rate',
-  async check() {
+  async check(req: DispatchRequest) {
     if (!isInjectRateConfigured()) return { ok: false, reason: 'governor_unconfigured:inject_rate' }
     const cap = maxInjectsPerHour()
     if (!Number.isFinite(cap) || cap <= 0) return { ok: false, reason: 'governor_unconfigured:inject_rate' }
+    const n = await countRateUnion(req.sessionId, 60)
+    if (n >= cap) return { ok: false, reason: `over_session_inject_rate:${n}>=${cap}` }
     return { ok: true }
   },
 }
 
-/** Fail-closed slot: Phase 4 replaces the body with the durable lifetime counter. */
+/** Real durable lifetime counter: the SAME function reference the dispatcher-list gate runs. */
 export const lifetimeCounterGovernor: GovernorGate = {
   name: 'lifetime_counter',
-  async check() {
-    return { ok: false, reason: 'governor_not_implemented:lifetime_counter' }
-  },
+  check: lifetimeCounterCheck,
 }
 
 export const PRODUCTION_GOVERNORS: readonly GovernorGate[] = [

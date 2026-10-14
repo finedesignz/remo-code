@@ -37,7 +37,7 @@ maybe('fix/stop-the-bleed e2e — the daily TOKEN cap fires on the real inject p
   let tokenDal: typeof import('../../src/db/token-usage-dal.ts')
   let h: import('./orchestrator-harness.ts').Harness
 
-  const CAP = 50_000_000 // the shipped default, asserted below
+  const CAP = 20_000_000 // the shipped default, asserted below
 
   beforeAll(async () => {
     process.env.DATABASE_URL = process.env.REMO_E2E_DB_URL!
@@ -112,7 +112,7 @@ maybe('fix/stop-the-bleed e2e — the daily TOKEN cap fires on the real inject p
     await clearTokens()
 
     // The 2026-07 incident's exact shape: no input/output to speak of, a mountain
-    // of cache-read. 1.4B > the 50M default cap by 28x.
+    // of cache-read. 1.4B > the 20M default cap by 70x.
     await seedTokens({ input: 1_000, output: 1_000, cacheRead: 1_400_000_000 })
 
     // The counter must SEE the cache-read (the #335 blindness that let the burn run).
@@ -146,7 +146,7 @@ maybe('fix/stop-the-bleed e2e — the daily TOKEN cap fires on the real inject p
   test('UNDER cap (control): the same real path dispatches and sends', async () => {
     pipelineMod._reset()
     await clearTokens()
-    await seedTokens({ input: 10_000, output: 5_000, cacheRead: 1_000_000 }) // ~1M << 50M
+    await seedTokens({ input: 10_000, output: 5_000, cacheRead: 1_000_000 }) // ~1M << 20M
 
     const before = await messageCount()
     const { channel, sent } = fakeChannel()
@@ -164,7 +164,22 @@ maybe('fix/stop-the-bleed e2e — the daily TOKEN cap fires on the real inject p
     expect(outcome.kind).toBe('dispatched')
     expect(sent.length).toBe(1)
     expect(await messageCount()).toBe(before + 1)
-  })
+
+    // PTYCAP-04: the real-Postgres proof of the automation controls SQL (advisory-lock
+    // reservation under concurrency, partial unique indexes, ON CONFLICT claims,
+    // count-after-reset, text/uuid casts, rate-union de-duplication) runs HERE, in the
+    // body of this existing test, so it executes in Woodpecker (postgres:16) with zero
+    // new tests and zero new skips. See ./automation-controls-checks.ts.
+    const { runAutomationControlsChecks } = await import('./automation-controls-checks.ts')
+    await runAutomationControlsChecks({
+      sql: h.sql,
+      userId: h.userId,
+      sessionId: h.sessionId,
+      controls: await import('../../src/dispatch/automation-controls.ts'),
+      inject: injectMod,
+      pipeline: pipelineMod,
+    })
+  }, 120_000)
 
   test('the pre-#342 accounting (input+output only) would NOT have fired — regression pin', async () => {
     await clearTokens()

@@ -46,6 +46,8 @@ export interface ExecuteResult {
   outcome: string;
   /** Optional gap dimension (gap-scan rotation, Phase 26) — logged if present. */
   gapDimension?: string | null;
+  /** PTYCAP-04: the token of the inject this outcome records (set only when dispatched). */
+  injectToken?: string | null;
 }
 
 export type ReviewerVerdict = 'PASS' | 'FAIL' | 'UNCERTAIN' | string;
@@ -157,7 +159,7 @@ export function makeLiveSeams(injectDeps?: InjectDeps): WaveSeams {
           // Prompt is on its way to the agent. The gsd skill + PR + reviewer run
           // async inside the agent turn; pr_url/verdict reconciled later. For a
           // gap-scan, persist the rotated dimension so the next tick advances (D7).
-          return { outcome: 'dispatched', gapDimension: composed.gapDimension };
+          return { outcome: 'dispatched', gapDimension: composed.gapDimension, injectToken: token };
         case 'refused_cost_cap':
           return { outcome: 'refused_cost_cap' };
         case 'no_session':
@@ -217,6 +219,7 @@ async function runUnit(unit: WaveUnit, ctx: WaveRunContext, seams: WaveSeams): P
   let prUrl: string | null = null;
   let reviewerVerdict: ReviewerVerdict | null = null;
   let gapDimension: string | null = null;
+  let injectToken: string | null = null;
   const proposed = unit.propose;
 
   try {
@@ -229,6 +232,7 @@ async function runUnit(unit: WaveUnit, ctx: WaveRunContext, seams: WaveSeams): P
       const exec = await seams.executeCommand(unit, ctx);
       outcome = exec.outcome;
       gapDimension = exec.gapDimension ?? null;
+      injectToken = exec.injectToken ?? null;
       // (b) create PR (still attempted even on a non-success exec outcome so the
       //     run log carries whatever PR the agent opened; reviewer follows).
       prUrl = await seams.createPrForUnit(unit, ctx);
@@ -253,6 +257,8 @@ async function runUnit(unit: WaveUnit, ctx: WaveRunContext, seams: WaveSeams): P
       pr_url: prUrl,
       reviewer_verdict: reviewerVerdict,
       deploy_verify_result: null, // deploy/log-verify tail is Phase 27
+      // PTYCAP-04 (F-6): only a dispatched inject carries its token.
+      inject_token: outcome === 'dispatched' ? injectToken : null,
     });
   } catch (err: any) {
     console.warn(`[orchestrator] run-log append failed command=${unit.command}: ${err?.message ?? err}`);

@@ -1359,6 +1359,712 @@ To perform this operation, you must be authenticated by means of one of the foll
 bearerAuth
 </aside>
 
+<h1 id="remo-code-hub-automation">automation</h1>
+
+## Read the automation kill-switch state visible to the caller
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X GET https://app.remo-code.com/api/automation/kill-switch \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+
+const headers = {
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/automation/kill-switch',
+{
+  method: 'GET',
+
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`GET /api/automation/kill-switch`
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "env": true,
+  "global": {
+    "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+    "scope": "global",
+    "user_id": "string",
+    "session_id": "string",
+    "engaged": true,
+    "reason": "string",
+    "engaged_by": "string",
+    "engaged_at": "string"
+  },
+  "user": {
+    "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+    "scope": "global",
+    "user_id": "string",
+    "session_id": "string",
+    "engaged": true,
+    "reason": "string",
+    "engaged_by": "string",
+    "engaged_at": "string"
+  },
+  "sessions": [
+    {
+      "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+      "scope": "global",
+      "user_id": "string",
+      "session_id": "string",
+      "engaged": true,
+      "reason": "string",
+      "engaged_by": "string",
+      "engaged_at": "string"
+    }
+  ]
+}
+```
+
+<h3 id="read-the-automation-kill-switch-state-visible-to-the-caller-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Env flag, the global row, the caller's user row and session rows. A non-admin sees the global row reduced to {engaged: true} (no engaged_by, reason or id).|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+
+<h3 id="read-the-automation-kill-switch-state-visible-to-the-caller-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» env|boolean|true|none|none|
+|» global|any|true|none|none|
+
+*anyOf*
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|»» *anonymous*|object|false|none|none|
+|»»» id|string(uuid)|true|none|none|
+|»»» scope|string|true|none|none|
+|»»» user_id|string¦null|true|none|none|
+|»»» session_id|string¦null|true|none|none|
+|»»» engaged|boolean|true|none|none|
+|»»» reason|string¦null|true|none|none|
+|»»» engaged_by|string|true|none|none|
+|»»» engaged_at|string|true|none|none|
+
+*or*
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|»» *anonymous*|object|false|none|none|
+|»»» engaged|boolean|true|none|none|
+
+*or*
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|»» *anonymous*|any|false|none|none|
+
+*continued*
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» user|object¦null|true|none|none|
+|»» id|string(uuid)|true|none|none|
+|»» scope|string|true|none|none|
+|»» user_id|string¦null|true|none|none|
+|»» session_id|string¦null|true|none|none|
+|»» engaged|boolean|true|none|none|
+|»» reason|string¦null|true|none|none|
+|»» engaged_by|string|true|none|none|
+|»» engaged_at|string|true|none|none|
+|» sessions|[object]|true|none|none|
+|»» id|string(uuid)|true|none|none|
+|»» scope|string|true|none|none|
+|»» user_id|string¦null|true|none|none|
+|»» session_id|string¦null|true|none|none|
+|»» engaged|boolean|true|none|none|
+|»» reason|string¦null|true|none|none|
+|»» engaged_by|string|true|none|none|
+|»» engaged_at|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|scope|global|
+|scope|user|
+|scope|session|
+|engaged|true|
+|scope|global|
+|scope|user|
+|scope|session|
+|scope|global|
+|scope|user|
+|scope|session|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Engage the kill switch (writes a row only; never stops a running session)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/automation/kill-switch/engage \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "scope": "global",
+  "session_id": "string",
+  "reason": "string"
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/automation/kill-switch/engage',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/automation/kill-switch/engage`
+
+> Body parameter
+
+```json
+{
+  "scope": "global",
+  "session_id": "string",
+  "reason": "string"
+}
+```
+
+<h3 id="engage-the-kill-switch-(writes-a-row-only;-never-stops-a-running-session)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» scope|body|string|true|global requires the admin role; user is always the caller; session must be owned by the caller|
+|» session_id|body|string|false|Required for session scope|
+|» reason|body|string|false|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|» scope|global|
+|» scope|user|
+|» scope|session|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "engaged": true,
+  "alreadyEngaged": true,
+  "scope": "string"
+}
+```
+
+<h3 id="engage-the-kill-switch-(writes-a-row-only;-never-stops-a-running-session)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Engaged (idempotent)|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Global scope requires the admin role|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Session not found or not owned by the caller|Inline|
+
+<h3 id="engage-the-kill-switch-(writes-a-row-only;-never-stops-a-running-session)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» engaged|boolean|true|none|none|
+|» alreadyEngaged|boolean|true|none|none|
+|» scope|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|engaged|true|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|error|forbidden|
+|reason|admin_required|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Release the kill switch (requires a login under 15 minutes old)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/automation/kill-switch/release \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "scope": "global",
+  "session_id": "string",
+  "reason": "string"
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/automation/kill-switch/release',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/automation/kill-switch/release`
+
+> Body parameter
+
+```json
+{
+  "scope": "global",
+  "session_id": "string",
+  "reason": "string"
+}
+```
+
+<h3 id="release-the-kill-switch-(requires-a-login-under-15-minutes-old)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» scope|body|string|true|global requires the admin role; user is always the caller; session must be owned by the caller|
+|» session_id|body|string|false|Required for session scope|
+|» reason|body|string|false|none|
+
+#### Enumerated Values
+
+|Parameter|Value|
+|---|---|
+|» scope|global|
+|» scope|user|
+|» scope|session|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "released": true,
+  "scope": "string"
+}
+```
+
+<h3 id="release-the-kill-switch-(requires-a-login-under-15-minutes-old)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Released flag|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT, or re_auth_required|Inline|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Global scope requires the admin role|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Session not found or not owned by the caller|Inline|
+
+<h3 id="release-the-kill-switch-(requires-a-login-under-15-minutes-old)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» released|boolean|true|none|none|
+|» scope|string|true|none|none|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|error|re_auth_required|
+
+Status Code **403**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+|» reason|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|error|forbidden|
+|reason|admin_required|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+## Append a lifetime-counter reset marker (requires a login under 15 minutes old)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/automation/lifetime/reset \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "counter_key": "string"
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/automation/lifetime/reset',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/automation/lifetime/reset`
+
+> Body parameter
+
+```json
+{
+  "counter_key": "string"
+}
+```
+
+<h3 id="append-a-lifetime-counter-reset-marker-(requires-a-login-under-15-minutes-old)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» counter_key|body|string|true|none|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "ok": true,
+  "counter_key": "string"
+}
+```
+
+<h3 id="append-a-lifetime-counter-reset-marker-(requires-a-login-under-15-minutes-old)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Reset|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT, or re_auth_required|Inline|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|No ledger rows for this counter key and caller|Inline|
+
+<h3 id="append-a-lifetime-counter-reset-marker-(requires-a-login-under-15-minutes-old)-responseschema">Response Schema</h3>
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» ok|boolean|true|none|none|
+|» counter_key|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|ok|true|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|error|re_auth_required|
+
+Status Code **404**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
+<h1 id="remo-code-hub-sessions">sessions</h1>
+
+## Launch a fresh session for the external self-heal service (machine surface)
+
+> Code samples
+
+```shell
+# You can also use wget
+curl -X POST https://app.remo-code.com/api/sessions/heal \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer {access-token}'
+
+```
+
+```javascript
+const inputBody = '{
+  "repo": "string",
+  "branch": "string",
+  "prompt": "string",
+  "model": "string",
+  "exclude_supervisor_ids": [
+    "string"
+  ]
+}';
+const headers = {
+  'Content-Type':'application/json',
+  'Accept':'application/json',
+  'Authorization':'Bearer {access-token}'
+};
+
+fetch('https://app.remo-code.com/api/sessions/heal',
+{
+  method: 'POST',
+  body: inputBody,
+  headers: headers
+})
+.then(function(res) {
+    return res.json();
+}).then(function(body) {
+    console.log(body);
+});
+
+```
+
+`POST /api/sessions/heal`
+
+> Body parameter
+
+```json
+{
+  "repo": "string",
+  "branch": "string",
+  "prompt": "string",
+  "model": "string",
+  "exclude_supervisor_ids": [
+    "string"
+  ]
+}
+```
+
+<h3 id="launch-a-fresh-session-for-the-external-self-heal-service-(machine-surface)-parameters">Parameters</h3>
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|object|false|none|
+|» repo|body|string|true|none|
+|» branch|body|string|true|none|
+|» prompt|body|string|true|none|
+|» model|body|string|false|none|
+|» exclude_supervisor_ids|body|[string]|false|none|
+
+> Example responses
+
+> 202 Response
+
+```json
+{
+  "session_id": "string",
+  "target_kind": "supervisor",
+  "supervisor_id": "string",
+  "url": "string"
+}
+```
+
+<h3 id="launch-a-fresh-session-for-the-external-self-heal-service-(machine-surface)-responses">Responses</h3>
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Session start dispatched|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid body|Inline|
+|401|[Unauthorized](https://tools.ietf.org/html/rfc7235#section-3.1)|Missing or invalid JWT|Inline|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Run row could not be inserted|Inline|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|Not started. automation_halted: a kill-switch row (or the env break-glass) covers the caller. lifetime_inject_exhausted: the heal:<userId>:<repo> lifetime budget is spent (owner reset needed). quota_threshold_reached and no_target_available are the pre-existing refusals.|Inline|
+
+<h3 id="launch-a-fresh-session-for-the-external-self-heal-service-(machine-surface)-responseschema">Response Schema</h3>
+
+Status Code **202**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» session_id|string|true|none|none|
+|» target_kind|string|true|none|none|
+|» supervisor_id|string|false|none|none|
+|» url|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|target_kind|supervisor|
+|target_kind|local_agent|
+
+Status Code **400**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **401**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+Status Code **500**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|» error|string|true|none|none|
+
+#### Enumerated Values
+
+|Property|Value|
+|---|---|
+|error|automation_halted|
+|error|lifetime_inject_exhausted|
+|error|quota_threshold_reached|
+|error|no_target_available|
+
+<aside class="warning">
+To perform this operation, you must be authenticated by means of one of the following methods:
+bearerAuth
+</aside>
+
 <h1 id="remo-code-hub-orchestrator-tasks">orchestrator-tasks</h1>
 
 ## Get a session's orchestrator task + its rows (task null if none)

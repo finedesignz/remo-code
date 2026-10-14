@@ -10,9 +10,11 @@
  */
 import type { ServerWebSocket } from 'bun'
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
+import { rearmOnceTask } from '../../db/scheduled-tasks-dal.ts'
 import { sql } from '../../db/postgres.ts'
 import { broadcastToUser } from '../../ws/registry.ts'
 import { finalizeRun } from '../dispatcher.ts'
+import { haltBeforeMachineSend } from '../../dispatch/automation-controls.ts'
 
 interface PendingRun {
   runId: string
@@ -29,6 +31,7 @@ interface RunCtxLike {
   taskId: string
   userId: string
   target: { supervisorId?: string | null; supervisorSocket?: ServerWebSocket<any> | null }
+  onceClaimed?: boolean
 }
 
 async function commandExists(supervisorId: string, command: string): Promise<boolean> {
@@ -53,6 +56,23 @@ export async function sendSupervisorTask(task: ScheduledTask, ctx: RunCtxLike): 
 
   if (!(await commandExists(supervisorId, command))) {
     await finalizeRun(ctx.runId, 'failed', 'command_not_available')
+    return
+  }
+
+  // QC B1: the dispatcher's halt check predates the pre-gates, the target resolution and
+  // commandExists. A scheduled run_command is machine-initiated automation, so re-read the
+  // kill switch fresh immediately before the transmission and finalize the run skipped.
+  const pre = await haltBeforeMachineSend({ userId: ctx.userId })
+  if (!pre.ok) {
+    // R3: a CLAIMED one-time task must not be burned by the refusal; restore the claim so
+    // the once-due sweep re-fires it after release. The skipped run below is the visible
+    // record of this attempt even if the re-arm itself fails.
+    if (task.schedule_kind === 'once' && ctx.onceClaimed === true) {
+      try { await rearmOnceTask(task.id) } catch (err: any) {
+        console.error(`[scheduler.supervisor] once re-arm failed task=${task.id}: ${err?.message ?? err}`)
+      }
+    }
+    await finalizeRun(ctx.runId, 'skipped', pre.reason)
     return
   }
 

@@ -10,6 +10,7 @@
  * cache-bust the module under test, afterAll(mock.restore).
  */
 import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
+import { automationControlsLeaf } from './fixtures/automation-controls-leaf.ts'
 
 type Task = any
 
@@ -41,7 +42,11 @@ mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
   // Milestone once: dispatcher.fire() now imports this (used only on the
   // schedule_kind='once' short-circuit, which these cron-bound tasks never hit).
   claimOnceTask: async () => true,
+  rearmOnceTask: async () => false,
 }))
+
+// PTYCAP-04-06: dispatcher now consults the kill switch; leaf mock = never halted.
+mock.module('../src/dispatch/automation-controls.ts', () => automationControlsLeaf())
 
 mock.module('../src/scheduler/registry.ts', () => ({
   unregister: (taskId: string) => { state.unregistered.push(taskId) },
