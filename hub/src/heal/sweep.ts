@@ -99,24 +99,40 @@ export async function sweepStaleHealLaunches(deps: SweepDeps = REAL_SWEEP_DEPS):
         continue;
       }
       const event = eventFromRow(row);
-      // Terminalize the source run. A permanent failure here (rows deleted, a source context that
-      // predates recovery_ctx) must not strand the reservation or re-fail on every boot, so the
-      // reservation and the ledger outcome are reconciled regardless.
+      // Two independent obligations: terminalize the SOURCE run and release the RESERVATION. Both are
+      // always attempted (a permanent source failure must not strand the slot, a failed release must
+      // not strand the source run). The ledger row is closed ONLY when both are confirmed (QC r2): any
+      // failure leaves it selectable for the next sweep with its recoverable outcome intact.
       let sinkError: string | null = null;
       try {
         const sink = await deps.makeSink(event, { eventId: row.id });
         await sink.finalizeTerminal({ kind: 'failed', reason: 'heal_spawn_timeout' });
       } catch (err: any) {
         sinkError = err?.message ?? String(err);
-        log(`row ${row.id} source run not terminalized (reservation still released): ${sinkError}`);
       }
-      // A release failure leaves the row for the next sweep: the slot is still stranded.
-      if (row.repo_ident) await deps.release(row.user_id, row.repo_ident, row.id);
-      await deps.setOutcome(row.id, 'failed:spawn_timeout', {});
-      await notifyOnce(row.id, event, 'spawn_timeout', deps.notify ?? REAL_NOTIFY_DEPS);
-      if (sinkError) {
+      let releaseError: string | null = null;
+      if (row.repo_ident) {
+        try {
+          await deps.release(row.user_id, row.repo_ident, row.id); // strict + idempotent
+        } catch (err: any) {
+          releaseError = err?.message ?? String(err);
+        }
+      }
+      if (sinkError || releaseError) {
         result.failed++;
+        log(`row ${row.id} kept for retry (source run: ${sinkError ?? 'ok'}; release: ${releaseError ?? 'ok'})`);
+        // Same outcome, fresh updated_at: a permanently failing row goes to the back of the queue
+        // instead of starving the rest of the bounded batch.
+        await deps.setOutcome(row.id, fresh.outcome, {}).catch(() => {});
         continue;
+      }
+      await deps.setOutcome(row.id, 'failed:spawn_timeout', {});
+      if (row.source === 'scheduled_task') {
+        // The scheduler default email is the owner notification for a scheduled-task event once its
+        // launch outcome was returned; the sweep takes the claim only and never sends a second one.
+        await (deps.notify ?? REAL_NOTIFY_DEPS).claim(row.id).catch(() => false);
+      } else {
+        await notifyOnce(row.id, event, 'spawn_timeout', deps.notify ?? REAL_NOTIFY_DEPS);
       }
       result.swept++;
     } catch (err: any) {
