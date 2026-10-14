@@ -249,7 +249,16 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
     `;
     expect(prRows.length).toBe(1);
     expect(prRows[0].pr_url).toBe(PR_URL);
-  });
+
+    // PTYCAP-05: the real-Postgres proof of the throwaway-repo proof SQL (advisory-locked
+    // single-flight, partial unique indexes, CHECKs, exactly-once terminalize, token
+    // attribution, disarm scope) runs HERE, in the body of this existing test, so it
+    // executes in Woodpecker (postgres:16) with zero new tests and zero new skips.
+    // See ./proof-checks.ts. It uses its own synthetic users, so the allowlist state above
+    // is untouched.
+    const { runProofChecks } = await import('./proof-checks.ts');
+    await runProofChecks({ sql: h.sql, userId: h.userId, sessionId: h.sessionId });
+  }, 120_000);
 
   // ── GATE NO-OPS ───────────────────────────────────────────────────────────────
   test('allowlist EMPTY → refused:not_allowlisted, no launch, no ledger row', async () => {
