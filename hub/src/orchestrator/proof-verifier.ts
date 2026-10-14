@@ -9,7 +9,9 @@
 
 import {
   PROOF_BRANCH_PREFIX,
+  PROOF_SUCCESS_OUTCOME,
   ProofGithubError,
+  type CheckState,
   type CompareResult,
   type ProofGithub,
   type ProofOutcome,
@@ -82,12 +84,50 @@ function pickPr(mine: PullSummary[]): PullSummary | null {
   })[0];
 }
 
+const RED_CONCLUSIONS = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
+const RED_COMMIT_STATUSES = new Set(['failure', 'error']);
+
 /**
- * The CI evaluation step (D-13). Task 2 of plan 03 fills this in; until then it can
- * only ever answer "not green".
+ * The CI evaluation step (D-13). Green only from complete, successful evidence that
+ * covers every frozen required context; every ambiguity is non-green. 'neutral' and
+ * 'skipped' are deliberately not success evidence.
  */
-async function evaluateCi(_github: ProofGithub, _run: ProofRun, pr: PullSummary): Promise<Terminal | Pending> {
-  return pending('ci_pending', 'ci_not_evaluated', pr);
+async function evaluateCi(github: ProofGithub, run: ProofRun, pr: PullSummary): Promise<Terminal | Pending> {
+  if (!pr.headSha) return pending('ci_unverifiable', 'pr_head_sha_missing', pr);
+
+  let state: CheckState;
+  try {
+    state = await github.getCheckState(run.repo_owner, run.repo_name, pr.headSha);
+  } catch {
+    return pending('ci_unverifiable', 'checks_unreadable', pr);
+  }
+  if (state.truncated) return pending('ci_unverifiable', 'checks_truncated', pr);
+
+  const runs = state.checkRuns;
+  const stats = state.statuses;
+  if (
+    runs.some((c) => c.status === 'completed' && c.conclusion != null && RED_CONCLUSIONS.has(c.conclusion)) ||
+    stats.some((s) => RED_COMMIT_STATUSES.has(s.state))
+  ) {
+    return pending('ci_red', 'ci_red', pr);
+  }
+  if (runs.some((c) => c.status !== 'completed') || stats.some((s) => s.state === 'pending')) {
+    return pending('ci_pending', 'ci_pending', pr);
+  }
+
+  const passed = new Set<string>([
+    ...runs.filter((c) => c.conclusion === 'success').map((c) => c.name),
+    ...stats.filter((s) => s.state === 'success').map((s) => s.context),
+  ]);
+  const missing = run.required_contexts.filter((ctx) => !passed.has(ctx));
+  if (missing.length > 0) return pending('ci_pending', `required_not_success ${missing.join(',')}`, pr);
+  if (passed.size === 0) return pending('ci_pending', 'no_passing_check', pr);
+
+  // Re-compare after the CI read so a default-branch advance mid-verification is never green.
+  const advanced = await checkDefaultBranch(github, run, pr);
+  if (advanced) return advanced;
+
+  return terminal(PROOF_SUCCESS_OUTCOME, 'pr_open_green', pr);
 }
 
 export async function verifyProof(github: ProofGithub, run: ProofRun): Promise<ProofObservation> {
