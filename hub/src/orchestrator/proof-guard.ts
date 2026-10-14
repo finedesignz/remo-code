@@ -178,7 +178,9 @@ export async function proofGuard(deps: ProofGuardDeps, input: ProofGuardInput): 
     } catch {
       owns = true; // cannot tell: never fall through to the dev macro
     }
-    if (!owns) return { kind: 'pass_through' };
+    // QC round 1: proof mode is EXCLUSIVE. The flags are hub-global, so a task that owns no
+    // proof run must NOT receive the ordinary dev macro while the stack is ON.
+    if (!owns) return { kind: 'blocked', reason: 'proof_mode_non_proof_task' };
     await bestEffort('disableTask', () => deps.disableTask(input.userId, input.taskId));
     return { kind: 'blocked', reason: 'proof_task_without_active_run' };
   }

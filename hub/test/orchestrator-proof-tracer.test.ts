@@ -285,14 +285,14 @@ describe('flag ON: claim + proof prompt', () => {
     expect(store.calls.disable).toEqual(['t1'])
   })
 
-  test('task with no proof run at all passes through to the ordinary macro', async () => {
+  test('QC r1: a task with no proof run is BLOCKED while proof mode is on (exclusive), never the dev macro', async () => {
     flagsOn()
     const store = makeStore([runRow({ task_id: 'other' })])
     const { deps, log } = cycleDeps(makeProofHooks(store.deps))
     const r = await runMacroCycle(input(), deps)
-    expect(r.proofDecision).toBe('pass_through')
-    expect(r.injected).toBe(true)
-    expect(log.injects[0].prompt).toBe(devPrompt())
+    expect(r.proofDecision).toBe('blocked')
+    expect(r.injected).toBe(false)
+    expect(log.injects).toHaveLength(0)
     expect(store.runs[0].status).toBe('armed')
   })
 

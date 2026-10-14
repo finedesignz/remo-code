@@ -125,7 +125,7 @@ async function main(): Promise<number> {
   const { armProof } = await import('../src/orchestrator/proof-arm.ts');
   const { isGitHubAppConfigured, listInstallationRepos } = await import('../src/auth/github-app.ts');
   const { makeProofGithub } = await import('../src/orchestrator/proof-github.ts');
-  const { armProofRunTx } = await import('../src/db/orchestrator-proof-dal.ts');
+  const { armProofRunTx, countOtherEnabledOrchestratorTasks } = await import('../src/db/orchestrator-proof-dal.ts');
   const { getGithubInstallationForUser, getSessionRepoBinding } = await import('../src/db/orchestrator-proof-arm-reads.ts');
   const { listRepoAutospawnAllowlist } = await import('../src/db/orchestrator-rows-dal.ts');
 
@@ -150,6 +150,7 @@ async function main(): Promise<number> {
       listInstallationRepos,
       getSession: getSessionRepoBinding,
       listAllowlist: listRepoAutospawnAllowlist,
+      countOtherEnabledOrchestratorTasks,
       armTx: armProofRunTx,
       env: process.env,
       now: () => new Date(),
