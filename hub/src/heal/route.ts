@@ -63,7 +63,12 @@ export interface HealDeps {
   notify?: NotifyDeps;
   /** Governed autospawn collaborators (07-06). Defaults to REAL_AUTOSPAWN. */
   autospawn?: AutospawnDeps;
+  /** Adds the heal outcome to a still-undelivered owner-email obligation (best-effort). */
+  appendOwnerEmailReason?(eventId: string, reason: string): Promise<void>;
 }
+
+const REAL_APPEND_REASON = async (eventId: string, reason: string): Promise<void> =>
+  (await import('../db/heal-events-dal.ts')).appendOwnerEmailReason(eventId, reason);
 
 /** Real collaborators. DB-touching ones are lazy so importing this module never loads the DB. */
 export const REAL_DEPS: HealDeps = {
@@ -172,6 +177,17 @@ async function finalizeNonLive(
 ): Promise<HealOutcome> {
   await persist(deps, eventId, outcome, extra);
   await terminalize(sink, sinkOutcome ?? (outcome as HealTerminalOutcome));
+  // Outbox (repair round): a scheduled_task event carrying a persisted owner-email obligation is
+  // notified by THAT obligation (scheduler sends it, the sweep redelivers it after a crash). Heal
+  // adds its outcome to the obligation and never sends a second, ownerless email.
+  if (event.source === 'scheduled_task' && event.owner_email) {
+    try {
+      await (deps.appendOwnerEmailReason ?? REAL_APPEND_REASON)(eventId, outcomeReason(outcome));
+    } catch (err) {
+      log(`owner email reason append failed id=${eventId}: ${errMsg(err)}`);
+    }
+    notify = false;
+  }
   if (!notify) {
     // The owner notification for this event was already settled elsewhere (the scheduler default
     // email, selected when the launch outcome was returned). Take the claim only, never send.
@@ -480,6 +496,7 @@ export async function routeHeal(input: unknown, deps: HealDeps = REAL_DEPS): Pro
       ...(target.kind !== 'none' ? { maxPerRepoHour: healMaxPerRepoHour() } : {}),
       ...(event.source === 'scheduled_task' ? { maxPerTaskDay: healMaxPerTaskDay() } : {}),
       recoveryCtx: recoveryCtxFor(event),
+      ...(event.source === 'scheduled_task' && event.owner_email ? { ownerEmail: event.owner_email } : {}),
       nowMs: deps.now(),
     });
     if (!claim.ok) {

@@ -836,7 +836,16 @@ async function healFailedRunHook(
     const { healUnifiedEnabled } = await import('../heal/config.ts')
     if (!healUnifiedEnabled()) return false
     const { healFailedScheduledRun } = await import('../heal/sources/scheduled-task.ts')
-    return await healFailedScheduledRun({ runId, status: 'failed', error, task })
+    // Outbox: when the default failure email applies, it is persisted with the heal claim and sent
+    // from here, so a crash between the claim and the send cannot lose it (the sweep redelivers).
+    const { defaultFailureEmailApplies } = await import('./post-run/dispatcher.ts')
+    const persistOwnerEmail = await defaultFailureEmailApplies(task).catch(() => false)
+    const healOwns = await healFailedScheduledRun({ runId, status: 'failed', error, task, persistOwnerEmail })
+    if (persistOwnerEmail) {
+      const { deliverOwnerEmailForRun } = await import('../heal/owner-email.ts')
+      if (await deliverOwnerEmailForRun(runId)) return true
+    }
+    return healOwns
   } catch (err: any) {
     log.error('scheduler.dispatcher.heal_hook_failed', { task_id: task.id, run_id: runId, error: err?.message })
     return false

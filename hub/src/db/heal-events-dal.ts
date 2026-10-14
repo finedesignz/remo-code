@@ -60,8 +60,19 @@ export interface ClaimHealArgs {
   maxPerTaskDay?: number
   /** Minimal validated source context a boot/follow-up sweep needs to terminalize the event. */
   recoveryCtx?: Record<string, unknown> | null
+  /**
+   * Pending default owner-email obligation (scheduled_task only), persisted in the SAME transaction
+   * as the claim so a crash after the claim can never lose it. Delivered once via the lease CAS below.
+   */
+  ownerEmail?: OwnerEmailPayload | null
   /** Injectable clock (tests); defaults to Date.now(). */
   nowMs?: number
+}
+
+export interface OwnerEmailPayload {
+  subject: string
+  text: string
+  html: string
 }
 
 export type ClaimHealResult =
@@ -85,6 +96,9 @@ export interface HealEventRow {
   outcome: string | null
   notification_claimed_at: string | Date | null
   recovery_ctx?: Record<string, unknown> | null
+  owner_email?: OwnerEmailPayload | null
+  owner_email_claimed_at?: string | Date | null
+  owner_email_delivered_at?: string | Date | null
   created_at: string | Date
   updated_at: string | Date
 }
@@ -187,10 +201,10 @@ export async function claimHealEvent(args: ClaimHealArgs, exec: HealExec = sql):
 
     // (d) INSERT; the unique indexes are the backstop - an empty return means duplicate.
     const inserted = await tx`
-      INSERT INTO heal_events (user_id, source, repo_ident, dedupe_key, window_bucket, trigger_run_id, outcome, recovery_ctx, created_at, updated_at)
+      INSERT INTO heal_events (user_id, source, repo_ident, dedupe_key, window_bucket, trigger_run_id, outcome, recovery_ctx, owner_email, created_at, updated_at)
       VALUES (${args.userId}, ${args.source}, ${args.repoIdent ?? null}, ${args.dedupeKey}, ${bucket},
               ${args.triggerRunId ?? null}, ${preOutcome}, ${args.recoveryCtx ? JSON.stringify(args.recoveryCtx) : null}::jsonb,
-              ${createdAt}, ${createdAt})
+              ${args.ownerEmail ? JSON.stringify(args.ownerEmail) : null}::jsonb, ${createdAt}, ${createdAt})
       ON CONFLICT DO NOTHING
       RETURNING id
     `
@@ -296,4 +310,104 @@ export async function listStaleLaunchingHealEvents(
     LIMIT 50
   `
   return rows as HealEventRow[]
+}
+
+// --- Owner-email outbox (PTYCAP-07 repair round) ---------------------------------------------
+// The obligation (owner_email) is written in the claim transaction. Delivery is a LEASE CAS:
+// owner_email_claimed_at is stamped by the one caller that may send (a stale lease, i.e. a crash
+// mid-send, can be re-taken), owner_email_delivered_at is the terminal flag stamped after the send.
+// At-least-once across a crash in the narrow send->mark window, never zero, never concurrent.
+
+export const OWNER_EMAIL_LEASE_MS = 5 * 60_000
+
+export interface OwnerEmailClaim {
+  id: string
+  user_id: string
+  owner_email: OwnerEmailPayload
+}
+
+/** True when this run's heal event carries an undelivered-or-delivered obligation (a row exists). */
+export async function hasOwnerEmailObligation(runId: string, exec: HealExec = sql): Promise<boolean> {
+  const rows = await exec`
+    SELECT 1 AS one FROM heal_events
+    WHERE source = 'scheduled_task' AND trigger_run_id = ${runId} AND owner_email IS NOT NULL
+    LIMIT 1
+  `
+  return rows.length > 0
+}
+
+/** Lease CAS by event id. Yields the payload to the ONE caller allowed to send, else null. */
+export async function claimOwnerEmailDelivery(
+  id: string,
+  leaseMs: number = OWNER_EMAIL_LEASE_MS,
+  exec: HealExec = sql,
+  nowMs: number = Date.now(),
+): Promise<OwnerEmailClaim | null> {
+  const staleBefore = new Date(nowMs - leaseMs)
+  const rows = await exec`
+    UPDATE heal_events SET owner_email_claimed_at = ${new Date(nowMs)}
+    WHERE id = ${id} AND owner_email IS NOT NULL AND owner_email_delivered_at IS NULL
+      AND (owner_email_claimed_at IS NULL OR owner_email_claimed_at < ${staleBefore})
+    RETURNING id, user_id, owner_email
+  `
+  return rows.length > 0 ? (rows[0] as OwnerEmailClaim) : null
+}
+
+export async function claimOwnerEmailDeliveryByRun(
+  runId: string,
+  leaseMs: number = OWNER_EMAIL_LEASE_MS,
+  exec: HealExec = sql,
+  nowMs: number = Date.now(),
+): Promise<OwnerEmailClaim | null> {
+  const found = await exec`
+    SELECT id FROM heal_events WHERE source = 'scheduled_task' AND trigger_run_id = ${runId} LIMIT 1
+  `
+  if (found.length === 0) return null
+  return claimOwnerEmailDelivery(found[0].id as string, leaseMs, exec, nowMs)
+}
+
+/** Terminal flag. Idempotent. */
+export async function markOwnerEmailDelivered(id: string, exec: HealExec = sql): Promise<void> {
+  await exec`
+    UPDATE heal_events SET owner_email_delivered_at = now(), updated_at = now()
+    WHERE id = ${id} AND owner_email_delivered_at IS NULL
+  `
+}
+
+/** Failed send: drop the lease so the next sweep retries without waiting out the lease. */
+export async function releaseOwnerEmailClaim(id: string, exec: HealExec = sql): Promise<void> {
+  await exec`
+    UPDATE heal_events SET owner_email_claimed_at = NULL
+    WHERE id = ${id} AND owner_email_delivered_at IS NULL
+  `
+}
+
+/** Best-effort: add the heal outcome reason to a still-undelivered obligation. */
+export async function appendOwnerEmailReason(id: string, reason: string, exec: HealExec = sql): Promise<void> {
+  const line = `Self-heal outcome: ${reason}`.replace(/[^ -~]/g, '?').slice(0, 200)
+  await exec`
+    UPDATE heal_events SET owner_email = jsonb_set(
+      jsonb_set(owner_email, '{text}', to_jsonb((owner_email->>'text') || E'
+' || ${line}::text)),
+      '{html}', to_jsonb((owner_email->>'html') || '<p>' || replace(replace(${line}::text, '&', '&amp;'), '<', '&lt;') || '</p>'))
+    WHERE id = ${id} AND owner_email IS NOT NULL AND owner_email_delivered_at IS NULL
+  `
+}
+
+/** Undelivered obligations older than the guard whose lease is free or stale. Bounded. */
+export async function listPendingOwnerEmails(
+  olderThanMs: number,
+  exec: HealExec = sql,
+  nowMs: number = Date.now(),
+  leaseMs: number = OWNER_EMAIL_LEASE_MS,
+): Promise<OwnerEmailClaim[]> {
+  const rows = await exec`
+    SELECT id, user_id, owner_email FROM heal_events
+    WHERE owner_email IS NOT NULL AND owner_email_delivered_at IS NULL
+      AND created_at < ${new Date(nowMs - olderThanMs)}
+      AND (owner_email_claimed_at IS NULL OR owner_email_claimed_at < ${new Date(nowMs - leaseMs)})
+    ORDER BY created_at
+    LIMIT 50
+  `
+  return rows as OwnerEmailClaim[]
 }

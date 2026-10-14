@@ -301,6 +301,13 @@ export async function handleInternalTriageRun(args: AfterRunArgs): Promise<void>
   )
 }
 
+/** True when the default failure email would be built for a failed root run of this task. */
+export async function defaultFailureEmailApplies(task: ScheduledTask): Promise<boolean> {
+  const parsed = validatePostRunActions(await listActionsForTask(task.id))
+  if (!parsed.ok) return false // fireWithContext returns before any action when the set is invalid
+  return buildDefaultEmailActions(task, 0, parsed.value, { status: 'failed', output_snippet: null }).length > 0
+}
+
 export async function fireWithContext(args: FireCtxArgs): Promise<void> {
   // Awaited (errors contained) so the AAF forward + fallback email finish inside the
   // post-run lifecycle instead of being orphaned when the caller releases.
