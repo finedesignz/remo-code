@@ -1092,6 +1092,108 @@ issue from a `triage` run result.
 
 ---
 
+## Task QC (PTYCAP Phase 8)
+
+A periodic, config-only auditor of the user's own scheduled tasks. It is a system-owned
+`scheduled_tasks` row (`task_type='task_qc'`, one per user) fired by the normal cron registry, but
+the work is **deterministic hub code**: `hub/src/task-qc/*` plus `hub/src/scheduler/senders/task-qc.ts`.
+No model, no session, no `dispatch()`, no PTY, no dev loop; a pass spends **zero model tokens**
+(a closed import allowlist, `task-qc-no-llm-guard.test.ts`, enforces it). Source of truth for the
+design: `.planning/phases/PTYCAP-08-task-qc/08-CONTEXT.md` and `GATES/verdict.md`.
+
+**Off by default.** With `REMO_TASK_QC_ENABLED` unset the boot seed makes zero database calls, a
+left-behind `task_qc` row is never registered or caught up, and nothing is emailed.
+
+### Audit set and the six detectors
+
+The audit set is the user's non-internal tasks (never `task_qc` rows, never `__internal_*` anchors,
+never orchestrator rows). Detectors are pure functions over plain row objects (real columns:
+`next_fire_at`/`last_fire_at`, `COALESCE(cron_expr, cron_expression)`, `timezone`,
+`scheduled_task_runs.status/error/finished_at`):
+
+| Detector | Fires when |
+|---|---|
+| `FAILING` | the last N terminal runs all failed (`REMO_TASK_QC_FAIL_STREAK`, default 3); `high` severity at 10x N or a streak filling the history window |
+| `SKIP_FOREVER` | the last N runs are all `skipped`/`skipped_quota` with the same reason (digits in the reason are collapsed), not on the benign list (`no_errors_detected`, `automation_halted:*`) |
+| `NEVER_FIRED` | enabled task whose cron/timezone is invalid, or older than two fire intervals with no runs, or with a NULL or stale `next_fire_at` (age-gated so a new task is not flagged) |
+| `MISCONFIGURED` | per-type payload check fails, e.g. `log_check`/`log_pull` with no resolvable Coolify app uuid, `teab` without `teab_repo_ident` |
+| `DEAD_SESSION` | the bound session is deleted or long offline |
+| `OPTIMIZE` | proposal-only: hot cadence with no change, top-decile prompt length, duplicate enabled tasks |
+
+### Fixes: three kinds, report-only by default
+
+Only three fix kinds exist, each writing an **input column the dispatcher reads at fire time**:
+`normalize_timezone` (`timezone`), `backfill_payload_from_sibling` (`payload.application_uuid`, only
+when exactly one unambiguous sibling exists), `rebind_dead_session` (`session_id`, and `target_id`
+when it equalled the old session, only when exactly one live same-repo candidate exists). The allowlist
+is a closure-backed read-only structure; anything else throws `unlisted_fix_kind` before any SQL. The
+writer never touches `enabled`, `prompt`, cadence, caps or env (static guard
+`task-qc-never-disables.test.ts`), refuses a row with an open run or a shared live session
+(`skipped_in_flight`), and applies each fix in one transaction (`FOR UPDATE`, audit-set re-check,
+precondition re-check, UPDATE, same-transaction audit row with before/after and rollback SQL).
+
+Registry-owned columns are deliberately not fixable. `next_fire_at` mirrors the live job registry, so
+a DB-only rewrite would hide an unarmed job. **Limitation (honest):** an unarmed or never-fired job is
+reported as a **proposal** carrying the exact PATCH that re-arms it (`PATCH {enabled:true}` through the
+route), not an automatic repair. Cadence and prompt changes are proposals only.
+
+### Flags and arming order
+
+| Env | Default | Notes |
+|---|---|---|
+| `REMO_TASK_QC_ENABLED` | OFF | `1\|true\|yes\|on`; read at call time |
+| `REMO_TASK_QC_AUTOFIX` | OFF | inert unless ENABLED is also on; OFF means zero `UPDATE scheduled_tasks` |
+| `REMO_TASK_QC_FAIL_STREAK` | `3` | non-positive or unparseable becomes 3 |
+| `REMO_TASK_QC_CADENCE` | `0 9 * * *` | seed cron; invalid or faster than hourly becomes the default |
+
+Recommended arming order: `ENABLED` on with `AUTOFIX` off for at least a week of digests (read them,
+confirm the detectors do not lie), then `AUTOFIX` on. Rollback of any applied fix: run the
+`rollback_sql` stored on its `task_qc_findings` row (also shown in the digest).
+
+### Bounds (constants, not knobs) and the lifetime counter
+
+There is **no token cap** for the engine because it spends no tokens. A pass is bounded by frozen
+constants in `TASK_QC_BOUNDS` (500 audited tasks, 50 history rows per task, 25 fixes per pass, 200 rows
+written per run, 60 s wall-clock with `SET LOCAL statement_timeout`); `clampBounds()` can only lower
+them. One run holds at most one open `task_qc` run per user (per-user advisory lock claim). Each run
+reserves one slot of the Phase 4 lifetime inject counter under key `taskqc:<userId>`
+([usage-cost.md](usage-cost.md) "PTYCAP Phase 4"); exhausted means the run finalizes `skipped` with
+`lifetime_inject_exhausted:*`. The slot is released if the engine throws.
+
+### Digest and failure email
+
+One direct email per run, only when there is something new: applied fixes first, then newly recorded
+findings (a same-day repeat of an already-recorded finding sends nothing; zero findings sends nothing).
+Built from typed fields only, with fixed per-kind command templates, separate text/HTML escaping and
+ASCII-only output. If the engine throws, one plain typed-code **ENGINE failure** email is sent (one
+`ENGINE` finding per task per UTC day), never the raw error. Findings are idempotent on
+`(user_id, task_id, detector, evidence_sig, day)`.
+
+### Kill switch
+
+The Phase 4 check runs before any work with a user anchor and no session. Global, user and env scopes
+stop the auditor; a session-scoped halt (even on a session it audits) does not. With the flag OFF the
+fire returns before the kill-switch block (no automation is performed, so nothing is weakened). When
+halted mid-pass the writer re-checks once before its first write and the pass becomes read-only
+(`halted_read_only` proposals).
+
+### API contract for the row
+
+`POST /api/scheduled-tasks` with `task_type='task_qc'` is `400 task_qc_machine_seeded` (only the boot
+seed creates it). `DELETE` is `409 task_qc_system_task`. `PATCH` accepts only `enabled`, a cadence
+(`cron_expr`) and `timezone`; any differing locked key is `400 task_qc_field_immutable` (with `fields`),
+a cadence that is invalid or faster than hourly is `400 task_qc_cadence_invalid`. Run Now is allowed.
+A `task_qc` run never fires a post-run chain or another `task_qc`.
+
+### Seed
+
+At boot, before `schedRegistry.loadAll()` and `schedCatchup.runOnce()`, `seedTaskQcTasks()` inserts one
+row per user with at least one auditable task (`ON CONFLICT (user_id) WHERE task_type = 'task_qc' DO
+NOTHING`, `session_id` NULL, cadence `REMO_TASK_QC_CADENCE`). A user who gains their first auditable
+task after boot is seeded on the next boot. No `UPDATE` or `DELETE` is ever issued by the seed, and
+`schema.sql` carries only DDL (`task_qc` in the `task_type` CHECK, the per-user partial unique index,
+`task_qc_findings`).
+
 ## Environment variables
 
 The scheduler does not introduce new required env vars. Optional vars:
