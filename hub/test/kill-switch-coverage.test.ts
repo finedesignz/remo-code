@@ -100,7 +100,12 @@ const HUMAN: Record<string, string> = {
 const PTY_DOOR = 'dispatch/pty-preflight.ts'
 
 /** Lists that carry the lifetime counter (LAST element). Key-bearing paths (D-05). */
-const COUNTED = new Set(['orchestrator/inject.ts', 'scheduler/senders/agent.ts', 'scheduler/senders/triage.ts'])
+const COUNTED = new Set([
+  'orchestrator/inject.ts',
+  'scheduler/senders/agent.ts',
+  'scheduler/senders/triage.ts',
+  'heal/route.ts', // PTYCAP-07: the unified self-heal seam, key heal:<userId>:<repo_ident>, counter LAST
+])
 
 /** Machine lists deliberately NOT counted. One reason each; a new machine list must pick a side. */
 const COUNTER_EXEMPT: Record<string, string> = {
@@ -117,6 +122,7 @@ const KNOWN_FILES = [
   'dispatch/pty-preflight.ts',
   'error-capture/dispatcher.ts',
   'feedback/dispatcher.ts',
+  'heal/route.ts',
   'orchestrator/inject.ts',
   'revanote/dispatcher.ts',
   'scheduler/senders/agent.ts',
@@ -132,12 +138,12 @@ describe('kill switch covers every machine-initiated dispatch list', () => {
     expect(gateLists().unparsed).toEqual([])
   })
 
-  test('the scan actually found the known dispatchers (12 lists, inject.ts twice)', () => {
+  test('the scan actually found the known dispatchers (13 lists, inject.ts twice)', () => {
     const { lists } = gateLists()
     const files = new Set(lists.map((g) => g.file))
     for (const f of KNOWN_FILES) expect(files.has(f), `scanner did not find ${f}`).toBe(true)
     expect(lists.filter((g) => g.file === 'orchestrator/inject.ts')).toHaveLength(2)
-    expect(lists).toHaveLength(12)
+    expect(lists).toHaveLength(13)
   })
 
   test('scanner self-check: element splitting handles nested calls, comments and trailing commas', () => {
