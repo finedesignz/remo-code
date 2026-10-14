@@ -176,3 +176,133 @@ describe('GET and run-now stay open for task_qc', () => {
     expect(stubRunNow).toHaveBeenCalledTimes(1)
   })
 })
+
+const LOCKED_DIFFERING: Array<[string, unknown]> = [
+  ['task_type', 'dev'],
+  ['target_kind', 'all_agents'],
+  ['target_id', 'some-target'],
+  ['payload', { prompt: 'evil' }],
+  ['prompt', 'evil'],
+  ['email_summary', true],
+  ['post_run_actions', [{ kind: 'x' }]],
+  ['schedule_kind', 'once'],
+  ['run_at', '2030-01-01T00:00:00Z'],
+  ['schedule_rules', [{ interval: 1, unit: 'hours', start_at: '2030-01-01T00:00:00Z' }]],
+  ['catchup_policy', 'run_once'],
+  ['max_concurrent', 5],
+  ['teab_repo_ident', 'github://o/r'],
+  ['name', 'renamed'],
+  ['name_suffix', 'renamed'],
+]
+
+describe('PATCH: only enabled, a validated cadence and a valid timezone', () => {
+  test('allowed keys succeed and the update receives ONLY those fields', async () => {
+    const res = await call('PATCH', '/qc-1', { enabled: false, cron_expr: '0 */6 * * *', timezone: 'America/Los_Angeles' })
+    expect(res.status).toBe(200)
+    expect(stubUpdate).toHaveBeenCalledTimes(1)
+    const patch = (stubUpdate.mock.calls[0] as any[])[2]
+    expect(Object.keys(patch).filter((k) => patch[k] !== undefined).sort()).toEqual(['cron_expr', 'enabled', 'timezone'])
+    for (const k of ['name', 'name_prefix', 'name_suffix', 'payload', 'prompt', 'catchup_policy', 'max_concurrent', 'post_run_actions', 'email_summary', 'task_type']) {
+      expect(patch[k]).toBeUndefined()
+    }
+    expect(regReplace).toHaveBeenCalledTimes(1)
+  })
+
+  test('enabled-only patch never renames the row', async () => {
+    const res = await call('PATCH', '/qc-1', { enabled: true })
+    expect(res.status).toBe(200)
+    const patch = (stubUpdate.mock.calls[0] as any[])[2]
+    expect(patch.name).toBeUndefined()
+    expect(patch.name_prefix).toBeUndefined()
+    expect(patch.name_suffix).toBeUndefined()
+    expect(patch.enabled).toBe(true)
+    expect(regReplace).toHaveBeenCalledTimes(1)
+  })
+
+  for (const [key, value] of LOCKED_DIFFERING) {
+    test(`locked key ${key} with a differing value is 400 task_qc_field_immutable`, async () => {
+      const res = await call('PATCH', '/qc-1', { [key]: value })
+      // schedule_rules may fail generic body/rule validation before the guard
+      // only if the guard ran after it; the guard must run first.
+      expect(res.status).toBe(400)
+      const body = await res.json()
+      expect(body.error).toBe('task_qc_field_immutable')
+      expect(body.fields).toContain(key)
+      expect(stubUpdate).not.toHaveBeenCalled()
+      expect(regReplace).not.toHaveBeenCalled()
+    })
+  }
+
+  test('several offending keys are all named', async () => {
+    const res = await call('PATCH', '/qc-1', { payload: { a: 1 }, prompt: 'x', enabled: false })
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.fields.sort()).toEqual(['payload', 'prompt'])
+    expect(stubUpdate).not.toHaveBeenCalled()
+  })
+
+  test('locked keys equal to the stored values are ignored and the request succeeds', async () => {
+    const res = await call('PATCH', '/qc-1', {
+      name: QC_TASK.name,
+      name_suffix: QC_TASK.name_suffix,
+      task_type: 'task_qc',
+      target_kind: 'all_supervisors',
+      target_id: null,
+      payload: { depth: 2, prompt: 'audit' },
+      prompt: 'audit',
+      email_summary: false,
+      post_run_actions: [],
+      schedule_kind: 'cron',
+      run_at: null,
+      catchup_policy: 'skip',
+      max_concurrent: 1,
+      teab_repo_ident: null,
+      enabled: false,
+    })
+    expect(res.status).toBe(200)
+    const patch = (stubUpdate.mock.calls[0] as any[])[2]
+    expect(Object.keys(patch).filter((k) => patch[k] !== undefined)).toEqual(['enabled'])
+  })
+
+  test('faster-than-hourly cron is 400 task_qc_cadence_invalid / faster_than_hourly', async () => {
+    const res = await call('PATCH', '/qc-1', { cron_expr: '*/5 * * * *' })
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toBe('task_qc_cadence_invalid')
+    expect(body.reason).toBe('faster_than_hourly')
+    expect(stubUpdate).not.toHaveBeenCalled()
+  })
+
+  test('invalid cron is 400 task_qc_cadence_invalid / invalid_cron', async () => {
+    const res = await call('PATCH', '/qc-1', { cron_expr: 'not a cron' })
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toBe('task_qc_cadence_invalid')
+    expect(body.reason).toBe('invalid_cron')
+    expect(stubUpdate).not.toHaveBeenCalled()
+  })
+
+  test('invalid timezone is 400 task_qc_cadence_invalid / invalid_timezone', async () => {
+    const res = await call('PATCH', '/qc-1', { timezone: 'Mars/Olympus' })
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toBe('task_qc_cadence_invalid')
+    expect(body.reason).toBe('invalid_timezone')
+    expect(stubUpdate).not.toHaveBeenCalled()
+  })
+
+  test('a valid daily cron passes', async () => {
+    const res = await call('PATCH', '/qc-1', { cron_expr: '30 3 * * *' })
+    expect(res.status).toBe(200)
+    expect(((stubUpdate.mock.calls[0] as any[])[2]).cron_expr).toBe('30 3 * * *')
+  })
+
+  test('non-task_qc rows keep the generic PATCH behavior (rename recompute, free fields)', async () => {
+    const res = await call('PATCH', '/dev-1', { payload: { prompt: 'new' }, cron_expr: '*/5 * * * *' })
+    expect(res.status).toBe(200)
+    const patch = (stubUpdate.mock.calls[0] as any[])[2]
+    expect(patch.prompt).toBe('new')
+    expect(patch.cron_expr).toBe('*/5 * * * *')
+    expect(patch.name).toBeDefined()
+  })
+})
