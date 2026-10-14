@@ -68,9 +68,10 @@
    squash-merges green PRs.
 6. **Make the agent credential non-admin.** The supervisor host's git/gh identity must have **write**,
    not maintain or admin, on that repo only. Verify with the collaborator permission endpoint
-   (`GET /repos/<owner>/<repo>/collaborators/<login>/permission`) and pass `--agent-login <login>` so
-   the dry run records it. If you omit it, arm records `agent_permission = unverified` with a warning:
-   the hub cannot read the agent credential, so this check is then the only control.
+   (`GET /repos/<owner>/<repo>/collaborators/<login>/permission`) and pass `--agent-login <login>`.
+   `--agent-login` is REQUIRED: if it is omitted, or the App cannot read that login's collaborator
+   permission, the dry run and arm refuse with `agent_permission_unverified` (an admin agent identity
+   could rewrite the never-merge ruleset before the hub's next check).
 7. **Proof mode is hub-EXCLUSIVE: disable every other orchestrator task first.** The
    `REMO_ORCHESTRATOR_*` flags are hub-global, so any other enabled orchestrator task (yours or
    any other user's) would tick under them. `--dry-run`, arm and `--enable` all refuse with
@@ -96,7 +97,10 @@ a hosting provider.
    ```
 
    Optional: `--max-injects N --max-tokens N --max-wall-ms N` (digits only; otherwise
-   `REMO_PROOF_MAX_INJECTS` / `REMO_PROOF_MAX_TOKENS` / `REMO_PROOF_MAX_WALL_MS`, then the defaults)
+   `REMO_PROOF_MAX_INJECTS` / `REMO_PROOF_MAX_TOKENS` / `REMO_PROOF_MAX_WALL_MS`, then the defaults).
+   Hard ceilings, enforced by arm and by database CHECK constraints: injects <= 50, tokens <= 50,000,000,
+   wall <= 86,400,000 ms (24h); a larger value refuses `invalid_budget`. The repo ident is matched
+   case-insensitively and stored lowercase (`github://owner/repo`)
    and `--every N --unit minutes|hours`. Read the printed summary: default branch, base sha, protection
    shape, ruleset ids and digest prefix, required contexts, allowlist, bypass verification, agent
    permission.
@@ -116,6 +120,7 @@ a hosting provider.
    | `proof_protection_unverifiable` | ruleset unreadable or ambiguous, including `bypass_actors_not_visible` | section 3 item 3 |
    | `proof_protection_insufficient` | ruleset is not an accepted shape, or has a bypass actor | fix the ruleset, section 3 item 5 |
    | `agent_credential_is_admin` | the agent login is a repo admin and could edit the ruleset | section 3 item 6 |
+   | `agent_permission_unverified` | `--agent-login` missing, or the App cannot read that login's permission | pass `--agent-login`, section 3 item 6 |
    | `other_repo_allowlisted` | the autospawn allowlist holds another repo | empty it or target that repo |
    | `other_orchestrator_task_enabled` | another orchestrator task (any user) is enabled; proof mode is hub-exclusive | disable it, section 3 item 7 |
    | `proof_already_active` | an armed or running proof already exists for this user | disarm it first |
@@ -190,6 +195,12 @@ let the ordinary dev macro run unguarded on that repo. Stop the driver first, th
   parse a PR url). The proof reads GitHub directly; the PR url in `GET /api/orchestrator/proof`
   comes from that read.
 - The `term.input` automation producer is deferred (D-01).
+- Token-budget attribution: a `usage_event` the hub received but could not persist marks the session
+  in hub process memory, and the proof then ends `terminated:budget_attribution_lost` (fail closed)
+  instead of trusting an under-counted sum. A hub restart forgets the mark, and a usage event that
+  never reaches the hub at all is not observable.
+- PR scope: any PR created after arming from a head not under `proof/`, and a run-branch PR whose head
+  repository is not the armed repo (a fork), ends `terminated:pr_scope_violation`.
 
 ## 7. Owner decisions in this runbook, and only these
 

@@ -1723,6 +1723,19 @@ DO $$ BEGIN
   ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_injects_check
     CHECK (max_injects > 0);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- QC r1 (adversary MINOR 6): ceilings mirror proof-arm.ts; NOT VALID = never fails the boot on an existing row.
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_injects_ceiling
+    CHECK (max_injects <= 50) NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_tokens_ceiling
+    CHECK (max_tokens <= 50000000) NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_wall_ms_ceiling
+    CHECK (max_wall_ms <= 86400000) NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_tokens_check
     CHECK (max_tokens > 0);

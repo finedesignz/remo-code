@@ -24,6 +24,7 @@ export type ArmRefusalCode =
   | 'proof_protection_unverifiable'
   | 'proof_protection_insufficient'
   | 'agent_credential_is_admin'
+  | 'agent_permission_unverified'
   | 'other_repo_allowlisted'
   | 'other_orchestrator_task_enabled'
   | 'proof_already_active';
@@ -31,6 +32,12 @@ export type ArmRefusalCode =
 export const DEFAULT_MAX_INJECTS = 6;
 export const DEFAULT_MAX_TOKENS = 3_000_000;
 export const DEFAULT_MAX_WALL_MS = 21_600_000;
+// QC r1 (adversary MINOR 6): the "hard" budget is owner-supplied, so it needs an upper bound or
+// `--max-tokens 9e15` makes it meaningless. Ceilings: tokens = the global daily token cap default
+// (50M), wall = 24h, injects = 50. Mirrored by CHECK constraints in schema.sql.
+export const MAX_INJECTS_CEILING = 50;
+export const MAX_TOKENS_CEILING = 50_000_000;
+export const MAX_WALL_MS_CEILING = 86_400_000;
 export const DEFAULT_EVERY = 30;
 export const DEFAULT_UNIT = 'minutes';
 
@@ -141,6 +148,12 @@ export async function armProof(rawArgs: ArmProofArgs, deps: ProofArmDeps): Promi
     const bad = [maxInjects === null && 'max injects', maxTokens === null && 'max tokens', maxWallMs === null && 'max wall ms'].filter(Boolean);
     return refuse('invalid_budget', `${bad.join(', ')} must be a positive integer (digits only); no default is applied to garbage`);
   }
+  if (maxInjects > MAX_INJECTS_CEILING || maxTokens > MAX_TOKENS_CEILING || maxWallMs > MAX_WALL_MS_CEILING) {
+    return refuse(
+      'invalid_budget',
+      `budget above the ceiling (max injects <= ${MAX_INJECTS_CEILING}, max tokens <= ${MAX_TOKENS_CEILING}, max wall ms <= ${MAX_WALL_MS_CEILING})`,
+    );
+  }
   const every = parsePositiveInt(args.every);
   const unit = args.unit ?? DEFAULT_UNIT;
   if (every === null || (unit !== 'minutes' && unit !== 'hours')) {
@@ -207,13 +220,16 @@ export async function armProof(rawArgs: ArmProofArgs, deps: ProofArmDeps): Promi
   // 9. The agent credential must not be able to edit the ruleset (unreadable = recorded, loudly).
   const admin = await assertAgentNotAdmin(github, target, args.agentLogin);
   if (!admin.ok) return refuse(admin.reason, `agent login '${args.agentLogin}' is a repository admin and could edit or delete the ruleset`);
-  const warnings: string[] = [];
-  const agentPermission: 'verified' | 'unverified' = admin.verified ? 'verified' : 'unverified';
+  // QC r1 (adversary MINOR 3): an admin agent identity can edit the ruleset and merge in one turn,
+  // and the hub only notices at the NEXT dispatch. Unproven = refuse (fail closed), never a warning.
   if (!admin.verified) {
-    warnings.push(
-      `WARNING: arm_preconditions.agent_permission = unverified (${admin.detail}). The hub could not prove the agent credential is not an admin; the runbook check is the control.`,
+    return refuse(
+      'agent_permission_unverified',
+      `the hub could not prove the agent login is not a repository admin (${admin.detail}); pass --agent-login <the GitHub login the agent pushes as> and make sure the App can read its collaborator permission`,
     );
   }
+  const warnings: string[] = [];
+  const agentPermission: 'verified' = 'verified';
 
   // 10. Exactly-one allowlist invariant (re-checked authoritatively inside the arm transaction).
   const allowlist = await deps.listAllowlist(args.userId);
