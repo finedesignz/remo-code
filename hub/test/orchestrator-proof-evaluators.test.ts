@@ -80,7 +80,7 @@ function input(over: Partial<ProofGuardInput> = {}): ProofGuardInput {
   return { userId: 'u1', sessionId: 's1', taskId: 't1', repoIdent: 'github://acme/proof', repoKey: 'github://acme/proof', sentinels: null, runLive: false, ...over }
 }
 
-function mkDeps(fake: FakeProofGithub, st: { halted?: boolean; haltThrows?: boolean; injects?: number; tokens?: number; sessionExists?: boolean } = {}) {
+function mkDeps(fake: FakeProofGithub, st: { halted?: boolean; haltThrows?: boolean; injects?: number; tokens?: number; sessionExists?: boolean; attributionLost?: boolean } = {}) {
   const rec = { observed: [] as any[] }
   const state = { halted: false, haltThrows: false, injects: 0, tokens: 0, sessionExists: true, ...st }
   const deps: ProofEvaluatorDeps = {
@@ -93,7 +93,7 @@ function mkDeps(fake: FakeProofGithub, st: { halted?: boolean; haltThrows?: bool
       rec.observed.push([id, patch])
     },
     countInjects: async () => state.injects,
-    sumTokens: async () => ({ tokens: state.tokens, sessionExists: state.sessionExists }),
+    sumTokens: async () => ({ tokens: state.tokens, sessionExists: state.sessionExists, ...(state.attributionLost ? { attributionLost: true } : {}) }),
   }
   return { deps, rec, state }
 }
@@ -309,6 +309,12 @@ describe('budget (tick-side)', () => {
   test('session row gone -> terminated:budget_attribution_lost', async () => {
     const fake = fakeGh()
     const v = await chain(mkDeps(fake, { sessionExists: false }).deps, await armedRun(fake), input())
+    expect(v).toMatchObject({ kind: 'terminal', outcome: 'terminated:budget_attribution_lost' })
+  })
+
+  test('live session but a usage persist failed -> terminated:budget_attribution_lost (codex #4)', async () => {
+    const fake = fakeGh()
+    const v = await chain(mkDeps(fake, { attributionLost: true }).deps, await armedRun(fake), input())
     expect(v).toMatchObject({ kind: 'terminal', outcome: 'terminated:budget_attribution_lost' })
   })
 
