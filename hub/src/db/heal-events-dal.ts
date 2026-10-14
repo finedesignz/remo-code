@@ -217,7 +217,7 @@ export async function countRepoDispatchesLastHour(
   const rows = await exec`
     SELECT count(*)::text AS n FROM heal_events
     WHERE user_id = ${userId} AND repo_ident = ${repoIdent}
-      AND outcome IN ('dispatched_live', 'autospawn_launched', 'autospawn_parked')
+      AND outcome IN ('dispatched_live', 'dispatched_after_spawn', 'autospawn_launched', 'autospawn_parked')
       AND created_at > ${since}
   `
   return Number(rows[0]?.n ?? 0)
@@ -246,7 +246,7 @@ export async function listStaleLaunchingHealEvents(
   const cutoff = new Date(nowMs - olderThanMs)
   const rows = await exec`
     SELECT * FROM heal_events
-    WHERE outcome = 'autospawn_launched' AND updated_at < ${cutoff}
+    WHERE outcome IN ('autospawn_launched', 'autospawn_parked') AND updated_at < ${cutoff}
     ORDER BY updated_at
     LIMIT 50
   `

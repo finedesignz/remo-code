@@ -173,6 +173,7 @@ describe('counts', () => {
     expect(calls[0].text).toContain('dispatched_live')
     expect(calls[0].text).toContain('autospawn_launched')
     expect(calls[0].text).toContain('autospawn_parked')
+    expect(calls[0].text).toContain('dispatched_after_spawn')
   })
   test('countTaskClaimsToday uses the task: prefix', async () => {
     const { exec, calls } = fake(() => [{ n: '2' }])
@@ -208,7 +209,7 @@ describe('listStaleLaunchingHealEvents', () => {
     const { exec, calls } = fake(() => [{ id: 'a' }])
     const rows = await listStaleLaunchingHealEvents(60_000, exec, 10_000_000)
     expect(rows).toHaveLength(1)
-    expect(calls[0].text).toContain("outcome = 'autospawn_launched'")
+    expect(calls[0].text).toContain("outcome IN ('autospawn_launched', 'autospawn_parked')")
     expect(calls[0].text).toMatch(/LIMIT 50/)
   })
 })

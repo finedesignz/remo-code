@@ -66,6 +66,7 @@ import { startAskReaperSweep, stopAskReaperSweep } from './ask/reaper.ts'
 import { startWorkReaperSweep, stopWorkReaperSweep } from './work/reaper.ts'
 import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
 import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.ts'
+import { healUnifiedEnabled } from './heal/config.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
 import { assertAutomationControlsEnv, assertAutomationControlsTables } from './dispatch/automation-controls.ts'
 import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
@@ -812,6 +813,14 @@ runMigrations()
     // latency-optimization is lost (restart / thrown fire / swallowed register).
     // claimOnceTask keeps it exactly-once. No-op when REMO_ONCE_SWEEP_DISABLED.
     startOnceDueSweep()
+    // PTYCAP-07-06 — boot-time sweep: terminalizes heal autospawn launches stranded by a
+    // restart (the spawn-deadline timer is process-local) so the 6h reaper is never their
+    // backstop. Event-driven (once, no interval); flag-OFF boot loads nothing of it.
+    if (healUnifiedEnabled()) {
+      void import('./heal/sweep.ts')
+        .then((m) => m.sweepStaleHealLaunches())
+        .catch((err) => console.error('[startup] heal boot sweep failed:', err?.message ?? err))
+    }
     console.log('[startup] reset sessions/messages/runs; scheduler ready')
   })
   .catch((err) => {
