@@ -175,6 +175,9 @@ function appliedBlock(a: TaskQcResult['applied'][number], n: number): Block {
     ? `rollback SQL: ${a.rollbackSql}`
     : `rollback SQL (non-ASCII or oversized data) not shown: read rollback_sql from task_qc_findings for task ${safeText(a.taskId, 64)}`
   const lines = [`before: ${safeText(JSON.stringify(a.before), 300)}`, `after: ${safeText(JSON.stringify(a.after), 300)}`, rollback]
+  // The writer changes the stored column only; the in-memory cron job reads its timezone when it is
+  // armed, so an invalid-timezone job stays unarmed until the next hub boot or a task edit re-arms it.
+  if (a.fix === 'normalize_timezone') lines.push('note: the stored timezone is corrected; the job is re-armed at the next hub restart or when the task is next edited')
   return {
     text: [`  ${head}`, ...lines.map((l) => `     ${l}`)].join('\n'),
     html: `<h3>${esc(head)}</h3><ul>${lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul>`,

@@ -118,6 +118,13 @@ describe('digest content (TQC-05, SC4)', () => {
     expect(d.html).toContain('Applied automatically')
   })
 
+  test('an applied normalize_timezone says the job is re-armed only at restart or next edit (no silent no-op)', () => {
+    const f = finding({ detector: 'MISCONFIGURED', severity: 'warn', evidence: { reason: 'timezone_invalid' }, proposal: { kind: 'fix_timezone', params: { taskId: ID } }, fixCandidate: 'normalize_timezone' })
+    const mk = (fix: any) => result({ findings: [f], applied: [{ finding: f, fix, taskId: ID, before: {}, after: {}, rollbackSql: 'UPDATE x' }] })
+    expect(buildDigest(mk('normalize_timezone'), {}).text).toMatch(/re-armed at the next hub restart/)
+    expect(buildDigest(mk('rebind_dead_session'), {}).text).not.toMatch(/re-armed/)
+  })
+
   test('truncated passes are flagged in the summary', () => {
     const d = buildDigest(result({ findings: [finding()], truncated: true }), {})
     expect(d.text).toMatch(/truncated/i)
