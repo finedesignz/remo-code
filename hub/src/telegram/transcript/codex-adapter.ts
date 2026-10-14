@@ -52,7 +52,7 @@ export function codexSessionsRoot(): string {
  * matches the id, it does NOT pick the newest file. Bounded: reads only the
  * first line of each candidate (where session_meta lives).
  */
-export function resolveCodexRolloutByMetaId(rolloutId: string, root = codexSessionsRoot()): string | null {
+export function resolveCodexRolloutByMetaId(rolloutId: string, root: string = codexSessionsRoot()): string | null {
   if (!rolloutId || !existsSync(root)) return null
   // Walk YYYY/MM/DD; match a rollout-*.jsonl whose first session_meta id matches.
   const stack: string[] = [root]
@@ -97,7 +97,10 @@ export class CodexTranscriptAdapter implements TranscriptSource {
     if (ctx.transcriptPath && ctx.transcriptPath.trim().length > 0 && existsSync(ctx.transcriptPath)) {
       path = ctx.transcriptPath
     } else if (ctx.codexRolloutId) {
-      path = resolveCodexRolloutByMetaId(ctx.codexRolloutId)
+      path = resolveCodexRolloutByMetaId(
+        ctx.codexRolloutId,
+        ctx.codexSessionsRoot === undefined ? codexSessionsRoot() : ctx.codexSessionsRoot,
+      )
     }
 
     if (!path || !existsSync(path)) {

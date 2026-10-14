@@ -111,18 +111,20 @@ turn-end signal. To keep interactive typing from wedging:
 ## Human-only guard (Phase 20, ToS)
 
 Telegram inbound dispatch carries a `source` tag and passes the Phase-16
-**human-only PTY guard** (`humanOnlyPtyGate`): a genuine human Telegram message
+**governed-automation PTY guard** (`governedAutomationPtyGate`, formerly humanOnlyPtyGate; flag REMO_GOVERNED_AUTOMATION_PTY, default OFF; external-ask/external-work are never PTY-eligible): a genuine human Telegram message
 may drive a `pty-interactive` session; an automation-tagged Telegram-origin
 dispatch (auto-nudge / scheduled / orchestrator-background / error-capture) is
 **rejected** before any PTY injection — "a robot pressing enter via the
 interactive entrypoint" is the ban-risk move. The guard composes WITH (never
-replaces) the non-bypassable daily-cost-cap gate.
+replaces) the non-bypassable daily-cost-cap gate. The dispatch `source` is a REQUIRED
+parameter with no default; the authenticated webhook passes `'human'` explicitly, and a missing
+source fails closed on a `pty-interactive` session.
 
 ---
 
 Inbound messages route through the **shared session-dispatch pipeline**
 (`hub/src/dispatch/`) — the same gate ordering (threshold → daily-cost-cap →
-human-only-PTY), per-session queue, and offline-grace buffer the other subsystems
+governed-automation PTY guard), per-session queue, and offline-grace buffer the other subsystems
 use — with `store: null` (Telegram writes no run row). A single hub-wide bot
 serves every user, keyed by `users.telegram_chat_id`.
 One BotFather bot, one Telegram webhook secret, one redeploy.

@@ -10,7 +10,7 @@
  *
  * The ACTOR is SERVER-INFERRED: an api-key-authenticated request is automation
  * (`external-ask`), never a client-asserted field. Nothing in the request body can
- * make it a `human`, so `humanOnlyPtyGate` can never be talked out of rejecting a
+ * make it a `human`, so `governedAutomationPtyGate` can never be talked out of rejecting a
  * pty-interactive target.
  */
 import type { Context, Next } from 'hono'
@@ -26,7 +26,7 @@ export const EXT_ACTOR = 'external-ask'
 
 /**
  * Milestone WORK. The actor for an inbound-email work item — SERVER-INFERRED from
- * the api_key + the route, never a client-assertable body field. `humanOnlyPtyGate`
+ * the api_key + the route, never a client-assertable body field. `governedAutomationPtyGate`
  * therefore can never be talked into letting an email drive a human's PTY.
  */
 export const EXT_WORK_ACTOR = 'external-work'

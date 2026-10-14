@@ -399,7 +399,7 @@ THIN adapter that reconstructs the input from `work_runs` + `payload` and calls 
   route, so a forbidden repo/site/sender still `403`s with ZERO rows and ZERO
   spend — a one-time task can never reach a repo the allowlist forbids. At RUN
   time, `dispatchWork`'s own non-negotiable gate list (`dailyCostCapGate` ·
-  `dailyTokenCapGate` · `humanOnlyPtyGate` · `workRateGate` ·
+  `dailyTokenCapGate` · `governedAutomationPtyGate` (formerly humanOnlyPtyGate; flag REMO_GOVERNED_AUTOMATION_PTY, default OFF; external-ask/external-work are never PTY-eligible) · `workRateGate` ·
   `workRepoAllowlistGate`) runs again. **No scheduling path reaches a repo/site
   that direct dispatch couldn't.** Proven by `test/ext-work-containment.test.ts`
   (b) + `test/ext-work-gates.test.ts` + `test/once-work-sender.test.ts`.

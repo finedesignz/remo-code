@@ -30,7 +30,7 @@
 
 - [ ] **Phase 1: PTY Token Accounting** — live, mid-turn token accounting for a PTY turn (post-hoc is too late; a TUI turn can run for many minutes).
 - [x] **Phase 2: PTY Pre-Flight Gate** — a programmatic turn cannot be written to the PTY without passing the full gate chain.
-- [ ] **Phase 3: Governed-Automation Guard** — `humanOnlyPtyGate` → `governedAutomationPtyGate`, new flag, default OFF.
+- [x] **Phase 3: Governed-Automation Guard** — `humanOnlyPtyGate` → `governedAutomationPtyGate`, new flag, default OFF.
 - [ ] **Phase 4: Lifetime Inject Counter + Kill Switch** — rate ceilings don't stop a slow grind; add a lifetime per-task counter and a real kill switch.
 - [ ] **Phase 5: Throwaway-Repo Due→PR Proof** — prove the thing actually works, once, on a repo nobody cares about.
 - [ ] **Phase 6: Hardening + Docs + Release** — real-Postgres e2e, docs, version bump, ship, smoke-verify.
@@ -114,6 +114,8 @@ ceiling (and the programmatic-credit halt).
   3. Alarm emails the owner at 60% of the daily token ceiling.
   4. Default daily token cap lowered from 50M to a survivable figure (~20M).
 
+**Hand-off from Phase 3**: Phase 4 replaces the fail-closed `kill_switch` and `lifetime_counter` governor bodies in `hub/src/dispatch/governed-pty.ts` (today they block `governor_not_implemented:<name>`). Entry criteria: an admitted automation PTY turn must be COUNTED (durable ledger) before the governed chain is trusted; Phase-3 governors are non-consuming checks -- atomic reserve-before-send consumption is Phase 4's design.
+
 ### Phase 5: Throwaway-Repo Due→PR Proof
 
 **Goal**: The orchestrator produces one reviewable PR, unattended, on a repo nobody cares about.
@@ -190,7 +192,7 @@ fix the CAUSE, and escalates to the human when it cannot.
 |-------|--------|
 | 1. PTY Token Accounting | In Progress|
 | 2. PTY Pre-Flight Gate | Done |
-| 3. Governed-Automation Guard | Not started |
+| 3. Governed-Automation Guard | Complete (4/4 plans) - PR #505 open |
 | 4. Lifetime Counter + Kill Switch | Not started |
 | 5. Throwaway-Repo Due→PR Proof | Not started |
 | 6. Hardening + Docs + Release | Not started |

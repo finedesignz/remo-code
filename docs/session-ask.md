@@ -24,12 +24,12 @@ Design spec: [`.planning/architecture/SESSION-ASK-API-SPEC.md`](../.planning/arc
   state) — never a resume of, or a keystroke into, the human's live conversation
   (which would fork the transcript and break the human-only guard).
 - **The actor is SERVER-INFERRED** from the api_key (`external-ask`, an automation
-  actor). Nothing in the request body can claim `human`. `humanOnlyPtyGate` therefore
+  actor). Nothing in the request body can claim `human`. `governedAutomationPtyGate` (formerly humanOnlyPtyGate; flag REMO_GOVERNED_AUTOMATION_PTY, default OFF; external-ask/external-work are never PTY-eligible) therefore
   **rejects** a pty-interactive target (`automation_blocked_on_pty:external-ask`) —
   it is never silently redirected. The redirect to a stream-json ask-session is an
   explicit *resolution* step that happens BEFORE dispatch.
 - **Every ask rides the shared, non-bypassable gate list**:
-  `thresholdGate → dailyCostCapGate → dailyTokenCapGate → humanOnlyPtyGate → askRateGate`.
+  `thresholdGate → dailyCostCapGate → dailyTokenCapGate → governedAutomationPtyGate → askRateGate`.
   `hub/test/token-cap-coverage.test.ts` hard-fails CI if the token cap is ever dropped.
 - **Reads are read-only, on the supervisor host, and byte-capped.** The hub never
   supplies a path — it supplies the session's `project_dir` and the supervisor derives
@@ -152,8 +152,8 @@ other ~35) is a follow-up; it ships in-repo so it versions with the API it wraps
   `502 unknown_command` (fail closed, nothing else regresses).
 - **Phase 4 (PTY-native ask) is deliberately NOT here.** Per the owner's mandatory
   ordering (`project_direction_pty_orchestrator_monetize`), it needs (1) a token gate on
-  the PTY path, (2) supervisor→hub transcript streaming, (3) `humanOnlyPtyGate` →
-  a governed-automation gate. Until all three exist, do not attempt it.
+  the PTY path, (2) supervisor→hub transcript streaming, (3) a governed-automation gate that could admit an
+  ask actor (`governedAutomationPtyGate`; formerly `humanOnlyPtyGate`, it never admits `external-ask` today). Until all three exist, do not attempt it.
 
 ## Tests
 

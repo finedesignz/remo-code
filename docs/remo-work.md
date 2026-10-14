@@ -38,7 +38,7 @@ the reassuring direction. The design below moves every gate into **code**.
 | **`published` in the DB** | `finalizeWork` | Written only by the hub's own publish path, and still ANDed with `work_runs.auto_publish` in SQL as a backstop. |
 | **Branch identity** | `finalizeWorkFromReply` | The branch name is HUB-CHOSEN (`work/<nonce>`). A reply naming any other branch ⇒ `needs_human` / `branch_mismatch`. |
 | **Spend ceilings** | `dailyCostCapGate` + `dailyTokenCapGate` + `workRateGate` | Non-bypassable daily cost + token caps; `REMO_WORK_MAX_PER_HOUR` (default 4). |
-| **No PTY** | `humanOnlyPtyGate`, actor server-inferred `external-work` | An email can never drive a human's interactive terminal. |
+| **No PTY** | `governedAutomationPtyGate` (formerly humanOnlyPtyGate; flag REMO_GOVERNED_AUTOMATION_PTY, default OFF; external-ask/external-work are never PTY-eligible), actor server-inferred `external-work` | An email can never drive a human's interactive terminal. |
 
 ### ADVISORY (prompt-level — mitigations, not proofs)
 
@@ -245,7 +245,7 @@ The daily cost cap and daily token cap are non-bypassable and are not work-speci
   add its credential to `DEPLOY_KEY_DENYLIST` / `DEPLOY_PATTERNS` in the same commit.
 - **Both allowlists default EMPTY; `auto_publish` defaults FALSE.**
 - **Gate list is non-negotiable:** `dailyCostCapGate` + `dailyTokenCapGate` (scanned by
-  `hub/test/token-cap-coverage.test.ts`) + `humanOnlyPtyGate` + `workRateGate` +
+  `hub/test/token-cap-coverage.test.ts`) + `governedAutomationPtyGate` + `workRateGate` +
   `workRepoAllowlistGate`.
 
 Proofs: `hub/test/ext-work-containment.test.ts` (entry containment + fence + nonce),

@@ -1,19 +1,21 @@
 ---
-gsd_state_version: 1.0
+gsd_state_version: "1.0"
 milestone: PTYCAP
 milestone_name: Milestone PTYCAP (Token-Gate the Interactive PTY Path)
-current_phase: 02
-current_phase_name: pty-preflight-gate
+current_phase: 04
+current_phase_name: lifetime-inject-counter-kill-switch
 status: executing
-last_updated: "2026-09-28T00:00:00.000Z"
+stopped_at: PTYCAP-03 complete (PR #505 open, verified SHIP-WITH-NOTES); PTYCAP-04 planning
+last_updated: "2026-10-13T18:00:00.000Z"
 last_activity: 2026-09-28
-last_activity_desc: BLEED milestone reconciled CLOSED (all four fixers verified shipped on main); milestone pointer advanced to PTYCAP; Phase 1 confirmed shipped (#395); Phase 2 execution started
+last_activity_desc: "BLEED milestone reconciled CLOSED (all four fixers verified shipped on main); milestone pointer advanced to PTYCAP; Phase 1 confirmed shipped (#395); Phase 2 execution started"
+state_head: a745ab9efb8e26c340e87a1f56cc55d3b2f35497
 progress:
   total_phases: 9
-  completed_phases: 1
-  total_plans: 4
-  completed_plans: 4
-  percent: 11
+  completed_phases: 3
+  total_plans: 9
+  completed_plans: 8
+  percent: 33
 ---
 
 > **BLEED milestone reconciled CLOSED 2026-09-28.** This file and `.planning/PROJECT.md` had
@@ -89,9 +91,9 @@ connection is the Tauri Supervisor MSI.
 
 ## Current position
 
-Phase: PTYCAP-02 (pty-preflight-gate) — EXECUTING
-Status: Executing Phase PTYCAP-02 (Phase 1, pty-token-accounting, shipped complete via #395)
-Last activity: 2026-09-28 — BLEED reconciled closed; PTYCAP-02 execution started
+Phase: PTYCAP-04 (lifetime-inject-counter-kill-switch) - PLANNING (stacked on PTYCAP-03 branch)
+Status: PTYCAP-03 complete: 4/4 plans, /qc PASS (Codex round-1 2 MINORs fixed, re-QC PASS), verifier SHIP-WITH-NOTES, PR #505 open (not merged)
+Last activity: 2026-10-13 - PTYCAP-03 closed out; PTYCAP-04 context/research locked, planning in progress on branch phase-ptycap-04-lifetime-counter-kill-switch
 
 ### OBSRV phase ledger (`.planning/phases/`)
 
@@ -144,3 +146,19 @@ reset 2026-05-29 to unblock owner login. `jamie@theleadingpractice.com` is NOT a
 | Date | Slug | Summary | Commits |
 |---|---|---|---|
 | 2026-09-27 | cloud-sessions | Chat with claude.ai cloud sessions: `claude -p --cloud` send + Stop-hook reply webhook | 4f9b35b..83abd55 |
+
+## Performance Metrics
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase PTYCAP-03 P01 | 25min | 3 tasks | 10 files |
+
+## Decisions
+
+- [Phase PTYCAP-03]: 03-01: governedAutomationPtyGate hard-renamed (no alias); flag REMO_GOVERNED_AUTOMATION_PTY default OFF is a proven no-op; kill_switch and lifetime_counter are fail-closed Phase-4 slots — Differential vs frozen legacy oracle; D-02/D-04/D-05/D-06
+
+## Session
+
+**Last session:** 2026-10-07T23:32:22.340Z
+**Stopped at:** Completed PTYCAP-03-01-PLAN.md
+**Resume file:** None

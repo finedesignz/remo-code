@@ -60,6 +60,13 @@ export interface TranscriptOpenCtx {
   transcriptPath?: string | null
   /** Codex `session_meta` id persisted at spawn. Optional — scrape-mode if absent. */
   codexRolloutId?: string | null
+  /**
+   * Override for the Codex sessions date-tree root the resolver scans
+   * (defaults to `~/.codex/sessions`). Test-only escape hatch so tests never
+   * scan the real home directory (avoids flaky timeouts under full-suite /
+   * loaded-host conditions scanning a large real tree).
+   */
+  codexSessionsRoot?: string
 }
 
 /** A final assistant turn (the bridge forwards this to Telegram). */

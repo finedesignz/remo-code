@@ -44,7 +44,8 @@ import {
   type DispatchRequest,
   type PipelineDeps,
 } from "../dispatch/pipeline.ts";
-import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, humanOnlyPtyGate } from "../dispatch/gates.ts";
+import { thresholdGate, dailyCostCapGate, dailyTokenCapGate } from "../dispatch/gates.ts";
+import { governedAutomationPtyGate } from "../dispatch/governed-pty.ts";
 import { getSessionRunnerType } from "../db/dal.ts";
 
 export type DispatchOutcome =
@@ -74,9 +75,11 @@ export interface DispatchInput {
   text: string;
   /** base64 data URIs, matches web-client `send_message` shape. */
   images?: string[];
-  /** Source actor (default 'human'). Automation sources are guard-rejected on a
-   *  pty-interactive session. */
-  source?: TelegramDispatchSource;
+  /** Source actor. REQUIRED and server-asserted by the caller at an authenticated
+   *  boundary: the Telegram webhook passes the literal 'human'. There is no
+   *  default -- a missing source is never treated as human (PTYCAP Phase 3,
+   *  D-09). Automation sources are guard-rejected on a pty-interactive session. */
+  source: TelegramDispatchSource;
 }
 
 /** Next UTC midnight as an ISO string — used for the throttle reply text. */
@@ -158,21 +161,22 @@ export async function dispatchToSession(input: DispatchInput): Promise<DispatchO
     );
   };
 
-  const source: TelegramDispatchSource = input.source ?? "human";
+  const source: TelegramDispatchSource = input.source;
 
-  // R-TG-11: the Phase-16 human-only guard. A pty-interactive session may be
-  // driven ONLY by a genuine human turn; an automation-sourced Telegram-origin
+  // R-TG-11: governedAutomationPtyGate (flag-gated; with the flag OFF it is the
+  // legacy Phase-16 human-only decision, byte-identical). A pty-interactive session
+  // may be driven ONLY by a genuine human turn; an automation-sourced Telegram-origin
   // dispatch is rejected before any PTY injection. The guard reads the SOURCE
   // actor (here, off the dispatch input — Telegram inbound is server-tagged) +
   // the target session's runner_type. Stream-json sessions are unaffected.
-  const guard = humanOnlyPtyGate(async () => ({
+  const guard = governedAutomationPtyGate(async () => ({
     actor: source,
     runnerType: await getSessionRunnerType(input.sessionId, input.userId),
   }));
 
   const deps: PipelineDeps = {
     // IR-1: cost-cap non-bypassable. IR-2: threshold first, then cost-cap.
-    // R-TG-11: human-only PTY guard composed WITH (never replacing) the cost cap.
+    // R-TG-11: governedAutomationPtyGate composed WITH (never replacing) the cost cap.
     gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, guard],
     // Telegram is user traffic — no run row.
     store: null,

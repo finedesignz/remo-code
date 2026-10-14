@@ -176,6 +176,15 @@ function isTokenCapExplicitlyDisabled(): boolean {
   return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase())
 }
 
+/**
+ * True when the daily token ceiling is in force (i.e. NOT explicitly disabled).
+ * Read at call time. The governed-automation token_cap governor (dispatch/governed-pty.ts)
+ * uses it for its "enabled" rule; the "over the limit" check stays with dailyTokenCapGate.
+ */
+export function isDailyTokenCapEnforced(): boolean {
+  return !isTokenCapExplicitlyDisabled()
+}
+
 /** Parse result for the configured cap. `invalid` ⇒ the value is unusable. */
 function parseDailyTokenCap(raw: string | undefined): { ok: boolean; cap: number } {
   if (raw == null || raw.trim() === '') return { ok: true, cap: DEFAULT_DAILY_TOKEN_CAP }
@@ -286,6 +295,20 @@ export function maxInjectsPerHour(): number {
   if (raw == null || raw.trim() === '') return DEFAULT_MAX_INJECTS_PER_HOUR
   const n = Number(raw)
   return Number.isFinite(n) ? n : DEFAULT_MAX_INJECTS_PER_HOUR
+}
+
+/**
+ * True when the inject-rate ceiling is validly configured: unset/blank (the
+ * default applies) or a finite value > 0. A garbage / NaN / Infinity / <= 0
+ * value is INVALID. `maxInjectsPerHour()` quietly coerces non-finite input to
+ * the default, so the governed-PTY governor (PTYCAP Phase 3) uses this to see
+ * the raw validity; the legacy `sessionInjectRateGate` does not call it.
+ */
+export function isInjectRateConfigured(): boolean {
+  const raw = process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR
+  if (raw == null || raw.trim() === '') return true
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0
 }
 
 /**
@@ -442,8 +465,10 @@ export function isOverAutospawnDailyLaunchCap(launchesToday: number): boolean {
  * The SHARED chokepoint that rejects AUTOMATION sources from ever driving a
  * `pty-interactive` session — the flagged "robot pressing enter via the
  * interactive entrypoint" / ToS-risk move. It is composed into BOTH:
- *   (a) the dispatch pipeline (this DispatchGate form), and
- *   (b) the raw `term.input` relay ingress (the `rejectsActor` helper below),
+ *   (a) the dispatch pipeline (the DispatchGate form now lives in
+ *       dispatch/governed-pty.ts as `governedAutomationPtyGate`, PTYCAP Phase 3;
+ *       `humanOnlyRejectsActor` below remains the shared legacy decision), and
+ *   (b) the raw `term.input` relay ingress (the `humanOnlyRejectsActor` predicate),
  * so there is NO second, ungated write route into a PTY session.
  *
  * The ACTOR is SERVER-INFERRED from the connection, never a client-asserted
@@ -454,6 +479,10 @@ export function isOverAutospawnDailyLaunchCap(launchesToday: number): boolean {
  *
  * It composes WITH (never replaces) `dailyCostCapGate` — the PTY path introduces
  * no uncapped dispatch route.
+ *
+ * AUTOMATION_ACTORS is now also consulted by the eligible-actor rule in
+ * dispatch/governed-pty.ts (PTYCAP Phase 3, D-06): only these actors can ever be
+ * admitted under the governed-automation flag.
  */
 export const AUTOMATION_ACTORS: ReadonlySet<string> = new Set([
   'scheduler',
@@ -470,33 +499,6 @@ export const AUTOMATION_ACTORS: ReadonlySet<string> = new Set([
 export function humanOnlyRejectsActor(actor: string, runnerType: string): boolean {
   if (runnerType !== 'pty-interactive') return false
   return actor !== 'human' // any non-human actor (incl. all AUTOMATION_ACTORS) is rejected
-}
-
-/**
- * DispatchGate form for the pipeline. Reads the dispatch source + the target
- * session's runner_type. A pty-interactive session driven by an automation
- * source is blocked with `automation_blocked_on_pty:<actor>`. Stream-json
- * sessions are unaffected (still cost-capped by dailyCostCapGate).
- *
- * The source + runner_type are read off the DispatchRequest (the dispatch
- * context already carries the source; runner_type is resolved via the DAL). To
- * keep `DispatchRequest` unchanged we accept them on an optional augmentation
- * the caller threads through — the pipeline composes this gate only for PTY-
- * capable dispatches.
- */
-export function humanOnlyPtyGate(
-  resolveActorAndRunnerType: (req: DispatchRequest) => Promise<{ actor: string; runnerType: string }>,
-): DispatchGate {
-  return {
-    name: 'human_only_pty',
-    async check(req: DispatchRequest) {
-      const { actor, runnerType } = await resolveActorAndRunnerType(req)
-      if (humanOnlyRejectsActor(actor, runnerType)) {
-        return { ok: false, reason: `automation_blocked_on_pty:${actor}` }
-      }
-      return { ok: true }
-    },
-  }
 }
 
 /**
