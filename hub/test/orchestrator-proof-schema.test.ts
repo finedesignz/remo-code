@@ -32,6 +32,9 @@ describe('orchestrator_proof_runs DDL', () => {
       expect(stmt).toContain('EXCEPTION WHEN duplicate_object THEN NULL')
     }
     expect(block).toContain("CHECK (status IN ('armed','running','succeeded','nothing','terminated','disarmed'))")
+    // codex #6: the repo identity is stored canonical (lowercase), so the plain unique index over
+    // repo_ident IS the single-flight over the canonical value.
+    expect(block).toContain('CHECK (repo_ident = lower(repo_ident))')
     expect(block).toContain('CHECK (max_injects > 0)')
     expect(block).toContain('CHECK (max_tokens > 0)')
     expect(block).toContain('CHECK (max_wall_ms > 0)')
