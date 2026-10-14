@@ -26,7 +26,7 @@ type GateResult = { ok: true } | { ok: false; reason: string };
 export interface ProofGateDeps {
   findRun(args: { requestKey?: string | null; sessionId: string }): Promise<ProofRun | null>;
   countInjects(key: string, since: Date | string): Promise<number>;
-  sumTokens(sessionId: string, since: Date | string): Promise<{ tokens: number; sessionExists: boolean }>;
+  sumTokens(sessionId: string, since: Date | string): Promise<{ tokens: number; sessionExists: boolean; attributionLost?: boolean }>;
   /** Monotone tokens_hwm write (best-effort, errors swallowed by the gate). */
   recordTokens(runId: string, tokens: number): Promise<unknown>;
   githubFor(run: ProofRun): ProofGithub;
@@ -134,7 +134,7 @@ export function makeProofBudgetGate(deps?: ProofGateDeps): DispatchGate {
         }
 
         const sum = await d.sumTokens(run.session_id, since);
-        if (!sum.sessionExists) return { ok: false, reason: 'proof_budget_attribution_lost' };
+        if (!sum.sessionExists || sum.attributionLost) return { ok: false, reason: 'proof_budget_attribution_lost' };
         const hwm = Number(run.tokens_hwm);
         const tokens = Math.max(hwm, sum.tokens);
         if (tokens > hwm) await d.recordTokens(run.id, tokens).catch(() => undefined);

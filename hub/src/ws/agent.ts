@@ -835,6 +835,15 @@ export async function handleAgentMessage(ws: ServerWebSocket<AgentWsData>, raw: 
       })
     } catch (err: any) {
       console.error('[agent] usage_event handler failed', err?.message)
+      // PTYCAP-05 (codex #4): an unrecorded turn under-counts every token budget. Record the loss
+      // so a proof run fails closed (budget_attribution_lost) instead of trusting the short sum.
+      try {
+        const { markUsageAttributionLost } = await import('../usage/attribution-loss.ts')
+        markUsageAttributionLost(ws.data.sessionId)
+        markUsageAttributionLost((msg as { session_id?: string }).session_id)
+      } catch {
+        /* the mark is in-process memory; nothing here can fail meaningfully */
+      }
     }
     return
   }

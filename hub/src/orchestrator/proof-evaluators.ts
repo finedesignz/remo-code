@@ -32,7 +32,7 @@ export interface ProofEvaluatorDeps {
     patch: { pr_url?: string | null; pr_number?: number | null; last_ci_state?: string | null; tokens?: number | null },
   ): Promise<unknown>;
   countInjects(key: string, since: Date | string): Promise<number>;
-  sumTokens(sessionId: string, since: Date | string): Promise<{ tokens: number; sessionExists: boolean }>;
+  sumTokens(sessionId: string, since: Date | string): Promise<{ tokens: number; sessionExists: boolean; attributionLost?: boolean }>;
   /** Default: verifyProof. Injectable for tests. */
   verify?(github: ProofGithub, run: ProofRun): Promise<ProofObservation>;
   /** Default: reassertProtection. Injectable for tests. */
@@ -158,8 +158,12 @@ export function defaultProofEvaluators(deps: ProofEvaluatorDeps): ProofEvaluator
 
     const injects = await deps.countInjects(run.counter_key, since);
     const sum = await deps.sumTokens(run.session_id, since);
-    if (!sum.sessionExists) {
-      return { kind: 'terminal', outcome: 'terminated:budget_attribution_lost', detail: 'session row missing; token spend cannot be attributed' };
+    if (!sum.sessionExists || sum.attributionLost) {
+      return {
+        kind: 'terminal',
+        outcome: 'terminated:budget_attribution_lost',
+        detail: sum.sessionExists ? 'a usage_event failed to persist; token spend is under-counted' : 'session row missing; token spend cannot be attributed',
+      };
     }
     const hwm = Number(run.tokens_hwm);
     const tokens = Math.max(hwm, sum.tokens);

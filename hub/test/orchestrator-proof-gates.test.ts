@@ -208,6 +208,13 @@ describe('proofBudgetGate (flag ON)', () => {
     expect(await g.check(req())).toEqual({ ok: false, reason: 'proof_budget_attribution_lost' })
   })
 
+  test('proof_budget_attribution_lost when a usage persist failed for a live session (codex #4)', async () => {
+    const g = makeProofBudgetGate(
+      deps({ sumTokens: async () => ({ tokens: 10, sessionExists: true, attributionLost: true }) }),
+    )
+    expect(await g.check(req())).toEqual({ ok: false, reason: 'proof_budget_attribution_lost' })
+  })
+
   test('first block wins: key, then wall, then injects, then tokens', async () => {
     const all = deps({
       now: () => T0 + 10 * 60_000,
