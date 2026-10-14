@@ -77,14 +77,21 @@ export function parseHealEvent(input: unknown): HealEvent {
   return { ...parsed, stored_content: parsed.stored_content ?? parsed.prompt } as HealEvent;
 }
 
+/**
+ * `notifyClaimed` (optional, set only by routeHeal's finalization): the heal path WON the owner
+ * notification claim for this event, whether or not the send succeeded. A caller that has its own
+ * notifier (the scheduler default failure email) suppresses it exactly when this is true, so the
+ * owner gets exactly one notification per heal event. `notified` (no_routable_session) is the
+ * narrower "the send succeeded" fact and is kept for existing readers.
+ */
 export type HealOutcome =
   | { kind: 'dispatched_live' }
   | { kind: 'autospawn_launched' }
   | { kind: 'autospawn_parked' }
-  | { kind: 'no_routable_session'; reason: string; notified: boolean }
+  | { kind: 'no_routable_session'; reason: string; notified: boolean; notifyClaimed?: boolean }
   | { kind: 'deduped' }
-  | { kind: 'refused'; reason: string }
-  | { kind: 'failed'; reason: string };
+  | { kind: 'refused'; reason: string; notifyClaimed?: boolean }
+  | { kind: 'failed'; reason: string; notifyClaimed?: boolean };
 
 /** Persisted vocabulary: dispatched_live, autospawn_launched, autospawn_parked, no_routable_session, deduped, refused:{r}, failed:{r}. */
 export function outcomeToString(o: HealOutcome): string {

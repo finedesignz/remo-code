@@ -33,7 +33,7 @@ import { resolveHealTarget, type HealTarget } from './resolve.ts';
 import { parseHealEvent, outcomeToString, type HealEvent, type HealOutcome } from './types.ts';
 import type { HealSink, HealTerminalOutcome, SinkFactory } from './sinks/types.ts';
 import type { ClaimHealArgs, ClaimHealResult, HealOutcomeExtra } from '../db/heal-events-dal.ts';
-import { notifyOnce, REAL_NOTIFY_DEPS, type NotifyDeps } from './notify.ts';
+import { notifyOnceDetailed, REAL_NOTIFY_DEPS, type NotifyDeps } from './notify.ts';
 
 export { REAL_AUTOSPAWN, type AutospawnDeps };
 
@@ -152,8 +152,11 @@ async function finalizeNonLive(
 ): Promise<HealOutcome> {
   await persist(deps, eventId, outcome, extra);
   await terminalize(sink, sinkOutcome ?? (outcome as HealTerminalOutcome));
-  const notified = await notifyOnce(eventId, event, outcomeReason(outcome), deps.notify ?? REAL_NOTIFY_DEPS);
-  return outcome.kind === 'no_routable_session' ? { ...outcome, notified } : outcome;
+  const n = await notifyOnceDetailed(eventId, event, outcomeReason(outcome), deps.notify ?? REAL_NOTIFY_DEPS);
+  // Ownership (claimed) is reported for EVERY non-live outcome, independent of delivery (sent).
+  if (outcome.kind === 'no_routable_session') return { ...outcome, notified: n.sent, notifyClaimed: n.claimed };
+  if (outcome.kind === 'refused' || outcome.kind === 'failed') return { ...outcome, notifyClaimed: n.claimed };
+  return outcome;
 }
 
 /** Heal-generated provenance of either run id. Throws on a probe error (caller fails closed). */
@@ -336,6 +339,16 @@ async function autospawnHeal(
   // Launched (or already in flight): the ledger outcome first so a crash is recoverable by the
   // boot sweep, then ONE deadline timer, then park through the single pipeline.
   await persist(deps, eventId, { kind }, extra);
+  if (event.source === 'scheduled_task') {
+    // The scheduler's default failure email goes out NOW (the heal returns un-claimed). Take the
+    // notification claim on its behalf, with no send, so a later spawn_timeout / grace_expired /
+    // boot-sweep notice for this same event loses the claim: one owner notification per event.
+    try {
+      await (deps.notify ?? REAL_NOTIFY_DEPS).claim(eventId);
+    } catch (err) {
+      log(`scheduler notification slot claim failed id=${eventId}: ${errMsg(err)}`);
+    }
+  }
   timer = a.setTimer(() => void expire('spawn_timeout', 'heal_spawn_timeout'), healSpawnTimeoutMs());
   let result: DispatchOutcome;
   try {

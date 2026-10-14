@@ -128,12 +128,12 @@ describe('error-capture sink', () => {
     expect(state.broadcasts[1]).toMatchObject({ type: 'error_run_finished', run_id: id, status: 'success' })
   })
 
-  test('markSkipped(session_busy) keeps the throttled notification and a later finalizeTerminal writes nothing', async () => {
+  test('markSkipped(session_busy) sends NO legacy notification (routeHeal owns it) and a later finalizeTerminal writes nothing', async () => {
     const { sink } = await ecSink()
     await sink.markSkipped('heal:ev1', 'session_busy')
     await sink.finalizeTerminal({ kind: 'refused', reason: 'session_busy' })
     expect(state.dispatchStatus).toEqual([['err-1', 'skipped', 'session_busy']])
-    expect(state.notified).toEqual(['dispatch_failed'])
+    expect(state.notified).toEqual([]) // QC r1 (codex #4): the unified sink never runs the legacy notifier
     expect(state.broadcasts.filter((b) => b.type === 'error_skipped')).toHaveLength(1)
   })
 
@@ -160,6 +160,26 @@ describe('error-capture sink', () => {
     await sink.markFailed(id!, 'socket gone')
     await sink.finalizeTerminal({ kind: 'failed', reason: 'socket gone' })
     expect(state.dispatchStatus).toEqual([['err-1', 'failed', 'agent_send: socket gone']])
+  })
+
+  test('markFailed (send failure) sends NO legacy notification either (QC r1 codex #4)', async () => {
+    const { sink } = await ecSink()
+    const id = await sink.open!(REQ as any)
+    await sink.markFailed(id!, 'socket gone')
+    expect(state.notified).toEqual([])
+  })
+
+  test('the LEGACY store (flag OFF dispatcher, notify default) still sends both throttled notices; notify:false silences both', async () => {
+    const args = { errorId: 'err-1', project: PROJECT, sessionId: 's1', userId: 'u1', notifyCtx: { error_type: 'T', error_value: 'v' } }
+    const legacy = buildErrorCaptureRunStore(args)
+    await legacy.markSkipped('t', 'session_busy')
+    await legacy.markFailed('erun-x', 'boom')
+    expect(state.notified).toEqual(['dispatch_failed', 'dispatch_failed'])
+    state.notified.length = 0
+    const quiet = buildErrorCaptureRunStore({ ...args, notify: false })
+    await quiet.markSkipped('t', 'session_busy')
+    await quiet.markFailed('erun-x', 'boom')
+    expect(state.notified).toEqual([])
   })
 
   test('onParkExpire writes skipped target_offline_expired exactly as the legacy hook', async () => {

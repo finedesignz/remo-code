@@ -1,9 +1,9 @@
 // hub/src/heal/sinks/error-capture.ts
 //
-// PTYCAP-07-07: error-capture sink. Run lifecycle, throttled notifications and broadcasts come
-// from the legacy store extracted verbatim from error-capture/dispatcher.ts
-// (buildErrorCaptureRunStore); the legacy post-dispatch transitions are expressed through the
-// existing HealSink callbacks. Per AM-F1-5 there is no ensure-online hook here: that exists only
+// PTYCAP-07-07: error-capture sink. Run lifecycle and broadcasts come from the legacy store
+// extracted from error-capture/dispatcher.ts (buildErrorCaptureRunStore). Its legacy throttled
+// notifier is DISABLED here: routeHeal is the sole owner-notification path (QC r1). The legacy
+// post-dispatch transitions are expressed through the existing HealSink callbacks. Per AM-F1-5 there is no ensure-online hook here: that exists only
 // on the flag-OFF legacy path.
 
 import { buildErrorCaptureRunStore } from '../../error-capture/dispatcher.ts';
@@ -49,6 +49,7 @@ export async function buildErrorCaptureSink(
     sessionId: event.bound_session_id,
     userId,
     notifyCtx: { error_type: error.error_type, error_value: error.error_value },
+    notify: false, // routeHeal is the sole owner-notification path inside the unified flow
   });
 
   /** Set by the first terminal dispatch-status write; a later terminalization is a no-op. */
