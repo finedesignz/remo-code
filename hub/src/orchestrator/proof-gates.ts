@@ -24,8 +24,8 @@ export const PROOF_PROTECTION_GATE_NAME = 'proof_protection';
 type GateResult = { ok: true } | { ok: false; reason: string };
 
 export interface ProofGateDeps {
-  findRun(args: { counterKey?: string | null; sessionId: string }): Promise<ProofRun | null>;
-  countInjects(counterKey: string, since: Date | string): Promise<number>;
+  findRun(args: { requestKey?: string | null; sessionId: string }): Promise<ProofRun | null>;
+  countInjects(key: string, since: Date | string): Promise<number>;
   sumTokens(sessionId: string, since: Date | string): Promise<{ tokens: number; sessionExists: boolean }>;
   /** Monotone tokens_hwm write (best-effort, errors swallowed by the gate). */
   recordTokens(runId: string, tokens: number): Promise<unknown>;
@@ -78,7 +78,7 @@ export function makeProofBudgetGate(deps?: ProofGateDeps): DispatchGate {
       if (!isProofEnabled()) return { ok: true };
       try {
         const d = deps ?? (await realDeps());
-        const run = await d.findRun({ counterKey: req.counterKey ?? null, sessionId: req.sessionId });
+        const run = await d.findRun({ requestKey: req.counterKey ?? null, sessionId: req.sessionId });
         if (!run) return { ok: true };
 
         // D-02 pin: a proof task may only dispatch with its own task:<id> counter key.
@@ -124,7 +124,7 @@ export function makeProofProtectionGate(deps?: ProofGateDeps): DispatchGate {
       if (!isProofEnabled()) return { ok: true };
       try {
         const d = deps ?? (await realDeps());
-        const run = await d.findRun({ counterKey: req.counterKey ?? null, sessionId: req.sessionId });
+        const run = await d.findRun({ requestKey: req.counterKey ?? null, sessionId: req.sessionId });
         // No run / terminal run: the budget gate (ahead of this one) owns the verdict.
         if (!run || !isActive(run)) return { ok: true };
         const res = await d.reassert(d.githubFor(run), frozenOf(run));

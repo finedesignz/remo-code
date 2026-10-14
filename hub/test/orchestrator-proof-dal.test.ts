@@ -204,11 +204,11 @@ describe('claim / terminalize (tracer subset)', () => {
 describe('reads, counters, observation', () => {
   test('findProofRunForRequest: counter_key (any status) first, else the ACTIVE run for the session', async () => {
     const { run, taskId } = await D.armProofRunTx(armArgs())
-    expect((await D.findProofRunForRequest({ counterKey: `task:${taskId}`, sessionId: 'zzz' })).id).toBe(run.id)
-    expect((await D.findProofRunForRequest({ counterKey: 'task:other', sessionId: 's1' })).id).toBe(run.id)
+    expect((await D.findProofRunForRequest({ requestKey: `task:${taskId}`, sessionId: 'zzz' })).id).toBe(run.id)
+    expect((await D.findProofRunForRequest({ requestKey: 'task:other', sessionId: 's1' })).id).toBe(run.id)
     await D.terminalizeProofRun({ runId: run.id, outcome: 'nothing:agent_declined', detail: 'x' })
-    expect((await D.findProofRunForRequest({ counterKey: `task:${taskId}` })).status).toBe('nothing') // terminal, by key
-    expect(await D.findProofRunForRequest({ counterKey: 'task:other', sessionId: 's1' })).toBeNull() // terminal, by session
+    expect((await D.findProofRunForRequest({ requestKey: `task:${taskId}` })).status).toBe('nothing') // terminal, by key
+    expect(await D.findProofRunForRequest({ requestKey: 'task:other', sessionId: 's1' })).toBeNull() // terminal, by session
     expect(await D.findProofRunForRequest({})).toBeNull()
   })
 
