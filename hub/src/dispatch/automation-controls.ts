@@ -436,14 +436,23 @@ export async function reserveInject(args: ReserveArgs): Promise<ReserveResult> {
   return outcome
 }
 
+/**
+ * Strict release: stamps released_at while null and THROWS on a database error, so a caller that
+ * owes a retry (the heal sweep / route) can tell "released" from "still reserved". Idempotent: a
+ * row that never reserved, or is already released, matches nothing and resolves.
+ */
+export async function releaseInjectStrict(args: { counterKey: string; token: string }): Promise<void> {
+  await sql`
+    UPDATE automation_inject_ledger SET released_at = now()
+    WHERE counter_key = ${args.counterKey} AND token = ${args.token}
+      AND kind = 'inject' AND released_at IS NULL
+  `
+}
+
 /** Append-only compensation: stamp released_at while null. Never deletes, never throws. */
 export async function releaseInject(args: { counterKey: string; token: string }): Promise<void> {
   try {
-    await sql`
-      UPDATE automation_inject_ledger SET released_at = now()
-      WHERE counter_key = ${args.counterKey} AND token = ${args.token}
-        AND kind = 'inject' AND released_at IS NULL
-    `
+    await releaseInjectStrict(args)
   } catch (err: any) {
     console.error(`[automation-controls] release failed: ${err?.message ?? err}`)
   }

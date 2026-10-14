@@ -134,7 +134,7 @@ describe('sweepStaleHealLaunches', () => {
     expect(rec.released.length).toBe(1)
   })
 
-  test('a sink failure counts as failed but the reservation and ledger outcome are still reconciled; other rows continue', async () => {
+  test('QC r2: a source-terminalization failure still releases the slot but does NOT close the row (retryable); other rows continue', async () => {
     const { deps, rec } = mk([row('a'), row('b'), row('c')])
     const base = deps.makeSink
     deps.makeSink = (e, ctx) => {
@@ -143,19 +143,54 @@ describe('sweepStaleHealLaunches', () => {
     }
     expect(await sweepStaleHealLaunches(deps)).toEqual({ swept: 2, skipped: 0, failed: 1 })
     expect(rec.terminal.map((t) => t[0])).toEqual(['a', 'c'])
-    // b's slot is freed and its row closed (no re-failing on every boot)
-    expect(rec.released.map((r) => r[2])).toEqual(['a', 'b', 'c'])
-    expect(rec.outcomes.map((o) => o[0])).toEqual(['a', 'b', 'c'])
+    expect(rec.released.map((r) => r[2])).toEqual(['a', 'b', 'c']) // b's slot is freed regardless
+    // b is never written terminal and gets no notification; its recoverable outcome is re-stamped
+    expect(rec.outcomes).toEqual([
+      ['a', 'failed:spawn_timeout'],
+      ['b', 'autospawn_launched'],
+      ['c', 'failed:spawn_timeout'],
+    ])
+    expect(rec.sends.length).toBe(2)
   })
 
-  test('a release failure leaves the row for the next sweep (the slot is still stranded)', async () => {
+  test('QC r2: a release failure terminalizes the source but does NOT close the row (the slot is still held), no notification', async () => {
     const { deps, rec } = mk([row('a'), row('b')], {
       release: async (_u, _r, e) => {
         if (e === 'a') throw new Error('db down')
       },
     })
     expect(await sweepStaleHealLaunches(deps)).toEqual({ swept: 1, skipped: 0, failed: 1 })
-    expect(rec.outcomes.map((o) => o[0])).toEqual(['b']) // a stays stranded: retried
+    expect(rec.terminal.map((t) => t[0])).toEqual(['a', 'b']) // source obligation is independent
+    expect(rec.outcomes).toEqual([
+      ['a', 'autospawn_launched'], // recoverable outcome kept, never failed:spawn_timeout
+      ['b', 'failed:spawn_timeout'],
+    ])
+    expect(rec.sends.length).toBe(1) // only b notified
+  })
+
+  test('QC r2: a retry after the failure closes the row once both obligations are confirmed', async () => {
+    let failRelease = true
+    const { deps, rec } = mk([row('a')], {
+      release: async () => {
+        if (failRelease) throw new Error('db down')
+      },
+    })
+    expect((await sweepStaleHealLaunches(deps)).failed).toBe(1)
+    failRelease = false
+    expect(await sweepStaleHealLaunches(deps)).toEqual({ swept: 1, skipped: 0, failed: 0 })
+    expect(rec.outcomes.at(-1)).toEqual(['a', 'failed:spawn_timeout'])
+    expect(rec.sends.length).toBe(1)
+  })
+
+  test('QC r2: a scheduled_task row is closed with the claim only - the scheduler default email already owned the notification', async () => {
+    const claims: string[] = []
+    const { deps, rec } = mk([row('s', { source: 'scheduled_task' })], {
+      notify: { claim: async (id) => (claims.push(id), true), resolveOwnerEmail: async () => 'o@x.com', send: async (m) => (rec.sends.push(m), true) },
+    })
+    expect((await sweepStaleHealLaunches(deps)).swept).toBe(1)
+    expect(rec.outcomes).toEqual([['s', 'failed:spawn_timeout']])
+    expect(claims).toEqual(['s'])
+    expect(rec.sends).toEqual([])
   })
 
   test('autospawn_starting rows (crash between claim and launched) are swept and their reservation released', async () => {

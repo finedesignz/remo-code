@@ -287,6 +287,28 @@ describe('releaseInject', () => {
   })
 })
 
+describe('releaseInjectStrict (QC r2: a failed release must be visible to the retrying caller)', () => {
+  test('stamps the reservation, is idempotent, and resolves for a token that never reserved', async () => {
+    await reserve({ token: 'a' })
+    await C.releaseInjectStrict({ counterKey: 'task:T1', token: 'a' })
+    const stamp = injectRows()[0]!.released_at
+    expect(stamp).not.toBeNull()
+    await C.releaseInjectStrict({ counterKey: 'task:T1', token: 'a' })
+    expect(injectRows()[0]!.released_at).toBe(stamp)
+    await C.releaseInjectStrict({ counterKey: 'task:T1', token: 'never-reserved' }) // MINOR 3: no row, no throw
+    expect(state.ledger.length).toBe(1)
+  })
+
+  test('REJECTS on a database failure, while the legacy releaseInject still swallows it', async () => {
+    await reserve({ token: 'a' })
+    state.failOn = () => true
+    await expect(C.releaseInjectStrict({ counterKey: 'task:T1', token: 'a' })).rejects.toBeDefined()
+    await C.releaseInject({ counterKey: 'task:T1', token: 'a' }) // must not throw
+    state.failOn = null
+    expect(injectRows()[0]!.released_at).toBeNull() // the failed releases left the reservation active
+  })
+})
+
 describe('pages and reset', () => {
   test('claimLifetimePage claims once per (key, kind, epoch); a reset opens a new epoch; kinds are independent', async () => {
     const a = { userId: 'u1', sessionId: 's1', counterKey: 'task:T1' }
