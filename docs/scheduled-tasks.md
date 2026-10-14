@@ -998,6 +998,33 @@ non-propose → no surface).
 
 ---
 
+## Scheduled-task failure heal source (flag `REMO_HEAL_UNIFIED`)
+
+With `REMO_HEAL_UNIFIED` ON (default OFF), a failed scheduled-task run can be routed to the session
+bound to the task's repo through `routeHeal` (`docs/self-heal-routing.md`). The hook is in
+`finalizeRun` (`hub/src/scheduler/dispatcher.ts`), for `failed` outcomes only, between the task load
+and the post-run (notification) processing; an error in the hook resolves to "hook off" and the
+legacy path continues. `healFailedScheduledRun` (`hub/src/heal/sources/scheduled-task.ts`) builds an
+event only when ALL hold:
+
+- the transition is a real `failed` (not `skipped`, `skipped_quota`, `cancelled`, and not an
+  `only_if_active` no-op) and the failure is not `run_timeout` (reaper-finalized runs are excluded);
+- the task is non-internal: the `scheduled_tasks.is_internal` column (additive, set true by the
+  `ensureInternal*Task` inserts, never backfilled) or the legacy `__internal_` name prefix marks it
+  internal, and a missing task row counts as internal (fail closed). `__internal_*` rows stay
+  `enabled=false` by design;
+- neither the trigger nor the metadata run is heal-derived (provenance probe against `heal_events`;
+  a probe error means no event), so a failed child heal run cannot create another heal event;
+- the task's session resolves to a non-rootless canonical repo;
+- the per-task daily count is below `REMO_HEAL_MAX_PER_TASK_DAY` (default 3).
+
+Notification owner: when the heal path claims the owner notification (`no_routable_session`), the
+default failure email is suppressed for that run (`suppressDefaultFailureEmail`) so exactly one
+notice goes out. A `refused` or `failed` heal outcome sends the heal notice and still lets the
+default email go. With the flag OFF, `finalizeRun` and the default failure email behave as before.
+
+---
+
 ## Coolify webhook ingress (Phase 06)
 
 Public webhook endpoint that turns Coolify deployment events into

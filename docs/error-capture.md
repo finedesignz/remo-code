@@ -220,6 +220,28 @@ Finalize happens via the **pipeline finalize hook**, not a per-subsystem run-lif
 
 > **Transitional dual-path (Round-2 pilot):** error-capture is the FIRST subsystem migrated onto the shared pipeline. The `assistant_message` branch in `hub/src/ws/agent.ts` calls `onSessionReply` AND still calls the not-yet-migrated scheduler/triage/revanote `onAssistantMessage`/`onAgentReply` hooks. `onSessionReply` no-ops for any session without an active pipeline hook, so the calls coexist safely. The `// TODO(round2): collapse to onSessionReply once all subsystems migrated` comment marks where the legacy calls are removed once revanote/scheduler/telegram land on the pipeline.
 
+### Unified self-heal routing (flag `REMO_HEAL_UNIFIED`)
+
+With `REMO_HEAL_UNIFIED` ON (default OFF), `dispatchPendingError` builds an `error_capture`
+`HealEvent` (`hub/src/heal/sources/error-capture.ts`) and calls `routeHeal`
+(`docs/self-heal-routing.md`) instead of assembling its own `PipelineDeps` and gate list:
+
+- the project's bound session (`project.session_id`) is revalidated against the owner
+  (`getSession(id, userId)`): a missing, deleted, rootless, foreign-tenant, PTY-ineligible or
+  repo-mismatched session is never dispatched into, with no silent repo fallback;
+- no `ensureOnline` hook is used; an offline bound session is woken only through the governed
+  autospawn (repo on the shared allowlist, heal armed, supervisor online), otherwise it fails fast;
+- the six-gate chain now includes the Phase 4 lifetime counter (`heal:<userId>:<repo_ident>`) and the
+  session inject-rate gate; the dedupe key is `err:<project>:<fingerprint>` over
+  `REMO_HEAL_DEDUPE_WINDOW_MS`;
+- an un-routable report finalizes the error row `skipped` (reason such as `bound_session_unavailable`
+  or `not_allowlisted`, ledger outcome `no_routable_session`) and the owner gets exactly one
+  notification, which replaces the throttled `session_offline` email on this path.
+
+With the flag OFF the dispatcher runs its previous body unchanged (`dispatchPendingErrorLegacy`),
+and `spawn-on-error` (`REMO_SPAWN_ON_ERROR`, above) is retained for the flag-OFF path. A project with
+no bound session (hub self-capture) always takes the legacy path.
+
 ### Offline grace
 
 Now the **shared `hub/src/dispatch/grace.ts`** buffer (the old `error-capture/grace.ts` was deleted). When `dispatch()` finds the session offline it parks an opaque `replay()` thunk keyed by `sessionId` for 10 minutes. On `/ws/agent` auth success the agent handler calls `getGraceBuffer().drain(sessionId)` to re-run each live thunk; TTL-lapsed entries instead fire their `onExpire` (→ `skipped(target_offline_expired)`) exactly once, at drain-time or via the single 60s sweep — whichever observes the lapse first.
