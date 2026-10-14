@@ -276,3 +276,68 @@ function stateErrorCode(err: unknown): string | null {
   const e = err as { name?: string; code?: string } | null;
   return e && e.name === 'ProofStateError' && typeof e.code === 'string' ? e.code : null;
 }
+
+// ── Disarm: transaction FIRST, kill switch second, flags last (owner, runbook) ──────────────
+
+export interface ProofDisarmDeps {
+  disarmTx(args: { userId: string; detail?: string | null }): Promise<{ disarmed: false } | { disarmed: true; run: ProofRun }>;
+  engageKillSwitch(args: {
+    scope: 'session';
+    userId: string;
+    sessionId: string;
+    reason: string;
+    engagedBy: string;
+  }): Promise<unknown>;
+}
+
+export type DisarmProofResult =
+  | { disarmed: false }
+  | { disarmed: true; run: ProofRun; killSwitch: { engaged: boolean; error?: string } };
+
+/**
+ * An ONLINE session bypasses the autospawn branch, so flags alone would not stop it. Order is
+ * therefore: (1) one transaction terminalizes the run, disables the task + its row and removes
+ * only the exact allowlist row; (2) best-effort session kill switch (a failure is reported, it
+ * never undoes the disarm and never throws); (3) the owner unsets flags, later, by hand.
+ */
+export async function disarmProof(args: { userId: string; detail?: string | null }, deps: ProofDisarmDeps): Promise<DisarmProofResult> {
+  const out = await deps.disarmTx({ userId: args.userId, ...(args.detail !== undefined ? { detail: args.detail } : {}) });
+  if (!out.disarmed) return { disarmed: false };
+  try {
+    await deps.engageKillSwitch({
+      scope: 'session',
+      userId: args.userId,
+      sessionId: out.run.session_id,
+      reason: 'proof disarmed',
+      engagedBy: 'arm-orchestrator-proof',
+    });
+    return { disarmed: true, run: out.run, killSwitch: { engaged: true } };
+  } catch (err) {
+    return { disarmed: true, run: out.run, killSwitch: { engaged: false, error: String((err as Error)?.message ?? err) } };
+  }
+}
+
+// ── Enable: the owner's final act, only on an armed run (D-17) ──────────────────────────────
+
+export interface ProofEnableDeps {
+  enableTx(args: { userId: string }): Promise<{ run: ProofRun }>;
+}
+
+export type EnableProofResult =
+  | { ok: true; run: ProofRun; message: string }
+  | { ok: false; code: 'proof_not_armed'; detail: string };
+
+export async function enableProof(args: { userId: string }, deps: ProofEnableDeps): Promise<EnableProofResult> {
+  try {
+    const { run } = await deps.enableTx({ userId: args.userId });
+    return {
+      ok: true,
+      run,
+      message:
+        'task enabled: the first tick spawns the build session for the armed repo. Watch the proof status endpoint; --disarm stops it.',
+    };
+  } catch (err) {
+    if (stateErrorCode(err) === 'proof_not_armed') return { ok: false, code: 'proof_not_armed', detail: 'no armed proof run to enable' };
+    throw err;
+  }
+}
