@@ -86,7 +86,7 @@ beforeAll(async () => {
   const { scheduledTasks } = await import('../src/api/scheduled-tasks.ts')
   app = new Hono()
   app.use('/api/scheduled-tasks/*', async (c, next) => {
-    c.set('userId', 'u1' as any)
+    (c as any).set('userId', 'u1')
     return next()
   })
   app.route('/api/scheduled-tasks', scheduledTasks)
@@ -113,7 +113,7 @@ describe('POST: task_qc is machine-seeded only', () => {
       task_type: 'task_qc', target_kind: 'all_supervisors', cron_expr: '0 9 * * *', timezone: 'UTC',
     })
     expect(res.status).toBe(400)
-    expect((await res.json()).error).toBe('task_qc_machine_seeded')
+    expect(((await res.json()) as any).error).toBe('task_qc_machine_seeded')
     expect(stubCreate).not.toHaveBeenCalled()
     expect(regRegister).not.toHaveBeenCalled()
   })
@@ -124,7 +124,7 @@ describe('POST: task_qc is machine-seeded only', () => {
       run_at: '2030-01-01T00:00:00Z', timezone: 'UTC',
     })
     expect(res.status).toBe(400)
-    expect((await res.json()).error).toBe('task_qc_machine_seeded')
+    expect(((await res.json()) as any).error).toBe('task_qc_machine_seeded')
     expect(stubCreate).not.toHaveBeenCalled()
   })
 
@@ -142,7 +142,7 @@ describe('DELETE: task_qc is never deletable', () => {
   test('409 task_qc_system_task, no unregister, no delete DAL call', async () => {
     const res = await call('DELETE', '/qc-1')
     expect(res.status).toBe(409)
-    expect((await res.json()).error).toBe('task_qc_system_task')
+    expect(((await res.json()) as any).error).toBe('task_qc_system_task')
     expect(regUnregister).not.toHaveBeenCalled()
     expect(stubDelete).not.toHaveBeenCalled()
   })
@@ -164,10 +164,10 @@ describe('DELETE: task_qc is never deletable', () => {
 describe('GET and run-now stay open for task_qc', () => {
   test('list and get still return the task_qc row', async () => {
     const list = await call('GET', '')
-    expect((await list.json()).tasks.some((t: any) => t.task_type === 'task_qc')).toBe(true)
+    expect(((await list.json()) as any).tasks.some((t: any) => t.task_type === 'task_qc')).toBe(true)
     const one = await call('GET', '/qc-1')
     expect(one.status).toBe(200)
-    expect((await one.json()).task_type).toBe('task_qc')
+    expect(((await one.json()) as any).task_type).toBe('task_qc')
   })
 
   test('run-now is not rejected by the API layer', async () => {
@@ -225,7 +225,7 @@ describe('PATCH: only enabled, a validated cadence and a valid timezone', () => 
       // schedule_rules may fail generic body/rule validation before the guard
       // only if the guard ran after it; the guard must run first.
       expect(res.status).toBe(400)
-      const body = await res.json()
+      const body = (await res.json()) as any
       expect(body.error).toBe('task_qc_field_immutable')
       expect(body.fields).toContain(key)
       expect(stubUpdate).not.toHaveBeenCalled()
@@ -236,7 +236,7 @@ describe('PATCH: only enabled, a validated cadence and a valid timezone', () => 
   test('several offending keys are all named', async () => {
     const res = await call('PATCH', '/qc-1', { payload: { a: 1 }, prompt: 'x', enabled: false })
     expect(res.status).toBe(400)
-    const body = await res.json()
+    const body = (await res.json()) as any
     expect(body.fields.sort()).toEqual(['payload', 'prompt'])
     expect(stubUpdate).not.toHaveBeenCalled()
   })
@@ -267,7 +267,7 @@ describe('PATCH: only enabled, a validated cadence and a valid timezone', () => 
   test('faster-than-hourly cron is 400 task_qc_cadence_invalid / faster_than_hourly', async () => {
     const res = await call('PATCH', '/qc-1', { cron_expr: '*/5 * * * *' })
     expect(res.status).toBe(400)
-    const body = await res.json()
+    const body = (await res.json()) as any
     expect(body.error).toBe('task_qc_cadence_invalid')
     expect(body.reason).toBe('faster_than_hourly')
     expect(stubUpdate).not.toHaveBeenCalled()
@@ -276,7 +276,7 @@ describe('PATCH: only enabled, a validated cadence and a valid timezone', () => 
   test('invalid cron is 400 task_qc_cadence_invalid / invalid_cron', async () => {
     const res = await call('PATCH', '/qc-1', { cron_expr: 'not a cron' })
     expect(res.status).toBe(400)
-    const body = await res.json()
+    const body = (await res.json()) as any
     expect(body.error).toBe('task_qc_cadence_invalid')
     expect(body.reason).toBe('invalid_cron')
     expect(stubUpdate).not.toHaveBeenCalled()
@@ -285,7 +285,7 @@ describe('PATCH: only enabled, a validated cadence and a valid timezone', () => 
   test('invalid timezone is 400 task_qc_cadence_invalid / invalid_timezone', async () => {
     const res = await call('PATCH', '/qc-1', { timezone: 'Mars/Olympus' })
     expect(res.status).toBe(400)
-    const body = await res.json()
+    const body = (await res.json()) as any
     expect(body.error).toBe('task_qc_cadence_invalid')
     expect(body.reason).toBe('invalid_timezone')
     expect(stubUpdate).not.toHaveBeenCalled()
