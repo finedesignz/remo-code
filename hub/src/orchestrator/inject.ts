@@ -40,7 +40,8 @@ import {
 } from '../dispatch/automation-controls.ts'
 import { isOrchestratorEnabled, isAutospawnEnabled } from './controller.ts'
 // PTYCAP-05: flag-gated (OFF = pass-through, zero db/network); real deps load lazily.
-import { proofBudgetGate, proofProtectionGate } from './proof-gates.ts'
+import { proofBudgetGate, proofProtectionGate, sendAtProofBoundary } from './proof-gates.ts'
+import { isProofEnabled } from './proof-types.ts'
 import {
   isRepoAutospawnAllowed,
   countAutospawnLaunchesToday,
@@ -194,26 +195,32 @@ async function resolveInjectCounterKey(input: InjectInput, deps: InjectDeps): Pr
 }
 
 /** Build the prompt-delivery `send` closure (shared by the live + park paths). */
-function buildSend(prompt: string, token: string, deps: InjectDeps): PipelineDeps['send'] {
+export function buildSend(prompt: string, token: string, deps: InjectDeps): PipelineDeps['send'] {
   return async (req) => {
     const channel = deps.getChannel(req.sessionId)
     if (!channel) throw new Error('agent_socket_missing')
     const msg = await insertMessage(req.sessionId, 'user', prompt)
-    broadcastToSubscribers(req.sessionId, {
-      type: 'message',
-      session_id: req.sessionId,
-      message: msg,
-      run_id: token,
-    })
-    channel.ws.send(
-      JSON.stringify({
-        type: 'user_message',
-        id: msg.id,
-        content: prompt,
-        ts: msg.created_at,
+    const deliver = () => {
+      broadcastToSubscribers(req.sessionId, {
+        type: 'message',
+        session_id: req.sessionId,
+        message: msg,
         run_id: token,
-      }),
-    )
+      })
+      channel.ws.send(
+        JSON.stringify({
+          type: 'user_message',
+          id: msg.id,
+          content: prompt,
+          ts: msg.created_at,
+          run_id: token,
+        }),
+      )
+    }
+    // PTYCAP-05 (QC r2): with proof mode ON the delivery runs behind the wire-send boundary - a
+    // recheck after the awaited persistence above, under the arm/disarm lock. Flag OFF = unchanged.
+    if (isProofEnabled()) await sendAtProofBoundary(req, deliver)
+    else deliver()
   }
 }
 
