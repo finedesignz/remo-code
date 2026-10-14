@@ -47,6 +47,12 @@ export interface FindingInput {
   day: string
   /** override the derived signature (claimEngineFailure uses a constant) */
   sig?: string
+  /**
+   * Report-until-delivered (proposals only): on a same-day conflict return the existing row's id
+   * while no digest containing it was delivered (digest_sent_at IS NULL), so a failed send or a
+   * same-day re-run still reaches a digest. Without it a conflict means "already recorded".
+   */
+  redeliver?: boolean
 }
 
 const json = (v: unknown) => (v === undefined || v === null ? null : stableStringify(v))
@@ -57,7 +63,17 @@ export async function insertFinding(q: QueryRunner, f: FindingInput): Promise<{ 
   const severity = f.severity ?? 'info'
   if (!(SEVERITIES as readonly string[]).includes(severity)) throw new Error(`task_qc: unknown severity ${String(severity)}`)
   const sig = f.sig ?? evidenceSig(f.detector, f.evidence)
-  const rows = await q`
+  const rows = f.redeliver
+    ? await q`
+    INSERT INTO task_qc_findings
+      (user_id, task_id, detector, severity, disposition, fix_kind, before_json, after_json, rollback_sql, evidence, evidence_sig, day)
+    VALUES
+      (${f.userId}, ${f.taskId}, ${f.detector}, ${severity}, ${f.disposition}, ${f.fixKind ?? null},
+       ${json(f.before)}::jsonb, ${json(f.after)}::jsonb, ${f.rollbackSql ?? null},
+       ${json(f.evidence) ?? '{}'}::jsonb, ${sig}, ${f.day})
+    ON CONFLICT (user_id, task_id, detector, evidence_sig, day) DO UPDATE SET severity = EXCLUDED.severity
+      WHERE task_qc_findings.digest_sent_at IS NULL RETURNING id`
+    : await q`
     INSERT INTO task_qc_findings
       (user_id, task_id, detector, severity, disposition, fix_kind, before_json, after_json, rollback_sql, evidence, evidence_sig, day)
     VALUES
