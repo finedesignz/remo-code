@@ -71,6 +71,41 @@ export function buildNotification(event: NotifyEvent, reason: string): { subject
   };
 }
 
+/**
+ * Ownership vs delivery are separate facts. `claimed` = this caller won the conditional-UPDATE
+ * ownership claim (so no other path may notify for this event); `sent` = the single send attempt
+ * reported success. A claimed-but-unsent notification is still OWNED: the caller must not fall
+ * back to another notifier (the scheduler default email), or the owner gets two.
+ */
+export interface NotifyResult {
+  claimed: boolean;
+  sent: boolean;
+}
+
+export async function notifyOnceDetailed(
+  eventId: string,
+  event: NotifyEvent,
+  reason: string,
+  deps: NotifyDeps = REAL_NOTIFY_DEPS,
+): Promise<NotifyResult> {
+  let claimed = false;
+  try {
+    if (!(await deps.claim(eventId))) return { claimed: false, sent: false }; // lost claim: someone else owns the attempt
+    claimed = true;
+    const to = await deps.resolveOwnerEmail(event.user_id);
+    if (!to) {
+      log(`no owner address for event ${eventId}; not sent`);
+      return { claimed, sent: false };
+    }
+    const ok = await deps.send({ to, ...buildNotification(event, reason) });
+    if (!ok) log(`send reported failure for event ${eventId}; not retried`);
+    return { claimed, sent: ok === true };
+  } catch (err: any) {
+    log(`notify failed for event ${eventId}: ${err?.message ?? err}; not retried`);
+    return { claimed, sent: false };
+  }
+}
+
 /** Returns true only when the single send attempt reported success. */
 export async function notifyOnce(
   eventId: string,
@@ -78,18 +113,5 @@ export async function notifyOnce(
   reason: string,
   deps: NotifyDeps = REAL_NOTIFY_DEPS,
 ): Promise<boolean> {
-  try {
-    if (!(await deps.claim(eventId))) return false; // lost claim: someone else owns the attempt
-    const to = await deps.resolveOwnerEmail(event.user_id);
-    if (!to) {
-      log(`no owner address for event ${eventId}; not sent`);
-      return false;
-    }
-    const ok = await deps.send({ to, ...buildNotification(event, reason) });
-    if (!ok) log(`send reported failure for event ${eventId}; not retried`);
-    return ok === true;
-  } catch (err: any) {
-    log(`notify failed for event ${eventId}: ${err?.message ?? err}; not retried`);
-    return false;
-  }
+  return (await notifyOnceDetailed(eventId, event, reason, deps)).sent;
 }

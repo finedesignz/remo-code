@@ -73,9 +73,10 @@ function oneLine(s: string | null | undefined, max: number): string {
 }
 
 /**
- * Heal a failed scheduled-task run. Resolves true ONLY when the heal path claimed and sent the
- * owner notification (the caller then suppresses the default failure email); every other result,
- * including every error, resolves false so the normal failure email proceeds.
+ * Heal a failed scheduled-task run. Resolves true ONLY when the heal path WON the owner
+ * notification claim for this event (the caller then suppresses the default failure email), whether
+ * or not that one send succeeded; every other result, including every error, resolves false so the
+ * normal failure email proceeds. Exactly one owner notification per heal event.
  */
 export async function healFailedScheduledRun(
   input: FailedRunInput,
@@ -124,5 +125,6 @@ export async function healFailedScheduledRun(
     notify_summary: `Task "${name}" run ${runId} failed: ${oneLine(error, 300)}`.slice(0, 500),
     ctx: { task_id: task.id, task_name: name, error_signature: normalized },
   });
+  if ('notifyClaimed' in outcome && outcome.notifyClaimed === true) return true;
   return 'notified' in outcome && outcome.notified === true;
 }

@@ -77,8 +77,15 @@ export function buildErrorCaptureRunStore(args: {
   sessionId: string
   userId: string
   notifyCtx: { error_type: string; error_value: string }
+  /**
+   * Legacy owner notifications (throttled). The unified heal sink passes false: routeHeal is then
+   * the SOLE notification owner for the event (one claim per ledger row), so a refused / failed
+   * heal never produces a second, independently-throttled notice. Default true = legacy unchanged.
+   */
+  notify?: boolean
 }): RunStore {
   const { errorId, project, sessionId, userId, notifyCtx } = args
+  const notify = args.notify !== false
   return {
     // Insert the run row (in_flight) and RETURN its id — the pipeline threads
     // this id into the finalize hook, so onFinalize / markFailed receive the
@@ -95,7 +102,7 @@ export function buildErrorCaptureRunStore(args: {
     // 'session_busy'. We translate to the error_capture skip vocabulary.
     async markSkipped(_token, reason) {
       await updateErrorDispatchStatus(errorId, 'skipped', reason)
-      if (reason === 'session_busy') {
+      if (reason === 'session_busy' && notify) {
         void notifyThrottled('dispatch_failed', `${project.id}:${sessionId}:busy`, 900, project, {
           ...notifyCtx,
           detail: 'session_busy',
@@ -140,10 +147,12 @@ export function buildErrorCaptureRunStore(args: {
         error: `agent_send: ${errMsg}`,
         finished_at: new Date(),
       })
-      void notifyThrottled('dispatch_failed', `${project.id}:${sessionId}:send`, 900, project, {
-        ...notifyCtx,
-        detail: errMsg,
-      }).catch(() => {})
+      if (notify) {
+        void notifyThrottled('dispatch_failed', `${project.id}:${sessionId}:send`, 900, project, {
+          ...notifyCtx,
+          detail: errMsg,
+        }).catch(() => {})
+      }
     },
   }
 }

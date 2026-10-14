@@ -167,6 +167,76 @@ function mk(over: { heal?: Partial<HealDeps>; auto?: Partial<AutospawnDeps> } = 
   return { deps, rec }
 }
 
+// PTYCAP-07 QC r1 (codex #3, correctness MAJOR 1): ONE owner notification per heal event.
+describe('single notification owner across the autospawn lifecycle', () => {
+  /** A real once-per-event claim, the way the conditional UPDATE behaves. */
+  function onceNotify(rec: { sends: any[] }) {
+    const claimed = new Set<string>()
+    const claims: string[] = []
+    return {
+      claims,
+      notify: {
+        claim: async (id: string) => {
+          claims.push(id)
+          if (claimed.has(id)) return false
+          claimed.add(id)
+          return true
+        },
+        resolveOwnerEmail: async () => 'o@x.com',
+        send: async (m: any) => {
+          rec.sends.push(m)
+          return true
+        },
+      },
+    }
+  }
+  const taskEvent = () =>
+    event({
+      source: 'scheduled_task',
+      dedupe_key: 'task:t1:sig',
+      bound_session_id: 's1',
+      ctx: { task_id: 't1', task_name: 'nightly', error_signature: 'boom' },
+      metadata_run_id: null,
+    })
+
+  test('scheduled_task launched: the heal takes the claim for the scheduler default email, so the spawn_timeout notice sends nothing', async () => {
+    const rec0 = { sends: [] as any[] }
+    const n = onceNotify(rec0)
+    const { deps, rec } = mk({ heal: { notify: n.notify } })
+    rec.sends = rec0.sends
+    const out = await routeHeal(taskEvent(), deps)
+    expect(out).toEqual({ kind: 'autospawn_launched' }) // not claimed in the outcome: the default email goes out
+    expect(n.claims).toEqual(['ev1'])
+    expect(rec.sends.length).toBe(0)
+    // the deadline fires: the failed finalization loses the claim -> no second notification
+    rec.timers[0]!.fn()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(rec.outcomes[rec.outcomes.length - 1]).toBe('failed:spawn_timeout')
+    expect(rec.sends.length).toBe(0)
+  })
+
+  test('coolify launched then spawn_timeout: the heal notice is the one notification (exactly one send)', async () => {
+    const rec0 = { sends: [] as any[] }
+    const n = onceNotify(rec0)
+    const { deps, rec } = mk({ heal: { notify: n.notify } })
+    rec.sends = rec0.sends
+    expect(await routeHeal(event(), deps)).toEqual({ kind: 'autospawn_launched' })
+    expect(n.claims).toEqual([]) // nothing claimed at launch for non-scheduler sources
+    rec.timers[0]!.fn()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(rec.sends.length).toBe(1)
+  })
+
+  test('scheduled_task refused / failed report ownership even when the one send fails', async () => {
+    const rec0 = { sends: [] as any[] }
+    const n = onceNotify(rec0)
+    n.notify.send = async () => false
+    const { deps } = mk({ heal: { notify: n.notify }, auto: { launchSessionForUser: async () => ({ ok: false, reason: 'at_capacity' }) as any } })
+    const out = await routeHeal(taskEvent(), deps)
+    expect(out).toEqual({ kind: 'refused', reason: 'autospawn_launch_at_capacity', notifyClaimed: true })
+  })
+})
+
 describe('governed autospawn: happy path', () => {
   test('exactly one launch (machine true); gates, reserve, ledger all BEFORE launch; park with the same token and six gates', async () => {
     const { deps, rec } = mk()
@@ -228,7 +298,7 @@ describe('governed autospawn: refusals launch nothing', () => {
   test('not armed (heal ON, autospawn flag OFF): zero launches, zero reservations, no_routable_session, notified once', async () => {
     const { deps, rec } = mk({ auto: { armed: () => false } })
     const out = await routeHeal(event(), deps)
-    expect(out).toEqual({ kind: 'no_routable_session', reason: 'autospawn_not_armed', notified: true })
+    expect(out).toEqual({ kind: 'no_routable_session', reason: 'autospawn_not_armed', notified: true, notifyClaimed: true })
     expect(rec.launches.length).toBe(0)
     expect(rec.reserves.length).toBe(0)
     expect(rec.sends.length).toBe(1)
@@ -253,21 +323,21 @@ describe('governed autospawn: refusals launch nothing', () => {
 
   test('over the token cap: refused over_token_cap, zero launches', async () => {
     const { deps, rec } = mk({ auto: { getTokenCapStatus: async () => ({ over: true }) } })
-    expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason: 'over_token_cap' })
+    expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason: 'over_token_cap', notifyClaimed: true })
     expect(rec.launches.length).toBe(0)
     expect(rec.reserves.length).toBe(0)
   })
 
   test('launch-count cap: refused launch_cap, zero launches', async () => {
     const { deps, rec } = mk({ auto: { isOverAutospawnDailyLaunchCap: () => true } })
-    expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason: 'launch_cap' })
+    expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason: 'launch_cap', notifyClaimed: true })
     expect(rec.launches.length).toBe(0)
   })
 
   test('a gate refusal (cost cap / kill switch): zero reservation, zero launch, refused with that reason', async () => {
     for (const reason of ['over_daily_cost_cap:5', 'automation_halted']) {
       const { deps, rec } = mk({ auto: { checkGates: async () => reason } })
-      expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason })
+      expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason, notifyClaimed: true })
       expect(rec.reserves.length).toBe(0)
       expect(rec.launches.length).toBe(0)
       expect(rec.terminal.map((t) => t.kind)).toEqual(['refused'])
@@ -277,7 +347,7 @@ describe('governed autospawn: refusals launch nothing', () => {
 
   test('lifetime reservation exhausted: refused with the lifetime reason, zero launches', async () => {
     const { deps, rec } = mk({ auto: { reserve: async () => ({ ok: false, reason: 'lifetime_inject_exhausted:20>=20' }) } })
-    expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason: 'lifetime_inject_exhausted:20>=20' })
+    expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason: 'lifetime_inject_exhausted:20>=20', notifyClaimed: true })
     expect(rec.launches.length).toBe(0)
   })
 
@@ -289,7 +359,7 @@ describe('governed autospawn: refusals launch nothing', () => {
         },
       },
     })
-    expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason: 'ledger_unavailable' })
+    expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason: 'ledger_unavailable', notifyClaimed: true })
     expect(rec.launches.length).toBe(0)
     expect(rec.releases.length).toBe(1)
   })
@@ -298,7 +368,7 @@ describe('governed autospawn: refusals launch nothing', () => {
 describe('governed autospawn: launch failure and in-flight', () => {
   test('launch not ok: reservation released, refused autospawn_launch_{reason}, terminalized, notified once', async () => {
     const { deps, rec } = mk({ auto: { launchSessionForUser: async () => ({ ok: false, reason: 'at_capacity' }) as any } })
-    expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason: 'autospawn_launch_at_capacity' })
+    expect(await routeHeal(event(), deps)).toEqual({ kind: 'refused', reason: 'autospawn_launch_at_capacity', notifyClaimed: true })
     expect(rec.releases.length).toBe(1)
     expect(rec.releases[0]).toEqual({ counterKey: buildHealKey('u1', REPO), token: 'heal:ev1' })
     expect(rec.terminal.map((t) => t.kind)).toEqual(['refused'])

@@ -151,7 +151,7 @@ describe('dedupe and caps', () => {
   test('per-repo hourly bound: at the limit => refused repo_rate_bound, row set, no dispatch', async () => {
     const { deps, rec } = mkDeps({ countRepoDispatches: async () => 4 })
     const out = await routeHeal(coolify(), deps)
-    expect(out).toEqual({ kind: 'refused', reason: 'repo_rate_bound' })
+    expect(out).toEqual({ kind: 'refused', reason: 'repo_rate_bound', notifyClaimed: false })
     expect(rec.dispatches).toBe(0)
     expect(rec.outcomes).toEqual(['refused:repo_rate_bound'])
     expect(rec.terminal.length).toBe(1)

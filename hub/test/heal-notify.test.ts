@@ -3,7 +3,7 @@
  * AM-F3-2). DB-free: the claim / owner lookup / send seam is injected.
  */
 import { describe, test, expect } from 'bun:test'
-import { notifyOnce, buildNotification, type NotifyDeps, type NotifyEvent } from '../src/heal/notify.ts'
+import { notifyOnce, notifyOnceDetailed, buildNotification, type NotifyDeps, type NotifyEvent } from '../src/heal/notify.ts'
 
 const EVENT: NotifyEvent = {
   user_id: 'u1',
@@ -83,6 +83,33 @@ describe('notifyOnce', () => {
     const { deps, rec } = mkDeps({ resolveOwnerEmail: async () => null })
     expect(await notifyOnce('ev1', EVENT, 'x', deps)).toBe(false)
     expect(rec.sends.length).toBe(0)
+  })
+})
+
+describe('notifyOnceDetailed: ownership (claimed) is separate from delivery (sent)', () => {
+  test('won claim + successful send => claimed and sent', async () => {
+    const { deps } = mkDeps()
+    expect(await notifyOnceDetailed('ev1', EVENT, 'r', deps)).toEqual({ claimed: true, sent: true })
+  })
+  test('won claim + failed send => still claimed, not sent (owner of the one attempt)', async () => {
+    const { deps } = mkDeps({ send: async () => false })
+    expect(await notifyOnceDetailed('ev1', EVENT, 'r', deps)).toEqual({ claimed: true, sent: false })
+  })
+  test('won claim + throwing send => claimed, not sent', async () => {
+    const { deps } = mkDeps({ send: async () => { throw new Error('smtp') } })
+    expect(await notifyOnceDetailed('ev1', EVENT, 'r', deps)).toEqual({ claimed: true, sent: false })
+  })
+  test('no owner address => claimed (claim consumed), not sent', async () => {
+    const { deps } = mkDeps({ resolveOwnerEmail: async () => null })
+    expect(await notifyOnceDetailed('ev1', EVENT, 'r', deps)).toEqual({ claimed: true, sent: false })
+  })
+  test('lost claim => neither', async () => {
+    const { deps } = mkDeps({ claim: async () => false })
+    expect(await notifyOnceDetailed('ev1', EVENT, 'r', deps)).toEqual({ claimed: false, sent: false })
+  })
+  test('throwing claim => neither (the default email may proceed)', async () => {
+    const { deps } = mkDeps({ claim: async () => { throw new Error('db') } })
+    expect(await notifyOnceDetailed('ev1', EVENT, 'r', deps)).toEqual({ claimed: false, sent: false })
   })
 })
 
