@@ -1630,10 +1630,10 @@ export async function ensureInternalTriageTask(userId: string): Promise<string> 
   const rows = await sql<{ id: string }[]>`
     INSERT INTO scheduled_tasks (
       user_id, session_id, name, cron_expression, prompt,
-      enabled, task_type, target_kind, payload, cron_expr, timezone
+      enabled, task_type, target_kind, payload, cron_expr, timezone, is_internal
     ) VALUES (
       ${userId}, NULL, ${INTERNAL_TRIAGE_TASK_NAME}, ${NEVER}, '',
-      false, 'triage', 'session', '{}'::jsonb, ${NEVER}, 'UTC'
+      false, 'triage', 'session', '{}'::jsonb, ${NEVER}, 'UTC', true
     )
     RETURNING id
   `;
@@ -1653,10 +1653,10 @@ export async function ensureInternalDeploymentTask(userId: string): Promise<stri
   const rows = await sql<{ id: string }[]>`
     INSERT INTO scheduled_tasks (
       user_id, session_id, name, cron_expression, prompt,
-      enabled, task_type, target_kind, payload, cron_expr, timezone
+      enabled, task_type, target_kind, payload, cron_expr, timezone, is_internal
     ) VALUES (
       ${userId}, NULL, ${INTERNAL_DEPLOY_TASK_NAME}, ${NEVER}, '',
-      false, 'log_check', 'session', '{}'::jsonb, ${NEVER}, 'UTC'
+      false, 'log_check', 'session', '{}'::jsonb, ${NEVER}, 'UTC', true
     )
     RETURNING id
   `;
