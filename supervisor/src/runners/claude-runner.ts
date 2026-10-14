@@ -476,8 +476,11 @@ export class ClaudeRunner implements CliRunner {
 
     if (event.type === 'result') {
       const r = event as any
+      // PTYCAP-05: one id per turn, stamped on BOTH the assistant message and the result/usage so the
+      // hub can correlate this turn's ledger row to its message (proof budget attribution).
+      const turnId = crypto.randomUUID()
       if (this.fullText) {
-        this.listener?.({ type: 'assistant_message', content: this.fullText })
+        this.listener?.({ type: 'assistant_message', content: this.fullText, turn_id: turnId })
         this.fullText = ''
       }
       const parsed = parseUsageFromResult(r, this.lastModel)
@@ -488,6 +491,7 @@ export class ClaudeRunner implements CliRunner {
         ...(parsed.model ? { model: parsed.model } : {}),
         ...(parsed.usage ? { usage: parsed.usage } : {}),
         cost_from_sdk: parsed.cost_from_sdk,
+        turn_id: turnId,
       })
       this.listener?.({ type: 'status', state: 'idle' })
     }

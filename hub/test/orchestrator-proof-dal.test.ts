@@ -266,6 +266,19 @@ describe('QC r2 kill-switch ownership (codex new #2, sonnet MINOR 1)', () => {
     expect(state.kill.find((k) => k.id === run.kill_switch_id)?.engaged).toBe(false)
   })
 
+  test('REGRESSION (repair round): a MANUAL engage made AFTER arm coexists with the proof row and survives --enable', async () => {
+    const { engageKillSwitch } = await import('../src/dispatch/automation-controls.ts')
+    const { run } = await D.armProofRunTx(armArgs())
+    const out = await engageKillSwitch({ scope: 'session', userId: 'u1', sessionId: run.session_id, reason: 'emergency', engagedBy: 'owner-user' })
+    expect(out.alreadyEngaged).toBe(false) // NOT coalesced onto the proof row
+    const manual = state.kill.find((k) => k.engaged_by === 'owner-user')!
+    expect(manual.engaged).toBe(true)
+    expect(state.kill.filter((k) => k.engaged)).toHaveLength(2)
+    await D.enableProofTaskTx({ userId: 'u1' })
+    expect(state.kill.find((k) => k.id === run.kill_switch_id)?.engaged).toBe(false)
+    expect(state.kill.find((k) => k.id === manual.id)?.engaged).toBe(true) // halt still effective
+  })
+
   test('a stale halt the proof tooling left on the session is released at arm and replaced by the run own row', async () => {
     state.kill.push(foreign({ id: 'k-stale', engaged_by: 'proof-guard' }))
     const { run } = await D.armProofRunTx(armArgs())
@@ -421,21 +434,42 @@ describe('sumSessionTokensSince (F2-3 attribution)', () => {
   describe('QC r2 durable attribution: completed turns vs ledger rows (codex #4)', () => {
     const OLD = 2000 // created_at well before now - 120s
     const turn = (over: Record<string, unknown> = {}) => ({ session_id: 's1', role: 'assistant', status: 'complete', created_at: OLD, ...over })
+    const usage = (turnId: string | null, over: Record<string, unknown> = {}) => ({ session_id: 's1', tokens: 10, created_at: OLD, turn_id: turnId, ...over })
 
     test('a completed turn with no token_usage row is attribution lost, with NO in-process mark (survives restart/eviction)', async () => {
       const L = await import('../src/usage/attribution-loss.ts')
       L.resetUsageAttributionLoss() // a restarted hub: nothing remembered
       state.sessions.add('s1')
-      state.messages.push(turn(), turn({ created_at: OLD + 1 }))
-      state.tokenUsage.push({ session_id: 's1', tokens: 10, created_at: OLD }) // 2 turns, 1 ledger row
+      state.messages.push(turn({ turn_id: 't1' }), turn({ created_at: OLD + 1, turn_id: 't2' }))
+      state.tokenUsage.push(usage('t1')) // 2 turns, 1 ledger row (t2 lost)
       expect(await T.sumSessionTokensSince('s1', new Date(1000))).toEqual({ tokens: 10, sessionExists: true, attributionLost: true })
     })
 
     test('every completed turn has a ledger row: not lost', async () => {
       state.sessions.add('s1')
-      state.messages.push(turn(), turn({ created_at: OLD + 1 }))
-      state.tokenUsage.push({ session_id: 's1', tokens: 10, created_at: OLD }, { session_id: 's1', tokens: 10, created_at: OLD + 1 })
+      state.messages.push(turn({ turn_id: 't1' }), turn({ created_at: OLD + 1, turn_id: 't2' }))
+      state.tokenUsage.push(usage('t1'), usage('t2', { created_at: OLD + 1 }))
       expect(await T.sumSessionTokensSince('s1', new Date(1000))).toEqual({ tokens: 20, sessionExists: true })
+    })
+
+    test('REGRESSION (repair round): a lost usage row masked by an EXTRA row from another turn is still detected', async () => {
+      const L = await import('../src/usage/attribution-loss.ts')
+      L.resetUsageAttributionLoss()
+      state.sessions.add('s1')
+      state.messages.push(turn({ turn_id: 't1' }), turn({ created_at: OLD + 1, turn_id: 't2' }))
+      // t2's row was lost; an extra row (a duplicate of t1, plus a PTY-style row with no turn id) brings the AGGREGATE count to 2 == turns
+      state.tokenUsage.push(usage('t1'), usage('t1', { created_at: OLD + 2 }))
+      expect(await T.sumSessionTokensSince('s1', new Date(1000))).toMatchObject({ attributionLost: true })
+      state.tokenUsage.length = 0
+      state.tokenUsage.push(usage('t1'), usage(null, { created_at: OLD + 2 }))
+      expect(await T.sumSessionTokensSince('s1', new Date(1000))).toMatchObject({ attributionLost: true })
+    })
+
+    test('a completed turn carrying no turn_id cannot be correlated and fails closed', async () => {
+      state.sessions.add('s1')
+      state.messages.push(turn()) // older supervisor: no turn_id
+      state.tokenUsage.push(usage(null))
+      expect(await T.sumSessionTokensSince('s1', new Date(1000))).toMatchObject({ attributionLost: true })
     })
 
     test('a turn still inside the grace window, a streaming placeholder, a user message, another session and a pre-arm turn are not losses', async () => {

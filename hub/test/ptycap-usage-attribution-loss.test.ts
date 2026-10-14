@@ -97,6 +97,18 @@ describe('usage attribution loss registry', () => {
   })
 })
 
+describe('turn_id correlation (repair round)', () => {
+  test('a usage_event turn_id is persisted on the ledger row; absent => null', async () => {
+    failInsert = false
+    const frame = (turnId?: string) => JSON.stringify({ ...JSON.parse(usageFrame(SESSION)), ...(turnId ? { turn_id: turnId } : {}) })
+    await handleAgentMessage(wsFor(SESSION), frame('turn-abc'))
+    await handleAgentMessage(wsFor(SESSION), frame())
+    expect(inserts[0]).toContain('turn-abc')
+    expect(inserts[1]).not.toContain('turn-abc')
+    expect(inserts[1][inserts[1].length - 1]).toBeNull()
+  })
+})
+
 describe('sumSessionTokensSince surfaces the loss', () => {
   test('lost -> attributionLost true even though the session row exists and sum looks fine', async () => {
     loss.markUsageAttributionLost(SESSION, Date.parse('2026-10-13T10:05:00Z'))

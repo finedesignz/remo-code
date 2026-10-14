@@ -37,6 +37,7 @@ export interface FakeTokenRow {
   session_id: string | null
   tokens: number
   created_at: number
+  turn_id?: string | null
 }
 
 export interface ProofFakeState {
@@ -47,7 +48,7 @@ export interface ProofFakeState {
   ledger: FakeLedger[]
   tokenUsage: FakeTokenRow[]
   /** messages rows (assistant turns) for the durable attribution-gap check */
-  messages: Array<{ session_id: string; role: string; status: string; created_at: number }>
+  messages: Array<{ session_id: string; role: string; status: string; created_at: number; turn_id?: string | null }>
   sessions: Set<string>
   /** automation_kill_switch rows touched by arm / enable / disarm */
   kill: Array<{ id?: string; engaged_by?: string; scope: string; user_id: string | null; session_id: string; reason: string; engaged: boolean }>
@@ -120,9 +121,18 @@ export function createProofFakeSql() {
         .filter((k) => k.engaged && k.scope === 'session' && k.session_id === values[0])
         .map((k) => ({ id: k.id, engaged_by: k.engaged_by ?? 'unknown' }))
     }
+    if (text.includes('INSERT INTO automation_kill_switch') && values.length === 5) {
+      // engageKillSwitch (manual engage): VALUES (scope, user, session, reason, engagedBy); unique per (session, engaged_by)
+      const [scope, userId, sessionId, reason, engagedBy] = values
+      if (state.kill.some((k) => k.engaged && k.scope === scope && k.session_id === sessionId && k.engaged_by === engagedBy)) return []
+      const row = { id: nid('kill_'), engaged_by: engagedBy, scope, user_id: userId, session_id: sessionId, reason, engaged: true } as any
+      state.kill.push(row)
+      return [{ id: row.id }]
+    }
     if (text.includes('INSERT INTO automation_kill_switch')) {
       const [userId, sessionId, engagedBy] = values
-      if (state.kill.some((k) => k.engaged && k.scope === 'session' && k.session_id === sessionId)) return [] // ON CONFLICT DO NOTHING
+      // idx_automation_kill_switch_session_owner: unique per (session_id, engaged_by) while engaged
+      if (state.kill.some((k) => k.engaged && k.scope === 'session' && k.session_id === sessionId && k.engaged_by === engagedBy)) return [] // ON CONFLICT DO NOTHING
       const row = { id: nid('kill_'), engaged_by: engagedBy, scope: 'session', user_id: userId, session_id: sessionId, reason: 'proof armed', engaged: true }
       state.kill.push(row)
       return [{ id: row.id }]
@@ -297,12 +307,15 @@ export function createProofFakeSql() {
       r.tokens_hwm = Math.max(Number(r.tokens_hwm), Number(tokens ?? 0))
       return [{ ...r }]
     }
-    if (text.includes('AS completed_turns')) {
-      const [sid1, since1, sid2, since2] = values
-      const cutoff = Date.now() - 120_000 // created_at < now() - 120s, same window for both counts
-      const turns = state.messages.filter((m) => m.session_id === sid1 && m.role === 'assistant' && m.status === 'complete' && m.created_at >= Number(since1) && m.created_at < cutoff).length
-      const rows = state.tokenUsage.filter((t) => t.session_id === sid2 && t.created_at >= Number(since2) && t.created_at < cutoff).length
-      return [{ completed_turns: String(turns), usage_rows: String(rows) }]
+    if (text.includes('AS unmatched_turns')) {
+      // per-turn anti-join: completed assistant messages in the window with no token_usage row of the SAME (session, turn_id)
+      const [sid, since] = values
+      const cutoff = Date.now() - 120_000
+      const unmatched = state.messages.filter(
+        (m) => m.session_id === sid && m.role === 'assistant' && m.status === 'complete' && m.created_at >= Number(since) && m.created_at < cutoff &&
+          !state.tokenUsage.some((t) => t.session_id === m.session_id && m.turn_id != null && t.turn_id === m.turn_id),
+      ).length
+      return [{ unmatched_turns: String(unmatched) }]
     }
     if (text.includes('EXISTS (SELECT 1 FROM sessions WHERE id')) {
       const [sessionId, , since] = values // EXISTS(sessionId), WHERE session_id = sessionId, created_at >= since

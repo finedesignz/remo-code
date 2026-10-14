@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS turn_id TEXT;
 
 CREATE TABLE IF NOT EXISTS api_keys (
   id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -1353,6 +1354,13 @@ ALTER TABLE token_usage ADD COLUMN IF NOT EXISTS runner_type TEXT NOT NULL DEFAU
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='token_usage_runner_type_check' AND conrelid = 'token_usage'::regclass) THEN ALTER TABLE token_usage ADD CONSTRAINT token_usage_runner_type_check CHECK (runner_type IN ('stream-json','pty-interactive')); END IF; END $$;
 CREATE INDEX IF NOT EXISTS idx_token_usage_user_runner_created ON token_usage(user_id, runner_type, created_at DESC);
 
+-- PTYCAP-05 repair: per-turn correlation. The supervisor stamps ONE turn_id on a turn's
+-- assistant_message and its usage_event; the hub stores it on messages and token_usage so the proof
+-- budget detector can prove every completed turn has ITS OWN ledger row (never an aggregate count).
+-- Nullable, additive, no backfill.
+ALTER TABLE token_usage ADD COLUMN IF NOT EXISTS turn_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_token_usage_session_turn ON token_usage(session_id, turn_id) WHERE turn_id IS NOT NULL;
+
 -- Daily per-(user, model) rollup, upserted on each usage_event for cheap
 -- today/7d/total aggregates without scanning the full ledger.
 CREATE TABLE IF NOT EXISTS token_usage_daily (
@@ -1638,8 +1646,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_global
   ON automation_kill_switch(scope) WHERE scope = 'global' AND engaged;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_user
   ON automation_kill_switch(user_id) WHERE scope = 'user' AND engaged;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_session
-  ON automation_kill_switch(session_id) WHERE scope = 'session' AND engaged;
+-- PTYCAP-05 repair: session halts are OWNER-TAGGED. Several engaged rows may coexist per session
+-- (one per engaged_by); a halt is effective while ANY row is engaged, and a proof run releases only
+-- the row it engaged, so a manual emergency engage made after arm can never be released by proof code.
+-- schema-lint: allow idempotent DDL — IF EXISTS drop of the superseded one-engaged-row-per-session index; no-op once dropped
+DROP INDEX IF EXISTS idx_automation_kill_switch_session;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_session_owner
+  ON automation_kill_switch(session_id, engaged_by) WHERE scope = 'session' AND engaged;
 
 -- Daily token-ceiling alarm claim: one row per (user, local day). `delivered`
 -- flips only when the email was really sent, so a failed send is retried.
