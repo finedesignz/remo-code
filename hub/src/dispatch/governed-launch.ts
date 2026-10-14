@@ -43,7 +43,7 @@ export interface PreLaunchGovernor {
   /** Atomically reserve the lifetime budget BEFORE the launch. */
   reserve: () => Promise<{ ok: true } | { ok: false; reason: string }>
   /** Release the reservation (refused / failed launch). Best-effort by the caller's closure. */
-  release: () => Promise<void>
+  release: () => Promise<unknown>
 }
 
 export interface GovernedLaunchArgs {

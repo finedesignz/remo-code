@@ -15,12 +15,12 @@ export interface AgentChannel {
 export interface SendDeps {
   getChannel(sessionId: string): AgentChannel | null | undefined | Promise<AgentChannel | null | undefined>;
   insertMessage(sessionId: string, role: string, content: string): Promise<{ id: string; created_at: unknown }>;
-  broadcastToSubscribers(sessionId: string, message: object): void | Promise<void>;
+  broadcastToSubscribers(sessionId: string, message: object): unknown;
 }
 
 export const REAL_SEND_DEPS: SendDeps = {
   getChannel: async (sessionId) => (await import('../../ws/registry.ts')).getChannel(sessionId) as AgentChannel | undefined,
-  insertMessage: async (sessionId, role, content) => (await import('../../db/dal.ts')).insertMessage(sessionId, role, content),
+  insertMessage: async (sessionId, role, content) => (await import('../../db/dal.ts')).insertMessage(sessionId, role, content) as unknown as { id: string; created_at: unknown },
   broadcastToSubscribers: async (sessionId, message) => (await import('../../ws/registry.ts')).broadcastToSubscribers(sessionId, message),
 };
 
@@ -61,7 +61,7 @@ export interface LedgerSinkDeps {
    * Optional observer for sink callbacks. The ledger has no detail column; the outcome string the
    * route persists is the record, so there is no default writer.
    */
-  recordDetail?: (eventId: string | null, detail: string) => void | Promise<void>;
+  recordDetail?: (eventId: string | null, detail: string) => unknown;
 }
 
 /**
