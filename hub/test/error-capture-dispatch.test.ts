@@ -16,6 +16,7 @@
  * ADAPTER↔PIPELINE wiring, specifically the open()→finalize run lifecycle.
  */
 import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
+import { automationControlsLeaf } from './fixtures/automation-controls-leaf.ts'
 
 // Cache-bust real modules so partial mocks don't strip sibling exports.
 const realDal = await import(`../src/db/dal.ts?bust=${Date.now()}`)
@@ -107,10 +108,18 @@ mock.module('../src/error-capture/notify.ts', () => ({
   notifyThrottled: async () => {},
 }))
 
+// PTYCAP-04-06: record the order the gates run in, so the test can pin that the kill
+// switch is FIRST. The controls leaf mock keeps this test about its own subject.
+const gateOrder: string[] = []
+mock.module('../src/dispatch/automation-controls.ts', () => ({
+  ...automationControlsLeaf(),
+  automationKillSwitchGate: { name: 'automation_kill_switch', async check() { gateOrder.push('automation_kill_switch'); return { ok: true } } },
+}))
+
 // Pass-through gates so we exercise the dispatch path (gate SQL covered in
 // dispatch-pipeline.test.ts / gates unit tests).
 mock.module('../src/dispatch/gates.ts', () => ({
-  thresholdGate: { name: 'threshold', async check() { return { ok: true } } },
+  thresholdGate: { name: 'threshold', async check() { gateOrder.push('threshold'); return { ok: true } } },
   dailyCostCapGate: { name: 'daily_cost_cap', async check() { return { ok: true } } },
   // fix/stop-the-bleed: the token cap now rides EVERY dispatch gate list.
   dailyTokenCapGate: { name: 'daily_token_cap', async check() { return { ok: true } } },
@@ -129,6 +138,7 @@ beforeEach(() => {
   state.sentFrames = []
   runSeq = 0
   sqlCall = 0
+  gateOrder.length = 0
   _reset()
 })
 
@@ -137,6 +147,10 @@ describe('error-capture dispatch adapter — open()→finalize lifecycle', () =>
 
   test('dispatched error inserts error_run, broadcasts error_dispatched with real run id, then finalizes on reply', async () => {
     const out = await dispatchPendingError('err-1')
+
+    // PTYCAP-04-06 (D-08): the kill-switch gate runs FIRST, ahead of the spend gates.
+    expect(gateOrder[0]).toBe('automation_kill_switch')
+    expect(gateOrder).toContain('threshold')
 
     // 1. open() ran → exactly one error_run, marked in_flight then it stays
     //    until finalize. The dispatched outcome carries the REAL run id.

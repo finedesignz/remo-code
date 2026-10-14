@@ -10,10 +10,11 @@
  * back through the EXISTING `assistant_message → onSessionReply → RunStore.onFinalize`
  * path. Zero new transport, zero gate relaxation.
  *
- * `humanOnlyPtyGate` STAYS in the gate list: the actor is server-inferred
+ * `governedAutomationPtyGate` STAYS in the gate list: the actor is server-inferred
  * `external-ask` (automation), so if the resolved answering session were somehow a
  * pty-interactive row the ask is REJECTED (`automation_blocked_on_pty:external-ask`),
- * never silently redirected. The redirect to a stream-json session is an explicit
+ * never silently redirected. An external actor is never PTY-eligible, even with the
+ * governed-automation flag on and every governor passing (D-06). The redirect to a stream-json session is an explicit
  * resolution step that happens BEFORE dispatch, not a gate bypass.
  */
 import { sql } from '../db/postgres.ts'
@@ -29,9 +30,10 @@ import {
   thresholdGate,
   dailyCostCapGate,
   dailyTokenCapGate,
-  humanOnlyPtyGate,
   askRateGate,
 } from '../dispatch/gates.ts'
+import { governedAutomationPtyGate } from '../dispatch/governed-pty.ts'
+import { automationKillSwitchGate } from '../dispatch/automation-controls.ts'
 import { EXT_ACTOR } from '../auth/ext-api-key-middleware.ts'
 import { finalizeAsk, markAskDispatched } from '../db/ask-dal.ts'
 import { parseAskOutput } from './result-schema.ts'
@@ -126,13 +128,17 @@ export async function dispatchAsk(input: {
   const deps: PipelineDeps = {
     // NON-NEGOTIABLE gate list. dailyCostCapGate + dailyTokenCapGate are
     // non-bypassable (IR-1 / BSA-04, scanned by hub/test/token-cap-coverage.test.ts).
-    // humanOnlyPtyGate keeps automation off any pty-interactive row. askRateGate
-    // bounds a looping external caller.
+    // governedAutomationPtyGate keeps automation off any pty-interactive row (an
+    // external actor is never eligible, flag on or off). askRateGate bounds a
+    // looping external caller.
     gates: [
+      // PTYCAP-04 D-08: the kill switch is FIRST (halts before any spend gate runs).
+      // Key-less adapter: no lifetime counter (exempt in kill-switch-coverage.test.ts).
+      automationKillSwitchGate,
       thresholdGate,
       dailyCostCapGate,
       dailyTokenCapGate,
-      humanOnlyPtyGate(async (req) => {
+      governedAutomationPtyGate(async (req) => {
         const rows = await sql<{ runner_type: string }[]>`
           SELECT runner_type FROM sessions WHERE id = ${req.sessionId} LIMIT 1
         `
@@ -148,7 +154,8 @@ export async function dispatchAsk(input: {
     ensureOnline: async (req) => {
       try {
         const { launchSessionForUser } = await import('../telegram/launch.ts')
-        const res = await launchSessionForUser({ userId: req.userId, sessionId: req.sessionId })
+        // machine: true (PTYCAP-04-07): ext ask is automation; a halt returns false so the pipeline parks.
+        const res = await launchSessionForUser({ userId: req.userId, sessionId: req.sessionId, machine: true })
         if (!res.ok) return false
         const deadline = Date.now() + 25_000
         while (Date.now() < deadline) {

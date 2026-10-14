@@ -46,7 +46,7 @@ Two independent walls, both live in prod (`REMO_PTY_INTERACTIVE=1` since the 202
 **Wall A — the gate.** `sessions.runner_type` is `'stream-json' | 'pty-interactive'`
 (`hub/src/db/schema.sql:615–621`). The human web/phone surface runs `pty-interactive`.
 `humanOnlyRejectsActor(actor, runnerType)` (`hub/src/dispatch/gates.ts:371–374`) returns true
-for **any** actor ≠ `'human'` when `runnerType === 'pty-interactive'`, and `humanOnlyPtyGate`
+for **any** actor ≠ `'human'` when `runnerType === 'pty-interactive'`, and `governedAutomationPtyGate`
 (gates.ts:388–401) turns that into `automation_blocked_on_pty:<actor>`. An external ask is
 by definition non-human (server-inferred from an api_key), so it is rejected before send.
 
@@ -71,7 +71,7 @@ prod (#247) and Telegram outbound falls back to the host-agnostic stream-json ev
 `~/.claude/projects/.../memory/project_direction_pty_orchestrator_monetize.md` (2026-07-12):
 the owner has **deliberately** decided automation will eventually drive the interactive PTY,
 with a **mandatory ordering**: (1) caps proven on all dispatch paths, (2) **cap the PTY path
-FIRST** (it has no token gate today; usage is post-hoc), (3) *then* relax `humanOnlyPtyGate`
+FIRST** (it has no token gate today; usage is post-hoc), (3) *then* relax `humanOnlyPtyGate` (renamed governedAutomationPtyGate in PTYCAP Phase 3)
 into a governed-automation gate (new flag, default OFF, server-inferred actor), (4) prove
 due→PR, (5) 30-night receipts.
 
@@ -164,12 +164,12 @@ Desktop doesn't have to memorize UUIDs.
 
 - `token: 'ask:<ask_id>'` (queue token + finalize key).
 - **Gates, in order — all non-bypassable:**
-  `thresholdGate` → `dailyCostCapGate` → **`dailyTokenCapGate`** → `humanOnlyPtyGate` →
+  `thresholdGate` → `dailyCostCapGate` → **`dailyTokenCapGate`** → `governedAutomationPtyGate` →
   `askRateGate` (new: N asks/hour/session, default 10) → `concurrencyGate(supervisorId)` when
   autospawning.
   `dailyTokenCapGate` is mandatory on every gate list and is scanned by
   `hub/test/token-cap-coverage.test.ts` — a new `gates: [...]` array missing it **fails CI**.
-  `humanOnlyPtyGate` stays in the list: if the resolved target is a `pty-interactive` row, the
+  `governedAutomationPtyGate` stays in the list: if the resolved target is a `pty-interactive` row, the
   ask is **rejected** (`automation_blocked_on_pty:external-ask`) rather than silently
   redirected — the redirect to a stream-json ask-session is an explicit resolution step
   (§2.1), decided *before* dispatch, not a gate bypass.
@@ -229,7 +229,7 @@ guard test (`hub/test/automation-routing-guard.test.ts`) still passes.
 2. Supervisor→hub **transcript streaming** over `/ws/agent` (new `transcript_delta` /
    `turn_complete` frames) so the hub can extract a reply from a PTY without reading the
    supervisor's disk. Requires a new signed MSI.
-3. `humanOnlyPtyGate` → `governedAutomationGate` (new flag, default OFF, server-inferred
+3. `humanOnlyPtyGate` → `governedAutomationPtyGate` (new flag, default OFF, server-inferred
    actor, + lifetime per-ask counter + kill switch).
 Until all three exist, **a PTY-native ask is not implementable and must not be attempted.**
 
@@ -292,7 +292,7 @@ only escalate to `remo_ask` when the free reads are inconclusive.
 | **1. Read surface (do this first)** | External api-key-authed READ of a session's transcript tail + memory + state. Zero tokens, zero PTY writes, works for PTY *and* stream-json sessions. | supervisor: new allowlisted `session_transcript_tail` / `session_memory` commands (registry alongside `teab_run`); reuse `hub/src/telegram/transcript/{claude,codex}-adapter.ts` for parsing. hub: `hub/src/api/ext.ts` (`/sessions`, `/:id/transcript`, `/:id/memory`, `/:id/state`), mount in `hub/src/index.ts` after L248, `api_keys.scopes` DDL in `schema.sql`, `hub/test/mount-order.test.ts` case. | **Needs a new signed supervisor MSI.** |
 | **2. Ask** | `POST /api/ext/sessions/:id/ask` + poll/long-poll, answered by a stream-json ask-session bound to the target's `project_dir`. | `hub/src/ask/{dispatch,result-schema,prompt,reaper}.ts` (mirroring `hub/src/revanote/*`), `session_asks` DDL, ask-session resolution/autospawn reusing `launchSessionForUser`, gates list incl. `dailyTokenCapGate` + new `askRateGate` in `hub/src/dispatch/gates.ts`, finalize hook wired via existing `onSessionReply` (no change to `hub/src/ws/agent.ts:729`). | Hub-only. No supervisor change, no PTY change, no gate relaxation. |
 | **3. MCP server** | `mcp-servers/apps/remo-code/` (5 tools above) + gateway registration + `docs/api.md` regen (`bun run docs:sync`). | `mcp-servers/apps/remo-code/*`, remo-code `hub/src/api/_openapi.ts` + `docs/api.md`. | — |
-| **4. PTY-native ask (OWNER-GATED — do not start early)** | Ask the *live* human PTY session and read its reply. | (a) token gate on the PTY path; (b) supervisor `transcript_delta`/`turn_complete` frames on `/ws/agent` + hub-side consumer replacing the disk tail; (c) `humanOnlyPtyGate` → `governedAutomationGate` (new flag, default OFF, lifetime ask counter, kill switch). | Blocked on the owner's mandatory ordering in `project_direction_pty_orchestrator_monetize`. |
+| **4. PTY-native ask (OWNER-GATED — do not start early)** | Ask the *live* human PTY session and read its reply. | (a) token gate on the PTY path; (b) supervisor `transcript_delta`/`turn_complete` frames on `/ws/agent` + hub-side consumer replacing the disk tail; (c) `humanOnlyPtyGate` → `governedAutomationPtyGate` (new flag, default OFF, lifetime ask counter, kill switch). | Blocked on the owner's mandatory ordering in `project_direction_pty_orchestrator_monetize`. |
 
 ### Test strategy
 

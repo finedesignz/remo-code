@@ -20,6 +20,7 @@ import {
   insertRunV2,
   type ScheduledTask,
 } from '../db/scheduled-tasks-dal.ts'
+import { isTaskQcEnabled } from '../task-qc/flags.ts'
 
 const MAX_MISSED = 1000
 
@@ -88,6 +89,7 @@ export async function runOnce(): Promise<{
   let dispatched = 0
   let skipped = 0
   for (const t of tasks) {
+    if (t.task_type === 'task_qc' && !isTaskQcEnabled()) continue // PTYCAP-08 F2-B3
     const missed = computeMissed(t)
     if (missed.length === 0) continue
     missedTotal += missed.length

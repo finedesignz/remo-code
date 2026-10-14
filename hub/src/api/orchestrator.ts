@@ -105,6 +105,9 @@ orchestrator.post('/start', async (c) => {
       return c.json({ error: 'at_capacity', running: res.running, cap: res.cap }, 429);
     case 'send_failed':
       return c.json({ error: 'dispatch_failed', detail: res.error }, 503);
+    case 'automation_halted':
+      // Unreachable from this human route (it never passes `machine`); present for exhaustiveness.
+      return c.json({ error: 'automation_halted' }, 503);
     default:
       return c.json({ error: 'internal_error', detail: res.error }, 500);
   }

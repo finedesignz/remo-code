@@ -21,6 +21,7 @@
  * remains the source of truth for the outcome.
  */
 import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
+import { rearmOnceTask } from '../../db/scheduled-tasks-dal.ts'
 import { getWorkRun, findWorkSite } from '../../db/work-dal.ts'
 import { dispatchWork } from '../../work/dispatch.ts'
 import { finalizeRun } from '../dispatcher.ts'
@@ -28,6 +29,7 @@ import { finalizeRun } from '../dispatcher.ts'
 interface RunCtxLike {
   runId: string
   userId: string
+  onceClaimed?: boolean
 }
 
 export async function sendWorkTask(task: ScheduledTask, ctx: RunCtxLike): Promise<void> {
@@ -76,6 +78,14 @@ export async function sendWorkTask(task: ScheduledTask, ctx: RunCtxLike): Promis
       await finalizeRun(ctx.runId, 'success', null, { output_snippet: note, only_if_active: true })
       return
     case 'skipped':
+      // PTYCAP-04-06 (panel F-4): a kill-switch refusal of a CLAIMED one-time work task must
+      // not burn the client's work. Restore the claim (the once-due sweep re-fires it after
+      // release); this attempt's run is recorded as skipped, never as completed work.
+      if (ctx.onceClaimed === true && outcome.reason.startsWith('automation_halted:')) {
+        try { await rearmOnceTask(task.id) } catch (err: any) {
+          console.error(`[scheduler.work] once re-arm failed task=${task.id}: ${err?.message ?? err}`)
+        }
+      }
       await finalizeRun(ctx.runId, 'skipped', outcome.reason, { output_snippet: note, only_if_active: true })
       return
     case 'failed':

@@ -31,6 +31,7 @@ import {
   type RunStore,
 } from '../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
+import { automationKillSwitchGate } from '../dispatch/automation-controls.ts'
 import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
 import { fenceUntrusted, SCOPE_CONTRACT } from '../dispatch/untrusted.ts'
 
@@ -127,7 +128,7 @@ export async function dispatchFeedback(
     // IR-1 / IR-2: threshold then non-bypassable cost-cap.
     // sessionInjectRateGate: a feedback flood (public submit token) must not drive
     // N turns/hour into the bound session — a rate ceiling, not just a $ / token one.
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
+    gates: [automationKillSwitchGate, thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Wake an offline bound session (opt-in via REMO_SPAWN_ON_ERROR). Leak-safe

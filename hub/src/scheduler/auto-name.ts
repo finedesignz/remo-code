@@ -20,6 +20,7 @@ export type TaskType =
   | 'qc_review' | 'qc_fix' | 'qc_verify'
   | 'triage'
   | 'teab'
+  | 'task_qc'
 export type TargetKind = 'session' | 'supervisor' | 'all_agents' | 'all_supervisors'
 
 export interface SessionLike {
@@ -66,6 +67,7 @@ const TYPE_LABELS: Record<TaskType, string> = {
   log_triage: 'Log · Triage',
   triage: 'Triage',
   teab: 'TEAB Build',
+  task_qc: 'Task QC',
 }
 
 function shortenPath(p: string | null | undefined): string {

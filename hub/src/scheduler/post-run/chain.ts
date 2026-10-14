@@ -9,6 +9,7 @@
 import type { PostRunAction } from './schema.ts'
 import { nextStepInWorkflow, workflowRootForStep } from '../workflows.ts'
 import type { TaskType } from '../../db/scheduled-tasks-dal.ts'
+import { log } from '../../observability/logger'
 
 interface ChainCtx {
   parentRunId: string
@@ -27,6 +28,19 @@ export async function executeChain(action: PostRunAction, ctx: ChainCtx): Promis
   if (action.type !== 'chain_task') return
   const childId = action.config.task_id
   if (!childId) return
+
+  // PTYCAP-08 (F1-A2, T-08-10): task_qc is terminal. It never chains onward, and no chain
+  // edge may start it, even if a stored chain_task row points at it.
+  if (ctx.parentTaskKind === 'task_qc') {
+    log.info('scheduler.chain.task_qc_parent_refused', { parent_run_id: ctx.parentRunId, child_task_id: childId })
+    return
+  }
+  const { getTaskById } = await import('../../db/scheduled-tasks-dal.ts')
+  const child = await getTaskById(childId)
+  if (child?.task_type === 'task_qc') {
+    log.info('scheduler.chain.task_qc_child_refused', { parent_run_id: ctx.parentRunId, child_task_id: childId })
+    return
+  }
 
   // Workflow-aware audit log: if parent is a known chained step, surface the
   // expected next step kind so downstream tooling can detect mis-wired chains.

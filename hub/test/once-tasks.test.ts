@@ -16,6 +16,7 @@
  * gate runs each file in its own process.
  */
 import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
+import { automationControlsLeaf } from './fixtures/automation-controls-leaf.ts'
 
 const state = {
   claimCalls: [] as string[],
@@ -43,7 +44,11 @@ mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
   },
   // The atomic claim: returns true iff THIS caller won it (row was still enabled).
   claimOnceTask: async (taskId: string) => { state.claimCalls.push(taskId); return state.claimResult },
+  rearmOnceTask: async () => false,
 }))
+
+// PTYCAP-04-06: dispatcher now consults the kill switch; leaf mock = never halted.
+mock.module('../src/dispatch/automation-controls.ts', () => automationControlsLeaf())
 
 // Threshold NOT allowed → fireTask short-circuits into the skipped_quota run row
 // BEFORE resolveTargets. This exercises the full "insert run → onRunFinalized"

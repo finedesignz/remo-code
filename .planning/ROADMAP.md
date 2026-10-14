@@ -30,7 +30,7 @@
 
 - [ ] **Phase 1: PTY Token Accounting** — live, mid-turn token accounting for a PTY turn (post-hoc is too late; a TUI turn can run for many minutes).
 - [x] **Phase 2: PTY Pre-Flight Gate** — a programmatic turn cannot be written to the PTY without passing the full gate chain.
-- [ ] **Phase 3: Governed-Automation Guard** — `humanOnlyPtyGate` → `governedAutomationPtyGate`, new flag, default OFF.
+- [x] **Phase 3: Governed-Automation Guard** — `humanOnlyPtyGate` → `governedAutomationPtyGate`, new flag, default OFF.
 - [ ] **Phase 4: Lifetime Inject Counter + Kill Switch** — rate ceilings don't stop a slow grind; add a lifetime per-task counter and a real kill switch.
 - [ ] **Phase 5: Throwaway-Repo Due→PR Proof** — prove the thing actually works, once, on a repo nobody cares about.
 - [ ] **Phase 6: Hardening + Docs + Release** — real-Postgres e2e, docs, version bump, ship, smoke-verify.
@@ -114,6 +114,12 @@ ceiling (and the programmatic-credit halt).
   3. Alarm emails the owner at 60% of the daily token ceiling.
   4. Default daily token cap lowered from 50M to a survivable figure (~20M).
 
+**Hand-off from Phase 3**: DELIVERED in Phase 4. The fail-closed `kill_switch` and `lifetime_counter` governor bodies in `hub/src/dispatch/governed-pty.ts` are now real; an admitted automation PTY turn is COUNTED in a durable append-only ledger (`automation_inject_ledger`) by an atomic reserve-before-send. See [docs/usage-cost.md](../docs/usage-cost.md) "PTYCAP Phase 4".
+
+**Delivery notes (Phase 4)**: the lifetime cap is LITERAL (default 1000 per counter key, env-raisable, owner reset, one-shot warning page at 80 percent and an exhaustion page); `POST /api/sessions/heal` is classified a machine surface; with `REMO_GOVERNED_AUTOMATION_PTY` ON the ask, work and telegram governed lists carry no counter key, so the `lifetime_counter` governor refuses `lifetime_counter_key_missing` until Phase 5/7 supply keys (fail closed, flag default OFF). The 20M default token cap applies only where `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` is unset.
+
+**Deferred to Milestone GOV (from Phase 4)**: a Telegram or UI kill-switch trigger; opt-in `stop_running` cancellation of active runs once automation ownership is tracked; a counter policy for QC keys (Phases 7/8) beyond the heal key; the cap-hit QC kind (Phase 9).
+
 ### Phase 5: Throwaway-Repo Due→PR Proof
 
 **Goal**: The orchestrator produces one reviewable PR, unattended, on a repo nobody cares about.
@@ -166,9 +172,23 @@ safe-fix allowlist, and emails a PROPOSAL for everything else.
   2. The auto-fix allowlist is a literal, enumerated set. A fix not on it is IMPOSSIBLE to apply —
      a guard test asserts the writer rejects any unlisted fix kind.
   3. It NEVER auto-disables a task, never mutates another session's in-flight work, and never opens
-     a dev loop: its own token ceiling is separate and small.
+     a dev loop: its own token ceiling is separate and small (satisfied structurally: the engine is
+     deterministic and spends zero model tokens, bounded by deterministic pass bounds and the Phase 4
+     lifetime counter).
   4. Everything not auto-fixed becomes one digest email with a proposal per finding.
   5. Flag-gated; default OFF; empty allowlist ⇒ report-only.
+**Plans:** 10 plans (5 waves)
+Plans:
+- [x] 08-01-PLAN.md (wave 1) - DDL (task_qc in the type CHECK, per-user partial unique index, task_qc_findings), four-carrier enum sync, flags + frozen bounds, idempotent findings DAL, strict fake-sql fixture
+- [x] 08-02-PLAN.md (wave 1) - shared types + the six pure detectors + audit-set predicate (purity proven)
+- [x] 08-03-PLAN.md (wave 2) - TRACER: flag-on fire to finding + digest email; fireTask branch ordering, flag-OFF no-op, atomic single run claim, terminal lifecycle (no post-run/chain)
+- [x] 08-04-PLAN.md (wave 2) - safe-fix writer: 3-kind immutable allowlist, one tx per fix (lock, in-flight refusal, audit row), pure fix planner, static never-disables guard
+- [x] 08-05-PLAN.md (wave 2) - API guards: system-owned task_qc row (no create/delete, PATCH only enabled + validated cadence/timezone)
+- [x] 08-06-PLAN.md (wave 3) - bounded read layer, full runTaskQcPass (report-only default, halt re-check), deterministic bounds, narrowing-only scope, no-model import allowlist guard
+- [x] 08-07-PLAN.md (wave 3) - digest hardening (typed fields only, ASCII, command templates), sender lifetime counter + ENGINE failure email, Phase 4 pin-test entries
+- [x] 08-08-PLAN.md (wave 3) - boot seed (before registry load + catchup), flag-OFF exclusion in registry/catchup, kill-switch scope pins
+- [x] 08-09-PLAN.md (wave 4) - real-Postgres e2e helpers (zero new tests/skips): CHECK/index/NULL anchor/locks/rollbacks/report-only snapshot
+- [x] 08-10-PLAN.md (wave 5) - spec supersession (08-SPEC TQC-07, 09-SPEC budget rows), docs, roadmap, baseline, full phase gate
 
 ### Phase 9: Cap-Hit → QC Trigger
 **Goal**: Hitting a token cap stops being a dead end. It fires a single bounded QC pass that tries to
@@ -190,12 +210,12 @@ fix the CAUSE, and escalates to the human when it cannot.
 |-------|--------|
 | 1. PTY Token Accounting | In Progress|
 | 2. PTY Pre-Flight Gate | Done |
-| 3. Governed-Automation Guard | Not started |
-| 4. Lifetime Counter + Kill Switch | Not started |
+| 3. Governed-Automation Guard | Complete (4/4 plans) - PR #505 open |
+| 4. Lifetime Counter + Kill Switch | Executed (8/8 plans) - QC BLOCKED (2 open races), draft PR #506 |
 | 5. Throwaway-Repo Due→PR Proof | Not started |
 | 6. Hardening + Docs + Release | Not started |
 | 7. Unified Self-Heal Routing | Specced, not started (blocked on #346 + Phase 4) |
-| 8. Periodic Task QC + Optimization | Specced, not started (blocked on Phase 4) |
+| 8. Periodic Task QC + Optimization | Executed (10/10 plans) - QC BLOCKED (1 open MAJOR), draft PR |
 | 9. Cap-Hit → QC Trigger | Specced, not started (blocked on Phases 4 + 8) |
 
 ## Dependency graph

@@ -30,6 +30,10 @@ mock.module('../src/scheduler/dispatcher.ts', () => ({
   },
 }))
 
+const rearmed: string[] = []
+mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
+  rearmOnceTask: async (id: string) => { rearmed.push(id); return true },
+}))
 mock.module('../src/db/work-dal.ts', () => ({
   getWorkRun: async () => state.workRun,
   findWorkSite: async () => state.site,
@@ -99,6 +103,15 @@ describe('sendWorkTask — thin adapter over dispatchWork', () => {
     state.dispatchOutcome = { kind: 'skipped', reason: 'over_work_rate' }
     await sendWorkTask(task(), ctx)
     expect(state.finalized).toEqual([{ runId: 'run-1', status: 'skipped', error: 'over_work_rate' }])
+  })
+
+  test('QC R4: halted dispatch re-arms ONLY when this run claimed the once-task', async () => {
+    state.dispatchOutcome = { kind: 'skipped', reason: 'automation_halted:user' }
+    rearmed.length = 0
+    await sendWorkTask(task(), ctx)
+    expect(rearmed).toEqual([])
+    await sendWorkTask(task(), { ...ctx, onceClaimed: true })
+    expect(rearmed).toEqual(['task-work-1'])
   })
 
   test('failed dispatch → run finalized failed WITH the reason', async () => {

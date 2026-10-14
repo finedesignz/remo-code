@@ -42,6 +42,7 @@ import { usage as usageApi } from './api/usage'
 import { wellKnown } from './api/well-known'
 import { clientConfig } from './api/client-config'
 import { orchestrator as orchestratorApi } from './api/orchestrator'
+import { automationApi } from './api/automation'
 import { orchestratorTasks as orchestratorTasksApi } from './api/orchestrator-tasks'
 import { requireActiveLicense } from './license-gate'
 import { openapi as openapiApp } from './api/_openapi'
@@ -49,6 +50,7 @@ import { runMigrations } from './db/migrate'
 import { markOrphanedRunsInterrupted } from './db/scheduled-tasks-dal.ts'
 // V2 scheduler.
 import * as schedRegistry from './scheduler/registry.ts'
+import { seedTaskQcTasks } from './task-qc/seed.ts'
 import * as schedCatchup from './scheduler/catchup.ts'
 import { clearPendingTimers as clearPostRunTimers } from './scheduler/post-run/dispatcher.ts'
 import { getGraceBuffer as getDispatchGraceBuffer } from './dispatch/grace.ts'
@@ -66,6 +68,8 @@ import { startWorkReaperSweep, stopWorkReaperSweep } from './work/reaper.ts'
 import { startStaleRunReaperSweep, stopStaleRunReaperSweep } from './sessions/stale-run-reaper.ts'
 import { startOnceDueSweep, stopOnceDueSweep } from './scheduler/once-due-sweep.ts'
 import { assertTokenCapConfig } from './dispatch/gates.ts'
+import { assertAutomationControlsEnv, assertAutomationControlsTables } from './dispatch/automation-controls.ts'
+import { registerTokenCapAlarm } from './observability/token-cap-alarm.ts'
 import { apiKeyMiddleware } from './auth/api-key-middleware'
 import { extApiKeyMiddleware } from './auth/ext-api-key-middleware'
 import { ext } from './api/ext'
@@ -438,6 +442,15 @@ app.use('/api/orchestrator', orchestratorStepUp)
 app.use('/api/orchestrator/*', orchestratorStepUp)
 app.use('/api/orchestrator', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/orchestrator/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
+// PTYCAP-04-05: automation controls. Engage (kill switch) deliberately has NO step-up,
+// mirroring the orchestrator /stop precedent: an emergency stop must work with a
+// weeks-old cookie. Release and lifetime reset RE-ENABLE spend, so a stolen cookie
+// must not do them: they need a login under 15 minutes old.
+app.use('/api/automation/kill-switch/release', async (c, next) =>
+  isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/automation/lifetime/reset', async (c, next) =>
+  isMutating(c) ? requireRecentAuth()(c, next) : next())
+app.use('/api/automation/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/mappings', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/mappings/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
 app.use('/api/revanote/annotations/*', async (c, next) => isMutating(c) ? userMutationLimit(c, next) : next())
@@ -482,6 +495,7 @@ app.route('/api/error-setup', errorSetupApi)
 // Phase 08: JWT-authed revanote sub-routes (mappings + annotations).
 // The public webhook route lives at /api/revanote/webhook/* (mounted above).
 app.route('/api/orchestrator', orchestratorApi)
+app.route('/api/automation', automationApi)
 // Phase 31 (auto-dev-orchestrator): authed config REST for the one-per-session
 // orchestrator task + its rows. Data-only (controller path is flag-OFF). Mounted
 // alongside the other authed user routes (post-auth catch-all).
@@ -572,6 +586,23 @@ try {
   console.error(`[startup] FATAL: ${err?.message ?? err}`)
   process.exit(1)
 }
+
+// PTYCAP-04: a bad lifetime inject cap is a safety defect, refused BEFORE the port binds
+// (env half only; the table-existence half runs right after runMigrations() below).
+try {
+  assertAutomationControlsEnv()
+} catch (err: any) {
+  console.error(`[startup] FATAL: ${err?.message ?? err}`)
+  process.exit(1)
+}
+
+// PTYCAP-04-05 / QC M4: usage events schedule the daily-token-ceiling alarm. Registering the
+// listener is purely in-memory (no DB, no timer), so it happens BEFORE Bun.serve accepts
+// traffic: a usage event recorded in the boot window must not be lost. The DB claim runs
+// later, on the listener's trailing-edge timer (5s quiet window); if the tables are not
+// migrated yet that evaluation fails, is logged ("evaluation failed") and the next usage
+// event re-arms it - it never throws into the recorder. Event-driven; no timer here.
+registerTokenCapAlarm()
 
 // Start Bun server with WebSocket upgrade handling.
 //
@@ -704,6 +735,13 @@ const server = Bun.serve({
 // On startup: apply migrations, then mark all sessions as offline,
 // boot the W2 scheduler (registry + catchup) alongside the legacy v0.
 runMigrations()
+  // PTYCAP-04: first step after migrations. The server is already listening during this
+  // step; every automation gate fails closed on a DB error in that window. NEVER move this
+  // before runMigrations() (it would exit on the very first deploy, before the DDL ran).
+  .then(() => assertAutomationControlsTables().catch((err: any) => {
+    console.error(`[startup] FATAL: ${err?.message ?? err}`)
+    process.exit(1)
+  }))
   .then(() => setOfflineStaleAgentSessions())
   .then(() => markStreamingMessagesAsInterrupted())
   .then(() => markOrphanedRunsInterrupted())
@@ -711,6 +749,11 @@ runMigrations()
     // V2 scheduler: load enabled tasks, run catch-up. Waiter promotion lives in
     // the shared dispatch pipeline (onSessionReply → queue.markFinished →
     // re-dispatch); there is no dispatcher init step to wire anymore.
+    // PTYCAP-08 (F2-B3): seed the per-user task_qc row BEFORE the registry load and catchup so the
+    // normal loader arms it. Flag OFF = no database call. A failure logs and boot continues.
+    try { await seedTaskQcTasks() } catch (err: any) {
+      console.error(`[startup] task_qc seed failed: ${err?.message ?? err}`)
+    }
     await schedRegistry.loadAll()
     await schedCatchup.runOnce()
     // Round-2 migration: error-capture grace now lives in the shared dispatch

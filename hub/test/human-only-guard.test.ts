@@ -11,12 +11,15 @@
  *     of, the cap),
  *   - the gate never bypasses the cost cap.
  */
-import { describe, test, expect } from 'bun:test'
-import {
-  humanOnlyRejectsActor,
-  humanOnlyPtyGate,
-  AUTOMATION_ACTORS,
-} from '../src/dispatch/gates'
+import { describe, test, expect, beforeEach } from 'bun:test'
+import { humanOnlyRejectsActor, AUTOMATION_ACTORS } from '../src/dispatch/gates'
+import { governedAutomationPtyGate } from '../src/dispatch/governed-pty'
+
+// The dispatch-pipeline-form tests below assert the flag-OFF (legacy) behavior
+// regardless of any ambient env.
+beforeEach(() => {
+  delete process.env.REMO_GOVERNED_AUTOMATION_PTY
+})
 
 const baseReq = {
   userId: 'u1',
@@ -51,27 +54,27 @@ describe('Phase 16 — humanOnlyRejectsActor (shared decision)', () => {
   })
 })
 
-describe('Phase 16 — humanOnlyPtyGate (dispatch pipeline form)', () => {
+describe('PTYCAP Phase 3 — governedAutomationPtyGate (dispatch pipeline form, flag OFF = legacy)', () => {
   test('blocks an automation source for a pty-interactive session', async () => {
-    const gate = humanOnlyPtyGate(async () => ({ actor: 'scheduler', runnerType: 'pty-interactive' }))
+    const gate = governedAutomationPtyGate(async () => ({ actor: 'scheduler', runnerType: 'pty-interactive' }))
     const r = await gate.check(baseReq as any)
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('automation_blocked_on_pty:scheduler')
   })
 
   test('allows a human turn to a pty-interactive session', async () => {
-    const gate = humanOnlyPtyGate(async () => ({ actor: 'human', runnerType: 'pty-interactive' }))
+    const gate = governedAutomationPtyGate(async () => ({ actor: 'human', runnerType: 'pty-interactive' }))
     expect((await gate.check(baseReq as any)).ok).toBe(true)
   })
 
   test('allows automation to a stream-json session (still subject to other gates)', async () => {
-    const gate = humanOnlyPtyGate(async () => ({ actor: 'scheduler', runnerType: 'stream-json' }))
+    const gate = governedAutomationPtyGate(async () => ({ actor: 'scheduler', runnerType: 'stream-json' }))
     expect((await gate.check(baseReq as any)).ok).toBe(true)
   })
 
   test('the gate is named distinctly so it composes alongside daily_cost_cap (never replaces it)', () => {
-    const gate = humanOnlyPtyGate(async () => ({ actor: 'human', runnerType: 'pty-interactive' }))
-    expect(gate.name).toBe('human_only_pty')
+    const gate = governedAutomationPtyGate(async () => ({ actor: 'human', runnerType: 'pty-interactive' }))
+    expect(gate.name).toBe('governed_automation_pty')
     expect(gate.name).not.toBe('daily_cost_cap')
   })
 })

@@ -225,7 +225,10 @@ ALTER TABLE scheduled_tasks ADD CONSTRAINT scheduled_tasks_task_type_check
     -- existing dispatchWork; work_runs remains the typed result/audit record.
     'work',
     -- Internal: synthesized by Coolify webhook
-    'triage'
+    'triage',
+    -- PTYCAP-08: the per-user task-quality auditor. One row per user (see
+    -- idx_scheduled_tasks_task_qc_unique); seeded at boot, never user-created.
+    'task_qc'
   ));
 ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS target_kind TEXT NOT NULL DEFAULT 'session'
   CHECK (target_kind IN ('session','supervisor','all_agents','all_supervisors'));
@@ -292,6 +295,12 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next_fire
 CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_tasks_orchestrator_unique
   ON scheduled_tasks(session_id)
   WHERE task_type = 'orchestrator';
+
+-- PTYCAP-08: at most ONE task_qc (task-quality auditor) row per user. Partial
+-- unique index, same style as the orchestrator one above.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_tasks_task_qc_unique
+  ON scheduled_tasks(user_id)
+  WHERE task_type = 'task_qc';
 
 -- D10: manual lifecycle stage with per-stage frequency presets. Default
 -- 'development'. Constrained to the three stages. Named CHECK added guardedly
@@ -1596,3 +1605,117 @@ DO $$ BEGIN
       CHECK (runner_type IN ('stream-json','pty-interactive','cloud'));
   END IF;
 END $$;
+
+-- ── PTYCAP-04: lifetime inject ledger + automation kill switch + token-cap alarm ──
+-- All three tables are ADDITIVE and carry NO foreign keys (plain TEXT ids): the
+-- ledger is append-only history that must survive deletion of a task or session
+-- (the counter is a budget, not a relation). Corrections are append-only (a
+-- 'reset' marker row, released_at stamped on a failed send) - never a delete.
+CREATE TABLE IF NOT EXISTS automation_inject_ledger (
+  seq         BIGSERIAL,
+  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id     TEXT NOT NULL,
+  session_id  TEXT,
+  counter_key TEXT NOT NULL,
+  actor       TEXT NOT NULL DEFAULT '',
+  token       TEXT NOT NULL,
+  kind        TEXT NOT NULL DEFAULT 'inject' CHECK (kind IN ('inject','reset','page')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  released_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_inject_ledger_key_token
+  ON automation_inject_ledger(counter_key, token);
+CREATE INDEX IF NOT EXISTS idx_automation_inject_ledger_key_seq
+  ON automation_inject_ledger(counter_key, seq DESC);
+CREATE INDEX IF NOT EXISTS idx_automation_inject_ledger_session_created
+  ON automation_inject_ledger(session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS automation_kill_switch (
+  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  scope       TEXT NOT NULL CHECK (scope IN ('global','user','session')),
+  user_id     TEXT,
+  session_id  TEXT,
+  engaged     BOOLEAN NOT NULL DEFAULT true,
+  reason      TEXT,
+  engaged_by  TEXT NOT NULL,
+  engaged_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  released_by TEXT,
+  released_at TIMESTAMPTZ
+);
+-- At most ONE engaged row per target (engage is idempotent; history rows stay).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_global
+  ON automation_kill_switch(scope) WHERE scope = 'global' AND engaged;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_user
+  ON automation_kill_switch(user_id) WHERE scope = 'user' AND engaged;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_kill_switch_session
+  ON automation_kill_switch(session_id) WHERE scope = 'session' AND engaged;
+
+-- Daily token-ceiling alarm claim: one row per (user, local day). `delivered`
+-- flips only when the email was really sent, so a failed send is retried.
+CREATE TABLE IF NOT EXISTS token_cap_alarms (
+  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id         TEXT NOT NULL,
+  local_date      DATE NOT NULL,
+  pct             INTEGER NOT NULL,
+  tokens          BIGINT,
+  cap             BIGINT,
+  delivered       BOOLEAN NOT NULL DEFAULT false,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_token_cap_alarms_user_date
+  ON token_cap_alarms(user_id, local_date);
+
+-- Dedupe key shared by the rate union (routine_run_log inject rows vs ledger
+-- reserve rows): nullable, written by the inject path, never backfilled.
+ALTER TABLE routine_run_log ADD COLUMN IF NOT EXISTS inject_token TEXT;
+
+-- PTYCAP-08: audit trail for the task-quality auditor. No foreign key on task_id
+-- because audited tasks can be deleted. evidence_sig + day make a re-run of an
+-- unchanged condition idempotent (unique index below; writers use ON CONFLICT
+-- DO NOTHING).
+CREATE TABLE IF NOT EXISTS task_qc_findings (
+  id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  task_id      TEXT NOT NULL,
+  detector     TEXT NOT NULL
+    CHECK (detector IN ('FAILING','SKIP_FOREVER','NEVER_FIRED','MISCONFIGURED','DEAD_SESSION','OPTIMIZE','ENGINE')),
+  severity     TEXT NOT NULL DEFAULT 'info'
+    CHECK (severity IN ('info','warn','high')),
+  disposition  TEXT NOT NULL
+    CHECK (disposition IN ('auto_fixed','proposed','skipped_in_flight')),
+  fix_kind     TEXT,
+  before_json  JSONB,
+  after_json   JSONB,
+  rollback_sql TEXT,
+  evidence     JSONB NOT NULL DEFAULT '{}'::jsonb,
+  evidence_sig TEXT NOT NULL,
+  day          DATE NOT NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_qc_findings_user_created
+  ON task_qc_findings(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_qc_findings_task
+  ON task_qc_findings(user_id, task_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_qc_findings_dedupe
+  ON task_qc_findings(user_id, task_id, detector, evidence_sig, day);
+
+-- PTYCAP-08 QC round 2: the round-1 BEFORE INSERT trigger on scheduled_task_runs (a
+-- per-session advisory lock taken on every session-bound run insert) is REMOVED. It put
+-- work on the hot run-insert path even with Task QC off. The safe-fix writer now gets the
+-- same atomicity from row locks it takes itself (the task row and the target session row,
+-- FOR UPDATE, which the FK key-share of a run insert conflicts with), so run insertion is
+-- byte-for-byte the pre-feature statement. The existence check keeps a converged boot from
+-- taking any lock on scheduled_task_runs. Idempotent; no data touched.
+-- schema-lint: allow idempotent DDL - drops a retired trigger and function only if present; no rows touched
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_scheduled_task_runs_session_lock' AND NOT tgisinternal) THEN
+    DROP TRIGGER trg_scheduled_task_runs_session_lock ON scheduled_task_runs;
+  END IF;
+  DROP FUNCTION IF EXISTS scheduled_task_runs_session_lock();
+END $$;
+
+-- PTYCAP-08 QC round 1: a digest marks the proposal rows it contained as delivered, so a
+-- failed send (or a same-day re-run) re-reports them instead of losing them. Additive.
+ALTER TABLE task_qc_findings ADD COLUMN IF NOT EXISTS digest_sent_at TIMESTAMPTZ;

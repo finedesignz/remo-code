@@ -28,6 +28,17 @@ export interface TokenUsageInput {
 }
 
 /**
+ * PTYCAP-04-05: single-slot listener invoked (fire-and-forget) after the ledger commit.
+ * Registered at boot by observability/token-cap-alarm.ts; absent in every unit test, so
+ * recordTokenUsage issues exactly its two statements and nothing else (F-7).
+ */
+type TokenUsageListener = (u: TokenUsageInput) => void | Promise<unknown>
+let tokenUsageListener: TokenUsageListener | null = null
+export function setTokenUsageListener(fn: TokenUsageListener | null): void {
+  tokenUsageListener = fn
+}
+
+/**
  * Insert a ledger row + upsert the daily rollup. The daily `day` is derived
  * from now() in UTC (the rollup is a coarse cache; the precise per-window
  * aggregates use token_usage.created_at directly).
@@ -70,6 +81,16 @@ export async function recordTokenUsage(u: TokenUsageInput): Promise<{ id: string
       cost_usd                    = token_usage_daily.cost_usd + EXCLUDED.cost_usd,
       updated_at                  = now()
   `
+  const listener = tokenUsageListener
+  if (listener) {
+    // Never awaited, never allowed to change the ledger result: swallow both a
+    // synchronous throw and a rejected promise.
+    try {
+      Promise.resolve(listener(u)).catch(() => {})
+    } catch {
+      /* swallowed */
+    }
+  }
   return rows[0]!
 }
 

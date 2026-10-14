@@ -222,7 +222,15 @@ export async function runMacroCycle(
       macroTaskType === 'dev'
         ? { isBuild: true, repoIdent: input.repoIdent, tz: undefined }
         : undefined;
-    const outcome = await d.inject({ userId, sessionId, token, prompt: macro.prompt, autospawn });
+    const outcome = await d.inject({
+      userId,
+      sessionId,
+      token,
+      prompt: macro.prompt,
+      autospawn,
+      // PTYCAP-04 (D-01, F-5c): one lifetime budget per orchestrator task.
+      taskId: input.taskId,
+    });
     result.injected =
       outcome.kind === 'dispatched' ||
       outcome.kind === 'queued' ||
@@ -270,6 +278,9 @@ export async function runMacroCycle(
         command: `macro:${macroTaskType}`,
         decision_rationale: `resume-heartbeat inject (stage=${stage}); outcome=${outcome.kind}`,
         outcome: outcome.kind,
+        // PTYCAP-04 (F-6): the rate union de-duplicates this row against the ledger row
+        // by token. Only inject outcomes (dispatched|queued|autospawn_*) carry it.
+        inject_token: result.injected ? token : null,
       });
     } catch {
       /* best-effort */
@@ -285,13 +296,20 @@ export async function runMacroCycle(
       // do NOT page on it. BSA-02: an autospawn GATE refusal (not_allowlisted /
       // supervisor_offline / launch_cap / over_token_cap / a launch-primitive
       // refusal) is ALSO benign — it is the expected state when autospawn is OFF /
-      // unconfigured, so it must NOT page either. A real cost-cap/threshold refusal
-      // or a hard failure still surfaces.
+      // unconfigured, so it must NOT page either. PTYCAP-04 (D-04, F-9): a kill-switch
+      // halt (`automation_halted:*`) and a spent lifetime budget
+      // (`lifetime_inject_exhausted:*`) are benign here too - the controls module has
+      // ALREADY paged the owner once per epoch, so a per-tick failure page would only
+      // storm. A real cost-cap/threshold refusal or a hard failure still surfaces.
       const benignAutospawnRefusal =
         outcome.kind === 'refused' &&
         ['not_allowlisted', 'supervisor_offline', 'launch_cap', 'over_token_cap'].includes(reason as string) ||
         (typeof reason === 'string' && reason.startsWith('autospawn_launch_'));
-      if (outcome.kind !== 'no_session' && !benignAutospawnRefusal) {
+      const benignAutomationControl =
+        outcome.kind === 'refused' &&
+        typeof reason === 'string' &&
+        (reason.startsWith('automation_halted:') || reason.startsWith('lifetime_inject_exhausted:'));
+      if (outcome.kind !== 'no_session' && !benignAutospawnRefusal && !benignAutomationControl) {
         await emitFailure(d, input, `resume inject ${outcome.kind}: ${reason}`);
       }
     }
