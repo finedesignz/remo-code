@@ -92,6 +92,8 @@ const ALLOW: Record<string, string[]> = {
     '../../lib/email.ts',
     '../../task-qc/engine.ts',
     '../../task-qc/digest.ts',
+    '../../task-qc/findings.ts',
+    '../../task-qc/types.ts',
     '../../dispatch/automation-controls.ts',
     '../dispatcher.ts',
     '../../observability/logger',
