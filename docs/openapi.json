@@ -2082,6 +2082,354 @@
         }
       }
     },
+    "/api/orchestrator/proof": {
+      "get": {
+        "summary": "Read the caller's throwaway-repo proof run (latest plus up to 5 earlier runs)",
+        "tags": [
+          "orchestrator"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Latest proof run (null when none) and earlier runs, newest first. Read-only; no credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "run": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "armed",
+                            "running",
+                            "succeeded",
+                            "nothing",
+                            "terminated",
+                            "disarmed"
+                          ]
+                        },
+                        "outcome": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "outcome_detail": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "repo_ident": {
+                          "type": "string"
+                        },
+                        "branch": {
+                          "type": "string"
+                        },
+                        "base_sha": {
+                          "type": "string"
+                        },
+                        "default_branch": {
+                          "type": "string"
+                        },
+                        "pr_url": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "pr_number": {
+                          "type": "integer",
+                          "nullable": true
+                        },
+                        "last_ci_state": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "last_inject_outcome": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "protection_shape": {
+                          "type": "string"
+                        },
+                        "ruleset_digest": {
+                          "type": "string",
+                          "description": "First 12 characters of the frozen ruleset digest"
+                        },
+                        "budgets": {
+                          "type": "object",
+                          "properties": {
+                            "max_injects": {
+                              "type": "integer"
+                            },
+                            "max_tokens": {
+                              "type": "number"
+                            },
+                            "max_wall_ms": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "max_injects",
+                            "max_tokens",
+                            "max_wall_ms"
+                          ]
+                        },
+                        "usage": {
+                          "type": "object",
+                          "properties": {
+                            "injects": {
+                              "type": "integer",
+                              "nullable": true,
+                              "description": "Live injects since start; null when the count could not be read"
+                            },
+                            "tokens_hwm": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "injects",
+                            "tokens_hwm"
+                          ]
+                        },
+                        "bypass_verification": {
+                          "type": "string",
+                          "enum": [
+                            "verified",
+                            "unverified"
+                          ]
+                        },
+                        "armed_at": {
+                          "type": "string"
+                        },
+                        "started_at": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "terminal_at": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "status",
+                        "outcome",
+                        "outcome_detail",
+                        "repo_ident",
+                        "branch",
+                        "base_sha",
+                        "default_branch",
+                        "pr_url",
+                        "pr_number",
+                        "last_ci_state",
+                        "last_inject_outcome",
+                        "protection_shape",
+                        "ruleset_digest",
+                        "budgets",
+                        "usage",
+                        "bypass_verification",
+                        "armed_at",
+                        "started_at",
+                        "terminal_at"
+                      ]
+                    },
+                    "history": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "armed",
+                              "running",
+                              "succeeded",
+                              "nothing",
+                              "terminated",
+                              "disarmed"
+                            ]
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "outcome_detail": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "repo_ident": {
+                            "type": "string"
+                          },
+                          "branch": {
+                            "type": "string"
+                          },
+                          "base_sha": {
+                            "type": "string"
+                          },
+                          "default_branch": {
+                            "type": "string"
+                          },
+                          "pr_url": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "pr_number": {
+                            "type": "integer",
+                            "nullable": true
+                          },
+                          "last_ci_state": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "last_inject_outcome": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "protection_shape": {
+                            "type": "string"
+                          },
+                          "ruleset_digest": {
+                            "type": "string",
+                            "description": "First 12 characters of the frozen ruleset digest"
+                          },
+                          "budgets": {
+                            "type": "object",
+                            "properties": {
+                              "max_injects": {
+                                "type": "integer"
+                              },
+                              "max_tokens": {
+                                "type": "number"
+                              },
+                              "max_wall_ms": {
+                                "type": "number"
+                              }
+                            },
+                            "required": [
+                              "max_injects",
+                              "max_tokens",
+                              "max_wall_ms"
+                            ]
+                          },
+                          "usage": {
+                            "type": "object",
+                            "properties": {
+                              "injects": {
+                                "type": "integer",
+                                "nullable": true,
+                                "description": "Live injects since start; null when the count could not be read"
+                              },
+                              "tokens_hwm": {
+                                "type": "number"
+                              }
+                            },
+                            "required": [
+                              "injects",
+                              "tokens_hwm"
+                            ]
+                          },
+                          "bypass_verification": {
+                            "type": "string",
+                            "enum": [
+                              "verified",
+                              "unverified"
+                            ]
+                          },
+                          "armed_at": {
+                            "type": "string"
+                          },
+                          "started_at": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "terminal_at": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "status",
+                          "outcome",
+                          "outcome_detail",
+                          "repo_ident",
+                          "branch",
+                          "base_sha",
+                          "default_branch",
+                          "pr_url",
+                          "pr_number",
+                          "last_ci_state",
+                          "last_inject_outcome",
+                          "protection_shape",
+                          "ruleset_digest",
+                          "budgets",
+                          "usage",
+                          "bypass_verification",
+                          "armed_at",
+                          "started_at",
+                          "terminal_at"
+                        ]
+                      },
+                      "maxItems": 5
+                    }
+                  },
+                  "required": [
+                    "run",
+                    "history"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error (no detail leaked)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/sessions/heal": {
       "post": {
         "summary": "Launch a fresh session for the external self-heal service (machine surface)",
