@@ -118,6 +118,14 @@ describe('launchSessionForUser machine option', () => {
     expect(s.orchestratorArgs[1].machine).toBeUndefined()
   })
 
+  test('QC r2: skipPermissions:false is forwarded to launchOrchestrator for an orchestrator session; absent stays absent', async () => {
+    s.sessionRow = { id: 'sess-o', project_dir: '/repos', hostname: 'devbox', is_orchestrator: true }
+    await launchSessionForUser({ userId: 'u1', sessionId: 'sess-o', machine: true, skipPermissions: false })
+    expect(s.orchestratorArgs[0].skipPermissions).toBe(false)
+    await launchSessionForUser({ userId: 'u1', sessionId: 'sess-o', machine: true })
+    expect(s.orchestratorArgs[1].skipPermissions).toBeUndefined()
+  })
+
   test('QC B1: an engage landing after the early check (session found, slot reserved) stops the send and closes the run', async () => {
     s.lateHalted = { scope: 'global' }
     const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1', machine: true })

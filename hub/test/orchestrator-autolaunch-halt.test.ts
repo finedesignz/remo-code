@@ -18,6 +18,7 @@ const s = {
   lateSessionScope: null as null | string,
   lateArgs: [] as Array<{ userId: string; sessionId?: string }>,
   launchable: false,
+  skipPerm: false,
   sends: [] as any[],
   ended: [] as any[],
   existing: true,
@@ -75,7 +76,7 @@ mock.module('../src/ws/supervisor-registry.ts', () => ({
   updateSupervisorState: async () => {},
 }))
 mock.module('../src/ws/idle-teardown.ts', () => ({ markOrchestratorSession: () => {} }))
-mock.module('../src/db/dal.ts', () => ({ getSessionSkipPermissions: async () => false }))
+mock.module('../src/db/dal.ts', () => ({ getSessionSkipPermissions: async () => s.skipPerm }))
 
 const mod = await import('../src/orchestrator/auto-launch.ts')
 
@@ -86,6 +87,7 @@ beforeEach(() => {
   s.lateSessionScope = null
   s.lateArgs = []
   s.launchable = false
+  s.skipPerm = false
   s.sends = []
   s.ended = []
   s.existing = true
@@ -185,5 +187,25 @@ describe('launchOrchestrator machine option', () => {
     expect(h.ok).toBe(true)
     expect(s.lateCalls).toBe(0)
     expect(s.sends).toHaveLength(1)
+  })
+})
+
+describe('launchOrchestrator skipPermissions (QC r2: heal spawn must never skip permissions)', () => {
+  test('stored setting true + skipPermissions:false => frame dangerously_skip_permissions false', async () => {
+    s.launchable = true
+    s.existing = false
+    s.skipPerm = true
+    const r = await mod.launchOrchestrator({ userId: 'u1', machine: true, skipPermissions: false })
+    expect(r.ok).toBe(true)
+    expect(s.sends).toHaveLength(1)
+    expect(s.sends[0].msg.dangerously_skip_permissions).toBe(false)
+  })
+
+  test('default (omitted) keeps the persisted setting unchanged', async () => {
+    s.launchable = true
+    s.existing = false
+    s.skipPerm = true
+    await mod.launchOrchestrator({ userId: 'u1', machine: true })
+    expect(s.sends[0].msg.dangerously_skip_permissions).toBe(true)
   })
 })
