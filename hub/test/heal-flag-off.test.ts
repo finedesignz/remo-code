@@ -424,3 +424,148 @@ describe('flag-OFF static import hygiene', () => {
     })
   }
 })
+
+// ---------------------------------------------------------------------------
+// 6. PTYCAP-07-10 (SC5, SH-07, D-01): the final flag matrix. routeHeal is spied (the real module is
+//    spread, only the entry function is replaced). OFF = every value that is not 1|true|yes|on
+//    (trimmed, case-insensitive): routeHeal is NEVER invoked by any of the four entry points and the
+//    legacy traces are unchanged. ON = the same four entry points call routeHeal exactly once per
+//    eligible input: the flag is the only switch. The finalizeRun failed-run path is driven through
+//    the REAL scheduler dispatcher (loaded under a query so the file-level dispatcher mock does not
+//    apply) with its leaves mocked.
+// ---------------------------------------------------------------------------
+const routeCalls: unknown[] = []
+const healTaskCalls: unknown[] = []
+const afterRunArgs: any[] = []
+
+const realRouteMod = await import(`../src/heal/route.ts?bust=${Date.now()}`)
+mock.module('../src/heal/route.ts', () => ({
+  ...realRouteMod,
+  routeHeal: async (event: unknown) => {
+    routeCalls.push(event)
+    return { kind: 'dispatched_live' }
+  },
+}))
+const realSchedSource = await import(`../src/heal/sources/scheduled-task.ts?bust=${Date.now()}`)
+mock.module('../src/heal/sources/scheduled-task.ts', () => ({
+  ...realSchedSource,
+  healFailedScheduledRun: async (input: unknown) => {
+    healTaskCalls.push(input)
+    return false
+  },
+}))
+const realStDalMod = await import(`../src/db/scheduled-tasks-dal.ts?bust=${Date.now()}`)
+const FINAL_TASK = { id: 't1', name: 'nightly-sync', user_id: 'u1', session_id: 's1', is_internal: false }
+mock.module('../src/db/scheduled-tasks-dal.ts', () => ({
+  ...realStDalMod,
+  updateRunStatus: async () => ({ user_id: 'u1', task_id: 't1' }),
+  getTaskById: async () => FINAL_TASK,
+}))
+const realPostRunMod = await import(`../src/scheduler/post-run/dispatcher.ts?bust=${Date.now()}`)
+mock.module('../src/scheduler/post-run/dispatcher.ts', () => ({
+  ...realPostRunMod,
+  afterRun: async (args: any) => { afterRunArgs.push(args) },
+}))
+const { finalizeRun: realFinalizeRun } = await import(`../src/scheduler/dispatcher.ts?real=${Date.now()}`)
+
+const OFF_VALUES: Array<string | undefined> = [undefined, '', '0', 'false', 'no', 'off', 'maybe', 'garbage', '2', 'onn', '10']
+const ON_VALUES: string[] = ['1', 'true', 'yes', 'on', 'ON', 'True', 'YES', 'On', ' on ', ' 1 ']
+
+function resetFinalMatrix(): void {
+  resetScenario()
+  routeCalls.length = 0
+  healTaskCalls.length = 0
+  afterRunArgs.length = 0
+}
+
+async function driveAllFour(): Promise<void> {
+  await dispatchTriage('user-1', 'run-meta-1', COOLIFY_PAYLOAD, {
+    fetchLogSnippet: async () => 'LOGS',
+    resolveRepoKeyFromAppUuid: async () => null,
+  })
+  await dispatchPendingError('err-1')
+  await dispatchFeedback({ submissionId: 'sub-m', userId: 'user-1', sessionId: 'sess-1', comment: 'matrix' })
+  await realFinalizeRun('run-m', 'failed', 'boom')
+}
+
+for (const flag of OFF_VALUES) {
+  describe(`final flag-OFF proof [REMO_HEAL_UNIFIED=${flagLabel(flag)}]`, () => {
+    beforeEach(() => { resetFinalMatrix(); applyFlag(flag) })
+    afterEach(() => { delete process.env.REMO_HEAL_UNIFIED })
+
+    test('routeHeal and the scheduled-task source are never invoked by any entry point', async () => {
+      await driveAllFour()
+      expect(routeCalls).toHaveLength(0)
+      expect(healTaskCalls).toHaveLength(0)
+    })
+
+    test('the legacy traces are unchanged (Coolify trace, one legacy dispatch each, plain failed post-run)', async () => {
+      sc.repoKeyed = { agent_session_id: 'sess-repo', repo_key: 'owner/repo' }
+      await dispatchTriage('user-1', 'run-meta-1', COOLIFY_PAYLOAD)
+      expect(trace).toEqual([CLAIM, RESOLVE, LOGS, ENSURE, RUN_NOW])
+      sc.dispatchCalls = []
+      await dispatchPendingError('err-1')
+      await dispatchFeedback({ submissionId: 'sub-m', userId: 'user-1', sessionId: 'sess-1', comment: 'x' })
+      expect(sc.dispatchCalls).toHaveLength(2)
+      for (const { deps } of sc.dispatchCalls) expect(deps.gates.map((g: any) => g.name)).toEqual(LEGACY_GATE_NAMES)
+      await realFinalizeRun('run-m', 'failed', 'boom')
+      expect(afterRunArgs).toHaveLength(1)
+      expect('suppressDefaultFailureEmail' in afterRunArgs[0]).toBe(false)
+      expect(routeCalls).toHaveLength(0)
+    })
+  })
+}
+
+for (const flag of ON_VALUES) {
+  describe(`final flag-ON proof [REMO_HEAL_UNIFIED=${JSON.stringify(flag)}]`, () => {
+    beforeEach(() => { resetFinalMatrix(); applyFlag(flag) })
+    afterEach(() => { delete process.env.REMO_HEAL_UNIFIED })
+
+    test('Coolify, error-capture and feedback each call routeHeal exactly once; no legacy dispatch', async () => {
+      await dispatchTriage('user-1', 'run-meta-1', COOLIFY_PAYLOAD, {
+        fetchLogSnippet: async () => 'LOGS',
+        resolveRepoKeyFromAppUuid: async () => null,
+      })
+      expect(routeCalls).toHaveLength(1)
+      await dispatchPendingError('err-1')
+      expect(routeCalls).toHaveLength(2)
+      await dispatchFeedback({ submissionId: 'sub-m', userId: 'user-1', sessionId: 'sess-1', comment: 'matrix' })
+      expect(routeCalls).toHaveLength(3)
+      expect(sc.dispatchCalls).toHaveLength(0)
+      expect(trace.some((t) => t.c === 'claimDeployFailure' || t.c === 'runNow')).toBe(false)
+    })
+
+    test('a failed scheduled run reaches the scheduled-task heal source exactly once', async () => {
+      await realFinalizeRun('run-m', 'failed', 'boom')
+      expect(healTaskCalls).toHaveLength(1)
+      expect(afterRunArgs).toHaveLength(1)
+    })
+  })
+}
+
+describe('the flag is read at call time', () => {
+  beforeEach(() => { resetFinalMatrix(); delete process.env.REMO_HEAL_UNIFIED })
+  afterEach(() => { delete process.env.REMO_HEAL_UNIFIED })
+
+  test('flipping the env between two calls in one process switches behaviour', async () => {
+    const sub = { submissionId: 'sub-f', userId: 'user-1', sessionId: 'sess-1', comment: 'flip' }
+    await dispatchFeedback(sub)
+    expect(routeCalls).toHaveLength(0)
+    expect(sc.dispatchCalls).toHaveLength(1)
+    process.env.REMO_HEAL_UNIFIED = 'on'
+    await dispatchFeedback(sub)
+    expect(routeCalls).toHaveLength(1)
+    expect(sc.dispatchCalls).toHaveLength(1)
+    process.env.REMO_HEAL_UNIFIED = 'off'
+    await dispatchFeedback(sub)
+    expect(routeCalls).toHaveLength(1)
+    expect(sc.dispatchCalls).toHaveLength(2)
+  })
+
+  test('a non-failed scheduled finalize never reaches the heal source even when ON', async () => {
+    process.env.REMO_HEAL_UNIFIED = '1'
+    await realFinalizeRun('run-m', 'success', null)
+    expect(healTaskCalls).toHaveLength(0)
+    expect(afterRunArgs).toHaveLength(1)
+  })
+})
