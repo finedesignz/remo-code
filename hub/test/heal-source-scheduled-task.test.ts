@@ -68,7 +68,6 @@ const failed = (over: Record<string, unknown> = {}) => ({
   runId: 'run-1',
   status: 'failed',
   error: 'boom: connection refused',
-  onlyIfActive: false,
   task: task(),
   ...over,
 })
@@ -85,10 +84,12 @@ describe('healFailedScheduledRun eligibility (AM-F5-1, AM-F5-3, AM-F5-4)', () =>
     })
   }
 
-  test('reaper- or race-finalized (onlyIfActive) produces no event', async () => {
+  // QC r1 (codex #5): only_if_active is a CAS, not a reaper marker. A genuine failure finalized
+  // through the claim (work sender, TEAB terminal result) must still heal; the source ignores the flag.
+  test('a genuine failure finalized under the only_if_active claim still produces an event', async () => {
     const { deps, calls } = mkDeps()
-    expect(await healFailedScheduledRun(failed({ onlyIfActive: true }), deps)).toBe(false)
-    expect(calls.routeHeal).toEqual([])
+    await healFailedScheduledRun({ ...failed({ error: 'work_site_not_found' }), onlyIfActive: true } as any, deps)
+    expect(calls.routeHeal.length).toBe(1)
   })
 
   test('a run_timeout error produces no event', async () => {
@@ -365,11 +366,18 @@ describe('finalizeRun heal hook', () => {
     expect('suppressDefaultFailureEmail' in afterRunCalls[0]).toBe(false)
   })
 
-  test('flag ON, only_if_active (reaper/TEAB) finalize: no heal event, post-run unchanged', async () => {
+  test('flag ON, reaper finalize (only_if_active + run_timeout): no heal event, post-run unchanged', async () => {
     process.env.REMO_HEAL_UNIFIED = '1'
     await finalizeRun('run-1', 'failed', 'run_timeout', { only_if_active: true })
     expect(trace).toEqual(['afterRun'])
     expect('suppressDefaultFailureEmail' in afterRunCalls[0]).toBe(false)
+  })
+
+  test('flag ON, genuine failure under only_if_active (work / TEAB sender): heal runs and owns the notice', async () => {
+    process.env.REMO_HEAL_UNIFIED = '1'
+    await finalizeRun('run-1', 'failed', 'work_site_not_found', { only_if_active: true })
+    expect(trace).toEqual(['routeHeal', 'afterRun'])
+    expect(afterRunCalls[0].suppressDefaultFailureEmail).toBe(true)
   })
 
   for (const flag of [undefined, '', '0', 'false', 'maybe', 'garbage']) {
