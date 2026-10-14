@@ -60,3 +60,12 @@ orchestrator owns the decision to merge versus fix first.
 3. Postgres-only proofs (CHECK re-apply, partial unique index, NULL-session binding, row-for-row report-only snapshot, writer lock serialization, atomic claim) skip locally; pending Woodpecker qc on PR #513 => PARTIAL until CI is green.
 4. Full-suite `check-baseline` and `tsc` not re-run by this verifier (claims from QC record / 08-10 SUMMARY only).
 5. Doc nit: ROADMAP SC5 wording "empty allowlist" does not match the implemented control (AUTOFIX flag off); consider aligning the ROADMAP text to TQC-08.
+
+## Repair round (post-BLOCKED)
+
+Commit 623cb82 fixes the round-3 MAJOR in hub/src/scheduler/senders/task-qc.ts: the whole-run deadline now starts at sender entry (before the recipient read), the recipient read and the lifetime reservation are raced against it (a reservation landing late is released; the run is finalized failed `task_qc_engine_error:statement_timeout`), and markDelivered uses boundedBegin (pool acquisition raced) plus a makeDeadlineArmer recheck INSIDE the acquired callback, so a late connection issues no write. Deadline errors map to the typed `statement_timeout` code. Tests: hub/test/task-qc-sender-deadline.test.ts (normal path unchanged; slow acquisition -> no write + finalized; slow recipient read; slow reservation + release). Touched tests pass individually; check-baseline OK (pass 3169, skip 259, fail 0). Flag-OFF behaviour untouched (sender reachable only with the flag ON).
+
+Codex read-only re-QC: FINAL VERDICT CONTENT-BLOCK, 2 NEW MAJORs, RECORDED NOT FIXED (per brief):
+1. Deadline starts at sender entry, not true run claim (dispatcher bookkeeping before the sender is outside the bound; ctx carries no claim timestamp). Needs the claim time threaded through ctx.
+2. After an engine-deadline failure, `releaseInject` and `notifyEngineFailure` DB work are unbounded and awaited before `finalizeRun` (task-qc.ts ~147-153); pool exhaustion could still leave the run open. Fix: finalize first / race the cleanup against a grace bound.
+PR #513 stays DRAFT. Status: still BLOCKED on these two.
