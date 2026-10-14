@@ -172,21 +172,23 @@ safe-fix allowlist, and emails a PROPOSAL for everything else.
   2. The auto-fix allowlist is a literal, enumerated set. A fix not on it is IMPOSSIBLE to apply —
      a guard test asserts the writer rejects any unlisted fix kind.
   3. It NEVER auto-disables a task, never mutates another session's in-flight work, and never opens
-     a dev loop: its own token ceiling is separate and small.
+     a dev loop: its own token ceiling is separate and small (satisfied structurally: the engine is
+     deterministic and spends zero model tokens, bounded by deterministic pass bounds and the Phase 4
+     lifetime counter).
   4. Everything not auto-fixed becomes one digest email with a proposal per finding.
   5. Flag-gated; default OFF; empty allowlist ⇒ report-only.
 **Plans:** 10 plans (5 waves)
 Plans:
-- [ ] 08-01-PLAN.md (wave 1) - DDL (task_qc in the type CHECK, per-user partial unique index, task_qc_findings), four-carrier enum sync, flags + frozen bounds, idempotent findings DAL, strict fake-sql fixture
-- [ ] 08-02-PLAN.md (wave 1) - shared types + the six pure detectors + audit-set predicate (purity proven)
-- [ ] 08-03-PLAN.md (wave 2) - TRACER: flag-on fire to finding + digest email; fireTask branch ordering, flag-OFF no-op, atomic single run claim, terminal lifecycle (no post-run/chain)
-- [ ] 08-04-PLAN.md (wave 2) - safe-fix writer: 3-kind immutable allowlist, one tx per fix (lock, in-flight refusal, audit row), pure fix planner, static never-disables guard
-- [ ] 08-05-PLAN.md (wave 2) - API guards: system-owned task_qc row (no create/delete, PATCH only enabled + validated cadence/timezone)
-- [ ] 08-06-PLAN.md (wave 3) - bounded read layer, full runTaskQcPass (report-only default, halt re-check), deterministic bounds, narrowing-only scope, no-model import allowlist guard
-- [ ] 08-07-PLAN.md (wave 3) - digest hardening (typed fields only, ASCII, command templates), sender lifetime counter + ENGINE failure email, Phase 4 pin-test entries
-- [ ] 08-08-PLAN.md (wave 3) - boot seed (before registry load + catchup), flag-OFF exclusion in registry/catchup, kill-switch scope pins
-- [ ] 08-09-PLAN.md (wave 4) - real-Postgres e2e helpers (zero new tests/skips): CHECK/index/NULL anchor/locks/rollbacks/report-only snapshot
-- [ ] 08-10-PLAN.md (wave 5) - spec supersession (08-SPEC TQC-07, 09-SPEC budget rows), docs, roadmap, baseline, full phase gate
+- [x] 08-01-PLAN.md (wave 1) - DDL (task_qc in the type CHECK, per-user partial unique index, task_qc_findings), four-carrier enum sync, flags + frozen bounds, idempotent findings DAL, strict fake-sql fixture
+- [x] 08-02-PLAN.md (wave 1) - shared types + the six pure detectors + audit-set predicate (purity proven)
+- [x] 08-03-PLAN.md (wave 2) - TRACER: flag-on fire to finding + digest email; fireTask branch ordering, flag-OFF no-op, atomic single run claim, terminal lifecycle (no post-run/chain)
+- [x] 08-04-PLAN.md (wave 2) - safe-fix writer: 3-kind immutable allowlist, one tx per fix (lock, in-flight refusal, audit row), pure fix planner, static never-disables guard
+- [x] 08-05-PLAN.md (wave 2) - API guards: system-owned task_qc row (no create/delete, PATCH only enabled + validated cadence/timezone)
+- [x] 08-06-PLAN.md (wave 3) - bounded read layer, full runTaskQcPass (report-only default, halt re-check), deterministic bounds, narrowing-only scope, no-model import allowlist guard
+- [x] 08-07-PLAN.md (wave 3) - digest hardening (typed fields only, ASCII, command templates), sender lifetime counter + ENGINE failure email, Phase 4 pin-test entries
+- [x] 08-08-PLAN.md (wave 3) - boot seed (before registry load + catchup), flag-OFF exclusion in registry/catchup, kill-switch scope pins
+- [x] 08-09-PLAN.md (wave 4) - real-Postgres e2e helpers (zero new tests/skips): CHECK/index/NULL anchor/locks/rollbacks/report-only snapshot
+- [x] 08-10-PLAN.md (wave 5) - spec supersession (08-SPEC TQC-07, 09-SPEC budget rows), docs, roadmap, baseline, full phase gate
 
 ### Phase 9: Cap-Hit → QC Trigger
 **Goal**: Hitting a token cap stops being a dead end. It fires a single bounded QC pass that tries to
@@ -213,7 +215,7 @@ fix the CAUSE, and escalates to the human when it cannot.
 | 5. Throwaway-Repo Due→PR Proof | Not started |
 | 6. Hardening + Docs + Release | Not started |
 | 7. Unified Self-Heal Routing | Specced, not started (blocked on #346 + Phase 4) |
-| 8. Periodic Task QC + Optimization | Planned (10 plans, 5 waves); fork verdict locked (deterministic engine, system-owned row) |
+| 8. Periodic Task QC + Optimization | Executed (10/10 plans) - PR pending QC |
 | 9. Cap-Hit → QC Trigger | Specced, not started (blocked on Phases 4 + 8) |
 
 ## Dependency graph
