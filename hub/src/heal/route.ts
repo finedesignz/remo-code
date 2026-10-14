@@ -17,6 +17,7 @@ import { governedLaunch } from '../dispatch/governed-launch.ts';
 import { REAL_AUTOSPAWN, type AutospawnDeps } from './autospawn-deps.ts';
 import { AUTOSPAWN_LAUNCH_COMMAND } from '../db/orchestrator-rows-dal.ts';
 import { automationKillSwitchGate, automationLifetimeCounterGate } from '../dispatch/automation-controls.ts';
+import { governedAutomationPtyGate } from '../dispatch/governed-pty.ts';
 import { getChannel } from '../ws/registry.ts';
 import {
   healUnifiedEnabled,
@@ -49,6 +50,8 @@ export interface HealDeps {
   makeSink: SinkFactory;
   dispatch(req: DispatchRequest, deps: PipelineDeps): Promise<DispatchOutcome>;
   isChannelOnline(sessionId: string): boolean;
+  /** Session runner type at DISPATCH time (the PTY denial must hold here, not only at resolve time). */
+  runnerTypeOf(sessionId: string, userId: string): Promise<string>;
   /** Owner-notification seam (07-06). Defaults to the real claim + email sender. */
   notify?: NotifyDeps;
   /** Governed autospawn collaborators (07-06). Defaults to REAL_AUTOSPAWN. */
@@ -72,6 +75,11 @@ export const REAL_DEPS: HealDeps = {
   },
   dispatch,
   isChannelOnline: (sessionId) => getChannel(sessionId) != null,
+  runnerTypeOf: async (sessionId, userId) => {
+    const { getSession } = await import('../db/dal.ts');
+    const s = (await getSession(sessionId, userId)) as { runner_type?: string | null } | null;
+    return s?.runner_type ?? 'stream-json';
+  },
 };
 
 function log(msg: string): void {
@@ -108,12 +116,18 @@ function buildPipelineDeps(
   hooks?: Pick<PipelineDeps, 'replay' | 'onParkExpire'>,
 ): PipelineDeps {
   return {
-    // D-07: kill switch, threshold, cost cap, token cap, session inject rate, lifetime counter.
+    // D-07: kill switch, threshold, cost cap, token cap, PTY denial (actor self-heal is never an
+    // eligible automation actor, so a pty-interactive target is always refused), session inject
+    // rate, lifetime counter.
     gates: [
       automationKillSwitchGate,
       thresholdGate,
       dailyCostCapGate,
       dailyTokenCapGate,
+      governedAutomationPtyGate(async (req) => ({
+        actor: HEAL_ACTOR,
+        runnerType: await deps.runnerTypeOf(req.sessionId, req.userId),
+      })),
       sessionInjectRateGate,
       automationLifetimeCounterGate,
     ],
