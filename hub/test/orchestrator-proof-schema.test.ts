@@ -55,6 +55,13 @@ describe('orchestrator_proof_runs DDL', () => {
     expect(table.match(/REFERENCES/g)?.length).toBe(1) // only users(id)
   })
 
+  test('QC r1: the proof_owned marker column is additive + idempotent and sits just before the block', () => {
+    const ddl = 'ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS proof_owned BOOLEAN NOT NULL DEFAULT false;'
+    expect(schema).toContain(ddl)
+    expect(schema.indexOf(ddl)).toBeLessThan(start)
+    expect(schema.indexOf(ddl)).toBeGreaterThan(start - 600)
+  })
+
   test('no mutating statement in the block (additive DDL only)', () => {
     const code = block
       .split('\n')

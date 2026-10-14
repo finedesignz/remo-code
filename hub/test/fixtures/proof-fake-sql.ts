@@ -15,6 +15,7 @@ export interface FakeTask {
   task_type: string
   enabled: boolean
   macro_task_type: string
+  proof_owned?: boolean
 }
 export interface FakeRow {
   task_id: string
@@ -148,12 +149,12 @@ export function createProofFakeSql() {
     }
     if (text.includes("UPDATE scheduled_tasks SET enabled = false, macro_task_type = 'dev'")) {
       const [taskId, userId] = values
-      for (const t of state.tasks) if (t.id === taskId && t.user_id === userId) Object.assign(t, { enabled: false, macro_task_type: 'dev' })
+      for (const t of state.tasks) if (t.id === taskId && t.user_id === userId) Object.assign(t, { enabled: false, macro_task_type: 'dev', proof_owned: true })
       return []
     }
     if (text.includes('INSERT INTO scheduled_tasks')) {
       const [userId, sessionId] = values
-      const t: FakeTask = { id: nid('task_'), user_id: userId, session_id: sessionId, task_type: 'orchestrator', enabled: false, macro_task_type: 'dev' }
+      const t: FakeTask = { id: nid('task_'), user_id: userId, session_id: sessionId, task_type: 'orchestrator', enabled: false, macro_task_type: 'dev', proof_owned: true }
       state.tasks.push(t)
       return [{ id: t.id }]
     }
