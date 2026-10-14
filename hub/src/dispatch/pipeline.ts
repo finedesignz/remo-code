@@ -223,7 +223,7 @@ export function _reset(): void {
  * Run the gate list in order. First block wins. Returns the blocking reason or
  * null when every gate passes.
  */
-async function runGates(req: DispatchRequest, gates: DispatchGate[]): Promise<string | null> {
+export async function runGates(req: DispatchRequest, gates: DispatchGate[]): Promise<string | null> {
   for (const gate of gates) {
     const result = await gate.check(req)
     if (!result.ok) return result.reason
