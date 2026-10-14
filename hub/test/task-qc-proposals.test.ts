@@ -147,7 +147,7 @@ describe('fixed command templates per proposal kind', () => {
     ['fix_timezone', {}, /UPDATE scheduled_tasks SET timezone = 'REPLACE_WITH_IANA_TIMEZONE' WHERE id = 'task-abc_1'/],
     ['fix_payload', {}, /UPDATE scheduled_tasks SET payload = payload \|\| jsonb_build_object\('application_uuid', 'REPLACE_WITH_APPLICATION_UUID'::text\) WHERE id = 'task-abc_1'/],
     ['set_teab_repo', {}, /UPDATE scheduled_tasks SET teab_repo_ident = 'REPLACE_WITH_REPO_IDENT' WHERE id = 'task-abc_1'/],
-    ['rebind_session', { staleSessionId: "sess'1" }, /UPDATE scheduled_tasks SET session_id = 'REPLACE_WITH_LIVE_SESSION_ID', target_id = 'REPLACE_WITH_LIVE_SESSION_ID' WHERE id = 'task-abc_1' AND session_id IS NOT DISTINCT FROM 'sess''1'/],
+    ['rebind_session', { staleSessionId: "sess'1" }, /UPDATE scheduled_tasks SET session_id = CASE WHEN session_id = 'sess''1' THEN 'REPLACE_WITH_LIVE_SESSION_ID' ELSE session_id END, target_id = CASE WHEN target_id = 'sess''1' THEN 'REPLACE_WITH_LIVE_SESSION_ID' ELSE target_id END WHERE id = 'task-abc_1' AND \(session_id = 'sess''1' OR target_id = 'sess''1'\)/],
   ]
   for (const [kind, extra, re] of kinds) {
     test(`${kind} renders its fixed command`, () => {
