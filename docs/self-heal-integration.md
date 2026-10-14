@@ -119,8 +119,21 @@ Coordinate the cut-over with the user before flipping primary/fallback.
 
 ---
 
+## Relationship to the unified heal seam (PTYCAP Phase 7)
+
+`POST /api/sessions/heal` is unchanged by the unified heal seam (`docs/self-heal-routing.md`,
+flag `REMO_HEAL_UNIFIED`). It remains a separate external-service HTTP surface with its own
+Phase 4 reservation and is not one of the four seam sources (Coolify, scheduled-task failure,
+error-capture, feedback). Its lifetime counter key is `heal:<userId>:<repo>` with a caller-supplied
+repo string; the seam's key is `heal:<userId>:<canonical repo_ident>` built by `buildHealKey`. The
+two are prefix-compatible only: they share the `heal:` prefix and are not necessarily the same
+per-repo budget. Folding this endpoint into the seam is deferred.
+
+---
+
 ## See also
 
+- `docs/self-heal-routing.md` - the unified heal seam (`routeHeal`).
 - `docs/coolify-supervisor.md` — supervisor-side setup (Coolify deployment, API key, host_resources reporting).
 - `.planning/phases/04-coolify-dev-supervisor/ARCHITECTURE-REVIEW.md` §6 — the design rationale.
 - `hub/src/sessions/routing.ts` — the `pickSessionTarget` implementation; this endpoint is one of two callers (the other being the scheduler dispatcher, plan 04-003).
