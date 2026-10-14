@@ -112,6 +112,8 @@ export function setupFireHarness() {
     finalized: [] as Array<{ id: string; status: string; error: string | null; output_snippet: string | null }>,
     timestampCalls: [] as string[],
     emails: [] as any[],
+    /** what sendEmail returns (false simulates a failed digest send) */
+    emailOk: true,
     broadcasts: [] as any[],
     afterRunCalls: [] as any[],
     getTaskCalls: [] as string[],
@@ -144,6 +146,7 @@ export function setupFireHarness() {
     h.finalized = []
     h.timestampCalls = []
     h.emails = []
+    h.emailOk = true
     h.broadcasts = []
     h.afterRunCalls = []
     h.getTaskCalls = []
@@ -172,6 +175,7 @@ export function setupFireHarness() {
       return [row]
     })
     fake.onInsert(/INSERT INTO task_qc_findings/, () => h.findingRows)
+    fake.on(/^UPDATE task_qc_findings SET digest_sent_at/, [])
   }
   reset()
 
@@ -219,7 +223,7 @@ export function setupFireHarness() {
   }))
   mock.module('../../src/scheduler/registry.ts', () => ({ unregister: () => {}, nextRunFor: () => null }))
   mock.module('../../src/lib/email.ts', () => ({
-    sendEmail: async (input: any) => { h.emails.push(input); return true },
+    sendEmail: async (input: any) => { h.emails.push(input); return h.emailOk },
   }))
 
   return { h, reset }

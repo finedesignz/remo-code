@@ -66,6 +66,16 @@ async function notifyEngineFailure(
   }
 }
 
+/** Only a DELIVERED digest marks its rows mailed; a failed send leaves them to be reported again. Never throws. */
+async function markDelivered(userId: string, ids: string[], taskId: string, runId: string): Promise<void> {
+  if (ids.length === 0) return
+  try {
+    await sql`UPDATE task_qc_findings SET digest_sent_at = now() WHERE user_id = ${userId} AND id = ANY(${ids}::text[])`
+  } catch (err: any) {
+    log.error('scheduler.task_qc.mark_delivered_failed', { task_id: taskId, run_id: runId, error: err?.message })
+  }
+}
+
 export async function sendTaskQcTask(
   task: ScheduledTask,
   ctx: { runId: string; userId: string; isManual?: boolean },
@@ -104,8 +114,11 @@ export async function sendTaskQcTask(
     return
   }
 
-  // Report what is new: applied fixes plus findings newly recorded this run (an unchanged,
-  // already-reported condition is not re-mailed every day).
+  // Report applied fixes plus every finding not yet mailed (see recordProposal: a row is reported
+  // until a digest containing it was DELIVERED). The dedupe key includes the owner-local day, so a
+  // still-true condition is re-recorded and re-mailed on a later day. Known window: the engine
+  // gates only its WRITES on the kill switch; if it flips mid-pass the digest (read-only) is still
+  // sent, and the next fire's own pre-pass check stops everything after.
   const report = {
     findings: [...result.applied.map((a) => a.finding), ...result.proposals],
     applied: result.applied,
@@ -116,6 +129,7 @@ export async function sendTaskQcTask(
     if (to) {
       delivered = await sendDigest(report, { email: to })
       if (!delivered) log.warn('scheduler.task_qc.digest_not_delivered', { task_id: task.id, run_id: ctx.runId })
+      else await markDelivered(ctx.userId, result.recordedIds ?? [], task.id, ctx.runId)
     } else {
       log.warn('scheduler.task_qc.no_recipient', { task_id: task.id, run_id: ctx.runId })
     }

@@ -294,7 +294,7 @@ describe('result shape and idempotency', () => {
     live = [{ id: 'live-1' }]
     const res = await run({ autofix: true, haltCheck: haltOk })
     expect(res.applied.length + res.proposals.length).toBe(res.findings.length)
-    expect(Object.keys(res).sort()).toEqual(['applied', 'findings', 'proposals', 'truncated'])
+    expect(Object.keys(res).sort()).toEqual(['applied', 'findings', 'proposals', 'recordedIds', 'truncated'])
   })
 
   test('a re-run inserts each proposed row once: the conflict is not re-listed as a new proposal, findings still list all', async () => {

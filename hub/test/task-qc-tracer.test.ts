@@ -107,10 +107,47 @@ describe('task_qc tracer (flag on)', () => {
   })
 })
 
+describe('digest delivery marks findings (QC round 1: failed send / same-day rerun must not lose findings)', () => {
+  const marks = () => h.fake.state.updatesTo('task_qc_findings')
+
+  test('proposals are recorded report-until-delivered (ON CONFLICT re-returns an undelivered row)', async () => {
+    await fire(QC_ID)
+    await flush()
+    const ins = inserts(/INSERT INTO task_qc_findings/)[0]!
+    expect(ins.text).toMatch(/DO UPDATE SET .* WHERE task_qc_findings\.digest_sent_at IS NULL RETURNING id/)
+  })
+
+  test('a delivered digest marks exactly the reported rows as sent', async () => {
+    await fire(QC_ID)
+    await flush()
+    expect(h.emails).toHaveLength(1)
+    expect(marks()).toHaveLength(1)
+    expect(marks()[0]!.values).toContainEqual(['finding-1'])
+    expect(marks()[0]!.values).toContain(USER)
+  })
+
+  test('a failed digest send marks NOTHING as mailed, so the next run reports the findings again', async () => {
+    h.emailOk = false
+    await fire(QC_ID)
+    await flush()
+    expect(h.emails).toHaveLength(1)
+    expect(marks()).toHaveLength(0)
+    expect(JSON.parse(h.finalized[0]!.output_snippet as string).digest_delivered).toBe(false)
+  })
+
+  test('a row already delivered (conflict returns no row) is neither re-mailed nor re-marked', async () => {
+    h.findingRows = []
+    await fire(QC_ID)
+    await flush()
+    expect(h.emails).toHaveLength(0)
+    expect(marks()).toHaveLength(0)
+  })
+})
+
 describe('runTaskQcPass final signature', () => {
   test('returns { findings, applied, proposals, truncated } with applied empty; scope narrows only', async () => {
     const res = await runTaskQcPass({ userId: USER, origin: 'schedule' })
-    expect(Object.keys(res).sort()).toEqual(['applied', 'findings', 'proposals', 'truncated'])
+    expect(Object.keys(res).sort()).toEqual(['applied', 'findings', 'proposals', 'recordedIds', 'truncated'])
     expect(res.applied).toEqual([])
     expect(res.findings).toHaveLength(1)
     expect(res.proposals).toHaveLength(1)

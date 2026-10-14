@@ -148,6 +148,7 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
   const findings: Finding[] = []
   const applied: Applied[] = []
   const proposals: Finding[] = []
+  const recordedIds: string[] = []
   let rowsWritten = 0
   let fixAttempts = 0
   let halted = false
@@ -170,7 +171,7 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
     proposals.push(withParams(f, { reason, persisted: false }))
   }
 
-  /** Persist `f` as one proposed row; a same-day conflict is already reported and not re-listed. */
+  /** Persist `f` as one proposed row; a same-day conflict is re-listed until a digest containing it was delivered. */
   const recordProposal = async (f: Finding, reason?: string): Promise<void> => {
     const blocked = await gate()
     if (blocked) return unpersisted(f, blocked)
@@ -190,6 +191,7 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
           evidence: f.evidence,
           sig: evidenceSig(f.detector, f.evidence),
           day,
+          redeliver: true,
         }),
       )
     } catch (err) {
@@ -198,7 +200,10 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
       return unpersisted(f, 'deadline')
     }
     rowsWritten++
-    if (res.inserted) proposals.push(reason ? withParams(f, { reason }) : f)
+    if (res.inserted) {
+      recordedIds.push(res.id)
+      proposals.push(reason ? withParams(f, { reason }) : f)
+    }
   }
 
   for (const { f, plan } of steps) {
@@ -253,5 +258,5 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
     }
   }
 
-  return { findings, applied, proposals, truncated }
+  return { findings, applied, proposals, truncated, recordedIds }
 }

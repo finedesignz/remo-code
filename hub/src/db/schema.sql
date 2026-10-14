@@ -1721,3 +1721,7 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE TRIGGER trg_scheduled_task_runs_session_lock
   BEFORE INSERT ON scheduled_task_runs
   FOR EACH ROW EXECUTE FUNCTION scheduled_task_runs_session_lock();
+
+-- PTYCAP-08 QC round 1: a digest marks the proposal rows it contained as delivered, so a
+-- failed send (or a same-day re-run) re-reports them instead of losing them. Additive.
+ALTER TABLE task_qc_findings ADD COLUMN IF NOT EXISTS digest_sent_at TIMESTAMPTZ;

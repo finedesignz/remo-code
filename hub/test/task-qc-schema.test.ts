@@ -90,6 +90,11 @@ describe('PTYCAP-08 task_qc schema', () => {
     expect(writer).toContain("'taskqc-session:' + sid")
   })
 
+  test('digest_sent_at is an additive nullable column (report-until-delivered)', () => {
+    expect(FLAT).toMatch(/ALTER TABLE task_qc_findings ADD COLUMN IF NOT EXISTS digest_sent_at TIMESTAMPTZ;/)
+    expect(tableBlock('task_qc_findings')).not.toContain('digest_sent_at')
+  })
+
   test('schema-lint is clean (no un-pragmad mutating statement)', () => {
     const bad = lintSchemaSql(SCHEMA).filter((f) => f.allowedReason === null)
     expect(bad).toEqual([])
