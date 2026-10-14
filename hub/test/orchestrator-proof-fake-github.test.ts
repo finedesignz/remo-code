@@ -75,13 +75,12 @@ describe('makeFakeProofGithub', () => {
 describe('shared scenario helpers', () => {
   test('greenPr / redPr: an open proof PR and its check conclusion', async () => {
     const green = makeFakeProofGithub(greenPr())
-    const [p] = await green.listPullsWithHeadPrefix('a', 'b', 'proof/')
+    const [p] = await green.listPulls('a', 'b')
     expect(p).toMatchObject({ number: 1, state: 'open', merged: false, baseRef: 'main' })
     expect((await green.getCheckState('a', 'b', p.headSha)).checkRuns[0].conclusion).toBe('success')
-    expect(await green.listPullsWithHeadPrefix('a', 'b', 'feature/')).toEqual([])
 
     const red = makeFakeProofGithub(redPr())
-    const [q] = await red.listPullsWithHeadPrefix('a', 'b', 'proof/')
+    const [q] = await red.listPulls('a', 'b')
     expect((await red.getCheckState('a', 'b', q.headSha)).checkRuns[0].conclusion).toBe('failure')
   })
 
@@ -100,7 +99,7 @@ describe('shared scenario helpers', () => {
   test('apply() merges a patch and returns the fake', async () => {
     const g = makeFakeProofGithub()
     expect(g.apply(greenPr())).toBe(g)
-    expect(await g.listPullsWithHeadPrefix('a', 'b', 'proof/')).toHaveLength(1)
+    expect(await g.listPulls('a', 'b')).toHaveLength(1)
   })
 })
 

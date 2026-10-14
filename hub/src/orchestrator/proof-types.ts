@@ -231,6 +231,11 @@ export interface PullSummary {
   headSha: string;
   baseRef: string;
   draft: boolean;
+  /** `head.repo.full_name`; null when the head repository was deleted (a fork PR whose fork is gone). */
+  headRepoFullName: string | null;
+  authorLogin: string | null;
+  /** ISO creation time; null when GitHub omitted it (treated as new, fail closed). */
+  createdAt: string | null;
 }
 
 export interface CheckState {
@@ -253,7 +258,8 @@ export interface ProofGithub {
   getEffectiveBranchRules(owner: string, repo: string, branch: string): Promise<EffectiveRule[]>;
   getRuleset(owner: string, repo: string, rulesetId: number): Promise<RulesetDetail>;
   compare(owner: string, repo: string, base: string, head: string): Promise<CompareResult>;
-  listPullsWithHeadPrefix(owner: string, repo: string, headPrefix: string): Promise<PullSummary[]>;
+  /** QC round 1 (codex #5): ALL recent PRs (any head, any head repository), so scope is judged by the verifier. */
+  listPulls(owner: string, repo: string): Promise<PullSummary[]>;
   getCheckState(owner: string, repo: string, sha: string): Promise<CheckState>;
   listWorkflowFiles(owner: string, repo: string, ref: string): Promise<string[]>;
   getCollaboratorPermission(owner: string, repo: string, username: string): Promise<string>;

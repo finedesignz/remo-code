@@ -76,6 +76,9 @@ const pull = (over: Partial<PullSummary> = {}): PullSummary => ({
   headSha: PR_HEAD_SHA,
   baseRef: 'main',
   draft: false,
+  headRepoFullName: 'acme/proof',
+  authorLogin: 'proof-agent',
+  createdAt: '2026-10-02T00:00:00Z',
   ...over,
 })
 
@@ -160,9 +163,9 @@ export function makeFakeProofGithub(patch: Partial<FakeGithubScenario> & { fail?
       await enter('compare', [owner, repo, base, head])
       return state.scenario.compare
     },
-    async listPullsWithHeadPrefix(owner, repo, headPrefix) {
-      await enter('listPullsWithHeadPrefix', [owner, repo, headPrefix])
-      return state.scenario.pulls.filter((p) => p.headRef.startsWith(headPrefix))
+    async listPulls(owner, repo) {
+      await enter('listPulls', [owner, repo])
+      return state.scenario.pulls
     },
     async getCheckState(owner, repo, sha) {
       await enter('getCheckState', [owner, repo, sha])

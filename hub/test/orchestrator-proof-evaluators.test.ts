@@ -167,7 +167,7 @@ describe('protection (every tick, before the verifier)', () => {
     fake.scenario.rulesets[1] = { ...fake.scenario.rulesets[1], rules: [{ type: 'update', parameters: null }, { type: 'deletion', parameters: null }], updatedAt: '2026-10-02T00:00:00Z' }
     const v = await chain(mkDeps(fake).deps, run, input())
     expect(v).toMatchObject({ kind: 'terminal', outcome: 'terminated:proof_protection_drift' })
-    expect(fake.calls.some((c) => c.method === 'listPullsWithHeadPrefix')).toBe(false)
+    expect(fake.calls.some((c) => c.method === 'listPulls')).toBe(false)
   })
 
   test('ruleset unreadable -> terminated:proof_protection_unverifiable', async () => {
