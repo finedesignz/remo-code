@@ -96,6 +96,8 @@ export interface SessionInput {
   deleted_at?: Timestamp
   last_activity?: Timestamp
   created_at?: Timestamp
+  /** used by the engine to find live replacement candidates; detectors ignore it */
+  repo_key?: string | null
 }
 
 export interface DetectorInputs {
@@ -122,7 +124,14 @@ export type TaskQcOrigin = 'schedule' | 'run_now'
 
 export interface TaskQcResult {
   findings: Finding[]
-  applied: Array<{ finding: Finding; fix: SafeFixKind }>
+  applied: Array<{
+    finding: Finding
+    fix: SafeFixKind
+    taskId: string
+    before: Record<string, unknown>
+    after: Record<string, unknown>
+    rollbackSql: string
+  }>
   proposals: Finding[]
   truncated: boolean
 }
