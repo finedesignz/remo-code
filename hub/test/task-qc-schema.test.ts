@@ -76,18 +76,21 @@ describe('PTYCAP-08 task_qc schema', () => {
     expect(line!).toMatch(/ON DELETE SET NULL/)
   })
 
-  test('codex MAJOR 3: run creation takes the same per-session advisory lock the safe-fix writer holds', () => {
-    const fn = statement('CREATE OR REPLACE FUNCTION scheduled_task_runs_session_lock')
-    expect(fn).toContain("pg_advisory_xact_lock(hashtext('taskqc-session:' || NEW.session_id)::bigint)")
-    expect(fn).toContain('IF NEW.session_id IS NOT NULL')
-    const trg = statement('CREATE OR REPLACE TRIGGER trg_scheduled_task_runs_session_lock')
-    expect(trg).toContain('BEFORE INSERT ON scheduled_task_runs')
-    expect(trg).toContain('FOR EACH ROW')
-    // idempotent re-run: no DROP TRIGGER in schema.sql
-    expect(FLAT).not.toMatch(/DROP TRIGGER/i)
-    // the writer uses the identical key prefix
+  test('round 2 (codex new MAJOR 1): no trigger on scheduled_task_runs survives; existing DBs lose the round-1 trigger on boot', () => {
+    // flag-OFF true no-op: nothing in the schema may add work to a run insert
+    expect(FLAT).not.toMatch(/CREATE (OR REPLACE )?TRIGGER[^;]*scheduled_task_runs/i)
+    expect(FLAT).not.toMatch(/CREATE (OR REPLACE )?FUNCTION scheduled_task_runs_session_lock/i)
+    expect(FLAT).not.toContain('taskqc-session')
+    // the retired trigger and function are dropped idempotently, trigger first, only if present
+    const drop = FLAT.slice(FLAT.indexOf('trg_scheduled_task_runs_session_lock'))
+    expect(drop).toContain('DROP TRIGGER trg_scheduled_task_runs_session_lock ON scheduled_task_runs')
+    expect(drop).toContain('DROP FUNCTION IF EXISTS scheduled_task_runs_session_lock()')
+    expect(drop.indexOf('DROP TRIGGER')).toBeLessThan(drop.indexOf('DROP FUNCTION'))
+    expect(FLAT).toMatch(/IF EXISTS \(SELECT 1 FROM pg_trigger WHERE tgname = 'trg_scheduled_task_runs_session_lock'/)
+    // the writer no longer spells the retired advisory key
     const writer = readFileSync(join(import.meta.dir, '..', 'src', 'task-qc', 'safe-fixes.ts'), 'utf8')
-    expect(writer).toContain("'taskqc-session:' + sid")
+    expect(writer).not.toContain('taskqc-session')
+    expect(writer).not.toContain('pg_advisory')
   })
 
   test('digest_sent_at is an additive nullable column (report-until-delivered)', () => {

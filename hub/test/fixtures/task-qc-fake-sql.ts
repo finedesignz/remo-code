@@ -14,7 +14,7 @@ export interface Recorded {
   text: string
   kind: StatementKind
   values: any[]
-  /** the statement contains FOR UPDATE / FOR NO KEY UPDATE */
+  /** the statement contains FOR UPDATE (or FOR NO KEY UPDATE) */
   forUpdate: boolean
   /** which transaction (0 = top level, n = nth begin()) */
   tx: number

@@ -182,14 +182,14 @@ async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promis
   return db.begin(async (tx) => {
     // 0. the database cancels a statement blocked past the pass deadline (before any lock wait)
     if (ctx.armTimeout) await ctx.armTimeout(tx)
-    // 1. row lock, scoped by id AND owner; serialises every writer for this task.
-    // FOR NO KEY UPDATE (not FOR UPDATE): it still conflicts with every other writer of the row,
-    // but not with the FOR KEY SHARE an FK check takes when a run for this task is inserted, so
-    // the lock order below (row, then session) cannot deadlock against the run-insert trigger
-    // (session lock, then FK check on the task row).
+    // 1. row lock, scoped by id AND owner; serialises every writer for this task. FOR UPDATE (not
+    // FOR NO KEY UPDATE) on purpose: the FK check of a run insert for this task takes FOR KEY SHARE
+    // on this row, which only FOR UPDATE conflicts with. So a run for THIS task (session-bound or
+    // not: supervisor runs have a NULL session_id) either committed before the probe below (and is
+    // seen) or waits until this transaction ends. No trigger or lock is added to the run insert.
     const rows = await tx`
       SELECT id, user_id, name, task_type, enabled, schedule_kind, timezone, payload, session_id, target_kind, target_id
-      FROM scheduled_tasks WHERE id = ${ctx.taskId} AND user_id = ${ctx.userId} FOR NO KEY UPDATE`
+      FROM scheduled_tasks WHERE id = ${ctx.taskId} AND user_id = ${ctx.userId} FOR UPDATE`
     const row = rows[0]
     // 2. write-time audit-set re-check (F2-B7): never trust the finding
     if (!row || !isAuditable(row as AuditTaskInput)) return { status: 'refused_not_auditable', fixKind: kind, rowsWritten: 0 }
@@ -197,11 +197,12 @@ async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promis
     if (!preconditionHolds(fix, row)) return { status: 'noop_changed', fixKind: kind, rowsWritten: 0 }
     // 4. in-flight refusal (D-16): database truth only
     const sid: string | null = row.target_id ?? row.session_id ?? null
-    // The probe below is only atomic with the write if run creation for that session is serialised
-    // against it: scheduled_task_runs has a BEFORE INSERT trigger taking the same transaction-level
-    // advisory lock (key 'taskqc-session:' || session_id), so a run for ANY task on this session
-    // either committed before the probe (and is seen) or waits until this transaction ends.
-    if (sid != null) await tx`SELECT pg_advisory_xact_lock(hashtext(${'taskqc-session:' + sid})::bigint)`
+    // The shared-session probe is only atomic with the write if a run for ANOTHER task on that
+    // session cannot appear between probe and commit. scheduled_task_runs.session_id references
+    // sessions(id), so that insert's FK check takes FOR KEY SHARE on the sessions row; locking the
+    // row FOR UPDATE here makes it either commit before the probe (and be seen) or wait until this
+    // transaction ends. A session row that no longer exists cannot be referenced by a new run.
+    if (sid != null) await tx`SELECT id FROM sessions WHERE id = ${sid} FOR UPDATE`
     const own = await tx`
       SELECT 1 AS open FROM scheduled_task_runs
       WHERE task_id = ${ctx.taskId} AND status IN ('running','pending','in_flight') AND finished_at IS NULL AND completed_at IS NULL

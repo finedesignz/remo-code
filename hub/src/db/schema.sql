@@ -1701,26 +1701,20 @@ CREATE INDEX IF NOT EXISTS idx_task_qc_findings_task
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_qc_findings_dedupe
   ON task_qc_findings(user_id, task_id, detector, evidence_sig, day);
 
--- PTYCAP-08 QC round 1: serialise run creation against the task-qc safe-fix
--- writer's shared-session in-flight probe. The writer holds
--- pg_advisory_xact_lock(hashtext('taskqc-session:' || session_id)) while it
--- probes for open runs on a session and writes; every run inserted with that
--- session id takes the same lock first, so a run either committed before the
--- probe (and is seen) or waits until the writer's transaction ends. The lock is
--- transaction-scoped and uncontended outside a QC fix. Idempotent
--- (CREATE OR REPLACE); no data touched.
-CREATE OR REPLACE FUNCTION scheduled_task_runs_session_lock() RETURNS trigger AS $$
-BEGIN
-  IF NEW.session_id IS NOT NULL THEN
-    PERFORM pg_advisory_xact_lock(hashtext('taskqc-session:' || NEW.session_id)::bigint);
+-- PTYCAP-08 QC round 2: the round-1 BEFORE INSERT trigger on scheduled_task_runs (a
+-- per-session advisory lock taken on every session-bound run insert) is REMOVED. It put
+-- work on the hot run-insert path even with Task QC off. The safe-fix writer now gets the
+-- same atomicity from row locks it takes itself (the task row and the target session row,
+-- FOR UPDATE, which the FK key-share of a run insert conflicts with), so run insertion is
+-- byte-for-byte the pre-feature statement. The existence check keeps a converged boot from
+-- taking any lock on scheduled_task_runs. Idempotent; no data touched.
+-- schema-lint: allow idempotent DDL - drops a retired trigger and function only if present; no rows touched
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_scheduled_task_runs_session_lock' AND NOT tgisinternal) THEN
+    DROP TRIGGER trg_scheduled_task_runs_session_lock ON scheduled_task_runs;
   END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
--- schema-lint: allow idempotent DDL - CREATE OR REPLACE TRIGGER; INSERT is only the trigger event name, no row is inserted
-CREATE OR REPLACE TRIGGER trg_scheduled_task_runs_session_lock
-  BEFORE INSERT ON scheduled_task_runs
-  FOR EACH ROW EXECUTE FUNCTION scheduled_task_runs_session_lock();
+  DROP FUNCTION IF EXISTS scheduled_task_runs_session_lock();
+END $$;
 
 -- PTYCAP-08 QC round 1: a digest marks the proposal rows it contained as delivered, so a
 -- failed send (or a same-day re-run) re-reports them instead of losing them. Additive.
