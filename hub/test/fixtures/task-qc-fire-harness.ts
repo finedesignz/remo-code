@@ -69,8 +69,9 @@ export function auditedTaskRow(over: Record<string, unknown> = {}) {
     cron_expression: '0 3 * * *',
     timezone: 'UTC',
     created_at: '2026-09-01T00:00:00.000Z',
-    last_fire_at: '2026-10-12T03:00:00.000Z',
-    next_fire_at: '2026-10-13T03:00:00.000Z',
+    // relative to now so NEVER_FIRED stays quiet whenever the suite runs
+    last_fire_at: new Date(Date.now() - 23 * 3_600_000).toISOString(),
+    next_fire_at: new Date(Date.now() + 3_600_000).toISOString(),
     target_kind: 'session',
     target_id: 'sess-1',
     session_id: 'sess-1',
@@ -102,6 +103,8 @@ export function setupFireHarness() {
     auditedTasks: [auditedTaskRow()] as any[],
     auditedRuns: failedRuns() as any[],
     openRuns: [] as any[],
+    /** rows the audit-session SELECT yields (the audited task's session is live by default) */
+    sessionRows: [] as any[],
     /** rows the findings INSERT ... RETURNING yields ([] = ON CONFLICT DO NOTHING) */
     findingRows: [{ id: 'finding-1' }] as any[],
     claimed: [] as any[],
@@ -129,6 +132,7 @@ export function setupFireHarness() {
     h.auditedTasks = [auditedTaskRow()]
     h.auditedRuns = failedRuns()
     h.openRuns = []
+    h.sessionRows = [{ id: 'sess-1', status: 'online', deleted_at: null, last_activity: null, created_at: null, repo_key: null }]
     h.findingRows = [{ id: 'finding-1' }]
     h.claimed = []
     h.insertedRuns = []
@@ -151,6 +155,7 @@ export function setupFireHarness() {
       return h.auditedTasks
     }) as any)
     fake.onSelect(/ROW_NUMBER/, () => h.auditedRuns)
+    fake.onSelect(/FROM sessions WHERE user_id/, () => h.sessionRows)
     fake.onSelect(/FROM scheduled_task_runs WHERE task_id = \? AND status IN/, () => h.openRuns)
     fake.onInsert(/INSERT INTO scheduled_task_runs/, (values) => {
       const row = { id: `claim-${h.claimed.length + 1}`, task_id: values[0], user_id: values[1], status: 'pending' }
