@@ -66,7 +66,7 @@ describe('Codex transcript adapter — resolution + scrape fallback (T-20-01, T-
   it('persisted id ABSENT ⇒ scrape-mode (no file guess)', async () => {
     const adapter = new CodexTranscriptAdapter()
     const res = await adapter.open(
-      { sessionId: 's', projectDir: '/x', cliKind: 'codex' },
+      { sessionId: 's', projectDir: '/x', cliKind: 'codex', codexSessionsRoot: join(import.meta.dir, 'fixtures', 'codex-tree') },
       () => {},
     )
     expect(res.mode).toBe('scrape')
@@ -78,7 +78,16 @@ describe('Codex transcript adapter — resolution + scrape fallback (T-20-01, T-
     const adapter = new CodexTranscriptAdapter()
     const got: TranscriptEntry[] = []
     const res = await adapter.open(
-      { sessionId: 's', projectDir: '/x', cliKind: 'codex', codexRolloutId: 'does-not-exist' },
+      {
+        sessionId: 's',
+        projectDir: '/x',
+        cliKind: 'codex',
+        codexRolloutId: 'does-not-exist',
+        // Test-scoped root: a real home ~/.codex/sessions tree can be large and
+        // the directory walk flakily times out under full-suite / loaded-host
+        // conditions. Point the resolver at an empty fixture dir instead.
+        codexSessionsRoot: join(import.meta.dir, 'fixtures', 'codex-tree'),
+      },
       (e) => got.push(e),
     )
     expect(res.mode).toBe('scrape')
