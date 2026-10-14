@@ -5,8 +5,10 @@
 // a HealEvent for routeHeal.
 //
 // Every guard here fails CLOSED (an error means no event and no notification suppression):
-//   AM-F5-1  only a real failed transition: status failed, not reaper/race finalized
-//            (only_if_active) and not a run_timeout error
+//   AM-F5-1  only a real failed transition: status failed and not a reaper-finalized run
+//            (error run_timeout - the reaper's sole marker). `only_if_active` is a CAS used by
+//            real senders too (work, TEAB, agent), so it is NOT a reaper marker; the caller only
+//            reaches here after WINNING that claim.
 //   AM-F5-3  recursion is impossible: internal tasks (flag OR __internal_ name) and any run in
 //            the ledger's heal ancestry never produce an event
 //   AM-F5-4  per-task daily ceiling
@@ -31,8 +33,6 @@ export interface FailedRunInput {
   runId: string;
   status: string;
   error: string | null | undefined;
-  /** True for the reaper / TEAB race finalizers (claim-then-finalize). */
-  onlyIfActive?: boolean;
   task: HealableTask;
 }
 
@@ -84,7 +84,6 @@ export async function healFailedScheduledRun(
 ): Promise<boolean> {
   const { runId, status, error, task } = input;
   if (status !== 'failed') return false;
-  if (input.onlyIfActive === true) return false;
   if ((error ?? '').startsWith('run_timeout')) return false;
   if (isInternalScheduledTask(task)) return false;
   if (!task.session_id) return false;

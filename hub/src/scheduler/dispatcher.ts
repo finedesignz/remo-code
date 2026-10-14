@@ -810,7 +810,7 @@ export async function finalizeRun(
     // PTYCAP-07-08 (AM-F5-2): heal hook BETWEEN the terminal UPDATE and post-run processing.
     // Inert (returns false, imports nothing) unless the run failed AND REMO_HEAL_UNIFIED is ON.
     const healOwnsNotification = status === 'failed'
-      ? await healFailedRunHook(task, runId, error ?? null, fields.only_if_active === true)
+      ? await healFailedRunHook(task, runId, error ?? null)
       : false
     await onRunFinalized(task, runId, status, error ?? null, {
       cost_usd: costUsd,
@@ -831,13 +831,12 @@ async function healFailedRunHook(
   task: ScheduledTask,
   runId: string,
   error: string | null,
-  onlyIfActive: boolean,
 ): Promise<boolean> {
   try {
     const { healUnifiedEnabled } = await import('../heal/config.ts')
     if (!healUnifiedEnabled()) return false
     const { healFailedScheduledRun } = await import('../heal/sources/scheduled-task.ts')
-    return await healFailedScheduledRun({ runId, status: 'failed', error, onlyIfActive, task })
+    return await healFailedScheduledRun({ runId, status: 'failed', error, task })
   } catch (err: any) {
     log.error('scheduler.dispatcher.heal_hook_failed', { task_id: task.id, run_id: runId, error: err?.message })
     return false
