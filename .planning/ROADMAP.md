@@ -213,7 +213,7 @@ fix the CAUSE, and escalates to the human when it cannot.
 | 4. Lifetime Counter + Kill Switch | Executed (8/8 plans) - QC BLOCKED (2 open races), draft PR #506 |
 | 5. Throwaway-Repo Due→PR Proof | Not started |
 | 6. Hardening + Docs + Release | Not started |
-| 7. Unified Self-Heal Routing | Specced, not started (blocked on #346 + Phase 4) |
+| 7. Unified Self-Heal Routing | Executed (11/11 plans) - PR pending QC |
 | 8. Periodic Task QC + Optimization | Specced, not started (blocked on Phase 4) |
 | 9. Cap-Hit → QC Trigger | Specced, not started (blocked on Phases 4 + 8) |
 
