@@ -90,6 +90,9 @@ function setColumns(template: string): string[] {
 const files = readdirSync(SRC)
   .filter((f) => f.endsWith('.ts'))
   .map((f) => ({ f, src: readFileSync(join(SRC, f), 'utf8') }))
+/** the only file that spells UPDATE text without executing it (see the digest.ts pin below) */
+const TEXT_ONLY = new Set(['digest.ts'])
+const writerFiles = files.filter(({ f }) => !TEXT_ONLY.has(f))
 
 describe('TQC-04 static guard', () => {
   test('the extractor catches a violating fixture (non-vacuous)', () => {
@@ -113,15 +116,29 @@ describe('TQC-04 static guard', () => {
   })
 
   test('every UPDATE scheduled_tasks template is one of exactly the three allowlisted column lists', () => {
-    const lists = new Set(files.flatMap(({ src }) => updateTemplates(src).map((t) => setColumns(t).join(','))))
+    const lists = new Set(writerFiles.flatMap(({ src }) => updateTemplates(src).map((t) => setColumns(t).join(','))))
     // writer templates carry updated_at; rollback text does not. Union is exactly these sets:
     const normalised = [...lists].map((l) => l.split(',').filter((c) => c !== 'updated_at').join(',')).sort()
     expect([...new Set(normalised)]).toEqual(['payload', 'session_id,target_id', 'timezone'])
   })
 
   test('only safe-fixes.ts contains an UPDATE scheduled_tasks literal', () => {
-    const owners = files.filter(({ src }) => updateTemplates(src).length > 0).map(({ f }) => f)
+    const owners = writerFiles.filter(({ src }) => updateTemplates(src).length > 0).map(({ f }) => f)
     expect(owners).toEqual(['safe-fixes.ts'])
+  })
+
+  // PTYCAP-08-07: digest.ts RENDERS owner-runnable commands as text (one fixed template per proposal
+  // kind). It is the single named text-only exemption from the two writer scans above; the pins below
+  // prove it cannot execute anything and that its templates never touch the on/off column.
+  test('digest.ts is text-only: no database import, no sql tag, its UPDATE text never mentions the on/off column', () => {
+    const src = files.find((x) => x.f === 'digest.ts')!.src
+    const imports = [...src.matchAll(/^import[^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]!).sort()
+    expect(imports).toEqual(['../lib/email.ts', './safe-fixes.ts', './types.ts'])
+    const code = extractLiterals(src).join('\n')
+    expect(src).not.toMatch(/\bsql\s*`|\bsql\s*\(|\.begin\(|\.unsafe\(/)
+    expect(updateTemplates(src).length).toBeGreaterThanOrEqual(3)
+    expect(updateTemplates(src).filter(violatesTqc04)).toEqual([])
+    expect(code).not.toMatch(/registry|dispatch\(|injectOrchestratorPrompt/)
   })
 
   test('safe-fixes.ts imports no registry, dispatcher, dispatch pipeline or sender', () => {
