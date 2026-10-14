@@ -15,6 +15,10 @@ LOCK: none
 - Error (transient): github MCP get_check_runs on #509 returned "upstream connect error or disconnect/reset before headers"; retry succeeded. Not yet filed with AgentAutofix (transient, recovered).
 - install-gsd.sh not run. Resume: merge #506, #509; then #504, #503.
 
+## Run 20 addendum (2026-10-14, later)
+- Merged #509 (8d8b704) and #506 (ab69c42): Woodpecker qc + docs-drift green on heads 521d477 / ec8908f; AAF ai-review still in_progress on both new heads (reviewer infra slow), earlier blocking findings were fixed in-code; #506 had the 3-seat QC panel (substituted). No post-merge Coolify deploy check beyond /health.
+- Resume: #504 (revanote), #503 (dependabot cargo), then PTYCAP-05+ (drafts #511-513).
+
 ## Run 20 (2026-10-14)
 - memlog claim OK (routine-run-2026-10-14). Merged #505 (PTYCAP-03; qc+docs-drift+ai-review green, 3-seat QC earlier) -> main 66bf504.
 - #506 (PTYCAP-04): was stacked on #505 -> re-applied cleanly on main (ec8908f), retargeted to main, fixed codex-blocking releaseInject (retry + parked queue + test). Full 3-seat QC panel: no blocking (verdict commented on PR; lifetime cap on scheduler keys is locked design D-05). Woodpecker qc/docs-drift pending at end of run -> MERGE NEXT RUN if green and ai-review has no blocking finding.
