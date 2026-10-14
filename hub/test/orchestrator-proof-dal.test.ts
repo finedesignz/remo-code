@@ -30,6 +30,7 @@ beforeEach(() => {
   state.unknown.length = 0
   state.beginCalls = 0
   state.lockCalls = 0
+  state.lockKeys.length = 0
 })
 afterEach(() => {
   expect(state.unknown).toEqual([]) // the fake recognised every statement
@@ -258,6 +259,26 @@ describe('enableProofTaskTx', () => {
     const { taskId } = await D.armProofRunTx(armArgs())
     await D.claimActiveProofRunForTask(taskId) // armed -> running
     await expect(D.enableProofTaskTx({ userId: 'u1' })).rejects.toMatchObject({ code: 'proof_not_armed' })
+  })
+})
+
+describe('QC r2 global exclusivity: one hub-global lock serializes arm/enable across users (codex new #1)', () => {
+  test('two different users enabling concurrently: exactly one wins, the other is refused', async () => {
+    await D.armProofRunTx(armArgs())
+    await D.armProofRunTx(armArgs({ userId: 'u2', sessionId: 's2', repoIdent: 'github://acme/proof2' }))
+    const results = await Promise.allSettled([D.enableProofTaskTx({ userId: 'u1' }), D.enableProofTaskTx({ userId: 'u2' })])
+    expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected'])
+    const loser = results.find((r) => r.status === 'rejected') as PromiseRejectedResult
+    expect(loser.reason).toMatchObject({ code: 'other_orchestrator_task_enabled' })
+    expect(state.tasks.filter((t) => t.task_type === 'orchestrator' && t.enabled)).toHaveLength(1)
+  })
+
+  test('arm, disarm and enable all take the SAME global lock key', async () => {
+    await D.armProofRunTx(armArgs())
+    await D.enableProofTaskTx({ userId: 'u1' })
+    await D.disarmProofRunTx({ userId: 'u1' })
+    expect(state.lockCalls).toBe(3)
+    expect(state.lockKeys).toEqual([D.PROOF_LOCK_KEY, D.PROOF_LOCK_KEY, D.PROOF_LOCK_KEY])
   })
 })
 
