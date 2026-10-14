@@ -164,3 +164,92 @@ export interface ProofCycleHooks {
   /** End a claimed run when the cycle itself failed after the claim (never throws). */
   abort: (run: ProofRun, reason: NothingReason, detail: string, input: ProofGuardInput) => Promise<void>;
 }
+
+// ── ProofGithub: the READ-ONLY, injectable GitHub contract (D-12) ────────────
+// The hub never shells out to `gh`. Plan 05-02 wraps hub/src/auth/github-app.ts in the
+// real adapter; every other plan builds against this interface and the shared fake in
+// hub/test/fixtures/proof-fake-github.ts. NO method writes anything to GitHub.
+
+export type ProofGithubErrorKind = 'forbidden' | 'not_found' | 'unavailable';
+
+/** Typed failure: 403 -> forbidden, 404 -> not_found, everything else -> unavailable. */
+export class ProofGithubError extends Error {
+  constructor(
+    public kind: ProofGithubErrorKind,
+    public status: number | null,
+    message?: string,
+  ) {
+    super(message ?? `github ${kind}${status != null ? ` (${status})` : ''}`);
+    this.name = 'ProofGithubError';
+  }
+}
+
+export interface RepoInfo {
+  fullName: string;
+  defaultBranch: string;
+}
+
+export interface EffectiveRule {
+  type: string;
+  rulesetId: number | null;
+  rulesetSourceType: string | null;
+  parameters: Record<string, unknown> | null;
+}
+
+export interface RulesetDetail {
+  id: number;
+  name: string;
+  target: string;
+  sourceType: string;
+  enforcement: string;
+  /** null means "not returned to this token" (GitHub shows it only to callers with write access). */
+  bypassActors: unknown[] | null;
+  conditions: unknown;
+  rules: Array<{ type: string; parameters: Record<string, unknown> | null }>;
+  updatedAt: string | null;
+}
+
+export interface CompareResult {
+  status: 'identical' | 'ahead' | 'behind' | 'diverged';
+  aheadBy: number;
+  behindBy: number;
+}
+
+export interface PullSummary {
+  number: number;
+  htmlUrl: string;
+  state: string;
+  merged: boolean;
+  mergedAt: string | null;
+  headRef: string;
+  headSha: string;
+  baseRef: string;
+  draft: boolean;
+}
+
+export interface CheckState {
+  checkRuns: Array<{ name: string; status: string; conclusion: string | null }>;
+  statuses: Array<{ context: string; state: string }>;
+  truncated: boolean;
+}
+
+export interface PermissionProbe {
+  administrationRead: boolean;
+  checksRead: boolean;
+  statusesRead: boolean;
+  pullsRead: boolean;
+  contentsRead: boolean;
+}
+
+export interface ProofGithub {
+  getRepo(owner: string, repo: string): Promise<RepoInfo>;
+  getBranchHeadSha(owner: string, repo: string, branch: string): Promise<string>;
+  getEffectiveBranchRules(owner: string, repo: string, branch: string): Promise<EffectiveRule[]>;
+  getRuleset(owner: string, repo: string, rulesetId: number): Promise<RulesetDetail>;
+  compare(owner: string, repo: string, base: string, head: string): Promise<CompareResult>;
+  listPullsWithHeadPrefix(owner: string, repo: string, headPrefix: string): Promise<PullSummary[]>;
+  getCheckState(owner: string, repo: string, sha: string): Promise<CheckState>;
+  listWorkflowFiles(owner: string, repo: string, ref: string): Promise<string[]>;
+  getCollaboratorPermission(owner: string, repo: string, username: string): Promise<string>;
+  probePermissions(owner: string, repo: string): Promise<PermissionProbe>;
+}
