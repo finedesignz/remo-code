@@ -50,7 +50,7 @@ export async function buildErrorCaptureSink(
   const legacy = buildErrorCaptureRunStore({
     errorId,
     project,
-    sessionId: event.bound_session_id,
+    sessionId: event.bound_session_id as string,
     userId,
     notifyCtx: { error_type: error.error_type, error_value: error.error_value },
     notify: false, // routeHeal is the sole owner-notification path inside the unified flow

@@ -48,7 +48,7 @@ export async function resolveHealTarget(
   deps: ResolveDeps = REAL_RESOLVE_DEPS,
 ): Promise<HealTarget> {
   const boundId = 'bound_session_id' in event ? event.bound_session_id : null;
-  if (boundId) return resolveBound(event, boundId, deps);
+  if (boundId) return resolveBound(event, boundId as string, deps);
   return resolveByRepo(event, deps);
 }
 

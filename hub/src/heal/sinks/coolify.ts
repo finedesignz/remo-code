@@ -32,15 +32,15 @@ export interface CoolifyDeps {
     parentFireId: null;
     chainDepth: number;
     triggeredByRunId: string | null;
-  }): void | Promise<void>;
-  broadcastRunStarted?(userId: string, payload: object): void | Promise<void>;
+  }): unknown;
+  broadcastRunStarted?(userId: string, payload: object): unknown;
   finalizeRun(
     runId: string,
     status: RunStatusLike,
     error: string | null,
     fields: { duration_ms?: number | null; output_snippet?: string | null; only_if_active: true },
   ): Promise<void>;
-  removeRunContext(runId: string): void | Promise<void>;
+  removeRunContext(runId: string): unknown;
   send?: SendDeps;
   now(): number;
 }

@@ -118,5 +118,6 @@ export const OUTCOME_AUTOSPAWN_STARTING = 'autospawn_starting';
  */
 export function recoveryCtxFor(event: HealEvent): Record<string, string> | null {
   if (event.source !== 'error_capture') return null;
-  return { error_id: event.ctx.error_id, project_id: event.ctx.project_id };
+  const ctx = event.ctx as unknown as { error_id: string; project_id: string };
+  return { error_id: ctx.error_id, project_id: ctx.project_id };
 }
