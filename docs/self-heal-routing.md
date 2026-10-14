@@ -45,8 +45,8 @@ merges or deploys.
 ## 3. Routing decision table
 
 `routeHeal(event)` returns one `HealOutcome`. Order of work: validate the event, recursion/provenance
-guard (before any claim, fails closed), resolve the target, claim the ledger row, per-repo hourly
-bound, then route.
+guard (before any claim, fails closed), resolve the target, claim the ledger row (the per-repo hourly
+and per-task daily ceilings are decided atomically inside that claim), then route.
 
 | Target resolved | Result |
 |---|---|
@@ -84,6 +84,14 @@ to be private to the orchestrator (`maybeAutospawnOffline`). It has two policies
   that write fails, and releases the reservation on every refusal and failed launch. The spawn is
   last, so a refusal never costs a supervisor slot.
 
+The heal spawn is triggered by untrusted text, so it never inherits the session's
+`dangerously_skip_permissions`: the heal policy passes `skipPermissions: false` to
+`launchSessionForUser`, which then sends `dangerously_skip_permissions: false` in `session.start`
+whatever the session row says (CLAUDE.md machine-spawn invariant). The orchestrator (legacy policy)
+is unchanged. Before it reserves or spawns anything the autospawn persists the ledger outcome
+`autospawn_starting`, so a crash in the reservation-to-`autospawn_launched` window is recoverable by
+the sweep; if that write fails nothing is reserved or spawned.
+
 The reservation is idempotent on replay (same token `heal:<eventId>`). `launchSessionForUser` now
 closes its reserved run on every non-launch exit (it previously leaked a run on `send_failed` or a
 post-reservation throw), which keeps the supervisor concurrency counter honest. One deadline timer
@@ -94,7 +102,10 @@ is shared by the orchestrator and the heal seam (moved, not copied).
 Gate chain (one constant, `route.ts`, found by the `token-cap-coverage` scan), in the Phase 4
 composition: kill switch first, lifetime counter last:
 `automationKillSwitchGate`, `thresholdGate`, `dailyCostCapGate`, `dailyTokenCapGate`,
-`sessionInjectRateGate`, `automationLifetimeCounterGate`. No gate value changed in this phase.
+`governedAutomationPtyGate` (actor `self-heal` is never an eligible automation actor, so a
+`pty-interactive` target is refused `automation_blocked_on_pty:self-heal` at dispatch time, not
+only at resolve time), `sessionInjectRateGate`, `automationLifetimeCounterGate`. No existing gate
+value changed in this phase.
 
 ## 5. The `heal_events` ledger
 
@@ -104,6 +115,14 @@ Additive, idempotent DDL in `schema.sql` (no data statements there). The claim
 `created_at`, a per-user claim cap, then the insert. A unique index on
 `(user_id, source, dedupe_key, window_bucket)` is the backstop, not the mechanism. A claim failure
 propagates (fail closed); there is no dispatch-anyway branch.
+
+The per-repository hourly and per-task daily ceilings are counted in the same transaction, after
+the per-user advisory lock, so every claim of one user is serialized from the count to the insert:
+concurrent claims on distinct dedupe keys cannot all observe `cap - 1`. In-flight rows (NULL
+outcome) and `autospawn_starting` count. At the repo ceiling the row is still inserted, already
+`refused:repo_rate_bound`; at the task ceiling the claim is refused `task_day_cap` (no row).
+`recovery_ctx` (nullable jsonb, additive) holds the minimal validated source context a sweep needs
+(`error_id`/`project_id` for error_capture; nothing else).
 
 Columns of note: `outcome`, `repo_ident`, `session_id`, `trigger_run_id` (the run that failed) vs
 `dispatch_run_id` (the run the heal created), `notification_claimed_at`, `updated_at`. Every
@@ -137,8 +156,9 @@ non-canonical ident throws `HealKeyError`; `heal:<u>:null` can never exist. The 
 `route.ts` only (allow-listed in `counter-key-assignment-guard.test.ts`).
 
 Because the session-keyed inject-rate gate cannot see a freshly launched session, a per-repo
-hourly bound (`REMO_HEAL_MAX_PER_REPO_HOUR`, counted from the ledger) refuses with
-`refused:repo_rate_bound`. Exhaustion is reported in the outcome.
+hourly bound (`REMO_HEAL_MAX_PER_REPO_HOUR`, counted from the ledger inside the claim
+transaction, so it is atomic) refuses with `refused:repo_rate_bound`. Exhaustion is reported in the
+outcome.
 
 `POST /api/sessions/heal` is unchanged. Its key shares only the `heal:` prefix with the seam
 (prefix-compatible), with a caller-supplied repo string, so it does not necessarily share the
@@ -178,10 +198,15 @@ Arming for the autospawn branch needs the heal flag AND `REMO_ORCHESTRATOR_AUTOS
 default configuration spawns nothing: live dispatch and fail-fast still work, autospawn is a
 no-op. Arming is an owner action; steps are in `orchestrator-autospawn-runbook.md`.
 
-Boot sweep (`heal/sweep.ts`, called from `hub/src/index.ts` only when the flag is ON, imported
-lazily): terminalizes launches stranded by a hub restart (`autospawn_launched` and
-`autospawn_parked` rows past the deadline), releases their reservations, and finalizes the metadata
-run. With the flag OFF it performs zero reads.
+Boot sweep (`heal/sweep.ts` `bootSweepHealLaunches`, called from `hub/src/index.ts` only when the
+flag is ON, imported lazily): terminalizes launches stranded by a hub restart (`autospawn_starting`,
+`autospawn_launched` and `autospawn_parked` rows older than 2x `REMO_HEAL_SPAWN_TIMEOUT_MS`),
+finalizes the source run (an error_capture event is rebuilt from `recovery_ctx` and the stored
+session id), and ALWAYS releases the reservation and closes the ledger row even if the source run
+cannot be terminalized (a release failure leaves the row for the next sweep). A row stranded by a
+quick restart is younger than that guard at boot, so the boot sweep arms exactly ONE follow-up
+sweep after `2x timeout + 1s` (event driven, no interval): no stranded heal run waits for the 6h
+reaper. With the flag OFF it performs zero reads and arms no timer.
 
 ## 10. Flag OFF and the caller inventory
 
