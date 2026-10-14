@@ -1700,3 +1700,24 @@ CREATE INDEX IF NOT EXISTS idx_task_qc_findings_task
   ON task_qc_findings(user_id, task_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_task_qc_findings_dedupe
   ON task_qc_findings(user_id, task_id, detector, evidence_sig, day);
+
+-- PTYCAP-08 QC round 1: serialise run creation against the task-qc safe-fix
+-- writer's shared-session in-flight probe. The writer holds
+-- pg_advisory_xact_lock(hashtext('taskqc-session:' || session_id)) while it
+-- probes for open runs on a session and writes; every run inserted with that
+-- session id takes the same lock first, so a run either committed before the
+-- probe (and is seen) or waits until the writer's transaction ends. The lock is
+-- transaction-scoped and uncontended outside a QC fix. Idempotent
+-- (CREATE OR REPLACE); no data touched.
+CREATE OR REPLACE FUNCTION scheduled_task_runs_session_lock() RETURNS trigger AS $$
+BEGIN
+  IF NEW.session_id IS NOT NULL THEN
+    PERFORM pg_advisory_xact_lock(hashtext('taskqc-session:' || NEW.session_id)::bigint);
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+-- schema-lint: allow idempotent DDL - CREATE OR REPLACE TRIGGER; INSERT is only the trigger event name, no row is inserted
+CREATE OR REPLACE TRIGGER trg_scheduled_task_runs_session_lock
+  BEFORE INSERT ON scheduled_task_runs
+  FOR EACH ROW EXECUTE FUNCTION scheduled_task_runs_session_lock();

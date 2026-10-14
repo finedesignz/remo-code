@@ -108,7 +108,7 @@ describe('bounds (each enforced, not documented)', () => {
     world.store['a'] = mk('a')
     await run()
     expect(fake.state.beginModes).toEqual(['read only'])
-    expect(fake.state.setLocalCalls).toBe(1)
+    expect(fake.state.setLocalCalls).toBeGreaterThanOrEqual(1) // re-armed before every statement
     const set = fake.state.statements.find((s) => s.kind === 'set_local')!
     expect(set.text).toBe(`SET LOCAL statement_timeout = ${TASK_QC_BOUNDS.passTimeoutMs}`)
   })

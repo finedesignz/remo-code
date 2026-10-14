@@ -187,9 +187,11 @@ describe('loadAuditInputs: read-only transaction, timeout, lock, deadline', () =
     await loadAuditInputs({ ...base(), lock: true })
     expect(fake.state.beginCalls).toBe(1)
     expect(fake.state.beginModes).toEqual(['read only'])
-    expect(fake.state.setLocalCalls).toBe(1)
+    // armed with the time left before the lock and before every statement (F1-A3)
+    expect(fake.state.setLocalCalls).toBeGreaterThanOrEqual(2)
     const set = fake.state.statements.find((s) => s.kind === 'set_local')!
     expect(set.text).toMatch(/^SET LOCAL statement_timeout = \d+$/)
+    expect(fake.state.statements[0]!.kind).toBe('set_local')
     expect(fake.state.lockCalls).toBe(1)
     const lock = fake.state.statements.find((s) => s.kind === 'lock')!
     expect(lock.values[0]).toBe(`taskqc:${USER}`)

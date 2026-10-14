@@ -43,7 +43,7 @@ const ROW = {
 
 function setup(opts: { own?: boolean; shared?: boolean; row?: any }) {
   const fake = createTaskQcFakeSql()
-  fake.on('FOR UPDATE', [opts.row ?? ROW])
+  fake.on('FOR NO KEY UPDATE', [opts.row ?? ROW])
   fake.on(/FROM scheduled_task_runs WHERE task_id/, opts.own ? [{ open: 1 }] : [])
   fake.on(/FROM scheduled_task_runs WHERE session_id/, opts.shared ? [{ open: 1 }] : [])
   fake.on(/UPDATE scheduled_tasks SET timezone/, [{ timezone: 'UTC' }])
@@ -75,6 +75,34 @@ describe('in-flight refusal (TQC-06)', () => {
     // the shared-session probe is scoped by the task's effective session
     const probe = fake.state.statements.find((s) => /WHERE session_id/.test(s.text))!
     expect(probe.values).toEqual(['s1'])
+  })
+
+  test('codex MAJOR 3: the per-session advisory lock is taken after the row lock and BEFORE the in-flight probes and the write', async () => {
+    const fake = setup({})
+    await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
+    const st = fake.state.statements
+    const lockAt = st.findIndex((x) => x.kind === 'lock')
+    expect(lockAt).toBeGreaterThan(-1)
+    expect(st[lockAt]!.values).toEqual(['taskqc-session:s1'])
+    expect(st.findIndex((x) => x.forUpdate)).toBeLessThan(lockAt)
+    const firstProbe = st.findIndex((x) => /FROM scheduled_task_runs/.test(x.text))
+    expect(lockAt).toBeLessThan(firstProbe)
+    expect(lockAt).toBeLessThan(st.findIndex((x) => x.kind === 'update'))
+    // one transaction: the lock is transaction-scoped, so check and write share it
+    expect(st.every((x) => x.tx === 1)).toBe(true)
+  })
+
+  test('the session lock is also held when the write is refused for a shared-session run', async () => {
+    const fake = setup({ shared: true })
+    const r: any = await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
+    expect(r.status).toBe('skipped_in_flight')
+    expect(fake.state.lockCalls).toBe(1)
+  })
+
+  test('a task with no session takes no session lock', async () => {
+    const fake = setup({ row: { ...ROW, session_id: null, target_id: null, target_kind: 'agent' } })
+    await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
+    expect(fake.state.lockCalls).toBe(0)
   })
 
   test('the open-run definition is the D-07 one, in SQL', async () => {
