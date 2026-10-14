@@ -15,6 +15,8 @@ const s = {
   sessionRow: null as any,
   sendThrows: null as null | string,
   skipPermsThrows: null as null | string,
+  sessionSkipPerms: false,
+  frames: [] as any[],
   reservation: { ok: true, run: { id: 'run-1' } } as any,
 }
 
@@ -36,8 +38,9 @@ mock.module('../src/db/postgres.ts', () => ({
 }))
 mock.module('../src/ws/supervisor-registry.ts', () => ({
   isSupervisorOnline: () => true,
-  sendToSupervisor: () => {
+  sendToSupervisor: (_id: string, frame: any) => {
     if (s.sendThrows) throw new Error(s.sendThrows)
+    s.frames.push(frame)
   },
   updateSupervisorState: async () => {},
 }))
@@ -47,7 +50,7 @@ mock.module('../src/sessions/budget.ts', () => ({
 mock.module('../src/db/dal.ts', () => ({
   getSessionSkipPermissions: async () => {
     if (s.skipPermsThrows) throw new Error(s.skipPermsThrows)
-    return false
+    return s.sessionSkipPerms
   },
 }))
 mock.module('../src/orchestrator/auto-launch.ts', () => ({
@@ -65,6 +68,8 @@ beforeEach(() => {
   s.ended = []
   s.sendThrows = null
   s.skipPermsThrows = null
+  s.sessionSkipPerms = false
+  s.frames = []
   s.reservation = { ok: true, run: { id: 'run-1' } }
   s.sessionRow = { id: 'sess-1', project_dir: '/repos/a', hostname: 'devbox', is_orchestrator: false }
 })
@@ -125,5 +130,23 @@ describe('launchSessionForUser run-leak closure (AM-F1-4)', () => {
     expect(nd).toEqual({ ok: false, reason: 'no_project_dir' })
 
     expect(s.ended).toHaveLength(0)
+  })
+})
+
+describe('launchSessionForUser skipPermissions override (PTYCAP-07 QC adversary 1)', () => {
+  test('default: the session row dangerously_skip_permissions value is sent unchanged', async () => {
+    s.sessionSkipPerms = true
+    const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1', machine: true })
+    expect(res.ok).toBe(true)
+    expect(s.frames).toHaveLength(1)
+    expect(s.frames[0].dangerously_skip_permissions).toBe(true)
+  })
+
+  test('skipPermissions:false forces the frame false even when the session row is true', async () => {
+    s.sessionSkipPerms = true
+    const res = await launchSessionForUser({ userId: 'u1', sessionId: 'sess-1', machine: true, skipPermissions: false })
+    expect(res.ok).toBe(true)
+    expect(s.frames).toHaveLength(1)
+    expect(s.frames[0].dangerously_skip_permissions).toBe(false)
   })
 })

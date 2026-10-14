@@ -92,6 +92,13 @@ export async function launchSessionForUser(args: {
    * consulted). Pinned by test/launch-callers-guard.test.ts.
    */
   machine?: true
+  /**
+   * PTYCAP-07 QC: `false` forces the session.start frame's dangerously_skip_permissions OFF,
+   * ignoring the session row. Required for untrusted-triggered machine spawns (self-heal): a
+   * machine path must never launch with permission prompts disabled (CLAUDE.md invariant).
+   * Omitted => the session row value, unchanged for every other caller.
+   */
+  skipPermissions?: false
 }): Promise<LaunchResult> {
   // AM-F1-4: the supervisor run reserved below; closed on EVERY non-launch exit after the
   // reservation (send_failed, halt unwind, any throw) so a failed spawn cannot leak a slot.
@@ -202,7 +209,8 @@ export async function launchSessionForUser(args: {
     reservedRunId = run.id
     await updateSupervisorState(pick.supervisorId, 'starting', run.id)
 
-    const skipPerms = await getSessionSkipPermissions(session.id, args.userId)
+    const skipPerms =
+      args.skipPermissions === false ? false : await getSessionSkipPermissions(session.id, args.userId)
     // QC B1: fresh kill-switch read immediately before the machine session.start. The check
     // at the top of this function predates the session lookup, supervisor pick and slot
     // reservation. A halt closes the run row the reservation just opened (frees the slot).
