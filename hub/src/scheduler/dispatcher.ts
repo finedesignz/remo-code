@@ -28,6 +28,7 @@ import { broadcastScheduledRun, broadcastToUser } from '../ws/registry.ts'
 import { reserveSessionSlot, getCapacitySnapshot } from '../sessions/budget.ts'
 import { checkUserThreshold } from '../usage/threshold.ts'
 import { log } from '../observability/logger'
+import { isTaskQcEnabled } from '../task-qc/flags.ts'
 
 const MAX_CHAIN_DEPTH = 5
 
@@ -276,6 +277,71 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
     void onRunFinalized(task, haltRun.id, 'skipped', haltErr)
     if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
     runIds.push(haltRun.id)
+    return { runIds }
+  }
+
+  // PTYCAP-08 (F2-B1): the task-quality auditor has its OWN branch, right after the
+  // kill switch and BEFORE the quota threshold, cost cap and target resolution. It
+  // spends zero model tokens, so an exhausted daily cap must not silence it, and a
+  // null-session task_qc row would otherwise fail resolveTargets as no_targets.
+  if (task.task_type === 'task_qc') {
+    if (!isTaskQcEnabled()) return { runIds }
+    const { claimTaskQcRun } = await import('../task-qc/run-claim.ts')
+    const run = await claimTaskQcRun({
+      taskId: task.id,
+      userId,
+      scheduledFor: now,
+      triggeredByRunId: opts.triggeredByRunId ?? null,
+    })
+    if (!run) {
+      log.warn('scheduler.dispatcher.task_qc_already_running', { task_id: task.id, user_id: userId })
+      const dropped = await insertRunV2({
+        task_id: task.id,
+        user_id: userId,
+        status: 'skipped',
+        scheduled_for: now,
+        target_kind: 'session',
+        target_id: null,
+        triggered_by_run_id: opts.triggeredByRunId ?? null,
+        error: 'task_qc_already_running',
+      })
+      broadcastScheduledRun(userId, {
+        type: 'scheduled_run_finished',
+        run_id: dropped.id, task_id: task.id, status: 'skipped', error: 'task_qc_already_running',
+      })
+      if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
+      runIds.push(dropped.id)
+      return { runIds }
+    }
+    const ctx: NewRunContext = {
+      runId: run.id,
+      taskId: task.id,
+      userId,
+      target: { kind: 'session', sessionId: null, online: true },
+      startedAt: now.getTime(),
+      parentFireId: null,
+      chainDepth: opts.chainDepth,
+      triggeredByRunId: opts.triggeredByRunId ?? null,
+      isManual,
+    }
+    trackRun(ctx)
+    broadcastScheduledRun(userId, {
+      type: 'scheduled_run_started',
+      run_id: run.id,
+      task_id: task.id,
+      scheduled_for: now.toISOString(),
+      target_kind: 'session',
+      target_id: null,
+    })
+    try {
+      const { sendTaskQcTask } = await import('./senders/task-qc.ts')
+      await sendTaskQcTask(task, ctx)
+    } catch (err: any) {
+      log.error('scheduler.dispatcher.task_qc_sender_failed', { run_id: run.id, task_id: task.id, error: err?.message })
+      await finalizeRun(run.id, 'failed', err?.message || 'task_qc_threw')
+    }
+    if (!opts.skipCronUpdate) updateFireTimestamps(task.id, now)
+    runIds.push(run.id)
     return { runIds }
   }
 
