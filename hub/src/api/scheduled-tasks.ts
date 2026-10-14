@@ -502,7 +502,7 @@ scheduledTasks.patch('/:id', async (c) => {
   // optional schema keys (run_at, schedule_rules) reject null, so drop them first.
   if (existing.task_type === 'task_qc' && body && typeof body === 'object' && !Array.isArray(body)) {
     for (const k of Object.keys(body)) {
-      if ((body as Record<string, unknown>)[k] === null && ((existing as Record<string, unknown>)[k] ?? null) === null) {
+      if ((body as Record<string, unknown>)[k] === null && ((existing as unknown as Record<string, unknown>)[k] ?? null) === null) {
         delete (body as Record<string, unknown>)[k]
       }
     }
@@ -521,7 +521,7 @@ scheduledTasks.patch('/:id', async (c) => {
       if (TASK_QC_PATCHABLE.has(k)) return false
       const v = (data as Record<string, unknown>)[k]
       if (v === undefined) return false
-      return stableJson(v) !== stableJson((existing as Record<string, unknown>)[k])
+      return stableJson(v) !== stableJson((existing as unknown as Record<string, unknown>)[k])
     })
     if (offending.length > 0) {
       return c.json({ error: 'task_qc_field_immutable', fields: offending }, 400)
