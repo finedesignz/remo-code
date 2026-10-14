@@ -90,6 +90,8 @@ export interface ScheduledTask {
   // this task emails the owner a summary unless a custom notify_email action is
   // already configured. Set false to opt out. See post-run/dispatcher.ts.
   email_summary: boolean
+  // PTYCAP-07: durable internal-task marker (see hub/src/heal/internal-task.ts).
+  is_internal?: boolean
   // Derived from latest finalized run via LATERAL JOIN in listTasksForUser/getTask.
   last_run_cost_usd?: number | null
   last_run_duration_ms?: number | null
