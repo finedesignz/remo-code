@@ -99,6 +99,15 @@ export function createProofFakeSql() {
     }
 
     // ── halt / cancel (arm), release (enable) ──
+    if (text.includes('INSERT INTO automation_kill_switch') && text.includes('FROM orchestrator_proof_runs')) {
+      // disarm: engage for the user's ACTIVE run sessions (evaluated against the store BEFORE the run update)
+      for (const r of state.runs) {
+        if (r.user_id === values[0] && isActive(r) && !state.kill.some((k) => k.engaged && k.scope === 'session' && k.session_id === r.session_id)) {
+          state.kill.push({ scope: 'session', user_id: r.user_id, session_id: r.session_id, reason: 'proof disarmed', engaged: true })
+        }
+      }
+      return []
+    }
     if (text.includes('INSERT INTO automation_kill_switch')) {
       const [userId, sessionId, reason] = values
       if (!state.kill.some((k) => k.engaged && k.scope === 'session' && k.session_id === sessionId)) {
