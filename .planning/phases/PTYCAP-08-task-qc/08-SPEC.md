@@ -1,10 +1,11 @@
 # PTYCAP-08 — Periodic Task QC + Optimization
 
-> **Status: SPEC ONLY. Not buildable yet.**
-> Build starts only after **PTYCAP Phase 4** (lifetime inject counter + kill switch) is green, and
-> after **PR #346** lands (it owns `hub/src/dispatch/gates.ts` and the four dispatchers). This phase
-> gives an AI write-access to task CONFIG; the Phase-4 counter + kill switch are the preconditions.
-> Phase 8 may be built in parallel with Phase 7 (disjoint files).
+> **Status: BUILT (2026-10-13), behind `REMO_TASK_QC_ENABLED` (default OFF).**
+> This SPEC is **superseded** where it conflicts with `08-CONTEXT.md` and `GATES/verdict.md`
+> (locked): the engine is deterministic hub code with no model and no dev loop, so there is no QC
+> token ceiling, and the safe-fix allowlist has three kinds, not four. Written when Phase 8 gave an
+> AI write-access to task CONFIG; the Phase-4 counter + kill switch were the preconditions and are
+> still the outer bound.
 
 ---
 
@@ -19,7 +20,7 @@ is to *modify other tasks*. Three specific ways this could go wrong, each explic
 
 | Failure mode | Bound |
 |---|---|
-| The QC task opens a dev loop and grinds (the incident shape) | Its own small token ceiling (`REMO_TASK_QC_TOKEN_CAP`, default 500K), a **separate** ceiling from the daily cap; it diagnoses CONFIG, it never plans/builds/PRs |
+| The QC task opens a dev loop and grinds (the incident shape) | Structural, not a cap: the engine is deterministic hub code that spends zero model tokens and cannot reach `dispatch()`, the macros or a PTY; it is bounded by deterministic per-pass bounds (constants a caller can only lower) and the Phase 4 lifetime counter (key `taskqc:<userId>`). It diagnoses CONFIG, it never plans/builds/PRs |
 | The QC task auto-disables a task the owner deliberately set | **Auto-disable is not on the allowlist and cannot be added to it.** TQC-04 |
 | The QC task mutates a row another session is mid-write on | Writes only to `scheduled_tasks` rows with no in-flight run; skip-and-propose otherwise. TQC-06 |
 | The QC task "fixes" something wrong and hides it | Every write emits a `task_qc_findings` audit row with before/after + rollback SQL, and is named in the digest email |
@@ -81,14 +82,19 @@ is to *modify other tasks*. Three specific ways this could go wrong, each explic
 - **Current:** n/a.
 - **Target:** `hub/src/task-qc/safe-fixes.ts` exports a frozen, enumerated `SAFE_FIXES` set. The
   writer accepts a fix **only** if `SAFE_FIXES.has(fix.kind)`; anything else throws. Initial set
-  (owner-approvable, all reversible, all config-only):
+  (owner-approvable, all reversible, all config-only; exactly three kinds, each writing an INPUT
+  column the dispatcher reads at fire time):
 
   | Fix kind | Effect |
   |---|---|
-  | `recompute_next_run_at` | recompute `next_run_at` from `cron_expr` + `timezone` for a NEVER_FIRED task with a valid cron |
   | `normalize_timezone` | set `timezone` to the user's profile tz when NULL/invalid |
   | `backfill_payload_from_sibling` | copy a missing `payload.application_uuid` from another enabled task on the SAME app/repo, only when EXACTLY ONE unambiguous sibling exists |
   | `rebind_dead_session` | repoint `session_id` to the user's live session bound to the SAME `repo_ident`, only when EXACTLY ONE such session exists |
+
+  A next-run recompute is deliberately NOT on the list: `next_fire_at` mirrors the live in-memory
+  registry (the register path and the dispatcher rewrite it), so a DB-only rewrite would hide an
+  unarmed job instead of re-arming it. A NEVER_FIRED finding is a PROPOSAL carrying the exact
+  PATCH that re-arms the job.
 
 - **Acceptance:**
   - [ ] Test: `applyFix({kind: 'disable_task'})` **throws** (`unlisted_fix_kind`) and writes nothing.
@@ -130,22 +136,24 @@ is to *modify other tasks*. Three specific ways this could go wrong, each explic
   - [ ] Test: two concurrent QC runs cannot both write the same row (row-level `FOR UPDATE` or an
         advisory lock; single-replica assumption noted, same as `spawn-on-error.ts`).
 
-### TQC-07 — Its own small, separate token ceiling; no dev loop
+### TQC-07 - Deterministic, no dev loop, no model
 - **Current:** n/a.
-- **Target:** the QC run dispatches through the shared pipeline with the standard gate chain PLUS a
-  QC-specific ceiling `REMO_TASK_QC_TOKEN_CAP` (default 500,000 tokens/run). Its prompt is a
-  DIAGNOSTIC prompt: read config + run history, emit findings JSON. It has no plan/build/PR macro,
-  and it never enqueues one.
+- **Target:** the QC engine is deterministic hub code (`hub/src/task-qc/`, sender
+  `hub/src/scheduler/senders/task-qc.ts`). It spends zero model tokens, opens no session and never
+  reaches `dispatch()`, `injectOrchestratorPrompt` or the dev macros. The original per-run token
+  ceiling for a model turn is superseded (verdict F1-A1): there is no model turn to bound. The
+  run is bounded by constants (audited tasks, history rows per task, fixes per pass, rows written
+  per run, wall-clock) that a caller can only lower, and by the Phase 4 lifetime inject counter
+  (one slot per run under key `taskqc:<userId>`).
 - **Acceptance:**
-  - [ ] Test: the QC gate list includes `dailyTokenCapGate` (found by `token-cap-coverage.test.ts`)
-        AND the QC-specific ceiling.
-  - [ ] Test: a QC run exceeding the QC ceiling is halted with `over_task_qc_token_cap` — and the
-        halt does NOT consume the user's whole daily budget.
-  - [ ] Guard test: the QC prompt/macro contains none of the dev macro's build verbs and the QC
-        module never imports `task-macros.ts`'s dev macro or `injectOrchestratorPrompt` with a build
-        context.
-  - [ ] Test: a QC run cannot enqueue another QC run (recursion guard — this is Phase 9's core
-        invariant, asserted here too).
+  - [x] `task-qc-no-llm-guard.test.ts`: closed per-file import allowlist over `hub/src/task-qc/*`
+        and the sender; no dispatch, macro, PTY, provider or inject import is reachable.
+  - [x] A full pass records zero `token_usage` rows (asserted in the engine and tracer suites).
+  - [x] A QC run cannot enqueue another QC run: the `runNow` anti-chain sink and the terminal
+        guards in post-run and chain (`task-qc-fire-branch`, `task-qc-terminal`).
+  - [x] `task-qc-counter.test.ts` and the reserve-caller / counter-key pins: the lifetime counter
+        is reserved before the engine and released on throw.
+  - [x] `task-qc-bounds.test.ts`: the bounds are enforced and `clampBounds` can only lower them.
 
 ### TQC-08 — Flag-gated; OFF is a true no-op
 - **Target:** `REMO_TASK_QC_ENABLED` default **OFF**. When OFF, no task is created, nothing scans,
@@ -157,13 +165,15 @@ is to *modify other tasks*. Three specific ways this could go wrong, each explic
 
 ## 4. Env knobs
 
-| Knob | Default | Disabled semantics |
+| Knob | Default | Semantics |
 |---|---|---|
-| `REMO_TASK_QC_ENABLED` | `0` (OFF) | OFF ⇒ nothing runs; true no-op |
-| `REMO_TASK_QC_AUTOFIX` | `0` (OFF) | OFF ⇒ **report-only**: every finding is a proposal, zero writes |
-| `REMO_TASK_QC_TOKEN_CAP` | `500000` | non-positive / non-finite ⇒ ceiling disabled (fail-open) — **but the daily token cap still applies** |
-| `REMO_TASK_QC_FAIL_STREAK` | `3` | non-positive ⇒ default (never 0 — a 0-streak would flag everything) |
-| `REMO_TASK_QC_CADENCE_CRON` | `0 9 * * *` (daily 09:00 user tz) | — |
+| `REMO_TASK_QC_ENABLED` | OFF | `1|true|yes|on` (trim, lowercase) turns it on; anything else is OFF. OFF is a true no-op: no seed, no scan, no email, a left-behind row is never armed |
+| `REMO_TASK_QC_AUTOFIX` | OFF | report-only by default; ON applies the three allowlisted fixes. **Inert unless `REMO_TASK_QC_ENABLED` is also on** |
+| `REMO_TASK_QC_FAIL_STREAK` | `3` | not a positive integer => default (never 0: a 0 streak would flag everything) |
+| `REMO_TASK_QC_CADENCE` | `0 9 * * *` | seed cron; invalid, or faster than hourly => default |
+
+There is no token-cap knob (`REMO_TASK_QC_TOKEN_CAP` was superseded, see TQC-07). The per-pass bounds
+are constants, not env knobs: a caller can only lower them.
 
 Recommended arming order: `ENABLED=1` with `AUTOFIX=0` for ≥ 1 week (report-only soak; the owner
 reads the digests and confirms the detectors do not lie), THEN `AUTOFIX=1`.
@@ -183,20 +193,24 @@ reads the digests and confirms the detectors do not lie), THEN `AUTOFIX=1`.
 CREATE TABLE IF NOT EXISTS task_qc_findings (
   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  run_id       TEXT,                     -- the task_qc run that produced it
   task_id      TEXT NOT NULL,            -- the audited task (no FK: task may be deleted)
-  detector     TEXT NOT NULL,            -- FAILING | SKIP_FOREVER | NEVER_FIRED | MISCONFIGURED | DEAD_SESSION | OPTIMIZE
-  severity     TEXT NOT NULL DEFAULT 'info',
+  detector     TEXT NOT NULL,            -- FAILING | SKIP_FOREVER | NEVER_FIRED | MISCONFIGURED | DEAD_SESSION | OPTIMIZE | ENGINE
+  severity     TEXT NOT NULL DEFAULT 'info',   -- info | warn | high
   disposition  TEXT NOT NULL,            -- auto_fixed | proposed | skipped_in_flight
   fix_kind     TEXT,                     -- non-null only when disposition='auto_fixed'
   before_json  JSONB,
   after_json   JSONB,
   rollback_sql TEXT,
-  evidence     JSONB,
+  evidence     JSONB NOT NULL DEFAULT '{}'::jsonb,
+  evidence_sig TEXT NOT NULL,            -- idempotency signature of the evidence
+  day          DATE NOT NULL,            -- user-timezone day of the pass
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_task_qc_findings_user ON task_qc_findings(user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_task_qc_findings_task ON task_qc_findings(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_qc_findings_user_created ON task_qc_findings(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_task_qc_findings_task ON task_qc_findings(user_id, task_id, created_at DESC);
+-- one row per (user, task, detector, evidence signature, day): a repeat pass inserts nothing
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_qc_findings_dedupe
+  ON task_qc_findings(user_id, task_id, detector, evidence_sig, day);
 ```
 
 *Uncertain:* the exact idempotent form for extending the `task_type` CHECK constraint. `schema.sql`
@@ -215,20 +229,20 @@ existing Phase-11 pattern exactly rather than invent one — I have not read tha
 | `hub/test/task-qc-never-disables.test.ts` | TQC-04 (static grep guard + 500-failure fixture stays enabled) |
 | `hub/test/task-qc-proposals.test.ts` | TQC-05 (one email, zero writes; zero findings ⇒ zero emails) |
 | `hub/test/task-qc-in-flight.test.ts` | TQC-06 (open run ⇒ skip-and-propose) |
-| `hub/test/task-qc-budget.test.ts` | TQC-07 (QC ceiling; no dev macro import; cannot enqueue a QC run) |
+| `hub/test/task-qc-no-llm-guard.test.ts`, `task-qc-bounds.test.ts`, `task-qc-counter.test.ts` | TQC-07 (closed import allowlist; deterministic bounds; lifetime counter; cannot enqueue a QC run via `task-qc-fire-branch` / `task-qc-terminal`) |
 | `hub/test/task-qc-flag-off.test.ts` | TQC-08 (OFF = no-op) |
-| `hub/test/e2e/task-qc.test.ts` (real Postgres) | End-to-end: seeded broken tasks ⇒ correct findings, correct writes under `AUTOFIX=1`, zero writes under `AUTOFIX=0` |
+| `hub/test/e2e/task-qc-checks.ts` (real Postgres; helper called from existing gated e2e tests, zero new skips) | End-to-end: seeded broken tasks ⇒ correct findings, correct writes under `AUTOFIX=1`, zero writes under `AUTOFIX=0` |
 
 ---
 
 ## 7. In scope
 
-- A recurring `task_qc` task type + its diagnostic macro prompt.
+- A recurring `task_qc` task type run by a deterministic hub sender (no prompt, no model).
 - Six pure detectors over `scheduled_tasks` + `scheduled_task_runs`.
 - A frozen safe-fix allowlist + an auditing writer (`task_qc_findings` with rollback SQL).
 - A digest proposal email for everything not auto-fixed.
 - Optimization *proposals* (cadence, prompt cost, redundant tasks).
-- Its own separate, small token ceiling.
+- Deterministic per-pass bounds and the Phase 4 lifetime counter in place of any token ceiling.
 
 **Reasoning:** the value is a machine noticing what a human will not — a task that has been silently
 skipping for six weeks. The risk is that same machine editing things. Detection is where the value
