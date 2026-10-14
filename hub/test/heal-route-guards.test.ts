@@ -85,6 +85,7 @@ function mkDeps(over: Partial<HealDeps> = {}) {
       rec.dispatchReq = req
       return { kind: 'dispatched', runId: 'run1' }
     },
+    runnerTypeOf: async () => 'stream-json',
     isChannelOnline: () => true,
     // hermetic: never reach the real claim / email seam (07-06)
     notify: { claim: async () => false, resolveOwnerEmail: async () => null, send: async () => false },

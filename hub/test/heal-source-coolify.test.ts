@@ -203,6 +203,7 @@ function harness(opts: {
       rec.dispatches.push(req)
       return { kind: 'parked_offline' }
     },
+    runnerTypeOf: async () => 'stream-json',
     isChannelOnline: (id) => (opts.onlineChannels ?? []).includes(id),
     notify: {
       claim: async () => true,
@@ -309,7 +310,7 @@ describe('V2 replay: an unrelated agent session is online', () => {
       repoAllowlisted: true,
     })
     await h.webhook(RUN_8A6E0534, payload())
-    expect(h.rec.launches).toEqual([{ userId: 'u1', sessionId: 's-failing-repo', machine: true }])
+    expect(h.rec.launches).toEqual([{ userId: 'u1', sessionId: 's-failing-repo', machine: true, skipPermissions: false }])
     expect(h.rec.outcomes[h.rec.outcomes.length - 1]).toBe('autospawn_launched')
     expect(h.rec.dispatches.every((d) => d.sessionId === 's-failing-repo')).toBe(true)
   })

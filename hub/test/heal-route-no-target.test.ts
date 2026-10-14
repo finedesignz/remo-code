@@ -90,6 +90,7 @@ function mkDeps(over: Partial<HealDeps> = {}) {
       return { kind: 'dispatched', runId: 'run1' }
     },
     // The incident shape: an UNRELATED online session for another repo exists.
+    runnerTypeOf: async () => 'stream-json',
     isChannelOnline: (id) => id === 'other-repo-session',
     notify: notifyDeps,
     ...over,

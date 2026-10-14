@@ -221,6 +221,7 @@ function harness(opts: { sessions?: Sess[]; armed?: boolean; allowlisted?: boole
       }
       return { kind: 'parked_offline' }
     },
+    runnerTypeOf: async () => 'stream-json',
     isChannelOnline: (id) => byId.get(id)?.live === true,
     notify: {
       claim: async () => true,
@@ -307,7 +308,7 @@ describe('dispatchPendingError flag ON', () => {
     expect(h.rec.dispatches[0].sessionId).toBe('s-live')
     expect(h.rec.dispatches[0].counterKey).toBe(buildHealKey('u1', 'github://acme/web'))
     expect(h.rec.pdeps[0].ensureOnline).toBeUndefined()
-    expect(h.rec.pdeps[0].gates.length).toBe(6)
+    expect(h.rec.pdeps[0].gates.length).toBe(7)
     expect(h.rec.launches).toEqual([])
     expect(state.ensureOnlineCalls).toBe(0)
     expect(state.legacyDispatches).toEqual([])
@@ -361,7 +362,7 @@ describe('dispatchPendingError flag ON', () => {
     const h = harness({ sessions: [sess({ id: 's-live', live: false })], armed: true, allowlisted: true })
     const out = await dispatchPendingError('e1', { routeDeps: h.routeDeps })
     expect(out).toEqual({ status: 'queued' })
-    expect(h.rec.launches).toEqual([{ userId: 'u1', sessionId: 's-live', machine: true }])
+    expect(h.rec.launches).toEqual([{ userId: 'u1', sessionId: 's-live', machine: true, skipPermissions: false }])
     expect(h.rec.outcomes[h.rec.outcomes.length - 1]).toBe('autospawn_launched')
     expect(state.ensureOnlineCalls).toBe(0)
   })
@@ -491,7 +492,7 @@ describe('dispatchFeedback flag ON', () => {
     expect(h.rec.dispatches[0].images).toEqual([SHOT])
     expect(h.rec.dispatches[0].counterKey).toBe(buildHealKey('u1', 'github://acme/web'))
     expect(h.rec.pdeps[0].ensureOnline).toBeUndefined()
-    expect(h.rec.pdeps[0].gates.length).toBe(6)
+    expect(h.rec.pdeps[0].gates.length).toBe(7)
     expect(h.rec.frames.length).toBe(1)
     expect(h.rec.frames[0].images).toEqual([SHOT])
     expect(state.ensureOnlineCalls).toBe(0)
@@ -544,7 +545,7 @@ describe('dispatchFeedback flag ON', () => {
     const h = harness({ sessions: [sess({ id: 's-live', live: false })], armed: true, allowlisted: true })
     const out = await dispatchFeedback(submission(), { routeDeps: h.routeDeps })
     expect(out).toEqual({ status: 'queued' })
-    expect(h.rec.launches).toEqual([{ userId: 'u1', sessionId: 's-live', machine: true }])
+    expect(h.rec.launches).toEqual([{ userId: 'u1', sessionId: 's-live', machine: true, skipPermissions: false }])
     expect(state.ensureOnlineCalls).toBe(0)
   })
 

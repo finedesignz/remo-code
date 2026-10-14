@@ -25,6 +25,7 @@ const GATE_ORDER = [
   'threshold',
   'daily_cost_cap',
   'daily_token_cap',
+  'governed_automation_pty',
   'session_inject_rate',
   'lifetime_counter',
 ]
@@ -100,6 +101,7 @@ function mkDeps(over: Partial<HealDeps> = {}) {
       rec.dispatchCalls.push({ req, pdeps })
       return { kind: 'dispatched', runId: 'run1' }
     },
+    runnerTypeOf: async () => 'stream-json',
     isChannelOnline: () => true,
     // hermetic: never reach the real claim / email seam (07-06)
     notify: { claim: async () => false, resolveOwnerEmail: async () => null, send: async () => false },
@@ -216,6 +218,45 @@ describe('capped user never reaches send (SH-06, real dispatch + real gate objec
       expect(rec.outcomes[rec.outcomes.length - 1]![1]).toBe(`refused:${reason}`)
     })
   }
+})
+
+describe('PTY denial is in the heal gate list (PTYCAP-07 QC adversary MINOR)', () => {
+  const all = [
+    controls.automationKillSwitchGate,
+    gates.thresholdGate,
+    gates.dailyCostCapGate,
+    gates.dailyTokenCapGate,
+    gates.sessionInjectRateGate,
+    controls.automationLifetimeCounterGate,
+  ]
+  const originals = all.map((g) => g.check)
+  afterAll(() => {
+    all.forEach((g, i) => {
+      g.check = originals[i]!
+    })
+  })
+
+  test('a session flipped to pty-interactive at dispatch time is refused for actor self-heal, zero sends', async () => {
+    pipeline._reset()
+    all.forEach((g) => {
+      g.check = async () => ({ ok: true as const })
+    })
+    const { deps, rec } = mkDeps({ dispatch: pipeline.dispatch, runnerTypeOf: async () => 'pty-interactive' })
+    const out = await routeHeal(event(), deps)
+    expect(out).toMatchObject({ kind: 'refused', reason: 'automation_blocked_on_pty:self-heal' })
+    expect(rec.sends.length).toBe(0)
+  })
+
+  test('a stream-json session passes the PTY gate', async () => {
+    pipeline._reset()
+    all.forEach((g) => {
+      g.check = async () => ({ ok: true as const })
+    })
+    const { deps } = mkDeps({ dispatch: pipeline.dispatch, runnerTypeOf: async () => 'stream-json' })
+    const out = await routeHeal(event(), deps)
+    // The PTY gate admits it; anything later (the DB-backed final halt check) is not under test.
+    expect(JSON.stringify(out)).not.toContain('automation_blocked_on_pty')
+  })
 })
 
 describe('structure', () => {
