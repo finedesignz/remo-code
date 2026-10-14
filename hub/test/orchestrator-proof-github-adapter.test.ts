@@ -207,3 +207,44 @@ describe('proof-github.ts source properties', () => {
     expect(src.includes('process.env')).toBe(false)
   })
 })
+
+describe('QC r2 listPulls paginates until every PR since the arm is seen (codex #5)', () => {
+  const PULLS = `${REPO}/pulls?state=all&sort=created&direction=desc&per_page=50`
+  const pr = (n: number, createdAt: string, headRef = 'proof/x') => ({
+    number: n, html_url: `u${n}`, state: 'open', merged_at: null, draft: false,
+    head: { ref: headRef, sha: `h${n}`, repo: { full_name: 'acme/proof' } }, base: { ref: 'main' }, user: { login: 'bot' }, created_at: createdAt,
+  })
+  // newest first; page p holds PRs numbered (p-1)*50+1 .. p*50, all created after the arm
+  const page = (p: number, count = 50, createdAt = '2026-10-10T00:00:00Z') =>
+    Array.from({ length: count }, (_, i) => pr((p - 1) * 50 + i + 1, createdAt))
+
+  test('a post-arm off-prefix PR on page 2 is returned, not hidden behind the first 50', async () => {
+    const p2 = page(2)
+    p2[10] = pr(999, '2026-10-10T00:00:00Z', 'feat/sneaky')
+    const { request, calls } = fakeRequest({ [PULLS]: page(1), [`${PULLS}&page=2`]: p2, [`${PULLS}&page=3`]: page(3, 20) })
+    const gh = makeProofGithub({ installationId: 1 }, { request })
+    const pulls = await gh.listPulls(O, R, '2026-10-01T00:00:00Z')
+    expect(pulls).toHaveLength(120)
+    expect(pulls.some((p) => p.number === 999 && p.headRef === 'feat/sneaky')).toBe(true)
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'GET', 'GET'])
+  })
+
+  test('stops at the first page whose last PR predates the arm (no needless pages)', async () => {
+    const { request, calls } = fakeRequest({ [PULLS]: page(1, 50, '2026-09-01T00:00:00Z') })
+    const gh = makeProofGithub({ installationId: 1 }, { request })
+    expect(await gh.listPulls(O, R, '2026-10-01T00:00:00Z')).toHaveLength(50)
+    expect(calls).toHaveLength(1)
+  })
+
+  test('FAILS CLOSED when the pages never reach the arm time or the end (incomplete scan)', async () => {
+    const { request } = fakeRequest({ [PULLS]: page(1), ...Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`${PULLS}&page=${i + 2}`, page(i + 2)])) })
+    const gh = makeProofGithub({ installationId: 1 }, { request })
+    await expect(gh.listPulls(O, R, '2026-10-01T00:00:00Z')).rejects.toBeInstanceOf(ProofGithubError)
+  })
+
+  test('a failing later page propagates (never a silently truncated list)', async () => {
+    const { request } = fakeRequest({ [PULLS]: page(1), [`${PULLS}&page=2`]: httpErr(502) })
+    const gh = makeProofGithub({ installationId: 1 }, { request })
+    await expect(gh.listPulls(O, R, '2026-10-01T00:00:00Z')).rejects.toBeInstanceOf(Error)
+  })
+})

@@ -138,7 +138,7 @@ export async function verifyProof(github: ProofGithub, run: ProofRun): Promise<P
   // (2) PR scope (D-10 iii).
   let pulls: PullSummary[];
   try {
-    pulls = await github.listPulls(run.repo_owner, run.repo_name);
+    pulls = await github.listPulls(run.repo_owner, run.repo_name, run.armed_at);
   } catch {
     return pending('ci_unverifiable', 'pulls_unreadable');
   }
