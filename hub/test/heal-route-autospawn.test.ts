@@ -130,7 +130,6 @@ function mk(over: { heal?: Partial<HealDeps>; auto?: Partial<AutospawnDeps> } = 
       rec.outcomes.push(o)
     },
     isHealGenerated: async () => false,
-    countRepoDispatches: async () => 0,
     makeSink: () => {
       let done = false
       const sink: HealSink = {
@@ -236,6 +235,43 @@ describe('single notification owner across the autospawn lifecycle', () => {
     const { deps } = mk({ heal: { notify: n.notify }, auto: { launchSessionForUser: async () => ({ ok: false, reason: 'at_capacity' }) as any } })
     const out = await routeHeal(taskEvent(), deps)
     expect(out).toEqual({ kind: 'refused', reason: 'autospawn_launch_at_capacity', notifyClaimed: true })
+  })
+})
+
+// PTYCAP-07 QC r1 (codex #7): the autospawn is recoverable from the moment anything is reserved.
+describe('autospawn_starting: a crash between the reservation and the launched outcome is recoverable', () => {
+  test('autospawn_starting is persisted BEFORE gates, reserve, ledger and launch', async () => {
+    let recRef: any = null
+    let orderAtStarting: string[] | null = null
+    const { deps, rec } = mk({
+      heal: {
+        setOutcome: async (_id: string, o: string) => {
+          if (o === 'autospawn_starting') orderAtStarting = [...recRef.order]
+          recRef.outcomes.push(o)
+        },
+      },
+    })
+    recRef = rec
+    expect(await routeHeal(event(), deps)).toEqual({ kind: 'autospawn_launched' })
+    expect(orderAtStarting).toEqual([]) // nothing had run yet
+    expect(rec.order).toEqual(['gates', 'reserve', 'ledger', 'launch'])
+    expect(rec.outcomes.slice(0, 1)).toEqual(['autospawn_starting'])
+    expect(rec.outcomes[rec.outcomes.length - 1]).toBe('autospawn_launched')
+  })
+
+  test('if the starting outcome cannot be recorded nothing is reserved or spawned (fail closed)', async () => {
+    const { deps, rec } = mk({
+      heal: {
+        setOutcome: async (_id: string, o: string) => {
+          if (o === 'autospawn_starting') throw new Error('db down')
+        },
+      },
+    })
+    const out = await routeHeal(event(), deps)
+    expect(out.kind).toBe('failed')
+    expect(rec.order).toEqual([])
+    expect(rec.launches).toEqual([])
+    expect(rec.reserves).toEqual([])
   })
 })
 
