@@ -419,9 +419,14 @@ async function handleAuthenticated(opts: {
       // Fail-open: the try/catch below catches any lookup error and leaves
       // `suppress=false`, so a lookup failure dispatches triage anyway (never
       // silently drops it).
+      // PTYCAP-07 QC r1: with REMO_HEAL_UNIFIED ON the live session is routeHeal's FIRST choice
+      // (live-session-first routing), so suppression must not fire: it would skip routeHeal and
+      // strand the metadata run `pending`. Suppression is legacy-only.
       let suppress = false
       try {
-        suppress = await hasActiveSessionForRepo(userId, payload.git_repository)
+        if (!healUnifiedEnabled()) {
+          suppress = await hasActiveSessionForRepo(userId, payload.git_repository)
+        }
       } catch (err: any) {
         console.warn(
           `[coolify-webhook] active-session lookup errored (fail-open, dispatching): ${err?.message}`,
