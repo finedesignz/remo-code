@@ -93,7 +93,8 @@ describe('hostile input classes (one test each)', () => {
     })
     const d = build(f)
     const cmd = d.text.split('\n').find((l: string) => l.includes('UPDATE scheduled_tasks'))!
-    expect(cmd).toContain("session_id IS NOT DISTINCT FROM 's''; DROP TABLE y; --'")
+    expect(cmd).toContain("WHEN session_id = 's''; DROP TABLE y; --' THEN")
+    expect(cmd).toContain("WHEN target_id = 's''; DROP TABLE y; --' THEN")
     // every quote inside the literal is doubled: stripping '' pairs leaves a balanced count
     expect((cmd.replace(/''/g, '').match(/'/g) ?? []).length % 2).toBe(0)
     expect(cmd).not.toContain("O'Brien")
