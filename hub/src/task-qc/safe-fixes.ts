@@ -14,8 +14,9 @@
  */
 import { isValidTimezone } from '../scheduler/cron.ts'
 import { isAuditable } from './detectors.ts'
-import { insertFinding, type QueryRunner } from './findings.ts'
-import type { Finding, ProposalKind, SafeFixKind } from './types.ts'
+import { randomUUID } from 'node:crypto'
+import { evidenceSig, insertFinding, type QueryRunner } from './findings.ts'
+import type { AuditTaskInput, Finding, Proposal, SafeFixKind } from './types.ts'
 
 // ---------------------------------------------------------------------------
 // Frozen allowlist (D-15). A plain frozen Set still accepts add() and
@@ -83,7 +84,7 @@ export type ApplyResult =
       status: 'skipped_in_flight'
       fixKind: SafeFixKind
       rowsWritten: 1
-      proposal: { reason: 'in_flight'; kind: ProposalKind; params: Record<string, string> }
+      proposal: { reason: 'in_flight'; kind: Proposal['kind']; params: Proposal['params'] }
     }
   | { status: 'refused_not_auditable'; fixKind: SafeFixKind; rowsWritten: 0 }
   | { status: 'noop_changed'; fixKind: SafeFixKind; rowsWritten: 0 }
@@ -173,12 +174,112 @@ export async function applyFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promi
   return applyListedFix(db, fix, ctx)
 }
 
-async function applyListedFix(_db: TxDb, _fix: SafeFix, _ctx: ApplyContext): Promise<ApplyResult> {
-  void updateTimezone
-  void updatePayload
-  void updateSession
-  void isAuditable
-  void insertFinding
-  void isValidTimezone
-  throw new Error('task_qc: transaction body not implemented')
+async function applyListedFix(db: TxDb, fix: SafeFix, ctx: ApplyContext): Promise<ApplyResult> {
+  const kind = fix.kind
+  assertFixArguments(fix)
+  return db.begin(async (tx) => {
+    // 1. row lock, scoped by id AND owner; serialises every writer for this task
+    const rows = await tx`
+      SELECT id, user_id, name, task_type, enabled, schedule_kind, timezone, payload, session_id, target_kind, target_id
+      FROM scheduled_tasks WHERE id = ${ctx.taskId} AND user_id = ${ctx.userId} FOR UPDATE`
+    const row = rows[0]
+    // 2. write-time audit-set re-check (F2-B7): never trust the finding
+    if (!row || !isAuditable(row as AuditTaskInput)) return { status: 'refused_not_auditable', fixKind: kind, rowsWritten: 0 }
+    // 3. precondition re-check against the locked row
+    if (!preconditionHolds(fix, row)) return { status: 'noop_changed', fixKind: kind, rowsWritten: 0 }
+    // 4. in-flight refusal (D-16): database truth only
+    const sid: string | null = row.target_id ?? row.session_id ?? null
+    const own = await tx`
+      SELECT 1 AS open FROM scheduled_task_runs
+      WHERE task_id = ${ctx.taskId} AND status IN ('running','pending','in_flight') AND finished_at IS NULL AND completed_at IS NULL
+      LIMIT 1`
+    const shared =
+      own.length === 0 && sid != null
+        ? await tx`
+          SELECT 1 AS open FROM scheduled_task_runs
+          WHERE session_id = ${sid} AND status IN ('running','pending','in_flight') AND finished_at IS NULL AND completed_at IS NULL
+          LIMIT 1`
+        : []
+    if (own.length > 0 || shared.length > 0) {
+      const scope = own.length > 0 ? 'own_run' : 'shared_session'
+      const evidence = { ...ctx.finding.evidence, in_flight: scope }
+      await insertFinding(tx, {
+        userId: ctx.userId,
+        taskId: ctx.taskId,
+        detector: ctx.finding.detector,
+        severity: ctx.finding.severity,
+        disposition: 'skipped_in_flight',
+        fixKind: kind,
+        evidence,
+        day: ctx.day,
+        sig: evidenceSig(ctx.finding.detector, { evidence, disposition: 'skipped_in_flight', fix: kind }),
+      })
+      return {
+        status: 'skipped_in_flight',
+        fixKind: kind,
+        rowsWritten: 1,
+        proposal: { reason: 'in_flight', kind: ctx.finding.proposal.kind, params: { ...ctx.finding.proposal.params } },
+      }
+    }
+    // 5. the single fixed UPDATE, then 6. the audit row in the same transaction
+    let before: Record<string, unknown>
+    let after: Record<string, unknown>
+    let ret: any
+    if (fix.kind === 'normalize_timezone') {
+      ret = (await updateTimezone(tx, ctx.taskId, ctx.userId, fix.timezone))[0]
+      before = { timezone: row.timezone }
+      after = { timezone: ret?.timezone }
+    } else if (fix.kind === 'backfill_payload_from_sibling') {
+      ret = (await updatePayload(tx, ctx.taskId, ctx.userId, fix.applicationUuid))[0]
+      const prev = row.payload?.application_uuid
+      before = { application_uuid: prev == null ? null : prev }
+      after = { application_uuid: ret?.payload?.application_uuid }
+    } else {
+      ret = (await updateSession(tx, ctx.taskId, ctx.userId, fix.oldSessionId, fix.newSessionId))[0]
+      before = { session_id: row.session_id ?? null, target_id: row.target_id ?? null }
+      after = { session_id: ret?.session_id ?? null, target_id: ret?.target_id ?? null }
+    }
+    if (!ret) throw new Error('task_qc: fix UPDATE matched no row')
+    const rollbackSql = buildRollbackSql(kind, ctx.taskId, before, after)
+    const audit = await insertFinding(tx, {
+      userId: ctx.userId,
+      taskId: ctx.taskId,
+      detector: ctx.finding.detector,
+      severity: ctx.finding.severity,
+      disposition: 'auto_fixed',
+      fixKind: kind,
+      before,
+      after,
+      rollbackSql,
+      evidence: ctx.finding.evidence,
+      day: ctx.day,
+      // one audit row per applied write: never swallowed by an earlier same-day row
+      sig: evidenceSig('FIX', { kind, before, after, nonce: randomUUID() }),
+    })
+    if (!audit.inserted) throw new Error('task_qc: audit row not inserted; fix rolled back')
+    return { status: 'applied', fixKind: kind, rowsWritten: 2, before, after, rollbackSql }
+  })
+}
+
+/** Argument shape checks that need no database; run before the transaction opens. */
+function assertFixArguments(fix: SafeFix): void {
+  const bad = (m: string) => new Error(`task_qc: invalid fix arguments (${m})`)
+  const str = (v: unknown) => typeof v === 'string' && v.length > 0
+  if (fix.kind === 'normalize_timezone') {
+    if (!str(fix.timezone) || !isValidTimezone(fix.timezone)) throw bad('timezone')
+  } else if (fix.kind === 'backfill_payload_from_sibling') {
+    if (!str(fix.applicationUuid)) throw bad('applicationUuid')
+  } else if (!str(fix.oldSessionId) || !str(fix.newSessionId) || fix.oldSessionId === fix.newSessionId) {
+    throw bad('session ids')
+  }
+}
+
+function preconditionHolds(fix: SafeFix, row: any): boolean {
+  if (fix.kind === 'normalize_timezone') return typeof row.timezone !== 'string' || !isValidTimezone(row.timezone)
+  if (fix.kind === 'backfill_payload_from_sibling') {
+    if (row.task_type !== 'log_check' && row.task_type !== 'log_pull') return false
+    const cur = row.payload && typeof row.payload === 'object' ? row.payload.application_uuid : undefined
+    return !(typeof cur === 'string' && cur.trim() !== '')
+  }
+  return row.session_id === fix.oldSessionId || row.target_id === fix.oldSessionId
 }
