@@ -7,7 +7,7 @@ import type { ScheduledTask } from '../../db/scheduled-tasks-dal.ts'
 import { sql } from '../../db/postgres.ts'
 import { sendEmail } from '../../lib/email.ts'
 import { runTaskQcPass } from '../../task-qc/engine.ts'
-import { buildTaskQcDigest } from '../../task-qc/digest.ts'
+import { buildDigest } from '../../task-qc/digest.ts'
 import { finalizeRun } from '../dispatcher.ts'
 import { log } from '../../observability/logger'
 
@@ -18,7 +18,7 @@ export async function sendTaskQcTask(
   const result = await runTaskQcPass({ userId: ctx.userId, origin: ctx.isManual ? 'run_now' : 'schedule' })
 
   let delivered = false
-  const digest = buildTaskQcDigest(result.proposals)
+  const digest = buildDigest({ findings: result.proposals, applied: result.applied, truncated: result.truncated }, {})
   if (digest) {
     const rows = (await sql`SELECT email FROM users WHERE id = ${ctx.userId} LIMIT 1`) as Array<{ email?: string }>
     const to = rows[0]?.email
