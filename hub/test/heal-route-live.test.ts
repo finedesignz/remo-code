@@ -101,6 +101,8 @@ function mkDeps(over: Partial<HealDeps> = {}) {
       return { kind: 'dispatched', runId: 'run1' }
     },
     isChannelOnline: () => true,
+    // hermetic: never reach the real claim / email seam (07-06)
+    notify: { claim: async () => false, resolveOwnerEmail: async () => null, send: async () => false },
     ...over,
   }
   return { deps, rec }
