@@ -15,7 +15,7 @@ import { sendEmail } from '../../lib/email.ts'
 import { haltBeforeMachineSend, releaseInject, reserveInject } from '../../dispatch/automation-controls.ts'
 import { runTaskQcPass } from '../../task-qc/engine.ts'
 import { deliverDigest } from '../../task-qc/digest.ts'
-import { claimEngineFailure } from '../../task-qc/findings.ts'
+import { boundedBegin, claimEngineFailure, isDeadlineError, makeDeadlineArmer, raceDeadline } from '../../task-qc/findings.ts'
 import { clampBounds } from '../../task-qc/flags.ts'
 import { safeText, type TaskQcResult } from '../../task-qc/types.ts'
 import { finalizeRun } from '../dispatcher.ts'
@@ -26,6 +26,7 @@ type EngineErrorCode = 'statement_timeout' | 'halt_check_required' | 'db_unavail
 /** Fixed mapping from a thrown value to a typed code. The message is inspected, never emitted. */
 function engineErrorCode(err: unknown): EngineErrorCode {
   const msg = err instanceof Error ? err.message : ''
+  if (isDeadlineError(err)) return 'statement_timeout'
   if (msg === 'halt_check_required') return 'halt_check_required'
   if (/statement timeout|57014/i.test(msg)) return 'statement_timeout'
   if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|connection (terminated|closed|refused)|terminating connection|too many clients|CONNECTION_/i.test(msg)) {
@@ -72,14 +73,20 @@ async function markDelivered(userId: string, ids: string[], taskId: string, runI
   if (ids.length === 0) return
   try {
     // the database cancels the UPDATE at the run deadline; past it nothing is marked and the rows are
-    // simply reported again by the next run (a duplicate mail, never a lost finding)
-    const left = Math.floor(deadline - Date.now())
-    if (left <= 0) return log.warn('scheduler.task_qc.mark_delivered_deadline', { task_id: taskId, run_id: runId })
-    await (sql as any).begin(async (tx: any) => {
-      await tx.unsafe(`SET LOCAL statement_timeout = ${left}`)
-      await tx`UPDATE task_qc_findings SET digest_sent_at = now() WHERE user_id = ${userId} AND id = ANY(${ids}::text[])`
-    })
+    // simply reported again by the next run (a duplicate mail, never a lost finding). The wait for a
+    // pooled connection is raced against the deadline and the remaining time is recomputed INSIDE the
+    // acquired callback (arm throws, so no statement is issued, once the deadline has passed).
+    const arm = makeDeadlineArmer(deadline)
+    await boundedBegin(
+      (cb) => (sql as any).begin(cb),
+      arm,
+      async (tx: any) => {
+        await arm(tx)
+        await tx`UPDATE task_qc_findings SET digest_sent_at = now() WHERE user_id = ${userId} AND id = ANY(${ids}::text[])`
+      },
+    )
   } catch (err: any) {
+    if (isDeadlineError(err)) return void log.warn('scheduler.task_qc.mark_delivered_deadline', { task_id: taskId, run_id: runId })
     log.error('scheduler.task_qc.mark_delivered_failed', { task_id: taskId, run_id: runId, error: err?.message })
   }
 }
@@ -88,25 +95,47 @@ export async function sendTaskQcTask(
   task: ScheduledTask,
   ctx: { runId: string; userId: string; isManual?: boolean },
 ): Promise<void> {
-  const rows = (await sql`SELECT email FROM users WHERE id = ${ctx.userId} LIMIT 1`) as Array<{ email?: string }>
-  const to = rows[0]?.email
+  // ONE wall-clock bound for the whole run, started at claim: the recipient read, the counter
+  // reservation, the engine pass and the digest send/mark all share it, and the run is always
+  // finalized (never left open) when it expires.
+  const deadline = Date.now() + clampBounds().passTimeoutMs
+  const counterKey = `taskqc:${ctx.userId}`
+  const expire = async (where: string): Promise<void> => {
+    log.error('scheduler.task_qc.run_deadline', { task_id: task.id, run_id: ctx.runId, where })
+    await finalizeRun(ctx.runId, 'failed', 'task_qc_engine_error:statement_timeout', { only_if_active: true })
+  }
+
+  let to: string | undefined
+  try {
+    const rows = (await raceDeadline(sql`SELECT email FROM users WHERE id = ${ctx.userId} LIMIT 1`, deadline)) as Array<{ email?: string }>
+    to = rows[0]?.email
+  } catch (err) {
+    if (!isDeadlineError(err)) throw err
+    return expire('recipient')
+  }
 
   // D-22: one lifetime slot per run, after the caller's kill-switch gate and before the engine.
-  const counterKey = `taskqc:${ctx.userId}`
-  const reserved = await reserveInject({
+  const reservation = (async () => await reserveInject({
     userId: ctx.userId,
     sessionId: counterKey,
     token: ctx.runId,
     counterKey,
     actor: 'task-qc',
-  })
+  }))()
+  let reserved: Awaited<typeof reservation>
+  try {
+    reserved = await raceDeadline(reservation, deadline)
+  } catch (err) {
+    if (!isDeadlineError(err)) throw err
+    // a reservation that lands after the deadline must not leak its slot
+    void reservation.then((r) => (r.ok ? releaseInject({ counterKey, token: ctx.runId }) : undefined)).catch(() => {})
+    return expire('reserve')
+  }
   if (!reserved.ok) {
     await finalizeRun(ctx.runId, 'skipped', reserved.reason, { only_if_active: true })
     return
   }
 
-  // ONE wall-clock bound for the whole run: the engine pass and the digest send/mark share it
-  const deadline = Date.now() + clampBounds().passTimeoutMs
   let result: TaskQcResult
   try {
     result = await runTaskQcPass({
