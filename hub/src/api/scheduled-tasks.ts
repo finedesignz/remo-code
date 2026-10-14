@@ -513,6 +513,12 @@ scheduledTasks.patch('/:id', async (c) => {
   }
   const data = parsed.data
 
+  // PTYCAP-08 F2-B5/D-25: task_qc is machine-seeded only; PATCH must not be a second way to create
+  // one (it would bypass the POST guard and the cadence floor). Only the real task_qc row passes.
+  if (data.task_type === 'task_qc' && existing.task_type !== 'task_qc') {
+    return c.json({ error: 'task_qc_machine_seeded' }, 400)
+  }
+
   // PTYCAP-08 F2-B5: the auditor row is system-owned. Only enabled, a validated
   // cron_expr and a valid timezone may change; any other key must equal the
   // stored value (ignored) or the request is rejected. The name is never rebuilt.
