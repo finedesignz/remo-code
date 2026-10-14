@@ -14,7 +14,8 @@ import { join, relative } from 'node:path'
 const SRC = join(import.meta.dir, '..', 'src')
 
 const MACHINE = new Set([
-  'orchestrator/inject.ts', //         BSA autospawn launch
+  // orchestrator/inject.ts no longer calls the primitive: BSA autospawn launches through the
+  // shared adapter below (PTYCAP-07-04), which is the machine call site for it and for heal.
   'dispatch/governed-launch.ts', //    PTYCAP-07 shared governed autospawn adapter
   'scheduler/senders/agent.ts', //     maybeLaunchOfflineSession
   'ask/dispatch.ts', //                ensureOnline closure
