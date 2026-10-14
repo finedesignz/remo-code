@@ -16,6 +16,7 @@ import {
   getTaskById,
   setTaskFireTimestamps,
 } from '../db/scheduled-tasks-dal.ts'
+import { isTaskQcEnabled } from '../task-qc/flags.ts'
 import { ruleToCron, shouldSkipFire, type ScheduleRule } from './schedule-rules.ts'
 
 type Dispatcher = typeof import('./dispatcher.ts')
@@ -81,6 +82,7 @@ function registerInternal(task: ScheduledTask): void {
   const existing = jobs.get(task.id)
   if (existing) { for (const j of existing) { try { j.stop() } catch {} } ; jobs.delete(task.id) }
   if (!task.enabled) return
+  if (task.task_type === 'task_qc' && !isTaskQcEnabled()) return // PTYCAP-08 F2-B3: OFF = never armed
   const tz = task.timezone || 'UTC'
 
   // ── Milestone once: one-time tasks ─────────────────────────────────────────

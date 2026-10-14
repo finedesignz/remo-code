@@ -82,6 +82,8 @@ const ALLOW: Record<string, string[]> = {
   'task-qc/fix-plans.ts': ['../scheduler/cron.ts', ...SIB('safe-fixes', 'types')],
   'task-qc/safe-fixes.ts': [...NODE, '../scheduler/cron.ts', ...SIB('detectors', 'findings', 'types')],
   'task-qc/run-claim.ts': ['../db/postgres.ts'],
+  // PTYCAP-08-08 boot seed: plain SQL insert, the cron validator and the flag readers. No model, no network.
+  'task-qc/seed.ts': ['../db/postgres.ts', '../scheduler/cron.ts', ...SIB('flags')],
   // the one allowed cross-module dependency into a sender file: the exported app-uuid resolver (lazy)
   'task-qc/load.ts': ['../scheduler/senders/coolify.ts', ...SIB('findings', 'flags', 'types')],
   'task-qc/engine.ts': ['../db/postgres.ts', ...SIB('detectors', 'findings', 'fix-plans', 'flags', 'load', 'safe-fixes', 'types')],
