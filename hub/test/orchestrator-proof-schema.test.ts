@@ -36,6 +36,10 @@ describe('orchestrator_proof_runs DDL', () => {
     // repo_ident IS the single-flight over the canonical value.
     expect(block).toContain('CHECK (repo_ident = lower(repo_ident))')
     expect(block).toContain('CHECK (max_injects > 0)')
+    // adversary MINOR 6: DB-level ceilings mirror proof-arm.ts so a hand-written row cannot be unbounded
+    expect(block).toContain('CHECK (max_injects <= 50) NOT VALID')
+    expect(block).toContain('CHECK (max_tokens <= 50000000) NOT VALID')
+    expect(block).toContain('CHECK (max_wall_ms <= 86400000) NOT VALID')
     expect(block).toContain('CHECK (max_tokens > 0)')
     expect(block).toContain('CHECK (max_wall_ms > 0)')
     expect(block).toContain('CHECK (tokens_hwm >= 0)')
