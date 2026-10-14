@@ -764,7 +764,19 @@ The door reserves after the governors with `{counterKey, turnToken}` supplied on
 - The real-Postgres proof of the SQL is CI-only (`hub/test/e2e/automation-controls-checks.ts`,
   called from an existing DB-gated e2e test body; zero new skips).
 - Deferred to Milestone GOV: Telegram or UI kill-switch trigger; opt-in cancellation of
-  active runs; counter policy for QC keys (Phases 7-9).
+  active runs; counter policy for the Phase 7 and Phase 9 QC keys.
+
+### Counter key family `taskqc:` (PTYCAP Phase 8)
+
+The Task QC auditor (docs/scheduled-tasks.md "Task QC") is deterministic and injects nothing into a
+session, but the lifetime counter is the one durable per-key budget, so each run reserves one slot
+under counter key **`taskqc:<userId>`** (plain TEXT, no FK) via `reserveInject` in
+`hub/src/scheduler/senders/task-qc.ts`, the single producer of that key. The shared
+`REMO_AUTOMATION_LIFETIME_INJECT_CAP` applies (no new knob); a refusal finalizes the run `skipped`
+with `lifetime_inject_exhausted:*` and the slot is released if the engine throws. Owner reset is the
+existing `POST /api/automation/lifetime/reset {counter_key}`. The engine has no token cap because it
+spends no model tokens; `task_qc` runs record no `token_usage` rows. Pins:
+`reserve-caller-guard.test.ts`, `counter-key-assignment-guard.test.ts`, `task-qc-counter.test.ts`.
 
 ### Tests (PTYCAP Phase 4)
 
