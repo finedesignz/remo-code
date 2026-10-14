@@ -42,8 +42,13 @@ const BENIGN_EXACT = new Set([
   'orchestrator_due_tick_owned',
   'orchestrator_disabled',
   'replayed_on_reconnect',
+  // routine environmental skips the dispatcher/senders emit: not a task defect
+  'target_offline',
+  'no_online_supervisor',
+  'launch_pending',
 ])
-const BENIGN_PREFIX = ['automation_halted:', 'lifetime_inject_exhausted:']
+// the daily caps embed the live figure after the colon ("over_daily_cost_cap:$10.42>=$10.00")
+const BENIGN_PREFIX = ['automation_halted:', 'lifetime_inject_exhausted:', 'daily_cost_cap', 'over_daily_cost_cap']
 
 export function isBenignSkipReason(reason: string | null | undefined): boolean {
   if (reason == null) return false
