@@ -11,6 +11,7 @@
 
 import { healUnifiedEnabled, healSpawnTimeoutMs } from './config.ts';
 import { OUTCOME_AUTOSPAWN_STARTING } from './types.ts';
+import { sweepOwnerEmails, REAL_OWNER_EMAIL_DEPS, type OwnerEmailDeps } from './owner-email.ts';
 import { notifyOnce, REAL_NOTIFY_DEPS, type NotifyDeps } from './notify.ts';
 import type { HealEvent } from './types.ts';
 import type { HealOutcomeExtra, HealEventRow } from '../db/heal-events-dal.ts';
@@ -32,12 +33,15 @@ export interface SweepDeps {
   makeSink: SinkFactory;
   release(userId: string, repoIdent: string, eventId: string): Promise<void>;
   notify?: NotifyDeps;
+  /** Owner-email outbox collaborators (defaults to the real DAL + email sender). */
+  ownerEmails?: OwnerEmailDeps;
   /** One-shot timer for the follow-up sweep (unref'd in the real binding). */
   setTimer?(fn: () => void, ms: number): unknown;
 }
 
 /** Real collaborators: lazy imports, so a flag-OFF boot loads nothing of this. */
 export const REAL_SWEEP_DEPS: SweepDeps = {
+  ownerEmails: REAL_OWNER_EMAIL_DEPS,
   list: async (olderThanMs) => (await import('../db/heal-events-dal.ts')).listStaleLaunchingHealEvents(olderThanMs),
   reread: async (id) => (await import('../db/heal-events-dal.ts')).getHealEvent(id),
   setOutcome: async (id, outcome, extra) => (await import('../db/heal-events-dal.ts')).setHealOutcome(id, outcome, extra),
@@ -79,7 +83,7 @@ export interface SweepResult {
   failed: number;
 }
 
-export async function sweepStaleHealLaunches(deps: SweepDeps = REAL_SWEEP_DEPS): Promise<SweepResult> {
+async function sweepStrandedLaunches(deps: SweepDeps): Promise<SweepResult> {
   const result: SweepResult = { swept: 0, skipped: 0, failed: 0 };
   if (!healUnifiedEnabled()) return result; // flag OFF: nothing is read, nothing is touched
 
@@ -141,6 +145,24 @@ export async function sweepStaleHealLaunches(deps: SweepDeps = REAL_SWEEP_DEPS):
     }
   }
   if (result.swept || result.failed) log(`boot sweep: ${JSON.stringify(result)}`);
+  return result;
+}
+
+/**
+ * Stranded launches first (a terminalized scheduled_task event's obligation is then due), then the
+ * owner-email outbox: every default failure email a crash left undelivered is sent exactly once
+ * (lease CAS). Flag OFF: nothing is read or touched.
+ */
+export async function sweepStaleHealLaunches(deps: SweepDeps = REAL_SWEEP_DEPS): Promise<SweepResult> {
+  if (!healUnifiedEnabled()) return { swept: 0, skipped: 0, failed: 0 };
+  const result = await sweepStrandedLaunches(deps);
+  if (!deps.ownerEmails) return result; // injected-deps callers opt in explicitly
+  try {
+    const sent = await sweepOwnerEmails(2 * healSpawnTimeoutMs(), deps.ownerEmails);
+    if (sent) log(`owner email outbox: ${sent} redelivered`);
+  } catch (err: any) {
+    log(`owner email outbox sweep failed: ${err?.message ?? err}`);
+  }
   return result;
 }
 
