@@ -152,6 +152,12 @@ describe('SKIP_FOREVER (D-09)', () => {
       'replayed_on_reconnect',
       'automation_halted:kill_switch',
       'lifetime_inject_exhausted:cap',
+      // QC round 1: routine environmental skips are not a task defect
+      'over_daily_cost_cap:$10.42>=$10.00',
+      'daily_cost_cap',
+      'target_offline',
+      'no_online_supervisor',
+      'launch_pending',
     ]) {
       expect(detectSkipForever(task(), runs(['skipped', 'skipped', 'skipped'], r), CFG)).toBeNull()
     }
