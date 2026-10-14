@@ -3793,7 +3793,7 @@ Status Code **202**
 |» answer|string¦null|true|none|none|
 |» confidence|string¦null|true|none|none|
 |» evidence|[string]¦null|true|none|none|
-|» reason|string¦null|true|none|Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask, session_offline, ask_timeout.|
+|» reason|string¦null|true|none|Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask (governedAutomationPtyGate -- an external actor is never eligible to drive a pty-interactive session), session_offline, ask_timeout.|
 |» raw_reply|string¦null|true|none|none|
 |» created_at|string|true|none|none|
 |» answered_at|string¦null|true|none|none|
@@ -3930,7 +3930,7 @@ Status Code **200**
 |» answer|string¦null|true|none|none|
 |» confidence|string¦null|true|none|none|
 |» evidence|[string]¦null|true|none|none|
-|» reason|string¦null|true|none|Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask, session_offline, ask_timeout.|
+|» reason|string¦null|true|none|Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask (governedAutomationPtyGate -- an external actor is never eligible to drive a pty-interactive session), session_offline, ask_timeout.|
 |» raw_reply|string¦null|true|none|none|
 |» created_at|string|true|none|none|
 |» answered_at|string¦null|true|none|none|
@@ -4301,7 +4301,7 @@ apiKeyAuth
 |published|boolean|true|none|TRUE only when the HUB ITSELF performed the deploy (site.auto_publish AND hub-verified diff-scope AND hub-verified build AND hub-verified 2xx probe). The agent cannot set it; finalizeWork also ANDs it with the site flag in SQL as a backstop.|
 |live_url|string¦null|true|none|none|
 |blocker|string¦null|true|none|e.g. suspected_injection, unparseable_reply, or why a human is needed.|
-|reason|string¦null|true|none|Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work, session_offline, work_timeout.|
+|reason|string¦null|true|none|Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work (governedAutomationPtyGate -- an external actor is never eligible to drive a pty-interactive session), session_offline, work_timeout.|
 |auto_publish|boolean|true|none|none|
 |repo_ident|string|true|none|none|
 |site_key|string|true|none|none|

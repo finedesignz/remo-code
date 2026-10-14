@@ -16,8 +16,11 @@
  * (`PTY_AUTOMATION_TURN_GATES` is a reference to it, not a copy), so the
  * coverage scan cannot be satisfied by a decorative literal.
  *   - Automation chain (SC-1): threshold → daily token cap → daily cost cap →
- *     per-session inject-rate ceiling. No path admits automation to a PTY yet
- *     (`humanOnlyPtyGate`); Phase 3 will call this seam.
+ *     per-session inject-rate ceiling. The automation branch is gated by the
+ *     governed-automation flag (governed-pty.ts, default OFF = refuse before any
+ *     DB gate) and, when ON, runs this spend chain and THEN the governors from
+ *     governed-pty.ts. The governors are never members of a chain constant, and
+ *     the human chain never runs one.
  *   - Human chain: the same spend ceilings MINUS the inject-rate ceiling (SC-3:
  *     a human is never rate-limited like a loop), and exempt from the
  *     programmatic-credit halt inside `dailyCostCapGate` (via the server-set
@@ -29,6 +32,7 @@
 import type { DispatchGate, DispatchRequest } from './pipeline.ts'
 import { thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate } from './gates.ts'
 import { log } from '../observability/logger'
+import { governedAutomationEnabled, activeGovernors, automationBlockedReason } from './governed-pty.ts'
 
 export const ptyPreflightDispatchConfig: { gates: DispatchGate[] } = {
   gates: [thresholdGate, dailyTokenCapGate, dailyCostCapGate, sessionInjectRateGate],
@@ -169,6 +173,11 @@ export function isPtySubmit(bytesB64: string): boolean {
 
 async function runChain(input: { userId: string; sessionId: string; actor: PtyPreflightActor }): Promise<PtyPreflightResult> {
   const human = input.actor === 'human'
+  // Governed automation (PTYCAP Phase 3): flag FIRST, before any DB-backed gate,
+  // so OFF admits nothing to a PTY and costs nothing.
+  if (!human && !governedAutomationEnabled()) {
+    return { ok: false, reason: automationBlockedReason(input.actor) }
+  }
   const req: DispatchRequest = {
     userId: input.userId,
     sessionId: input.sessionId,
@@ -179,6 +188,15 @@ async function runChain(input: { userId: string; sessionId: string; actor: PtyPr
   for (const gate of human ? PTY_HUMAN_TURN_GATES : PTY_AUTOMATION_TURN_GATES) {
     const result = await gate.check(req)
     if (!result.ok) return { ok: false, reason: result.reason }
+  }
+  if (!human) {
+    // Governors run AFTER the spend gates, automation only. Deliberately no
+    // try/catch: a throw reaches checkPtyTurnPreflight's catch (pty_preflight_error)
+    // and a hang its timeout (pty_preflight_timeout) - both fail closed.
+    for (const governor of activeGovernors()) {
+      const result = await governor.check(req)
+      if (!result.ok) return { ok: false, reason: automationBlockedReason(input.actor, result.reason) }
+    }
   }
   return { ok: true }
 }

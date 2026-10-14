@@ -80,6 +80,7 @@ beforeEach(() => {
 describe("dispatchToSession — pipeline (store: null)", () => {
   test("happy path: dispatched, raw text stored (no [telegram] prefix)", async () => {
     const r = await dispatchToSession({
+      source: "human",
       userId: "u",
       sessionId: "s",
       chatId: 1,
@@ -94,6 +95,7 @@ describe("dispatchToSession — pipeline (store: null)", () => {
 
   test("agent socket payload carries raw content + images", async () => {
     await dispatchToSession({
+      source: "human",
       userId: "u",
       sessionId: "s",
       chatId: 1,
@@ -109,6 +111,7 @@ describe("dispatchToSession — pipeline (store: null)", () => {
   test("IR-1: over cost cap → cost_capped, send NEVER called", async () => {
     state.overCap = true;
     const r = await dispatchToSession({
+      source: "human",
       userId: "u",
       sessionId: "s",
       chatId: 1,
@@ -129,6 +132,7 @@ describe("dispatchToSession — pipeline (store: null)", () => {
     const q = getQueue();
     for (let i = 0; q.enqueue("s", `tg:1:${100 + i}`) !== "dropped"; i++);
     const r = await dispatchToSession({
+      source: "human",
       userId: "u",
       sessionId: "s",
       chatId: 1,
@@ -142,6 +146,7 @@ describe("dispatchToSession — pipeline (store: null)", () => {
   test("agent offline → agent_offline (parked in grace)", async () => {
     state.channelPresent = false;
     const r = await dispatchToSession({
+      source: "human",
       userId: "u",
       sessionId: "s",
       chatId: 1,
@@ -156,6 +161,7 @@ describe("dispatchToSession — pipeline (store: null)", () => {
 
   test("no sessionId → no_session", async () => {
     const r = await dispatchToSession({
+      source: "human",
       userId: "u",
       sessionId: "",
       chatId: 1,

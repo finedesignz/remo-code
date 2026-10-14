@@ -394,6 +394,9 @@ async function dispatchInbound(
     updateId,
     text,
     images: images.length > 0 ? images : undefined,
+    // The actor is server-inferred at this authenticated webhook boundary (a
+    // message from the linked Telegram user), never read from the update payload.
+    source: "human",
   });
 
   switch (result.kind) {

@@ -227,7 +227,7 @@ function askView(a: SessionAsk) {
 // TODO(milestone once): reroute /ask to enqueue a `schedule_kind='once'`
 // `task_type='ask'` scheduled task as its queue entry, mirroring /work above.
 // Deferred deliberately — ask already rides the SAME shared dispatch pipeline +
-// non-bypassable gates (dailyCostCapGate · dailyTokenCapGate · humanOnlyPtyGate ·
+// non-bypassable gates (dailyCostCapGate · dailyTokenCapGate · governedAutomationPtyGate ·
 // askRateGate in hub/src/ask/dispatch.ts), so the caps/gate unification the
 // owner requires is ALREADY satisfied; only the Tasks-list/queue-entry
 // unification remains. WORK was rerouted first (higher-value, higher-risk).

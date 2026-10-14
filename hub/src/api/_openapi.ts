@@ -844,7 +844,7 @@ openapi.openapi(taskTemplatesRoute, (c) => {
     evidence: z.array(z.string()).nullable(),
     reason: z.string().nullable().openapi({
       description:
-        "Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask, session_offline, ask_timeout.",
+        "Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask (governedAutomationPtyGate -- an external actor is never eligible to drive a pty-interactive session), session_offline, ask_timeout.",
     }),
     raw_reply: z.string().nullable(),
     created_at: z.string(),
@@ -1054,7 +1054,7 @@ openapi.openapi(taskTemplatesRoute, (c) => {
       }),
       reason: z.string().nullable().openapi({
         description:
-          "Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work, session_offline, work_timeout.",
+          "Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work (governedAutomationPtyGate -- an external actor is never eligible to drive a pty-interactive session), session_offline, work_timeout.",
       }),
       auto_publish: z.boolean(),
       repo_ident: z.string(),
