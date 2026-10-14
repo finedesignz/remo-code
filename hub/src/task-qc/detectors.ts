@@ -21,11 +21,13 @@ import type {
   EvidencePrimitive,
   Finding,
   RunInput,
+  SessionInput,
   Severity,
   TaskQcScope,
   Timestamp,
 } from './types.ts'
 import { safeText } from './types.ts'
+import { isValidTimezone, nextRuns, validate } from '../scheduler/cron.ts'
 
 const DEFAULT_WINDOW = 50
 const TERMINAL = new Set(['success', 'failed', 'skipped', 'skipped_quota', 'cancelled'])
@@ -169,4 +171,129 @@ export function detectSkipForever(task: AuditTaskInput, runs: RunInput[], config
   }
 }
 
-export type { DetectorInputs, TaskQcScope }
+function cronOf(task: AuditTaskInput): string {
+  return (task.cron_expr ?? task.cron_expression ?? '').trim()
+}
+
+/** Gap between the next two fires, or null when the cron/timezone cannot give one. */
+export function fireIntervalMs(task: AuditTaskInput, now: Date): number | null {
+  const expr = cronOf(task)
+  if (!validate(expr).ok || !isValidTimezone(task.timezone)) return null
+  const r = nextRuns(expr, task.timezone, 2, now)
+  return r.length < 2 ? null : r[1]!.getTime() - r[0]!.getTime()
+}
+
+/**
+ * NEVER_FIRED (D-10). Header note (planner decision, 08-CONTEXT risk 2):
+ * next_fire_at mirrors the LIVE job registry (written on register and after every
+ * fire, registry.ts / dispatcher.ts). A stale or NULL value on an enabled
+ * valid-cron task therefore means the job is not armed. Rewriting it in the
+ * database would turn a true unarmed-job signal into a false healthy reading and
+ * the same condition would re-fire every cycle, so no fixCandidate exists for
+ * (b)/(c); the proposal is reregister_job (PATCH enabled:true re-arms through the route).
+ */
+export function detectNeverFired(task: AuditTaskInput, runs: RunInput[], now: Date): Finding | null {
+  if (!isAuditable(task)) return null
+  const expr = cronOf(task)
+  const nowMs = now.getTime()
+  const reasons: string[] = []
+  let intervalMs: number | null = null
+
+  if (!validate(expr).ok) {
+    reasons.push('cron_invalid')
+  } else if (!isValidTimezone(task.timezone)) {
+    reasons.push('timezone_invalid')
+  } else {
+    intervalMs = fireIntervalMs(task, now)
+    const createdMs = toMs(task.created_at)
+    if (intervalMs != null && createdMs != null && nowMs - createdMs > 2 * intervalMs) {
+      if (runs.length === 0) reasons.push('no_runs')
+      const nextMs = toMs(task.next_fire_at)
+      if (nextMs == null) reasons.push('next_fire_missing')
+      else if (nextMs < nowMs - 2 * intervalMs) reasons.push('next_fire_stale')
+    }
+  }
+  if (reasons.length === 0) return null
+
+  const evidence = {
+    reasons,
+    intervalMinutes: intervalMs == null ? null : Math.round(intervalMs / 60_000),
+    createdAt: iso(toMs(task.created_at)),
+    nextFireAt: iso(toMs(task.next_fire_at)),
+    lastFireAt: iso(toMs(task.last_fire_at)),
+    runCount: runs.length,
+  }
+  const out = { ...base(task, 'NEVER_FIRED', 'warn'), evidence }
+  if (reasons[0] === 'cron_invalid') {
+    return { ...out, proposal: { kind: 'fix_cron', params: { taskId: task.id } } }
+  }
+  if (reasons[0] === 'timezone_invalid') {
+    return {
+      ...out,
+      proposal: { kind: 'fix_timezone', params: { taskId: task.id } },
+      fixCandidate: 'normalize_timezone',
+    }
+  }
+  return { ...out, proposal: { kind: 'reregister_job', params: { taskId: task.id, enabled: true } } }
+}
+
+/**
+ * MISCONFIGURED (D-11). The app-uuid resolver is NOT re-implemented here: the
+ * engine computes resolvedAppUuid with the sender's exported resolver and passes
+ * it in. undefined = not computed (never fires); null = unresolvable.
+ */
+export function detectMisconfigured(task: AuditTaskInput, runs: RunInput[]): Finding | null {
+  if (task.task_type === 'log_check' || task.task_type === 'log_pull') {
+    if (task.resolvedAppUuid !== null) return null
+    const skipEvidence = runs.filter((r) => (r.error ?? '').startsWith('no_application_uuid')).length
+    return {
+      ...base(task, 'MISCONFIGURED', 'warn'),
+      evidence: { reason: 'app_uuid_unresolvable', skipEvidence },
+      proposal: { kind: 'fix_payload', params: { taskId: task.id, field: 'application_uuid' } },
+      fixCandidate: 'backfill_payload_from_sibling',
+    }
+  }
+  if (task.task_type === 'teab') {
+    if (task.teab_repo_ident != null && task.teab_repo_ident.trim() !== '') return null
+    return {
+      ...base(task, 'MISCONFIGURED', 'warn'),
+      evidence: { reason: 'teab_repo_missing', skipEvidence: 0 },
+      proposal: { kind: 'set_teab_repo', params: { taskId: task.id } },
+    }
+  }
+  return null
+}
+
+const DEAD_SESSION_AGE_MS = 7 * 86_400_000
+
+/** DEAD_SESSION (D-12): durable last_activity proxy; supervisor liveness is not visible to a pure detector. */
+export function detectDeadSession(
+  task: AuditTaskInput,
+  sessionsById: Record<string, SessionInput | null>,
+  now: Date,
+): Finding | null {
+  if (task.target_kind !== 'session') return null
+  const sid = task.target_id ?? task.session_id ?? null
+  if (sid == null) return null
+  const session = sessionsById[sid] ?? null
+  let reason: string | null = null
+  let offlineDays: number | null = null
+  if (session == null) {
+    reason = 'missing'
+  } else if (session.deleted_at != null) {
+    reason = 'deleted'
+  } else if (session.status === 'offline') {
+    const last = toMs(session.last_activity) ?? toMs(session.created_at)
+    if (last != null && now.getTime() - last > DEAD_SESSION_AGE_MS) {
+      reason = 'offline_stale'
+      offlineDays = Math.floor((now.getTime() - last) / 86_400_000)
+    }
+  }
+  if (reason == null) return null
+  return {
+    ...base(task, 'DEAD_SESSION', 'warn'),
+    evidence: { reason, sessionId: safeText(sid, 64), offlineDays },
+    proposal: { kind: 'rebind_session', params: { taskId: task.id, staleSessionId: safeText(sid, 64) } },
+    fixCandidate: 'rebind_dead_session',
+  }
+}
