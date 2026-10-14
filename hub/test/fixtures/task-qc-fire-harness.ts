@@ -123,6 +123,9 @@ export function setupFireHarness() {
     resolveTargetsCalls: 0,
     /** optional gate the audited-task SELECT awaits (concurrency test) */
     engineGate: null as null | Promise<void>,
+    /** lifetime-counter reservations the sender made, and what reserveInject answers */
+    reservations: [] as any[],
+    reserveResult: { ok: true, count: 1 } as any,
   }
 
   const reset = () => {
@@ -148,6 +151,8 @@ export function setupFireHarness() {
     h.costCapCalls = 0
     h.resolveTargetsCalls = 0
     h.engineGate = null
+    h.reservations = []
+    h.reserveResult = { ok: true, count: 1 }
 
     fake.onSelect('FROM users', [{ email: OWNER_EMAIL }])
     fake.onSelect(/FROM scheduled_tasks WHERE user_id/, (async () => {
@@ -171,6 +176,10 @@ export function setupFireHarness() {
   mock.module('../../src/dispatch/automation-controls.ts', () => ({
     ...automationControlsLeaf(),
     isAutomationHalted: async () => (h.halt.halted ? { halted: true, scope: h.halt.scope ?? 'global' } : { halted: false }),
+    // PTYCAP-08-07: the sender reserves one lifetime slot per run and injects a kill-switch check
+    reserveInject: async (a: any) => { h.reservations.push(a); return h.reserveResult },
+    haltBeforeMachineSend: async () =>
+      h.halt.halted ? { ok: false, reason: `automation_halted:${h.halt.scope ?? 'global'}`, scope: h.halt.scope ?? 'global' } : { ok: true },
   }))
   mock.module('../../src/db/scheduled-tasks-dal.ts', () => ({
     getTaskById: async (id: string) => { h.getTaskCalls.push(id); return h.tasks[id] ?? null },
