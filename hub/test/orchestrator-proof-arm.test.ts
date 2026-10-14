@@ -237,6 +237,29 @@ describe('armProof refusals: first failure returns its code with NO write', () =
   })
 })
 
+describe('armProof canonical repo identity (codex #6)', () => {
+  test('a mixed-case ident is canonicalized before session comparison, summary and armTx', async () => {
+    const h = harness()
+    const r = await armProof(baseArgs({ repoIdent: 'github://Acme/PROOF' }), h.deps)
+    expect(r.ok).toBe(true)
+    expect(h.armCalls[0]).toMatchObject({ repoIdent: 'github://acme/proof', repoOwner: 'acme', repoName: 'proof' })
+    expect((r as any).summary.repoIdent).toBe('github://acme/proof')
+  })
+
+  test('the mixed-case twin of the allowlisted repo is the SAME repo, not "another repo"', async () => {
+    const h = harness({ listAllowlist: async () => ['github://Acme/Proof'] })
+    expect((await armProof(baseArgs(), h.deps)).ok).toBe(true)
+    const other = harness({ listAllowlist: async () => ['github://acme/other'] })
+    const r = await armProof(baseArgs(), other.deps)
+    expect(r.ok === false && r.code).toBe('other_repo_allowlisted')
+  })
+
+  test('a mixed-case session repo_key still matches the canonical target', async () => {
+    const h = harness({ getSession: async () => ({ user_id: USER, repo_key: 'github://ACME/Proof' }) })
+    expect((await armProof(baseArgs(), h.deps)).ok).toBe(true)
+  })
+})
+
 describe('armProof success', () => {
   test('calls armTx exactly once with frozen protection, base_sha, budgets, preconditions and cadence', async () => {
     const h = harness()

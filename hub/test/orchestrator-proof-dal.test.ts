@@ -61,6 +61,32 @@ const armArgs = (over: Record<string, unknown> = {}): any => ({
   ...over,
 })
 
+describe('canonical repo identity (codex #6)', () => {
+  test('a mixed-case ident is stored canonical in the allowlist and the proof row', async () => {
+    const { run } = await D.armProofRunTx(armArgs({ repoIdent: 'github://Acme/PROOF' }))
+    expect(run.repo_ident).toBe('github://acme/proof')
+    expect(state.allow).toEqual([{ user_id: 'u1', repo_ident: 'github://acme/proof' }])
+  })
+
+  test('the mixed-case twin of an existing allowlist row is the same repo (no other_repo_allowlisted)', async () => {
+    state.allow = [{ user_id: 'u1', repo_ident: 'github://Acme/Proof' }]
+    await D.armProofRunTx(armArgs())
+    expect(state.runs).toHaveLength(1)
+  })
+
+  test('merge-refusal lookup finds the active run through any casing of the repo key', async () => {
+    const { run } = await D.armProofRunTx(armArgs({ repoIdent: 'Github://ACME/Proof'.replace('Github', 'github') }))
+    expect((await D.findActiveProofRunForRepo('github://ACME/proof'))?.id).toBe(run.id)
+    expect(await D.findActiveProofRunForRepo('github://acme/other')).toBeNull()
+    expect(await D.findActiveProofRunForRepo('path:///tmp/x')).toBeNull()
+  })
+
+  test('a non github://owner/repo ident cannot be armed', async () => {
+    await expect(D.armProofRunTx(armArgs({ repoIdent: 'path:///tmp/x' }))).rejects.toThrow('repo_ident_not_canonical')
+    expect(state.runs).toHaveLength(0)
+  })
+})
+
 describe('armProofRunTx', () => {
   test('one begin; first statement is the advisory lock; creates disabled dev task, row, allowlist, frozen run', async () => {
     const { run, taskId } = await D.armProofRunTx(armArgs())
