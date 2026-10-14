@@ -488,6 +488,8 @@ export interface ResolvedCycleContext {
   macroTaskType: MacroTaskType;
   repoPath: string;
   repoIdent: string;
+  /** PTYCAP-05 (QC r1): the task row carries the proof_owned marker. */
+  proofOwned: boolean;
 }
 
 /**
@@ -576,6 +578,7 @@ export async function resolveCycleContext(
     macroTaskType,
     repoPath,
     repoIdent,
+    proofOwned: (task as any).proof_owned === true,
   };
 }
 
@@ -651,6 +654,7 @@ export function makeCycleRunner(resolveDeps: ResolveDeps = REAL_RESOLVE_DEPS): C
         repoPath: resolved.repoPath,
         repoIdent: resolved.repoIdent,
         repoKey,
+        ...(resolved.proofOwned ? { proofOwned: true } : {}),
       });
     } catch (err: any) {
       console.warn(`[orchestrator] macro cycle threw (ignored): ${err?.message ?? err}`);

@@ -50,6 +50,12 @@ export interface MacroCycleInput {
   repoPath: string;
   repoIdent: string;
   repoKey: string | null;
+  /**
+   * PTYCAP-05 (QC r1): the task row carries the proof_owned marker. A proof-owned task renders
+   * the dev macro ONLY via the proof guard (flag stack ON + a claimed run); under every other
+   * flag combination the cycle refuses, with zero db work.
+   */
+  proofOwned?: boolean;
 }
 
 // Injectable seams (tests swap these; defaults are the real adapters).
@@ -140,6 +146,16 @@ export async function runMacroCycle(
   }
 
   const { userId, sessionId, stage, macroTaskType, repoKey } = input;
+
+  // 0. PTYCAP-05 (QC r1): a task that owns a proof row must NEVER render/inject the dev macro
+  //    unless the proof guard claims a run for it (flag stack ON). Any partial flag state
+  //    (proof/orchestrator/autospawn drifted, typo, wrong rollback order) refuses instead.
+  //    Reads only the already-loaded task marker: no db, no import, nothing for other tasks.
+  if (input.proofOwned && !isProofEnabled()) {
+    result.proofDecision = 'blocked';
+    console.warn(`[orchestrator.macro] session=${sessionId} task is proof-owned but the proof flag stack is not fully ON; refusing to render the dev macro.`);
+    return result;
+  }
 
   // 1. RECONCILE the previous turn.
   let sentinels: ParsedSentinels | null = null;

@@ -79,6 +79,15 @@ describe('armProofRunTx', () => {
     expect(run).toMatchObject({ max_injects: 5, max_tokens: 1_000_000, max_wall_ms: 3_600_000, base_sha: 'a'.repeat(40) })
   })
 
+  test('QC r1: arm marks the task proof_owned (created AND reused) so the dev macro is refused for it under any flag combination', async () => {
+    const { taskId } = await D.armProofRunTx(armArgs())
+    expect(state.tasks.find((t) => t.id === taskId)?.proof_owned).toBe(true)
+    state.runs = []
+    state.tasks = [{ id: 'old', user_id: 'u1', session_id: 's1', task_type: 'orchestrator', enabled: true, macro_task_type: 'maintenance' }]
+    await D.armProofRunTx(armArgs())
+    expect(state.tasks[0].proof_owned).toBe(true)
+  })
+
   test('converts an existing orchestrator task for the session, forcing it disabled', async () => {
     state.tasks.push({ id: 'old', user_id: 'u1', session_id: 's1', task_type: 'orchestrator', enabled: true, macro_task_type: 'maintenance' })
     const { taskId } = await D.armProofRunTx(armArgs())

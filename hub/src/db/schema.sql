@@ -1662,6 +1662,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_token_cap_alarms_user_date
 -- reserve rows): nullable, written by the inject path, never backfilled.
 ALTER TABLE routine_run_log ADD COLUMN IF NOT EXISTS inject_token TEXT;
 
+-- PTYCAP-05 (QC r1): a scheduled task that has ever been armed as a proof task carries this marker, so the
+-- macro cycle can REFUSE to render the dev macro for it under ANY flag combination without a DB read.
+-- Additive + idempotent; set by the arm transaction, never backfilled, never cleared.
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS proof_owned BOOLEAN NOT NULL DEFAULT false;
+
 -- ── PTYCAP-05 (throwaway-repo due->PR proof): orchestrator_proof_runs ────────
 -- One row per owner-armed proof run. Additive + idempotent only (this file
 -- re-runs in full on every hub boot): CREATE ... IF NOT EXISTS, guarded named

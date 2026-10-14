@@ -172,17 +172,17 @@ export async function armProofRunTx(args: ArmProofRunArgs): Promise<{ run: Proof
       if (existing.length > 0) {
         taskId = existing[0].id;
         await tx`
-          UPDATE scheduled_tasks SET enabled = false, macro_task_type = 'dev'
+          UPDATE scheduled_tasks SET enabled = false, macro_task_type = 'dev', proof_owned = true
           WHERE id = ${taskId} AND user_id = ${args.userId}
         `;
       } else {
         const created = (await tx`
           INSERT INTO scheduled_tasks (
             user_id, session_id, name, cron_expression, prompt,
-            task_type, target_kind, target_id, lifecycle_stage, macro_task_type, enabled
+            task_type, target_kind, target_id, lifecycle_stage, macro_task_type, enabled, proof_owned
           ) VALUES (
             ${args.userId}, ${args.sessionId}, 'Orchestrator', '@orchestrator', '',
-            'orchestrator', 'session', ${args.sessionId}, 'development', 'dev', false
+            'orchestrator', 'session', ${args.sessionId}, 'development', 'dev', false, true
           )
           RETURNING id
         `) as Array<{ id: string }>;
