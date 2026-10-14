@@ -15,6 +15,7 @@ const SRC = join(import.meta.dir, '..', 'src')
 
 const MACHINE = new Set([
   'orchestrator/inject.ts', //         BSA autospawn launch
+  'dispatch/governed-launch.ts', //    PTYCAP-07 shared governed autospawn adapter
   'scheduler/senders/agent.ts', //     maybeLaunchOfflineSession
   'ask/dispatch.ts', //                ensureOnline closure
   'work/dispatch.ts', //               ensureOnline closure
@@ -73,6 +74,11 @@ describe('launchSessionForUser caller classification', () => {
   test('MACHINE callers pass machine: true on the call', () => {
     const bad = all.filter((s) => MACHINE.has(s.file) && !/machine:\s*true/.test(s.line)).map((s) => s.file)
     expect(bad).toEqual([])
+  })
+
+  test('the governed-launch adapter passes the machine option to the launch call (PTYCAP-07-04)', () => {
+    const src = readFileSync(join(SRC, 'dispatch/governed-launch.ts'), 'utf8')
+    expect(/launchSessionForUser\(\{[^}]*machine:\s*true/.test(src)).toBe(true)
   })
 
   test('HUMAN callers never pass the machine option', () => {
