@@ -65,35 +65,20 @@ async function loadErrorRow(errorId: string): Promise<ErrorRow | null> {
   return rows[0] ?? null
 }
 
-export async function dispatchPendingError(errorId: string): Promise<DispatchOutcome> {
-  const error = await loadErrorRow(errorId)
-  if (!error) return { status: 'noop', skip_reason: 'error_not_found' }
-  if (error.dispatch_status !== 'pending') {
-    return { status: 'noop', skip_reason: `not_pending:${error.dispatch_status}` }
-  }
-
-  // Project resolution — owner is on the project row (unscoped lookup; the
-  // errorId already authorizes us, the intake set project_id from the key).
-  const projRows = await sql<ErrorProject[]>`
-    SELECT * FROM error_projects WHERE id = ${error.project_id} LIMIT 1
-  `
-  const project = projRows[0]
-  if (!project) {
-    await updateErrorDispatchStatus(errorId, 'failed', 'project_missing')
-    return { status: 'failed', skip_reason: 'project_missing' }
-  }
-
-  const sessionId = project.session_id
-  const userId = project.user_id
-
-  // Prompt + stored chat content. Built once; the RunStore's send persists the
-  // user message and forwards it on the agent socket.
-  const content = buildErrorMessage(error, project)
-  const storedContent = `[error: ${project.name} — ${error.error_type}]\n\n${content}`
-
-  const notifyCtx = { error_type: error.error_type, error_value: error.error_value }
-
-  const store: RunStore = {
+/**
+ * The error-capture run store (error_runs lifecycle + throttled notifications + broadcasts).
+ * Extracted verbatim from dispatchPendingError so the legacy path and the heal sink
+ * (heal/sinks/error-capture.ts) share one implementation.
+ */
+export function buildErrorCaptureRunStore(args: {
+  errorId: string
+  project: ErrorProject
+  sessionId: string
+  userId: string
+  notifyCtx: { error_type: string; error_value: string }
+}): RunStore {
+  const { errorId, project, sessionId, userId, notifyCtx } = args
+  return {
     // Insert the run row (in_flight) and RETURN its id — the pipeline threads
     // this id into the finalize hook, so onFinalize / markFailed receive the
     // real run id as their token arg. Fires exactly when the pipeline actually
@@ -160,6 +145,37 @@ export async function dispatchPendingError(errorId: string): Promise<DispatchOut
       }).catch(() => {})
     },
   }
+}
+
+export async function dispatchPendingError(errorId: string): Promise<DispatchOutcome> {
+  const error = await loadErrorRow(errorId)
+  if (!error) return { status: 'noop', skip_reason: 'error_not_found' }
+  if (error.dispatch_status !== 'pending') {
+    return { status: 'noop', skip_reason: `not_pending:${error.dispatch_status}` }
+  }
+
+  // Project resolution — owner is on the project row (unscoped lookup; the
+  // errorId already authorizes us, the intake set project_id from the key).
+  const projRows = await sql<ErrorProject[]>`
+    SELECT * FROM error_projects WHERE id = ${error.project_id} LIMIT 1
+  `
+  const project = projRows[0]
+  if (!project) {
+    await updateErrorDispatchStatus(errorId, 'failed', 'project_missing')
+    return { status: 'failed', skip_reason: 'project_missing' }
+  }
+
+  const sessionId = project.session_id
+  const userId = project.user_id
+
+  // Prompt + stored chat content. Built once; the RunStore's send persists the
+  // user message and forwards it on the agent socket.
+  const content = buildErrorMessage(error, project)
+  const storedContent = `[error: ${project.name} — ${error.error_type}]\n\n${content}`
+
+  const notifyCtx = { error_type: error.error_type, error_value: error.error_value }
+
+  const store = buildErrorCaptureRunStore({ errorId, project, sessionId, userId, notifyCtx })
 
   const deps: PipelineDeps = {
     // IR-1: cost-cap is non-bypassable. IR-2: threshold first, then cost-cap.
