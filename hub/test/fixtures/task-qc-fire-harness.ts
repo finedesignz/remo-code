@@ -111,6 +111,10 @@ export function setupFireHarness() {
     emails: [] as any[],
     broadcasts: [] as any[],
     afterRunCalls: [] as any[],
+    getTaskCalls: [] as string[],
+    listActionsCalls: 0,
+    /** rows listActionsForTask yields (malformed-data tests) */
+    actionRows: [] as any[],
     thresholdCalls: 0,
     costCapCalls: 0,
     resolveTargetsCalls: 0,
@@ -133,6 +137,9 @@ export function setupFireHarness() {
     h.emails = []
     h.broadcasts = []
     h.afterRunCalls = []
+    h.getTaskCalls = []
+    h.listActionsCalls = 0
+    h.actionRows = []
     h.thresholdCalls = 0
     h.costCapCalls = 0
     h.resolveTargetsCalls = 0
@@ -161,7 +168,10 @@ export function setupFireHarness() {
     isAutomationHalted: async () => (h.halt.halted ? { halted: true, scope: h.halt.scope ?? 'global' } : { halted: false }),
   }))
   mock.module('../../src/db/scheduled-tasks-dal.ts', () => ({
-    getTaskById: async (id: string) => h.tasks[id] ?? null,
+    getTaskById: async (id: string) => { h.getTaskCalls.push(id); return h.tasks[id] ?? null },
+    listActionsForTask: async () => { h.listActionsCalls++; return h.actionRows },
+    getRun: async () => null,
+    findQcReviewSnippetForRun: async () => null,
     insertRunV2: async (input: any) => {
       const run = { id: `run-${h.insertedRuns.length + 1}`, ...input }
       h.insertedRuns.push(run)
