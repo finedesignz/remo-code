@@ -125,16 +125,21 @@ export async function runMergeToMain(
 
   // ── PROOF REPO NEVER MERGES (PTYCAP-05 D-10 i) ────────────────────────────
   // This is the ONLY auto-merge path (R-ADO-24): refuse it for a repo with an armed or
-  // running proof run. Flag OFF = skipped entirely. A lookup error fails CLOSED.
-  if (isProofEnabled() && ctx.repoKey) {
+  // running proof run. Flag OFF = skipped entirely. A lookup error - or a session with NO repo key
+  // (QC r1: the merge path then cannot prove it is not a proof repo) - fails CLOSED.
+  if (isProofEnabled()) {
     let refusal: string | null = null;
-    try {
-      const find =
-        deps.findActiveProofRunForRepo ??
-        (await import('../db/orchestrator-proof-dal.ts')).findActiveProofRunForRepo;
-      if (await find(ctx.repoKey)) refusal = 'proof_repo_never_merges';
-    } catch {
+    if (!ctx.repoKey) {
       refusal = 'proof_repo_never_merges:unverifiable';
+    } else {
+      try {
+        const find =
+          deps.findActiveProofRunForRepo ??
+          (await import('../db/orchestrator-proof-dal.ts')).findActiveProofRunForRepo;
+        if (await find(ctx.repoKey)) refusal = 'proof_repo_never_merges';
+      } catch {
+        refusal = 'proof_repo_never_merges:unverifiable';
+      }
     }
     if (refusal) {
       await deps.appendRunLog({

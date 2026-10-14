@@ -89,6 +89,23 @@ describe('runMergeToMain proof-repo refusal', () => {
     expect(calls.find).toEqual([])
   })
 
+  test('flag ON + null repoKey fails CLOSED: the merge path cannot prove the repo is not a proof repo', async () => {
+    flagsOn()
+    const { deps, calls } = mk(async () => null)
+    const out = await runMergeToMain({ ...ctx, repoKey: null }, deps)
+    expect(out).toEqual({ kind: 'refused', reason: 'proof_repo_never_merges:unverifiable', held: [] })
+    expect(calls.find).toEqual([]) // nothing to look up
+    expect(calls.injected).toHaveLength(0)
+    expect(calls.runLog).toHaveLength(1)
+  })
+
+  test('flag OFF + null repoKey: unchanged (no refusal)', async () => {
+    const { deps, calls } = mk(async () => null)
+    const out = await runMergeToMain({ ...ctx, repoKey: null }, deps)
+    expect(out.kind).toBe('dispatched')
+    expect(calls.find).toEqual([])
+  })
+
   test('flag ON + lookup error fails CLOSED: refused :unverifiable, nothing injected', async () => {
     flagsOn()
     const { deps, calls } = mk(async () => {
