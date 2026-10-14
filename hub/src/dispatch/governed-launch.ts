@@ -74,7 +74,12 @@ export interface GovernedLaunchDeps {
   countAutospawnLaunchesToday: (userId: string, tz: string) => Promise<number>
   isOverAutospawnDailyLaunchCap: (launchesToday: number) => boolean
   graceParkPending: (sessionId: string) => boolean
-  launchSessionForUser: (a: { userId: string; sessionId: string; machine: true }) => Promise<LaunchResult>
+  launchSessionForUser: (a: {
+    userId: string
+    sessionId: string
+    machine: true
+    skipPermissions?: false
+  }) => Promise<LaunchResult>
   appendRunLog: (row: {
     session_id: string
     repo_key: string
@@ -166,7 +171,10 @@ export async function governedLaunch(
   // ── Launch ─────────────────────────────────────────────────────────────────────
   let launch: LaunchResult
   try {
-    launch = await deps.launchSessionForUser({ userId, sessionId, machine: true })
+    // HEAL policy spawns are triggered by untrusted text: never inherit the session's
+    // dangerously_skip_permissions (machine-triggered spawns force it false). Legacy keeps the
+    // session-derived value (orchestrator behaviour unchanged).
+    launch = await deps.launchSessionForUser({ userId, sessionId, machine: true, ...(preLaunch ? { skipPermissions: false as const } : {}) })
   } catch (err) {
     await releaseIfReserved()
     return { kind: 'failed', reason: `autospawn_launch_threw: ${msg(err)}` }

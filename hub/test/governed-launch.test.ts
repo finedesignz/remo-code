@@ -125,7 +125,7 @@ describe('governedLaunch - heal policy (governor supplied)', () => {
     expect(calls).not.toContain('release')
     expect(ledgerRows).toHaveLength(1)
     expect(ledgerRows[0].decision_rationale).toBe('pre-launch')
-    expect(launchArgs).toEqual([{ userId: 'u1', sessionId: 's1', machine: true }])
+    expect(launchArgs).toEqual([{ userId: 'u1', sessionId: 's1', machine: true, skipPermissions: false }])
   })
 
   test('pre-flag chain order: armed, allowlist, supervisor, token, count/cap, grace, then gates', async () => {
@@ -265,5 +265,10 @@ describe('governedLaunch - legacy policy (no governor)', () => {
   test('launchSessionForUser is always called with machine: true', async () => {
     await governedLaunch(args(), deps())
     expect(launchArgs[0].machine).toBe(true)
+  })
+
+  test('legacy policy leaves skipPermissions unset (session-derived, orchestrator unchanged)', async () => {
+    await governedLaunch(args(), deps())
+    expect('skipPermissions' in launchArgs[0]).toBe(false)
   })
 })
