@@ -9,6 +9,7 @@
  * + per-repo). All queries are scoped by user_id.
  */
 import { sql } from './postgres.ts'
+import { usageAttributionLostSince } from '../usage/attribution-loss.ts'
 
 export interface TokenUsageInput {
   userId: string
@@ -245,12 +246,13 @@ export async function getTodayTokenTotal(userId: string, timezone: string): Prom
  * PTYCAP-05 (F2-3) - one session's token total since `since`, all FOUR buckets, plus
  * whether the session row still exists. token_usage.session_id is ON DELETE SET NULL,
  * so a deleted session silently loses attribution (tokens read 0): callers MUST treat
- * `sessionExists === false` as attribution lost and fail closed.
+ * `sessionExists === false` (or `attributionLost`, set when a usage_event for this session
+ * failed to persist inside the window) as attribution lost and fail closed.
  */
 export async function sumSessionTokensSince(
   sessionId: string,
   since: Date | string,
-): Promise<{ tokens: number; sessionExists: boolean }> {
+): Promise<{ tokens: number; sessionExists: boolean; attributionLost?: true }> {
   const rows = await sql<{ sum: string | null; session_exists: boolean }[]>`
     SELECT COALESCE(SUM(
       input_tokens + output_tokens
@@ -260,7 +262,14 @@ export async function sumSessionTokensSince(
     FROM token_usage
     WHERE session_id = ${sessionId} AND created_at >= ${since}
   `
-  return { tokens: Number(rows[0]?.sum ?? 0), sessionExists: rows[0]?.session_exists === true }
+  const out: { tokens: number; sessionExists: boolean; attributionLost?: true } = {
+    tokens: Number(rows[0]?.sum ?? 0),
+    sessionExists: rows[0]?.session_exists === true,
+  }
+  // QC round 1 (codex #4): a usage_event that failed to persist leaves the sum UNDER-counted while
+  // the session row still exists - the caller must treat that exactly like a deleted session.
+  if (usageAttributionLostSince(sessionId, since)) out.attributionLost = true
+  return out
 }
 
 /**
