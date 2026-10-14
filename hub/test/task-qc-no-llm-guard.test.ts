@@ -78,7 +78,7 @@ const ALLOW: Record<string, string[]> = {
   'task-qc/flags.ts': ['../scheduler/cron.ts'],
   'task-qc/findings.ts': [...NODE],
   'task-qc/detectors.ts': [...NODE, '../scheduler/cron.ts', ...SIB('types')],
-  'task-qc/digest.ts': [...SIB('types')],
+  'task-qc/digest.ts': ['../lib/email.ts', ...SIB('safe-fixes', 'types')],
   'task-qc/fix-plans.ts': ['../scheduler/cron.ts', ...SIB('safe-fixes', 'types')],
   'task-qc/safe-fixes.ts': [...NODE, '../scheduler/cron.ts', ...SIB('detectors', 'findings', 'types')],
   'task-qc/run-claim.ts': ['../db/postgres.ts'],
