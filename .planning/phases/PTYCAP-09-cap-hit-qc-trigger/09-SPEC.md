@@ -25,7 +25,7 @@ a bug. Therefore:
 |---|---|---|
 | **AR-1** | A cap-hit raised **inside a QC run** escalates to the human and spawns **NOTHING**. | The cap-hit event carries a server-inferred `origin`; `origin='task_qc'` ⇒ notify-only, hard return before the enqueue. Test: QC-origin cap-hit ⇒ 0 QC runs enqueued. |
 | **AR-2** | At most **one** QC run per `(task_id, cause)` per window. | DB-claimed dedupe (`INSERT ... ON CONFLICT DO NOTHING` on a unique key), not an in-memory set. Test: 100 concurrent identical cap-hits ⇒ exactly 1 QC run. |
-| **AR-3** | QC runs on a **separate, bounded budget that a QC run cannot raise**. | `REMO_TASK_QC_TOKEN_CAP` (Phase 8, default 500K/run) + a per-day `REMO_CAP_QC_DAILY_RUNS` (default 3). The QC safe-fix allowlist contains no fix that can modify a cap. Test: `applyFix({kind:'raise_cap'})` throws. |
+| **AR-3** | QC runs on a **separate, bounded budget that a QC run cannot raise**. | Phase 8's deterministic engine (zero model tokens, bounded by its deterministic pass bounds and the Phase 4 lifetime counter under key `taskqc`) + a per-day `REMO_CAP_QC_DAILY_RUNS` (default 3). The QC safe-fix allowlist contains no fix that can modify a cap. Test: `applyFix({kind:'raise_cap'})` throws. |
 
 **Additional bounds:**
 - Total QC runs triggered by cap-hits per user per day: `REMO_CAP_QC_DAILY_RUNS`, default **3**.
@@ -108,7 +108,8 @@ a bug. Therefore:
 
 ### CQ-04 — AR-3: separate bounded budget, unraisable by QC
 - **Current:** n/a.
-- **Target:** the QC run uses Phase 8's engine and therefore Phase 8's `REMO_TASK_QC_TOKEN_CAP`, plus
+- **Target:** the QC run uses Phase 8's deterministic engine (zero model tokens, bounded by its
+  deterministic pass bounds and the Phase 4 lifetime counter under key `taskqc`), plus
   a per-day count ceiling `REMO_CAP_QC_DAILY_RUNS` (default 3). No safe-fix in Phase 8's allowlist can
   modify any cap or any env-derived ceiling.
 - **Acceptance:**
@@ -124,12 +125,12 @@ a bug. Therefore:
 - **Current:** n/a.
 - **Target:** the cap-triggered QC run is a Phase-8 QC pass **scoped to the attributed cause** — it
   audits the attributed task (or, if unattributed, the top-N spenders for the window) and applies only
-  Phase-8 allowlisted safe fixes (e.g. `recompute_next_run_at` for a task firing far more often than
-  intended, `backfill_payload_from_sibling` for a task retrying on a bad payload). Everything else is
+  Phase-8 allowlisted safe fixes (e.g. `backfill_payload_from_sibling` for a task retrying on a bad payload,
+  `rebind_dead_session` for a task bound to a deleted session). Everything else is
   a proposal.
 - **Acceptance:**
-  - [ ] Test: a cap-hit attributed to a task with a broken `next_run_at` (firing every tick) ⇒ the QC
-        run applies `recompute_next_run_at` and emails what it did.
+  - [ ] Test: a cap-hit attributed to a task retrying on a payload missing `application_uuid` (exactly one
+        unambiguous sibling) ⇒ the QC run applies `backfill_payload_from_sibling` and emails what it did.
   - [ ] Test: a cap-hit attributed to a task whose prompt is simply expensive ⇒ **no auto-fix** (prompt
         editing is not allowlisted) ⇒ a proposal + escalation.
   - [ ] Test: the QC run NEVER re-enables, re-injects, or retries the capped work. Fixing the cause is
@@ -167,7 +168,6 @@ a bug. Therefore:
 | `REMO_CAP_QC_ESCALATION_THROTTLE_MS` | `3600000` (1h) | non-positive ⇒ default |
 | *inherited from Phase 8* | | |
 | `REMO_TASK_QC_ENABLED` | `0` | OFF ⇒ cap-hits escalate only; the engine does not exist to spawn |
-| `REMO_TASK_QC_TOKEN_CAP` | `500000` | the QC run's own ceiling |
 
 **Note the deliberate asymmetry:** the spend *caps* fail OPEN when misconfigured (a broken cap must
 not brick the app); the *spawn* ceilings here fail CLOSED (a broken spawn ceiling must not spawn).
@@ -220,7 +220,7 @@ have not benchmarked either against this schema.
 | `hub/test/cap-qc-fix-cause.test.ts` | CQ-05 (allowlisted fix applied; expensive-prompt case ⇒ proposal only; never retries the capped work) |
 | `hub/test/cap-qc-escalation.test.ts` | CQ-06 (one email per reason; storm throttled) |
 | `hub/test/cap-qc-flag-off.test.ts` | CQ-07 (OFF = today; trigger-without-engine ⇒ escalate only) |
-| `hub/test/e2e/cap-qc.test.ts` (real Postgres) | The whole chain: seeded runaway task ⇒ cap-hit ⇒ 1 QC run ⇒ `recompute_next_run_at` applied ⇒ no second QC run |
+| `hub/test/e2e/cap-qc.test.ts` (real Postgres) | The whole chain: seeded runaway task ⇒ cap-hit ⇒ 1 QC run ⇒ `backfill_payload_from_sibling` applied ⇒ no second QC run |
 
 ---
 

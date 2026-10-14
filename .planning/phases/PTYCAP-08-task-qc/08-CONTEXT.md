@@ -31,7 +31,7 @@ Phase 8 delivers a recurring, bounded, config-only auditor of `scheduled_tasks`:
 - **D-06 AUTOFIX requires ENABLED.** `AUTOFIX=1` with `ENABLED=0` is OFF-no-op. Boot logs one line when ENABLED=1 and AUTOFIX=0 ("report-only soak"). No boot-refuse for these flags (they default to no-op; the refuse-to-boot pattern is for ceilings only, Phase 4 D-04).
 
 ### Detectors (`hub/src/task-qc/detectors.ts`, pure: `(inputs) => Finding[]`, no `sql` import)
-- **D-07 Column mapping (the SPEC names columns that do not exist or are stale):** next fire = `next_fire_at` (authoritative; `last_run_at/next_run_at` are written alongside by `setTaskFireTimestamps`, scheduled-tasks-dal.ts:478-490, and are legacy mirrors - read `next_fire_at`/`last_fire_at`); cron = `COALESCE(cron_expr, cron_expression)`; tz = `timezone`; run finish = `finished_at` (`completed_at` is the legacy column; there is NO `ended_at`); run outcome reason = `scheduled_task_runs.error` (there is NO reason column); open run = `status IN ('running','pending','in_flight') AND finished_at IS NULL AND completed_at IS NULL`. `scheduled_task_runs.cost_usd` is NULL 100%: no detector reads, ranks or attributes cost (never join cost by timestamp). Detector inputs are plain row objects loaded by one query layer (`engine.ts`), so detectors stay pure and unit-testable without a DB.
+- **D-07 Column mapping (the SPEC names columns that do not exist or are stale):** next fire = `next_fire_at` (authoritative; `last_run_at/next_run_at` are written alongside by `setTaskFireTimestamps`, scheduled-tasks-dal.ts:478-490, and are legacy mirrors - read `next_fire_at`/`last_fire_at`); cron = `COALESCE(cron_expr, cron_expression)`; tz = `timezone`; run finish = `finished_at` (`completed_at` is the legacy column; there is NO `ended_at`); run outcome reason = `scheduled_task_runs.error` (there is NO reason column); open run = `status IN ('running','pending','in_flight') AND finished_at IS NULL AND completed_at IS NULL`. `scheduled_task_runs.cost_usd` is written by `finalizeRun` when a run accrued model usage (dispatcher.ts, fix/run-cost-attribution); the QC engine spends no model usage, so it reads, ranks and attributes no cost (and never joins cost by timestamp). Detector inputs are plain row objects loaded by one query layer (`engine.ts`), so detectors stay pure and unit-testable without a DB.
 - **D-08 FAILING:** last N (`FAIL_STREAK`) runs ordered by `started_at DESC` that have reached a terminal status are ALL `failed`. `running/pending/in_flight` are ignored (not terminal); `cancelled` is ignored; a `success` or any `skipped*` ends the streak. Evidence: run ids, distinct `error` signatures with counts, first/last `started_at`. Severity `warn`; `high` at 10x streak. Disposition always `proposed` (TQC-04: no disable fix exists).
 - **D-09 SKIP_FOREVER:** last N terminal runs ALL in `{skipped, skipped_quota}` AND all carrying the SAME `error` string, AND that string is not on the frozen benign set: `no_errors_detected` (clean log_check no-op BY DESIGN; project_logcheck_classifier_401_falsepos), `automation_halted:*` (owner deliberately engaged the kill switch), `orchestrator_due_tick_owned`, `orchestrator_disabled`, `replayed_on_reconnect`. `no_application_uuid` is NOT benign (a `skipped` forever on it is the real misconfiguration; since PR #322 the sender finalizes it `skipped`, coolify.ts:69). De-dup rule: if MISCONFIGURED fires for the same task the SKIP_FOREVER finding is suppressed (one finding per root cause; MISCONFIGURED carries the skip evidence). SPEC's "and >=0 success in the window" is vacuous and dropped.
 - **D-10 NEVER_FIRED:** over the D-03 audit set, fires when any of: (a) cron unparseable (`validate(cron).ok === false` or `isValidTimezone(timezone) === false`); (b) no `scheduled_task_runs` row has ever existed AND `created_at` older than 2 intervals; (c) `next_fire_at IS NULL` OR older than now minus 2 intervals, while `enabled`. Interval = gap between the next two fires from `nextRuns(expr, tz, 2)`; unparseable cron skips (b)/(c) (reported once under (a)). Last activity = `GREATEST(last_fire_at, MAX(runs.started_at))`.
@@ -43,14 +43,15 @@ Phase 8 delivers a recurring, bounded, config-only auditor of `scheduled_tasks`:
 - **D-14 One-open-run guard and write serialization.** The sender takes `pg_advisory_xact_lock(hashtext('taskqc:'||userId))` for the detection read; if another `task_qc` run for the same task is non-terminal (other than this run) it finalizes `skipped` `task_qc_already_running` and logs (TQC-01). Each fix is its own transaction: `SELECT ... FROM scheduled_tasks WHERE id=$1 FOR UPDATE`, then the in-flight check (D-16), then the UPDATE. Single-replica assumption noted (same as `spawn-on-error.ts`).
 - **D-15 THE LITERAL ALLOWLIST (frozen, enumerated; anything else throws `unlisted_fix_kind` before any SQL):**
   ```
+  // SUPERSEDED at plan time (2026-10-13): three kinds. recompute_next_run_at is a PROPOSAL, not a fix
+  // (see Planner decisions). Shipped as a closure-backed read-only structure, not a bare Set.
   export const SAFE_FIXES = Object.freeze(new Set([
-    'recompute_next_run_at',
     'normalize_timezone',
     'backfill_payload_from_sibling',
     'rebind_dead_session',
   ] as const))
   ```
-  - `recompute_next_run_at`: only for a NEVER_FIRED finding (b/c) with a valid cron+tz. Computes next fire from `nextRuns(expr, tz, 1)` and writes `next_fire_at` + `next_run_at` (the pair `setTaskFireTimestamps` writes) and nothing else. It does NOT touch the live croner registry (`registry.replace`) and does NOT touch `enabled`: re-registering a never-fired task would start spend, which is a cadence/spend change (out of scope, section 8). Honest limitation, documented: the registry rewrites these columns on its next (re)register, so this fix is a DB-truth repair, not a scheduler repair; unregistered-job cases surface as a proposal ("restart/replace the job") instead.
+  - (SUPERSEDED, not shipped as a fix) `recompute_next_run_at`: only for a NEVER_FIRED finding (b/c) with a valid cron+tz. Computes next fire from `nextRuns(expr, tz, 1)` and writes `next_fire_at` + `next_run_at` (the pair `setTaskFireTimestamps` writes) and nothing else. It does NOT touch the live croner registry (`registry.replace`) and does NOT touch `enabled`: re-registering a never-fired task would start spend, which is a cadence/spend change (out of scope, section 8). Honest limitation, documented: the registry rewrites these columns on its next (re)register, so this fix is a DB-truth repair, not a scheduler repair; unregistered-job cases surface as a proposal ("restart/replace the job") instead.
   - `normalize_timezone`: only when `isValidTimezone(timezone)` is false; sets `timezone` to `users.timezone` (gates.ts:72) when that is valid, else `'UTC'`. NOT NULL/default `'UTC'` means the SPEC's "when NULL" case is unreachable.
   - `backfill_payload_from_sibling`: only for MISCONFIGURED log_check/log_pull with an unresolvable uuid, only when EXACTLY ONE distinct non-empty `application_uuid` exists across the user's other enabled log_check/log_pull tasks on the SAME `session_id` (or same non-NULL `sessions.repo_key`). Zero or >=2 distinct candidates => PROPOSAL, zero writes. Writes `payload = payload || jsonb_build_object('application_uuid', $v)` only.
   - `rebind_dead_session`: only for DEAD_SESSION; candidate = the user's sessions with the SAME non-NULL `repo_key` as the dead session, live defined as `deleted_at IS NULL AND status IN ('online','thinking')`; EXACTLY ONE candidate, else PROPOSAL. Rewrites `session_id` (and `target_id` iff `target_id = old session id`) in one UPDATE. Never touches `enabled`, `prompt`, `cron*`.
@@ -91,7 +92,7 @@ Phase 8 delivers a recurring, bounded, config-only auditor of `scheduled_tasks`:
 | `normalize_timezone` "when NULL" | `timezone TEXT NOT NULL DEFAULT 'UTC'` (schema.sql 235): only invalid IANA names are reachable | D-15 |
 | DEAD_SESSION "deleted session" | hard delete cascades the task (`session_id ... ON DELETE CASCADE`); soft delete is `sessions.deleted_at`; `target_id` has no FK | D-12 |
 | "no supervisor could host it" | supervisor liveness is in-memory only | dropped, D-12 |
-| `REMO_TASK_QC_TOKEN_CAP` / TQC-07 token ceiling | deterministic engine spends zero tokens | D-01 (FORK-1); 09-SPEC inherited table needs a follow-up edit |
+| `REMO_TASK_QC_TOKEN_CAP` / TQC-07 token ceiling | deterministic engine spends zero tokens | D-01 (FORK-1); 09-SPEC inherited table rewritten in plan 08-10 |
 | extend `task_type` CHECK "like Phase-11" | the CHECK is already drop+add in place with one IN-list (schema.sql 205-228) | edit the list (D-24) |
 | existing `task_type='qc'` | UNRELATED auto-dev QC workflow root (`qc_review/qc_fix/qc_verify`, workflows.ts:32); new value is `task_qc` | name kept distinct; never reuse `qc` |
 </spec_drift>
@@ -145,7 +146,7 @@ Phase 8 delivers a recurring, bounded, config-only auditor of `scheduled_tasks`:
 ## Risks carried into planning
 
 1. FORK-1/FORK-2 overturned by the panel => D-01/D-02 and the sender/seed design change; costly to reverse after code lands (enum + table).
-2. `recompute_next_run_at` is a DB-truth repair only (registry rewrites it) - low value; plan may drop it to a proposal if the planner confirms no path where a registered job leaves a stale column (planner re-verify, registry.ts:115-130,187).
+2. RESOLVED (plan time, see Planner decisions): `recompute_next_run_at` is a DB-truth repair only (registry rewrites it) - low value; dropped to a proposal if the planner confirms no path where a registered job leaves a stale column (planner re-verify, registry.ts:115-130,187).
 3. CHECK rewrite + partial unique index behave differently on PGlite vs postgres:16 (memory). Real-PG e2e is mandatory.
 4. `email_summary=false` hides a QC row failure unless D-20 lands - keep D-20 in the plan, not optional.
 5. `reserveInject` counts a non-inject as an inject; ledger/`countRateUnion` semantics for a key that is not a session id - planner confirms `sessionId: key` does not pollute the per-session rate union (heal key precedent uses the same shape).
@@ -153,3 +154,18 @@ Phase 8 delivers a recurring, bounded, config-only auditor of `scheduled_tasks`:
 
 *Phase: 8-periodic-task-qc*
 *Context gathered: 2026-10-13*
+
+## Planner decisions (2026-10-13)
+
+Recorded by plan 08-10 from the plan 01-09 SUMMARY files, so a later reader does not re-open them.
+
+- **`recompute_next_run_at` is a proposal, not a fix.** Evidence: `next_fire_at` mirrors the live in-memory registry (registry.ts register path writes it; dispatcher `updateFireTimestamps` rewrites it after every fire). A stale or NULL value on an enabled valid-cron task therefore means the job is not armed; rewriting the column in the database would hide that signal and the condition would re-fire every cycle. NEVER_FIRED (b)/(c) carry the `reregister_job` proposal (PATCH `{enabled:true}` re-arms through the route). The allowlist is three kinds.
+- **Digit-collapse in the SKIP_FOREVER reason signature.** A `skipped_quota` reason with a changing figure still groups as one reason.
+- **NEVER_FIRED age gate.** The NULL/stale `next_fire_at` arm only applies once the task is older than two fire intervals, so a freshly created task is not flagged.
+- **Flag-OFF early return sits ahead of the kill-switch block** at the top of `fireTask`. It performs no automation, so it cannot weaken the kill switch, and OFF stays a true no-op even when the system is halted.
+- **Injected halt check on the engine.** Auto-fix without a halt check throws `halt_check_required`; the check is consulted once immediately before the first write, and a halted pass is read-only (findings returned as proposals, reason `halted_read_only`).
+- **Pass bounds are constants, not env knobs.** `TASK_QC_BOUNDS` is frozen; `clampBounds` can only lower values. There is no token-cap knob (verdict F1-A1).
+- **Release-on-throw simplification of D-22.** The sender reserves one `taskqc:<userId>` slot per run and releases it if the engine throws, rather than only when the run fails before detection.
+- **session_id nullability (F2-B2).** Verified `scheduled_tasks.session_id` is nullable (schema.sql DROP NOT NULL); the seeded row binds no session, so deleting a session cannot cascade-delete the auditor and a session-scoped kill-switch row never matches it.
+- **Digest content.** The digest mails applied fixes plus newly recorded findings (not every open finding), so an already-recorded same-day finding re-sends nothing.
+- **Cost statement (F1-A6).** `finalizeRun` writes run cost when a run accrued model usage; QC reads no cost because it spends none.
