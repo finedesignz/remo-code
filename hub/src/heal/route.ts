@@ -27,6 +27,7 @@ import { resolveHealTarget, type HealTarget } from './resolve.ts';
 import { parseHealEvent, outcomeToString, type HealEvent, type HealOutcome } from './types.ts';
 import type { HealSink, HealTerminalOutcome, SinkFactory } from './sinks/types.ts';
 import type { ClaimHealArgs, ClaimHealResult, HealOutcomeExtra } from '../db/heal-events-dal.ts';
+import { notifyOnce, REAL_NOTIFY_DEPS, type NotifyDeps } from './notify.ts';
 
 export interface HealDeps {
   now(): number;
@@ -38,6 +39,8 @@ export interface HealDeps {
   makeSink: SinkFactory;
   dispatch(req: DispatchRequest, deps: PipelineDeps): Promise<DispatchOutcome>;
   isChannelOnline(sessionId: string): boolean;
+  /** Owner-notification seam (07-06). Defaults to the real claim + email sender. */
+  notify?: NotifyDeps;
 }
 
 /** Real collaborators. DB-touching ones are lazy so importing this module never loads the DB. */
@@ -109,6 +112,30 @@ function buildPipelineDeps(sink: HealSink, deps: HealDeps): PipelineDeps {
 
 function errMsg(err: unknown): string {
   return (err as any)?.message ?? String(err);
+}
+
+/** Owner-visible reason for a non-dispatch outcome. */
+function outcomeReason(o: HealOutcome): string {
+  return 'reason' in o ? o.reason : o.kind;
+}
+
+/**
+ * The single finalization point for non-dispatch outcomes that have a ledger row: persist, terminalize
+ * through the sink, THEN notify the owner once (a crash between the writes still dedupes). A
+ * notification failure never changes the outcome and never throws.
+ */
+async function finalizeNonLive(
+  deps: HealDeps,
+  event: HealEvent,
+  eventId: string,
+  sink: HealSink | null,
+  outcome: HealOutcome,
+  extra: HealOutcomeExtra = {},
+): Promise<HealOutcome> {
+  await persist(deps, eventId, outcome, extra);
+  await terminalize(sink, outcome as HealTerminalOutcome);
+  const notified = await notifyOnce(eventId, event, outcomeReason(outcome), deps.notify ?? REAL_NOTIFY_DEPS);
+  return outcome.kind === 'no_routable_session' ? { ...outcome, notified } : outcome;
 }
 
 /** Heal-generated provenance of either run id. Throws on a probe error (caller fails closed). */
@@ -186,17 +213,19 @@ export async function routeHeal(input: unknown, deps: HealDeps = REAL_DEPS): Pro
         reason: target.kind === 'none' ? target.reason : 'session_offline',
         notified: false,
       };
-      await persist(deps, eventId, outcome, { repoIdent, sessionId: target.kind === 'none' ? null : target.sessionId });
-      await terminalize(sink, outcome);
-      return outcome;
+      return finalizeNonLive(deps, event, eventId, sink, outcome, {
+        repoIdent,
+        sessionId: target.kind === 'none' ? null : target.sessionId,
+      });
     }
 
     // Per-repo hourly bound (AM-F4-4): a fresh session cannot be seen by the session-keyed rate gate.
     if ((await deps.countRepoDispatches(event.user_id, target.repoIdent)) >= healMaxPerRepoHour()) {
       const outcome: HealOutcome = { kind: 'refused', reason: 'repo_rate_bound' };
-      await persist(deps, eventId, outcome, { repoIdent: target.repoIdent, sessionId: target.sessionId });
-      await terminalize(sink, outcome);
-      return outcome;
+      return finalizeNonLive(deps, event, eventId, sink, outcome, {
+        repoIdent: target.repoIdent,
+        sessionId: target.sessionId,
+      });
     }
 
     const req: DispatchRequest = {
@@ -229,22 +258,28 @@ export async function routeHeal(input: unknown, deps: HealDeps = REAL_DEPS): Pro
         outcome = { kind: 'no_routable_session', reason: 'target_went_offline', notified: false };
         break;
     }
-    await persist(deps, eventId, outcome, {
+    const extra = {
       sessionId: target.sessionId,
       repoIdent: target.repoIdent,
       dispatchRunId: result.kind === 'dispatched' ? result.runId : null,
-    });
-    if (outcome.kind !== 'dispatched_live') await terminalize(sink, outcome as HealTerminalOutcome);
-    return outcome;
+    };
+    if (outcome.kind === 'dispatched_live') {
+      await persist(deps, eventId, outcome, extra);
+      return outcome;
+    }
+    return finalizeNonLive(deps, event, eventId, sink, outcome, extra);
   } catch (err) {
     // D-06: any throw terminalizes as failed. There is NO dispatch-anyway branch.
     const outcome: HealOutcome = { kind: 'failed', reason: `heal_route_error: ${errMsg(err)}` };
     log(`route error: ${errMsg(err)}`);
-    await persist(deps, eventId, outcome);
     try {
-      await terminalize(await deps.makeSink(event, { eventId }), outcome);
+      const sink = await deps.makeSink(event, { eventId });
+      // A ledger row exists: finalize + notify once. Without one there is nothing to claim ownership on.
+      if (eventId) return await finalizeNonLive(deps, event, eventId, sink, outcome);
+      await terminalize(sink, outcome);
     } catch (sinkErr) {
       log(`no sink to terminalize route error: ${errMsg(sinkErr)}`);
+      await persist(deps, eventId, outcome);
     }
     return outcome;
   }
