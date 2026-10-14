@@ -87,7 +87,8 @@ export interface ProofGuardDeps {
 
 // ── The single-winner terminalizer ───────────────────────────────────────────
 
-function notifyFor(outcome: ProofOutcome, detail: string): Pick<NotifyInput, 'event' | 'level' | 'channels'> & { detail: string } {
+function notifyFor(outcome: ProofOutcome, detailText: string, prUrl?: string | null): Pick<NotifyInput, 'event' | 'level' | 'channels'> & { detail: string } {
+  const detail = prUrl ? `${detailText} (${prUrl})` : detailText;
   if (outcome === PROOF_SUCCESS_OUTCOME) {
     return { event: 'ship', level: 'blocking', channels: ['telegram', 'inapp', 'email', 'push'], detail: `proof succeeded: ${detail}` };
   }
@@ -142,7 +143,7 @@ export async function finishProofRun(
       pr_url: won.pr_url ?? extra.prUrl ?? null,
     }),
   );
-  const n = notifyFor(outcome, detail);
+  const n = notifyFor(outcome, detail, won.pr_url ?? extra.prUrl ?? null);
   await bestEffort('fanOut', () =>
     deps.fanOut({ userId: input.userId, sessionId: input.sessionId, event: n.event, level: n.level, detail: n.detail, channels: n.channels }),
   );
