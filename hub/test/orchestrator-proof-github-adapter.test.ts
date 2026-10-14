@@ -43,7 +43,7 @@ describe('makeProofGithub paths and normalization', () => {
       },
       [`${REPO}/compare/${SHA}...main?per_page=1`]: { status: 'ahead', ahead_by: 2, behind_by: 0 },
       [`${REPO}/pulls?state=all&sort=created&direction=desc&per_page=50`]: [
-        { number: 3, html_url: 'u3', state: 'closed', merged_at: '2026-10-02T00:00:00Z', draft: false, head: { ref: 'proof/x', sha: 'h3' }, base: { ref: 'main' } },
+        { number: 3, html_url: 'u3', state: 'closed', merged_at: '2026-10-02T00:00:00Z', draft: false, head: { ref: 'proof/x', sha: 'h3', repo: { full_name: 'Acme/Proof' } }, base: { ref: 'main' }, user: { login: 'agent-bot' }, created_at: '2026-10-01T12:00:00Z' },
         { number: 4, html_url: 'u4', state: 'open', merged_at: null, draft: true, head: { ref: 'feat/y', sha: 'h4' }, base: { ref: 'main' } },
       ],
       [`${REPO}/commits/${SHA}/check-runs?per_page=100`]: { total_count: 1, check_runs: [{ name: 'ci', status: 'completed', conclusion: 'success' }] },
@@ -62,9 +62,14 @@ describe('makeProofGithub paths and normalization', () => {
     expect(rs).toMatchObject({ id: 7, sourceType: 'Repository', enforcement: 'active', bypassActors: [], updatedAt: '2026-10-01T00:00:00Z' })
     expect(rs.rules).toEqual([{ type: 'update', parameters: null }])
     expect(await gh.compare(O, R, SHA, 'main')).toEqual({ status: 'ahead', aheadBy: 2, behindBy: 0 })
-    const pulls = await gh.listPullsWithHeadPrefix(O, R, 'proof/')
-    expect(pulls).toHaveLength(1)
-    expect(pulls[0]).toMatchObject({ number: 3, merged: true, mergedAt: '2026-10-02T00:00:00Z', headRef: 'proof/x', headSha: 'h3', baseRef: 'main', htmlUrl: 'u3' })
+    const pulls = await gh.listPulls(O, R)
+    // codex #5: off-prefix PRs are no longer dropped before the verifier can judge scope
+    expect(pulls).toHaveLength(2)
+    expect(pulls[0]).toMatchObject({
+      number: 3, merged: true, mergedAt: '2026-10-02T00:00:00Z', headRef: 'proof/x', headSha: 'h3', baseRef: 'main', htmlUrl: 'u3',
+      headRepoFullName: 'Acme/Proof', authorLogin: 'agent-bot', createdAt: '2026-10-01T12:00:00Z',
+    })
+    expect(pulls[1]).toMatchObject({ number: 4, headRef: 'feat/y', headRepoFullName: null, authorLogin: null, createdAt: null })
     expect(await gh.getCheckState(O, R, SHA)).toEqual({
       checkRuns: [{ name: 'ci', status: 'completed', conclusion: 'success' }],
       statuses: [{ context: 'lint', state: 'success' }],
