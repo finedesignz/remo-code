@@ -286,6 +286,6 @@ describe('resolveAppUuid export', () => {
     const src = readFileSync(new URL('../src/scheduler/senders/coolify.ts', import.meta.url), 'utf8')
     expect(src).toContain('export async function resolveAppUuid(')
     const load = readFileSync(new URL('../src/task-qc/load.ts', import.meta.url), 'utf8')
-    expect(load).toMatch(/import .*resolveAppUuid.* from '\.\.\/scheduler\/senders\/coolify\.ts'/)
+    expect(load).toMatch(/import\('\.\.\/scheduler\/senders\/coolify\.ts'\)/)
   })
 })
