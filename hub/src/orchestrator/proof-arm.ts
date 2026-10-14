@@ -10,6 +10,7 @@
 import { assertAgentNotAdmin, assertGithubPermissions, evaluateProtection } from './proof-protection.ts';
 import type { ProofGithub, ProofRun } from './proof-types.ts';
 import type { ArmProofRunArgs } from '../db/orchestrator-proof-dal.ts';
+import { canonicalGithubRepoIdent } from '../lib/repo-key.ts';
 
 export type ArmRefusalCode =
   | 'github_app_unconfigured'
@@ -122,7 +123,11 @@ function explainProtectionDetail(detail: string): string {
   return detail;
 }
 
-export async function armProof(args: ArmProofArgs, deps: ProofArmDeps): Promise<ArmProofResult> {
+export async function armProof(rawArgs: ArmProofArgs, deps: ProofArmDeps): Promise<ArmProofResult> {
+  // QC round 1 (codex #6): ONE canonical (lowercase) repo identity for everything below - session
+  // comparison, allowlist, summary, the frozen proof row and the merge-refusal lookup.
+  const canonicalIdent = canonicalGithubRepoIdent(rawArgs.repoIdent);
+  const args: ArmProofArgs = canonicalIdent ? { ...rawArgs, repoIdent: canonicalIdent } : rawArgs;
   // 1. GitHub App configured.
   if (!deps.isGithubAppConfigured()) {
     return refuse('github_app_unconfigured', 'the GitHub App is not configured on this host (no app id/key); the proof cannot verify protection');
@@ -163,7 +168,7 @@ export async function armProof(args: ArmProofArgs, deps: ProofArmDeps): Promise<
 
   // 5. The session is this user's and is bound to exactly this repo.
   const session = await deps.getSession(args.sessionId);
-  if (!session || session.user_id !== args.userId || session.repo_key !== args.repoIdent) {
+  if (!session || session.user_id !== args.userId || (canonicalGithubRepoIdent(session.repo_key) ?? session.repo_key) !== args.repoIdent) {
     return refuse('session_repo_mismatch', `session ${args.sessionId} is missing, not this user's, or its repo_key is not ${args.repoIdent}`);
   }
 
@@ -212,8 +217,9 @@ export async function armProof(args: ArmProofArgs, deps: ProofArmDeps): Promise<
 
   // 10. Exactly-one allowlist invariant (re-checked authoritatively inside the arm transaction).
   const allowlist = await deps.listAllowlist(args.userId);
-  if (allowlist.some((r) => r !== args.repoIdent)) {
-    return refuse('other_repo_allowlisted', `the autospawn allowlist already holds another repo (${allowlist.filter((r) => r !== args.repoIdent).length}); it must be empty or exactly the target`);
+  const sameRepo = (r: string) => (canonicalGithubRepoIdent(r) ?? r) === args.repoIdent;
+  if (allowlist.some((r) => !sameRepo(r))) {
+    return refuse('other_repo_allowlisted', `the autospawn allowlist already holds another repo (${allowlist.filter((r) => !sameRepo(r)).length}); it must be empty or exactly the target`);
   }
 
   // 11. Exclusivity (QC round 1): the hub flags are global, so any OTHER enabled orchestrator

@@ -1712,6 +1712,13 @@ DO $$ BEGIN
   ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_status_check
     CHECK (status IN ('armed','running','succeeded','nothing','terminated','disarmed'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- QC r1 (codex #6): GitHub owner/repo names are case-insensitive; the ident is stored canonical
+-- (lowercase) so the plain unique indexes below are single-flight over the canonical value. NOT VALID:
+-- enforced for every new/updated row, never fails the boot on a pre-existing row.
+DO $$ BEGIN
+  ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_repo_ident_canonical_check
+    CHECK (repo_ident = lower(repo_ident)) NOT VALID;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE orchestrator_proof_runs ADD CONSTRAINT orchestrator_proof_runs_max_injects_check
     CHECK (max_injects > 0);

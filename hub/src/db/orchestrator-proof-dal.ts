@@ -8,6 +8,7 @@
 import { sql } from './postgres.ts';
 import type { ProofOutcome, ProofRun, TerminalProofStatus } from '../orchestrator/proof-types.ts';
 import { outcomeToStatus, PROOF_BRANCH_PREFIX } from '../orchestrator/proof-types.ts';
+import { canonicalGithubRepoIdent } from '../lib/repo-key.ts';
 
 /**
  * THE atomic find-and-claim: armed -> running (idempotent for an already running
@@ -148,7 +149,12 @@ async function assertNoOtherEnabledOrchestratorTask(tx: any, taskId: string): Pr
  * frozen proof row atomically. Any throw rolls everything back. The DAL never flips a
  * flag or sets a cap (D-05): the budgets arrive frozen in `args`.
  */
-export async function armProofRunTx(args: ArmProofRunArgs): Promise<{ run: ProofRun; taskId: string }> {
+export async function armProofRunTx(rawArgs: ArmProofRunArgs): Promise<{ run: ProofRun; taskId: string }> {
+  // QC round 1 (codex #6): the repo identity is stored in ONE canonical (lowercase) form, so the
+  // unique indexes and every equality lookup agree on what "the same repo" means.
+  const repoIdent = canonicalGithubRepoIdent(rawArgs.repoIdent);
+  if (!repoIdent) throw new Error('repo_ident_not_canonical');
+  const args: ArmProofRunArgs = { ...rawArgs, repoIdent };
   try {
     return await (sql as any).begin(async (tx: any) => {
       await tx`SELECT pg_advisory_xact_lock(hashtext(${proofLockKey(args.userId)})::bigint)`;
@@ -156,7 +162,7 @@ export async function armProofRunTx(args: ArmProofRunArgs): Promise<{ run: Proof
       const allow = (await tx`
         SELECT repo_ident FROM orchestrator_autospawn_allowlist WHERE user_id = ${args.userId}
       `) as Array<{ repo_ident: string }>;
-      if (allow.some((r) => r.repo_ident !== args.repoIdent)) throw new ProofStateError('other_repo_allowlisted');
+      if (allow.some((r) => (canonicalGithubRepoIdent(r.repo_ident) ?? r.repo_ident) !== args.repoIdent)) throw new ProofStateError('other_repo_allowlisted');
 
       const active = (await tx`
         SELECT id FROM orchestrator_proof_runs
@@ -326,9 +332,12 @@ export async function findProofRunForRequest(args: { requestKey?: string | null;
 
 /** The armed/running run for a repo (merge-routing refusal, plan 05-05). */
 export async function findActiveProofRunForRepo(repoIdent: string): Promise<ProofRun | null> {
+  // Stored idents are canonical (armProofRunTx + the CHECK); canonicalize the lookup the same way.
+  const canonical = canonicalGithubRepoIdent(repoIdent);
+  if (!canonical) return null; // not a github repo: no proof row can own it
   const rows = await sql<ProofRun[]>`
     SELECT * FROM orchestrator_proof_runs
-    WHERE repo_ident = ${repoIdent} AND status IN ('armed','running') LIMIT 1
+    WHERE repo_ident = ${canonical} AND status IN ('armed','running') LIMIT 1
   `;
   return rows[0] ?? null;
 }
