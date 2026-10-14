@@ -57,6 +57,8 @@ export interface ProofFakeState {
   unknown: string[]
   beginCalls: number
   lockCalls: number
+  /** the hashtext key of every advisory lock taken, in order */
+  lockKeys: string[]
 }
 
 const ACTIVE = new Set(['armed', 'running'])
@@ -83,6 +85,7 @@ export function createProofFakeSql() {
     unknown: [],
     beginCalls: 0,
     lockCalls: 0,
+    lockKeys: [],
   }
   let idn = 0
   const nid = (p: string) => `${p}${++idn}`
@@ -305,11 +308,36 @@ export function createProofFakeSql() {
   }
   const sql: any = tag
   sql.json = (v: unknown) => v
+  // Real advisory-lock semantics: pg_advisory_xact_lock(hashtext(K)) blocks until the holder's
+  // transaction ends. Keyed by the text value, so two txs only exclude each other on the SAME key.
+  const lockChains = new Map<string, Promise<void>>()
+  async function acquire(key: string): Promise<() => void> {
+    const prev = lockChains.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const mine = new Promise<void>((r) => (release = r))
+    lockChains.set(key, prev.then(() => mine))
+    await prev
+    return release
+  }
   sql.begin = async (fn: (tx: any) => Promise<any>) => {
     state.beginCalls++
-    const snap = structuredClone({ runs: state.runs, tasks: state.tasks, rows: state.rows, allow: state.allow, kill: state.kill, queue: state.queue })
+    const held: Array<() => void> = []
+    const take = () => structuredClone({ runs: state.runs, tasks: state.tasks, rows: state.rows, allow: state.allow, kill: state.kill, queue: state.queue })
+    let snap = take()
     try {
-      const tx: any = tag
+      const tx: any = (strings: TemplateStringsArray, ...values: any[]) => {
+        if (strings.join('?').includes('pg_advisory_xact_lock')) {
+          state.lockCalls++
+          state.lockKeys.push(String(values[0]))
+          state.statements.push(strings.join('?').replace(/\s+/g, ' '))
+          return acquire(String(values[0])).then((rel) => {
+            held.push(rel)
+            snap = take() // a real tx sees the state committed by the previous lock holder
+            return []
+          })
+        }
+        return tag(strings, ...values)
+      }
       tx.json = sql.json
       return await fn(tx)
     } catch (err) {
@@ -320,6 +348,8 @@ export function createProofFakeSql() {
       state.kill = snap.kill
       state.queue = snap.queue
       throw err
+    } finally {
+      for (const rel of held) rel()
     }
   }
   return { sql, state }
