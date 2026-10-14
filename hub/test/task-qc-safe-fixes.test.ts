@@ -158,3 +158,164 @@ describe('buildRollbackSql', () => {
     expect(() => buildRollbackSql('disable_task' as any, 't1', {}, {})).toThrow()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Transaction behaviour (Task 2)
+// ---------------------------------------------------------------------------
+const baseRow = (over: Record<string, unknown> = {}) => ({
+  id: 't1',
+  user_id: 'u1',
+  name: 'nightly',
+  task_type: 'dev',
+  enabled: true,
+  schedule_kind: 'cron',
+  timezone: 'Mars/Base',
+  payload: {},
+  session_id: 's-old',
+  target_kind: 'session',
+  target_id: 's-old',
+  ...over,
+})
+
+function setup(row: Record<string, unknown> | null, opts: { ownOpen?: boolean; sharedOpen?: boolean } = {}) {
+  const fake = createTaskQcFakeSql()
+  fake.on('FOR UPDATE', row ? [row] : [])
+  fake.on(/FROM scheduled_task_runs WHERE task_id/, opts.ownOpen ? [{ open: 1 }] : [])
+  fake.on(/FROM scheduled_task_runs WHERE session_id/, opts.sharedOpen ? [{ open: 1 }] : [])
+  fake.on(/UPDATE scheduled_tasks SET timezone/, (v) => [{ timezone: v[0] }])
+  fake.on(/UPDATE scheduled_tasks SET payload/, (v) => [{ payload: { ...((row?.payload as object) ?? {}), application_uuid: v[0] } }])
+  fake.on(/UPDATE scheduled_tasks SET session_id/, (v) => [
+    {
+      session_id: row?.session_id === v[0] ? v[1] : row?.session_id,
+      target_id: row?.target_id === v[0] ? v[1] : row?.target_id,
+    },
+  ])
+  fake.on('INSERT INTO task_qc_findings', [{ id: 'f1' }])
+  return fake
+}
+
+const kinds = (fake: ReturnType<typeof createTaskQcFakeSql>) => fake.state.statements.map((s) => s.kind + (s.forUpdate ? ':forupdate' : ''))
+
+describe('applyFix transaction', () => {
+  test('timezone fix: one begin, lock then in-flight then update then insert, all in tx 1', async () => {
+    const fake = setup(baseRow())
+    const r = await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
+    expect(r.status).toBe('applied')
+    expect(fake.state.beginCalls).toBe(1)
+    expect(kinds(fake)).toEqual(['select:forupdate', 'select', 'select', 'update', 'insert'])
+    expect(fake.state.statements.every((s) => s.tx === 1)).toBe(true)
+    // lock is scoped by id AND user
+    expect(fake.state.statements[0]!.text).toContain('id = ? AND user_id = ?')
+    expect(fake.state.statements[0]!.values).toEqual(['t1', 'u1'])
+    fake.assertNoUnknown()
+  })
+
+  test('applied result: rowsWritten 2, before/after over the changed column, guarded rollback, audit row fields', async () => {
+    const fake = setup(baseRow())
+    const r: any = await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
+    expect(r.rowsWritten).toBe(2)
+    expect(r.before).toEqual({ timezone: 'Mars/Base' })
+    expect(r.after).toEqual({ timezone: 'UTC' })
+    expect(r.rollbackSql).toBe(`UPDATE scheduled_tasks SET timezone = 'Mars/Base' WHERE id = 't1' AND timezone IS NOT DISTINCT FROM 'UTC'`)
+    const ins = fake.state.statements.find((s) => s.kind === 'insert')!
+    expect(ins.values).toContain('auto_fixed')
+    expect(ins.values).toContain('normalize_timezone')
+    expect(ins.values).toContain(r.rollbackSql)
+    expect(ins.values).toContain('{"timezone":"Mars/Base"}')
+    expect(ins.values).toContain('{"timezone":"UTC"}')
+    expect(fake.state.updatesTo('scheduled_tasks').length).toBe(1)
+  })
+
+  test('payload backfill writes only application_uuid and records a null before', async () => {
+    const fake = setup(baseRow({ task_type: 'log_check', payload: { keep: 1 }, timezone: 'UTC' }))
+    const r: any = await applyFix(fake.sql, { kind: 'backfill_payload_from_sibling', applicationUuid: 'abc' }, CTX)
+    expect(r.status).toBe('applied')
+    expect(r.before).toEqual({ application_uuid: null })
+    expect(r.after).toEqual({ application_uuid: 'abc' })
+    expect(r.rollbackSql).toContain("payload - 'application_uuid'")
+    const upd = fake.state.updatesTo('scheduled_tasks')[0]!
+    expect(upd.text).toContain("jsonb_build_object('application_uuid'")
+    expect(upd.values).toEqual(['abc', 't1', 'u1'])
+  })
+
+  test('session rebind rewrites session_id and target_id only where they equal the old id', async () => {
+    const fake = setup(baseRow({ timezone: 'UTC', target_id: 's-old', session_id: 's-old' }))
+    const r: any = await applyFix(fake.sql, { kind: 'rebind_dead_session', oldSessionId: 's-old', newSessionId: 's-new' }, CTX)
+    expect(r.status).toBe('applied')
+    expect(r.after).toEqual({ session_id: 's-new', target_id: 's-new' })
+    expect(r.before).toEqual({ session_id: 's-old', target_id: 's-old' })
+    expect(r.rollbackSql).toContain("SET session_id = 's-old', target_id = 's-old'")
+    const upd = fake.state.updatesTo('scheduled_tasks')[0]!
+    expect(upd.text).toContain('CASE WHEN session_id = ? THEN ? ELSE session_id END')
+  })
+
+  test.each([
+    ['disabled row', baseRow({ enabled: false })],
+    ['internal anchor', baseRow({ name: '__internal_nightly' })],
+    ['task_qc row', baseRow({ task_type: 'task_qc' })],
+    ['orchestrator row', baseRow({ task_type: 'orchestrator' })],
+    ['once schedule', baseRow({ schedule_kind: 'once' })],
+    ['vanished row', null],
+  ])('%s is refused_not_auditable: no update, no finding row', async (_n, row) => {
+    const fake = setup(row as any)
+    const r = await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
+    expect(r.status).toBe('refused_not_auditable')
+    expect(r.rowsWritten).toBe(0)
+    expect(fake.state.writes().length).toBe(0)
+    expect(kinds(fake)).toEqual(['select:forupdate'])
+  })
+
+  test.each([
+    ['timezone now valid', baseRow({ timezone: 'America/Los_Angeles' }), { kind: 'normalize_timezone', timezone: 'UTC' }],
+    ['payload now has a uuid', baseRow({ task_type: 'log_check', payload: { application_uuid: 'zzz' } }), { kind: 'backfill_payload_from_sibling', applicationUuid: 'abc' }],
+    ['session id moved on', baseRow({ session_id: 's-other', target_id: 's-other' }), { kind: 'rebind_dead_session', oldSessionId: 's-old', newSessionId: 's-new' }],
+    ['payload fix on a non log task', baseRow({ task_type: 'dev' }), { kind: 'backfill_payload_from_sibling', applicationUuid: 'abc' }],
+  ])('precondition changed (%s) is noop_changed with no write', async (_n, row, fix) => {
+    const fake = setup(row as any)
+    const r = await applyFix(fake.sql, fix as any, CTX)
+    expect(r.status).toBe('noop_changed')
+    expect(fake.state.writes().length).toBe(0)
+  })
+
+  test('a throw from the UPDATE propagates, the finding insert never runs, no retry', async () => {
+    const fake = setup(baseRow())
+    fake.failOn(/UPDATE scheduled_tasks SET timezone/, new Error('boom'))
+    await expect(applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)).rejects.toThrow('boom')
+    expect(fake.state.statements.filter((s) => s.kind === 'insert').length).toBe(0)
+    expect(fake.state.updatesTo('scheduled_tasks').length).toBe(1)
+    expect(fake.state.beginCalls).toBe(1)
+  })
+
+  test('a throw from the finding insert propagates out of the transaction', async () => {
+    const fake = setup(baseRow())
+    fake.failOn('INSERT INTO task_qc_findings', new Error('insert failed'))
+    await expect(applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)).rejects.toThrow('insert failed')
+    expect(fake.state.beginCalls).toBe(1)
+  })
+
+  test('an audit insert that conflicts aborts the transaction instead of leaving an unaudited write', async () => {
+    const fake = createTaskQcFakeSql()
+    fake.on('FOR UPDATE', [baseRow()])
+    fake.on(/FROM scheduled_task_runs/, [])
+    fake.on(/UPDATE scheduled_tasks SET timezone/, [{ timezone: 'UTC' }])
+    fake.on('INSERT INTO task_qc_findings', [])
+    await expect(applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)).rejects.toThrow('audit row not inserted')
+  })
+
+  test('invalid fix arguments throw before the transaction opens', async () => {
+    const fake = setup(baseRow())
+    await expect(applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'Not/AZone' }, CTX)).rejects.toThrow('invalid fix arguments')
+    await expect(applyFix(fake.sql, { kind: 'rebind_dead_session', oldSessionId: 'a', newSessionId: 'a' }, CTX)).rejects.toThrow('invalid fix arguments')
+    await expect(applyFix(fake.sql, { kind: 'backfill_payload_from_sibling', applicationUuid: '' }, CTX)).rejects.toThrow('invalid fix arguments')
+    expect(fake.state.statements.length).toBe(0)
+    expect(fake.state.beginCalls).toBe(0)
+  })
+
+  test('two fixes for one task: each begins its own transaction and its statements are contiguous', async () => {
+    const fake = setup(baseRow())
+    await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
+    await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
+    expect(fake.state.beginCalls).toBe(2)
+    expect(fake.state.statements.map((s) => s.tx)).toEqual([1, 1, 1, 1, 1, 2, 2, 2, 2, 2])
+  })
+})
