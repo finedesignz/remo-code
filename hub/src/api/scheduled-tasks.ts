@@ -314,6 +314,11 @@ scheduledTasks.post('/', async (c) => {
   }
   const data = parsed.data
 
+  // PTYCAP-08 F2-B5/D-25: task_qc is system-owned; only the boot seed creates it.
+  if (data.task_type === 'task_qc') {
+    return c.json({ error: 'task_qc_machine_seeded' }, 400)
+  }
+
   // ── Milestone once: one-time task branch ───────────────────────────────────
   // A 'once' task carries no cron; it needs a valid `run_at` and reuses the
   // whole downstream pipeline verbatim. Handled up-front so the cron/rule
@@ -605,6 +610,8 @@ scheduledTasks.delete('/:id', async (c) => {
   const id = c.req.param('id')
   const existing = await getTask(id, userId)
   if (!existing) return c.json({ error: 'not_found' }, 404)
+  // PTYCAP-08 F2-B5: the auditor row is never deletable (owner may disable it).
+  if (existing.task_type === 'task_qc') return c.json({ error: 'task_qc_system_task' }, 409)
   registry.unregister(id)
   await deleteTask(id, userId)
   return c.json({ ok: true })
