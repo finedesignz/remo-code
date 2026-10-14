@@ -293,7 +293,7 @@ export async function runMacroCycle(
 
     // PTYCAP-05: record what the proof inject did (best-effort; the hook never throws).
     if (proofRun && proofHooks) {
-      try { await proofHooks.observeInject(proofRun, outcome.kind); } catch { /* best-effort */ }
+      try { await proofHooks.observeInject(proofRun, outcome, proofGuardInput ?? undefined); } catch { /* best-effort */ }
     }
 
     // OBSRV-03: dispatch-outcome counter + skip-reason on non-dispatch outcomes.

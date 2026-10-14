@@ -154,13 +154,19 @@ export type ProofGuardDecision =
 
 export type ProofDecisionKind = ProofGuardDecision['kind'];
 
+/** What the inject seam returned (a structural subset of InjectOutcome: kind plus an optional refusal reason). */
+export interface ProofInjectOutcome {
+  kind: string;
+  reason?: string;
+}
+
 /** Injectable seam: macro-cycle only ever talks to the proof code through this. */
 export interface ProofCycleHooks {
   guard: (input: ProofGuardInput) => Promise<ProofGuardDecision>;
   /** Render the proof prompt from the CLAIMED snapshot (throws unless it is running). */
   render: (run: ProofRun) => string;
-  /** Best-effort: persist what the inject did (never throws). */
-  observeInject: (run: ProofRun, outcomeKind: string) => Promise<void>;
+  /** Best-effort: persist what the inject did and map refusals onto the closed outcome sets (never throws). */
+  observeInject: (run: ProofRun, outcome: ProofInjectOutcome | string, input?: ProofGuardInput) => Promise<void>;
   /** End a claimed run when the cycle itself failed after the claim (never throws). */
   abort: (run: ProofRun, reason: NothingReason, detail: string, input: ProofGuardInput) => Promise<void>;
 }
