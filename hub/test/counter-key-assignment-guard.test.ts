@@ -19,6 +19,7 @@ const ALLOWED = new Set([
   'scheduler/senders/agent.ts', //      task:<scheduled_tasks.id>
   'scheduler/senders/triage.ts', //     triage:<application_uuid>
   'api/sessions.ts', //                 POST /heal reserves heal:<userId>:<repo> (04-07, panel F-2); server-set from the validated repo, never a DispatchRequest
+  'heal/route.ts', //                   the heal seam assigns the lifetime key from the shared buildHealKey (07-05, AM-F4-3)
 ])
 
 // property (`counterKey: x`, `counterKey?: x`), shorthand (`{ counterKey }`), member (`.counterKey = x`)
