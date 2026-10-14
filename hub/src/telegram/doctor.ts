@@ -325,6 +325,8 @@ export async function runDoctor(opts: DoctorOpts): Promise<{ outcome: DoctorOutc
           updateId: replayUpdateId as any,
           text: buffered.text,
           images: buffered.images,
+          // Replay of a message buffered by the authenticated webhook (linked human user).
+          source: 'human',
         })
       } catch (err: any) {
         await safeSay(chatId, `⚠ Launch complete but replay failed: ${err?.message ?? 'unknown'}`)

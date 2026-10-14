@@ -9,6 +9,7 @@
  * + per-repo). All queries are scoped by user_id.
  */
 import { sql } from './postgres.ts'
+import { usageAttributionLostSince } from '../usage/attribution-loss.ts'
 
 export interface TokenUsageInput {
   userId: string
@@ -25,6 +26,19 @@ export interface TokenUsageInput {
    *  is deliberately NOT split by runner_type — it stays a combined-bucket cache
    *  for the cost cap; the per-runner split lives in the precise ledger table. */
   runnerType?: 'stream-json' | 'pty-interactive' | 'cloud'
+  /** PTYCAP-05: per-turn id shared with the turn's assistant message (nullable, additive). */
+  turnId?: string | null
+}
+
+/**
+ * PTYCAP-04-05: single-slot listener invoked (fire-and-forget) after the ledger commit.
+ * Registered at boot by observability/token-cap-alarm.ts; absent in every unit test, so
+ * recordTokenUsage issues exactly its two statements and nothing else (F-7).
+ */
+type TokenUsageListener = (u: TokenUsageInput) => void | Promise<unknown>
+let tokenUsageListener: TokenUsageListener | null = null
+export function setTokenUsageListener(fn: TokenUsageListener | null): void {
+  tokenUsageListener = fn
 }
 
 /**
@@ -41,12 +55,12 @@ export async function recordTokenUsage(u: TokenUsageInput): Promise<{ id: string
       user_id, session_id, model,
       input_tokens, output_tokens,
       cache_creation_input_tokens, cache_read_input_tokens,
-      cost_usd, cost_source, runner_type
+      cost_usd, cost_source, runner_type, turn_id
     ) VALUES (
       ${u.userId}, ${u.sessionId}, ${model},
       ${u.inputTokens}, ${u.outputTokens},
       ${u.cacheCreationInputTokens}, ${u.cacheReadInputTokens},
-      ${u.costUsd}, ${u.costSource}, ${runnerType}
+      ${u.costUsd}, ${u.costSource}, ${runnerType}, ${u.turnId ?? null}
     )
     RETURNING id
   `
@@ -70,6 +84,16 @@ export async function recordTokenUsage(u: TokenUsageInput): Promise<{ id: string
       cost_usd                    = token_usage_daily.cost_usd + EXCLUDED.cost_usd,
       updated_at                  = now()
   `
+  const listener = tokenUsageListener
+  if (listener) {
+    // Never awaited, never allowed to change the ledger result: swallow both a
+    // synchronous throw and a rejected promise.
+    try {
+      Promise.resolve(listener(u)).catch(() => {})
+    } catch {
+      /* swallowed */
+    }
+  }
   return rows[0]!
 }
 
@@ -218,6 +242,54 @@ export async function getTodayTokenTotal(userId: string, timezone: string): Prom
       AND created_at >= date_trunc('day', now() AT TIME ZONE ${tz}) AT TIME ZONE ${tz}
   `
   return Number(rows[0]?.sum ?? 0)
+}
+
+/**
+ * PTYCAP-05 (F2-3) - one session's token total since `since`, all FOUR buckets, plus
+ * whether the session row still exists. token_usage.session_id is ON DELETE SET NULL,
+ * so a deleted session silently loses attribution (tokens read 0): callers MUST treat
+ * `sessionExists === false` (or `attributionLost`, set when a usage_event for this session
+ * failed to persist inside the window) as attribution lost and fail closed.
+ */
+export async function sumSessionTokensSince(
+  sessionId: string,
+  since: Date | string,
+): Promise<{ tokens: number; sessionExists: boolean; attributionLost?: true }> {
+  const rows = await sql<{ sum: string | null; session_exists: boolean }[]>`
+    SELECT COALESCE(SUM(
+      input_tokens + output_tokens
+      + cache_creation_input_tokens + cache_read_input_tokens
+    ), 0)::text AS sum,
+    EXISTS (SELECT 1 FROM sessions WHERE id = ${sessionId}) AS session_exists
+    FROM token_usage
+    WHERE session_id = ${sessionId} AND created_at >= ${since}
+  `
+  const out: { tokens: number; sessionExists: boolean; attributionLost?: true } = {
+    tokens: Number(rows[0]?.sum ?? 0),
+    sessionExists: rows[0]?.session_exists === true,
+  }
+  // QC round 1 (codex #4): a usage_event that failed to persist leaves the sum UNDER-counted while
+  // the session row still exists - the caller must treat that exactly like a deleted session.
+  if (usageAttributionLostSince(sessionId, since)) out.attributionLost = true
+  // QC round 2/3 (codex #4): the in-process mark above is forgotten on restart and evicted past 1000
+  // sessions, so attribution is ALSO derived from the database. PER-TURN correlation (repair round):
+  // every completed assistant message in [since, now - grace) must have a token_usage row carrying
+  // the SAME (session_id, turn_id). An aggregate count could be masked by an extra row from another
+  // turn; a per-turn anti-join cannot. A message with no turn_id (older supervisor, un-correlatable)
+  // has no matching row by construction and fails closed. The grace window keeps a usage_event that
+  // is merely in flight right behind its assistant_message from reading as a loss.
+  const gap = await sql<{ unmatched_turns: string | null }[]>`
+    SELECT COUNT(*)::text AS unmatched_turns
+    FROM messages m
+    WHERE m.session_id = ${sessionId} AND m.role = 'assistant' AND m.status = 'complete'
+      AND m.created_at >= ${since} AND m.created_at < now() - interval '120 seconds'
+      AND NOT EXISTS (
+        SELECT 1 FROM token_usage tu
+        WHERE tu.session_id = m.session_id AND m.turn_id IS NOT NULL AND tu.turn_id = m.turn_id
+      )
+  `
+  if (Number(gap[0]?.unmatched_turns ?? 0) > 0) out.attributionLost = true
+  return out
 }
 
 /**

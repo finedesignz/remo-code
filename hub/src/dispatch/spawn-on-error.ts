@@ -231,6 +231,22 @@ export async function ensureSessionOnline(
     // ceiling (applied = requested && allowed), so opting in can never exceed
     // what the operator already permitted for that host.
     const skipPerms = opts.useSessionSkipPermissions ? sessionSkipPerms : false
+    // QC B1: ensureOnline is a MACHINE adapter (error-capture / feedback / revanote lists).
+    // The pipeline's gate list ran before the awaits above; re-read the kill switch fresh
+    // immediately before the session.start. A halt closes the run + frees the slot (same
+    // unwind as a failed send) and reports "not online" so the pipeline parks/skips.
+    {
+      const { haltBeforeMachineSend } = await import('./automation-controls.ts')
+      const pre = await haltBeforeMachineSend({ userId, sessionId })
+      if (!pre.ok) {
+        try {
+          await endRun(runId, null, pre.reason)
+        } catch {}
+        await releaseSessionSlot(userId, supervisorId)
+        log.warn('spawn_on_error.halted', { user_id: userId, session_id: sessionId, reason: pre.reason })
+        return false
+      }
+    }
     try {
       sendToSupervisor(supervisorId, {
         type: 'session.start',

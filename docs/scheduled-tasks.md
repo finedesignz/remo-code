@@ -399,7 +399,7 @@ THIN adapter that reconstructs the input from `work_runs` + `payload` and calls 
   route, so a forbidden repo/site/sender still `403`s with ZERO rows and ZERO
   spend — a one-time task can never reach a repo the allowlist forbids. At RUN
   time, `dispatchWork`'s own non-negotiable gate list (`dailyCostCapGate` ·
-  `dailyTokenCapGate` · `humanOnlyPtyGate` · `workRateGate` ·
+  `dailyTokenCapGate` · `governedAutomationPtyGate` (formerly humanOnlyPtyGate; flag REMO_GOVERNED_AUTOMATION_PTY, default OFF; external-ask/external-work are never PTY-eligible) · `workRateGate` ·
   `workRepoAllowlistGate`) runs again. **No scheduling path reaches a repo/site
   that direct dispatch couldn't.** Proven by `test/ext-work-containment.test.ts`
   (b) + `test/ext-work-gates.test.ts` + `test/once-work-sender.test.ts`.
@@ -473,7 +473,9 @@ Bounds stop a task cleanly and **auto-disable** it:
 - `until` — stop at/after an absolute instant.
 - `max_runs` — stop after N **total** fires (any status: a skipped/quota-capped
   fire still consumes a slot; counted via `countFiresForTask` = `COUNT(*)` of
-  `scheduled_task_runs` for the task).
+  `scheduled_task_runs` for the task), EXCEPT runs the kill switch refused
+  (`status='skipped'`, `error` starting `automation_halted:`): nothing was attempted,
+  so a halt can never exhaust a bounded task (PTYCAP-04).
 - `for: {count, unit}` — convenience, **normalized to `until = start_at +
   count*unit` at save time** (`normalizeRulesForStorage` in the API create/patch
   handlers). Storage only ever carries `until`; the editor re-derives the

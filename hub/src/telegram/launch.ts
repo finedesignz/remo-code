@@ -23,6 +23,7 @@ import {
 } from '../db/supervisor-dal.ts'
 import { reserveSessionSlot } from '../sessions/budget.ts'
 import { getSessionSkipPermissions } from '../db/dal.ts'
+import { isAutomationHalted, haltBeforeMachineSend } from '../dispatch/automation-controls.ts'
 import {
   isSupervisorOnline,
   sendToSupervisor,
@@ -38,6 +39,7 @@ export type LaunchResult =
   | { ok: false; reason: 'at_capacity'; running: number; cap: number }
   | { ok: false; reason: 'send_failed'; error: string }
   | { ok: false; reason: 'internal_error'; error: string }
+  | { ok: false; reason: `automation_halted:${string}` }
 
 interface SessionRow {
   id: string
@@ -82,8 +84,20 @@ async function pickSupervisorForSession(
 export async function launchSessionForUser(args: {
   userId: string
   sessionId: string
+  /**
+   * PTYCAP-04-07 (D-09b): machine-origin marker. ONLY machine callers (orchestrator
+   * autospawn, scheduler agent lazy launch, ask / work ensureOnline) pass `true`; when
+   * set, the kill switch is consulted FIRST. Human callers (Telegram /doctor and
+   * commands) omit it and are NEVER blocked by the switch (the predicate is not even
+   * consulted). Pinned by test/launch-callers-guard.test.ts.
+   */
+  machine?: true
 }): Promise<LaunchResult> {
   try {
+    if (args.machine) {
+      const halt = await isAutomationHalted({ userId: args.userId, sessionId: args.sessionId })
+      if (halt.halted) return { ok: false, reason: `automation_halted:${halt.scope}` }
+    }
     const rows = await sql<SessionRow[]>`
       SELECT id, project_dir, hostname, is_orchestrator
         FROM sessions
@@ -100,7 +114,12 @@ export async function launchSessionForUser(args: {
     // session.start would spawn a non-orchestrator Claude with no hub key.
     if (session.is_orchestrator) {
       const { launchOrchestrator } = await import('../orchestrator/auto-launch.ts')
-      const res = await launchOrchestrator({ userId: args.userId, requireEnabled: true, skipIfRunning: true })
+      const res = await launchOrchestrator({
+        userId: args.userId,
+        requireEnabled: true,
+        skipIfRunning: true,
+        ...(args.machine ? { machine: true as const } : {}),
+      })
       if (res.ok) {
         return { ok: true, runId: res.runId, supervisorId: res.supervisorId, hostname: '', repoPath: res.cwd }
       }
@@ -117,6 +136,8 @@ export async function launchSessionForUser(args: {
           return { ok: false, reason: 'send_failed', error: res.error }
         case 'disabled':
           return { ok: false, reason: 'session_not_found' }
+        case 'automation_halted':
+          return { ok: false, reason: 'automation_halted:user' }
         default:
           return { ok: false, reason: 'internal_error', error: res.error }
       }
@@ -167,6 +188,21 @@ export async function launchSessionForUser(args: {
     await updateSupervisorState(pick.supervisorId, 'starting', run.id)
 
     const skipPerms = await getSessionSkipPermissions(session.id, args.userId)
+    // QC B1: fresh kill-switch read immediately before the machine session.start. The check
+    // at the top of this function predates the session lookup, supervisor pick and slot
+    // reservation. A halt closes the run row the reservation just opened (frees the slot).
+    if (args.machine) {
+      const pre = await haltBeforeMachineSend({ userId: args.userId, sessionId: args.sessionId })
+      if (!pre.ok) {
+        try {
+          const { endRun } = await import('../db/supervisor-dal.ts')
+          await endRun(run.id, null, pre.reason)
+        } catch (err: any) {
+          console.error(`[telegram-launch] halt unwind endRun failed run=${run.id}: ${err?.message ?? err}`)
+        }
+        return { ok: false, reason: `automation_halted:${pre.scope}` }
+      }
+    }
     try {
       sendToSupervisor(pick.supervisorId, {
         type: 'session.start',

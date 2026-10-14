@@ -69,6 +69,7 @@ import {
   type RunStore,
 } from '../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate } from '../dispatch/gates.ts'
+import { automationKillSwitchGate } from '../dispatch/automation-controls.ts'
 import { ensureSessionOnline } from '../dispatch/spawn-on-error.ts'
 
 export type DispatchOutcome =
@@ -314,7 +315,7 @@ export async function dispatchAnnotationRow(ann: AnnotationRow): Promise<Dispatc
     // IR-1: cost-cap non-bypassable. IR-2: threshold → cost-cap → revanote-budget.
     // sessionInjectRateGate: an annotation flood must not drive N turns/hour into the
     // bound session — a rate ceiling, not just a $ / token one.
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate, revanoteBudgetGate(userId, tz)],
+    gates: [automationKillSwitchGate, thresholdGate, dailyCostCapGate, dailyTokenCapGate, sessionInjectRateGate, revanoteBudgetGate(userId, tz)],
     store,
     // Bounded terminal fallback for `store.shouldFinalize` above: a session
     // that never emits the envelope still resolves (as an honest parse

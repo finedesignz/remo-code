@@ -51,13 +51,13 @@ afterEach(() => {
 })
 
 describe('daily token cap — cache-dominated day', () => {
-  test('a day that is ~all cache_read trips the 50M default cap', async () => {
+  test('a day that is ~all cache_read trips the 20M default cap', async () => {
     // The incident shape: 214K real I/O tokens, 2.83B cache_read. The old
     // I/O-only sum (214_000) was nowhere near the cap; the all-buckets sum is.
     state.tokens = 214_000 + 2_830_000_000
     const r = await dailyTokenCapGate.check(req)
     expect(r.ok).toBe(false)
-    expect((r as { reason: string }).reason).toBe('over_daily_token_cap:2830214000>=50000000')
+    expect((r as { reason: string }).reason).toBe('over_daily_token_cap:2830214000>=20000000')
   })
 
   test('the same day counted I/O-only (pre-fix) would NOT have tripped', async () => {

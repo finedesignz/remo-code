@@ -2,7 +2,7 @@
  * Milestone ASK — the gate contract for the external ask path.
  *
  * IR-1 / BSA-04: the ask dispatch MUST ride the non-bypassable daily COST cap AND
- * daily TOKEN cap, the human-only-PTY guard (the actor is server-inferred
+ * daily TOKEN cap, the governed-automation PTY guard (the actor is server-inferred
  * automation, so a pty-interactive target is REJECTED, never redirected), and the
  * per-key ask-rate ceiling. `hub/test/token-cap-coverage.test.ts` scans every
  * `gates: [...]` array in hub/src and hard-fails CI if the token cap is missing —
@@ -12,6 +12,11 @@ import { describe, test, expect } from 'bun:test'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { humanOnlyRejectsActor, maxAsksPerHour } from '../src/dispatch/gates.ts'
+import {
+  governedAutomationPtyGate,
+  _setGovernorsForTests,
+  _resetGovernorsForTests,
+} from '../src/dispatch/governed-pty.ts'
 import { EXT_ACTOR } from '../src/auth/ext-api-key-middleware.ts'
 
 const askDispatchSrc = readFileSync(join(import.meta.dir, '../src/ask/dispatch.ts'), 'utf8')
@@ -26,14 +31,14 @@ describe('ask gate list', () => {
     'thresholdGate',
     'dailyCostCapGate',
     'dailyTokenCapGate',
-    'humanOnlyPtyGate',
+    'governedAutomationPtyGate',
     'askRateGate',
   ]) {
     test(`ask dispatch composes ${gate}`, () => {
       expect(
         gatesBlock.includes(gate),
         `hub/src/ask/dispatch.ts gates[] is missing ${gate}. The external ask path must ` +
-          `never dispatch without the cost cap, the token cap, the human-only-PTY guard, ` +
+          `never dispatch without the cost cap, the token cap, the governed-automation PTY guard, ` +
           `and the per-key ask-rate ceiling.`,
       ).toBe(true)
     })
@@ -66,6 +71,28 @@ describe('the actor is server-inferred automation', () => {
 
   test('the actor constant is not something a client could assert as human', () => {
     expect(EXT_ACTOR).not.toBe('human')
+  })
+
+  test('PTYCAP Phase 3 (D-06): an external ask is still blocked on a pty-interactive session with the flag ON and every governor passing', async () => {
+    const prev = process.env.REMO_GOVERNED_AUTOMATION_PTY
+    process.env.REMO_GOVERNED_AUTOMATION_PTY = '1'
+    try {
+      _setGovernorsForTests(
+        (['kill_switch', 'token_cap', 'inject_rate', 'lifetime_counter'] as const).map((name) => ({
+          name,
+          async check() {
+            return { ok: true as const }
+          },
+        })),
+      )
+      const gate = governedAutomationPtyGate(async () => ({ actor: EXT_ACTOR, runnerType: 'pty-interactive' }))
+      const r = await gate.check({ userId: 'u', sessionId: 's', token: 't', prompt: 'p' })
+      expect(r).toEqual({ ok: false, reason: 'automation_blocked_on_pty:external-ask' })
+    } finally {
+      _resetGovernorsForTests()
+      if (prev === undefined) delete process.env.REMO_GOVERNED_AUTOMATION_PTY
+      else process.env.REMO_GOVERNED_AUTOMATION_PTY = prev
+    }
   })
 })
 

@@ -44,6 +44,10 @@ import {
   type RunStore,
 } from '../../dispatch/pipeline.ts'
 import { thresholdGate, dailyCostCapGate, dailyTokenCapGate } from '../../dispatch/gates.ts'
+import {
+  automationKillSwitchGate,
+  automationLifetimeCounterGate,
+} from '../../dispatch/automation-controls.ts'
 
 export interface TriagePayload {
   application_uuid: string
@@ -139,7 +143,14 @@ export async function sendTriage(
 
   const deps: PipelineDeps = {
     // IR-1 / IR-2: cost-cap non-bypassable; threshold → cost-cap (+ promotion re-check).
-    gates: [thresholdGate, dailyCostCapGate, dailyTokenCapGate],
+    // PTYCAP-04: kill switch first, lifetime counter last; the three existing gates unchanged.
+    gates: [
+      automationKillSwitchGate,
+      thresholdGate,
+      dailyCostCapGate,
+      dailyTokenCapGate,
+      automationLifetimeCounterGate,
+    ],
     store,
     isOnline: (req) => getChannel(req.sessionId) != null,
     // Triage runs are not replayed on reconnect (they carry per-event payload
@@ -159,7 +170,16 @@ export async function sendTriage(
     },
   }
 
-  const req: DispatchRequest = { userId: ctx.userId, sessionId, token: ctx.runId, prompt }
+  // PTYCAP-04 (D-05, panel F-5b): one lifetime budget per Coolify APPLICATION, set on both
+  // routing branches (repo-keyed and capacity fallback converge here). application_uuid is a
+  // mandatory TriagePayload field, so a noisy application cannot brick triage for the rest.
+  const req: DispatchRequest = {
+    userId: ctx.userId,
+    sessionId,
+    token: ctx.runId,
+    prompt,
+    counterKey: `triage:${payload.application_uuid}`,
+  }
   const outcome = await dispatch(req, deps)
   if (outcome.kind === 'parked_offline') {
     // No live agent socket; the pipeline parked a replay that fails fast.

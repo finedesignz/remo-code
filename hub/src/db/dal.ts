@@ -838,9 +838,9 @@ export async function listMessages(sessionId: string, userId: string) {
   `;
 }
 
-export async function insertMessage(sessionId: string, role: string, content: string) {
+export async function insertMessage(sessionId: string, role: string, content: string, turnId: string | null = null) {
   const rows = await sql`
-    INSERT INTO messages (session_id, role, content) VALUES (${sessionId}, ${role}, ${content}) RETURNING *
+    INSERT INTO messages (session_id, role, content, turn_id) VALUES (${sessionId}, ${role}, ${content}, ${turnId}) RETURNING *
   `;
   return rows[0];
 }
@@ -868,9 +868,9 @@ export async function appendToMessage(messageId: string, delta: string) {
 // Final overwrite at turn end — ensures the persisted content matches the
 // fully assembled text from the agent (covers any deltas dropped during
 // throttle flush or network blips) and flips status to 'complete'.
-export async function finalizeMessage(messageId: string, content: string) {
+export async function finalizeMessage(messageId: string, content: string, turnId: string | null = null) {
   const rows = await sql`
-    UPDATE messages SET content = ${content}, status = 'complete'
+    UPDATE messages SET content = ${content}, status = 'complete', turn_id = ${turnId}
     WHERE id = ${messageId}
     RETURNING *
   `;

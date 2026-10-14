@@ -64,11 +64,11 @@ Confirm `scheduled_tasks.macro_task_type = 'dev'` for the bound session.
 
 ### Step 3 — Set the token ceiling + launch cap (OWNER decision: final numbers)
 
-Conservative defaults ship in code: token cap **50M tokens/day**, launch cap **20/day**.
+Conservative defaults ship in code: token cap **20M tokens/day** (only where the env is unset), launch cap **20/day**.
 Set the prod numbers explicitly before arming:
 
 ```
-REMO_ORCHESTRATOR_DAILY_TOKEN_CAP=<tokens-per-day>        # default 50_000_000
+REMO_ORCHESTRATOR_DAILY_TOKEN_CAP=<tokens-per-day>        # default 20_000_000
 REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES=<launches/day> # default 20
 ```
 
@@ -90,9 +90,10 @@ Watch `routine_run_log` for the target session:
 
 - A `command = 'autospawn-launch'` row appears (the spawn fired) — confirms
   `session.start` reached the supervisor and the macro prompt was parked.
-- On the launched runner's drain + simulated/real reply, a later tick reconciles
-  `routine_run_log.pr_url` (the dead-end this milestone closes). Confirm a real `pr_url`
-  lands.
+- `routine_run_log.pr_url` is NOT parsed from the agent's sentinels (the reconcile step does
+  not extract a PR URL), so do not expect it to populate. The throwaway-repo proof reads
+  GitHub directly for the PR (see [ptycap-05-proof-runbook.md](ptycap-05-proof-runbook.md)).
+  Confirm the PR on the repo itself.
 - Confirm the token cap + launch cap engage as expected; cross-check
   `GET /api/usage/cost` and today's token total.
 
@@ -111,6 +112,13 @@ WHERE s.user_id = '<id>' ORDER BY created_at DESC LIMIT 20;
   fail-closes to `refused:not_allowlisted` for every repo while leaving the flag on.
 - Autospawn NEVER auto-merges to main — merge stays the off-hours window-gated
   `runMergeToMain` path, so a rollback cannot strand a half-merged change.
+
+## Throwaway-repo proof (PTYCAP-05)
+
+The first governed use of autospawn is the one-repo, branch-only due-to-PR proof. It has its own
+OWNER GO/NO-GO arming and ordered-rollback procedure:
+[ptycap-05-proof-runbook.md](ptycap-05-proof-runbook.md). That runbook, not this one, governs
+arming it (it additionally needs `REMO_ORCHESTRATOR_PROOF` and a ruleset-protected repo).
 
 ## Out of scope (explicit)
 

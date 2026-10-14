@@ -409,6 +409,221 @@ openapi.openapi(dismissLocalRoute, async (c) => {
     },
   });
 }
+// ── Automation controls (PTYCAP-04-05) ──────────────────────────────────────
+// Spec-only registration. The plain-Hono router in `./automation.ts` serves
+// traffic. Engage has NO step-up (emergency stop); release and lifetime reset
+// require a login under 15 minutes old (re_auth_required).
+{
+  const Err = z.object({ error: z.string() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  // Loosely typed like the zod-to-openapi registry calls elsewhere in this file: the strict
+  // overload rejects the shared `base`/`json` helper shapes (pre-existing typing gap).
+  const register = (r: any) => reg.registerPath(r);
+  const base = { tags: ["automation"], security: [{ bearerAuth: [] }] } as const;
+  const Forbidden = z.object({ error: z.literal("forbidden"), reason: z.literal("admin_required") });
+  const ReAuth = z.object({ error: z.literal("re_auth_required"), max_age_seconds: z.number().int() });
+  const KillRow = z.object({
+    id: z.string().uuid(),
+    scope: z.enum(["global", "user", "session"]),
+    user_id: z.string().nullable(),
+    session_id: z.string().nullable(),
+    engaged: z.boolean(),
+    reason: z.string().nullable(),
+    engaged_by: z.string(),
+    engaged_at: z.string(),
+  });
+  const ScopeBody = z.object({
+    scope: z.enum(["global", "user", "session"]).openapi({
+      description: "global requires the admin role; user is always the caller; session must be owned by the caller",
+    }),
+    session_id: z.string().optional().openapi({ description: "Required for session scope" }),
+    reason: z.string().max(500).optional(),
+  });
+
+  register({
+    method: "get",
+    path: "/api/automation/kill-switch",
+    summary: "Read the automation kill-switch state visible to the caller",
+    ...base,
+    responses: {
+      200: {
+        description:
+          "Env flag, the global row, the caller's user row and session rows. A non-admin sees the global row " +
+          "reduced to {engaged: true} (no engaged_by, reason or id).",
+        ...json(
+          z.object({
+            env: z.boolean(),
+            global: z.union([KillRow, z.object({ engaged: z.literal(true) })]).nullable(),
+            user: KillRow.nullable(),
+            sessions: z.array(KillRow),
+          }),
+        ),
+      },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+    },
+  });
+  register({
+    method: "post",
+    path: "/api/automation/kill-switch/engage",
+    summary: "Engage the kill switch (writes a row only; never stops a running session)",
+    ...base,
+    request: { body: json(ScopeBody) },
+    responses: {
+      200: {
+        description: "Engaged (idempotent)",
+        ...json(z.object({ engaged: z.literal(true), alreadyEngaged: z.boolean(), scope: z.string() })),
+      },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      403: { description: "Global scope requires the admin role", ...json(Forbidden) },
+      404: { description: "Session not found or not owned by the caller", ...json(Err) },
+    },
+  });
+  register({
+    method: "post",
+    path: "/api/automation/kill-switch/release",
+    summary: "Release the kill switch (requires a login under 15 minutes old)",
+    ...base,
+    request: { body: json(ScopeBody) },
+    responses: {
+      200: { description: "Released flag", ...json(z.object({ released: z.boolean(), scope: z.string() })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT, or re_auth_required", ...json(z.union([Err, ReAuth])) },
+      403: { description: "Global scope requires the admin role", ...json(Forbidden) },
+      404: { description: "Session not found or not owned by the caller", ...json(Err) },
+    },
+  });
+  register({
+    method: "post",
+    path: "/api/automation/lifetime/reset",
+    summary: "Append a lifetime-counter reset marker (requires a login under 15 minutes old)",
+    ...base,
+    request: { body: json(z.object({ counter_key: z.string().min(1).max(300) })) },
+    responses: {
+      200: { description: "Reset", ...json(z.object({ ok: z.literal(true), counter_key: z.string() })) },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT, or re_auth_required", ...json(z.union([Err, ReAuth])) },
+      404: { description: "No ledger rows for this counter key and caller", ...json(Err) },
+    },
+  });
+}
+// ── Throwaway-repo proof status (PTYCAP-05-04) ──────────────────────────────
+// Spec-only registration. The plain-Hono router in `./orchestrator-proof.ts` serves traffic.
+// Read-only and tenant-scoped; arm / disarm / enable are an operator script, never HTTP.
+{
+  const Err = z.object({ error: z.string() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const register = (r: any) => openapi.openAPIRegistry.registerPath(r);
+  const ProofRunView = z.object({
+    id: z.string(),
+    status: z.enum(["armed", "running", "succeeded", "nothing", "terminated", "disarmed"]),
+    outcome: z.string().nullable(),
+    outcome_detail: z.string().nullable(),
+    repo_ident: z.string(),
+    branch: z.string(),
+    base_sha: z.string(),
+    default_branch: z.string(),
+    pr_url: z.string().nullable(),
+    pr_number: z.number().int().nullable(),
+    last_ci_state: z.string().nullable(),
+    last_inject_outcome: z.string().nullable(),
+    protection_shape: z.string(),
+    ruleset_digest: z.string().openapi({ description: "First 12 characters of the frozen ruleset digest" }),
+    budgets: z.object({
+      max_injects: z.number().int(),
+      max_tokens: z.number(),
+      max_wall_ms: z.number(),
+    }),
+    usage: z.object({
+      injects: z.number().int().nullable().openapi({ description: "Live injects since start; null when the count could not be read" }),
+      tokens_hwm: z.number(),
+    }),
+    bypass_verification: z.enum(["verified", "unverified"]),
+    armed_at: z.string(),
+    started_at: z.string().nullable(),
+    terminal_at: z.string().nullable(),
+  });
+  register({
+    method: "get",
+    path: "/api/orchestrator/proof",
+    summary: "Read the caller's throwaway-repo proof run (latest plus up to 5 earlier runs)",
+    tags: ["orchestrator"],
+    security: [{ bearerAuth: [] }],
+    responses: {
+      200: {
+        description: "Latest proof run (null when none) and earlier runs, newest first. Read-only; no credentials.",
+        ...json(z.object({ run: ProofRunView.nullable(), history: z.array(ProofRunView).max(5) })),
+      },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      500: { description: "Internal error (no detail leaked)", ...json(Err) },
+    },
+  });
+}
+// ── Self-heal launch (PTYCAP-04-07) ─────────────────────────────────────────
+// Spec-only registration; the plain-Hono router in `./sessions.ts` serves traffic. The route
+// is a MACHINE surface: the kill switch is checked first and one lifetime reservation
+// (counter key heal:<userId>:<repo>) is taken before any session.start is sent.
+{
+  const Err = z.object({ error: z.string() });
+  const json = (schema: any) => ({ content: { "application/json": { schema } } });
+  const reg = openapi.openAPIRegistry;
+  const register = (r: any) => reg.registerPath(r);
+  register({
+    method: "post",
+    path: "/api/sessions/heal",
+    summary: "Launch a fresh session for the external self-heal service (machine surface)",
+    tags: ["sessions"],
+    security: [{ bearerAuth: [] }],
+    request: {
+      body: json(
+        z.object({
+          repo: z.string().min(1).max(500),
+          branch: z.string().min(1).max(200),
+          prompt: z.string().min(1).max(20000),
+          model: z.string().max(120).optional(),
+          exclude_supervisor_ids: z.array(z.string()).max(20).optional(),
+        }),
+      ),
+    },
+    responses: {
+      202: {
+        description: "Session start dispatched",
+        ...json(
+          z.object({
+            session_id: z.string(),
+            target_kind: z.enum(["supervisor", "local_agent"]),
+            supervisor_id: z.string().optional(),
+            url: z.string(),
+          }),
+        ),
+      },
+      400: { description: "Invalid body", ...json(Err) },
+      401: { description: "Missing or invalid JWT", ...json(Err) },
+      500: { description: "Run row could not be inserted", ...json(Err) },
+      503: {
+        description:
+          "Not started. automation_halted: a kill-switch row (or the env break-glass) covers the caller. " +
+          "lifetime_inject_exhausted: the heal:<userId>:<repo> lifetime budget is spent (owner reset needed). " +
+          "quota_threshold_reached and no_target_available are the pre-existing refusals.",
+        ...json(
+          z.union([
+            z.object({ error: z.literal("automation_halted"), reason: z.string() }),
+            z.object({ error: z.literal("lifetime_inject_exhausted"), reason: z.string() }),
+            z.object({
+              error: z.literal("quota_threshold_reached"),
+              reason: z.string(),
+              utilization_pct: z.number().optional(),
+              threshold_pct: z.number().optional(),
+              resets_at: z.string().nullable().optional(),
+            }),
+            z.object({ error: z.literal("no_target_available"), reason: z.string().optional() }),
+          ]),
+        ),
+      },
+    },
+  });
+}
 // ── Auto-dev orchestrator task config (Phase 31) ────────────────────────────
 // Spec-only registration. The plain-Hono router in `./orchestrator-tasks.ts`
 // serves traffic; these declarations only contribute to the OpenAPI spec.
@@ -844,7 +1059,7 @@ openapi.openapi(taskTemplatesRoute, (c) => {
     evidence: z.array(z.string()).nullable(),
     reason: z.string().nullable().openapi({
       description:
-        "Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask, session_offline, ask_timeout.",
+        "Why a non-answered ask ended that way — e.g. over_daily_cost_cap, over_daily_token_cap, over_ask_rate, automation_blocked_on_pty:external-ask (governedAutomationPtyGate -- an external actor is never eligible to drive a pty-interactive session), session_offline, ask_timeout.",
     }),
     raw_reply: z.string().nullable(),
     created_at: z.string(),
@@ -1054,7 +1269,7 @@ openapi.openapi(taskTemplatesRoute, (c) => {
       }),
       reason: z.string().nullable().openapi({
         description:
-          "Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work, session_offline, work_timeout.",
+          "Why a non-terminal-success work item ended that way — over_daily_cost_cap, over_daily_token_cap, over_work_rate, repo_not_allowlisted, automation_blocked_on_pty:external-work (governedAutomationPtyGate -- an external actor is never eligible to drive a pty-interactive session), session_offline, work_timeout.",
       }),
       auto_publish: z.boolean(),
       repo_ident: z.string(),

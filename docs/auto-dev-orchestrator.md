@@ -209,7 +209,7 @@ Refusal reasons (typed `InjectOutcome`): `not_allowlisted`, `supervisor_offline`
 | Env | Default | Purpose |
 |---|---|---|
 | `REMO_ORCHESTRATOR_AUTOSPAWN` | OFF (`0`) | Arms the autospawn capability. Accepts `1\|true\|yes\|on`. Carries `REMO_ORCHESTRATOR_ENABLED` (both ON). |
-| `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` | `50_000_000` (50M) | Non-bypassable daily TOKEN ceiling. Counts **all four buckets: input + output + cache_creation + cache_read** (see below). Non-positive/non-finite ⇒ disabled (fail-open). |
+| `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` | `20_000_000` (20M; applies only where the env is unset) | Non-bypassable daily TOKEN ceiling. Counts **all four buckets: input + output + cache_creation + cache_read** (see below). Non-positive/non-finite ⇒ falls back to the default AND the hub refuses to boot (fail-closed); only `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1` disables it. |
 | `REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR` | `4` | Per-session orchestrator inject-RATE ceiling (`sessionInjectRateGate`). Non-positive/non-finite ⇒ disabled (fail-open). |
 | `REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES` | `20` | Per-day autospawn launch-count cap. Non-positive/non-finite ⇒ disabled. |
 
@@ -332,6 +332,38 @@ Do NOT auto-run against prod — run by hand after reviewing the dry-run output.
 - Single dispatch pipeline (`hub/src/dispatch/`) — no per-subsystem queue/grace.
 - Hub injects TEXT ONLY; the agent owns gh/git/PR/reviewer inside its turn.
 - Off-hours merge is the ONLY auto-merge-to-main path.
+
+## Throwaway-repo proof (PTYCAP-05)
+
+A one-repo, branch-only proof that the orchestrator can take a due `dev` task to ONE reviewable PR
+with a green CI check, or cleanly do nothing and say why. Owner-gated: nothing here arms it. Owner
+procedure and ordered rollback: [ptycap-05-proof-runbook.md](ptycap-05-proof-runbook.md).
+
+- **Flag stack:** `REMO_ORCHESTRATOR_PROOF` AND `REMO_ORCHESTRATOR_ENABLED` AND
+  `REMO_ORCHESTRATOR_AUTOSPAWN`. Any one OFF is a true no-op: zero queries, zero fetches, no proof
+  module loaded (`proof-types.ts` is the only static import in `macro-cycle.ts`).
+- **State machine** (`orchestrator_proof_runs`, closed sets in `proof-types.ts`): `armed` ->
+  `running` (a single-winner claim at the first due tick) -> one of `succeeded`, `nothing`,
+  `terminated`; `disarmed` is the owner's rollback. Exactly one winner ends a run.
+- **Evaluator order** (`proof-evaluators.ts`, locked): kill switch, repo match, protection,
+  verifier (default-branch advance via compare, PR scope under the `proof/` prefix, CI/green
+  decision), agent-declined, then budget (injects, four-bucket tokens, wall; attribution lost
+  fails closed).
+- **Outcomes:** `pr_open_green`; `nothing:<reason>` (quiet info page); `terminated:<reason>`
+  (blocking page, includes `pr_open_ci_red`, `main_advanced`, `pr_scope_violation`,
+  `proof_protection_drift`, `proof_protection_unverifiable`, budget terminals).
+- **Prompt override:** the macro prompt is rendered from the CLAIMED run snapshot (branch and
+  default branch) and tells the agent to push only `proof/<run-id>`, open one PR, and never merge.
+  The prompt is advisory; the ruleset and the hub verifier are the controls.
+- **Protection:** the hub asserts the ruleset at arm (shape `branch_lock` or `review_gate`, zero
+  visible bypass actors) and `proofProtectionGate` re-asserts it before every dispatch; any drift or
+  ambiguity is terminal. `proofBudgetGate` enforces the frozen budget. Both ride the kill switch.
+- **Merge routing:** while a proof run owns a repo, the merge command never merges it
+  (`proof_repo_never_merges`, fail closed).
+- **Read-only status:** `GET /api/orchestrator/proof`. **Owner script:**
+  `hub/scripts/arm-orchestrator-proof.ts` (`--dry-run`, arm, `--enable`, `--disarm`); data only.
+- **Deferred (D-01):** the automation `term.input` PTY producer is NOT built; the proof drives the
+  existing stream-json macro path.
 
 ## Ghost-session reaper (fix/ghost-session-reaper)
 

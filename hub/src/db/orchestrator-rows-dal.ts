@@ -176,6 +176,8 @@ export interface OrchestratorTask {
   lifecycle_stage_explicit: boolean;
   /** Milestone TMAC: dev|maintenance|security|brainstorming (macro prompt key). */
   macro_task_type: MacroTaskType;
+  /** PTYCAP-05 (QC r1): this task has been armed as a proof task; it must never run the dev macro outside a live proof. */
+  proof_owned?: boolean;
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -194,7 +196,7 @@ export async function getOrchestratorTaskForSession(
   sessionId: string,
 ): Promise<OrchestratorTask | null> {
   const rows = await sql<OrchestratorTask[]>`
-    SELECT id, user_id, session_id, name, lifecycle_stage, lifecycle_stage_explicit, macro_task_type, enabled, created_at, updated_at FROM scheduled_tasks
+    SELECT id, user_id, session_id, name, lifecycle_stage, lifecycle_stage_explicit, macro_task_type, enabled, proof_owned, created_at, updated_at FROM scheduled_tasks
     WHERE user_id = ${userId} AND session_id = ${sessionId}
       AND task_type = 'orchestrator'
     LIMIT 1
@@ -301,13 +303,18 @@ export interface NewRoutineRunLogEntry {
   pr_url?: string | null;
   reviewer_verdict?: string | null;
   deploy_verify_result?: string | null;
+  /**
+   * PTYCAP-04: the inject token of the dispatch this row records (rate-union dedupe key
+   * shared with automation_inject_ledger.token). Omitted/NULL for non-inject rows.
+   */
+  inject_token?: string | null;
 }
 
 export async function insertRoutineRunLog(e: NewRoutineRunLogEntry): Promise<RoutineRunLogEntry> {
   const rows = await sql<RoutineRunLogEntry[]>`
     INSERT INTO routine_run_log (
       session_id, repo_key, command, decision_rationale, outcome,
-      gap_dimension, pr_url, reviewer_verdict, deploy_verify_result
+      gap_dimension, pr_url, reviewer_verdict, deploy_verify_result, inject_token
     ) VALUES (
       ${e.session_id},
       ${e.repo_key ?? null},
@@ -317,7 +324,8 @@ export async function insertRoutineRunLog(e: NewRoutineRunLogEntry): Promise<Rou
       ${e.gap_dimension ?? null},
       ${e.pr_url ?? null},
       ${e.reviewer_verdict ?? null},
-      ${e.deploy_verify_result ?? null}
+      ${e.deploy_verify_result ?? null},
+      ${e.inject_token ?? null}
     )
     RETURNING *
   `;

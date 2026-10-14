@@ -159,6 +159,24 @@ describe('mount-order: protected /api/* routes are behind the JWT catch-all', ()
     const res = await app.request('/api/scheduled-tasks', { method: 'GET' });
     expect(res.status).toBe(401);
   });
+
+  test('unauth GET /api/automation/kill-switch → 401 (PTYCAP-04 controls are behind the JWT catch-all)', async () => {
+    const res = await app.request('/api/automation/kill-switch', { method: 'GET' });
+    expect(
+      res.status,
+      `GET /api/automation/kill-switch returned ${res.status}; expected 401. A 404 means the ` +
+        `route was not mounted after the /api/* catch-alls in index.ts.`,
+    ).toBe(401);
+  });
+
+  test('unauth GET /api/orchestrator/proof → 401 (PTYCAP-05 proof status is behind the JWT catch-all)', async () => {
+    const res = await app.request('/api/orchestrator/proof', { method: 'GET' });
+    expect(
+      res.status,
+      `GET /api/orchestrator/proof returned ${res.status}; expected 401. A 404 means the ` +
+        `route was not mounted, a 200 means it is reachable without auth.`,
+    ).toBe(401);
+  });
 });
 
 describe('mount-order: /api/ext is api-key-authed and mounted BEFORE the cookie catch-all', () => {

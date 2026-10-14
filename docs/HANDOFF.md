@@ -46,6 +46,11 @@ This grants the hub permission to list your repos and clone them on demand.
    - Contents: **Read & write**
    - Metadata: **Read-only** (auto-selected)
    - Pull requests: **Read-only**
+   - *Throwaway-repo proof only (PTYCAP-05):* the proof additionally needs Administration
+     (**Read-only**), Checks (**Read-only**) and Commit statuses (**Read-only**). The installation
+     owner must accept the updated permissions. See
+     [ptycap-05-proof-runbook.md](ptycap-05-proof-runbook.md). The required permissions above are
+     unchanged.
 4. **Where can this GitHub App be installed?** → Only on this account
 5. Create.
 6. On the next page:

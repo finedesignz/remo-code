@@ -27,6 +27,10 @@ import { shouldNotify, fanOutNotify, type NotifyEvent } from './notify.ts';
 import { appendRunLog } from './run-log.ts';
 import { injectOrchestratorPrompt } from './inject.ts';
 import type { LifecycleStage, MacroTaskType } from '../db/orchestrator-rows-dal.ts';
+// PTYCAP-05: types + the flag predicate ONLY. The guard/DAL/prompt are loaded by
+// dynamic import() strictly when isProofEnabled() (flag OFF = true no-op, D-03).
+import { isProofEnabled } from './proof-types.ts';
+import type { ProofCycleHooks, ProofDecisionKind, ProofRun } from './proof-types.ts';
 import {
   orchestratorCycleSkipReason,
   orchestratorDispatchOutcome,
@@ -46,6 +50,12 @@ export interface MacroCycleInput {
   repoPath: string;
   repoIdent: string;
   repoKey: string | null;
+  /**
+   * PTYCAP-05 (QC r1): the task row carries the proof_owned marker. A proof-owned task renders
+   * the dev macro ONLY via the proof guard (flag stack ON + a claimed run); under every other
+   * flag combination the cycle refuses, with zero db work.
+   */
+  proofOwned?: boolean;
 }
 
 // Injectable seams (tests swap these; defaults are the real adapters).
@@ -65,6 +75,8 @@ export interface MacroCycleDeps {
     userId: string,
     tz: string,
   ) => Promise<{ costStatus: Parameters<typeof evaluateCapAlert>[0]['costStatus']; tokenStatus: Parameters<typeof evaluateCapAlert>[0]['tokenStatus'] }>;
+  /** PTYCAP-05: proof hooks (injectable for tests). Only consulted when isProofEnabled(). */
+  proof?: ProofCycleHooks;
 }
 
 const realCapStatuses: NonNullable<MacroCycleDeps['getCapStatuses']> = async (userId, tz) => {
@@ -111,6 +123,8 @@ export interface MacroCycleResult {
   stubNotReady: boolean;
   /** the parsed sentinels from the prior reply (for tests/observability). */
   sentinels: ParsedSentinels | null;
+  /** PTYCAP-05: the proof guard's decision; undefined whenever the proof flag stack is OFF. */
+  proofDecision?: ProofDecisionKind;
 }
 
 /**
@@ -133,6 +147,16 @@ export async function runMacroCycle(
 
   const { userId, sessionId, stage, macroTaskType, repoKey } = input;
 
+  // 0. PTYCAP-05 (QC r1): a task that owns a proof row must NEVER render/inject the dev macro
+  //    unless the proof guard claims a run for it (flag stack ON). Any partial flag state
+  //    (proof/orchestrator/autospawn drifted, typo, wrong rollback order) refuses instead.
+  //    Reads only the already-loaded task marker: no db, no import, nothing for other tasks.
+  if (input.proofOwned && !isProofEnabled()) {
+    result.proofDecision = 'blocked';
+    console.warn(`[orchestrator.macro] session=${sessionId} task is proof-owned but the proof flag stack is not fully ON; refusing to render the dev macro.`);
+    return result;
+  }
+
   // 1. RECONCILE the previous turn.
   let sentinels: ParsedSentinels | null = null;
   try {
@@ -145,6 +169,38 @@ export async function runMacroCycle(
     }
   } catch (err: any) {
     console.warn('[orchestrator.macro] reconcile threw (ignored):', err?.message ?? err);
+  }
+
+  // 1b. PTYCAP-05 proof guard (flag stack ON only). FAILS CLOSED: any throw here means
+  //     NO inject and never the dev macro prompt (verdict F3). OFF = none of this runs.
+  let proofRun: ProofRun | null = null;
+  let proofHooks: ProofCycleHooks | null = null;
+  let proofGuardInput: import('./proof-types.ts').ProofGuardInput | null = null;
+  if (isProofEnabled()) {
+    try {
+      proofHooks = d.proof ?? (await (await import('./proof-guard.ts')).realProofHooks());
+      proofGuardInput = {
+        userId,
+        sessionId,
+        taskId: input.taskId,
+        repoIdent: input.repoIdent,
+        repoKey,
+        sentinels,
+        runLive: d.isRunLive(sessionId),
+      };
+      const decision = await proofHooks.guard(proofGuardInput);
+      result.proofDecision = decision.kind;
+      if (decision.kind === 'proceed') {
+        proofRun = decision.run;
+      } else if (decision.kind !== 'pass_through') {
+        console.log(`[orchestrator.macro] session=${sessionId} proof guard: ${decision.kind}; not injecting.`);
+        return result;
+      }
+    } catch (err: any) {
+      result.proofDecision = 'blocked';
+      console.error('[orchestrator.macro] proof guard threw (fail closed, no inject):', err?.message ?? err);
+      return result;
+    }
   }
 
   // 2. HALT check — an open GATE stops the resume at a halting stage. Brainstorming
@@ -187,7 +243,19 @@ export async function runMacroCycle(
       repo_ident: input.repoIdent,
       lifecycle_stage: stage,
     };
-    const macro = renderMacro(macroTaskType, ctx);
+    let macro = renderMacro(macroTaskType, ctx);
+    if (proofRun && proofHooks && proofGuardInput) {
+      // PTYCAP-05: the proof prompt, rendered from the CLAIMED snapshot, REPLACES the
+      // dev macro. A render throw ends the run and injects nothing (never the dev macro).
+      try {
+        macro = { ...macro, prompt: proofHooks.render(proofRun), complete: true };
+      } catch (err: any) {
+        result.proofDecision = 'terminal';
+        console.error('[orchestrator.macro] proof render threw (no inject):', err?.message ?? err);
+        await proofHooks.abort(proofRun, 'guard_error', `render threw: ${err?.message ?? String(err)}`, proofGuardInput);
+        return result;
+      }
+    }
 
     // F-12: never inject a half-authored stub prompt on an unattended run. A
     // stub (complete=false) finalizes the tick cleanly with a recognizable
@@ -213,7 +281,9 @@ export async function runMacroCycle(
       return result;
     }
 
-    const token = `orch:${sessionId}:macro:${macroTaskType}:${Date.now()}`;
+    const token = proofRun
+      ? `orch:${sessionId}:proof:${proofRun.id}:${Date.now()}`
+      : `orch:${sessionId}:macro:${macroTaskType}:${Date.now()}`;
     // BSA-02: thread the autospawn decision for a BUILD (dev) macro. The inject
     // seam only acts on it when fully gated ON (REMO_ORCHESTRATOR_AUTOSPAWN +
     // allowlist + caps); for any other task_type the field is omitted, so the seam
@@ -222,12 +292,27 @@ export async function runMacroCycle(
       macroTaskType === 'dev'
         ? { isBuild: true, repoIdent: input.repoIdent, tz: undefined }
         : undefined;
-    const outcome = await d.inject({ userId, sessionId, token, prompt: macro.prompt, autospawn });
+    const outcome = await d.inject({
+      userId,
+      sessionId,
+      token,
+      prompt: macro.prompt,
+      autospawn,
+      // PTYCAP-04 (D-01, F-5c): one lifetime budget per orchestrator task.
+      taskId: input.taskId,
+      // PTYCAP-05 (QC r1): the final gate requires an exact match with the ACTIVE run.
+      ...(proofRun ? { proofRunId: proofRun.id } : {}),
+    });
     result.injected =
       outcome.kind === 'dispatched' ||
       outcome.kind === 'queued' ||
       outcome.kind === 'autospawn_launched' ||
       outcome.kind === 'autospawn_parked';
+
+    // PTYCAP-05: record what the proof inject did (best-effort; the hook never throws).
+    if (proofRun && proofHooks) {
+      try { await proofHooks.observeInject(proofRun, outcome, proofGuardInput ?? undefined); } catch { /* best-effort */ }
+    }
 
     // OBSRV-03: dispatch-outcome counter + skip-reason on non-dispatch outcomes.
     try {
@@ -270,6 +355,9 @@ export async function runMacroCycle(
         command: `macro:${macroTaskType}`,
         decision_rationale: `resume-heartbeat inject (stage=${stage}); outcome=${outcome.kind}`,
         outcome: outcome.kind,
+        // PTYCAP-04 (F-6): the rate union de-duplicates this row against the ledger row
+        // by token. Only inject outcomes (dispatched|queued|autospawn_*) carry it.
+        inject_token: result.injected ? token : null,
       });
     } catch {
       /* best-effort */
@@ -285,20 +373,29 @@ export async function runMacroCycle(
       // do NOT page on it. BSA-02: an autospawn GATE refusal (not_allowlisted /
       // supervisor_offline / launch_cap / over_token_cap / a launch-primitive
       // refusal) is ALSO benign — it is the expected state when autospawn is OFF /
-      // unconfigured, so it must NOT page either. A real cost-cap/threshold refusal
-      // or a hard failure still surfaces.
+      // unconfigured, so it must NOT page either. PTYCAP-04 (D-04, F-9): a kill-switch
+      // halt (`automation_halted:*`) and a spent lifetime budget
+      // (`lifetime_inject_exhausted:*`) are benign here too - the controls module has
+      // ALREADY paged the owner once per epoch, so a per-tick failure page would only
+      // storm. A real cost-cap/threshold refusal or a hard failure still surfaces.
       const benignAutospawnRefusal =
         outcome.kind === 'refused' &&
         ['not_allowlisted', 'supervisor_offline', 'launch_cap', 'over_token_cap'].includes(reason as string) ||
         (typeof reason === 'string' && reason.startsWith('autospawn_launch_'));
-      if (outcome.kind !== 'no_session' && !benignAutospawnRefusal) {
+      const benignAutomationControl =
+        outcome.kind === 'refused' &&
+        typeof reason === 'string' &&
+        (reason.startsWith('automation_halted:') || reason.startsWith('lifetime_inject_exhausted:'));
+      // PTYCAP-05: while a proof snapshot is in play the proof terminalizer is the ONLY
+      // reporter, so a refused/failed proof tick never pages from here.
+      if (!proofRun && outcome.kind !== 'no_session' && !benignAutospawnRefusal && !benignAutomationControl) {
         await emitFailure(d, input, `resume inject ${outcome.kind}: ${reason}`);
       }
     }
   } catch (err: any) {
     console.warn('[orchestrator.macro] inject threw (ignored):', err?.message ?? err);
-    // F-10: a thrown resume is a failure — surface it.
-    await emitFailure(d, input, `resume inject threw: ${err?.message ?? String(err)}`);
+    // F-10: a thrown resume is a failure — surface it (proof ticks: the proof path reports).
+    if (!proofRun) await emitFailure(d, input, `resume inject threw: ${err?.message ?? String(err)}`);
   }
 
   return result;

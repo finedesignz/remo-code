@@ -42,6 +42,7 @@ import {
 import { injectOrchestratorPrompt } from './inject.ts';
 import { notifyChatSurface } from './propose.ts';
 import { PROPOSE_ONLY_COMMANDS } from './command-prompts.ts';
+import { isProofEnabled } from './proof-types.ts';
 
 /** The canonical command name. EXCLUDED from the wave planner; routed here. */
 export const MERGE_COMMAND = 'merge-to-main';
@@ -78,6 +79,12 @@ export interface MergeDeps {
   injectOrchestratorPrompt: typeof injectOrchestratorPrompt;
   notifyChatSurface: typeof notifyChatSurface;
   appendRunLog: typeof appendRunLog;
+  /**
+   * PTYCAP-05 (D-10 i): the armed/running proof run for a repo, or null. Optional so
+   * existing fakes are unchanged; when absent the real DAL is dynamic-imported, and ONLY
+   * when the proof flag stack is ON (flag OFF = zero extra work).
+   */
+  findActiveProofRunForRepo?: (repoIdent: string) => Promise<unknown | null>;
 }
 
 const REAL_DEPS: MergeDeps = {
@@ -115,6 +122,36 @@ export async function runMergeToMain(
 ): Promise<MergeOutcome> {
   const now = deps.now();
   const tz = ctx.tz ?? 'UTC';
+
+  // ── PROOF REPO NEVER MERGES (PTYCAP-05 D-10 i) ────────────────────────────
+  // This is the ONLY auto-merge path (R-ADO-24): refuse it for a repo with an armed or
+  // running proof run. Flag OFF = skipped entirely. A lookup error - or a session with NO repo key
+  // (QC r1: the merge path then cannot prove it is not a proof repo) - fails CLOSED.
+  if (isProofEnabled()) {
+    let refusal: string | null = null;
+    if (!ctx.repoKey) {
+      refusal = 'proof_repo_never_merges:unverifiable';
+    } else {
+      try {
+        const find =
+          deps.findActiveProofRunForRepo ??
+          (await import('../db/orchestrator-proof-dal.ts')).findActiveProofRunForRepo;
+        if (await find(ctx.repoKey)) refusal = 'proof_repo_never_merges';
+      } catch {
+        refusal = 'proof_repo_never_merges:unverifiable';
+      }
+    }
+    if (refusal) {
+      await deps.appendRunLog({
+        session_id: ctx.sessionId,
+        repo_key: ctx.repoKey,
+        command: MERGE_COMMAND,
+        outcome: 'refused',
+        decision_rationale: `Merge refused: ${refusal} (an armed or running proof run owns this repo).`,
+      });
+      return { kind: 'refused', reason: refusal, held: [] };
+    }
+  }
 
   // ── WINDOW GATE (R-ADO-24) ────────────────────────────────────────────────
   // Outside the configured off-hours window ⇒ no-op (skipped run-log row). A null
@@ -238,6 +275,8 @@ export async function runMergeToMain(
     repo_key: ctx.repoKey,
     command: MERGE_COMMAND,
     outcome: dispatched ? 'merge_dispatched' : `refused_${inj.kind}`,
+    // PTYCAP-04 (F-6): link the row to the ledger reservation of the same inject.
+    inject_token: dispatched ? token : null,
     decision_rationale:
       `Merging ${merged.length} PR(s) (dev PASS auto-merge; ship/milestone/tag approved): ${merged.join(', ')}.` +
       (held.length > 0 ? ` Held ${held.length}: ${held.join(', ')}.` : '') +

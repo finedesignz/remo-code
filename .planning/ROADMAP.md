@@ -30,7 +30,7 @@
 
 - [ ] **Phase 1: PTY Token Accounting** — live, mid-turn token accounting for a PTY turn (post-hoc is too late; a TUI turn can run for many minutes).
 - [x] **Phase 2: PTY Pre-Flight Gate** — a programmatic turn cannot be written to the PTY without passing the full gate chain.
-- [ ] **Phase 3: Governed-Automation Guard** — `humanOnlyPtyGate` → `governedAutomationPtyGate`, new flag, default OFF.
+- [x] **Phase 3: Governed-Automation Guard** — `humanOnlyPtyGate` → `governedAutomationPtyGate`, new flag, default OFF.
 - [ ] **Phase 4: Lifetime Inject Counter + Kill Switch** — rate ceilings don't stop a slow grind; add a lifetime per-task counter and a real kill switch.
 - [ ] **Phase 5: Throwaway-Repo Due→PR Proof** — prove the thing actually works, once, on a repo nobody cares about.
 - [ ] **Phase 6: Hardening + Docs + Release** — real-Postgres e2e, docs, version bump, ship, smoke-verify.
@@ -114,6 +114,12 @@ ceiling (and the programmatic-credit halt).
   3. Alarm emails the owner at 60% of the daily token ceiling.
   4. Default daily token cap lowered from 50M to a survivable figure (~20M).
 
+**Hand-off from Phase 3**: DELIVERED in Phase 4. The fail-closed `kill_switch` and `lifetime_counter` governor bodies in `hub/src/dispatch/governed-pty.ts` are now real; an admitted automation PTY turn is COUNTED in a durable append-only ledger (`automation_inject_ledger`) by an atomic reserve-before-send. See [docs/usage-cost.md](../docs/usage-cost.md) "PTYCAP Phase 4".
+
+**Delivery notes (Phase 4)**: the lifetime cap is LITERAL (default 1000 per counter key, env-raisable, owner reset, one-shot warning page at 80 percent and an exhaustion page); `POST /api/sessions/heal` is classified a machine surface; with `REMO_GOVERNED_AUTOMATION_PTY` ON the ask, work and telegram governed lists carry no counter key, so the `lifetime_counter` governor refuses `lifetime_counter_key_missing` until Phase 5/7 supply keys (fail closed, flag default OFF). The 20M default token cap applies only where `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` is unset.
+
+**Deferred to Milestone GOV (from Phase 4)**: a Telegram or UI kill-switch trigger; opt-in `stop_running` cancellation of active runs once automation ownership is tracked; a counter policy for QC keys (Phases 7/8) beyond the heal key; the cap-hit QC kind (Phase 9).
+
 ### Phase 5: Throwaway-Repo Due→PR Proof
 
 **Goal**: The orchestrator produces one reviewable PR, unattended, on a repo nobody cares about.
@@ -123,6 +129,21 @@ ceiling (and the programmatic-credit halt).
   1. Branch-only. **Never merges to main.** One whitelisted repo. Hard budget.
   2. It produces a reviewable PR with a green CI check, or it cleanly does nothing and says why.
   3. This has **never once happened**. Until it does, the orchestrator is unproven and unsellable.
+
+**Plans:** 9 plans (the live proof is OWNER-GATED; these plans build, test and document the machinery and the arming runbook, they arm nothing)
+
+Plans:
+- [x] 05-01-PLAN.md -- tracer (armed run to terminal outcome through every layer, flag OFF a true no-op) + orchestrator_proof_runs state layer + ProofGithub contract and fake (wave 1)
+- [x] 05-02-PLAN.md -- read-only GitHub adapter + protection assertion/freeze/drift (ruleset shape, zero bypass, permission probe) (wave 2)
+- [x] 05-03-PLAN.md -- hub verifier: default-branch advance via compare, PR scope, CI/green decision (wave 2)
+- [x] 05-04-PLAN.md -- read-only GET /api/orchestrator/proof + OpenAPI + docs:sync (wave 2)
+- [x] 05-05-PLAN.md -- proofBudgetGate + proofProtectionGate in both orchestrator gate lists, coverage scans, merge-routing refusal (wave 3)
+- [x] 05-06-PLAN.md -- ordered evaluators, tick-side budget termination, inject-outcome mapping, counter-key pin (wave 3)
+- [x] 05-07-PLAN.md -- arm/disarm/enable cores + operator CLI (exactly-one allowlist, frozen budget and protection) (wave 3)
+- [x] 05-08-PLAN.md -- flag-OFF differential matrix, real-Postgres proof helper (CI only), baseline (wave 4)
+- [x] 05-09-PLAN.md -- owner runbook (permissions, repo + ruleset, ordered rollback), CLAUDE.md/docs, runbook pin test (wave 4)
+
+**Delivery notes (Phase 5)**: the machinery is built and tested against a fake GitHub client and, in CI, against real Postgres; nothing was armed and no flag, GitHub or prod system was touched. The live run is OWNER-GATED (`docs/ptycap-05-proof-runbook.md`); Phase 5 stays unchecked until SC-3 closes live, so SC-2/SC-3 are "armed-ready, live proof pending owner GO", never PASS. Deferred: the automation `term.input` PTY producer (D-01, drives the stream-json macro path instead). Recorded dependency: arming refuses `proof_protection_unverifiable` (`bypass_actors_not_visible`) unless the GitHub App token can see ruleset bypass actors (GitHub shows them only to a caller with write access); that is an owner decision about the App's permission level, with no override path.
 
 ### Phase 6: Hardening + Docs + Release
 
@@ -190,9 +211,9 @@ fix the CAUSE, and escalates to the human when it cannot.
 |-------|--------|
 | 1. PTY Token Accounting | In Progress|
 | 2. PTY Pre-Flight Gate | Done |
-| 3. Governed-Automation Guard | Not started |
-| 4. Lifetime Counter + Kill Switch | Not started |
-| 5. Throwaway-Repo Due→PR Proof | Not started |
+| 3. Governed-Automation Guard | Complete (4/4 plans) - PR #505 open |
+| 4. Lifetime Counter + Kill Switch | Executed (8/8 plans) - QC BLOCKED (2 open races), draft PR #506 |
+| 5. Throwaway-Repo Due→PR Proof | Executed (9/9 plans) - QC BLOCKED (2 open MAJOR), draft PR - live proof pending owner GO |
 | 6. Hardening + Docs + Release | Not started |
 | 7. Unified Self-Heal Routing | Specced, not started (blocked on #346 + Phase 4) |
 | 8. Periodic Task QC + Optimization | Specced, not started (blocked on Phase 4) |

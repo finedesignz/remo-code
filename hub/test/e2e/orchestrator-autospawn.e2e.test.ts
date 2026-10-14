@@ -85,7 +85,7 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
 
   // ── A capturing harness for one inject call ───────────────────────────────────
   interface Capture {
-    launches: Array<{ userId: string; sessionId: string }>;
+    launches: Array<{ userId: string; sessionId: string; machine?: boolean }>;
     dispatched: DispatchRequest[];
     /** what the captured `dispatch` returns (drives the parked vs delivered path). */
     dispatchKind: Awaited<ReturnType<typeof import('../../src/dispatch/pipeline.ts').dispatch>>['kind'];
@@ -126,7 +126,7 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
       appendRunLog,
       // Stubbed supervisor liveness + captured launch (the session.start emit).
       supervisorOnlineForUser: async () => cap.supervisorOnline,
-      launchSessionForUser: (async (args: { userId: string; sessionId: string }) => {
+      launchSessionForUser: (async (args: { userId: string; sessionId: string; machine?: boolean }) => {
         cap.launches.push(args);
         return cap.launchResult;
       }) as InjectDeps['launchSessionForUser'],
@@ -207,7 +207,7 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
 
     // 1. session.start fired exactly once (captured launch), parked.
     expect(cap.launches.length).toBe(1);
-    expect(cap.launches[0]).toEqual({ userId: h.userId, sessionId: h.sessionId });
+    expect(cap.launches[0]).toEqual({ userId: h.userId, sessionId: h.sessionId, machine: true });
     expect(outcome.kind).toBe('autospawn_launched');
 
     // 2. The prompt was handed to dispatch (parked in grace for drain).
@@ -249,7 +249,16 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
     `;
     expect(prRows.length).toBe(1);
     expect(prRows[0].pr_url).toBe(PR_URL);
-  });
+
+    // PTYCAP-05: the real-Postgres proof of the throwaway-repo proof SQL (advisory-locked
+    // single-flight, partial unique indexes, CHECKs, exactly-once terminalize, token
+    // attribution, disarm scope) runs HERE, in the body of this existing test, so it
+    // executes in Woodpecker (postgres:16) with zero new tests and zero new skips.
+    // See ./proof-checks.ts. It uses its own synthetic users, so the allowlist state above
+    // is untouched.
+    const { runProofChecks } = await import('./proof-checks.ts');
+    await runProofChecks({ sql: h.sql, userId: h.userId, sessionId: h.sessionId });
+  }, 120_000);
 
   // ── GATE NO-OPS ───────────────────────────────────────────────────────────────
   test('allowlist EMPTY → refused:not_allowlisted, no launch, no ledger row', async () => {

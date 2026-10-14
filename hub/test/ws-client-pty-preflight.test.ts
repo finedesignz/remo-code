@@ -166,6 +166,43 @@ describe('PTYCAP Phase 2 — what gets checked', () => {
   })
 })
 
+// PTYCAP Phase 3 (D-09 ii): the actor is inferred from the authenticated
+// connection. zod's default object parsing strips unknown keys, so a client that
+// asserts `source` / `actor` in a frame gets neither honored nor forwarded. This
+// PROVES the strip (rather than inferring it from the schema shape).
+describe('PTYCAP Phase 3 — client-asserted actor keys are stripped (D-09)', () => {
+  test('term.input carrying source:scheduler + actor:orchestrator-background is preflighted as human and forwarded without the extra keys', async () => {
+    const { ws } = humanClient()
+    await handleClientMessage(ws, JSON.stringify({
+      type: 'term.input',
+      session_id: SESSION,
+      bytes: btoa(ENTER),
+      source: 'scheduler',
+      actor: 'orchestrator-background',
+    }))
+    expect(preflightCalls).toEqual([{ userId: USER, sessionId: SESSION, actor: 'human' }])
+    const forwarded = fwd.filter((f) => f.type === 'term.input')
+    expect(forwarded.length).toBe(1)
+    expect(Object.keys(forwarded[0]).sort()).toEqual(['bytes', 'session_id', 'type'])
+  })
+
+  test('term.attach_file is exempt from the preflight by design (D-10) and extra source/actor keys are not forwarded', async () => {
+    const { ws } = humanClient()
+    await handleClientMessage(ws, JSON.stringify({
+      type: 'term.attach_file',
+      session_id: SESSION,
+      filename: 'a.txt',
+      data_b64: btoa('x'),
+      source: 'scheduler',
+      actor: 'agent',
+    }))
+    expect(preflightCalls).toEqual([])
+    expect(fwd.length).toBe(1)
+    expect('source' in fwd[0]).toBe(false)
+    expect('actor' in fwd[0]).toBe(false)
+  })
+})
+
 describe('PTYCAP Phase 2 — refusal', () => {
   test('a refused submit is dropped and the client gets send_refused on the term channel', async () => {
     preflightResult = { ok: false, reason: 'over_daily_cost_cap:$12.00>=$10.00' }
