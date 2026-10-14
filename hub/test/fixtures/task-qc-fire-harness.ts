@@ -107,6 +107,8 @@ export function setupFireHarness() {
     sessionRows: [] as any[],
     /** rows the findings INSERT ... RETURNING yields ([] = ON CONFLICT DO NOTHING) */
     findingRows: [{ id: 'finding-1' }] as any[],
+    /** when set, yields each findings INSERT's rows instead of findingRows (unique ids per call) */
+    findingRowsFn: null as null | (() => any[]),
     claimed: [] as any[],
     insertedRuns: [] as any[],
     finalized: [] as Array<{ id: string; status: string; error: string | null; output_snippet: string | null }>,
@@ -141,6 +143,7 @@ export function setupFireHarness() {
     h.openRuns = []
     h.sessionRows = [{ id: 'sess-1', status: 'online', deleted_at: null, last_activity: null, created_at: null, repo_key: null }]
     h.findingRows = [{ id: 'finding-1' }]
+    h.findingRowsFn = null
     h.claimed = []
     h.insertedRuns = []
     h.finalized = []
@@ -174,7 +177,7 @@ export function setupFireHarness() {
       h.openRuns.push({ id: row.id })
       return [row]
     })
-    fake.onInsert(/INSERT INTO task_qc_findings/, () => h.findingRows)
+    fake.onInsert(/INSERT INTO task_qc_findings/, () => (h.findingRowsFn ? h.findingRowsFn() : h.findingRows))
     fake.on(/^UPDATE task_qc_findings SET digest_sent_at/, [])
   }
   reset()

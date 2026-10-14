@@ -14,7 +14,7 @@ import { sql } from '../../db/postgres.ts'
 import { sendEmail } from '../../lib/email.ts'
 import { haltBeforeMachineSend, releaseInject, reserveInject } from '../../dispatch/automation-controls.ts'
 import { runTaskQcPass } from '../../task-qc/engine.ts'
-import { sendDigest } from '../../task-qc/digest.ts'
+import { deliverDigest } from '../../task-qc/digest.ts'
 import { claimEngineFailure } from '../../task-qc/findings.ts'
 import { clampBounds } from '../../task-qc/flags.ts'
 import { safeText, type TaskQcResult } from '../../task-qc/types.ts'
@@ -141,9 +141,15 @@ export async function sendTaskQcTask(
       // out of time: no email starts past the deadline; the rows stay unmailed and are reported next run
       log.warn('scheduler.task_qc.digest_deadline', { task_id: task.id, run_id: ctx.runId })
     } else if (to) {
-      delivered = await sendDigest(report, { email: to }, { sendTimeoutMs: left })
+      const sent = await deliverDigest(report, { email: to }, { sendTimeoutMs: left })
+      delivered = sent.delivered
       if (!delivered) log.warn('scheduler.task_qc.digest_not_delivered', { task_id: task.id, run_id: ctx.runId })
-      else await markDelivered(ctx.userId, result.recordedIds ?? [], task.id, ctx.runId, deadline)
+      else {
+        // only the findings the digest RENDERED were delivered; a size or count cut leaves the rest unmarked
+        const shown = new Set<unknown>(sent.shown)
+        const ids = (result.recorded ?? []).filter((r) => shown.has(r.finding)).map((r) => r.id)
+        await markDelivered(ctx.userId, ids, task.id, ctx.runId, deadline)
+      }
     } else {
       log.warn('scheduler.task_qc.no_recipient', { task_id: task.id, run_id: ctx.runId })
     }
