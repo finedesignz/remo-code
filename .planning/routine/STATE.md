@@ -8,6 +8,13 @@
      its iteration. -->
 LOCK: none
 
+## Run 21 (2026-10-14T17:50Z)
+- memlog claim OK (routine-run-2026-10-14b). Prod /health = {"ok":true}. DIRECTIVE has section 0.
+- #506 (ec8908f) and #509 (521d477): Woodpecker qc + docs-drift green, no review threads, 3-seat panel on #506 clear. AAF ai-review on both still `in_progress` since ~17:07Z (45+ min, no verdict, prior codex blocking finding on #506 was fixed in ec8908f). Not merged: sensitive-path (#506) spend path, will not merge past a pending review. MERGE NEXT RUN if ai-review completes with no blocking finding; if still in_progress with no verdict, treat as stuck AAF reviewer (file agentautofix report) and substitute panel verdict for #506, merge #509.
+- Not touched: #504, #503, #502, #494, drafts #511-513.
+- Error (transient): github MCP get_check_runs on #509 returned "upstream connect error or disconnect/reset before headers"; retry succeeded. Not yet filed with AgentAutofix (transient, recovered).
+- install-gsd.sh not run. Resume: merge #506, #509; then #504, #503.
+
 ## Run 20 (2026-10-14)
 - memlog claim OK (routine-run-2026-10-14). Merged #505 (PTYCAP-03; qc+docs-drift+ai-review green, 3-seat QC earlier) -> main 66bf504.
 - #506 (PTYCAP-04): was stacked on #505 -> re-applied cleanly on main (ec8908f), retargeted to main, fixed codex-blocking releaseInject (retry + parked queue + test). Full 3-seat QC panel: no blocking (verdict commented on PR; lifetime cap on scheduler keys is locked design D-05). Woodpecker qc/docs-drift pending at end of run -> MERGE NEXT RUN if green and ai-review has no blocking finding.
