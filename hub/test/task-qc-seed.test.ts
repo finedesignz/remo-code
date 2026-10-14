@@ -7,6 +7,7 @@ import { createTaskQcFakeSql } from './fixtures/task-qc-fake-sql.ts'
 
 const fake = createTaskQcFakeSql()
 mock.module('../src/db/postgres.ts', () => ({ sql: fake.sql }))
+// @ts-expect-error cache-bust query suffix is not a resolvable module specifier
 const { seedTaskQcTasks } = await import('../src/task-qc/seed.ts?seed-test')
 
 const ENV_KEYS = ['REMO_TASK_QC_ENABLED', 'REMO_TASK_QC_AUTOFIX', 'REMO_TASK_QC_CADENCE']

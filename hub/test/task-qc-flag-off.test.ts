@@ -19,9 +19,12 @@ mock.module('../src/scheduler/senders/agent.ts', () => ({ sendAgentTask: async (
 mock.module('../src/scheduler/senders/supervisor.ts', () => ({ sendSupervisorTask: async () => {} }))
 
 // The harness mocks scheduler/registry.ts for the dispatcher; load the REAL one by cache-bust.
+// @ts-expect-error cache-bust query suffix is not a resolvable module specifier
 const registry = await import('../src/scheduler/registry.ts?flag-off-real')
+// @ts-expect-error cache-bust query suffix is not a resolvable module specifier
 const catchup = await import('../src/scheduler/catchup.ts?flag-off-real')
 const dispatcher = await import('../src/scheduler/dispatcher.ts')
+// @ts-expect-error cache-bust query suffix is not a resolvable module specifier
 const { seedTaskQcTasks } = await import('../src/task-qc/seed.ts?flag-off-real')
 
 const DAY = 86_400_000
