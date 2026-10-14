@@ -28,6 +28,8 @@ export interface DigestOptions {
   /** origin such as https://app.example.com; ignored unless it matches the strict pattern */
   appBaseUrl?: string
   now?: Date
+  /** sendDigest only: upper bound in ms on the email request (the sender passes the pass time left) */
+  sendTimeoutMs?: number
 }
 
 export const MAX_FINDINGS_RENDERED = 200
@@ -270,5 +272,5 @@ export async function sendDigest(
 ): Promise<boolean> {
   const digest = buildDigest(result, { ...opts, userName: user.name })
   if (!digest) return false
-  return sendEmail({ to: user.email, subject: digest.subject, html: digest.html, text: digest.text })
+  return sendEmail({ to: user.email, subject: digest.subject, html: digest.html, text: digest.text, timeoutMs: opts.sendTimeoutMs })
 }

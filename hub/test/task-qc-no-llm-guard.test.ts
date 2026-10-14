@@ -95,6 +95,7 @@ const ALLOW: Record<string, string[]> = {
     '../../task-qc/engine.ts',
     '../../task-qc/digest.ts',
     '../../task-qc/findings.ts',
+    '../../task-qc/flags.ts', // pure bounds constants: the run-wide wall-clock deadline (round 2)
     '../../task-qc/types.ts',
     '../../dispatch/automation-controls.ts',
     '../dispatcher.ts',

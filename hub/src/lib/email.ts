@@ -8,6 +8,8 @@ export interface SendEmailInput {
   subject: string;
   html: string;
   text: string;
+  /** upper bound on the whole request, in ms (default and ceiling 10000); a caller with a deadline passes the time it has left */
+  timeoutMs?: number;
 }
 
 export async function sendEmail(input: SendEmailInput): Promise<boolean> {
@@ -23,7 +25,7 @@ export async function sendEmail(input: SendEmailInput): Promise<boolean> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
       body: JSON.stringify({ from_inbox_id: inboxId, to: input.to, subject: input.subject, html: input.html, text: input.text }),
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(Math.min(10_000, Math.max(1, Math.floor(input.timeoutMs ?? 10_000)))),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');

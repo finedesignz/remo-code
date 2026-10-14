@@ -139,14 +139,59 @@ export function isDeadlineError(err: unknown): boolean {
   return code === '57014' || code === '55P03'
 }
 
-/** Arms the remaining pass time as the transaction-local statement timeout; throws when none is left. */
-export type DeadlineArmer = (tx: QueryRunner) => Promise<void>
+/**
+ * Arms the remaining pass time as the transaction-local statement timeout; throws when none is left.
+ * It carries the deadline and clock it was built from so connection acquisition (boundedBegin) and
+ * the per-statement re-arming share ONE bound.
+ */
+export type DeadlineArmer = ((tx: QueryRunner) => Promise<void>) & { readonly deadline: number; readonly clock: () => number }
 
 export function makeDeadlineArmer(deadline: number, clock: () => number = Date.now): DeadlineArmer {
-  return async (tx) => {
+  const arm = async (tx: QueryRunner): Promise<void> => {
     const remaining = Math.floor(deadline - clock())
     if (remaining <= 0) throw new TaskQcDeadlineError()
     await (tx as unknown as { unsafe(text: string): PromiseLike<any[]> }).unsafe(`SET LOCAL statement_timeout = ${remaining}`)
+  }
+  return Object.assign(arm, { deadline, clock })
+}
+
+/**
+ * Open a transaction without letting the wait for a pooled connection outlast the deadline
+ * (statement_timeout cannot cover it: it is armed inside the transaction). `begin` binds the
+ * caller's begin overload. Only the ACQUISITION is raced: once the callback runs, the database
+ * enforces the deadline per statement (the callers re-arm before every statement), so a write
+ * transaction is never abandoned half-way. A transaction that acquires its connection after the
+ * deadline rolls back before issuing any statement.
+ */
+export async function boundedBegin<T>(
+  begin: (cb: (tx: any) => Promise<T>) => Promise<T>,
+  arm: DeadlineArmer,
+  fn: (tx: any) => Promise<T>,
+): Promise<T> {
+  const remaining = arm.deadline - arm.clock()
+  if (remaining <= 0) throw new TaskQcDeadlineError()
+  let acquired = false
+  let expired = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const work = begin(async (tx) => {
+    acquired = true
+    if (timer) clearTimeout(timer)
+    if (expired) throw new TaskQcDeadlineError()
+    return fn(tx)
+  })
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      if (acquired) return
+      expired = true
+      reject(new TaskQcDeadlineError())
+    }, remaining)
+  })
+  // the loser of the race must not surface as an unhandled rejection
+  work.catch(() => {})
+  try {
+    return await Promise.race([work, guard])
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
 
