@@ -179,7 +179,8 @@ const baseRow = (over: Record<string, unknown> = {}) => ({
 
 function setup(row: Record<string, unknown> | null, opts: { ownOpen?: boolean; sharedOpen?: boolean } = {}) {
   const fake = createTaskQcFakeSql()
-  fake.on('FOR NO KEY UPDATE', row ? [row] : [])
+  fake.on(/FROM scheduled_tasks WHERE id = \? AND user_id = \? FOR UPDATE/, row ? [row] : [])
+  fake.on(/FROM sessions WHERE id = \? FOR UPDATE/, [{ id: 's1' }])
   fake.on(/FROM scheduled_task_runs WHERE task_id/, opts.ownOpen ? [{ open: 1 }] : [])
   fake.on(/FROM scheduled_task_runs WHERE session_id/, opts.sharedOpen ? [{ open: 1 }] : [])
   fake.on(/UPDATE scheduled_tasks SET timezone/, (v) => [{ timezone: v[0] }])
@@ -202,7 +203,7 @@ describe('applyFix transaction', () => {
     const r = await applyFix(fake.sql, { kind: 'normalize_timezone', timezone: 'UTC' }, CTX)
     expect(r.status).toBe('applied')
     expect(fake.state.beginCalls).toBe(1)
-    expect(kinds(fake)).toEqual(['select:forupdate', 'lock', 'select', 'select', 'update', 'insert'])
+    expect(kinds(fake)).toEqual(['select:forupdate', 'select:forupdate', 'select', 'select', 'update', 'insert'])
     expect(fake.state.statements.every((s) => s.tx === 1)).toBe(true)
     // lock is scoped by id AND user
     expect(fake.state.statements[0]!.text).toContain('id = ? AND user_id = ?')
@@ -295,7 +296,7 @@ describe('applyFix transaction', () => {
 
   test('an audit insert that conflicts aborts the transaction instead of leaving an unaudited write', async () => {
     const fake = createTaskQcFakeSql()
-    fake.on('FOR NO KEY UPDATE', [baseRow()])
+    fake.on(/FROM scheduled_tasks WHERE id = \? AND user_id = \? FOR UPDATE/, [baseRow()])
     fake.on(/FROM scheduled_task_runs/, [])
     fake.on(/UPDATE scheduled_tasks SET timezone/, [{ timezone: 'UTC' }])
     fake.on('INSERT INTO task_qc_findings', [])
