@@ -109,6 +109,47 @@ export async function proofFinalCheck(req: DispatchRequest, deps?: ProofGateDeps
   }
 }
 
+export interface ProofSendBoundaryDeps {
+  /** Run fn while holding the hub-global proof lock (arm / disarm / enable wait for it). */
+  withLock<T>(fn: () => Promise<T>): Promise<T>;
+  /** Fresh kill-switch read + active-run identity (finalHaltCheck with the proof recheck). */
+  finalCheck(req: DispatchRequest): Promise<GateResult>;
+}
+
+async function realBoundaryDeps(): Promise<ProofSendBoundaryDeps> {
+  const [dal, controls] = await Promise.all([
+    import('../db/orchestrator-proof-dal.ts'),
+    import('../dispatch/automation-controls.ts'),
+  ]);
+  return {
+    withLock: (fn) => dal.withProofLock(fn),
+    finalCheck: (req) => controls.finalHaltCheck(req, { proof: true }),
+  };
+}
+
+/**
+ * QC round 2 (codex #2/#3): the ACTUAL wire-send boundary. The pipeline's final halt check runs
+ * BEFORE the awaited message persistence in the orchestrator `send`, so an arm / disarm that
+ * committed during that await would still be followed by a stale (merge-capable) send. This
+ * re-runs the kill-switch + active-run identity check AFTER persistence and performs the delivery
+ * while holding the same hub-global advisory lock arm / disarm / enable take: either the arm /
+ * disarm committed first (the recheck sees it and the send is refused), or it waits for the
+ * delivery to finish. Throws `proof_send_refused:<reason>` (the pipeline records a failed send);
+ * a lock or lookup error also throws (fail closed). Callers invoke it only when proof mode is ON.
+ */
+export async function sendAtProofBoundary(
+  req: DispatchRequest,
+  deliver: () => void | Promise<void>,
+  deps?: ProofSendBoundaryDeps,
+): Promise<void> {
+  const d = deps ?? (await realBoundaryDeps());
+  await d.withLock(async () => {
+    const r = await d.finalCheck(req);
+    if (!r.ok) throw new Error(`proof_send_refused:${r.reason}`);
+    await deliver();
+  });
+}
+
 export function makeProofBudgetGate(deps?: ProofGateDeps): DispatchGate {
   return {
     name: PROOF_BUDGET_GATE_NAME,
