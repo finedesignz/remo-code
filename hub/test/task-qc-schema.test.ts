@@ -76,6 +76,20 @@ describe('PTYCAP-08 task_qc schema', () => {
     expect(line!).toMatch(/ON DELETE SET NULL/)
   })
 
+  test('codex MAJOR 3: run creation takes the same per-session advisory lock the safe-fix writer holds', () => {
+    const fn = statement('CREATE OR REPLACE FUNCTION scheduled_task_runs_session_lock')
+    expect(fn).toContain("pg_advisory_xact_lock(hashtext('taskqc-session:' || NEW.session_id)::bigint)")
+    expect(fn).toContain('IF NEW.session_id IS NOT NULL')
+    const trg = statement('CREATE OR REPLACE TRIGGER trg_scheduled_task_runs_session_lock')
+    expect(trg).toContain('BEFORE INSERT ON scheduled_task_runs')
+    expect(trg).toContain('FOR EACH ROW')
+    // idempotent re-run: no DROP TRIGGER in schema.sql
+    expect(FLAT).not.toMatch(/DROP TRIGGER/i)
+    // the writer uses the identical key prefix
+    const writer = readFileSync(join(import.meta.dir, '..', 'src', 'task-qc', 'safe-fixes.ts'), 'utf8')
+    expect(writer).toContain("'taskqc-session:' + sid")
+  })
+
   test('schema-lint is clean (no un-pragmad mutating statement)', () => {
     const bad = lintSchemaSql(SCHEMA).filter((f) => f.allowedReason === null)
     expect(bad).toEqual([])

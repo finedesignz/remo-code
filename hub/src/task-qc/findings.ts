@@ -99,3 +99,54 @@ export function userDay(timezone: string, now: Date = new Date()): string {
     return fmt('UTC')
   }
 }
+
+// ---------------------------------------------------------------------------
+// Wall-clock enforcement (F1-A3). The pass deadline is a hard bound only if the
+// DATABASE cancels a blocked statement: sampling clock() before an await cannot
+// stop a query stuck behind a lock. Every QC transaction therefore arms
+// `SET LOCAL statement_timeout = <remaining ms>` as its FIRST statement (before
+// any advisory lock) and the engine treats the resulting cancellation as the
+// deadline having passed.
+// ---------------------------------------------------------------------------
+export class TaskQcDeadlineError extends Error {
+  readonly code = 'task_qc_deadline'
+  constructor() {
+    super('task_qc: pass deadline reached')
+    this.name = 'TaskQcDeadlineError'
+  }
+}
+
+/** Our own deadline error, or postgres query_canceled (57014 statement_timeout) / lock_not_available (55P03). */
+export function isDeadlineError(err: unknown): boolean {
+  if (err instanceof TaskQcDeadlineError) return true
+  const code = (err as { code?: unknown } | null | undefined)?.code
+  return code === '57014' || code === '55P03'
+}
+
+/** Arms the remaining pass time as the transaction-local statement timeout; throws when none is left. */
+export type DeadlineArmer = (tx: QueryRunner) => Promise<void>
+
+export function makeDeadlineArmer(deadline: number, clock: () => number = Date.now): DeadlineArmer {
+  return async (tx) => {
+    const remaining = Math.floor(deadline - clock())
+    if (remaining <= 0) throw new TaskQcDeadlineError()
+    await (tx as unknown as { unsafe(text: string): PromiseLike<any[]> }).unsafe(`SET LOCAL statement_timeout = ${remaining}`)
+  }
+}
+
+/** Resolve with `p`, or reject with TaskQcDeadlineError once the deadline passes (for non-database awaits). */
+export async function raceDeadline<T>(p: PromiseLike<T>, deadline: number, clock: () => number = Date.now): Promise<T> {
+  const remaining = deadline - clock()
+  if (remaining <= 0) throw new TaskQcDeadlineError()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      Promise.resolve(p),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new TaskQcDeadlineError()), remaining)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}

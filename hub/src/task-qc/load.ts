@@ -11,7 +11,7 @@
  * is imported lazily, only when a log task is audited, exactly as the
  * dispatcher itself loads that sender.
  */
-import type { QueryRunner } from './findings.ts'
+import { isDeadlineError, makeDeadlineArmer, raceDeadline, type QueryRunner } from './findings.ts'
 import { TASK_QC_BOUNDS, type TaskQcBounds } from './flags.ts'
 import type { AuditTaskInput, RunInput, SessionInput, TaskQcScope } from './types.ts'
 
@@ -51,7 +51,17 @@ const empty = (truncated: boolean): LoadedAudit => ({
 
 const effectiveSession = (t: AuditTaskInput): string | null => (t.target_kind === 'session' ? (t.target_id ?? t.session_id ?? null) : null)
 
+/** A pass that runs out of time (our check, or the database cancelling at the deadline) reads nothing more: truncated. */
 export async function loadAuditInputs(args: LoadArgs): Promise<LoadedAudit> {
+  try {
+    return await loadAuditInputsBounded(args)
+  } catch (err) {
+    if (isDeadlineError(err)) return empty(true)
+    throw err
+  }
+}
+
+async function loadAuditInputsBounded(args: LoadArgs): Promise<LoadedAudit> {
   const { userId, runner } = args
   const bounds = args.bounds ?? TASK_QC_BOUNDS
   const clock = args.clock ?? Date.now
@@ -64,8 +74,12 @@ export async function loadAuditInputs(args: LoadArgs): Promise<LoadedAudit> {
   if (remaining <= 0) return empty(true)
 
   const out = await runner.begin('read only', async (tx): Promise<LoadedAudit> => {
+    // statement_timeout is re-armed with the time LEFT before EVERY statement (the lock first: a
+    // blocked advisory-lock wait is cancelled by the database at the deadline, F1-A3).
+    const arm = makeDeadlineArmer(args.deadline, clock)
+    await arm(tx)
     if (args.lock) await tx`SELECT pg_advisory_xact_lock(hashtext(${'taskqc:' + userId})::bigint)`
-    await tx.unsafe(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(remaining))}`)
+    await arm(tx)
 
     const taskRows = (await tx`
       SELECT id, user_id, name, task_type, enabled, schedule_kind, cron_expr, cron_expression, timezone,
@@ -83,6 +97,7 @@ export async function loadAuditInputs(args: LoadArgs): Promise<LoadedAudit> {
     if (tasks.length === 0) return empty(truncatedTasks)
     const taskIds = tasks.map((t) => t.id)
 
+    await arm(tx)
     const runRows = (await tx`
       SELECT id, task_id, status, error, started_at, finished_at, output_snippet FROM (
         SELECT id, task_id, status, error, started_at, finished_at, output_snippet,
@@ -96,6 +111,7 @@ export async function loadAuditInputs(args: LoadArgs): Promise<LoadedAudit> {
     const sessionsById: Record<string, SessionInput | null> = {}
     const sids = [...new Set(tasks.map(effectiveSession).filter((s): s is string => s != null))]
     if (sids.length > 0 && want('DEAD_SESSION')) {
+      await arm(tx)
       const rows = (await tx`
         SELECT id, status, deleted_at, last_activity, created_at, repo_key
         FROM sessions WHERE user_id = ${userId} AND id = ANY(${sids}::text[])
@@ -104,6 +120,7 @@ export async function loadAuditInputs(args: LoadArgs): Promise<LoadedAudit> {
       for (const r of rows) sessionsById[r.id] = r
     }
 
+    await arm(tx)
     const tzRows = (await tx`SELECT timezone FROM users WHERE id = ${userId} LIMIT 1`) as Array<{ timezone?: string | null }>
     const userTimezone = tzRows[0]?.timezone || 'UTC'
 
@@ -120,7 +137,8 @@ export async function loadAuditInputs(args: LoadArgs): Promise<LoadedAudit> {
     }
     for (const t of logTasks) {
       if (clock() >= args.deadline) return { ...out, tasks: [], runsByTask: {}, sessionsById: {}, truncated: true }
-      t.resolvedAppUuid = (await resolve!(t, userId)) ?? null
+      // the resolver reads through its own DAL (no database-level cancel), so the deadline is raced
+      t.resolvedAppUuid = (await raceDeadline(resolve!(t, userId), args.deadline, clock)) ?? null
     }
   }
   return out

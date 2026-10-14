@@ -71,7 +71,7 @@ export function makeEngineWorld() {
     fake.onSelect(/FROM sessions WHERE user_id = \? AND repo_key/, () => world.live)
     fake.onSelect(/FROM users/, () => [{ timezone: 'America/Los_Angeles' }])
     fake.onSelect(/FROM scheduled_tasks t/, () => world.siblings)
-    fake.onSelect(/FROM scheduled_tasks WHERE id = \? AND user_id = \? FOR UPDATE/, (v) => (world.store[v[0]] ? [world.store[v[0]]] : []))
+    fake.onSelect(/FROM scheduled_tasks WHERE id = \? AND user_id = \? FOR NO KEY UPDATE/, (v) => (world.store[v[0]] ? [world.store[v[0]]] : []))
     fake.onSelect(/FROM scheduled_task_runs WHERE (task_id|session_id) = \? AND status IN/, () => [])
     fake.on(/^UPDATE scheduled_tasks SET timezone/, (v) => [{ timezone: v[0] }])
     fake.on(/^UPDATE scheduled_tasks SET payload/, (v) => [{ payload: { application_uuid: v[0] } }])

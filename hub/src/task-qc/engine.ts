@@ -15,7 +15,7 @@
  */
 import { sql } from '../db/postgres.ts'
 import { runDetectors } from './detectors.ts'
-import { evidenceSig, insertFinding, userDay, type QueryRunner } from './findings.ts'
+import { evidenceSig, insertFinding, isDeadlineError, makeDeadlineArmer, userDay, type QueryRunner } from './findings.ts'
 import { clampBounds, isTaskQcAutofixEnabled, taskQcFailStreak, type TaskQcBounds } from './flags.ts'
 import { loadAuditInputs, loadLiveSessionCandidates, loadSiblingUuids, type ReadDb } from './load.ts'
 import { planFix, type PlanContext, type PlanResult } from './fix-plans.ts'
@@ -76,6 +76,14 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
   const clock = deps.clock ?? Date.now
   const bounds = clampBounds(deps.bounds)
   const deadline = clock() + bounds.passTimeoutMs
+  // every QC transaction arms the time LEFT as its statement_timeout, so the database cancels a
+  // statement blocked past the deadline (F1-A3); a cancellation is treated as the deadline passing
+  const arm = makeDeadlineArmer(deadline, clock)
+  const inTx = <T>(fn: (tx: QueryRunner) => Promise<T>): Promise<T> =>
+    q.begin(async (tx: QueryRunner) => {
+      await arm(tx)
+      return fn(tx)
+    })
 
   // Scope can only narrow: read exactly two keys, ignore everything else.
   const requested = args.scope?.detectors
@@ -117,13 +125,20 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
     }
     const task = tasksById.get(f.taskId)!
     const ctx: PlanContext = { autofix, taskTimezone: task.timezone, userTimezone: loaded.userTimezone }
-    if (autofix && f.fixCandidate === 'backfill_payload_from_sibling') {
-      ctx.siblingApplicationUuids = await loadSiblingUuids(q, userId, task)
-    } else if (autofix && f.fixCandidate === 'rebind_dead_session') {
-      const sid = typeof f.evidence.sessionId === 'string' ? f.evidence.sessionId : ''
-      const dead = loaded.sessionsById[sid] ?? null
-      ctx.deadSessionRepoKey = dead?.repo_key ?? null
-      ctx.liveSessionIds = await loadLiveSessionCandidates(q, userId, dead ? { id: sid, repo_key: dead.repo_key } : null)
+    try {
+      if (autofix && f.fixCandidate === 'backfill_payload_from_sibling') {
+        ctx.siblingApplicationUuids = await inTx((tx) => loadSiblingUuids(tx, userId, task))
+      } else if (autofix && f.fixCandidate === 'rebind_dead_session') {
+        const sid = typeof f.evidence.sessionId === 'string' ? f.evidence.sessionId : ''
+        const dead = loaded.sessionsById[sid] ?? null
+        ctx.deadSessionRepoKey = dead?.repo_key ?? null
+        ctx.liveSessionIds = await inTx((tx) => loadLiveSessionCandidates(tx, userId, dead ? { id: sid, repo_key: dead.repo_key } : null))
+      }
+    } catch (err) {
+      if (!isDeadlineError(err)) throw err
+      truncated = true
+      steps.push({ f, plan: { kind: 'deadline' } })
+      continue
     }
     steps.push({ f, plan: planFix(f, ctx) })
   }
@@ -163,16 +178,25 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
       truncated = true
       return unpersisted(f, 'rows_budget_exhausted')
     }
-    const res = await insertFinding(q, {
-      userId,
-      taskId: f.taskId,
-      detector: f.detector,
-      severity: f.severity,
-      disposition: 'proposed',
-      evidence: f.evidence,
-      sig: evidenceSig(f.detector, f.evidence),
-      day,
-    })
+    let res: Awaited<ReturnType<typeof insertFinding>>
+    try {
+      res = await inTx((tx) =>
+        insertFinding(tx, {
+          userId,
+          taskId: f.taskId,
+          detector: f.detector,
+          severity: f.severity,
+          disposition: 'proposed',
+          evidence: f.evidence,
+          sig: evidenceSig(f.detector, f.evidence),
+          day,
+        }),
+      )
+    } catch (err) {
+      if (!isDeadlineError(err)) throw err
+      truncated = true
+      return unpersisted(f, 'deadline')
+    }
     rowsWritten++
     if (res.inserted) proposals.push(reason ? withParams(f, { reason }) : f)
   }
@@ -208,7 +232,16 @@ export async function runTaskQcPass(args: TaskQcPassArgs): Promise<TaskQcResult>
       continue
     }
     fixAttempts++
-    const res = await applyFix(q, plan.fix, { userId, taskId: f.taskId, day, finding: f })
+    let res: Awaited<ReturnType<typeof applyFix>>
+    try {
+      res = await applyFix(q, plan.fix, { userId, taskId: f.taskId, day, finding: f, armTimeout: arm })
+    } catch (err) {
+      // the fix transaction rolled back whole: nothing was written for this finding
+      if (!isDeadlineError(err)) throw err
+      truncated = true
+      unpersisted(f, 'deadline')
+      continue
+    }
     rowsWritten += res.rowsWritten
     if (res.status === 'applied') {
       applied.push({ finding: f, fix: res.fixKind, taskId: f.taskId, before: res.before, after: res.after, rollbackSql: res.rollbackSql })
