@@ -284,6 +284,8 @@ export async function runMacroCycle(
       autospawn,
       // PTYCAP-04 (D-01, F-5c): one lifetime budget per orchestrator task.
       taskId: input.taskId,
+      // PTYCAP-05 (QC r1): the final gate requires an exact match with the ACTIVE run.
+      ...(proofRun ? { proofRunId: proofRun.id } : {}),
     });
     result.injected =
       outcome.kind === 'dispatched' ||

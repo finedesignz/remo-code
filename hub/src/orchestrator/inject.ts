@@ -100,6 +100,8 @@ export interface InjectInput {
    * Server-side only; it becomes `DispatchRequest.counterKey`.
    */
   taskId?: string
+  /** PTYCAP-05 (QC r1): the claimed proof run this prompt was rendered for. Server-only. */
+  proofRunId?: string
 }
 
 /** Injectable seam for tests: lets the seam swap the real `dispatch()` for a spy. */
@@ -315,7 +317,7 @@ export async function injectOrchestratorPrompt(
     return { kind: 'failed', reason: `counter_key_unresolved:${err?.message ?? err}` }
   }
 
-  const req: DispatchRequest = { userId, sessionId, token, prompt, counterKey }
+  const req: DispatchRequest = { userId, sessionId, token, prompt, counterKey, ...(input.proofRunId ? { proofRunId: input.proofRunId } : {}) }
   const outcome = await deps.dispatch(req, deployDeps)
   return mapDispatchOutcome(outcome)
 }
@@ -444,7 +446,7 @@ async function maybeAutospawnOffline(
     async markFailed() {},
   }
   const send = buildSend(prompt, token, deps)
-  const req: DispatchRequest = { userId, sessionId, token, prompt, counterKey }
+  const req: DispatchRequest = { userId, sessionId, token, prompt, counterKey, ...(input.proofRunId ? { proofRunId: input.proofRunId } : {}) }
   const deployDeps: PipelineDeps = {
     // PTYCAP-04: same composition as the online path - kill switch first, lifetime
     // counter last, the original four unchanged between.
