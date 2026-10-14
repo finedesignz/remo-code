@@ -90,6 +90,15 @@ describe('reserveSessionSlot orchestrator guard', () => {
     usedRepoPaths = []
   })
 
+  test('forward-slash UNC paths are case-insensitive (Windows share aliases cannot evade the guard)', async () => {
+    orchestrators = [{ id: 'orch-1', project_dir: '//Server/Share/Repo' }]
+    usedRepoPaths = []
+    for (const alias of ['//server/share/repo', '\\\\SERVER\\Share\\Repo\\']) {
+      const r: any = await reserveSessionSlot('u1', 'sup1', run({ repoPath: alias }))
+      expect(r.reason).toBe('orchestrator_session')
+    }
+  })
+
   test('POSIX paths are case-sensitive (no false positive)', async () => {
     orchestrators = [{ id: 'orch-1', project_dir: '/srv/Code' }]
     usedRepoPaths = []

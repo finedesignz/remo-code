@@ -60,7 +60,7 @@ export type ReserveResult =
  */
 function normPath(p: string): string {
   if (!p) return ''
-  if (/^[a-zA-Z]:/.test(p) || p.includes('\\')) {
+  if (/^[a-zA-Z]:/.test(p) || p.includes('\\') || p.startsWith('//')) {
     return path.win32.normalize(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
   }
   return path.posix.normalize(p).replace(/(.)\/+$/, '$1')
