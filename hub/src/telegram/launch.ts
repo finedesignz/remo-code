@@ -140,6 +140,7 @@ export async function launchSessionForUser(args: {
         requireEnabled: true,
         skipIfRunning: true,
         ...(args.machine ? { machine: true as const } : {}),
+        ...(args.skipPermissions === false ? { skipPermissions: false as const } : {}),
       })
       if (res.ok) {
         return { ok: true, runId: res.runId, supervisorId: res.supervisorId, hostname: '', repoPath: res.cwd }
