@@ -197,7 +197,6 @@ function harness(opts: {
       rec.outcomes.push(o)
     },
     isHealGenerated: async () => false,
-    countRepoDispatches: async () => 0,
     makeSink: (event, ctx) => sinkFor(event, ctx, { coolify: coolifyDeps }),
     dispatch: async (req) => {
       rec.dispatches.push(req)
@@ -325,7 +324,7 @@ describe('V2 replay: an unrelated agent session is online', () => {
     })
     await h.webhook(RUN_8A6E0534, payload())
     expect(h.rec.launches).toEqual([])
-    expect(h.rec.outcomes).toEqual(['no_routable_session'])
+    expect(h.rec.outcomes).toEqual(['autospawn_starting', 'no_routable_session'])
     expect(h.runs.get(RUN_8A6E0534)).toEqual({ status: 'skipped', error: 'no_routable_session' })
   })
 })
