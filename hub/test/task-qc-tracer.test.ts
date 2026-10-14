@@ -144,6 +144,44 @@ describe('digest delivery marks findings (QC round 1: failed send / same-day rer
   })
 })
 
+describe('round 2: the digest send and the delivery mark share the run deadline', () => {
+  const realNow = Date.now
+
+  afterEach(() => {
+    Date.now = realNow
+  })
+
+  test('the email request is bounded by the time left in the pass', async () => {
+    await fire(QC_ID)
+    await flush()
+    expect(h.emails).toHaveLength(1)
+    expect(h.emails[0].timeoutMs).toBeGreaterThan(0)
+    expect(h.emails[0].timeoutMs).toBeLessThanOrEqual(60_000)
+  })
+
+  test('the delivery mark runs in a transaction with its own statement_timeout', async () => {
+    await fire(QC_ID)
+    await flush()
+    const st = h.fake.state.statements
+    const at = st.findIndex((s) => s.kind === 'update' && /task_qc_findings/.test(s.text))
+    expect(at).toBeGreaterThan(0)
+    expect(st[at - 1]!.kind).toBe('set_local')
+    expect(st[at - 1]!.text).toMatch(/^SET LOCAL statement_timeout = \d+$/)
+  })
+
+  test('a run whose pass used its whole budget starts no email and marks nothing; the run still finalizes', async () => {
+    // the wall clock jumps past the deadline once the pass has recorded its finding
+    Date.now = () =>
+      realNow() + (h.fake.state.statements.some((s) => s.kind === 'insert' && /INSERT INTO task_qc_findings/.test(s.text)) ? 10 * 60_000 : 0)
+    await fire(QC_ID)
+    await flush()
+    expect(h.emails).toHaveLength(0)
+    expect(h.fake.state.updatesTo('task_qc_findings')).toHaveLength(0)
+    expect(h.finalized[0]!.status).toBe('success')
+    expect(JSON.parse(h.finalized[0]!.output_snippet as string).digest_delivered).toBe(false)
+  })
+})
+
 describe('runTaskQcPass final signature', () => {
   test('returns { findings, applied, proposals, truncated } with applied empty; scope narrows only', async () => {
     const res = await runTaskQcPass({ userId: USER, origin: 'schedule' })

@@ -16,6 +16,7 @@ import { haltBeforeMachineSend, releaseInject, reserveInject } from '../../dispa
 import { runTaskQcPass } from '../../task-qc/engine.ts'
 import { sendDigest } from '../../task-qc/digest.ts'
 import { claimEngineFailure } from '../../task-qc/findings.ts'
+import { clampBounds } from '../../task-qc/flags.ts'
 import { safeText, type TaskQcResult } from '../../task-qc/types.ts'
 import { finalizeRun } from '../dispatcher.ts'
 import { log } from '../../observability/logger'
@@ -67,10 +68,17 @@ async function notifyEngineFailure(
 }
 
 /** Only a DELIVERED digest marks its rows mailed; a failed send leaves them to be reported again. Never throws. */
-async function markDelivered(userId: string, ids: string[], taskId: string, runId: string): Promise<void> {
+async function markDelivered(userId: string, ids: string[], taskId: string, runId: string, deadline: number): Promise<void> {
   if (ids.length === 0) return
   try {
-    await sql`UPDATE task_qc_findings SET digest_sent_at = now() WHERE user_id = ${userId} AND id = ANY(${ids}::text[])`
+    // the database cancels the UPDATE at the run deadline; past it nothing is marked and the rows are
+    // simply reported again by the next run (a duplicate mail, never a lost finding)
+    const left = Math.floor(deadline - Date.now())
+    if (left <= 0) return log.warn('scheduler.task_qc.mark_delivered_deadline', { task_id: taskId, run_id: runId })
+    await (sql as any).begin(async (tx: any) => {
+      await tx.unsafe(`SET LOCAL statement_timeout = ${left}`)
+      await tx`UPDATE task_qc_findings SET digest_sent_at = now() WHERE user_id = ${userId} AND id = ANY(${ids}::text[])`
+    })
   } catch (err: any) {
     log.error('scheduler.task_qc.mark_delivered_failed', { task_id: taskId, run_id: runId, error: err?.message })
   }
@@ -97,13 +105,15 @@ export async function sendTaskQcTask(
     return
   }
 
+  // ONE wall-clock bound for the whole run: the engine pass and the digest send/mark share it
+  const deadline = Date.now() + clampBounds().passTimeoutMs
   let result: TaskQcResult
   try {
     result = await runTaskQcPass({
       userId: ctx.userId,
       origin: ctx.isManual ? 'run_now' : 'schedule',
       // D-21: fresh read, user anchor only (no session), fail closed inside haltBeforeMachineSend
-      deps: { haltCheck: async () => ({ halted: !(await haltBeforeMachineSend({ userId: ctx.userId })).ok }) },
+      deps: { deadline, haltCheck: async () => ({ halted: !(await haltBeforeMachineSend({ userId: ctx.userId })).ok }) },
     })
   } catch (err: any) {
     await releaseInject({ counterKey, token: ctx.runId })
@@ -126,10 +136,14 @@ export async function sendTaskQcTask(
   }
   let delivered = false
   if (report.findings.length > 0) {
-    if (to) {
-      delivered = await sendDigest(report, { email: to })
+    const left = Math.floor(deadline - Date.now())
+    if (to && left <= 0) {
+      // out of time: no email starts past the deadline; the rows stay unmailed and are reported next run
+      log.warn('scheduler.task_qc.digest_deadline', { task_id: task.id, run_id: ctx.runId })
+    } else if (to) {
+      delivered = await sendDigest(report, { email: to }, { sendTimeoutMs: left })
       if (!delivered) log.warn('scheduler.task_qc.digest_not_delivered', { task_id: task.id, run_id: ctx.runId })
-      else await markDelivered(ctx.userId, result.recordedIds ?? [], task.id, ctx.runId)
+      else await markDelivered(ctx.userId, result.recordedIds ?? [], task.id, ctx.runId, deadline)
     } else {
       log.warn('scheduler.task_qc.no_recipient', { task_id: task.id, run_id: ctx.runId })
     }

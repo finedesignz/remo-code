@@ -100,3 +100,91 @@ describe('hard wall-clock bound (F1-A3)', () => {
     expect(res.findings).toHaveLength(0)
   })
 })
+
+describe('round 2 (codex MAJOR 2, still open after round 1): the bound covers acquisition, every fix statement and the halt check', () => {
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms))
+  const realClockDeps = (over: Record<string, unknown>) => ({ now: NOW, q: fake.sql, resolveAppUuid: async () => null, ...over }) as any
+
+  test('every statement of a fix transaction is preceded by its own SET LOCAL statement_timeout', async () => {
+    world.store['tz'] = mk('tz', { timezone: 'Mars/Phobos' })
+    world.runs.push(okRun('tz'))
+    const res = await run({ autofix: true, haltCheck: haltOk })
+    expect(res.applied).toHaveLength(1)
+    const fixTx = fake.state.statements.filter((s) => s.tx === 2)
+    expect(fixTx.length).toBeGreaterThan(5)
+    fixTx.forEach((s, i) => {
+      if (s.kind !== 'set_local') expect(fixTx[i - 1]!.kind).toBe('set_local')
+    })
+    // lock, probes, UPDATE and audit insert each have their own arm: > the 1 a single arm would give
+    expect(fixTx.filter((s) => s.kind === 'set_local').length).toBe(fixTx.filter((s) => s.kind !== 'set_local').length)
+  })
+
+  test('a deadline passing between a fix UPDATE and its audit insert rolls the fix back whole (no throw, nothing applied)', async () => {
+    world.store['tz'] = mk('tz', { timezone: 'Mars/Phobos' })
+    world.runs.push(okRun('tz'))
+    const clock = () => (fake.state.statements.some((s) => s.kind === 'update') ? NOW.getTime() + 10 * 60_000 : NOW.getTime())
+    const res = await run({ autofix: true, haltCheck: haltOk, clock })
+    expect(res.truncated).toBe(true)
+    expect(res.applied).toHaveLength(0)
+    expect(fake.state.statements.some((s) => s.kind === 'insert' && s.values.includes('auto_fixed'))).toBe(false)
+    expect(res.proposals.map((p) => p.proposal.params.reason)).toEqual(['deadline'])
+  })
+
+  test('a fix transaction whose pooled connection arrives after the deadline returns on time and issues no statement', async () => {
+    world.store['tz'] = mk('tz', { timezone: 'Mars/Phobos' })
+    world.runs.push(okRun('tz'))
+    const orig = fake.sql.begin
+    let begins = 0
+    // the read transaction is fast; the fix transaction waits 400ms for a connection
+    fake.sql.begin = (a: any, b?: any) => (++begins >= 2 ? settle(400).then(() => orig(a, b)) : orig(a, b))
+    const started = Date.now()
+    const res = await runTaskQcPass({ userId: USER, origin: 'schedule', deps: realClockDeps({ autofix: true, haltCheck: haltOk, bounds: { passTimeoutMs: 100 } }) })
+    expect(Date.now() - started).toBeLessThan(330)
+    expect(res.truncated).toBe(true)
+    expect(res.applied).toHaveLength(0)
+    expect(res.proposals.map((p) => p.proposal.params.reason)).toEqual(['deadline'])
+    // the late connection rolls back before issuing anything
+    const before = fake.state.statements.length
+    await settle(500)
+    expect(fake.state.statements.length).toBe(before)
+    expect(fake.state.updatesTo('scheduled_tasks')).toHaveLength(0)
+    fake.sql.begin = orig
+  })
+
+  test('a read transaction whose pooled connection arrives after the deadline is a truncated empty pass', async () => {
+    world.store['a'] = mk('a')
+    const orig = fake.sql.begin
+    fake.sql.begin = (a: any, b?: any) => settle(400).then(() => orig(a, b))
+    const started = Date.now()
+    const res = await runTaskQcPass({ userId: USER, origin: 'schedule', deps: realClockDeps({ bounds: { passTimeoutMs: 100 } }) })
+    expect(Date.now() - started).toBeLessThan(330)
+    expect(res.truncated).toBe(true)
+    expect(res.findings).toHaveLength(0)
+    fake.sql.begin = orig
+  })
+
+  test('a halt check that never answers cannot hold the pass past its deadline, and counts as NOT cleared to write', async () => {
+    world.store['tz'] = mk('tz', { timezone: 'Mars/Phobos' })
+    world.runs.push(okRun('tz'))
+    const started = Date.now()
+    let asked = 0
+    const res = await runTaskQcPass({
+      userId: USER,
+      origin: 'schedule',
+      deps: realClockDeps({
+        autofix: true,
+        haltCheck: () => {
+          asked++
+          return new Promise(() => {})
+        },
+        bounds: { passTimeoutMs: 100 },
+      }),
+    })
+    expect(asked).toBe(1)
+    expect(Date.now() - started).toBeLessThan(1500)
+    expect(res.truncated).toBe(true)
+    expect(res.applied).toHaveLength(0)
+    expect(fake.state.updatesTo('scheduled_tasks')).toHaveLength(0)
+    expect(fake.state.statements.some((s) => s.forUpdate && /FROM scheduled_tasks/.test(s.text))).toBe(false)
+  })
+})
