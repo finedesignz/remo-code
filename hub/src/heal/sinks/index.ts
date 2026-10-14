@@ -5,12 +5,14 @@
 
 import type { HealEvent, HealSource } from '../types.ts';
 import type { CoolifyDeps } from './coolify.ts';
+import type { ErrorCaptureDeps } from './error-capture.ts';
 import type { LedgerSinkDeps } from './shared.ts';
 import type { HealSink, SinkContext } from './types.ts';
 
 /** Per-source collaborator overrides; production passes none. */
 export interface SinkDeps {
   coolify?: CoolifyDeps;
+  errorCapture?: ErrorCaptureDeps;
   ledger?: LedgerSinkDeps;
 }
 
@@ -19,12 +21,8 @@ type Builder = (event: HealEvent, ctx: SinkContext, deps: SinkDeps) => Promise<H
 const SINKS: Record<HealSource, Builder> = {
   coolify_deploy: async (event, ctx, deps) => (await import('./coolify.ts')).buildCoolifySink(event, ctx, deps.coolify),
   scheduled_task: async (event, ctx, deps) => (await import('./scheduled-task.ts')).buildScheduledTaskSink(event, ctx, deps.ledger),
-  error_capture: async () => {
-    throw new Error('heal sink not available: error_capture');
-  },
-  feedback: async () => {
-    throw new Error('heal sink not available: feedback');
-  },
+  error_capture: async (event, ctx, deps) => (await import('./error-capture.ts')).buildErrorCaptureSink(event, ctx, deps.errorCapture),
+  feedback: async (event, ctx, deps) => (await import('./feedback.ts')).buildFeedbackSink(event, ctx, deps.ledger),
 };
 
 export async function sinkFor(event: HealEvent, ctx: SinkContext, deps: SinkDeps = {}): Promise<HealSink> {
