@@ -26,6 +26,8 @@ export interface TaskQcFakeState {
   statements: Recorded[]
   unknown: string[]
   beginCalls: number
+  /** mode strings passed to begin(mode, fn), e.g. 'read only' */
+  beginModes: string[]
   lockCalls: number
   setLocalCalls: number
   /** insert, update and delete statements, in order */
@@ -58,6 +60,7 @@ export function createTaskQcFakeSql() {
     statements: [],
     unknown: [],
     beginCalls: 0,
+    beginModes: [],
     lockCalls: 0,
     setLocalCalls: 0,
     writes: () => state.statements.filter((s) => WRITE_KINDS.includes(s.kind)),
@@ -87,6 +90,13 @@ export function createTaskQcFakeSql() {
     return []
   }
 
+  const unsafe = (text: string) => {
+    try {
+      return Promise.resolve(run(Object.assign([text], { raw: [text] }) as unknown as TemplateStringsArray, []))
+    } catch (err) {
+      return Promise.reject(err)
+    }
+  }
   const sql: any = (strings: TemplateStringsArray, ...values: any[]) => {
     try {
       return Promise.resolve(run(strings, values))
@@ -94,11 +104,16 @@ export function createTaskQcFakeSql() {
       return Promise.reject(err)
     }
   }
-  sql.begin = async (fn: (tx: any) => Promise<any>) => {
+  sql.unsafe = unsafe
+  sql.begin = async (a: any, b?: (tx: any) => Promise<any>) => {
+    // postgres.js accepts begin(fn) and begin('read only', fn)
+    const fn: (tx: any) => Promise<any> = typeof a === 'function' ? a : b!
+    if (typeof a === 'string') state.beginModes.push(a)
     state.beginCalls++
     const prev = currentTx
     currentTx = state.beginCalls
     const tx: any = (strings: TemplateStringsArray, ...values: any[]) => sql(strings, ...values)
+    tx.unsafe = sql.unsafe
     try {
       return await fn(tx)
     } finally {
@@ -133,6 +148,7 @@ export function createTaskQcFakeSql() {
       state.statements.length = 0
       state.unknown.length = 0
       state.beginCalls = 0
+      state.beginModes.length = 0
       state.lockCalls = 0
       state.setLocalCalls = 0
     },
