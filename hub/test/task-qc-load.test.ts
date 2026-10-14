@@ -206,6 +206,12 @@ describe('loadAuditInputs: read-only transaction, timeout, lock, deadline', () =
     expect(set.text).toBe('SET LOCAL statement_timeout = 4321')
   })
 
+  test('round 2 (codex MINOR 6): the per-task history bound ranks counted and ignored statuses separately', async () => {
+    await loadAuditInputs(base())
+    const q = fake.state.statements.find((s) => /ROW_NUMBER/.test(s.text))!
+    expect(q.text).toContain("PARTITION BY task_id, (status IN ('success','failed','skipped','skipped_quota'))")
+  })
+
   test('without lock the advisory lock is not taken', async () => {
     await loadAuditInputs(base())
     expect(fake.state.lockCalls).toBe(0)

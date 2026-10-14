@@ -133,6 +133,14 @@ describe('FAILING (D-08)', () => {
   })
 })
 
+describe('ignored runs do not use up the history window (codex MINOR 6)', () => {
+  test('cancelled and in-flight runs ahead of the failures do not hide the streak', () => {
+    const f = detectFailing(task(), runs(['cancelled', 'in_flight', 'pending', 'failed', 'failed', 'failed'], 'boom'), { failStreak: 3, windowSize: 3 })
+    expect(f).not.toBeNull()
+    expect(f!.evidence.streak).toBe(3)
+  })
+})
+
 describe('SKIP_FOREVER (D-09)', () => {
   test('3 skips on no_application_uuid fires', () => {
     const f = detectSkipForever(task(), runs(['skipped', 'skipped', 'skipped'], 'no_application_uuid'), CFG)
@@ -141,6 +149,17 @@ describe('SKIP_FOREVER (D-09)', () => {
     expect(f!.fixCandidate).toBeUndefined()
     expect(f!.evidence.skipRuns).toBe(3)
     expect(f!.evidence.reason).toBe('no_application_uuid')
+  })
+  test('round 2 (codex MINOR 4): long reasons that differ only past the rendering cap do not group', () => {
+    const prefix = 'x'.repeat(200)
+    const r = runs(['skipped', 'skipped', 'skipped'], (i) => `${prefix}-reason-${i === 0 ? 'a' : 'b'}`)
+    expect(detectSkipForever(task(), r, CFG)).toBeNull()
+    // the same long reason (digits aside) still groups, and the rendered evidence stays truncated
+    const same = runs(['skipped', 'skipped', 'skipped'], (i) => `${prefix}-quota-${i}`)
+    const f = detectSkipForever(task(), same, CFG)
+    expect(f).not.toBeNull()
+    expect((f!.evidence.reason as string).length).toBe(120)
+    expect((f!.evidence.reasonSignature as string).length).toBeLessThanOrEqual(120)
   })
   test('3 skips on no_errors_detected does NOT fire (benign)', () => {
     expect(detectSkipForever(task(), runs(['skipped', 'skipped', 'skipped'], 'no_errors_detected'), CFG)).toBeNull()

@@ -102,7 +102,10 @@ async function loadAuditInputsBounded(args: LoadArgs): Promise<LoadedAudit> {
     const runRows = (await tx`
       SELECT id, task_id, status, error, started_at, finished_at, output_snippet FROM (
         SELECT id, task_id, status, error, started_at, finished_at, output_snippet,
-               ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY started_at DESC) AS rn
+               ROW_NUMBER() OVER (
+                 PARTITION BY task_id, (status IN ('success','failed','skipped','skipped_quota'))
+                 ORDER BY started_at DESC
+               ) AS rn
         FROM scheduled_task_runs WHERE user_id = ${userId} AND task_id = ANY(${taskIds}::text[])
       ) t WHERE rn <= ${bounds.maxRunsPerTask}
     `) as RunInput[]
