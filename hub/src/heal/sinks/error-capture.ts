@@ -2,7 +2,8 @@
 //
 // PTYCAP-07-07: error-capture sink. Run lifecycle and broadcasts come from the legacy store
 // extracted from error-capture/dispatcher.ts (buildErrorCaptureRunStore). Its legacy throttled
-// notifier is DISABLED here: routeHeal is the sole owner-notification path (QC r1). The legacy
+// notifier is DISABLED here: owner notification is the per-event heal claim (QC r1), taken by
+// routeHeal for immediate outcomes and by this sink for deferred skip/send failures (QC r2). The legacy
 // post-dispatch transitions are expressed through the existing HealSink callbacks. Per AM-F1-5 there is no ensure-online hook here: that exists only
 // on the flag-OFF legacy path.
 
@@ -12,11 +13,14 @@ import type { ErrorProject } from '../../db/error-capture-dal.ts';
 import { broadcastErrorEvent } from '../../ws/registry.ts';
 import type { HealEvent } from '../types.ts';
 import { sendUserMessage, type SendDeps } from './shared.ts';
+import { notifyOnceDetailed, REAL_NOTIFY_DEPS, type NotifyDeps } from '../notify.ts';
 import type { HealSink, HealTerminalOutcome, SinkContext } from './types.ts';
 
 export interface ErrorCaptureDeps {
   load(errorId: string, projectId: string): Promise<{ project: ErrorProject; error: { error_type: string; error_value: string } }>;
   send?: SendDeps;
+  /** Owner-notification seam for deferred failures (defaults to the real claim + email sender). */
+  notify?: NotifyDeps;
 }
 
 export const REAL_ERROR_CAPTURE_DEPS: ErrorCaptureDeps = {
@@ -31,7 +35,7 @@ export const REAL_ERROR_CAPTURE_DEPS: ErrorCaptureDeps = {
 
 export async function buildErrorCaptureSink(
   event: HealEvent,
-  _ctx: SinkContext,
+  ctx: SinkContext,
   deps: ErrorCaptureDeps = REAL_ERROR_CAPTURE_DEPS,
 ): Promise<HealSink> {
   if (event.source !== 'error_capture' || !('bound_session_id' in event)) {
@@ -52,6 +56,15 @@ export async function buildErrorCaptureSink(
     notify: false, // routeHeal is the sole owner-notification path inside the unified flow
   });
 
+  // QC r2: a deferred outcome (a queued turn promoted later, then skipped or failing to send) happens
+  // AFTER routeHeal returned dispatched_live, so routeHeal never gets to notify it. The sink claims
+  // the SAME per-event notification slot routeHeal uses (keyed by eventId), so a synchronous failure
+  // that routeHeal also reports still yields exactly one notice, and a deferred one yields one too.
+  const notifyOwner = async (reason: string) => {
+    if (!ctx.eventId) return;
+    await notifyOnceDetailed(ctx.eventId, event, reason, deps.notify ?? REAL_NOTIFY_DEPS);
+  };
+
   /** Set by the first terminal dispatch-status write; a later terminalization is a no-op. */
   let settled = false;
 
@@ -71,6 +84,7 @@ export async function buildErrorCaptureSink(
     async markSkipped(token, reason) {
       settled = true;
       await legacy.markSkipped(token, reason);
+      await notifyOwner(reason);
     },
     // Legacy post-send step: status dispatched + the error_dispatched broadcast.
     async markDispatched(runId) {
@@ -87,6 +101,7 @@ export async function buildErrorCaptureSink(
     async markFailed(runId, errMsg) {
       settled = true;
       await legacy.markFailed(runId, errMsg);
+      await notifyOwner(`agent_send: ${errMsg}`);
     },
     send: (req) => sendUserMessage(req, { storedContent: event.stored_content }, deps.send),
     async finalizeTerminal(outcome: HealTerminalOutcome) {
