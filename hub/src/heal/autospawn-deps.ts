@@ -9,11 +9,11 @@ import { runGates, type DispatchRequest, type DispatchGate } from '../dispatch/p
 import { getTokenCapStatus, isOverAutospawnDailyLaunchCap } from '../dispatch/gates.ts';
 import { getGraceBuffer } from '../dispatch/grace.ts';
 import type { GovernedLaunchDeps } from '../dispatch/governed-launch.ts';
-import type { ReserveArgs, releaseInject } from '../dispatch/automation-controls.ts';
+import type { ReserveArgs, releaseInjectStrict } from '../dispatch/automation-controls.ts';
 import { healAutospawnArmed } from './config.ts';
 
 // The budget-key field is never spelled here: only allowlisted modules may assign it.
-type ReleaseArgs = Parameters<typeof releaseInject>[0];
+type ReleaseArgs = Parameters<typeof releaseInjectStrict>[0];
 
 /** Everything the autospawn branch touches, injectable so tests need no process-global mocks. */
 export interface AutospawnDeps extends GovernedLaunchDeps {
@@ -23,6 +23,7 @@ export interface AutospawnDeps extends GovernedLaunchDeps {
   /** The pipeline gate runner over the single builder's gate list: a refusal reason or null. */
   checkGates(req: DispatchRequest, gateList: DispatchGate[]): Promise<string | null>;
   reserve(a: ReserveArgs): Promise<{ ok: true } | { ok: false; reason: string }>;
+  /** STRICT: rejects when the release did not happen, so the caller can leave the event retryable. */
   release(a: ReleaseArgs): Promise<void>;
   /** One deadline timer (event-driven, never polling). Real impl is unref'd. */
   setTimer(fn: () => void, ms: number): unknown;
@@ -41,7 +42,7 @@ export const REAL_AUTOSPAWN: AutospawnDeps = {
   },
   checkGates: (req, gateList) => runGates(req, gateList),
   reserve: async (a) => (await import('../dispatch/automation-controls.ts')).reserveInject(a),
-  release: async (a) => (await import('../dispatch/automation-controls.ts')).releaseInject(a),
+  release: async (a) => (await import('../dispatch/automation-controls.ts')).releaseInjectStrict(a),
   isRepoAutospawnAllowed: async (u, r) => (await import('../db/orchestrator-rows-dal.ts')).isRepoAutospawnAllowed(u, r),
   supervisorOnlineForUser: async (userId) => {
     try {

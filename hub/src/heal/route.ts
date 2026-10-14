@@ -168,9 +168,20 @@ async function finalizeNonLive(
   outcome: HealOutcome,
   extra: HealOutcomeExtra = {},
   sinkOutcome?: HealTerminalOutcome,
+  notify = true,
 ): Promise<HealOutcome> {
   await persist(deps, eventId, outcome, extra);
   await terminalize(sink, sinkOutcome ?? (outcome as HealTerminalOutcome));
+  if (!notify) {
+    // The owner notification for this event was already settled elsewhere (the scheduler default
+    // email, selected when the launch outcome was returned). Take the claim only, never send.
+    try {
+      await (deps.notify ?? REAL_NOTIFY_DEPS).claim(eventId);
+    } catch (err) {
+      log(`notification slot claim failed id=${eventId}: ${errMsg(err)}`);
+    }
+    return outcome;
+  }
   const n = await notifyOnceDetailed(eventId, event, outcomeReason(outcome), deps.notify ?? REAL_NOTIFY_DEPS);
   // Ownership (claimed) is reported for EVERY non-live outcome, independent of delivery (sent).
   if (outcome.kind === 'no_routable_session') return { ...outcome, notified: n.sent, notifyClaimed: n.claimed };
@@ -241,13 +252,27 @@ async function autospawnHeal(
   const a = deps.autospawn ?? REAL_AUTOSPAWN;
   const req = buildRequest(event, target, eventId);
   const extra = { sessionId: target.sessionId, repoIdent: target.repoIdent };
-  const release = async () => {
+  // The release is STRICT (QC r2): a failed release must leave the event in a state the boot sweep
+  // retries (autospawn_starting / launched / parked), never a terminal outcome that hides the slot.
+  let releaseFailed = false;
+  const release = async (): Promise<boolean> => {
     try {
       await releaseHealReservation(event.user_id, target.repoIdent, eventId, a);
+      return true;
     } catch (err) {
-      log(`reservation release failed id=${eventId}: ${errMsg(err)}`);
+      releaseFailed = true;
+      log(`reservation release failed id=${eventId} (left for the sweep): ${errMsg(err)}`);
+      return false;
     }
   };
+  /** Release could not be confirmed: keep the recoverable outcome; the sweep terminalizes + notifies. */
+  const deferToSweep = (why: string): HealOutcome => {
+    log(`heal event ${eventId} left for the sweep: ${why}`);
+    return { kind: 'failed', reason: 'heal_release_pending' };
+  };
+  // The scheduler default email is the owner notification for a scheduled-task event once the launch
+  // outcome has been returned, so every ASYNC finalizer (deadline, replay) must not send a second.
+  const asyncNotify = event.source !== 'scheduled_task';
 
   let settled = false;
   let timer: unknown = null;
@@ -259,7 +284,7 @@ async function autospawnHeal(
     if (settled) return;
     settled = true;
     disarm();
-    await release();
+    if (!(await release())) return; // outcome stays autospawn_launched/parked: the sweep retries
     await finalizeNonLive(
       deps,
       event,
@@ -268,10 +293,11 @@ async function autospawnHeal(
       { kind: 'failed', reason: ledgerReason },
       extra,
       { kind: 'failed', reason: sinkReason },
+      asyncNotify,
     );
   };
   /** Outcome of a request that was actually dispatched after the spawn; null = delivered. */
-  const afterDispatch = async (result: DispatchOutcome): Promise<HealOutcome | null> => {
+  const afterDispatch = async (result: DispatchOutcome, notify = true): Promise<HealOutcome | null> => {
     if (result.kind === 'dispatched' || result.kind === 'queued') {
       try {
         await deps.setOutcome(eventId, 'dispatched_after_spawn', {
@@ -283,8 +309,8 @@ async function autospawnHeal(
       }
       return null;
     }
-    await release();
-    return finalizeNonLive(deps, event, eventId, sink, mapAfterSpawn(result), extra);
+    if (!(await release())) return deferToSweep('release after post-spawn refusal');
+    return finalizeNonLive(deps, event, eventId, sink, mapAfterSpawn(result), extra, undefined, notify);
   };
 
   const pdeps: PipelineDeps = buildPipelineDeps(sink, deps, {
@@ -295,11 +321,13 @@ async function autospawnHeal(
       settled = true;
       disarm();
       try {
-        await afterDispatch(await deps.dispatch(r ?? req, pdeps));
+        await afterDispatch(await deps.dispatch(r ?? req, pdeps), asyncNotify);
       } catch (err) {
         log(`replay failed id=${eventId}: ${errMsg(err)}`);
-        await release();
-        await finalizeNonLive(deps, event, eventId, sink, { kind: 'failed', reason: `heal_replay_error: ${errMsg(err)}` }, extra);
+        if (!(await release())) return;
+        await finalizeNonLive(
+          deps, event, eventId, sink, { kind: 'failed', reason: `heal_replay_error: ${errMsg(err)}` }, extra, undefined, asyncNotify,
+        );
       }
     },
     onParkExpire: () => expire('grace_expired', 'heal_grace_expired'),
@@ -341,6 +369,11 @@ async function autospawnHeal(
   );
 
   let kind: 'autospawn_launched' | 'autospawn_parked';
+  // A refusal / failure after the reservation was taken unwinds through release(); if that release
+  // did not land, the slot is still held: do not write a terminal outcome over the recoverable row.
+  if ((launched.kind === 'refused' || launched.kind === 'failed') && releaseFailed) {
+    return deferToSweep(`launch ${launched.kind}: ${launched.reason}`);
+  }
   switch (launched.kind) {
     case 'refused': {
       const outcome: HealOutcome =
@@ -368,6 +401,9 @@ async function autospawnHeal(
     // The scheduler's default failure email goes out NOW (the heal returns un-claimed). Take the
     // notification claim on its behalf, with no send, so a later spawn_timeout / grace_expired /
     // boot-sweep notice for this same event loses the claim: one owner notification per event.
+    // Determinism if this claim cannot be persisted (QC r2): the default email is STILL the sole
+    // owner, because every later heal finalizer for a scheduled_task event (deadline, replay, the
+    // boot sweep) is claim-only and never sends. A failed claim here cannot produce a second email.
     try {
       await (deps.notify ?? REAL_NOTIFY_DEPS).claim(eventId);
     } catch (err) {
@@ -381,7 +417,7 @@ async function autospawnHeal(
   } catch (err) {
     settled = true;
     disarm();
-    await release();
+    if (!(await release())) return deferToSweep(`dispatch threw: ${errMsg(err)}`);
     throw err; // D-06: the outer handler terminalizes as failed and notifies once
   }
   if (result.kind === 'parked_offline') return { kind };

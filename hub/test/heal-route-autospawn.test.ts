@@ -514,3 +514,125 @@ describe('governed autospawn: deadline, replay and release', () => {
     expect(rec.timers.every((t) => t.cleared) || rec.timers.length === 0).toBe(true)
   })
 })
+
+// PTYCAP-07 QC r2 (codex #2): a failed reservation release must leave the event retryable by the sweep.
+describe('QC r2: a failed reservation release never writes a terminal outcome over a recoverable row', () => {
+  const failingRelease = (rec?: { releaseAttempts: number }) => async () => {
+    if (rec) rec.releaseAttempts++
+    throw new Error('release db down')
+  }
+  const TERMINAL = /^(failed|refused|no_routable)/
+
+  test('spawn deadline: release fails -> outcome stays autospawn_launched, source not terminalized, nobody notified', async () => {
+    const { deps, rec } = mk({ auto: { release: failingRelease() } })
+    await routeHeal(event(), deps)
+    rec.timers[0]!.fn()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(rec.outcomes[rec.outcomes.length - 1]).toBe('autospawn_launched')
+    expect(rec.outcomes.some((o) => TERMINAL.test(o))).toBe(false)
+    expect(rec.terminal).toEqual([])
+    expect(rec.sends.length).toBe(0)
+  })
+
+  test('launch refused after the reservation: release fails -> no terminal outcome, route reports heal_release_pending', async () => {
+    const { deps, rec } = mk({
+      auto: { release: failingRelease(), launchSessionForUser: async () => ({ ok: false, reason: 'at_capacity' }) as any },
+    })
+    const out = await routeHeal(event(), deps)
+    expect(out).toEqual({ kind: 'failed', reason: 'heal_release_pending' })
+    expect(rec.outcomes).toEqual(['autospawn_starting']) // still sweepable
+    expect(rec.terminal).toEqual([])
+    expect(rec.sends.length).toBe(0)
+  })
+
+  test('dispatch throws after the launch: release fails -> deferred to the sweep instead of a terminal failure', async () => {
+    const { deps, rec } = mk({
+      auto: { release: failingRelease() },
+      heal: {
+        dispatch: async () => {
+          throw new Error('dispatch exploded')
+        },
+      },
+    })
+    const out = await routeHeal(event(), deps)
+    expect(out).toEqual({ kind: 'failed', reason: 'heal_release_pending' })
+    expect(rec.outcomes.some((o) => TERMINAL.test(o))).toBe(false)
+    expect(rec.terminal).toEqual([])
+  })
+
+  test('control: a release that lands still terminalizes as before', async () => {
+    const { deps, rec } = mk()
+    await routeHeal(event(), deps)
+    rec.timers[0]!.fn()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(rec.outcomes[rec.outcomes.length - 1]).toBe('failed:spawn_timeout')
+  })
+})
+
+// PTYCAP-07 QC r2 (codex #5): a failed launch-time claim for a scheduled task cannot yield two emails.
+describe('QC r2: scheduled_task with a failed launch-time notification claim', () => {
+  const taskEvent = () =>
+    event({
+      source: 'scheduled_task',
+      dedupe_key: 'task:t1:sig',
+      bound_session_id: 's1',
+      ctx: { task_id: 't1', task_name: 'nightly', error_signature: 'boom' },
+      metadata_run_id: null,
+    })
+  /** The first claim (launch time) throws; later claims succeed (the DB recovered). */
+  function flakyNotify(sends: any[]) {
+    let calls = 0
+    return {
+      claim: async () => {
+        if (++calls === 1) throw new Error('claim db down')
+        return true
+      },
+      resolveOwnerEmail: async () => 'o@x.com',
+      send: async (m: any) => {
+        sends.push(m)
+        return true
+      },
+    }
+  }
+
+  test('the spawn deadline after the DB recovers sends NO heal email (the scheduler default email is the sole owner)', async () => {
+    const sends: any[] = []
+    const { deps, rec } = mk({ heal: { notify: flakyNotify(sends) } })
+    const out = await routeHeal(taskEvent(), deps)
+    expect(out).toEqual({ kind: 'autospawn_launched' }) // no notifyClaimed: the scheduler sends its default email
+    rec.timers[0]!.fn()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(rec.outcomes[rec.outcomes.length - 1]).toBe('failed:spawn_timeout') // still finalized
+    expect(sends).toEqual([])
+  })
+
+  test('a refused replay after the DB recovers sends NO heal email either', async () => {
+    const sends: any[] = []
+    let n = 0
+    const { deps, rec } = mk({
+      heal: {
+        notify: flakyNotify(sends),
+        dispatch: async (req, pdeps) => {
+          rec.dispatches.push({ req, pdeps })
+          return ++n === 1 ? { kind: 'parked_offline' } : { kind: 'failed', reason: 'send_failed' }
+        },
+      },
+    })
+    await routeHeal(taskEvent(), deps)
+    const { req, pdeps } = rec.dispatches[0]!
+    await pdeps.replay(req)
+    expect(rec.outcomes[rec.outcomes.length - 1]).toBe('failed:send_failed')
+    expect(sends).toEqual([])
+  })
+
+  test('control: a coolify event still gets its one heal email at the deadline', async () => {
+    const sends: any[] = []
+    const { deps, rec } = mk({
+      heal: { notify: { claim: async () => true, resolveOwnerEmail: async () => 'o@x.com', send: async (m: any) => (sends.push(m), true) } },
+    })
+    await routeHeal(event(), deps)
+    rec.timers[0]!.fn()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(sends.length).toBe(1)
+  })
+})
