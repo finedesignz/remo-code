@@ -85,7 +85,7 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
 
   // ── A capturing harness for one inject call ───────────────────────────────────
   interface Capture {
-    launches: Array<{ userId: string; sessionId: string }>;
+    launches: Array<{ userId: string; sessionId: string; machine?: boolean }>;
     dispatched: DispatchRequest[];
     /** what the captured `dispatch` returns (drives the parked vs delivered path). */
     dispatchKind: Awaited<ReturnType<typeof import('../../src/dispatch/pipeline.ts').dispatch>>['kind'];
@@ -126,7 +126,7 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
       appendRunLog,
       // Stubbed supervisor liveness + captured launch (the session.start emit).
       supervisorOnlineForUser: async () => cap.supervisorOnline,
-      launchSessionForUser: (async (args: { userId: string; sessionId: string }) => {
+      launchSessionForUser: (async (args: { userId: string; sessionId: string; machine?: boolean }) => {
         cap.launches.push(args);
         return cap.launchResult;
       }) as InjectDeps['launchSessionForUser'],
@@ -207,7 +207,7 @@ maybeDescribe('BSA-07 e2e — build-session autospawn (real PG + stub supervisor
 
     // 1. session.start fired exactly once (captured launch), parked.
     expect(cap.launches.length).toBe(1);
-    expect(cap.launches[0]).toEqual({ userId: h.userId, sessionId: h.sessionId });
+    expect(cap.launches[0]).toEqual({ userId: h.userId, sessionId: h.sessionId, machine: true });
     expect(outcome.kind).toBe('autospawn_launched');
 
     // 2. The prompt was handed to dispatch (parked in grace for drain).

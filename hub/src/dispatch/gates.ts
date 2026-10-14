@@ -153,14 +153,15 @@ export const dailyCostCapGate: DispatchGate = {
  * flat-rate Max subscription (reality-doc issue #6 — no per-token billing), so
  * this token-count ceiling is what actually bounds a runaway autospawn loop.
  *
- * Default 50_000_000 (50M) tokens/day: a deliberately conservative-but-defensible
- * ceiling — well above a heavy legitimate Max-20x dev day (cache-read tokens
- * dominate and inflate raw counts), yet low enough to halt an unattended loop
- * within a day. Owner sets the real prod number via REMO_ORCHESTRATOR_DAILY_TOKEN_CAP
- * (this milestone ships the default only). A non-positive / non-finite value
- * DISABLES the token ceiling (fail-open, mirroring the cost cap's 0/neg semantics).
+ * Default 20_000_000 (20M) tokens/day (PTYCAP Phase 4, lowered from 50M; the
+ * figure is derived from the PTYCAP incident analysis). It applies only where
+ * REMO_ORCHESTRATOR_DAILY_TOKEN_CAP is unset; the owner sets the real prod number
+ * through that variable. The ceiling FAILS CLOSED: a non-positive / unparseable
+ * value falls back to this default AND the hub refuses to boot
+ * (assertTokenCapConfig); only the explicit
+ * REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED variable turns it off.
  */
-const DEFAULT_DAILY_TOKEN_CAP = 50_000_000
+const DEFAULT_DAILY_TOKEN_CAP = 20_000_000
 
 /**
  * The ONLY way to run with no token ceiling. It is a separate, self-describing
@@ -196,7 +197,7 @@ function parseDailyTokenCap(raw: string | undefined): { ok: boolean; cap: number
 /**
  * The daily token ceiling in force. FAILS CLOSED: a non-positive / unparseable
  * `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` does NOT disable the cap — it falls back to
- * the 50M default (and the hub refuses to boot, see {@link assertTokenCapConfig}).
+ * the 20M default (and the hub refuses to boot, see {@link assertTokenCapConfig}).
  * Only `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED` turns the ceiling off, and it
  * returns 0 to say so.
  */

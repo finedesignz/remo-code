@@ -262,8 +262,8 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
   supervisor-hosted session (reusing the scheduler `launchSessionForUser` primitive) and parks the macro
   prompt in grace, so the orchestrator can take an allowlisted repo due→PR. `isAutospawnEnabled()`
   (`hub/src/orchestrator/controller.ts`) carries `REMO_ORCHESTRATOR_ENABLED` (BOTH must be ON). True no-op
-  when OFF / empty allowlist. Companions: **`REMO_ORCHESTRATOR_DAILY_TOKEN_CAP`** (default **50_000_000**
-  = 50M tokens/day; non-positive/non-finite ⇒ falls back to the default AND the hub refuses to boot; only `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1` disables it) — the **non-bypassable daily TOKEN
+  when OFF / empty allowlist. Companions: **`REMO_ORCHESTRATOR_DAILY_TOKEN_CAP`** (default **20_000_000**
+  = 20M tokens/day; non-positive/non-finite ⇒ falls back to the default AND the hub refuses to boot; only `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1` disables it) — the **non-bypassable daily TOKEN
   ceiling** (`dailyTokenCapGate`, `hub/src/dispatch/gates.ts`), added ALONGSIDE the dollar cost cap because
   the cost cap is meaningless on a flat-rate Max subscription. **The token cap counts ALL FOUR buckets —
   `input + output + cache_creation + cache_read`** (`getTodayTokenTotal`, `hub/src/db/token-usage-dal.ts`).
@@ -280,10 +280,23 @@ tabs are gone (milestone v-settings-overhaul, 2026-05) — both routes redirect 
 - **`REMO_GOVERNED_AUTOMATION_PTY`** (default **OFF**; accepts `1|true|yes|on`, anything else OFF; PTYCAP
   Phase 3): read at call time by `governedAutomationEnabled()` in `hub/src/dispatch/governed-pty.ts`. OFF
   is a TRUE no-op - the dispatch gate (`governedAutomationPtyGate`) returns the byte-identical legacy
-  human-only decision and the automation PTY preflight refuses everything. ON in Phase 3 still admits
-  NOTHING, because the `kill_switch` and `lifetime_counter` governor slots fail closed
-  (`governor_not_implemented:<name>`) until Phase 4. Flipping it in prod is an owner-only cutover. See
+  human-only decision and the automation PTY preflight refuses everything. ON still admits
+  NOTHING in production until Phase 5: the `kill_switch` and `lifetime_counter` governors are real since
+  Phase 4, but no producer supplies a counter key yet, so the door refuses `lifetime_counter_key_missing`
+  (fail closed). Flipping it in prod is an owner-only cutover. See
   [docs/usage-cost.md](docs/usage-cost.md) "PTYCAP Phase 3".
+- **Automation kill switch + lifetime inject counter (milestone PTYCAP Phase 4)** — three env vars, all
+  read in `hub/src/dispatch/automation-controls.ts`:
+  **`REMO_AUTOMATION_KILL_SWITCH`** (truthy `1|true|yes|on`; default OFF) is the call-time **break-glass**:
+  it is read at every halt check and engages the GLOBAL scope regardless of the database (it works with the
+  DB down). It is a process env, so setting or clearing it needs a restart or redeploy and is therefore NOT
+  immediate; the authenticated API engage is the immediate path. **`REMO_AUTOMATION_LIFETIME_INJECT_CAP`**
+  (default **1000** per counter key; a non-positive or unparseable value REFUSES BOOT via the boot assertion
+  in `hub/src/index.ts`, it never silently becomes unlimited). **`REMO_TOKEN_CAP_ALARM_PCT`** (default **60**;
+  garbage or non-positive becomes 60 with a warning, never "off"; clamped to 100) is the percent of the daily
+  token ceiling at which the owner is emailed once per local day. Routes (all under `/api/automation`,
+  `hub/src/api/automation.ts`): `GET /kill-switch`, `POST /kill-switch/engage`, `POST /kill-switch/release`,
+  `POST /lifetime/reset`. Details: [docs/usage-cost.md](docs/usage-cost.md) "PTYCAP Phase 4".
 - **`REMO_PTY_INTERACTIVE`** (prod: **ON** since the 2026-06-04 cutover): drives the **web**
   default human surface — `GET /api/client-config` returns `pty_interactive`, and the SPA renders
   `TerminalSurface` (interactive `claude`/`codex` TUI over the Rust ConPTY) instead of the
@@ -398,7 +411,8 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
 | Shared dispatch + intake | [claude-architecture-notes.md](docs/claude-architecture-notes.md) | `hub/src/dispatch/` (gates→queue→grace→finalize) + `hub/src/webhooks/intake.ts`. All inbound subsystems ride these. |
 | Usage cost ledger | [usage-cost.md](docs/usage-cost.md) | P2 — per-turn token+cost capture (`usage_event`) → `token_usage` + `token_usage_daily` → `GET /api/usage/cost`. SDK `total_cost_usd` authoritative; `hub/src/usage/pricing.ts` is fallback only. Cost is a list-price ESTIMATE. Cap (P3) unaffected. Needs supervisor ≥0.8.0. **PTYCAP Phase 1** adds a second, supervisor-side source — the interactive PTY's own transcript JSONL, tailed by `pty-usage-emitter.ts` and tagged `token_usage.runner_type='pty-interactive'` vs `'stream-json'` for the SDK-stream path (RECORD only; gating is Phase 2). |
 | PTY terminal surface + cutover gate | [usage-cost.md](docs/usage-cost.md) · [cutover-gate-june15.md](docs/cutover-gate-june15.md) | Phases 15–19 — universal raw-terminal (PTY) human path (interactive `claude`/`codex` TUI, raw bytes, NO stream-json, NO API key). Phase-18 dual-bucket usage (interactive vs programmatic). Phase-19 fail-safe default-backend selector (`supervisor/src/runners/backend-selector.ts`), Codex/Gemini-stub fallback + shared `env-sanitize.ts`, and the June-15 cutover gate (`tools/cutover-deletion-gate.mjs`). Cutover flip + ChatSurface deletion are GATED (pending runbook + on-device attestations). **Attachments** (`term.attach_file`, `supervisor/src/runners/session-bridge.ts`): an uploaded file is written into the session's real working directory at `<repoPath>/.remo/attachments/<sessionId>/<nonce>-<safeName>` (NOT a host temp dir) so the CLI's own file tools resolve it, then its absolute path is typed into the PTY. `.remo/` is auto-added to the repo's `.gitignore` when `.git` is present (skipped for rootless/orchestrator dirs with no `.git`); the dir is removed best-effort on session stop. |
-| Governed-automation PTY guard | [usage-cost.md](docs/usage-cost.md) | PTYCAP Phase 3 - flag `REMO_GOVERNED_AUTOMATION_PTY` (default OFF, true no-op), `governedAutomationPtyGate` (formerly `humanOnlyPtyGate`), four governors in `hub/src/dispatch/governed-pty.ts` with two fail-closed Phase-4 slots (`kill_switch`, `lifetime_counter`), automation preflight branch, door pins in `hub/test/pty-door-guard.test.ts`. |
+| Governed-automation PTY guard | [usage-cost.md](docs/usage-cost.md) | PTYCAP Phase 3 - flag `REMO_GOVERNED_AUTOMATION_PTY` (default OFF, true no-op), `governedAutomationPtyGate` (formerly `humanOnlyPtyGate`), four governors in `hub/src/dispatch/governed-pty.ts` (`kill_switch` and `lifetime_counter` are real since Phase 4), automation preflight branch, door pins in `hub/test/pty-door-guard.test.ts`. |
+| Lifetime counter + kill switch | [usage-cost.md](docs/usage-cost.md) | PTYCAP Phase 4 - append-only `automation_inject_ledger`, atomic reserve-before-send, kill switch (`/api/automation`, env `REMO_AUTOMATION_KILL_SWITCH`), literal lifetime cap (`REMO_AUTOMATION_LIFETIME_INJECT_CAP`, 80% warning page), 60% daily-token alarm (`REMO_TOKEN_CAP_ALARM_PCT`), heal route as machine surface. |
 | Auto-dev orchestrator | [auto-dev-orchestrator.md](docs/auto-dev-orchestrator.md) · [.planning/architecture/auto-dev-task-prompts-SPEC.md](.planning/architecture/auto-dev-task-prompts-SPEC.md) | Phases 21–32 — session-level auto-dev: one `orchestrator` task per session + `orchestrator_rows`; global `routine_queue` + per-session lock; verify-tail. **Flag-gated OFF** (`REMO_ORCHESTRATOR_ENABLED`). **Milestone TMAC (2026-06-08): macro path is the default** — a task carries one `macro_task_type` (dev complete; maintenance/security/brainstorming stubs) resolved to ONE autonomous macro prompt (`task-macros.ts`); resume-heartbeat controller (`runMacroCycle`) reconciles `<<STATE>>`/`<<NOTIFY>>`/`<<GATE>>` sentinels (`sentinels.ts`) → `routine_run_log` + stage-gated `notify.ts` fan-out, halt on mandatory gate. Legacy micro-row wave path + its `REMO_ORCHESTRATOR_LEGACY_WAVES` rollback flag DELETED (guard test asserts they stay gone). Migrations: `hub/scripts/migrate-legacy-tasks-to-orchestrator.ts`, `migrate-orchestrator-macro-task-type.ts`. |
 | Session-Ask API | [session-ask.md](docs/session-ask.md) | Milestone ASK — external agent surface `/api/ext` (api_key + additive nullable `api_keys.scopes`: `ext:read`/`ext:ask`). FREE reads of a session's transcript tail + memory via READ-ONLY supervisor commands `session_transcript_tail`/`session_memory` (works for PTY sessions; **needs a new signed supervisor release**). PAID `POST /api/ext/sessions/:id/ask` answered by a stream-json ask-session on the target's `project_dir` — the human's PTY is NEVER written to; actor is server-inferred `external-ask`, so `governedAutomationPtyGate` (formerly `humanOnlyPtyGate`) rejects a PTY target. Gates: threshold → cost cap → **token cap** → governed-automation PTY guard (external actors never eligible) → `askRateGate` (`REMO_ASK_MAX_PER_HOUR`, default 10). `session_asks` + reaper (`REMO_ASK_MAX_MS`, 15min). MCP server in `mcp/`. Phase 4 (PTY-native ask) owner-gated, NOT shipped. |
 | Inbound-email work (`remo_work`) | [remo-work.md](docs/remo-work.md) | Milestone WORK — `POST /api/ext/work` (+ `GET /api/ext/work/:id`): an inbound CLIENT EMAIL → the repo's stream-json session. **THE AGENT PROPOSES, THE HUB DISPOSES**: the agent's authority ends at a pushed `work/<nonce>` branch (no deploy credentials in its env — `scrubDeployCredentials` in `supervisor/src/runners/env-sanitize.ts`; it is not even TOLD whether the site auto-publishes). The HUB then verifies the branch DIFF touches only `work_sites.site_dir` (`work_diff_scope` — this, not the prompt, is the boundary), runs the build itself (`work_build`, real exit code), probes the site over real HTTPS, and performs the merge + Coolify deploy ITSELF (`hub/src/work/publish.ts` `mayPublish` = auto_publish AND diff-scope AND build AND 2xx). `published=true` is only ever written on a hub-performed deploy. Entry gates (default-EMPTY): `work_repo_allowlist` (audit F6 ⇒ 403, no spend), `work_sites.client_emails` sender allowlist (⇒ 403 `unknown_sender`). Audit trail `work_runs` (F9: source email + FULL prompt + branch + commit SHAs + `hub_qc` evidence + deploy_status). Dispatch gates: threshold → cost cap → **token cap** → governed-automation PTY guard (actor `external-work`, never eligible) → `workRateGate` (`REMO_WORK_MAX_PER_HOUR`, 4) → `workRepoAllowlistGate`. Scope `ext:work`. Reaper `REMO_WORK_MAX_MS` (45min). **New supervisor MSI REQUIRED** (`work_diff_scope`/`work_build`/`work_publish`). MCP: `remo_work`/`remo_get_work`. |
@@ -429,7 +443,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   via `getTodayTokenCostUsd` (same tz-day boundary as `/api/usage/cost`). **Manual / interactive
   chat IS now capped** — not just scheduled runs. `token_usage` is the single source (it records
   every `usage_event`, including scheduled runs), so scheduled-run cost is not double-counted.
-  **The companion non-bypassable daily TOKEN cap** (`dailyTokenCapGate`, default 50M tokens/day) rides
+  **The companion non-bypassable daily TOKEN cap** (`dailyTokenCapGate`, default 20M tokens/day) rides
   ALONGSIDE the cost cap on **EVERY** dispatch gate list — orchestrator inject, scheduler agent +
   triage, error-capture, feedback, revanote, telegram (fix/stop-the-bleed; it previously rode ONLY the
   inject path, leaving every other path bounded solely by a dollar cap that is meaningless on a
@@ -438,7 +452,7 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   unparseable list hard-fails CI); proven to actually FIRE by `hub/test/token-cap-gate-fires.test.ts` +
   `hub/test/e2e/orchestrator-tokencap.e2e.test.ts` (cache-read alone trips it — the 2026-07 incident
   shape). **The token cap FAILS CLOSED**: a non-positive / unparseable
-  `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` no longer disables the ceiling — it falls back to the 50M default
+  `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` no longer disables the ceiling — it falls back to the 20M default
   AND the hub **refuses to boot** (`assertTokenCapConfig()` in `hub/src/index.ts`). The ONLY way to run
   with no ceiling is the explicit **`REMO_ORCHESTRATOR_DAILY_TOKEN_CAP_DISABLED=1`** (boots with a loud
   warning). A typo'd `0` must never silently become an unbounded spend path.
@@ -463,6 +477,51 @@ Cross-cutting prose + all historical phase rollups: [docs/claude-architecture-no
   chain never runs a governor. The ask/work/Telegram dispatch gates are NOT the door (they send
   `user_message` to the stream-json runner). A new hub->agent `term.*` emitter or privileged caller fails
   `hub/test/pty-door-guard.test.ts`. See [docs/usage-cost.md](docs/usage-cost.md) "PTYCAP Phase 3".
+- **Lifetime inject ledger + kill switch gate every machine dispatch (PTYCAP Phase 4).** The ledger
+  (`automation_inject_ledger`) is append-only: one atomic reservation (per-counter-key advisory lock) covers
+  BOTH the lifetime count and the trailing-hour rate (the de-duplicated union of the session's
+  `routine_run_log` inject rows and ledger reserve rows), and it is taken BEFORE the send; a refusal or a send
+  failure releases it (stamps `released_at`, never deletes). Counter keys are assigned only by server code
+  (allowlist pinned by `hub/test/counter-key-assignment-guard.test.ts`): `task:<scheduled_tasks.id>`
+  (scheduler agent and EVERY orchestrator inject, via the resolver), `triage:<application_uuid>`,
+  `heal:<userId>:<repo>`, `session:<id>` where no task exists. Everything fails closed. Refusal reasons:
+  `automation_halted:<scope>` and `lifetime_inject_exhausted:<n>>=<cap>`. The kill-switch gate is FIRST on
+  every machine gate list and a separate halt check runs immediately before `deps.send`; every machine `session.start`/`run_command` emitted outside `deps.send` re-reads the switch via `haltBeforeMachineSend` immediately before transmitting. HUMAN surfaces
+  (Telegram dispatch, cloud send, web/relay Enter, web Connect/Start) are never gated. Coverage is
+  default-deny and pinned (`kill-switch-coverage`, `launch-callers-guard`, `session-start-senders-guard`,
+  `reserve-caller-guard`). `POST /api/sessions/heal` (the external self-heal service) is classified a MACHINE
+  surface: halt check, then one `heal:<userId>:<repo>` reservation, released on any exit that starts no session.
+  A halt detected after a one-time task was claimed RE-ARMS the task (client work is not burned), and
+  releasing ANY scope resumes the deferred work in that scope (event-driven, no polling).
+  With `REMO_GOVERNED_AUTOMATION_PTY` ON the ask, work and telegram governed lists carry no counter key, so
+  the `lifetime_counter` governor refuses `lifetime_counter_key_missing` until Phase 5/7 supply keys (fail
+  closed; the flag defaults OFF).
+- **THE LIFETIME CAP IS LITERAL (read before relying on recurring automation).** It is a lifetime COUNT per
+  counter key, never a rate: default 1000, env-raisable via `REMO_AUTOMATION_LIFETIME_INJECT_CAP`, reset only
+  by the owner. An automation key that fires every 15 minutes spends 1000 injects in about ten days.
+  Recurring automation therefore continues indefinitely ONLY through owner resets (one authenticated
+  `POST /api/automation/lifetime/reset` call) or an env-raised cap. The owner gets a one-shot WARNING page at
+  80% of the cap and an exhaustion page, each once per counter key and reset epoch. A resolved panel verdict
+  (F-5a): indefinite recurrence without reauthorization is exactly what the ROADMAP SC-1 forbids.
+- **Owner emergency paths (no UI).** (1) API engage: `POST /api/automation/kill-switch/engage`
+  (`{scope: global|user|session, session_id?, reason?}`), cookie or JWT, NO step-up, but behind the license
+  gate, so it needs an ACTIVE license: an owner in an expired-grace state must use path (2). Global scope needs
+  the admin role. Engage writes a row only; it never stops a running session or cancels an in-flight turn.
+  (2) Env break-glass: set `REMO_AUTOMATION_KILL_SWITCH=1` and restart or redeploy (works with the DB down,
+  not immediate). Release (`/kill-switch/release`) and counter reset (`/lifetime/reset`) require a login less
+  than 15 minutes old (`requireRecentAuth`, `re_auth_required`); recovery is to log in again.
+- **Daily token ceiling alarm (60%).** When today's tokens first cross `REMO_TOKEN_CAP_ALARM_PCT` percent of the
+  daily ceiling the owner is emailed once per user per local day (durable claim in `token_cap_alarms`, delivered
+  flag, trailing-edge coalescing; in-app and Telegram fan-out only after the email was delivered).
+- **DEFAULT DAILY TOKEN CAP IS NOW 20M (PTYCAP Phase 4; was 50M).** `DEFAULT_DAILY_TOKEN_CAP` in
+  `hub/src/dispatch/gates.ts` is 20_000_000 tokens/day. It applies ONLY where
+  `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` is unset; a deployment that sets that variable is unchanged. HUMAN PTY
+  usage counts against it (all four buckets, from the PTY transcript tail) and the human preflight checks it
+  on every Enter, so a lowered cap can lock the owner's own terminal out for the rest of the day: recovery is
+  raising `REMO_ORCHESTRATOR_DAILY_TOKEN_CAP` plus a redeploy. THE OWNER MUST CHECK THE PROD ENV VALUE BEFORE
+  DEPLOY (this change touched no prod env or flag). The corrected PTY usage emitter (dedupe on `message.id`,
+  supervisor 0.15.1) needs a SIGNED supervisor MSI on the hosts (tag `supervisor-v*`); until hosts update, PTY
+  consumption is recorded about 2.5x too low (hub-versus-MSI ordering window).
 - **Don't hand-roll per-subsystem dispatch/queue/grace.** Round-2 collapse is complete — use
   `hub/src/dispatch/` (the old `scheduler/session-queue.ts` shim is deleted).
 - **One-time tasks are `scheduled_tasks`, not a parallel queue (milestone once).** A

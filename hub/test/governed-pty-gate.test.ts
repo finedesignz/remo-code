@@ -7,15 +7,53 @@
  *   COPY of that legacy semantics (deliberately NOT imported from production
  *   code) so it is an independent oracle.
  * SC-1 (structural): an eligible actor is admitted only when every governor
- *   passes -- provable only under the test-only DI setter, because the
- *   production kill_switch / lifetime_counter slots fail closed in Phase 3.
+ *   passes. PTYCAP-04-04: the kill_switch / lifetime_counter slots are REAL
+ *   (shared function references with the dispatcher-list gates) and inject_rate
+ *   counts; the controls module is leaf-mocked here, the SQL is proven elsewhere.
  *
  * DB-free: no DB access and no skipped tests (D-13).
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-chars-long-aaaaaaaa'
 
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import {
+import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test'
+import type { GovernorGate } from '../src/dispatch/governed-pty.ts'
+import * as gatesNs from '../src/dispatch/gates.ts'
+import { AUTOMATION_ACTORS, isDailyTokenCapEnforced } from '../src/dispatch/gates.ts'
+import { automationControlsLeaf } from './fixtures/automation-controls-leaf.ts'
+
+// PTYCAP-04-04: the governor slots delegate to the controls module. Leaf-mock it
+// with controllable fakes so this file stays DB-free (D-13) and keeps its subject.
+const fx = {
+  haltScope: null as string | null,
+  lifetimeReason: null as string | null,
+  rateCount: 0,
+  rateThrows: false,
+  rateCalls: [] as Array<{ sessionId: string; minutes: number }>,
+}
+async function fakeKillSwitchCheck(_req: any) {
+  if (fx.haltScope) return { ok: false as const, reason: `automation_halted:${fx.haltScope}` }
+  return { ok: true as const }
+}
+async function fakeLifetimeCounterCheck(req: any) {
+  if (!req.counterKey) return { ok: false as const, reason: 'lifetime_counter_key_missing' }
+  if (fx.lifetimeReason) return { ok: false as const, reason: fx.lifetimeReason }
+  return { ok: true as const }
+}
+mock.module('../src/dispatch/automation-controls.ts', () => ({
+  ...automationControlsLeaf(),
+  killSwitchCheck: fakeKillSwitchCheck,
+  lifetimeCounterCheck: fakeLifetimeCounterCheck,
+  automationKillSwitchGate: { name: 'automation_kill_switch', check: fakeKillSwitchCheck },
+  automationLifetimeCounterGate: { name: 'lifetime_counter', check: fakeLifetimeCounterCheck },
+  countRateUnion: async (sessionId: string, minutes: number) => {
+    fx.rateCalls.push({ sessionId, minutes })
+    if (fx.rateThrows) throw new Error('count boom')
+    return fx.rateCount
+  },
+}))
+const governedNs = await import('../src/dispatch/governed-pty.ts')
+const controlsNs = (await import('../src/dispatch/automation-controls.ts')) as any
+const {
   governedAutomationEnabled,
   governedAutomationPtyGate,
   killSwitchGovernor,
@@ -27,11 +65,7 @@ import {
   activeGovernors,
   _setGovernorsForTests,
   _resetGovernorsForTests,
-  type GovernorGate,
-} from '../src/dispatch/governed-pty.ts'
-import * as governedNs from '../src/dispatch/governed-pty.ts'
-import * as gatesNs from '../src/dispatch/gates.ts'
-import { AUTOMATION_ACTORS, isDailyTokenCapEnforced } from '../src/dispatch/gates.ts'
+} = governedNs
 
 type Decision = { ok: true } | { ok: false; reason: string }
 
@@ -84,6 +118,11 @@ beforeEach(() => {
     delete process.env[k]
   }
   _resetGovernorsForTests()
+  fx.haltScope = null
+  fx.lifetimeReason = null
+  fx.rateCount = 0
+  fx.rateThrows = false
+  fx.rateCalls.length = 0
 })
 
 afterEach(() => {
@@ -145,12 +184,42 @@ describe('PTYCAP Phase 3 -- flag parsing (D-04)', () => {
 })
 
 describe('PTYCAP Phase 3 -- production governors with the flag ON (D-02, D-06)', () => {
-  test('production list: scheduler on a pty-interactive session is blocked by the fail-closed kill_switch slot', async () => {
+  test('production list: kill switch engaged blocks first with the real reason (kill_switch is first in order)', async () => {
+    process.env[FLAG] = '1'
+    fx.haltScope = 'global'
+    const gate = governedAutomationPtyGate(async () => ({ actor: 'scheduler', runnerType: 'pty-interactive' }))
+    expect(await gate.check(baseReq as any)).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:scheduler:automation_halted:global',
+    })
+    expect(fx.rateCalls).toEqual([])
+  })
+
+  test('production list: kill switch clear and no counterKey refuses lifetime_counter_key_missing (fail closed until a key is supplied)', async () => {
     process.env[FLAG] = '1'
     const gate = governedAutomationPtyGate(async () => ({ actor: 'scheduler', runnerType: 'pty-interactive' }))
     expect(await gate.check(baseReq as any)).toEqual({
       ok: false,
-      reason: 'automation_blocked_on_pty:scheduler:governor_not_implemented:kill_switch',
+      reason: 'automation_blocked_on_pty:scheduler:lifetime_counter_key_missing',
+    })
+  })
+
+  test('production list: all controls clear, counterKey present, under every ceiling -> ok (rate counted for the session over 60 minutes)', async () => {
+    process.env[FLAG] = '1'
+    fx.rateCount = 3
+    process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR = '4'
+    const gate = governedAutomationPtyGate(async () => ({ actor: 'scheduler', runnerType: 'pty-interactive' }))
+    expect(await gate.check({ ...baseReq, counterKey: 'task:T1' } as any)).toEqual({ ok: true })
+    expect(fx.rateCalls).toEqual([{ sessionId: 's1', minutes: 60 }])
+  })
+
+  test('production list: lifetime exhausted surfaces the real reason after the rate governor passed', async () => {
+    process.env[FLAG] = '1'
+    fx.lifetimeReason = 'lifetime_inject_exhausted:1000>=1000'
+    const gate = governedAutomationPtyGate(async () => ({ actor: 'scheduler', runnerType: 'pty-interactive' }))
+    expect(await gate.check({ ...baseReq, counterKey: 'task:T1' } as any)).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:scheduler:lifetime_inject_exhausted:1000>=1000',
     })
   })
 
@@ -264,27 +333,57 @@ describe('PTYCAP Phase 3 -- enabled rule (D-03)', () => {
   })
 })
 
-describe('PTYCAP Phase 3 -- fail-closed slots, throw, non-PTY, DI-only, no alias', () => {
-  test('lifetime_counter slot fails closed even when every other governor passes', async () => {
-    process.env[FLAG] = '1'
-    _setGovernorsForTests([spy('kill_switch', []), tokenCapGovernor, injectRateGovernor, lifetimeCounterGovernor])
-    expect(await sched().check(baseReq as any)).toEqual({
-      ok: false,
-      reason: 'automation_blocked_on_pty:scheduler:governor_not_implemented:lifetime_counter',
-    })
+describe('PTYCAP Phase 4 -- real governor slots and the counting inject-rate governor (D-11)', () => {
+  test('identity: each governor check IS the controls function the dispatcher-list gate runs', () => {
+    expect(killSwitchGovernor.check).toBe(controlsNs.automationKillSwitchGate.check)
+    expect(lifetimeCounterGovernor.check).toBe(controlsNs.automationLifetimeCounterGate.check)
+    expect(killSwitchGovernor.name).toBe('kill_switch')
+    expect(lifetimeCounterGovernor.name).toBe('lifetime_counter')
   })
 
-  test('the production kill_switch and lifetime_counter bodies always block with governor_not_implemented', async () => {
-    expect(await killSwitchGovernor.check(baseReq as any)).toEqual({
-      ok: false,
-      reason: 'governor_not_implemented:kill_switch',
-    })
+  test('the Phase 3 not-implemented reasons are gone from the production governors', async () => {
+    expect(await killSwitchGovernor.check(baseReq as any)).toEqual({ ok: true })
+    expect(await lifetimeCounterGovernor.check({ ...baseReq, counterKey: 'task:T1' } as any)).toEqual({ ok: true })
     expect(await lifetimeCounterGovernor.check(baseReq as any)).toEqual({
       ok: false,
-      reason: 'governor_not_implemented:lifetime_counter',
+      reason: 'lifetime_counter_key_missing',
     })
   })
 
+  test('inject_rate: union count at the cap refuses over_session_inject_rate:4>=4; below the cap passes', async () => {
+    process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR = '4'
+    fx.rateCount = 4
+    expect(await injectRateGovernor.check(baseReq as any)).toEqual({
+      ok: false,
+      reason: 'over_session_inject_rate:4>=4',
+    })
+    fx.rateCount = 3
+    expect(await injectRateGovernor.check(baseReq as any)).toEqual({ ok: true })
+  })
+
+  test('inject_rate: an unconfigured ceiling refuses before any count', async () => {
+    for (const v of ['0', '-1', 'garbage', 'NaN', 'Infinity']) {
+      process.env.REMO_ORCHESTRATOR_MAX_INJECTS_PER_HOUR = v
+      expect(await injectRateGovernor.check(baseReq as any)).toEqual({
+        ok: false,
+        reason: 'governor_unconfigured:inject_rate',
+      })
+    }
+    expect(fx.rateCalls).toEqual([])
+  })
+
+  test('inject_rate: a count error propagates; the gate maps it to governor_error:inject_rate', async () => {
+    process.env[FLAG] = '1'
+    fx.rateThrows = true
+    await expect(injectRateGovernor.check(baseReq as any)).rejects.toThrow('count boom')
+    expect(await sched().check({ ...baseReq, counterKey: 'task:T1' } as any)).toEqual({
+      ok: false,
+      reason: 'automation_blocked_on_pty:scheduler:governor_error:inject_rate',
+    })
+  })
+})
+
+describe('PTYCAP Phase 3 -- throw, non-PTY, DI-only, no alias', () => {
   test('a governor that throws yields a typed governor_error denial, never a pass (D-14)', async () => {
     process.env[FLAG] = '1'
     const calls: string[] = []

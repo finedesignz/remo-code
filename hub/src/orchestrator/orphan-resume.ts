@@ -28,6 +28,7 @@
 import { reserveSessionSlot } from '../sessions/budget'
 import { listOnlineSupervisorIdsForUser, getSupervisor } from '../ws/supervisor-registry'
 import { getSessionSkipPermissionsByRepo } from '../db/dal'
+import { isAutomationHalted } from '../dispatch/automation-controls'
 
 const MAX_RESTART_COUNT = 10
 
@@ -47,6 +48,8 @@ export interface ResumeResult {
   skipped_capacity: string[]
   skipped_max_restarts: string[]
   finalized_stale: string[]
+  /** PTYCAP-04-07: orchestrator orphans deferred (row untouched) because automation is halted. */
+  skipped_halted: string[]
 }
 
 function emptyResult(): ResumeResult {
@@ -57,6 +60,7 @@ function emptyResult(): ResumeResult {
     skipped_capacity: [],
     skipped_max_restarts: [],
     finalized_stale: [],
+    skipped_halted: [],
   }
 }
 
@@ -162,6 +166,22 @@ async function resumeOrphansInner(args: {
       continue
     }
 
+    // (b.1) PTYCAP-04-07 kill-switch deferral (D-09b, panel F-4/S4). ONLY orchestrator
+    //       orphans are machine-driven; non-orchestrator orphans are human or machine
+    //       and indistinguishable, so they are NEVER deferred (human recovery must not
+    //       be blocked). Defer BEFORE the reboot UPDATE below and leave the row OPEN, so
+    //       the release-time sweep (api/automation.ts) or the next reconnect resumes it.
+    //       Evaluated per orphan with THAT orphan's user and session id, so a
+    //       session-scope halt defers only that session. A deferred row younger than 24h
+    //       is picked up after release; the 24h stale sweep above still finalizes older ones.
+    if (o.is_orchestrator) {
+      const halt = await isAutomationHalted({ userId, sessionId: o.session_id ?? undefined })
+      if (halt.halted) {
+        result.skipped_halted.push(o.id)
+        continue
+      }
+    }
+
     // (c) End the orphan FIRST so it doesn't count against the cap when we
     //     reserve a slot for its replacement.
     await sql`UPDATE session_runs SET ended_at = now(), exit_reason = 'reboot' WHERE id = ${o.id}`
@@ -179,7 +199,30 @@ async function resumeOrphansInner(args: {
           preferSupervisorId: supervisorId,
           requireEnabled: true, // honour the explicit-disable sentinel + enabled flag
           skipIfRunning: false,
+          machine: true, // final halt re-check inside the primitive (PTYCAP-04-07)
         })
+        // QC M1/R2: the original was closed above only so launchOrchestrator can reserve its
+        // slot (an open run blocks the replacement). launchOrchestrator may fail BEFORE it
+        // creates the replacement run row (a halt landing between the two statements, no
+        // capacity, no online supervisor, or an internal_error thrown ahead of the
+        // transaction), so the orphan is reopened exactly when no open replacement run
+        // exists for the session (checked atomically in the UPDATE). send_failed /
+        // already_running / disabled are not reopened: send_failed happens after the
+        // replacement row exists, and the other two never need the orphan back.
+        if (
+          !res.ok &&
+          (res.reason === 'automation_halted' ||
+            res.reason === 'at_capacity' ||
+            res.reason === 'no_online_supervisor' ||
+            res.reason === 'supervisor_has_no_roots' ||
+            res.reason === 'internal_error')
+        ) {
+          await reopenOrphanIfNoReplacement(sql, o.id, o.session_id, userId)
+        }
+        if (!res.ok && res.reason === 'automation_halted') {
+          result.skipped_halted.push(o.id)
+          continue
+        }
         if (!res.ok && res.reason === 'disabled') {
           result.skipped_user_stopped.push(o.session_id ?? o.id)
           continue
@@ -189,6 +232,12 @@ async function resumeOrphansInner(args: {
         else result.skipped_no_supervisor.push(o.id)
       } catch (err: any) {
         console.error('[orphan-resume] orchestrator relaunch failed run=' + o.id, err?.message)
+        // R2: a throw may precede the replacement run row; do not leave the orphan consumed.
+        try {
+          await reopenOrphanIfNoReplacement(sql, o.id, o.session_id, userId)
+        } catch (reopenErr: any) {
+          console.error('[orphan-resume] orphan reopen failed run=' + o.id, reopenErr?.message)
+        }
         result.skipped_no_supervisor.push(o.id)
       }
       continue
@@ -245,6 +294,31 @@ async function resumeOrphansInner(args: {
 }
 
 /**
+ * R2: undo the 'reboot' close of an orchestrator orphan iff NO open replacement run exists
+ * for its session. The NOT EXISTS is evaluated inside the UPDATE so it is atomic with the
+ * reopen: if launchOrchestrator created the replacement row before failing, the orphan stays
+ * consumed (two open runs would double-resume); otherwise it is restored so the release-time
+ * sweep or the next reconnect resumes it.
+ */
+async function reopenOrphanIfNoReplacement(sql: any, orphanId: string, sessionId: string | null, userId: string): Promise<void> {
+  // QC R4: take the SAME per-user advisory lock launchOrchestrator holds across its
+  // find-or-create -> reserve -> createRun transaction. Without it, the NOT EXISTS below can
+  // read before a concurrent launch commits its replacement row, and the reopen then lands
+  // beside it (two open runs). Under the lock the check and the reopen see a settled state.
+  await sql.begin(async (tx: any) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${'orchestrator:' + userId})::bigint)`
+    await tx`
+      UPDATE session_runs SET ended_at = NULL, exit_reason = NULL
+      WHERE id = ${orphanId} AND exit_reason = 'reboot'
+        AND NOT EXISTS (
+          SELECT 1 FROM session_runs r2
+          WHERE r2.session_id = ${sessionId} AND r2.ended_at IS NULL AND r2.id <> ${orphanId}
+        )
+    `
+  })
+}
+
+/**
  * Supervisor-scoped path — called from agent.ts supervisor.hello.
  *
  * The supervisor just reconnected. Resume all open runs for THIS supervisor.
@@ -255,6 +329,29 @@ export async function resumeOrphansForSupervisor(args: {
 }): Promise<ResumeResult> {
   const { sql } = await import('../db/postgres')
   return resumeOrphansInner({ sql, userId: args.userId, supervisorId: args.supervisorId })
+}
+
+/**
+ * PTYCAP-04-07 (panel F-4): which online supervisors to sweep after a kill-switch RELEASE.
+ * Global release sweeps every online supervisor (each with its own owner's user id, read from
+ * the in-memory registry record); user and session release sweep the releasing owner's
+ * supervisors. Event-driven (called by the release route only) - never polled. The registry
+ * is imported late so modules that merely import this file do not need the full surface.
+ */
+export async function listOnlineSupervisorsForRelease(args: {
+  scope: 'global' | 'user' | 'session'
+  userId: string
+}): Promise<Array<{ supervisorId: string; userId: string }>> {
+  const reg = await import('../ws/supervisor-registry')
+  if (args.scope !== 'global') {
+    return reg.listOnlineSupervisorIdsForUser(args.userId).map((supervisorId) => ({ supervisorId, userId: args.userId }))
+  }
+  const out: Array<{ supervisorId: string; userId: string }> = []
+  for (const { id } of reg.listSupervisors()) {
+    const entry = reg.getSupervisor(id)
+    if (entry) out.push({ supervisorId: id, userId: entry.userId })
+  }
+  return out
 }
 
 // ── Rate-limit: at most one client-driven resume sweep per (userId, 60s). ────
@@ -301,6 +398,7 @@ export async function resumeOrphanSessionsForUser(userId: string): Promise<Resum
       result.skipped_capacity.push(...r.skipped_capacity)
       result.skipped_max_restarts.push(...r.skipped_max_restarts)
       result.finalized_stale.push(...r.finalized_stale)
+      result.skipped_halted.push(...r.skipped_halted)
     } catch (err: any) {
       console.error(`[orphan-resume] sweep failed supervisor=${supervisorId}`, err?.message)
     }

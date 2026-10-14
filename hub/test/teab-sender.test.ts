@@ -31,6 +31,9 @@ const state: {
   inventory: any
   capExceeded: boolean
   thresholdAllowed: boolean
+  sqlTexts: string[]
+  engageOnStarted: boolean
+  engaged: boolean
 } = {
   task: null,
   inserted: [],
@@ -40,14 +43,26 @@ const state: {
   inventory: null,
   capExceeded: false,
   thresholdAllowed: true,
+  sqlTexts: [],
+  engageOnStarted: false,
+  engaged: false,
 }
 
 let runSeq = 0
 
 // ── leaf-dep mocks ──────────────────────────────────────────────────────────
 mock.module('../src/db/postgres.ts', () => ({
-  // teab.ts's only direct sql use is the `teab_last_status = 'started'` UPDATE.
-  sql: async () => [],
+  // teab.ts's direct sql use is the `teab_last_status` UPDATEs; the kill-switch read
+  // (automation-controls) is a SELECT over automation_kill_switch. `engageOnStarted`
+  // simulates an engage that lands AFTER the dispatcher's early check: the 'started'
+  // UPDATE (the last write before transmission) flips the switch on.
+  sql: async (strings: TemplateStringsArray) => {
+    const text = Array.isArray(strings) ? strings.join('?') : ''
+    state.sqlTexts.push(text)
+    if (state.engageOnStarted && text.includes("teab_last_status = 'started'")) state.engaged = true
+    if (text.includes('automation_kill_switch') && state.engaged) return [{ scope: 'global', engaged: true }]
+    return []
+  },
 }))
 
 // Spread the real DAL (it loads fine over the mocked postgres) so unrelated
@@ -125,6 +140,9 @@ beforeEach(() => {
   state.inventory = null
   state.capExceeded = false
   state.thresholdAllowed = true
+  state.sqlTexts = []
+  state.engageOnStarted = false
+  state.engaged = false
   state.task = TEAB_TASK()
 })
 
@@ -133,6 +151,9 @@ afterAll(() => mock.restore())
 describe('TEAB dispatch (Phase TEAB-04)', () => {
   test('(a)+(c) routing: a teab task reaches the teab sender and emits run_command teab_run', async () => {
     await runNow('task-teab-1', 'user-1')
+    // The sender runs detached from runNow and now awaits the fresh pre-send kill-switch
+    // read (QC B1) before transmitting; let it settle.
+    await new Promise((r) => setTimeout(r, 0))
 
     // A run row was inserted in-flight-pending and routed to the supervisor.
     expect(state.inserted).toHaveLength(1)
@@ -182,5 +203,16 @@ describe('TEAB dispatch (Phase TEAB-04)', () => {
     const skip = state.runStatusUpdates.find((u) => u.fields.status === 'skipped')
     expect(skip).toBeTruthy()
     expect(skip!.fields.error).toBe('no_online_supervisor')
+  })
+
+  test('QC B1: a kill-switch engage landing after the dispatcher check stops the run_command (finalized skipped, no frame)', async () => {
+    state.engageOnStarted = true
+    await runNow('task-teab-1', 'user-1')
+    await new Promise((r) => setTimeout(r, 0))
+
+    expect(state.sentFrames).toHaveLength(0)
+    const skip = state.runStatusUpdates.find((u) => u.fields.status === 'skipped')
+    expect(skip).toBeTruthy()
+    expect(skip!.fields.error).toBe('automation_halted:global')
   })
 })

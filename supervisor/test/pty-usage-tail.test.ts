@@ -696,3 +696,154 @@ describe('PtyUsageEmitter — end-to-end mid-turn accounting (SC-1/SC-2/SC-3)', 
     }
   })
 })
+
+/**
+ * PTYCAP-04 G-1 — the CLI transcript writes several `assistant` records per
+ * assistant message; they share one `message.id` and carry CUMULATIVE usage.
+ * The emitter must dedupe on message.id (fallback uuid), keep per-bucket
+ * maxima and emit only positive per-bucket deltas.
+ */
+describe('PtyUsageEmitter — message.id dedupe with cumulative usage (G-1, D-15)', () => {
+  function rec(uuid: string, id: string | null, u: { i: number; o: number; cc?: number; cr?: number }): string {
+    const message: Record<string, unknown> = {
+      model: 'claude-sonnet-5',
+      usage: {
+        input_tokens: u.i,
+        output_tokens: u.o,
+        cache_creation_input_tokens: u.cc ?? 0,
+        cache_read_input_tokens: u.cr ?? 0,
+      },
+    }
+    if (id !== null) message.id = id
+    return JSON.stringify({ type: 'assistant', uuid, message }) + '\n'
+  }
+  function sum(frames: PtyUsageEventFrame[]) {
+    return frames.reduce(
+      (a, f) => ({
+        i: a.i + f.input_tokens,
+        o: a.o + f.output_tokens,
+        cc: a.cc + f.cache_creation_input_tokens,
+        cr: a.cr + f.cache_read_input_tokens,
+      }),
+      { i: 0, o: 0, cc: 0, cr: 0 },
+    )
+  }
+  async function harness(tag: string) {
+    const h = makeHome()
+    const emitter = new PtyUsageEmitter()
+    const projectDir = process.platform === 'win32' ? `C:/fake/pty-usage-g1-${tag}` : `/fake/pty-usage-g1-${tag}`
+    const file = setupSessionFile(projectDir)
+    const captured: PtyUsageEventFrame[] = []
+    emitter.start({ sessionId: `sess-g1-${tag}`, projectDir, cliKind: 'claude', emit: (f) => captured.push(f) })
+    await wait(200)
+    return { file, captured, done: () => { emitter.stop(); h.restore() } }
+  }
+
+  test('three records sharing one message.id with cumulative usage emit frames summing to the LAST record, not 3x', async () => {
+    const t = await harness('a')
+    try {
+      writeFileSync(t.file, rec('u1', 'msg_1', { i: 100, o: 10, cr: 500 }), { flag: 'a' })
+      writeFileSync(t.file, rec('u2', 'msg_1', { i: 100, o: 40, cr: 500 }), { flag: 'a' })
+      writeFileSync(t.file, rec('u3', 'msg_1', { i: 100, o: 90, cr: 500 }), { flag: 'a' })
+      await wait(900)
+      expect(sum(t.captured)).toEqual({ i: 100, o: 90, cc: 0, cr: 500 })
+      // first frame is the full first record; later frames carry only positive deltas
+      expect(t.captured[0].input_tokens).toBe(100)
+      expect(t.captured[0].output_tokens).toBe(10)
+      expect(t.captured[0].cache_read_input_tokens).toBe(500)
+      expect(t.captured[1].input_tokens).toBe(0)
+      expect(t.captured[1].output_tokens).toBe(30)
+      expect(t.captured[1].cache_read_input_tokens).toBe(0)
+      expect(t.captured.every((f) => f.runner_type === 'pty-interactive')).toBe(true)
+    } finally {
+      t.done()
+    }
+  })
+
+  test('a later same-id record with a SMALLER bucket emits nothing and does not lower the stored maximum', async () => {
+    const t = await harness('b')
+    try {
+      writeFileSync(t.file, rec('u1', 'msg_2', { i: 100, o: 90, cr: 500 }), { flag: 'a' })
+      await wait(700)
+      expect(t.captured.length).toBe(1)
+      writeFileSync(t.file, rec('u2', 'msg_2', { i: 100, o: 40, cr: 500 }), { flag: 'a' })
+      await wait(700)
+      expect(t.captured.length).toBe(1) // no negative / no frame
+      writeFileSync(t.file, rec('u3', 'msg_2', { i: 100, o: 95, cr: 500 }), { flag: 'a' })
+      await wait(700)
+      expect(t.captured.length).toBe(2)
+      expect(t.captured[1].output_tokens).toBe(5) // delta vs the kept maximum 90, not vs 40
+      expect(t.captured.every((f) => f.input_tokens >= 0 && f.output_tokens >= 0 && f.cache_read_input_tokens >= 0 && f.cache_creation_input_tokens >= 0)).toBe(true)
+      expect(sum(t.captured)).toEqual({ i: 100, o: 95, cc: 0, cr: 500 })
+    } finally {
+      t.done()
+    }
+  })
+
+  test('a byte-identical record appended again (same id, same usage) emits nothing', async () => {
+    const t = await harness('c')
+    try {
+      const line = rec('u1', 'msg_3', { i: 7, o: 3, cc: 2, cr: 11 })
+      writeFileSync(t.file, line, { flag: 'a' })
+      await wait(700)
+      expect(t.captured.length).toBe(1)
+      writeFileSync(t.file, line, { flag: 'a' })
+      await wait(700)
+      expect(t.captured.length).toBe(1)
+      expect(sum(t.captured)).toEqual({ i: 7, o: 3, cc: 2, cr: 11 })
+    } finally {
+      t.done()
+    }
+  })
+
+  test('records with no message.id keep uuid dedupe: same uuid twice emits once, different uuids emit each', async () => {
+    const t = await harness('d')
+    try {
+      writeFileSync(t.file, rec('same', null, { i: 4, o: 2 }), { flag: 'a' })
+      writeFileSync(t.file, rec('same', null, { i: 4, o: 2 }), { flag: 'a' })
+      writeFileSync(t.file, rec('other', null, { i: 4, o: 2 }), { flag: 'a' })
+      await wait(900)
+      expect(t.captured.length).toBe(2)
+      expect(sum(t.captured)).toEqual({ i: 8, o: 4, cc: 0, cr: 0 })
+    } finally {
+      t.done()
+    }
+  })
+
+  test('a record with all-zero buckets is skipped before any bookkeeping (a later real record for that id still emits in full)', async () => {
+    const t = await harness('e')
+    try {
+      writeFileSync(t.file, rec('u1', 'msg_z', { i: 0, o: 0 }), { flag: 'a' })
+      await wait(700)
+      expect(t.captured.length).toBe(0)
+      writeFileSync(t.file, rec('u2', 'msg_z', { i: 5, o: 6 }), { flag: 'a' })
+      await wait(700)
+      expect(t.captured.length).toBe(1)
+      expect(sum(t.captured)).toEqual({ i: 5, o: 6, cc: 0, cr: 0 })
+    } finally {
+      t.done()
+    }
+  })
+
+  test('the per-key bookkeeping is bounded by SEEN_UUID_CAP (5000): after FIFO eviction the oldest id can emit again', async () => {
+    const t = await harness('f')
+    try {
+      // 5001 distinct ids -> msg_0 is evicted (cap 5000, oldest first).
+      let lines = ''
+      for (let n = 0; n < 5001; n++) lines += rec(`u${n}`, `msg_${n}`, { i: 1, o: 1 })
+      writeFileSync(t.file, lines, { flag: 'a' })
+      await wait(2500)
+      expect(t.captured.length).toBe(5001)
+      // A still-retained id replays silently...
+      writeFileSync(t.file, rec('r1', 'msg_5000', { i: 1, o: 1 }), { flag: 'a' })
+      await wait(700)
+      expect(t.captured.length).toBe(5001)
+      // ...but the evicted oldest id emits again (the bound is real).
+      writeFileSync(t.file, rec('r2', 'msg_0', { i: 1, o: 1 }), { flag: 'a' })
+      await wait(700)
+      expect(t.captured.length).toBe(5002)
+    } finally {
+      t.done()
+    }
+  })
+})

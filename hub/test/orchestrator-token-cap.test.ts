@@ -53,17 +53,17 @@ afterEach(() => {
 })
 
 describe('BSA-04 daily token cap gate', () => {
-  test('allows when today tokens are under the (default 50M) cap', async () => {
-    state.tokens = 49_999_999
+  test('allows when today tokens are under the (default 20M) cap', async () => {
+    state.tokens = 19_999_999
     const r = await dailyTokenCapGate.check(req)
     expect(r.ok).toBe(true)
   })
 
   test('blocks the NEXT dispatch at the cap boundary (>=)', async () => {
-    state.tokens = 50_000_000
+    state.tokens = 20_000_000
     const r = await dailyTokenCapGate.check(req)
     expect(r.ok).toBe(false)
-    expect((r as { reason: string }).reason).toBe('over_daily_token_cap:50000000>=50000000')
+    expect((r as { reason: string }).reason).toBe('over_daily_token_cap:20000000>=20000000')
   })
 
   test('honors REMO_ORCHESTRATOR_DAILY_TOKEN_CAP override', async () => {
@@ -84,7 +84,7 @@ describe('BSA-04 daily token cap gate', () => {
     for (const bad of ['0', '-5']) {
       process.env[TOKEN_KEY] = bad
       expect(await isOverTokenCap('u1', 'UTC')).toBe(true)
-      expect((await getTokenCapStatus('u1', 'UTC')).cap).toBe(50_000_000)
+      expect((await getTokenCapStatus('u1', 'UTC')).cap).toBe(20_000_000)
     }
   })
 

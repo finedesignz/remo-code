@@ -238,6 +238,8 @@ export async function runMergeToMain(
     repo_key: ctx.repoKey,
     command: MERGE_COMMAND,
     outcome: dispatched ? 'merge_dispatched' : `refused_${inj.kind}`,
+    // PTYCAP-04 (F-6): link the row to the ledger reservation of the same inject.
+    inject_token: dispatched ? token : null,
     decision_rationale:
       `Merging ${merged.length} PR(s) (dev PASS auto-merge; ship/milestone/tag approved): ${merged.join(', ')}.` +
       (held.length > 0 ? ` Held ${held.length}: ${held.join(', ')}.` : '') +

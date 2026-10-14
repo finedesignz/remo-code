@@ -24,6 +24,7 @@
  * ADAPTER↔PIPELINE wiring (open()→finalize lifecycle) + the budget DispatchGate.
  */
 import { describe, test, expect, beforeEach, afterAll, mock } from 'bun:test'
+import { automationControlsLeaf } from './fixtures/automation-controls-leaf.ts'
 
 const realDal = await import(`../src/db/dal.ts?bust=${Date.now()}`)
 const realRevDal = await import(`../src/db/revanote-dal.ts?bust=${Date.now()}`)
@@ -166,8 +167,16 @@ mock.module('../src/revanote/callback.ts', () => ({
 
 // Pass-through threshold + cost-cap so the REAL budget gate is what we exercise
 // in the budget test. The budget gate itself is imported real from the adapter.
+// PTYCAP-04-06: record the order the gates run in, so the test can pin that the kill
+// switch is FIRST. The controls leaf mock keeps this test about its own subject.
+const gateOrder: string[] = []
+mock.module('../src/dispatch/automation-controls.ts', () => ({
+  ...automationControlsLeaf(),
+  automationKillSwitchGate: { name: 'automation_kill_switch', async check() { gateOrder.push('automation_kill_switch'); return { ok: true } } },
+}))
+
 mock.module('../src/dispatch/gates.ts', () => ({
-  thresholdGate: { name: 'threshold', async check() { return { ok: true } } },
+  thresholdGate: { name: 'threshold', async check() { gateOrder.push('threshold'); return { ok: true } } },
   dailyCostCapGate: { name: 'daily_cost_cap', async check() {
     // Honor the cost cap so IR-1 stays testable through the real adapter path.
     if (state.costCap > 0 && state.todayCost >= state.costCap) {
@@ -199,6 +208,7 @@ beforeEach(() => {
   state.resolvedSession = { id: 'sess-1' }
   state.annSessionId = 'sess-1'
   runSeq = 0
+  gateOrder.length = 0
   _reset()
 })
 
@@ -207,6 +217,10 @@ describe('revanote dispatch adapter — open()→finalize lifecycle', () => {
 
   test('dispatched annotation inserts ONE annotation_run, broadcasts dispatched, finalizes + enqueues callback on reply', async () => {
     const out = await dispatchPendingAnnotation('ann-1')
+
+    // PTYCAP-04-06 (D-08): the kill-switch gate runs FIRST, ahead of the spend gates.
+    expect(gateOrder[0]).toBe('automation_kill_switch')
+    expect(gateOrder).toContain('threshold')
 
     // open() fired EXACTLY once → one annotation_run; outcome has the real id.
     expect(state.runs).toHaveLength(1)

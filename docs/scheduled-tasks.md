@@ -473,7 +473,9 @@ Bounds stop a task cleanly and **auto-disable** it:
 - `until` — stop at/after an absolute instant.
 - `max_runs` — stop after N **total** fires (any status: a skipped/quota-capped
   fire still consumes a slot; counted via `countFiresForTask` = `COUNT(*)` of
-  `scheduled_task_runs` for the task).
+  `scheduled_task_runs` for the task), EXCEPT runs the kill switch refused
+  (`status='skipped'`, `error` starting `automation_halted:`): nothing was attempted,
+  so a halt can never exhaust a bounded task (PTYCAP-04).
 - `for: {count, unit}` — convenience, **normalized to `until = start_at +
   count*unit` at save time** (`normalizeRulesForStorage` in the API create/patch
   handlers). Storage only ever carries `until`; the editor re-derives the

@@ -64,11 +64,11 @@ Confirm `scheduled_tasks.macro_task_type = 'dev'` for the bound session.
 
 ### Step 3 — Set the token ceiling + launch cap (OWNER decision: final numbers)
 
-Conservative defaults ship in code: token cap **50M tokens/day**, launch cap **20/day**.
+Conservative defaults ship in code: token cap **20M tokens/day** (only where the env is unset), launch cap **20/day**.
 Set the prod numbers explicitly before arming:
 
 ```
-REMO_ORCHESTRATOR_DAILY_TOKEN_CAP=<tokens-per-day>        # default 50_000_000
+REMO_ORCHESTRATOR_DAILY_TOKEN_CAP=<tokens-per-day>        # default 20_000_000
 REMO_ORCHESTRATOR_AUTOSPAWN_DAILY_LAUNCHES=<launches/day> # default 20
 ```
 
