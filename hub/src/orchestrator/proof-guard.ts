@@ -235,7 +235,9 @@ export async function realProofHooks(): Promise<ProofCycleHooks> {
     engageSessionKill: (a) => controls.engageKillSwitch({ scope: 'session', ...a }),
     appendRunLog,
     fanOut: fanOutNotify,
-    recordInjectOutcome: dal.recordProofInjectOutcome,
+    recordInjectOutcome: async (runId, kind) => {
+      await dal.recordProofObservation(runId, { last_inject_outcome: kind });
+    },
     evaluators: [agentDeclinedEvaluator],
     now: Date.now,
   });
