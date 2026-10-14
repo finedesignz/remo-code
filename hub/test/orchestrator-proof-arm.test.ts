@@ -1,7 +1,14 @@
 // PTYCAP-05-07 task 1: armProof is an ordered, fail-closed decision. Every refusal returns its
 // code with ZERO writes (the armTx spy is never called). All deps are fakes: no sql, no GitHub.
 import { describe, expect, test } from 'bun:test'
-import { armProof, type ArmProofArgs, type ProofArmDeps } from '../src/orchestrator/proof-arm.ts'
+import {
+  armProof,
+  MAX_INJECTS_CEILING,
+  MAX_TOKENS_CEILING,
+  MAX_WALL_MS_CEILING,
+  type ArmProofArgs,
+  type ProofArmDeps,
+} from '../src/orchestrator/proof-arm.ts'
 import { BASE_SHA, makeFakeProofGithub, type FakeProofGithub } from './fixtures/proof-fake-github.ts'
 import type { EffectiveRule, RulesetDetail } from '../src/orchestrator/proof-types.ts'
 
@@ -77,6 +84,7 @@ const baseArgs = (over: Partial<ArmProofArgs> = {}): ArmProofArgs => ({
   sessionId: SESSION,
   repoIdent: REPO_IDENT,
   installationId: INSTALL,
+  agentLogin: 'agent-bot', // arm refuses an unverified agent permission (QC r1), so the default is verifiable
   ...over,
 })
 
@@ -309,19 +317,40 @@ describe('armProof success', () => {
     expect(bad.armCalls.length).toBe(0)
   })
 
-  test('unreadable agent permission is NOT a refusal: recorded unverified with a loud warning', async () => {
+  test('unreadable agent permission REFUSES agent_permission_unverified (adversary MINOR 3)', async () => {
     const h = harness() // 'ghost-user' has no permission entry -> fake throws not_found
     const r = await armProof(baseArgs({ agentLogin: 'ghost-user' }), h.deps)
-    expect(r.ok).toBe(true)
-    if (!r.ok) return
-    expect(h.armCalls[0].armPreconditions.agent_permission).toBe('unverified')
-    expect(r.summary.warnings.join('\n')).toContain('agent_permission')
+    expect(r).toMatchObject({ ok: false, code: 'agent_permission_unverified' })
+    expect(h.armCalls.length).toBe(0)
   })
 
-  test('no --agent-login records agent_permission unverified', async () => {
+  test('no --agent-login REFUSES agent_permission_unverified, dry run included', async () => {
     const h = harness()
-    await armProof(baseArgs(), h.deps)
-    expect(h.armCalls[0].armPreconditions.agent_permission).toBe('unverified')
+    const r = await armProof(baseArgs({ agentLogin: undefined }), h.deps)
+    expect(r).toMatchObject({ ok: false, code: 'agent_permission_unverified' })
+    const d = await armProof(baseArgs({ agentLogin: undefined, dryRun: true }), harness().deps)
+    expect(d).toMatchObject({ ok: false, code: 'agent_permission_unverified' })
+    expect(h.armCalls.length).toBe(0)
+  })
+
+  test('budget ceilings: above-ceiling flag or env value is refused invalid_budget (adversary MINOR 6)', async () => {
+    const over = [
+      { maxTokens: String(MAX_TOKENS_CEILING + 1) },
+      { maxTokens: '9000000000000000' },
+      { maxWallMs: MAX_WALL_MS_CEILING + 1 },
+      { maxInjects: String(MAX_INJECTS_CEILING + 1) },
+    ]
+    for (const o of over) expect((await refused({}, o)).code).toBe('invalid_budget')
+    expect((await refused({ env: { REMO_PROOF_MAX_TOKENS: String(MAX_TOKENS_CEILING + 1) } })).code).toBe('invalid_budget')
+  })
+
+  test('budget exactly AT each ceiling is accepted', async () => {
+    const h = harness()
+    const r = await armProof(
+      baseArgs({ maxTokens: MAX_TOKENS_CEILING, maxWallMs: MAX_WALL_MS_CEILING, maxInjects: MAX_INJECTS_CEILING }),
+      h.deps,
+    )
+    expect(r.ok).toBe(true)
   })
 
   test('an allowlist that already holds exactly the target is accepted', async () => {
