@@ -290,41 +290,28 @@ function stateErrorCode(err: unknown): string | null {
 // ── Disarm: transaction FIRST, kill switch second, flags last (owner, runbook) ──────────────
 
 export interface ProofDisarmDeps {
+  /**
+   * ONE transaction: engages the proof session's kill switch FIRST, then terminalizes the run,
+   * disables the task + its row and removes only the exact allowlist row (QC r1, codex #3).
+   */
   disarmTx(args: { userId: string; detail?: string | null }): Promise<{ disarmed: false } | { disarmed: true; run: ProofRun }>;
-  engageKillSwitch(args: {
-    scope: 'session';
-    userId: string;
-    sessionId: string;
-    reason: string;
-    engagedBy: string;
-  }): Promise<unknown>;
 }
 
 export type DisarmProofResult =
   | { disarmed: false }
-  | { disarmed: true; run: ProofRun; killSwitch: { engaged: boolean; error?: string } };
+  | { disarmed: true; run: ProofRun; killSwitch: { engaged: true } };
 
 /**
- * An ONLINE session bypasses the autospawn branch, so flags alone would not stop it. Order is
- * therefore: (1) one transaction terminalizes the run, disables the task + its row and removes
- * only the exact allowlist row; (2) best-effort session kill switch (a failure is reported, it
- * never undoes the disarm and never throws); (3) the owner unsets flags, later, by hand.
+ * An ONLINE session bypasses the autospawn branch, so flags alone would not stop it. The disarm
+ * transaction therefore engages the session kill switch BEFORE it commits the terminal state
+ * (same transaction: atomic, so a dispatch that already passed the proof gates hits the kill
+ * switch or the terminal run in its final pre-send check, never a window with neither); the
+ * owner unsets flags, later, by hand.
  */
 export async function disarmProof(args: { userId: string; detail?: string | null }, deps: ProofDisarmDeps): Promise<DisarmProofResult> {
   const out = await deps.disarmTx({ userId: args.userId, ...(args.detail !== undefined ? { detail: args.detail } : {}) });
   if (!out.disarmed) return { disarmed: false };
-  try {
-    await deps.engageKillSwitch({
-      scope: 'session',
-      userId: args.userId,
-      sessionId: out.run.session_id,
-      reason: 'proof disarmed',
-      engagedBy: 'arm-orchestrator-proof',
-    });
-    return { disarmed: true, run: out.run, killSwitch: { engaged: true } };
-  } catch (err) {
-    return { disarmed: true, run: out.run, killSwitch: { engaged: false, error: String((err as Error)?.message ?? err) } };
-  }
+  return { disarmed: true, run: out.run, killSwitch: { engaged: true } };
 }
 
 // ── Enable: the owner's final act, only on an armed run (D-17) ──────────────────────────────
