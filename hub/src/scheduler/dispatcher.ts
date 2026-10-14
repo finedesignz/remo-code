@@ -190,6 +190,12 @@ export async function runNow(
   const task = await getTaskById(taskId)
   if (!task) return { runIds: [] }
   if (task.user_id !== userId) return { runIds: [] }
+  // PTYCAP-08 (T-08-10): a chain, webhook or any other triggering run can never start
+  // the auditor, and the auditor never chains. Only a plain manual Run Now gets through.
+  if (task.task_type === 'task_qc' && (opts.triggeredByRunId || (opts.chainDepth ?? 0) > 0)) {
+    log.warn('scheduler.dispatcher.task_qc_chain_refused', { task_id: taskId, user_id: userId })
+    return { runIds: [] }
+  }
   // A disabled task must not dispatch via chain_task or the grace-buffer
   // replay (neither passes isManual) — only the explicit human "Run Now"
   // button (POST /:id/run-now → isManual: true) may override. Mirrors
@@ -238,6 +244,11 @@ async function fireTask(task: ScheduledTask, opts: FireOpts): Promise<{ runIds: 
   const userId = task.user_id
   const runIds: string[] = []
   const isManual = opts.isManual === true
+
+  // PTYCAP-08 (F2-B3): flag OFF makes task_qc a true no-op, even with the kill switch
+  // engaged. Pure early return: no run row, no read. It performs no automation, so it
+  // cannot weaken the kill switch; the main branch below re-checks the flag.
+  if (task.task_type === 'task_qc' && !isTaskQcEnabled()) return { runIds }
 
   // PTYCAP-04-06 (D-09a): kill switch BEFORE every task_type branch and before the spend
   // pre-gates. Deliberately NOT keyed on isManual: Run Now, chain_task, webhook triage
@@ -760,6 +771,11 @@ export async function routeToSender(task: ScheduledTask, ctx: NewRunContext): Pr
     const { isOrchestratorEnabled } = await import('../orchestrator/controller.ts')
     const reason = isOrchestratorEnabled() ? 'orchestrator_due_tick_owned' : 'orchestrator_disabled'
     await finalizeRun(ctx.runId, 'skipped', reason)
+    return
+  }
+  if (task.task_type === 'task_qc') {
+    // The auditor is dispatched only by the dedicated fireTask branch; reaching here is a misroute.
+    await finalizeRun(ctx.runId, 'skipped', 'task_qc_not_routable')
     return
   }
   switch (task.task_type) {
