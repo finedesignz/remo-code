@@ -1,12 +1,15 @@
 /** PTYCAP-08 plan 02: pure detector fixtures (DB-free). */
 import { describe, expect, test } from 'bun:test'
 import {
+  detectDeadSession,
   detectFailing,
+  detectMisconfigured,
+  detectNeverFired,
   detectSkipForever,
   isAuditable,
 } from '../src/task-qc/detectors.ts'
 import { safeText } from '../src/task-qc/types.ts'
-import type { AuditTaskInput, RunInput } from '../src/task-qc/types.ts'
+import type { AuditTaskInput, RunInput, SessionInput } from '../src/task-qc/types.ts'
 
 const NOW = new Date('2026-10-13T12:00:00.000Z')
 const CFG = { failStreak: 3 }
@@ -170,5 +173,130 @@ describe('SKIP_FOREVER (D-09)', () => {
   test('non-terminal runs are ignored', () => {
     const rs = runs(['running', 'skipped', 'skipped', 'skipped'], 'no_application_uuid')
     expect(detectSkipForever(task(), rs, CFG)).not.toBeNull()
+  })
+})
+
+const DAY = 86_400_000
+const ago = (ms: number) => new Date(NOW.getTime() - ms).toISOString()
+const fromNow = (ms: number) => new Date(NOW.getTime() + ms).toISOString()
+
+describe('NEVER_FIRED (D-10)', () => {
+  test('daily task created 3 days ago with no runs fires, reregister_job, no fixCandidate', () => {
+    const f = detectNeverFired(task({ created_at: ago(3 * DAY), next_fire_at: fromNow(DAY / 2) }), [], NOW)
+    expect(f).not.toBeNull()
+    expect(f!.detector).toBe('NEVER_FIRED')
+    expect(f!.evidence.reasons).toEqual(['no_runs'])
+    expect(f!.proposal.kind).toBe('reregister_job')
+    expect(f!.proposal.params).toEqual({ taskId: 't1', enabled: true })
+    expect(f!.fixCandidate).toBeUndefined()
+  })
+  test('same task created 1 hour ago does not fire', () => {
+    expect(detectNeverFired(task({ created_at: ago(3_600_000), next_fire_at: null }), [], NOW)).toBeNull()
+  })
+  test('enabled task with future next_fire_at and recent runs does not fire', () => {
+    expect(detectNeverFired(task({ next_fire_at: fromNow(DAY / 2) }), runs(['success']), NOW)).toBeNull()
+  })
+  test('NULL next_fire_at on an old task with runs fires (not armed)', () => {
+    const f = detectNeverFired(task({ next_fire_at: null }), runs(['success']), NOW)
+    expect(f!.evidence.reasons).toEqual(['next_fire_missing'])
+    expect(f!.proposal.kind).toBe('reregister_job')
+    expect(f!.fixCandidate).toBeUndefined()
+  })
+  test('stale next_fire_at fires only beyond 2 intervals', () => {
+    expect(detectNeverFired(task({ next_fire_at: ago(5 * DAY) }), runs(['success']), NOW)!.evidence.reasons).toEqual(['next_fire_stale'])
+    expect(detectNeverFired(task({ next_fire_at: ago(DAY) }), runs(['success']), NOW)).toBeNull()
+  })
+  test('NULL next_fire_at on a brand-new task does not fire (age gate)', () => {
+    expect(detectNeverFired(task({ created_at: ago(3_600_000), next_fire_at: null }), runs(['success']), NOW)).toBeNull()
+  })
+  test('invalid timezone fires with the normalize_timezone candidate', () => {
+    const f = detectNeverFired(task({ timezone: 'Mars/Olympus' }), runs(['success']), NOW)
+    expect(f!.evidence.reasons).toEqual(['timezone_invalid'])
+    expect(f!.fixCandidate).toBe('normalize_timezone')
+    expect(f!.proposal.kind).toBe('fix_timezone')
+  })
+  test('unparseable cron is reported once under (a), no fixCandidate, skips (b)/(c)', () => {
+    const f = detectNeverFired(task({ cron_expr: 'not a cron', next_fire_at: null, created_at: ago(9 * DAY) }), [], NOW)
+    expect(f!.evidence.reasons).toEqual(['cron_invalid'])
+    expect(f!.fixCandidate).toBeUndefined()
+  })
+  test('cron falls back to cron_expression when cron_expr is NULL', () => {
+    expect(detectNeverFired(task({ cron_expr: null, cron_expression: '0 9 * * *', next_fire_at: fromNow(DAY / 2) }), runs(['success']), NOW)).toBeNull()
+  })
+  test('a disabled task and an internal anchor never fire', () => {
+    expect(detectNeverFired(task({ enabled: false, next_fire_at: null, created_at: ago(9 * DAY) }), [], NOW)).toBeNull()
+    expect(detectNeverFired(task({ name: '__internal_x', next_fire_at: null, created_at: ago(9 * DAY), cron_expr: '0 0 31 2 *' }), [], NOW)).toBeNull()
+  })
+})
+
+describe('MISCONFIGURED (D-11)', () => {
+  test('log_check with no payload uuid and unresolvable app FIRES (the real observed case)', () => {
+    const f = detectMisconfigured(
+      task({ task_type: 'log_check', payload: {}, resolvedAppUuid: null }),
+      runs(['skipped', 'skipped'], 'no_application_uuid'),
+    )
+    expect(f).not.toBeNull()
+    expect(f!.detector).toBe('MISCONFIGURED')
+    expect(f!.evidence.skipEvidence).toBe(2)
+    expect(f!.fixCandidate).toBe('backfill_payload_from_sibling')
+  })
+  test('log_check with no payload uuid but a mapped repo_key (resolved uuid) does NOT fire', () => {
+    expect(detectMisconfigured(task({ task_type: 'log_check', payload: {}, resolvedAppUuid: 'uuid-from-repo-key' }), [])).toBeNull()
+  })
+  test('log_check with a payload uuid does not fire', () => {
+    expect(detectMisconfigured(task({ task_type: 'log_check', payload: { application_uuid: 'u' }, resolvedAppUuid: 'u' }), [])).toBeNull()
+  })
+  test('log_pull is covered like log_check; an uncomputed resolver (undefined) never fires', () => {
+    expect(detectMisconfigured(task({ task_type: 'log_pull', resolvedAppUuid: null }), [])!.fixCandidate).toBe('backfill_payload_from_sibling')
+    expect(detectMisconfigured(task({ task_type: 'log_check' }), [])).toBeNull()
+  })
+  test('teab without repo fires (blank too), with repo does not; no fixCandidate', () => {
+    expect(detectMisconfigured(task({ task_type: 'teab', teab_repo_ident: null }), [])!.proposal.kind).toBe('set_teab_repo')
+    expect(detectMisconfigured(task({ task_type: 'teab', teab_repo_ident: '   ' }), [])).not.toBeNull()
+    expect(detectMisconfigured(task({ task_type: 'teab', teab_repo_ident: 'o/r' }), [])).toBeNull()
+    expect(detectMisconfigured(task({ task_type: 'teab', teab_repo_ident: null }), [])!.fixCandidate).toBeUndefined()
+  })
+  test('every other type, including work, never fires', () => {
+    for (const t of ['dev', 'work', 'qc', 'triage', 'security']) {
+      expect(detectMisconfigured(task({ task_type: t, resolvedAppUuid: null, teab_repo_ident: null }), [])).toBeNull()
+    }
+  })
+})
+
+describe('DEAD_SESSION (D-12)', () => {
+  const sess = (over: Partial<SessionInput> = {}): SessionInput => ({
+    id: 's1',
+    status: 'online',
+    deleted_at: null,
+    last_activity: ago(1000),
+    created_at: ago(30 * DAY),
+    ...over,
+  })
+  test('deleted session fires', () => {
+    const f = detectDeadSession(task(), { s1: sess({ deleted_at: ago(DAY) }) }, NOW)
+    expect(f!.detector).toBe('DEAD_SESSION')
+    expect(f!.evidence.reason).toBe('deleted')
+    expect(f!.fixCandidate).toBe('rebind_dead_session')
+  })
+  test('missing session (stale target_id) fires', () => {
+    expect(detectDeadSession(task(), {}, NOW)!.evidence.reason).toBe('missing')
+    expect(detectDeadSession(task(), { s1: null }, NOW)!.evidence.reason).toBe('missing')
+  })
+  test('offline 8 days fires; offline 2 days does not; online does not', () => {
+    expect(detectDeadSession(task(), { s1: sess({ status: 'offline', last_activity: ago(8 * DAY) }) }, NOW)!.evidence.reason).toBe('offline_stale')
+    expect(detectDeadSession(task(), { s1: sess({ status: 'offline', last_activity: ago(2 * DAY) }) }, NOW)).toBeNull()
+    expect(detectDeadSession(task(), { s1: sess() }, NOW)).toBeNull()
+  })
+  test('offline with NULL last_activity falls back to created_at', () => {
+    expect(detectDeadSession(task(), { s1: sess({ status: 'offline', last_activity: null, created_at: ago(10 * DAY) }) }, NOW)).not.toBeNull()
+  })
+  test('effective session is target_id, else session_id', () => {
+    const t = task({ target_id: null, session_id: 's9' })
+    expect(detectDeadSession(t, { s9: sess({ id: 's9', deleted_at: ago(DAY) }) }, NOW)).not.toBeNull()
+    expect(detectDeadSession(t, { s1: sess({ deleted_at: ago(DAY) }) }, NOW)!.evidence.reason).toBe('missing')
+  })
+  test('supervisor-kind and session-less tasks never fire', () => {
+    expect(detectDeadSession(task({ target_kind: 'supervisor', target_id: 'x' }), {}, NOW)).toBeNull()
+    expect(detectDeadSession(task({ target_id: null, session_id: null }), {}, NOW)).toBeNull()
   })
 })
