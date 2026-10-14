@@ -76,7 +76,7 @@ describe('hostile input classes (one test each)', () => {
     expect((d.text.match(/^#\d+ /gm) ?? []).length).toBe(1)
     expect((d.text.match(/^Summary: /gm) ?? []).length).toBe(1)
     // the only PATCH line is the real one for the real id
-    const patches = d.text.split('\n').filter((l) => l.trimStart().startsWith('PATCH '))
+    const patches = d.text.split('\n').filter((l: string) => l.trimStart().startsWith('PATCH '))
     expect(patches).toEqual([`  PATCH /api/scheduled-tasks/${ID}`])
     // every non-empty line is either indented data or a fixed column-0 line
     for (const line of d.text.split('\n')) {
@@ -92,7 +92,7 @@ describe('hostile input classes (one test each)', () => {
       proposal: { kind: 'rebind_session', params: { taskId: ID, staleSessionId: "s'; DROP TABLE y; --" } },
     })
     const d = build(f)
-    const cmd = d.text.split('\n').find((l) => l.includes('UPDATE scheduled_tasks'))!
+    const cmd = d.text.split('\n').find((l: string) => l.includes('UPDATE scheduled_tasks'))!
     expect(cmd).toContain("session_id IS NOT DISTINCT FROM 's''; DROP TABLE y; --'")
     // every quote inside the literal is doubled: stripping '' pairs leaves a balanced count
     expect((cmd.replace(/''/g, '').match(/'/g) ?? []).length % 2).toBe(0)
