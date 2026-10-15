@@ -8,6 +8,14 @@
      its iteration. -->
 LOCK: none
 
+## Run 22 (2026-10-15)
+- memlog claim OK (routine-run-2026-10-15). Prod /health = {"ok":true} before and after merges. Live-read: open PRs #514, #513-511 (drafts), #504, #503, #502, #494.
+- Merged #514 (dependabot rustls 0.23.40->46, mobile Cargo.lock only; ai-review success, no threads; zero-CI-status -> independent diff review) -> 6c0589b. Merged #503 (dependabot tauri-plugin-updater/shell + tokio patch bumps, Cargo.lock only; supervisor-build + ai-review success, changelogs benign) -> 5774241. Hub unaffected (no hub deploy change).
+- #504 (owner, revanote reliability, 4877 lines, sensitive paths): ai-review = failure, blocking finding from codex; base stale (8229841); no Woodpecker status. NOT merged. Next run: merge main into branch, read the codex finding, fix, full QC panel.
+- Not touched: #502 (AAF key-rotation CLI, owner sign-off comment), #494 (owner), drafts #511-513.
+- install-gsd.sh not run. No tool errors this run.
+- Resume: #504 fix+panel; then PTYCAP-05 (draft #511).
+
 ## Run 21 (2026-10-14T17:50Z)
 - memlog claim OK (routine-run-2026-10-14b). Prod /health = {"ok":true}. DIRECTIVE has section 0.
 - #506 (ec8908f) and #509 (521d477): Woodpecker qc + docs-drift green, no review threads, 3-seat panel on #506 clear. AAF ai-review on both still `in_progress` since ~17:07Z (45+ min, no verdict, prior codex blocking finding on #506 was fixed in ec8908f). Not merged: sensitive-path (#506) spend path, will not merge past a pending review. MERGE NEXT RUN if ai-review completes with no blocking finding; if still in_progress with no verdict, treat as stuck AAF reviewer (file agentautofix report) and substitute panel verdict for #506, merge #509.
