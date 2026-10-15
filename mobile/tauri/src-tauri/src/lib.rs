@@ -2,11 +2,16 @@
 //
 // Responsibilities:
 // 1. Embed a WebView pointed at https://app.remo-code.com (the hub-served SPA).
-// 2. Register the `remo-code://auth/callback?token=<X>` deep link.
-// 3. On deep-link receipt, eval JS in the WebView that POSTs the token to
-//    /api/auth/finalize-mobile (credentials: 'include' so the hub can set
-//    the opaque session cookie on the WebView's cookie jar), then reloads
-//    the SPA on 200 or alerts the user on failure.
+// 2. Register the `remo-code://auth/callback` deep link.
+// 3. Titanium hosted login (current): the SPA in this WebView starts the login
+//    with POST /auth/email {client:"app"}, which stores {state, PKCE verifier} in
+//    the WebView's own cookie jar and has the portal return to
+//    remo-code://auth/callback?state=..&code_challenge=..&act=... On receipt we eval
+//    JS in the WebView that POSTs {state, act} to /auth/app-finalize; the hub checks
+//    the state against that cookie, exchanges the act with the verifier + app_slug,
+//    and sets the session cookie. A deep link this device did not start is refused.
+// 4. Legacy (hub LEGACY_MAGIC_LINK_LOGIN=on only): `?token=<opaque>` is POSTed to
+//    /api/auth/finalize-mobile as before.
 //
 // Platform-specific scaffolding (Xcode project + Gradle project) is generated
 // via `cargo tauri ios init` / `cargo tauri android init` on a host with the
@@ -16,6 +21,7 @@ use tauri::{Emitter, Manager, Url, WebviewWindow};
 use tauri_plugin_deep_link::DeepLinkExt;
 
 const FINALIZE_PATH: &str = "/api/auth/finalize-mobile";
+const APP_FINALIZE_PATH: &str = "/auth/app-finalize";
 const APP_ORIGIN: &str = "https://app.remo-code.com";
 
 fn finalize_js(token: &str, app_origin: &str, finalize_path: &str) -> String {
@@ -54,6 +60,41 @@ fn finalize_js(token: &str, app_origin: &str, finalize_path: &str) -> String {
     )
 }
 
+fn app_finalize_js(state: &str, act: &str, app_origin: &str, path: &str) -> String {
+    // state + act come from the deep link; JSON-encode them so quotes and
+    // backslashes cannot break out of the string literals.
+    let state_json = serde_json::to_string(state).unwrap_or_else(|_| "\"\"".to_string());
+    let act_json = serde_json::to_string(act).unwrap_or_else(|_| "\"\"".to_string());
+    let origin_json = serde_json::to_string(app_origin).unwrap_or_else(|_| "\"\"".to_string());
+    let path_json = serde_json::to_string(path).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        r#"(async () => {{
+  try {{
+    const origin = {origin};
+    const res = await fetch(origin + {path}, {{
+      method: 'POST',
+      credentials: 'include',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ state: {state}, act: {act} }}),
+    }});
+    if (res.ok) {{
+      location.replace(origin + '/');
+    }} else {{
+      const body = await res.json().catch(() => ({{}}));
+      location.replace(origin + '/#/login?error=' + encodeURIComponent(body.error || 'exchange_failed'));
+    }}
+  }} catch (e) {{
+    alert('Sign-in error: ' + (e && e.message ? e.message : String(e)));
+    location.reload();
+  }}
+}})();"#,
+        origin = origin_json,
+        path = path_json,
+        state = state_json,
+        act = act_json,
+    )
+}
+
 fn handle_deep_link(window: &WebviewWindow, url_str: &str) {
     log::info!("[mobile] deep link received: {}", url_str);
     let parsed = match Url::parse(url_str) {
@@ -79,13 +120,32 @@ fn handle_deep_link(window: &WebviewWindow, url_str: &str) {
         return;
     }
 
-    let token = parsed
-        .query_pairs()
-        .find(|(k, _)| k == "token")
-        .map(|(_, v)| v.into_owned());
+    let param = |name: &str| {
+        parsed
+            .query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+    };
 
-    let Some(token) = token else {
-        log::warn!("[mobile] callback missing token");
+    // Titanium hosted login: remo-code://auth/callback?state=..&act=..
+    if let (Some(act), Some(state)) = (param("act"), param("state")) {
+        if parsed.scheme() == "https" {
+            // A https callback is the WEB leg: let the hub handle it as a normal
+            // top-level navigation (state mismatch there = confirmation page).
+            let target = serde_json::to_string(url_str).unwrap_or_else(|_| "\"\"".to_string());
+            let _ = window.eval(&format!("location.replace({});", target));
+            return;
+        }
+        let js = app_finalize_js(&state, &act, APP_ORIGIN, APP_FINALIZE_PATH);
+        if let Err(e) = window.eval(&js) {
+            log::error!("[mobile] eval app-finalize JS failed: {}", e);
+        }
+        return;
+    }
+
+    // Legacy own magic link handoff (hub LEGACY_MAGIC_LINK_LOGIN=on only).
+    let Some(token) = param("token") else {
+        log::warn!("[mobile] callback missing act/state (and legacy token)");
         return;
     };
 
@@ -157,6 +217,15 @@ mod tests {
         assert!(js.contains("\"abc\\\"123\""));
         assert!(js.contains("https://app.remo-code.com"));
         assert!(js.contains("/api/auth/finalize-mobile"));
+        assert!(js.contains("credentials: 'include'"));
+    }
+
+    #[test]
+    fn app_finalize_js_escapes_state_and_act() {
+        let js = app_finalize_js("st\"1", "act\\2", APP_ORIGIN, APP_FINALIZE_PATH);
+        assert!(js.contains("\"st\\\"1\""));
+        assert!(js.contains("\"act\\\\2\""));
+        assert!(js.contains("\"/auth/app-finalize\""));
         assert!(js.contains("credentials: 'include'"));
     }
 }

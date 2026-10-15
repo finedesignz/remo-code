@@ -56,3 +56,40 @@ export function appVersion(): string | null {
   const v = window.__REMO_APP_VERSION__
   return typeof v === 'string' && v.length > 0 ? v : null
 }
+
+const APP_SHELL_KEY = 'remo:app_shell'
+
+/**
+ * The Tauri shell boots on its own origin, then `location.replace`s the WebView to
+ * the hub origin with `?remo_shell=<version>` (mobile/tauri/ui/src/main.ts).
+ * sessionStorage is per-origin, so the marker has to cross in the URL: capture it
+ * here (once, at SPA boot) into THIS origin's sessionStorage and strip it from the
+ * address bar.
+ */
+export function captureAppShellMarker(): void {
+  if (typeof window === 'undefined') return
+  try {
+    const url = new URL(window.location.href)
+    const v = url.searchParams.get('remo_shell')
+    if (v === null) return
+    sessionStorage.setItem(APP_SHELL_KEY, v || '1')
+    url.searchParams.delete('remo_shell')
+    window.history.replaceState(null, '', url.pathname + url.search + url.hash)
+  } catch {
+    // sessionStorage blocked: the login falls back to the web leg.
+  }
+}
+
+/**
+ * True inside the Remo Code Tauri shell, also after it navigated its WebView to the
+ * hub origin (which drops `window.__TAURI_INTERNALS__`). Drives the deep-link login
+ * leg (`client: 'app'`, return to remo-code://auth/callback).
+ */
+export function isAppShell(): boolean {
+  if (isMobileApp()) return true
+  try {
+    return typeof sessionStorage !== 'undefined' && !!sessionStorage.getItem(APP_SHELL_KEY)
+  } catch {
+    return false
+  }
+}

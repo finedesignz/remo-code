@@ -878,6 +878,15 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS candidate_subject TEXT;
 -- Drop NOT NULL on password_hash only if currently NOT NULL (idempotent guard).
 DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='password_hash' AND is_nullable='NO') THEN ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL; END IF; END $$;
 
+-- Titanium hosted login (2026-10): the stable, opaque Titanium account id
+-- (`accountId` from POST /api/exchange). The login links a local user by this id
+-- first, else by the verified normalized email, and attaches it on first sight
+-- (hub/src/db/titanium-link-dal.ts). Nullable: rows that never signed in through
+-- Titanium (or whose login carried no accountId) keep NULL.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS titanium_account_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_titanium_account_id
+  ON users(titanium_account_id) WHERE titanium_account_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS auth_sessions (
   id           TEXT PRIMARY KEY,
   user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

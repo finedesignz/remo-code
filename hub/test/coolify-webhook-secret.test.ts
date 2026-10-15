@@ -8,6 +8,8 @@
 // Ensure config validation passes BEFORE importing anything that pulls
 // config.ts (the account router → DAL → postgres → config).
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-32-chars-long-aaaaaaaa'
+// This suite authenticates with a legacy Bearer JWT; that path is opt-in (default off).
+process.env.ALLOW_LEGACY_LOGIN = 'true'
 if (process.env.REMO_E2E_DB_URL) {
   process.env.DATABASE_URL = process.env.REMO_E2E_DB_URL
 }

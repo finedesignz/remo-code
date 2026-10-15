@@ -13,6 +13,10 @@ import { hubFetch } from '../lib/api'
  */
 export interface ClientConfig {
   pty_interactive: boolean
+  /** Hub ALLOW_LEGACY_LOGIN (default false): show the password form. */
+  legacy_password_login?: boolean
+  /** Hub LEGACY_MAGIC_LINK_LOGIN=on (default off): show the own email link. */
+  legacy_magic_link_login?: boolean
 }
 
 export function useClientConfig(): ClientConfig {
@@ -21,7 +25,15 @@ export function useClientConfig(): ClientConfig {
   useEffect(() => {
     let cancelled = false
     hubFetch<ClientConfig>(null, '/api/client-config')
-      .then((c) => { if (!cancelled) setCfg({ pty_interactive: !!c?.pty_interactive }) })
+      .then((c) => {
+        if (!cancelled) {
+          setCfg({
+            pty_interactive: !!c?.pty_interactive,
+            legacy_password_login: c?.legacy_password_login === true,
+            legacy_magic_link_login: c?.legacy_magic_link_login === true,
+          })
+        }
+      })
       .catch(() => { /* leave default (false) — preserves ChatSurface */ })
     return () => { cancelled = true }
   }, [])

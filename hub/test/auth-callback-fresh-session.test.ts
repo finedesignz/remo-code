@@ -19,6 +19,8 @@ process.env.TITANIUM_KEYGEN_API_URL = process.env.TITANIUM_KEYGEN_API_URL || 'ht
 process.env.TITANIUM_KEYGEN_ACCOUNT_ID = process.env.TITANIUM_KEYGEN_ACCOUNT_ID || 'acct_test_0000000000';
 process.env.TITANIUM_KEYGEN_PRODUCT_ID = process.env.TITANIUM_KEYGEN_PRODUCT_ID || 'prod_test_remo';
 process.env.TITANIUM_REQUIRE_REDIS = 'false';
+// The own magic link is a legacy surface now (404 unless LEGACY_MAGIC_LINK_LOGIN=on).
+process.env.LEGACY_MAGIC_LINK_LOGIN = 'on';
 
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
 import { Hono } from 'hono';

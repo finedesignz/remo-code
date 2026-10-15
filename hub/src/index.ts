@@ -8,6 +8,7 @@ import { apiKeys } from './api/api-keys'
 import { plugin } from './api/plugin'
 import { setup } from './api/setup'
 import { authRouter } from './api/auth'
+import { titaniumAuthRouter } from './api/titanium-auth'
 import { profile } from './api/profile'
 import { account } from './api/account'
 import { supervisors as supervisorsApi, usersMe as usersMeApi } from './api/supervisors'
@@ -245,6 +246,26 @@ app.use('/api/auth/login/callback', rateLimit({
   max: 10,
   keyFn: ipKey,
 }))
+
+// Titanium hosted login (hub/src/api/titanium-auth.ts). Root-mounted top-level
+// navigations + form posts (NOT /api/*): they do their own Origin / state / CSRF
+// checks. Rate limits mirror the legacy request-link + callback limits; the email
+// start is `silent` so a limited request gets the identical {ok:true} answer and
+// simply sends nothing.
+app.use('/auth/email', async (c, next) => {
+  const email = await readEmailForRateLimit(c)
+  return rateLimitMulti({
+    silent: true,
+    buckets: [
+      { bucket: 'titanium-email-ip', windowMs: 60_000, max: 3, keyFn: () => ipKey(c) },
+      { bucket: 'titanium-email-addr', windowMs: 3_600_000, max: 5, keyFn: () => email },
+    ],
+  })(c, next)
+})
+for (const p of ['/auth/start', '/auth/callback', '/auth/confirm', '/auth/app-finalize']) {
+  app.use(p, rateLimit({ bucket: `titanium-${p.slice(6)}`, windowMs: 60_000, max: 10, keyFn: ipKey }))
+}
+app.route('/auth', titaniumAuthRouter)
 
 // Auth routes (no auth required)
 app.route('/api/auth', authRouter)
@@ -545,8 +566,13 @@ function decrementIp(ip: string) {
 // should never take production down. Auth-gated routes fail closed at request
 // time via `verifyLicenseJwt`, which lazily warms on first use. We log
 // loudly so misconfiguration is still obvious in deploy logs.
+if (config.allowLegacyLogin) {
+  console.warn('[auth] ALLOW_LEGACY_LOGIN=true — legacy bcrypt login, /api/setup/create-admin and Bearer JWTs are ENABLED (rollback mode)')
+}
 if (config.titaniumBypass) {
-  console.warn('[titanium] BYPASS mode active — JWKS warm skipped, license gate disabled, magic-link endpoints will 503')
+  // License-only switch: login is unaffected (Titanium hosted login keeps working)
+  // and bypass never enables password login on its own.
+  console.warn('[titanium] BYPASS mode active — JWKS warm skipped, license gate disabled (login unaffected)')
 } else if (config.titanium.keygenApiUrl) {
   try {
     const { warmJwksCache } = await import('./titanium-client')
