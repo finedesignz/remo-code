@@ -5,6 +5,10 @@
 //   (b) `Authorization: Bearer <jwt>` legacy HS256 (only when
 //       config.allowLegacyLogin === true).
 //
+//   (c) `Authorization: Bearer remokey_<key>` — an api key with an explicit
+//       `settings:read` / `settings:write` scope, and ONLY on the settings route
+//       allowlist (hub/src/auth/settings-api-key.ts). Every other path → 403.
+//
 // Cookie wins if both present. Sets c.var.userId/userEmail/userRole the same
 // way regardless of source so downstream handlers don't branch.
 
@@ -12,6 +16,7 @@ import type { Context, Next } from "hono";
 import { verifyJwt } from "./jwt.ts";
 import { verifyAuthSessionCookie } from "../session.ts";
 import { config } from "../config.ts";
+import { authenticateSettingsApiKey } from "./settings-api-key.ts";
 
 export async function authMiddleware(c: Context, next: Next) {
   // (a) cookie path
@@ -24,8 +29,16 @@ export async function authMiddleware(c: Context, next: Next) {
     return next();
   }
 
-  // (b) legacy bearer path — only if soak flag is on
   const header = c.req.header("Authorization");
+
+  // (c) settings-scoped api key. Checked before the legacy JWT branch: a
+  // `remokey_` token is never a JWT, and must not depend on ALLOW_LEGACY_LOGIN.
+  if (header?.startsWith("Bearer remokey_")) {
+    const denied = await authenticateSettingsApiKey(c, header.slice(7).trim());
+    return denied ?? next();
+  }
+
+  // (b) legacy bearer path — only if soak flag is on
   if (header?.startsWith("Bearer ") && config.allowLegacyLogin) {
     const token = header.slice(7);
     try {

@@ -28,7 +28,24 @@ export const SCOPE_EXT_WORK = 'ext:work'
  */
 export const SCOPE_CLOUD_HOOK = 'cloud:hook'
 
-export const ALL_SCOPES = [SCOPE_AGENT, SCOPE_EXT_READ, SCOPE_EXT_ASK, SCOPE_EXT_WORK, SCOPE_CLOUD_HOOK] as const
+/**
+ * Read / change the user's Settings (profile, usage + cost controls, notify prefs,
+ * supervisor roots, orchestrator prefs) through the normal /api routes with a Bearer key.
+ * EXPLICIT-only, and limited to the route allowlist in `settings-api-key.ts`.
+ * `settings:write` implies `settings:read`.
+ */
+export const SCOPE_SETTINGS_READ = 'settings:read'
+export const SCOPE_SETTINGS_WRITE = 'settings:write'
+
+export const ALL_SCOPES = [
+  SCOPE_AGENT,
+  SCOPE_EXT_READ,
+  SCOPE_EXT_ASK,
+  SCOPE_EXT_WORK,
+  SCOPE_CLOUD_HOOK,
+  SCOPE_SETTINGS_READ,
+  SCOPE_SETTINGS_WRITE,
+] as const
 export type Scope = (typeof ALL_SCOPES)[number]
 
 export function isScope(s: unknown): s is Scope {

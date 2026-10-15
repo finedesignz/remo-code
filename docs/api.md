@@ -30,7 +30,7 @@ Base URLs:
 
 # Authentication
 
-- HTTP Authentication, scheme: bearer A remo-code api_key (`remokey_…`) from Settings → Credentials. Optional scopes: `ext:read` (free reads) and `ext:ask` (spends tokens). A key with NULL scopes keeps legacy full access.
+- HTTP Authentication, scheme: bearer A remo-code api_key (`remokey_…`) from Settings → Credentials. Optional scopes: `ext:read` (free reads) and `ext:ask` (spends tokens); `settings:read` / `settings:write` (explicit-only) reach the Settings routes listed in docs/auth.md. A key with NULL scopes keeps legacy full access.
 
 - HTTP Authentication, scheme: bearer 
 

@@ -33,9 +33,16 @@ import type { Context, Next } from 'hono';
 import jwt from 'jsonwebtoken';
 import { verifyAuthSessionCookie } from '../session';
 import { config } from '../config';
+import { isSettingsApiKeyRequest } from './settings-api-key';
 
 export function requireRecentAuth(maxAgeSeconds: number = 900) {
   return async (c: Context, next: Next) => {
+    // A settings-scoped api key on an allowlisted settings route was already
+    // authenticated + scope-checked by authMiddleware. The key itself was minted
+    // behind this same step-up, so it stands in for a fresh login here. Any other
+    // path (api-keys, admin, …) never gets this pass.
+    if (isSettingsApiKeyRequest(c)) return next();
+
     // (a) cookie session path — preferred.
     const ctx = await verifyAuthSessionCookie(c);
     if (ctx) {
